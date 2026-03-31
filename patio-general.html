@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Custom Patios in [SUBURB] | Patio Builders Perth — SecureWorks Group</title>
+<meta name="description" content="Custom patio builders in [SUBURB], Perth. Steel, insulated, timber & polycarbonate patios. Honest advice, transparent pricing. Free consultation & quote.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ============================================
+   BRAND SYSTEM — SECUREWORKS WA (Generalist)
+   ============================================ */
+:root {
+  --orange: #F15A29;
+  --orange-hover: #d94d20;
+  --orange-glow: rgba(241, 90, 41, 0.15);
+  --dark-blue: #293C46;
+  --mid-blue: #4C6A7C;
+  --light-blue: #5d7f94;
+  --pale-bg: #f4f7f9;
+  --tint: #edf1f4;
+  --white: #FFFFFF;
+  --near-black: #1a2a32;
+  --body-text: #3a4f5c;
+  --light-text: #6b8494;
+  --border: #d8e1e7;
+  --font: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --nav-height: 72px;
+  --section-pad: clamp(60px, 10vw, 100px);
+  --content-max: 1180px;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow-sm: 0 2px 8px rgba(41, 60, 70, 0.06);
+  --shadow-md: 0 4px 24px rgba(41, 60, 70, 0.08);
+  --shadow-lg: 0 8px 40px rgba(41, 60, 70, 0.12);
+  --shadow-card: 0 1px 3px rgba(41, 60, 70, 0.04), 0 4px 16px rgba(41, 60, 70, 0.06);
+  --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; scroll-padding-top: var(--nav-height); overflow-x: hidden; }
+body {
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--body-text);
+  background: var(--white);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+img { max-width: 100%; height: auto; display: block; }
+a { text-decoration: none; color: inherit; }
+button { font-family: var(--font); cursor: pointer; border: none; }
+.container { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: 0 20px; }
+
+/* Scroll Reveal */
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1), transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.reveal.visible { opacity: 1; transform: translateY(0); }
+.reveal-delay-1 { transition-delay: 0.1s; }
+.reveal-delay-2 { transition-delay: 0.2s; }
+.reveal-delay-3 { transition-delay: 0.3s; }
+.reveal-delay-4 { transition-delay: 0.4s; }
+
+/* ============================================
+   NAVIGATION
+   ============================================ */
+.nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+  height: var(--nav-height);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(41, 60, 70, 0.06);
+  transition: var(--transition);
+}
+.nav.scrolled { height: 60px; box-shadow: var(--shadow-sm); }
+.nav-inner {
+  max-width: var(--content-max); margin: 0 auto; padding: 0 20px;
+  height: 100%; display: flex; align-items: center; justify-content: space-between;
+}
+.nav-logo { display: flex; align-items: center; }
+.nav-logo-img { height: 36px; width: auto; }
+.nav-links { display: none; list-style: none; gap: 28px; align-items: center; }
+.nav-links a { font-size: 14px; font-weight: 600; color: var(--mid-blue); transition: color var(--transition); }
+.nav-links a:hover { color: var(--dark-blue); }
+.nav-phone {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--orange); color: var(--white);
+  padding: 8px 14px; border-radius: 50px; font-size: 12px; font-weight: 700;
+  white-space: nowrap; transition: all var(--transition);
+}
+.nav-phone:hover { background: var(--orange-hover); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(241, 90, 41, 0.35); }
+.nav-phone svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+@media (min-width: 768px) {
+  .nav-links { display: flex; }
+  .nav-phone { padding: 10px 20px; font-size: 14px; gap: 8px; }
+  .nav-phone svg { width: 16px; height: 16px; }
+}
+
+/* ============================================
+   HERO
+   ============================================ */
+.hero {
+  position: relative; min-height: 100svh; display: flex; align-items: center;
+  padding: calc(var(--nav-height) + 20px) 0 40px; overflow: hidden;
+}
+.hero-bg {
+  position: absolute; inset: 0; z-index: 0;
+  background-image: url('assets/photos/verandah-bush-exterior.png');
+  background-color: var(--dark-blue);
+  background-size: cover; background-position: center 35%;
+}
+.hero-bg::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(135deg, rgba(26, 40, 48, 0.75) 0%, rgba(41, 60, 70, 0.4) 50%, rgba(41, 60, 70, 0.2) 100%);
+}
+.hero-inner {
+  position: relative; z-index: 1; max-width: var(--content-max);
+  margin: 0 auto; padding: 0 20px; width: 100%; display: grid; gap: 40px;
+}
+.hero-content { max-width: 560px; }
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(76, 106, 124, 0.2); border: 1px solid rgba(76, 106, 124, 0.4);
+  padding: 6px 14px; border-radius: 50px; font-size: 13px; font-weight: 600;
+  color: rgba(255, 255, 255, 0.85); margin-bottom: 20px; backdrop-filter: blur(8px);
+}
+.hero-badge svg { width: 14px; height: 14px; }
+.hero h1 {
+  font-size: clamp(32px, 7vw, 52px); font-weight: 800; color: var(--white);
+  line-height: 1.1; letter-spacing: -1px; margin-bottom: 16px;
+}
+.hero h1 em { font-style: normal; color: var(--orange); }
+.hero-sub {
+  font-size: clamp(16px, 3vw, 19px); color: rgba(255, 255, 255, 0.8);
+  line-height: 1.6; margin-bottom: 28px; max-width: 480px;
+}
+.hero-trust { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+.hero-trust-item {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; font-weight: 600; color: rgba(255, 255, 255, 0.9);
+}
+.hero-trust-item svg { width: 18px; height: 18px; color: var(--orange); flex-shrink: 0; }
+.hero-trust-divider { width: 1px; height: 20px; background: rgba(255, 255, 255, 0.2); display: none; }
+
+/* Hero Form */
+.hero-form-wrap {
+  background: var(--white); border-radius: var(--radius); padding: 28px 24px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15); max-width: 440px; width: 100%;
+}
+.hero-form-header { text-align: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--tint); }
+.hero-form-header h2 { font-size: 20px; font-weight: 800; color: var(--dark-blue); margin-bottom: 4px; }
+.hero-form-header p { font-size: 13px; color: var(--mid-blue); font-weight: 500; }
+.hero-form-header p span { display: inline-flex; align-items: center; gap: 4px; }
+.hero-form-header p span::before { content: '\2713'; color: var(--orange); font-weight: 700; }
+.ghl-form-placeholder {
+  background: var(--pale-bg); border-radius: var(--radius-sm); padding: 48px 20px;
+  text-align: center; color: var(--mid-blue); border: 2px dashed var(--border);
+}
+.ghl-form-placeholder svg { margin: 0 auto 12px; color: var(--mid-blue); }
+.ghl-form-placeholder p { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.ghl-form-placeholder small { font-size: 12px; color: var(--light-text); }
+.form-privacy { text-align: center; font-size: 11px; color: var(--light-text); margin-top: 10px; }
+.form-privacy svg { width: 12px; height: 12px; vertical-align: -2px; margin-right: 3px; }
+
+@media (min-width: 768px) {
+  .hero { min-height: auto; padding: calc(var(--nav-height) + 60px) 0 80px; }
+  .hero-inner { grid-template-columns: 1fr 440px; align-items: center; gap: 60px; }
+  .hero-trust-divider { display: block; }
+  .hero-form-wrap { justify-self: end; }
+}
+
+/* ============================================
+   TRUST BAR
+   ============================================ */
+.trust-bar { background: var(--dark-blue); padding: 20px 0; border-top: 3px solid var(--orange); }
+.trust-bar-inner {
+  max-width: var(--content-max); margin: 0 auto; padding: 0 20px;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+}
+.trust-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
+.trust-item-icon {
+  width: 36px; height: 36px; border-radius: 8px;
+  background: rgba(241, 90, 41, 0.2);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.trust-item-icon svg { width: 18px; height: 18px; color: var(--orange); }
+.trust-item-text { font-size: 12px; font-weight: 600; color: rgba(255, 255, 255, 0.9); line-height: 1.3; }
+
+@media (max-width: 767px) {
+  .trust-bar-inner { grid-template-columns: repeat(2, 1fr); }
+  .trust-item:nth-child(5), .trust-item:nth-child(6) { display: none; }
+}
+@media (min-width: 768px) {
+  .trust-bar-inner { grid-template-columns: repeat(6, 1fr); }
+  .trust-item-text { font-size: 13px; }
+}
+
+/* SUPPLIER LOGOS STRIP */
+.supplier-logos { background: var(--pale-bg); padding: 16px 0; border-bottom: 1px solid rgba(41, 60, 70, 0.06); }
+.supplier-logos .container { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; }
+.supplier-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--light-text); }
+.supplier-strip { display: flex; align-items: center; gap: 16px; }
+.supplier-logo-text { font-size: 14px; font-weight: 700; color: var(--mid-blue); letter-spacing: 0.5px; }
+.supplier-logo-text sup { font-size: 8px; }
+.supplier-divider { width: 1px; height: 16px; background: rgba(41, 60, 70, 0.15); }
+@media (max-width: 479px) {
+  .supplier-label { width: 100%; text-align: center; }
+  .supplier-strip { flex-wrap: wrap; justify-content: center; gap: 12px; }
+  .supplier-logo-text { font-size: 12px; }
+}
+
+/* ============================================
+   SECTION HEADINGS (shared)
+   ============================================ */
+.section-label {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 1.5px; color: var(--orange); margin-bottom: 16px;
+}
+.section-label::before { content: ''; width: 24px; height: 2px; background: var(--orange); }
+.section-title {
+  font-size: clamp(28px, 5vw, 40px); font-weight: 800; color: var(--dark-blue);
+  line-height: 1.15; letter-spacing: -0.5px; margin-bottom: 16px;
+}
+.section-subtitle {
+  font-size: clamp(16px, 2.5vw, 18px); color: var(--body-text);
+  max-width: 640px; line-height: 1.65;
+}
+
+/* ============================================
+   PROBLEM / AGITATE
+   ============================================ */
+.problem { padding: var(--section-pad) 0; background: var(--white); }
+.problem-grid { display: grid; gap: 16px; margin-top: 40px; }
+.problem-card {
+  display: flex; gap: 16px; padding: 20px;
+  background: var(--pale-bg); border-radius: var(--radius); border-left: 3px solid var(--mid-blue);
+}
+.problem-card-icon {
+  width: 40px; height: 40px; border-radius: 10px; background: var(--white);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 20px;
+}
+.problem-card h3 { font-size: 16px; font-weight: 700; color: var(--dark-blue); margin-bottom: 4px; }
+.problem-card p { font-size: 14px; color: var(--body-text); line-height: 1.55; }
+@media (min-width: 768px) { .problem-grid { grid-template-columns: 1fr 1fr; gap: 20px; } }
+
+/* ============================================
+   VALUE PROPOSITION + STATS
+   ============================================ */
+/* Value prop — light bg for breathing room */
+.value-prop {
+  padding: 48px 0 0;
+  background: var(--white);
+  text-align: center;
+}
+.value-prop-title {
+  font-size: clamp(24px, 4.5vw, 34px); font-weight: 800; color: var(--dark-blue);
+  line-height: 1.15; letter-spacing: -0.5px; margin-bottom: 12px;
+}
+.value-prop-title em { font-style: normal; color: var(--orange); }
+.value-prop-body {
+  font-size: clamp(14px, 2.2vw, 16px); color: var(--body-text);
+  max-width: 580px; margin: 0 auto; line-height: 1.7;
+}
+/* Stats strip — stays dark, thin accent */
+.stats-strip {
+  padding: 28px 0;
+  background: var(--dark-blue);
+  margin-top: 40px;
+}
+.stats-strip-inner {
+  max-width: var(--content-max); margin: 0 auto; padding: 0 20px;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; text-align: center;
+}
+.stat-number { font-size: clamp(24px, 4vw, 34px); font-weight: 800; color: var(--orange); line-height: 1.1; margin-bottom: 3px; }
+.stat-label { font-size: 12px; font-weight: 600; color: rgba(255, 255, 255, 0.65); line-height: 1.4; }
+.stat-source { font-size: 10px; color: rgba(255, 255, 255, 0.3); margin-top: 3px; }
+@media (max-width: 639px) {
+  .stats-strip-inner { grid-template-columns: 1fr; gap: 16px; }
+  .stat-item { display: flex; align-items: center; gap: 16px; text-align: left; }
+  .stat-number { font-size: 24px; margin-bottom: 0; white-space: nowrap; }
+}
+
+/* ============================================
+   PATIO TYPES — alternating photo-text rows
+   ============================================ */
+.patio-types { padding: var(--section-pad) 0; background: var(--pale-bg); }
+.patio-types-header { text-align: center; max-width: 700px; margin: 0 auto 48px; }
+.patio-types-grid { display: grid; gap: 24px; }
+.patio-type-card {
+  display: grid; grid-template-columns: 1fr;
+  background: var(--white); border-radius: var(--radius); overflow: hidden;
+  box-shadow: var(--shadow-card); border: 1px solid transparent;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.patio-type-card:hover { border-color: rgba(241, 90, 41, 0.3); box-shadow: var(--shadow-md); }
+.patio-type-img {
+  min-height: 260px; background-size: cover; background-position: center;
+  background-color: var(--mid-blue);
+}
+.patio-type-card.featured { border-color: var(--orange); }
+.patio-type-body { padding: 28px 24px; display: flex; flex-direction: column; justify-content: center; }
+.patio-type-body h3 { font-size: 22px; font-weight: 800; color: var(--dark-blue); margin-bottom: 10px; }
+.patio-type-body > p { font-size: 15px; color: var(--body-text); line-height: 1.7; margin-bottom: 12px; }
+.patio-type-best { font-size: 13px; font-weight: 600; color: var(--mid-blue); margin-bottom: 8px; }
+.patio-type-best strong { color: var(--dark-blue); }
+.patio-type-note {
+  font-size: 13px; color: var(--body-text); line-height: 1.5;
+  padding: 10px 14px; background: var(--pale-bg); border-radius: var(--radius-sm);
+  border-left: 3px solid var(--mid-blue); margin-top: 12px;
+}
+.patio-type-card.featured .patio-type-note { border-left-color: var(--orange); }
+.patio-type-crosslink {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 12px;
+  font-size: 13px; font-weight: 700; color: var(--orange);
+  transition: gap var(--transition);
+}
+.patio-type-crosslink:hover { gap: 10px; }
+
+@media (min-width: 768px) {
+  .patio-type-card { grid-template-columns: 1fr 1fr; }
+  .patio-type-img { min-height: 360px; }
+  .patio-type-body { padding: 36px 32px; }
+  /* Alternate: flip photo/text sides */
+  .patio-type-card:nth-child(even) .patio-type-img { order: 2; }
+  .patio-type-card:nth-child(even) .patio-type-body { order: 1; }
+}
+
+/* ============================================
+   ROOF STYLES
+   ============================================ */
+.styles { padding: var(--section-pad) 0; background: var(--white); }
+.styles-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 32px; }
+.style-tile {
+  border-radius: var(--radius); overflow: hidden; position: relative;
+  aspect-ratio: 4/3; background-size: cover; background-position: center;
+  background-color: var(--mid-blue); cursor: default;
+}
+.style-tile::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(to top, rgba(26, 40, 48, 0.8) 0%, transparent 60%);
+}
+.style-tile-content {
+  position: absolute; bottom: 0; left: 0; right: 0; padding: 16px;
+  z-index: 1; color: var(--white);
+}
+.style-tile-content h3 { font-size: 16px; font-weight: 800; margin-bottom: 2px; }
+.style-tile-content p { font-size: 12px; color: rgba(255,255,255,0.75); line-height: 1.4; }
+.style-tile-tag {
+  position: absolute; top: 12px; left: 12px; z-index: 1;
+  background: var(--orange); color: var(--white);
+  padding: 4px 10px; border-radius: 50px; font-size: 11px; font-weight: 700;
+}
+@media (min-width: 640px) { .styles-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 1024px) { .styles-grid { grid-template-columns: repeat(5, 1fr); gap: 14px; } }
+
+/* ============================================
+   PRICE GUIDE (replaces Panel Specs)
+   ============================================ */
+.price-guide { padding: var(--section-pad) 0; background: var(--pale-bg); }
+.price-guide-header { text-align: center; max-width: 680px; margin: 0 auto 40px; }
+.price-table-wrap {
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  border-radius: var(--radius); box-shadow: var(--shadow-md);
+}
+.price-table { width: 100%; min-width: 500px; border-collapse: collapse; font-size: 14px; }
+.price-table thead th {
+  padding: 16px 20px; text-align: left; font-size: 13px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px; color: var(--white);
+  background: var(--dark-blue); border-bottom: 3px solid var(--orange);
+}
+.price-table tbody td {
+  padding: 14px 20px; border-bottom: 1px solid var(--tint); color: var(--body-text); vertical-align: top;
+}
+.price-table tbody td:first-child { font-weight: 600; color: var(--dark-blue); }
+.price-table tbody td:nth-child(2) { font-weight: 700; color: var(--dark-blue); white-space: nowrap; }
+.price-table tbody tr:nth-child(even) { background: var(--pale-bg); }
+.price-table tbody tr:nth-child(odd) { background: var(--white); }
+.price-table tbody tr:hover { background: rgba(76, 106, 124, 0.06); }
+.price-disclaimer {
+  font-size: 13px; color: var(--light-text); text-align: center;
+  max-width: 640px; margin: 20px auto 0; line-height: 1.6;
+}
+
+/* ============================================
+   COLORBOND COLOURS
+   ============================================ */
+.colours { padding: var(--section-pad) 0; background: var(--white); }
+.colours-header { text-align: center; max-width: 640px; margin: 0 auto 40px; }
+.colours-group-title { font-size: 17px; font-weight: 700; color: var(--dark-blue); margin-bottom: 20px; }
+.colour-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.colour-swatch { text-align: center; }
+.swatch-circle {
+  width: 56px; height: 56px; border-radius: 50%; margin: 0 auto 8px;
+  border: 3px solid var(--white); box-shadow: var(--shadow-sm);
+  transition: transform var(--transition);
+}
+.colour-swatch:hover .swatch-circle { transform: scale(1.12); }
+.swatch-name { font-size: 12px; font-weight: 600; color: var(--dark-blue); }
+.colours-note { font-size: 14px; color: var(--body-text); margin-bottom: 20px; }
+@media (min-width: 480px) { .colour-grid { grid-template-columns: repeat(4, 1fr); } }
+@media (min-width: 640px) { .colour-grid { grid-template-columns: repeat(6, 1fr); } }
+@media (min-width: 900px) { .colour-grid { grid-template-columns: repeat(9, 1fr); } .swatch-circle { width: 64px; height: 64px; } }
+
+/* ============================================
+   GALLERY
+   ============================================ */
+/* Full-bleed gallery — edge to edge, dramatic */
+.gallery { padding: 0; background: var(--dark-blue); }
+.gallery-header { padding: 48px 20px 0; text-align: center; }
+.gallery .section-label { color: var(--orange); }
+.gallery .section-label::before { background: var(--orange); }
+.gallery .section-title { color: var(--white); }
+.gallery-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; margin-top: 32px; }
+.gallery-item:nth-child(n+7) { display: none; }
+.gallery-item {
+  overflow: hidden; position: relative; cursor: pointer;
+  background: linear-gradient(135deg, var(--mid-blue), var(--dark-blue)); aspect-ratio: 4/3;
+}
+.gallery-item:first-child { grid-column: 1 / -1; aspect-ratio: 21/9; }
+.gallery-item img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1); }
+.gallery-item:hover img { transform: scale(1.05); }
+.gallery-caption {
+  position: absolute; bottom: 0; left: 0; right: 0; padding: 48px 20px 16px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.65)); color: var(--white);
+  font-size: 14px; font-weight: 600;
+}
+.gallery-caption span { font-size: 12px; font-weight: 500; opacity: 0.8; display: block; margin-top: 2px; }
+@media (min-width: 768px) {
+  .gallery-grid { grid-template-columns: repeat(3, 1fr); gap: 5px; }
+  .gallery-item:first-child { grid-column: 1 / 3; grid-row: 1 / 3; aspect-ratio: auto; }
+  .gallery-item:nth-child(n+7) { display: block; }
+}
+@media (min-width: 1024px) {
+  .gallery-grid { grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .gallery-item:first-child { grid-column: 1 / 3; grid-row: 1 / 3; }
+}
+
+/* ============================================
+   PROJECT TIMELINE (replaces How It Works + Council/Finance)
+   ============================================ */
+.timeline-section {
+  padding: 56px 0 48px;
+  background: linear-gradient(rgba(41, 60, 70, 0.86), rgba(41, 60, 70, 0.92)), url('assets/photos/real-flat-patio-deck.jpg') center 40%/cover no-repeat;
+  color: var(--white);
+}
+.timeline-header { text-align: center; max-width: 560px; margin: 0 auto 44px; }
+.timeline-header .section-title { color: var(--white); }
+.timeline-header .section-subtitle { color: rgba(255,255,255,0.7); }
+.timeline-header .section-label { color: var(--orange); }
+.timeline-header .section-label::before { background: var(--orange); }
+
+/* The timeline track */
+.timeline {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  max-width: 960px;
+  margin: 0 auto;
+}
+/* Vertical line (mobile) */
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 19px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: linear-gradient(to bottom, var(--orange), var(--mid-blue) 50%, rgba(255,255,255,0.2));
+}
+.timeline-step {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  gap: 16px;
+  align-items: start;
+  padding-bottom: 28px;
+  position: relative;
+}
+.timeline-step:last-child { padding-bottom: 0; }
+.timeline-dot {
+  width: 40px; height: 40px; border-radius: 50%;
+  background: var(--dark-blue); border: 2px solid var(--orange);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 800; color: var(--orange);
+  position: relative; z-index: 1; flex-shrink: 0;
+}
+.timeline-step.active .timeline-dot { background: var(--orange); color: var(--white); }
+.timeline-step-content {}
+.timeline-step-top {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 2px;
+}
+.timeline-step-title { font-size: 16px; font-weight: 700; color: var(--white); }
+.timeline-step-time {
+  font-size: 12px; font-weight: 600; color: var(--orange);
+  background: rgba(241, 90, 41, 0.15); padding: 2px 10px; border-radius: 50px;
+}
+.timeline-step-desc { font-size: 13px; color: rgba(255,255,255,0.6); line-height: 1.5; }
+
+/* Facts strip below timeline */
+.timeline-facts {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 12px 24px;
+  margin-top: 36px; padding-top: 28px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+.timeline-fact {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.75);
+}
+.timeline-fact svg { width: 16px; height: 16px; color: var(--orange); flex-shrink: 0; }
+
+/* Desktop: horizontal layout */
+@media (min-width: 768px) {
+  .timeline {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 0;
+    text-align: center;
+  }
+  .timeline::before {
+    left: 0; right: 0;
+    top: 19px; bottom: auto;
+    width: auto; height: 2px;
+    background: linear-gradient(to right, var(--orange), var(--mid-blue) 60%, rgba(255,255,255,0.2));
+  }
+  .timeline-step {
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding-bottom: 0;
+    justify-items: center;
+  }
+  .timeline-dot { margin-bottom: 14px; }
+  .timeline-step-top {
+    justify-content: center;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .timeline-step-title { font-size: 14px; }
+  .timeline-step-time { font-size: 11px; }
+  .timeline-step-desc { font-size: 12px; }
+}
+
+/* ============================================
+   INSULATED CALLOUT — slim banner
+   ============================================ */
+.insulated-callout {
+  padding: 28px 0; background: var(--dark-blue);
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+.insulated-callout-inner {
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap; gap: 12px 24px; text-align: center;
+}
+.insulated-callout-text { font-size: 15px; font-weight: 600; color: rgba(255,255,255,0.8); }
+.insulated-callout-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 10px 22px; background: var(--orange); color: var(--white);
+  font-size: 14px; font-weight: 700; border-radius: 50px;
+  transition: all var(--transition);
+}
+.insulated-callout-btn:hover { background: var(--orange-hover); transform: translateY(-1px); }
+
+/* ============================================
+   TESTIMONIALS
+   ============================================ */
+.testimonials { padding: var(--section-pad) 0; background: var(--white); }
+.testimonials-header { text-align: center; max-width: 600px; margin: 0 auto 40px; }
+.testimonials-grid { display: grid; gap: 20px; }
+.testimonial-card { background: var(--pale-bg); border-radius: var(--radius); padding: 28px 24px; position: relative; }
+.testimonial-stars { display: flex; gap: 3px; margin-bottom: 14px; }
+.testimonial-stars svg { width: 18px; height: 18px; color: #f5a623; }
+.testimonial-card blockquote { font-size: 15px; color: var(--dark-blue); line-height: 1.65; font-style: normal; margin-bottom: 16px; }
+.testimonial-author { display: flex; align-items: center; gap: 10px; }
+.testimonial-avatar {
+  width: 40px; height: 40px; border-radius: 50%; background: var(--orange); color: var(--white);
+  display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700;
+}
+.testimonial-author-info .name { font-size: 14px; font-weight: 700; color: var(--dark-blue); }
+.testimonial-author-info .location { font-size: 12px; color: var(--light-text); }
+.testimonial-google {
+  position: absolute; top: 20px; right: 20px; font-size: 11px; font-weight: 600;
+  color: var(--light-text); display: flex; align-items: center; gap: 4px;
+}
+@media (min-width: 768px) { .testimonials-grid { grid-template-columns: repeat(3, 1fr); } }
+
+/* ============================================
+   FAQ
+   ============================================ */
+.faq { padding: var(--section-pad) 0; background: var(--pale-bg); }
+.faq-header { text-align: center; max-width: 600px; margin: 0 auto 40px; }
+.faq-list { max-width: 780px; margin: 0 auto; display: grid; gap: 12px; }
+.faq-item {
+  background: var(--white); border-radius: var(--radius); overflow: hidden;
+  box-shadow: var(--shadow-sm); transition: box-shadow var(--transition), border-color var(--transition);
+  border-left: 3px solid transparent;
+}
+.faq-item:hover { box-shadow: var(--shadow-card); }
+.faq-item.active { border-left-color: var(--orange); }
+.faq-question {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 20px; background: none; font-family: var(--font); font-size: 15px;
+  font-weight: 600; color: var(--dark-blue); text-align: left; cursor: pointer; gap: 16px;
+}
+.faq-question:hover { color: var(--orange); }
+.faq-question svg { width: 20px; height: 20px; flex-shrink: 0; color: var(--mid-blue); transition: transform var(--transition); }
+.faq-item.active .faq-question svg { transform: rotate(45deg); color: var(--orange); }
+.faq-answer { max-height: 0; overflow: hidden; transition: max-height 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+.faq-answer-inner { padding: 0 20px 18px; font-size: 14px; color: var(--body-text); line-height: 1.7; }
+
+/* ============================================
+   FINAL CTA
+   ============================================ */
+.final-cta {
+  padding: var(--section-pad) 0;
+  background: linear-gradient(135deg, #1a2830 0%, var(--dark-blue) 50%, #1a2830 100%);
+  text-align: center; position: relative; overflow: hidden;
+}
+.final-cta::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: radial-gradient(ellipse at 50% 120%, rgba(241, 90, 41, 0.1) 0%, transparent 60%);
+}
+.final-cta::after {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(to right, transparent, var(--orange), transparent);
+}
+.final-cta-content { position: relative; z-index: 1; max-width: 560px; margin: 0 auto; }
+.final-cta h2 { font-size: clamp(28px, 5vw, 40px); font-weight: 800; color: var(--white); line-height: 1.15; margin-bottom: 16px; }
+.final-cta p { font-size: 17px; color: rgba(255, 255, 255, 0.7); margin-bottom: 32px; line-height: 1.6; }
+.final-cta-buttons { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.btn-primary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 16px 36px; background: var(--orange); color: var(--white); font-size: 16px;
+  font-weight: 700; border-radius: 50px; transition: all var(--transition); width: 100%; max-width: 320px;
+}
+.btn-primary:hover { background: var(--orange-hover); transform: translateY(-2px); box-shadow: 0 6px 24px rgba(241, 90, 41, 0.35); }
+.btn-secondary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 16px 36px; background: transparent; border: 2px solid rgba(255, 255, 255, 0.25);
+  color: var(--white); font-size: 16px; font-weight: 700; border-radius: 50px;
+  transition: all var(--transition); width: 100%; max-width: 320px;
+}
+.btn-secondary:hover { border-color: var(--white); background: rgba(255, 255, 255, 0.05); }
+@media (min-width: 640px) {
+  .final-cta-buttons { flex-direction: row; justify-content: center; }
+  .btn-primary, .btn-secondary { width: auto; }
+}
+
+/* ============================================
+   FOOTER
+   ============================================ */
+.footer { padding: 48px 0 120px; background: #1a2830; color: rgba(255, 255, 255, 0.6); font-size: 14px; }
+.footer-inner { max-width: var(--content-max); margin: 0 auto; padding: 0 20px; display: grid; gap: 32px; }
+.footer-brand .footer-logo { margin-bottom: 12px; }
+.footer-brand .footer-logo img { height: 32px; width: auto; }
+.footer-brand p { line-height: 1.6; font-size: 13px; }
+.footer-links h4 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: rgba(255, 255, 255, 0.9); margin-bottom: 12px; }
+.footer-links ul { list-style: none; }
+.footer-links li { padding: 4px 0; }
+.footer-links a { transition: color var(--transition); font-size: 13px; }
+.footer-links a:hover { color: var(--orange); }
+.footer-bottom {
+  padding-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.08); font-size: 12px;
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px;
+}
+.footer-cross-sell {
+  margin-top: 16px; padding: 16px; background: rgba(255, 255, 255, 0.04);
+  border-radius: var(--radius-sm); border-left: 3px solid var(--orange); font-size: 13px;
+}
+.footer-cross-sell strong { color: rgba(255, 255, 255, 0.9); }
+@media (min-width: 768px) { .footer-inner { grid-template-columns: 2fr 1fr 1fr; } .footer { padding-bottom: 48px; } }
+
+/* ============================================
+   STICKY MOBILE CTA BAR
+   ============================================ */
+.mobile-cta {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 999;
+  background: var(--white); border-top: 1px solid var(--border);
+  padding: 10px 16px; display: flex; gap: 10px;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+  transform: translateY(100%); transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.mobile-cta.visible { transform: translateY(0); }
+.mobile-cta-quote {
+  flex: 1; padding: 12px; background: var(--orange); color: var(--white);
+  font-size: 14px; font-weight: 700; border-radius: var(--radius-sm); text-align: center;
+}
+.mobile-cta-quote:hover { background: var(--orange-hover); }
+.mobile-cta-call {
+  padding: 12px 20px; background: var(--dark-blue); color: var(--white);
+  border-radius: var(--radius-sm); display: flex; align-items: center; gap: 6px;
+  font-size: 14px; font-weight: 700;
+}
+.mobile-cta-call:hover { background: var(--near-black); }
+.mobile-cta-call svg { width: 16px; height: 16px; }
+@media (min-width: 768px) { .mobile-cta { display: none; } .footer { padding-bottom: 48px; } }
+</style>
+</head>
+<body>
+
+<!-- NAVIGATION -->
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a href="/" class="nav-logo">
+      <img src="assets/logo/svg/SecureWorks Group Main.svg" alt="SecureWorks Group" class="nav-logo-img">
+    </a>
+    <ul class="nav-links">
+      <li><a href="#patio-types">Patio Types</a></li>
+      <li><a href="#gallery">Projects</a></li>
+      <li><a href="#pricing">Pricing</a></li>
+      <li><a href="#faq">FAQ</a></li>
+    </ul>
+    <a href="tel:+61489267774" class="nav-phone">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z"/></svg>
+      0489 267 774
+    </a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero" id="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-inner">
+    <div class="hero-content">
+      <div class="hero-badge">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"/></svg>
+        Every Patio Type — One Honest Conversation
+      </div>
+      <h1>Custom Patios in <em>[SUBURB]</em> — Built for Perth's Climate</h1>
+      <p class="hero-sub">From simple shade structures to fully insulated outdoor rooms. We build the right patio for your home, your budget, and the way you actually live.</p>
+      <div class="hero-trust">
+        <div class="hero-trust-item">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l1.518 3.593 3.841.299c1.167.091 1.638 1.543.737 2.272l-2.96 2.394.924 3.758c.28 1.14-.964 2.037-1.95 1.406L12 14.946l-3.322 1.986c-.986.63-2.23-.266-1.95-1.406l.924-3.758-2.96-2.394c-.901-.729-.43-2.181.737-2.272l3.841-.299 1.518-3.593z" clip-rule="evenodd"/></svg>
+          4.9 on Google
+        </div>
+        <div class="hero-trust-divider"></div>
+        <div class="hero-trust-item">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg>
+          Every Patio Type
+        </div>
+        <div class="hero-trust-divider"></div>
+        <div class="hero-trust-item">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"/></svg>
+          Perth Family Business
+        </div>
+      </div>
+    </div>
+
+    <!--
+      ============================================================
+      GHL FORM INTEGRATION — DEVELOPER INSTRUCTIONS
+      ============================================================
+      1. In GoHighLevel, get the iframe embed code for your lead form
+      2. Replace the placeholder <div> below with your <iframe> tag
+      3. Set iframe style: width:100%; min-height:450px; border:none;
+      4. Copy the GHL Custom CSS into:
+         GHL Form Builder > Styles > Advanced > Custom CSS
+
+      Recommended GHL form fields:
+        - Full Name (required)
+        - Phone (required)
+        - Address / Suburb (pre-fill with [SUBURB] if possible)
+        - What type of patio are you interested in? (dropdown)
+        - What are you looking for? (textarea)
+      ============================================================
+    -->
+    <div class="hero-form-wrap">
+      <div class="hero-form-header">
+        <h2>Get Your Free Patio Consultation</h2>
+        <p><span>Free site visit</span> &nbsp;·&nbsp; <span>Honest recommendations</span></p>
+      </div>
+
+      <!-- REPLACE: Paste your GHL form iframe embed code below -->
+      <div class="ghl-form-placeholder">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="32" height="32"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+        <p>GHL Form Embed Goes Here</p>
+        <small>See HTML comments above for integration instructions</small>
+      </div>
+
+      <p class="form-privacy">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/></svg>
+        Your details are secure and never shared.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- TRUST BAR -->
+<section class="trust-bar">
+  <div class="trust-bar-inner">
+    <div class="trust-item">
+      <div class="trust-item-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z"/></svg></div>
+      <div class="trust-item-text">100+ 5-Star<br>Google Reviews</div>
+    </div>
+    <div class="trust-item">
+      <div class="trust-item-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"/></svg></div>
+      <div class="trust-item-text">Every Patio<br>Type Built</div>
+    </div>
+    <div class="trust-item">
+      <div class="trust-item-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m5.231 13.481L15 17.25m-4.5-15H5.625c-.621 0-1.125.504-1.125 1.125v16.5c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9zm3.75 11.625a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg></div>
+      <div class="trust-item-text">Engineering &<br>Council Handled</div>
+    </div>
+    <div class="trust-item">
+      <div class="trust-item-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z"/></svg></div>
+      <div class="trust-item-text">Finance<br>Available</div>
+    </div>
+    <div class="trust-item">
+      <div class="trust-item-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg></div>
+      <div class="trust-item-text">Family Owned<br>Perth Business</div>
+    </div>
+    <div class="trust-item">
+      <div class="trust-item-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg></div>
+      <div class="trust-item-text">Fully Licensed<br>& Insured</div>
+    </div>
+  </div>
+</section>
+
+<!-- SUPPLIER LOGOS -->
+<div class="supplier-logos">
+  <div class="container">
+    <span class="supplier-label">Trusted Materials From</span>
+    <div class="supplier-strip">
+      <span class="supplier-logo-text">Metroll</span>
+      <span class="supplier-divider"></span>
+      <span class="supplier-logo-text">COLORBOND<sup>&reg;</sup> steel</span>
+      <span class="supplier-divider"></span>
+      <span class="supplier-logo-text">BlueScope</span>
+      <span class="supplier-divider"></span>
+      <span class="supplier-logo-text">Bondor</span>
+    </div>
+  </div>
+</div>
+
+<!-- VALUE PROPOSITION — light bg -->
+<section class="value-prop">
+  <div class="container">
+    <div class="reveal">
+      <h2 class="value-prop-title">Unlock the <em>Most Valuable Room</em> You Already Own</h2>
+      <p class="value-prop-body">A strategic patio isn't just shade — it's habitable space that adds real value to your home. We partner with you on function, style, and design that works for how you actually live. The right build turns underused backyard into the room your family lives in most.</p>
+    </div>
+  </div>
+</section>
+
+<!-- STATS STRIP — dark accent -->
+<div class="stats-strip">
+  <div class="stats-strip-inner reveal">
+    <div class="stat-item">
+      <div class="stat-number">375m²</div>
+      <div>
+        <div class="stat-label">Average Perth block — down from 700m² in the '70s</div>
+        <div class="stat-source">ABS / Cygnet West</div>
+      </div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-number">~$4,700/m²</div>
+      <div>
+        <div class="stat-label">To build a room inside your home</div>
+        <div class="stat-source">Residential Attitudes, 2025</div>
+      </div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-number">~$500/m²</div>
+      <div>
+        <div class="stat-label">For a quality patio — 1/10th the price</div>
+        <div class="stat-source">SecureWorks project data</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PATIO TYPES — What Type of Patio is Right for You? -->
+<section class="patio-types" id="patio-types">
+  <div class="container">
+    <div class="patio-types-header reveal">
+      <div class="section-label accent">The Guide</div>
+      <h2 class="section-title">What Type of Patio is Right for You?</h2>
+      <p class="section-subtitle">We build them all — so we recommend what's actually best for you. Here's an honest look at every option.</p>
+    </div>
+    <div class="patio-types-grid">
+
+      <!-- Steel Sheet -->
+      <div class="patio-type-card reveal reveal-delay-1">
+        <div class="patio-type-img" style="background-image:url('assets/photos/flat-patio-daytime.png');"></div>
+        <div class="patio-type-body">
+          <h3>Steel Sheet Patio</h3>
+          <p>Clean, practical Colorbond coverage that matches your existing roof. The reliable choice for carports, alfresco areas, and covered outdoor zones.</p>
+          <div class="patio-type-best"><strong>Great for:</strong> Carports, alfresco shade, side entries</div>
+          <div class="patio-type-note">Our take: Perfect for solid coverage without the premium — we can add polycarb lites for natural light too.</div>
+        </div>
+      </div>
+
+      <!-- Insulated Panels (featured) -->
+      <div class="patio-type-card featured reveal reveal-delay-2">
+        <div class="patio-type-img" style="background-image:url('assets/photos/ceiling-detail-downlight.png');"></div>
+        <div class="patio-type-body">
+          <h3>Insulated Panel Patio</h3>
+          <p>Roof, insulation, and a flat ceiling in one panel. Up to 22°C cooler, silent in rain, ready for downlights and fans. This is where a patio becomes a room.</p>
+          <div class="patio-type-best"><strong>Great for:</strong> Outdoor dining, entertaining, second living rooms</div>
+          <div class="patio-type-note">Our take: If you'll actually live in the space — not just walk through it — insulated is worth every dollar.</div>
+          <!-- Cross-link to insulated specialist site -->
+          <a href="#" class="patio-type-crosslink">
+            <!-- TODO: Replace # with insulated specialist site URL -->
+            Learn more on our Insulated Patios page &rarr;
+          </a>
+        </div>
+      </div>
+
+      <!-- Timber Pergola -->
+      <div class="patio-type-card reveal reveal-delay-3">
+        <div class="patio-type-img" style="background-image:url('assets/photos/patio-deck-golden.png');"></div>
+        <div class="patio-type-body">
+          <h3>Timber Pergola / Patio</h3>
+          <p>Real timber brings warmth and character that steel can't replicate. Jarrah, merbau, or treated pine — stunning on federation, Hamptons, and coastal homes.</p>
+          <div class="patio-type-best"><strong>Great for:</strong> Character homes, pools, design-led builds</div>
+          <div class="patio-type-note">Our take: Pair a timber frame with insulated roofing for the best of both worlds.</div>
+        </div>
+      </div>
+
+      <!-- Open Pergola / Shade -->
+      <div class="patio-type-card reveal reveal-delay-1">
+        <div class="patio-type-img" style="background-image:url('assets/photos/patio-deck-bush.png');"></div>
+        <div class="patio-type-body">
+          <h3>Open Pergola / Shade</h3>
+          <p>Posts, beams, and battens — with shade cloth, climbing plants, or left open. The simplest way to define an outdoor space on a budget.</p>
+          <div class="patio-type-best"><strong>Great for:</strong> Garden features, poolside, wisteria structures</div>
+          <div class="patio-type-note">Our take: Sometimes simple is exactly right — and we'll tell you when that's the case.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- GALLERY — full bleed, dramatic -->
+<section class="gallery" id="gallery">
+  <div class="gallery-header">
+    <div class="reveal">
+      <div class="section-label">Our Work</div>
+      <h2 class="section-title">Patios We've Built Across Perth</h2>
+    </div>
+  </div>
+  <div class="gallery-grid reveal">
+    <div class="gallery-item" style="background-image:url('assets/photos/verandah-bush-interior.png');background-size:115%;background-position:left 35%;"><div class="gallery-caption">Verandah with Timber Deck<span>Insulated ceiling, hardwood deck</span></div></div>
+    <div class="gallery-item" style="background-image:url('assets/photos/flat-patio-daytime.png');background-size:cover;background-position:center;"><div class="gallery-caption">Flat Steel Patio<span>Colorbond sheet, clean lines</span></div></div>
+    <div class="gallery-item" style="background-image:url('assets/photos/gable-patio-classic.png');background-size:cover;background-position:center;"><div class="gallery-caption">Gable Patio<span>Classic pitched roof design</span></div></div>
+    <div class="gallery-item" style="background-image:url('assets/photos/outdoor-kitchen-gable.png');background-size:cover;background-position:center;"><div class="gallery-caption">Outdoor Kitchen & Gable Patio<span>Entertain all year round</span></div></div>
+    <div class="gallery-item" style="background-image:url('assets/photos/flyover-patio-home.png');background-size:cover;background-position:center;"><div class="gallery-caption">Flyover Patio<span>Raised above existing roofline</span></div></div>
+    <div class="gallery-item" style="background-image:url('assets/photos/poolside-patio-luxury.png');background-size:cover;background-position:center;"><div class="gallery-caption">Poolside Freestanding Patio<span>Separate entertaining zone</span></div></div>
+    <div class="gallery-item" style="background-image:url('assets/photos/team-crew-onsite.jpg');background-size:cover;background-position:center 25%;"><div class="gallery-caption">Build Day<span>Our crew on every project</span></div></div>
+    <div class="gallery-item" style="background-image:url('assets/photos/patio-deck-golden.png');background-size:cover;background-position:center;"><div class="gallery-caption">Deck & Patio Combination<span>Complete outdoor living</span></div></div>
+  </div>
+</section>
+
+<!-- TESTIMONIALS (moved up — social proof break after photos) -->
+<section class="testimonials" id="testimonials">
+  <div class="container">
+    <div class="testimonials-header reveal">
+      <div class="section-label">Reviews</div>
+      <h2 class="section-title">What Our Clients Say</h2>
+    </div>
+    <div class="testimonials-grid">
+      <div class="testimonial-card reveal reveal-delay-1">
+        <div class="testimonial-google"><svg width="14" height="14" viewBox="0 0 24 24"><path fill="#4285f4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34a853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#fbbc05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#ea4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg> Google Review</div>
+        <div class="testimonial-stars"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></div>
+        <blockquote>"Absolutely on point with quality, service and price. Dealing with the team was super easy. Thank you Godfrey and especially Henry for your impressive workmanship and super friendly service. Highly recommend, You won't go wrong choosing them!"</blockquote>
+        <div class="testimonial-author"><div class="testimonial-avatar">T</div><div class="testimonial-author-info"><div class="name">Tony G.</div><div class="location">Perth</div></div></div>
+      </div>
+      <div class="testimonial-card reveal reveal-delay-2">
+        <div class="testimonial-google"><svg width="14" height="14" viewBox="0 0 24 24"><path fill="#4285f4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34a853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#fbbc05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#ea4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg> Google Review</div>
+        <div class="testimonial-stars"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></div>
+        <blockquote>"Quote was done politely by Marnin; and the work done (as quoted on time) by his team — the guys were very clean, friendly and efficient."</blockquote>
+        <div class="testimonial-author"><div class="testimonial-avatar">L</div><div class="testimonial-author-info"><div class="name">Lisa Gioconda</div><div class="location">Perth</div></div></div>
+      </div>
+      <div class="testimonial-card reveal reveal-delay-3">
+        <div class="testimonial-google"><svg width="14" height="14" viewBox="0 0 24 24"><path fill="#4285f4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34a853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#fbbc05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#ea4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg> Google Review</div>
+        <div class="testimonial-stars"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></div>
+        <blockquote>"I have recently had a pergola constructed by SecureWorks and it was the most uncomplicated procedure I think I have ever had. From the outset where a quote was supplied (which was very competitive against other quotes) to the final nail being driven in, was so seamless. Workmanship was top notch. A special thanks to Jan for his 'above and beyond' service. I do not hesitate in recommending this company to anyone."</blockquote>
+        <div class="testimonial-author"><div class="testimonial-avatar">M</div><div class="testimonial-author-info"><div class="name">Martyn Evans</div><div class="location">Perth · Local Guide</div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PRICE GUIDE -->
+<section class="price-guide" id="pricing">
+  <div class="container">
+    <div class="price-guide-header reveal">
+      <div class="section-label accent">Transparent Pricing</div>
+      <h2 class="section-title">Patio Price Guide — Perth Metro</h2>
+      <p class="section-subtitle">Most builders hide their pricing. We'd rather be upfront.</p>
+    </div>
+    <div class="price-table-wrap reveal">
+      <table class="price-table">
+        <thead><tr><th>Patio Type</th><th>Typical Range (Installed)</th><th>What Affects Price</th></tr></thead>
+        <tbody>
+          <tr><td>Open pergola / shade structure</td><td>$3,000 – $8,000</td><td>Size, timber species, complexity</td></tr>
+          <tr><td>Steel sheet patio (flat, attached)</td><td>$5,000 – $15,000</td><td>Size, posts, footings, guttering</td></tr>
+          <tr><td>Steel sheet gable patio</td><td>$8,000 – $20,000</td><td>Span, gable infill, engineering</td></tr>
+          <tr><td>Insulated panel patio (flat)</td><td>$12,000 – $30,000</td><td>Panel thickness, span, electrical</td></tr>
+          <tr><td>Insulated panel gable</td><td>$18,000 – $50,000+</td><td>Size, custom trusses, electrical</td></tr>
+          <tr><td>Premium timber + insulated</td><td>$25,000 – $60,000+</td><td>Timber species, design complexity</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="price-disclaimer reveal">Guide ranges based on typical Perth metro builds. Your quote will reflect your specific situation. No hidden costs.</p>
+  </div>
+</section>
+
+<!-- PROJECT TIMELINE — full journey, start to finish -->
+<section class="timeline-section" id="process">
+  <div class="container">
+    <div class="timeline-header reveal">
+      <div class="section-label">Your Project</div>
+      <h2 class="section-title">Start to Finish — We Handle Everything</h2>
+      <p class="section-subtitle">Here's exactly what happens from the moment you call us. No surprises, no chasing tradespeople, no council headaches.</p>
+    </div>
+    <div class="timeline reveal">
+      <div class="timeline-step active">
+        <div class="timeline-dot">1</div>
+        <div class="timeline-step-content">
+          <div class="timeline-step-top">
+            <span class="timeline-step-title">Free Consult</span>
+            <span class="timeline-step-time">Day 1</span>
+          </div>
+          <p class="timeline-step-desc">Site visit, measure up, talk through options honestly</p>
+        </div>
+      </div>
+      <div class="timeline-step">
+        <div class="timeline-dot">2</div>
+        <div class="timeline-step-content">
+          <div class="timeline-step-top">
+            <span class="timeline-step-title">Design & Quote</span>
+            <span class="timeline-step-time">48 hours</span>
+          </div>
+          <p class="timeline-step-desc">Fully itemised quote. Deposit on acceptance.</p>
+        </div>
+      </div>
+      <div class="timeline-step">
+        <div class="timeline-dot">3</div>
+        <div class="timeline-step-content">
+          <div class="timeline-step-top">
+            <span class="timeline-step-title">Engineering</span>
+            <span class="timeline-step-time">1–2 weeks</span>
+          </div>
+          <p class="timeline-step-desc">Professional drafting & structural certification</p>
+        </div>
+      </div>
+      <div class="timeline-step">
+        <div class="timeline-dot">4</div>
+        <div class="timeline-step-content">
+          <div class="timeline-step-top">
+            <span class="timeline-step-title">Council Approval</span>
+            <span class="timeline-step-time">CDC 1–3 wks</span>
+          </div>
+          <p class="timeline-step-desc">We lodge and manage — CDC or DA, fully handled</p>
+        </div>
+      </div>
+      <div class="timeline-step">
+        <div class="timeline-dot">5</div>
+        <div class="timeline-step-content">
+          <div class="timeline-step-top">
+            <span class="timeline-step-title">Build</span>
+            <span class="timeline-step-time">2–5 days</span>
+          </div>
+          <p class="timeline-step-desc">Footings, frame, roof, gutters, full cleanup</p>
+        </div>
+      </div>
+      <div class="timeline-step active">
+        <div class="timeline-dot">&#10003;</div>
+        <div class="timeline-step-content">
+          <div class="timeline-step-top">
+            <span class="timeline-step-title">Enjoy</span>
+            <span class="timeline-step-time">Week 6–10</span>
+          </div>
+          <p class="timeline-step-desc">Walkthrough, warranty docs, fire up the BBQ</p>
+        </div>
+      </div>
+    </div>
+    <div class="timeline-facts reveal">
+      <div class="timeline-fact"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> Engineering & council fees included in quote</div>
+      <div class="timeline-fact"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> Finance options available</div>
+      <div class="timeline-fact"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> No hidden costs — ever</div>
+      <div class="timeline-fact"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> Full workmanship warranty</div>
+    </div>
+  </div>
+</section>
+
+<!-- INSULATED PATIO CALLOUT — slim banner -->
+<section class="insulated-callout">
+  <div class="container">
+    <div class="insulated-callout-inner reveal">
+      <span class="insulated-callout-text">Already know you want insulated panels?</span>
+      <a href="#" class="insulated-callout-btn">Visit Our Insulated Patios Page &rarr;</a>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ — 5 key questions -->
+<section class="faq" id="faq">
+  <div class="container">
+    <div class="faq-header reveal">
+      <div class="section-label">FAQ</div>
+      <h2 class="section-title">Common Questions</h2>
+    </div>
+    <div class="faq-list">
+      <div class="faq-item reveal"><button class="faq-question">What's the difference between a patio and a pergola?<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg></button><div class="faq-answer"><div class="faq-answer-inner">A patio has a solid, waterproof roof — full shade and rain protection. A pergola has open battens or lattice, giving filtered light but no weather protection. We build both. If you want to use the space year-round, you need a solid roof.</div></div></div>
+
+      <div class="faq-item reveal"><button class="faq-question">Do I need council approval for a patio in [SUBURB]?<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg></button><div class="faq-answer"><div class="faq-answer-inner">Almost always, yes. Most patios qualify for a CDC (Complying Development Certificate) — typically approved in 1–3 weeks. We handle the entire process: drafting, engineering, and council lodgement.</div></div></div>
+
+      <div class="faq-item reveal"><button class="faq-question">How long does a patio take from start to finish?<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg></button><div class="faq-answer"><div class="faq-answer-inner">On-site build is typically 2–5 days. Total timeline from quote to completion is usually 6–10 weeks including drafting, council approval, and materials ordering. We keep you updated at every stage.</div></div></div>
+
+      <div class="faq-item reveal"><button class="faq-question">What's the best roofing material for Perth?<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg></button><div class="faq-answer"><div class="faq-answer-inner">Depends on the space. Colorbond steel is proven and affordable for carports and basic shade. Insulated panels (SolarSpan) are the clear winner for entertaining areas — up to 22°C cooler, silent in rain. We'll recommend what makes sense for your situation, not just the most expensive option.</div></div></div>
+
+      <div class="faq-item reveal"><button class="faq-question">How much does a patio cost in Perth?<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg></button><div class="faq-answer"><div class="faq-answer-inner">Shade structures start from $3,000, steel sheet patios $5,000–$20,000, insulated patios $12,000–$50,000+. See our price guide above for full ranges. Your quote will be fully itemised — engineering, drafting, and council fees included. No hidden costs.</div></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- FINAL CTA -->
+<section class="final-cta" id="final-cta">
+  <div class="container">
+    <div class="final-cta-content reveal">
+      <h2>Every Patio Type.<br>One Honest Conversation.</h2>
+      <p>We build them all — so we'll tell you what we'd do if it was our house. Book your free consultation and get straight answers, not a sales pitch.</p>
+      <div class="final-cta-buttons">
+        <a href="#hero" class="btn-primary">Get My Free Consultation &rarr;</a>
+        <a href="tel:+61489267774" class="btn-secondary">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="18" height="18"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z"/></svg>
+          Call 0489 267 774
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <div class="footer-logo"><img src="assets/logo/svg/SecureWorks Group White.svg" alt="SecureWorks Group" height="32"></div>
+      <p>Perth's patio builders. Steel, insulated, timber, and everything in between — we build the right patio for the way you actually live.</p>
+      <div class="footer-cross-sell"><strong>We also install Colorbond fencing, composite decking & astro turf.</strong> Ask about package deals when we visit your property.</div>
+    </div>
+    <div class="footer-links">
+      <h4>Patios</h4>
+      <ul>
+        <li><a href="#patio-types">Steel Sheet Patios</a></li>
+        <li><a href="#patio-types">Insulated Patios</a></li>
+        <li><a href="#patio-types">Timber Pergolas</a></li>
+        <li><a href="#patio-types">Carports</a></li>
+        <li><a href="#">Colorbond Fencing</a></li>
+      </ul>
+    </div>
+    <div class="footer-links">
+      <h4>Contact</h4>
+      <ul>
+        <li><a href="tel:+61489267774">0489 267 774</a></li>
+        <li><a href="mailto:patios@secureworkswa.com.au">patios@secureworkswa.com.au</a></li>
+        <li>Perth, Western Australia</li>
+        <li>ABN: 64 689 223 416</li>
+      </ul>
+    </div>
+  </div>
+  <div class="container">
+    <div class="footer-bottom">
+      <span>&copy; 2026 SecureWorks Group. All rights reserved.</span>
+      <span>Serving all Perth metro suburbs</span>
+    </div>
+  </div>
+</footer>
+
+<!-- STICKY MOBILE CTA BAR -->
+<div class="mobile-cta" id="mobileCta">
+  <a href="#hero" class="mobile-cta-quote">Get Free Consultation</a>
+  <a href="tel:+61489267774" class="mobile-cta-call">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z"/></svg>
+    Call
+  </a>
+</div>
+
+<!-- JAVASCRIPT -->
+<script>
+// Scroll Reveal
+const revealElements = document.querySelectorAll('.reveal');
+const revealObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+      revealObserver.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+revealElements.forEach(el => revealObserver.observe(el));
+
+// Nav Scroll
+const nav = document.getElementById('nav');
+window.addEventListener('scroll', () => {
+  nav.classList.toggle('scrolled', window.scrollY > 50);
+});
+
+// Mobile CTA Bar
+const mobileCta = document.getElementById('mobileCta');
+window.addEventListener('scroll', () => {
+  mobileCta.classList.toggle('visible', window.scrollY > 600);
+});
+
+// FAQ Accordion
+document.querySelectorAll('.faq-question').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const item = btn.parentElement;
+    const answer = item.querySelector('.faq-answer');
+    const isActive = item.classList.contains('active');
+    document.querySelectorAll('.faq-item.active').forEach(other => {
+      if (other !== item) { other.classList.remove('active'); other.querySelector('.faq-answer').style.maxHeight = '0'; }
+    });
+    if (isActive) { item.classList.remove('active'); answer.style.maxHeight = '0'; }
+    else { item.classList.add('active'); answer.style.maxHeight = answer.scrollHeight + 'px'; }
+  });
+});
+
+// Smooth scroll
+document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+  anchor.addEventListener('click', function(e) {
+    e.preventDefault();
+    const target = document.querySelector(this.getAttribute('href'));
+    if (target) target.scrollIntoView({ behavior: 'smooth' });
+  });
+});
+</script>
+
+</body>
+</html>

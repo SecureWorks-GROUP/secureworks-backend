@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Backfill Scope Photos</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; background: #f8f9fa; }
+    h1 { color: #293C46; font-size: 20px; }
+    p { font-size: 13px; color: #666; }
+    .status { padding: 12px; margin: 8px 0; border-radius: 6px; font-size: 13px; word-break: break-word; }
+    .info { background: #EBF5FB; color: #2471A3; }
+    .success { background: #EAFAF1; color: #27AE60; }
+    .error { background: #FDEDEC; color: #E74C3C; }
+    .warn { background: #FEF9E7; color: #D35400; }
+    button { background: #F15A29; color: #fff; border: none; padding: 12px 24px; border-radius: 6px; font-size: 15px; cursor: pointer; font-weight: 600; margin-right: 8px; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #log { max-height: 500px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Backfill Scope Photos to Ops Dash</h1>
+  <p>
+    Scans all fencing + patio jobs, finds photos embedded in <code>scope_json</code> that aren't in <code>job_media</code> yet, and uploads them so they show in the ops dashboard.
+  </p>
+  <p>They'll be thumbnail quality (200px for fencing, compressed for patio) — not full-res. But at least they'll be visible.</p>
+  <div style="margin-bottom:16px;">
+    <button id="scanBtn" onclick="scan()">Step 1: Scan Jobs</button>
+    <button id="runBtn" onclick="run()" disabled>Step 2: Upload Photos</button>
+  </div>
+  <div id="log"></div>
+
+<script>
+  var SUPABASE_URL = 'https://kevgrhcjxspbxgovpmfl.supabase.co';
+  var API_KEY = '097a1160f9a8b2f517f4770ebbe88dca105a36f816ef728cc8724da25b2667dc';
+  var GHL_PROXY = SUPABASE_URL + '/functions/v1/ghl-proxy';
+  var OPS_API = SUPABASE_URL + '/functions/v1/ops-api';
+
+  var jobsToProcess = [];
+
+  function log(msg, cls) {
+    var el = document.getElementById('log');
+    el.innerHTML += '<div class="status ' + (cls || 'info') + '">' + msg + '</div>';
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // Extract photos from scope_json — handles both fencing and patio formats
+  function extractPhotos(scope, jobType) {
+    var photos = [];
+    if (!scope) return photos;
+
+    // Fencing: scope.job.checklist.photos[]
+    if (scope.job && scope.job.checklist && scope.job.checklist.photos) {
+      scope.job.checklist.photos.forEach(function(p) {
+        if (p.dataUrl && p.dataUrl.startsWith('data:')) {
+          photos.push({ dataUrl: p.dataUrl, label: p.name || p.label || 'Site Photo' });
+        }
+      });
+    }
+
+    // Patio/Decking: scope.sitePhotos[]
+    if (scope.sitePhotos && Array.isArray(scope.sitePhotos)) {
+      scope.sitePhotos.forEach(function(p) {
+        if (p.dataUrl && p.dataUrl.startsWith('data:')) {
+          photos.push({ dataUrl: p.dataUrl, label: p.label || p.caption || 'Site Photo' });
+        }
+      });
+    }
+
+    return photos;
+  }
+
+  async function scan() {
+    document.getElementById('scanBtn').disabled = true;
+    document.getElementById('log').innerHTML = '';
+    jobsToProcess = [];
+    log('Scanning all jobs for embedded photos...');
+
+    try {
+      // Fetch all jobs
+      var res = await fetch(OPS_API + '?action=list_jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+        body: JSON.stringify({})
+      });
+      var data = await res.json();
+      var jobs = data.jobs || data || [];
+      if (!Array.isArray(jobs)) { log('Unexpected response format', 'error'); return; }
+      log('Found ' + jobs.length + ' total jobs');
+
+      var withPhotos = [];
+      for (var i = 0; i < jobs.length; i++) {
+        var j = jobs[i];
+        var scope = j.scope_json;
+        if (!scope) continue;
+        if (typeof scope === 'string') try { scope = JSON.parse(scope); } catch(e) { continue; }
+
+        var photos = extractPhotos(scope, j.type);
+        if (photos.length > 0) {
+          withPhotos.push({
+            id: j.id,
+            job_number: j.job_number || j.id.slice(0, 8),
+            client_name: j.client_name || 'Unknown',
+            type: j.type || '?',
+            photos: photos
+          });
+        }
+      }
+
+      log('Found ' + withPhotos.length + ' jobs with embedded photos');
+
+      // Check which already have media
+      var needsUpload = [];
+      for (var k = 0; k < withPhotos.length; k++) {
+        var wj = withPhotos[k];
+        try {
+          var mediaRes = await fetch(OPS_API + '?action=job_detail', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+            body: JSON.stringify({ jobId: wj.id })
+          });
+          var detail = await mediaRes.json();
+          var existing = (detail.media || []).filter(function(m) { return m.type === 'photo' && m.phase === 'scope'; });
+
+          if (existing.length >= wj.photos.length) {
+            log(wj.type.toUpperCase() + ' ' + wj.job_number + ' (' + wj.client_name + ') — ' + existing.length + ' already uploaded, skipping');
+            continue;
+          }
+          var missing = wj.photos.length - existing.length;
+          log(wj.type.toUpperCase() + ' ' + wj.job_number + ' (' + wj.client_name + ') — ' + wj.photos.length + ' in scope, ' + existing.length + ' uploaded, <strong>' + missing + ' to upload</strong>', 'warn');
+          needsUpload.push(wj);
+        } catch(e) {
+          log(wj.job_number + ' — check failed: ' + e.message, 'error');
+          needsUpload.push(wj);
+        }
+      }
+
+      jobsToProcess = needsUpload;
+      var totalPhotos = needsUpload.reduce(function(sum, j) { return sum + j.photos.length; }, 0);
+
+      if (needsUpload.length > 0) {
+        log('<strong>' + needsUpload.length + ' jobs need photos uploaded (' + totalPhotos + ' photos total)</strong>', 'warn');
+        document.getElementById('runBtn').disabled = false;
+      } else {
+        log('All photos already uploaded — nothing to do!', 'success');
+      }
+    } catch(e) {
+      log('Scan failed: ' + e.message, 'error');
+    }
+    document.getElementById('scanBtn').disabled = false;
+  }
+
+  async function run() {
+    document.getElementById('runBtn').disabled = true;
+    var uploaded = 0, failed = 0;
+
+    for (var i = 0; i < jobsToProcess.length; i++) {
+      var job = jobsToProcess[i];
+      log('Processing ' + job.type.toUpperCase() + ' ' + job.job_number + ' (' + job.client_name + ') — ' + job.photos.length + ' photos...');
+
+      for (var p = 0; p < job.photos.length; p++) {
+        var photo = job.photos[p];
+        try {
+          var res = await fetch(GHL_PROXY + '?action=upload_photo', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jobId: job.id,
+              dataUrl: photo.dataUrl,
+              label: photo.label
+            })
+          });
+
+          if (!res.ok) {
+            var err = await res.json().catch(function() { return {}; });
+            throw new Error(err.error || 'HTTP ' + res.status);
+          }
+
+          uploaded++;
+          log('  Uploaded ' + (p + 1) + '/' + job.photos.length + ': ' + photo.label, 'success');
+        } catch(e) {
+          failed++;
+          log('  FAILED ' + (p + 1) + '/' + job.photos.length + ': ' + e.message, 'error');
+        }
+
+        // Throttle to avoid hammering the API
+        await new Promise(function(r) { setTimeout(r, 300); });
+      }
+    }
+
+    log('<strong>Done! Uploaded: ' + uploaded + ', Failed: ' + failed + '</strong>', failed === 0 ? 'success' : 'warn');
+    document.getElementById('runBtn').disabled = false;
+  }
+</script>
+</body>
+</html>

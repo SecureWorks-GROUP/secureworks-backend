@@ -1,0 +1,2398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SecureWorks Group — Outdoor Living Lookbook</title>
+<!-- Paged.js polyfill — disabled for browser preview, enable for print production
+<script src="https://unpkg.com/pagedjs/dist/paged.polyfill.js"></script>
+-->
+<style>
+/* ============================================================
+   SECUREWORKS WA — OUTDOOR LIVING LOOKBOOK
+   30-Page A4 Portrait — Print-Ready — Perfect Bound — v3
+   ============================================================ */
+
+/* --- Reset --- */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* --- Design System Variables --- */
+:root {
+  /* --- Orange Family --- */
+  --orange-900: #C4481F;
+  --orange-700: #F15A29;
+  --orange-500: #F4845F;
+  --orange-300: #FADDD2;
+  --orange-100: #FDF2EE;
+
+  /* --- Blue Family --- */
+  --blue-950: #1A272E;
+  --blue-800: #293C46;
+  --blue-600: #4C6A7C;
+  --blue-400: #8FA4B2;
+  --blue-200: #D4DEE4;
+  --blue-100: #EDF1F4;
+
+  /* --- Warm Family --- */
+  --warm-300: #E8E4DF;
+  --warm-200: #F0ECE8;
+  --warm-100: #F8F6F3;
+  --warm-50: #FCFBFA;
+
+  /* --- Semantic Aliases --- */
+  --orange: var(--orange-700);
+  --dark-blue: var(--blue-800);
+  --mid-blue: var(--blue-600);
+  --immersive: var(--blue-950);
+  --white: #FFFFFF;
+  --warm-grey: var(--warm-100);
+  --body-text: #323232;
+  --tab-brown: #8B6F47;
+
+  /* --- Shadows (blue-toned, never black) --- */
+  --shadow-lift: 0 1px 3px rgba(41,60,70,0.08);
+  --shadow-rise: 0 4px 12px rgba(41,60,70,0.10);
+  --shadow-float: 0 8px 30px rgba(41,60,70,0.12);
+
+  /* --- Opacity Scale --- */
+  --op-body: 0.85;
+  --op-label: 0.55;
+  --op-watermark: 0.25;
+  --op-divider: 0.08;
+  --op-card: 0.04;
+
+  /* Page Dimensions */
+  --page-w: 210mm;
+  --page-h: 297mm;
+  --bind: 10mm;
+  --safe: 10mm;
+  --bleed: 3mm;
+
+  /* Typography Scale (3x+ jumps for editorial impact) */
+  --font-mega: 72pt;
+  --font-divider: 48pt;
+  --font-h1: 28pt;
+  --font-h2: 18pt;
+  --font-h3: 14pt;
+  --font-body: 11pt;
+  --font-caption: 9pt;
+  --font-fine: 8pt;
+  --font-label: 9pt;
+
+  /* Spacing Scale */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 40px;
+  --space-2xl: 60px;
+
+  /* Overlay Colours (for photo treatments) */
+  --overlay-dark: rgba(41, 60, 70, 0.88);
+  --overlay-gradient-bottom: linear-gradient(to bottom, rgba(41,60,70,0.05) 0%, rgba(41,60,70,0.15) 50%, rgba(41,60,70,0.65) 100%);
+  --overlay-gradient-full: linear-gradient(to bottom, rgba(41,60,70,0.3) 0%, rgba(41,60,70,0.1) 40%, rgba(41,60,70,0.55) 100%);
+}
+
+/* --- Paged Media Rules --- */
+@page {
+  size: A4 portrait;
+  margin: 0;
+  bleed: var(--bleed, 3mm);
+  marks: crop cross;
+}
+@page:left { /* Even pages — binding on RIGHT */ }
+@page:right { /* Odd pages — binding on LEFT */ }
+
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+/* --- Editorial Design Utilities --- */
+/* Full-bleed image: breaks out of page padding to reach edges */
+.full-bleed {
+  margin-left: calc(-1 * var(--safe) - var(--bind));
+  margin-right: calc(-1 * var(--safe));
+  width: calc(100% + var(--safe) + var(--bind) + var(--safe));
+}
+.full-bleed-even {
+  margin-left: calc(-1 * var(--safe));
+  margin-right: calc(-1 * var(--safe) - var(--bind));
+  width: calc(100% + var(--safe) + var(--bind) + var(--safe));
+}
+
+/* Geometric photo masking — clip-path shapes */
+.mask-angle-br { clip-path: polygon(0 0, 100% 0, 100% 85%, 0 100%); }
+.mask-angle-bl { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 85%); }
+.mask-angle-tr { clip-path: polygon(0 0, 100% 15%, 100% 100%, 0 100%); }
+.mask-diagonal { clip-path: polygon(0 0, 100% 8%, 100% 100%, 0 92%); }
+.mask-wedge { clip-path: polygon(0 0, 100% 0, 85% 100%, 0 100%); }
+
+/* Colour overlay on photos */
+.photo-overlay-blue {
+  position: relative;
+}
+.photo-overlay-blue::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--dark-blue);
+  opacity: 0.15;
+  mix-blend-mode: multiply;
+}
+.photo-overlay-warm::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(241,90,41,0.08), transparent 60%);
+  mix-blend-mode: overlay;
+}
+
+/* Editorial grid layout templates */
+.grid-editorial {
+  display: grid;
+  height: 100%;
+}
+.grid-editorial--hero-text {
+  grid-template-areas:
+    "hero hero hero"
+    ".    text sidebar";
+  grid-template-columns: 1fr 2fr 1fr;
+  grid-template-rows: 60% 1fr;
+}
+.grid-editorial--split-asymmetric {
+  grid-template-areas:
+    "photo content content";
+  grid-template-columns: 55% 1fr 1fr;
+  grid-template-rows: 1fr;
+}
+.grid-editorial--text-photo {
+  grid-template-areas:
+    "text text photo";
+  grid-template-columns: 1fr 1fr 45%;
+  grid-template-rows: 1fr;
+}
+
+/* Monumental numbers (for stats, section numbers) */
+.stat-number {
+  font-family: 'HelveticaNeue-CondensedBold', 'Helvetica Neue', Helvetica, sans-serif;
+  font-size: 64pt;
+  font-weight: 900;
+  line-height: 0.85;
+  color: var(--orange);
+  letter-spacing: -2px;
+}
+.stat-label {
+  font-size: var(--font-label);
+  font-weight: 700;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--mid-blue);
+}
+
+/* Colour blocking sections */
+.block-dark {
+  background: var(--dark-blue);
+  color: var(--white);
+  padding: var(--space-xl);
+}
+.block-warm {
+  background: var(--warm-grey);
+  padding: var(--space-xl);
+}
+.block-orange-accent {
+  border-left: 4px solid var(--orange);
+  padding-left: var(--space-md);
+}
+
+body {
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  color: var(--body-text);
+  line-height: 1.5;
+  background: var(--immersive);
+}
+
+/* --- Screen Display --- */
+@media screen {
+  body { padding: 40px 0; }
+  .page { margin: 0 auto 40px; box-shadow: 0 4px 60px rgba(41,60,70,0.5); }
+}
+
+/* --- Page Base --- */
+.page {
+  width: var(--page-w);
+  height: var(--page-h);
+  position: relative;
+  overflow: hidden;
+  page-break-after: always;
+  background: var(--white);
+}
+.page:last-child { page-break-after: auto; }
+
+/* --- Content Padding (respects binding margin for perfect binding) --- */
+/* Odd pages (right-hand): binding on LEFT */
+.pad {
+  padding: 16mm 14mm 14mm calc(var(--bind) + var(--safe));
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+/* Even pages (left-hand): binding on RIGHT */
+.pad-even {
+  padding: 16mm calc(var(--bind) + var(--safe)) 14mm 14mm;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Typography --- */
+.section-label {
+  display: inline-block;
+  font-size: 9pt;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--orange);
+}
+.section-label-white {
+  display: inline-block;
+  font-size: 9pt;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--white);
+  opacity: var(--op-label);
+}
+.h1 {
+  font-size: 28pt;
+  font-weight: 800;
+  line-height: 1.05;
+  color: var(--dark-blue);
+  letter-spacing: -0.3px;
+}
+.h1-white {
+  font-size: 28pt;
+  font-weight: 800;
+  line-height: 1.05;
+  color: var(--white);
+  letter-spacing: -0.3px;
+}
+.h1-mega {
+  font-family: 'HelveticaNeue-CondensedBold', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-size: 72pt;
+  font-weight: 900;
+  line-height: 0.88;
+  text-transform: uppercase;
+  color: var(--white);
+  text-shadow: 0 2px 30px rgba(41,60,70,0.3);
+}
+.h1-divider {
+  font-family: 'HelveticaNeue-CondensedBold', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-size: 48pt;
+  font-weight: 900;
+  line-height: 0.95;
+  text-transform: uppercase;
+  color: var(--white);
+  text-shadow: 0 2px 20px rgba(41,60,70,0.25);
+}
+.h2 {
+  font-size: 18pt;
+  font-weight: 700;
+  color: var(--dark-blue);
+  line-height: 1.15;
+}
+.h2-white {
+  font-size: 18pt;
+  font-weight: 700;
+  color: var(--white);
+  line-height: 1.15;
+}
+.body-text {
+  font-size: 11pt;
+  line-height: 1.7;
+  color: var(--body-text);
+}
+.body-white {
+  font-size: 11pt;
+  line-height: 1.7;
+  color: var(--white);
+  opacity: var(--op-body);
+}
+.caption {
+  font-size: 9pt;
+  color: var(--mid-blue);
+  line-height: 1.4;
+}
+.fine-print {
+  font-size: 8pt;
+  color: var(--mid-blue);
+  font-style: italic;
+}
+
+/* --- Utility --- */
+.accent-line {
+  width: 40px;
+  height: 3px;
+  background: var(--orange);
+  margin: 8px 0 14px;
+}
+.accent-line-white {
+  width: 40px;
+  height: 3px;
+  background: var(--orange);
+  margin: 8px 0 14px;
+}
+.mt-auto { margin-top: auto; }
+.mt-8 { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
+.mt-16 { margin-top: 16px; }
+.mt-20 { margin-top: 20px; }
+.mt-24 { margin-top: 24px; }
+.text-center { text-align: center; }
+.flex-1 { flex: 1; }
+
+/* --- Section Tab Markers --- */
+.tab {
+  position: absolute;
+  right: 0;
+  width: 5mm;
+  height: 22mm;
+  z-index: 10;
+}
+.tab-left {
+  position: absolute;
+  left: 0;
+  width: 5mm;
+  height: 22mm;
+  z-index: 10;
+}
+.tab-orange { background: var(--orange); top: 35mm; }
+.tab-blue { background: var(--mid-blue); top: 62mm; }
+.tab-brown { background: var(--tab-brown); top: 89mm; }
+
+/* --- Page Number --- */
+.page-num {
+  position: absolute;
+  bottom: 8mm;
+  font-size: 8pt;
+  color: var(--mid-blue);
+  opacity: var(--op-label);
+}
+.page-num-r { right: 12mm; }
+.page-num-l { left: calc(var(--bind) + 8mm); }
+.page-num-white { color: var(--white); opacity: var(--op-watermark); }
+
+/* --- Photo Overlay Pages --- */
+.photo-bg {
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.overlay-bottom {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(to bottom, rgba(41,60,70,0.05) 0%, rgba(41,60,70,0.15) 50%, rgba(41,60,70,0.65) 100%);
+}
+.overlay-full {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(to bottom, rgba(41,60,70,0.3) 0%, rgba(41,60,70,0.1) 40%, rgba(41,60,70,0.55) 100%);
+}
+/* Branded overlay: dark blue semi-transparent over photo for spec pages */
+.overlay-brand {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(41, 60, 70, 0.88);
+}
+.overlay-content {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Orange Tag Pills (Corvus-inspired) --- */
+.tag {
+  display: inline-block;
+  background: var(--orange);
+  color: var(--white);
+  padding: 5px 14px;
+  font-size: 9pt;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.tag-outline {
+  display: inline-block;
+  border: 2px solid var(--orange);
+  color: var(--orange);
+  padding: 4px 12px;
+  font-size: 9pt;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* --- Benefit Numbers --- */
+.benefit-num {
+  font-size: 14pt;
+  font-weight: 800;
+  color: var(--orange);
+  min-width: 32px;
+}
+.benefit-title {
+  font-size: 12pt;
+  font-weight: 700;
+  color: var(--dark-blue);
+}
+
+/* --- Colour Swatches --- */
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: flex-start;
+}
+.swatch {
+  text-align: center;
+  width: 56px;
+}
+.swatch-circle {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  margin: 0 auto;
+  border: 2px solid rgba(41,60,70,0.08);
+}
+.swatch-name {
+  font-size: 8pt;
+  font-weight: 700;
+  margin-top: 4px;
+  color: var(--dark-blue);
+  line-height: 1.2;
+}
+
+/* --- Cards --- */
+.card {
+  background: var(--white);
+  border: 1px solid #E8ECF0;
+  border-radius: 0;
+  padding: 16px;
+}
+.card-highlight {
+  background: var(--white);
+  border: 2px solid var(--orange);
+  border-radius: 0;
+  padding: 16px;
+  position: relative;
+}
+.card-highlight::after {
+  content: 'Most Popular';
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--orange);
+  color: white;
+  font-size: 8pt;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 2px 10px;
+  border-radius: 100px;
+  white-space: nowrap;
+}
+
+/* --- Spec Cards (for technical pages) --- */
+.spec-card {
+  background: var(--white);
+  border: 1px solid #E8ECF0;
+  border-radius: 0;
+  padding: 14px;
+  text-align: center;
+}
+.spec-card h4 {
+  font-size: 12pt;
+  font-weight: 700;
+  color: var(--dark-blue);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.spec-card p {
+  font-size: 11pt;
+  color: var(--body-text);
+  line-height: 1.5;
+  margin-top: 6px;
+}
+
+/* --- Comparison Grid --- */
+.compare-col {
+  padding: 16px;
+  border-radius: 0;
+  flex: 1;
+}
+.compare-col h3 {
+  font-size: 14pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+.compare-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.compare-check {
+  color: var(--orange);
+  font-weight: 700;
+  font-size: 11pt;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* --- Profile Diagram (for roofing/fencing profiles) --- */
+.profile-card {
+  background: var(--white);
+  border: 1px solid #E8ECF0;
+  border-radius: 0;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.profile-visual {
+  width: 100%;
+  height: 32px;
+  border-radius: 0;
+  margin-bottom: 8px;
+}
+
+/* --- Photo Grid --- */
+.grid-2x2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.grid-item {
+  position: relative;
+  overflow: hidden;
+  background-size: cover;
+  background-position: center;
+  border-radius: 0;
+}
+.grid-caption {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 24px 10px 8px;
+  background: linear-gradient(to top, rgba(41,60,70,0.7), transparent);
+  color: white;
+}
+.grid-caption-title {
+  font-size: 9pt;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.grid-caption-sub {
+  font-size: 8pt;
+  opacity: 0.7;
+  margin-top: 1px;
+}
+
+/* --- Photo Placeholder --- */
+.placeholder {
+  background: #ECEAE6;
+  border: 2px dashed #C5C0B8;
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+}
+.placeholder-text {
+  font-size: 9pt;
+  font-style: italic;
+  color: var(--mid-blue);
+  line-height: 1.4;
+}
+
+/* --- Stars --- */
+.stars {
+  color: var(--orange);
+  font-size: 14pt;
+  letter-spacing: 2px;
+}
+
+/* --- Split Layout --- */
+.split {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  height: 100%;
+}
+
+/* --- Timeline --- */
+.timeline {
+  position: relative;
+  padding-left: 36px;
+}
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: linear-gradient(to bottom, var(--orange), var(--mid-blue));
+}
+.timeline-step {
+  position: relative;
+  padding: 8px 0;
+}
+.timeline-dot {
+  position: absolute;
+  left: -36px;
+  top: 10px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--orange);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10pt;
+  font-weight: 700;
+}
+.timeline-name {
+  font-size: 12pt;
+  font-weight: 700;
+  color: var(--dark-blue);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.timeline-desc {
+  font-size: 11pt;
+  color: var(--mid-blue);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+
+/* --- Pricing --- */
+.price-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1px solid #E8ECF0;
+}
+.price-label {
+  font-size: 11pt;
+  color: var(--dark-blue);
+  font-weight: 400;
+}
+.price-value {
+  font-size: 11pt;
+  font-weight: 700;
+  color: var(--dark-blue);
+}
+
+/* --- Guarantee --- */
+.guarantee-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.guarantee-check {
+  color: var(--orange);
+  font-weight: 700;
+  font-size: 12pt;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* --- Quote Checklist (Page 29) --- */
+.quote-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid #E8ECF0;
+}
+.quote-check-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--orange);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10pt;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* --- Interactive Circle Select (Notes page) --- */
+.circle-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--mid-blue);
+  border-radius: 50%;
+  margin-right: 4px;
+}
+.pref-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #E0E4E8;
+}
+.pref-label {
+  font-size: 11pt;
+  font-weight: 700;
+  color: var(--dark-blue);
+  min-width: 120px;
+}
+.pref-options {
+  font-size: 11pt;
+  color: var(--body-text);
+}
+.notes-line {
+  border-bottom: 1px solid #D0CCC6;
+  height: 28px;
+  width: 100%;
+}
+
+/* --- PHOTO SOURCING OVERLAYS (for Shaun) --- */
+/* Wrap any photo container with .needs-photo to flag it */
+.needs-photo {
+  position: relative;
+}
+.needs-photo::after {
+  content: attr(data-shot);
+  position: absolute;
+  inset: 0;
+  background: rgba(241, 90, 41, 0.75);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 9pt;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  line-height: 1.3;
+  padding: 8px;
+  z-index: 50;
+  border: 3px dashed white;
+  border-radius: 0;
+  text-transform: uppercase;
+}
+/* Locked photos get a small green tick badge */
+.photo-locked {
+  position: relative;
+}
+.photo-locked::after {
+  content: '✓ LOCKED';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: rgba(34, 139, 34, 0.85);
+  color: white;
+  font-size: 7pt;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  z-index: 50;
+}
+
+/* --- Grain Texture (for dark sections) --- */
+.grain::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.03;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* --- Print --- */
+@media print {
+  body { background: none; padding: 0; }
+  .page { box-shadow: none; margin: 0; }
+}
+</style>
+</head>
+<body>
+
+
+<!-- ============================================================
+     PAGE 1 — COVER (Outside Front)
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/elevated-patio-exterior.jpg');background-position:35% 20%;">
+  <!-- Subtle gradient: heavier at top-left for text readability, lighter elsewhere to let the photo breathe -->
+  <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(160deg, rgba(41,60,70,0.45) 0%, rgba(41,60,70,0.15) 35%, rgba(41,60,70,0.05) 60%, rgba(41,60,70,0.3) 100%);"></div>
+  <!-- Title text — massive condensed bold, flush left, dominating the top half -->
+  <div class="overlay-content" style="padding:22mm 18mm 18mm 18mm;justify-content:space-between;">
+    <div>
+      <h1 style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:96pt;font-weight:900;line-height:0.85;text-transform:uppercase;color:white;text-shadow:0 2px 40px rgba(41,60,70,0.3),0 1px 6px rgba(41,60,70,0.15);letter-spacing:-1px;">OUTDOOR<br>LIVING</h1>
+      <div style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:36pt;font-weight:800;text-transform:uppercase;color:white;letter-spacing:6px;margin-top:6px;text-shadow:0 2px 20px rgba(41,60,70,0.3);opacity:0.9;">LOOKBOOK</div>
+    </div>
+    <!-- Logo bottom-right -->
+    <div style="display:flex;justify-content:flex-end;align-items:flex-end;">
+      <img src="assets/logo/svg/SecureWorks%20Group%20White.svg" alt="SecureWorks Group" style="height:26px;filter:drop-shadow(0 1px 4px rgba(41,60,70,0.3));">
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     PAGE 2 — WHO WE ARE + PHOTO SPREAD START (Even page — binding RIGHT)
+     Left: intro text | Right: photo bleeding to spine — reads as spread with p3
+     ============================================================ -->
+<div class="page" style="background:var(--white);overflow:hidden;">
+  <div style="display:grid;grid-template-columns:48% 52%;height:100%;">
+    <!-- Left: Text content -->
+    <div style="padding:24mm 14mm 18mm 14mm;display:flex;flex-direction:column;justify-content:center;">
+      <span class="section-label">OUTDOOR LIVING</span>
+      <div class="accent-line"></div>
+      <h1 class="h1" style="font-size:32pt;">Double Your<br>Living Space</h1>
+      <p class="body-text" style="margin-top:14px;">Your backyard is the biggest unused room in your house. We turn it into a space you actually live in &mdash; patios, decking, fencing, and everything that ties them together.</p>
+      <p class="body-text mt-8" style="font-weight:700;color:var(--dark-blue);">One team. One quote. No subcontractors to chase.</p>
+
+      <!-- Three pillars -->
+      <div style="margin-top:24px;display:flex;flex-direction:column;gap:8px;border-top:1px solid #E0E4E8;padding-top:14px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="width:36px;height:36px;background:var(--orange);border-radius:0;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <span style="font-size:14pt;font-weight:800;color:white;">P</span>
+          </div>
+          <div>
+            <div style="font-size:11pt;font-weight:700;color:var(--dark-blue);">Patios</div>
+            <div style="font-size:9pt;color:var(--mid-blue);">Insulated outdoor rooms</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="width:36px;height:36px;background:var(--dark-blue);border-radius:0;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <span style="font-size:14pt;font-weight:800;color:white;">D</span>
+          </div>
+          <div>
+            <div style="font-size:11pt;font-weight:700;color:var(--dark-blue);">Decking</div>
+            <div style="font-size:9pt;color:var(--mid-blue);">The foundation underfoot</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="width:36px;height:36px;background:var(--mid-blue);border-radius:0;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <span style="font-size:14pt;font-weight:800;color:white;">F</span>
+          </div>
+          <div>
+            <div style="font-size:11pt;font-weight:700;color:var(--dark-blue);">Fencing</div>
+            <div style="font-size:9pt;color:var(--mid-blue);">Privacy, safety, street appeal</div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:8px;font-size:9pt;color:var(--mid-blue);font-style:italic;">Plus blinds, screening, outdoor kitchens, lighting &amp; fans</div>
+    </div>
+    <!-- Right: Photo bleeding to spine — sized to full spread width so it continues onto p3 -->
+    <div style="background-image:url('assets/photos/patio-entertaining-sunset.png');background-size:auto 297mm;background-position:-113mm center;background-repeat:no-repeat;"></div>
+  </div>
+  <span class="page-num page-num-r">2</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 3 — SOCIAL PROOF (Odd page — binding LEFT)
+     Three Google reviews + 100+ stat — trust builder
+     ============================================================ -->
+<div class="page" style="background:var(--warm-grey);">
+  <div style="padding:18mm 14mm 14mm calc(var(--bind) + var(--safe));height:100%;display:flex;flex-direction:column;">
+    <!-- Header with stat -->
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:16px;">
+      <div>
+        <span class="section-label">WHAT OUR CLIENTS SAY</span>
+        <div class="accent-line"></div>
+        <h2 class="h1" style="font-size:28pt;">Real Reviews.<br>Real Families.</h2>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:48pt;font-weight:800;color:var(--dark-blue);line-height:0.85;">100+</div>
+        <div style="font-size:13pt;color:var(--orange);margin-top:4px;">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
+        <div style="font-size:9pt;font-weight:700;color:var(--mid-blue);margin-top:2px;">Five-Star Google Reviews</div>
+      </div>
+    </div>
+
+    <!-- Review 1 — Large featured review -->
+    <div style="background:white;border-radius:0;padding:20px 22px;margin-bottom:12px;border-left:4px solid var(--orange);">
+      <div style="font-size:14pt;color:var(--orange);letter-spacing:2px;">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
+      <p style="font-size:12pt;color:var(--body-text);line-height:1.6;margin-top:8px;font-style:italic;">&ldquo;We use the patio every single night now. Best money we&rsquo;ve ever spent on the house. The whole process was smooth &mdash; Marnin and the team were fantastic from start to finish.&rdquo;</p>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:10px;">
+        <div style="width:36px;height:36px;background:var(--dark-blue);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:13pt;">S</div>
+        <div>
+          <div style="font-size:11pt;font-weight:700;color:var(--dark-blue);">Sarah M.</div>
+          <div style="font-size:9pt;color:var(--mid-blue);">Duncraig &mdash; Insulated Gable Patio</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Review 2 -->
+    <div style="background:white;border-radius:0;padding:16px 20px;margin-bottom:12px;">
+      <div style="font-size:12pt;color:var(--orange);letter-spacing:2px;">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
+      <p style="font-size:11pt;color:var(--body-text);line-height:1.55;margin-top:6px;font-style:italic;">&ldquo;Professional from day one. The patio was done in 3 days and looks like it&rsquo;s always been part of the house. Can&rsquo;t believe how much cooler it is underneath compared to our old tin roof.&rdquo;</p>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:10px;">
+        <div style="width:32px;height:32px;background:var(--mid-blue);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:11pt;">J</div>
+        <div>
+          <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);">James &amp; Kate R.</div>
+          <div style="font-size:9pt;color:var(--mid-blue);">Joondalup &mdash; Flat Patio + Merbau Decking</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Review 3 -->
+    <div style="background:white;border-radius:0;padding:16px 20px;margin-bottom:12px;">
+      <div style="font-size:12pt;color:var(--orange);letter-spacing:2px;">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
+      <p style="font-size:11pt;color:var(--body-text);line-height:1.55;margin-top:6px;font-style:italic;">&ldquo;Had the patio and fencing done together. One team, one point of contact, no mucking around. The fence went up in two days and the patio the following week. Highly recommend.&rdquo;</p>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:10px;">
+        <div style="width:32px;height:32px;background:var(--tab-brown);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:11pt;">M</div>
+        <div>
+          <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);">Mark D.</div>
+          <div style="font-size:9pt;color:var(--mid-blue);">Hillarys &mdash; Patio + COLORBOND Fencing</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Google badge -->
+    <div style="margin-top:auto;display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 0;border-top:1px solid #E0E4E8;">
+      <div style="font-size:11pt;font-weight:700;color:var(--dark-blue);letter-spacing:0.3px;">Google Reviews</div>
+      <div style="width:1px;height:16px;background:#E0E4E8;"></div>
+      <div style="font-size:9pt;color:var(--mid-blue);">4.9 average &nbsp;|&nbsp; 100+ reviews &nbsp;|&nbsp; Verified</div>
+    </div>
+  </div>
+  <span class="page-num page-num-l">3</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 4 — FEATURED PROJECT SPREAD (Left page)
+     Full-bleed 2-page spread — single photo spanning both pages
+     Even page — binding on RIGHT
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/outdoor-living-decking-blinds.jpg');background-size:auto 100%;background-position:left center;">
+  <!-- Subtle bottom gradient for text legibility -->
+  <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.85) 0%, rgba(41,60,70,0.4) 25%, transparent 50%);"></div>
+  <div class="overlay-content" style="padding:18mm calc(var(--bind) + 14mm) 22mm 16mm;justify-content:flex-end;">
+    <!-- Location badge top-left -->
+    <div style="position:absolute;top:18mm;left:16mm;">
+      <span style="font-size:8pt;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--orange);">FEATURED PROJECT</span>
+    </div>
+    <!-- Bottom content -->
+    <div>
+      <div style="font-size:8pt;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--orange);margin-bottom:6px;">DUNCRAIG, PERTH</div>
+      <h1 style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:44pt;font-weight:900;line-height:0.9;text-transform:uppercase;color:white;">The<br>Complete<br>Picture</h1>
+      <div style="width:40px;height:3px;background:var(--orange);margin:12px 0;"></div>
+      <p style="font-size:11pt;color:rgba(255,255,255,0.85);line-height:1.5;max-width:280px;">When patio, deck, fencing, and lighting are designed as one system &mdash; your backyard becomes a room.</p>
+    </div>
+  </div>
+  <span class="page-num page-num-r page-num-white">4</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 5 — FEATURED PROJECT SPREAD (Right page)
+     Same photo, right half — component tags floating over image
+     Odd page — binding on LEFT
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/outdoor-living-decking-blinds.jpg');background-size:auto 100%;background-position:right center;">
+  <!-- Light gradient bottom-right for tag legibility -->
+  <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.7) 0%, transparent 35%);"></div>
+  <div class="overlay-content" style="padding:20mm 20mm 22mm calc(var(--bind) + 20mm);justify-content:flex-end;">
+    <!-- Component tags — what went into this build -->
+    <div style="display:flex;flex-wrap:wrap;gap:8px 10px;max-width:360px;">
+      <span style="padding:5px 12px;background:rgba(241,90,41,0.92);color:white;border-radius:3px;font-size:8pt;font-weight:700;letter-spacing:0.5px;">INSULATED GABLE PATIO</span>
+      <span style="padding:5px 12px;background:rgba(241,90,41,0.92);color:white;border-radius:3px;font-size:8pt;font-weight:700;letter-spacing:0.5px;">MERBAU DECKING</span>
+      <span style="padding:5px 12px;background:rgba(241,90,41,0.92);color:white;border-radius:3px;font-size:8pt;font-weight:700;letter-spacing:0.5px;">LED DOWNLIGHTS</span>
+      <span style="padding:5px 12px;background:rgba(241,90,41,0.92);color:white;border-radius:3px;font-size:8pt;font-weight:700;letter-spacing:0.5px;">CEILING FAN</span>
+      <span style="padding:5px 12px;background:rgba(241,90,41,0.92);color:white;border-radius:3px;font-size:8pt;font-weight:700;letter-spacing:0.5px;">OUTDOOR BLINDS</span>
+      <span style="padding:5px 12px;background:rgba(241,90,41,0.92);color:white;border-radius:3px;font-size:8pt;font-weight:700;letter-spacing:0.5px;">COLORBOND FENCING</span>
+    </div>
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.2);">
+      <p style="font-size:10pt;color:rgba(255,255,255,0.7);font-style:italic;">One team designed and built everything you see here.</p>
+    </div>
+  </div>
+  <span class="page-num page-num-l page-num-white">5</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 6 — PORTFOLIO (Even page — binding on RIGHT)
+     ============================================================ -->
+<div class="page">
+  <div style="padding:12mm 12mm 10mm 14mm;height:100%;display:flex;flex-direction:column;">
+    <div class="text-center">
+      <span class="section-label">PORTFOLIO</span>
+      <h2 style="font-size:26pt;font-weight:800;color:var(--dark-blue);margin-top:4px;">Recent Projects</h2>
+      <p style="font-size:11pt;color:var(--mid-blue);margin-top:2px;">Four families. Four outdoor rooms. Designed for how they actually live.</p>
+    </div>
+    <div class="grid-2x2" style="flex:1;margin-top:10px;">
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/gable-patio-classic.png');">
+        <div class="grid-caption">
+          <div class="grid-caption-title">DUNCRAIG</div>
+          <div class="grid-caption-sub">6m x 5m Gable | 75mm Panel | Monument</div>
+        </div>
+      </div>
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/two-storey-balcony-front.jpg');">
+        <div class="grid-caption">
+          <div class="grid-caption-title">SWANBOURNE</div>
+          <div class="grid-caption-sub">Two-Storey Balcony | Flyover Patio | Woodland Grey</div>
+        </div>
+      </div>
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/hero-patio.jpg');">
+        <div class="grid-caption">
+          <div class="grid-caption-title">JOONDALUP</div>
+          <div class="grid-caption-sub">Freestanding Pavilion | Decking | Woodland Grey</div>
+        </div>
+      </div>
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/real-project-flat-patio.jpg');">
+        <div class="grid-caption">
+          <div class="grid-caption-title">SORRENTO</div>
+          <div class="grid-caption-sub">Pool Pavilion | 100mm Panel | Basalt</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <span class="page-num page-num-r">6</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 7 — BEFORE/AFTER SHOWCASE (Odd page — binding on LEFT)
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div class="pad">
+    <span class="section-label">THE TRANSFORMATION</span>
+    <div class="accent-line"></div>
+    <h2 class="h1" style="font-size:24pt;">From Wasted Space<br>to Favourite Room</h2>
+    <p class="body-text mt-8" style="color:var(--mid-blue);">Same backyard. Completely different lifestyle.</p>
+
+    <!-- Before/After Pair 1 -->
+    <div style="margin-top:14px;flex:1;display:flex;flex-direction:column;gap:14px;">
+      <div style="flex:1;display:flex;flex-direction:column;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;flex:1;">
+          <!-- Before -->
+          <div style="position:relative;border-radius:0;overflow:hidden;min-height:100px;">
+            <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/backyard-before-shadesails.jpg');"></div>
+            <div style="position:absolute;top:8px;left:8px;"><span class="tag" style="font-size:7pt;padding:3px 10px;background:var(--mid-blue);">BEFORE</span></div>
+          </div>
+          <!-- After -->
+          <div style="position:relative;border-radius:0;overflow:hidden;min-height:100px;">
+            <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/real-flat-patio-deck.jpg');"></div>
+            <div style="position:absolute;top:8px;left:8px;"><span class="tag" style="font-size:7pt;padding:3px 10px;">AFTER</span></div>
+          </div>
+        </div>
+        <p style="font-size:10pt;color:var(--body-text);margin-top:6px;line-height:1.4;"><strong style="color:var(--dark-blue);">Hillarys</strong> — Shade sail replaced with insulated flat patio + Merbau decking</p>
+      </div>
+
+      <!-- Before/After Pair 2 -->
+      <div style="flex:1;display:flex;flex-direction:column;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;flex:1;">
+          <!-- Before (placeholder) -->
+          <div class="needs-photo" data-shot="📷 BEFORE photo — empty residential backyard, Perth" style="position:relative;border-radius:0;overflow:hidden;min-height:100px;">
+            <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/rural-jobsite.jpg');"></div>
+            <div style="position:absolute;top:8px;left:8px;"><span class="tag" style="font-size:7pt;padding:3px 10px;background:var(--mid-blue);">BEFORE</span></div>
+          </div>
+          <!-- After -->
+          <div style="position:relative;border-radius:0;overflow:hidden;min-height:100px;">
+            <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/insulated-patio-garden-view.jpg');"></div>
+            <div style="position:absolute;top:8px;left:8px;"><span class="tag" style="font-size:7pt;padding:3px 10px;">AFTER</span></div>
+          </div>
+        </div>
+        <p style="font-size:10pt;color:var(--body-text);margin-top:6px;line-height:1.4;"><strong style="color:var(--dark-blue);">Padbury</strong> — Complete backyard transformation</p>
+      </div>
+    </div>
+
+    <!-- Bottom text -->
+    <p style="text-align:center;font-style:italic;color:var(--mid-blue);font-size:11pt;margin-top:10px;padding-top:8px;border-top:1px solid #E8ECF0;">Every one of these homes gained genuine living space &mdash; and genuine value.</p>
+  </div>
+  <span class="page-num page-num-l">7</span>
+</div>
+<!-- ============================================================
+     PAGE 8 — INSULATED PATIO HERO (Even, binding RIGHT)
+     Full-bleed single page — sunset entertaining photo, big emotional opener
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/freestanding-patio-interior.jpg');background-position:center center;">
+  <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(26,39,46,0.9) 0%, rgba(26,39,46,0.45) 35%, rgba(26,39,46,0.1) 60%, transparent 80%);"></div>
+  <div class="overlay-content" style="padding:18mm calc(var(--bind) + 14mm) 20mm 16mm;justify-content:flex-end;">
+    <div>
+      <span style="display:inline-block;padding:4px 12px;background:rgba(241,90,41,0.92);color:white;font-size:7pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;border-radius:3px;margin-bottom:10px;">OUTDOOR ROOMS</span>
+      <h1 style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:52pt;font-weight:900;line-height:0.88;text-transform:uppercase;color:white;">Insulated<br>Patios</h1>
+      <div style="width:40px;height:3px;background:var(--orange);margin:12px 0;"></div>
+      <p style="font-size:13pt;color:rgba(255,255,255,0.95);line-height:1.4;max-width:300px;font-weight:700;">Not all patios are created equal.</p>
+      <p style="font-size:10.5pt;color:rgba(255,255,255,0.65);line-height:1.5;max-width:300px;margin-top:6px;">Stay cool in summer, dry in winter, and add real value to your home. This is the product that changes everything.</p>
+    </div>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-r page-num-white">8</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 9 — WHY INSULATED (Odd, binding LEFT)
+     Clean white page — 6 big benefit cards, easy to read
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div style="padding:14mm 14mm 12mm calc(var(--bind) + var(--safe));height:100%;display:flex;flex-direction:column;">
+    <span class="section-label">WHY INSULATED?</span>
+    <div class="accent-line"></div>
+    <h2 style="font-size:26pt;font-weight:800;color:var(--dark-blue);line-height:1.05;margin-top:2px;">Stop Sweating<br>Under Tin</h2>
+    <p style="font-size:10.5pt;color:var(--mid-blue);margin-top:6px;max-width:340px;line-height:1.5;">Standard roofs cook you in summer and deafen you in rain. Insulated panels fix both &mdash; permanently.</p>
+
+    <!-- 6 benefit cards — 2 columns × 3 rows -->
+    <div style="display:grid;grid-template-columns:3fr 2fr;gap:10px;margin-top:14px;flex:1;">
+      <!-- 22°C Cooler -->
+      <div style="background:var(--warm-grey);border-radius:0;padding:14px 16px;display:flex;flex-direction:column;">
+        <div style="font-size:28pt;font-weight:800;color:var(--orange);line-height:1;">22&deg;C</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Cooler Underneath</div>
+        <p style="font-size:9pt;color:var(--body-text);line-height:1.4;margin-top:4px;">Insulated panels dramatically reduce heat transfer. Standard tin roofs radiate heat directly down &mdash; insulated panels block it.</p>
+      </div>
+      <!-- Silent in Rain -->
+      <div style="background:var(--warm-grey);border-radius:0;padding:14px 16px;display:flex;flex-direction:column;">
+        <div style="font-size:20pt;font-weight:800;color:var(--dark-blue);line-height:1;">SILENT</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">In The Rain</div>
+        <p style="font-size:9pt;color:var(--body-text);line-height:1.4;margin-top:4px;">Sit under your patio during a Perth winter storm and have a normal conversation. Impossible with standard roofing.</p>
+      </div>
+      <!-- Adds Value -->
+      <div style="background:var(--warm-grey);border-radius:0;padding:14px 16px;display:flex;flex-direction:column;">
+        <div style="font-size:20pt;font-weight:800;color:var(--dark-blue);line-height:1;">VALUE</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Adds Property Value</div>
+        <p style="font-size:9pt;color:var(--body-text);line-height:1.4;margin-top:4px;">A genuine home improvement, not just a shade structure. Buyers recognise the difference at appraisal time.</p>
+      </div>
+      <!-- Flat Ceiling -->
+      <div style="background:var(--warm-grey);border-radius:0;padding:14px 16px;display:flex;flex-direction:column;">
+        <div style="font-size:20pt;font-weight:800;color:var(--dark-blue);line-height:1;">FLAT</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Ceiling Finish</div>
+        <p style="font-size:9pt;color:var(--body-text);line-height:1.4;margin-top:4px;">Clean, smooth underside &mdash; no exposed beams or corrugated tin. Looks like a natural extension of your home.</p>
+      </div>
+      <!-- Engineered for Perth -->
+      <div style="background:var(--warm-grey);border-radius:0;padding:14px 16px;display:flex;flex-direction:column;">
+        <div style="font-size:20pt;font-weight:800;color:var(--orange);line-height:1;">8m+</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Clear Span</div>
+        <p style="font-size:9pt;color:var(--body-text);line-height:1.4;margin-top:4px;">No mid-posts cluttering your space. Up to 8 metres without intermediate supports. More usable room.</p>
+      </div>
+      <!-- Ready to Live In -->
+      <div style="background:var(--warm-grey);border-radius:0;padding:14px 16px;display:flex;flex-direction:column;">
+        <div style="font-size:20pt;font-weight:800;color:var(--dark-blue);line-height:1;">READY</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">To Live In</div>
+        <p style="font-size:9pt;color:var(--body-text);line-height:1.4;margin-top:4px;">Downlights, ceiling fans, power points &mdash; a room, not just a covered area. Comfortable year-round.</p>
+      </div>
+    </div>
+
+    <!-- Bottom tagline -->
+    <div style="margin-top:10px;padding:8px 12px;background:var(--dark-blue);border-radius:0;text-align:center;">
+      <p style="font-size:10pt;font-weight:700;color:white;letter-spacing:0.5px;">It&rsquo;s not just a roof &mdash; it&rsquo;s a room.</p>
+    </div>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-l">9</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 10 — THE PANEL (Even, binding RIGHT)
+     Full dark page — panel cross-section centered, stats, attachments
+     Photo strip across top showing ceiling detail
+     ============================================================ -->
+<div class="page grain" style="background:var(--dark-blue);">
+  <!-- Top photo strip — landscape ceiling shot -->
+  <div style="position:absolute;top:0;left:0;right:0;height:35%;">
+    <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/bush-patio-interior-ceiling.jpg');"></div>
+    <div style="position:absolute;inset:0;background:linear-gradient(to top, var(--dark-blue) 0%, rgba(41,60,70,0.4) 40%, transparent 100%);"></div>
+  </div>
+
+  <div style="position:relative;height:100%;padding:14mm calc(var(--bind) + var(--safe)) 12mm 14mm;display:flex;flex-direction:column;color:white;">
+    <!-- Header overlapping the photo strip -->
+    <div style="margin-top:auto;"><!-- pushes content to bottom half --></div>
+
+    <span style="font-size:7pt;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--orange);">THE TECHNOLOGY</span>
+    <div style="width:24px;height:2px;background:var(--orange);margin:6px 0 8px;"></div>
+    <h2 style="font-size:30pt;font-weight:800;color:white;line-height:1.05;">One Panel.<br>Three Layers.</h2>
+    <p style="font-size:10.5pt;color:rgba(255,255,255,0.65);margin-top:6px;line-height:1.5;max-width:380px;">No separate ceiling. No exposed beams. No corrugated underside. Just a finished room.</p>
+
+    <!-- Panel cross-section — full width -->
+    <div style="display:flex;flex-direction:column;gap:0;margin-top:14px;">
+      <div style="background:linear-gradient(135deg,#5A6C78,#4A5C68);border-radius:0;display:flex;align-items:center;padding:12px 18px;min-height:50px;">
+        <div style="width:8px;height:8px;background:var(--orange);border-radius:50%;margin-right:12px;flex-shrink:0;"></div>
+        <div>
+          <div style="font-size:11pt;font-weight:700;letter-spacing:0.5px;">COLORBOND&reg; Steel Skin</div>
+          <div style="font-size:9pt;opacity:0.8;">Weatherproof roof in your choice of colour. Australian made.</div>
+        </div>
+      </div>
+      <div style="background:var(--orange);display:flex;align-items:center;padding:14px 18px;min-height:65px;">
+        <div style="flex:1;">
+          <div style="font-size:14pt;font-weight:800;letter-spacing:0.5px;">EPS INSULATION CORE</div>
+          <div style="font-size:9pt;opacity:0.9;margin-top:3px;line-height:1.3;">Thermal + acoustic barrier &mdash; up to 22&deg;C cooler. Absorbs rain noise completely.</div>
+        </div>
+        <div style="text-align:center;padding-left:14px;">
+          <div style="font-size:28pt;font-weight:800;line-height:1;">R2.4</div>
+          <div style="font-size:7pt;text-transform:uppercase;letter-spacing:1px;opacity:0.8;">max rating</div>
+        </div>
+      </div>
+      <div style="background:linear-gradient(135deg,#D4D0C8,#C8C4BC);border-radius:0;display:flex;align-items:center;padding:12px 18px;min-height:50px;color:var(--dark-blue);">
+        <div style="width:8px;height:8px;background:var(--orange);border-radius:50%;margin-right:12px;flex-shrink:0;"></div>
+        <div>
+          <div style="font-size:11pt;font-weight:700;letter-spacing:0.5px;">Pre-Finished Ceiling</div>
+          <div style="font-size:9pt;opacity:0.7;">Ready for downlights, ceiling fans, and power points.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3 key stats -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:14px;">
+      <div style="text-align:center;padding:10px 8px;border:1px solid rgba(255,255,255,0.12);border-radius:0;">
+        <div style="font-size:20pt;font-weight:800;color:white;">8m+</div>
+        <div style="font-size:8.5pt;opacity:0.7;">Clear span, no mid-posts</div>
+      </div>
+      <div style="text-align:center;padding:10px 8px;border:1px solid rgba(255,255,255,0.12);border-radius:0;">
+        <div style="font-size:20pt;font-weight:800;color:var(--orange);">22&deg;C</div>
+        <div style="font-size:8.5pt;opacity:0.7;">Cooler than sheet roofing</div>
+      </div>
+      <div style="text-align:center;padding:10px 8px;border:1px solid rgba(255,255,255,0.12);border-radius:0;">
+        <div style="font-size:20pt;font-weight:800;color:white;">50yr</div>
+        <div style="font-size:8.5pt;opacity:0.7;">Bondor panel warranty</div>
+      </div>
+    </div>
+
+    <!-- HOW IT ATTACHES -->
+    <div style="margin-top:14px;">
+      <div style="font-size:7.5pt;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--orange);margin-bottom:8px;">HOW IT ATTACHES TO YOUR HOME</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+        <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:0;padding:10px;text-align:center;">
+          <div style="width:44px;height:44px;border-radius:0;margin:0 auto 6px;overflow:hidden;">
+            <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/insulated-patio-detail.jpg');background-size:cover;background-position:center;"></div>
+          </div>
+          <div style="font-size:9.5pt;font-weight:700;">Fascia Riser</div>
+          <div style="font-size:7.5pt;opacity:0.6;margin-top:2px;line-height:1.3;">Brackets bolted to fascia. Most common method.</div>
+        </div>
+        <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:0;padding:10px;text-align:center;">
+          <div style="width:44px;height:44px;border-radius:0;margin:0 auto 6px;overflow:hidden;">
+            <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/real-patio-ceiling-angle.jpg');background-size:cover;background-position:center;"></div>
+          </div>
+          <div style="font-size:9.5pt;font-weight:700;">Receiving Channel</div>
+          <div style="font-size:7.5pt;opacity:0.6;margin-top:2px;line-height:1.3;">Direct into wall. Flush, seamless finish.</div>
+        </div>
+        <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:0;padding:10px;text-align:center;">
+          <div style="width:44px;height:44px;border-radius:0;margin:0 auto 6px;overflow:hidden;">
+            <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/two-storey-balcony-detail.jpg');background-size:cover;background-position:center;"></div>
+          </div>
+          <div style="font-size:9.5pt;font-weight:700;">Flyover Post</div>
+          <div style="font-size:7.5pt;opacity:0.6;margin-top:2px;line-height:1.3;">Posts through roof line. Two-storey homes.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Brand bar -->
+    <div style="display:flex;align-items:center;justify-content:center;gap:20px;margin-top:10px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.1);">
+      <span style="font-size:8.5pt;font-weight:700;letter-spacing:1px;color:rgba(255,255,255,0.35);">BONDOR</span>
+      <span style="font-size:8.5pt;font-weight:700;letter-spacing:1px;color:rgba(255,255,255,0.35);">COLORBOND&reg;</span>
+      <span style="font-size:8.5pt;font-weight:700;letter-spacing:1px;color:rgba(255,255,255,0.35);">BLUESCOPE</span>
+      <span style="font-size:8.5pt;font-weight:700;letter-spacing:1px;color:rgba(255,255,255,0.35);">50yr WARRANTY</span>
+    </div>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-r" style="color:rgba(255,255,255,0.5);">10</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 11 — COLOURS & FINISHES (Odd, binding LEFT)
+     Technical spread RIGHT page — 22 COLORBOND colours + ceiling finishes
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div style="padding:12mm 14mm 10mm calc(var(--bind) + var(--safe));height:100%;display:flex;flex-direction:column;">
+    <span class="section-label">YOUR STYLE</span>
+    <div class="accent-line"></div>
+    <h2 style="font-size:22pt;font-weight:800;color:var(--dark-blue);margin-top:2px;">Looks Like It Was<br>Always There</h2>
+    <p style="font-size:10pt;color:var(--mid-blue);margin-top:2px;">Full COLORBOND&reg; colour range. Posts, gutters, downpipes, and fascia all colour-matched for a seamless finish.</p>
+
+    <!-- Roof & Post Colours — all 22 core COLORBOND colours -->
+    <div style="margin-top:8px;">
+      <div style="font-size:8pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);margin-bottom:6px;">Roof &amp; Post Colours</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px 4px;justify-content:flex-start;">
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#F9FBF1;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Dover White</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#E4E2D5;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Surfmist</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#D2D1CB;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Southerly</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#E9DCB8;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Classic Cream</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#C5C2AA;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Evening Haze</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#CABFA4;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Paperbark</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#BDBFBA;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Shale Grey</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#B1ADA3;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Dune</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#888B8A;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Windspray</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#969799;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Bluegum</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#857E73;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Gully</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#7F7C78;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Wallaby</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#7C846A;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Pale Eucalypt</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#6C6153;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Jasper</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#6D6C6E;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Basalt</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#364152;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Deep Ocean</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#3E434C;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Ironstone</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#304C3C;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Cottage Green</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#5E1D0E;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Manor Red</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#4B4C46;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Woodland Grey</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#323233;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Monument</div></div>
+        <div style="text-align:center;width:48px;"><div style="width:36px;height:36px;border-radius:50%;margin:0 auto;border:2px solid rgba(41,60,70,0.08);background:#000000;"></div><div style="font-size:6pt;font-weight:700;margin-top:2px;color:var(--dark-blue);line-height:1.1;">Night Sky</div></div>
+      </div>
+      <p style="font-size:8pt;color:var(--mid-blue);font-style:italic;margin-top:4px;">Surfmist and Monument are our most popular. Full palette of 22 colours available.</p>
+    </div>
+
+    <!-- Ceiling Finishes -->
+    <div style="margin-top:8px;">
+      <div style="font-size:8pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);margin-bottom:4px;">Ceiling Finish</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+        <div style="text-align:center;">
+          <div style="height:32px;background:#D4D0C8;border-radius:0;"></div>
+          <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:3px;">PLAIN</div>
+          <div style="font-size:8pt;color:var(--mid-blue);">Smooth, modern finish</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="height:32px;background:repeating-linear-gradient(0deg,#C8C4BC,#C8C4BC 3px,#D4D0C8 3px,#D4D0C8 6px);border-radius:0;"></div>
+          <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:3px;">LINED</div>
+          <div style="font-size:8pt;color:var(--mid-blue);">Traditional grooved panel</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="height:32px;background:linear-gradient(90deg,#B8906A,#C9A07A,#A8805A);border-radius:0;"></div>
+          <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:3px;">CEDAR LOOK</div>
+          <div style="font-size:8pt;color:var(--mid-blue);">Timber look, zero maintenance</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cross-sell -->
+    <div style="margin-top:8px;padding:8px 10px;background:var(--warm-grey);border-left:3px solid var(--orange);border-radius:0;">
+      <p style="font-size:9pt;color:var(--dark-blue);font-weight:700;line-height:1.4;">Your patio colour can coordinate with your fencing, screening, and gates.</p>
+    </div>
+
+    <!-- Consultant note -->
+    <div style="margin-top:6px;text-align:center;padding:5px;background:var(--warm-grey);border-radius:0;">
+      <p style="font-size:9pt;color:var(--mid-blue);font-weight:700;">Your consultant will bring physical colour samples to your consultation.</p>
+    </div>
+
+    <!-- Brand bar -->
+    <div style="margin-top:auto;display:flex;align-items:center;justify-content:center;gap:20px;padding-top:6px;border-top:1px solid #E0E4E8;">
+      <span style="font-size:10pt;font-weight:700;letter-spacing:1px;color:var(--mid-blue);">COLORBOND&reg; Steel</span>
+      <span style="font-size:10pt;font-weight:700;letter-spacing:1px;color:var(--mid-blue);">BlueScope</span>
+      <span style="font-size:10pt;font-weight:700;letter-spacing:1px;color:var(--mid-blue);">Australian Made</span>
+    </div>
+    <p class="fine-print text-center" style="margin-top:3px;">Colours shown are indicative only. Physical samples available at your consultation.</p>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-l">11</span>
+</div>
+
+<!-- ============================================================
+     PAGE 12 — FLAT + GABLE ROOF STYLES (Even, binding RIGHT)
+     Two showcase cells stacked vertically
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div style="padding:10mm 20mm 10mm 14mm;height:100%;display:flex;flex-direction:column;">
+    <div style="text-align:center;margin-bottom:8px;">
+      <span class="section-label">PATIO DESIGN</span>
+      <h2 style="font-size:24pt;font-weight:800;color:var(--dark-blue);margin-top:4px;">Choose Your Style</h2>
+      <p style="font-size:11pt;color:var(--mid-blue);margin-top:2px;">Which one catches your eye?</p>
+    </div>
+
+    <!-- FLAT / SKILLION -->
+    <div style="flex:1;position:relative;border-radius:0;overflow:hidden;margin-bottom:8px;">
+      <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/flat-patio-daytime.png');"></div>
+      <div style="position:absolute;top:10px;left:10px;z-index:2;">
+        <span class="tag" style="font-size:7.5pt;padding:3px 10px;">MOST POPULAR</span>
+      </div>
+      <div style="position:absolute;bottom:0;left:0;right:0;padding:30px 14px 12px;background:linear-gradient(to top,rgba(41,60,70,0.75),transparent);color:white;z-index:2;">
+        <div style="font-size:14pt;font-weight:700;text-transform:uppercase;letter-spacing:1px;">FLAT / SKILLION</div>
+        <div style="font-size:11pt;opacity:0.9;line-height:1.4;margin-top:3px;">Clean, modern lines. Most popular for contemporary homes.</div>
+        <div style="font-size:9pt;font-style:italic;opacity:0.7;margin-top:3px;">Best for: Modern outdoor rooms, clean extensions</div>
+      </div>
+    </div>
+
+    <!-- GABLE -->
+    <div style="flex:1;position:relative;border-radius:0;overflow:hidden;">
+      <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/gable-patio-pool-oceanview.jpg');"></div>
+      <div style="position:absolute;bottom:0;left:0;right:0;padding:30px 14px 12px;background:linear-gradient(to top,rgba(41,60,70,0.75),transparent);color:white;z-index:2;">
+        <div style="font-size:14pt;font-weight:700;text-transform:uppercase;letter-spacing:1px;">GABLE</div>
+        <div style="font-size:11pt;opacity:0.9;line-height:1.4;margin-top:3px;">Classic peaked roof. Adds height and grandeur.</div>
+        <div style="font-size:9pt;font-style:italic;opacity:0.7;margin-top:3px;">Best for: Grand entertaining areas, traditional homes</div>
+      </div>
+    </div>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-r">12</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 13 — FLYOVER + FREESTANDING ROOF STYLES (Odd, binding LEFT)
+     Two showcase cells stacked vertically
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div style="padding:10mm 14mm 10mm 20mm;height:100%;display:flex;flex-direction:column;">
+    <div style="text-align:center;margin-bottom:8px;">
+      <span class="section-label">PATIO DESIGN</span>
+      <h2 style="font-size:24pt;font-weight:800;color:var(--dark-blue);margin-top:4px;">Choose Your Style</h2>
+      <p style="font-size:11pt;color:var(--mid-blue);margin-top:2px;">Which one catches your eye?</p>
+    </div>
+
+    <!-- FLYOVER -->
+    <div style="flex:1;position:relative;border-radius:0;overflow:hidden;margin-bottom:8px;">
+      <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/flyover-patio-exterior.png');"></div>
+      <div style="position:absolute;bottom:0;left:0;right:0;padding:30px 14px 12px;background:linear-gradient(to top,rgba(41,60,70,0.75),transparent);color:white;z-index:2;">
+        <div style="font-size:14pt;font-weight:700;text-transform:uppercase;letter-spacing:1px;">FLYOVER</div>
+        <div style="font-size:11pt;opacity:0.9;line-height:1.4;margin-top:3px;">Sits above your existing roofline. Open, elevated feel.</div>
+        <div style="font-size:9pt;font-style:italic;opacity:0.7;margin-top:3px;">Best for: Elevated outdoor rooms, capturing breezes and views</div>
+      </div>
+    </div>
+
+    <!-- FREESTANDING -->
+    <div style="flex:1;position:relative;border-radius:0;overflow:hidden;">
+      <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/freestanding-patio-outdoor-kitchen.jpg');"></div>
+      <div style="position:absolute;bottom:0;left:0;right:0;padding:30px 14px 12px;background:linear-gradient(to top,rgba(41,60,70,0.75),transparent);color:white;z-index:2;">
+        <div style="font-size:14pt;font-weight:700;text-transform:uppercase;letter-spacing:1px;">FREESTANDING</div>
+        <div style="font-size:11pt;opacity:0.9;line-height:1.4;margin-top:3px;">Standalone structure. Posts on all sides. Complete independence.</div>
+        <div style="font-size:9pt;font-style:italic;opacity:0.7;margin-top:3px;">Best for: Pool pavilions, outdoor kitchens, garden retreats</div>
+      </div>
+    </div>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-l">13</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 14 — LIFESTYLE GALLERY (Even, binding RIGHT)
+     2x2 grid: ENTERTAIN, RELAX, COOK, GATHER
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div style="height:100%;display:flex;flex-direction:column;">
+    <div class="grid-2x2" style="flex:1;">
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/patio-lifestyle-golden.png');border-radius:0;">
+        <div class="grid-caption"><div class="grid-caption-title" style="font-size:11pt;letter-spacing:2px;">ENTERTAIN</div></div>
+      </div>
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/client-balcony-portrait.jpg');border-radius:0;">
+        <div class="grid-caption"><div class="grid-caption-title" style="font-size:11pt;letter-spacing:2px;">RELAX</div></div>
+      </div>
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/outdoor-kitchen-gable.png');border-radius:0;">
+        <div class="grid-caption"><div class="grid-caption-title" style="font-size:11pt;letter-spacing:2px;">COOK</div></div>
+      </div>
+      <div class="grid-item photo-bg" style="background-image:url('assets/photos/modern-patio-screening-lights.png');border-radius:0;">
+        <div class="grid-caption"><div class="grid-caption-title" style="font-size:11pt;letter-spacing:2px;">GATHER</div></div>
+      </div>
+    </div>
+    <div style="padding:10px 20mm;text-align:center;background:var(--white);">
+      <p style="font-size:12pt;font-style:italic;color:var(--mid-blue);">This is outdoor living done properly.</p>
+    </div>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-r">14</span>
+</div>
+
+<!-- ============================================================
+     PAGE 15 — POOL PAVILION (Even, binding RIGHT)
+     Full-bleed poolside photo with overlay
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/poolside-patio-luxury.png');">
+  <div class="overlay-full"></div>
+  <div class="overlay-content" style="padding:18mm 20mm 22mm 14mm;">
+    <div>
+      <span class="section-label-white">SPECIAL APPLICATION</span>
+      <div class="accent-line-white"></div>
+      <h1 class="h1-divider" style="font-size:40pt;">Your Pool<br>Deserves<br>a Room</h1>
+      <p class="body-white" style="max-width:340px;margin-top:8px;">An insulated pavilion turns your pool area from a seasonal feature into year-round outdoor living space &mdash; and adds serious value to your property.</p>
+      <p class="body-white" style="max-width:340px;margin-top:8px;">Swim without squinting. Supervise the kids without baking. Entertain poolside all day, every day.</p>
+    </div>
+    <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px;">
+      <div style="display:flex;align-items:center;gap:10px;color:white;font-size:11pt;font-weight:700;">
+        <span style="width:7px;height:7px;background:var(--orange);border-radius:50%;flex-shrink:0;"></span>
+        Engineered for pool environments
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;color:white;font-size:11pt;font-weight:700;">
+        <span style="width:7px;height:7px;background:var(--orange);border-radius:50%;flex-shrink:0;"></span>
+        Corrosion-resistant fixings and fasteners
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;color:white;font-size:11pt;font-weight:700;">
+        <span style="width:7px;height:7px;background:var(--orange);border-radius:50%;flex-shrink:0;"></span>
+        Extends usable swimming hours into the hottest part of the day
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;color:white;font-size:11pt;font-weight:700;">
+        <span style="width:7px;height:7px;background:var(--orange);border-radius:50%;flex-shrink:0;"></span>
+        No leaves in the pool
+      </div>
+    </div>
+  </div>
+  <div class="tab tab-orange"></div>
+  <span class="page-num page-num-r page-num-white">15</span>
+</div>
+
+
+
+<!-- ============================================================
+     PAGE 18 — FENCING OPENER (Even, binding RIGHT)
+     Full-bleed fence photo with text overlay
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/colorbond-fence-install.jpg');">
+  <div class="overlay-bottom"></div>
+  <div class="overlay-content" style="padding:0 14mm 28mm 22mm;justify-content:flex-end;">
+    <span class="section-label-white">FENCING DIVISION</span>
+    <div class="accent-line-white"></div>
+    <h1 class="h1-divider" style="font-size:44pt;">SECURE YOUR<br>BOUNDARY</h1>
+    <p class="body-white" style="margin-top:8px;max-width:320px;font-size:13pt;">Define your outdoor rooms.<br>Same team. Same standards.<br>Same result that lasts.</p>
+  </div>
+  <div class="tab tab-blue"></div>
+  <span class="page-num page-num-r page-num-white">16</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 19 — DEFINE YOUR SPACE (Odd, binding LEFT)
+     Fence photo background with white text panel on right
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/colorbond-fence-lattice-wide.jpg');">
+  <div style="position:absolute;top:0;right:0;width:40%;height:100%;background:rgba(255,255,255,0.96);z-index:2;"></div>
+  <div style="position:absolute;top:0;right:0;width:40%;height:100%;z-index:3;padding:28mm 14mm 20mm 16mm;display:flex;flex-direction:column;justify-content:center;">
+    <span class="section-label">FENCING DIVISION</span>
+    <div class="accent-line"></div>
+    <h1 class="h1" style="font-size:28pt;line-height:1.0;">DEFINE<br>YOUR<br>SPACE</h1>
+    <p class="body-text" style="margin-top:14px;font-size:11pt;line-height:1.65;">Fencing isn&rsquo;t just a boundary. It creates outdoor rooms, safe play areas, and private entertaining spaces your family will use every day.</p>
+    <div style="margin-top:18px;display:flex;flex-wrap:wrap;gap:6px;">
+      <span class="tag" style="font-size:7.5pt;padding:3px 10px;">PRIVACY</span>
+      <span class="tag" style="font-size:7.5pt;padding:3px 10px;">SAFETY</span>
+      <span class="tag" style="font-size:7.5pt;padding:3px 10px;">STREET APPEAL</span>
+    </div>
+  </div>
+  <div class="tab tab-blue"></div>
+  <span class="page-num page-num-l">17</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 20 — FENCING: BUILT TO YOUR SITE
+     Photo-based heights, post cards, retaining photo — no SVGs
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div class="pad-even">
+    <span class="section-label">FENCING SPECIFICATIONS</span>
+    <div class="accent-line"></div>
+    <h2 class="h1" style="font-size:22pt;">Built to Your Site</h2>
+    <p style="font-size:11pt;color:var(--mid-blue);margin-top:2px;">Three standard heights. Two post sizes. We match the fence to your boundary.</p>
+
+    <!-- Heights — 3 photo panels with labels -->
+    <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;flex:0 0 auto;">
+      <!-- 1500mm -->
+      <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+        <div class="photo-bg" style="height:100px;background-image:url('assets/photos/colorbond-fence-lattice.jpg');background-position:center bottom;">
+          <div style="position:absolute;top:6px;left:6px;padding:3px 8px;background:var(--mid-blue);border-radius:3px;font-size:8pt;font-weight:700;color:white;">1500mm</div>
+        </div>
+        <div style="padding:8px 10px;text-align:center;">
+          <div style="font-size:12pt;font-weight:800;color:var(--dark-blue);">Standard</div>
+          <div style="font-size:9pt;color:var(--mid-blue);margin-top:2px;">Front boundary<br>Dividing fences</div>
+        </div>
+      </div>
+      <!-- 1800mm POPULAR -->
+      <div style="border-radius:0;overflow:hidden;border:2px solid var(--orange);">
+        <div class="photo-bg" style="height:100px;background-image:url('assets/photos/colorbond-fence-trimclad.jpg');background-position:center bottom;position:relative;">
+          <div style="position:absolute;top:6px;left:6px;padding:3px 8px;background:var(--orange);border-radius:3px;font-size:8pt;font-weight:700;color:white;">1800mm</div>
+          <div style="position:absolute;top:6px;right:6px;padding:3px 8px;background:var(--orange);border-radius:100px;font-size:7pt;font-weight:700;color:white;letter-spacing:0.5px;">MOST POPULAR</div>
+        </div>
+        <div style="padding:8px 10px;text-align:center;">
+          <div style="font-size:12pt;font-weight:800;color:var(--orange);">Full Privacy</div>
+          <div style="font-size:9pt;color:var(--mid-blue);margin-top:2px;">Side &amp; rear boundaries<br>80% of our installs</div>
+        </div>
+      </div>
+      <!-- 2100mm -->
+      <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+        <div class="photo-bg" style="height:100px;background-image:url('assets/photos/colorbond-fence-lattice-wide.jpg');background-position:center bottom;">
+          <div style="position:absolute;top:6px;left:6px;padding:3px 8px;background:var(--dark-blue);border-radius:3px;font-size:8pt;font-weight:700;color:white;">2100mm</div>
+        </div>
+        <div style="padding:8px 10px;text-align:center;">
+          <div style="font-size:12pt;font-weight:800;color:var(--dark-blue);">Maximum Height</div>
+          <div style="font-size:9pt;color:var(--mid-blue);margin-top:2px;">Council limit<br>Total privacy</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Post Sizes — two clean cards -->
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid #E8ECF0;">
+      <div style="font-size:9pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);margin-bottom:8px;">SQUARE STEEL POSTS</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div style="background:var(--warm-grey);border-radius:0;padding:12px 14px;display:flex;gap:12px;align-items:center;">
+          <div style="width:36px;height:36px;background:var(--dark-blue);border-radius:0;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:8pt;font-weight:700;color:white;">90</div>
+          <div>
+            <div style="font-size:12pt;font-weight:700;color:var(--dark-blue);">90 &times; 90mm</div>
+            <div style="font-size:9pt;color:var(--mid-blue);">Standard &mdash; fences up to 1800mm</div>
+          </div>
+        </div>
+        <div style="background:var(--warm-grey);border-radius:0;padding:12px 14px;display:flex;gap:12px;align-items:center;">
+          <div style="width:42px;height:42px;background:var(--dark-blue);border-radius:0;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:8pt;font-weight:700;color:white;">100</div>
+          <div>
+            <div style="font-size:12pt;font-weight:700;color:var(--dark-blue);">100 &times; 100mm</div>
+            <div style="font-size:9pt;color:var(--mid-blue);">Heavy duty &mdash; 2100mm panels</div>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:9pt;color:var(--mid-blue);font-style:italic;margin-top:4px;">Galvanised steel, powder-coated to match your fence colour.</p>
+    </div>
+
+    <!-- Council Heights + Colour -->
+    <div style="margin-top:auto;display:flex;flex-direction:column;gap:6px;">
+      <div style="padding:8px 16px;background:var(--dark-blue);border-radius:0;color:white;">
+        <div style="display:flex;align-items:center;gap:16px;">
+          <div style="font-size:8pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);white-space:nowrap;">PERTH COUNCIL</div>
+          <div style="display:flex;gap:14px;flex:1;">
+            <div><span style="font-size:18pt;font-weight:800;">1.2m</span> <span style="font-size:8pt;opacity:0.7;">Front</span></div>
+            <div><span style="font-size:18pt;font-weight:800;">1.8m</span> <span style="font-size:8pt;opacity:0.7;">Side</span></div>
+            <div><span style="font-size:18pt;font-weight:800;">2.1m</span> <span style="font-size:8pt;opacity:0.7;">Rear</span></div>
+          </div>
+        </div>
+      </div>
+      <div style="padding:6px 16px;background:var(--orange);border-radius:0;text-align:center;">
+        <p style="font-size:9pt;font-weight:700;color:white;">Full COLORBOND&reg; colour range &mdash; match your fence and patio in the same colour.</p>
+      </div>
+    </div>
+  </div>
+  <div class="tab tab-blue"></div>
+  <span class="page-num page-num-r">18</span>
+</div>
+
+
+
+
+<!-- ============================================================
+     PAGE 22 — MAIN FENCING PRODUCTS: Trimclad, Harmony, Slat, Blade
+     White background — 2×2 product showcase grid
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div class="pad-even">
+    <span class="section-label">FENCING PROFILES</span>
+    <div class="accent-line"></div>
+    <h2 class="h1" style="font-size:22pt;">Pick Your Style</h2>
+    <p style="font-size:11pt;color:var(--mid-blue);margin-top:2px;">COLORBOND&reg; steel for boundaries. Aluminium for feature fences. Both built to last.</p>
+
+    <!-- 2×2 Product Grid: All four cards equal size -->
+    <div style="margin-top:10px;display:grid;grid-template-columns:3fr 2fr;grid-template-rows:1fr 1fr;gap:8px;flex:1;">
+
+      <!-- Trimclad -->
+      <div style="background:var(--warm-grey);border-radius:0;overflow:hidden;display:flex;flex-direction:column;">
+        <div class="photo-bg" style="flex:1;min-height:0;background-image:url('assets/photos/colorbond-fence-lattice.jpg');background-size:cover;background-position:center;"></div>
+        <div style="padding:8px 10px;">
+          <h3 style="font-size:13pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;">Trimclad</h3>
+          <p style="font-size:9.5pt;color:var(--body-text);line-height:1.35;margin-top:2px;">Ribs on one side, flat on the other. The classic COLORBOND boundary fence. Clean, affordable, proven.</p>
+          <p style="font-size:8pt;color:var(--mid-blue);margin-top:3px;">Panel width: 2365mm &nbsp;|&nbsp; All colours</p>
+        </div>
+      </div>
+
+      <!-- Same Side -->
+      <div style="background:var(--warm-grey);border-radius:0;overflow:hidden;display:flex;flex-direction:column;">
+        <div class="photo-bg" style="flex:1;min-height:0;border-radius:0;background-image:url('assets/photos/colorbond-fence-install.jpg');"></div>
+        <div style="padding:8px 10px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <h3 style="font-size:13pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;">Same Side</h3>
+            <span style="font-size:7pt;font-weight:700;color:var(--orange);letter-spacing:0.5px;">SAME BOTH SIDES</span>
+          </div>
+          <p style="font-size:9.5pt;color:var(--body-text);line-height:1.35;margin-top:2px;">No &ldquo;good side, bad side.&rdquo; Same clean look for you AND your neighbour. Same price as Trimclad.</p>
+          <p style="font-size:8pt;color:var(--mid-blue);margin-top:3px;">Panel width: 2365mm &nbsp;|&nbsp; All colours</p>
+        </div>
+      </div>
+
+      <!-- Slat Fencing -->
+      <div style="background:var(--warm-grey);border-radius:0;overflow:hidden;display:flex;flex-direction:column;">
+        <div class="needs-photo photo-bg" data-shot="📷 Aluminium slat fence — residential front feature, Monument/Woodland Grey" style="flex:1;min-height:0;border-radius:0;background-image:url('assets/photos/commercial-alfresco-screening.jpg');position:relative;"></div>
+        <div style="padding:8px 10px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <h3 style="font-size:13pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;">Aluminium Slat</h3>
+            <span class="tag" style="font-size:6.5pt;padding:2px 7px;background:var(--orange);">PREMIUM</span>
+          </div>
+          <p style="font-size:9.5pt;color:var(--body-text);line-height:1.35;margin-top:2px;">Modern horizontal aluminium slats. Adjustable gaps for privacy or airflow. The go-to for front feature fences.</p>
+          <p style="font-size:8pt;color:var(--mid-blue);margin-top:3px;">Powder-coated aluminium &nbsp;|&nbsp; Any colour</p>
+        </div>
+      </div>
+
+      <!-- Blade Fencing -->
+      <div style="background:var(--warm-grey);border-radius:0;overflow:hidden;display:flex;flex-direction:column;">
+        <div class="photo-bg" style="flex:1;min-height:0;border-radius:0;background-image:url('assets/photos/colorbond-fence-lattice-wide.jpg');"></div>
+        <div style="padding:8px 10px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <h3 style="font-size:13pt;font-weight:700;color:var(--dark-blue);text-transform:uppercase;">Aluminium Blade</h3>
+            <span class="tag" style="font-size:6.5pt;padding:2px 7px;background:var(--orange);">PREMIUM</span>
+          </div>
+          <p style="font-size:9.5pt;color:var(--body-text);line-height:1.35;margin-top:2px;">Vertical blades angled for directional privacy. See out but not in. A real architectural statement.</p>
+          <p style="font-size:8pt;color:var(--mid-blue);margin-top:3px;">Powder-coated aluminium &nbsp;|&nbsp; Custom angles</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  <div class="tab tab-blue"></div>
+  <span class="page-num page-num-r">19</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 23 — SPECIALTY FENCING → EXTENSIONS → GATES
+     Flow: Fencing styles (from p22) → Extensions (with photos) → Gates (hero)
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div style="padding:12mm 14mm 10mm 20mm;height:100%;display:flex;flex-direction:column;gap:8px;">
+    <div>
+      <span class="section-label">COMPLETE YOUR BOUNDARY</span>
+      <div class="accent-line"></div>
+      <h2 style="font-size:22pt;font-weight:800;color:var(--dark-blue);margin-top:2px;">Specialty, Extensions &amp; Gates</h2>
+    </div>
+
+    <!-- ═══ SPECIALTY FENCING — 3 medium cards (continues p22 fence types) ═══ -->
+    <div style="flex:0.7;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+      <div class="needs-photo" data-shot="📷 White PVC panel fence — residential, maintenance-free look" style="border-radius:0;overflow:hidden;position:relative;">
+        <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/colorbond-fence-lattice.jpg');"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.88) 0%, transparent 55%);"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+          <div style="font-size:10pt;font-weight:700;color:white;text-transform:uppercase;">PVC Fencing</div>
+          <div style="font-size:7.5pt;color:rgba(255,255,255,0.7);margin-top:1px;">Maintenance-free. No painting, no rotting.</div>
+        </div>
+      </div>
+      <div class="needs-photo" data-shot="📷 Pool fencing — glass or aluminium, AS1926 compliant, residential pool" style="border-radius:0;overflow:hidden;position:relative;">
+        <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/freestanding-patio-pool-view.jpg');"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.88) 0%, transparent 55%);"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+          <div style="font-size:10pt;font-weight:700;color:white;text-transform:uppercase;">Pool Fencing</div>
+          <div style="font-size:7.5pt;color:rgba(255,255,255,0.7);margin-top:1px;">Australian pool safety standards. Glass, aluminium, or steel.</div>
+        </div>
+      </div>
+      <div class="needs-photo" data-shot="📷 Batten fence — timber or aluminium battens, residential feature fence" style="border-radius:0;overflow:hidden;position:relative;">
+        <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/commercial-alfresco-screening.jpg');"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.88) 0%, transparent 55%);"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+          <div style="font-size:10pt;font-weight:700;color:white;text-transform:uppercase;">Batten Fencing</div>
+          <div style="font-size:7.5pt;color:rgba(255,255,255,0.7);margin-top:1px;">Timber or aluminium battens. Feature fences and screening.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ EXTENSIONS — 3 cards WITH photos, compact strip ═══ -->
+    <div style="flex:0.35;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+      <div style="border-radius:0;overflow:hidden;position:relative;">
+        <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/colorbond-fence-lattice-wide.jpg');"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.9) 0%, rgba(41,60,70,0.2) 50%, transparent 100%);"></div>
+        <div style="position:absolute;top:6px;left:8px;">
+          <span style="font-size:6.5pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);background:rgba(41,60,70,0.7);padding:2px 6px;border-radius:2px;">EXTENSION</span>
+        </div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+          <div style="font-size:10pt;font-weight:700;color:white;">Lattice</div>
+          <div style="font-size:7.5pt;color:rgba(255,255,255,0.7);margin-top:1px;">300&ndash;600mm added height with airflow.</div>
+        </div>
+      </div>
+      <div style="border-radius:0;overflow:hidden;position:relative;">
+        <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/colorbond-fence-install.jpg');"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.9) 0%, rgba(41,60,70,0.2) 50%, transparent 100%);"></div>
+        <div style="position:absolute;top:6px;left:8px;">
+          <span style="font-size:6.5pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);background:rgba(41,60,70,0.7);padding:2px 6px;border-radius:2px;">EXTENSION</span>
+        </div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+          <div style="font-size:10pt;font-weight:700;color:white;">Slat</div>
+          <div style="font-size:7.5pt;color:rgba(255,255,255,0.7);margin-top:1px;">Aluminium slats above COLORBOND. Modern street appeal.</div>
+        </div>
+      </div>
+      <div class="needs-photo" data-shot="📷 Solid fill extension panel — full privacy, on top of Colorbond" style="border-radius:0;overflow:hidden;position:relative;">
+        <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/team-fencing-action.jpg');background-position:center top;"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.9) 0%, rgba(41,60,70,0.2) 50%, transparent 100%);"></div>
+        <div style="position:absolute;top:6px;left:8px;">
+          <span style="font-size:6.5pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);background:rgba(41,60,70,0.7);padding:2px 6px;border-radius:2px;">EXTENSION</span>
+        </div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+          <div style="font-size:10pt;font-weight:700;color:white;">Solid Fill</div>
+          <div style="font-size:7.5pt;color:rgba(255,255,255,0.7);margin-top:1px;">Full panel. Maximum privacy and wind protection.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ GATES — HERO SIZE — biggest section ═══ -->
+    <div style="flex:1;display:grid;grid-template-columns:1.2fr 1fr;gap:8px;">
+      <!-- Sliding Gate — feature card, biggest -->
+      <div class="needs-photo" data-shot="📷 Sliding gate — automated, on driveway track, residential, Monument" style="border-radius:0;overflow:hidden;position:relative;">
+        <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/branded-ute-rural.jpg');"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.92) 0%, rgba(41,60,70,0.3) 50%, transparent 100%);"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 14px;">
+          <span class="tag" style="font-size:7pt;padding:2px 8px;background:var(--orange);margin-bottom:4px;display:inline-block;">AUTOMATION AVAILABLE</span>
+          <div style="font-size:14pt;font-weight:800;color:white;text-transform:uppercase;letter-spacing:0.5px;">Sliding Gate</div>
+          <div style="font-size:8.5pt;color:rgba(255,255,255,0.8);margin-top:2px;line-height:1.3;">Tracks along fence line. Driveway access with remote automation.</div>
+        </div>
+      </div>
+      <!-- Stacked: Pedestrian + Double Swing -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div class="needs-photo" data-shot="📷 Pedestrian gate — single width, side access, finished product" style="flex:1;border-radius:0;overflow:hidden;position:relative;">
+          <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/team-drilling-fence.jpg');"></div>
+          <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.9) 0%, transparent 60%);"></div>
+          <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+            <div style="font-size:11pt;font-weight:800;color:white;text-transform:uppercase;">Pedestrian Gate</div>
+            <div style="font-size:7.5pt;color:rgba(255,255,255,0.75);margin-top:1px;">Single width. Side access and garden entries.</div>
+          </div>
+        </div>
+        <div class="needs-photo" data-shot="📷 Double swing gate — driveway width, closed position, residential" style="flex:1;border-radius:0;overflow:hidden;position:relative;">
+          <div class="photo-bg" style="position:absolute;inset:0;background-image:url('assets/photos/team-fencing-action.jpg');"></div>
+          <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.9) 0%, transparent 60%);"></div>
+          <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 10px;">
+            <div style="font-size:11pt;font-weight:800;color:white;text-transform:uppercase;">Double Swing Gate</div>
+            <div style="font-size:7.5pt;color:rgba(255,255,255,0.75);margin-top:1px;">Full driveway width. Manual or automated.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p style="font-size:7.5pt;color:var(--mid-blue);text-align:right;margin-top:-2px;">All gates: 90&times;90mm square steel posts, quality hardware, colour-matched.</p>
+
+  </div>
+  <div class="tab tab-blue"></div>
+  <span class="page-num page-num-l">20</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 25 — TEAM HERO (Full-bleed staff photo)
+     Full page photo with powerful tagline
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/team-posthole-smile.jpg');background-size:cover;background-position:center 20%;">
+  <!-- Subtle gradient for text readability at bottom -->
+  <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(to bottom, rgba(41,60,70,0.03) 0%, rgba(41,60,70,0.0) 40%, rgba(41,60,70,0.7) 85%, rgba(41,60,70,0.9) 100%);"></div>
+  <div class="overlay-content" style="padding:20mm 20mm 18mm 20mm;justify-content:flex-end;">
+    <div style="max-width:320px;">
+      <h2 style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:34pt;font-weight:900;line-height:0.95;text-transform:uppercase;color:white;text-shadow:0 2px 20px rgba(41,60,70,0.3);">A Crew That<br>Takes Pride In<br>Your Home</h2>
+      <div style="width:40px;height:3px;background:var(--orange);margin:10px 0;"></div>
+      <p style="font-size:11pt;color:rgba(255,255,255,0.9);line-height:1.5;text-shadow:0 1px 6px rgba(41,60,70,0.2);">Real tradespeople who genuinely care about the result. Not subcontractors. Not day labour. Your team from start to finish.</p>
+    </div>
+  </div>
+  <div class="tab tab-blue"></div>
+  <span class="page-num page-num-l page-num-white">21</span>
+</div>
+
+<!-- ============================================================
+     PAGE 26 — DECKING SECTION OPENER (Lifestyle-Led)
+     Even page | page-num-r | tab-brown — reads as spread with p26
+     ============================================================ -->
+<div class="page" style="background-image:url('assets/photos/deck-patio-golden.png');background-size:auto 297mm;background-position:-115mm center;background-repeat:no-repeat;">
+  <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(to bottom, rgba(41,60,70,0.05) 0%, rgba(41,60,70,0.0) 40%, rgba(41,60,70,0.5) 100%);"></div>
+  <div class="overlay-content" style="padding:20mm 16mm 16mm 14mm;justify-content:flex-end;">
+    <div style="max-width:360px;">
+      <span class="section-label-white">DECKING DIVISION</span>
+      <div class="accent-line-white"></div>
+      <h1 class="h1-divider" style="font-size:40pt;">THE FOUNDATION OF YOUR OUTDOOR ROOM</h1>
+      <p class="body-white" style="margin-top:10px;">The right deck transforms bare concrete or tired turf into genuine living space. The surface you&rsquo;ll feel underfoot every day.</p>
+    </div>
+  </div>
+  <div class="tab tab-brown"></div>
+  <span class="page-num page-num-r page-num-white">22</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 22 — DECKING MATERIALS & COLOURS (Odd, binding LEFT)
+     Combined material choices + colour swatches — single comprehensive page
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div style="padding:12mm 14mm 10mm calc(var(--bind) + var(--safe));height:100%;display:flex;flex-direction:column;">
+    <span class="section-label">YOUR OPTIONS</span>
+    <div class="accent-line"></div>
+    <h2 class="h1" style="font-size:24pt;">Choose Your Material</h2>
+
+    <!-- Composite Section -->
+    <div style="margin-top:10px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <div style="font-size:9pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);">COMPOSITE DECKING</div>
+        <div style="font-size:8pt;color:var(--mid-blue);font-style:italic;">Zero maintenance &bull; 20+ year lifespan &bull; Termite-proof</div>
+      </div>
+      <p style="font-size:10pt;color:var(--body-text);line-height:1.5;margin-bottom:6px;">Engineered boards that look like timber but never need staining, sealing, or sanding. Won&rsquo;t splinter, warp, or rot.</p>
+      <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;">
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+          <div style="height:36px;background:linear-gradient(135deg,#A09D93,#8E8B82);"></div>
+          <div style="padding:3px 4px;text-align:center;"><div style="font-size:7pt;font-weight:700;color:var(--dark-blue);">Backbeach</div></div>
+        </div>
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+          <div style="height:36px;background:linear-gradient(135deg,#807870,#6E665E);"></div>
+          <div style="padding:3px 4px;text-align:center;"><div style="font-size:7pt;font-weight:700;color:var(--dark-blue);">Alpine Ash</div></div>
+        </div>
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+          <div style="height:36px;background:linear-gradient(135deg,#7A6450,#62503C);"></div>
+          <div style="padding:3px 4px;text-align:center;"><div style="font-size:7pt;font-weight:700;color:var(--dark-blue);">Leatherwood</div></div>
+        </div>
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+          <div style="height:36px;background:linear-gradient(135deg,#574838,#433428);"></div>
+          <div style="padding:3px 4px;text-align:center;"><div style="font-size:7pt;font-weight:700;color:var(--dark-blue);">Ironwood</div></div>
+        </div>
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+          <div style="height:36px;background:linear-gradient(135deg,#6A3D30,#4E2920);"></div>
+          <div style="padding:3px 4px;text-align:center;"><div style="font-size:7pt;font-weight:700;color:var(--dark-blue);">Riverbank Red</div></div>
+        </div>
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;">
+          <div style="height:36px;background:linear-gradient(135deg,#48382A,#34241A);"></div>
+          <div style="padding:3px 4px;text-align:center;"><div style="font-size:7pt;font-weight:700;color:var(--dark-blue);">Estate Brown</div></div>
+        </div>
+      </div>
+      <p style="font-size:7.5pt;color:var(--mid-blue);font-style:italic;margin-top:3px;">Ekodeck Designer Series. Double-sided boards. Durashell&reg; coating. Physical samples at consultation.</p>
+    </div>
+
+    <!-- Hardwood Section -->
+    <div style="margin-top:10px;">
+      <div style="font-size:9pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);margin-bottom:6px;">HARDWOOD DECKING</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;display:flex;flex-direction:column;">
+          <div class="photo-bg" style="flex:1;min-height:70px;border-radius:0;background-image:url('assets/photos/decking-edge-detail.jpg');"></div>
+          <div style="padding:6px 10px;">
+            <div style="font-size:11pt;font-weight:700;color:var(--dark-blue);">Merbau</div>
+            <div style="font-size:8.5pt;color:var(--body-text);line-height:1.3;margin-top:2px;">Rich reddish-brown. Naturally durable. Our most popular timber. Oil 1&ndash;2&times;/year.</div>
+          </div>
+        </div>
+        <div style="border-radius:0;overflow:hidden;border:1px solid #E0E4E8;display:flex;flex-direction:column;">
+          <div class="photo-bg" style="flex:1;min-height:70px;border-radius:0;background-image:url('assets/photos/patio-vline-ceiling-decking.jpg');"></div>
+          <div style="padding:6px 10px;">
+            <div style="font-size:11pt;font-weight:700;color:var(--dark-blue);">Spotted Gum</div>
+            <div style="font-size:8.5pt;color:var(--body-text);line-height:1.3;margin-top:2px;">Stunning grain variation. Extremely hard and durable. Premium Australian native.</div>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:8.5pt;color:var(--mid-blue);margin-top:4px;"><strong style="color:var(--dark-blue);">Treated Pine</strong> also available &mdash; budget-friendly option, requires regular sealing.</p>
+    </div>
+
+    <!-- Subframe -->
+    <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <div style="background:var(--warm-grey);border-radius:0;padding:8px 10px;border-left:3px solid var(--mid-blue);">
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);">Steel Subframe</div>
+        <div style="font-size:8pt;color:var(--body-text);line-height:1.3;margin-top:2px;">Termite-proof, won&rsquo;t warp. Best with composite + patio integration.</div>
+      </div>
+      <div style="background:var(--warm-grey);border-radius:0;padding:8px 10px;border-left:3px solid var(--tab-brown);">
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);">Timber Subframe</div>
+        <div style="font-size:8pt;color:var(--body-text);line-height:1.3;margin-top:2px;">Traditional build. Merbau or treated pine. Suits standalone decks.</div>
+      </div>
+    </div>
+
+    <!-- Integration CTA -->
+    <div style="margin-top:auto;padding:10px 14px;background:var(--orange);border-radius:0;text-align:center;">
+      <p style="font-size:10pt;font-weight:700;color:white;">When your deck is part of a patio project, the subframe is engineered as one integrated system.</p>
+    </div>
+  </div>
+  <div class="tab tab-brown"></div>
+  <span class="page-num page-num-l">23</span>
+</div>
+
+
+
+
+<!-- ============================================================
+     PAGE 30 — ADD-ONS: PHOTO-LED GRID (3 rows)
+     Even page | page-num-r | NO tab
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <div class="pad-even" style="gap:0;">
+    <span class="section-label">BRING IT TO LIFE</span>
+    <div class="accent-line"></div>
+    <h2 class="h1" style="font-size:26pt;">Make It a Room</h2>
+    <p style="font-size:11pt;color:var(--mid-blue);margin-top:4px;margin-bottom:10px;">The details that turn a covered area into genuine living space.</p>
+
+    <!-- Row 1: Outdoor Blinds — big photo with overlay label -->
+    <div style="flex:1;position:relative;border-radius:0;overflow:hidden;">
+      <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/patio-outdoor-blinds.png');"></div>
+      <div style="position:absolute;bottom:0;left:0;right:0;padding:10px 14px;background:linear-gradient(transparent,rgba(41,60,70,0.9));">
+        <span class="tag" style="font-size:8pt;padding:3px 10px;background:var(--orange);color:white;border:none;">OUTDOOR BLINDS</span>
+        <p style="font-size:10pt;color:white;margin-top:4px;line-height:1.3;">Block sun, wind, and insects. The easiest way to double your patio's usable months.</p>
+      </div>
+    </div>
+
+    <!-- Row 2: Two photos side by side — Kitchens + Screening -->
+    <div style="flex:1;display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+      <div style="position:relative;border-radius:0;overflow:hidden;">
+        <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/freestanding-patio-outdoor-kitchen.jpg');"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 12px;background:linear-gradient(transparent,rgba(41,60,70,0.9));">
+          <span class="tag" style="font-size:8pt;padding:3px 8px;background:var(--orange);color:white;border:none;">OUTDOOR KITCHENS</span>
+          <p style="font-size:9pt;color:white;margin-top:3px;line-height:1.3;">BBQ, benchtops, sink &mdash; integrated from day one.</p>
+        </div>
+      </div>
+      <div class="needs-photo" data-shot="📷 Residential patio screening — slat or decorative panels, not commercial" style="position:relative;border-radius:0;overflow:hidden;">
+        <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/commercial-alfresco-screening.jpg');"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 12px;background:linear-gradient(transparent,rgba(41,60,70,0.9));">
+          <span class="tag" style="font-size:8pt;padding:3px 8px;background:var(--orange);color:white;border:none;">SCREENING &amp; PRIVACY</span>
+          <p style="font-size:9pt;color:white;margin-top:3px;line-height:1.3;">Slat screens and decorative panels.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3: Three photos — Lighting, Fans, Turf -->
+    <div style="flex:0.8;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
+      <div style="position:relative;border-radius:0;overflow:hidden;">
+        <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/ceiling-detail-downlight.png');"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:6px 10px;background:linear-gradient(transparent,rgba(41,60,70,0.9));">
+          <div style="font-size:9pt;font-weight:700;color:white;">DOWNLIGHTS</div>
+        </div>
+      </div>
+      <div style="position:relative;border-radius:0;overflow:hidden;">
+        <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/patio-decking-ceiling-fan.jpg');"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:6px 10px;background:linear-gradient(transparent,rgba(41,60,70,0.9));">
+          <div style="font-size:9pt;font-weight:700;color:white;">CEILING FANS</div>
+        </div>
+      </div>
+      <div style="position:relative;border-radius:0;overflow:hidden;background:var(--warm-grey);">
+        <div class="photo-bg" style="width:100%;height:100%;border-radius:0;background-image:url('assets/photos/drone-bush-patio-deck.jpg');"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:6px 10px;background:linear-gradient(transparent,rgba(41,60,70,0.9));">
+          <div style="font-size:9pt;font-weight:700;color:white;">ASTROTURF</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CTA strip -->
+    <div style="margin-top:8px;padding:8px 14px;background:var(--dark-blue);border-radius:0;text-align:center;">
+      <p style="font-size:10pt;color:white;font-weight:700;">Plus shutters, feature lighting, audio &amp; more &mdash; tell your consultant which extras interest you.</p>
+    </div>
+  </div>
+  <span class="page-num page-num-r">24</span>
+</div>
+
+
+
+
+<!-- ============================================================
+     PAGE 32 — PROCESS TIMELINE
+     Even page | page-num-r | NO tab — Before/After + horizontal timeline
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <!-- Before/After photo pair — top 38% -->
+  <div style="height:38%;display:grid;grid-template-columns:1fr 1fr;gap:0;">
+    <div style="position:relative;">
+      <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/aerial-patio-construction.png');"></div>
+      <div style="position:absolute;bottom:8px;left:8px;padding:4px 10px;background:var(--dark-blue);border-radius:3px;font-size:8pt;font-weight:700;color:white;letter-spacing:1px;">DURING</div>
+    </div>
+    <div style="position:relative;">
+      <div class="photo-bg" style="width:100%;height:100%;background-image:url('assets/photos/curved-awning-underside.jpg');"></div>
+      <div style="position:absolute;bottom:8px;left:8px;padding:4px 10px;background:var(--orange);border-radius:3px;font-size:8pt;font-weight:700;color:white;letter-spacing:1px;">AFTER</div>
+    </div>
+  </div>
+  <!-- Content -->
+  <div style="flex:1;padding:8mm calc(var(--bind) + var(--safe)) 10mm 14mm;display:flex;flex-direction:column;">
+    <span class="section-label">FROM START TO FINISH</span>
+    <div class="accent-line"></div>
+    <h2 class="h1" style="font-size:22pt;">Your Journey</h2>
+
+    <!-- Compact horizontal timeline -->
+    <div style="margin-top:10px;display:grid;grid-template-columns:2fr 3fr 2fr;gap:8px;">
+      <div style="background:var(--warm-grey);border-radius:0;padding:10px;">
+        <div style="font-size:18pt;font-weight:800;color:var(--orange);line-height:1;">1</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:4px;">CONSULTATION</div>
+        <div style="font-size:9pt;color:var(--body-text);margin-top:2px;line-height:1.35;">We visit, measure, and listen. No pressure.</div>
+      </div>
+      <div style="background:var(--warm-grey);border-radius:0;padding:10px;">
+        <div style="font-size:18pt;font-weight:800;color:var(--dark-blue);line-height:1;">2</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:4px;">DESIGN &amp; QUOTE</div>
+        <div style="font-size:9pt;color:var(--body-text);margin-top:2px;line-height:1.35;">Custom plans, engineering, clear pricing.</div>
+      </div>
+      <div style="background:var(--warm-grey);border-radius:0;padding:10px;">
+        <div style="font-size:18pt;font-weight:800;color:var(--mid-blue);line-height:1;">3</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:4px;">APPROVAL</div>
+        <div style="font-size:9pt;color:var(--body-text);margin-top:2px;line-height:1.35;">We handle council, permits, and engineering sign-off.</div>
+      </div>
+    </div>
+    <div style="margin-top:8px;display:grid;grid-template-columns:2fr 3fr 2fr;gap:8px;">
+      <div style="background:var(--warm-grey);border-radius:0;padding:10px;">
+        <div style="font-size:18pt;font-weight:800;color:var(--dark-blue);line-height:1;">4</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:4px;">BUILD</div>
+        <div style="font-size:9pt;color:var(--body-text);margin-top:2px;line-height:1.35;">Our crew installs &mdash; typically 2-5 days. Clean site.</div>
+      </div>
+      <div style="background:var(--warm-grey);border-radius:0;padding:10px;">
+        <div style="font-size:18pt;font-weight:800;color:var(--mid-blue);line-height:1;">5</div>
+        <div style="font-size:10pt;font-weight:700;color:var(--dark-blue);margin-top:4px;">WALKTHROUGH</div>
+        <div style="font-size:9pt;color:var(--body-text);margin-top:2px;line-height:1.35;">Final inspection together. Warranty docs handed over.</div>
+      </div>
+      <div style="background:var(--dark-blue);border-radius:0;padding:10px;">
+        <div style="font-size:18pt;font-weight:800;color:var(--orange);line-height:1;">&#10003;</div>
+        <div style="font-size:10pt;font-weight:700;color:white;margin-top:4px;">ENJOY</div>
+        <div style="font-size:9pt;color:rgba(255,255,255,0.7);margin-top:2px;line-height:1.35;">Your outdoor room is ready.</div>
+      </div>
+    </div>
+
+    <!-- Timeframes -->
+    <div style="margin-top:auto;padding:10px 14px;background:var(--warm-grey);border-radius:0;display:flex;justify-content:center;gap:24px;">
+      <div style="text-align:center;">
+        <div style="font-size:16pt;font-weight:800;color:var(--dark-blue);">6&ndash;10 weeks</div>
+        <div style="font-size:9pt;color:var(--mid-blue);">Patio projects</div>
+      </div>
+      <div style="width:1px;background:#E0E4E8;"></div>
+      <div style="text-align:center;">
+        <div style="font-size:16pt;font-weight:800;color:var(--dark-blue);">2&ndash;4 weeks</div>
+        <div style="font-size:9pt;color:var(--mid-blue);">Fencing projects</div>
+      </div>
+    </div>
+  </div>
+  <span class="page-num page-num-r">25</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 26 — WHY SECUREWORKS (NEW — Differentiation page)
+     Odd page | page-num-l | NO tab — answers "why choose us?"
+     ============================================================ -->
+<div class="page grain" style="background:var(--dark-blue);">
+  <div style="padding:18mm 14mm 14mm calc(var(--bind) + var(--safe));height:100%;display:flex;flex-direction:column;color:white;">
+    <span style="font-size:8pt;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--orange);">WHY SECUREWORKS</span>
+    <div style="width:40px;height:3px;background:var(--orange);margin:8px 0 12px;"></div>
+    <h2 style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:36pt;font-weight:900;line-height:0.95;text-transform:uppercase;color:white;">Not a Kit.<br>Not a Franchise.<br>Built for You.</h2>
+    <p style="font-size:11pt;color:rgba(255,255,255,0.65);margin-top:10px;max-width:380px;line-height:1.6;">Some patio companies sell pre-designed kits. Others subcontract the work. We do neither. Every project is custom designed, individually engineered, and built by our crew.</p>
+
+    <!-- 4 differentiators — large numbered cards -->
+    <div style="margin-top:20px;display:grid;grid-template-columns:3fr 2fr;gap:12px;flex:1;">
+      <!-- Custom Design -->
+      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:0;padding:16px 18px;display:flex;flex-direction:column;">
+        <div style="font-size:36pt;font-weight:800;color:var(--orange);line-height:0.85;">01</div>
+        <div style="font-size:13pt;font-weight:700;color:white;margin-top:8px;text-transform:uppercase;letter-spacing:0.5px;">Custom, Not Kit</div>
+        <p style="font-size:9.5pt;color:rgba(255,255,255,0.65);margin-top:6px;line-height:1.45;">Every patio is designed from scratch to fit your home, your block, and how you actually live. No catalogue. No compromises.</p>
+      </div>
+      <!-- One Team -->
+      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:0;padding:16px 18px;display:flex;flex-direction:column;">
+        <div style="font-size:36pt;font-weight:800;color:rgba(255,255,255,0.25);line-height:0.85;">02</div>
+        <div style="font-size:13pt;font-weight:700;color:white;margin-top:8px;text-transform:uppercase;letter-spacing:0.5px;">One Team</div>
+        <p style="font-size:9.5pt;color:rgba(255,255,255,0.65);margin-top:6px;line-height:1.45;">Patio, decking, fencing &mdash; one crew, one point of contact, one standard of finish. No subcontractors to chase.</p>
+      </div>
+      <!-- Perth Engineered -->
+      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:0;padding:16px 18px;display:flex;flex-direction:column;">
+        <div style="font-size:36pt;font-weight:800;color:rgba(255,255,255,0.25);line-height:0.85;">03</div>
+        <div style="font-size:13pt;font-weight:700;color:white;margin-top:8px;text-transform:uppercase;letter-spacing:0.5px;">Perth Engineered</div>
+        <p style="font-size:9.5pt;color:rgba(255,255,255,0.65);margin-top:6px;line-height:1.45;">Individually engineered for your site and Perth wind conditions. Council permits, structural certification &mdash; all handled.</p>
+      </div>
+      <!-- Proven Track Record -->
+      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:0;padding:16px 18px;display:flex;flex-direction:column;">
+        <div style="font-size:36pt;font-weight:800;color:rgba(255,255,255,0.25);line-height:0.85;">04</div>
+        <div style="font-size:13pt;font-weight:700;color:white;margin-top:8px;text-transform:uppercase;letter-spacing:0.5px;">100+ Five-Star Reviews</div>
+        <p style="font-size:9.5pt;color:rgba(255,255,255,0.65);margin-top:6px;line-height:1.45;">Real Perth families. Real reviews on Google. Not paid testimonials &mdash; genuine feedback from clients who chose us.</p>
+      </div>
+    </div>
+
+    <!-- Bottom statement -->
+    <div style="margin-top:auto;padding:12px 0;border-top:1px solid rgba(255,255,255,0.12);text-align:center;">
+      <p style="font-size:12pt;font-weight:700;color:white;letter-spacing:0.3px;">Quality you can see. Not a brand tax.</p>
+    </div>
+  </div>
+  <span class="page-num page-num-l page-num-white">26</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 33 — THE SECUREWORKS STANDARD (Spread left)
+     Full-bleed photo spread — left half. Authority builder.
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/gable-patio-decking-downlights.jpg');background-size:auto 100%;background-position:left center;">
+  <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.95) 0%, rgba(41,60,70,0.7) 35%, rgba(41,60,70,0.1) 60%, rgba(41,60,70,0.02) 100%);"></div>
+  <div class="overlay-content" style="padding:18mm 10mm 14mm 20mm;justify-content:flex-end;">
+    <!-- Title block -->
+    <div style="margin-bottom:16px;">
+      <span style="font-size:8pt;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--orange);">EVERY QUOTE INCLUDES</span>
+      <div style="width:40px;height:3px;background:var(--orange);margin:8px 0 10px;"></div>
+      <h1 style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:38pt;font-weight:900;line-height:0.92;text-transform:uppercase;color:white;">Built to<br>the Highest<br>Standard</h1>
+    </div>
+
+    <!-- Condensed inclusions — 2 columns, no boxes -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 20px;">
+      <div style="display:flex;align-items:baseline;gap:8px;">
+        <span style="width:6px;height:6px;background:var(--orange);border-radius:50%;flex-shrink:0;margin-top:2px;"></span>
+        <div>
+          <span style="font-size:10pt;font-weight:700;color:white;">Individually Engineered</span>
+          <span style="font-size:8.5pt;color:rgba(255,255,255,0.6);margin-left:4px;">for your site</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:8px;">
+        <span style="width:6px;height:6px;background:var(--orange);border-radius:50%;flex-shrink:0;margin-top:2px;"></span>
+        <div>
+          <span style="font-size:10pt;font-weight:700;color:white;">Council &amp; Permits</span>
+          <span style="font-size:8.5pt;color:rgba(255,255,255,0.6);margin-left:4px;">handled entirely</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:8px;">
+        <span style="width:6px;height:6px;background:var(--orange);border-radius:50%;flex-shrink:0;margin-top:2px;"></span>
+        <div>
+          <span style="font-size:10pt;font-weight:700;color:white;">N2/N3 Wind Rated</span>
+          <span style="font-size:8.5pt;color:rgba(255,255,255,0.6);margin-left:4px;">Perth weather ready</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:8px;">
+        <span style="width:6px;height:6px;background:var(--orange);border-radius:50%;flex-shrink:0;margin-top:2px;"></span>
+        <div>
+          <span style="font-size:10pt;font-weight:700;color:white;">High-Strength Steel + Proper Footings</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- One-liner CTA -->
+    <div style="margin-top:14px;padding:10px 0;border-top:1px solid rgba(255,255,255,0.15);">
+      <p style="font-size:11pt;font-weight:700;color:rgba(255,255,255,0.85);letter-spacing:0.3px;">No surprises. No extras. One quote covers everything.</p>
+    </div>
+  </div>
+  <span class="page-num page-num-l page-num-white">27</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 34 — THE SMARTEST INVESTMENT (Spread right)
+     Full-bleed photo spread — right half. Cost comparison + package.
+     ============================================================ -->
+<div class="page photo-bg" style="background-image:url('assets/photos/gable-patio-decking-downlights.jpg');background-size:auto 100%;background-position:right center;">
+  <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(41,60,70,0.95) 0%, rgba(41,60,70,0.6) 45%, rgba(41,60,70,0.05) 70%, rgba(41,60,70,0.02) 100%);"></div>
+  <div class="overlay-content" style="padding:18mm calc(var(--bind) + var(--safe) + 4mm) 14mm 14mm;justify-content:flex-end;">
+
+    <!-- Cost comparison — the killer stat -->
+    <div style="margin-bottom:16px;">
+      <span style="font-size:8pt;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--orange);">THE NUMBERS</span>
+      <div style="width:40px;height:3px;background:var(--orange);margin:8px 0 10px;"></div>
+      <h1 style="font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:34pt;font-weight:900;line-height:0.92;text-transform:uppercase;color:white;">The Smartest<br>Investment<br>You Can Make</h1>
+    </div>
+
+    <!-- Big comparison -->
+    <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:center;padding:16px 0;border-top:1px solid rgba(255,255,255,0.15);border-bottom:1px solid rgba(255,255,255,0.15);">
+      <div style="text-align:center;">
+        <div style="font-size:8pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,0.45);">Indoor Extension</div>
+        <div style="font-size:28pt;font-weight:800;color:rgba(255,255,255,0.4);margin-top:2px;">$3&ndash;5K<span style="font-size:12pt;">/m&sup2;</span></div>
+      </div>
+      <div style="font-size:14pt;color:rgba(255,255,255,0.25);font-weight:300;">vs</div>
+      <div style="text-align:center;">
+        <div style="font-size:8pt;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--orange);">Outdoor Room</div>
+        <div style="font-size:28pt;font-weight:800;color:var(--orange);margin-top:2px;">$650&ndash;900<span style="font-size:12pt;">/m&sup2;</span></div>
+      </div>
+    </div>
+
+    <!-- Tight 3-line pricing anchors — replaces full table -->
+    <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+      <div style="text-align:center;">
+        <div style="font-size:8pt;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(255,255,255,0.5);">Patios from</div>
+        <div style="font-size:18pt;font-weight:800;color:white;">$12K</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:8pt;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(255,255,255,0.5);">Fencing from</div>
+        <div style="font-size:18pt;font-weight:800;color:white;">$75<span style="font-size:10pt;">/m</span></div>
+        <div style="font-size:7pt;color:rgba(255,255,255,0.35);margin-top:1px;">Aluminium from $350/m</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:8pt;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(255,255,255,0.5);">Decking from</div>
+        <div style="font-size:18pt;font-weight:800;color:white;">$300<span style="font-size:10pt;">/m&sup2;</span></div>
+      </div>
+    </div>
+
+    <!-- Package CTA -->
+    <div style="margin-top:14px;padding:12px 16px;background:rgba(241,90,41,0.15);border:1px solid rgba(241,90,41,0.4);border-radius:0;text-align:center;">
+      <div style="font-size:13pt;font-weight:800;color:white;text-transform:uppercase;letter-spacing:0.5px;">Complete Outdoor Living Package</div>
+      <p style="font-size:9.5pt;color:rgba(255,255,255,0.7);margin-top:3px;">Patio + deck + fencing &mdash; typically less than a single indoor room extension.</p>
+    </div>
+
+    <p style="font-size:7.5pt;color:rgba(255,255,255,0.35);margin-top:6px;text-align:center;">Guide prices only. Quoted to your specific site. No hidden costs.</p>
+  </div>
+  <span class="page-num page-num-r page-num-white">28</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 35 — OUR GUARANTEE
+     Odd page | page-num-l | NO tab
+     ============================================================ -->
+<div class="page" style="background:var(--white);">
+  <!-- Top photo — 42% of page to show more of the crew -->
+  <div class="photo-bg" style="height:42%;background-image:url('assets/photos/team-crew-thumbsup.jpg');background-position:center 45%;"></div>
+  <!-- Content — vertically centered in remaining space -->
+  <div style="flex:1;padding:10mm 14mm 14mm 20mm;display:flex;flex-direction:column;justify-content:center;">
+    <span class="section-label">OUR PROMISE</span>
+    <div class="accent-line"></div>
+    <h2 class="h1" style="font-size:26pt;">Our Guarantee</h2>
+    <p style="font-size:10pt;color:var(--mid-blue);margin-top:3px;">This is what it means to build with SecureWorks.</p>
+
+    <div style="margin-top:12px;display:flex;flex-direction:column;gap:12px;">
+      <div class="guarantee-item" style="gap:10px;">
+        <span class="guarantee-check" style="font-size:13pt;">&#10003;</span>
+        <div>
+          <div style="font-size:12pt;font-weight:700;color:var(--dark-blue);">Engineering Certified</div>
+          <div style="font-size:10pt;color:var(--body-text);margin-top:2px;line-height:1.45;">Engineered for your site and Perth wind conditions. Individual certification for every build.</div>
+        </div>
+      </div>
+      <div class="guarantee-item" style="gap:10px;">
+        <span class="guarantee-check" style="font-size:13pt;">&#10003;</span>
+        <div>
+          <div style="font-size:12pt;font-weight:700;color:var(--dark-blue);">Licensed Builder</div>
+          <div style="font-size:10pt;color:var(--body-text);margin-top:2px;line-height:1.45;">WA Building Commission licensed. Fully insured. Your project is protected.</div>
+        </div>
+      </div>
+      <div class="guarantee-item" style="gap:10px;">
+        <span class="guarantee-check" style="font-size:13pt;">&#10003;</span>
+        <div>
+          <div style="font-size:12pt;font-weight:700;color:var(--dark-blue);">Structural Warranty</div>
+          <div style="font-size:10pt;color:var(--body-text);margin-top:2px;line-height:1.45;">If it&rsquo;s structural, we fix it. We stand behind the quality of every build.</div>
+        </div>
+      </div>
+      <div class="guarantee-item" style="gap:10px;">
+        <span class="guarantee-check" style="font-size:13pt;">&#10003;</span>
+        <div>
+          <div style="font-size:12pt;font-weight:700;color:var(--dark-blue);">We Stand Behind It</div>
+          <div style="font-size:10pt;color:var(--body-text);margin-top:2px;line-height:1.45;">Not right? We come back. No excuses. No chasing. That&rsquo;s the deal.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center;padding-top:12px;margin-top:12px;border-top:2px solid var(--orange);">
+      <p style="font-size:14pt;font-weight:800;color:var(--dark-blue);">Built right. Guaranteed.</p>
+    </div>
+  </div>
+  <span class="page-num page-num-l">29</span>
+</div>
+
+
+<!-- ============================================================
+     PAGE 37 — BACK COVER
+     Even page | NO page number | NO tab
+     ============================================================ -->
+<div class="page photo-bg grain" style="background-image:url('assets/photos/team-commercial-hivis.jpg');background-position:center 30%;">
+  <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(41,60,70,0.88);"></div>
+  <div style="position:relative;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24mm 20mm;">
+
+    <img src="assets/logo/svg/SecureWorks%20Group%20White.svg" alt="SecureWorks Group" style="height:48px;">
+
+    <div style="width:50px;height:3px;background:var(--orange);margin:24px auto;"></div>
+
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">
+      <div style="font-size:12pt;color:white;opacity:0.8;letter-spacing:0.5px;"><strong>Phone:</strong> 0489 267 774</div>
+      <div style="font-size:12pt;color:white;opacity:0.8;letter-spacing:0.5px;"><strong>Email:</strong> swwa@secureworkswa.com.au</div>
+      <div style="font-size:12pt;color:white;opacity:0.8;letter-spacing:0.5px;"><strong>Web:</strong> www.secureworkswa.com.au</div>
+    </div>
+
+    <div style="font-size:9pt;letter-spacing:2px;text-transform:uppercase;color:white;opacity:0.5;margin-top:16px;">Perth's Northern Suburbs &nbsp;|&nbsp; Perth Metro</div>
+
+    <!-- Service area suburbs -->
+    <div style="margin-top:16px;max-width:360px;">
+      <p style="font-size:9pt;color:white;opacity:0.45;line-height:1.8;letter-spacing:0.3px;">
+        Joondalup &nbsp;|&nbsp; Wanneroo &nbsp;|&nbsp; Stirling &nbsp;|&nbsp; Swan<br>
+        Duncraig &nbsp;|&nbsp; Hillarys &nbsp;|&nbsp; Sorrento &nbsp;|&nbsp; Padbury<br>
+        Woodvale &nbsp;|&nbsp; Balcatta &nbsp;|&nbsp; Karrinyup &nbsp;|&nbsp; Scarborough<br>
+        Innaloo &nbsp;|&nbsp; Mundaring &nbsp;|&nbsp; Ellenbrook &nbsp;|&nbsp; Midland
+      </p>
+      <p style="font-size:9pt;color:white;opacity:0.35;font-style:italic;margin-top:4px;">Plus all surrounding suburbs.</p>
+    </div>
+
+    <div style="margin-top:20px;padding:14px 28px;background:var(--orange);border-radius:0;display:inline-block;">
+      <div style="font-size:16pt;font-weight:800;color:white;text-transform:uppercase;letter-spacing:1px;">Book Your Free Consultation</div>
+    </div>
+    <p style="font-size:10pt;color:white;opacity:0.6;margin-top:10px;max-width:320px;line-height:1.5;">No obligation. No pressure. Just a conversation about your outdoor space.</p>
+
+    <div style="margin-top:20px;display:flex;gap:20px;font-size:11pt;color:white;opacity:0.5;letter-spacing:0.5px;">
+      <span>@secureworkswa</span>
+      <span>SecureWorks WA</span>
+    </div>
+
+    <p style="font-size:8pt;letter-spacing:1.5px;text-transform:uppercase;color:white;opacity:0.3;margin-top:16px;">Fully Licensed &nbsp;|&nbsp; Engineering Certified &nbsp;|&nbsp; Quality Guaranteed</p>
+
+    <!-- QR Code Placeholder — 25×25mm minimum -->
+    <div style="position:absolute;bottom:14mm;right:14mm;width:25mm;height:25mm;background:white;border-radius:0;display:flex;align-items:center;justify-content:center;">
+      <div style="text-align:center;">
+        <div style="font-size:5pt;color:var(--dark-blue);font-weight:700;letter-spacing:0.5px;">DESIGNER:<br>QR CODE</div>
+        <div style="font-size:4pt;color:var(--mid-blue);margin-top:2px;">Link to booking page<br>or secureworkswa.com.au</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+</body>
+</html>

@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council Approval Guide — SecureWorks Group</title>
+<style>
+@page { size: A4 portrait; margin: 0; }
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+:root {
+  --orange: #F15A29;
+  --dark: #293C46;
+  --mid: #4C6A7C;
+  --warm: #F8F6F3;
+  --white: #FFFFFF;
+  --body: #3a4f5c;
+  --green: #2EAD6B;
+}
+
+body {
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  color: var(--dark);
+  -webkit-font-smoothing: antialiased;
+}
+@media screen {
+  body { background: #111; padding: 40px 0; }
+  .page { margin: 0 auto 40px; box-shadow: 0 8px 80px rgba(0,0,0,0.6); }
+}
+@media print {
+  body { background: white; padding: 0; }
+  .page { margin: 0; box-shadow: none; }
+}
+
+.page {
+  width: 210mm;
+  height: 297mm;
+  position: relative;
+  overflow: hidden;
+  page-break-after: always;
+  background: var(--white);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Shared */
+.sh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.sh::before {
+  content: '';
+  width: 20px; height: 2.5px;
+  background: var(--orange);
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+.sh h2 {
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--dark);
+}
+.sh-white h2 { color: rgba(255,255,255,0.6); }
+
+.tab {
+  position: absolute;
+  right: 0;
+  width: 5px;
+  height: 22px;
+  background: var(--orange);
+  z-index: 10;
+}
+
+.pg-footer {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 7px 36px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.pg-footer-logo { height: 10px; opacity: 0.2; }
+.pg-footer-text {
+  font-size: 6.5px;
+  color: var(--mid);
+  opacity: 0.4;
+}
+
+
+/* ============================================================
+   PAGE 1 — "HERE'S THE DEAL"
+   The reassurance page. Hero → Intro → Process timeline →
+   Permits & Setbacks → "We handle everything" banner
+   ============================================================ */
+
+/* Hero */
+.p1-hero {
+  position: relative;
+  height: 225px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.p1-hero-img {
+  position: absolute;
+  inset: 0;
+  background: url('assets/photos-optimized/patio-lifestyle-golden.jpg') center 30% / cover;
+}
+.p1-hero-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    170deg,
+    rgba(41,60,70,0.92) 0%,
+    rgba(41,60,70,0.65) 45%,
+    rgba(41,60,70,0.3) 100%
+  );
+}
+.p1-hero::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 4px;
+  background: var(--orange);
+  z-index: 5;
+}
+.p1-hero-inner {
+  position: relative;
+  z-index: 3;
+  height: 100%;
+  padding: 24px 36px 26px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.p1-logo { height: 22px; opacity: 0.8; }
+.p1-hero-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.p1-tag {
+  display: inline-block;
+  background: var(--orange);
+  color: var(--white);
+  padding: 4px 12px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.p1-headline {
+  font-size: 46px;
+  font-weight: 900;
+  color: var(--white);
+  line-height: 0.95;
+  letter-spacing: -1.2px;
+}
+.p1-headline em {
+  font-style: normal;
+  color: var(--orange);
+}
+.p1-hero-stats {
+  display: flex;
+  gap: 20px;
+  text-align: right;
+}
+.p1-hs-num {
+  font-size: 26px;
+  font-weight: 900;
+  color: var(--white);
+  line-height: 1;
+}
+.p1-hs-num em {
+  font-style: normal;
+  color: var(--orange);
+}
+.p1-hs-num small {
+  font-size: 12px;
+  font-weight: 800;
+}
+.p1-hs-label {
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.4);
+  margin-top: 2px;
+}
+
+/* Intro */
+.p1-intro {
+  background: var(--warm);
+  padding: 18px 36px;
+  border-bottom: 1px solid #E8E4DF;
+  flex-shrink: 0;
+}
+.p1-intro p {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--body);
+}
+.p1-intro strong {
+  color: var(--dark);
+  font-weight: 700;
+}
+
+/* Timeline — horizontal 4-step with connecting line */
+.p1-timeline {
+  padding: 22px 36px 20px;
+  flex-shrink: 0;
+}
+.tl-flow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  position: relative;
+}
+.tl-flow::before {
+  content: '';
+  position: absolute;
+  top: 22px;
+  left: 24px;
+  right: 24px;
+  height: 2px;
+  background: linear-gradient(to right, var(--orange), var(--mid), var(--green));
+  z-index: 0;
+}
+.tl-item {
+  text-align: center;
+  position: relative;
+  z-index: 1;
+}
+.tl-dot {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 10px;
+  border-radius: 50%;
+  background: var(--white);
+  border: 3px solid var(--orange);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 900;
+  color: var(--orange);
+}
+.tl-item:last-child .tl-dot {
+  background: var(--green);
+  border-color: var(--green);
+  color: var(--white);
+}
+.tl-item h3 {
+  font-size: 10.5px;
+  font-weight: 800;
+  color: var(--dark);
+  margin-bottom: 3px;
+}
+.tl-item p {
+  font-size: 8.5px;
+  color: var(--mid);
+  line-height: 1.4;
+  padding: 0 8px;
+}
+.tl-time {
+  display: inline-block;
+  margin-top: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--orange);
+  background: rgba(241,90,41,0.08);
+  padding: 3px 10px;
+  border-radius: 10px;
+}
+.tl-item:last-child .tl-time {
+  color: var(--green);
+  background: rgba(46,173,107,0.08);
+}
+
+/* Total bar */
+.tl-total {
+  margin-top: 14px;
+  background: var(--warm);
+  border-radius: 6px;
+  padding: 12px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.tl-total-label {
+  font-size: 9px;
+  color: var(--mid);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tl-total-bar {
+  flex: 1;
+  height: 5px;
+  background: #E8E4DF;
+  border-radius: 3px;
+  position: relative;
+  overflow: hidden;
+}
+.tl-total-bar::after {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 75%;
+  background: linear-gradient(to right, var(--orange), var(--green));
+  border-radius: 3px;
+}
+.tl-total-value {
+  font-size: 24px;
+  font-weight: 900;
+  color: var(--dark);
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+}
+.tl-total-value em {
+  font-style: normal;
+  color: var(--orange);
+}
+
+/* Two-column: Permits + Setbacks */
+.p1-lower {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  padding: 0 36px;
+  flex-shrink: 0;
+}
+
+/* Permit cards */
+.permit-stack {}
+.permit-card {
+  border-radius: 8px;
+  padding: 16px 18px 14px;
+  margin-bottom: 8px;
+}
+.permit-card:last-child { margin-bottom: 0; }
+.permit-dark {
+  background: var(--dark);
+}
+.permit-light {
+  background: var(--warm);
+  border: 1px solid #E4E1DC;
+}
+.permit-card h3 {
+  font-size: 12.5px;
+  font-weight: 800;
+  margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.permit-dark h3 { color: var(--white); }
+.permit-light h3 { color: var(--dark); }
+.permit-pill {
+  font-size: 6.5px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 2px;
+}
+.permit-dark .permit-pill {
+  background: rgba(241,90,41,0.2);
+  color: var(--orange);
+}
+.permit-light .permit-pill {
+  background: rgba(241,90,41,0.12);
+  color: var(--orange);
+}
+.permit-card p {
+  font-size: 9px;
+  line-height: 1.6;
+}
+.permit-dark p { color: rgba(255,255,255,0.65); }
+.permit-light p { color: var(--mid); }
+.permit-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+  font-size: 8px;
+  font-weight: 700;
+}
+.permit-dark .permit-check { color: var(--orange); }
+.permit-light .permit-check { color: var(--green); }
+
+/* Setbacks */
+.setback-col {}
+.setback-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.sb-card {
+  background: var(--warm);
+  border-radius: 6px;
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.sb-num {
+  font-size: 32px;
+  font-weight: 900;
+  color: var(--orange);
+  line-height: 1;
+  letter-spacing: -1px;
+  min-width: 56px;
+}
+.sb-num small {
+  font-size: 15px;
+  font-weight: 800;
+}
+.sb-text {}
+.sb-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--dark);
+}
+.sb-note {
+  font-size: 8px;
+  color: var(--mid);
+  margin-top: 1px;
+}
+
+/* "We handle everything" banner — anchored to bottom */
+.p1-banner {
+  margin: auto 24px 30px;
+  background: var(--dark);
+  border-radius: 10px;
+  padding: 20px 26px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.p1-banner::before {
+  content: '';
+  position: absolute;
+  top: -80px; right: -40px;
+  width: 200px; height: 200px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(241,90,41,0.1), transparent);
+}
+.p1-banner-shield {
+  width: 48px; height: 48px;
+  border: 2.5px solid var(--orange);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+}
+.p1-banner-shield svg { width: 22px; height: 22px; }
+.p1-banner-body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+}
+.p1-banner-body h3 {
+  font-size: 17px;
+  font-weight: 900;
+  color: var(--white);
+  margin-bottom: 6px;
+}
+.p1-banner-body h3 em {
+  font-style: normal;
+  color: var(--orange);
+}
+.p1-banner-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 2px 14px;
+  list-style: none;
+}
+.p1-banner-list li {
+  font-size: 8.5px;
+  color: rgba(255,255,255,0.6);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  line-height: 1.8;
+}
+.p1-banner-list li::before {
+  content: '';
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--orange);
+  flex-shrink: 0;
+}
+
+
+/* ============================================================
+   PAGE 2 — "HERE'S THE PROOF"
+   Photo strip → Paperwork checklist (who does what) →
+   FAQ (specific objections answered) → CTA
+   Different structure: editorial, warm bg, no hero photo
+   ============================================================ */
+
+.p2 {
+  background: var(--warm);
+}
+
+/* Dark header — compact, typographic */
+.p2-header {
+  background: var(--dark);
+  padding: 22px 36px 20px;
+  position: relative;
+  flex-shrink: 0;
+}
+.p2-header::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 4px;
+  background: var(--orange);
+}
+.p2-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.p2-logo { height: 18px; opacity: 0.5; }
+.p2-title {
+  font-size: 24px;
+  font-weight: 900;
+  color: var(--white);
+  letter-spacing: -0.5px;
+}
+.p2-title em {
+  font-style: normal;
+  color: var(--orange);
+}
+
+/* Photo strip — full-width, earns its space with a caption overlay */
+.p2-photo {
+  position: relative;
+  height: 160px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.p2-photo-img {
+  position: absolute;
+  inset: 0;
+  background: url('assets/photos-optimized/patio-entertaining-sunset.jpg') center 50% / cover;
+}
+.p2-photo-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to right,
+    rgba(41,60,70,0.8) 0%,
+    rgba(41,60,70,0.3) 35%,
+    transparent 60%
+  );
+}
+.p2-photo-text {
+  position: absolute;
+  bottom: 20px;
+  left: 36px;
+  z-index: 2;
+}
+.p2-photo-label {
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--orange);
+  margin-bottom: 4px;
+}
+.p2-photo-quote {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--white);
+  line-height: 1.15;
+  letter-spacing: -0.3px;
+}
+.p2-photo-quote em {
+  font-style: normal;
+  color: var(--orange);
+}
+
+/* Checklist — full width, big and clear */
+.p2-checklist-section {
+  padding: 22px 36px 18px;
+  flex-shrink: 0;
+}
+.p2-check-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+  list-style: none;
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  background: var(--white);
+  border-radius: 6px;
+  border-left: 3px solid var(--green);
+}
+.check-row-you {
+  border-left-color: var(--orange);
+}
+.check-row svg {
+  width: 18px; height: 18px;
+  flex-shrink: 0;
+}
+.check-text {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--dark);
+  flex: 1;
+}
+.check-badge {
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.badge-green {
+  background: rgba(46,173,107,0.1);
+  color: var(--green);
+}
+.badge-orange {
+  background: rgba(241,90,41,0.1);
+  color: var(--orange);
+}
+
+/* FAQ — 2x2 grid, white cards */
+.p2-faq-section {
+  padding: 0 36px;
+  flex: 1;
+}
+.faq-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.faq-card {
+  background: var(--white);
+  border-radius: 6px;
+  padding: 16px 18px;
+  border-top: 3px solid var(--orange);
+}
+.faq-card:nth-child(even) {
+  border-top-color: var(--mid);
+}
+.faq-q {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--dark);
+  margin-bottom: 6px;
+  line-height: 1.25;
+}
+.faq-a {
+  font-size: 9.5px;
+  color: var(--mid);
+  line-height: 1.65;
+}
+
+/* CTA */
+.p2-cta {
+  margin: auto 24px 30px;
+  background: var(--dark);
+  border-radius: 10px;
+  padding: 24px 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.p2-cta::before {
+  content: '';
+  position: absolute;
+  bottom: -60px; right: -20px;
+  width: 200px; height: 200px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(241,90,41,0.12), transparent);
+}
+.p2-cta-left {
+  position: relative;
+  z-index: 1;
+}
+.p2-cta-title {
+  font-size: 24px;
+  font-weight: 900;
+  color: var(--white);
+  line-height: 1.05;
+  letter-spacing: -0.3px;
+}
+.p2-cta-title em {
+  font-style: normal;
+  color: var(--orange);
+}
+.p2-cta-sub {
+  font-size: 10px;
+  color: rgba(255,255,255,0.4);
+  margin-top: 4px;
+}
+.p2-cta-right {
+  text-align: right;
+  position: relative;
+  z-index: 1;
+}
+.p2-cta-phone {
+  font-size: 26px;
+  font-weight: 900;
+  color: var(--white);
+  letter-spacing: 0.5px;
+}
+.p2-cta-email {
+  font-size: 9px;
+  color: rgba(255,255,255,0.45);
+  margin-top: 3px;
+}
+.p2-cta-pill {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 6px 18px;
+  background: var(--orange);
+  color: var(--white);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  border-radius: 3px;
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     PAGE 1 — "HERE'S THE DEAL"
+     Your patio needs a permit. We handle it. Here's the process.
+     ============================================================ -->
+<div class="page">
+  <div class="tab" style="top:235px"></div>
+
+  <div class="p1-hero">
+    <div class="p1-hero-img"></div>
+    <div class="p1-hero-overlay"></div>
+    <div class="p1-hero-inner">
+      <img class="p1-logo" src="assets/logo/svg/SecureWorks Group White.svg">
+
+      <div class="p1-hero-bottom">
+        <div>
+          <div class="p1-tag">Council Approval — Process &amp; Timeline</div>
+          <h1 class="p1-headline">Your Patio<br>Approval, <em>Sorted.</em></h1>
+        </div>
+        <div class="p1-hero-stats">
+          <div>
+            <div class="p1-hs-num"><em>6–8</em><small>wks</small></div>
+            <div class="p1-hs-label">Design to Build</div>
+          </div>
+          <div>
+            <div class="p1-hs-num"><em>100</em><small>%</small></div>
+            <div class="p1-hs-label">Managed By Us</div>
+          </div>
+          <div>
+            <div class="p1-hs-num"><em>$0</em> <small>extra</small></div>
+            <div class="p1-hs-label">Permit Fees</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="p1-intro">
+    <p>Every patio in WA needs a building permit — but <strong>that's our job, not yours</strong>. We handle the engineering, paperwork, council lodgement, and follow-up. Most clients go from signed quote to completed build in 6–8 weeks. Here's what happens behind the scenes.</p>
+  </div>
+
+  <!-- The process — one clear visual timeline -->
+  <div class="p1-timeline">
+    <div class="sh"><h2>What Happens After You Say Yes</h2></div>
+    <div class="tl-flow">
+      <div class="tl-item">
+        <div class="tl-dot">1</div>
+        <h3>Design &amp; Quote</h3>
+        <p>Measurements, materials &amp; your detailed quote</p>
+        <span class="tl-time">1–2 days</span>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot">2</div>
+        <h3>Drafting &amp; Engineering</h3>
+        <p>Structural plans, footings &amp; engineering submission</p>
+        <span class="tl-time">~2 weeks</span>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot">3</div>
+        <h3>Council Lodge</h3>
+        <p>Full application with plans, survey &amp; fees</p>
+        <span class="tl-time">10–15 days</span>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot">&#10003;</div>
+        <h3>Build &amp; Enjoy</h3>
+        <p>Permit approved, patio built &amp; handed over</p>
+        <span class="tl-time">1–2 weeks</span>
+      </div>
+    </div>
+    <div class="tl-total">
+      <span class="tl-total-label">Complete design &amp; approval process</span>
+      <div class="tl-total-bar"></div>
+      <span class="tl-total-value"><em>6–8</em> weeks</span>
+    </div>
+  </div>
+
+  <!-- Permits + Setbacks — side by side -->
+  <div class="p1-lower">
+    <div class="permit-stack">
+      <div class="sh"><h2>Permits Explained</h2></div>
+      <div class="permit-card permit-dark">
+        <h3>Building Permit <span class="permit-pill">Required</span></h3>
+        <p>We prepare engineer-certified plans, site survey &amp; application — lodge with your council. Fees ($150–300) included in your quote.</p>
+        <div class="permit-check">
+          <svg width="10" height="10" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg>
+          Approved in 10–15 business days
+        </div>
+      </div>
+      <div class="permit-card permit-light">
+        <h3>Planning Approval <span class="permit-pill">Rare</span></h3>
+        <p>Only needed for boundary builds or heritage zones. We design to avoid it — most clients skip this entirely.</p>
+        <div class="permit-check">
+          <svg width="10" height="10" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg>
+          We design around it
+        </div>
+      </div>
+    </div>
+
+    <div class="setback-col">
+      <div class="sh"><h2>Boundary Setbacks</h2></div>
+      <div class="setback-strip">
+        <div class="sb-card">
+          <div class="sb-num">1.0<small>m</small></div>
+          <div class="sb-text">
+            <div class="sb-title">Standard Setback</div>
+            <div class="sb-note">No neighbour consent needed</div>
+          </div>
+        </div>
+        <div class="sb-card">
+          <div class="sb-num">0.5<small>m</small></div>
+          <div class="sb-text">
+            <div class="sb-title">With Neighbour Letter</div>
+            <div class="sb-note">Signed consent from next door</div>
+          </div>
+        </div>
+        <div class="sb-card">
+          <div class="sb-num">0<small>m</small></div>
+          <div class="sb-text">
+            <div class="sb-title">Posts on Boundary</div>
+            <div class="sb-note">Consent + roof 500mm clear of boundary</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- We handle everything — anchored to bottom -->
+  <div class="p1-banner">
+    <div class="p1-banner-shield">
+      <svg fill="none" viewBox="0 0 24 24" stroke="#F15A29" stroke-width="2"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+    </div>
+    <div class="p1-banner-body">
+      <h3>We Handle <em>Everything</em></h3>
+      <ul class="p1-banner-list">
+        <li>Site survey &amp; measurements</li>
+        <li>Council lodgement &amp; chasing</li>
+        <li>Structural engineering</li>
+        <li>All forms &amp; documentation</li>
+        <li>Permit fees included</li>
+        <li>Progress updates throughout</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pg-footer">
+    <img class="pg-footer-logo" src="assets/logo/svg/SecureWorks Group Main.svg">
+    <span class="pg-footer-text">secureworkswa.com.au · Page 1 of 2</span>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     PAGE 2 — "HERE'S THE PROOF"
+     The detail page: who does the paperwork, your questions answered.
+     ============================================================ -->
+<div class="page p2">
+  <div class="tab" style="top:36px"></div>
+
+  <div class="p2-header">
+    <div class="p2-header-row">
+      <img class="p2-logo" src="assets/logo/svg/SecureWorks Group White.svg">
+      <div class="p2-title">The <em>Detail</em></div>
+    </div>
+  </div>
+
+  <!-- Photo strip with reassurance message -->
+  <div class="p2-photo">
+    <div class="p2-photo-img"></div>
+    <div class="p2-photo-overlay"></div>
+    <div class="p2-photo-text">
+      <div class="p2-photo-label">What Our Clients Experience</div>
+      <div class="p2-photo-quote">"You literally don't have to<br>do <em>anything</em> — we sort it all."</div>
+    </div>
+  </div>
+
+  <!-- Paperwork checklist — 2-column grid -->
+  <div class="p2-checklist-section">
+    <div class="sh"><h2>Paperwork — Who Handles What</h2></div>
+    <ul class="p2-check-grid">
+      <li class="check-row">
+        <svg fill="none" viewBox="0 0 24 24" stroke="#2EAD6B" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
+        <span class="check-text">Site Plan &amp; Survey</span>
+        <span class="check-badge badge-green">We do this</span>
+      </li>
+      <li class="check-row">
+        <svg fill="none" viewBox="0 0 24 24" stroke="#2EAD6B" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
+        <span class="check-text">Structural Engineering</span>
+        <span class="check-badge badge-green">We do this</span>
+      </li>
+      <li class="check-row">
+        <svg fill="none" viewBox="0 0 24 24" stroke="#2EAD6B" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
+        <span class="check-text">Council Application Forms</span>
+        <span class="check-badge badge-green">We do this</span>
+      </li>
+      <li class="check-row">
+        <svg fill="none" viewBox="0 0 24 24" stroke="#2EAD6B" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
+        <span class="check-text">Permit Lodgement &amp; Fees</span>
+        <span class="check-badge badge-green">Included</span>
+      </li>
+      <li class="check-row">
+        <svg fill="none" viewBox="0 0 24 24" stroke="#2EAD6B" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
+        <span class="check-text">Progress Updates</span>
+        <span class="check-badge badge-green">We do this</span>
+      </li>
+      <li class="check-row check-row-you">
+        <svg fill="none" viewBox="0 0 24 24" stroke="#F15A29" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>
+        <span class="check-text">Neighbour Letter</span>
+        <span class="check-badge badge-orange">If needed</span>
+      </li>
+    </ul>
+  </div>
+
+  <!-- FAQ — 2x2 cards with colored top borders -->
+  <div class="p2-faq-section">
+    <div class="sh"><h2>Your Questions Answered</h2></div>
+    <div class="faq-grid">
+      <div class="faq-card">
+        <div class="faq-q">Do I need to do anything?</div>
+        <div class="faq-a">Almost nothing. We manage the entire permit process. The only time you may need to help is getting a neighbour consent letter — and we'll walk you through it step by step.</div>
+      </div>
+      <div class="faq-card">
+        <div class="faq-q">Is the permit fee extra?</div>
+        <div class="faq-a">No. Council building permit fees (typically $150–300) are already included in your quote. There are no hidden costs or surprise invoices down the line.</div>
+      </div>
+      <div class="faq-card">
+        <div class="faq-q">What if my property is tricky?</div>
+        <div class="faq-a">We deal with tight setbacks, sloping blocks, and heritage zones regularly. Our engineer designs around constraints so you get the best outcome without delays.</div>
+      </div>
+      <div class="faq-card">
+        <div class="faq-q">Can I start before the permit?</div>
+        <div class="faq-a">No — building before a permit is issued is illegal in WA. But our process is fast, so you won't be waiting long. We keep you updated at every stage.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CTA — anchored to bottom -->
+  <div class="p2-cta">
+    <div class="p2-cta-left">
+      <div class="p2-cta-title">Ready to <em>Get Started?</em></div>
+      <div class="p2-cta-sub">Your approval is in good hands.</div>
+    </div>
+    <div class="p2-cta-right">
+      <div class="p2-cta-phone">0489 267 774</div>
+      <div class="p2-cta-email">marnin@secureworkswa.com.au</div>
+      <div class="p2-cta-pill">Free Quote</div>
+    </div>
+  </div>
+
+  <div class="pg-footer">
+        <img class="pg-footer-logo" src="assets/logo/svg/SecureWorks Group Main.svg">
+    <span class="pg-footer-text">secureworkswa.com.au · Page 2 of 2</span>
+  </div>
+</div>
+
+</body>
+</html>

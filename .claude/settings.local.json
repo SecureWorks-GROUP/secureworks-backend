@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip:*)",
+      "WebFetch(domain:patios.secureworksgroup.com.au)",
+      "Bash(ls:*)",
+      "Bash(gh repo list:*)",
+      "Bash(gh search:*)",
+      "Bash(sqlite3 \"/Users/marninstobbe/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite\" \"SELECT ZCONTACTJID, ZPARTNERNAME FROM ZWACHATSESSION WHERE ZPARTNERNAME LIKE ''%photo%'' OR ZPARTNERNAME LIKE ''%core%'' OR ZPARTNERNAME LIKE ''%secure%'' OR ZPARTNERNAME LIKE ''%patio%'' OR ZPARTNERNAME LIKE ''%all in%'' COLLATE NOCASE LIMIT 20;\")",
+      "mcp__claude_ai_ms365__sharepoint_search",
+      "mcp__claude_ai_ms365__sharepoint_folder_search",
+      "mcp__claude_ai_ms365__read_resource",
+      "Bash(# Search everywhere for CPCCBC5011 and CPCCBC4009 files echo \"\"=== CPCCBC5011 ===\"\" find /Users/marninstobbe -maxdepth 6 -iname \"\"*5011*\"\")",
+      "Bash(# Also check OneDrive for any diploma files find \"\"/Users/marninstobbe/Library/CloudStorage/OneDrive-SecureWorksWA\"\" -maxdepth 5 \\\\\\( -iname \"\"*CPCCBC*\"\" -o -iname \"\"*BSBPMG*\"\" -o -iname \"\"*BSBWHS*\"\" -o -iname \"\"*CPCSUS*\"\" -o -iname \"\"*diploma*\"\" -o -iname \"\"*assessment*\"\" \\\\\\))",
+      "mcp__claude_ai_ms365__outlook_email_search"
+    ]
+  }
+}
