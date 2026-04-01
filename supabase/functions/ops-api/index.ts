@@ -610,6 +610,16 @@ serve(async (req: Request) => {
       case 'send_work_order': return json(await sendWorkOrder(client, body))
       case 'create_invoice': return json(await createInvoice(client, body))
       case 'sync_job_invoices': return json(await syncJobInvoices(client, body))
+      case 'update_invoice_job_link': {
+        const xiid = body.xero_invoice_id
+        const jid = body.job_id
+        if (!xiid || !jid) return json({ error: 'xero_invoice_id and job_id required' }, 400)
+        const { error: linkErr } = await client.from('xero_invoices')
+          .update({ job_id: jid, updated_at: new Date().toISOString() })
+          .eq('xero_invoice_id', xiid)
+        if (linkErr) return json({ error: linkErr.message }, 500)
+        return json({ success: true })
+      }
       case 'complete_and_invoice': return json(await completeAndInvoice(client, body))
       case 'create_deposit_invoice': return json(await createDepositInvoice(client, body))
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
@@ -1738,7 +1748,86 @@ serve(async (req: Request) => {
               } catch (e) { console.log('[ops-api] Telegram notify failed:', e) }
             }
 
-            return json({ success: true, invoice_id: invoice.id, invoice_number: invoiceNumber, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length + extraLineItems.length })
+            // ── Auto-push to Xero as DRAFT ACCPAY bill ──
+            let xeroBillId = null
+            let xeroBillNumber = null
+            try {
+              const { accessToken, tenantId } = await getToken(client)
+              const tradeEmail = tradeUser.email || ''
+
+              // Resolve Xero supplier contact (search by email, create if not found)
+              let xeroContactId = null
+              try {
+                const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
+                if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+              } catch (e) { /* fallback to create */ }
+              if (!xeroContactId) {
+                const createRes = await xeroPost('/Contacts', accessToken, tenantId, {
+                  Contacts: [{ Name: userProfile?.name || 'Trade', EmailAddress: tradeEmail, IsSupplier: true }]
+                }, 'PUT')
+                xeroContactId = createRes?.Contacts?.[0]?.ContactID
+              }
+
+              if (xeroContactId) {
+                const dueDate = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10)
+                // Build Xero line items from all invoice lines
+                const allLines = [...lineItems.map((l: any) => ({
+                  Description: (l.job_number || 'Labour') + ' ' + (l.client_name || '') + ' — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr',
+                  Quantity: l.total_hours,
+                  UnitAmount: l.hourly_rate,
+                  AccountCode: '301',
+                  TaxType: 'INPUT',
+                })), ...extraLineItems.map((e: any) => ({
+                  Description: (e.description || e.line_type || 'Extra') + (e.division ? ' [' + e.division + ']' : ''),
+                  Quantity: e.quantity || 1,
+                  UnitAmount: e.unit_rate || 0,
+                  AccountCode: '301',
+                  TaxType: 'INPUT',
+                }))]
+
+                const xeroPayload = {
+                  Invoices: [{
+                    Type: 'ACCPAY',
+                    Contact: { ContactID: xeroContactId },
+                    Reference: invoiceNumber,
+                    DueDate: dueDate,
+                    Status: 'DRAFT',
+                    LineAmountTypes: 'Exclusive',
+                    LineItems: allLines,
+                  }],
+                }
+                const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', 'trade-inv-' + invoice.id)
+                const bill = xeroResult?.Invoices?.[0]
+                if (bill?.InvoiceID) {
+                  xeroBillId = bill.InvoiceID
+                  xeroBillNumber = bill.InvoiceNumber || ''
+                  await client.from('trade_invoices').update({
+                    xero_bill_id: bill.InvoiceID,
+                    xero_pushed_at: new Date().toISOString(),
+                    status: 'pushed_to_xero',
+                  }).eq('id', invoice.id)
+                  // Cache
+                  try {
+                    await client.from('xero_invoices').upsert({
+                      org_id: DEFAULT_ORG_ID,
+                      xero_invoice_id: bill.InvoiceID,
+                      invoice_number: bill.InvoiceNumber || '',
+                      invoice_type: 'ACCPAY',
+                      status: 'DRAFT',
+                      reference: invoiceNumber,
+                      total: totalInc,
+                      amount_due: totalInc,
+                      due_date: dueDate,
+                      contact_name: userProfile?.name || 'Trade',
+                    }, { onConflict: 'xero_invoice_id' })
+                  } catch (e) { /* non-blocking */ }
+                }
+              }
+            } catch (e) {
+              console.log('[ops-api] Xero auto-push failed (non-blocking):', (e as Error).message)
+            }
+
+            return json({ success: true, invoice_id: invoice.id, invoice_number: invoiceNumber, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length + extraLineItems.length, xero_bill_id: xeroBillId, xero_bill_number: xeroBillNumber })
           }
 
           case 'my_invoices': {
@@ -2561,7 +2650,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
     client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', jobIds),
     client.from('po_communications').select('job_id, direction, created_at').in('job_id', jobIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false }).limit(500),
-    client.from('xero_invoices').select('job_id, status, invoice_type').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
+    client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
   ])
 
   const countMap = (rows: any[]) => {
@@ -2589,12 +2678,21 @@ async function pipeline(client: any, params: URLSearchParams) {
     if (!emailActivityMap[em.job_id]) emailActivityMap[em.job_id] = { at: em.created_at, dir: em.direction }
   }
 
-  // Invoice status per job (for complete column sub-stages)
-  const invoiceMap: Record<string, { has_invoice: boolean; all_paid: boolean }> = {}
+  // Invoice status per job — track any invoice (for accepted) + deposit vs final split (for complete)
+  const invoiceMap: Record<string, { has_any: boolean; any_paid: boolean; has_deposit: boolean; deposit_paid: boolean; has_final: boolean; final_paid: boolean }> = {}
   for (const inv of (invoiceRes.data || [])) {
-    if (!invoiceMap[inv.job_id]) invoiceMap[inv.job_id] = { has_invoice: true, all_paid: true }
-    invoiceMap[inv.job_id].has_invoice = true
-    if (inv.status !== 'PAID') invoiceMap[inv.job_id].all_paid = false
+    if (!invoiceMap[inv.job_id]) invoiceMap[inv.job_id] = { has_any: false, any_paid: false, has_deposit: false, deposit_paid: false, has_final: false, final_paid: false }
+    const m = invoiceMap[inv.job_id]
+    m.has_any = true
+    if (inv.status === 'PAID') m.any_paid = true
+    const isDep = (inv.reference || '').toUpperCase().includes('DEP')
+    if (isDep) {
+      m.has_deposit = true
+      if (inv.status === 'PAID') m.deposit_paid = true
+    } else {
+      m.has_final = true
+      if (inv.status === 'PAID') m.final_paid = true
+    }
   }
 
   const enriched = jobs.map((j: any) => {
@@ -2622,8 +2720,12 @@ async function pipeline(client: any, params: URLSearchParams) {
       council_step: councilInfo?.step || null,
       last_po_email_at: emailActivity?.at || null,
       last_po_email_dir: emailActivity?.dir || null,
-      has_invoice: invoiceMap[j.id]?.has_invoice || false,
-      invoice_paid: invoiceMap[j.id]?.all_paid || false,
+      has_any_invoice: invoiceMap[j.id]?.has_any || false,
+      any_invoice_paid: invoiceMap[j.id]?.any_paid || false,
+      has_deposit_invoice: invoiceMap[j.id]?.has_deposit || false,
+      deposit_paid: invoiceMap[j.id]?.deposit_paid || false,
+      has_final_invoice: invoiceMap[j.id]?.has_final || false,
+      final_paid: invoiceMap[j.id]?.final_paid || false,
     }
   }).filter((j: any) => {
     if (!search) return true
