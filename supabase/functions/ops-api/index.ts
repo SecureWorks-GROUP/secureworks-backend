@@ -612,6 +612,11 @@ serve(async (req: Request) => {
       case 'complete_and_invoice': return json(await completeAndInvoice(client, body))
       case 'create_deposit_invoice': return json(await createDepositInvoice(client, body))
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
+      case 'fix_legacy': {
+        const { data, error } = await client.from('jobs').update({ legacy: false }).is('legacy', null).select('id')
+        const { data: d2, error: e2 } = await client.from('jobs').update({ legacy: false }).eq('legacy', true).not('status', 'in', '("cancelled","lost")').select('id')
+        return json({ fixed_null: data?.length || 0, fixed_true: d2?.length || 0, error: error?.message, error2: e2?.message })
+      }
       case 'create_unified_invoice': return json(await createUnifiedInvoice(client, body))
       case 'reconcile_payment': return json(await reconcilePayment(client, body))
       case 'sync_suppliers': return json(await syncSuppliers(client))
@@ -1237,6 +1242,88 @@ serve(async (req: Request) => {
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
           case 'my_trade_invoices': return json(await myTradeInvoices(client, tradeUser.id))
+          case 'get_trade_invoice': {
+            const invoiceId = url.searchParams.get('invoice_id') || body?.invoice_id
+            if (!invoiceId) throw new ApiError('invoice_id required', 400)
+            const { data: inv, error: invErr } = await client.from('trade_invoices')
+              .select('*, lines:trade_invoice_lines(*)')
+              .eq('id', invoiceId)
+              .eq('user_id', tradeUser.id)
+              .single()
+            if (invErr || !inv) throw new ApiError('Invoice not found', 404)
+            return json({ invoice: inv })
+          }
+          case 'save_trade_invoice_draft': {
+            const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
+
+            // Check for existing draft this week
+            let draftId: string | null = null
+            if (draftWeekStart) {
+              const { data: existingDraft } = await client.from('trade_invoices')
+                .select('id')
+                .eq('user_id', tradeUser.id)
+                .eq('week_start', draftWeekStart)
+                .eq('status', 'draft')
+                .maybeSingle()
+              if (existingDraft) {
+                draftId = existingDraft.id
+                // Clear old lines
+                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', draftId)
+              }
+            }
+
+            // Calculate totals
+            let labourTotal = 0
+            const labourLines = Array.isArray(draftLabour) ? draftLabour : []
+            for (const l of labourLines) labourTotal += Number(l.line_total_ex || 0)
+            let extraTotal = 0
+            const extras = Array.isArray(draftExtras) ? draftExtras : []
+            for (const e of extras) extraTotal += Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100
+            const draftSubtotal = labourTotal + extraTotal
+            const draftGst = Math.round(draftSubtotal * 0.1 * 100) / 100
+
+            if (draftId) {
+              // Update existing draft
+              await client.from('trade_invoices').update({
+                notes: draftNotes || null,
+                subtotal_ex: draftSubtotal,
+                gst: draftGst,
+                total_inc: Math.round((draftSubtotal + draftGst) * 100) / 100,
+              }).eq('id', draftId)
+            } else {
+              // Create new draft
+              const { data: newDraft, error: draftErr } = await client.from('trade_invoices').insert({
+                user_id: tradeUser.id,
+                week_start: draftWeekStart || null,
+                week_end: draftWeekStart ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10) : null,
+                total_hours: labourLines.reduce((s: number, l: any) => s + Number(l.total_hours || 0), 0),
+                subtotal_ex: draftSubtotal,
+                gst: draftGst,
+                total_inc: Math.round((draftSubtotal + draftGst) * 100) / 100,
+                notes: draftNotes || null,
+                status: 'draft',
+              }).select('id').single()
+              if (draftErr) throw new Error('Failed to save draft: ' + draftErr.message)
+              draftId = newDraft!.id
+            }
+
+            // Insert lines
+            for (const l of labourLines) {
+              await client.from('trade_invoice_lines').insert({ trade_invoice_id: draftId, line_type: 'labour', ...l })
+            }
+            for (const e of extras) {
+              await client.from('trade_invoice_lines').insert({
+                trade_invoice_id: draftId,
+                line_type: (e.type || 'other').toLowerCase(),
+                description: e.description || e.type || 'Extra item',
+                quantity: Number(e.quantity || 1),
+                unit: e.unit || 'ea',
+                unit_rate: Number(e.rate || 0),
+                line_total_ex: Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100,
+              })
+            }
+            return json({ success: true, draft_id: draftId })
+          }
           case 'set_trade_rate': return json(await setTradeRate(client, tradeUser.id, body))
           case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
           case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id))
@@ -1246,31 +1333,44 @@ serve(async (req: Request) => {
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
-            const { week_start } = body
-            if (!week_start) throw new ApiError('week_start required (Monday date)', 400)
+            const { week_start, extra_items, notes: invoiceNotes } = body
 
-            // Calculate week end (Sunday)
-            const weekStartDate = new Date(week_start + 'T00:00:00Z')
-            const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
-            const weekEnd = weekEndDate.toISOString().slice(0, 10)
+            // Miscellaneous invoice (no week) or weekly invoice
+            let weekEnd: string | null = null
+            if (week_start) {
+              const weekStartDate = new Date(week_start + 'T00:00:00Z')
+              const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
+              weekEnd = weekEndDate.toISOString().slice(0, 10)
 
-            // Check for existing invoice this week
-            const { data: existing } = await client.from('trade_invoices')
-              .select('id, status')
-              .eq('user_id', tradeUser.id)
-              .eq('week_start', week_start)
-              .maybeSingle()
-            if (existing) throw new ApiError('Invoice already exists for this week (status: ' + existing.status + ')', 400)
+              // Check for existing invoice this week
+              const { data: existing } = await client.from('trade_invoices')
+                .select('id, status')
+                .eq('user_id', tradeUser.id)
+                .eq('week_start', week_start)
+                .maybeSingle()
+              if (existing && existing.status !== 'draft') throw new ApiError('Invoice already exists for this week (status: ' + existing.status + ')', 400)
+              // If draft exists, delete it and recreate (user is finalising)
+              if (existing && existing.status === 'draft') {
+                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', existing.id)
+                await client.from('trade_invoices').delete().eq('id', existing.id)
+              }
+            }
 
-            // Get all completed assignments for this user this week
-            const { data: assignments } = await client.from('job_assignments')
-              .select('id, job_id, clocked_on_at, clocked_off_at, hours_worked, hourly_rate, break_minutes, manual_override_flag, scheduled_date, status')
-              .eq('user_id', tradeUser.id)
-              .gte('scheduled_date', week_start)
-              .lte('scheduled_date', weekEnd)
-              .eq('status', 'complete')
+            // Get completed assignments (only if weekly invoice)
+            let assignments: any[] = []
+            if (week_start && weekEnd) {
+              const { data: asn } = await client.from('job_assignments')
+                .select('id, job_id, clocked_on_at, clocked_off_at, hours_worked, hourly_rate, break_minutes, manual_override_flag, scheduled_date, status')
+                .eq('user_id', tradeUser.id)
+                .gte('scheduled_date', week_start)
+                .lte('scheduled_date', weekEnd)
+                .eq('status', 'complete')
+              assignments = asn || []
+            }
 
-            if (!assignments || assignments.length === 0) throw new ApiError('No completed assignments this week', 400)
+            // Must have either hours or extra items
+            const hasExtras = Array.isArray(extra_items) && extra_items.length > 0
+            if (assignments.length === 0 && !hasExtras) throw new ApiError('No completed assignments or line items to invoice', 400)
 
             // Get user's default rate
             const { data: userProfile } = await client.from('users')
@@ -1332,14 +1432,43 @@ serve(async (req: Request) => {
               })
             }
 
-            const subtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
+            // Build extra line items from client-sent extras
+            const extraLineItems: any[] = []
+            let extraSubtotal = 0
+            if (hasExtras) {
+              for (const item of extra_items) {
+                const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
+                extraSubtotal += amt
+                extraLineItems.push({
+                  line_type: item.type ? item.type.toLowerCase() : 'other',
+                  description: item.description || item.type || 'Extra item',
+                  quantity: Number(item.quantity || 1),
+                  unit: item.unit || 'ea',
+                  unit_rate: Number(item.rate || 0),
+                  line_total_ex: amt,
+                })
+              }
+            }
+
+            const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
+            const subtotal = labourSubtotal + extraSubtotal
             const gst = Math.round(subtotal * 0.1 * 100) / 100
             const totalInc = Math.round((subtotal + gst) * 100) / 100
+
+            // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq}
+            const initials = (userProfile?.name || 'XX').split(' ').map((n: string) => n.charAt(0).toUpperCase()).join('').slice(0, 3)
+            const today = new Date().toISOString().slice(2, 10).replace(/-/g, '')
+            const { count: seqCount } = await client.from('trade_invoices')
+              .select('id', { count: 'exact', head: true })
+              .eq('user_id', tradeUser.id)
+              .gte('created_at', new Date().toISOString().slice(0, 10) + 'T00:00:00Z')
+            const seq = String((seqCount || 0) + 1).padStart(3, '0')
+            const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
 
             // Create invoice + line items
             const { data: invoice, error: invErr } = await client.from('trade_invoices').insert({
               user_id: tradeUser.id,
-              week_start,
+              week_start: week_start || null,
               week_end: weekEnd,
               total_hours: Math.round(totalHours * 100) / 100,
               total_breaks_minutes: totalBreaks,
@@ -1348,16 +1477,27 @@ serve(async (req: Request) => {
               total_inc: totalInc,
               has_manual_overrides: hasOverrides,
               override_details: hasOverrides ? overrideDetails : null,
+              notes: invoiceNotes || null,
+              invoice_number: invoiceNumber,
               submitted_at: new Date().toISOString(),
             }).select('id').single()
 
             if (invErr) throw new Error('Failed to create invoice: ' + invErr.message)
 
-            // Insert line items
+            // Insert labour line items
             for (const line of lineItems) {
               await client.from('trade_invoice_lines').insert({
                 trade_invoice_id: invoice.id,
+                line_type: 'labour',
                 ...line,
+              })
+            }
+
+            // Insert extra line items (travel, materials, equipment, other)
+            for (const extra of extraLineItems) {
+              await client.from('trade_invoice_lines').insert({
+                trade_invoice_id: invoice.id,
+                ...extra,
               })
             }
 
@@ -1458,7 +1598,7 @@ serve(async (req: Request) => {
               } catch (e) { console.log('[ops-api] Telegram notify failed:', e) }
             }
 
-            return json({ success: true, invoice_id: invoice.id, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length })
+            return json({ success: true, invoice_id: invoice.id, invoice_number: invoiceNumber, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length + extraLineItems.length })
           }
 
           case 'my_invoices': {
@@ -1846,7 +1986,7 @@ async function opsSummary(client: any) {
     client.from('jobs')
       .select('id, status, type, accepted_at, completed_at, pricing_json')
       .eq('org_id', DEFAULT_ORG_ID)
-      .eq('legacy', false)
+      .not('legacy', 'is', true)
       .in('status', ['quoted', 'accepted', 'scheduled', 'in_progress', 'complete', 'invoiced'])
       .not('job_number', 'is', null),
 
@@ -1870,7 +2010,7 @@ async function opsSummary(client: any) {
     client.from('jobs')
       .select('id, completed_at')
       .eq('org_id', DEFAULT_ORG_ID)
-      .eq('legacy', false)
+      .not('legacy', 'is', true)
       .in('status', ['complete', 'invoiced'])
       .gte('completed_at', monthStart),
 
@@ -1893,7 +2033,7 @@ async function opsSummary(client: any) {
     client.from('jobs')
       .select('id, client_name, site_suburb, type, job_number, accepted_at, updated_at')
       .eq('org_id', DEFAULT_ORG_ID)
-      .eq('legacy', false)
+      .not('legacy', 'is', true)
       .eq('status', 'accepted')
       .not('job_number', 'is', null)
       .lt('accepted_at', new Date(Date.now() - 14 * 86400000).toISOString()),
@@ -1902,7 +2042,7 @@ async function opsSummary(client: any) {
     client.from('jobs')
       .select('id, client_name, type, created_at')
       .eq('org_id', DEFAULT_ORG_ID)
-      .eq('legacy', false)
+      .not('legacy', 'is', true)
       .eq('status', 'draft')
       .lt('created_at', new Date(Date.now() - 7 * 86400000).toISOString())
       .limit(20),
@@ -2126,7 +2266,7 @@ async function opsSummary(client: any) {
 
   // ── Pipeline counts ──
   const pipelineCounts: Record<string, number> = {
-    quoted: 0, accepted: 0, scheduled: 0, in_progress: 0, complete: 0, invoiced: 0,
+    quoted: 0, accepted: 0, approvals: 0, deposit: 0, pre_build: 0, scheduled: 0, in_progress: 0, complete: 0, invoiced: 0,
   }
   for (const j of allActive) {
     if (pipelineCounts[j.status] !== undefined) pipelineCounts[j.status]++
@@ -2252,16 +2392,16 @@ async function pipeline(client: any, params: URLSearchParams) {
   const search = params.get('search') || ''
 
   let query = client.from('jobs')
-    .select('id, type, status, client_name, client_phone, site_address, site_suburb, pricing_json, ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, scheduled_at, completed_at, created_at, updated_at')
+    .select('id, type, status, client_name, client_phone, site_address, site_suburb, pricing_json, ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, pre_build_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount')
     .eq('org_id', DEFAULT_ORG_ID)
-    .eq('legacy', false)
+    .or('legacy.is.null,legacy.eq.false')
     .or('job_number.not.is.null,status.eq.draft')
     .order('updated_at', { ascending: false })
 
   if (statusFilter) {
     query = query.eq('status', statusFilter)
   } else {
-    query = query.in('status', ['draft', 'quoted', 'accepted', 'scheduled', 'in_progress', 'complete', 'invoiced'])
+    query = query.in('status', ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress', 'complete', 'invoiced'])
   }
   if (typeFilter) query = query.eq('type', typeFilter)
 
@@ -2269,7 +2409,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (error) throw error
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], scheduled: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], deposit: [], pre_build: [], scheduled: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
 
   const jobIds = jobs.map((j: any) => j.id)
@@ -2311,6 +2451,9 @@ async function pipeline(client: any, params: URLSearchParams) {
   const enriched = jobs.map((j: any) => {
     const value = j.pricing_json?.totalIncGST || j.pricing_json?.total || 0
     const stageStart = j.status === 'accepted' ? j.accepted_at
+      : j.status === 'approvals' ? j.approvals_at
+      : j.status === 'deposit' ? j.deposit_at
+      : j.status === 'pre_build' ? j.pre_build_at
       : j.status === 'scheduled' ? j.scheduled_at
       : j.status === 'complete' ? j.completed_at
       : j.updated_at
@@ -2340,7 +2483,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   })
 
   const columns: Record<string, any[]> = {
-    draft: [], quoted: [], accepted: [], scheduled: [], in_progress: [], complete: [], invoiced: [],
+    draft: [], quoted: [], accepted: [], approvals: [], deposit: [], pre_build: [], scheduled: [], in_progress: [], complete: [], invoiced: [],
   }
   for (const j of enriched) {
     if (columns[j.status]) columns[j.status].push(j)
@@ -2508,7 +2651,7 @@ async function listQuotes(client: any, params: URLSearchParams) {
   let query = client.from('jobs')
     .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, job_number, pricing_json, created_at, updated_at, notes')
     .eq('org_id', DEFAULT_ORG_ID)
-    .eq('legacy', false)
+    .not('legacy', 'is', true)
     .in('status', ['quoted', 'draft'])
     .order('created_at', { ascending: false })
     .limit(100)
@@ -2698,11 +2841,13 @@ async function createAssignment(client: any, body: any) {
 
   if (error) throw error
 
-  // Auto-update job status to 'scheduled' if currently 'accepted'
-  await client.from('jobs')
-    .update({ status: 'scheduled', scheduled_at: new Date().toISOString() })
-    .eq('id', jId)
-    .eq('status', 'accepted')
+  // Auto-update job status when crew is assigned
+  // pre_build jobs with crew assigned can auto-advance (kept for backwards compat)
+  // Legacy 'accepted' jobs also auto-advance to 'pre_build'
+  const { data: currentJob } = await client.from('jobs').select('status').eq('id', jId).single()
+  if (currentJob?.status === 'accepted') {
+    await client.from('jobs').update({ status: 'pre_build', pre_build_at: new Date().toISOString() }).eq('id', jId)
+  }
 
   // Log event
   await client.from('job_events').insert({
@@ -2950,7 +3095,7 @@ async function updateJobStatus(client: any, body: any) {
   const status = body.status
   if (!jId || !status) throw new Error('jobId and status required')
 
-  const validStatuses = ['draft', 'quoted', 'accepted', 'scheduled', 'in_progress', 'complete', 'invoiced', 'cancelled', 'lost']
+  const validStatuses = ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress', 'complete', 'invoiced', 'cancelled', 'lost']
   if (!validStatuses.includes(status)) throw new Error('Invalid status: ' + status)
 
   // Capture old status + job data for business_events dual-write
@@ -2962,6 +3107,9 @@ async function updateJobStatus(client: any, body: any) {
   const update: Record<string, unknown> = { status }
   if (status === 'quoted') update.quoted_at = new Date().toISOString()
   if (status === 'accepted') update.accepted_at = new Date().toISOString()
+  if (status === 'approvals') update.approvals_at = new Date().toISOString()
+  if (status === 'deposit') update.deposit_at = new Date().toISOString()
+  if (status === 'pre_build') update.pre_build_at = new Date().toISOString()
   if (status === 'scheduled') update.scheduled_at = new Date().toISOString()
   if (status === 'complete') update.completed_at = new Date().toISOString()
 
@@ -3813,8 +3961,8 @@ async function completeAndInvoice(client: any, body: any) {
     .single()
   if (jobErr || !job) throw new Error('Job not found')
 
-  if (!['in_progress', 'complete', 'scheduled'].includes(job.status)) {
-    throw new Error(`Cannot complete+invoice a job with status "${job.status}". Must be in_progress, scheduled, or complete.`)
+  if (!['in_progress', 'complete', 'scheduled', 'pre_build'].includes(job.status)) {
+    throw new Error(`Cannot complete+invoice a job with status "${job.status}". Must be in_progress, pre_build, scheduled, or complete.`)
   }
 
   // Use line_items_override if provided (from invoice creation modal),
@@ -4872,7 +5020,7 @@ async function morningBrief(client: any) {
     .from('jobs')
     .select('id, client_name, job_number, site_suburb, pricing_json, completed_at')
     .eq('org_id', DEFAULT_ORG_ID)
-    .eq('legacy', false)
+    .not('legacy', 'is', true)
     .eq('status', 'complete')
     .order('completed_at', { ascending: true })
     .limit(10)
@@ -6493,13 +6641,20 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
 async function myTradeInvoices(client: any, userId: string) {
   const { data, error } = await client
     .from('trade_invoices')
-    .select('id, week_ending, subtotal, gst, total, xero_bill_number, status, created_at')
+    .select('id, week_start, week_end, week_ending, invoice_number, notes, subtotal_ex, gst, total_inc, subtotal, total, xero_bill_number, status, created_at')
     .eq('user_id', userId)
-    .order('week_ending', { ascending: false })
+    .order('created_at', { ascending: false })
     .limit(20)
 
   if (error) throw error
-  return { invoices: data || [] }
+  // Normalize: some rows have old schema (week_ending, subtotal, total) vs new (week_start, subtotal_ex, total_inc)
+  const invoices = (data || []).map((inv: any) => ({
+    ...inv,
+    week_ending: inv.week_ending || inv.week_end,
+    total: inv.total ?? inv.total_inc ?? 0,
+    subtotal: inv.subtotal ?? inv.subtotal_ex ?? 0,
+  }))
+  return { invoices }
 }
 
 // ── set_trade_rate: trade or ops sets hourly rate ──
@@ -6773,8 +6928,8 @@ async function completeJob(client: any, body: any) {
     .single()
   if (jobErr || !job) throw new Error('Job not found')
 
-  if (!['in_progress', 'scheduled', 'accepted'].includes(job.status)) {
-    throw new Error(`Cannot complete a job with status "${job.status}". Must be in_progress, scheduled, or accepted.`)
+  if (!['in_progress', 'scheduled', 'pre_build', 'accepted'].includes(job.status)) {
+    throw new Error(`Cannot complete a job with status "${job.status}". Must be in_progress, pre_build, scheduled, or accepted.`)
   }
 
   // Update status + completed_at
