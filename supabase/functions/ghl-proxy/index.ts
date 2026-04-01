@@ -70,7 +70,7 @@ const OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
     accepted:    'c1615373-9140-4e49-92aa-aa0cfa8e9793', // Job Accepted Ready for Execution
     // approvals: fencing skips approvals — stays at accepted stage in GHL
     deposit:     'c1615373-9140-4e49-92aa-aa0cfa8e9793', // 50% Deposit To Be Received (use accepted stage — GHL deposit stages are manual)
-    pre_build:   'c0e34aa5-c113-4485-a962-33eadd7be4de', // Materials To Be Ordered / Job Scheduled
+    processing:   'c0e34aa5-c113-4485-a962-33eadd7be4de', // Materials To Be Ordered / Job Scheduled
     scheduled:   'c0e34aa5-c113-4485-a962-33eadd7be4de', // Materials To Be Ordered / Job Scheduled (legacy)
     in_progress: '6d57806c-314c-47e5-a681-d163c10ed27e', // Scheduled / In Progress
     complete:    'f622844c-2fac-4627-81d4-978a6a864c72', // Get Final Payment Both Clients
@@ -80,7 +80,7 @@ const OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
     accepted:    '66742bf8-4917-406c-a1c1-33ac271cfe09', // Ready to Execute
     approvals:   '66742bf8-4917-406c-a1c1-33ac271cfe09', // Council Approval in progress (use Ready to Execute — GHL has granular stages)
     deposit:     '66742bf8-4917-406c-a1c1-33ac271cfe09', // Finalised Plans and Invoice for Deposit Sent
-    pre_build:   '48f6871b-2d6c-4679-86a6-5b7bd602a6a8', // Deposit Received Materials to be ordered
+    processing:   '48f6871b-2d6c-4679-86a6-5b7bd602a6a8', // Deposit Received Materials to be ordered
     scheduled:   '48f6871b-2d6c-4679-86a6-5b7bd602a6a8', // Scheduled Awaiting Start Date (legacy)
     in_progress: '4dfa654d-4d7c-491b-89dc-39717fc8e911', // In Progress
     complete:    '54d52061-6fca-4dfe-a421-f35a3b88d434', // Job complete Needs to be invoiced
@@ -229,12 +229,12 @@ serve(async (req: Request) => {
                 'Job Accepted Ready for Execution': 'accepted',
                 '25% Deposits To Be Received (Shared Fence)': 'deposit',
                 '50% Deposit To Be Received': 'deposit',
-                'Materials To Be Ordered / Job Scheduled': 'pre_build',
-                'Pending WhatsApp Confirmation From Fencing Team': 'pre_build',
-                'Pending Confirmation Email From Supplier': 'pre_build',
-                'Confirmed Material Order': 'pre_build',
-                'Order to be Picked up': 'pre_build',
-                'Order To be Delivered (Materials TBC on Site)': 'pre_build',
+                'Materials To Be Ordered / Job Scheduled': 'processing',
+                'Pending WhatsApp Confirmation From Fencing Team': 'processing',
+                'Pending Confirmation Email From Supplier': 'processing',
+                'Confirmed Material Order': 'processing',
+                'Order to be Picked up': 'processing',
+                'Order To be Delivered (Materials TBC on Site)': 'processing',
                 'Scheduled / In Progress': 'in_progress',
                 'Get Final Payment Both Clients': 'complete',
                 'Get Google Review': 'complete',
@@ -248,9 +248,9 @@ serve(async (req: Request) => {
                 'CDC in Progress': 'approvals',
                 'Council Approval in progress': 'approvals',
                 'Finalised Plans and Invoice for Deposit Sent': 'deposit',
-                'Deposit Received Materials to be ordered': 'pre_build',
-                'Materials Ordered Job to be Scheduled': 'pre_build',
-                'Scheduled Awaiting Start Date': 'pre_build',
+                'Deposit Received Materials to be ordered': 'processing',
+                'Materials Ordered Job to be Scheduled': 'processing',
+                'Scheduled Awaiting Start Date': 'processing',
                 'In Progress': 'in_progress',
                 'Rectifcation / To be Finished off': 'in_progress',
                 'Job complete Needs to be invoiced': 'complete',
@@ -1679,12 +1679,12 @@ serve(async (req: Request) => {
         'Job Accepted Ready for Execution': 'accepted',
         '25% Deposits To Be Received (Shared Fence)': 'deposit',
         '50% Deposit To Be Received': 'deposit',
-        'Materials To Be Ordered / Job Scheduled': 'pre_build',
-        'Pending WhatsApp Confirmation From Fencing Team': 'pre_build',
-        'Pending Confirmation Email From Supplier': 'pre_build',
-        'Confirmed Material Order': 'pre_build',
-        'Order to be Picked up': 'pre_build',
-        'Order To be Delivered (Materials TBC on Site)': 'pre_build',
+        'Materials To Be Ordered / Job Scheduled': 'processing',
+        'Pending WhatsApp Confirmation From Fencing Team': 'processing',
+        'Pending Confirmation Email From Supplier': 'processing',
+        'Confirmed Material Order': 'processing',
+        'Order to be Picked up': 'processing',
+        'Order To be Delivered (Materials TBC on Site)': 'processing',
         'Scheduled / In Progress': 'in_progress',
         'Get Final Payment Both Clients': 'complete',
         'Get Google Review': 'complete',
@@ -1698,9 +1698,9 @@ serve(async (req: Request) => {
         'CDC in Progress': 'approvals',
         'Council Approval in progress': 'approvals',
         'Finalised Plans and Invoice for Deposit Sent': 'deposit',
-        'Deposit Received Materials to be ordered': 'pre_build',
-        'Materials Ordered Job to be Scheduled': 'pre_build',
-        'Scheduled Awaiting Start Date': 'pre_build',
+        'Deposit Received Materials to be ordered': 'processing',
+        'Materials Ordered Job to be Scheduled': 'processing',
+        'Scheduled Awaiting Start Date': 'processing',
         'In Progress': 'in_progress',
         'Rectifcation / To be Finished off': 'in_progress',
         'Job complete Needs to be invoiced': 'complete',

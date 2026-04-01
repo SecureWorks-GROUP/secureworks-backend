@@ -643,12 +643,12 @@ serve(async (req: Request) => {
           .select('id')
         results.accepted_to_deposit = depMoved?.length || 0
 
-        // 3. scheduled jobs → pre_build
+        // 3. scheduled jobs → processing
         const { data: schedMoved } = await client.from('jobs')
-          .update({ status: 'pre_build', pre_build_at: new Date().toISOString() })
+          .update({ status: 'processing', processing_at: new Date().toISOString() })
           .eq('status', 'scheduled')
           .select('id')
-        results.scheduled_to_pre_build = schedMoved?.length || 0
+        results.scheduled_to_processing = schedMoved?.length || 0
 
         return json({ success: true, migrated: results })
       }
@@ -1251,6 +1251,8 @@ serve(async (req: Request) => {
       case 'list_pending_verifications':
       case 'verify_hours':
       case 'dispute_hours':
+      case 'crew_charges_on_my_jobs':
+      case 'review_crew_charge':
       case 'generate_trade_invoice':
       case 'my_invoices':
       case 'acknowledge_invoice_line':
@@ -1287,6 +1289,78 @@ serve(async (req: Request) => {
               .single()
             if (invErr || !inv) throw new ApiError('Invoice not found', 404)
             return json({ invoice: inv })
+          }
+          case 'crew_charges_on_my_jobs': {
+            const ccWeekStart = url.searchParams.get('week_start') || body?.week_start
+            // Find jobs where this user is lead
+            const { data: leadJobs } = await client.from('job_assignments')
+              .select('job_id')
+              .eq('user_id', tradeUser.id)
+              .in('role', ['lead', 'lead_installer'])
+            const leadJobIds = [...new Set((leadJobs || []).map((a: any) => a.job_id).filter(Boolean))]
+            if (leadJobIds.length === 0) return json({ charges: [] })
+
+            // Get other trades' invoice lines on those jobs
+            let query = client.from('trade_invoice_lines')
+              .select('id, job_id, job_number, client_name, total_hours, hourly_rate, line_total_ex, acknowledgment_status, override_amount, override_note, line_date, division, description, trade_invoices!inner(user_id, week_start, status, users:user_id(name))')
+              .in('job_id', leadJobIds)
+              .neq('trade_invoices.user_id', tradeUser.id)
+            if (ccWeekStart) query = query.eq('trade_invoices.week_start', ccWeekStart)
+            const { data: charges, error: ccErr } = await query.order('line_date', { ascending: true })
+            if (ccErr) throw new Error('Failed to load crew charges: ' + ccErr.message)
+
+            const mapped = (charges || []).map((c: any) => ({
+              line_id: c.id,
+              trade_name: c.trade_invoices?.users?.name || 'Unknown',
+              job_number: c.job_number || '',
+              job_id: c.job_id,
+              total_hours: c.total_hours || 0,
+              hourly_rate: c.hourly_rate || 0,
+              line_total_ex: c.line_total_ex || 0,
+              acknowledgment_status: c.acknowledgment_status || 'pending',
+              override_amount: c.override_amount,
+              override_note: c.override_note,
+              line_date: c.line_date,
+              division: c.division,
+              description: c.description,
+              invoice_status: c.trade_invoices?.status,
+            }))
+            return json({ charges: mapped })
+          }
+          case 'review_crew_charge': {
+            const { line_id, action: reviewAction, override_amount: overrideAmt, note: reviewNote } = body
+            if (!line_id) throw new ApiError('line_id required', 400)
+            if (!['approve', 'adjust', 'reject'].includes(reviewAction)) throw new ApiError('action must be approve, adjust, or reject', 400)
+
+            // Verify user is lead on this job
+            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id').eq('id', line_id).single()
+            if (!lineData) throw new ApiError('Line not found', 404)
+            const { data: isLead } = await client.from('job_assignments')
+              .select('id')
+              .eq('user_id', tradeUser.id)
+              .eq('job_id', lineData.job_id)
+              .in('role', ['lead', 'lead_installer'])
+              .limit(1)
+              .maybeSingle()
+            if (!isLead) throw new ApiError('Not authorised — you are not lead on this job', 403)
+
+            const updates: any = {
+              acknowledged_by: tradeUser.id,
+              acknowledged_at: new Date().toISOString(),
+            }
+            if (reviewAction === 'approve') {
+              updates.acknowledgment_status = 'acknowledged'
+            } else if (reviewAction === 'adjust') {
+              updates.acknowledgment_status = 'acknowledged'
+              updates.override_amount = Number(overrideAmt) || 0
+              updates.override_by = tradeUser.id
+              updates.override_note = reviewNote || 'Adjusted by lead'
+            } else if (reviewAction === 'reject') {
+              updates.acknowledgment_status = 'queried'
+              updates.override_note = reviewNote || 'Rejected by lead'
+            }
+            await client.from('trade_invoice_lines').update(updates).eq('id', line_id)
+            return json({ success: true })
           }
           case 'save_trade_invoice_draft': {
             const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
@@ -2026,7 +2100,7 @@ async function opsSummary(client: any) {
       .select('id, status, type, accepted_at, completed_at, pricing_json')
       .eq('org_id', DEFAULT_ORG_ID)
       .not('legacy', 'is', true)
-      .in('status', ['quoted', 'accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress', 'complete', 'invoiced'])
+      .in('status', ['quoted', 'accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced'])
       .not('job_number', 'is', null),
 
     // Overdue receivable invoices
@@ -2305,7 +2379,7 @@ async function opsSummary(client: any) {
 
   // ── Pipeline counts ──
   const pipelineCounts: Record<string, number> = {
-    quoted: 0, accepted: 0, approvals: 0, deposit: 0, pre_build: 0, scheduled: 0, in_progress: 0, complete: 0, invoiced: 0,
+    quoted: 0, accepted: 0, approvals: 0, deposit: 0, processing: 0, scheduled: 0, in_progress: 0, complete: 0, invoiced: 0,
   }
   for (const j of allActive) {
     if (pipelineCounts[j.status] !== undefined) pipelineCounts[j.status]++
@@ -2431,7 +2505,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   const search = params.get('search') || ''
 
   let query = client.from('jobs')
-    .select('id, type, status, client_name, client_phone, site_address, site_suburb, pricing_json, ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, pre_build_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount')
+    .select('id, type, status, client_name, client_phone, site_address, site_suburb, pricing_json, ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount')
     .eq('org_id', DEFAULT_ORG_ID)
     .or('legacy.is.null,legacy.eq.false')
     .or('job_number.not.is.null,status.eq.draft')
@@ -2440,7 +2514,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (statusFilter) {
     query = query.eq('status', statusFilter)
   } else {
-    query = query.in('status', ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress', 'complete', 'invoiced'])
+    query = query.in('status', ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced'])
   }
   if (typeFilter) query = query.eq('type', typeFilter)
 
@@ -2448,7 +2522,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (error) throw error
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], deposit: [], pre_build: [], scheduled: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], deposit: [], processing: [], scheduled: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
 
   const jobIds = jobs.map((j: any) => j.id)
@@ -2492,7 +2566,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     const stageStart = j.status === 'accepted' ? j.accepted_at
       : j.status === 'approvals' ? j.approvals_at
       : j.status === 'deposit' ? j.deposit_at
-      : j.status === 'pre_build' ? j.pre_build_at
+      : j.status === 'processing' ? j.processing_at
       : j.status === 'scheduled' ? j.scheduled_at
       : j.status === 'complete' ? j.completed_at
       : j.updated_at
@@ -2522,7 +2596,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   })
 
   const columns: Record<string, any[]> = {
-    draft: [], quoted: [], accepted: [], approvals: [], deposit: [], pre_build: [], scheduled: [], in_progress: [], complete: [], invoiced: [],
+    draft: [], quoted: [], accepted: [], approvals: [], deposit: [], processing: [], scheduled: [], in_progress: [], complete: [], invoiced: [],
   }
   for (const j of enriched) {
     if (columns[j.status]) columns[j.status].push(j)
@@ -2881,11 +2955,11 @@ async function createAssignment(client: any, body: any) {
   if (error) throw error
 
   // Auto-update job status when crew is assigned
-  // pre_build jobs with crew assigned can auto-advance (kept for backwards compat)
-  // Legacy 'accepted' jobs also auto-advance to 'pre_build'
+  // processing jobs with crew assigned can auto-advance (kept for backwards compat)
+  // Legacy 'accepted' jobs also auto-advance to 'processing'
   const { data: currentJob } = await client.from('jobs').select('status').eq('id', jId).single()
   if (currentJob?.status === 'accepted') {
-    await client.from('jobs').update({ status: 'pre_build', pre_build_at: new Date().toISOString() }).eq('id', jId)
+    await client.from('jobs').update({ status: 'processing', processing_at: new Date().toISOString() }).eq('id', jId)
   }
 
   // Log event
@@ -3056,7 +3130,7 @@ async function updateAssignment(client: any, body: any) {
           .select('status')
           .eq('id', data.job_id)
           .single()
-        if (job && ['in_progress', 'scheduled', 'pre_build'].includes(job.status)) {
+        if (job && ['in_progress', 'scheduled', 'processing'].includes(job.status)) {
           suggestStatus = 'complete'
         }
       }
@@ -3134,7 +3208,7 @@ async function updateJobStatus(client: any, body: any) {
   const status = body.status
   if (!jId || !status) throw new Error('jobId and status required')
 
-  const validStatuses = ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress', 'complete', 'invoiced', 'cancelled', 'lost']
+  const validStatuses = ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced', 'cancelled', 'lost']
   if (!validStatuses.includes(status)) throw new Error('Invalid status: ' + status)
 
   // Capture old status + job data for business_events dual-write
@@ -3148,7 +3222,7 @@ async function updateJobStatus(client: any, body: any) {
   if (status === 'accepted') update.accepted_at = new Date().toISOString()
   if (status === 'approvals') update.approvals_at = new Date().toISOString()
   if (status === 'deposit') update.deposit_at = new Date().toISOString()
-  if (status === 'pre_build') update.pre_build_at = new Date().toISOString()
+  if (status === 'processing') update.processing_at = new Date().toISOString()
   if (status === 'scheduled') update.scheduled_at = new Date().toISOString()
   if (status === 'complete') update.completed_at = new Date().toISOString()
 
@@ -4000,8 +4074,8 @@ async function completeAndInvoice(client: any, body: any) {
     .single()
   if (jobErr || !job) throw new Error('Job not found')
 
-  if (!['in_progress', 'complete', 'scheduled', 'pre_build'].includes(job.status)) {
-    throw new Error(`Cannot complete+invoice a job with status "${job.status}". Must be in_progress, pre_build, scheduled, or complete.`)
+  if (!['in_progress', 'complete', 'scheduled', 'processing'].includes(job.status)) {
+    throw new Error(`Cannot complete+invoice a job with status "${job.status}". Must be in_progress, processing, scheduled, or complete.`)
   }
 
   // Use line_items_override if provided (from invoice creation modal),
@@ -6967,8 +7041,8 @@ async function completeJob(client: any, body: any) {
     .single()
   if (jobErr || !job) throw new Error('Job not found')
 
-  if (!['in_progress', 'scheduled', 'pre_build', 'accepted'].includes(job.status)) {
-    throw new Error(`Cannot complete a job with status "${job.status}". Must be in_progress, pre_build, scheduled, or accepted.`)
+  if (!['in_progress', 'scheduled', 'processing', 'accepted'].includes(job.status)) {
+    throw new Error(`Cannot complete a job with status "${job.status}". Must be in_progress, processing, scheduled, or accepted.`)
   }
 
   // Update status + completed_at
@@ -8971,7 +9045,7 @@ async function createJobAnnotations(
     }
 
     // ── 2. Materials Not Confirmed Check ──
-    const activeStatuses = ['accepted', 'approvals', 'deposit', 'pre_build', 'scheduled']
+    const activeStatuses = ['accepted', 'approvals', 'deposit', 'processing', 'scheduled']
     if (activeStatuses.includes(job?.status)) {
       // Check if build is within 5 days
       const nextAssignment = (assignments || []).find((a: any) => a.scheduled_date)
@@ -10034,7 +10108,7 @@ async function checkJobDurations(client: any) {
   // Get all active jobs (in_progress or scheduled)
   const { data: jobs } = await client.from('jobs')
     .select('id, job_number, type, status, client_name, scope_json, scheduled_at, accepted_at, created_at')
-    .in('status', ['accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress'])
+    .in('status', ['accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress'])
     .eq('is_callback', false)
     .limit(200)
 
