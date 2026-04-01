@@ -1525,11 +1525,13 @@ serve(async (req: Request) => {
                 .eq('user_id', tradeUser.id)
                 .eq('week_start', week_start)
                 .maybeSingle()
-              if (existing && existing.status !== 'draft') throw new ApiError('Invoice already exists for this week (status: ' + existing.status + ')', 400)
-              // If draft exists, delete it and recreate (user is finalising)
-              if (existing && existing.status === 'draft') {
+              // If existing invoice for this week, allow re-submission (delete old + recreate)
+              // Bookkeepers can handle duplicate Xero bills if any
+              if (existing) {
+                if (existing.status === 'paid') throw new ApiError('Invoice already paid for this week — cannot re-submit', 400)
                 await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', existing.id)
                 await client.from('trade_invoices').delete().eq('id', existing.id)
+                console.log('[ops-api] Deleted previous invoice for re-submission:', existing.id, existing.status)
               }
             }
 
@@ -7061,7 +7063,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
 async function myTradeInvoices(client: any, userId: string) {
   const { data, error } = await client
     .from('trade_invoices')
-    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, total_inc, xero_bill_number, xero_bill_id, status, created_at')
+    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, total_inc, xero_bill_id, status, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(20)
