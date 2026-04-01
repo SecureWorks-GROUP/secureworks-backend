@@ -609,6 +609,7 @@ serve(async (req: Request) => {
       case 'update_work_order': return json(await updateWorkOrder(client, body))
       case 'send_work_order': return json(await sendWorkOrder(client, body))
       case 'create_invoice': return json(await createInvoice(client, body))
+      case 'sync_job_invoices': return json(await syncJobInvoices(client, body))
       case 'complete_and_invoice': return json(await completeAndInvoice(client, body))
       case 'create_deposit_invoice': return json(await createDepositInvoice(client, body))
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
@@ -1253,6 +1254,7 @@ serve(async (req: Request) => {
       case 'dispute_hours':
       case 'crew_charges_on_my_jobs':
       case 'review_crew_charge':
+      case 'search_all_jobs':
       case 'generate_trade_invoice':
       case 'my_invoices':
       case 'acknowledge_invoice_line':
@@ -1289,6 +1291,19 @@ serve(async (req: Request) => {
               .single()
             if (invErr || !inv) throw new ApiError('Invoice not found', 404)
             return json({ invoice: inv })
+          }
+          case 'search_all_jobs': {
+            const q = (url.searchParams.get('q') || '').toLowerCase().trim()
+            let jobQuery = client.from('jobs')
+              .select('id, job_number, client_name, site_suburb, type, status')
+              .not('status', 'in', '("lost","cancelled")')
+              .order('created_at', { ascending: false })
+              .limit(200)
+            if (q) {
+              jobQuery = jobQuery.or(`job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%`)
+            }
+            const { data: allJobs } = await jobQuery
+            return json({ jobs: allJobs || [] })
           }
           case 'crew_charges_on_my_jobs': {
             const ccWeekStart = url.searchParams.get('week_start') || body?.week_start
@@ -2379,7 +2394,7 @@ async function opsSummary(client: any) {
 
   // ── Pipeline counts ──
   const pipelineCounts: Record<string, number> = {
-    quoted: 0, accepted: 0, approvals: 0, deposit: 0, processing: 0, scheduled: 0, in_progress: 0, complete: 0, invoiced: 0,
+    quoted: 0, accepted: 0, approvals: 0, processing: 0, in_progress: 0, complete: 0, invoiced: 0,
   }
   for (const j of allActive) {
     if (pipelineCounts[j.status] !== undefined) pipelineCounts[j.status]++
@@ -2522,18 +2537,19 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (error) throw error
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], deposit: [], processing: [], scheduled: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
 
   const jobIds = jobs.map((j: any) => j.id)
 
-  // Enrich with assignment/PO/WO/council counts + email activity
-  const [assignRes, poRes, woRes, councilRes, emailRes] = await Promise.all([
+  // Enrich with assignment/PO/WO/council counts + email activity + invoices
+  const [assignRes, poRes, woRes, councilRes, emailRes, invoiceRes] = await Promise.all([
     client.from('job_assignments').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
     client.from('purchase_orders').select('job_id').in('job_id', jobIds).neq('status', 'deleted'),
     client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
     client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', jobIds),
     client.from('po_communications').select('job_id, direction, created_at').in('job_id', jobIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false }).limit(500),
+    client.from('xero_invoices').select('job_id, status, invoice_type').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
   ])
 
   const countMap = (rows: any[]) => {
@@ -2561,6 +2577,14 @@ async function pipeline(client: any, params: URLSearchParams) {
     if (!emailActivityMap[em.job_id]) emailActivityMap[em.job_id] = { at: em.created_at, dir: em.direction }
   }
 
+  // Invoice status per job (for complete column sub-stages)
+  const invoiceMap: Record<string, { has_invoice: boolean; all_paid: boolean }> = {}
+  for (const inv of (invoiceRes.data || [])) {
+    if (!invoiceMap[inv.job_id]) invoiceMap[inv.job_id] = { has_invoice: true, all_paid: true }
+    invoiceMap[inv.job_id].has_invoice = true
+    if (inv.status !== 'PAID') invoiceMap[inv.job_id].all_paid = false
+  }
+
   const enriched = jobs.map((j: any) => {
     const value = j.pricing_json?.totalIncGST || j.pricing_json?.total || 0
     const stageStart = j.status === 'accepted' ? j.accepted_at
@@ -2586,6 +2610,8 @@ async function pipeline(client: any, params: URLSearchParams) {
       council_step: councilInfo?.step || null,
       last_po_email_at: emailActivity?.at || null,
       last_po_email_dir: emailActivity?.dir || null,
+      has_invoice: invoiceMap[j.id]?.has_invoice || false,
+      invoice_paid: invoiceMap[j.id]?.all_paid || false,
     }
   }).filter((j: any) => {
     if (!search) return true
@@ -2596,10 +2622,14 @@ async function pipeline(client: any, params: URLSearchParams) {
   })
 
   const columns: Record<string, any[]> = {
-    draft: [], quoted: [], accepted: [], approvals: [], deposit: [], processing: [], scheduled: [], in_progress: [], complete: [], invoiced: [],
+    draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [],
   }
   for (const j of enriched) {
-    if (columns[j.status]) columns[j.status].push(j)
+    // Merge deposit → accepted column, scheduled → processing column
+    const col = j.status === 'deposit' ? 'accepted'
+      : j.status === 'scheduled' ? 'processing'
+      : j.status
+    if (columns[col]) columns[col].push(j)
   }
 
   return { columns, total: enriched.length }
@@ -3895,6 +3925,118 @@ async function createInvoice(client: any, body: any) {
   }
 
   return { success: true, xero_invoice_id: xeroInvId, invoice_number: invNumber, total: invTotal }
+}
+
+// ── Sync Job Invoices — pull invoices from Xero for a specific job and link them ──
+async function syncJobInvoices(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new Error('job_id required')
+
+  const { data: job, error: jobErr } = await client
+    .from('jobs')
+    .select('id, job_number, client_name, xero_contact_id')
+    .eq('id', jId)
+    .single()
+  if (jobErr || !job) throw new Error('Job not found')
+
+  const { accessToken, tenantId } = await getToken(client)
+
+  let synced = 0
+  const syncedInvoices: any[] = []
+
+  // Strategy 1: Search by Xero contact ID
+  if (job.xero_contact_id) {
+    try {
+      const result = await xeroGet('/Invoices', accessToken, tenantId, {
+        where: `Contact.ContactID=guid("${job.xero_contact_id}") AND Type=="ACCREC"`,
+        Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
+      })
+      const invoices = result?.Invoices || []
+      for (const inv of invoices) {
+        const record: any = {
+          org_id: DEFAULT_ORG_ID,
+          xero_invoice_id: inv.InvoiceID,
+          xero_contact_id: inv.Contact?.ContactID || null,
+          contact_name: inv.Contact?.Name || null,
+          invoice_number: inv.InvoiceNumber || null,
+          invoice_type: inv.Type,
+          status: inv.Status,
+          reference: inv.Reference || null,
+          sub_total: inv.SubTotal || 0,
+          total_tax: inv.TotalTax || 0,
+          total: inv.Total || 0,
+          amount_due: inv.AmountDue || 0,
+          amount_paid: inv.AmountPaid || 0,
+          invoice_date: inv.DateString || null,
+          due_date: inv.DueDateString || null,
+          line_items: inv.LineItems || [],
+          raw_json: inv,
+          job_id: job.id,
+          synced_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
+        const { error } = await client.from('xero_invoices').upsert(record, {
+          onConflict: 'org_id,xero_invoice_id',
+        })
+        if (!error) {
+          synced++
+          syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status })
+        }
+      }
+    } catch (e: any) {
+      console.log('[sync_job_invoices] Xero contact search failed:', e.message)
+    }
+  }
+
+  // Strategy 2: Search by reference containing job number
+  if (job.job_number) {
+    try {
+      const result = await xeroGet('/Invoices', accessToken, tenantId, {
+        where: `Reference.Contains("${job.job_number}") AND Type=="ACCREC"`,
+        Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
+      })
+      const invoices = result?.Invoices || []
+      for (const inv of invoices) {
+        // Skip if already synced from Strategy 1
+        const alreadySynced = syncedInvoices.some(s => s.invoice_number === inv.InvoiceNumber)
+        if (alreadySynced) continue
+
+        const record: any = {
+          org_id: DEFAULT_ORG_ID,
+          xero_invoice_id: inv.InvoiceID,
+          xero_contact_id: inv.Contact?.ContactID || null,
+          contact_name: inv.Contact?.Name || null,
+          invoice_number: inv.InvoiceNumber || null,
+          invoice_type: inv.Type,
+          status: inv.Status,
+          reference: inv.Reference || null,
+          sub_total: inv.SubTotal || 0,
+          total_tax: inv.TotalTax || 0,
+          total: inv.Total || 0,
+          amount_due: inv.AmountDue || 0,
+          amount_paid: inv.AmountPaid || 0,
+          invoice_date: inv.DateString || null,
+          due_date: inv.DueDateString || null,
+          line_items: inv.LineItems || [],
+          raw_json: inv,
+          job_id: job.id,
+          synced_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
+        const { error } = await client.from('xero_invoices').upsert(record, {
+          onConflict: 'org_id,xero_invoice_id',
+        })
+        if (!error) {
+          synced++
+          syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status })
+        }
+      }
+    } catch (e: any) {
+      console.log('[sync_job_invoices] Xero reference search failed:', e.message)
+    }
+  }
+
+  return { success: true, synced, job_number: job.job_number, invoices: syncedInvoices }
 }
 
 // ── Update Invoice — edit line items on an existing Xero invoice ──
