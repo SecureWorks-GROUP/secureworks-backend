@@ -68,14 +68,20 @@ const JOB_COMPLETE_STAGES: Record<string, string> = {
 const OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
   fencing: {
     accepted:    'c1615373-9140-4e49-92aa-aa0cfa8e9793', // Job Accepted Ready for Execution
-    scheduled:   'c0e34aa5-c113-4485-a962-33eadd7be4de', // Materials To Be Ordered / Job Scheduled
+    // approvals: fencing skips approvals — stays at accepted stage in GHL
+    deposit:     'c1615373-9140-4e49-92aa-aa0cfa8e9793', // 50% Deposit To Be Received (use accepted stage — GHL deposit stages are manual)
+    pre_build:   'c0e34aa5-c113-4485-a962-33eadd7be4de', // Materials To Be Ordered / Job Scheduled
+    scheduled:   'c0e34aa5-c113-4485-a962-33eadd7be4de', // Materials To Be Ordered / Job Scheduled (legacy)
     in_progress: '6d57806c-314c-47e5-a681-d163c10ed27e', // Scheduled / In Progress
     complete:    'f622844c-2fac-4627-81d4-978a6a864c72', // Get Final Payment Both Clients
     invoiced:    'c065222d-7364-412d-9a7b-42e699764d1f', // Outstanding Payments Backlog
   },
   patio: {
     accepted:    '66742bf8-4917-406c-a1c1-33ac271cfe09', // Ready to Execute
-    scheduled:   '48f6871b-2d6c-4679-86a6-5b7bd602a6a8', // Scheduled Awaiting Start Date
+    approvals:   '66742bf8-4917-406c-a1c1-33ac271cfe09', // Council Approval in progress (use Ready to Execute — GHL has granular stages)
+    deposit:     '66742bf8-4917-406c-a1c1-33ac271cfe09', // Finalised Plans and Invoice for Deposit Sent
+    pre_build:   '48f6871b-2d6c-4679-86a6-5b7bd602a6a8', // Deposit Received Materials to be ordered
+    scheduled:   '48f6871b-2d6c-4679-86a6-5b7bd602a6a8', // Scheduled Awaiting Start Date (legacy)
     in_progress: '4dfa654d-4d7c-491b-89dc-39717fc8e911', // In Progress
     complete:    '54d52061-6fca-4dfe-a421-f35a3b88d434', // Job complete Needs to be invoiced
     invoiced:    '0276706b-faeb-44ff-b049-efce11a96a7f', // Invoice Sent waiting on Final Payment
@@ -219,30 +225,32 @@ serve(async (req: Request) => {
             for (const s of (p.stages || [])) {
               // Use the STAGE_MAP defined in sync_ghl to resolve stage name → status
               const STAGE_MAP: Record<string, string> = {
+                // Fencing Execution
                 'Job Accepted Ready for Execution': 'accepted',
-                '25% Deposits To Be Received (Shared Fence)': 'accepted',
-                '50% Deposit To Be Received': 'accepted',
-                'Materials To Be Ordered / Job Scheduled': 'scheduled',
-                'Pending WhatsApp Confirmation From Fencing Team': 'scheduled',
-                'Pending Confirmation Email From Supplier': 'scheduled',
-                'Confirmed Material Order': 'scheduled',
-                'Order to be Picked up': 'scheduled',
-                'Order To be Delivered (Materials TBC on Site)': 'scheduled',
+                '25% Deposits To Be Received (Shared Fence)': 'deposit',
+                '50% Deposit To Be Received': 'deposit',
+                'Materials To Be Ordered / Job Scheduled': 'pre_build',
+                'Pending WhatsApp Confirmation From Fencing Team': 'pre_build',
+                'Pending Confirmation Email From Supplier': 'pre_build',
+                'Confirmed Material Order': 'pre_build',
+                'Order to be Picked up': 'pre_build',
+                'Order To be Delivered (Materials TBC on Site)': 'pre_build',
                 'Scheduled / In Progress': 'in_progress',
                 'Get Final Payment Both Clients': 'complete',
                 'Get Google Review': 'complete',
                 'Completed and Archived in Tradify (Get Sign off)': 'complete',
                 'Outstanding Payments Backlog': 'invoiced',
+                // Patio Execution
                 'Ready to Execute': 'accepted',
-                'Drafting in progress': 'accepted',
-                'DA in Progress': 'accepted',
-                'Engineering in progress': 'accepted',
-                'CDC in Progress': 'accepted',
-                'Council Approval in progress': 'accepted',
-                'Finalised Plans and Invoice for Deposit Sent': 'accepted',
-                'Deposit Received Materials to be ordered': 'scheduled',
-                'Materials Ordered Job to be Scheduled': 'scheduled',
-                'Scheduled Awaiting Start Date': 'scheduled',
+                'Drafting in progress': 'approvals',
+                'DA in Progress': 'approvals',
+                'Engineering in progress': 'approvals',
+                'CDC in Progress': 'approvals',
+                'Council Approval in progress': 'approvals',
+                'Finalised Plans and Invoice for Deposit Sent': 'deposit',
+                'Deposit Received Materials to be ordered': 'pre_build',
+                'Materials Ordered Job to be Scheduled': 'pre_build',
+                'Scheduled Awaiting Start Date': 'pre_build',
                 'In Progress': 'in_progress',
                 'Rectifcation / To be Finished off': 'in_progress',
                 'Job complete Needs to be invoiced': 'complete',
@@ -854,7 +862,7 @@ serve(async (req: Request) => {
 
       let query = sb.from('jobs')
         .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, job_number, ghl_opportunity_id, ghl_contact_id, scope_json, pricing_json, updated_at, created_at')
-        .eq('legacy', false)
+        .not('legacy', 'is', true)
         .order('updated_at', { ascending: false })
         .limit(limit)
 
@@ -896,6 +904,7 @@ serve(async (req: Request) => {
         org_id: orgId,
         type: toolType || 'patio',
         status: 'draft',
+        legacy: false,
         client_name: clientName || '',
         client_phone: clientPhone || '',
         client_email: clientEmail || '',
@@ -1064,7 +1073,7 @@ serve(async (req: Request) => {
         }
       } catch (_) { /* non-blocking */ }
 
-      const update: Record<string, any> = { scope_json: scopeJson || {} }
+      const update: Record<string, any> = { scope_json: scopeJson || {}, legacy: false }
       if (meta) {
         if (meta.client_name) update.client_name = meta.client_name
         if (meta.client_phone) update.client_phone = meta.client_phone
@@ -1666,32 +1675,32 @@ serve(async (req: Request) => {
         'On Hold': 'draft',
         'Stale Lead': 'cancelled',
         'Job Lost': 'cancelled',
-        // Fencing Execution pipeline stages (all = accepted or beyond)
+        // Fencing Execution pipeline stages
         'Job Accepted Ready for Execution': 'accepted',
-        '25% Deposits To Be Received (Shared Fence)': 'accepted',
-        '50% Deposit To Be Received': 'accepted',
-        'Materials To Be Ordered / Job Scheduled': 'scheduled',
-        'Pending WhatsApp Confirmation From Fencing Team': 'scheduled',
-        'Pending Confirmation Email From Supplier': 'scheduled',
-        'Confirmed Material Order': 'scheduled',
-        'Order to be Picked up': 'scheduled',
-        'Order To be Delivered (Materials TBC on Site)': 'scheduled',
+        '25% Deposits To Be Received (Shared Fence)': 'deposit',
+        '50% Deposit To Be Received': 'deposit',
+        'Materials To Be Ordered / Job Scheduled': 'pre_build',
+        'Pending WhatsApp Confirmation From Fencing Team': 'pre_build',
+        'Pending Confirmation Email From Supplier': 'pre_build',
+        'Confirmed Material Order': 'pre_build',
+        'Order to be Picked up': 'pre_build',
+        'Order To be Delivered (Materials TBC on Site)': 'pre_build',
         'Scheduled / In Progress': 'in_progress',
         'Get Final Payment Both Clients': 'complete',
         'Get Google Review': 'complete',
         'Completed and Archived in Tradify (Get Sign off)': 'complete',
         'Outstanding Payments Backlog': 'invoiced',
-        // Patios Execution pipeline stages (all = accepted or beyond)
+        // Patios Execution pipeline stages
         'Ready to Execute': 'accepted',
-        'Drafting in progress': 'accepted',
-        'DA in Progress': 'accepted',
-        'Engineering in progress': 'accepted',
-        'CDC in Progress': 'accepted',
-        'Council Approval in progress': 'accepted',
-        'Finalised Plans and Invoice for Deposit Sent': 'accepted',
-        'Deposit Received Materials to be ordered': 'scheduled',
-        'Materials Ordered Job to be Scheduled': 'scheduled',
-        'Scheduled Awaiting Start Date': 'scheduled',
+        'Drafting in progress': 'approvals',
+        'DA in Progress': 'approvals',
+        'Engineering in progress': 'approvals',
+        'CDC in Progress': 'approvals',
+        'Council Approval in progress': 'approvals',
+        'Finalised Plans and Invoice for Deposit Sent': 'deposit',
+        'Deposit Received Materials to be ordered': 'pre_build',
+        'Materials Ordered Job to be Scheduled': 'pre_build',
+        'Scheduled Awaiting Start Date': 'pre_build',
         'In Progress': 'in_progress',
         'Rectifcation / To be Finished off': 'in_progress',
         'Job complete Needs to be invoiced': 'complete',

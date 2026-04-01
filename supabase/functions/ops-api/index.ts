@@ -617,6 +617,41 @@ serve(async (req: Request) => {
         const { data: d2, error: e2 } = await client.from('jobs').update({ legacy: false }).eq('legacy', true).not('status', 'in', '("cancelled","lost")').select('id')
         return json({ fixed_null: data?.length || 0, fixed_true: d2?.length || 0, error: error?.message, error2: e2?.message })
       }
+      case 'migrate_pipeline': {
+        // Migrate existing jobs to new pipeline statuses
+        const results: Record<string, number> = {}
+
+        // 1. accepted jobs with active council submissions → approvals
+        const { data: councilJobs } = await client.from('council_submissions')
+          .select('job_id')
+          .in('overall_status', ['in_progress', 'not_started', 'blocked'])
+        const councilJobIds = (councilJobs || []).map((c: any) => c.job_id)
+        if (councilJobIds.length > 0) {
+          const { data: moved } = await client.from('jobs')
+            .update({ status: 'approvals', approvals_at: new Date().toISOString() })
+            .eq('status', 'accepted')
+            .in('id', councilJobIds)
+            .select('id')
+          results.accepted_to_approvals = moved?.length || 0
+        }
+
+        // 2. accepted jobs with deposit_invoice_id → deposit
+        const { data: depMoved } = await client.from('jobs')
+          .update({ status: 'deposit', deposit_at: new Date().toISOString() })
+          .eq('status', 'accepted')
+          .not('deposit_invoice_id', 'is', null)
+          .select('id')
+        results.accepted_to_deposit = depMoved?.length || 0
+
+        // 3. scheduled jobs → pre_build
+        const { data: schedMoved } = await client.from('jobs')
+          .update({ status: 'pre_build', pre_build_at: new Date().toISOString() })
+          .eq('status', 'scheduled')
+          .select('id')
+        results.scheduled_to_pre_build = schedMoved?.length || 0
+
+        return json({ success: true, migrated: results })
+      }
       case 'create_unified_invoice': return json(await createUnifiedInvoice(client, body))
       case 'reconcile_payment': return json(await reconcilePayment(client, body))
       case 'sync_suppliers': return json(await syncSuppliers(client))
@@ -1446,6 +1481,10 @@ serve(async (req: Request) => {
                   unit: item.unit || 'ea',
                   unit_rate: Number(item.rate || 0),
                   line_total_ex: amt,
+                  line_date: item.date || null,
+                  division: item.division || null,
+                  job_id: item.job_id || null,
+                  job_number: item.job_number || null,
                 })
               }
             }
@@ -1987,7 +2026,7 @@ async function opsSummary(client: any) {
       .select('id, status, type, accepted_at, completed_at, pricing_json')
       .eq('org_id', DEFAULT_ORG_ID)
       .not('legacy', 'is', true)
-      .in('status', ['quoted', 'accepted', 'scheduled', 'in_progress', 'complete', 'invoiced'])
+      .in('status', ['quoted', 'accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress', 'complete', 'invoiced'])
       .not('job_number', 'is', null),
 
     // Overdue receivable invoices
@@ -3017,7 +3056,7 @@ async function updateAssignment(client: any, body: any) {
           .select('status')
           .eq('id', data.job_id)
           .single()
-        if (job && ['in_progress', 'scheduled'].includes(job.status)) {
+        if (job && ['in_progress', 'scheduled', 'pre_build'].includes(job.status)) {
           suggestStatus = 'complete'
         }
       }
@@ -8932,7 +8971,7 @@ async function createJobAnnotations(
     }
 
     // ── 2. Materials Not Confirmed Check ──
-    const activeStatuses = ['accepted', 'scheduled']
+    const activeStatuses = ['accepted', 'approvals', 'deposit', 'pre_build', 'scheduled']
     if (activeStatuses.includes(job?.status)) {
       // Check if build is within 5 days
       const nextAssignment = (assignments || []).find((a: any) => a.scheduled_date)
@@ -9995,7 +10034,7 @@ async function checkJobDurations(client: any) {
   // Get all active jobs (in_progress or scheduled)
   const { data: jobs } = await client.from('jobs')
     .select('id, job_number, type, status, client_name, scope_json, scheduled_at, accepted_at, created_at')
-    .in('status', ['accepted', 'scheduled', 'in_progress'])
+    .in('status', ['accepted', 'approvals', 'deposit', 'pre_build', 'scheduled', 'in_progress'])
     .eq('is_callback', false)
     .limit(200)
 
