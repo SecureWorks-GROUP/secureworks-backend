@@ -1246,6 +1246,7 @@ serve(async (req: Request) => {
       case 'submit_trade_invoice':
       case 'my_trade_invoices':
       case 'set_trade_rate':
+      case 'update_trade_profile':
       case 'create_trade_alert':
       case 'trade_labour_budget':
       case 'update_job_phase':
@@ -1449,6 +1450,17 @@ serve(async (req: Request) => {
             return json({ success: true, draft_id: draftId })
           }
           case 'set_trade_rate': return json(await setTradeRate(client, tradeUser.id, body))
+          case 'update_trade_profile': {
+            const { fullName, phone, email, abn, bsb, accountNo, accountName, licence, gstRegistered } = body
+            // Store trade details as user_metadata jsonb on the users table
+            const updates: any = {}
+            if (abn !== undefined) updates.abn = abn || null
+            // Store everything else in a trade_details jsonb column
+            const tradeDetails = { fullName, phone, email, bsb, accountNo, accountName, licence, gstRegistered }
+            updates.trade_details = tradeDetails
+            await client.from('users').update(updates).eq('id', tradeUser.id)
+            return json({ success: true })
+          }
           case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
           case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id))
           case 'update_job_phase': return json(await updateJobPhase(client, body, tradeUser.id))

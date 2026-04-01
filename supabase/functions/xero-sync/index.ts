@@ -52,8 +52,8 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(url, { ...options, signal: controller.signal })
-  } catch (err) {
-    if ((err as Error).name === 'AbortError') {
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
       throw new Error(`Request to ${url.split('?')[0]} timed out after ${timeoutMs}ms`)
     }
     throw err
@@ -111,7 +111,7 @@ serve(async (req: Request) => {
       default:
         return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions' }, 400)
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error(`xero-sync [${action}] error:`, err)
     // Log webhook error
     try {
@@ -164,7 +164,7 @@ async function refreshToken(sb: any) {
       const connections = await connResp.json()
       if (connections.length > 0) tenantId = connections[0].tenantId
     }
-  } catch (e) {
+  } catch (e: any) {
     console.warn('Could not fetch tenant ID:', e.message)
   }
 
@@ -428,9 +428,22 @@ async function syncInvoices(sb: any) {
         break
       }
 
-      // Upsert each invoice
+      // Upsert each invoice — preserve existing job_id linkage
       for (const inv of invoices) {
-        const record = {
+        // Check if this invoice already has a job link (set by createInvoice)
+        let existingJobId: string | null = null
+        let existingJobContactId: string | null = null
+        const { data: existingRec } = await sb.from('xero_invoices')
+          .select('job_id, job_contact_id')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .eq('xero_invoice_id', inv.InvoiceID)
+          .maybeSingle()
+        if (existingRec) {
+          existingJobId = existingRec.job_id
+          existingJobContactId = existingRec.job_contact_id
+        }
+
+        const record: any = {
           org_id: DEFAULT_ORG_ID,
           xero_invoice_id: inv.InvoiceID,
           xero_contact_id: inv.Contact?.ContactID || null,
@@ -453,6 +466,10 @@ async function syncInvoices(sb: any) {
           updated_at: parseXeroDate(inv.UpdatedDateUTC) || new Date().toISOString(),
           synced_at: new Date().toISOString(),
         }
+
+        // Preserve job linkage — don't let sync wipe links set by createInvoice
+        if (existingJobId) record.job_id = existingJobId
+        if (existingJobContactId) record.job_contact_id = existingJobContactId
 
         const { error } = await sb.from('xero_invoices').upsert(record, {
           onConflict: 'org_id,xero_invoice_id',
@@ -547,7 +564,7 @@ async function syncInvoices(sb: any) {
                     })
                     const opsResult = await opsResp.json()
                     console.log(`[xero-sync] Job ${jobData.id} fully paid — status updated via ops-api:`, opsResult.job?.status || opsResult.error)
-                  } catch (e) {
+                  } catch (e: any) {
                     // Fallback: update directly if ops-api call fails
                     console.error(`[xero-sync] ops-api call failed, updating directly:`, (e as Error).message)
                     await sb.from('jobs')
@@ -575,8 +592,8 @@ async function syncInvoices(sb: any) {
 
           // ── Trade invoice payment detection — ACCPAY bills ──
           // Match both reference formats: "TRADE-Name-WKn-year" (ops push) and "Name WE date" (direct push)
-          const ref = inv.Reference || ''
-          const isTradeInvoice = ref.startsWith('TRADE-') || / WE \d{4}-\d{2}-\d{2}/.test(ref)
+          const tradeRef = inv.Reference || ''
+          const isTradeInvoice = tradeRef.startsWith('TRADE-') || / WE \d{4}-\d{2}-\d{2}/.test(tradeRef)
           if (inv.Type === 'ACCPAY' && inv.Status === 'PAID' && isTradeInvoice) {
             try {
               // Check both column names: xero_bill_id (ops push) and xero_invoice_id (direct push)
@@ -605,11 +622,11 @@ async function syncInvoices(sb: any) {
                         text: 'Invoice for week of ' + tradeInv.week_start + ' paid — $' + Number(tradeInv.total_inc).toLocaleString() + ' ✓',
                       }),
                     }, 15000)
-                  } catch (e) { console.log('[xero-sync] Trade payment telegram failed:', e) }
+                  } catch (e: any) { console.log('[xero-sync] Trade payment telegram failed:', e) }
                 }
                 console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' marked as paid')
               }
-            } catch (e) { console.log('[xero-sync] Trade payment check failed:', e) }
+            } catch (e: any) { console.log('[xero-sync] Trade payment check failed:', e) }
           }
         }
       }
@@ -665,7 +682,7 @@ async function syncInvoices(sb: any) {
               .eq('xero_invoice_id', stale.xero_invoice_id)
               .eq('org_id', DEFAULT_ORG_ID)
           }
-        } catch (e) {
+        } catch (e: any) {
           // If 404, invoice was deleted in Xero
           console.log(`[xero-sync] Invoice ${stale.xero_invoice_id} not found in Xero — marking DELETED`)
           await sb.from('xero_invoices')
@@ -676,7 +693,7 @@ async function syncInvoices(sb: any) {
         }
       }
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[xero-sync] Reconciliation error:', (e as Error).message)
   }
 
@@ -822,7 +839,7 @@ async function matchUnlinkedInvoices(client: any) {
 
     console.log(`[xero-sync] Invoice matching: ${matched} auto-linked, ${flagged} flagged for review`)
     return { matched, flagged }
-  } catch (e) {
+  } catch (e: any) {
     console.log('[xero-sync] Invoice matching failed:', (e as Error).message)
     return { matched: 0, flagged: 0 }
   }
@@ -880,9 +897,21 @@ async function backfillInvoices(sb: any, searchParams: URLSearchParams) {
         break
       }
 
-      // Upsert each invoice
+      // Upsert each invoice — preserve existing job linkage
       for (const inv of invoices) {
-        const record = {
+        let existingJobId: string | null = null
+        let existingJobContactId: string | null = null
+        const { data: existingRec } = await sb.from('xero_invoices')
+          .select('job_id, job_contact_id')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .eq('xero_invoice_id', inv.InvoiceID)
+          .maybeSingle()
+        if (existingRec) {
+          existingJobId = existingRec.job_id
+          existingJobContactId = existingRec.job_contact_id
+        }
+
+        const record: any = {
           org_id: DEFAULT_ORG_ID,
           xero_invoice_id: inv.InvoiceID,
           xero_contact_id: inv.Contact?.ContactID || null,
@@ -905,6 +934,9 @@ async function backfillInvoices(sb: any, searchParams: URLSearchParams) {
           updated_at: parseXeroDate(inv.UpdatedDateUTC) || new Date().toISOString(),
           synced_at: new Date().toISOString(),
         }
+
+        if (existingJobId) record.job_id = existingJobId
+        if (existingJobContactId) record.job_contact_id = existingJobContactId
 
         const { error } = await sb.from('xero_invoices').upsert(record, {
           onConflict: 'org_id,xero_invoice_id',
@@ -968,7 +1000,7 @@ async function syncReports(sb: any) {
     }, { onConflict: 'org_id,report_type,report_date' })
 
     results.profit_and_loss = true
-  } catch (e) {
+  } catch (e: any) {
     console.error('P&L sync failed:', e.message)
     results.profit_and_loss = false
   }
@@ -995,7 +1027,7 @@ async function syncReports(sb: any) {
     }, { onConflict: 'org_id,report_type,report_date' })
 
     results.profit_and_loss_prev = true
-  } catch (e) {
+  } catch (e: any) {
     console.error('Previous P&L sync failed:', e.message)
     results.profit_and_loss_prev = false
   }
@@ -1022,7 +1054,7 @@ async function syncReports(sb: any) {
     }, { onConflict: 'org_id,report_type,report_date' })
 
     results.profit_and_loss_ytd = true
-  } catch (e) {
+  } catch (e: any) {
     console.error('YTD P&L sync failed:', e.message)
     results.profit_and_loss_ytd = false
   }
@@ -1103,7 +1135,7 @@ async function syncReports(sb: any) {
     }, { onConflict: 'org_id,report_type,report_date' })
 
     results.aged_receivables = true
-  } catch (e) {
+  } catch (e: any) {
     console.error('Aged Receivables sync failed:', e.message)
     results.aged_receivables = false
   }
@@ -1320,7 +1352,7 @@ async function syncTrackingPL(sb: any) {
       }, { onConflict: 'org_id,report_type,report_date' })
 
       results.push({ month: fromDate, columns: Object.keys(parsed), status: 'ok' })
-    } catch (e) {
+    } catch (e: any) {
       console.error(`Tracking P&L sync failed for ${fromDate}:`, e.message)
       results.push({ month: fromDate, status: 'error', error: e.message })
     }
@@ -1809,7 +1841,7 @@ async function createOrFindContact(sb: any, body: any) {
         xeroContact = matches[0]
         console.log(`[xero-sync] Found Xero contact by email: ${xeroContact.Name} (${xeroContact.ContactID})`)
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn('[xero-sync] Email search failed:', e.message)
     }
   }
@@ -1825,7 +1857,7 @@ async function createOrFindContact(sb: any, body: any) {
         xeroContact = matches[0]
         console.log(`[xero-sync] Found Xero contact by name: ${xeroContact.Name} (${xeroContact.ContactID})`)
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn('[xero-sync] Name search failed:', e.message)
     }
   }
@@ -2102,7 +2134,7 @@ async function backfillXeroContacts(sb: any, batchLimit = 10) {
 
       if (result.created) created++
       else found++
-    } catch (e) {
+    } catch (e: any) {
       console.error(`[xero-sync] backfill contact failed for job ${job.id} (${job.client_name}):`, e.message)
       failed++
     }
@@ -2185,7 +2217,7 @@ async function syncBankBalances(sb: any) {
 
     console.log(`[xero-sync] Synced ${synced} bank balances from Bank Summary report`)
     return { success: true, accounts_synced: synced }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[xero-sync] Bank Summary report failed, falling back to Accounts API:', (e as Error).message)
 
     // Fallback: GET /Accounts (won't have balances but at least gets account names)
