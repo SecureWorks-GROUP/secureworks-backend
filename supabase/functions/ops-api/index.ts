@@ -623,6 +623,26 @@ serve(async (req: Request) => {
       case 'complete_and_invoice': return json(await completeAndInvoice(client, body))
       case 'create_deposit_invoice': return json(await createDepositInvoice(client, body))
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
+      case 'create_trade_user': {
+        const { email, password, name, role, phone } = body
+        if (!email || !password || !name) return json({ error: 'email, password, name required' }, 400)
+        const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const { data: authUser, error: authErr } = await adminClient.auth.admin.createUser({
+          email, password, email_confirm: true,
+          user_metadata: { full_name: name }
+        })
+        if (authErr) return json({ error: authErr.message }, 500)
+        const { data: profile, error: profErr } = await adminClient.from('users').insert({
+          id: authUser.user.id,
+          org_id: '00000000-0000-0000-0000-000000000001',
+          name: name,
+          email: email,
+          phone: phone || null,
+          role: role || 'crew'
+        }).select().single()
+        if (profErr) return json({ error: profErr.message, auth_id: authUser.user.id }, 500)
+        return json({ success: true, user: profile })
+      }
       case 'fix_legacy': {
         const { data, error } = await client.from('jobs').update({ legacy: false }).is('legacy', null).select('id')
         const { data: d2, error: e2 } = await client.from('jobs').update({ legacy: false }).eq('legacy', true).not('status', 'in', '("cancelled","lost")').select('id')
@@ -1525,7 +1545,8 @@ serve(async (req: Request) => {
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
-            const { week_start, extra_items, notes: invoiceNotes } = body
+            const { week_start, extra_items, notes: invoiceNotes, gst_registered } = body
+            const taxType = gst_registered === false ? 'NONE' : 'INPUT'
 
             // Miscellaneous invoice (no week) or weekly invoice
             let weekEnd: string | null = null
@@ -1822,20 +1843,20 @@ serve(async (req: Request) => {
                   return option ? [{ Name: 'Business Unit', Option: option }] : []
                 }
 
-                // Build Xero line items with tracking
+                // Build Xero line items with tracking + correct tax type
                 const allLines = [...lineItems.map((l: any) => ({
                   Description: (l.job_number || 'Labour') + ' — ' + (l.client_name || '') + ' — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr',
                   Quantity: l.total_hours,
                   UnitAmount: l.hourly_rate,
                   AccountCode: '301',
-                  TaxType: 'INPUT',
+                  TaxType: taxType,
                   Tracking: xeroTracking(l.job_number || ''),
                 })), ...extraLineItems.map((e: any) => ({
-                  Description: (e.job_number ? e.job_number + ' — ' : '') + (e.description || e.line_type || 'Extra'),
+                  Description: (e.job_number ? e.job_number + ' — ' : '') + (e.description || e.line_type || 'Extra') + (e.client_name && !e.job_number ? ' — ' + e.client_name + (e.site_address ? ', ' + e.site_address : '') : ''),
                   Quantity: e.quantity || 1,
                   UnitAmount: e.unit_rate || 0,
                   AccountCode: '301',
-                  TaxType: 'INPUT',
+                  TaxType: taxType,
                   Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                 }))]
 
@@ -1847,7 +1868,7 @@ serve(async (req: Request) => {
                     Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
-                    LineAmountTypes: 'Exclusive',
+                    LineAmountTypes: gst_registered === false ? 'NoTax' : 'Exclusive',
                     LineItems: allLines,
                   }],
                 }
