@@ -1257,6 +1257,7 @@ serve(async (req: Request) => {
       case 'my_trade_invoices':
       case 'set_trade_rate':
       case 'update_trade_profile':
+      case 'attach_invoice_pdf':
       case 'create_trade_alert':
       case 'trade_labour_budget':
       case 'update_job_phase':
@@ -1470,6 +1471,36 @@ serve(async (req: Request) => {
             updates.trade_details = tradeDetails
             await client.from('users').update(updates).eq('id', tradeUser.id)
             return json({ success: true })
+          }
+          case 'attach_invoice_pdf': {
+            const { xero_bill_id: attachBillId, pdf_base64, filename } = body
+            if (!attachBillId || !pdf_base64) throw new ApiError('xero_bill_id and pdf_base64 required', 400)
+            try {
+              const { accessToken, tenantId } = await getToken(client)
+              const pdfBytes = Uint8Array.from(atob(pdf_base64), (c: string) => c.charCodeAt(0))
+              const attachRes = await fetch(
+                `https://api.xero.com/api.xro/2.0/Invoices/${attachBillId}/Attachments/${encodeURIComponent(filename || 'invoice.pdf')}`,
+                {
+                  method: 'PUT',
+                  headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Xero-tenant-id': tenantId,
+                    'Content-Type': 'application/pdf',
+                    'Content-Length': String(pdfBytes.length),
+                  },
+                  body: pdfBytes,
+                }
+              )
+              if (!attachRes.ok) {
+                const errText = await attachRes.text()
+                console.log('[ops-api] Xero PDF attach failed:', attachRes.status, errText)
+                throw new Error('Xero attachment failed: ' + attachRes.status)
+              }
+              return json({ success: true })
+            } catch (e) {
+              console.log('[ops-api] PDF attachment error:', (e as Error).message)
+              return json({ success: false, error: (e as Error).message }, 500)
+            }
           }
           case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
           case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id))
@@ -1769,20 +1800,39 @@ serve(async (req: Request) => {
               }
 
               if (xeroContactId) {
-                const dueDate = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10)
-                // Build Xero line items from all invoice lines
+                // Due date: submit by Sunday → next Friday. Submit Mon+ → Friday after next.
+                const now = new Date()
+                const dayOfWeek = now.getDay() // 0=Sun, 1=Mon, ..., 6=Sat
+                let daysToFriday = (5 - dayOfWeek + 7) % 7 || 7 // days until next Friday
+                if (dayOfWeek >= 1 && dayOfWeek <= 6) daysToFriday += 7 // Mon-Sat: push to NEXT Friday
+                // Sunday (0): this coming Friday. Mon-Sat: Friday after next.
+                const dueDate = new Date(now.getTime() + daysToFriday * 86400000).toISOString().slice(0, 10)
+
+                // Map division to Xero tracking option
+                const divToTracking = (div: string): any[] => {
+                  const map: Record<string, string> = {
+                    'Patio': 'SW - PATIOS', 'Fencing': 'SW - FENCING', 'Decking': 'SW - DECKING',
+                    'Make Safe': 'SW - INSURANCE WORK', 'General Labour': 'SW - GROUP',
+                  }
+                  const option = map[div] || ''
+                  return option ? [{ Name: 'Business Unit', Option: option }] : []
+                }
+
+                // Build Xero line items with tracking
                 const allLines = [...lineItems.map((l: any) => ({
-                  Description: (l.job_number || 'Labour') + ' ' + (l.client_name || '') + ' — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr',
+                  Description: (l.job_number || 'Labour') + ' — ' + (l.client_name || '') + ' — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr',
                   Quantity: l.total_hours,
                   UnitAmount: l.hourly_rate,
                   AccountCode: '301',
                   TaxType: 'INPUT',
+                  Tracking: xeroTracking(l.job_number || ''),
                 })), ...extraLineItems.map((e: any) => ({
-                  Description: (e.description || e.line_type || 'Extra') + (e.division ? ' [' + e.division + ']' : ''),
+                  Description: (e.job_number ? e.job_number + ' — ' : '') + (e.description || e.line_type || 'Extra'),
                   Quantity: e.quantity || 1,
                   UnitAmount: e.unit_rate || 0,
                   AccountCode: '301',
                   TaxType: 'INPUT',
+                  Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                 }))]
 
                 const xeroPayload = {
@@ -1790,6 +1840,7 @@ serve(async (req: Request) => {
                     Type: 'ACCPAY',
                     Contact: { ContactID: xeroContactId },
                     Reference: invoiceNumber,
+                    Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
                     LineAmountTypes: 'Exclusive',
