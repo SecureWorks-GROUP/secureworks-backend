@@ -1258,6 +1258,7 @@ serve(async (req: Request) => {
       case 'set_trade_rate':
       case 'update_trade_profile':
       case 'attach_invoice_pdf':
+      case 'delete_trade_invoice':
       case 'create_trade_alert':
       case 'trade_labour_budget':
       case 'update_job_phase':
@@ -1502,6 +1503,20 @@ serve(async (req: Request) => {
               return json({ success: false, error: (e as Error).message }, 500)
             }
           }
+          case 'delete_trade_invoice': {
+            const { invoice_id: delInvId } = body
+            if (!delInvId) throw new ApiError('invoice_id required', 400)
+            const { data: delInv } = await client.from('trade_invoices')
+              .select('id, status')
+              .eq('id', delInvId)
+              .eq('user_id', tradeUser.id)
+              .single()
+            if (!delInv) throw new ApiError('Invoice not found', 404)
+            if (delInv.status === 'paid') throw new ApiError('Cannot delete a paid invoice', 400)
+            await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', delInvId)
+            await client.from('trade_invoices').delete().eq('id', delInvId)
+            return json({ success: true })
+          }
           case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
           case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id))
           case 'update_job_phase': return json(await updateJobPhase(client, body, tradeUser.id))
@@ -1519,20 +1534,7 @@ serve(async (req: Request) => {
               const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
               weekEnd = weekEndDate.toISOString().slice(0, 10)
 
-              // Check for existing invoice this week
-              const { data: existing } = await client.from('trade_invoices')
-                .select('id, status')
-                .eq('user_id', tradeUser.id)
-                .eq('week_start', week_start)
-                .maybeSingle()
-              // If existing invoice for this week, allow re-submission (delete old + recreate)
-              // Bookkeepers can handle duplicate Xero bills if any
-              if (existing) {
-                if (existing.status === 'paid') throw new ApiError('Invoice already paid for this week — cannot re-submit', 400)
-                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', existing.id)
-                await client.from('trade_invoices').delete().eq('id', existing.id)
-                console.log('[ops-api] Deleted previous invoice for re-submission:', existing.id, existing.status)
-              }
+              // No duplicate check — trades can submit multiple invoices per week
             }
 
             // Get completed assignments (only if weekly invoice)
@@ -1638,14 +1640,14 @@ serve(async (req: Request) => {
             const gst = Math.round(subtotal * 0.1 * 100) / 100
             const totalInc = Math.round((subtotal + gst) * 100) / 100
 
-            // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq}
+            // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq} (global sequence, never reused)
             const initials = (userProfile?.name || 'XX').split(' ').map((n: string) => n.charAt(0).toUpperCase()).join('').slice(0, 3)
             const today = new Date().toISOString().slice(2, 10).replace(/-/g, '')
-            const { count: seqCount } = await client.from('trade_invoices')
+            // Global count of ALL invoices by this user (never decreases even if deleted)
+            const { count: totalCount } = await client.from('trade_invoices')
               .select('id', { count: 'exact', head: true })
               .eq('user_id', tradeUser.id)
-              .gte('created_at', new Date().toISOString().slice(0, 10) + 'T00:00:00Z')
-            const seq = String((seqCount || 0) + 1).padStart(3, '0')
+            const seq = String((totalCount || 0) + 1).padStart(3, '0')
             const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
 
             // Create invoice + line items
