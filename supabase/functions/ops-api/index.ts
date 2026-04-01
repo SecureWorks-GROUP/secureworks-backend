@@ -7010,18 +7010,17 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
 async function myTradeInvoices(client: any, userId: string) {
   const { data, error } = await client
     .from('trade_invoices')
-    .select('id, week_start, week_end, week_ending, invoice_number, notes, subtotal_ex, gst, total_inc, subtotal, total, xero_bill_number, status, created_at')
+    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, total_inc, xero_bill_number, xero_bill_id, status, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(20)
 
   if (error) throw error
-  // Normalize: some rows have old schema (week_ending, subtotal, total) vs new (week_start, subtotal_ex, total_inc)
   const invoices = (data || []).map((inv: any) => ({
     ...inv,
-    week_ending: inv.week_ending || inv.week_end,
-    total: inv.total ?? inv.total_inc ?? 0,
-    subtotal: inv.subtotal ?? inv.subtotal_ex ?? 0,
+    week_ending: inv.week_end,
+    total: inv.total_inc ?? 0,
+    subtotal: inv.subtotal_ex ?? 0,
   }))
   return { invoices }
 }
