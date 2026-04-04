@@ -94,6 +94,16 @@ const THRESHOLDS = {
   no_activity_days: 3,           // No new leads for 3+ days
 }
 
+// Test/dummy data filter — excludes records that pollute metrics
+const TEST_NAMES = ['test', 'test user', 'banana person']
+function isTestJob(j: any): boolean {
+  const name = (j.client_name || '').trim().toLowerCase()
+  if (!name) return true
+  if (TEST_NAMES.includes(name)) return true
+  if (name === 'marnin stobbe') return true
+  return false
+}
+
 interface Alert {
   severity: 'critical' | 'warning' | 'info'
   category: string
@@ -311,7 +321,7 @@ async function generateCoachingInsights(diagnostics: Record<string, any>, digest
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1500,
-        system: `You are a business coach for SecureWorks Group, a Perth outdoor living construction company. Monthly targets: $180K revenue, 30% margin, 15 jobs. You have diagnostic data from their actual database. Generate coaching DIRECTIVES — not observations. Each directive must: (1) State the specific metric and current value, (2) Compare to benchmark or previous period where possible, (3) Quantify the dollar impact, (4) Give the exact action to fix it. Return JSON: { "ceo": ["directive1", "directive2"], "ops": ["directive1", "directive2"], "sales": { "nathan": ["directive1"], "khairo": ["directive1"] } }`,
+        system: `You are a business coach for SecureWorks Group, a Perth outdoor living construction company. Monthly targets: $180K revenue, 30% margin, 15 jobs. You have diagnostic data from their actual database. Generate coaching DIRECTIVES — not observations. Each directive must: (1) State the specific metric and current value, (2) Compare to benchmark or previous period where possible, (3) Quantify the dollar impact, (4) Give the exact action to fix it. CRITICAL: Only cite numbers that appear verbatim in the provided diagnostics or snapshot data. Do not estimate, calculate, or infer new dollar figures. If a specific number is not in the data, say "data not available" instead of guessing. Return JSON: { "ceo": ["directive1", "directive2"], "ops": ["directive1", "directive2"], "sales": { "nathan": ["directive1"], "khairo": ["directive1"] } }`,
         messages: [{
           role: 'user',
           content: `Generate coaching directives from this diagnostic data:\n\nDiagnostics: ${JSON.stringify(diagnostics)}\n\nDigest snapshot: ${JSON.stringify(digest.snapshot || {})}\n\nReturn ONLY valid JSON.`,
@@ -1530,7 +1540,8 @@ async function generateWeeklyPulse(sb: any) {
     .eq('legacy', false)
 
   const allJobs = (jobs || []).filter((j: any) =>
-    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb))
+    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb)
+    && !isTestJob(j))
   const thisWeek = allJobs.filter((j: any) => j.created_at >= weekAgo)
   const lastWeek = allJobs.filter((j: any) => j.created_at >= twoWeeksAgo && j.created_at < weekAgo)
 
@@ -1760,7 +1771,7 @@ async function generateFinancialSnapshot(sb: any) {
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 500,
-          system: 'You are a concise CFO analyst for SecureWorks Group, a Perth construction company. Generate two outputs: 1) A 2-3 sentence executive summary of the financial position. 2) A P&L explanation if there are unbilled jobs or timing discrepancies. Reference specific dollar amounts and job names. Be direct.',
+          system: 'You are a concise CFO analyst for SecureWorks Group, a Perth construction company. Generate two outputs: 1) A 2-3 sentence executive summary of the financial position. 2) A P&L explanation if there are unbilled jobs or timing discrepancies. CRITICAL: Only reference numbers explicitly present in the financial snapshot provided. Do not infer or calculate values not in the data (e.g., do not guess monthly fixed costs or crew idle time). Be direct.',
           messages: [{
             role: 'user',
             content: `Financial snapshot data for ${today}:\n${JSON.stringify(summaryData, null, 2)}\n\nGenerate: {"executive_summary": "...", "pnl_narrative": "..."}`,
@@ -2787,7 +2798,8 @@ async function generateDigest(sb: any) {
   ])
 
   const allJobs = (jobs || []).filter((j: any) =>
-    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb))
+    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb)
+    && !isTestJob(j))
   const allReceivables = receivables || []
 
   // ── Payment chase data (for PAYMENTS section) ──
@@ -2859,7 +2871,7 @@ async function generateDigest(sb: any) {
   // ════════════════════════════════════════
   const overdueInvoices = allReceivables.filter((r: any) =>
     ['31-60', '61-90', '90+'].includes(r.age_bucket))
-  const severeOverdue = allReceivables.filter((r: any) => r.age_bucket === '90+')
+  const severeOverdue = allReceivables.filter((r: any) => ['61-90', '90+'].includes(r.age_bucket))
 
   if (severeOverdue.length > 0) {
     const total = severeOverdue.reduce((s: number, r: any) => s + (parseFloat(r.amount_due) || 0), 0)
@@ -2947,7 +2959,7 @@ async function generateDigest(sb: any) {
   const staleDrafts = allJobs.filter((j: any) => {
     if (j.status !== 'draft') return false
     const daysSince = (now.getTime() - new Date(j.created_at).getTime()) / 86400000
-    return daysSince > THRESHOLDS.draft_stale_days
+    return daysSince > THRESHOLDS.draft_stale_days && daysSince <= 180
   })
 
   if (staleDrafts.length > 0) {
@@ -3094,49 +3106,39 @@ async function generateDigest(sb: any) {
   }
 
   // ════════════════════════════════════════
-  // 8. BREAK-EVEN CHECK
+  // 8. JOB COMPLETION PACE CHECK (uses org_config targets, not synthetic break-even)
   // ════════════════════════════════════════
-  const fixedCosts = fixedCostsConfig?.config_value?.amount || 0
-  let breakEvenJobs = null
-  if (fixedCosts > 0) {
-    const completedJobs = allJobs.filter((j: any) =>
-      ['complete', 'invoiced'].includes(j.status))
-    const avgJobProfit = completedJobs.length > 0
-      ? completedJobs.reduce((s: number, j: any) =>
-          s + (parseFloat(j.pricing_json?.totalExGST || j.pricing_json?.totalIncGST || 0) * 0.3), 0) / completedJobs.length
-      : 0
+  const jobsTarget = fixedCostsConfig?.config_value?.monthly_jobs_target || 15
+  const completedThisMonth = allJobs.filter((j: any) =>
+    ['complete', 'invoiced'].includes(j.status) &&
+    j.completed_at && new Date(j.completed_at) >= new Date(currentMonthStart)
+  ).length
 
-    if (avgJobProfit > 0) {
-      breakEvenJobs = Math.ceil(fixedCosts / avgJobProfit)
-      const completedThisMonth = allJobs.filter((j: any) =>
-        ['complete', 'invoiced'].includes(j.status) &&
-        j.completed_at && new Date(j.completed_at) >= new Date(currentMonthStart)
-      ).length
+  const dayOfMonth = now.getDate()
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+  const paceNeeded = jobsTarget * (dayOfMonth / daysInMonth)
 
-      const dayOfMonth = now.getDate()
-      const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
-      const paceNeeded = breakEvenJobs * (dayOfMonth / daysInMonth)
-
-      if (completedThisMonth < paceNeeded * 0.7) {
-        alerts.push({
-          severity: 'warning',
-          category: 'Financial',
-          title: `Behind break-even pace`,
-          detail: `${completedThisMonth} jobs completed this month. Need ${breakEvenJobs} to break even (${Math.round(paceNeeded)} by today based on pace).`,
-          action: 'Push to close accepted jobs. Check scheduled jobs for delays.',
-          data: { completed: completedThisMonth, needed: breakEvenJobs, pace_target: paceNeeded },
-        })
-      }
-    }
+  if (completedThisMonth < paceNeeded * 0.7) {
+    alerts.push({
+      severity: 'warning',
+      category: 'Financial',
+      title: `Behind job completion pace`,
+      detail: `${completedThisMonth} jobs completed this month against ${jobsTarget} target (${Math.round(paceNeeded)} expected by today).`,
+      action: 'Push to close accepted jobs. Check scheduled jobs for delays.',
+      data: { completed: completedThisMonth, target: jobsTarget, pace_target: paceNeeded },
+    })
   }
 
   // ════════════════════════════════════════
   // 9. WIN RATE HEALTH — both too low AND too high are problems
   // ════════════════════════════════════════
+  const ninetyDaysAgoStr = new Date(now.getTime() - 90 * 86400000).toISOString()
   const quotedJobs = allJobs.filter((j: any) =>
-    ['quoted','accepted','scheduled','in_progress','complete','invoiced'].includes(j.status))
+    ['quoted','accepted','scheduled','in_progress','complete','invoiced'].includes(j.status)
+    && j.created_at && j.created_at >= ninetyDaysAgoStr)
   const wonJobs = allJobs.filter((j: any) =>
-    ['accepted','scheduled','in_progress','complete','invoiced'].includes(j.status))
+    ['accepted','scheduled','in_progress','complete','invoiced'].includes(j.status)
+    && j.created_at && j.created_at >= ninetyDaysAgoStr)
   const winRate = quotedJobs.length > 0 ? (wonJobs.length / quotedJobs.length) * 100 : null
 
   if (winRate !== null && quotedJobs.length >= 10) {
@@ -3359,7 +3361,7 @@ async function generateDigest(sb: any) {
   const unscopedLeads = allJobs.filter((j: any) => {
     if (j.status !== 'draft') return false
     const daysSince = (now.getTime() - new Date(j.created_at).getTime()) / 86400000
-    return daysSince > 5 && !scopedJobIds.has(j.id)
+    return daysSince > 5 && daysSince <= 90 && !scopedJobIds.has(j.id)
   })
   if (unscopedLeads.length > 0) {
     alerts.push({
@@ -3566,9 +3568,12 @@ async function generateDigest(sb: any) {
     pipeline_coverage: monthlyRevTarget > 0 ? parseFloat((pipelineValue / monthlyRevTarget).toFixed(1)) : null,
     jobs_in_progress: allJobs.filter((j: any) => j.status === 'in_progress').length,
     jobs_scheduled: allJobs.filter((j: any) => j.status === 'scheduled').length,
-    quotes_outstanding: allJobs.filter((j: any) => j.status === 'quoted').length,
+    quotes_outstanding: allJobs.filter((j: any) => {
+      if (j.status !== 'quoted' || !j.quoted_at) return false
+      return (now.getTime() - new Date(j.quoted_at).getTime()) / 86400000 <= 60
+    }).length,
     drafts_pending: allJobs.filter((j: any) => j.status === 'draft').length,
-    break_even_jobs: breakEvenJobs,
+    jobs_target: jobsTarget,
   }
 
   // ════════════════════════════════════════
@@ -3686,7 +3691,8 @@ async function createDailyAnnotations(sb: any, digest: any) {
   ])
 
   const allJobs = (jobs || []).filter((j: any) =>
-    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb))
+    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb)
+    && !isTestJob(j))
   const poJobIds = new Set((allPOs || []).map((p: any) => p.job_id).filter(Boolean))
   const confirmedPOJobIds = new Set((allPOs || []).filter((p: any) =>
     ['confirmed', 'delivered', 'billed', 'authorised'].includes(p.status)
