@@ -27,10 +27,10 @@ const AWST_OFFSET_MS = 8 * 60 * 60 * 1000
 function awstNow(): Date { return new Date(Date.now() + AWST_OFFSET_MS) }
 
 // ── Telegram Helper ──
-async function sendTelegramMessage(chatId: number | string, text: string) {
-  if (!TELEGRAM_BOT_TOKEN) return
+async function sendTelegramMessage(chatId: number | string, text: string): Promise<boolean> {
+  if (!TELEGRAM_BOT_TOKEN) return false
   try {
-    await fetchWithTimeout(`${TELEGRAM_API}/sendMessage`, {
+    const res = await fetchWithTimeout(`${TELEGRAM_API}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -39,8 +39,10 @@ async function sendTelegramMessage(chatId: number | string, text: string) {
         parse_mode: 'HTML',
       }),
     }, 15000)
+    return res?.ok ?? false
   } catch (e) {
     console.log('[daily-digest] Telegram send failed:', (e as Error).message)
+    return false
   }
 }
 
@@ -1022,8 +1024,8 @@ Sign off as "Your AI Operations Partner".`,
 
 // ── Telegram Morning Brief ───────────────────────────────
 
-async function sendMorningBrief(sb: any, digest: any) {
-  if (!TELEGRAM_BOT_TOKEN) return
+async function sendMorningBrief(sb: any, digest: any): Promise<boolean> {
+  if (!TELEGRAM_BOT_TOKEN) return false
 
   try {
     // Get group chat_id from org settings
@@ -1035,7 +1037,7 @@ async function sendMorningBrief(sb: any, digest: any) {
     const groupChatId = org?.settings_json?.telegram_group_chat_id
     if (!groupChatId) {
       console.log('[daily-digest] No telegram_group_chat_id stored yet — skipping morning brief')
-      return
+      return false
     }
 
     const today = awstNow().toISOString().slice(0, 10)
@@ -1189,9 +1191,10 @@ async function sendMorningBrief(sb: any, digest: any) {
     }
 
     lines.push('')
-    await sendTelegramMessage(groupChatId, lines.join('\n'))
+    return await sendTelegramMessage(groupChatId, lines.join('\n'))
   } catch (e) {
     console.log('[daily-digest] morning brief failed:', (e as Error).message)
+    return false
   }
 }
 
@@ -2699,14 +2702,8 @@ serve(async (req: Request) => {
     // GET requests from dashboards should only return data, not spam Telegram
     const shouldSendTelegram = req.method === 'POST' || url.searchParams.get('send_telegram') === 'true'
     if (shouldSendTelegram) {
-      // Await morning brief (primary delivery) before marking delivered
-      let briefSent = false
-      try {
-        await sendMorningBrief(sb, digest)
-        briefSent = true
-      } catch (e) {
-        console.log('[daily-digest] morning brief error:', e)
-      }
+      // Await morning brief (primary delivery) — returns true only if Telegram API confirmed ok
+      const briefSent = await sendMorningBrief(sb, digest)
 
       // Role-specific coaching DMs (non-blocking)
       sendRoleSpecificDMs(sb, digest, coachingInsights).catch(e =>
