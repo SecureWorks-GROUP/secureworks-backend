@@ -2461,9 +2461,22 @@ serve(async (req: Request) => {
   }
 
   try {
+    // Auto-resolve stale alerts (>7 days, not dismissed, not resolved)
+    try {
+      const staleDate = new Date(Date.now() - 7 * 86400000).toISOString()
+      await sb.from('ai_alerts')
+        .update({ resolved_at: new Date().toISOString() })
+        .eq('org_id', DEFAULT_ORG_ID)
+        .is('dismissed_at', null)
+        .is('resolved_at', null)
+        .lt('created_at', staleDate)
+    } catch (e) {
+      console.log('[daily-digest] stale alert cleanup failed:', e)
+    }
+
     const digest = await generateDigest(sb)
 
-    // Store individual alerts in ai_alerts table
+    // Store individual alerts in ai_alerts table (with 24h deduplication)
     try {
       const alertRows = digest.alerts.map((a: Alert) => ({
         org_id: DEFAULT_ORG_ID,
@@ -2475,7 +2488,17 @@ serve(async (req: Request) => {
         detail_json: a,
       }))
       if (alertRows.length > 0) {
-        await sb.from('ai_alerts').insert(alertRows)
+        // Deduplicate: skip alerts already raised in last 24h
+        const since24h = new Date(Date.now() - 86400000).toISOString()
+        const { data: recentAlerts } = await sb.from('ai_alerts')
+          .select('alert_type')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .gte('created_at', since24h)
+        const recentTypes = new Set((recentAlerts || []).map((a: any) => a.alert_type))
+        const dedupedRows = alertRows.filter((r: any) => !recentTypes.has(r.alert_type))
+        if (dedupedRows.length > 0) {
+          await sb.from('ai_alerts').insert(dedupedRows)
+        }
       }
     } catch (e) {
       console.log('[daily-digest] ai_alerts insert failed (table may not exist):', e)
@@ -3201,9 +3224,19 @@ async function generateDigest(sb: any) {
   // ════════════════════════════════════════
   // 11. COMPLETED JOBS NOT INVOICED (money left on the table)
   // ════════════════════════════════════════
+  // Cross-reference xero_invoices so jobs with PAID/AUTHORISED invoices don't count
+  const { data: invoicedJobRows } = await sb.from('xero_invoices')
+    .select('job_id')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('invoice_type', 'ACCREC')
+    .not('status', 'in', '("VOIDED","DELETED")')
+    .not('job_id', 'is', null)
+  const invoicedJobIds = new Set((invoicedJobRows || []).map((i: any) => i.job_id))
+
   const completedNotInvoiced = allJobs.filter((j: any) => {
     if (j.status !== 'complete') return false
     if (!j.completed_at) return false
+    if (invoicedJobIds.has(j.id)) return false
     const daysSince = (now.getTime() - new Date(j.completed_at).getTime()) / 86400000
     return daysSince > 3 // More than 3 days since completion without moving to invoiced
   })
@@ -3232,7 +3265,7 @@ async function generateDigest(sb: any) {
     if (!['accepted', 'scheduled'].includes(j.status)) return false
     if (!j.accepted_at) return false
     const daysSince = (now.getTime() - new Date(j.accepted_at).getTime()) / 86400000
-    return daysSince > 7 && !poJobIds.has(j.id)
+    return daysSince > 7 && daysSince <= 90 && !poJobIds.has(j.id)
   })
   if (acceptedNoMaterials.length > 0) {
     alerts.push({
@@ -3427,22 +3460,9 @@ async function generateDigest(sb: any) {
   }
 
   // ════════════════════════════════════════
-  // PERSIST ALERTS TO ai_alerts TABLE
+  // PERSIST ALERTS TO ai_alerts TABLE (REMOVED — deduped insert happens in generateDigest caller)
   // ════════════════════════════════════════
-  if (alerts.length > 0) {
-    const alertRows = alerts.map((a: any) => ({
-      org_id: DEFAULT_ORG_ID,
-      alert_type: a.category?.toLowerCase().replace(/\s+/g, '_') || 'general',
-      severity: a.severity === 'critical' ? 'red' : 'amber',
-      message: a.title,
-      recommended_action: a.action || null,
-      detail_json: { detail: a.detail || null, category: a.category || null },
-    }))
-    const { error: alertInsertErr } = await sb.from('ai_alerts').insert(alertRows)
-    if (alertInsertErr) {
-      console.error('Failed to persist alerts to ai_alerts:', alertInsertErr.message)
-    }
-  }
+  // (duplicate insert block removed)
 
   // ════════════════════════════════════════
   // DRAFT SMS NOTIFICATIONS FOR DELIVERY CHECKS
