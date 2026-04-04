@@ -2776,6 +2776,7 @@ async function generateDigest(sb: any) {
     { data: adsPrev7 },
     { data: matchedLeads },
     { data: fixedCostsConfig },
+    { data: jobsTargetConfig },
     { data: allPOs },
     { data: upcomingAssignments },
     { data: scopeAssigns },
@@ -2792,6 +2793,7 @@ async function generateDigest(sb: any) {
       .lt('report_date', new Date(now.getTime() - 7 * 86400000).toISOString().split('T')[0]),
     sb.from('contact_matches').select('job_id, lead_source, created_at').eq('org_id', DEFAULT_ORG_ID),
     sb.from('org_config').select('config_value').eq('org_id', DEFAULT_ORG_ID).eq('config_key', 'monthly_fixed_costs').maybeSingle(),
+    sb.from('org_config').select('config_value').eq('org_id', DEFAULT_ORG_ID).eq('config_key', 'monthly_jobs_target').maybeSingle(),
     sb.from('purchase_orders').select('job_id, status').eq('org_id', DEFAULT_ORG_ID).neq('status', 'deleted'),
     sb.from('job_assignments').select('job_id, scheduled_date, assignment_type').eq('assignment_type', 'install').gte('scheduled_date', today).lte('scheduled_date', fiveDaysOut),
     sb.from('job_assignments').select('job_id').eq('assignment_type', 'scope'),
@@ -3108,7 +3110,7 @@ async function generateDigest(sb: any) {
   // ════════════════════════════════════════
   // 8. JOB COMPLETION PACE CHECK (uses org_config targets, not synthetic break-even)
   // ════════════════════════════════════════
-  const jobsTarget = fixedCostsConfig?.config_value?.monthly_jobs_target || 15
+  const jobsTarget = jobsTargetConfig?.config_value?.amount || 15
   const completedThisMonth = allJobs.filter((j: any) =>
     ['complete', 'invoiced'].includes(j.status) &&
     j.completed_at && new Date(j.completed_at) >= new Date(currentMonthStart)
