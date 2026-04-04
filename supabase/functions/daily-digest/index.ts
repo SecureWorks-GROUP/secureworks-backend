@@ -97,10 +97,12 @@ const THRESHOLDS = {
 // Test/dummy data filter — excludes records that pollute metrics
 const TEST_NAMES = ['test', 'test user', 'banana person']
 function isTestJob(j: any): boolean {
-  const name = (j.client_name || '').trim().toLowerCase()
+  const name = (j.client_name || '').trim().toLowerCase().replace(/\s+/g, ' ')
   if (!name) return true
   if (TEST_NAMES.includes(name)) return true
   if (name === 'marnin stobbe') return true
+  if (name.includes('test')) return true
+  if (name.includes('banana')) return true
   return false
 }
 
@@ -2758,6 +2760,14 @@ async function generateDigest(sb: any) {
   const now = new Date()
   const today = now.toISOString().split('T')[0]
   const alerts: Alert[] = []
+
+  // Bulk-resolve stale alerts older than 7 days
+  await sb.from('ai_alerts')
+    .update({ resolved_at: new Date().toISOString() })
+    .eq('org_id', DEFAULT_ORG_ID)
+    .is('resolved_at', null)
+    .is('dismissed_at', null)
+    .lt('created_at', new Date(Date.now() - 7 * 86400000).toISOString())
 
   // ── Fetch all data in parallel ──
   const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0]
