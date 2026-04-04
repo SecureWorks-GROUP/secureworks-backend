@@ -2513,19 +2513,9 @@ serve(async (req: Request) => {
         detail_json: a,
       }))
       if (alertRows.length > 0) {
-        // Deduplicate: skip alerts already raised in last 24h
-        const since24h = new Date(Date.now() - 86400000).toISOString()
-        const { data: recentAlerts } = await sb.from('ai_alerts')
-          .select('alert_type')
-          .eq('org_id', DEFAULT_ORG_ID)
-          .is('resolved_at', null)
-          .is('dismissed_at', null)
-          .gte('created_at', since24h)
-        const recentTypes = new Set((recentAlerts || []).map((a: any) => a.alert_type))
-        const dedupedRows = alertRows.filter((r: any) => !recentTypes.has(r.alert_type))
-        if (dedupedRows.length > 0) {
-          await sb.from('ai_alerts').insert(dedupedRows)
-        }
+        // Resolve-all in generateDigest() already clears old alerts;
+        // just insert fresh ones directly
+        await sb.from('ai_alerts').insert(alertRows)
       }
     } catch (e) {
       console.log('[daily-digest] ai_alerts insert failed (table may not exist):', e)
