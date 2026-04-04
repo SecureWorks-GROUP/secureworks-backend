@@ -2709,6 +2709,12 @@ serve(async (req: Request) => {
       // Smart nudges (non-blocking)
       generateSmartNudges(sb, digest, digest.diagnostics).catch(e =>
         console.log('[daily-digest] smart nudges error:', e))
+
+      // Mark digest as delivered (Telegram is the primary delivery channel)
+      await sb.from('daily_digests')
+        .update({ delivered: true, delivered_at: new Date().toISOString() })
+        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('digest_date', new Date().toISOString().split('T')[0])
     } else {
       console.log('[daily-digest] GET request - skipping Telegram sends')
     }
