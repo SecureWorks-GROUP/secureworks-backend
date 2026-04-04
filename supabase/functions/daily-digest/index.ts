@@ -150,7 +150,8 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
       sb.from('jobs')
         .select('id, job_number, client_name, quoted_at, quoted_value, created_by, status')
         .eq('status', 'quoted')
-        .not('quoted_at', 'is', null),
+        .not('quoted_at', 'is', null)
+        .gte('quoted_at', sixtyDaysAgo),
 
       // 1 + 5. Lead response time + pipeline velocity (last 30d)
       sb.from('jobs')
@@ -1518,7 +1519,8 @@ async function generateWeeklyPulse(sb: any) {
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('legacy', false)
 
-  const allJobs = jobs || []
+  const allJobs = (jobs || []).filter((j: any) =>
+    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb))
   const thisWeek = allJobs.filter((j: any) => j.created_at >= weekAgo)
   const lastWeek = allJobs.filter((j: any) => j.created_at >= twoWeeksAgo && j.created_at < weekAgo)
 
@@ -2766,7 +2768,8 @@ async function generateDigest(sb: any) {
     sb.from('job_assignments').select('job_id').eq('assignment_type', 'scope'),
   ])
 
-  const allJobs = jobs || []
+  const allJobs = (jobs || []).filter((j: any) =>
+    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb))
   const allReceivables = receivables || []
 
   // ── Payment chase data (for PAYMENTS section) ──
@@ -2812,7 +2815,7 @@ async function generateDigest(sb: any) {
     if (j.status !== 'quoted') return false
     if (!j.quoted_at) return false
     const daysSinceQuoted = (now.getTime() - new Date(j.quoted_at).getTime()) / 86400000
-    return daysSinceQuoted > THRESHOLDS.stale_quote_days
+    return daysSinceQuoted > THRESHOLDS.stale_quote_days && daysSinceQuoted <= 60
   })
 
   if (staleQuotes.length > 0) {
@@ -3664,7 +3667,8 @@ async function createDailyAnnotations(sb: any, digest: any) {
       .limit(50),
   ])
 
-  const allJobs = jobs || []
+  const allJobs = (jobs || []).filter((j: any) =>
+    !(j.status === 'scheduled' && !j.job_number && !j.site_suburb))
   const poJobIds = new Set((allPOs || []).map((p: any) => p.job_id).filter(Boolean))
   const confirmedPOJobIds = new Set((allPOs || []).filter((p: any) =>
     ['confirmed', 'delivered', 'billed', 'authorised'].includes(p.status)
@@ -3891,7 +3895,8 @@ async function createDailyAnnotations(sb: any, digest: any) {
   // ── 4. Stale Quotes — granular follow-up nudges (3/5/7 day tiers) ──
   const quotedJobs = allJobs.filter((j: any) => {
     if (j.status !== 'quoted' || !j.quoted_at) return false
-    return (now.getTime() - new Date(j.quoted_at).getTime()) / 86400000 >= 3
+    const daysSince = (now.getTime() - new Date(j.quoted_at).getTime()) / 86400000
+    return daysSince >= 3 && daysSince <= 60
   })
   for (const job of quotedJobs) {
     const daysSince = Math.round((now.getTime() - new Date(job.quoted_at).getTime()) / 86400000)
