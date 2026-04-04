@@ -2518,6 +2518,7 @@ serve(async (req: Request) => {
         const { data: recentAlerts } = await sb.from('ai_alerts')
           .select('alert_type')
           .eq('org_id', DEFAULT_ORG_ID)
+          .is('resolved_at', null)
           .gte('created_at', since24h)
         const recentTypes = new Set((recentAlerts || []).map((a: any) => a.alert_type))
         const dedupedRows = alertRows.filter((r: any) => !recentTypes.has(r.alert_type))
