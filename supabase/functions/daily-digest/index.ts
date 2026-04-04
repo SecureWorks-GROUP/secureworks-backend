@@ -2761,13 +2761,12 @@ async function generateDigest(sb: any) {
   const today = now.toISOString().split('T')[0]
   const alerts: Alert[] = []
 
-  // Bulk-resolve stale alerts older than 7 days
+  // Dedup: resolve old alerts before generating new ones
   await sb.from('ai_alerts')
     .update({ resolved_at: new Date().toISOString() })
     .eq('org_id', DEFAULT_ORG_ID)
     .is('resolved_at', null)
     .is('dismissed_at', null)
-    .lt('created_at', new Date(Date.now() - 7 * 86400000).toISOString())
 
   // ── Fetch all data in parallel ──
   const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0]
