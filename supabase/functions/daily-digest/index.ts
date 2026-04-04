@@ -2699,8 +2699,14 @@ serve(async (req: Request) => {
     // GET requests from dashboards should only return data, not spam Telegram
     const shouldSendTelegram = req.method === 'POST' || url.searchParams.get('send_telegram') === 'true'
     if (shouldSendTelegram) {
-      sendMorningBrief(sb, digest).catch(e =>
-        console.log('[daily-digest] morning brief error:', e))
+      // Await morning brief (primary delivery) before marking delivered
+      let briefSent = false
+      try {
+        await sendMorningBrief(sb, digest)
+        briefSent = true
+      } catch (e) {
+        console.log('[daily-digest] morning brief error:', e)
+      }
 
       // Role-specific coaching DMs (non-blocking)
       sendRoleSpecificDMs(sb, digest, coachingInsights).catch(e =>
@@ -2710,11 +2716,13 @@ serve(async (req: Request) => {
       generateSmartNudges(sb, digest, digest.diagnostics).catch(e =>
         console.log('[daily-digest] smart nudges error:', e))
 
-      // Mark digest as delivered (Telegram is the primary delivery channel)
-      await sb.from('daily_digests')
-        .update({ delivered: true, delivered_at: new Date().toISOString() })
-        .eq('org_id', DEFAULT_ORG_ID)
-        .eq('digest_date', new Date().toISOString().split('T')[0])
+      // Mark digest as delivered only after morning brief succeeds
+      if (briefSent) {
+        await sb.from('daily_digests')
+          .update({ delivered: true, delivered_at: new Date().toISOString() })
+          .eq('org_id', DEFAULT_ORG_ID)
+          .eq('digest_date', new Date().toISOString().split('T')[0])
+      }
     } else {
       console.log('[daily-digest] GET request - skipping Telegram sends')
     }
