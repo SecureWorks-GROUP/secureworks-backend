@@ -2513,9 +2513,14 @@ serve(async (req: Request) => {
         detail_json: a,
       }))
       if (alertRows.length > 0) {
-        // Resolve-all in generateDigest() already clears old alerts;
-        // just insert fresh ones directly
+        // Insert fresh alerts, then resolve old ones (order ensures no gap on failure)
         await sb.from('ai_alerts').insert(alertRows)
+        await sb.from('ai_alerts')
+          .update({ resolved_at: new Date().toISOString() })
+          .eq('org_id', DEFAULT_ORG_ID)
+          .is('resolved_at', null)
+          .is('dismissed_at', null)
+          .lt('created_at', new Date(Date.now() - 60000).toISOString()) // resolve alerts older than 1 min (i.e. not the ones just inserted)
       }
     } catch (e) {
       console.log('[daily-digest] ai_alerts insert failed (table may not exist):', e)
@@ -2752,13 +2757,6 @@ async function generateDigest(sb: any) {
   const now = new Date()
   const today = now.toISOString().split('T')[0]
   const alerts: Alert[] = []
-
-  // Dedup: resolve old alerts before generating new ones
-  await sb.from('ai_alerts')
-    .update({ resolved_at: new Date().toISOString() })
-    .eq('org_id', DEFAULT_ORG_ID)
-    .is('resolved_at', null)
-    .is('dismissed_at', null)
 
   // ── Fetch all data in parallel ──
   const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0]
