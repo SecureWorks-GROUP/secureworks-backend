@@ -1515,7 +1515,7 @@ async function generateWeeklyPulse(sb: any) {
 
   // This week's jobs
   const { data: jobs } = await sb.from('jobs')
-    .select('id, status, type, created_by, client_name, pricing_json, created_at, quoted_at, accepted_at, completed_at')
+    .select('id, status, type, created_by, client_name, pricing_json, created_at, quoted_at, accepted_at, completed_at, job_number, site_suburb')
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('legacy', false)
 
@@ -2751,7 +2751,7 @@ async function generateDigest(sb: any) {
     { data: upcomingAssignments },
     { data: scopeAssigns },
   ] = await Promise.all([
-    sb.from('jobs').select('id, status, client_name, site_suburb, type, pricing_json, created_at, quoted_at, accepted_at, completed_at, updated_at')
+    sb.from('jobs').select('id, status, client_name, site_suburb, job_number, type, pricing_json, created_at, quoted_at, accepted_at, completed_at, updated_at')
       .eq('org_id', DEFAULT_ORG_ID).eq('legacy', false),
     sb.from('aged_receivables').select('*').eq('org_id', DEFAULT_ORG_ID),
     sb.from('monthly_revenue').select('*').eq('org_id', DEFAULT_ORG_ID).eq('month', currentMonthStart).maybeSingle(),
@@ -3644,7 +3644,7 @@ async function createDailyAnnotations(sb: any, digest: any) {
     { data: unlinkedInvoices },
     { data: overdueInvoices },
   ] = await Promise.all([
-    sb.from('jobs').select('id, status, client_name, job_number, type, pricing_json, quoted_at, completed_at, accepted_at')
+    sb.from('jobs').select('id, status, client_name, job_number, site_suburb, type, pricing_json, quoted_at, completed_at, accepted_at')
       .eq('org_id', DEFAULT_ORG_ID).eq('legacy', false)
       .not('status', 'in', '("cancelled","lost")'),
     sb.from('purchase_orders').select('job_id, status')
