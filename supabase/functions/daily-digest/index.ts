@@ -2513,15 +2513,15 @@ serve(async (req: Request) => {
         detail_json: a,
       }))
       if (alertRows.length > 0) {
-        // Insert fresh alerts, then resolve old ones (order ensures no gap on failure)
         await sb.from('ai_alerts').insert(alertRows)
-        await sb.from('ai_alerts')
-          .update({ resolved_at: new Date().toISOString() })
-          .eq('org_id', DEFAULT_ORG_ID)
-          .is('resolved_at', null)
-          .is('dismissed_at', null)
-          .lt('created_at', new Date(Date.now() - 60000).toISOString()) // resolve alerts older than 1 min (i.e. not the ones just inserted)
       }
+      // Resolve old alerts after insert (runs even if zero new alerts generated)
+      await sb.from('ai_alerts')
+        .update({ resolved_at: new Date().toISOString() })
+        .eq('org_id', DEFAULT_ORG_ID)
+        .is('resolved_at', null)
+        .is('dismissed_at', null)
+        .lt('created_at', new Date(Date.now() - 60000).toISOString())
     } catch (e) {
       console.log('[daily-digest] ai_alerts insert failed (table may not exist):', e)
     }
