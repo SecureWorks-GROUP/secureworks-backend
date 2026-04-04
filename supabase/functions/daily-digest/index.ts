@@ -39,7 +39,14 @@ async function sendTelegramMessage(chatId: number | string, text: string): Promi
         parse_mode: 'HTML',
       }),
     }, 15000)
-    return res?.ok ?? false
+    if (!res?.ok) return false
+    // Telegram returns HTTP 200 even on failures — check JSON body
+    try {
+      const body = await res.json()
+      return body?.ok === true
+    } catch {
+      return false
+    }
   } catch (e) {
     console.log('[daily-digest] Telegram send failed:', (e as Error).message)
     return false

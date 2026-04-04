@@ -5,9 +5,10 @@
 -- scoping tool all INSERT without calling next_job_number().
 -- This trigger ensures every NEW job gets a number automatically.
 --
--- Fault-tolerant: if next_job_number() fails for any reason,
--- the INSERT proceeds with job_number = NULL rather than
--- blocking the job creation.
+-- FAIL CLOSED: if next_job_number() fails, the INSERT is
+-- blocked. A missing job number causes the job to disappear
+-- from ops reporting (phantom filter), so a failed insert is
+-- better than an invisible job.
 --
 -- NOTE: Does NOT backfill existing NULL jobs. That requires
 -- separate impact analysis (Fix 2 phantom filter depends on
@@ -18,11 +19,7 @@ CREATE OR REPLACE FUNCTION auto_assign_job_number()
 RETURNS trigger AS $$
 BEGIN
   IF NEW.job_number IS NULL THEN
-    BEGIN
-      NEW.job_number := next_job_number(COALESCE(NEW.type, 'patio'));
-    EXCEPTION WHEN OTHERS THEN
-      RAISE WARNING 'auto_assign_job_number failed: %, allowing INSERT with NULL', SQLERRM;
-    END;
+    NEW.job_number := next_job_number(COALESCE(NEW.type, 'patio'));
   END IF;
   RETURN NEW;
 END;
