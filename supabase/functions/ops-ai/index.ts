@@ -119,6 +119,16 @@ function sbClient() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 }
 
+async function callGhlProxy(action: string, params: Record<string, string> = {}): Promise<any> {
+  const url = new URL(`${SUPABASE_URL}/functions/v1/ghl-proxy`)
+  url.searchParams.set('action', action)
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
+  const resp = await fetch(url.toString(), {
+    headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+  })
+  return resp.json()
+}
+
 // ════════════════════════════════════════════════════════════
 // TOOL DEFINITIONS
 // ════════════════════════════════════════════════════════════
@@ -280,8 +290,24 @@ const CEO_TOOLS = [
   },
   {
     name: 'get_debt_followup',
-    description: 'Get outstanding receivables grouped by client with contact details and age buckets.',
-    input_schema: { type: 'object', properties: {} },
+    description: 'Get outstanding receivables grouped by client with contact details and age buckets. Use search to find a specific client.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        search: { type: 'string', description: 'Search by client name (e.g. "Anthony Yeo"). Returns only matching clients.' },
+      },
+    },
+  },
+  {
+    name: 'search_contacts',
+    description: 'Search for a client/contact by name across all data sources (jobs, Xero invoices, contact matches). Returns contact details, phone, email, GHL ID, job count, and outstanding balance.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Client name to search for (partial match, case-insensitive)' },
+      },
+      required: ['name'],
+    },
   },
 ]
 
@@ -639,6 +665,162 @@ const EXECUTE_TOOLS = [
       required: ['invoice_id', 'amount'],
     },
   },
+  // ── Additional ops tools (Batch 2 additions) ──
+  {
+    name: 'list_variations',
+    description: 'List variations (scope changes) across jobs. Filter by job_id or status.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Filter by job UUID' },
+        status: { type: 'string', description: 'Filter by status: pending, approved, rejected' },
+      },
+    },
+  },
+  {
+    name: 'list_council_submissions',
+    description: 'List council/permit submissions. Shows status, current step, and job linkage.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Filter by job UUID' },
+        status: { type: 'string', description: 'Filter by overall_status: not_started, in_progress, approved, rejected' },
+      },
+    },
+  },
+  {
+    name: 'list_expenses',
+    description: 'List business expenses. Filter by date range, category, or status.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'Start date (YYYY-MM-DD)' },
+        to: { type: 'string', description: 'End date (YYYY-MM-DD)' },
+        status: { type: 'string', description: 'Filter by status: pending, approved, paid' },
+      },
+    },
+  },
+  {
+    name: 'list_purchase_orders',
+    description: 'List purchase orders. Filter by job, supplier name, or status.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Filter by job UUID' },
+        supplier: { type: 'string', description: 'Search by supplier name (partial match)' },
+        status: { type: 'string', description: 'Filter by status: draft, sent, confirmed, received, cancelled' },
+      },
+    },
+  },
+  {
+    name: 'list_work_orders',
+    description: 'List work orders. Filter by job or status.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Filter by job UUID' },
+        status: { type: 'string', description: 'Filter by status: draft, sent, accepted, in_progress, complete, cancelled' },
+      },
+    },
+  },
+  {
+    name: 'execute_create_work_order',
+    description: 'Create a work order for a job. REQUIRES USER CONFIRMATION.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Job UUID' },
+        description: { type: 'string', description: 'Work order description/scope' },
+        assigned_to: { type: 'string', description: 'User ID to assign to' },
+      },
+      required: ['job_id'],
+    },
+  },
+  {
+    name: 'get_crew_availability',
+    description: 'Check crew availability for a date range. Shows who is free and who is booked.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'Start date (YYYY-MM-DD). Defaults to today.' },
+        to: { type: 'string', description: 'End date (YYYY-MM-DD). Defaults to 7 days from start.' },
+      },
+    },
+  },
+  {
+    name: 'list_suppliers',
+    description: 'List all suppliers with their contact details and categories.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_email_events',
+    description: 'Get email delivery events (sent, opened, bounced, etc.). Filter by job or recipient.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Filter by job UUID' },
+        email: { type: 'string', description: 'Filter by recipient email' },
+        limit: { type: 'number', description: 'Max results (default 20)' },
+      },
+    },
+  },
+  {
+    name: 'execute_send_review_request',
+    description: 'Send a Google review request to a client after job completion. REQUIRES USER CONFIRMATION.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Job UUID (must be complete/invoiced)' },
+        method: { type: 'string', description: 'Send via: sms or email. Default: sms' },
+      },
+      required: ['job_id'],
+    },
+  },
+  {
+    name: 'search_ghl_contacts',
+    description: 'Search GoHighLevel CRM contacts by name, email, or phone. Use this when a contact is not found in Supabase jobs — they may be a lead in GHL.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        search: { type: 'string', description: 'Search term (name, email, or phone)' },
+      },
+      required: ['search'],
+    },
+  },
+  {
+    name: 'get_team_activity',
+    description: 'Get recent team activity — job events, status changes, assignments, POs created. Shows what happened in the last 24-48 hours.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        hours: { type: 'number', description: 'Look back this many hours (default: 24)' },
+        user_id: { type: 'string', description: 'Filter by specific team member UUID' },
+      },
+    },
+  },
+  {
+    name: 'get_sales_leads',
+    description: 'Get new sales leads/opportunities from GHL. Shows recent inquiries, their status, and assignment.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'Start date (YYYY-MM-DD). Defaults to 7 days ago.' },
+        status: { type: 'string', description: 'Filter by status: new, contacted, qualified, quoted' },
+      },
+    },
+  },
+  {
+    name: 'get_inbox_summary',
+    description: 'Get recent email inbox activity — new emails received, classified by type and priority. Shows what came in overnight or recently.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        hours: { type: 'number', description: 'Look back this many hours (default: 24)' },
+        mailbox: { type: 'string', description: 'Filter by mailbox (e.g. "marnin@secureworkswa.com.au")' },
+        priority: { type: 'string', description: 'Filter by priority: high, normal, low' },
+      },
+    },
+  },
 ]
 
 // ════════════════════════════════════════════════════════════
@@ -798,7 +980,32 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       if (input.status) params.status = input.status
       if (input.type) params.type = input.type
       if (input.search) params.search = input.search
-      return { result: await callOpsApi('pipeline', params) }
+      const pipelineResult = await callOpsApi('pipeline', params)
+
+      // If search returned no results and we have a search term, try GHL as fallback
+      if (input.search && pipelineResult?.total === 0) {
+        try {
+          const ghlResult = await callGhlProxy('search', { q: input.search })
+          if (ghlResult?.opportunities?.length > 0) {
+            return {
+              result: {
+                ...pipelineResult,
+                ghl_leads: ghlResult.opportunities.slice(0, 10).map((o: any) => ({
+                  name: o.contact_name || o.name,
+                  status: o.status || o.stage_name,
+                  pipeline: o.pipeline_name,
+                  phone: o.phone,
+                  email: o.email,
+                  source: 'GHL (not yet a job in system)',
+                })),
+                _note: `No jobs found for "${input.search}" but found ${ghlResult.opportunities.length} lead(s) in GHL CRM.`,
+              }
+            }
+          }
+        } catch (e) { /* GHL fallback is best-effort */ }
+      }
+
+      return { result: pipelineResult }
     }
     case 'get_schedule': {
       const from = input.from || awstDate()
@@ -862,8 +1069,68 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       return { result: await callReportingApi('trends') }
     case 'get_sales_breakdown':
       return { result: await callReportingApi('sales_breakdown') }
-    case 'get_debt_followup':
-      return { result: await callReportingApi('debt_followup') }
+    case 'get_debt_followup': {
+      const params: Record<string, string> = {}
+      if (input.search) params.search = input.search
+      return { result: await callReportingApi('debt_followup', params) }
+    }
+    case 'search_contacts': {
+      const sb = sbClient()
+      const searchName = (input.name || '').trim()
+      if (!searchName) return { result: { error: 'Name is required' } }
+      const searchPattern = `%${searchName}%`
+
+      // Search across multiple data sources in parallel
+      const [jobsRes, xeroRes, contactsRes] = await Promise.all([
+        sb.from('jobs')
+          .select('id, client_name, client_phone, client_email, ghl_contact_id, xero_contact_id, job_number, status, type')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .or('legacy.is.null,legacy.eq.false')
+          .ilike('client_name', searchPattern)
+          .limit(10),
+        sb.from('xero_invoices')
+          .select('xero_contact_id, contact_name, amount_due, status, invoice_type')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .eq('invoice_type', 'ACCREC')
+          .ilike('contact_name', searchPattern)
+          .limit(20),
+        sb.from('contact_matches')
+          .select('id, client_name, phone, email, ghl_contact_id, xero_contact_id, job_id')
+          .ilike('client_name', searchPattern)
+          .limit(10),
+      ])
+
+      // Merge into unified contact results
+      const contactMap: Record<string, any> = {}
+      for (const j of (jobsRes.data || [])) {
+        const key = (j.client_name || '').toLowerCase()
+        if (!contactMap[key]) contactMap[key] = { name: j.client_name, phone: null, email: null, ghl_contact_id: null, xero_contact_id: null, jobs: [], outstanding: 0 }
+        contactMap[key].phone = contactMap[key].phone || j.client_phone
+        contactMap[key].email = contactMap[key].email || j.client_email
+        contactMap[key].ghl_contact_id = contactMap[key].ghl_contact_id || j.ghl_contact_id
+        contactMap[key].xero_contact_id = contactMap[key].xero_contact_id || j.xero_contact_id
+        contactMap[key].jobs.push({ job_number: j.job_number, status: j.status, type: j.type })
+      }
+      for (const c of (contactsRes.data || [])) {
+        const key = (c.client_name || '').toLowerCase()
+        if (!contactMap[key]) contactMap[key] = { name: c.client_name, phone: null, email: null, ghl_contact_id: null, xero_contact_id: null, jobs: [], outstanding: 0 }
+        contactMap[key].phone = contactMap[key].phone || c.phone
+        contactMap[key].email = contactMap[key].email || c.email
+        contactMap[key].ghl_contact_id = contactMap[key].ghl_contact_id || c.ghl_contact_id
+        contactMap[key].xero_contact_id = contactMap[key].xero_contact_id || c.xero_contact_id
+      }
+      // Sum outstanding from Xero invoices
+      for (const inv of (xeroRes.data || [])) {
+        const key = (inv.contact_name || '').toLowerCase()
+        if (!contactMap[key]) contactMap[key] = { name: inv.contact_name, phone: null, email: null, ghl_contact_id: null, xero_contact_id: inv.xero_contact_id, jobs: [], outstanding: 0 }
+        if (['AUTHORISED', 'SUBMITTED'].includes(inv.status) && inv.amount_due > 0) {
+          contactMap[key].outstanding += Number(inv.amount_due) || 0
+        }
+        contactMap[key].xero_contact_id = contactMap[key].xero_contact_id || inv.xero_contact_id
+      }
+
+      return { result: { contacts: Object.values(contactMap), count: Object.keys(contactMap).length } }
+    }
 
     // ── Intelligence tools ──
     case 'analyse_profitability': {
@@ -2018,6 +2285,158 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
         needs_confirm: true,
       }
 
+    // ── Batch 2: New tool handlers ──
+    case 'list_variations': {
+      const params: Record<string, string> = {}
+      if (input.job_id) params.job_id = input.job_id
+      if (input.status) params.status = input.status
+      return { result: await callOpsApi('list_variations', params) }
+    }
+    case 'list_council_submissions': {
+      const params: Record<string, string> = {}
+      if (input.job_id) params.job_id = input.job_id
+      if (input.status) params.status = input.status
+      return { result: await callOpsApi('list_council_submissions', params) }
+    }
+    case 'list_expenses': {
+      const params: Record<string, string> = {}
+      if (input.from) params.from = input.from
+      if (input.to) params.to = input.to
+      if (input.status) params.status = input.status
+      return { result: await callOpsApi('list_expenses', params) }
+    }
+    case 'list_purchase_orders': {
+      const params: Record<string, string> = {}
+      if (input.job_id) params.job_id = input.job_id
+      if (input.supplier) params.supplier = input.supplier
+      if (input.status) params.status = input.status
+      return { result: await callOpsApi('list_pos', params) }
+    }
+    case 'list_work_orders': {
+      const params: Record<string, string> = {}
+      if (input.job_id) params.job_id = input.job_id
+      if (input.status) params.status = input.status
+      return { result: await callOpsApi('list_work_orders', params) }
+    }
+    case 'execute_create_work_order':
+      return {
+        result: {
+          action: 'create_work_order',
+          params: { job_id: input.job_id, description: input.description || '', assigned_to: input.assigned_to || '' },
+          message: `Create work order for job${input.description ? ': ' + input.description : ''}?`,
+        },
+        needs_confirm: true,
+      }
+    case 'get_crew_availability': {
+      const params: Record<string, string> = {}
+      if (input.from) params.from = input.from
+      if (input.to) params.to = input.to
+      return { result: await callOpsApi('get_crew_availability', params) }
+    }
+    case 'list_suppliers':
+      return { result: await callOpsApi('list_suppliers') }
+    case 'get_email_events': {
+      const params: Record<string, string> = {}
+      if (input.job_id) params.job_id = input.job_id
+      if (input.email) params.email = input.email
+      if (input.limit) params.limit = String(input.limit)
+      return { result: await callOpsApi('get_email_events', params) }
+    }
+    case 'execute_send_review_request':
+      return {
+        result: {
+          action: 'send_review_request',
+          params: { job_id: input.job_id, method: input.method || 'sms' },
+          message: `Send Google review request via ${input.method || 'sms'}?`,
+        },
+        needs_confirm: true,
+      }
+    case 'search_ghl_contacts': {
+      const params: Record<string, string> = { q: input.search }
+      return { result: await callGhlProxy('search', params) }
+    }
+    case 'get_team_activity': {
+      const sb = sbClient()
+      const hours = input.hours || 24
+      const since = new Date(Date.now() - hours * 3600000).toISOString()
+      let query = sb.from('job_events')
+        .select('id, job_id, event_type, detail_json, created_at, users:user_id(name)')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .gte('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(50)
+      if (input.user_id) query = query.eq('user_id', input.user_id)
+      const { data: events } = await query
+
+      // Get job names for context
+      const jobIds = [...new Set((events || []).map((e: any) => e.job_id).filter(Boolean))]
+      let jobNames: Record<string, string> = {}
+      if (jobIds.length > 0) {
+        const { data: jobs } = await sb.from('jobs').select('id, client_name, job_number').in('id', jobIds.slice(0, 100))
+        for (const j of (jobs || [])) jobNames[j.id] = `${j.job_number} (${j.client_name})`
+      }
+
+      return {
+        result: {
+          events: (events || []).map((e: any) => ({
+            type: e.event_type,
+            job: jobNames[e.job_id] || e.job_id,
+            who: e.users?.name || 'System',
+            when: e.created_at,
+            detail: typeof e.detail_json === 'string' ? e.detail_json.slice(0, 200) : JSON.stringify(e.detail_json || {}).slice(0, 200),
+          })),
+          total: (events || []).length,
+          period: `Last ${hours} hours`,
+        }
+      }
+    }
+    case 'get_sales_leads': {
+      const params: Record<string, string> = {}
+      if (input.from) params.from = input.from
+      if (input.status) params.status = input.status
+      return { result: await callReportingApi('sales_leads', params) }
+    }
+    case 'get_inbox_summary': {
+      const sb = sbClient()
+      const hours = input.hours || 24
+      const since = new Date(Date.now() - hours * 3600000).toISOString()
+      let query = sb.from('inbox_events')
+        .select('id, mailbox, from_email, from_name, subject, classification, priority, action_needed, job_id, received_at, telegram_notified')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .gte('received_at', since)
+        .order('received_at', { ascending: false })
+        .limit(30)
+      if (input.mailbox) query = query.eq('mailbox', input.mailbox)
+      if (input.priority) query = query.eq('priority', input.priority)
+      const { data: events } = await query
+
+      // Summary stats
+      const byClass: Record<string, number> = {}
+      const byPriority: Record<string, number> = {}
+      for (const e of (events || [])) {
+        byClass[e.classification] = (byClass[e.classification] || 0) + 1
+        byPriority[e.priority] = (byPriority[e.priority] || 0) + 1
+      }
+
+      return {
+        result: {
+          emails: (events || []).map((e: any) => ({
+            from: e.from_name || e.from_email,
+            subject: e.subject,
+            classification: e.classification,
+            priority: e.priority,
+            action_needed: e.action_needed,
+            received: e.received_at,
+            mailbox: e.mailbox,
+          })),
+          total: (events || []).length,
+          by_classification: byClass,
+          by_priority: byPriority,
+          period: `Last ${hours} hours`,
+        },
+      }
+    }
+
     default:
       return { result: { error: `Unknown tool: ${name}` } }
   }
@@ -2561,6 +2980,24 @@ FINANCIAL INTELLIGENCE: When asked about money/profit/cash:
 - Strategy/pricing: mention division_comparison
 
 PROACTIVE INTELLIGENCE: After answering, suggest ONE relevant deeper analysis if applicable. Do not list all tools.
+
+ACTION EXECUTION (CRITICAL):
+When the user asks you to DO something (chase, send, schedule, invoice, create, update, assign, complete, approve, cancel), you MUST call the appropriate tool. Never describe what you WOULD do — actually do it. The confirmation system handles safety.
+- "Chase [name]" → search_contacts or get_debt_followup with search, find their details, then execute_send_sms or execute_send_email
+- "Schedule [crew] for [job]" → create_assignment
+- "Send [name] an update" → execute_send_sms or execute_send_email
+- "Invoice [job]" → complete_and_invoice
+- "Create work order" → execute_create_work_order
+- "Send review request" → execute_send_review_request
+If you need more info to execute, call the lookup tool FIRST (search_contacts, get_job_detail), then call the action tool. Do not stop at the lookup.
+
+YOUR TOOLS INVENTORY (you have ALL of these — use them):
+LOOKUP: search_jobs, get_job_detail, get_schedule, search_contacts, search_ghl_contacts, search_invoices, get_attention_items, get_dashboard_summary, get_debt_followup, get_job_profitability, get_trends, get_sales_breakdown, get_marketing_summary, get_client_conversation, get_quote_terms, get_crew_availability, list_suppliers, get_email_events, get_team_activity, get_sales_leads, get_ai_alerts, get_inbox_summary
+DATA: list_variations, list_council_submissions, list_expenses, list_purchase_orders, list_work_orders
+FINANCIAL: explain_pnl, cash_flow_forecast, cash_flow_status, unbilled_revenue, division_comparison, cost_trend_analysis, check_supplier_pricing
+ANALYSIS: analyse_profitability, revenue_forecast, supplier_analysis, sales_performance, job_duration_analysis, estimate_accuracy_report, generate_pricing_recommendation
+ACTIONS (need confirmation): execute_send_sms, execute_send_email, execute_send_quote, create_assignment, update_job_status, execute_create_po, execute_create_work_order, execute_push_po_to_xero, execute_add_ghl_note, execute_email_supplier_po, execute_send_telegram, execute_create_invoice, complete_and_invoice, execute_reconcile_payment, execute_send_review_request
+NEVER say "I don't have that capability" or "I don't have access" — check your tools first.
 `
 
   // Coaching persona — role-specific voice
@@ -2853,6 +3290,21 @@ serve(async (req: Request) => {
         case 'reconcile_payment':
           result = await postOpsApi('reconcile_payment', params)
           break
+        case 'create_work_order':
+          result = await postOpsApi('create_work_order', params)
+          break
+        case 'send_review_request': {
+          // Route via GHL proxy or ops-api depending on method
+          const url = new URL(`${SUPABASE_URL}/functions/v1/ghl-proxy`)
+          url.searchParams.set('action', params.method === 'email' ? 'send_review_email' : 'send_review_sms')
+          const reviewResp = await fetch(url.toString(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+            body: JSON.stringify(params),
+          })
+          result = await reviewResp.json()
+          break
+        }
         default:
           return json({ error: 'Unknown confirm action' }, 400)
       }
@@ -2968,7 +3420,7 @@ serve(async (req: Request) => {
       }
     } catch (e) { console.log('[ops-ai] classifier error:', (e as Error).message) }
 
-    const SIMPLE_TOOLS = (tools || []).filter((t: any) => ['search_jobs', 'get_job_detail', 'get_schedule', 'get_attention_items', 'get_dashboard_summary'].includes(t.name))
+    const SIMPLE_TOOLS = (tools || []).filter((t: any) => ['search_jobs', 'get_job_detail', 'get_schedule', 'get_attention_items', 'get_dashboard_summary', 'search_contacts'].includes(t.name))
 
     // ── Role-based model override ──
     // After classifier determines A/B/C, override model based on WHO is asking
@@ -3235,10 +3687,43 @@ serve(async (req: Request) => {
             }),
           })
         } else {
-          // Trim large results to stay within context limits
-          let resultStr = JSON.stringify(toolResult)
-          if (resultStr.length > 8000) {
-            resultStr = resultStr.slice(0, 8000) + '... (truncated)'
+          // Smart truncation: summarize lists instead of dumb slice
+          let resultStr: string
+          const MAX_RESULT_CHARS = 6000
+          const rawStr = JSON.stringify(toolResult)
+          if (rawStr.length > MAX_RESULT_CHARS) {
+            // If result has a list/array, summarize it
+            const result = toolResult?.result || toolResult
+            if (result?.clients && Array.isArray(result.clients)) {
+              // Debt/overdue: keep summary stats + top 10 clients (without nested invoices)
+              const lite = {
+                ...result,
+                clients: result.clients.slice(0, 10).map((c: any) => ({
+                  contact_name: c.contact_name, total_owed: c.total_owed, phone: c.phone, email: c.email,
+                  ghl_contact_id: c.ghl_contact_id, invoice_count: c.invoices?.length || 0,
+                  first_client: c.first_client || false,
+                })),
+                _truncated: true,
+                _total_clients: result.clients.length,
+              }
+              resultStr = JSON.stringify({ result: lite })
+            } else if (result?.columns) {
+              // Pipeline: count per column + top 5 per column
+              const liteCols: Record<string, any> = {}
+              for (const [col, jobs] of Object.entries(result.columns)) {
+                const arr = jobs as any[]
+                liteCols[col] = {
+                  count: arr.length,
+                  total_value: arr.reduce((s: number, j: any) => s + (j.value || 0), 0),
+                  jobs: arr.slice(0, 5).map((j: any) => ({ job_number: j.job_number, client_name: j.client_name, value: j.value, status: j.status, days_in_stage: j.days_in_stage })),
+                }
+              }
+              resultStr = JSON.stringify({ result: { columns: liteCols, total: result.total, _truncated: true } })
+            } else {
+              resultStr = rawStr.slice(0, MAX_RESULT_CHARS) + '... (truncated)'
+            }
+          } else {
+            resultStr = rawStr
           }
           toolResults.push({
             type: 'tool_result',

@@ -98,6 +98,10 @@ const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
+// Test data filter — exclude test records from production outputs
+const isTestRecord = (name: string | null | undefined): boolean =>
+  !name ? false : /\btest\b/i.test(name) || /^marnin test/i.test(name)
+
 // ── Reply-to routing: fencing jobs → fencing@, everything else → patios@ ──
 function getClientReplyTo(jobType: string | null, jobNumber?: string): string {
   const dept = jobType === 'fencing' ? 'fencing' : 'patios'
@@ -1287,6 +1291,8 @@ serve(async (req: Request) => {
       case 'dispute_hours':
       case 'crew_charges_on_my_jobs':
       case 'review_crew_charge':
+      case 'my_work_orders':
+      case 'submit_work_order_invoice':
       case 'search_all_jobs':
       case 'generate_trade_invoice':
       case 'my_invoices':
@@ -1410,6 +1416,231 @@ serve(async (req: Request) => {
             await client.from('trade_invoice_lines').update(updates).eq('id', line_id)
             return json({ success: true })
           }
+
+          case 'my_work_orders': {
+            // Get work orders assigned to this user (as lead trade)
+            const woStatus = url.searchParams.get('status') // optional filter
+            let woQuery = client.from('work_orders')
+              .select('id, job_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, jobs!inner(job_number, client_name, type, status)')
+              .eq('assigned_user_id', tradeUser.id)
+              .not('status', 'in', '("cancelled","deleted")')
+              .order('created_at', { ascending: false })
+            if (woStatus) woQuery = woQuery.eq('status', woStatus)
+            const { data: workOrders, error: woErr } = await woQuery.limit(30)
+            if (woErr) throw new Error('Failed to load work orders: ' + woErr.message)
+
+            // For each work order, check if already invoiced
+            const woIds = (workOrders || []).map((wo: any) => wo.id)
+            const { data: existingInvoices } = await client.from('trade_invoices')
+              .select('work_order_id, status, xero_bill_id')
+              .in('work_order_id', woIds.length > 0 ? woIds : ['00000000-0000-0000-0000-000000000000'])
+              .eq('user_id', tradeUser.id)
+              .not('status', 'in', '("draft","failed")')
+            const invoicedWOs = new Set((existingInvoices || []).map((i: any) => i.work_order_id))
+
+            const mapped = (workOrders || []).map((wo: any) => {
+              // Calculate total from scope_items
+              const items = wo.scope_items || []
+              const subtotal = items.reduce((sum: number, item: any) => {
+                const qty = Number(item.quantity || item.metres || item.qty || 0)
+                const price = Number(item.unit_price || item.rate || item.price || 0)
+                return sum + (qty * price)
+              }, 0)
+              const gst = Math.round(subtotal * 0.1 * 100) / 100 // 10% GST
+              return {
+                id: wo.id,
+                wo_number: wo.wo_number,
+                job_id: wo.job_id,
+                job_number: wo.jobs?.job_number || '',
+                client_name: wo.jobs?.client_name || '',
+                job_type: wo.jobs?.type || '',
+                job_status: wo.jobs?.status || '',
+                status: wo.status,
+                site_address: wo.site_address || '',
+                scheduled_date: wo.scheduled_date,
+                scope_items: items,
+                subtotal: Math.round(subtotal * 100) / 100,
+                gst: Math.round(gst * 100) / 100,
+                total: Math.round((subtotal + gst) * 100) / 100,
+                already_invoiced: invoicedWOs.has(wo.id),
+                can_invoice: wo.status === 'complete' && !invoicedWOs.has(wo.id),
+              }
+            })
+            return json({ work_orders: mapped })
+          }
+
+          case 'submit_work_order_invoice': {
+            const { work_order_id } = body
+            if (!work_order_id) throw new ApiError('work_order_id required', 400)
+
+            // Get the work order (include address fields for rich descriptions)
+            const { data: wo, error: woFetchErr } = await client.from('work_orders')
+              .select('id, job_id, wo_number, status, scope_items, site_address, assigned_user_id, jobs!inner(job_number, client_name, type, site_address, site_suburb)')
+              .eq('id', work_order_id)
+              .single()
+            if (woFetchErr || !wo) throw new ApiError('Work order not found', 404)
+            if (wo.assigned_user_id !== tradeUser.id) throw new ApiError('Not authorised — you are not assigned to this work order', 403)
+            if (wo.status !== 'complete') throw new ApiError('Work order must be complete before invoicing', 400)
+
+            // Check not already invoiced — allow retry if previous attempt failed
+            const { data: existingWoInv } = await client.from('trade_invoices')
+              .select('id, status')
+              .eq('work_order_id', work_order_id)
+              .eq('user_id', tradeUser.id)
+              .maybeSingle()
+            if (existingWoInv) {
+              if (existingWoInv.status === 'draft') {
+                // Clean up failed attempt so we can retry
+                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', existingWoInv.id)
+                await client.from('trade_invoices').delete().eq('id', existingWoInv.id)
+              } else {
+                throw new ApiError('This work order has already been invoiced', 400)
+              }
+            }
+
+            // Get user info (include email for contact auto-create)
+            const { data: tradeXeroUser } = await client.from('users')
+              .select('xero_contact_id, name, email, abn, trade_details')
+              .eq('id', tradeUser.id)
+              .single()
+
+            // Resolve Xero supplier contact — auto-create if not linked
+            let woXeroContactId = tradeXeroUser?.xero_contact_id || null
+            const { accessToken: woAt, tenantId: woTi } = await getToken(client)
+            if (!woXeroContactId) {
+              const woTradeEmail = tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || ''
+              if (woTradeEmail) {
+                try {
+                  const woContacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(woTradeEmail) + '%22', woAt, woTi)
+                  if (woContacts?.Contacts?.length > 0) woXeroContactId = woContacts.Contacts[0].ContactID
+                } catch { /* fallback to create */ }
+              }
+              if (!woXeroContactId) {
+                const woCreateRes = await xeroPost('/Contacts', woAt, woTi, {
+                  Contacts: [{ Name: tradeXeroUser?.name || 'Trade', EmailAddress: tradeXeroUser?.email || undefined, IsSupplier: true }]
+                }, 'PUT')
+                woXeroContactId = woCreateRes?.Contacts?.[0]?.ContactID
+              }
+              if (woXeroContactId) {
+                await client.from('users').update({ xero_contact_id: woXeroContactId }).eq('id', tradeUser.id)
+              }
+              if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
+            }
+
+            // Build line items from scope_items — rich descriptions, correct codes
+            const scopeItems = wo.scope_items || []
+            const woJobNum = wo.jobs?.job_number || ''
+            const woDivision = trackingCategoryForJob(woJobNum)
+            const woClientLine = [wo.jobs?.client_name, wo.jobs?.site_address, wo.jobs?.site_suburb].filter(Boolean).join(', ')
+            const woGstRegistered = tradeXeroUser?.trade_details?.gstRegistered !== false
+            const woTaxType = woGstRegistered ? 'INPUT' : 'NONE'
+
+            const lineItems = scopeItems.map((item: any) => {
+              const qty = Number(item.quantity || item.metres || item.qty || 1)
+              const price = Number(item.unit_price || item.rate || item.price || 0)
+              const desc = item.description || item.name || 'Work order item'
+              return {
+                Description: [
+                  `${wo.wo_number} | ${woJobNum} | ${woDivision || 'Construction'}`,
+                  desc + (qty > 1 ? ` (${qty} × $${price.toFixed(2)})` : ''),
+                  woClientLine,
+                ].filter(Boolean).join('\n'),
+                Quantity: qty,
+                UnitAmount: price,
+                AccountCode: accountCodeForJob(wo.jobs?.type || '', '200'),
+                TaxType: woTaxType,
+                Tracking: xeroTracking(woJobNum),
+              }
+            })
+
+            const subtotal = lineItems.reduce((sum: number, li: any) => sum + (li.Quantity * li.UnitAmount), 0)
+            const gst = Math.round(subtotal * 0.1 * 100) / 100
+            const total = subtotal + gst
+
+            // Push directly to Xero as DRAFT ACCPAY bill
+            const tradeName = tradeXeroUser?.name || 'Trade'
+            const dueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+            const xeroPayload = {
+              Invoices: [{
+                Type: 'ACCPAY',
+                Contact: { ContactID: woXeroContactId },
+                Reference: `${tradeName} | ${wo.wo_number} | ${woJobNum}`,
+                DueDate: dueDate,
+                Status: 'DRAFT',
+                LineAmountTypes: woGstRegistered ? 'Exclusive' : 'NoTax',
+                LineItems: lineItems,
+              }],
+            }
+
+            // Stable key prevents duplicate bills — if previous push succeeded but we missed the response,
+            // Xero returns the cached success (same bill ID, no duplicate). Cached errors expire after 12hrs.
+            const woIdempotencyKey = `wo-inv-${tradeUser.id}-${work_order_id}`
+            let xeroSuccess = false
+            let xeroBillId = ''
+            let xeroBillNumber = ''
+            try {
+              const xeroResult = await xeroPost('/Invoices', woAt, woTi, xeroPayload, 'PUT', woIdempotencyKey)
+              const xeroInv = xeroResult?.Invoices?.[0]
+              xeroBillId = xeroInv?.InvoiceID || ''
+              xeroBillNumber = xeroInv?.InvoiceNumber || ''
+              xeroSuccess = !!xeroBillId
+            } catch (e: any) {
+              console.error('[ops-api] WO invoice Xero push failed:', e.message)
+            }
+
+            // Save local trade_invoices record
+            const { data: tradeInv } = await client.from('trade_invoices').insert({
+              org_id: '00000000-0000-0000-0000-000000000001',
+              user_id: tradeUser.id,
+              work_order_id: work_order_id,
+              invoice_source: 'work_order',
+              subtotal_ex: Math.round(subtotal * 100) / 100,
+              gst: Math.round(gst * 100) / 100,
+              total_inc: Math.round(total * 100) / 100,
+              status: xeroSuccess ? 'pushed_to_xero' : 'draft',
+              xero_bill_id: xeroBillId || null,
+              xero_pushed_at: xeroSuccess ? new Date().toISOString() : null,
+              submitted_at: new Date().toISOString(),
+            }).select('id').single()
+
+            // Save line items
+            if (tradeInv?.id) {
+              const lines = scopeItems.map((item: any) => ({
+                trade_invoice_id: tradeInv.id,
+                job_id: wo.job_id,
+                job_number: woJobNum,
+                client_name: wo.jobs?.client_name || '',
+                description: item.description || item.name || 'Work order item',
+                total_hours: 0,
+                hourly_rate: 0,
+                line_total_ex: Number(item.quantity || item.metres || 1) * Number(item.unit_price || item.rate || 0),
+              }))
+              await client.from('trade_invoice_lines').insert(lines)
+            }
+
+            // Log event
+            await client.from('job_events').insert({
+              job_id: wo.job_id,
+              user_id: tradeUser.id,
+              event_type: 'work_order_invoiced',
+              detail_json: {
+                work_order_id,
+                wo_number: wo.wo_number,
+                subtotal, gst, total,
+                xero_bill_id: xeroBillId,
+                xero_bill_number: xeroBillNumber,
+              },
+            })
+
+            return json({
+              success: xeroSuccess,
+              xero_bill_number: xeroBillNumber,
+              total: Math.round(total * 100) / 100,
+              error: xeroSuccess ? undefined : 'Xero push failed — contact admin',
+            })
+          }
+
           case 'save_trade_invoice_draft': {
             const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
 
@@ -1590,7 +1821,7 @@ serve(async (req: Request) => {
             // Get job details
             const jobIds = Object.keys(jobGroups)
             const { data: jobs } = await client.from('jobs')
-              .select('id, job_number, client_name')
+              .select('id, job_number, client_name, type, site_address, site_suburb')
               .in('id', jobIds)
             const jobMap: Record<string, any> = {}
             for (const j of (jobs || [])) jobMap[j.id] = j
@@ -1824,6 +2055,16 @@ serve(async (req: Request) => {
                 xeroContactId = createRes?.Contacts?.[0]?.ContactID
               }
 
+              // Save contact ID for next time
+              if (xeroContactId && !tradeUser.xero_contact_id) {
+                await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', tradeUser.id)
+              }
+              if (!xeroContactId) {
+                console.error('[ops-api] Could not resolve Xero contact for trade', tradeUser.id)
+                // Mark invoice as needing manual Xero push
+                await client.from('trade_invoices').update({ status: 'draft' }).eq('id', invoice.id)
+              }
+
               if (xeroContactId) {
                 // Due date: submit by Sunday → next Friday. Submit Mon+ → Friday after next.
                 const now = new Date()
@@ -1843,19 +2084,27 @@ serve(async (req: Request) => {
                   return option ? [{ Name: 'Business Unit', Option: option }] : []
                 }
 
-                // Build Xero line items with tracking + correct tax type
+                // Build Xero line items with tracking + correct tax type + rich descriptions
                 const allLines = [...lineItems.map((l: any) => ({
-                  Description: (l.job_number || 'Labour') + ' — ' + (l.client_name || '') + ' — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr',
+                  Description: [
+                    (l.job_number || 'Labour') + ' | ' + (trackingCategoryForJob(l.job_number || '') || 'Construction'),
+                    'Labour — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr' + (l.days_worked > 1 ? ' (' + l.days_worked + ' days)' : ''),
+                    [l.client_name, jobMap[l.job_id]?.site_address, jobMap[l.job_id]?.site_suburb].filter(Boolean).join(', '),
+                  ].filter(Boolean).join('\n'),
                   Quantity: l.total_hours,
                   UnitAmount: l.hourly_rate,
-                  AccountCode: '301',
+                  AccountCode: accountCodeForJob(jobMap[l.job_id]?.type || '', '301'),
                   TaxType: taxType,
                   Tracking: xeroTracking(l.job_number || ''),
                 })), ...extraLineItems.map((e: any) => ({
-                  Description: (e.job_number ? e.job_number + ' — ' : '') + (e.description || e.line_type || 'Extra') + (e.client_name && !e.job_number ? ' — ' + e.client_name + (e.site_address ? ', ' + e.site_address : '') : ''),
+                  Description: [
+                    e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
+                    (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
+                    e.client_name ? [e.client_name, e.site_address].filter(Boolean).join(', ') : '',
+                  ].filter(Boolean).join('\n'),
                   Quantity: e.quantity || 1,
                   UnitAmount: e.unit_rate || 0,
-                  AccountCode: '301',
+                  AccountCode: e.job_id ? accountCodeForJob(jobMap[e.job_id]?.type || '', '301') : '301',
                   TaxType: taxType,
                   Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                 }))]
@@ -1864,7 +2113,7 @@ serve(async (req: Request) => {
                   Invoices: [{
                     Type: 'ACCPAY',
                     Contact: { ContactID: xeroContactId },
-                    Reference: invoiceNumber,
+                    Reference: invoiceNumber + ' | ' + [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', '),
                     Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
@@ -1903,7 +2152,7 @@ serve(async (req: Request) => {
               console.log('[ops-api] Xero auto-push failed (non-blocking):', (e as Error).message)
             }
 
-            return json({ success: true, invoice_id: invoice.id, invoice_number: invoiceNumber, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length + extraLineItems.length, xero_bill_id: xeroBillId, xero_bill_number: xeroBillNumber })
+            return json({ success: true, invoice_id: invoice.id, invoice_number: invoiceNumber, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length + extraLineItems.length, xero_bill_id: xeroBillId, xero_bill_number: xeroBillNumber, xero_warning: !xeroBillId ? 'Invoice saved but could not push to Xero — admin will push manually' : undefined })
           }
 
           case 'my_invoices': {
@@ -2717,17 +2966,25 @@ async function pipeline(client: any, params: URLSearchParams) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
 
-  const jobIds = jobs.map((j: any) => j.id)
+  // Only enrich non-draft jobs (drafts have no assignments/POs/invoices)
+  // This keeps the .in() query within PostgREST URL limits (~381 drafts would exceed it)
+  const nonDraftJobs = jobs.filter((j: any) => j.status !== 'draft')
+  const jobIds = nonDraftJobs.map((j: any) => j.id)
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
-  const [assignRes, poRes, woRes, councilRes, emailRes, invoiceRes] = await Promise.all([
-    client.from('job_assignments').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
-    client.from('purchase_orders').select('job_id').in('job_id', jobIds).neq('status', 'deleted'),
-    client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
-    client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', jobIds),
-    client.from('po_communications').select('job_id, direction, created_at').in('job_id', jobIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false }).limit(500),
-    client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
-  ])
+  let assignRes: any = { data: [] }, poRes: any = { data: [] }, woRes: any = { data: [] }
+  let councilRes: any = { data: [] }, emailRes: any = { data: [] }, invoiceRes: any = { data: [] }
+
+  if (jobIds.length > 0) {
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes] = await Promise.all([
+      client.from('job_assignments').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
+      client.from('purchase_orders').select('job_id').in('job_id', jobIds).neq('status', 'deleted'),
+      client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
+      client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', jobIds),
+      client.from('po_communications').select('job_id, direction, created_at').in('job_id', jobIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false }).limit(500),
+      client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
+    ])
+  }
 
   const countMap = (rows: any[]) => {
     const m: Record<string, number> = {}
@@ -2786,8 +3043,10 @@ async function pipeline(client: any, params: URLSearchParams) {
 
     const councilInfo = councilStatusMap[j.id] || null
     const emailActivity = emailActivityMap[j.id] || null
+    // Strip pricing_json from response — value already extracted
+    const { pricing_json: _p, ...jLite } = j
     return {
-      ...j, value, days_in_stage: daysInStage,
+      ...jLite, value, days_in_stage: daysInStage,
       assignment_count: assignMap[j.id] || 0,
       po_count: poMap[j.id] || 0,
       wo_count: woMap[j.id] || 0,
@@ -2804,11 +3063,14 @@ async function pipeline(client: any, params: URLSearchParams) {
       final_paid: invoiceMap[j.id]?.final_paid || false,
     }
   }).filter((j: any) => {
+    // Filter out test records
+    if (isTestRecord(j.client_name)) return false
     if (!search) return true
     const s = search.toLowerCase()
     return (j.client_name || '').toLowerCase().includes(s)
       || (j.site_suburb || '').toLowerCase().includes(s)
       || (j.site_address || '').toLowerCase().includes(s)
+      || (j.job_number || '').toLowerCase().includes(s)
   })
 
   const columns: Record<string, any[]> = {
@@ -2832,7 +3094,7 @@ async function jobDetail(client: any, jobId: string) {
     client.from('jobs').select('*').eq('id', jobId).single(),
     client.from('job_assignments').select('*, users:user_id(name, phone, email)').eq('job_id', jobId).order('scheduled_date'),
     client.from('job_documents').select('*').eq('job_id', jobId).order('created_at', { ascending: false }),
-    client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
+    client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
     client.from('job_media').select('*').eq('job_id', jobId).order('created_at'),
     client.from('purchase_orders').select('*').eq('job_id', jobId).neq('status', 'deleted').order('created_at', { ascending: false }),
     client.from('work_orders').select('*').eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
@@ -2887,7 +3149,7 @@ async function jobDetail(client: any, jobId: string) {
       .select('id, xero_invoice_id, method, outcome, notes, follow_up_date, follow_up_resolved, chased_by, created_at')
       .in('xero_invoice_id', overdueInvIds)
       .order('created_at', { ascending: false })
-      .limit(30)
+      .limit(10)
     chaseLogs = cl || []
   }
 
@@ -2917,16 +3179,31 @@ async function jobDetail(client: any, jobId: string) {
     console.log('[ops-api] readiness computation failed (non-blocking):', (e as Error).message)
   }
 
+  // Strip heavy JSON blobs from response — keep only computed values
+  const { scope_json: _s, pricing_json: _p, ...jobLite } = jobRes.data || {}
+
+  // Strip line_items from invoices (huge nested JSON)
+  const invoicesLite = invoices.map((inv: any) => {
+    const { line_items: _li, ...rest } = inv
+    return rest
+  })
+
+  // Strip heavy fields from POs and WOs
+  const posLite = (poRes.data || []).map((po: any) => {
+    const { line_items: _li, ...rest } = po
+    return rest
+  })
+
   return {
-    job: jobRes.data,
+    job: jobLite,
     assignments: assignRes.data || [],
-    documents: docsRes.data || [],
+    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: d.name, type: d.type, url: d.url, created_at: d.created_at })),
     events: eventsRes.data || [],
     media: mediaRes.data || [],
-    purchase_orders: poRes.data || [],
+    purchase_orders: posLite,
     work_orders: woRes.data || [],
     xero_project: xeroRes.data,
-    invoices,
+    invoices: invoicesLite,
     job_contacts: contactsRes.data || [],
     invoice_summary: {
       quoted_total: quotedTotal,
@@ -3007,15 +3284,17 @@ async function listQuotes(client: any, params: URLSearchParams) {
 async function listPOs(client: any, params: URLSearchParams) {
   const status = params.get('status')
   const jobId = params.get('job_id')
+  const supplier = params.get('supplier')
 
   let query = client.from('purchase_orders')
-    .select('*, jobs:job_id(job_number, client_name, type), communications:po_communications(id, direction, from_email, subject, body_text, created_at, communication_type)')
+    .select('*, jobs:job_id(job_number, client_name, type), communications:po_communications(id, direction, from_email, subject, created_at, communication_type)')
     .eq('org_id', DEFAULT_ORG_ID)
     .neq('status', 'deleted')
     .order('created_at', { ascending: false })
 
   if (status) query = query.eq('status', status)
   if (jobId) query = query.eq('job_id', jobId)
+  if (supplier) query = query.ilike('supplier_name', `%${supplier}%`)
 
   const { data, error } = await query
   if (error) throw error
@@ -3532,7 +3811,7 @@ async function createPO(client: any, body: any) {
 
   const items = line_items || lineItems || []
   const subtotal = items.reduce((s: number, li: any) => s + ((li.quantity || 0) * (li.unit_price || li.unitPrice || 0)), 0)
-  const tax = Math.round(subtotal * 10) / 100 // 10% GST
+  const tax = Math.round(subtotal * 0.1 * 100) / 100 // 10% GST
   const total = subtotal + tax
 
   const { data, error } = await client
@@ -3602,7 +3881,7 @@ async function updatePO(client: any, body: any) {
   if (filtered.line_items) {
     const items = filtered.line_items
     filtered.subtotal = items.reduce((s: number, li: any) => s + ((li.quantity || 0) * (li.unit_price || 0)), 0)
-    filtered.tax = Math.round(filtered.subtotal * 10) / 100
+    filtered.tax = Math.round(filtered.subtotal * 0.1 * 100) / 100
     filtered.total = filtered.subtotal + filtered.tax
   }
 
@@ -5476,7 +5755,7 @@ async function morningBrief(client: any) {
       let value = 0
       if (j.pricing_json) {
         const p = typeof j.pricing_json === 'string' ? JSON.parse(j.pricing_json) : j.pricing_json
-        value = p.total || p.amount || (p.items || []).reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.price || 0)), 0)
+        value = parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.amount || p.subtotal || 0) || 0
       }
       return { id: j.id, client: j.client_name, job_number: j.job_number, suburb: j.site_suburb, value, completed: j.completed_at }
     }),
@@ -6905,13 +7184,37 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   // Get trade user info
   const { data: tradeUser } = await client
     .from('users')
-    .select('name, xero_contact_id')
+    .select('name, email, xero_contact_id, trade_details')
     .eq('id', userId)
     .single()
 
-  if (!tradeUser?.xero_contact_id) throw new Error('No Xero supplier contact linked — ask admin to set your Xero contact ID')
+  const stGstRegistered = tradeUser?.trade_details?.gstRegistered !== false
+  const stTaxType = stGstRegistered ? 'INPUT' : 'NONE'
 
-  const tradeName = tradeUser.name || 'Trade'
+  // Resolve Xero supplier contact — auto-create if not linked
+  const { accessToken: stAt, tenantId: stTi } = await getToken(client)
+  let stXeroContactId = tradeUser?.xero_contact_id || null
+  if (!stXeroContactId) {
+    const stEmail = tradeUser?.email || ''
+    if (stEmail) {
+      try {
+        const stContacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(stEmail) + '%22', stAt, stTi)
+        if (stContacts?.Contacts?.length > 0) stXeroContactId = stContacts.Contacts[0].ContactID
+      } catch { /* fallback to create */ }
+    }
+    if (!stXeroContactId) {
+      const stCreateRes = await xeroPost('/Contacts', stAt, stTi, {
+        Contacts: [{ Name: tradeUser?.name || 'Trade', EmailAddress: tradeUser?.email || undefined, IsSupplier: true }]
+      }, 'PUT')
+      stXeroContactId = stCreateRes?.Contacts?.[0]?.ContactID
+    }
+    if (stXeroContactId) {
+      await client.from('users').update({ xero_contact_id: stXeroContactId }).eq('id', userId)
+    }
+    if (!stXeroContactId) throw new Error('Could not create Xero supplier contact')
+  }
+
+  const tradeName = tradeUser?.name || 'Trade'
 
   // Build line items
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -6940,17 +7243,17 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
 
       const job = jobMap[item.job_id] || {}
       const desc = [
-        job.job_number || '',
-        [job.client_name, job.site_suburb].filter(Boolean).join(', '),
-        `${metres}m @ $${pmRate}/m`,
-      ].filter(Boolean).join(' | ')
+        (job.job_number || '') + ' | ' + (trackingCategoryForJob(job.job_number || '') || 'Construction'),
+        [job.client_name, job.site_address, job.site_suburb].filter(Boolean).join(', '),
+        `Fencing installation — ${metres}m @ $${pmRate}/m`,
+      ].filter(Boolean).join('\n')
 
       lineItems.push({
         Description: desc,
         Quantity: metres,
         UnitAmount: pmRate,
-        AccountCode: '301',
-        TaxType: 'INPUT',
+        AccountCode: accountCodeForJob(job.type || '', '301'),
+        TaxType: stTaxType,
         Tracking: xeroTracking(job.job_number || ''),
       })
     }
@@ -6984,19 +7287,17 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       const roleLabel = a.role ? ` (${a.role})` : ''
 
       const desc = [
-        job?.job_number || '',
-        division || '',
-        `Install${roleLabel}`,
+        (job?.job_number || '') + ' | ' + (division || 'Construction'),
+        `Install${roleLabel} — ${dayLabel} — ${hours}hrs @ $${rate}/hr`,
         [job?.client_name, job?.site_address, job?.site_suburb].filter(Boolean).join(', '),
-        `${dayLabel} — ${hours}hrs`,
-      ].filter(Boolean).join(' | ')
+      ].filter(Boolean).join('\n')
 
       lineItems.push({
         Description: desc,
         Quantity: hours,
         UnitAmount: rate,
-        AccountCode: '301',
-        TaxType: 'INPUT',
+        AccountCode: accountCodeForJob(job?.type || '', '301'),
+        TaxType: stTaxType,
         Tracking: xeroTracking(job?.job_number || ''),
       })
     }
@@ -7012,19 +7313,18 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const xeroPayload = {
     Invoices: [{
       Type: 'ACCPAY',
-      Contact: { ContactID: tradeUser.xero_contact_id },
-      Reference: `${tradeName} WE ${week_ending}`,
+      Contact: { ContactID: stXeroContactId },
+      Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(assignments.map((a: any) => (a.jobs as any)?.job_number).filter(Boolean))].join(', ')}`,
       DueDate: dueDate,
       Status: 'DRAFT',
-      LineAmountTypes: 'Exclusive',
+      LineAmountTypes: stGstRegistered ? 'Exclusive' : 'NoTax',
       LineItems: lineItems,
     }],
   }
 
-  // Push to Xero
-  const { accessToken, tenantId } = await getToken(client)
+  // Push to Xero (reuse token from contact resolution above)
   const idempotencyKey = `trade-inv-${userId}-${week_ending}`
-  const result = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
+  const result = await xeroPost('/Invoices', stAt, stTi, xeroPayload, 'PUT', idempotencyKey)
 
   const xeroInv = result?.Invoices?.[0]
   const xeroInvId = xeroInv?.InvoiceID
@@ -7036,12 +7336,12 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       await client.from('xero_invoices').upsert({
         org_id: DEFAULT_ORG_ID,
         xero_invoice_id: xeroInvId,
-        xero_contact_id: tradeUser.xero_contact_id,
+        xero_contact_id: stXeroContactId,
         contact_name: tradeName,
         invoice_number: billNumber,
         invoice_type: 'ACCPAY',
         status: 'DRAFT',
-        reference: `${tradeName} WE ${week_ending}`,
+        reference: `${tradeName} | WE ${week_ending}`,
         sub_total: subtotal,
         total_tax: gst,
         total: total,
@@ -7074,7 +7374,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     notes: notes || null,
     xero_invoice_id: xeroInvId || null,
     xero_bill_number: billNumber || null,
-    status: xeroInvId ? 'pushed' : 'failed',
+    status: xeroInvId ? 'pushed_to_xero' : 'draft',
   }
 
   await client.from('trade_invoices').insert(invoiceRecord)
@@ -10964,7 +11264,7 @@ async function listOverdueInvoices(client: any) {
   let jobMap: Record<string, any> = {}
   if (jobIds.length > 0) {
     const { data: jobs } = await client.from('jobs')
-      .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, ghl_contact_id, ghl_opportunity_id, scope_json, pricing_json, created_at, quoted_at, accepted_at, scheduled_at, completed_at')
+      .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, ghl_contact_id, ghl_opportunity_id, created_at, quoted_at, accepted_at, scheduled_at, completed_at')
       .in('id', jobIds)
     ;(jobs || []).forEach((j: any) => { jobMap[j.id] = j })
   }
@@ -10998,7 +11298,7 @@ async function listOverdueInvoices(client: any) {
       if (!chaseMap[log.xero_invoice_id]) chaseMap[log.xero_invoice_id] = []
       if (!chaseCountMap[log.xero_invoice_id]) chaseCountMap[log.xero_invoice_id] = 0
       chaseCountMap[log.xero_invoice_id]++
-      if (chaseMap[log.xero_invoice_id].length < 10) chaseMap[log.xero_invoice_id].push(log)
+      if (chaseMap[log.xero_invoice_id].length < 3) chaseMap[log.xero_invoice_id].push(log)
       // Track next unresolved follow-up
       if (log.follow_up_date && !log.follow_up_resolved && !followUpMap[log.xero_invoice_id]) {
         followUpMap[log.xero_invoice_id] = log.follow_up_date
@@ -11046,8 +11346,8 @@ async function listOverdueInvoices(client: any) {
     .limit(1)
   const lastSyncedAt = syncRow?.[0]?.synced_at || null
 
-  // 5. Build enriched invoice list with auto-classification
-  const enriched = invoices.map((inv: any) => {
+  // 5. Build enriched invoice list with auto-classification (filter out test records)
+  const enriched = invoices.filter((inv: any) => !isTestRecord(inv.contact_name)).map((inv: any) => {
     const job = inv.job_id ? jobMap[inv.job_id] : null
     const contact = inv.xero_contact_id ? contactInfo[inv.xero_contact_id] : null
     const ghl_contact_id = job?.ghl_contact_id || contact?.ghl_id || null
@@ -11106,10 +11406,7 @@ async function listOverdueInvoices(client: any) {
       site_address: job?.site_address || null,
       site_suburb: job?.site_suburb || null,
       invoice_status: inv.status || null,
-      line_items: inv.line_items || null,
       amount_paid: inv.amount_paid || 0,
-      scope_json: job?.scope_json || null,
-      pricing_json: job?.pricing_json || null,
       job_created_at: job?.created_at || null,
       job_quoted_at: job?.quoted_at || null,
       job_accepted_at: job?.accepted_at || null,
@@ -11155,7 +11452,7 @@ async function listOverdueInvoices(client: any) {
   // 6b. Fetch PAID invoices for these contacts (gives full picture per client)
   if (xeroContactIds.length > 0) {
     const { data: paidInvoices } = await client.from('xero_invoices')
-      .select('xero_contact_id, invoice_number, total, amount_paid, fully_paid_on, invoice_date, reference, job_id, line_items')
+      .select('xero_contact_id, invoice_number, total, amount_paid, fully_paid_on, invoice_date, reference, job_id')
       .eq('org_id', DEFAULT_ORG_ID)
       .eq('invoice_type', 'ACCREC')
       .eq('status', 'PAID')
@@ -11174,7 +11471,6 @@ async function listOverdueInvoices(client: any) {
           invoice_date: pi.invoice_date,
           reference: pi.reference,
           job_id: pi.job_id,
-          line_items: pi.line_items || null,
         })
       }
     })

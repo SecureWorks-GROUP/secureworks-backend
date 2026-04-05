@@ -633,8 +633,8 @@ async function sendRichApprovalCard(chatId: number, card: any, pendingId: string
   // Build rich card body from the message field
   const message = card.message || card.description || `Execute ${actionType}`
 
-  // Truncate if too long for Telegram (max ~4096 chars)
-  const displayMessage = message.length > 800 ? message.slice(0, 800) + '...' : message
+  // Telegram supports 4096 chars — allow up to 2000 for the card body
+  const displayMessage = message.length > 2000 ? message.slice(0, 2000) + '...' : message
 
   const lines = [`<b>${label}</b>\n`, displayMessage]
 
@@ -1275,8 +1275,10 @@ async function handleConfirmRejectCallback(
       } catch { /* non-blocking */ }
     }
 
-    // Execute the confirmed action via ops-ai
+    // Execute the confirmed action via agent
     try {
+      console.log(`[telegram-bot] executing confirm_action: tool=${pending.action_type}, args=${JSON.stringify(pending.action_payload).slice(0, 200)}`)
+
       const resp = await fetch(AGENT_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -1292,14 +1294,32 @@ async function handleConfirmRejectCallback(
           },
         }),
       })
-      const result = await resp.json()
+
+      const resultText = await resp.text()
+      console.log(`[telegram-bot] confirm_action response: status=${resp.status}, body=${resultText.slice(0, 300)}`)
+
+      if (!resp.ok) {
+        throw new Error(`Agent returned ${resp.status}: ${resultText.slice(0, 200)}`)
+      }
+
+      let result: any
+      try { result = JSON.parse(resultText) } catch { result = { content: resultText } }
+
+      // Check for error in response
+      if (result.error) {
+        throw new Error(result.error)
+      }
+
+      const successMsg = result.content || result.confirmed_result
+        ? `\u2705 <b>Done</b> \u2014 ${result.content || 'Action executed successfully.'}`
+        : `\u2705 <b>Approved</b> \u2014 Action completed.`
 
       await fetch(`${TELEGRAM_API}/editMessageText`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId, message_id: messageId,
-          text: `\u2705 <b>Approved</b> \u2014 ${result.content || 'Action completed.'}`,
+          text: successMsg,
           parse_mode: 'HTML',
         }),
       })
@@ -1655,6 +1675,23 @@ serve(async (req: Request) => {
   try {
     const body = await req.json()
 
+    // ── Handle automation results from Railway scheduler ──
+    if (body.type === 'automation_result' && body.chat_id && body.content) {
+      try {
+        const content = body.content as string
+        const automation = body.automation || 'unknown'
+        // Truncate to Telegram limit (4096 chars)
+        const text = content.length > 4000
+          ? content.slice(0, 4000) + '\n\n... (truncated)'
+          : content
+        await sendMessage(Number(body.chat_id), `📋 <b>${automation}</b>\n\n${text}`)
+        console.log(`[telegram-bot] delivered automation result: ${automation} to ${body.chat_id}`)
+      } catch (e) {
+        console.error('[telegram-bot] automation delivery failed:', (e as Error).message)
+      }
+      return new Response('ok', { status: 200 })
+    }
+
     // ── Dedup: skip already-processed updates (Telegram retries on slow 200) ──
     const updateId = body.update_id as number | undefined
     if (updateId) {
@@ -1776,20 +1813,26 @@ serve(async (req: Request) => {
         // ── Native data commands (direct Supabase, no agent round-trip) ──
         case '/overdue': {
           try {
+            const today = new Date().toISOString().slice(0, 10)
             const { data: inv } = await client.from('xero_invoices')
               .select('contact_name, amount_due, due_date, invoice_number')
-              .eq('type', 'ACCREC').in('status', ['AUTHORISED', 'SUBMITTED'])
-              .gt('amount_due', 0).order('due_date', { ascending: true }).limit(15)
+              .eq('invoice_type', 'ACCREC')
+              .eq('org_id', DEFAULT_ORG_ID)
+              .in('status', ['AUTHORISED', 'SUBMITTED'])
+              .gt('amount_due', 0)
+              .lt('due_date', today)
+              .order('due_date', { ascending: true })
+              .limit(20)
             if (!inv || inv.length === 0) {
-              await sendMessage(message.chat.id, 'No overdue invoices right now. 🎉')
+              await sendMessage(message.chat.id, 'No overdue invoices right now.')
             } else {
               const now = Date.now()
               const lines = inv.map((i: any) => {
                 const days = Math.round((now - new Date(i.due_date).getTime()) / 86400000)
-                return `• <b>${i.contact_name}</b> — $${Number(i.amount_due).toLocaleString()} (${days > 0 ? days + 'd overdue' : 'due ' + i.due_date})`
+                return `• <b>${i.contact_name}</b> — $${Number(i.amount_due).toLocaleString()} (${days}d overdue)`
               })
               const total = inv.reduce((s: number, i: any) => s + Number(i.amount_due || 0), 0)
-              await sendMessage(message.chat.id, `<b>Overdue Invoices</b> ($${Math.round(total).toLocaleString()} total)\n\n${lines.join('\n')}`)
+              await sendMessage(message.chat.id, `<b>Overdue Invoices</b> (${inv.length} invoices, $${Math.round(total).toLocaleString()} total)\n\n${lines.join('\n')}`)
             }
           } catch (e) { await sendMessage(message.chat.id, 'Could not load overdue invoices — try again.') }
           break
@@ -2029,12 +2072,17 @@ serve(async (req: Request) => {
           // This prevents ops-ai from ever being called for banter.
           const strippedText = fullText.replace(/@\w+bot\b/gi, '').trim().toLowerCase()
           const hasJobRef = /SW[PFDR]-\d{5}/i.test(text)  // Don't use global regex (lastIndex bug)
-          const hasBusinessKeywords = /\b(jobs?|schedule|invoice|quote|pipeline|status|today|tomorrow|this week|next week|overdue|revenue|margin|sales figures|leads?|client[s]?|materials?|site|install|build|fence|fencing|patio|deck|how many|how much|total|numbers?|report|weekly|daily|monthly)\b/i.test(strippedText)
+          // Broad keyword filter — anything remotely business-related goes to ops-ai
+          const hasBusinessKeywords = /\b(jobs?|schedule[ds]?|invoice[ds]?|quote[ds]?|pipeline|status|today|tomorrow|this week|next week|overdue|revenue|margin|sales|leads?|client[s]?|materials?|site|install|build|fence|fencing|patio|deck|how many|how much|total|numbers?|report|weekly|daily|monthly|chase|send|create|update|move|assign|cancel|approve|reject|check|look\s*up|find|call|email|sms|text|message|notify|deposit|payment|paid|crew|supplier|po\b|purchase\s*order|work\s*order|council|variation|expense|contact|customer|debtor|complete[d]?|finish|done|start|begin|price|cost|amount|owing|owe[sd]?|follow\s*up|remind|reminder|morning|brief|digest|inbox|do\s*it|go\s*ahead|what\s*about|how\s*about|and\s*the)\b/i.test(strippedText)
+          // Also catch dollar amounts ($123), phone numbers (04xx), and addresses (number + street name)
+          const hasBusinessPatterns = /\$[\d,]+|\b0[45]\d{2}\s?\d{3}\s?\d{3}\b|\b\d+\s+[A-Z][a-z]+\s+(st|rd|dr|ave|way|pl|ct|cres|loop|tce|parade)\b/i.test(strippedText)
+          // If replying to a bot message, ALWAYS route to ops-ai (continuing a business conversation)
+          const isReplyToBot = !!message.reply_to_message?.from?.is_bot
 
-          console.log('[telegram-bot] ROUTE CHECK:', JSON.stringify({ strippedText, hasJobRef, hasBusinessKeywords }))
+          console.log('[telegram-bot] ROUTE CHECK:', JSON.stringify({ strippedText: strippedText.slice(0, 80), hasJobRef, hasBusinessKeywords, hasBusinessPatterns, isReplyToBot }))
 
-          // If no business keywords and no job ref → it's banter, go freestyle
-          if (!hasBusinessKeywords && !hasJobRef) {
+          // If no business signals at all → it's banter, go freestyle
+          if (!hasBusinessKeywords && !hasJobRef && !hasBusinessPatterns && !isReplyToBot) {
             console.log('[telegram-bot] → FREESTYLE MODE (no business keywords)')
             try {
               const banterResponse = await freestylePersonality(text, callerContext, recentMessages)

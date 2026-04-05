@@ -21,6 +21,10 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
+// Test data filter — exclude test records from production outputs
+const isTestRecord = (name: string | null | undefined): boolean =>
+  !name ? false : /\btest\b/i.test(name) || /^marnin test/i.test(name)
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -198,7 +202,7 @@ serve(async (req: Request) => {
       case 'match_invoices':
         return json(await matchInvoicesToJobs(sb))
       case 'debt_followup':
-        return json(await debtFollowup(sb))
+        return json(await debtFollowup(sb, url.searchParams.get('search') || undefined))
       case 'ceo_report':
         return json(await ceoReport(sb))
       case 'sales_summary':
@@ -554,6 +558,8 @@ async function dashboardSummary(sb: any) {
     },
     pl_reports: plReports || [],
     aged_receivables: buckets,
+    overdue_total: (buckets['1-30'].total + buckets['31-60'].total + buckets['61-90'].total + buckets['90+'].total),
+    overdue_count: (buckets['1-30'].count + buckets['31-60'].count + buckets['61-90'].count + buckets['90+'].count),
     pipeline_forecast: {
       raw_pipeline: rawPipeline,
       weighted_pipeline: weightedPipeline,
@@ -1198,15 +1204,23 @@ async function marketingSummary(sb: any) {
 // DEBT FOLLOW-UP — client-grouped receivables with phone numbers
 // ════════════════════════════════════════════════════════════
 
-async function debtFollowup(sb: any) {
+async function debtFollowup(sb: any, search?: string) {
   // Get all outstanding receivables
-  const { data: receivables } = await sb
+  let query = sb
     .from('aged_receivables')
     .select('*')
     .eq('org_id', DEFAULT_ORG_ID)
+    .neq('age_bucket', 'current') // Exclude not-yet-due invoices — overdue only
+
+  // Filter by client name if search provided
+  if (search) {
+    query = query.ilike('contact_name', `%${search}%`)
+  }
+
+  const { data: receivables } = await query
 
   if (!receivables || receivables.length === 0) {
-    return { clients: [], total_outstanding: 0 }
+    return { clients: [], total_outstanding: 0, total_clients: 0, total_invoices: 0 }
   }
 
   // Get unique Xero contact IDs
@@ -1255,6 +1269,9 @@ async function debtFollowup(sb: any) {
     }
   }
 
+  // Filter out test records before grouping
+  const filteredReceivables = receivables.filter((r: any) => !isTestRecord(r.contact_name))
+
   // Group receivables by contact
   const byContact: Record<string, {
     contact_name: string,
@@ -1269,7 +1286,7 @@ async function debtFollowup(sb: any) {
 
   const bucketSeverity: Record<string, number> = { 'current': 0, '1-30': 1, '31-60': 2, '61-90': 3, '90+': 4 }
 
-  for (const r of receivables) {
+  for (const r of filteredReceivables) {
     const key = r.xero_contact_id || r.contact_name || 'Unknown'
     if (!byContact[key]) {
       const info = contactInfo[r.xero_contact_id] || {}
@@ -1316,7 +1333,7 @@ async function debtFollowup(sb: any) {
     clients,
     total_outstanding: totalOutstanding,
     total_clients: clients.length,
-    total_invoices: receivables.length,
+    total_invoices: filteredReceivables.length,
   }
 }
 
