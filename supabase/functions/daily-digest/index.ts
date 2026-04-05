@@ -2513,15 +2513,17 @@ serve(async (req: Request) => {
         detail_json: a,
       }))
       if (alertRows.length > 0) {
+        // Resolve active alerts with same types (handles concurrent runs — last writer wins)
+        const alertTypes = alertRows.map((r: any) => r.alert_type)
+        await sb.from('ai_alerts')
+          .update({ resolved_at: new Date().toISOString() })
+          .eq('org_id', DEFAULT_ORG_ID)
+          .is('resolved_at', null)
+          .is('dismissed_at', null)
+          .in('alert_type', alertTypes)
+        // Insert fresh
         await sb.from('ai_alerts').insert(alertRows)
       }
-      // Resolve old alerts after insert (runs even if zero new alerts generated)
-      await sb.from('ai_alerts')
-        .update({ resolved_at: new Date().toISOString() })
-        .eq('org_id', DEFAULT_ORG_ID)
-        .is('resolved_at', null)
-        .is('dismissed_at', null)
-        .lt('created_at', new Date(Date.now() - 60000).toISOString())
     } catch (e) {
       console.log('[daily-digest] ai_alerts insert failed (table may not exist):', e)
     }
