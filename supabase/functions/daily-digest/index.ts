@@ -2512,16 +2512,14 @@ serve(async (req: Request) => {
         financial_impact: a.data?.total_value || a.data?.total || null,
         detail_json: a,
       }))
+      // Resolve ALL active alerts (clears stale types that no longer apply + handles concurrent dedup)
+      await sb.from('ai_alerts')
+        .update({ resolved_at: new Date().toISOString() })
+        .eq('org_id', DEFAULT_ORG_ID)
+        .is('resolved_at', null)
+        .is('dismissed_at', null)
+      // Insert fresh
       if (alertRows.length > 0) {
-        // Resolve active alerts with same types (handles concurrent runs — last writer wins)
-        const alertTypes = alertRows.map((r: any) => r.alert_type)
-        await sb.from('ai_alerts')
-          .update({ resolved_at: new Date().toISOString() })
-          .eq('org_id', DEFAULT_ORG_ID)
-          .is('resolved_at', null)
-          .is('dismissed_at', null)
-          .in('alert_type', alertTypes)
-        // Insert fresh
         await sb.from('ai_alerts').insert(alertRows)
       }
     } catch (e) {
