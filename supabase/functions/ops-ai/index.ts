@@ -3326,7 +3326,7 @@ serve(async (req: Request) => {
               body: JSON.stringify({
                 contactId: params.ghl_contact_id,
                 subject: 'How was your SecureWorks experience?',
-                body: params.message,
+                htmlBody: `<p>${(params.message || '').replace(/\n/g, '<br>')}</p>`,
               }),
             })
             result = await reviewResp.json()
