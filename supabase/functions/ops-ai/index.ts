@@ -2542,13 +2542,17 @@ async function getOrCreateSession(sb: any, userId: string, channel: string): Pro
 }
 
 async function fetchRecentMessages(sb: any, sessionId: string, limit = 5): Promise<Array<{ role: string; content: string }>> {
+  // Fetch newest N messages (DESC), then reverse for chronological order
   const { data: rows } = await sb.from('conversation_history')
     .select('role, content, tool_calls')
     .eq('session_id', sessionId)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(limit)
 
   if (!rows || rows.length === 0) return []
+
+  // Reverse to chronological (oldest first) for Claude's messages array
+  rows.reverse()
 
   return rows.map((r: any) => {
     let content = r.content || ''
