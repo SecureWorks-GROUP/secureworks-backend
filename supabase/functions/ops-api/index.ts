@@ -2465,6 +2465,7 @@ serve(async (req: Request) => {
       case 'send_chase_sms': return json(await sendChaseSms(client, body))
       case 'trigger_chase_workflow': return json(await triggerChaseWorkflow(client, body))
       case 'stop_chase_workflow': return json(await stopChaseWorkflow(client, body))
+      case 'handle_payment_event': return json(await handlePaymentEvent(client, body))
       case 'trigger_xero_sync': return json(await triggerXeroSync())
       case 'ai_analyse_debt_client': return json(await aiAnalyseDebtClient(client, body))
       case 'ai_draft_chase_message': return json(await aiDraftChaseMessage(body))
@@ -11886,4 +11887,77 @@ async function stopChaseWorkflow(client: any, body: any) {
   }
 
   return { success: true, tag_removed: tagResult.success }
+}
+
+// ── Handle payment detection events ──
+// Called when xero sync detects an invoice has been paid (amount_due → 0).
+// Stops chase workflow, sends thank-you SMS, logs to payment_chase_logs.
+async function handlePaymentEvent(client: any, body: any) {
+  const { xero_contact_id, xero_invoice_id, invoice_number, contact_name, amount_paid, job_id } = body
+  if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
+
+  const results: string[] = []
+
+  // 1. Resolve GHL contact from contact_matches
+  let ghlContactId: string | null = null
+  const { data: match } = await client.from('contact_matches')
+    .select('ghl_contact_id, phone')
+    .eq('xero_contact_id', xero_contact_id)
+    .limit(1)
+    .maybeSingle()
+  if (match?.ghl_contact_id) {
+    ghlContactId = match.ghl_contact_id
+  }
+
+  // 2. Stop chase workflow if GHL contact exists
+  if (ghlContactId) {
+    try {
+      await stopChaseWorkflow(client, { ghl_contact_id: ghlContactId })
+      results.push('chase_stopped')
+    } catch (e) {
+      console.log(`[ops-api] stopChaseWorkflow failed for ${ghlContactId}:`, e)
+    }
+  }
+
+  // 3. Resolve any unresolved follow-ups for this invoice
+  const { count: resolvedCount } = await client.from('payment_chase_logs')
+    .update({ follow_up_resolved: true })
+    .eq('xero_invoice_id', xero_invoice_id)
+    .eq('follow_up_resolved', false)
+    .not('follow_up_date', 'is', null)
+  if (resolvedCount && resolvedCount > 0) {
+    results.push(`resolved_${resolvedCount}_followups`)
+  }
+
+  // 4. Log payment received to chase logs
+  await client.from('payment_chase_logs').insert({
+    xero_invoice_id,
+    job_id: job_id || null,
+    ghl_contact_id: ghlContactId || null,
+    contact_name: contact_name || null,
+    method: 'status_change',
+    outcome: `Payment received: $${amount_paid || '?'} — ${invoice_number}`,
+    chased_by: 'system',
+  })
+  results.push('chase_log_created')
+
+  // 5. Send thank-you SMS if we have a GHL contact with a phone
+  if (ghlContactId && match?.phone) {
+    const firstName = (contact_name || '').split(' ')[0] || 'there'
+    const thankYouMsg = `Hi ${firstName}, we've received your payment of $${Math.round(Number(amount_paid) || 0).toLocaleString()} for invoice ${invoice_number}. Thank you! — SecureWorks`
+    try {
+      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
+      await fetch(ghlUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+        body: JSON.stringify({ contactId: ghlContactId, message: thankYouMsg }),
+      })
+      results.push('thank_you_sms_sent')
+    } catch (e) {
+      console.log(`[ops-api] Thank-you SMS failed for ${ghlContactId}:`, e)
+      results.push('thank_you_sms_failed')
+    }
+  }
+
+  return { success: true, invoice_number, contact_name, actions: results }
 }
