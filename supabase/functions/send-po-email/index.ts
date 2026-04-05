@@ -74,6 +74,7 @@ serve(async (req: Request) => {
       dry_run,
     } = body
     let { job_id } = body
+    const cc: string[] = body.cc || []
 
     if (!po_id || !to_email) {
       return json({ error: 'po_id and to_email required' }, 400)
@@ -177,6 +178,7 @@ serve(async (req: Request) => {
         html: fullHtml,
       }
       if (body_text) resendPayload.text = body_text
+      if (cc.length > 0) resendPayload.cc = cc
 
       // Add PDF and any other attachments
       if (emailAttachments.length > 0) {
@@ -229,6 +231,7 @@ serve(async (req: Request) => {
         in_reply_to: inReplyTo,
         thread_id: threadId,
         delivery_status: 'sent',
+        cc_emails: cc.length > 0 ? cc : null,
       })
       .select('id')
       .single()
