@@ -288,13 +288,22 @@ PERSONALITY RULES:
 
 // ── Connect to ops-ai ────────────────────────────────────
 
-async function askOpsAi(text: string, callerContext: CallerContext, view: string = 'ops', groupContext?: 'crew' | 'ops'): Promise<{ content: string; action_cards?: any[]; session_id?: string }> {
+async function askOpsAi(text: string, callerContext: CallerContext, view: string = 'ops', groupContext?: 'crew' | 'ops', chatHistory?: Array<{ query: string; response: string }>): Promise<{ content: string; action_cards?: any[]; session_id?: string }> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 120000) // 120s timeout (Railway agent needs more time)
 
   try {
+    // Build messages array: conversation history + current message
+    const historyMsgs: Array<{ role: string; content: string }> = []
+    if (chatHistory && chatHistory.length > 0) {
+      for (const h of chatHistory) {
+        if (h.query) historyMsgs.push({ role: 'user', content: h.query.slice(0, 500) })
+        if (h.response) historyMsgs.push({ role: 'assistant', content: h.response.slice(0, 1000) })
+      }
+    }
+
     const requestBody: any = {
-      messages: [{ role: 'user', content: text }],
+      messages: [...historyMsgs, { role: 'user', content: text }],
       view,
       caller_context: callerContext,
     }
@@ -2008,6 +2017,7 @@ serve(async (req: Request) => {
 
           // Conversational memory — load recent messages from SAME chat (not all channels)
           let recentMessages: string[] = []
+          let chatHistoryRaw: Array<{ query: string; response: string }> = []
           try {
             // Filter by user_id for DMs, or by channel for groups — ensures proper threading
             const chatFilter = channel === 'telegram_dm'
@@ -2016,15 +2026,18 @@ serve(async (req: Request) => {
             let query = client.from('chat_logs')
               .select('query, response')
               .order('created_at', { ascending: false })
-              .limit(5)
+              .limit(3)
             for (const [k, v] of Object.entries(chatFilter)) {
               query = query.eq(k, v)
             }
             const { data: recentChats } = await query
             if (recentChats && recentChats.length > 0) {
-              recentMessages = recentChats.reverse().map((c: any) =>
+              const reversed = recentChats.reverse()
+              recentMessages = reversed.map((c: any) =>
                 `User: ${(c.query || '').slice(0, 150)}\nAI: ${(c.response || '').slice(0, 200)}`
               )
+              // Raw history for messages array injection
+              chatHistoryRaw = reversed.map((c: any) => ({ query: c.query || '', response: c.response || '' }))
             }
           } catch { /* non-blocking — memory is best-effort */ }
 
@@ -2128,7 +2141,7 @@ serve(async (req: Request) => {
           }
 
           try {
-            const aiResponse = await askOpsAi(fullText, callerContext, view, groupContext)
+            const aiResponse = await askOpsAi(fullText, callerContext, view, groupContext, chatHistoryRaw)
 
             // Rewrite tone for Telegram personality
             aiResponse.content = await rewriteTone(aiResponse.content, fullText, callerContext)
