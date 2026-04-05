@@ -9,6 +9,40 @@
 -- "request dispatched" not "delivery confirmed".
 -- ════════════════════════════════════════════════════════════
 
+-- ════════════════════════════════════════
+-- Ensure outbound_message_queue exists (may already exist in live DB)
+-- ════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS outbound_message_queue (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  communication_log_id uuid,
+  channel varchar NOT NULL,
+  recipient_id varchar,
+  recipient_type varchar,
+  message_content text,
+  message_type varchar DEFAULT 'text',
+  priority_level varchar NOT NULL DEFAULT 'normal',
+  scheduled_for timestamptz,
+  rate_limit_bucket varchar,
+  rate_limit_tokens_required integer DEFAULT 1,
+  dedup_key varchar,
+  is_duplicate boolean DEFAULT false,
+  duplicate_of uuid,
+  status varchar NOT NULL DEFAULT 'queued',
+  attempt_count integer DEFAULT 0,
+  max_attempts integer DEFAULT 3,
+  last_attempt_at timestamptz,
+  error_message text,
+  error_code varchar,
+  next_retry_at timestamptz,
+  retry_backoff_ms integer DEFAULT 5000,
+  sent_at timestamptz,
+  response_id varchar,
+  response_status varchar,
+  metadata jsonb DEFAULT '{}'::jsonb,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
 -- Service role key (same as all cron jobs — safe in postgres-only context)
 -- Using a helper function to avoid repeating the key in every function
 CREATE OR REPLACE FUNCTION _sw_service_key() RETURNS text AS $$
