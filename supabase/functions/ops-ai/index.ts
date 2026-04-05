@@ -2499,6 +2499,115 @@ function logChat(opts: {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// CONVERSATION MEMORY — session management + message persistence
+// ════════════════════════════════════════════════════════════
+
+function resolveMemoryUserId(caller: CallerContext): string {
+  if (caller.channel?.startsWith('telegram') && caller.user_id) {
+    return `telegram:${caller.user_id}`
+  }
+  return caller.user_email || `unknown:${caller.user_name}`
+}
+
+async function getOrCreateSession(sb: any, userId: string, channel: string): Promise<string> {
+  const thirtyMinsAgo = new Date(Date.now() - 30 * 60000).toISOString()
+
+  // Find active session (activity within last 30 min)
+  const { data: existing } = await sb.from('conversation_sessions')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('channel', channel)
+    .gte('last_activity_at', thirtyMinsAgo)
+    .order('last_activity_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (existing?.id) {
+    // Update activity timestamp + increment count (fire-and-forget)
+    sb.from('conversation_sessions')
+      .update({ last_activity_at: new Date().toISOString(), message_count: existing.message_count + 1 })
+      .eq('id', existing.id)
+      .then(() => {}).catch(() => {})
+    return existing.id
+  }
+
+  // Create new session
+  const { data: newSession, error } = await sb.from('conversation_sessions')
+    .insert({ user_id: userId, channel, message_count: 1 })
+    .select('id')
+    .single()
+  if (error) throw error
+  return newSession.id
+}
+
+async function fetchRecentMessages(sb: any, sessionId: string, limit = 10): Promise<Array<{ role: string; content: string }>> {
+  const { data: rows } = await sb.from('conversation_history')
+    .select('role, content, tool_calls')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true })
+    .limit(limit)
+
+  if (!rows || rows.length === 0) return []
+
+  return rows.map((r: any) => {
+    let content = r.content || ''
+    // For assistant messages that used tools, prepend a brief note
+    if (r.role === 'assistant' && r.tool_calls && Array.isArray(r.tool_calls) && r.tool_calls.length > 0) {
+      const toolNames = r.tool_calls.map((t: any) => t.name).filter(Boolean).join(', ')
+      if (toolNames) content = `[Used: ${toolNames}] ${content}`
+    }
+    return { role: r.role, content }
+  })
+}
+
+function truncateHistoryToTokenBudget(messages: Array<{ role: string; content: string }>, maxTokens = 2000): Array<{ role: string; content: string }> {
+  if (messages.length === 0) return []
+
+  const maxChars = maxTokens * 4 // ~4 chars per token
+  let charBudget = maxChars
+  const kept: Array<{ role: string; content: string }> = []
+
+  // Work backwards — keep most recent messages first
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msgChars = (messages[i].content || '').length
+    if (charBudget - msgChars < 0 && kept.length > 0) break // Budget exceeded, stop
+    kept.unshift(messages[i])
+    charBudget -= msgChars
+  }
+
+  // Ensure messages alternate correctly (Claude requires user→assistant→user pattern)
+  // If first message is assistant, drop it
+  if (kept.length > 0 && kept[0].role === 'assistant') {
+    kept.shift()
+  }
+
+  return kept
+}
+
+function saveConversationMessage(
+  sb: any, userId: string, sessionId: string, channel: string,
+  role: string, content: string,
+  toolCalls: any[] = [], jobIds: string[] = [], contactIds: string[] = [], tokensUsed = 0,
+) {
+  // Non-blocking fire-and-forget — never slows down response
+  const cappedContent = (content || '').slice(0, 10000)
+  sb.from('conversation_history')
+    .insert({
+      user_id: userId,
+      channel,
+      session_id: sessionId,
+      role,
+      content: cappedContent,
+      tool_calls: toolCalls,
+      job_ids: jobIds,
+      contact_ids: contactIds,
+      tokens_used: tokensUsed,
+    })
+    .then(() => {})
+    .catch((e: any) => console.log('[ops-ai] conversation save failed:', e?.message))
+}
+
 // Log reasoning trace to ai_reasoning_traces table
 async function logReasoningTrace(opts: {
   triggerType: string;
@@ -3025,14 +3134,11 @@ NEVER say "I don't have that capability" or "I don't have access" — check your
   // Coaching persona — role-specific voice
   const coachingPersona = caller ? buildCoachingPersona(caller) : ''
 
-  // Conversational memory — inject recent messages for context continuity
-  let memoryContext = ''
-  if (caller?.recent_messages && caller.recent_messages.length > 0) {
-    memoryContext = `\nRECENT CONVERSATION CONTEXT (last few exchanges with this person):\n${caller.recent_messages.join('\n')}\n\nUse this to maintain continuity. If they said "that job" — you know which job. If they asked about revenue yesterday, build on that context today.\n`
-  }
+  // Conversational memory now injected as proper Claude messages (not system prompt)
+  // See: historyMessages in main handler + conversation_history table
 
   if (view === 'ops') {
-    return coachingPersona + memoryContext + base + `
+    return coachingPersona + base + `
 Caller: Shaun (Operations Manager). Focus: scheduling, crew coordination, job tracking, POs, material deliveries, bottlenecks.
 
 Morning brief format (when asked "what should I focus on?"):
@@ -3056,7 +3162,7 @@ ${context ? JSON.stringify(context, null, 2) : 'Loading...'}
 
   // CEO view
   if (view === 'ceo') {
-    return coachingPersona + memoryContext + base + `
+    return coachingPersona + base + `
 Caller: Marnin (CEO). Focus: revenue pacing vs $180K, margin vs 30%, pipeline health, marketing ROI, cash flow, strategy.
 
 "Are we on track?" format:
@@ -3079,7 +3185,7 @@ ${context ? JSON.stringify(context, null, 2) : 'Loading...'}
   }
 
   if (view === 'sales') {
-    return coachingPersona + memoryContext + base + `
+    return coachingPersona + base + `
 Caller: salesperson. Focus: pipeline, follow-ups, lead conversion, client comms, personal KPIs.
 
 PROACTIVE FLAGS — add at end only if relevant:
@@ -3094,7 +3200,7 @@ Context: ${context ? JSON.stringify(context, null, 2) : 'Loading...'}
   }
 
   // Fallback (CEO view reaches here)
-  return coachingPersona + memoryContext + base
+  return coachingPersona + base
 }
 
 // ════════════════════════════════════════════════════════════
@@ -3197,6 +3303,23 @@ serve(async (req: Request) => {
       user_role: 'admin' as const,
       channel: (view === 'ceo' ? 'ceo_dashboard' : 'dashboard') as CallerContext['channel'],
       org_id: DEFAULT_ORG_ID,
+    }
+
+    // ── Conversation memory: resolve session + fetch history ──
+    const memoryUserId = resolveMemoryUserId(callerContext)
+    const memoryChannel = callerContext.channel?.startsWith('telegram') ? 'telegram' : 'dashboard'
+    let sessionId: string | null = null
+    let historyMessages: Array<{ role: string; content: string }> = []
+
+    if (!confirm_action) {
+      try {
+        const memorySb = sbClient()
+        sessionId = await getOrCreateSession(memorySb, memoryUserId, memoryChannel)
+        const recent = await fetchRecentMessages(memorySb, sessionId, 10)
+        historyMessages = truncateHistoryToTokenBudget(recent, 2000)
+      } catch (e) {
+        console.log('[ops-ai] Memory fetch failed (degrading to stateless):', (e as Error).message)
+      }
     }
 
     // Handle confirmed write actions (user clicked Confirm in the UI)
@@ -3414,11 +3537,11 @@ serve(async (req: Request) => {
     const systemPrompt = buildSystemPrompt(view, context, callerContext, group_context) + learnedBehaviors + confirmedRules + fewShotExamples
     const tools = getToolsForCaller(view, callerContext)
 
-    // Claude Messages API call with tool_use
-    let anthropicMessages = messages.map((m: any) => ({
-      role: m.role,
-      content: m.content,
-    }))
+    // Claude Messages API call with tool_use — prepend conversation history
+    let anthropicMessages = [
+      ...historyMessages,
+      ...messages.map((m: any) => ({ role: m.role, content: m.content })),
+    ]
 
     // Tool use loop — keep calling until Claude produces a final text response
     const MAX_TOOL_ROUNDS = 5
@@ -3816,6 +3939,17 @@ serve(async (req: Request) => {
       insightsGenerated: flagLines,
       caller: callerContext,
     })
+
+    // Fire-and-forget: save to conversation memory
+    if (sessionId) {
+      const userContent = typeof lastUserMsg?.content === 'string'
+        ? lastUserMsg.content : JSON.stringify(lastUserMsg?.content || '')
+      const toolCallsSummary = toolsUsed.map(t => ({ name: t }))
+      const jobIdArr = [...jobIdsReferenced]
+      const memorySb = sbClient()
+      saveConversationMessage(memorySb, memoryUserId, sessionId, memoryChannel, 'user', userContent, [], jobIdArr, [], 0)
+      saveConversationMessage(memorySb, memoryUserId, sessionId, memoryChannel, 'assistant', finalResponse, toolCallsSummary, jobIdArr, [], 0)
+    }
 
     return json({
       role: 'assistant',
