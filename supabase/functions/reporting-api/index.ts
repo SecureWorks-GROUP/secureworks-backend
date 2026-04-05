@@ -215,6 +215,16 @@ serve(async (req: Request) => {
         return json(await salesLeadsAction(sb, url.searchParams))
       case 'sales_alerts':
         return json(await salesAlertsAction(sb, url.searchParams))
+      case 'sales_snooze': {
+        if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+        const body = await req.json()
+        return json(await salesSnoozeAction(sb, body))
+      }
+      case 'sales_quick_action': {
+        if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+        const body = await req.json()
+        return json(await salesQuickAction(sb, body))
+      }
       case 'reconcile_transaction': {
         if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
         const body = await req.json()
@@ -240,7 +250,7 @@ serve(async (req: Request) => {
         return json({ success: true, transaction_id, status: status || 'reconciled' })
       }
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, reconcile_transaction' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
@@ -2995,24 +3005,55 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
   const closePool = monthJobs.filter((j: any) => ['quoted', 'accepted', 'cancelled'].includes(j.status)).length
   const closeRate = closePool > 0 ? Math.round((accepted / closePool) * 100) : 0
 
-  // Follow-ups due: quoted > 7 days ago
+  // ── Snooze filtering: exclude jobs snoozed until future ──
+  const allActionJobIds = [...drafts.map((j: any) => j.id), ...jobs.filter((j: any) => j.status === 'quoted').map((j: any) => j.id)]
+  const { data: activeSnoozes } = allActionJobIds.length > 0
+    ? await sb.from('sales_snooze').select('job_id, snoozed_until').in('job_id', allActionJobIds.slice(0, 200)).gte('snoozed_until', now.toISOString())
+    : { data: [] }
+  const snoozedJobIds = new Set((activeSnoozes || []).map((s: any) => s.job_id))
+
+  // ── Last event per job (for "last contact X days ago") ──
+  const { data: lastEvents } = allActionJobIds.length > 0
+    ? await sb.rpc('get_last_event_per_job', { job_ids: allActionJobIds.slice(0, 200) }).catch(() => ({ data: null }))
+    : { data: null }
+  // Fallback: query job_events directly if RPC doesn't exist
+  let lastEventMap: Record<string, string> = {}
+  if (lastEvents && Array.isArray(lastEvents)) {
+    lastEventMap = Object.fromEntries(lastEvents.map((e: any) => [e.job_id, e.last_event_at]))
+  } else if (allActionJobIds.length > 0) {
+    const { data: evRows } = await sb.from('job_events').select('job_id, created_at').in('job_id', allActionJobIds.slice(0, 200)).order('created_at', { ascending: false })
+    const seen = new Set<string>()
+    for (const e of (evRows || [])) {
+      if (!seen.has(e.job_id)) { lastEventMap[e.job_id] = e.created_at; seen.add(e.job_id) }
+    }
+  }
+
+  // Follow-ups due: quoted > 7 days ago (exclude snoozed)
   const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000).toISOString()
-  const followUps = jobs.filter((j: any) => j.status === 'quoted' && j.quoted_at && j.quoted_at < sevenDaysAgo)
-    .map((j: any) => ({ job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000), client_phone: j.client_phone }))
+  const sixtyDaysAgo = new Date(now.getTime() - 60 * 86400000).toISOString()
+  const followUps = jobs.filter((j: any) => j.status === 'quoted' && j.quoted_at && j.quoted_at < sevenDaysAgo && !snoozedJobIds.has(j.id))
+    .map((j: any) => {
+      const daysSinceQuoted = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
+      const category = daysSinceQuoted <= 14 ? 'warm' : daysSinceQuoted <= 60 ? 'warm' : 'clean'
+      return { job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: daysSinceQuoted, client_phone: j.client_phone, last_event_at: lastEventMap[j.id] || null, category }
+    })
 
-  // Quotes expiring: quoted > 21 days ago
+  // Quotes expiring: quoted > 21 days ago, value > $5K (exclude snoozed)
   const twentyOneDaysAgo = new Date(now.getTime() - 21 * 86400000).toISOString()
-  const expiring = jobs.filter((j: any) => j.status === 'quoted' && j.quoted_at && j.quoted_at < twentyOneDaysAgo)
-    .map((j: any) => ({ job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000) }))
+  const expiring = jobs.filter((j: any) => j.status === 'quoted' && j.quoted_at && j.quoted_at < twentyOneDaysAgo && !snoozedJobIds.has(j.id))
+    .map((j: any) => {
+      const daysSinceQuoted = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
+      return { job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: daysSinceQuoted, last_event_at: lastEventMap[j.id] || null, category: 'hot' as const }
+    })
 
-  // Needs first contact: drafts with no scope assignment
+  // Needs first contact: drafts with no scope assignment (exclude snoozed)
   const draftIds = drafts.map((j: any) => j.id)
   const { data: scopeAssignments } = draftIds.length > 0
     ? await sb.from('job_assignments').select('job_id').in('job_id', draftIds).eq('assignment_type', 'scope')
     : { data: [] }
   const scopedJobIds = new Set((scopeAssignments || []).map((a: any) => a.job_id))
-  const needsContact = drafts.filter((j: any) => !scopedJobIds.has(j.id))
-    .map((j: any) => ({ job_id: j.id, client_name: j.client_name, days_old: Math.floor((now.getTime() - new Date(j.created_at).getTime()) / 86400000), type: j.type }))
+  const needsContact = drafts.filter((j: any) => !scopedJobIds.has(j.id) && !snoozedJobIds.has(j.id))
+    .map((j: any) => ({ job_id: j.id, client_name: j.client_name, days_old: Math.floor((now.getTime() - new Date(j.created_at).getTime()) / 86400000), type: j.type, last_event_at: lastEventMap[j.id] || null, category: 'hot' as const }))
 
   // Scope visits today
   const today = now.toISOString().slice(0, 10)
@@ -3023,8 +3064,16 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
   const scopeJobMap = Object.fromEntries(jobs.map((j: any) => [j.id, j]))
   const scopeVisits = (todayScopes || []).map((s: any) => {
     const j = scopeJobMap[s.job_id] || {}
-    return { job_id: s.job_id, client_name: j.client_name || '', site_address: j.site_address || '', time: s.notes || '', type: j.type || '' }
+    return { job_id: s.job_id, client_name: j.client_name || '', site_address: j.site_address || '', time: s.notes || '', type: j.type || '', category: 'hot' as const }
   })
+
+  // Stale quotes (>60 days) — separate "clean" category for archival
+  const staleQuotes = jobs.filter((j: any) => j.status === 'quoted' && j.quoted_at && j.quoted_at < sixtyDaysAgo && !snoozedJobIds.has(j.id))
+    .map((j: any) => ({
+      job_id: j.id, client_name: j.client_name, quote_value: qv(j),
+      days_since_quoted: Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000),
+      client_phone: j.client_phone, last_event_at: lastEventMap[j.id] || null, category: 'clean' as const
+    }))
 
   // Recent activity: last 10 job_events for this user's jobs
   const jobIds = jobs.map((j: any) => j.id)
@@ -3043,7 +3092,7 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
     booked_this_week: { count: bookedThisWeek.length, value: bookedThisWeek.reduce((s: number, j: any) => s + qv(j), 0) },
     my_leads: { count: drafts.length, oldest_days: oldestDraft },
     close_rate_month: closeRate,
-    actions: { needs_first_contact: needsContact, follow_ups_due: followUps, scope_visits_today: scopeVisits, quotes_expiring: expiring },
+    actions: { needs_first_contact: needsContact, follow_ups_due: followUps, scope_visits_today: scopeVisits, quotes_expiring: expiring, stale_quotes: staleQuotes },
     recent_activity: recentActivity,
   }
 }
@@ -3442,4 +3491,50 @@ async function salesAlertsAction(sb: any, params: URLSearchParams) {
   }
 
   return { alerts }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// SALES SNOOZE — Snooze a job in the action queue
+// ════════════════════════════════════════════════════════════
+async function salesSnoozeAction(sb: any, body: any) {
+  const { job_id, days, reason } = body
+  if (!job_id) return { error: 'job_id required' }
+  const snoozeDays = Math.min(Math.max(parseInt(days) || 7, 1), 90)
+  const snoozedUntil = new Date(Date.now() + snoozeDays * 86400000).toISOString()
+
+  const { error } = await sb.from('sales_snooze').insert({
+    job_id,
+    snoozed_until: snoozedUntil,
+    reason: reason || `Snoozed ${snoozeDays} days`,
+  })
+  if (error) return { error: 'Failed to snooze: ' + error.message }
+
+  return { success: true, job_id, snoozed_until: snoozedUntil, days: snoozeDays }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// SALES QUICK ACTION — One-tap actions from action queue
+// ════════════════════════════════════════════════════════════
+async function salesQuickAction(sb: any, body: any) {
+  const { action_type, job_id } = body
+  if (!job_id || !action_type) return { error: 'job_id and action_type required' }
+
+  if (action_type === 'archive') {
+    // Mark job as cancelled with archived reason
+    const { error } = await sb.from('jobs').update({ status: 'cancelled' }).eq('id', job_id)
+    if (error) return { error: 'Failed to archive: ' + error.message }
+
+    // Log the event
+    await sb.from('job_events').insert({
+      job_id,
+      event_type: 'status_change',
+      detail_json: { from: 'quoted', to: 'cancelled', reason: 'archived_dead_quote', source: 'sale_dashboard' },
+    })
+
+    return { success: true, job_id, action: 'archived' }
+  }
+
+  return { error: 'Unknown action_type: ' + action_type }
 }
