@@ -2541,7 +2541,7 @@ async function getOrCreateSession(sb: any, userId: string, channel: string): Pro
   return newSession.id
 }
 
-async function fetchRecentMessages(sb: any, sessionId: string, limit = 10): Promise<Array<{ role: string; content: string }>> {
+async function fetchRecentMessages(sb: any, sessionId: string, limit = 5): Promise<Array<{ role: string; content: string }>> {
   const { data: rows } = await sb.from('conversation_history')
     .select('role, content, tool_calls')
     .eq('session_id', sessionId)
@@ -3103,6 +3103,7 @@ RESPONSE RULES (MANDATORY):
 9. If you lack data, say so. Do not guess.
 10. Confidence notes should be brief: "(First time — verify)" or "(Matches usual approach)"
 11. When your response includes financial data from Xero, append a freshness note at the end: "(Xero data synced X minutes ago)" — get the sync age from context.xero_sync_age_minutes if available.
+12. CONVERSATION HISTORY: Previous messages in this session provide background only. ONLY reference prior context when the current message explicitly refers to it (pronouns like "them", "that job", "the same client", "his invoice", or follow-up phrases). If the current message is a standalone question, answer it fresh — do NOT mention or reference earlier topics.
 
 FINANCIAL INTELLIGENCE: When asked about money/profit/cash:
 - Run unbilled_revenue first (most common cash gap)
@@ -3116,6 +3117,7 @@ ACTION EXECUTION (CRITICAL):
 When the user asks you to DO something (chase, send, schedule, invoice, create, update, assign, complete, approve, cancel), you MUST call the appropriate tool. Never describe what you WOULD do — actually do it. The confirmation system handles safety.
 - "Chase [name]" → search_contacts or get_debt_followup with search, find their details, then execute_send_sms or execute_send_email
 - "Schedule [crew] for [job]" → create_assignment
+- "Find [name]" or "look up [name]" → search_contacts (finds across jobs, Xero, GHL)
 - "Send [name] an update" → execute_send_sms or execute_send_email
 - "Invoice [job]" → complete_and_invoice
 - "Create work order" → execute_create_work_order
@@ -3315,7 +3317,7 @@ serve(async (req: Request) => {
       try {
         const memorySb = sbClient()
         sessionId = await getOrCreateSession(memorySb, memoryUserId, memoryChannel)
-        const recent = await fetchRecentMessages(memorySb, sessionId, 10)
+        const recent = await fetchRecentMessages(memorySb, sessionId, 5)
         historyMessages = truncateHistoryToTokenBudget(recent, 2000)
       } catch (e) {
         console.log('[ops-ai] Memory fetch failed (degrading to stateless):', (e as Error).message)
