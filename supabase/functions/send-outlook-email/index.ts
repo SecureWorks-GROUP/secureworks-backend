@@ -24,6 +24,14 @@ const CORS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
+const EMAIL_SIGNATURE = `
+<div style="margin-top:24px;font-family:Calibri,sans-serif;font-size:12pt;color:black">Kind Regards,</div>
+<div style="margin-top:12px">
+  <p style="line-height:24px;margin:0 0 4px;font-size:14px;color:#000">Marnin Stobbe<br/><b>Operations Manager</b></p>
+  <p style="line-height:24px;margin:12px 0 0;font-size:14px;color:#000;letter-spacing:2px">E X C E L L E N C E &nbsp;|&nbsp; I N T E G R I T Y &nbsp;|&nbsp; S E R V I C E</p>
+  <p style="line-height:24px;margin:4px 0 0;font-size:14px;color:#000"><i><b>P:</b> 0404 777 984 | <b>E:</b> <a href="mailto:marnin@secureworkswa.com.au" style="color:#0086F0">marnin@secureworkswa.com.au</a></i></p>
+</div>`
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -164,7 +172,7 @@ serve(async (req: Request) => {
     // Build message
     const message: Record<string, unknown> = {
       subject,
-      body: { contentType: 'HTML', content: htmlBody },
+      body: { contentType: 'HTML', content: htmlBody + EMAIL_SIGNATURE },
       toRecipients,
     }
     if (ccRecipients) message.ccRecipients = ccRecipients
