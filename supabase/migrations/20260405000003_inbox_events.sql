@@ -32,3 +32,21 @@ ALTER TABLE inbox_events ENABLE ROW LEVEL SECURITY;
 
 -- Grant access to service role
 GRANT ALL ON inbox_events TO service_role;
+
+-- Trigger function for pg_cron (every 5 min)
+CREATE OR REPLACE FUNCTION trigger_monitor_inbox() RETURNS void AS $$
+BEGIN
+  PERFORM net.http_post(
+    url := 'https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/monitor-inbox',
+    headers := jsonb_build_object(
+      'Authorization', 'Bearer ' || _sw_service_key(),
+      'Content-Type', 'application/json'
+    ),
+    body := '{}'::jsonb
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMENT ON FUNCTION trigger_monitor_inbox IS 'Poll Microsoft Graph inboxes for new emails. Called by pg_cron every 5 min.';
+
+SELECT cron.schedule('monitor-inbox-poll', '*/5 * * * *', $$SELECT trigger_monitor_inbox()$$);

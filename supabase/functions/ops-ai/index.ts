@@ -3690,10 +3690,10 @@ serve(async (req: Request) => {
           // Smart truncation: summarize lists instead of dumb slice
           let resultStr: string
           const MAX_RESULT_CHARS = 6000
-          const rawStr = JSON.stringify(toolResult)
+          const rawStr = JSON.stringify(toolResult ?? {})
           if (rawStr.length > MAX_RESULT_CHARS) {
             // If result has a list/array, summarize it
-            const result = toolResult?.result || toolResult
+            const result = toolResult?.result ?? toolResult ?? {}
             if (result?.clients && Array.isArray(result.clients)) {
               // Debt/overdue: keep summary stats + top 10 clients (without nested invoices)
               const lite = {

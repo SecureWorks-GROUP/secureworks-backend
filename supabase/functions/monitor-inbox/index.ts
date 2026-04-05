@@ -104,7 +104,7 @@ job_ref: extract any job reference (SWP-XXXXX, SWF-XXXXX, SWD-XXXXX) from subjec
     // Extract JSON from response
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0])
+      try { return JSON.parse(jsonMatch[0]) } catch { /* fall through to default */ }
     }
   } catch (e) {
     console.log('[monitor-inbox] Classification failed:', (e as Error).message)
