@@ -2083,7 +2083,9 @@ serve(async (req: Request) => {
           const strippedText = fullText.replace(/@\w+bot\b/gi, '').trim().toLowerCase()
           const hasJobRef = /SW[PFDR]-\d{5}/i.test(text)  // Don't use global regex (lastIndex bug)
           // Broad keyword filter — anything remotely business-related goes to ops-ai
-          const hasBusinessKeywords = /\b(jobs?|schedule[ds]?|invoice[ds]?|quote[ds]?|pipeline|status|today|tomorrow|this week|next week|overdue|revenue|margin|sales|leads?|client[s]?|materials?|site|install|build|fence|fencing|patio|deck|how many|how much|total|numbers?|report|weekly|daily|monthly|chase|send|create|update|move|assign|cancel|approve|reject|check|look\s*up|find|call|email|sms|text|message|notify|deposit|payment|paid|crew|supplier|po\b|purchase\s*order|work\s*order|council|variation|expense|contact|customer|debtor|complete[d]?|finish|done|start|begin|price|cost|amount|owing|owe[sd]?|follow\s*up|remind|reminder|morning|brief|digest|inbox|do\s*it|go\s*ahead|what\s*about|how\s*about|and\s*the)\b/i.test(strippedText)
+          const hasBusinessKeywords = /\b(jobs?|schedule[ds]?|invoice[ds]?|quote[ds]?|pipeline|status|today|tomorrow|this week|next week|overdue|revenue|margin|sales|leads?|client[s]?|materials?|site|install|build|fence|fencing|patio|deck|how many|how much|total|numbers?|report|weekly|daily|monthly|chase|send|create|update|move|assign|cancel|approve|reject|check|look\s*up|find|call|email|sms|text|message|notify|deposit|payment|paid|crew|supplier|po\b|purchase\s*order|work\s*order|council|variation|expense|contact|customer|debtor|complete[d]?|finish|done|start|begin|price|cost|amount|owing|owe[sd]?|follow\s*up|remind|reminder|morning|brief|digest|inbox|do\s*it|go\s*ahead|what\s*about|how\s*about|and\s*the|company|business|organi[sz]ation|performance|rate|score|review|assess|audit|efficien|team|profit|growth|target|budget|forecast|capacity|utili[sz]|backlog|strategy|risk|cash|debt|receivable|xero|ghl)\b/i.test(strippedText)
+          // Messages over 15 words are almost certainly business queries, not banter
+          const isSubstantiveQuery = strippedText.split(/\s+/).length > 15
           // Also catch dollar amounts ($123), phone numbers (04xx), and addresses (number + street name)
           const hasBusinessPatterns = /\$[\d,]+|\b0[45]\d{2}\s?\d{3}\s?\d{3}\b|\b\d+\s+[A-Z][a-z]+\s+(st|rd|dr|ave|way|pl|ct|cres|loop|tce|parade)\b/i.test(strippedText)
           // If replying to a bot message, ALWAYS route to ops-ai (continuing a business conversation)
@@ -2092,7 +2094,7 @@ serve(async (req: Request) => {
           console.log('[telegram-bot] ROUTE CHECK:', JSON.stringify({ strippedText: strippedText.slice(0, 80), hasJobRef, hasBusinessKeywords, hasBusinessPatterns, isReplyToBot }))
 
           // If no business signals at all → it's banter, go freestyle
-          if (!hasBusinessKeywords && !hasJobRef && !hasBusinessPatterns && !isReplyToBot) {
+          if (!hasBusinessKeywords && !hasJobRef && !hasBusinessPatterns && !isReplyToBot && !isSubstantiveQuery) {
             console.log('[telegram-bot] → FREESTYLE MODE (no business keywords)')
             try {
               const banterResponse = await freestylePersonality(text, callerContext, recentMessages)
