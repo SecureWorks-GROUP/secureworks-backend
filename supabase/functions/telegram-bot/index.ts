@@ -2015,20 +2015,18 @@ serve(async (req: Request) => {
             org_id: DEFAULT_ORG_ID,
           }
 
-          // Conversational memory — load recent messages from SAME chat (not all channels)
+          // Conversational memory — load recent messages from SAME user/chat
           let recentMessages: string[] = []
           let chatHistoryRaw: Array<{ query: string; response: string }> = []
           try {
-            // Filter by user_id for DMs, or by channel for groups — ensures proper threading
-            const chatFilter = channel === 'telegram_dm'
-              ? { user_id: user.id, channel: 'telegram_dm' }
-              : { channel: 'telegram_group' }
             let query = client.from('chat_logs')
               .select('query, response')
+              .eq('channel', channel)
               .order('created_at', { ascending: false })
               .limit(3)
-            for (const [k, v] of Object.entries(chatFilter)) {
-              query = query.eq(k, v)
+            // For DMs, filter by user_email (user_id is often NULL)
+            if (channel === 'telegram_dm') {
+              query = query.eq('user_email', user.email)
             }
             const { data: recentChats } = await query
             if (recentChats && recentChats.length > 0) {
@@ -2166,6 +2164,17 @@ serve(async (req: Request) => {
             }
 
             // Handle action cards (confirmation flow)
+            // Save to chat_logs for conversation memory (BEFORE action card handling)
+            client.from('chat_logs').insert({
+              user_id: callerContext.user_id,
+              user_email: callerContext.user_email,
+              role: callerContext.user_role,
+              query: text.slice(0, 500),
+              response: (aiResponse.content || '').slice(0, 5000),
+              tools_used: [],
+              channel,
+            }).then(() => {}).catch(() => {})
+
             if (aiResponse.action_cards && aiResponse.action_cards.length > 0) {
               await sendMessage(message.chat.id, aiResponse.content)
               // Create pending confirmations and send inline keyboard buttons
