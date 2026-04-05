@@ -3601,7 +3601,7 @@ serve(async (req: Request) => {
       }
     } catch (e) { console.log('[ops-ai] classifier error:', (e as Error).message) }
 
-    const SIMPLE_TOOLS = (tools || []).filter((t: any) => ['search_jobs', 'get_job_detail', 'get_schedule', 'get_attention_items', 'get_dashboard_summary', 'search_contacts'].includes(t.name))
+    const SIMPLE_TOOLS = (tools || []).filter((t: any) => ['search_jobs', 'get_job_detail', 'get_schedule', 'get_attention_items', 'get_dashboard_summary', 'search_contacts', 'list_purchase_orders', 'list_work_orders', 'list_variations', 'list_council_submissions', 'list_expenses', 'search_invoices', 'get_debt_followup', 'get_sales_leads', 'list_suppliers', 'get_crew_availability', 'get_client_conversation'].includes(t.name))
 
     // ── Role-based model override ──
     // After classifier determines A/B/C, override model based on WHO is asking
