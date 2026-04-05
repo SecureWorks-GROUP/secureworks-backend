@@ -283,8 +283,9 @@ Deno.serve(async (req) => {
 
   // Auth: check SW_API_KEY or Supabase service key
   const authHeader = req.headers.get('authorization') || ''
+  const bearerToken = authHeader.replace(/^Bearer\s+/i, '')
   const apiKey = req.headers.get('x-api-key') || ''
-  if (!authHeader.includes(SUPABASE_SERVICE_KEY) && apiKey !== SW_API_KEY && !authHeader.includes(SW_API_KEY)) {
+  if (bearerToken !== SUPABASE_SERVICE_KEY && bearerToken !== SW_API_KEY && apiKey !== SW_API_KEY) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401,
       headers: { ...CORS, 'Content-Type': 'application/json' },

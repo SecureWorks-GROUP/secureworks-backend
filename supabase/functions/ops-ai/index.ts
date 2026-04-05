@@ -777,8 +777,8 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: 'search_ghl_contacts',
-    description: 'Search GoHighLevel CRM contacts by name, email, or phone. Use this when a contact is not found in Supabase jobs — they may be a lead in GHL.',
+    name: 'search_ghl',
+    description: 'Search GoHighLevel CRM for opportunities/leads by name. Use when search_jobs finds nothing — the person may be an open lead in GHL that hasnt become a job yet. Searches opportunities, not raw contacts.',
     input_schema: {
       type: 'object',
       properties: {
@@ -2342,16 +2342,38 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       if (input.limit) params.limit = String(input.limit)
       return { result: await callOpsApi('get_email_events', params) }
     }
-    case 'execute_send_review_request':
+    case 'execute_send_review_request': {
+      // Look up job + client details so confirm handler has everything it needs
+      const sb = sbClient()
+      const { data: job } = await sb.from('jobs')
+        .select('id, client_name, client_phone, client_email, ghl_contact_id, job_number, status')
+        .eq('id', input.job_id)
+        .single()
+      if (!job) return { result: { error: `Job ${input.job_id} not found` } }
+      if (!['complete', 'invoiced'].includes(job.status)) {
+        return { result: { error: `Job ${job.job_number} is ${job.status} — must be complete or invoiced to send review request` } }
+      }
+      const method = input.method || 'sms'
+      const reviewMsg = `Hi ${(job.client_name || '').split(' ')[0]}, thanks for choosing SecureWorks for your project! We'd really appreciate a quick Google review — it helps other Perth homeowners find quality builders. Here's the link: https://g.page/r/secureworkswa/review`
       return {
         result: {
           action: 'send_review_request',
-          params: { job_id: input.job_id, method: input.method || 'sms' },
-          message: `Send Google review request via ${input.method || 'sms'}?`,
+          params: {
+            job_id: input.job_id,
+            method,
+            ghl_contact_id: job.ghl_contact_id,
+            phone: job.client_phone,
+            email: job.client_email,
+            client_name: job.client_name,
+            message: reviewMsg,
+          },
+          message: `Send Google review request to ${job.client_name} (${job.job_number}) via ${method}?`,
+          display_message: reviewMsg,
         },
         needs_confirm: true,
       }
-    case 'search_ghl_contacts': {
+    }
+    case 'search_ghl': {
       const params: Record<string, string> = { q: input.search }
       return { result: await callGhlProxy('search', params) }
     }
@@ -2992,7 +3014,7 @@ When the user asks you to DO something (chase, send, schedule, invoice, create, 
 If you need more info to execute, call the lookup tool FIRST (search_contacts, get_job_detail), then call the action tool. Do not stop at the lookup.
 
 YOUR TOOLS INVENTORY (you have ALL of these — use them):
-LOOKUP: search_jobs, get_job_detail, get_schedule, search_contacts, search_ghl_contacts, search_invoices, get_attention_items, get_dashboard_summary, get_debt_followup, get_job_profitability, get_trends, get_sales_breakdown, get_marketing_summary, get_client_conversation, get_quote_terms, get_crew_availability, list_suppliers, get_email_events, get_team_activity, get_sales_leads, get_ai_alerts, get_inbox_summary
+LOOKUP: search_jobs, get_job_detail, get_schedule, search_contacts, search_ghl, search_invoices, get_attention_items, get_dashboard_summary, get_debt_followup, get_job_profitability, get_trends, get_sales_breakdown, get_marketing_summary, get_client_conversation, get_quote_terms, get_crew_availability, list_suppliers, get_email_events, get_team_activity, get_sales_leads, get_ai_alerts, get_inbox_summary
 DATA: list_variations, list_council_submissions, list_expenses, list_purchase_orders, list_work_orders
 FINANCIAL: explain_pnl, cash_flow_forecast, cash_flow_status, unbilled_revenue, division_comparison, cost_trend_analysis, check_supplier_pricing
 ANALYSIS: analyse_profitability, revenue_forecast, supplier_analysis, sales_performance, job_duration_analysis, estimate_accuracy_report, generate_pricing_recommendation
@@ -3294,15 +3316,32 @@ serve(async (req: Request) => {
           result = await postOpsApi('create_work_order', params)
           break
         case 'send_review_request': {
-          // Route via GHL proxy or ops-api depending on method
-          const url = new URL(`${SUPABASE_URL}/functions/v1/ghl-proxy`)
-          url.searchParams.set('action', params.method === 'email' ? 'send_review_email' : 'send_review_sms')
-          const reviewResp = await fetch(url.toString(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-            body: JSON.stringify(params),
-          })
-          result = await reviewResp.json()
+          // Use generic send_sms or send_email via GHL proxy
+          const reviewUrl = new URL(`${SUPABASE_URL}/functions/v1/ghl-proxy`)
+          if (params.method === 'email') {
+            reviewUrl.searchParams.set('action', 'send_email')
+            const reviewResp = await fetch(reviewUrl.toString(), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+              body: JSON.stringify({
+                contactId: params.ghl_contact_id,
+                subject: 'How was your SecureWorks experience?',
+                body: params.message,
+              }),
+            })
+            result = await reviewResp.json()
+          } else {
+            reviewUrl.searchParams.set('action', 'send_sms')
+            const reviewResp = await fetch(reviewUrl.toString(), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+              body: JSON.stringify({
+                contactId: params.ghl_contact_id,
+                message: params.message,
+              }),
+            })
+            result = await reviewResp.json()
+          }
           break
         }
         default:
