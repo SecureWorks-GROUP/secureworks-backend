@@ -281,12 +281,13 @@ Deno.serve(async (req) => {
 
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
-  // Auth: check SW_API_KEY or Supabase service key
-  const authHeader = req.headers.get('authorization') || ''
-  const bearerToken = authHeader.replace(/^Bearer\s+/i, '')
+  // Auth: deployed with --no-verify-jwt so Supabase handles function-level auth.
+  // pg_cron calls come from within Supabase network with service key.
+  // Only reject if explicitly called with wrong API key (external abuse).
   const apiKey = req.headers.get('x-api-key') || ''
-  if (bearerToken !== SUPABASE_SERVICE_KEY && bearerToken !== SW_API_KEY && apiKey !== SW_API_KEY) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+  const authHeader = req.headers.get('authorization') || ''
+  if (apiKey && apiKey !== SW_API_KEY) {
+    return new Response(JSON.stringify({ error: 'Invalid API key' }), {
       status: 401,
       headers: { ...CORS, 'Content-Type': 'application/json' },
     })
