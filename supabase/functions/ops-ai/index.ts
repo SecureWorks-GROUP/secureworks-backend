@@ -72,7 +72,7 @@ function resolveRole(email: string): CallerContext['user_role'] {
   const e = (email || '').toLowerCase()
   if (e.includes('marnin') || e.includes('shaun') || e.includes('jan')) return 'admin'
   if (e.includes('henry')) return 'division_ops'
-  if (e.includes('nathan') || e.includes('khairo')) return 'sales'
+  if (e.includes('nithin') || e.includes('khairo')) return 'sales'
   if (e.includes('isaac')) return 'lead_installer'
   return 'crew'
 }
@@ -1600,7 +1600,7 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
           common_event_types: [...new Set(events.map((e: any) => e.event_type))],
           confirmed_business_rules: rulesContext,
           process_specific_data: processData,
-          instruction: `Generate a detailed SOP for the "${input.process}" process based on this real job data AND the confirmed business rules below. Include: numbered steps, responsible person (Shaun=ops, Nathan/Khairo=sales, Marnin=CEO), timing benchmarks from the data, business rules as mandatory checkpoints, and exception handling. Format as markdown.`,
+          instruction: `Generate a detailed SOP for the "${input.process}" process based on this real job data AND the confirmed business rules below. Include: numbered steps, responsible person (Shaun=ops, Nithin/Khairo=sales, Marnin=CEO), timing benchmarks from the data, business rules as mandatory checkpoints, and exception handling. Format as markdown.`,
         },
       }
     }
@@ -2895,9 +2895,9 @@ ${format}
 ${patternRecognition}${safety}`
   }
 
-  // Nathan — Sales Performance Coach (Patios)
-  if (e.includes('nathan')) {
-    return `Sales coach for Nathan (patios). Give specific call lists with priority and talking points. "Call {client} first — $12K quote, 5 days old. Say: just checking in, any questions?" Make it impossible to not know what to do next.
+  // Nithin — Sales Performance Coach (Patios)
+  if (e.includes('nithin')) {
+    return `Sales coach for Nithin (patios). Give specific call lists with priority and talking points. "Call {client} first — $12K quote, 5 days old. Say: just checking in, any questions?" Make it impossible to not know what to do next.
 
 Caller: ${name} (Sales — Patios) | Channel: ${caller.channel}
 ${format}
@@ -3620,7 +3620,7 @@ serve(async (req: Request) => {
       routedModel = queryClass === 'A' ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-20250514'
       routedMaxTokens = queryClass === 'A' ? 512 : 2048
       routedTools = queryClass === 'A' ? SIMPLE_TOOLS : tools
-    } else if (callerEmail.includes('nathan') || callerEmail.includes('khairo')) {
+    } else if (callerEmail.includes('nithin') || callerEmail.includes('khairo')) {
       // Sales: Haiku for A/B, Sonnet only for actions
       routedModel = queryClass === 'C' ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5-20251001'
       routedMaxTokens = queryClass === 'C' ? 2048 : 512

@@ -94,7 +94,7 @@ function resolveRole(email: string): CallerContext['user_role'] {
   const local = (email || '').toLowerCase().split('@')[0]
   if (['marnin', 'shaun', 'jan'].includes(local)) return 'admin'
   if (local === 'henry') return 'division_ops'
-  if (['nathan', 'khairo'].includes(local)) return 'sales'
+  if (['nithin', 'khairo'].includes(local)) return 'sales'
   if (local === 'isaac') return 'lead_installer'
   return 'crew'
 }
