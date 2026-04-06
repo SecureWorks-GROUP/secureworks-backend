@@ -3113,15 +3113,25 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
   const salesperson_id = params.get('salesperson_id') || undefined
   const type_filter = params.get('type_filter') || 'all'
 
-  const filters: Record<string, any> = { org_id: DEFAULT_ORG_ID, legacy: false }
+  const now = new Date()
+  // Only fetch pipeline-relevant statuses directly from DB
+  const pipelineStatuses = ['draft', 'quoted', 'accepted', 'cancelled']
+  // Cancelled/lost older than 90 days are irrelevant to pipeline view
+  const cutoff90 = new Date(now.getTime() - 90 * 86400000).toISOString()
+
+  const filters: Record<string, any> = {
+    org_id: DEFAULT_ORG_ID,
+    legacy: false,
+    _in: { status: pipelineStatuses },
+  }
   if (salesperson_id) filters.created_by = salesperson_id
 
+  // Only select columns needed for cards — skip pricing_json (huge), extract value via DB-side or small parse
   const jobs = await fetchAll(sb, 'jobs',
     'id, job_number, client_name, client_phone, client_email, type, status, pricing_json, created_at, quoted_at, accepted_at',
     filters
   )
 
-  const now = new Date()
   const qv = (j: any) => { const p = j.pricing_json; if (!p) return 0; return parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.subtotal || 0) || 0 }
 
   // Filter out ghost drafts (scope-tool auto-saves with no job_number)
@@ -3130,9 +3140,14 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
   // Filter by type
   const filtered = type_filter === 'all' ? realJobs : realJobs.filter((j: any) => j.type === type_filter)
 
-  // Only pipeline-relevant statuses
-  const pipelineStatuses = ['draft', 'quoted', 'accepted', 'cancelled']
-  const pipelineJobs = filtered.filter((j: any) => pipelineStatuses.includes(j.status))
+  // Drop cancelled/lost older than 90 days
+  const pipelineJobs = filtered.filter((j: any) => {
+    if (j.status === 'cancelled') {
+      const refDate = j.quoted_at || j.created_at
+      return refDate >= cutoff90
+    }
+    return true
+  })
 
   const toCard = (j: any) => {
     let daysInStage = 0
@@ -3143,14 +3158,28 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
     return { id: j.id, job_number: j.job_number || null, client_name: j.client_name, type: j.type, status: j.status, quote_value: qv(j), days_in_stage: daysInStage, phone: j.client_phone, email: j.client_email }
   }
 
-  const columns = {
-    draft: pipelineJobs.filter((j: any) => j.status === 'draft').map(toCard),
-    quoted: pipelineJobs.filter((j: any) => j.status === 'quoted').map(toCard),
-    accepted: pipelineJobs.filter((j: any) => j.status === 'accepted').map(toCard),
-    lost: pipelineJobs.filter((j: any) => j.status === 'cancelled').map(toCard),
+  // Cap each column at 25 cards — include summary counts + total value for overflow
+  const MAX_CARDS = 25
+  const buildColumn = (jobs: any[]) => {
+    const cards = jobs.map(toCard).sort((a: any, b: any) => b.quote_value - a.quote_value)
+    const totalValue = cards.reduce((s: number, c: any) => s + (c.quote_value || 0), 0)
+    const totalCount = cards.length
+    return {
+      total_count: totalCount,
+      total_value: totalValue,
+      cards: cards.slice(0, MAX_CARDS),
+      ...(totalCount > MAX_CARDS ? { truncated: totalCount - MAX_CARDS } : {}),
+    }
   }
 
-  const pipelineValue = columns.quoted.reduce((s: number, c: any) => s + (c.quote_value || 0), 0)
+  const columns = {
+    draft: buildColumn(pipelineJobs.filter((j: any) => j.status === 'draft')),
+    quoted: buildColumn(pipelineJobs.filter((j: any) => j.status === 'quoted')),
+    accepted: buildColumn(pipelineJobs.filter((j: any) => j.status === 'accepted')),
+    lost: buildColumn(pipelineJobs.filter((j: any) => j.status === 'cancelled')),
+  }
+
+  const pipelineValue = columns.quoted.total_value
 
   return { pipeline_value: pipelineValue, columns }
 }
