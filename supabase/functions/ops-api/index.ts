@@ -6315,6 +6315,69 @@ async function myJobs(client: any, userId: string, showAll = false) {
   return grouped
 }
 
+// ── Scope Photo Extraction ──────────────────────────────────────────────
+// Fencing scope tool captures photos as BASE64 inside scope_json.scopeMedia.photos.
+// This extracts them to Supabase Storage + job_media so the trade app can display them.
+async function extractScopePhotos(client: any, jobId: string, scopeJson: any): Promise<number> {
+  // Guard: nothing to extract
+  const photos = scopeJson?.scopeMedia?.photos
+  if (!Array.isArray(photos) || photos.length === 0) return 0
+
+  // Check if already extracted
+  const { data: existing } = await client.from('job_media')
+    .select('id')
+    .eq('job_id', jobId)
+    .eq('phase', 'scope')
+    .limit(1)
+  if (existing && existing.length > 0) return 0
+
+  // Ensure bucket exists (idempotent)
+  try { await client.storage.createBucket('job-photos', { public: true }) } catch { /* exists */ }
+
+  let count = 0
+  for (let i = 0; i < photos.length; i++) {
+    const photo = photos[i]
+    if (!photo?.dataUrl || typeof photo.dataUrl !== 'string') continue
+
+    try {
+      // Strip data URL prefix — handle jpeg, png, webp etc
+      const base64 = photo.dataUrl.split(',')[1]
+      if (!base64) continue
+
+      const mimeMatch = photo.dataUrl.match(/data:([^;]+);/)
+      const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg'
+      const ext = mime.includes('png') ? 'png' : 'jpg'
+      const bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0))
+
+      const path = `${DEFAULT_ORG_ID}/${jobId}/scope/${i}.${ext}`
+
+      const { error: uploadError } = await client.storage
+        .from('job-photos')
+        .upload(path, bytes, { contentType: mime, upsert: true })
+      if (uploadError) { console.log(`[ops-api] scope photo ${i} upload failed:`, uploadError.message); continue }
+
+      const { data: urlData } = client.storage.from('job-photos').getPublicUrl(path)
+
+      const { error: insertError } = await client.from('job_media').insert({
+        job_id: jobId,
+        phase: 'scope',
+        type: 'photo',
+        storage_url: urlData.publicUrl,
+        label: photo.label || `Scope photo ${i + 1}`,
+        created_at: new Date().toISOString(),
+      })
+      if (insertError) { console.log(`[ops-api] scope photo ${i} insert failed:`, insertError.message); continue }
+
+      count++
+    } catch (err: any) {
+      console.log(`[ops-api] scope photo ${i} error:`, err?.message)
+    }
+  }
+
+  console.log(`[ops-api] extracted ${count} scope photos for job ${jobId}`)
+  return count
+}
+
 async function tradeJobDetail(client: any, params: URLSearchParams, userId: string, isAdmin = false) {
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
@@ -6364,6 +6427,12 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
       unit: li.unit || li.UnitAmount ? undefined : undefined,
     })),
   }))
+
+  // Fire-and-forget: extract scope photos if not already done
+  if (jobRes.data?.scope_json?.scopeMedia?.photos?.length > 0) {
+    extractScopePhotos(client, jobId, jobRes.data.scope_json)
+      .catch(e => console.log('[ops-api] scope photo extraction failed:', e?.message))
+  }
 
   return {
     job: jobRes.data,
