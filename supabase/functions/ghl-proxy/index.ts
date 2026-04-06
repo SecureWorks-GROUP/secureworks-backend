@@ -323,6 +323,37 @@ serve(async (req: Request) => {
         }
       }
 
+      // Fallback: if GHL returned 0 results, search Supabase jobs table with fuzzy matching
+      if (opps.length === 0 && q) {
+        try {
+          const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+          const { data: jobMatches } = await sb.from('jobs')
+            .select('id, job_number, client_name, contact_phone, contact_email, status, suburb, address, quoted_value, ghl_opportunity_id')
+            .or(`client_name.ilike.%${q}%,contact_phone.ilike.%${q}%,suburb.ilike.%${q}%,address.ilike.%${q}%`)
+            .not('status', 'in', '("cancelled","lost")')
+            .order('created_at', { ascending: false })
+            .limit(10)
+          if (jobMatches && jobMatches.length > 0) {
+            // Return as opportunities-shaped objects so the agent can use them
+            const fallbackOpps = jobMatches.map((j: any) => ({
+              id: j.ghl_opportunity_id || j.id,
+              name: j.client_name || 'Unknown',
+              status: j.status || 'unknown',
+              monetaryValue: j.quoted_value || 0,
+              contact: { name: j.client_name, phone: j.contact_phone, email: j.contact_email },
+              supabaseJobId: j.id,
+              jobNumber: j.job_number,
+              address: j.address,
+              suburb: j.suburb,
+              _source: 'supabase_fallback',
+            }))
+            return json({ opportunities: fallbackOpps, _note: 'Results from Supabase fallback (GHL returned 0)' })
+          }
+        } catch (e) {
+          console.log('[ghl-proxy] Supabase fallback search failed:', e)
+        }
+      }
+
       return json({ opportunities: opps })
     }
 
@@ -2027,10 +2058,29 @@ serve(async (req: Request) => {
 
       try {
         // Step 1: Find conversation ID for this contact
-        const searchResult = await ghl(`/conversations/search?contactId=${contactId}&locationId=${GHL_LOCATION_ID}`)
-        const conversations = searchResult.conversations || []
+        // Try current API version first, then fall back to direct contact lookup
+        let conversations: any[] = []
+        try {
+          const searchResult = await ghl(`/conversations/search?contactId=${contactId}&locationId=${GHL_LOCATION_ID}`)
+          conversations = searchResult.conversations || []
+          console.log(`[ghl-proxy] conversation search returned ${conversations.length} conversations`)
+        } catch (e) {
+          console.log(`[ghl-proxy] conversation search failed: ${(e as Error).message}`)
+        }
+
+        // Fallback: try getting conversations directly by contact ID
         if (conversations.length === 0) {
-          return json({ messages: [], contactId, conversationId: null })
+          try {
+            const directResult = await ghl(`/conversations?contactId=${contactId}&locationId=${GHL_LOCATION_ID}`)
+            conversations = directResult.conversations || (Array.isArray(directResult) ? directResult : [])
+            console.log(`[ghl-proxy] direct conversations endpoint returned ${conversations.length}`)
+          } catch (e) {
+            console.log(`[ghl-proxy] direct conversations also failed: ${(e as Error).message}`)
+          }
+        }
+
+        if (conversations.length === 0) {
+          return json({ messages: [], contactId, conversationId: null, _debug: 'No conversations found via search or direct endpoint' })
         }
 
         const conversationId = conversations[0].id

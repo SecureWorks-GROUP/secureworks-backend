@@ -3013,9 +3013,13 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
   const snoozedJobIds = new Set((activeSnoozes || []).map((s: any) => s.job_id))
 
   // ── Last event per job (for "last contact X days ago") ──
-  const { data: lastEvents } = allActionJobIds.length > 0
-    ? await sb.rpc('get_last_event_per_job', { job_ids: allActionJobIds.slice(0, 200) }).catch(() => ({ data: null }))
-    : { data: null }
+  let lastEvents: any = null
+  if (allActionJobIds.length > 0) {
+    try {
+      const rpcResult = await sb.rpc('get_last_event_per_job', { job_ids: allActionJobIds.slice(0, 200) })
+      lastEvents = rpcResult.data
+    } catch { /* RPC may not exist — fallback below */ }
+  }
   // Fallback: query job_events directly if RPC doesn't exist
   let lastEventMap: Record<string, string> = {}
   if (lastEvents && Array.isArray(lastEvents)) {
