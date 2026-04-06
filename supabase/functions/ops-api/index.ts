@@ -2862,8 +2862,8 @@ async function opsSummary(client: any) {
 }
 
 async function calendarEvents(client: any, params: URLSearchParams) {
-  const from = params.get('from') || new Date().toISOString().slice(0, 10)
-  const to = params.get('to') || (() => {
+  const from = params.get('from') || params.get('start_date') || new Date().toISOString().slice(0, 10)
+  const to = params.get('to') || params.get('end_date') || (() => {
     const d = new Date(from); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10)
   })()
   const jobType = params.get('type')
@@ -3247,7 +3247,13 @@ async function listInvoices(client: any, params: URLSearchParams) {
     .order('invoice_date', { ascending: false })
     .range(offset, offset + limit - 1)
 
-  if (status) query = query.eq('status', status)
+  if (status === 'overdue') {
+    // 'overdue' is a virtual status — filter by open invoices past due date
+    const todayFilter = new Date().toISOString().slice(0, 10)
+    query = query.in('status', ['AUTHORISED', 'SUBMITTED']).gt('amount_due', 0).lt('due_date', todayFilter)
+  } else if (status) {
+    query = query.eq('status', status.toUpperCase())
+  }
   if (dateFrom) query = query.gte('invoice_date', dateFrom)
   if (dateTo) query = query.lte('invoice_date', dateTo)
 
