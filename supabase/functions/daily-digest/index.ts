@@ -1986,15 +1986,39 @@ serve(async (req: Request) => {
         }).then(r => r.json()).catch(() => null),
       ])
 
-      // Use Claude to synthesise into a concise brief
-      const briefData = JSON.stringify({ waterfall: waterfall?.summary, leaks: leaks?.summary, benchmarks: benchmarks?.this_month }, null, 2)
+      // Use Claude to synthesise into a concise brief — include all 7 cash states, leak details, and benchmarks
+      const briefData = JSON.stringify({
+        cash_position: waterfall?.summary,
+        cash_states: waterfall?.states,
+        cash_actions: waterfall?.actions,
+        leaks: leaks?.summary,
+        leak_detail: leaks?.margin_analysis,
+        benchmarks_this_month: benchmarks?.this_month,
+        benchmarks_comparison: benchmarks?.comparison,
+      }, null, 2)
       const aiResp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
-          max_tokens: 800,
-          system: 'You are JARVIS. Write a weekly financial brief for Marnin (CEO, SecureWorks Group, Perth construction). Telegram format — concise, numbers first, actions at the end. Address him as "sir". No emojis except one at the start. Max 1500 chars.',
+          max_tokens: 1200,
+          system: `You are JARVIS, the AI operations intelligence for SecureWorks Group. Write a weekly financial brief for Marnin (CEO). Telegram format. Address him as "sir". No emojis except one at the start. Max 2000 chars.
+
+Structure EXACTLY like this:
+
+1. CASH POSITION — Report all 7 cash states: in-bank, owed-to-us (overdue), completed-not-invoiced, coming-in (not yet due), committed-to-suppliers, owed-to-suppliers, deposits-held. End with real available cash after commitments.
+
+2. REVENUE vs PACE — Compare MTD revenue against $180K monthly target. State if ahead/behind and by how much. Extrapolate to month-end based on current run rate.
+
+3. TOP 3 LEAKS — Name the 3 biggest leaks by dollar amount from the leak data. Be specific: "$X,XXX lost on [job/category]" not vague statements.
+
+4. MARGINS — Report margin by type (patio vs fencing). Flag any type below 25%.
+
+5. CYCLE TIME — If available, report the slowest segment of the quote-to-cash cycle (lead-to-quote, quote-to-acceptance, acceptance-to-complete, complete-to-invoiced). Flag the bottleneck.
+
+6. ACTIONS — 3 specific actions ranked by dollar impact. Start each with a verb.
+
+Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30 seconds and know exactly where to focus this week.`,
           messages: [{ role: 'user', content: `Weekly financial data:\n${briefData}` }],
         }),
       })

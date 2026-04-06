@@ -3132,9 +3132,9 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
   }
   if (salesperson_id) filters.created_by = salesperson_id
 
-  // Only select columns needed for cards — skip pricing_json (huge), extract value via DB-side or small parse
+  // Select minimal columns — pricing_json needed for value extraction only
   const jobs = await fetchAll(sb, 'jobs',
-    'id, job_number, client_name, client_phone, client_email, type, status, pricing_json, created_at, quoted_at, accepted_at',
+    'id, job_number, client_name, type, status, pricing_json, created_at, quoted_at, accepted_at',
     filters
   )
 
@@ -3161,14 +3161,14 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
     else if (j.status === 'quoted' && j.quoted_at) daysInStage = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
     else if (j.status === 'accepted' && j.accepted_at) daysInStage = Math.floor((now.getTime() - new Date(j.accepted_at).getTime()) / 86400000)
     else if (j.status === 'cancelled' && j.quoted_at) daysInStage = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
-    return { id: j.id, job_number: j.job_number || null, client_name: j.client_name, type: j.type, status: j.status, quote_value: qv(j), days_in_stage: daysInStage, phone: j.client_phone, email: j.client_email }
+    return { job_number: j.job_number || null, client: j.client_name, type: j.type, value: Math.round(qv(j)), days: daysInStage }
   }
 
-  // Cap each column at 25 cards — include summary counts + total value for overflow
-  const MAX_CARDS = 25
+  // Cap each column — full details via sw_job_detail
+  const MAX_CARDS = 15
   const buildColumn = (jobs: any[]) => {
-    const cards = jobs.map(toCard).sort((a: any, b: any) => b.quote_value - a.quote_value)
-    const totalValue = cards.reduce((s: number, c: any) => s + (c.quote_value || 0), 0)
+    const cards = jobs.map(toCard).sort((a: any, b: any) => b.value - a.value)
+    const totalValue = cards.reduce((s: number, c: any) => s + (c.value || 0), 0)
     const totalCount = cards.length
     return {
       total_count: totalCount,
@@ -3715,7 +3715,8 @@ async function cashLeakDetection(sb: any) {
   const now = new Date()
   const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 6, 1).toISOString().split('T')[0]
 
-  // 1. Jobs where actual cost exceeded quote (underquoted)
+  // 1. Profitability analysis — use Xero actuals (total_invoiced vs total_expenses)
+  //    pricing_json contains unreliable placeholder values for many jobs
   const { data: projects } = await sb.from('xero_projects')
     .select('job_id, total_invoiced, total_expenses, project_name, job_number, status')
     .eq('org_id', DEFAULT_ORG_ID)
@@ -3727,32 +3728,56 @@ async function cashLeakDetection(sb: any) {
     .in('status', ['complete', 'invoiced'])
     .gte('completed_at', sixMonthsAgo)
 
-  // Build underquoted jobs list
+  // Match jobs to Xero project data
   const projectByJob: Record<string, any> = {}
   for (const p of (projects || [])) { if (p.job_id) projectByJob[p.job_id] = p }
 
-  const underquoted = (jobs || []).map((j: any) => {
-    const p = j.pricing_json || {}
-    const quoted = parseFloat(p.totalExGST || p.totalIncGST || p.total || 0) || 0
+  // Build full profitability list using Xero actuals
+  const allJobMargins = (jobs || []).map((j: any) => {
     const proj = projectByJob[j.id]
-    const actual = proj ? (proj.total_expenses || 0) : 0
-    if (actual <= 0 || quoted <= 0) return null
-    const margin_pct = Math.round(((quoted - actual) / quoted) * 100)
-    const loss = actual > quoted ? Math.round(actual - quoted) : 0
-    return { job_number: j.job_number, client: j.client_name, type: j.type, quoted: Math.round(quoted), actual_cost: Math.round(actual), margin_pct, loss }
-  }).filter(Boolean).filter((j: any) => j.margin_pct < 20).sort((a: any, b: any) => a.margin_pct - b.margin_pct)
+    if (!proj) return null
+    const revenue = Number(proj.total_invoiced) || 0
+    const cost = Number(proj.total_expenses) || 0
+    // Need both revenue and cost to calculate meaningful margin
+    if (revenue <= 0 && cost <= 0) return null
+    // If invoiced but no expenses tracked yet, skip (incomplete data)
+    if (revenue > 0 && cost <= 0) return null
+    const margin_pct = revenue > 0 ? Math.round(((revenue - cost) / revenue) * 100) : -100
+    const loss = cost > revenue ? Math.round(cost - revenue) : 0
+    return {
+      job_number: j.job_number || proj.job_number,
+      client: j.client_name,
+      type: j.type,
+      revenue: Math.round(revenue),
+      actual_cost: Math.round(cost),
+      margin_pct,
+      loss,
+    }
+  }).filter(Boolean)
+
+  // Loss-making or thin-margin jobs (margin < 20%)
+  const underperforming = (allJobMargins as any[])
+    .filter((j: any) => j.margin_pct < 20)
+    .sort((a: any, b: any) => a.margin_pct - b.margin_pct)
 
   // 2. Completed but not invoiced (unbilled delay)
+  //    Cross-reference with Xero to find jobs with $0 invoiced
   const { data: unbilledJobs } = await sb.from('jobs')
     .select('id, job_number, client_name, pricing_json, completed_at')
     .eq('org_id', DEFAULT_ORG_ID).eq('status', 'complete').not('legacy', 'is', true)
 
   const unbilled = (unbilledJobs || []).map((j: any) => {
+    const proj = projectByJob[j.id]
+    // Use Xero invoiced amount if available, else fall back to pricing_json estimate
+    const xeroInvoiced = proj ? Number(proj.total_invoiced) || 0 : 0
+    // If already invoiced in Xero, skip
+    if (xeroInvoiced > 0) return null
     const p = j.pricing_json || {}
-    const value = parseFloat(p.totalIncGST || p.totalExGST || p.total || 0) || 0
+    const estimatedValue = parseFloat(p.totalIncGST || p.totalExGST || p.total || 0) || 0
     const days = j.completed_at ? Math.floor((Date.now() - new Date(j.completed_at).getTime()) / 86400000) : 0
-    return { job_number: j.job_number, client: j.client_name, value: Math.round(value), days_since_complete: days }
-  }).filter((j: any) => j.days_since_complete > 3).sort((a: any, b: any) => b.days_since_complete - a.days_since_complete)
+    if (days <= 3) return null
+    return { job_number: j.job_number, client: j.client_name, estimated_value: Math.round(estimatedValue), days_since_complete: days }
+  }).filter(Boolean).sort((a: any, b: any) => b.days_since_complete - a.days_since_complete)
 
   // 3. No deposit collected but POs sent
   const { data: noDep } = await sb.from('jobs')
@@ -3762,14 +3787,16 @@ async function cashLeakDetection(sb: any) {
     .or('deposit_amount.is.null,deposit_amount.eq.0')
 
   const { data: posForJobs } = (noDep && noDep.length > 0)
-    ? await sb.from('purchase_orders').select('job_id').in('job_id', noDep.map((j: any) => j.id)).neq('status', 'deleted')
+    ? await sb.from('purchase_orders').select('job_id, subtotal').in('job_id', noDep.map((j: any) => j.id)).neq('status', 'deleted')
     : { data: [] }
-  const jobsWithPOs = new Set((posForJobs || []).map((p: any) => p.job_id))
+  // Sum PO values per job
+  const poValueByJob: Record<string, number> = {}
+  for (const p of (posForJobs || [])) {
+    poValueByJob[p.job_id] = (poValueByJob[p.job_id] || 0) + (Number(p.subtotal) || 0)
+  }
 
-  const noDeposit = (noDep || []).filter((j: any) => jobsWithPOs.has(j.id)).map((j: any) => {
-    const p = j.pricing_json || {}
-    const value = parseFloat(p.totalIncGST || p.totalExGST || 0) || 0
-    return { job_number: j.job_number, client: j.client_name, value: Math.round(value), materials_ordered: true }
+  const noDeposit = (noDep || []).filter((j: any) => poValueByJob[j.id]).map((j: any) => {
+    return { job_number: j.job_number, client: j.client_name, po_value: Math.round(poValueByJob[j.id] || 0), materials_ordered: true }
   })
 
   // 4. Bad debt risk (90+ days overdue)
@@ -3777,50 +3804,62 @@ async function cashLeakDetection(sb: any) {
     .select('contact_name, amount_due, due_date, age_bucket')
     .eq('org_id', DEFAULT_ORG_ID).eq('age_bucket', '90+')
 
-  // 5. Margin by type
-  const marginByType: Record<string, { total_quoted: number, total_actual: number, count: number }> = {}
-  for (const j of (underquoted || [])) {
-    const t = (j as any).type || 'other'
-    if (!marginByType[t]) marginByType[t] = { total_quoted: 0, total_actual: 0, count: 0 }
-    marginByType[t].total_quoted += (j as any).quoted
-    marginByType[t].total_actual += (j as any).actual_cost
+  // 5. Margin by type — use ALL jobs with Xero data (not just underperforming)
+  const marginByType: Record<string, { total_revenue: number, total_cost: number, count: number }> = {}
+  for (const j of (allJobMargins as any[])) {
+    const t = j.type || 'other'
+    if (!marginByType[t]) marginByType[t] = { total_revenue: 0, total_cost: 0, count: 0 }
+    marginByType[t].total_revenue += j.revenue
+    marginByType[t].total_cost += j.actual_cost
     marginByType[t].count++
   }
 
   const byType: Record<string, any> = {}
   for (const [type, data] of Object.entries(marginByType)) {
-    byType[type] = { avg_margin: data.total_quoted > 0 ? Math.round(((data.total_quoted - data.total_actual) / data.total_quoted) * 100) : 0, job_count: data.count }
+    byType[type] = {
+      avg_margin: data.total_revenue > 0 ? Math.round(((data.total_revenue - data.total_cost) / data.total_revenue) * 100) : 0,
+      total_revenue: Math.round(data.total_revenue),
+      total_cost: Math.round(data.total_cost),
+      job_count: data.count,
+    }
   }
 
   // Summary
-  const totalUnderquoteLoss = (underquoted || []).reduce((s: number, j: any) => s + (j.loss || 0), 0)
-  const totalUnbilledValue = unbilled.reduce((s, j) => s + j.value, 0)
+  const totalLosses = (underperforming || []).reduce((s: number, j: any) => s + (j.loss || 0), 0)
+  const totalUnbilledValue = (unbilled as any[]).reduce((s: number, j: any) => s + (j.estimated_value || 0), 0)
   const totalBadDebt = (badDebt || []).reduce((s: number, d: any) => s + (Number(d.amount_due) || 0), 0)
-  const totalLeaked = totalUnderquoteLoss + totalBadDebt
+  const totalNoDeposit = noDeposit.reduce((s, j) => s + j.po_value, 0)
+  const totalLeaked = totalLosses + totalBadDebt
 
   const actions: string[] = []
-  if (unbilled.length > 0) actions.push(`Invoice ${unbilled.length} completed jobs worth $${totalUnbilledValue.toLocaleString()} immediately`)
+  if (unbilled.length > 0) actions.push(`Invoice ${unbilled.length} completed jobs (est $${totalUnbilledValue.toLocaleString()}) immediately`)
   if (totalBadDebt > 0) actions.push(`Escalate $${Math.round(totalBadDebt).toLocaleString()} in 90+ day debt to collections`)
-  if (noDeposit.length > 0) actions.push(`Collect deposits on ${noDeposit.length} jobs before ordering more materials`)
+  if (noDeposit.length > 0) actions.push(`Collect deposits on ${noDeposit.length} jobs with $${totalNoDeposit.toLocaleString()} in POs already issued`)
+  if (underperforming.length > 0) actions.push(`Review ${underperforming.length} jobs with <20% margin — $${totalLosses.toLocaleString()} in losses`)
 
   return {
+    data_source: 'xero_actuals',
+    period: `${sixMonthsAgo} to today`,
     leaks: {
-      underquoted_jobs: (underquoted || []).slice(0, 10),
-      unbilled_delay: unbilled.slice(0, 10),
+      loss_making_jobs: (underperforming || []).slice(0, 10),
+      unbilled_delay: (unbilled as any[]).slice(0, 10),
       no_deposit_collected: noDeposit.slice(0, 10),
       bad_debt_risk: (badDebt || []).map((d: any) => ({ client: d.contact_name, amount: Math.round(Number(d.amount_due) || 0), age_bucket: d.age_bucket })).slice(0, 10),
     },
     summary: {
-      total_leaked_estimate: totalLeaked,
+      total_job_losses: totalLosses,
       unbilled_floating: totalUnbilledValue,
       bad_debt_at_risk: Math.round(totalBadDebt),
-      biggest_leak: totalUnderquoteLoss > totalBadDebt ? 'underquoting' : 'bad_debt',
-      top_actions: actions.slice(0, 3),
+      no_deposit_exposure: totalNoDeposit,
+      total_leaked_estimate: totalLeaked,
+      biggest_leak: totalLosses > totalBadDebt ? 'loss_making_jobs' : 'bad_debt',
+      jobs_analysed: (allJobMargins as any[]).length,
+      top_actions: actions.slice(0, 4),
     },
     margin_analysis: {
       by_type: byType,
-      worst_5: (underquoted || []).slice(0, 5),
-      best_5: (underquoted || []).slice(-5).reverse(),
+      worst_5: (underperforming || []).slice(0, 5),
+      best_5: (allJobMargins as any[]).sort((a: any, b: any) => b.margin_pct - a.margin_pct).slice(0, 5),
     },
   }
 }
