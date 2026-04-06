@@ -277,18 +277,6 @@ const CEO_TOOLS = [
     input_schema: { type: 'object', properties: {} },
   },
   {
-    name: 'search_invoices',
-    description: 'Search Xero invoices by type (ACCREC/ACCPAY), status, or contact name.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        type: { type: 'string', description: 'ACCREC (sales) or ACCPAY (bills)' },
-        status: { type: 'string', description: 'DRAFT, SUBMITTED, AUTHORISED, PAID, OVERDUE' },
-        search: { type: 'string', description: 'Contact name or reference search' },
-      },
-    },
-  },
-  {
     name: 'get_debt_followup',
     description: 'Get outstanding receivables grouped by client with contact details and age buckets. Use search to find a specific client.',
     input_schema: {
