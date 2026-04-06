@@ -3457,7 +3457,7 @@ async function createAssignment(client: any, body: any) {
           assignmentType, assignment_type, crewName, crew_name, role, notes } = body
 
   const jId = jobId || job_id
-  const sDate = scheduledDate || scheduled_date
+  const sDate = scheduledDate || scheduled_date || body.date
   if (!jId || !sDate) throw new Error('jobId and scheduledDate required')
 
   const confStatus = body.confirmationStatus || body.confirmation_status || 'tentative'
@@ -3923,7 +3923,6 @@ async function updatePO(client: any, body: any) {
   const { id, ...updates } = body
   if (!id) throw new Error('id required')
 
-  // TODO: Add invoice_received_at, paid_at, xero_bill_id columns to purchase_orders table
   const allowed = ['supplier_name', 'xero_contact_id', 'line_items', 'delivery_date',
                     'reference', 'notes', 'status',
                     'invoice_received_at', 'paid_at', 'xero_bill_id']
