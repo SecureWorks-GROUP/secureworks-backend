@@ -2864,7 +2864,7 @@ async function opsSummary(client: any) {
 async function calendarEvents(client: any, params: URLSearchParams) {
   const from = params.get('from') || new Date().toISOString().slice(0, 10)
   const to = params.get('to') || (() => {
-    const d = new Date(); d.setDate(d.getDate() + 60); return d.toISOString().slice(0, 10)
+    const d = new Date(from); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10)
   })()
   const jobType = params.get('type')
   const includeFinancials = params.get('include_financials') === 'true'
@@ -3234,7 +3234,7 @@ async function listInvoices(client: any, params: URLSearchParams) {
   const dateTo = params.get('date_to')
 
   let query = client.from('xero_invoices')
-    .select('*', { count: 'exact' })
+    .select('id, xero_invoice_id, invoice_number, contact_name, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id', { count: 'exact' })
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('invoice_type', type)
     .order('invoice_date', { ascending: false })
@@ -6055,9 +6055,11 @@ async function schedulingCapacity(client: any, params: URLSearchParams) {
     const { data: assignments } = await client
       .from('job_assignments')
       .select('id')
+      .eq('org_id', DEFAULT_ORG_ID)
       .gte('scheduled_date', startStr)
       .lte('scheduled_date', endStr)
       .neq('status', 'cancelled')
+      .limit(200)
 
     const assignmentCount = (assignments || []).length
     const maxCapacity = crewCount * 5 // 5 weekdays per crew
@@ -8114,11 +8116,12 @@ async function sendReviewRequest(client: any, body: any) {
 // ════════════════════════════════════════════════════════════
 
 async function getCrewAvailability(client: any, params: URLSearchParams) {
-  // Default to this week if no dates provided (prevents 500 errors from agent calls)
+  // Default to 14 days if no dates provided (prevents 500 errors / timeouts from agent calls)
   const today = new Date().toISOString().split('T')[0]
-  const weekOut = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0]
   const startDate = params.get('start_date') || params.get('from') || params.get('date') || today
-  const endDate = params.get('end_date') || params.get('to') || weekOut
+  const defaultEnd = new Date(startDate)
+  defaultEnd.setDate(defaultEnd.getDate() + 14)
+  const endDate = params.get('end_date') || params.get('to') || defaultEnd.toISOString().split('T')[0]
 
   // Fetch availability rows
   const { data: rows, error } = await client
@@ -8127,6 +8130,7 @@ async function getCrewAvailability(client: any, params: URLSearchParams) {
     .gte('date', startDate)
     .lte('date', endDate)
     .order('date', { ascending: true })
+    .limit(200)
 
   if (error) throw error
 
