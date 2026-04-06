@@ -19,26 +19,26 @@ Any AI agent working on SecureWorks reads this FIRST before writing code.
                 |         [Claude API + tool loop]
                 |              |
             ops-api ──────── reporting-api ──── daily-digest
-           (11,867 lines)   (3,428 lines)    (4,568 lines)
+           (12,176 lines)   (3,548 lines)    (4,568 lines)
                 |              |                  |
            Supabase DB    xero-sync          pg_cron jobs
                 |          (2,367 lines)
             ghl-proxy
-           (2,214 lines)
+           (2,316 lines)
 ```
 
-### Edge Functions (19 total, 38,671 lines)
+### Edge Functions (19 total, 39,038 lines)
 
 | Function | Lines | What It Does | External APIs |
 |----------|-------|-------------|---------------|
-| **ops-api** | 11,963 | Job CRUD, pipeline, scheduling, invoicing, POs, WOs, council, variations | Supabase |
+| **ops-api** | 12,176 | Job CRUD, pipeline, scheduling, invoicing, POs, WOs, council, variations | Supabase |
 | **daily-digest** | 4,568 | Morning brief, financial snapshots, nudges, weekly letter | Claude API, Telegram |
 | **ops-ai** | 3,983 | AI chat with 60+ tools, multi-round tool loop, confirmation flow, conversation memory | Claude API (Anthropic) |
-| **reporting-api** | 3,540 | Financial reports, debt followup, CEO report, sales summary, profitability | Supabase, Xero data |
+| **reporting-api** | 3,548 | Financial reports, debt followup, CEO report, sales summary, profitability, team_activity | Supabase, Xero data |
 | **send-quote** | 3,147 | Quote PDF generation, email delivery, acceptance tracking | Resend API, GHL |
 | **xero-sync** | 2,367 | Invoice sync, bank balance, aged payables from Xero | Xero API |
 | **telegram-bot** | 2,312 | Telegram message handling, classification, tone rewrite, action cards | Claude API, Telegram API |
-| **ghl-proxy** | 2,214 | GoHighLevel CRM proxy — contacts, opportunities, pipelines, SMS, email | GHL API |
+| **ghl-proxy** | 2,316 | GoHighLevel CRM proxy — contacts, opportunities, pipelines, SMS, email | GHL API |
 | **agent-runner** | 1,025 | Railway agent runner for MCP tools | Railway, Claude API |
 | **completion-pack** | 836 | Branded HTML completion report generator | GHL |
 | **ghl-webhook** | 611 | GHL opportunity sync on stage changes | GHL webhook |
@@ -82,6 +82,7 @@ Any AI agent working on SecureWorks reads this FIRST before writing code.
 | **org_config** | Business targets/settings | config_key, config_value |
 | **po_communications** | Supplier email threads | job_id, direction, message_id, thread_id |
 | **email_events** | Outbound email delivery tracking | recipient, status, sent_at |
+| **jarvis_event_log** | Action dedup + audit trail for JARVIS actions | action_type, action_key, channel, dedup_window |
 
 ### Integration Credentials (locations, NOT values)
 
@@ -140,17 +141,25 @@ Telegram message arrives
 - All error messages updated, freestyle personality refined
 - Business keyword routing expanded (20+ new keywords, 15-word length check)
 
+### Sprint 1 Sweep (2026-04-06)
+- GHL conversations fix verified working (Cowork confirmed)
+- Contact data cleanup: 3 dupes fixed, suburbs standardised, 3 Xero-GHL links created
+- Action dedup gate: 24hr on payment links, 10-min content-aware on SMS
+- jarvis_event_log table created + wired into 4+ action handlers
+- search_contacts GHL endpoint: new /contacts/ API call (was searching opportunities)
+- Response size fixes: listOverdueInvoices, calendarEvents, salesPipeline, jobProfitability all stripped
+- team_activity endpoint added to reporting-api
+- monitor-inbox 401 auth fix (relaxed for pg_cron)
+- job_number→UUID auto-resolution in jobDetail
+
 ---
 
 ## Known Issues & Tech Debt
 
 | Issue | Severity | File | Notes |
 |-------|----------|------|-------|
-| sw_get_conversation returns empty | P0 | ghl-proxy | GHL conversations API may need different auth or endpoint |
-| sw_send_payment_link no dedup | P1 | ghl-proxy | Rachael Torre got 10 duplicates |
 | Proposed actions queue always empty | P1 | ops-api | sw_list_proposed_actions returns nothing — no generation engine |
 | Resend email blocked | P1 | send-po-email | DNS controlled by marketing agency, can't add MX records |
-| Nathan→Nithin name fix | P3 | ops-ai/reporting-api | Sales tool descriptions reference wrong name |
 | Railway agent has no conversation memory | P2 | Railway | Memory only works because telegram-bot injects history |
 | monitor-inbox MARNIN_TELEGRAM_ID | P3 | monitor-inbox | Uses users table lookup, needs role column verification |
 | Xero bank transactions sync | P3 | xero-sync | Column mismatch, non-critical |
