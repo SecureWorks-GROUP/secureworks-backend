@@ -6229,7 +6229,7 @@ async function myJobs(client: any, userId: string, showAll = false) {
         user:user_id ( id, name ),
         jobs:job_id (
           id, type, status, client_name, client_phone, client_email,
-          site_address, site_suburb, notes, job_number, pricing_json
+          site_address, site_suburb, notes, job_number
         )
       `)
       .neq('status', 'cancelled')
@@ -6246,7 +6246,7 @@ async function myJobs(client: any, userId: string, showAll = false) {
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id (
           id, type, status, client_name, client_phone, client_email,
-          site_address, site_suburb, notes, job_number, pricing_json
+          site_address, site_suburb, notes, job_number
         )
       `)
       .eq('user_id', userId)
