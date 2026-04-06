@@ -179,6 +179,47 @@ Telegram message arrives
 
 ---
 
+## Railway Agent (~/Projects/secureworks-agent/)
+
+**This is a 17K-line autonomous agent, NOT just a tool proxy.**
+
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| mcp-server.ts | 1,468 | 97 sw_* tool definitions |
+| agent.ts | 536 | Multi-turn autonomous agent |
+| orchestrator/ | 1,387 | Decision routing, safety rules |
+| monitoring/ | 2,614 | Email/GHL/Telegram watchers, audit rules |
+| memory/ | 1,159 | Prompt cache, retrieval, scoring |
+| jobs/ | 1,183 | Job state machine, scope validator |
+| channels/ | 1,002 | Telegram, Email, Graph clients |
+| automation/ | 725 | Cron scheduler, brief aggregator |
+| sop/ | 766 | Standard Operating Procedures |
+| personas/ | 369 | Personality configs per user |
+| intelligence/ | 334 | Cross-thread context |
+| context/ | 274 | Person context builder |
+| triage/ | 142 | Email classifier |
+| subagents/ | 108 | Ops/Sales/Finance delegations |
+
+**CRITICAL:** This agent and ops-ai are PEERS. Both have tool loops, both call Claude. Telegram routes to Railway (via RAILWAY_AGENT_URL). Dashboard routes to Supabase ops-ai. Changes to one don't affect the other unless explicitly synced.
+
+---
+
+## Scattered Planning Documents
+
+| Document | Path | Status |
+|----------|------|--------|
+| AI Implementation Roadmap | `docs/ai-implementation-roadmap.md` | Current (7-phase build spec) |
+| Data Architecture Spec | `docs/data-architecture-spec.md` | Definitive (6-layer, CloudEvents) |
+| Autonomous Agent Research | `docs/research-autonomous-ai-agent.md` | Current (600+ lines, L0-L4 autonomy) |
+| System Upgrade Plan | `docs/strategy/SYSTEM-UPGRADE-PLAN.md` | Active (3 flywheels, 90-day plan) |
+| Business Context | `docs/strategy/SECUREWORKS-BUSINESS-CONTEXT.md` | Current ($5.5M target) |
+| Autonomous Agent Build Plan | `AUTONOMOUS-AGENT-BUILD-PLAN.md` | v2 corrected (agent SDK strategy) |
+| Phase 2 Handoffs | `PHASE2_HANDOFFS.md` | Build spec (terminal handoffs) |
+| Design Brief | `SECUREWORKS-DESIGN-BRIEF.md` | Current (Architectural Assurance) |
+| Project Knowledge Base | `docs/project-knowledge/*.md` | 7 subdocs (architecture, schema, GHL, gotchas) |
+
+---
+
 ## Project Map
 
 | Project | Path | Deployed On |
