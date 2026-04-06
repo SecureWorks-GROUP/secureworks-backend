@@ -1983,6 +1983,17 @@ serve(async (req: Request) => {
           }
         }
 
+        // Log to jarvis_event_log (non-blocking, fire-and-forget)
+        sb.from('jarvis_event_log').insert({
+          event_type: 'chase_sms_sent',
+          contact_id: contactId,
+          job_id: jobId || null,
+          channel: 'sms',
+          triggered_by: userId || 'jarvis',
+          message_content: message.slice(0, 2000),
+          metadata: { message_id: result.messageId || result.id },
+        }).then(() => {}).catch(() => {})
+
         return json({ success: true, messageId: result.messageId || result.id })
       } catch (e) {
         console.log('[ghl-proxy] send_sms failed:', e)
@@ -2007,6 +2018,20 @@ serve(async (req: Request) => {
           }),
         })
         console.log(`[ghl-proxy] Email sent to contact ${contactId}: ${subject}`)
+
+        // Log to jarvis_event_log (non-blocking, fire-and-forget)
+        try {
+          const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+          sb.from('jarvis_event_log').insert({
+            event_type: 'email_sent',
+            contact_id: contactId,
+            channel: 'email',
+            triggered_by: 'jarvis',
+            message_content: (subject + '\n' + htmlBody).slice(0, 2000),
+            metadata: { subject, message_id: result.messageId || result.id },
+          }).then(() => {}).catch(() => {})
+        } catch { /* non-blocking */ }
+
         return json({ success: true, messageId: result.messageId || result.id })
       } catch (e) {
         console.log('[ghl-proxy] send_email failed:', e)

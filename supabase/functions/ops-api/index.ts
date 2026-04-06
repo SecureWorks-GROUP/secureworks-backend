@@ -3759,6 +3759,16 @@ async function updateJobStatus(client: any, body: any) {
     detail_json: { new_status: status, source, operator: body.operator_email || body.user_email || null },
   })
 
+  // Log to jarvis_event_log (non-blocking, fire-and-forget)
+  client.from('jarvis_event_log').insert({
+    event_type: 'status_changed',
+    job_id: jId,
+    channel: 'system',
+    triggered_by: body.operator_email || body.user_email || 'ops_dashboard',
+    message_content: `Status changed from ${oldStatus} to ${status}`,
+    metadata: { old_status: oldStatus, new_status: status, source },
+  }).then(() => {}).catch(() => {})
+
   // Dual-write to business_events
   logBusinessEvent(client, {
     event_type: 'job.status_changed',
@@ -7852,6 +7862,18 @@ async function sendPaymentLink(client: any, body: any) {
       sms_sent: smsResult.success || false,
     },
   })
+
+  // Log to jarvis_event_log (non-blocking, fire-and-forget)
+  client.from('jarvis_event_log').insert({
+    event_type: 'payment_link_sent',
+    contact_id: job.ghl_contact_id,
+    job_id: jId,
+    invoice_id: invoice.xero_invoice_id,
+    channel: 'sms',
+    triggered_by: 'jarvis',
+    message_content: smsMessage.slice(0, 2000),
+    metadata: { invoice_number: invoice.invoice_number, payment_url: onlineUrl },
+  }).then(() => {}).catch(() => {})
 
   return {
     success: true,
