@@ -2871,7 +2871,7 @@ async function calendarEvents(client: any, params: URLSearchParams) {
 
   const calSelect = includeFinancials
     ? '*'
-    : 'assignment_id, job_id, job_number, client_name, client_phone, site_address, site_suburb, job_type, job_status, job_phase, crew_name, assigned_to, user_id, scheduled_date, scheduled_end, start_time, end_time, assignment_status, assignment_type, assignment_notes, confirmation_status, confirmed_at, completed_at, started_at, duration_days, scope_json, ghl_contact_id, legacy, org_id, last_phase_changed_at, assigned_phone, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, hours_worked'
+    : 'assignment_id, job_id, job_number, client_name, site_address, scheduled_date, start_time, end_time, crew_name, assignment_type, assignment_status, job_type, job_status, scope_json, ghl_contact_id, org_id'
 
   let query = client
     .from('calendar_events')
@@ -2881,6 +2881,7 @@ async function calendarEvents(client: any, params: URLSearchParams) {
     .eq('org_id', DEFAULT_ORG_ID)
     .neq('assignment_status', 'cancelled')
     .order('scheduled_date', { ascending: true })
+    .limit(100)
 
   if (jobType) query = query.eq('job_type', jobType)
 
@@ -2939,7 +2940,13 @@ async function calendarEvents(client: any, params: URLSearchParams) {
     }
   }
 
-  return { events, deliveries: deliveries || [], readiness }
+  // Strip heavy fields (scope_json used above for readiness but not needed in response)
+  const lightEvents = (events || []).map((e: any) => {
+    const { scope_json, org_id, ...rest } = e
+    return rest
+  })
+
+  return { events: lightEvents, deliveries: deliveries || [], readiness }
 }
 
 async function pipeline(client: any, params: URLSearchParams) {
@@ -11429,40 +11436,19 @@ async function listOverdueInvoices(client: any) {
 
     return {
       xero_invoice_id: inv.xero_invoice_id,
-      xero_contact_id: inv.xero_contact_id,
       invoice_number: inv.invoice_number,
-      reference: inv.reference,
       contact_name: inv.contact_name,
       amount_due: inv.amount_due,
       total: inv.total,
       due_date: inv.due_date,
-      invoice_date: inv.invoice_date,
       days_overdue: daysOverdue,
       age_bucket: daysOverdue <= 30 ? '1-30' : daysOverdue <= 60 ? '31-60' : daysOverdue <= 90 ? '61-90' : '90+',
       classification,
-      classification_reason: classificationReason,
-      auto_classified: autoClassified,
-      classified_by: inv.debt_classified_by,
-      classified_at: inv.debt_classified_at,
-      job_id: inv.job_id,
       job_number: job?.job_number || null,
-      job_type: job?.type || null,
       job_status: job?.status || null,
-      ghl_contact_id,
-      ghl_opportunity_id: job?.ghl_opportunity_id || null,
       phone,
       email,
-      site_address: job?.site_address || null,
-      site_suburb: job?.site_suburb || null,
-      invoice_status: inv.status || null,
-      amount_paid: inv.amount_paid || 0,
-      job_created_at: job?.created_at || null,
-      job_quoted_at: job?.quoted_at || null,
-      job_accepted_at: job?.accepted_at || null,
-      job_scheduled_at: job?.scheduled_at || null,
-      job_completed_at: job?.completed_at || null,
-      days_since_completion: job?.completed_at ? Math.ceil((Date.now() - new Date(job.completed_at).getTime()) / 86400000) : null,
-      chase_logs: chaseMap[inv.xero_invoice_id] || [],
+      ghl_contact_id,
       chase_log_count: chaseCountMap[inv.xero_invoice_id] || 0,
       next_follow_up: followUpMap[inv.xero_invoice_id] || null,
       flags,
@@ -11512,15 +11498,14 @@ async function listOverdueInvoices(client: any) {
       const key = pi.xero_contact_id || 'unknown'
       if (clientMap[key]) {
         if (!clientMap[key].paid_invoices) clientMap[key].paid_invoices = []
-        clientMap[key].paid_invoices.push({
-          invoice_number: pi.invoice_number,
-          total: pi.total,
-          amount_paid: pi.amount_paid,
-          fully_paid_on: pi.fully_paid_on,
-          invoice_date: pi.invoice_date,
-          reference: pi.reference,
-          job_id: pi.job_id,
-        })
+        if (clientMap[key].paid_invoices.length < 3) {
+          clientMap[key].paid_invoices.push({
+            invoice_number: pi.invoice_number,
+            total: pi.total,
+            amount_paid: pi.amount_paid,
+            fully_paid_on: pi.fully_paid_on,
+          })
+        }
       }
     })
   }
