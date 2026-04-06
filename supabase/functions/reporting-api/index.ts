@@ -275,8 +275,12 @@ serve(async (req: Request) => {
       }
       case 'cash_waterfall':
         return json(await cashWaterfall(sb))
+      case 'cash_leak_detection':
+        return json(await cashLeakDetection(sb))
+      case 'performance_benchmarks':
+        return json(await performanceBenchmarks(sb))
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
@@ -3582,7 +3586,7 @@ async function salesQuickAction(sb: any, body: any) {
 // CASH WATERFALL — where every dollar is across the business
 // ══════════════════════════════════════════════════════════
 async function cashWaterfall(sb: any) {
-  const [bankRes, receivablesRes, payablesRes, jobsRes, posRes, depositsRes, invoicesRes] = await Promise.all([
+  const [bankRes, receivablesRes, payablesRes, jobsRes, posRes, depositsRes, invoicesRes, unreconciledRes] = await Promise.all([
     // 1. Bank balances (from last sync)
     sb.from('xero_bank_balances').select('account_name, balance, updated_at').eq('org_id', DEFAULT_ORG_ID),
 
@@ -3618,6 +3622,14 @@ async function cashWaterfall(sb: any) {
       .in('status', ['AUTHORISED', 'SUBMITTED']).gt('amount_due', 0)
       .gte('due_date', new Date().toISOString().slice(0, 10))
       .order('due_date', { ascending: true }),
+
+    // 8. Recent unreconciled bank transactions (money in but not matched)
+    sb.from('xero_bank_transactions')
+      .select('txn_date, contact_name, amount, reference, is_reconciled, txn_type')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('is_reconciled', false)
+      .order('txn_date', { ascending: false })
+      .limit(20),
   ])
 
   // Calculate totals
@@ -3650,8 +3662,15 @@ async function cashWaterfall(sb: any) {
   const comingIn = (invoicesRes.data || []).reduce((s: number, i: any) => s + (Number(i.amount_due) || 0), 0)
   const comingInCount = (invoicesRes.data || []).length
 
-  // Real available cash = bank - PO committed - deposits held
-  const realAvailable = Math.round(bankTotal - poCommitted - depositsHeld)
+  // Unreconciled bank transactions
+  const unreconciledData = (unreconciledRes.data || [])
+  const unreconciledReceive = unreconciledData.filter((t: any) => t.txn_type === 'RECEIVE')
+  const unreconciledTotal = unreconciledData.reduce((s: number, t: any) => s + (Number(t.amount) || 0), 0)
+  const unreconciledReceiveTotal = unreconciledReceive.reduce((s: number, t: any) => s + (Number(t.amount) || 0), 0)
+  const unreconciledCount = unreconciledData.length
+
+  // Real available cash = bank - PO committed - deposits held + unreconciled incoming
+  const realAvailable = Math.round(bankTotal - poCommitted - depositsHeld + unreconciledReceiveTotal)
 
   // Potential inflow = overdue + unbilled + coming in
   const potentialInflow = Math.round(overdueTotal + unbilledTotal + comingIn)
@@ -3671,6 +3690,17 @@ async function cashWaterfall(sb: any) {
       '5_committed_to_suppliers': { total: Math.round(poCommitted), count: poCount },
       '6_owed_to_suppliers': { total: Math.round(payablesTotal) },
       '7_deposits_held_precommitted': { total: Math.round(depositsHeld), jobs: depositJobs },
+      '8_arrived_unreconciled': {
+        total: Math.round(unreconciledTotal),
+        count: unreconciledCount,
+        transactions: unreconciledData.slice(0, 10).map((t: any) => ({
+          date: t.txn_date,
+          amount: Math.round(Number(t.amount) || 0),
+          contact: t.contact_name || 'Unknown',
+          reference: t.reference || null,
+        })),
+        note: 'Cash in bank not yet matched to invoices. Appears 12-24hrs after bank processes.'
+      },
     },
     actions: {
       invoice_now: unbilledJobs.length > 0 ? `${unbilledJobs.length} jobs worth $${unbilledTotal.toLocaleString()} need invoicing` : null,
