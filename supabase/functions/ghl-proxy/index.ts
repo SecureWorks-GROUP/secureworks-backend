@@ -1924,11 +1924,10 @@ serve(async (req: Request) => {
         const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
         const { data: recentSms } = await sb.from('business_events')
-          .select('id, payload')
+          .select('payload')
           .eq('event_type', 'sms_sent')
           .eq('entity_id', contactId)
           .gte('occurred_at', tenMinsAgo)
-          .limit(5)
         // Only block if the SAME message content was sent recently
         const isDuplicate = (recentSms || []).some((e: any) => {
           const prevMsg = e.payload?.message || ''
