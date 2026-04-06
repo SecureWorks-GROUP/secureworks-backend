@@ -281,6 +281,30 @@ serve(async (req: Request) => {
       return json({ opportunities: opps })
     }
 
+    // ── Search Contacts (dedicated contact search, not opportunities) ──
+    if (action === 'search_contacts') {
+      const q = (url.searchParams.get('q') || '').trim()
+      if (!q) return json({ contacts: [], total: 0 })
+
+      // GHL contacts search endpoint
+      const searchUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=20`
+      const result = await ghl(searchUrl)
+
+      const contacts = (result.contacts || []).map((c: any) => ({
+        id: c.id,
+        name: `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.name || c.email || 'Unknown',
+        email: c.email || null,
+        phone: c.phone || null,
+        tags: c.tags || [],
+        source: c.source || null,
+        dateAdded: c.dateAdded || c.dateCreated || null,
+        address: c.address1 || null,
+        city: c.city || null,
+      }))
+
+      return json({ contacts, total: contacts.length })
+    }
+
     // ── Search (enhanced: pipeline filter, stage names, Supabase cross-ref) ──
     if (action === 'search') {
       const q = (url.searchParams.get('q') || '').trim()
