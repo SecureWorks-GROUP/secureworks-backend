@@ -2985,7 +2985,7 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
   const filters: Record<string, any> = { org_id: DEFAULT_ORG_ID, legacy: false }
   if (salesperson_id) filters.created_by = salesperson_id
   const allJobs = await fetchAll(sb, 'jobs',
-    'id, job_number, status, type, client_name, client_phone, client_email, site_address, site_suburb, pricing_json, quoted_at, accepted_at, created_at, created_by',
+    'id, job_number, status, type, client_name, client_phone, client_email, site_address, site_suburb, pricing_json, quoted_at, accepted_at, created_at, created_by, ghl_contact_id',
     filters
   )
 
@@ -3035,7 +3035,7 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
     .map((j: any) => {
       const daysSinceQuoted = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
       const category = daysSinceQuoted <= 14 ? 'warm' : daysSinceQuoted <= 60 ? 'warm' : 'clean'
-      return { job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: daysSinceQuoted, client_phone: j.client_phone, last_event_at: lastEventMap[j.id] || null, category }
+      return { job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: daysSinceQuoted, client_phone: j.client_phone, ghl_contact_id: j.ghl_contact_id || null, last_event_at: lastEventMap[j.id] || null, category }
     })
 
   // Quotes expiring: quoted > 21 days ago, value > $5K (exclude snoozed)
@@ -3043,7 +3043,7 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
   const expiring = jobs.filter((j: any) => j.status === 'quoted' && j.quoted_at && j.quoted_at < twentyOneDaysAgo && !snoozedJobIds.has(j.id))
     .map((j: any) => {
       const daysSinceQuoted = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
-      return { job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: daysSinceQuoted, last_event_at: lastEventMap[j.id] || null, category: 'hot' as const }
+      return { job_id: j.id, client_name: j.client_name, quote_value: qv(j), days_since_quoted: daysSinceQuoted, client_phone: j.client_phone, ghl_contact_id: j.ghl_contact_id || null, last_event_at: lastEventMap[j.id] || null, category: 'hot' as const }
     })
 
   // Needs first contact: drafts with no scope assignment (exclude snoozed)
@@ -3053,7 +3053,7 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
     : { data: [] }
   const scopedJobIds = new Set((scopeAssignments || []).map((a: any) => a.job_id))
   const needsContact = drafts.filter((j: any) => !scopedJobIds.has(j.id) && !snoozedJobIds.has(j.id))
-    .map((j: any) => ({ job_id: j.id, client_name: j.client_name, days_old: Math.floor((now.getTime() - new Date(j.created_at).getTime()) / 86400000), type: j.type, last_event_at: lastEventMap[j.id] || null, category: 'hot' as const }))
+    .map((j: any) => ({ job_id: j.id, client_name: j.client_name, days_old: Math.floor((now.getTime() - new Date(j.created_at).getTime()) / 86400000), type: j.type, client_phone: j.client_phone, ghl_contact_id: j.ghl_contact_id || null, last_event_at: lastEventMap[j.id] || null, category: 'hot' as const }))
 
   // Scope visits today
   const today = now.toISOString().slice(0, 10)
@@ -3072,7 +3072,7 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
     .map((j: any) => ({
       job_id: j.id, client_name: j.client_name, quote_value: qv(j),
       days_since_quoted: Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000),
-      client_phone: j.client_phone, last_event_at: lastEventMap[j.id] || null, category: 'clean' as const
+      client_phone: j.client_phone, ghl_contact_id: j.ghl_contact_id || null, last_event_at: lastEventMap[j.id] || null, category: 'clean' as const
     }))
 
   // Recent activity: last 10 job_events for this user's jobs

@@ -1033,6 +1033,7 @@ serve(async (req: Request) => {
       case 'scope_to_po': return json(await scopeToPO(client, url.searchParams))
       case 'scheduling_capacity': return json(await schedulingCapacity(client, url.searchParams))
       case 'get_crew_availability': return json(await getCrewAvailability(client, url.searchParams))
+      case 'scope_availability': return json(await scopeAvailability(client, url.searchParams))
       case 'dismiss_alert': return json(await dismissAlert(client, body))
       case 'annotations': return json(await getAnnotations(client, url.searchParams))
       case 'resolve_annotation': return json(await resolveAnnotation(client, body))
@@ -11960,4 +11961,184 @@ async function handlePaymentEvent(client: any, body: any) {
   }
 
   return { success: true, invoice_number, contact_name, actions: results }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// SCOPE AVAILABILITY — Smart booking slots with suburb scoring
+// ════════════════════════════════════════════════════════════
+
+// Perth suburb zones for proximity scoring
+const PERTH_ZONES: Record<string, string[]> = {
+  north: ['Joondalup','Clarkson','Wanneroo','Alkimos','Yanchep','Two Rocks','Butler','Mindarie','Quinns Rocks','Currambine','Kinross','Burns Beach','Iluka','Connolly','Heathridge','Ocean Reef','Mullaloo','Kallaroo','Hillarys','Padbury','Duncraig','Craigie','Woodvale','Kingsley','Greenwood','Warwick','Hamersley','Carine','Sorrento','Marmion','Watermans Bay','Banksia Grove','Tapping','Madeley','Landsdale','Alexander Heights','Marangaroo','Girrawheen','Koondoola','Ballajura','Malaga','Noranda'],
+  inner_north: ['Scarborough','Doubleview','Innaloo','Stirling','Osborne Park','Tuart Hill','Nollamara','Balga','Westminster','Mirrabooka','Morley','Dianella','Yokine','Mount Lawley','Inglewood','Bedford','Bayswater','Embleton','Maylands','Bassendean','Eden Hill','Ashfield','Guildford'],
+  east: ['Midland','Swan View','Ellenbrook','The Vines','Upper Swan','Henley Brook','Aveley','Dayton','Brabham','Whiteman','Bennett Springs','Stratton','Viveash','Caversham','Kiara'],
+  hills: ['Mundaring','Kalamunda','Lesmurdie','Gooseberry Hill','High Wycombe','Forrestfield','Maida Vale','Helena Valley','Darlington','Glen Forrest','Parkerville','Stoneville','Hovea','Sawyers Valley'],
+  inner_south: ['Fremantle','Booragoon','Applecross','Mount Pleasant','Bateman','Bull Creek','Leeming','Jandakot','Bibra Lake','Cockburn','Success','Atwell','Aubin Grove','Coogee','Spearwood','Hamilton Hill','Coolbellup','Kardinya','Murdoch','Winthrop','Melville','Palmyra','Bicton','East Fremantle','Willagee','Hilton','White Gum Valley','Beaconsfield','South Lake','Yangebup','Henderson','Munster'],
+  south: ['Rockingham','Baldivis','Wellard','Bertram','Wandi','Byford','Mundijong','Armadale','Kelmscott','Gosnells','Southern River','Canning Vale','Harrisdale','Piara Waters','Thornlie','Langford','Ferndale','Riverton','Willetton','Cannington','Beckenham','Kenwick','Maddington','Orange Grove','Martin','Roleystone','Bedfordale','Seville Grove','Brookdale','Champion Lakes','Haynes','Hilbert'],
+  central: ['Perth','Northbridge','East Perth','West Perth','Subiaco','Leederville','North Perth','Mount Hawthorn','Joondanna','Wembley','Floreat','City Beach','Nedlands','Claremont','Cottesloe','Dalkeith','Peppermint Grove','Crawley','Shenton Park','Daglish','Churchlands','Woodlands','Karrinyup','Gwelup','Trigg'],
+  east_vic_park: ['Victoria Park','East Victoria Park','Carlisle','Lathlain','Bentley','St James','Welshpool','Kewdale','Cloverdale','Belmont','Redcliffe','Ascot','Rivervale'],
+}
+
+// Adjacent zone pairs for partial scoring
+const ADJACENT_ZONES: Record<string, string[]> = {
+  north: ['inner_north', 'east'],
+  inner_north: ['north', 'central', 'east', 'east_vic_park'],
+  east: ['north', 'inner_north', 'hills'],
+  hills: ['east', 'east_vic_park', 'south'],
+  inner_south: ['central', 'east_vic_park', 'south'],
+  south: ['inner_south', 'hills', 'east_vic_park'],
+  central: ['inner_north', 'inner_south', 'east_vic_park'],
+  east_vic_park: ['inner_north', 'central', 'inner_south', 'south', 'hills'],
+}
+
+function getSuburbZone(suburb: string): string | null {
+  if (!suburb) return null
+  const normalised = suburb.trim().toLowerCase()
+  for (const [zone, suburbs] of Object.entries(PERTH_ZONES)) {
+    if (suburbs.some(s => s.toLowerCase() === normalised)) return zone
+  }
+  return null
+}
+
+function scoreSuburbProximity(targetSuburb: string, existingSuburbs: string[]): number {
+  const targetZone = getSuburbZone(targetSuburb)
+  if (!targetZone || existingSuburbs.length === 0) return 50 // neutral if no data
+
+  const existingZones = existingSuburbs.map(s => getSuburbZone(s)).filter(Boolean) as string[]
+  if (existingZones.length === 0) return 50
+
+  // Same zone = 100, adjacent = 70, different = 20
+  if (existingZones.includes(targetZone)) return 100
+  const adjacent = ADJACENT_ZONES[targetZone] || []
+  if (existingZones.some(z => adjacent.includes(z))) return 70
+  return 20
+}
+
+const SCOPE_SLOTS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00']
+
+async function scopeAvailability(client: any, params: URLSearchParams) {
+  const scoperId = params.get('scoper_id') || undefined
+  const suburb = params.get('suburb') || undefined
+  const fromStr = params.get('from') || new Date().toISOString().slice(0, 10)
+  const toStr = params.get('to') || (() => {
+    const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10)
+  })()
+
+  // Get scopers (users with estimator or scoper role, or all crew if not filtered)
+  let userQuery = client.from('users').select('id, name, email, phone, role')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .in('role', ['estimator', 'sales', 'admin', 'ops_manager'])
+  if (scoperId) userQuery = userQuery.eq('id', scoperId)
+  const { data: scopers } = await userQuery
+
+  // Filter to known scopers (Khairo, Nithin, Nathan) — anyone who does scope assignments
+  const { data: recentScopers } = await client
+    .from('job_assignments')
+    .select('user_id')
+    .eq('assignment_type', 'scope')
+    .gte('scheduled_date', new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10))
+  const activeScoперIds = new Set((recentScopers || []).map((r: any) => r.user_id).filter(Boolean))
+
+  // Use recent scopers if available, otherwise fall back to all scopers from role query
+  const allScopers = (scopers || []).filter((s: any) => scoperId ? true : activeScoперIds.has(s.id))
+  if (allScopers.length === 0 && scopers && scopers.length > 0) {
+    // Fallback: just use the first 3 from role query
+    allScopers.push(...(scopers || []).slice(0, 3))
+  }
+  const scoperIds = allScopers.map((s: any) => s.id)
+  const scoperMap: Record<string, any> = Object.fromEntries(allScopers.map((s: any) => [s.id, s]))
+
+  // Existing scope assignments in range
+  const { data: existingAssignments } = await client
+    .from('job_assignments')
+    .select('user_id, scheduled_date, start_time, end_time, job_id')
+    .eq('assignment_type', 'scope')
+    .neq('status', 'cancelled')
+    .gte('scheduled_date', fromStr)
+    .lte('scheduled_date', toStr)
+    .in('user_id', scoperIds.length > 0 ? scoperIds : ['00000000-0000-0000-0000-000000000000'])
+
+  // Get suburbs for existing assignments
+  const assignmentJobIds = [...new Set((existingAssignments || []).map((a: any) => a.job_id).filter(Boolean))]
+  let jobSuburbMap: Record<string, string> = {}
+  if (assignmentJobIds.length > 0) {
+    const { data: jobRows } = await client.from('jobs').select('id, site_suburb').in('id', assignmentJobIds)
+    jobSuburbMap = Object.fromEntries((jobRows || []).map((j: any) => [j.id, j.site_suburb || '']))
+  }
+
+  // Crew availability (leave/unavailable)
+  const { data: availRows } = await client
+    .from('crew_availability')
+    .select('user_id, date, status')
+    .gte('date', fromStr)
+    .lte('date', toStr)
+    .in('user_id', scoperIds.length > 0 ? scoperIds : ['00000000-0000-0000-0000-000000000000'])
+  const unavailableSet = new Set(
+    (availRows || []).filter((r: any) => r.status === 'leave' || r.status === 'unavailable')
+      .map((r: any) => `${r.user_id}_${r.date}`)
+  )
+
+  // Build booked slots lookup: "userId_date_time" → true
+  const bookedSlots = new Set<string>()
+  const daySuburbs: Record<string, string[]> = {} // "userId_date" → suburbs[]
+  for (const a of (existingAssignments || [])) {
+    const key = `${a.user_id}_${a.scheduled_date}`
+    if (a.start_time) {
+      bookedSlots.add(`${key}_${a.start_time.slice(0, 5)}`)
+    }
+    // Track suburbs for this scoper+day
+    if (!daySuburbs[key]) daySuburbs[key] = []
+    const sub = jobSuburbMap[a.job_id]
+    if (sub && !daySuburbs[key].includes(sub)) daySuburbs[key].push(sub)
+  }
+
+  // Generate slots
+  const slots: any[] = []
+  const from = new Date(fromStr + 'T00:00:00')
+  const to = new Date(toStr + 'T00:00:00')
+
+  for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
+    const dayOfWeek = d.getDay()
+    if (dayOfWeek === 0 || dayOfWeek === 6) continue // skip weekends
+
+    const dateStr = d.toISOString().slice(0, 10)
+
+    for (const scoper of allScopers) {
+      const dayKey = `${scoper.id}_${dateStr}`
+
+      // Skip if on leave
+      if (unavailableSet.has(dayKey)) continue
+
+      const existingSubs = daySuburbs[dayKey] || []
+
+      for (const time of SCOPE_SLOTS) {
+        const slotKey = `${dayKey}_${time}`
+        const available = !bookedSlots.has(slotKey)
+
+        const suburbScore = suburb ? scoreSuburbProximity(suburb, existingSubs) : 50
+
+        slots.push({
+          date: dateStr,
+          scoper_id: scoper.id,
+          scoper_name: scoper.name,
+          start_time: time,
+          available,
+          existing_suburbs: existingSubs,
+          zone: suburb ? getSuburbZone(suburb) : null,
+          suburb_score: available ? suburbScore : 0,
+        })
+      }
+    }
+  }
+
+  // Sort: available first, then by suburb_score desc, then by date asc, then by time asc
+  slots.sort((a: any, b: any) => {
+    if (a.available !== b.available) return a.available ? -1 : 1
+    if (a.suburb_score !== b.suburb_score) return b.suburb_score - a.suburb_score
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1
+    return a.start_time < b.start_time ? -1 : 1
+  })
+
+  return { slots, scopers: allScopers.map((s: any) => ({ id: s.id, name: s.name })) }
 }
