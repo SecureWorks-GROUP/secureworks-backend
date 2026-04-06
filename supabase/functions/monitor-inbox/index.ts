@@ -239,6 +239,89 @@ async function processMailbox(
 
     processed++
 
+    // Download attachments if present and matched to a job
+    if (msg.hasAttachments && jobId) {
+      try {
+        const attachResp = await fetch(
+          `https://graph.microsoft.com/v1.0/users/${mailbox}/messages/${msg.id}/attachments`,
+          { headers: { 'Authorization': `Bearer ${token}` } }
+        )
+        if (attachResp.ok) {
+          const attachData = await attachResp.json()
+          for (const att of (attachData.value || [])) {
+            if (!att.contentBytes || att.size > 10000000) continue // Skip if no content or >10MB
+            const isPdf = (att.contentType || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+            const isImage = (att.contentType || '').startsWith('image/')
+            if (!isPdf && !isImage) continue // Only store PDFs and images
+
+            const ext = isPdf ? 'pdf' : (att.name || '').split('.').pop() || 'jpg'
+            const storagePath = `${DEFAULT_ORG_ID}/${jobId}/supplier/${Date.now()}_${(att.name || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_')}`
+
+            // Upload to Supabase Storage
+            const fileBuffer = Uint8Array.from(atob(att.contentBytes), c => c.charCodeAt(0))
+            const { error: uploadErr } = await sb.storage
+              .from('job-photos')
+              .upload(storagePath, fileBuffer, { contentType: att.contentType || 'application/pdf', upsert: true })
+
+            if (uploadErr) {
+              console.log(`[monitor-inbox] Attachment upload failed:`, uploadErr.message)
+              continue
+            }
+
+            const { data: urlData } = sb.storage.from('job-photos').getPublicUrl(storagePath)
+            const publicUrl = urlData?.publicUrl || ''
+
+            if (isPdf) {
+              // Store as job_document (visible to trades)
+              await sb.from('job_documents').insert({
+                job_id: jobId,
+                type: 'supplier_quote',
+                file_name: att.name || 'Supplier Document',
+                storage_url: publicUrl,
+                pdf_url: publicUrl,
+                visible_to_trades: true,
+                version: 1,
+              }).then(() => {}).catch(() => {})
+              console.log(`[monitor-inbox] Stored supplier PDF: ${att.name} for job ${jobId}`)
+            } else {
+              // Store as job_media
+              await sb.from('job_media').insert({
+                job_id: jobId,
+                phase: 'receipt',
+                type: 'photo',
+                storage_url: publicUrl,
+                label: att.name || 'Supplier attachment',
+              }).then(() => {}).catch(() => {})
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[monitor-inbox] Attachment processing failed:`, (e as Error).message)
+      }
+    }
+
+    // Also try to match supplier emails to POs by sender
+    if (msg.hasAttachments && !jobId && fromEmail) {
+      try {
+        // Check if sender email matches any supplier
+        const { data: supplierPOs } = await sb.from('purchase_orders')
+          .select('id, job_id, supplier_name')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .ilike('supplier_email', `%${fromEmail.split('@')[1]}%`)
+          .order('created_at', { ascending: false })
+          .limit(1)
+        if (supplierPOs && supplierPOs.length > 0) {
+          jobId = supplierPOs[0].job_id
+          console.log(`[monitor-inbox] Matched supplier ${fromEmail} to job ${jobId} via PO`)
+          // Re-update inbox_events with the matched job_id
+          await sb.from('inbox_events')
+            .update({ job_id: jobId })
+            .eq('graph_message_id', msg.id)
+            .then(() => {}).catch(() => {})
+        }
+      } catch { /* best effort */ }
+    }
+
     // Telegram notification for high priority
     if (classification.priority === 'high') {
       const emoji = classification.classification === 'complaint' ? '🚨'
