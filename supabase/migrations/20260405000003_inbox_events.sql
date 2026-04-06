@@ -32,6 +32,7 @@ ALTER TABLE inbox_events ENABLE ROW LEVEL SECURITY;
 
 -- Grant access to service role
 GRANT ALL ON inbox_events TO service_role;
+CREATE POLICY "service_role_all" ON inbox_events FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Trigger function for pg_cron (every 5 min)
 CREATE OR REPLACE FUNCTION trigger_monitor_inbox() RETURNS void AS $$

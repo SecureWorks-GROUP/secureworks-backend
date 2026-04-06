@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
 CREATE INDEX IF NOT EXISTS idx_conv_sessions_lookup ON conversation_sessions(user_id, channel, last_activity_at DESC);
 ALTER TABLE conversation_sessions ENABLE ROW LEVEL SECURITY;
 GRANT ALL ON conversation_sessions TO service_role;
+CREATE POLICY "service_role_all" ON conversation_sessions FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Message history
 CREATE TABLE IF NOT EXISTS conversation_history (
@@ -36,6 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_history_jobs ON conversation_history USING G
 CREATE INDEX IF NOT EXISTS idx_conv_history_cleanup ON conversation_history(created_at);
 ALTER TABLE conversation_history ENABLE ROW LEVEL SECURITY;
 GRANT ALL ON conversation_history TO service_role;
+CREATE POLICY "service_role_all" ON conversation_history FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Auto-cleanup via pg_cron
 SELECT cron.schedule('cleanup-conv-history', '0 19 * * *',
