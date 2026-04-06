@@ -3092,6 +3092,13 @@ async function pipeline(client: any, params: URLSearchParams) {
 async function jobDetail(client: any, jobId: string) {
   if (!jobId) throw new Error('jobId required')
 
+  // If job_number passed instead of UUID, resolve it
+  if (/^SW[PFDRI]-\d+$/i.test(jobId)) {
+    const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
+    if (!found) throw new ApiError(`Job ${jobId} not found`, 404)
+    jobId = found.id
+  }
+
   const [jobRes, assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes] = await Promise.all([
     client.from('jobs').select('*').eq('id', jobId).single(),
     client.from('job_assignments').select('*, users:user_id(name, phone, email)').eq('job_id', jobId).order('scheduled_date'),
