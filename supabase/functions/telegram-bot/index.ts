@@ -1094,6 +1094,47 @@ async function handleCallbackQuery(client: any, callbackQuery: any) {
     await handleContextCaptureCallback(client, callbackQuery, user, action, payload, chatId, messageId)
   } else if (action.startsWith('grad_')) {
     await handleGraduationCallback(client, callbackQuery, user, action, payload, chatId, messageId)
+  } else if (action === 'chase_approve' || action === 'chase_skip') {
+    // Debt chase inline approval — calls Railway agent's /api/chase-confirm
+    try {
+      const approved = action === 'chase_approve'
+      const agentUrl = Deno.env.get('SECUREWORKS_AGENT_URL') || 'https://secureworks-agent-production.up.railway.app'
+      const resp = await fetch(`${agentUrl}/api/chase-confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: payload, approved }),
+      })
+      const result = await resp.json()
+      const ackText = approved
+        ? (result.success ? 'Sent ✓' : `Failed: ${result.error}`)
+        : 'Skipped'
+
+      // Answer callback
+      await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id, text: ackText }),
+      })
+
+      // Update the message to show result
+      const originalText = callbackQuery.message?.text || ''
+      await fetch(`${TELEGRAM_API}/editMessageText`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text: `${originalText}\n\n${approved ? '✅ Sent' : '⏭ Skipped'}`,
+        }),
+      })
+    } catch (e) {
+      console.error('[telegram-bot] chase callback failed:', (e as Error).message)
+      await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id, text: 'Error — try again' }),
+      })
+    }
   } else if (action === 'assist_approve') {
     try {
       const OPS_API = SUPABASE_URL + '/functions/v1/ops-api'
@@ -1688,11 +1729,40 @@ serve(async (req: Request) => {
       try {
         const content = body.content as string
         const automation = body.automation || 'unknown'
+        const chatId = Number(body.chat_id)
         // Truncate to Telegram limit (4096 chars)
         const text = content.length > 4000
           ? content.slice(0, 4000) + '\n\n... (truncated)'
           : content
-        await sendMessage(Number(body.chat_id), `📋 <b>${automation}</b>\n\n${text}`)
+        await sendMessage(chatId, `📋 <b>${automation}</b>\n\n${text}`)
+
+        // Send action_cards with inline approve/skip buttons (debt-chase)
+        const actionCards = body.action_cards as any[] | undefined
+        if (actionCards?.length) {
+          for (const card of actionCards) {
+            if (card.confirmation_token) {
+              const desc = card.message || `${card.tool}(${JSON.stringify(card.args).slice(0, 100)})`
+              const truncDesc = desc.length > 200 ? desc.slice(0, 200) + '...' : desc
+              await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: `💬 <b>Chase approval needed:</b>\n${truncDesc}`,
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                    inline_keyboard: [[
+                      { text: '✓ Send', callback_data: `chase_approve:${card.confirmation_token}` },
+                      { text: '✗ Skip', callback_data: `chase_skip:${card.confirmation_token}` },
+                    ]],
+                  },
+                }),
+              })
+            }
+          }
+          console.log(`[telegram-bot] sent ${actionCards.filter((c: any) => c.confirmation_token).length} chase approval buttons`)
+        }
+
         console.log(`[telegram-bot] delivered automation result: ${automation} to ${body.chat_id}`)
       } catch (e) {
         console.error('[telegram-bot] automation delivery failed:', (e as Error).message)
