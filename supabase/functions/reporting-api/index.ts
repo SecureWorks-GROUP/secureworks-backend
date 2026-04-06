@@ -647,6 +647,7 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
   const dateTo = params.get('to') || null
   const jobType = params.get('type') || null
   const status = params.get('status') || null
+  const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 5000)
 
   // Get jobs with pricing
   let query = sb
@@ -660,7 +661,7 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
   if (status) query = query.eq('status', status)
   if (dateFrom) query = query.gte('created_at', dateFrom)
   if (dateTo) query = query.lte('created_at', dateTo)
-  query = query.limit(5000)
+  query = query.limit(limit)
 
   const { data: jobs, error: jobErr } = await query
   if (jobErr) throw jobErr
@@ -672,7 +673,7 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
   if (jobIds.length > 0) {
     const { data: invoices } = await sb
       .from('xero_invoices')
-      .select('job_id, invoice_type, sub_total, total, amount_paid, line_items, invoice_number, status, contact_name')
+      .select('job_id, invoice_type, sub_total, total, amount_paid')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('job_id', jobIds)
 
@@ -732,17 +733,10 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
     const margin = invoiced - bills
     const marginPct = invoiced > 0 ? Math.round((margin / invoiced) * 100) : 0
 
-    // Quote accuracy: compare quoted margin estimate to actual
-    // Terminal A writes margin_pct; legacy data may have marginPercent or margin_percent
-    const quotedMarginPct = job.pricing_json?.margin_pct ?? job.pricing_json?.marginPercent ?? job.pricing_json?.margin_percent ?? null
-    const slippage = quotedMarginPct != null && invoiced > 0
-      ? Math.round(marginPct - parseFloat(quotedMarginPct))
-      : null
-
     return {
       id: job.id,
-      client: job.client_name,
-      suburb: job.site_suburb,
+      job_number: job.job_number || xeroProject?.job_number || null,
+      client_name: job.client_name,
       type: job.type,
       status: job.status,
       quote_value: quoteValue,
@@ -750,13 +744,7 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
       bills,
       margin,
       margin_pct: marginPct,
-      quoted_margin_pct: quotedMarginPct != null ? parseFloat(quotedMarginPct) : null,
-      slippage,
       data_source: xeroProject ? 'xero_projects' : (jobInvoices.length > 0 ? 'invoice_match' : 'none'),
-      job_number: job.job_number || xeroProject?.job_number || null,
-      to_be_invoiced: xeroProject?.to_be_invoiced || 0,
-      invoices: jobInvoices,
-      created_at: job.created_at,
     }
   })
 
@@ -764,12 +752,6 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
   const totalInvoiced = rows.reduce((s: number, r: any) => s + r.invoiced, 0)
   const totalBills = rows.reduce((s: number, r: any) => s + r.bills, 0)
   const avgMargin = totalInvoiced > 0 ? Math.round(((totalInvoiced - totalBills) / totalInvoiced) * 100) : 0
-
-  // Average slippage (only jobs that have both quoted and actual margin)
-  const slippageJobs = rows.filter((r: any) => r.slippage !== null)
-  const avgSlippage = slippageJobs.length > 0
-    ? Math.round(slippageJobs.reduce((s: number, r: any) => s + r.slippage, 0) / slippageJobs.length)
-    : null
 
   // Data source breakdown
   const dataSourceCounts = rows.reduce((acc: Record<string, number>, r: any) => {
@@ -785,8 +767,6 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
       total_bills: totalBills,
       total_margin: totalInvoiced - totalBills,
       avg_margin_pct: avgMargin,
-      avg_slippage: avgSlippage,
-      slippage_jobs_count: slippageJobs.length,
       data_sources: dataSourceCounts,
       xero_projects_matched: (xeroProjects || []).length,
     },
@@ -3137,7 +3117,7 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
   if (salesperson_id) filters.created_by = salesperson_id
 
   const jobs = await fetchAll(sb, 'jobs',
-    'id, job_number, client_name, client_phone, client_email, site_suburb, type, status, pricing_json, created_at, quoted_at, accepted_at',
+    'id, job_number, client_name, client_phone, client_email, type, status, pricing_json, created_at, quoted_at, accepted_at',
     filters
   )
 
@@ -3160,7 +3140,7 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
     else if (j.status === 'quoted' && j.quoted_at) daysInStage = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
     else if (j.status === 'accepted' && j.accepted_at) daysInStage = Math.floor((now.getTime() - new Date(j.accepted_at).getTime()) / 86400000)
     else if (j.status === 'cancelled' && j.quoted_at) daysInStage = Math.floor((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000)
-    return { id: j.id, client_name: j.client_name, site_suburb: j.site_suburb, type: j.type, quote_value: qv(j), days_in_stage: daysInStage, client_phone: j.client_phone, client_email: j.client_email }
+    return { id: j.id, job_number: j.job_number || null, client_name: j.client_name, type: j.type, status: j.status, quote_value: qv(j), days_in_stage: daysInStage, phone: j.client_phone, email: j.client_email }
   }
 
   const columns = {
