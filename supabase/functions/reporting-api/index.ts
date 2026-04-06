@@ -3709,3 +3709,265 @@ async function cashWaterfall(sb: any) {
     },
   }
 }
+
+async function cashLeakDetection(sb: any) {
+  const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
+  const now = new Date()
+  const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 6, 1).toISOString().split('T')[0]
+
+  // 1. Jobs where actual cost exceeded quote (underquoted)
+  const { data: projects } = await sb.from('xero_projects')
+    .select('job_id, total_invoiced, total_expenses, project_name, job_number, status')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .not('job_id', 'is', null)
+
+  const { data: jobs } = await sb.from('jobs')
+    .select('id, job_number, client_name, type, status, pricing_json, completed_at, deposit_amount, accepted_at')
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['complete', 'invoiced'])
+    .gte('completed_at', sixMonthsAgo)
+
+  // Build underquoted jobs list
+  const projectByJob: Record<string, any> = {}
+  for (const p of (projects || [])) { if (p.job_id) projectByJob[p.job_id] = p }
+
+  const underquoted = (jobs || []).map((j: any) => {
+    const p = j.pricing_json || {}
+    const quoted = parseFloat(p.totalExGST || p.totalIncGST || p.total || 0) || 0
+    const proj = projectByJob[j.id]
+    const actual = proj ? (proj.total_expenses || 0) : 0
+    if (actual <= 0 || quoted <= 0) return null
+    const margin_pct = Math.round(((quoted - actual) / quoted) * 100)
+    const loss = actual > quoted ? Math.round(actual - quoted) : 0
+    return { job_number: j.job_number, client: j.client_name, type: j.type, quoted: Math.round(quoted), actual_cost: Math.round(actual), margin_pct, loss }
+  }).filter(Boolean).filter((j: any) => j.margin_pct < 20).sort((a: any, b: any) => a.margin_pct - b.margin_pct)
+
+  // 2. Completed but not invoiced (unbilled delay)
+  const { data: unbilledJobs } = await sb.from('jobs')
+    .select('id, job_number, client_name, pricing_json, completed_at')
+    .eq('org_id', DEFAULT_ORG_ID).eq('status', 'complete').not('legacy', 'is', true)
+
+  const unbilled = (unbilledJobs || []).map((j: any) => {
+    const p = j.pricing_json || {}
+    const value = parseFloat(p.totalIncGST || p.totalExGST || p.total || 0) || 0
+    const days = j.completed_at ? Math.floor((Date.now() - new Date(j.completed_at).getTime()) / 86400000) : 0
+    return { job_number: j.job_number, client: j.client_name, value: Math.round(value), days_since_complete: days }
+  }).filter((j: any) => j.days_since_complete > 3).sort((a: any, b: any) => b.days_since_complete - a.days_since_complete)
+
+  // 3. No deposit collected but POs sent
+  const { data: noDep } = await sb.from('jobs')
+    .select('id, job_number, client_name, pricing_json, deposit_amount, status')
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['accepted', 'processing', 'scheduled', 'in_progress'])
+    .or('deposit_amount.is.null,deposit_amount.eq.0')
+
+  const { data: posForJobs } = (noDep && noDep.length > 0)
+    ? await sb.from('purchase_orders').select('job_id').in('job_id', noDep.map((j: any) => j.id)).neq('status', 'deleted')
+    : { data: [] }
+  const jobsWithPOs = new Set((posForJobs || []).map((p: any) => p.job_id))
+
+  const noDeposit = (noDep || []).filter((j: any) => jobsWithPOs.has(j.id)).map((j: any) => {
+    const p = j.pricing_json || {}
+    const value = parseFloat(p.totalIncGST || p.totalExGST || 0) || 0
+    return { job_number: j.job_number, client: j.client_name, value: Math.round(value), materials_ordered: true }
+  })
+
+  // 4. Bad debt risk (90+ days overdue)
+  const { data: badDebt } = await sb.from('aged_receivables')
+    .select('contact_name, amount_due, due_date, age_bucket')
+    .eq('org_id', DEFAULT_ORG_ID).eq('age_bucket', '90+')
+
+  // 5. Margin by type
+  const marginByType: Record<string, { total_quoted: number, total_actual: number, count: number }> = {}
+  for (const j of (underquoted || [])) {
+    const t = (j as any).type || 'other'
+    if (!marginByType[t]) marginByType[t] = { total_quoted: 0, total_actual: 0, count: 0 }
+    marginByType[t].total_quoted += (j as any).quoted
+    marginByType[t].total_actual += (j as any).actual_cost
+    marginByType[t].count++
+  }
+
+  const byType: Record<string, any> = {}
+  for (const [type, data] of Object.entries(marginByType)) {
+    byType[type] = { avg_margin: data.total_quoted > 0 ? Math.round(((data.total_quoted - data.total_actual) / data.total_quoted) * 100) : 0, job_count: data.count }
+  }
+
+  // Summary
+  const totalUnderquoteLoss = (underquoted || []).reduce((s: number, j: any) => s + (j.loss || 0), 0)
+  const totalUnbilledValue = unbilled.reduce((s, j) => s + j.value, 0)
+  const totalBadDebt = (badDebt || []).reduce((s: number, d: any) => s + (Number(d.amount_due) || 0), 0)
+  const totalLeaked = totalUnderquoteLoss + totalBadDebt
+
+  const actions: string[] = []
+  if (unbilled.length > 0) actions.push(`Invoice ${unbilled.length} completed jobs worth $${totalUnbilledValue.toLocaleString()} immediately`)
+  if (totalBadDebt > 0) actions.push(`Escalate $${Math.round(totalBadDebt).toLocaleString()} in 90+ day debt to collections`)
+  if (noDeposit.length > 0) actions.push(`Collect deposits on ${noDeposit.length} jobs before ordering more materials`)
+
+  return {
+    leaks: {
+      underquoted_jobs: (underquoted || []).slice(0, 10),
+      unbilled_delay: unbilled.slice(0, 10),
+      no_deposit_collected: noDeposit.slice(0, 10),
+      bad_debt_risk: (badDebt || []).map((d: any) => ({ client: d.contact_name, amount: Math.round(Number(d.amount_due) || 0), age_bucket: d.age_bucket })).slice(0, 10),
+    },
+    summary: {
+      total_leaked_estimate: totalLeaked,
+      unbilled_floating: totalUnbilledValue,
+      bad_debt_at_risk: Math.round(totalBadDebt),
+      biggest_leak: totalUnderquoteLoss > totalBadDebt ? 'underquoting' : 'bad_debt',
+      top_actions: actions.slice(0, 3),
+    },
+    margin_analysis: {
+      by_type: byType,
+      worst_5: (underquoted || []).slice(0, 5),
+      best_5: (underquoted || []).slice(-5).reverse(),
+    },
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// PERFORMANCE BENCHMARKS
+// ════════════════════════════════════════════════════════════
+async function performanceBenchmarks(sb: any) {
+  const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
+  const now = new Date()
+  const currentMonth = now.toISOString().slice(0, 7)
+  const currentMonthStart = `${currentMonth}-01`
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+  const dayOfMonth = now.getDate()
+  const daysRemaining = daysInMonth - dayOfMonth
+
+  // Last month
+  const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const lastMonthKey = lastMonth.toISOString().slice(0, 7)
+  const lastMonthStart = `${lastMonthKey}-01`
+  const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0]
+
+  // Same month last year
+  const sameMonthLastYear = new Date(now.getFullYear() - 1, now.getMonth(), 1)
+  const yoyKey = sameMonthLastYear.toISOString().slice(0, 7)
+
+  // Get targets from org_config
+  const { data: configRows } = await sb.from('org_config')
+    .select('config_key, config_value')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .in('config_key', ['monthly_revenue_target', 'margin_target_pct', 'monthly_jobs_target', 'win_rate_target'])
+  const targets: Record<string, number> = {}
+  for (const r of (configRows || [])) {
+    targets[r.config_key] = r.config_value?.amount || 0
+  }
+  const revenueTarget = targets.monthly_revenue_target || 180000
+  const marginTarget = targets.margin_target_pct || 30
+  const jobsTarget = targets.monthly_jobs_target || 15
+
+  // Get P&L data from xero_reports for current, last, and YoY months
+  const { data: plReports } = await sb.from('xero_reports')
+    .select('report_date, period_start, report_json')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('report_type', 'pl')
+    .in('period_start', [currentMonthStart, lastMonthStart, `${yoyKey}-01`])
+
+  const plByMonth: Record<string, any> = {}
+  for (const r of (plReports || [])) {
+    const key = (r.period_start || '').slice(0, 7)
+    plByMonth[key] = r.report_json?.data || {}
+  }
+
+  const currentPL = plByMonth[currentMonth] || {}
+  const lastPL = plByMonth[lastMonthKey] || {}
+  const yoyPL = plByMonth[yoyKey] || {}
+
+  const revenueMtd = currentPL.revenue || 0
+  const revenueLastMonth = lastPL.revenue || 0
+  const revenueYoY = yoyPL.revenue || 0
+  const marginMtd = revenueMtd > 0 ? Math.round(((currentPL.gross_profit || 0) / revenueMtd) * 100) : 0
+  const marginLast = revenueLastMonth > 0 ? Math.round(((lastPL.gross_profit || 0) / revenueLastMonth) * 100) : 0
+
+  // Jobs completed this month vs last
+  const { count: jobsThisMonth } = await sb.from('jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['complete', 'invoiced'])
+    .gte('completed_at', currentMonthStart)
+
+  const { count: jobsLastMonth } = await sb.from('jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['complete', 'invoiced'])
+    .gte('completed_at', lastMonthStart).lt('completed_at', currentMonthStart)
+
+  // Win rate (quoted -> accepted this month)
+  const { count: quotedThisMonth } = await sb.from('jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['quoted', 'accepted', 'cancelled'])
+    .gte('quoted_at', currentMonthStart)
+
+  const { count: acceptedThisMonth } = await sb.from('jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .eq('status', 'accepted')
+    .gte('accepted_at', currentMonthStart)
+
+  const winRate = (quotedThisMonth || 0) > 0 ? Math.round(((acceptedThisMonth || 0) / (quotedThisMonth || 1)) * 100) : 0
+
+  // Quote-to-cash cycle time (last 20 completed jobs)
+  const { data: cycleJobs } = await sb.from('jobs')
+    .select('quoted_at, accepted_at, scheduled_at, completed_at')
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['complete', 'invoiced'])
+    .not('quoted_at', 'is', null).not('completed_at', 'is', null)
+    .order('completed_at', { ascending: false })
+    .limit(20)
+
+  let avgCycleDays = 0
+  const segmentTotals = { accept: 0, schedule: 0, build: 0, count: 0 }
+  for (const j of (cycleJobs || [])) {
+    const quoted = new Date(j.quoted_at).getTime()
+    const accepted = j.accepted_at ? new Date(j.accepted_at).getTime() : quoted
+    const scheduled = j.scheduled_at ? new Date(j.scheduled_at).getTime() : accepted
+    const completed = new Date(j.completed_at).getTime()
+    const totalDays = (completed - quoted) / 86400000
+    avgCycleDays += totalDays
+    segmentTotals.accept += (accepted - quoted) / 86400000
+    segmentTotals.schedule += (scheduled - accepted) / 86400000
+    segmentTotals.build += (completed - scheduled) / 86400000
+    segmentTotals.count++
+  }
+  const n = segmentTotals.count || 1
+  avgCycleDays = Math.round(avgCycleDays / n)
+
+  const dailyRunRate = dayOfMonth > 0 ? revenueMtd / dayOfMonth : 0
+  const projectedRevenue = Math.round(dailyRunRate * daysInMonth)
+  const neededPerDay = daysRemaining > 0 ? Math.round((revenueTarget - revenueMtd) / daysRemaining) : 0
+
+  // Changes
+  const revenueChangePct = revenueLastMonth > 0 ? Math.round(((revenueMtd - revenueLastMonth) / revenueLastMonth) * 100) : 0
+  const yoyChangePct = revenueYoY > 0 ? Math.round(((revenueMtd - revenueYoY) / revenueYoY) * 100) : 0
+
+  const improving: string[] = []
+  const declining: string[] = []
+  if (marginMtd > marginLast) improving.push('margin'); else if (marginMtd < marginLast) declining.push('margin')
+  if ((jobsThisMonth || 0) > (jobsLastMonth || 0)) improving.push('jobs_completed'); else if ((jobsThisMonth || 0) < (jobsLastMonth || 0)) declining.push('jobs_completed')
+
+  // Slowest segment
+  const segments = {
+    quote_to_acceptance: Math.round(segmentTotals.accept / n),
+    acceptance_to_schedule: Math.round(segmentTotals.schedule / n),
+    schedule_to_completion: Math.round(segmentTotals.build / n),
+  }
+  const slowest = Object.entries(segments).sort((a, b) => b[1] - a[1])[0]
+
+  return {
+    this_month: {
+      revenue: { actual: Math.round(revenueMtd), target: revenueTarget, pct: Math.round((revenueMtd / revenueTarget) * 100), projected: projectedRevenue, days_remaining: daysRemaining, needed_per_day: neededPerDay },
+      margin: { actual_pct: marginMtd, target_pct: marginTarget, gap: marginMtd - marginTarget },
+      jobs_completed: { actual: jobsThisMonth || 0, target: jobsTarget, gap: (jobsThisMonth || 0) - jobsTarget },
+      win_rate: { actual_pct: winRate, quoted: quotedThisMonth || 0, accepted: acceptedThisMonth || 0 },
+    },
+    vs_last_month: { revenue_change_pct: revenueChangePct, margin_change: marginMtd - marginLast, jobs_change: (jobsThisMonth || 0) - (jobsLastMonth || 0), improving, declining },
+    vs_last_year: { revenue_change_pct: yoyChangePct, trajectory: yoyChangePct > 20 ? 'accelerating' : yoyChangePct > 0 ? 'steady' : 'slowing' },
+    cycle_time: { avg_days: avgCycleDays, segments, slowest_segment: slowest[0], slowest_days: slowest[1] },
+  }
+}
