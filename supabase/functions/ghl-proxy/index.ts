@@ -1918,6 +1918,22 @@ serve(async (req: Request) => {
       const { contactId, message, jobId, userId } = body
       if (!contactId || !message) return json({ error: 'contactId and message required' }, 400)
 
+      // Dedup: check for same SMS to same contact within last hour
+      try {
+        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+        const { data: recentSms } = await sb.from('business_events')
+          .select('id')
+          .eq('event_type', 'sms_sent')
+          .eq('entity_id', contactId)
+          .gte('occurred_at', oneHourAgo)
+          .limit(1)
+        if (recentSms && recentSms.length > 0) {
+          console.log(`[ghl-proxy] DEDUP BLOCKED: SMS to ${contactId} already sent within last hour`)
+          return json({ success: false, error: 'SMS already sent to this contact within the last hour. Blocked to prevent duplicates.', dedup_blocked: true }, 409)
+        }
+      } catch { /* dedup is best-effort — don't block sends if check fails */ }
+
       try {
         const result = await ghl('/conversations/messages', {
           method: 'POST',
@@ -1928,6 +1944,19 @@ serve(async (req: Request) => {
           }),
         })
         console.log(`[ghl-proxy] SMS sent to contact ${contactId}`)
+
+        // Log to business_events for dedup + audit trail
+        try {
+          const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+          await sb.from('business_events').insert({
+            event_type: 'sms_sent',
+            source: 'ghl-proxy',
+            entity_type: 'contact',
+            entity_id: contactId,
+            job_id: jobId || null,
+            payload: { message: message.slice(0, 500), message_id: result.messageId || result.id },
+          })
+        } catch { /* non-blocking */ }
 
         // Log to job_events so Ops timeline + Trade can show sent messages without calling GHL
         if (jobId) {

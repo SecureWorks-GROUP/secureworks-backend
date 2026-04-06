@@ -7772,6 +7772,20 @@ async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
+  // Dedup check: prevent sending same payment link within 24 hours
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const { data: recentSends } = await client
+    .from('job_events')
+    .select('id, created_at')
+    .eq('job_id', jId)
+    .eq('event_type', 'payment_link_sent')
+    .gte('created_at', twentyFourHoursAgo)
+    .limit(1)
+  if (recentSends && recentSends.length > 0) {
+    const lastSent = recentSends[0].created_at
+    throw new ApiError(`Payment link already sent for this job within the last 24 hours (last sent: ${new Date(lastSent).toLocaleString('en-AU', { timeZone: 'Australia/Perth' })}). To prevent duplicate messages, please wait before resending.`, 409)
+  }
+
   // Get job with GHL contact
   const { data: job, error: jobErr } = await client
     .from('jobs')

@@ -2265,7 +2265,10 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
           ],
         }}
       } else {
-        return { result: { error: 'Unknown template. Use "patio" or "fencing".' } }
+        // No specific template requested — return both
+        const patioResult = await executeTool('get_quote_terms', { template: 'patio' }, caller)
+        const fencingResult = await executeTool('get_quote_terms', { template: 'fencing' }, caller)
+        return { result: { templates: { patio: patioResult.result, fencing: fencingResult.result }, note: 'Both patio and fencing terms returned. Specify template for one type only.' } }
       }
     }
 
@@ -3917,6 +3920,14 @@ serve(async (req: Request) => {
       // Add assistant message + tool results to conversation
       anthropicMessages.push({ role: 'assistant', content: result.content })
       anthropicMessages.push({ role: 'user', content: toolResults })
+
+      // Capture last text as fallback in case we hit MAX_TOOL_ROUNDS without a final answer
+      if (roundText) finalResponse = roundText
+    }
+
+    // If we exited the loop without a response (hit max rounds or all tool-use), provide fallback
+    if (!finalResponse && toolsUsed.length > 0) {
+      finalResponse = `I used ${toolsUsed.length} tool${toolsUsed.length > 1 ? 's' : ''} (${toolsUsed.slice(0, 5).join(', ')}) but ran out of reasoning rounds to compose a final answer. Try asking a more specific question, or ask me to summarise what I found.`
     }
 
     // Log reasoning trace (non-blocking)
