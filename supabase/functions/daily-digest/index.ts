@@ -1971,6 +1971,55 @@ serve(async (req: Request) => {
     }
   }
 
+  if (action === 'ceo_financial_brief') {
+    try {
+      // Weekly CEO Financial Brief — calls reporting-api tools and sends to Telegram
+      const [waterfall, leaks, benchmarks] = await Promise.all([
+        fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=cash_waterfall`, {
+          headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+        }).then(r => r.json()).catch(() => null),
+        fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=cash_leak_detection`, {
+          headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+        }).then(r => r.json()).catch(() => null),
+        fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=performance_benchmarks`, {
+          headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+        }).then(r => r.json()).catch(() => null),
+      ])
+
+      // Use Claude to synthesise into a concise brief
+      const briefData = JSON.stringify({ waterfall: waterfall?.summary, leaks: leaks?.summary, benchmarks: benchmarks?.this_month }, null, 2)
+      const aiResp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 800,
+          system: 'You are JARVIS. Write a weekly financial brief for Marnin (CEO, SecureWorks Group, Perth construction). Telegram format — concise, numbers first, actions at the end. Address him as "sir". No emojis except one at the start. Max 1500 chars.',
+          messages: [{ role: 'user', content: `Weekly financial data:\n${briefData}` }],
+        }),
+      })
+      const aiResult = await aiResp.json()
+      const briefText = aiResult.content?.[0]?.text || 'Weekly financial brief could not be generated.'
+
+      // Send to admin Telegram users
+      const { data: admins } = await sb.from('users')
+        .select('telegram_id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .in('role', ['admin', 'owner'])
+        .not('telegram_id', 'is', null)
+      for (const admin of (admins || [])) {
+        if (admin.telegram_id) {
+          await sendTelegramMessage(admin.telegram_id, briefText)
+        }
+      }
+
+      return json({ success: true, sent_to: (admins || []).length })
+    } catch (err) {
+      console.error('[daily-digest] CEO financial brief error:', err)
+      return json({ error: (err as Error).message }, 500)
+    }
+  }
+
   if (action === 'financial_snapshot') {
     try {
       const snapshot = await generateFinancialSnapshot(sb)
