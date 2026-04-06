@@ -4063,7 +4063,8 @@ async function emailPO(client: any, body: any) {
     .eq('id', id)
     .single()
 
-  if (error || !po || !po.xero_po_id) throw new Error('PO not found or not synced to Xero')
+  if (error || !po) throw new Error('PO not found')
+  if (!po.xero_po_id) throw new Error('PO has not been synced to Xero yet. Call sw_push_po_to_xero first, then sw_email_po.')
 
   const { accessToken, tenantId } = await getToken(client)
   await xeroPost(`/PurchaseOrders/${po.xero_po_id}/Email`, accessToken, tenantId, {}, 'POST')
