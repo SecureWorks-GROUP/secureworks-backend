@@ -273,8 +273,10 @@ serve(async (req: Request) => {
 
         return json({ success: true, transaction_id, status: status || 'reconciled' })
       }
+      case 'cash_waterfall':
+        return json(await cashWaterfall(sb))
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
@@ -3574,4 +3576,106 @@ async function salesQuickAction(sb: any, body: any) {
   }
 
   return { error: 'Unknown action_type: ' + action_type }
+}
+
+// ══════════════════════════════════════════════════════════
+// CASH WATERFALL — where every dollar is across the business
+// ══════════════════════════════════════════════════════════
+async function cashWaterfall(sb: any) {
+  const [bankRes, receivablesRes, payablesRes, jobsRes, posRes, depositsRes, invoicesRes] = await Promise.all([
+    // 1. Bank balances (from last sync)
+    sb.from('xero_bank_balances').select('account_name, balance, updated_at').eq('org_id', DEFAULT_ORG_ID),
+
+    // 2. Receivables (what clients owe us) — only overdue
+    sb.from('aged_receivables').select('contact_name, amount_due, age_bucket, due_date').eq('org_id', DEFAULT_ORG_ID).neq('age_bucket', 'current'),
+
+    // 3. Payables (what we owe suppliers) — from xero aged payables
+    sb.from('xero_aged_payables').select('contact_name, amount_due, age_bucket').eq('org_id', DEFAULT_ORG_ID),
+
+    // 4. Completed but not invoiced (money floating in limbo)
+    sb.from('jobs')
+      .select('id, job_number, client_name, pricing_json, completed_at')
+      .eq('org_id', DEFAULT_ORG_ID).eq('status', 'complete').not('legacy', 'is', true)
+      .order('completed_at', { ascending: true }),
+
+    // 5. PO committed (money spent but not left bank yet)
+    sb.from('purchase_orders')
+      .select('id, supplier_name, total, status, job_id')
+      .eq('org_id', DEFAULT_ORG_ID).in('status', ['sent', 'confirmed', 'draft'])
+      .not('status', 'eq', 'deleted'),
+
+    // 6. Deposits collected but work not done (in bank but pre-committed)
+    sb.from('jobs')
+      .select('id, job_number, client_name, deposit_amount, status')
+      .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+      .in('status', ['accepted', 'approvals', 'deposit', 'processing', 'scheduled'])
+      .gt('deposit_amount', 0),
+
+    // 7. Current month invoices sent but unpaid
+    sb.from('xero_invoices')
+      .select('contact_name, amount_due, due_date, invoice_number')
+      .eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCREC')
+      .in('status', ['AUTHORISED', 'SUBMITTED']).gt('amount_due', 0)
+      .gte('due_date', new Date().toISOString().slice(0, 10))
+      .order('due_date', { ascending: true }),
+  ])
+
+  // Calculate totals
+  const bankTotal = (bankRes.data || []).reduce((s: number, b: any) => s + (Number(b.balance) || 0), 0)
+  const bankAccounts = (bankRes.data || []).map((b: any) => ({ name: b.account_name, balance: Math.round(Number(b.balance) || 0), synced: b.updated_at }))
+
+  const overdueTotal = (receivablesRes.data || []).reduce((s: number, r: any) => s + (Number(r.amount_due) || 0), 0)
+  const overdueCount = (receivablesRes.data || []).length
+
+  const payablesTotal = (payablesRes.data || []).reduce((s: number, p: any) => s + (Number(p.amount_due) || 0), 0)
+
+  // Unbilled completed jobs
+  const unbilledJobs = (jobsRes.data || []).map((j: any) => {
+    const p = j.pricing_json || {}
+    const value = parseFloat(p.totalIncGST || p.totalExGST || p.total || 0) || 0
+    const daysSinceComplete = j.completed_at ? Math.floor((Date.now() - new Date(j.completed_at).getTime()) / 86400000) : 0
+    return { job_number: j.job_number, client: j.client_name, value: Math.round(value), days_since_complete: daysSinceComplete }
+  })
+  const unbilledTotal = unbilledJobs.reduce((s: number, j: any) => s + j.value, 0)
+
+  // PO committed
+  const poCommitted = (posRes.data || []).reduce((s: number, p: any) => s + (Number(p.total) || 0), 0)
+  const poCount = (posRes.data || []).length
+
+  // Deposits held (pre-committed)
+  const depositsHeld = (depositsRes.data || []).reduce((s: number, j: any) => s + (Number(j.deposit_amount) || 0), 0)
+  const depositJobs = (depositsRes.data || []).length
+
+  // Coming in (not yet due invoices)
+  const comingIn = (invoicesRes.data || []).reduce((s: number, i: any) => s + (Number(i.amount_due) || 0), 0)
+  const comingInCount = (invoicesRes.data || []).length
+
+  // Real available cash = bank - PO committed - deposits held
+  const realAvailable = Math.round(bankTotal - poCommitted - depositsHeld)
+
+  // Potential inflow = overdue + unbilled + coming in
+  const potentialInflow = Math.round(overdueTotal + unbilledTotal + comingIn)
+
+  return {
+    summary: {
+      bank_balance: Math.round(bankTotal),
+      real_available_cash: realAvailable,
+      potential_inflow: potentialInflow,
+      net_position: Math.round(realAvailable + potentialInflow - payablesTotal),
+    },
+    states: {
+      '1_in_bank': { total: Math.round(bankTotal), accounts: bankAccounts },
+      '2_owed_to_us_overdue': { total: Math.round(overdueTotal), count: overdueCount },
+      '3_completed_not_invoiced': { total: unbilledTotal, jobs: unbilledJobs },
+      '4_coming_in_not_yet_due': { total: Math.round(comingIn), count: comingInCount },
+      '5_committed_to_suppliers': { total: Math.round(poCommitted), count: poCount },
+      '6_owed_to_suppliers': { total: Math.round(payablesTotal) },
+      '7_deposits_held_precommitted': { total: Math.round(depositsHeld), jobs: depositJobs },
+    },
+    actions: {
+      invoice_now: unbilledJobs.length > 0 ? `${unbilledJobs.length} jobs worth $${unbilledTotal.toLocaleString()} need invoicing` : null,
+      chase_now: overdueTotal > 0 ? `$${Math.round(overdueTotal).toLocaleString()} overdue across ${overdueCount} invoices` : null,
+      cash_warning: realAvailable < 10000 ? `Real available cash is only $${realAvailable.toLocaleString()} after commitments` : null,
+    },
+  }
 }
