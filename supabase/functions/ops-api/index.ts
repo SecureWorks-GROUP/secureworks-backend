@@ -3558,6 +3558,14 @@ async function createAssignment(client: any, body: any) {
     console.log('[ops-api] GHL custom field push failed (non-blocking):', e)
   }
 
+  // Log to jarvis_event_log (non-blocking, fire-and-forget)
+  client.from('jarvis_event_log').insert({
+    event_type: 'crew_assigned', job_id: jId,
+    channel: 'system', triggered_by: body.created_by || 'jarvis',
+    message_content: `Assigned ${body.user_name || body.crew_name || body.crewName || 'crew'} to job on ${sDate}`,
+    metadata: { user_id: userId || user_id || null, scheduled_date: sDate },
+  }).then(() => {}).catch(() => {})
+
   return { assignment: data }
 }
 
@@ -3888,6 +3896,14 @@ async function createPO(client: any, body: any) {
     metadata: { operator: body.operator_email || body.user_email || null },
   })
 
+  // Log to jarvis_event_log (non-blocking, fire-and-forget)
+  client.from('jarvis_event_log').insert({
+    event_type: 'po_created', job_id: job_id || jobId || null,
+    channel: 'system', triggered_by: body.created_by || 'jarvis',
+    message_content: `PO created for ${supplier}: $${total || 0}`,
+    metadata: { supplier_name: supplier, total },
+  }).then(() => {}).catch(() => {})
+
   return { purchase_order: data }
 }
 
@@ -4175,6 +4191,14 @@ async function createWorkOrder(client: any, body: any) {
     event_type: 'wo_created',
     detail_json: { wo_number: woNum, trade: body.trade_name || body.tradeName },
   })
+
+  // Log to jarvis_event_log (non-blocking, fire-and-forget)
+  client.from('jarvis_event_log').insert({
+    event_type: 'work_order_created', job_id: jId,
+    channel: 'system', triggered_by: 'jarvis',
+    message_content: `Work order created`,
+    metadata: {},
+  }).then(() => {}).catch(() => {})
 
   return { work_order: data }
 }
@@ -4825,6 +4849,14 @@ async function completeAndInvoice(client: any, body: any) {
       financial: { amount: balance || 0, currency: 'AUD' },
     },
   })
+
+  // Log to jarvis_event_log (non-blocking, fire-and-forget)
+  client.from('jarvis_event_log').insert({
+    event_type: 'job_completed_and_invoiced', job_id: jId,
+    channel: 'system', triggered_by: 'jarvis',
+    message_content: `Job completed and invoice created`,
+    metadata: {},
+  }).then(() => {}).catch(() => {})
 
   return {
     success: true,
