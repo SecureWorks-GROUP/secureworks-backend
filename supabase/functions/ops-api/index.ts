@@ -3335,16 +3335,22 @@ async function listPOs(client: any, params: URLSearchParams) {
 
 async function listWorkOrders(client: any, params: URLSearchParams) {
   const status = params.get('status')
-  const jobId = params.get('job_id')
+  const jobId = params.get('job_id') || params.get('jobId')
 
   let query = client.from('work_orders')
     .select('*')
-    .eq('org_id', DEFAULT_ORG_ID)
     .neq('status', 'cancelled')
     .order('created_at', { ascending: false })
 
+  // DEV-37: When filtering by job_id, skip org_id filter so WOs without org_id still appear.
+  // When listing all, keep the org_id guard to scope results.
+  if (jobId) {
+    query = query.eq('job_id', jobId)
+  } else {
+    query = query.eq('org_id', DEFAULT_ORG_ID)
+  }
+
   if (status) query = query.eq('status', status)
-  if (jobId) query = query.eq('job_id', jobId)
 
   const { data, error } = await query
   if (error) throw error

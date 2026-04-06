@@ -286,11 +286,7 @@ serve(async (req: Request) => {
       const q = (url.searchParams.get('q') || '').trim()
       if (!q) return json({ contacts: [], total: 0 })
 
-      // GHL contacts search endpoint
-      const searchUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=20`
-      const result = await ghl(searchUrl)
-
-      const contacts = (result.contacts || []).map((c: any) => ({
+      const mapContact = (c: any) => ({
         id: c.id,
         name: `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.name || c.email || 'Unknown',
         email: c.email || null,
@@ -300,7 +296,27 @@ serve(async (req: Request) => {
         dateAdded: c.dateAdded || c.dateCreated || null,
         address: c.address1 || null,
         city: c.city || null,
-      }))
+      })
+
+      // GHL contacts search endpoint
+      const searchUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=20`
+      const result = await ghl(searchUrl)
+      let contacts = (result.contacts || []).map(mapContact)
+
+      // DEV-36: If no results and query has multiple words, retry with first word only
+      // Handles cases where GHL contact has empty lastName (e.g. "Louisa Webb" → search "Louisa")
+      if (contacts.length === 0 && q.includes(' ')) {
+        const firstName = q.split(' ')[0]
+        const retryUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(firstName)}&limit=20`
+        const retryResult = await ghl(retryUrl)
+        const allContacts = (retryResult.contacts || [])
+        const qLower = q.toLowerCase()
+        const firstLower = firstName.toLowerCase()
+        contacts = allContacts.filter((c: any) => {
+          const fullName = `${c.firstName || ''} ${c.lastName || ''}`.trim().toLowerCase()
+          return fullName.includes(qLower) || (c.firstName || '').toLowerCase() === firstLower
+        }).map(mapContact)
+      }
 
       return json({ contacts, total: contacts.length })
     }
