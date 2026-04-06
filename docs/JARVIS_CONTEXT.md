@@ -15,41 +15,41 @@ Any AI agent working on SecureWorks reads this FIRST before writing code.
                  telegram-bot (2214 lines)
                   /          \
           Railway Agent    Supabase ops-ai (3970 lines)
-          (101 MCP tools)      |
+          (97 MCP tools)      |
                 |         [Claude API + tool loop]
                 |              |
             ops-api ──────── reporting-api ──── daily-digest
            (11,867 lines)   (3,428 lines)    (4,568 lines)
                 |              |                  |
            Supabase DB    xero-sync          pg_cron jobs
-                |          (2,074 lines)
+                |          (2,367 lines)
             ghl-proxy
-           (1,525+ lines)
+           (2,214 lines)
 ```
 
-### Edge Functions (19 total)
+### Edge Functions (19 total, 38,671 lines)
 
 | Function | Lines | What It Does | External APIs |
 |----------|-------|-------------|---------------|
-| **ops-api** | 11,867 | Job CRUD, pipeline, scheduling, invoicing, POs, WOs, council, variations | Supabase |
-| **ops-ai** | 3,970 | AI chat with 60+ tools, multi-round tool loop, confirmation flow, conversation memory | Claude API (Anthropic) |
+| **ops-api** | 11,963 | Job CRUD, pipeline, scheduling, invoicing, POs, WOs, council, variations | Supabase |
 | **daily-digest** | 4,568 | Morning brief, financial snapshots, nudges, weekly letter | Claude API, Telegram |
-| **reporting-api** | 3,428 | Financial reports, debt followup, CEO report, sales summary, profitability | Supabase, Xero data |
-| **telegram-bot** | 2,214 | Telegram message handling, classification, tone rewrite, action cards | Claude API, Telegram API |
-| **xero-sync** | 2,074 | Invoice sync, bank balance, aged payables from Xero | Xero API |
-| **ghl-proxy** | 1,525+ | GoHighLevel CRM proxy — contacts, opportunities, pipelines, SMS, email | GHL API |
-| **send-outlook-email** | 800+ | Microsoft Graph email sending with signature, CC, attachments | Microsoft Graph |
-| **send-po-email** | 600+ | PO email via Resend with PDF attachment | Resend API |
-| **receive-po-email** | 500+ | Inbound PO email processing, supplier quote analysis | Resend webhook |
-| **send-quote** | 400+ | Quote PDF generation and delivery | Resend API |
-| **monitor-inbox** | 300 | NEW: Graph inbox polling, Haiku classification, Telegram alerts | Microsoft Graph, Claude API |
-| **resend-webhook** | 300+ | Email delivery tracking (sent, opened, bounced) | Resend webhook |
-| **ghl-webhook** | 200+ | GHL opportunity sync on stage changes | GHL webhook |
-| **google-ads-ingest** | 200+ | Google Ads spend/conversion import | Google Ads API |
-| **sql-query** | 100+ | Direct SQL query endpoint for Cowork | Supabase |
-| **system-health** | 100+ | Health check endpoint | Supabase |
-| **completion-pack** | 100+ | Job completion data packaging | Supabase |
-| **agent-runner** | 100+ | Railway agent runner for MCP tools | Railway |
+| **ops-ai** | 3,983 | AI chat with 60+ tools, multi-round tool loop, confirmation flow, conversation memory | Claude API (Anthropic) |
+| **reporting-api** | 3,540 | Financial reports, debt followup, CEO report, sales summary, profitability | Supabase, Xero data |
+| **send-quote** | 3,147 | Quote PDF generation, email delivery, acceptance tracking | Resend API, GHL |
+| **xero-sync** | 2,367 | Invoice sync, bank balance, aged payables from Xero | Xero API |
+| **telegram-bot** | 2,312 | Telegram message handling, classification, tone rewrite, action cards | Claude API, Telegram API |
+| **ghl-proxy** | 2,214 | GoHighLevel CRM proxy — contacts, opportunities, pipelines, SMS, email | GHL API |
+| **agent-runner** | 1,025 | Railway agent runner for MCP tools | Railway, Claude API |
+| **completion-pack** | 836 | Branded HTML completion report generator | GHL |
+| **ghl-webhook** | 611 | GHL opportunity sync on stage changes | GHL webhook |
+| **receive-po-email** | 549 | Inbound PO email processing, supplier quote analysis | Resend webhook |
+| **monitor-inbox** | 329 | Graph inbox polling, Haiku classification, Telegram alerts | Microsoft Graph, Claude API |
+| **send-po-email** | 301 | PO email via Resend with thread tracking | Resend API |
+| **resend-webhook** | 287 | Email delivery tracking (sent, opened, bounced) | Resend webhook |
+| **send-outlook-email** | 245 | Microsoft Graph email sending with signature, CC, attachments | Microsoft Graph |
+| **google-ads-ingest** | 157 | Google Ads spend/conversion import | Google Ads API |
+| **system-health** | 146 | Health check endpoint | Supabase |
+| **sql-query** | 91 | Direct SQL query endpoint for Cowork | Supabase |
 
 ### Key Database Tables
 
@@ -105,6 +105,8 @@ Telegram message arrives
   → Banter? → freestylePersonality() (Sonnet, no tools)
   → Response → rewriteTone() (Sonnet) → send to Telegram
 ```
+
+**Database:** 92 migrations applied (2025-03-01 to 2026-04-06).
 
 **CRITICAL:** `RAILWAY_AGENT_URL` IS SET. Telegram business messages go to Railway, not Supabase ops-ai. Conversation memory was built in ops-ai but only works because telegram-bot now injects chat_logs history into the messages array before sending to Railway.
 
