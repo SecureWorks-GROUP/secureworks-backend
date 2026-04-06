@@ -3452,12 +3452,12 @@ async function getEmailEvents(client: any, params: URLSearchParams) {
 // ════════════════════════════════════════════════════════════
 
 async function createAssignment(client: any, body: any) {
-  const { jobId, job_id, userId, user_id, scheduledDate, scheduled_date,
+  const { jobId, job_id, userId, user_id, scheduledDate, scheduled_date, date,
           scheduledEnd, scheduled_end, startTime, start_time, endTime, end_time,
           assignmentType, assignment_type, crewName, crew_name, role, notes } = body
 
   const jId = jobId || job_id
-  const sDate = scheduledDate || scheduled_date || body.date
+  const sDate = scheduledDate || scheduled_date || date
   if (!jId || !sDate) throw new Error('jobId and scheduledDate required')
 
   const confStatus = body.confirmationStatus || body.confirmation_status || 'tentative'
@@ -3582,7 +3582,7 @@ async function createAssignment(client: any, body: any) {
 }
 
 async function updateAssignment(client: any, body: any) {
-  const id = body.assignmentId || body.id
+  const id = body.assignmentId || body.assignment_id || body.id
   if (!id) throw new Error('assignmentId required')
 
   // Capture old state for dual-write
@@ -3593,13 +3593,13 @@ async function updateAssignment(client: any, body: any) {
     .single()
 
   const allowed: Record<string, string> = {
-    scheduledDate: 'scheduled_date', scheduled_date: 'scheduled_date',
+    scheduledDate: 'scheduled_date', scheduled_date: 'scheduled_date', date: 'scheduled_date',
     scheduledEnd: 'scheduled_end', scheduled_end: 'scheduled_end',
     startTime: 'start_time', start_time: 'start_time',
     endTime: 'end_time', end_time: 'end_time',
     status: 'status', notes: 'notes',
     crewName: 'crew_name', crew_name: 'crew_name',
-    assignmentType: 'assignment_type', assignment_type: 'assignment_type',
+    assignmentType: 'assignment_type', assignment_type: 'assignment_type', type: 'assignment_type',
     userId: 'user_id', user_id: 'user_id',
     confirmationStatus: 'confirmation_status', confirmation_status: 'confirmation_status',
   }
@@ -3700,7 +3700,7 @@ async function updateAssignment(client: any, body: any) {
 }
 
 async function deleteAssignment(client: any, body: any) {
-  const id = body.assignmentId || body.id
+  const id = body.assignmentId || body.assignment_id || body.id
   if (!id) throw new Error('assignmentId required')
 
   // Get assignment for event log + dual-write
@@ -11873,7 +11873,9 @@ async function forceReconcileInvoice(dbClient: any, body: any) {
 }
 
 async function sendChaseSms(client: any, body: any) {
-  const { xero_invoice_id, job_id, message, operator_email } = body
+  const { xero_invoice_id, message, operator_email } = body
+  // Normalise empty strings to null — job_id has FK constraint to jobs(id)
+  const job_id = body.job_id && String(body.job_id).trim() ? String(body.job_id).trim() : null
   const ghl_contact_id = body.ghl_contact_id || body.contact_id
   if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
 
@@ -11887,10 +11889,10 @@ async function sendChaseSms(client: any, body: any) {
   const smsResult = await smsResp.json()
   if (!smsResult.success) throw new Error(smsResult.error || 'SMS send failed')
 
-  // Log the chase
+  // Log the chase (job_id optional — some chase SMS target contacts without linked jobs)
   await client.from('payment_chase_logs').insert({
     xero_invoice_id: xero_invoice_id || null,
-    job_id: job_id || null,
+    job_id: job_id,
     ghl_contact_id,
     method: 'sms',
     outcome: 'SMS sent',
