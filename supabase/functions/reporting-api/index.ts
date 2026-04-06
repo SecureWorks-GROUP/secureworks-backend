@@ -279,14 +279,91 @@ serve(async (req: Request) => {
         return json(await cashLeakDetection(sb))
       case 'performance_benchmarks':
         return json(await performanceBenchmarks(sb))
+      case 'job_context':
+        return json(await jobContext(sb, url.searchParams.get('job_id') || ''))
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
     return json({ error: (err as Error).message || String(err) }, 500)
   }
 })
+
+
+// ════════════════════════════════════════════════════════════
+// JOB CONTEXT — Unified memory for JARVIS
+// ════════════════════════════════════════════════════════════
+
+async function jobContext(sb: any, jobId: string) {
+  if (!jobId) throw new Error('job_id required')
+
+  // Resolve job_number to UUID if needed
+  if (/^SW[PFDRI]-\d+$/i.test(jobId)) {
+    const { data: found } = await sb.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
+    if (found) jobId = found.id
+  }
+
+  const [job, events, emails, chases, jarvisActions, conversations] = await Promise.all([
+    // 1. Job details (lite — no scope/pricing)
+    sb.from('jobs')
+      .select('id, job_number, client_name, client_phone, client_email, type, status, site_address, site_suburb, ghl_contact_id, created_at, quoted_at, accepted_at, scheduled_at, completed_at')
+      .eq('id', jobId).single(),
+
+    // 2. Recent job events (last 20)
+    sb.from('job_events')
+      .select('event_type, detail_json, created_at, users:user_id(name)')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(20),
+
+    // 3. Emails related to this job (from inbox_events)
+    sb.from('inbox_events')
+      .select('from_name, from_email, subject, classification, priority, received_at, action_needed')
+      .eq('job_id', jobId)
+      .order('received_at', { ascending: false }).limit(10),
+
+    // 4. Chase history (from payment_chase_logs via invoices)
+    sb.from('xero_invoices')
+      .select('invoice_number, amount_due, status, due_date')
+      .eq('job_id', jobId).eq('invoice_type', 'ACCREC')
+      .not('status', 'in', '("VOIDED","DELETED")')
+      .order('invoice_date', { ascending: false }).limit(5),
+
+    // 5. JARVIS actions on this job
+    sb.from('jarvis_event_log')
+      .select('event_type, channel, message_content, created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(10),
+
+    // 6. Client conversations (business_events)
+    sb.from('business_events')
+      .select('event_type, payload, occurred_at')
+      .eq('job_id', jobId)
+      .in('event_type', ['sms_sent', 'email_sent', 'quote_sent', 'quote_accepted'])
+      .order('occurred_at', { ascending: false }).limit(10),
+  ])
+
+  // Build timeline from all sources
+  const timeline = [
+    ...(events.data || []).map((e: any) => ({ type: e.event_type, who: e.users?.name || 'System', when: e.created_at, detail: typeof e.detail_json === 'string' ? e.detail_json.slice(0, 200) : JSON.stringify(e.detail_json || {}).slice(0, 200), source: 'job_events' })),
+    ...(emails.data || []).map((e: any) => ({ type: 'email_' + e.classification, who: e.from_name || e.from_email, when: e.received_at, detail: e.subject, source: 'inbox' })),
+    ...(jarvisActions.data || []).map((e: any) => ({ type: e.event_type, who: 'JARVIS', when: e.created_at, detail: (e.message_content || '').slice(0, 200), source: 'jarvis' })),
+    ...(conversations.data || []).map((e: any) => ({ type: e.event_type, who: 'JARVIS', when: e.occurred_at, detail: (e.payload?.message || '').slice(0, 200), source: 'comms' })),
+  ].sort((a, b) => new Date(b.when).getTime() - new Date(a.when).getTime()).slice(0, 30)
+
+  return {
+    job: job.data,
+    invoices: (chases.data || []).map((i: any) => ({ number: i.invoice_number, amount_due: Number(i.amount_due) || 0, status: i.status, due_date: i.due_date })),
+    timeline,
+    summary: {
+      total_events: timeline.length,
+      emails_received: (emails.data || []).length,
+      jarvis_actions: (jarvisActions.data || []).length,
+      comms_sent: (conversations.data || []).length,
+      has_overdue: (chases.data || []).some((i: any) => i.status !== 'PAID' && i.due_date && new Date(i.due_date) < new Date()),
+    },
+  }
+}
 
 
 // ════════════════════════════════════════════════════════════
