@@ -1,0 +1,203 @@
+# JARVIS Platform Context — Single Source of Truth
+
+> Last updated: 2026-04-06 by Terminal (Claude Code)
+> Notion Mission Control: https://www.notion.so/33a9fef56a4d81ae8814d81313007f6c
+
+Any AI agent working on SecureWorks reads this FIRST before writing code.
+
+---
+
+## Architecture Overview
+
+```
+                    Telegram
+                       |
+                 telegram-bot (2214 lines)
+                  /          \
+          Railway Agent    Supabase ops-ai (3970 lines)
+          (101 MCP tools)      |
+                |         [Claude API + tool loop]
+                |              |
+            ops-api ──────── reporting-api ──── daily-digest
+           (11,867 lines)   (3,428 lines)    (4,568 lines)
+                |              |                  |
+           Supabase DB    xero-sync          pg_cron jobs
+                |          (2,074 lines)
+            ghl-proxy
+           (1,525+ lines)
+```
+
+### Edge Functions (19 total)
+
+| Function | Lines | What It Does | External APIs |
+|----------|-------|-------------|---------------|
+| **ops-api** | 11,867 | Job CRUD, pipeline, scheduling, invoicing, POs, WOs, council, variations | Supabase |
+| **ops-ai** | 3,970 | AI chat with 60+ tools, multi-round tool loop, confirmation flow, conversation memory | Claude API (Anthropic) |
+| **daily-digest** | 4,568 | Morning brief, financial snapshots, nudges, weekly letter | Claude API, Telegram |
+| **reporting-api** | 3,428 | Financial reports, debt followup, CEO report, sales summary, profitability | Supabase, Xero data |
+| **telegram-bot** | 2,214 | Telegram message handling, classification, tone rewrite, action cards | Claude API, Telegram API |
+| **xero-sync** | 2,074 | Invoice sync, bank balance, aged payables from Xero | Xero API |
+| **ghl-proxy** | 1,525+ | GoHighLevel CRM proxy — contacts, opportunities, pipelines, SMS, email | GHL API |
+| **send-outlook-email** | 800+ | Microsoft Graph email sending with signature, CC, attachments | Microsoft Graph |
+| **send-po-email** | 600+ | PO email via Resend with PDF attachment | Resend API |
+| **receive-po-email** | 500+ | Inbound PO email processing, supplier quote analysis | Resend webhook |
+| **send-quote** | 400+ | Quote PDF generation and delivery | Resend API |
+| **monitor-inbox** | 300 | NEW: Graph inbox polling, Haiku classification, Telegram alerts | Microsoft Graph, Claude API |
+| **resend-webhook** | 300+ | Email delivery tracking (sent, opened, bounced) | Resend webhook |
+| **ghl-webhook** | 200+ | GHL opportunity sync on stage changes | GHL webhook |
+| **google-ads-ingest** | 200+ | Google Ads spend/conversion import | Google Ads API |
+| **sql-query** | 100+ | Direct SQL query endpoint for Cowork | Supabase |
+| **system-health** | 100+ | Health check endpoint | Supabase |
+| **completion-pack** | 100+ | Job completion data packaging | Supabase |
+| **agent-runner** | 100+ | Railway agent runner for MCP tools | Railway |
+
+### Key Database Tables
+
+| Table | Purpose | Key Fields |
+|-------|---------|------------|
+| **jobs** | All jobs (fencing, patio, decking) | id, job_number, client_name, status, pricing_json, scope_json |
+| **job_assignments** | Crew scheduling | job_id, user_id, scheduled_date |
+| **job_events** | Activity timeline | job_id, event_type, detail_json |
+| **purchase_orders** | Material POs | job_id, supplier_name, status, total |
+| **work_orders** | Work order tracking | job_id, description, status |
+| **xero_invoices** | Synced from Xero | invoice_number, contact_name, amount_due, status |
+| **xero_projects** | Xero project financials | job_id, total_invoiced, total_expenses |
+| **contact_matches** | GHL↔Xero contact linking | ghl_contact_id, xero_contact_id, phone, email |
+| **aged_receivables** | VIEW: overdue invoice bucketing | age_bucket (current, 1-30, 31-60, 61-90, 90+) |
+| **council_submissions** | Council/permit tracking | job_id, overall_status, steps |
+| **variations** | Scope change requests | job_id, status, amount |
+| **payment_chase_logs** | Debt chase history | xero_invoice_id, method, outcome |
+| **ai_feedback_outcomes** | AI action approval/rejection tracking | feedback_category, human_action |
+| **learned_rules** | AI business rules (confirmed) | rule_type, description, confidence |
+| **ai_annotations** | Proactive AI flags on jobs | entity_type, annotation_type, message |
+| **business_events** | CloudEvents audit log | event_type, entity_id, payload |
+| **chat_logs** | Conversation Q&A logging | query, response, channel, user_email |
+| **conversation_sessions** | NEW: 30-min session tracking | user_id, channel, last_activity_at |
+| **conversation_history** | NEW: Full message persistence | session_id, role, content, tool_calls |
+| **inbox_events** | NEW: Email inbox monitoring | graph_message_id, classification, priority |
+| **users** | Team members | name, email, telegram_id, role |
+| **pending_confirmations** | Telegram action approval queue | action_type, action_payload, status |
+| **financial_snapshots** | Daily pre-computed financials | snapshot_date, revenue_mtd, outstanding |
+| **material_price_ledger** | Supplier price tracking | supplier_name, material_code, unit_price |
+| **org_config** | Business targets/settings | config_key, config_value |
+| **po_communications** | Supplier email threads | job_id, direction, message_id, thread_id |
+| **email_events** | Outbound email delivery tracking | recipient, status, sent_at |
+
+### Integration Credentials (locations, NOT values)
+
+| Service | Where Stored |
+|---------|-------------|
+| Supabase | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — Supabase edge function env |
+| Anthropic (Claude) | `ANTHROPIC_API_KEY` — Supabase secrets |
+| Telegram | `TELEGRAM_BOT_TOKEN` — Supabase secrets |
+| GoHighLevel | GHL API key in ghl-proxy env, `GHL_LOCATION_ID` |
+| Xero | OAuth tokens in `xero_tokens` table, refreshed by xero-sync |
+| Microsoft Graph | `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` — Supabase secrets |
+| Railway Agent | `RAILWAY_AGENT_URL`, `SW_API_KEY` — Supabase secrets |
+| Resend (email) | `RESEND_API_KEY` — Supabase secrets (DNS blocked by marketing agency) |
+
+### Routing Architecture
+
+```
+Telegram message arrives
+  → telegram-bot classifies (Haiku)
+  → Business? → askOpsAi() → RAILWAY_AGENT_URL (if set) or Supabase ops-ai
+  → Banter? → freestylePersonality() (Sonnet, no tools)
+  → Response → rewriteTone() (Sonnet) → send to Telegram
+```
+
+**CRITICAL:** `RAILWAY_AGENT_URL` IS SET. Telegram business messages go to Railway, not Supabase ops-ai. Conversation memory was built in ops-ai but only works because telegram-bot now injects chat_logs history into the messages array before sending to Railway.
+
+---
+
+## What's Been Built (This Session: 2026-04-05/06)
+
+### Batch 1 Fixes (deployed)
+- Token bloat: stripped scope_json/pricing_json from 4 endpoints (11.4M → ~1.5M)
+- Actionability: search_contacts tool, debt_followup search param, action execution prompt
+- Data accuracy: /overdue bug (wrong column), $0 values (wrong field name), test data filter
+- Email monitoring: monitor-inbox function, inbox_events table, pg_cron every 5 min
+
+### Batch 2 Fixes (deployed)
+- 14 missing tool definitions added to ops-ai
+- Job number added to pipeline search (was missing)
+- GHL fallback on search (auto-search GHL when Supabase empty)
+- Action cards extended to create_work_order, send_review_request
+- SIMPLE_TOOLS expanded from 6 to 17
+
+### Conversation Memory (deployed)
+- conversation_sessions + conversation_history tables
+- 30-min session timeout, 5 most recent messages
+- History injected as proper Claude message pairs (not system prompt text)
+- telegram-bot saves Q&A to chat_logs + passes history to agent
+- Pronoun resolution works: "What's his email?" after discussing someone resolves correctly
+
+### JARVIS Persona (deployed)
+- Complete rewrite from casual Australian bro → Tony Stark's JARVIS
+- Sophisticated, precise, dry wit, addresses Marnin as "sir"
+- All error messages updated, freestyle personality refined
+- Business keyword routing expanded (20+ new keywords, 15-word length check)
+
+---
+
+## Known Issues & Tech Debt
+
+| Issue | Severity | File | Notes |
+|-------|----------|------|-------|
+| sw_get_conversation returns empty | P0 | ghl-proxy | GHL conversations API may need different auth or endpoint |
+| sw_send_payment_link no dedup | P1 | ghl-proxy | Rachael Torre got 10 duplicates |
+| Proposed actions queue always empty | P1 | ops-api | sw_list_proposed_actions returns nothing — no generation engine |
+| Resend email blocked | P1 | send-po-email | DNS controlled by marketing agency, can't add MX records |
+| Nathan→Nithin name fix | P3 | ops-ai/reporting-api | Sales tool descriptions reference wrong name |
+| Railway agent has no conversation memory | P2 | Railway | Memory only works because telegram-bot injects history |
+| monitor-inbox MARNIN_TELEGRAM_ID | P3 | monitor-inbox | Uses users table lookup, needs role column verification |
+| Xero bank transactions sync | P3 | xero-sync | Column mismatch, non-critical |
+| Google Ads UTM tracking | P2 | blocked | Marketing team needs to configure GHL forms |
+| financial_snapshots raw JSON | P3 | daily-digest | executive_summary has markdown fences from Claude output |
+
+---
+
+## Monthly Cost
+
+~$36-38/month total:
+- Supabase Pro: $25
+- Claude API: ~$8-10 (Sonnet for chat, Haiku for classification/evaluation)
+- Haiku classifier/evaluator/nudges: ~$2.70
+
+---
+
+## pg_cron Jobs
+
+| Schedule | Job | Function |
+|----------|-----|----------|
+| `0 23 * * *` (7am AWST) | Daily digest | trigger_daily_digest() |
+| `0 3,7,11 * * *` | Nudge check | 11am/3pm/7pm AWST |
+| `*/5 * * * *` | Inbox monitor | trigger_monitor_inbox() |
+| `0 19 * * *` (3am AWST) | Cleanup conv history | DELETE older than 14 days |
+| `0 19 * * 0` (3am Sun AWST) | Cleanup conv sessions | DELETE older than 90 days |
+| `* * * * *` | Queue processor | process_outbound_queue() |
+
+---
+
+## Project Map
+
+| Project | Path | Deployed On |
+|---------|------|-------------|
+| Edge Functions | `~/Projects/secureworks-site/supabase/functions/` | Supabase |
+| Dashboards (CEO, Ops, Trade) | GitHub: `marninms98-dotcom/securedash` | GitHub Pages |
+| Sale Dashboard | GitHub: `marninms98-dotcom/secureworks-sale` | GitHub Pages |
+| Patio Scoping Tool | `~/Projects/patio-tool/` | GitHub Pages |
+| Fencing Scoping Tool | GitHub: `marninms98-dotcom/fence-designer` | GitHub Pages |
+| Astro Website | `~/Projects/secureworks-website/` | Cloudflare Pages |
+| Marketing Generator | `~/Projects/secureworks-marketing/` | Not deployed |
+| Railway MCP Agent | Railway | Railway (production) |
+
+---
+
+## Mandatory Pre-Work Checks
+
+Before editing any git-tracked project:
+1. `git fetch origin && git pull origin main`
+2. Resolve conflicts before starting
+3. After finishing: commit + push (live versions run from GitHub Pages / Supabase)
+4. Deploy edge functions: `supabase functions deploy <name> --no-verify-jwt`
