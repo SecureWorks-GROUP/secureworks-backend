@@ -4049,7 +4049,7 @@ async function pushPOToXero(client: any, body: any) {
 }
 
 async function emailPO(client: any, body: any) {
-  const { id } = body
+  const id = body.id || body.po_id
   if (!id) throw new Error('id required')
 
   const { data: po, error } = await client
@@ -4237,7 +4237,7 @@ async function updateWorkOrder(client: any, body: any) {
 }
 
 async function sendWorkOrder(client: any, body: any) {
-  const { id } = body
+  const id = body.id || body.work_order_id
   if (!id) throw new Error('id required')
 
   const { data: wo, error } = await client
@@ -11867,7 +11867,8 @@ async function forceReconcileInvoice(dbClient: any, body: any) {
 }
 
 async function sendChaseSms(client: any, body: any) {
-  const { ghl_contact_id, xero_invoice_id, job_id, message, operator_email } = body
+  const { xero_invoice_id, job_id, message, operator_email } = body
+  const ghl_contact_id = body.ghl_contact_id || body.contact_id
   if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
 
   // Send via GHL proxy

@@ -1357,7 +1357,8 @@ serve(async (req: Request) => {
       if (email) update.email = email
       if (phone) update.phone = phone
       if (address) update.address1 = address
-      if (suburb) update.city = suburb
+      // suburb === '' explicitly clears city; GHL needs a space to accept clearing
+      if (suburb !== undefined) update.city = suburb || ' '
 
       await ghl(`/contacts/${contactId}`, { method: 'PUT', body: JSON.stringify(update) })
       return json({ success: true })
@@ -2008,7 +2009,8 @@ serve(async (req: Request) => {
         }
 
         // Log to jarvis_event_log (non-blocking, fire-and-forget)
-        sb.from('jarvis_event_log').insert({
+        const sbJarvis = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        sbJarvis.from('jarvis_event_log').insert({
           event_type: 'chase_sms_sent',
           contact_id: contactId,
           job_id: jobId || null,
