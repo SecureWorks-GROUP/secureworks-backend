@@ -285,6 +285,40 @@ serve(async (req: Request) => {
         return json(await getPortfolioSummary(sb))
       case 'job_intelligence':
         return json(await getJobIntelligence(sb, url.searchParams.get('job_id') || ''))
+      case 'group_messages': {
+        const since = url.searchParams.get('since') || new Date(Date.now() - 24 * 3600000).toISOString()
+        const group = url.searchParams.get('group') // filter by chat_title in payload
+        const topic = url.searchParams.get('topic') // filter by topic_id in payload
+        const limit = Math.min(Number(url.searchParams.get('limit')) || 30, 100)
+        let query = sb.from('business_events')
+          .select('id, event_type, payload, created_at')
+          .in('event_type', ['crew.message', 'crew.photo', 'crew.voice_note'])
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(limit)
+        if (group) query = query.ilike('payload->>chat_title', `%${group}%`)
+        if (topic) query = query.eq('payload->>topic_id', topic)
+        const { data, error } = await query
+        if (error) return json({ error: error.message }, 500)
+        return json({
+          messages: (data || []).map((e: any) => ({
+            id: e.id,
+            type: e.event_type.replace('crew.', ''),
+            from: e.payload?.from,
+            text: e.payload?.text || e.payload?.caption || null,
+            has_photo: e.event_type === 'crew.photo',
+            has_voice: e.event_type === 'crew.voice_note',
+            voice_duration: e.payload?.duration || null,
+            job_refs: e.payload?.job_refs || [],
+            group: e.payload?.chat_title || 'Unknown',
+            topic_id: e.payload?.topic_id || null,
+            timestamp: e.created_at,
+          })),
+          total: (data || []).length,
+          period: `Since ${since}`,
+          group_filter: group || 'all',
+        })
+      }
       case 'chat_logs': {
         const since = url.searchParams.get('since') || new Date(Date.now() - 7 * 24 * 3600000).toISOString()
         const channel = url.searchParams.get('channel')
@@ -313,7 +347,7 @@ serve(async (req: Request) => {
         })
       }
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence, chat_logs' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence, chat_logs, group_messages' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)

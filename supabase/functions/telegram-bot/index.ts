@@ -901,6 +901,8 @@ async function handleText(client: any, message: any) {
       telegram_id: fromId,
       job_refs: refs,
       chat_id: chatId,
+      topic_id: message.message_thread_id || null,
+      chat_title: message.chat.title || null,
     },
   })
 
@@ -931,6 +933,8 @@ async function handlePhoto(client: any, message: any) {
       job_refs: refs,
       chat_id: chatId,
       photo_count: (message.photo || []).length,
+      topic_id: message.message_thread_id || null,
+      chat_title: message.chat.title || null,
     },
   })
 
@@ -959,6 +963,8 @@ async function handleVoice(client: any, message: any) {
       from: fromName,
       telegram_id: fromId,
       chat_id: chatId,
+      topic_id: message.message_thread_id || null,
+      chat_title: message.chat.title || null,
     },
   })
 }
