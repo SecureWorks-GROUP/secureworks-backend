@@ -285,8 +285,92 @@ serve(async (req: Request) => {
         return json(await getPortfolioSummary(sb))
       case 'job_intelligence':
         return json(await getJobIntelligence(sb, url.searchParams.get('job_id') || ''))
+      case 'shaun_brief': {
+        const since = url.searchParams.get('since') || '2026-03-26'
+        const [
+          { data: statusChanges },
+          { data: newJobs },
+          { data: invoicesSent },
+          { data: invoicesPaid },
+          { data: posCreated },
+          { data: upcomingAssignments },
+          { data: overdueInvoices },
+        ] = await Promise.all([
+          sb.from('job_events').select('job_id, event_type, detail_json, created_at')
+            .eq('event_type', 'status_changed').gte('created_at', since)
+            .order('created_at', { ascending: false }).limit(100),
+          sb.from('jobs').select('id, job_number, client_name, type, status, site_suburb, created_at')
+            .gte('created_at', since).not('status', 'eq', 'cancelled')
+            .order('created_at', { ascending: false }).limit(50),
+          sb.from('xero_invoices').select('invoice_number, contact_name, total, status, job_id, invoice_date')
+            .eq('invoice_type', 'ACCREC').gte('invoice_date', since)
+            .not('status', 'in', '("VOIDED","DELETED")')
+            .order('invoice_date', { ascending: false }).limit(50),
+          sb.from('xero_invoices').select('invoice_number, contact_name, total, status')
+            .eq('invoice_type', 'ACCREC').eq('status', 'PAID')
+            .gte('invoice_date', since).limit(50),
+          sb.from('purchase_orders').select('po_number, supplier_name, total, status, job_id, created_at')
+            .gte('created_at', since).neq('status', 'deleted')
+            .order('created_at', { ascending: false }).limit(50),
+          sb.from('job_assignments').select('job_id, scheduled_date, crew_name, assigned_to, assignment_status')
+            .gte('scheduled_date', new Date().toISOString().slice(0, 10))
+            .neq('status', 'cancelled')
+            .order('scheduled_date', { ascending: true }).limit(30),
+          sb.from('xero_invoices').select('invoice_number, contact_name, amount_due, due_date')
+            .eq('invoice_type', 'ACCREC').in('status', ['AUTHORISED', 'SUBMITTED'])
+            .gt('amount_due', 0).lt('due_date', new Date().toISOString().slice(0, 10))
+            .order('due_date', { ascending: true }).limit(30),
+        ])
+
+        // Enrich assignments with job info
+        const assignJobIds = [...new Set((upcomingAssignments || []).map((a: any) => a.job_id).filter(Boolean))]
+        let assignJobMap: Record<string, any> = {}
+        if (assignJobIds.length > 0) {
+          const { data: aJobs } = await sb.from('jobs').select('id, job_number, client_name, site_suburb').in('id', assignJobIds)
+          for (const j of (aJobs || [])) assignJobMap[j.id] = j
+        }
+
+        const totalInvoiced = (invoicesSent || []).reduce((s: number, i: any) => s + Number(i.total || 0), 0)
+        const totalPaid = (invoicesPaid || []).reduce((s: number, i: any) => s + Number(i.total || 0), 0)
+        const totalPOs = (posCreated || []).reduce((s: number, p: any) => s + Number(p.total || 0), 0)
+        const totalOverdue = (overdueInvoices || []).reduce((s: number, i: any) => s + Number(i.amount_due || 0), 0)
+
+        return json({
+          period: `Since ${since}`,
+          generated_at: new Date().toISOString(),
+          summary: {
+            jobs_created: (newJobs || []).length,
+            status_changes: (statusChanges || []).length,
+            invoices_sent: (invoicesSent || []).length,
+            total_invoiced: totalInvoiced,
+            invoices_paid: (invoicesPaid || []).length,
+            total_paid: totalPaid,
+            pos_created: (posCreated || []).length,
+            total_po_value: totalPOs,
+            overdue_invoices: (overdueInvoices || []).length,
+            total_overdue: totalOverdue,
+            upcoming_assignments: (upcomingAssignments || []).length,
+          },
+          new_jobs: (newJobs || []).map((j: any) => ({
+            job_number: j.job_number, client: j.client_name, type: j.type, status: j.status, suburb: j.site_suburb,
+          })),
+          key_status_changes: (statusChanges || []).slice(0, 20).map((e: any) => ({
+            job_id: e.job_id, change: e.detail_json, when: e.created_at,
+          })),
+          upcoming_schedule: (upcomingAssignments || []).map((a: any) => {
+            const j = assignJobMap[a.job_id] || {}
+            return { date: a.scheduled_date, job: j.job_number, client: j.client_name, suburb: j.site_suburb, crew: a.crew_name || a.assigned_to, status: a.assignment_status }
+          }),
+          overdue_debt: (overdueInvoices || []).map((i: any) => ({
+            invoice: i.invoice_number, client: i.contact_name, amount: i.amount_due, due: i.due_date,
+          })),
+          recent_pos: (posCreated || []).slice(0, 10).map((p: any) => ({
+            po: p.po_number, supplier: p.supplier_name, total: p.total, status: p.status,
+          })),
+        })
+      }
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence, shaun_brief' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
