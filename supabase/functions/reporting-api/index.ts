@@ -216,8 +216,7 @@ serve(async (req: Request) => {
       case 'team_activity': {
         const since = url.searchParams.get('since') || new Date(Date.now() - 24 * 3600000).toISOString()
         const { data: events } = await sb.from('job_events')
-          .select('id, job_id, event_type, detail_json, created_at, users:user_id(name)')
-          .eq('org_id', DEFAULT_ORG_ID)
+          .select('id, job_id, user_id, event_type, detail_json, created_at')
           .gte('created_at', since)
           .order('created_at', { ascending: false })
           .limit(50)
@@ -230,7 +229,7 @@ serve(async (req: Request) => {
         return json({
           events: (events || []).map((e: any) => ({
             type: e.event_type, job: jobNames[e.job_id] || e.job_id,
-            who: e.users?.name || 'System', when: e.created_at,
+            who: e.user_id || 'System', when: e.created_at,
             detail: typeof e.detail_json === 'string' ? e.detail_json.slice(0, 200) : JSON.stringify(e.detail_json || {}).slice(0, 200),
           })),
           total: (events || []).length,
