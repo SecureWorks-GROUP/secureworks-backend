@@ -1348,7 +1348,7 @@ async function debtFollowup(sb: any, search?: string) {
     }
   }
 
-  // Also try to find phone/email from jobs table (fallback)
+  // Also try to find phone/email from jobs table (fallback via contact_matches.job_id)
   const matchedJobIds = (matches || []).filter((m: any) => m.job_id).map((m: any) => m.job_id)
   if (matchedJobIds.length > 0) {
     const { data: jobs } = await sb
@@ -1367,6 +1367,39 @@ async function debtFollowup(sb: any, search?: string) {
         if (!contactInfo[xeroId].phone && j.client_phone) contactInfo[xeroId].phone = j.client_phone
         if (!contactInfo[xeroId].email && j.client_email) contactInfo[xeroId].email = j.client_email
         if (!contactInfo[xeroId].ghl_id && j.ghl_contact_id) contactInfo[xeroId].ghl_id = j.ghl_contact_id
+      }
+    }
+  }
+
+  // For contacts with NO contact_matches record, resolve via xero_invoices → jobs (direct path)
+  const unmatchedIds = xeroContactIds.filter(id => !contactInfo[id])
+  if (unmatchedIds.length > 0) {
+    const { data: linkedInvoices } = await sb
+      .from('xero_invoices')
+      .select('xero_contact_id, job_id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .in('xero_contact_id', unmatchedIds.slice(0, 200))
+      .not('job_id', 'is', null)
+
+    const invoiceJobIds = [...new Set((linkedInvoices || []).filter((i: any) => i.job_id).map((i: any) => i.job_id))]
+    if (invoiceJobIds.length > 0) {
+      const { data: invJobs } = await sb
+        .from('jobs')
+        .select('id, client_phone, client_email, ghl_contact_id')
+        .in('id', invoiceJobIds.slice(0, 200))
+
+      const invJobMap: Record<string, any> = {}
+      for (const j of (invJobs || [])) { invJobMap[j.id] = j }
+
+      for (const inv of (linkedInvoices || [])) {
+        if (inv.xero_contact_id && inv.job_id && invJobMap[inv.job_id] && !contactInfo[inv.xero_contact_id]) {
+          const j = invJobMap[inv.job_id]
+          contactInfo[inv.xero_contact_id] = {
+            phone: j.client_phone || null,
+            email: j.client_email || null,
+            ghl_id: j.ghl_contact_id || null,
+          }
+        }
       }
     }
   }
