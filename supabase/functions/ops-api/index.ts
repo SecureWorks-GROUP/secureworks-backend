@@ -5922,8 +5922,45 @@ async function morningBrief(client: any) {
     .order('completed_at', { ascending: true })
     .limit(10)
 
+  // Stale pipeline: quotes with no activity > 14 days + accepted jobs stalled > 10 days
+  const fourteenDaysAgo = new Date(Date.now() - 14 * 86400000).toISOString()
+  const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString()
+  const [staleQuotes, stalledAccepted] = await Promise.all([
+    client.from('jobs')
+      .select('id, client_name, job_number, site_suburb, pricing_json, updated_at, quoted_at')
+      .eq('org_id', DEFAULT_ORG_ID).eq('status', 'quoted')
+      .not('legacy', 'is', true)
+      .lt('updated_at', fourteenDaysAgo)
+      .order('updated_at', { ascending: true }).limit(20),
+    client.from('jobs')
+      .select('id, client_name, job_number, site_suburb, pricing_json, updated_at, accepted_at')
+      .eq('org_id', DEFAULT_ORG_ID).eq('status', 'accepted')
+      .not('legacy', 'is', true)
+      .lt('updated_at', tenDaysAgo)
+      .order('updated_at', { ascending: true }).limit(20),
+  ])
+
+  const extractValue = (j: any) => {
+    if (!j.pricing_json) return 0
+    const p = typeof j.pricing_json === 'string' ? JSON.parse(j.pricing_json) : j.pricing_json
+    return parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.amount || p.subtotal || 0) || 0
+  }
+
+  const staleQuotesList = (staleQuotes.data || []).map((j: any) => ({
+    id: j.id, client: j.client_name, job_number: j.job_number, suburb: j.site_suburb,
+    value: extractValue(j), days_stale: Math.ceil((Date.now() - new Date(j.updated_at).getTime()) / 86400000),
+    quoted_at: j.quoted_at,
+  }))
+  const stalledAcceptedList = (stalledAccepted.data || []).map((j: any) => ({
+    id: j.id, client: j.client_name, job_number: j.job_number, suburb: j.site_suburb,
+    value: extractValue(j), days_stale: Math.ceil((Date.now() - new Date(j.updated_at).getTime()) / 86400000),
+    accepted_at: j.accepted_at,
+  }))
+
   const briefData = {
     ...summary,
+    stale_quotes: { count: staleQuotesList.length, total_value: staleQuotesList.reduce((s: number, j: any) => s + j.value, 0), items: staleQuotesList },
+    stalled_accepted: { count: stalledAcceptedList.length, total_value: stalledAcceptedList.reduce((s: number, j: any) => s + j.value, 0), items: stalledAcceptedList },
     complete_not_invoiced: (completeNotInvoiced.data || []).map((j: any) => {
       let value = 0
       if (j.pricing_json) {
