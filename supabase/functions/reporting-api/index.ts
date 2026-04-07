@@ -285,8 +285,35 @@ serve(async (req: Request) => {
         return json(await getPortfolioSummary(sb))
       case 'job_intelligence':
         return json(await getJobIntelligence(sb, url.searchParams.get('job_id') || ''))
+      case 'chat_logs': {
+        const since = url.searchParams.get('since') || new Date(Date.now() - 7 * 24 * 3600000).toISOString()
+        const channel = url.searchParams.get('channel')
+        const limit = Math.min(Number(url.searchParams.get('limit')) || 20, 50)
+        let query = sb.from('chat_logs')
+          .select('id, role, query, response, tools_used, channel, created_at')
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(limit)
+        if (channel) query = query.eq('channel', channel)
+        const { data, error } = await query
+        if (error) return json({ error: error.message }, 500)
+        return json({
+          logs: (data || []).map((r: any) => ({
+            id: r.id,
+            role: r.role,
+            query: r.query?.slice(0, 500),
+            response: r.response?.slice(0, 500),
+            tools_used: r.tools_used,
+            channel: r.channel,
+            timestamp: r.created_at,
+          })),
+          total: (data || []).length,
+          period: `Since ${since}`,
+          channel_filter: channel || 'all',
+        })
+      }
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence, chat_logs' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
