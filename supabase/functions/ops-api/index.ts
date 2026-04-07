@@ -1052,6 +1052,20 @@ serve(async (req: Request) => {
       case 'extract_po_pricing': return json(await extractPOPricing(client, body))
       case 'confirm_price': return json(await confirmPrice(client, body))
       case 'dismiss_price': return json(await dismissPrice(client, body))
+      case 'sync_job_scope': {
+        const { job_id, ...scopeFields } = body
+        if (!job_id) return json({ error: 'job_id required' }, 400)
+        const area = scopeFields.projection_mm && scopeFields.length_mm
+          ? (scopeFields.projection_mm * scopeFields.length_mm) / 1000000 : null
+        const { error } = await client.from('job_scope').upsert({
+          job_id, ...scopeFields,
+          area_sqm: area,
+          scope_hash: `${JSON.stringify(scopeFields).length}_${Date.now()}`,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'job_id' })
+        if (error) return json({ error: error.message }, 500)
+        return json({ success: true, job_id })
+      }
       case 'pending_prices': return json(await getPendingPrices(client))
       case 'create_variation': return json(await createVariation(client, body))
       case 'approve_variation': return json(await approveVariation(client, body))
