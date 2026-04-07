@@ -6182,13 +6182,23 @@ async function scopeToPO(client: any, params: URLSearchParams) {
 async function schedulingCapacity(client: any, params: URLSearchParams) {
   const weeksCount = parseInt(params.get('weeks') || '6')
   const crewCount = parseInt(params.get('crew_count') || '3') // Default 3 crews
+  const startParam = params.get('start_date')
 
-  const now = new Date()
-  // Start from next Monday
-  const dayOfWeek = now.getDay() || 7
-  const nextMonday = new Date(now)
-  nextMonday.setDate(now.getDate() - dayOfWeek + 8) // Next Monday
-  nextMonday.setHours(0, 0, 0, 0)
+  let weekStart: Date
+  if (startParam) {
+    // Use provided start date (round to Monday of that week)
+    weekStart = new Date(startParam + 'T00:00:00')
+    const dow = weekStart.getDay() || 7
+    weekStart.setDate(weekStart.getDate() - dow + 1) // Back to Monday
+  } else {
+    // Default: start from next Monday
+    const now = new Date()
+    const dayOfWeek = now.getDay() || 7
+    weekStart = new Date(now)
+    weekStart.setDate(now.getDate() - dayOfWeek + 8)
+  }
+  weekStart.setHours(0, 0, 0, 0)
+  const nextMonday = weekStart
 
   const weeks: any[] = []
   for (let i = 0; i < weeksCount; i++) {
@@ -6200,11 +6210,10 @@ async function schedulingCapacity(client: any, params: URLSearchParams) {
     const startStr = weekStart.toISOString().slice(0, 10)
     const endStr = weekEnd.toISOString().slice(0, 10)
 
-    // Count assignments in this week
+    // Count assignments in this week (job_assignments has no org_id column)
     const { data: assignments } = await client
       .from('job_assignments')
       .select('id')
-      .eq('org_id', DEFAULT_ORG_ID)
       .gte('scheduled_date', startStr)
       .lte('scheduled_date', endStr)
       .neq('status', 'cancelled')
