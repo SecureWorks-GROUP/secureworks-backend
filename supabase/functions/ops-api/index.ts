@@ -8795,6 +8795,28 @@ async function confirmPrice(client: any, body: any) {
     })
   }
 
+  // UPSERT into scope_tool_defaults — feed confirmed prices back to scoping tools
+  if (entry?.material_category && entry?.item_description) {
+    try {
+      const scopeTool = entry.job_id ? (await client.from('jobs').select('type').eq('id', entry.job_id).single()).data?.type || 'patio' : 'patio'
+      const itemKey = (entry.item_description || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 100)
+      await client.from('scope_tool_defaults').upsert({
+        org_id: DEFAULT_ORG_ID,
+        scope_tool: scopeTool,
+        category: entry.material_category,
+        item_key: itemKey,
+        item_description: entry.item_description,
+        unit: entry.unit || 'ea',
+        default_price: entry.unit_price,
+        default_supplier_name: entry.supplier_name,
+        source: 'confirmed_price',
+        last_updated_at: new Date().toISOString(),
+      }, { onConflict: 'org_id,scope_tool,category,item_key' })
+    } catch (e) {
+      console.log('[ops-api] scope_tool_defaults upsert failed (non-blocking):', (e as Error).message)
+    }
+  }
+
   return { success: true, ledger_id, scoper_notified: !!scoperAlert }
 }
 
