@@ -281,8 +281,10 @@ serve(async (req: Request) => {
         return json(await performanceBenchmarks(sb))
       case 'job_context':
         return json(await jobContext(sb, url.searchParams.get('job_id') || ''))
+      case 'portfolio_summary':
+        return json(await getPortfolioSummary(sb))
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
@@ -4085,5 +4087,138 @@ async function performanceBenchmarks(sb: any) {
     vs_last_month: { revenue_change_pct: revenueChangePct, margin_change: marginMtd - marginLast, jobs_change: (jobsThisMonth || 0) - (jobsLastMonth || 0), improving, declining },
     vs_last_year: { revenue_change_pct: yoyChangePct, trajectory: yoyChangePct > 20 ? 'accelerating' : yoyChangePct > 0 ? 'steady' : 'slowing' },
     cycle_time: { avg_days: avgCycleDays, segments, slowest_segment: slowest[0], slowest_days: slowest[1] },
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// PORTFOLIO SUMMARY — CEO morning number
+// Pipeline value, risk distribution, KPI breaches, velocity, 30-day forecast
+// ════════════════════════════════════════════════════════════
+
+async function getPortfolioSummary(sb: any) {
+  const now = new Date()
+  const monthStart = `${now.toISOString().slice(0, 7)}-01`
+
+  // 1. Pipeline financials from jobs
+  const { data: activeJobs } = await sb.from('jobs')
+    .select('id, status, type, pricing_json, created_by, quoted_at, accepted_at, scheduled_at, completed_at, created_at')
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['quoted', 'accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced'])
+
+  // 2. Invoice totals
+  const { data: invoices } = await sb.from('xero_invoices')
+    .select('total, amount_paid, amount_due, status')
+    .eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCREC')
+    .not('status', 'in', '("VOIDED","DELETED")')
+
+  // 3. PO totals
+  const { data: pos } = await sb.from('purchase_orders')
+    .select('total, status')
+    .eq('org_id', DEFAULT_ORG_ID).neq('status', 'deleted')
+
+  // 4. Risk distribution from job_intelligence (may be empty initially)
+  const { data: intel } = await sb.from('job_intelligence')
+    .select('risk_level, health_score, things_to_know, responsible_person, stale')
+
+  // 5. Velocity from completed jobs (last 6 months)
+  const sixMonthsAgo = new Date(now.getTime() - 180 * 86400000).toISOString().slice(0, 10)
+  const { data: completedJobs } = await sb.from('jobs')
+    .select('quoted_at, accepted_at, scheduled_at, completed_at, created_by, type, pricing_json')
+    .eq('org_id', DEFAULT_ORG_ID).not('legacy', 'is', true)
+    .in('status', ['complete', 'invoiced'])
+    .gte('completed_at', sixMonthsAgo)
+    .not('quoted_at', 'is', null).not('completed_at', 'is', null)
+
+  // Compute pipeline
+  const qv = (j: any) => { const p = j.pricing_json; if (!p) return 0; return parseFloat(p.totalIncGST || p.totalExGST || p.total || 0) || 0 }
+  const stageProb: Record<string, number> = { quoted: 0.3, accepted: 0.85, approvals: 0.85, deposit: 0.85, processing: 0.90, scheduled: 0.95, in_progress: 0.99, complete: 0.90, invoiced: 1.0 }
+
+  let totalQuoted = 0, totalAccepted = 0
+  const jobCounts: Record<string, number> = {}
+  const forecast30 = { revenue: 0, costs: 0 }
+
+  for (const j of (activeJobs || [])) {
+    const val = qv(j)
+    jobCounts[j.status] = (jobCounts[j.status] || 0) + 1
+    if (['quoted'].includes(j.status)) totalQuoted += val
+    if (['accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress'].includes(j.status)) totalAccepted += val
+    forecast30.revenue += val * (stageProb[j.status] || 0.5)
+  }
+
+  const totalInvoiced = (invoices || []).reduce((s: number, i: any) => s + (Number(i.total) || 0), 0)
+  const totalCollected = (invoices || []).reduce((s: number, i: any) => s + (Number(i.amount_paid) || 0), 0)
+  const totalOutstanding = (invoices || []).reduce((s: number, i: any) => s + (Number(i.amount_due) || 0), 0)
+  const totalCostsCommitted = (pos || []).filter((p: any) => !['deleted', 'cancelled'].includes(p.status)).reduce((s: number, p: any) => s + (Number(p.total) || 0), 0)
+
+  // Risk distribution
+  const riskDist: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }
+  const kpiBreachesByPerson: Record<string, any[]> = {}
+  for (const i of (intel || [])) {
+    riskDist[i.risk_level || 'unknown'] = (riskDist[i.risk_level || 'unknown'] || 0) + 1
+    // Extract KPI breaches from things_to_know flags
+    const flags = i.things_to_know || []
+    for (const f of flags) {
+      if (f.days_breached && f.responsible_person) {
+        if (!kpiBreachesByPerson[f.responsible_person]) kpiBreachesByPerson[f.responsible_person] = []
+        kpiBreachesByPerson[f.responsible_person].push(f)
+      }
+    }
+  }
+
+  // Velocity
+  let avgQuoteToAccept = 0, avgAcceptToBuild = 0, avgBuildToPayment = 0, count = 0
+  for (const j of (completedJobs || [])) {
+    const q = new Date(j.quoted_at).getTime()
+    const a = j.accepted_at ? new Date(j.accepted_at).getTime() : q
+    const s = j.scheduled_at ? new Date(j.scheduled_at).getTime() : a
+    const c = new Date(j.completed_at).getTime()
+    avgQuoteToAccept += (a - q) / 86400000
+    avgAcceptToBuild += (s - a) / 86400000
+    avgBuildToPayment += (c - s) / 86400000
+    count++
+  }
+  const n = count || 1
+
+  // Completed this month
+  const completedThisMonth = (activeJobs || []).filter((j: any) =>
+    j.status === 'complete' || (j.status === 'invoiced' && j.completed_at && j.completed_at >= monthStart)
+  ).length
+
+  return {
+    pipeline: {
+      total_quoted: Math.round(totalQuoted),
+      total_accepted: Math.round(totalAccepted),
+      total_invoiced: Math.round(totalInvoiced),
+      total_collected: Math.round(totalCollected),
+      total_outstanding: Math.round(totalOutstanding),
+      total_costs_committed: Math.round(totalCostsCommitted),
+      projected_gross_margin: Math.round(totalAccepted - totalCostsCommitted),
+      projected_margin_pct: totalAccepted > 0 ? Math.round(((totalAccepted - totalCostsCommitted) / totalAccepted) * 100) : 0,
+    },
+    jobs: {
+      active: (activeJobs || []).length,
+      quoting: jobCounts['quoted'] || 0,
+      scheduled: (jobCounts['scheduled'] || 0) + (jobCounts['processing'] || 0),
+      building: jobCounts['in_progress'] || 0,
+      awaiting_payment: jobCounts['complete'] || 0,
+      completed_this_month: completedThisMonth,
+    },
+    risk: riskDist,
+    kpi_breaches: {
+      by_person: kpiBreachesByPerson,
+      total: Object.values(kpiBreachesByPerson).flat().length,
+    },
+    velocity: {
+      avg_quote_to_acceptance_days: Math.round(avgQuoteToAccept / n),
+      avg_acceptance_to_build_days: Math.round(avgAcceptToBuild / n),
+      avg_build_to_payment_days: Math.round(avgBuildToPayment / n),
+      avg_quote_to_cash_days: Math.round((avgQuoteToAccept + avgAcceptToBuild + avgBuildToPayment) / n),
+    },
+    forecast_30_day: {
+      revenue: Math.round(forecast30.revenue),
+      costs: Math.round(totalCostsCommitted),
+    },
+    computed_at: now.toISOString(),
   }
 }

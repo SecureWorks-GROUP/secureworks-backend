@@ -3582,6 +3582,11 @@ async function createAssignment(client: any, body: any) {
     metadata: { user_id: userId || user_id || null, scheduled_date: sDate },
   }).then(() => {}).catch(() => {})
 
+  // Fire-and-forget: recompute job intelligence after assignment creation
+  fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jId}`, {
+    headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+  }).catch(() => {})
+
   return { assignment: data }
 }
 
@@ -3816,6 +3821,11 @@ async function updateJobStatus(client: any, body: any) {
     metadata: { operator: body.operator_email || body.user_email || null },
   })
 
+  // Fire-and-forget: recompute job intelligence after status change
+  fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jId}`, {
+    headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+  }).catch(() => {})
+
   // ── Push status change to GHL (non-blocking) ──
   // Skip if this change originated from a GHL webhook (anti-loop)
   if (source !== 'ghl_webhook' && data.ghl_opportunity_id) {
@@ -3919,6 +3929,13 @@ async function createPO(client: any, body: any) {
     message_content: `PO created for ${supplier}: $${total || 0}`,
     metadata: { supplier_name: supplier, total },
   }).then(() => {}).catch(() => {})
+
+  // Fire-and-forget: recompute job intelligence after PO creation
+  if (job_id || jobId) {
+    fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${job_id || jobId}`, {
+      headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+    }).catch(() => {})
+  }
 
   return { purchase_order: data }
 }
@@ -7998,6 +8015,11 @@ async function sendPaymentLink(client: any, body: any) {
     message_content: smsMessage.slice(0, 2000),
     metadata: { invoice_number: invoice.invoice_number, payment_url: onlineUrl },
   }).then(() => {}).catch(() => {})
+
+  // Fire-and-forget: recompute job intelligence after payment link sent
+  fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jId}`, {
+    headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+  }).catch(() => {})
 
   return {
     success: true,

@@ -474,6 +474,11 @@ const INTELLIGENCE_TOOLS = [
     description: 'Revenue vs targets, margin trends, win rate, cycle time breakdown, month-over-month and year-over-year comparisons.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'get_portfolio_summary',
+    description: 'Full business snapshot: pipeline value, risk distribution, KPI breaches by person, velocity metrics, 30-day forecast. The CEO morning number.',
+    input_schema: { type: 'object', properties: {} },
+  },
 ]
 
 // Execute tools — write actions requiring confirmation (admin + tier-appropriate only)
@@ -844,7 +849,7 @@ const EXECUTE_TOOLS = [
 const FINANCIAL_TOOLS = new Set([
   'get_dashboard_summary', 'get_trends', 'explain_pnl', 'cash_flow_forecast',
   'cash_flow_status', 'cash_waterfall', 'cash_leak_detection', 'division_comparison', 'get_debt_followup', 'get_job_profitability',
-  'get_sales_breakdown', 'performance_benchmarks',
+  'get_sales_breakdown', 'performance_benchmarks', 'get_portfolio_summary',
 ])
 
 const COST_TOOLS = new Set([
@@ -1429,6 +1434,9 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
 
     case 'performance_benchmarks':
       return { result: await callReportingApi('performance_benchmarks') }
+
+    case 'get_portfolio_summary':
+      return { result: await callReportingApi('portfolio_summary') }
 
     case 'estimate_accuracy_report': {
       const sb = sbClient()
@@ -3172,7 +3180,7 @@ If you need more info to execute, call the lookup tool FIRST (search_contacts, g
 YOUR TOOLS INVENTORY (you have ALL of these — use them):
 LOOKUP: search_jobs, get_job_detail, get_job_context, get_schedule, search_contacts, search_ghl, search_invoices, get_attention_items, get_dashboard_summary, get_debt_followup, get_job_profitability, get_trends, get_sales_breakdown, get_marketing_summary, get_client_conversation, get_quote_terms, get_crew_availability, list_suppliers, get_email_events, get_team_activity, get_sales_leads, get_ai_alerts, get_inbox_summary
 DATA: list_variations, list_council_submissions, list_expenses, list_purchase_orders, list_work_orders
-FINANCIAL: explain_pnl, cash_flow_forecast, cash_flow_status, cash_waterfall, cash_leak_detection, unbilled_revenue, division_comparison, cost_trend_analysis, check_supplier_pricing, performance_benchmarks
+FINANCIAL: explain_pnl, cash_flow_forecast, cash_flow_status, cash_waterfall, cash_leak_detection, unbilled_revenue, division_comparison, cost_trend_analysis, check_supplier_pricing, performance_benchmarks, get_portfolio_summary
 ANALYSIS: analyse_profitability, revenue_forecast, supplier_analysis, sales_performance, job_duration_analysis, estimate_accuracy_report, generate_pricing_recommendation
 ACTIONS (need confirmation): execute_send_sms, execute_send_email, execute_send_quote, create_assignment, update_job_status, execute_create_po, execute_create_work_order, execute_push_po_to_xero, execute_add_ghl_note, execute_email_supplier_po, execute_send_telegram, execute_create_invoice, complete_and_invoice, execute_reconcile_payment, execute_send_review_request
 NEVER say "I don't have that capability" or "I don't have access" — check your tools first.
