@@ -3823,6 +3823,12 @@ async function cashLeakDetection(sb: any) {
     if (revenue <= 0 && cost <= 0) return null
     // If invoiced but no expenses tracked yet, skip (incomplete data)
     if (revenue > 0 && cost <= 0) return null
+    // If expenses but no revenue, likely misattributed admin costs — skip small amounts
+    if (revenue <= 0 && cost > 0 && cost < 500) return null
+    // If revenue is very small relative to cost (>5x), likely data issue — flag but don't include in averages
+    if (revenue > 0 && cost > revenue * 5) {
+      return { job_number: j.job_number || proj.job_number, client: j.client_name, type: j.type, revenue: Math.round(revenue), actual_cost: Math.round(cost), margin_pct: Math.round(((revenue - cost) / revenue) * 100), loss: Math.round(cost - revenue), data_flag: 'Expenses 5x+ revenue — likely Xero Projects misattribution. Verify manually.' }
+    }
     const margin_pct = revenue > 0 ? Math.round(((revenue - cost) / revenue) * 100) : -100
     const loss = cost > revenue ? Math.round(cost - revenue) : 0
     return {
@@ -3885,9 +3891,10 @@ async function cashLeakDetection(sb: any) {
     .select('contact_name, amount_due, due_date, age_bucket')
     .eq('org_id', DEFAULT_ORG_ID).eq('age_bucket', '90+')
 
-  // 5. Margin by type — use ALL jobs with Xero data (not just underperforming)
+  // 5. Margin by type — use ALL jobs with Xero data (exclude flagged data issues)
   const marginByType: Record<string, { total_revenue: number, total_cost: number, count: number }> = {}
   for (const j of (allJobMargins as any[])) {
+    if ((j as any).data_flag) continue // Skip misattributed data
     const t = j.type || 'other'
     if (!marginByType[t]) marginByType[t] = { total_revenue: 0, total_cost: 0, count: 0 }
     marginByType[t].total_revenue += j.revenue
