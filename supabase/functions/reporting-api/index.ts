@@ -237,6 +237,32 @@ serve(async (req: Request) => {
           period: `Since ${since}`,
         })
       }
+      case 'chat_logs': {
+        const chatLimit = parseInt(url.searchParams.get('limit') || '20')
+        const chatSince = url.searchParams.get('since') || new Date(Date.now() - 7 * 86400000).toISOString()
+        const chatChannel = url.searchParams.get('channel')
+        let chatQuery = sb.from('chat_logs')
+          .select('id, user_email, role, query, response, tools_used, channel, created_at')
+          .gte('created_at', chatSince)
+          .order('created_at', { ascending: false })
+          .limit(Math.min(chatLimit, 50))
+        if (chatChannel) chatQuery = chatQuery.eq('channel', chatChannel)
+        const { data: logs } = await chatQuery
+        return json({
+          logs: (logs || []).map((l: any) => ({
+            id: l.id,
+            user: l.user_email || 'unknown',
+            role: l.role,
+            query: (l.query || '').slice(0, 500),
+            response: (l.response || '').slice(0, 500),
+            tools_used: l.tools_used,
+            channel: l.channel,
+            when: l.created_at,
+          })),
+          total: (logs || []).length,
+          period: `Since ${chatSince}`,
+        })
+      }
       case 'sales_alerts':
         return json(await salesAlertsAction(sb, url.searchParams))
       case 'sales_snooze': {
