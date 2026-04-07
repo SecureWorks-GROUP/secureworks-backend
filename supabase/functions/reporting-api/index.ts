@@ -952,6 +952,18 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
     }
   }
 
+  // Get PO costs per job for variance breakdown
+  let posByJob: Record<string, any[]> = {}
+  if (jobIds.length > 0) {
+    const { data: pos } = await sb.from('purchase_orders')
+      .select('job_id, supplier_name, total, status')
+      .in('job_id', jobIds).neq('status', 'deleted')
+    for (const po of (pos || [])) {
+      if (!posByJob[po.job_id]) posByJob[po.job_id] = []
+      posByJob[po.job_id].push(po)
+    }
+  }
+
   // Build profitability rows — prefer Xero Projects data, fall back to invoice matching
   const rows = (jobs || []).map((job: any) => {
     const quoteValue = job.pricing_json?.totalExGST || job.pricing_json?.totalIncGST || 0
@@ -974,6 +986,12 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
     const margin = invoiced - bills
     const marginPct = invoiced > 0 ? Math.round((margin / invoiced) * 100) : 0
 
+    // PO variance: quoted materials vs actual PO costs
+    const jobPOs = posByJob[job.id] || []
+    const poCosts = jobPOs.reduce((s: number, p: any) => s + Number(p.total || 0), 0)
+    const quotedMaterials = job.pricing_json?.materialsCost ?? job.pricing_json?.materials ?? null
+    const variance = quotedMaterials != null && poCosts > 0 ? poCosts - Number(quotedMaterials) : null
+
     return {
       id: job.id,
       job_number: job.job_number || xeroProject?.job_number || null,
@@ -985,6 +1003,10 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
       bills,
       margin,
       margin_pct: marginPct,
+      po_costs: poCosts,
+      quoted_materials: quotedMaterials != null ? Number(quotedMaterials) : null,
+      materials_variance: variance != null ? Math.round(variance * 100) / 100 : null,
+      variance_pct: quotedMaterials && Number(quotedMaterials) > 0 && variance != null ? Math.round((variance / Number(quotedMaterials)) * 100) : null,
       data_source: xeroProject ? 'xero_projects' : (jobInvoices.length > 0 ? 'invoice_match' : 'none'),
     }
   })
