@@ -369,8 +369,34 @@ serve(async (req: Request) => {
           })),
         })
       }
+      case 'supplier_performance': {
+        const { data: pos } = await sb.from('purchase_orders')
+          .select('id, supplier_name, total, status, created_at, delivery_date, confirmed_delivery_date, paid_at')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .neq('status', 'deleted')
+          .order('supplier_name')
+        const suppliers: Record<string, any> = {}
+        for (const po of (pos || [])) {
+          const name = po.supplier_name || 'Unknown'
+          if (!suppliers[name]) suppliers[name] = { name, po_count: 0, total_spend: 0, statuses: {}, lead_times: [] }
+          const s = suppliers[name]
+          s.po_count++
+          s.total_spend += Number(po.total || 0)
+          s.statuses[po.status] = (s.statuses[po.status] || 0) + 1
+          if (po.confirmed_delivery_date && po.created_at) {
+            const days = Math.ceil((new Date(po.confirmed_delivery_date).getTime() - new Date(po.created_at).getTime()) / 86400000)
+            if (days > 0 && days < 180) s.lead_times.push(days)
+          }
+        }
+        const result = Object.values(suppliers).map((s: any) => ({
+          supplier: s.name, po_count: s.po_count, total_spend: Math.round(s.total_spend * 100) / 100,
+          avg_lead_time_days: s.lead_times.length > 0 ? Math.round(s.lead_times.reduce((a: number, b: number) => a + b, 0) / s.lead_times.length) : null,
+          statuses: s.statuses,
+        })).sort((a: any, b: any) => b.total_spend - a.total_spend)
+        return json({ suppliers: result, total_suppliers: result.length })
+      }
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence, shaun_brief' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence, shaun_brief, supplier_performance' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
