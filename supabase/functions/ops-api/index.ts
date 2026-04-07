@@ -7957,6 +7957,44 @@ async function completeJob(client: any, body: any) {
     }
   }
 
+  // Capture job_predictions (non-blocking) — store predicted vs actual for benchmarking
+  try {
+    const completedAt = new Date()
+    const { data: intel } = await client.from('job_intelligence')
+      .select('margin_forecast_pct, risk_level, computed_at')
+      .eq('job_id', jId).maybeSingle()
+    const { data: fullJob } = await client.from('jobs')
+      .select('accepted_at, pricing_json').eq('id', jId).single()
+    const acceptedAt = fullJob?.accepted_at ? new Date(fullJob.accepted_at) : null
+    const actualDays = acceptedAt ? Math.ceil((completedAt.getTime() - acceptedAt.getTime()) / 86400000) : null
+
+    // Actual margin from invoices vs POs
+    const [{ data: invRows }, { data: poRows }] = await Promise.all([
+      client.from('xero_invoices').select('total').eq('job_id', jId).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
+      client.from('purchase_orders').select('total').eq('job_id', jId).neq('status', 'deleted'),
+    ])
+    const totalInvoiced = (invRows || []).reduce((s: number, r: any) => s + Number(r.total || 0), 0)
+    const totalCosts = (poRows || []).reduce((s: number, r: any) => s + Number(r.total || 0), 0)
+    const actualMargin = totalInvoiced > 0 ? ((totalInvoiced - totalCosts) / totalInvoiced) * 100 : null
+
+    await client.from('job_predictions').insert({
+      org_id: DEFAULT_ORG_ID,
+      job_id: jId,
+      job_type: job.type || 'patio',
+      predicted_margin_pct: intel?.margin_forecast_pct || null,
+      predicted_risk_level: intel?.risk_level || null,
+      predicted_at: intel?.computed_at || null,
+      actual_duration_days: actualDays,
+      actual_margin_pct: actualMargin != null ? Math.round(actualMargin * 100) / 100 : null,
+      completed_at: completedAt.toISOString(),
+      margin_accuracy_pct: (intel?.margin_forecast_pct != null && actualMargin != null)
+        ? Math.round((1 - Math.abs(intel.margin_forecast_pct - actualMargin) / Math.max(Math.abs(actualMargin), 1)) * 10000) / 100
+        : null,
+    })
+  } catch (e) {
+    console.log('[ops-api] job_predictions capture failed (non-blocking):', (e as Error).message)
+  }
+
   // Low satisfaction alert
   if (body.satisfaction_rating != null && body.satisfaction_rating < 4) {
     try {
