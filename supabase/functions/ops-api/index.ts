@@ -612,6 +612,12 @@ serve(async (req: Request) => {
       case 'create_work_order': return json(await createWorkOrder(client, body))
       case 'update_work_order': return json(await updateWorkOrder(client, body))
       case 'send_work_order': return json(await sendWorkOrder(client, body))
+      case 'add_note': {
+        // Dual auth: API key callers (MCP/Cowork) pass as admin, JWT callers pass their userId
+        const noteUserId = authMode === 'jwt' ? authUser!.id : (body.userId || body.user_id || null)
+        const noteIsAdmin = authMode === 'api_key' || authUser?.role === 'admin'
+        return json(await addNote(client, { ...body, userId: noteUserId }, noteIsAdmin))
+      }
       case 'create_invoice': return json(await createInvoice(client, body))
       case 'sync_job_invoices': return json(await syncJobInvoices(client, body))
       case 'update_invoice_job_link': {
@@ -1270,7 +1276,6 @@ serve(async (req: Request) => {
       // ── Trade (mobile) — JWT auth required ──
       case 'my_jobs':
       case 'trade_job_detail':
-      case 'add_note':
       case 'upload_photo':
       case 'get_upload_url':
       case 'confirm_upload':
@@ -1311,7 +1316,6 @@ serve(async (req: Request) => {
             return json(await myJobs(client, tradeUser.id, showAll))
           }
           case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isAdmin))
-          case 'add_note': return json(await addNote(client, { ...body, userId: tradeUser.id }, isAdmin))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
           case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin))
           case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin))
@@ -2871,7 +2875,7 @@ async function calendarEvents(client: any, params: URLSearchParams) {
 
   const calSelect = includeFinancials
     ? '*'
-    : 'assignment_id, job_id, job_number, client_name, site_address, scheduled_date, start_time, end_time, crew_name, assignment_type, assignment_status, job_type, job_status, scope_json, ghl_contact_id, org_id'
+    : 'assignment_id, job_id, user_id, job_number, client_name, site_address, site_suburb, scheduled_date, scheduled_end, start_time, end_time, crew_name, assigned_to, assignment_type, assignment_status, confirmation_status, job_type, job_status, scope_json, ghl_contact_id, org_id'
 
   let query = client
     .from('calendar_events')
