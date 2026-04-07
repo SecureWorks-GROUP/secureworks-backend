@@ -1959,25 +1959,21 @@ serve(async (req: Request) => {
       const { contactId, message, jobId, userId } = body
       if (!contactId || !message) return json({ error: 'contactId and message required' }, 400)
 
-      // Dedup: check for identical SMS to same contact within last 10 minutes
-      // Only blocks exact same message — different messages to same contact are allowed
+      // Atomic dedup: claim slot via advisory-locked DB function (prevents race condition)
+      let dedupEventId: number | null = null
       try {
         const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
-        const { data: recentSms } = await sb.from('business_events')
-          .select('payload')
-          .eq('event_type', 'sms_sent')
-          .eq('entity_id', contactId)
-          .gte('occurred_at', tenMinsAgo)
-        // Only block if the SAME message content was sent recently
-        const isDuplicate = (recentSms || []).some((e: any) => {
-          const prevMsg = e.payload?.message || ''
-          return prevMsg === message.slice(0, 500) // Compare against what we'd store
+        const { data: dedup, error: dedupErr } = await sb.rpc('claim_sms_slot', {
+          p_contact_id: contactId,
+          p_message: message,
+          p_job_id: jobId || null,
         })
-        if (isDuplicate) {
+        if (dedupErr) console.log('[ghl-proxy] Dedup check failed:', dedupErr.message)
+        if (dedup && !dedup.allowed) {
           console.log(`[ghl-proxy] DEDUP BLOCKED: identical SMS to ${contactId} sent within last 10 min`)
           return json({ success: false, error: 'This exact SMS was already sent to this contact within the last 10 minutes.', dedup_blocked: true }, 409)
         }
+        dedupEventId = dedup?.event_id || null
       } catch { /* dedup is best-effort — don't block sends if check fails */ }
 
       try {
@@ -1991,18 +1987,28 @@ serve(async (req: Request) => {
         })
         console.log(`[ghl-proxy] SMS sent to contact ${contactId}`)
 
-        // Log to business_events for dedup + audit trail
-        try {
-          const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-          await sb.from('business_events').insert({
-            event_type: 'sms_sent',
-            source: 'ghl-proxy',
-            entity_type: 'contact',
-            entity_id: contactId,
-            job_id: jobId || null,
-            payload: { message: message.slice(0, 500), message_id: result.messageId || result.id },
-          })
-        } catch { /* non-blocking */ }
+        // Update the pending dedup event with actual send details
+        if (dedupEventId) {
+          try {
+            const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+            await sb.from('business_events').update({
+              payload: { message: message.slice(0, 500), message_id: result.messageId || result.id, status: 'sent' },
+            }).eq('id', dedupEventId)
+          } catch { /* non-blocking */ }
+        } else {
+          // Fallback: insert if no dedup event was created (dedup check failed gracefully)
+          try {
+            const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+            await sb.from('business_events').insert({
+              event_type: 'sms_sent',
+              source: 'ghl-proxy',
+              entity_type: 'contact',
+              entity_id: contactId,
+              job_id: jobId || null,
+              payload: { message: message.slice(0, 500), message_id: result.messageId || result.id },
+            })
+          } catch { /* non-blocking */ }
+        }
 
         // Log to job_events so Ops timeline + Trade can show sent messages without calling GHL
         if (jobId) {

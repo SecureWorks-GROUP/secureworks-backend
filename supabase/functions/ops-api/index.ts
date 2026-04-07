@@ -7932,19 +7932,14 @@ async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
-  // Dedup check: prevent sending same payment link within 24 hours
-  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-  const { data: recentSends } = await client
-    .from('job_events')
-    .select('id, created_at')
-    .eq('job_id', jId)
-    .eq('event_type', 'payment_link_sent')
-    .gte('created_at', twentyFourHoursAgo)
-    .limit(1)
-  if (recentSends && recentSends.length > 0) {
-    const lastSent = recentSends[0].created_at
+  // Atomic dedup: claim slot via advisory-locked DB function (prevents race condition)
+  const { data: dedup, error: dedupErr } = await client.rpc('claim_payment_link_slot', { p_job_id: jId })
+  if (dedupErr) throw new Error('Dedup check failed: ' + dedupErr.message)
+  if (!dedup?.allowed) {
+    const lastSent = dedup?.last_sent
     throw new ApiError(`Payment link already sent for this job within the last 24 hours (last sent: ${new Date(lastSent).toLocaleString('en-AU', { timeZone: 'Australia/Perth' })}). To prevent duplicate messages, please wait before resending.`, 409)
   }
+  const dedupEventId = dedup.event_id
 
   // Get job with GHL contact
   const { data: job, error: jobErr } = await client
@@ -7992,17 +7987,16 @@ async function sendPaymentLink(client: any, body: any) {
   })
   const smsResult = await smsResp.json()
 
-  // Log event
-  await client.from('job_events').insert({
-    job_id: jId,
-    event_type: 'payment_link_sent',
+  // Update the pending dedup event with actual details
+  await client.from('job_events').update({
     detail_json: {
+      status: 'sent',
       invoice_number: invoice.invoice_number,
       xero_invoice_id: invoice.xero_invoice_id,
       online_url: onlineUrl,
       sms_sent: smsResult.success || false,
     },
-  })
+  }).eq('id', dedupEventId)
 
   // Log to jarvis_event_log (non-blocking, fire-and-forget)
   client.from('jarvis_event_log').insert({
