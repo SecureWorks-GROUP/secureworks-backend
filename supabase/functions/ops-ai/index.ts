@@ -2312,8 +2312,8 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
         }}
       } else {
         // No specific template requested — return both
-        const patioResult = await executeTool('get_quote_terms', { template: 'patio' }, caller)
-        const fencingResult = await executeTool('get_quote_terms', { template: 'fencing' }, caller)
+        const patioResult = await executeTool('get_quote_terms', { template: 'patio' }, view)
+        const fencingResult = await executeTool('get_quote_terms', { template: 'fencing' }, view)
         return { result: { templates: { patio: patioResult.result, fencing: fencingResult.result }, note: 'Both patio and fencing terms returned. Specify template for one type only.' } }
       }
     }
