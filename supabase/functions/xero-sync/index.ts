@@ -1619,7 +1619,7 @@ async function backfillContacts(sb: any) {
 
     rows.push({
       org_id: DEFAULT_ORG_ID,
-      ghl_contact_id: job.ghl_opportunity_id || null,
+      ghl_contact_id: job.ghl_contact_id || null,
       job_id: job.id,
       email: job.client_email || null,
       phone: job.client_phone || null,
