@@ -392,7 +392,7 @@ async function jobContext(sb: any, jobId: string) {
     if (found) jobId = found.id
   }
 
-  const [job, events, emails, chases, jarvisActions, conversations] = await Promise.all([
+  const [job, events, emails, chases, jarvisActions, conversations, poComms, jobDocs, councilSubs, emailEvents] = await Promise.all([
     // 1. Job details (lite — no scope/pricing)
     sb.from('jobs')
       .select('id, job_number, client_name, client_phone, client_email, type, status, site_address, site_suburb, ghl_contact_id, created_at, quoted_at, accepted_at, scheduled_at, completed_at')
@@ -429,6 +429,30 @@ async function jobContext(sb: any, jobId: string) {
       .eq('job_id', jobId)
       .in('event_type', ['sms_sent', 'email_sent', 'quote_sent', 'quote_accepted'])
       .order('occurred_at', { ascending: false }).limit(10),
+
+    // 7. PO communications (supplier email threads)
+    sb.from('po_communications')
+      .select('id, po_id, direction, from_email, subject, ai_classification, ai_confidence, quote_version, received_at, created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(20),
+
+    // 8. Job documents (PDFs, photos, certificates)
+    sb.from('job_documents')
+      .select('id, type, file_name, storage_url, visible_to_trades, version, created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(20),
+
+    // 9. Council submissions
+    sb.from('council_submissions')
+      .select('id, overall_status, current_step_index, steps, created_at, updated_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(5),
+
+    // 10. Email events (delivery tracking)
+    sb.from('email_events')
+      .select('event_type, recipient_email, subject, status, created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(15),
   ])
 
   // Build timeline from all sources
@@ -443,11 +467,31 @@ async function jobContext(sb: any, jobId: string) {
     job: job.data,
     invoices: (chases.data || []).map((i: any) => ({ number: i.invoice_number, amount_due: Number(i.amount_due) || 0, status: i.status, due_date: i.due_date })),
     timeline,
+    po_communications: (poComms.data || []).map((c: any) => ({
+      id: c.id, po_id: c.po_id, direction: c.direction, from: c.from_email, subject: c.subject,
+      classification: c.ai_classification, confidence: c.ai_confidence, quote_version: c.quote_version,
+      when: c.received_at || c.created_at,
+    })),
+    documents: (jobDocs.data || []).map((d: any) => ({
+      id: d.id, type: d.type, name: d.file_name, url: d.storage_url,
+      visible_to_trades: d.visible_to_trades, version: d.version, when: d.created_at,
+    })),
+    council: (councilSubs.data || []).map((c: any) => ({
+      id: c.id, status: c.overall_status, current_step: c.current_step_index,
+      total_steps: (c.steps || []).length, steps: (c.steps || []).map((s: any) => ({ name: s.name || s.label, status: s.status })),
+      when: c.updated_at || c.created_at,
+    })),
+    email_tracking: (emailEvents.data || []).map((e: any) => ({
+      type: e.event_type, to: e.recipient_email, subject: e.subject, status: e.status, when: e.created_at,
+    })),
     summary: {
       total_events: timeline.length,
       emails_received: (emails.data || []).length,
       jarvis_actions: (jarvisActions.data || []).length,
       comms_sent: (conversations.data || []).length,
+      po_threads: (poComms.data || []).length,
+      documents: (jobDocs.data || []).length,
+      council_submissions: (councilSubs.data || []).length,
       has_overdue: (chases.data || []).some((i: any) => i.status !== 'PAID' && i.due_date && new Date(i.due_date) < new Date()),
     },
   }
