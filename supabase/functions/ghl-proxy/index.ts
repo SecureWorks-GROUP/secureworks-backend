@@ -1960,7 +1960,7 @@ serve(async (req: Request) => {
       if (!contactId || !message) return json({ error: 'contactId and message required' }, 400)
 
       // Atomic dedup: claim slot via advisory-locked DB function (prevents race condition)
-      let dedupEventId: number | null = null
+      let dedupEventId: string | null = null
       try {
         const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         const { data: dedup, error: dedupErr } = await sb.rpc('claim_sms_slot', {
