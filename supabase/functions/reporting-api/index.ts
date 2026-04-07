@@ -1353,7 +1353,7 @@ async function debtFollowup(sb: any, search?: string) {
   if (matchedJobIds.length > 0) {
     const { data: jobs } = await sb
       .from('jobs')
-      .select('id, client_phone, client_email, client_name')
+      .select('id, client_phone, client_email, client_name, ghl_contact_id')
       .in('id', matchedJobIds.slice(0, 200))
 
     // Map job_id back to xero_contact_id via matches
@@ -1366,6 +1366,7 @@ async function debtFollowup(sb: any, search?: string) {
       if (xeroId && contactInfo[xeroId]) {
         if (!contactInfo[xeroId].phone && j.client_phone) contactInfo[xeroId].phone = j.client_phone
         if (!contactInfo[xeroId].email && j.client_email) contactInfo[xeroId].email = j.client_email
+        if (!contactInfo[xeroId].ghl_id && j.ghl_contact_id) contactInfo[xeroId].ghl_id = j.ghl_contact_id
       }
     }
   }
