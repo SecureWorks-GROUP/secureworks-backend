@@ -340,8 +340,9 @@ serve(async (req: Request) => {
     return json({
       success: true,
       from,
-      to: Array.isArray(to) ? to : [to],
-      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : [],
+      to: splitEmails(to),
+      cc: cc ? splitEmails(cc) : [],
+      bcc: bcc ? splitEmails(bcc) : [],
       subject,
       attachments: (attachments || []).length,
     })
