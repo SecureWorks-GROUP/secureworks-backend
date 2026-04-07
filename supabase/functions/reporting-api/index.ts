@@ -4509,10 +4509,15 @@ async function getPortfolioSummary(sb: any) {
     .eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCREC')
     .not('status', 'in', '("VOIDED","DELETED")')
 
-  // 3. PO totals
+  // 3. Cost totals — internal POs + Xero supplier bills (ACCPAY)
   const { data: pos } = await sb.from('purchase_orders')
     .select('total, status')
     .eq('org_id', DEFAULT_ORG_ID).neq('status', 'deleted')
+
+  const { data: bills } = await sb.from('xero_invoices')
+    .select('total, amount_paid, status')
+    .eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCPAY')
+    .not('status', 'in', '("VOIDED","DELETED")')
 
   // 4. Risk distribution from job_intelligence (may be empty initially)
   const { data: intel } = await sb.from('job_intelligence')
@@ -4546,7 +4551,10 @@ async function getPortfolioSummary(sb: any) {
   const totalInvoiced = (invoices || []).reduce((s: number, i: any) => s + (Number(i.total) || 0), 0)
   const totalCollected = (invoices || []).reduce((s: number, i: any) => s + (Number(i.amount_paid) || 0), 0)
   const totalOutstanding = (invoices || []).reduce((s: number, i: any) => s + (Number(i.amount_due) || 0), 0)
-  const totalCostsCommitted = (pos || []).filter((p: any) => !['deleted', 'cancelled'].includes(p.status)).reduce((s: number, p: any) => s + (Number(p.total) || 0), 0)
+  const poTotal = (pos || []).filter((p: any) => !['deleted', 'cancelled'].includes(p.status)).reduce((s: number, p: any) => s + (Number(p.total) || 0), 0)
+  const billsTotal = (bills || []).reduce((s: number, b: any) => s + (Number(b.total) || 0), 0)
+  const billsPaid = (bills || []).reduce((s: number, b: any) => s + (Number(b.amount_paid) || 0), 0)
+  const totalCostsCommitted = poTotal + billsTotal
 
   // Risk distribution
   const riskDist: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }
@@ -4590,8 +4598,9 @@ async function getPortfolioSummary(sb: any) {
       total_collected: Math.round(totalCollected),
       total_outstanding: Math.round(totalOutstanding),
       total_costs_committed: Math.round(totalCostsCommitted),
-      projected_gross_margin: Math.round(totalAccepted - totalCostsCommitted),
-      projected_margin_pct: totalAccepted > 0 ? Math.round(((totalAccepted - totalCostsCommitted) / totalAccepted) * 100) : 0,
+      costs_breakdown: { internal_pos: Math.round(poTotal), xero_bills: Math.round(billsTotal), xero_bills_paid: Math.round(billsPaid) },
+      projected_gross_margin: Math.round(totalInvoiced - totalCostsCommitted),
+      projected_margin_pct: totalInvoiced > 0 ? Math.round(((totalInvoiced - totalCostsCommitted) / totalInvoiced) * 100) : 0,
     },
     jobs: {
       active: (activeJobs || []).length,
