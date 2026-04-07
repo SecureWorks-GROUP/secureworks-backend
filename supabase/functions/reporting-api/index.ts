@@ -283,8 +283,10 @@ serve(async (req: Request) => {
         return json(await jobContext(sb, url.searchParams.get('job_id') || ''))
       case 'portfolio_summary':
         return json(await getPortfolioSummary(sb))
+      case 'job_intelligence':
+        return json(await getJobIntelligence(sb, url.searchParams.get('job_id') || ''))
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
@@ -3941,6 +3943,394 @@ async function cashLeakDetection(sb: any) {
       best_5: (allJobMargins as any[]).sort((a: any, b: any) => b.margin_pct - a.margin_pct).slice(0, 5),
     },
   }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// JOB INTELLIGENCE — Full AI assessment per job
+// ════════════════════════════════════════════════════════════
+
+const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
+
+async function computeJobIntelligence(sb: any, jobId: string) {
+  const now = new Date()
+
+  // ── 1. Gather data in parallel (10 queries) ──
+  const [
+    jobRes, eventsRes, invoicesRes, posRes, wosRes,
+    assignmentsRes, commsRes, inboxRes, annotationsRes,
+  ] = await Promise.all([
+    // Job details
+    sb.from('jobs')
+      .select('id, job_number, client_name, client_phone, client_email, type, status, pricing_json, created_at, quoted_at, accepted_at, scheduled_at, completed_at, deposit_amount, created_by, site_suburb')
+      .eq('id', jobId).single(),
+    // Job events (last 20)
+    sb.from('job_events')
+      .select('event_type, detail_json, created_at, users:user_id(name)')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(20),
+    // Xero invoices (ACCREC, active)
+    sb.from('xero_invoices')
+      .select('invoice_number, invoice_type, status, total, amount_due, amount_paid, due_date, invoice_date')
+      .eq('job_id', jobId).eq('invoice_type', 'ACCREC')
+      .not('status', 'in', '("VOIDED","DELETED")'),
+    // Purchase orders
+    sb.from('purchase_orders')
+      .select('id, po_number, supplier_name, status, total, delivery_date, delivery_confirmed_at, confirmed_delivery_date, created_at')
+      .eq('job_id', jobId)
+      .not('status', 'eq', 'deleted'),
+    // Work orders
+    sb.from('work_orders')
+      .select('id, wo_number, status, scope_items, scheduled_date, completed_at')
+      .eq('job_id', jobId),
+    // Job assignments
+    sb.from('job_assignments')
+      .select('id, user_id, crew_name, scheduled_date, scheduled_end, status')
+      .eq('job_id', jobId),
+    // PO communications
+    sb.from('po_communications')
+      .select('id, direction, channel, created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(20),
+    // Inbox events
+    sb.from('inbox_events')
+      .select('id, from_name, subject, received_at, classification')
+      .eq('job_id', jobId)
+      .order('received_at', { ascending: false }).limit(10),
+    // AI annotations
+    sb.from('ai_annotations')
+      .select('id, annotation_type, severity, content, created_at')
+      .eq('job_id', jobId),
+  ])
+
+  const job = jobRes.data
+  if (!job) throw new Error(`Job not found: ${jobId}`)
+
+  // Cross-job: other jobs by same client for payment history
+  const { data: crossJobs } = await sb.from('jobs')
+    .select('id, job_number, status')
+    .ilike('client_name', job.client_name)
+    .neq('id', jobId)
+
+  // Get invoices for cross-jobs to check payment history
+  const crossJobIds = (crossJobs || []).map((j: any) => j.id)
+  let crossInvoices: any[] = []
+  if (crossJobIds.length > 0) {
+    const { data } = await sb.from('xero_invoices')
+      .select('job_id, status, amount_due, due_date')
+      .in('job_id', crossJobIds.slice(0, 20))
+      .eq('invoice_type', 'ACCREC')
+      .not('status', 'in', '("VOIDED","DELETED")')
+    crossInvoices = data || []
+  }
+
+  const events = eventsRes.data || []
+  const invoices = invoicesRes.data || []
+  const pos = posRes.data || []
+  const wos = wosRes.data || []
+  const assignments = assignmentsRes.data || []
+  const comms = commsRes.data || []
+  const inboxEmails = inboxRes.data || []
+  const annotations = annotationsRes.data || []
+
+  // ── 2. Compute financials ──
+  const pricingJson = job.pricing_json || {}
+  const quoted = parseFloat(pricingJson.totalExGST || pricingJson.totalIncGST || pricingJson.total || '0') || 0
+  const invoiced = invoices.reduce((s: number, i: any) => s + (parseFloat(i.total) || 0), 0)
+  const paid = invoices.reduce((s: number, i: any) => s + (parseFloat(i.amount_paid) || 0), 0)
+  const owing = invoices.reduce((s: number, i: any) => s + (parseFloat(i.amount_due) || 0), 0)
+
+  const poTotal = pos.reduce((s: number, p: any) => s + (parseFloat(p.total) || 0), 0)
+  const woTotal = wos.reduce((s: number, w: any) => {
+    const items = w.scope_items || []
+    return s + items.reduce((is: number, it: any) => is + (parseFloat(it.total || it.amount || '0') || 0), 0)
+  }, 0)
+  const costs_committed = poTotal + woTotal
+  const margin = quoted > 0 ? quoted - costs_committed : 0
+  const margin_pct = quoted > 0 ? Math.round((margin / quoted) * 100) : 0
+
+  const financials = { quoted, invoiced, paid, owing, costs_committed, margin, margin_pct, po_total: poTotal, wo_total: woTotal }
+
+  // ── 3. Compute risk level (0-7 signals) ──
+  let riskSignals = 0
+  const riskDetails: string[] = []
+
+  // Overdue invoice 30+ days
+  const overdueInvoices = invoices.filter((i: any) => {
+    if (i.status === 'PAID') return false
+    const due = new Date(i.due_date)
+    return (now.getTime() - due.getTime()) > 30 * 86400000
+  })
+  if (overdueInvoices.length > 0) { riskSignals++; riskDetails.push(`${overdueInvoices.length} invoice(s) overdue 30+ days`) }
+
+  // No PO but scheduled within 5 days
+  const hasSchedule = assignments.some((a: any) => a.scheduled_date)
+  const nearestSchedule = assignments
+    .filter((a: any) => a.scheduled_date)
+    .map((a: any) => new Date(a.scheduled_date))
+    .sort((a: Date, b: Date) => a.getTime() - b.getTime())[0]
+  if (nearestSchedule && pos.length === 0 && (nearestSchedule.getTime() - now.getTime()) < 5 * 86400000 && nearestSchedule > now) {
+    riskSignals++; riskDetails.push('No PO but scheduled within 5 days')
+  }
+
+  // No deposit on accepted job (3+ days)
+  if (job.accepted_at && !job.deposit_amount && (now.getTime() - new Date(job.accepted_at).getTime()) > 3 * 86400000) {
+    const hasDepositInvoice = invoices.some((i: any) => (i.invoice_number || '').toLowerCase().includes('dep'))
+    if (!hasDepositInvoice) { riskSignals++; riskDetails.push('No deposit 3+ days after acceptance') }
+  }
+
+  // Client has overdue on OTHER jobs
+  const clientOverdue = crossInvoices.some((i: any) => {
+    if (i.status === 'PAID') return false
+    return i.due_date && new Date(i.due_date) < now
+  })
+  if (clientOverdue) { riskSignals++; riskDetails.push('Client has overdue invoices on other jobs') }
+
+  // Quote 21+ days, no acceptance
+  if (job.quoted_at && !job.accepted_at && (now.getTime() - new Date(job.quoted_at).getTime()) > 21 * 86400000) {
+    riskSignals++; riskDetails.push('Quote 21+ days with no acceptance')
+  }
+
+  // Materials not confirmed, build within 3 days
+  const unconfirmedPOs = pos.filter((p: any) => !p.delivery_confirmed_at)
+  if (unconfirmedPOs.length > 0 && nearestSchedule && (nearestSchedule.getTime() - now.getTime()) < 3 * 86400000 && nearestSchedule > now) {
+    riskSignals++; riskDetails.push('Materials not confirmed, build within 3 days')
+  }
+
+  // Complete 2+ days, no final invoice
+  if (job.completed_at && (now.getTime() - new Date(job.completed_at).getTime()) > 2 * 86400000) {
+    const hasPostCompletionInvoice = invoices.some((i: any) => new Date(i.invoice_date) >= new Date(job.completed_at))
+    if (!hasPostCompletionInvoice) { riskSignals++; riskDetails.push('Complete 2+ days with no final invoice') }
+  }
+
+  const risk_level = riskSignals === 0 ? 'low' : riskSignals <= 2 ? 'medium' : riskSignals <= 4 ? 'high' : 'critical'
+
+  // ── 4. Compute health score (0-100) ──
+  // Margin health (30%)
+  const marginHealth = quoted > 0 ? Math.min(100, Math.max(0, Math.round((margin_pct / 30) * 100))) : 50
+  // Schedule adherence (20%)
+  const crewAssigned = assignments.length > 0
+  const datesSet = assignments.some((a: any) => a.scheduled_date)
+  const scheduleHealth = crewAssigned && datesSet ? 100 : crewAssigned || datesSet ? 50 : 0
+  // Payment status (20%)
+  const paymentHealth = invoiced > 0 ? Math.round((paid / invoiced) * 100) : (job.status === 'draft' || job.status === 'quoted' ? 50 : 0)
+  // Client responsiveness (15%)
+  const totalComms = comms.length + inboxEmails.length
+  const lastContact = comms[0]?.created_at || inboxEmails[0]?.received_at
+  const daysSinceContact = lastContact ? Math.floor((now.getTime() - new Date(lastContact).getTime()) / 86400000) : 999
+  const commsScore = Math.min(100, totalComms * 10) * (daysSinceContact < 7 ? 1 : daysSinceContact < 14 ? 0.7 : 0.4)
+  // Materials readiness (15%)
+  const confirmedPOs = pos.filter((p: any) => p.delivery_confirmed_at).length
+  const materialsHealth = pos.length > 0 ? Math.round((confirmedPOs / pos.length) * 100) : (job.status === 'draft' || job.status === 'quoted' ? 50 : 100)
+
+  const health_score = Math.round(
+    marginHealth * 0.30 +
+    scheduleHealth * 0.20 +
+    paymentHealth * 0.20 +
+    commsScore * 0.15 +
+    materialsHealth * 0.15
+  )
+
+  // ── 5. Compute client quality score (1-10) ──
+  let clientScore = 5
+  // Deposit paid on time
+  if (job.deposit_amount && job.deposit_amount > 0) clientScore += 2
+  // No scope changes after acceptance
+  const scopeChangesAfterAcceptance = job.accepted_at ? events.filter((e: any) => e.event_type === 'scope_updated' && new Date(e.created_at) > new Date(job.accepted_at)).length : 0
+  if (scopeChangesAfterAcceptance === 0 && job.accepted_at) clientScore += 1
+  // Clean payment history (other jobs all paid)
+  const allCrossJobsPaid = crossInvoices.length === 0 || crossInvoices.every((i: any) => i.status === 'PAID' || (parseFloat(i.amount_due) || 0) <= 0)
+  if (allCrossJobsPaid && crossJobs && crossJobs.length > 0) clientScore += 2
+  // Complained or disputed
+  const hasDispute = events.some((e: any) => {
+    const detail = typeof e.detail_json === 'string' ? e.detail_json : JSON.stringify(e.detail_json || '')
+    return /dispute|complain|unhappy/i.test(detail)
+  })
+  if (hasDispute) clientScore -= 2
+  const client_quality_score = Math.max(1, Math.min(10, clientScore))
+
+  // ── 6. KPI breach flags (things_to_know) ──
+  const things_to_know: any[] = []
+
+  if (overdueInvoices.length > 0) {
+    things_to_know.push({ flag: 'overdue_invoice', detail: `${overdueInvoices.length} invoice(s) overdue 30+ days totalling $${overdueInvoices.reduce((s: number, i: any) => s + (parseFloat(i.amount_due) || 0), 0).toLocaleString()}`, severity: 'high', responsible_person: 'Accounts' })
+  }
+  if (job.completed_at && !invoices.some((i: any) => new Date(i.invoice_date) >= new Date(job.completed_at))) {
+    const daysSinceComplete = Math.floor((now.getTime() - new Date(job.completed_at).getTime()) / 86400000)
+    things_to_know.push({ flag: 'unbilled_complete', detail: `Job completed ${daysSinceComplete} days ago with no final invoice`, severity: daysSinceComplete > 7 ? 'high' : 'medium', responsible_person: 'Accounts', days_breached: daysSinceComplete })
+  }
+  if (margin_pct < 15 && quoted > 0) {
+    things_to_know.push({ flag: 'low_margin', detail: `Margin at ${margin_pct}% ($${margin.toLocaleString()}) — below 15% threshold`, severity: margin_pct < 5 ? 'high' : 'medium', responsible_person: 'Shaun' })
+  }
+  for (const rd of riskDetails) {
+    if (!things_to_know.some((t: any) => t.detail === rd)) {
+      things_to_know.push({ flag: 'risk_signal', detail: rd, severity: 'medium' })
+    }
+  }
+
+  // ── 7. Compute next_actions ──
+  const next_actions: any[] = []
+  if (job.status === 'quoted' && !job.accepted_at) {
+    const daysSinceQuote = job.quoted_at ? Math.floor((now.getTime() - new Date(job.quoted_at).getTime()) / 86400000) : 0
+    next_actions.push({ action: 'Follow up quote', detail: `Quoted ${daysSinceQuote} days ago — needs follow-up`, priority: daysSinceQuote > 14 ? 'high' : 'medium' })
+  }
+  if (job.accepted_at && !job.deposit_amount) {
+    next_actions.push({ action: 'Collect deposit', detail: 'Job accepted but no deposit recorded', priority: 'high' })
+  }
+  if (job.status === 'accepted' && pos.length === 0) {
+    next_actions.push({ action: 'Create purchase orders', detail: 'Job accepted — materials need ordering', priority: 'high' })
+  }
+  if (job.completed_at && owing > 0) {
+    next_actions.push({ action: 'Chase final payment', detail: `$${owing.toLocaleString()} outstanding`, priority: 'high' })
+  }
+
+  // ── 8. Stale detection ──
+  const lastEventAt = events[0]?.created_at ? new Date(events[0].created_at) : null
+  const last_activity_at = lastEventAt || new Date(job.created_at)
+  const statusChangeEvents = events.filter((e: any) => e.event_type === 'status_changed' || e.event_type === 'stage_changed')
+  const lastStatusChange = statusChangeEvents[0]?.created_at ? new Date(statusChangeEvents[0].created_at) : new Date(job.created_at)
+  const days_in_current_stage = Math.floor((now.getTime() - lastStatusChange.getTime()) / 86400000)
+  const terminalStatuses = ['complete', 'completed', 'invoiced', 'cancelled', 'lost']
+  const stale = (now.getTime() - last_activity_at.getTime()) > 7 * 86400000 && !terminalStatuses.includes(job.status)
+
+  // ── 9. Responsible person ──
+  let responsible_person = 'Unknown'
+  if (['draft', 'quoted'].includes(job.status)) {
+    responsible_person = 'Salesperson'
+  } else if (['accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress'].includes(job.status)) {
+    responsible_person = 'Shaun'
+  } else if (['complete', 'completed', 'invoiced'].includes(job.status)) {
+    responsible_person = 'Accounts'
+  }
+
+  // ── 10. Communications summary ──
+  const communications_summary = {
+    total_comms: totalComms,
+    inbound_emails: inboxEmails.length,
+    po_comms: comms.length,
+    last_contact_at: lastContact || null,
+    days_since_contact: daysSinceContact < 999 ? daysSinceContact : null,
+  }
+
+  // ── 11. Materials status ──
+  const materials_status = {
+    total_pos: pos.length,
+    confirmed: confirmedPOs,
+    unconfirmed: pos.length - confirmedPOs,
+    total_cost: poTotal,
+    suppliers: [...new Set(pos.map((p: any) => p.supplier_name))],
+  }
+
+  // ── 12. Schedule status ──
+  const schedule_status = {
+    crew_assigned: crewAssigned,
+    dates_set: datesSet,
+    next_date: nearestSchedule?.toISOString()?.slice(0, 10) || null,
+    total_assignments: assignments.length,
+    crew_names: [...new Set(assignments.map((a: any) => a.crew_name).filter(Boolean))],
+  }
+
+  // ── 13. AI summary via Haiku ──
+  let ai_summary = ''
+  let computation_cost_usd = 0
+  if (ANTHROPIC_API_KEY) {
+    try {
+      const aiPayload = {
+        job: { number: job.job_number, client: job.client_name, type: job.type, status: job.status, suburb: job.site_suburb },
+        financials,
+        risk_level,
+        risk_details: riskDetails,
+        health_score,
+        client_quality_score,
+        stale,
+        days_in_current_stage,
+        schedule: schedule_status,
+        materials: materials_status,
+        things_to_know: things_to_know.slice(0, 5),
+        next_actions: next_actions.slice(0, 3),
+      }
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 200,
+          system: 'You are JARVIS. Write a 2-3 sentence operations assessment. Focus on: biggest risk, financial position, what needs to happen next. Be specific — names, dollar amounts, dates. No filler.',
+          messages: [{ role: 'user', content: JSON.stringify(aiPayload) }],
+        }),
+      })
+      if (resp.ok) {
+        const aiResult = await resp.json()
+        ai_summary = aiResult.content?.[0]?.text || ''
+        const inputTokens = aiResult.usage?.input_tokens || 0
+        const outputTokens = aiResult.usage?.output_tokens || 0
+        computation_cost_usd = (inputTokens * 1 / 1_000_000) + (outputTokens * 5 / 1_000_000)
+      }
+    } catch (e) {
+      console.error('[job-intelligence] Haiku call failed:', (e as Error).message)
+      ai_summary = `[AI summary unavailable — ${risk_level} risk, health ${health_score}/100, margin ${margin_pct}%]`
+    }
+  } else {
+    ai_summary = `[No API key — ${risk_level} risk, health ${health_score}/100, margin ${margin_pct}%]`
+  }
+
+  // ── 14. Upsert to job_intelligence ──
+  const staleAfter = new Date(now.getTime() + 30 * 60 * 1000) // 30 min cache
+
+  const record = {
+    job_id: jobId,
+    org_id: DEFAULT_ORG_ID,
+    risk_level,
+    health_score,
+    client_quality_score,
+    margin_forecast_pct: margin_pct,
+    margin_forecast_amount: Math.round(margin),
+    things_to_know,
+    next_actions,
+    financials,
+    communications_summary,
+    materials_status,
+    schedule_status,
+    days_in_current_stage,
+    last_activity_at: last_activity_at.toISOString(),
+    stale,
+    responsible_person,
+    decision_log: [],
+    ai_summary,
+    computed_at: now.toISOString(),
+    stale_after: staleAfter.toISOString(),
+    computation_cost_usd,
+  }
+
+  const { data: upserted, error: upsertErr } = await sb
+    .from('job_intelligence')
+    .upsert(record, { onConflict: 'job_id' })
+    .select()
+    .single()
+
+  if (upsertErr) {
+    console.error('[job-intelligence] upsert error:', upsertErr)
+    return { ...record, _upsert_error: upsertErr.message }
+  }
+
+  return upserted
+}
+
+async function getJobIntelligence(sb: any, jobId: string) {
+  if (!jobId) throw new Error('job_id required')
+
+  // Resolve job_number if needed
+  if (/^SW[PFDRI]-\d+$/i.test(jobId)) {
+    const { data } = await sb.from('jobs').select('id').ilike('job_number', jobId).maybeSingle()
+    if (data) jobId = data.id
+  }
+
+  // Check cache
+  const { data: cached } = await sb.from('job_intelligence').select('*').eq('job_id', jobId).maybeSingle()
+  if (cached && new Date(cached.stale_after) > new Date()) return cached
+
+  // Recompute
+  return await computeJobIntelligence(sb, jobId)
 }
 
 

@@ -479,6 +479,17 @@ const INTELLIGENCE_TOOLS = [
     description: 'Full business snapshot: pipeline value, risk distribution, KPI breaches by person, velocity metrics, 30-day forecast. The CEO morning number.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'get_job_intelligence',
+    description: 'Full AI intelligence assessment: risk level, health score (0-100), client quality score, margin forecast, KPI breach flags, things to know, next actions, AI summary. The complete picture for any job.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Job UUID or job number (e.g. SWP-25042)' },
+      },
+      required: ['job_id'],
+    },
+  },
 ]
 
 // Execute tools — write actions requiring confirmation (admin + tier-appropriate only)
@@ -1095,6 +1106,8 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
     }
     case 'get_job_context':
       return { result: await callReportingApi('job_context', { job_id: input.job_id }) }
+    case 'get_job_intelligence':
+      return { result: await callReportingApi('job_intelligence', { job_id: input.job_id }) }
     case 'search_contacts': {
       const sb = sbClient()
       const searchName = (input.name || '').trim()
@@ -3181,7 +3194,7 @@ YOUR TOOLS INVENTORY (you have ALL of these — use them):
 LOOKUP: search_jobs, get_job_detail, get_job_context, get_schedule, search_contacts, search_ghl, search_invoices, get_attention_items, get_dashboard_summary, get_debt_followup, get_job_profitability, get_trends, get_sales_breakdown, get_marketing_summary, get_client_conversation, get_quote_terms, get_crew_availability, list_suppliers, get_email_events, get_team_activity, get_sales_leads, get_ai_alerts, get_inbox_summary
 DATA: list_variations, list_council_submissions, list_expenses, list_purchase_orders, list_work_orders
 FINANCIAL: explain_pnl, cash_flow_forecast, cash_flow_status, cash_waterfall, cash_leak_detection, unbilled_revenue, division_comparison, cost_trend_analysis, check_supplier_pricing, performance_benchmarks, get_portfolio_summary
-ANALYSIS: analyse_profitability, revenue_forecast, supplier_analysis, sales_performance, job_duration_analysis, estimate_accuracy_report, generate_pricing_recommendation
+ANALYSIS: analyse_profitability, revenue_forecast, supplier_analysis, sales_performance, job_duration_analysis, estimate_accuracy_report, generate_pricing_recommendation, get_job_intelligence
 ACTIONS (need confirmation): execute_send_sms, execute_send_email, execute_send_quote, create_assignment, update_job_status, execute_create_po, execute_create_work_order, execute_push_po_to_xero, execute_add_ghl_note, execute_email_supplier_po, execute_send_telegram, execute_create_invoice, complete_and_invoice, execute_reconcile_payment, execute_send_review_request
 NEVER say "I don't have that capability" or "I don't have access" — check your tools first.
 `
@@ -3637,7 +3650,7 @@ serve(async (req: Request) => {
       }
     } catch (e) { console.log('[ops-ai] classifier error:', (e as Error).message) }
 
-    const SIMPLE_TOOLS = (tools || []).filter((t: any) => ['search_jobs', 'get_job_detail', 'get_schedule', 'get_attention_items', 'get_dashboard_summary', 'search_contacts', 'list_purchase_orders', 'list_work_orders', 'list_variations', 'list_council_submissions', 'list_expenses', 'search_invoices', 'get_debt_followup', 'get_sales_leads', 'list_suppliers', 'get_crew_availability', 'get_client_conversation', 'get_job_context'].includes(t.name))
+    const SIMPLE_TOOLS = (tools || []).filter((t: any) => ['search_jobs', 'get_job_detail', 'get_schedule', 'get_attention_items', 'get_dashboard_summary', 'search_contacts', 'list_purchase_orders', 'list_work_orders', 'list_variations', 'list_council_submissions', 'list_expenses', 'search_invoices', 'get_debt_followup', 'get_sales_leads', 'list_suppliers', 'get_crew_availability', 'get_client_conversation', 'get_job_context', 'get_job_intelligence'].includes(t.name))
 
     // ── Role-based model override ──
     // After classifier determines A/B/C, override model based on WHO is asking
