@@ -322,6 +322,96 @@ async function processMailbox(
       } catch { /* best effort */ }
     }
 
+    // ── PO Reply Pipeline: supplier_quote/supplier_response → po_communications + analyse ──
+    if (['supplier_quote', 'supplier_response'].includes(classification.classification) && fromEmail) {
+      try {
+        // Find PO by sender domain match or subject PO number
+        let poId: string | null = null
+        let poNumber: string | null = null
+
+        // Try subject line PO number first
+        const poMatch = subject.match(/PO[-\s]?(\d{6})/i) || subject.match(/(PO-\d+)/i)
+        if (poMatch) {
+          const poRef = poMatch[0].replace(/\s/g, '')
+          const { data: po } = await sb.from('purchase_orders')
+            .select('id, job_id, po_number')
+            .ilike('po_number', `%${poRef}%`)
+            .eq('org_id', DEFAULT_ORG_ID)
+            .maybeSingle()
+          if (po) { poId = po.id; poNumber = po.po_number; if (!jobId) jobId = po.job_id }
+        }
+
+        // Fallback: sender domain → supplier → active POs
+        if (!poId) {
+          const senderDomain = fromEmail.split('@')[1] || ''
+          const { data: supplierPOs } = await sb.from('purchase_orders')
+            .select('id, job_id, po_number, supplier_name')
+            .eq('org_id', DEFAULT_ORG_ID)
+            .not('status', 'in', '("deleted","billed")')
+            .order('created_at', { ascending: false })
+            .limit(20)
+          // Match by domain in supplier name (lysaght.com → supplier ILIKE %lysaght%)
+          const domainRoot = senderDomain.replace(/\.com\.au$|\.com$|\.au$/, '')
+          const matchedPO = (supplierPOs || []).find((p: any) =>
+            p.supplier_name?.toLowerCase().includes(domainRoot.toLowerCase())
+          )
+          if (matchedPO) { poId = matchedPO.id; poNumber = matchedPO.po_number; if (!jobId) jobId = matchedPO.job_id }
+        }
+
+        if (poId) {
+          // Create po_communications record
+          await sb.from('po_communications').insert({
+            po_id: poId,
+            job_id: jobId,
+            direction: 'inbound',
+            from_email: fromEmail,
+            to_email: toEmail,
+            subject,
+            body_text: bodyPreview,
+            communication_type: 'purchase_order',
+            received_at: receivedAt,
+          }).then(() => {}).catch((e: any) => console.log('[monitor-inbox] po_communications insert failed:', e.message))
+
+          // Log as job_event
+          if (jobId) {
+            await sb.from('job_events').insert({
+              job_id: jobId,
+              event_type: 'po_email_received',
+              detail_json: { po_id: poId, po_number: poNumber, from_email: fromEmail, subject, source: 'monitor-inbox' },
+            }).then(() => {}).catch(() => {})
+          }
+
+          // Call analyse_supplier_quote (non-blocking)
+          try {
+            const analysisResp = await fetch(
+              `${SUPABASE_URL}/functions/v1/ops-api?action=analyse_supplier_quote`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+                body: JSON.stringify({ po_id: poId, quote_text: bodyPreview }),
+              }
+            )
+            if (analysisResp.ok) {
+              const result = await analysisResp.json()
+              console.log(`[monitor-inbox] analyse_supplier_quote: classification=${result.classification}, items=${result.items_extracted}`)
+            }
+          } catch (e) {
+            console.log('[monitor-inbox] analyse_supplier_quote failed (non-blocking):', (e as Error).message)
+          }
+
+          // Update inbox_events with matched PO + job
+          await sb.from('inbox_events')
+            .update({ job_id: jobId, metadata: { has_attachments: msg.hasAttachments || false, job_ref: classification.job_ref, po_id: poId, po_number: poNumber } })
+            .eq('graph_message_id', msg.id)
+            .then(() => {}).catch(() => {})
+
+          console.log(`[monitor-inbox] PO pipeline: ${fromEmail} → PO ${poNumber} (${poId}), job ${jobId}`)
+        }
+      } catch (e) {
+        console.log('[monitor-inbox] PO reply pipeline failed (non-blocking):', (e as Error).message)
+      }
+    }
+
     // Telegram notification for high priority
     if (classification.priority === 'high') {
       const emoji = classification.classification === 'complaint' ? '🚨'
