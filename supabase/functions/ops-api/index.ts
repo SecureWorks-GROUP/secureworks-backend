@@ -592,6 +592,7 @@ serve(async (req: Request) => {
       case 'pipeline': return json(await pipeline(client, url.searchParams))
       case 'job_detail': return json(await jobDetail(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
+      case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))
       case 'list_pos': return json(await listPOs(client, url.searchParams))
       case 'list_work_orders': return json(await listWorkOrders(client, url.searchParams))
@@ -4293,6 +4294,72 @@ async function sendWorkOrder(client: any, body: any) {
     message: `Work order ${wo.wo_number} marked as sent`,
     share_token: wo.share_token,
   }
+}
+
+// Fetch invoice PDF from Xero API and return as base64
+async function getInvoicePdf(client: any, params: URLSearchParams) {
+  let xeroInvoiceId = params.get('xero_invoice_id')
+  const invoiceNumber = params.get('invoice_number')
+
+  if (!xeroInvoiceId && invoiceNumber) {
+    const { data } = await client.from('xero_invoices')
+      .select('xero_invoice_id, invoice_number')
+      .eq('invoice_number', invoiceNumber)
+      .maybeSingle()
+    if (!data) throw new ApiError(`Invoice ${invoiceNumber} not found`, 404)
+    xeroInvoiceId = data.xero_invoice_id
+  }
+  if (!xeroInvoiceId) throw new ApiError('xero_invoice_id or invoice_number required', 400)
+
+  const { accessToken, tenantId } = await getToken(client)
+
+  // Fetch PDF from Xero — raw binary, not JSON
+  let resp: Response | null = null
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    resp = await fetch(`${XERO_API_BASE}/Invoices/${xeroInvoiceId}`, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Xero-tenant-id': tenantId,
+        'Accept': 'application/pdf',
+      },
+    })
+    if (resp.status === 429) {
+      if (attempt >= 3) throw new ApiError('Xero rate limited after retries', 429)
+      const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
+      await new Promise(r => setTimeout(r, retryAfter * 1000))
+      continue
+    }
+    break
+  }
+
+  if (!resp || !resp.ok) {
+    const errText = resp ? await resp.text() : 'No response'
+    if (resp?.status === 404) throw new ApiError('Invoice not found in Xero', 404)
+    throw new ApiError(`Failed to fetch PDF from Xero: ${resp?.status} ${errText}`, 502)
+  }
+
+  // Convert binary PDF to base64
+  const buffer = await resp.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  const pdf_base64 = btoa(binary)
+
+  // Get invoice number for filename
+  let filename = `${xeroInvoiceId}.pdf`
+  if (invoiceNumber) {
+    filename = `${invoiceNumber}.pdf`
+  } else {
+    const { data: invRecord } = await client.from('xero_invoices')
+      .select('invoice_number')
+      .eq('xero_invoice_id', xeroInvoiceId)
+      .maybeSingle()
+    if (invRecord?.invoice_number) filename = `${invRecord.invoice_number}.pdf`
+  }
+
+  return { success: true, pdf_base64, filename, content_type: 'application/pdf' }
 }
 
 async function createInvoice(client: any, body: any) {
