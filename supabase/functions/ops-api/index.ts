@@ -2892,21 +2892,27 @@ async function calendarEvents(client: any, params: URLSearchParams) {
   const { data, error } = await query
   if (error) throw error
 
-  // Also get PO deliveries in range — use confirmed_delivery_date if available
-  const { data: deliveriesByReq } = await client
-    .from('purchase_orders')
-    .select('id, po_number, supplier_name, delivery_date, confirmed_delivery_date, job_id, status, total')
-    .eq('org_id', DEFAULT_ORG_ID)
-    .gte('delivery_date', from)
-    .lte('delivery_date', to)
-    .in('status', ['draft', 'submitted', 'authorised'])
-  const { data: deliveriesByConfirmed } = await client
-    .from('purchase_orders')
-    .select('id, po_number, supplier_name, delivery_date, confirmed_delivery_date, job_id, status, total')
-    .eq('org_id', DEFAULT_ORG_ID)
-    .gte('confirmed_delivery_date', from)
-    .lte('confirmed_delivery_date', to)
-    .in('status', ['draft', 'submitted', 'authorised'])
+  // Run PO delivery queries in parallel for performance
+  const events = data || []
+  const uniqueJobIds = [...new Set(events.map((e: any) => e.job_id).filter(Boolean))]
+
+  const poSelect = 'id, po_number, supplier_name, delivery_date, confirmed_delivery_date, job_id, status, total'
+  const [
+    { data: deliveriesByReq },
+    { data: deliveriesByConfirmed },
+    intelResult,
+  ] = await Promise.all([
+    client.from('purchase_orders').select(poSelect)
+      .eq('org_id', DEFAULT_ORG_ID).gte('delivery_date', from).lte('delivery_date', to)
+      .in('status', ['draft', 'submitted', 'authorised']),
+    client.from('purchase_orders').select(poSelect)
+      .eq('org_id', DEFAULT_ORG_ID).gte('confirmed_delivery_date', from).lte('confirmed_delivery_date', to)
+      .in('status', ['draft', 'submitted', 'authorised']),
+    uniqueJobIds.length > 0
+      ? client.from('job_intelligence').select('*').in('job_id', uniqueJobIds)
+      : Promise.resolve({ data: [] }),
+  ])
+
   // Merge and deduplicate by id
   const deliveryMap = new Map<string, any>()
   for (const d of [...(deliveriesByReq || []), ...(deliveriesByConfirmed || [])]) {
@@ -2916,15 +2922,9 @@ async function calendarEvents(client: any, params: URLSearchParams) {
 
   // ── Readiness: compute per unique job in range ──
   const readiness: Record<string, JobReadiness> = {}
-  const events = data || []
-  const uniqueJobIds = [...new Set(events.map((e: any) => e.job_id).filter(Boolean))]
 
   if (uniqueJobIds.length > 0) {
-    // Fetch job_intelligence for these jobs
-    const { data: intelRows } = await client
-      .from('job_intelligence')
-      .select('*')
-      .in('job_id', uniqueJobIds)
+    const intelRows = intelResult.data
 
     // Build lookup
     const intelMap: Record<string, any> = {}
