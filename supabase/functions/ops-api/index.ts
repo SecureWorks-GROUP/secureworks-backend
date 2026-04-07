@@ -2933,9 +2933,24 @@ async function calendarEvents(client: any, params: URLSearchParams) {
       intelMap[row.job_id] = row
     }
 
+    // Query live assignment/PO/WO counts (job_intelligence doesn't have these)
+    const [assignRes, poRes, woRes] = await Promise.all([
+      client.from('job_assignments').select('job_id').in('job_id', uniqueJobIds).neq('status', 'cancelled'),
+      client.from('purchase_orders').select('job_id').in('job_id', uniqueJobIds).neq('status', 'deleted'),
+      client.from('work_orders').select('job_id').in('job_id', uniqueJobIds).neq('status', 'cancelled'),
+    ])
+    const countByJob = (rows: any[]) => {
+      const m: Record<string, number> = {}
+      for (const r of rows) m[r.job_id] = (m[r.job_id] || 0) + 1
+      return m
+    }
+    const assignCounts = countByJob(assignRes.data || [])
+    const poCounts = countByJob(poRes.data || [])
+    const woCounts = countByJob(woRes.data || [])
+
     // Get scope_json for conditional rules (from events data — already have it)
     for (const jobId of uniqueJobIds) {
-      const intel = intelMap[jobId] || {}
+      const intel = { ...(intelMap[jobId] || {}), assignment_count: assignCounts[jobId] || 0, po_count: poCounts[jobId] || 0, wo_count: woCounts[jobId] || 0 }
       // Find scope_json + pricing_json from the event data (calendar_events view now includes them)
       const ev = events.find((e: any) => e.job_id === jobId)
       const scopeJson = ev?.scope_json || null
