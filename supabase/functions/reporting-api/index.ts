@@ -369,6 +369,48 @@ serve(async (req: Request) => {
           })),
         })
       }
+      case 'cross_sell_opportunities': {
+        // Find contacts with completed jobs of only one service type
+        const { data: completedJobs } = await sb.from('jobs')
+          .select('id, client_name, client_email, client_phone, type, job_number, site_suburb, ghl_contact_id, completed_at')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .eq('status', 'complete')
+          .not('legacy', 'is', true)
+          .not('client_email', 'is', null)
+          .order('completed_at', { ascending: false })
+        // Group by client email
+        const byClient: Record<string, any[]> = {}
+        for (const j of (completedJobs || [])) {
+          const key = j.client_email || j.client_name
+          if (!byClient[key]) byClient[key] = []
+          byClient[key].push(j)
+        }
+        // Find single-service clients
+        const opportunities = Object.entries(byClient)
+          .filter(([_, jobs]) => {
+            const types = new Set(jobs.map((j: any) => j.type))
+            return types.size === 1 // Only used one service
+          })
+          .map(([client, jobs]) => {
+            const latest = jobs[0]
+            const serviceUsed = latest.type
+            const suggestService = serviceUsed === 'patio' ? 'fencing' : serviceUsed === 'fencing' ? 'patio' : 'decking'
+            return {
+              client_name: latest.client_name,
+              email: latest.client_email,
+              phone: latest.client_phone,
+              suburb: latest.site_suburb,
+              ghl_contact_id: latest.ghl_contact_id,
+              service_used: serviceUsed,
+              suggest_service: suggestService,
+              jobs_completed: jobs.length,
+              last_completed: latest.completed_at,
+            }
+          })
+          .sort((a: any, b: any) => new Date(b.last_completed).getTime() - new Date(a.last_completed).getTime())
+          .slice(0, 50)
+        return json({ opportunities, total: opportunities.length })
+      }
       case 'supplier_performance': {
         const { data: pos } = await sb.from('purchase_orders')
           .select('id, supplier_name, total, status, created_at, delivery_date, confirmed_delivery_date, paid_at')
