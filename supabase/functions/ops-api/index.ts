@@ -11612,9 +11612,11 @@ async function listOverdueInvoices(client: any) {
   const enriched = invoices.filter((inv: any) => !isTestRecord(inv.contact_name)).map((inv: any) => {
     const job = inv.job_id ? jobMap[inv.job_id] : null
     const contact = inv.xero_contact_id ? contactInfo[inv.xero_contact_id] : null
-    const ghl_contact_id = job?.ghl_contact_id || contact?.ghl_id || null
-    const phone = job?.client_phone || contact?.phone || null
-    const email = job?.client_email || contact?.email || null
+    // Contact resolution: invoice contact (contact_matches) takes priority over job contact.
+    // Multi-party invoices (boundary fences) have different invoicees than the job client.
+    const ghl_contact_id = contact?.ghl_id || job?.ghl_contact_id || null
+    const phone = contact?.phone || job?.client_phone || null
+    const email = contact?.email || job?.client_email || null
     const daysOverdue = Math.ceil((Date.now() - new Date(inv.due_date + 'T00:00:00').getTime()) / 86400000)
 
     // Auto-classify (computed, not stored) — only override if current is 'unclassified'
@@ -11639,6 +11641,9 @@ async function listOverdueInvoices(client: any) {
     const flags: string[] = []
     if (!ghl_contact_id) flags.push('No GHL contact')
     if (!job) flags.push('No job linked')
+    if (job && inv.contact_name && job.client_name && inv.contact_name.toLowerCase() !== job.client_name.toLowerCase()) {
+      flags.push(`Invoice contact "${inv.contact_name}" ≠ job client "${job.client_name}" — multi-party or cross-linked`)
+    }
 
     return {
       xero_invoice_id: inv.xero_invoice_id,
