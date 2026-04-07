@@ -20,9 +20,18 @@ const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Monitored mailboxes
-const MONITORED_MAILBOXES = [
-  'marnin@secureworkswa.com.au',
-  'jan@secureworkswa.com.au',
+// Mailbox config: type 'user' uses /users/ Graph API, type 'group' uses /groups/ with group ID
+const MONITORED_MAILBOXES: Array<{ email: string; type: 'user' | 'group'; groupId?: string }> = [
+  { email: 'marnin@secureworkswa.com.au', type: 'user' },
+  { email: 'jan@secureworkswa.com.au', type: 'user' },
+  { email: 'admin@secureworkswa.com.au', type: 'user' },
+  { email: 'shaun@secureworkswa.com.au', type: 'user' },
+  { email: 'nithin@secureworkswa.com.au', type: 'user' },
+  { email: 'khairo@secureworkswa.com.au', type: 'user' },
+  // MS365 Groups — use group ID (resolve via Graph /groups?$filter=mail eq '...')
+  // Group IDs need to be populated after first run — will log errors until set
+  { email: 'patios@secureworkswa.com.au', type: 'group', groupId: '' },
+  { email: 'fencing@secureworkswa.com.au', type: 'group', groupId: '' },
 ]
 
 // Admin Telegram chat IDs — resolved from users table at runtime
@@ -137,13 +146,19 @@ async function processMailbox(
   token: string,
   mailbox: string,
   adminTelegramIds: number[],
+  mailboxType: 'user' | 'group' = 'user',
+  groupId?: string,
 ): Promise<{ processed: number; notified: number }> {
   let processed = 0
   let notified = 0
 
   // Fetch unread messages from last 15 mins (overlap to catch any missed)
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60000).toISOString()
-  const graphUrl = `https://graph.microsoft.com/v1.0/users/${mailbox}/mailFolders/inbox/messages` +
+  // Groups use /groups/{id}, users use /users/{email}
+  const graphBase = mailboxType === 'group' && groupId
+    ? `https://graph.microsoft.com/v1.0/groups/${groupId}`
+    : `https://graph.microsoft.com/v1.0/users/${mailbox}`
+  const graphUrl = `${graphBase}/mailFolders/inbox/messages` +
     `?$filter=isRead eq false and receivedDateTime ge ${fifteenMinsAgo}` +
     `&$top=20` +
     `&$select=id,from,toRecipients,subject,bodyPreview,receivedDateTime,hasAttachments` +
@@ -257,7 +272,7 @@ async function processMailbox(
     if (msg.hasAttachments && jobId) {
       try {
         const attachResp = await fetch(
-          `https://graph.microsoft.com/v1.0/users/${mailbox}/messages/${msg.id}/attachments`,
+          `${graphBase}/messages/${msg.id}/attachments`,
           { headers: { 'Authorization': `Bearer ${token}` } }
         )
         if (attachResp.ok) {
@@ -426,6 +441,84 @@ async function processMailbox(
       }
     }
 
+    // ── Classification routing: council, client_reply, invoice, complaint ──
+    if (classification.classification === 'council' && jobId) {
+      try {
+        // Find council_submission for this job where a step is waiting on this sender's domain
+        const senderDomain = fromEmail.split('@')[1] || ''
+        const { data: submissions } = await sb.from('council_submissions')
+          .select('id, steps, current_step_index, overall_status')
+          .eq('job_id', jobId)
+          .neq('overall_status', 'approved')
+          .limit(1)
+        if (submissions && submissions.length > 0) {
+          const sub = submissions[0]
+          // Update last_activity_at
+          await sb.from('council_submissions')
+            .update({ updated_at: new Date().toISOString() })
+            .eq('id', sub.id)
+          // Log council email event
+          await sb.from('job_events').insert({
+            job_id: jobId, event_type: 'council_email_received',
+            detail_json: { from: fromEmail, subject, domain: senderDomain, submission_id: sub.id },
+          }).then(() => {}).catch(() => {})
+          console.log(`[monitor-inbox] Council routing: ${fromEmail} → submission ${sub.id}`)
+        }
+      } catch (e) {
+        console.log('[monitor-inbox] Council routing failed:', (e as Error).message)
+      }
+    }
+
+    if (classification.classification === 'client_reply' && jobId) {
+      try {
+        await sb.from('job_events').insert({
+          job_id: jobId, event_type: 'client_email_received',
+          detail_json: { from: fromEmail, from_name: fromName, subject, preview: bodyPreview.slice(0, 200) },
+        })
+        console.log(`[monitor-inbox] Client reply routed to job_events for job ${jobId}`)
+      } catch (e) {
+        console.log('[monitor-inbox] Client reply routing failed:', (e as Error).message)
+      }
+    }
+
+    if (classification.classification === 'invoice' && jobId) {
+      try {
+        // Store as job_document (type: trade_invoice) — PDF already stored above if present
+        await sb.from('job_documents').insert({
+          job_id: jobId,
+          type: 'trade_invoice',
+          file_name: subject || 'Supplier Invoice',
+          visible_to_trades: false,
+          version: 1,
+        }).then(() => {}).catch(() => {})
+        await sb.from('job_events').insert({
+          job_id: jobId, event_type: 'invoice_email_received',
+          detail_json: { from: fromEmail, subject, classification: 'trade_invoice' },
+        }).then(() => {}).catch(() => {})
+        console.log(`[monitor-inbox] Invoice routed to job_documents for job ${jobId}`)
+      } catch (e) {
+        console.log('[monitor-inbox] Invoice routing failed:', (e as Error).message)
+      }
+    }
+
+    if (classification.classification === 'complaint' && jobId) {
+      try {
+        await sb.from('job_events').insert({
+          job_id: jobId, event_type: 'complaint_received',
+          detail_json: { from: fromEmail, from_name: fromName, subject, preview: bodyPreview.slice(0, 200), severity: 'high' },
+        })
+        await sb.from('ai_alerts').insert({
+          org_id: DEFAULT_ORG_ID, job_id: jobId,
+          alert_type: 'client_complaint', severity: 'red',
+          message: `Complaint from ${fromName || fromEmail}: ${subject}`,
+          recommended_action: classification.action_needed || 'Contact client immediately to resolve.',
+        }).then(() => {}).catch(() => {})
+        console.log(`[monitor-inbox] Complaint alert created for job ${jobId}`)
+      } catch (e) {
+        console.log('[monitor-inbox] Complaint routing failed:', (e as Error).message)
+      }
+    }
+
     // Telegram notification for high priority
     if (classification.priority === 'high') {
       const emoji = classification.classification === 'complaint' ? '🚨'
@@ -488,8 +581,13 @@ Deno.serve(async (req) => {
     let totalProcessed = 0
     let totalNotified = 0
 
-    for (const mailbox of MONITORED_MAILBOXES) {
-      const { processed, notified } = await processMailbox(sb, token, mailbox, adminTelegramIds)
+    for (const mb of MONITORED_MAILBOXES) {
+      // Skip groups with no groupId configured yet
+      if (mb.type === 'group' && !mb.groupId) {
+        console.log(`[monitor-inbox] Skipping ${mb.email} — group ID not configured`)
+        continue
+      }
+      const { processed, notified } = await processMailbox(sb, token, mb.email, adminTelegramIds, mb.type, mb.groupId)
       totalProcessed += processed
       totalNotified += notified
     }
@@ -498,7 +596,7 @@ Deno.serve(async (req) => {
       success: true,
       processed: totalProcessed,
       notified: totalNotified,
-      mailboxes: MONITORED_MAILBOXES.length,
+      mailboxes: MONITORED_MAILBOXES.map(m => m.email),
       timestamp: new Date().toISOString(),
     }
 
