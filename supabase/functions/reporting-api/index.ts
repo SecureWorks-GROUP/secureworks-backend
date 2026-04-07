@@ -1392,14 +1392,15 @@ async function debtFollowup(sb: any, search?: string) {
       for (const j of (invJobs || [])) { invJobMap[j.id] = j }
 
       for (const inv of (linkedInvoices || [])) {
-        if (inv.xero_contact_id && inv.job_id && invJobMap[inv.job_id] && !contactInfo[inv.xero_contact_id]) {
-          const j = invJobMap[inv.job_id]
-          contactInfo[inv.xero_contact_id] = {
-            phone: j.client_phone || null,
-            email: j.client_email || null,
-            ghl_id: j.ghl_contact_id || null,
-          }
+        if (!inv.xero_contact_id || !inv.job_id || !invJobMap[inv.job_id]) continue
+        const j = invJobMap[inv.job_id]
+        if (!contactInfo[inv.xero_contact_id]) {
+          contactInfo[inv.xero_contact_id] = { phone: null, email: null, ghl_id: null }
         }
+        const ci = contactInfo[inv.xero_contact_id]
+        if (!ci.phone && j.client_phone) ci.phone = j.client_phone
+        if (!ci.email && j.client_email) ci.email = j.client_email
+        if (!ci.ghl_id && j.ghl_contact_id) ci.ghl_id = j.ghl_contact_id
       }
     }
   }
