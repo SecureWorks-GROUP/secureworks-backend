@@ -17,6 +17,10 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
+const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_KEY')!
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -128,6 +132,49 @@ async function fetchAttachment(url: string, name: string): Promise<{
   }
 }
 
+// ── Dynamic Signature Selection ──
+function getSignature(from: string): string {
+  const email = (from || '').toLowerCase()
+  if (email.includes('shaun')) {
+    return EMAIL_SIGNATURE
+      .replace('Marnin Stobbe', 'Shaun')
+      .replace('Operations Manager', 'Operations Manager')
+      .replace('0404 777 984', '')
+      .replace('marnin@secureworkswa.com.au', 'shaun@secureworkswa.com.au')
+      .replace('mailto:marnin@', 'mailto:shaun@')
+      .replace('tel:0404777984', '')
+  }
+  if (email.includes('jan')) {
+    return EMAIL_SIGNATURE
+      .replace('Marnin Stobbe', 'Jan Stobbe')
+      .replace('Operations Manager', 'Director')
+      .replace('0404 777 984', '')
+      .replace('marnin@secureworkswa.com.au', 'jan@secureworkswa.com.au')
+      .replace('mailto:marnin@', 'mailto:jan@')
+      .replace('tel:0404777984', '')
+  }
+  if (email.includes('fencing')) {
+    return EMAIL_SIGNATURE
+      .replace('Marnin Stobbe', 'SecureWorks Fencing')
+      .replace('Operations Manager', 'Fencing Division')
+      .replace('0404 777 984', '08 6102 2796')
+      .replace('marnin@secureworkswa.com.au', 'fencing@secureworkswa.com.au')
+      .replace('mailto:marnin@', 'mailto:fencing@')
+      .replace('tel:0404777984', 'tel:0861022796')
+  }
+  if (email.includes('patio')) {
+    return EMAIL_SIGNATURE
+      .replace('Marnin Stobbe', 'SecureWorks Patios')
+      .replace('Operations Manager', 'Patios Division')
+      .replace('0404 777 984', '08 6102 2796')
+      .replace('marnin@secureworkswa.com.au', 'patios@secureworkswa.com.au')
+      .replace('mailto:marnin@', 'mailto:patios@')
+      .replace('tel:0404777984', 'tel:0861022796')
+  }
+  // Default: Marnin
+  return EMAIL_SIGNATURE
+}
+
 // ── Main Handler ──
 
 serve(async (req: Request) => {
@@ -156,6 +203,9 @@ serve(async (req: Request) => {
       subject,
       htmlBody,
       attachments,
+      job_id,
+      ghl_contact_id,
+      sent_by,
     } = body
 
     if (!to || !subject || !htmlBody) {
@@ -176,7 +226,7 @@ serve(async (req: Request) => {
     // Build message
     const message: Record<string, unknown> = {
       subject,
-      body: { contentType: 'HTML', content: htmlBody + EMAIL_SIGNATURE },
+      body: { contentType: 'HTML', content: htmlBody + getSignature(from) },
       toRecipients,
     }
     if (ccRecipients) message.ccRecipients = ccRecipients
@@ -230,6 +280,52 @@ serve(async (req: Request) => {
     }
 
     // Graph sendMail returns 202 Accepted with no body
+
+    // ── Post-send logging (all fire-and-forget) ──
+    const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    const toStr = Array.isArray(to) ? to.join(', ') : to
+
+    // 1. Log to po_communications (unified comms timeline)
+    if (job_id) {
+      sb.from('po_communications').insert({
+        job_id,
+        direction: 'outbound',
+        from_email: from,
+        to_email: toStr,
+        cc_emails: cc ? (Array.isArray(cc) ? cc : [cc]) : null,
+        subject,
+        body_html: htmlBody,
+        communication_type: 'client',
+        sent_at: new Date().toISOString(),
+        created_by: sent_by || null,
+      }).then(() => {}).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
+    }
+
+    // 2. Log to email_events (delivery tracking)
+    sb.from('email_events').insert({
+      email_type: 'client_email',
+      entity_type: job_id ? 'job' : 'contact',
+      entity_id: job_id || ghl_contact_id || toStr,
+      job_id: job_id || null,
+      recipient: Array.isArray(to) ? to[0] : to,
+      sender: from,
+      subject,
+      status: 'sent',
+      sent_at: new Date().toISOString(),
+    }).then(() => {}).catch(() => {})
+
+    // 3. Log to GHL contact (so it shows in GHL timeline)
+    if (ghl_contact_id) {
+      fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=add_note`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+        body: JSON.stringify({
+          contactId: ghl_contact_id,
+          body: `Email sent: "${subject}" to ${toStr}`,
+        }),
+      }).catch(() => {})
+    }
+
     return json({
       success: true,
       from,
