@@ -1052,6 +1052,23 @@ serve(async (req: Request) => {
       case 'extract_po_pricing': return json(await extractPOPricing(client, body))
       case 'confirm_price': return json(await confirmPrice(client, body))
       case 'dismiss_price': return json(await dismissPrice(client, body))
+      case 'generate_nudges': return json(await generateNudges(client))
+      case 'list_nudges': {
+        const status = url.searchParams.get('status') || 'pending'
+        const { data } = await client.from('smart_nudges')
+          .select('*').eq('org_id', DEFAULT_ORG_ID).eq('status', status)
+          .order('created_at', { ascending: false }).limit(30)
+        return json({ nudges: data || [], count: (data || []).length })
+      }
+      case 'act_nudge': {
+        const { nudge_id, action: nudgeAction } = body
+        if (!nudge_id) return json({ error: 'nudge_id required' }, 400)
+        const update: any = { status: nudgeAction === 'dismiss' ? 'dismissed' : 'acted' }
+        if (nudgeAction === 'dismiss') update.dismissed_at = new Date().toISOString()
+        else update.acted_at = new Date().toISOString()
+        await client.from('smart_nudges').update(update).eq('id', nudge_id)
+        return json({ success: true })
+      }
       case 'sync_job_scope': {
         const { job_id, ...scopeFields } = body
         if (!job_id) return json({ error: 'job_id required' }, 400)
@@ -8784,6 +8801,93 @@ async function extractPOPricing(client: any, body: any) {
     skipped,
     total_line_items: lineItems.length,
   }
+}
+
+async function generateNudges(client: any) {
+  const now = new Date()
+  const nudges: any[] = []
+
+  // 1. Stale quotes: quoted > 7 days, no activity
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000).toISOString()
+  const { data: staleQuotes } = await client.from('jobs')
+    .select('id, client_name, job_number, site_suburb, pricing_json, updated_at')
+    .eq('org_id', DEFAULT_ORG_ID).eq('status', 'quoted')
+    .not('legacy', 'is', true)
+    .lt('updated_at', sevenDaysAgo)
+    .order('updated_at', { ascending: true }).limit(20)
+  for (const j of (staleQuotes || [])) {
+    const value = j.pricing_json?.totalIncGST || j.pricing_json?.total || 0
+    const days = Math.ceil((now.getTime() - new Date(j.updated_at).getTime()) / 86400000)
+    nudges.push({
+      org_id: DEFAULT_ORG_ID, nudge_type: 'stale_quote', job_id: j.id, contact_name: j.client_name,
+      trigger_rule: `Quote ${days} days old with no activity`,
+      suggested_action: `Follow up with ${j.client_name} on ${j.job_number || 'quote'} ($${value})`,
+      suggested_message: `Hi ${j.client_name?.split(' ')[0] || 'there'}, just checking in on the quote we sent through for your ${j.site_suburb || ''} project. Happy to answer any questions or make adjustments. — SecureWorks WA`,
+    })
+  }
+
+  // 2. Completed jobs with no invoice > 2 days
+  const twoDaysAgo = new Date(now.getTime() - 2 * 86400000).toISOString()
+  const { data: noInvoice } = await client.from('jobs')
+    .select('id, client_name, job_number, completed_at')
+    .eq('org_id', DEFAULT_ORG_ID).eq('status', 'complete')
+    .not('legacy', 'is', true)
+    .lt('completed_at', twoDaysAgo).limit(10)
+  // Check which have invoices
+  const noInvJobIds = (noInvoice || []).map((j: any) => j.id)
+  if (noInvJobIds.length > 0) {
+    const { data: invoiced } = await client.from('xero_invoices')
+      .select('job_id').in('job_id', noInvJobIds).eq('invoice_type', 'ACCREC')
+      .not('status', 'in', '("VOIDED","DELETED")')
+    const invoicedSet = new Set((invoiced || []).map((i: any) => i.job_id))
+    for (const j of (noInvoice || [])) {
+      if (!invoicedSet.has(j.id)) {
+        nudges.push({
+          org_id: DEFAULT_ORG_ID, nudge_type: 'no_invoice', job_id: j.id, contact_name: j.client_name,
+          trigger_rule: 'Job completed but no invoice created',
+          suggested_action: `Create invoice for ${j.client_name} (${j.job_number})`,
+        })
+      }
+    }
+  }
+
+  // 3. Deposit paid but no PO > 3 days
+  const threeDaysAgo = new Date(now.getTime() - 3 * 86400000).toISOString()
+  const { data: noPO } = await client.from('jobs')
+    .select('id, client_name, job_number, deposit_at')
+    .eq('org_id', DEFAULT_ORG_ID).in('status', ['deposit', 'processing'])
+    .not('legacy', 'is', true)
+    .not('deposit_at', 'is', null)
+    .lt('deposit_at', threeDaysAgo).limit(10)
+  if ((noPO || []).length > 0) {
+    const noPOIds = noPO!.map((j: any) => j.id)
+    const { data: hasPOs } = await client.from('purchase_orders')
+      .select('job_id').in('job_id', noPOIds).neq('status', 'deleted')
+    const hasPOSet = new Set((hasPOs || []).map((p: any) => p.job_id))
+    for (const j of (noPO || [])) {
+      if (!hasPOSet.has(j.id)) {
+        nudges.push({
+          org_id: DEFAULT_ORG_ID, nudge_type: 'no_po', job_id: j.id, contact_name: j.client_name,
+          trigger_rule: 'Deposit received but no purchase orders created',
+          suggested_action: `Create POs for ${j.client_name} (${j.job_number}) — deposit received, materials need ordering`,
+        })
+      }
+    }
+  }
+
+  // Dedup: don't create nudges that already exist as pending
+  const { data: existing } = await client.from('smart_nudges')
+    .select('job_id, nudge_type')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('status', 'pending')
+  const existingSet = new Set((existing || []).map((n: any) => `${n.job_id}_${n.nudge_type}`))
+  const newNudges = nudges.filter(n => !existingSet.has(`${n.job_id}_${n.nudge_type}`))
+
+  if (newNudges.length > 0) {
+    await client.from('smart_nudges').insert(newNudges)
+  }
+
+  return { generated: newNudges.length, total_pending: nudges.length, skipped_dupes: nudges.length - newNudges.length }
 }
 
 async function confirmPrice(client: any, body: any) {
