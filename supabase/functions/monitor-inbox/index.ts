@@ -88,12 +88,13 @@ async function classifyEmail(
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 200,
       system: `You classify business emails for a Perth outdoor construction company (SecureWorks WA).
-Return JSON only: { "classification": "...", "priority": "...", "action_needed": "..." or null, "job_ref": "SWP-XXXXX" or null }
+Return JSON only: { "classification": "...", "priority": "...", "action_needed": "..." or null, "job_ref": "SWP-XXXXX" or null, "po_ref": "PO-XXXXX" or null }
 
 Classifications: client_reply, supplier_quote, supplier_response, council, invoice, complaint, urgent, newsletter, spam, other
 Priority: high (complaints, urgent, council deadlines, large invoices), normal (client replies, supplier responses), low (newsletters, marketing, spam)
 action_needed: brief description of recommended action, or null if informational only
-job_ref: extract any job reference (SWP-XXXXX, SWF-XXXXX, SWD-XXXXX) from subject or body, or null`,
+job_ref: extract any job reference (SWP-XXXXX, SWF-XXXXX, SWD-XXXXX, SWR-XXXXX, SWI-XXXXX) from subject or body, or null
+po_ref: extract any PO reference (PO-XXXXX, PO - XXXXX, PO XXXXX) from subject or body, or null`,
       messages: [{
         role: 'user',
         content: `From: ${from}\nSubject: ${subject}\nPreview: ${bodyPreview}`,
@@ -186,7 +187,7 @@ async function processMailbox(
     // Classify
     const classification = await classifyEmail(fromEmail, subject, bodyPreview)
 
-    // Try to match to a job
+    // Try to match to a job via job reference OR PO reference
     let jobId: string | null = null
     let ghlContactId: string | null = null
     if (classification.job_ref) {
@@ -197,6 +198,40 @@ async function processMailbox(
         .limit(1)
         .maybeSingle()
       jobId = job?.id || null
+    }
+
+    // Fallback: match via PO number → get job_id from purchase_orders
+    if (!jobId && classification.po_ref) {
+      const poNum = classification.po_ref.replace(/\s+/g, '').replace(/^PO-?/i, 'PO-')
+      const { data: po } = await sb.from('purchase_orders')
+        .select('job_id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .ilike('po_number', `%${poNum.replace('PO-', '')}%`)
+        .not('job_id', 'is', null)
+        .limit(1)
+        .maybeSingle()
+      if (po?.job_id) {
+        jobId = po.job_id
+        console.log(`[monitor-inbox] Matched via PO ref ${classification.po_ref} → job ${jobId}`)
+      }
+    }
+
+    // Fallback: extract PO number from subject with regex (if classifier missed it)
+    if (!jobId) {
+      const poMatch = subject.match(/PO[\s-]*(\d{5,6})/i)
+      if (poMatch) {
+        const { data: po } = await sb.from('purchase_orders')
+          .select('job_id')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .ilike('po_number', `%${poMatch[1]}%`)
+          .not('job_id', 'is', null)
+          .limit(1)
+          .maybeSingle()
+        if (po?.job_id) {
+          jobId = po.job_id
+          console.log(`[monitor-inbox] Matched via subject PO regex ${poMatch[0]} → job ${jobId}`)
+        }
+      }
     }
 
     // Try to match sender to a contact
@@ -229,6 +264,7 @@ async function processMailbox(
       metadata: {
         has_attachments: msg.hasAttachments || false,
         job_ref: classification.job_ref,
+        po_ref: classification.po_ref || null,
       },
     })
 
@@ -239,7 +275,32 @@ async function processMailbox(
 
     processed++
 
-    // Download attachments if present and matched to a job
+    // Last-resort matching: try supplier name from POs (runs before attachment download)
+    if (!jobId && fromEmail) {
+      try {
+        const senderDomain = fromEmail.split('@')[1]?.toLowerCase() || ''
+        const senderName = (senderDomain.split('.')[0] || '').replace(/[-_]/g, ' ')
+        if (senderName.length > 2) {
+          const { data: supplierPOs } = await sb.from('purchase_orders')
+            .select('job_id, supplier_name')
+            .eq('org_id', DEFAULT_ORG_ID)
+            .ilike('supplier_name', `%${senderName}%`)
+            .not('job_id', 'is', null)
+            .order('created_at', { ascending: false })
+            .limit(1)
+          if (supplierPOs && supplierPOs.length > 0) {
+            jobId = supplierPOs[0].job_id
+            console.log(`[monitor-inbox] Matched supplier ${fromEmail} (${senderName}) to job ${jobId} via PO supplier_name`)
+            await sb.from('inbox_events')
+              .update({ job_id: jobId })
+              .eq('graph_message_id', msg.id)
+              .then(() => {}).catch(() => {})
+          }
+        }
+      } catch { /* best effort */ }
+    }
+
+    // Download attachments if present and matched to a job (runs AFTER all matching attempts)
     if (msg.hasAttachments && jobId) {
       try {
         const attachResp = await fetch(
@@ -249,15 +310,13 @@ async function processMailbox(
         if (attachResp.ok) {
           const attachData = await attachResp.json()
           for (const att of (attachData.value || [])) {
-            if (!att.contentBytes || att.size > 10000000) continue // Skip if no content or >10MB
+            if (!att.contentBytes || att.size > 10000000) continue
             const isPdf = (att.contentType || '').includes('pdf') || (att.name || '').endsWith('.pdf')
             const isImage = (att.contentType || '').startsWith('image/')
-            if (!isPdf && !isImage) continue // Only store PDFs and images
+            if (!isPdf && !isImage) continue
 
-            const ext = isPdf ? 'pdf' : (att.name || '').split('.').pop() || 'jpg'
             const storagePath = `${DEFAULT_ORG_ID}/${jobId}/supplier/${Date.now()}_${(att.name || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_')}`
 
-            // Upload to Supabase Storage
             const fileBuffer = Uint8Array.from(atob(att.contentBytes), c => c.charCodeAt(0))
             const { error: uploadErr } = await sb.storage
               .from('job-photos')
@@ -272,7 +331,6 @@ async function processMailbox(
             const publicUrl = urlData?.publicUrl || ''
 
             if (isPdf) {
-              // Store as job_document (visible to trades)
               await sb.from('job_documents').insert({
                 job_id: jobId,
                 type: 'supplier_quote',
@@ -284,7 +342,6 @@ async function processMailbox(
               }).then(() => {}).catch(() => {})
               console.log(`[monitor-inbox] Stored supplier PDF: ${att.name} for job ${jobId}`)
             } else {
-              // Store as job_media
               await sb.from('job_media').insert({
                 job_id: jobId,
                 phase: 'receipt',
@@ -298,28 +355,6 @@ async function processMailbox(
       } catch (e) {
         console.log(`[monitor-inbox] Attachment processing failed:`, (e as Error).message)
       }
-    }
-
-    // Also try to match supplier emails to POs by sender
-    if (msg.hasAttachments && !jobId && fromEmail) {
-      try {
-        // Check if sender email matches any supplier
-        const { data: supplierPOs } = await sb.from('purchase_orders')
-          .select('id, job_id, supplier_name')
-          .eq('org_id', DEFAULT_ORG_ID)
-          .ilike('supplier_email', `%${fromEmail.split('@')[1]}%`)
-          .order('created_at', { ascending: false })
-          .limit(1)
-        if (supplierPOs && supplierPOs.length > 0) {
-          jobId = supplierPOs[0].job_id
-          console.log(`[monitor-inbox] Matched supplier ${fromEmail} to job ${jobId} via PO`)
-          // Re-update inbox_events with the matched job_id
-          await sb.from('inbox_events')
-            .update({ job_id: jobId })
-            .eq('graph_message_id', msg.id)
-            .then(() => {}).catch(() => {})
-        }
-      } catch { /* best effort */ }
     }
 
     // Telegram notification for high priority
