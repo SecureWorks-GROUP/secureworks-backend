@@ -239,6 +239,20 @@ async function processMailbox(
 
     processed++
 
+    // Capability gap detection: log unclassified emails that look like requests
+    if (classification.classification === 'other' && bodyPreview.length > 20) {
+      const looksLikeRequest = /\?|please|can you|could you|i need|when will|how do|is it possible/i.test(bodyPreview)
+      if (looksLikeRequest) {
+        sb.from('business_events').insert({
+          event_type: 'capability_gap_detected',
+          source: 'monitor-inbox',
+          entity_type: 'email',
+          entity_id: msg.id,
+          payload: { from: fromEmail, subject, preview: bodyPreview.slice(0, 200), mailbox, classification: classification.classification },
+        }).then(() => {}).catch(() => {})
+      }
+    }
+
     // Download attachments if present and matched to a job
     if (msg.hasAttachments && jobId) {
       try {
