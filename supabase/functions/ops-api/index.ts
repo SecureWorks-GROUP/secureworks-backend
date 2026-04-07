@@ -280,12 +280,16 @@ function evaluateCondition(condition: string, data: Record<string, any>, scopeJs
   if (condition === 'needs_materials') {
     // Van stock job types never need POs
     if (VAN_STOCK_JOB_TYPES.includes(jobType)) return false
-    // Jobs with $0 or null materials cost don't need POs
+    // If POs already exist, materials are clearly needed
+    if ((data.po_count || 0) > 0) return true
+    // Jobs with explicit $0 materials cost don't need POs
     const pricing = data._pricing_json || {}
     const materialsCost = pricing.materialsCost ?? pricing.materials ?? pricing.materialsTotal ?? null
     if (materialsCost === 0 || materialsCost === '0') return false
-    // If quoted amount is $0 or null, likely a van-stock/labour-only job
-    if ((data.quoted_amount || 0) <= 0) return false
+    // If we have a quoted amount, materials are needed
+    if ((data.quoted_amount || 0) > 0) return true
+    // No pricing data yet — default to needing materials for standard job types
+    // (patio, fencing, combo all require materials; only van-stock types don't)
     return true
   }
   if (condition === 'quoted_amount > 15000') return (data.quoted_amount || 0) > 15000
@@ -2900,7 +2904,6 @@ async function calendarEvents(client: any, params: URLSearchParams) {
   const [
     { data: deliveriesByReq },
     { data: deliveriesByConfirmed },
-    intelResult,
   ] = await Promise.all([
     client.from('purchase_orders').select(poSelect)
       .eq('org_id', DEFAULT_ORG_ID).gte('delivery_date', from).lte('delivery_date', to)
@@ -2908,9 +2911,6 @@ async function calendarEvents(client: any, params: URLSearchParams) {
     client.from('purchase_orders').select(poSelect)
       .eq('org_id', DEFAULT_ORG_ID).gte('confirmed_delivery_date', from).lte('confirmed_delivery_date', to)
       .in('status', ['draft', 'submitted', 'authorised']),
-    uniqueJobIds.length > 0
-      ? client.from('job_intelligence').select('*').in('job_id', uniqueJobIds)
-      : Promise.resolve({ data: [] }),
   ])
 
   // Merge and deduplicate by id
@@ -2920,26 +2920,86 @@ async function calendarEvents(client: any, params: URLSearchParams) {
   }
   const deliveries = Array.from(deliveryMap.values())
 
-  // ── Readiness: compute per unique job in range ──
+  // ── Readiness: compute LIVE per unique job in range ──
+  // Direct PostgREST queries replace the old job_intelligence materialized view
   const readiness: Record<string, JobReadiness> = {}
 
   if (uniqueJobIds.length > 0) {
-    const intelRows = intelResult.data
+    const [assignResult, woResult, docResult, poResult, jobDepositResult] = await Promise.all([
+      client.from('job_assignments').select('job_id').in('job_id', uniqueJobIds).neq('status', 'cancelled'),
+      client.from('work_orders').select('job_id').in('job_id', uniqueJobIds).neq('status', 'cancelled'),
+      client.from('job_documents').select('job_id, type').in('job_id', uniqueJobIds),
+      client.from('purchase_orders').select('job_id, delivery_confirmed_at, delivery_date, status').in('job_id', uniqueJobIds).neq('status', 'deleted'),
+      client.from('jobs').select('id, deposit_at, deposit_amount').in('id', uniqueJobIds),
+    ])
 
-    // Build lookup
-    const intelMap: Record<string, any> = {}
-    for (const row of (intelRows || [])) {
-      intelMap[row.job_id] = row
+    // Xero invoice check for deposit (separate query — less common)
+    const xeroResult = await client.from('xero_invoices')
+      .select('job_id, amount_paid')
+      .in('job_id', uniqueJobIds)
+      .eq('invoice_type', 'ACCREC')
+      .not('status', 'in', '("VOIDED","DELETED")')
+      .gt('amount_paid', 0)
+
+    // Build assignment count map
+    const assignMap: Record<string, number> = {}
+    for (const row of (assignResult.data || [])) {
+      assignMap[row.job_id] = (assignMap[row.job_id] || 0) + 1
     }
 
-    // Get scope_json for conditional rules (from events data — already have it)
+    // Build work order count map
+    const woMap: Record<string, number> = {}
+    for (const row of (woResult.data || [])) {
+      woMap[row.job_id] = (woMap[row.job_id] || 0) + 1
+    }
+
+    // Build doc types map: { jobId: { type: count } }
+    const docMap: Record<string, Record<string, number>> = {}
+    for (const row of (docResult.data || [])) {
+      if (!docMap[row.job_id]) docMap[row.job_id] = {}
+      docMap[row.job_id][row.type] = (docMap[row.job_id][row.type] || 0) + 1
+    }
+
+    // Build PO maps: count + delivery confirmed
+    const poCountMap: Record<string, number> = {}
+    const poDeliveryBlockedMap: Record<string, boolean> = {}
+    for (const row of (poResult.data || [])) {
+      poCountMap[row.job_id] = (poCountMap[row.job_id] || 0) + 1
+      const confirmed = row.delivery_confirmed_at != null
+        || ['delivered', 'confirmed', 'billed'].includes(row.status)
+        || (row.delivery_date != null && new Date(row.delivery_date) <= new Date())
+      if (!confirmed) poDeliveryBlockedMap[row.job_id] = true
+    }
+
+    // Build deposit paid map (jobs.deposit_at OR xero invoices with amount_paid)
+    const depositMap: Record<string, boolean> = {}
+    for (const row of (jobDepositResult.data || [])) {
+      if (row.deposit_at != null) {
+        depositMap[row.id] = true
+      }
+    }
+    for (const row of (xeroResult.data || [])) {
+      if ((Number(row.amount_paid) || 0) > 0) depositMap[row.job_id] = true
+    }
+
+    // Compute readiness per job using live data
     for (const jobId of uniqueJobIds) {
-      const intel = intelMap[jobId] || {}
-      // Find scope_json + pricing_json from the event data (calendar_events view now includes them)
       const ev = events.find((e: any) => e.job_id === jobId)
       const scopeJson = ev?.scope_json || null
       const pricingJson = typeof ev?.pricing_json === 'string' ? JSON.parse(ev.pricing_json || '{}') : (ev?.pricing_json || {})
-      const jobType = intel.job_type || ev?.job_type || 'patio'
+      const jobType = ev?.job_type || 'patio'
+
+      const intel: Record<string, any> = {
+        assignment_count: assignMap[jobId] || 0,
+        wo_count: woMap[jobId] || 0,
+        doc_types: docMap[jobId] || {},
+        po_count: poCountMap[jobId] || 0,
+        deposit_paid: !!depositMap[jobId],
+        all_pos_delivery_confirmed: !poDeliveryBlockedMap[jobId],
+        job_type: jobType,
+        quoted_amount: ev?.pricing_json ? (typeof ev.pricing_json === 'string' ? JSON.parse(ev.pricing_json) : ev.pricing_json)?.totalIncGST || 0 : 0,
+      }
+
       readiness[jobId] = computeReadiness(jobType, intel, scopeJson, pricingJson)
     }
   }
