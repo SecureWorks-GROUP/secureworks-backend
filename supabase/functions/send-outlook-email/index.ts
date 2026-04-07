@@ -200,6 +200,7 @@ serve(async (req: Request) => {
       from = 'marnin@secureworkswa.com.au',
       to,
       cc,
+      bcc,
       subject,
       htmlBody,
       attachments,
@@ -212,15 +213,24 @@ serve(async (req: Request) => {
       return json({ error: 'Missing required fields: to, subject, htmlBody' }, 400)
     }
 
-    // Build recipients
-    const toRecipients = (Array.isArray(to) ? to : [to]).map((email: string) => ({
-      emailAddress: { address: email.trim() },
+    // Build recipients — split comma-separated strings into arrays
+    const splitEmails = (v: unknown): string[] => {
+      if (Array.isArray(v)) return v.flatMap((e: string) => e.split(',').map(s => s.trim()).filter(Boolean))
+      if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean)
+      return []
+    }
+    const toRecipients = splitEmails(to).map((email: string) => ({
+      emailAddress: { address: email },
     }))
 
-    const ccRecipients = cc
-      ? (Array.isArray(cc) ? cc : [cc]).map((email: string) => ({
-          emailAddress: { address: email.trim() },
-        }))
+    const ccList = cc ? splitEmails(cc) : []
+    const ccRecipients = ccList.length > 0
+      ? ccList.map((email: string) => ({ emailAddress: { address: email } }))
+      : undefined
+
+    const bccList = bcc ? splitEmails(bcc) : []
+    const bccRecipients = bccList.length > 0
+      ? bccList.map((email: string) => ({ emailAddress: { address: email } }))
       : undefined
 
     // Build message
@@ -230,6 +240,7 @@ serve(async (req: Request) => {
       toRecipients,
     }
     if (ccRecipients) message.ccRecipients = ccRecipients
+    if (bccRecipients) message.bccRecipients = bccRecipients
 
     // Handle attachments
     if (attachments && Array.isArray(attachments) && attachments.length > 0) {
