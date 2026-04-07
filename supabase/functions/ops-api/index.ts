@@ -2927,20 +2927,49 @@ async function calendarEvents(client: any, params: URLSearchParams) {
   if (uniqueJobIds.length > 0) {
     const intelRows = intelResult.data
 
-    // Build lookup
+    // Build cached intelligence lookup
     const intelMap: Record<string, any> = {}
     for (const row of (intelRows || [])) {
       intelMap[row.job_id] = row
     }
 
-    // Get scope_json for conditional rules (from events data — already have it)
+    // Live queries for dynamic fields that change frequently (not in job_intelligence cache)
+    const [assignResult, woResult, poResult, jobDepositResult] = await Promise.all([
+      client.from('job_assignments').select('job_id').in('job_id', uniqueJobIds).neq('status', 'cancelled'),
+      client.from('work_orders').select('job_id').in('job_id', uniqueJobIds).neq('status', 'cancelled'),
+      client.from('purchase_orders').select('job_id').in('job_id', uniqueJobIds).neq('status', 'deleted'),
+      client.from('jobs').select('id, deposit_at').in('id', uniqueJobIds),
+    ])
+
+    // Count per job
+    const assignMap: Record<string, number> = {}
+    for (const r of (assignResult.data || [])) { assignMap[r.job_id] = (assignMap[r.job_id] || 0) + 1 }
+    const woMap: Record<string, number> = {}
+    for (const r of (woResult.data || [])) { woMap[r.job_id] = (woMap[r.job_id] || 0) + 1 }
+    const poMap: Record<string, number> = {}
+    for (const r of (poResult.data || [])) { poMap[r.job_id] = (poMap[r.job_id] || 0) + 1 }
+    const depositMap: Record<string, boolean> = {}
+    for (const r of (jobDepositResult.data || [])) {
+      if (r.deposit_at != null) depositMap[r.id] = true
+    }
+
+    // Merge cached intelligence with live counts for readiness
     for (const jobId of uniqueJobIds) {
-      const intel = intelMap[jobId] || {}
-      // Find scope_json + pricing_json from the event data (calendar_events view now includes them)
+      const cached = intelMap[jobId] || {}
       const ev = events.find((e: any) => e.job_id === jobId)
       const scopeJson = ev?.scope_json || null
       const pricingJson = typeof ev?.pricing_json === 'string' ? JSON.parse(ev.pricing_json || '{}') : (ev?.pricing_json || {})
-      const jobType = intel.job_type || ev?.job_type || 'patio'
+      const jobType = cached.job_type || ev?.job_type || 'patio'
+
+      // Merge: live counts override cached values
+      const intel = {
+        ...cached,
+        assignment_count: assignMap[jobId] || 0,
+        wo_count: woMap[jobId] || 0,
+        po_count: poMap[jobId] || 0,
+        deposit_paid: !!depositMap[jobId],
+      }
+
       readiness[jobId] = computeReadiness(jobType, intel, scopeJson, pricingJson)
     }
   }
