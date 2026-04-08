@@ -122,6 +122,38 @@ job_ref: extract any job reference (SWP-XXXXX, SWF-XXXXX, SWD-XXXXX) from subjec
   return { classification: 'other', priority: 'normal', action_needed: null, job_ref: null }
 }
 
+// ── Resolve MS365 Group ID from email address ──
+const _groupIdCache = new Map<string, string>()
+
+async function resolveGroupId(token: string, groupEmail: string): Promise<string | null> {
+  const cached = _groupIdCache.get(groupEmail.toLowerCase())
+  if (cached) return cached
+
+  try {
+    const resp = await fetch(
+      `https://graph.microsoft.com/v1.0/groups?$filter=mail eq '${groupEmail}'&$select=id,displayName,mail&$top=1`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    )
+    if (!resp.ok) {
+      console.log(`[monitor-inbox] Group lookup failed for ${groupEmail}: ${resp.status}`)
+      return null
+    }
+    const data = await resp.json()
+    const groups = data.value || []
+    if (groups.length === 0) {
+      console.log(`[monitor-inbox] No M365 Group found for ${groupEmail}`)
+      return null
+    }
+    const groupId = groups[0].id
+    console.log(`[monitor-inbox] Resolved ${groupEmail} → Group ID ${groupId} (${groups[0].displayName})`)
+    _groupIdCache.set(groupEmail.toLowerCase(), groupId)
+    return groupId
+  } catch (e) {
+    console.log(`[monitor-inbox] Group resolve error for ${groupEmail}:`, (e as Error).message)
+    return null
+  }
+}
+
 // ── Send Telegram notification ──
 async function sendTelegram(chatId: number, html: string) {
   if (!TELEGRAM_BOT_TOKEN || !chatId) return
@@ -154,15 +186,26 @@ async function processMailbox(
 
   // Fetch unread messages from last 15 mins (overlap to catch any missed)
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60000).toISOString()
-  // Groups use /groups/{id}, users use /users/{email}
   const graphBase = mailboxType === 'group' && groupId
     ? `https://graph.microsoft.com/v1.0/groups/${groupId}`
     : `https://graph.microsoft.com/v1.0/users/${mailbox}`
-  const graphUrl = `${graphBase}/mailFolders/inbox/messages` +
-    `?$filter=isRead eq false and receivedDateTime ge ${fifteenMinsAgo}` +
-    `&$top=20` +
-    `&$select=id,from,toRecipients,subject,bodyPreview,receivedDateTime,hasAttachments` +
-    `&$orderby=receivedDateTime desc`
+
+  let graphUrl: string
+  let isGroupMode = false
+  if (mailboxType === 'group' && groupId) {
+    // Groups use /threads endpoint — no mailFolders
+    graphUrl = `${graphBase}/threads` +
+      `?$top=20` +
+      `&$select=id,topic,lastDeliveredDateTime,preview,hasAttachments` +
+      `&$orderby=lastDeliveredDateTime desc`
+    isGroupMode = true
+  } else {
+    graphUrl = `${graphBase}/mailFolders/inbox/messages` +
+      `?$filter=isRead eq false and receivedDateTime ge ${fifteenMinsAgo}` +
+      `&$top=20` +
+      `&$select=id,from,toRecipients,subject,bodyPreview,receivedDateTime,hasAttachments` +
+      `&$orderby=receivedDateTime desc`
+  }
 
   const resp = await fetch(graphUrl, {
     headers: { 'Authorization': `Bearer ${token}` },
@@ -175,7 +218,26 @@ async function processMailbox(
   }
 
   const data = await resp.json()
-  const messages = data.value || []
+  let messages = data.value || []
+
+  // Normalize group threads into message-like objects
+  if (isGroupMode) {
+    messages = messages
+      .filter((t: any) => {
+        // Only process threads from last 15 mins
+        const dt = new Date(t.lastDeliveredDateTime || 0)
+        return dt.getTime() > Date.now() - 15 * 60000
+      })
+      .map((t: any) => ({
+        id: t.id,
+        from: { emailAddress: { address: mailbox, name: t.topic || 'Group Thread' } },
+        toRecipients: [{ emailAddress: { address: mailbox } }],
+        subject: t.topic || '(no subject)',
+        bodyPreview: t.preview || '',
+        receivedDateTime: t.lastDeliveredDateTime,
+        hasAttachments: t.hasAttachments || false,
+      }))
+  }
 
   if (messages.length === 0) {
     return { processed: 0, notified: 0 }
@@ -582,12 +644,17 @@ Deno.serve(async (req) => {
     let totalNotified = 0
 
     for (const mb of MONITORED_MAILBOXES) {
-      // Skip groups with no groupId configured yet
-      if (mb.type === 'group' && !mb.groupId) {
-        console.log(`[monitor-inbox] Skipping ${mb.email} — group ID not configured`)
-        continue
+      let resolvedGroupId = mb.groupId || undefined
+      // Auto-resolve group IDs at runtime
+      if (mb.type === 'group' && !resolvedGroupId) {
+        const gid = await resolveGroupId(token, mb.email)
+        if (!gid) {
+          console.log(`[monitor-inbox] Skipping ${mb.email} — could not resolve Group ID`)
+          continue
+        }
+        resolvedGroupId = gid
       }
-      const { processed, notified } = await processMailbox(sb, token, mb.email, adminTelegramIds, mb.type, mb.groupId)
+      const { processed, notified } = await processMailbox(sb, token, mb.email, adminTelegramIds, mb.type, resolvedGroupId)
       totalProcessed += processed
       totalNotified += notified
     }
