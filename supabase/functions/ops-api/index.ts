@@ -9513,6 +9513,33 @@ async function listVariations(client: any, params: URLSearchParams) {
 // One Sonnet call does pricing + classification — no separate Haiku needed.
 // ════════════════════════════════════════════════════════════
 
+// Map supplier item description to scope tool field for pricing feedback
+function mapScopeToolField(description: string, category: string): string | null {
+  const d = description.toLowerCase()
+  // Fencing materials
+  if (/trimdek|sameside|metzag|metclad/.test(d) && /fenc/.test(category)) return 'panel_rate_per_lm'
+  if (/post.*(65|90|100)/.test(d)) return 'post_rate_each'
+  if (/gate\s*(kit)?/.test(d)) return 'gate_kit_rate'
+  if (/plinth/.test(d)) return 'plinth_rate_each'
+  if (/concrete|cement/.test(d)) return 'concrete_rate_each'
+  // Patio roofing
+  if (/solarspan|bondor|insulated\s*panel/.test(d)) return 'panel_rate_per_sqm'
+  if (/trimdek|spandek|corrugated|spanplus/.test(d) && /roof/.test(category)) return 'sheet_rate_per_sqm'
+  // Patio steel
+  if (/beam|channel|ub\s|pfc\s|rhs/.test(d)) return 'beam_rate_per_m'
+  if (/rafter|purlin/.test(d)) return 'rafter_rate_per_m'
+  if (/column|post.*shs/.test(d) && !/fenc/.test(category)) return 'column_rate_each'
+  // Flashings & drainage
+  if (/gutter/.test(d)) return 'gutter_rate_per_m'
+  if (/fascia/.test(d)) return 'fascia_rate_per_m'
+  if (/downpipe/.test(d)) return 'downpipe_rate_per_m'
+  if (/flash/.test(d)) return 'flashing_rate_per_m'
+  // Fixings
+  if (/tek.*screw|roofing.*screw/.test(d)) return 'fixings_rate'
+  if (/delivery/.test(d)) return 'delivery_rate'
+  return null // unmapped — operator can set in Pending Prices UI
+}
+
 async function analyseSupplierQuote(client: any, body: any) {
   const { po_id, poId, image_url, image_base64, quote_text } = body
   const pId = po_id || poId
@@ -9837,6 +9864,22 @@ Return ONLY valid JSON in this exact format:
     const normPrice = item.normalised_price && item.normalised_price > 0 ? item.normalised_price : item.unit_price
     const normUnit = item.normalised_unit || item.unit || 'ea'
 
+    // Map to scope tool field for pricing feedback loop
+    const scopeField = mapScopeToolField(item.description || '', item.material_category || 'other')
+
+    // Look up previous rate from scope_tool_defaults for delta display
+    let prevRate = item.our_po_price || null
+    if (!prevRate && scopeField) {
+      try {
+        const { data: def } = await client.from('scope_tool_defaults')
+          .select('default_price')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .ilike('item_key', '%' + (item.description || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 50) + '%')
+          .limit(1)
+        if (def && def.length > 0) prevRate = def[0].default_price
+      } catch { /* non-blocking */ }
+    }
+
     await client.from('material_price_ledger').insert({
       org_id: DEFAULT_ORG_ID,
       supplier_name: po.supplier_name,
@@ -9850,7 +9893,8 @@ Return ONLY valid JSON in this exact format:
       po_id: po.id,
       job_id: po.job_id || null,
       status: 'pending',
-      previous_rate: item.our_po_price || null,
+      previous_rate: prevRate,
+      scope_tool_field: scopeField,
     })
     stored++
   }
