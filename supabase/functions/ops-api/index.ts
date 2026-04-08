@@ -8892,17 +8892,24 @@ async function generateNudges(client: any) {
     .lt('updated_at', sevenDaysAgo)
     .order('updated_at', { ascending: true }).limit(20)
 
-  // Trust layer: check for recent activity on candidate jobs
+  // Trust layer: check for recent CLIENT activity on candidate jobs
+  // Only suppress nudges for genuine client engagement, not system/outbound emails
   const candidateIds = (staleQuotes || []).map((j: any) => j.id)
   let activeJobIds = new Set<string>()
   if (candidateIds.length > 0) {
-    const [recentEmails, recentEvents] = await Promise.all([
-      client.from('inbox_events').select('job_id').in('job_id', candidateIds).gte('received_at', sevenDaysAgo),
-      client.from('job_events').select('job_id').in('job_id', candidateIds)
-        .in('event_type', ['note_added', 'status_changed', 'sms_sent', 'email_sent', 'client_email_received'])
+    const [recentClientEmails, recentClientEvents] = await Promise.all([
+      // Only count inbound client emails (not outbound, spam, newsletters)
+      client.from('inbox_events').select('job_id')
+        .in('job_id', candidateIds)
+        .gte('received_at', sevenDaysAgo)
+        .in('classification', ['client_reply', 'complaint', 'urgent']),
+      // Only count client-facing events (not internal system events)
+      client.from('job_events').select('job_id')
+        .in('job_id', candidateIds)
+        .in('event_type', ['client_email_received', 'sms_received', 'quote_accepted', 'deposit_received'])
         .gte('created_at', sevenDaysAgo),
     ])
-    for (const r of [...(recentEmails.data || []), ...(recentEvents.data || [])]) {
+    for (const r of [...(recentClientEmails.data || []), ...(recentClientEvents.data || [])]) {
       if (r.job_id) activeJobIds.add(r.job_id)
     }
   }
