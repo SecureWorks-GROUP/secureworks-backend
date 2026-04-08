@@ -2089,10 +2089,10 @@ serve(async (req: Request) => {
           let chatHistoryRaw: Array<{ query: string; response: string }> = []
           try {
             let query = client.from('chat_logs')
-              .select('query, response')
+              .select('query, response, job_ids_referenced')
               .eq('channel', channel)
               .order('created_at', { ascending: false })
-              .limit(3)
+              .limit(5)
             // For DMs, filter by user_email (user_id is often NULL)
             if (channel === 'telegram_dm') {
               query = query.eq('user_email', user.email)
