@@ -9867,16 +9867,19 @@ Return ONLY valid JSON in this exact format:
     // Map to scope tool field for pricing feedback loop
     const scopeField = mapScopeToolField(item.description || '', item.material_category || 'other')
 
-    // Look up previous rate from scope_tool_defaults for delta display
+    // Look up previous rate: first from PO line items, then from last confirmed ledger entry
     let prevRate = item.our_po_price || null
-    if (!prevRate && scopeField) {
+    if (!prevRate) {
       try {
-        const { data: def } = await client.from('scope_tool_defaults')
-          .select('default_price')
+        const { data: prev } = await client.from('material_price_ledger')
+          .select('unit_price')
           .eq('org_id', DEFAULT_ORG_ID)
-          .ilike('item_key', '%' + (item.description || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 50) + '%')
+          .eq('supplier_name', po.supplier_name)
+          .eq('status', 'confirmed')
+          .ilike('item_description', item.description || '')
+          .order('captured_at', { ascending: false })
           .limit(1)
-        if (def && def.length > 0) prevRate = def[0].default_price
+        if (prev && prev.length > 0) prevRate = prev[0].unit_price
       } catch { /* non-blocking */ }
     }
 
