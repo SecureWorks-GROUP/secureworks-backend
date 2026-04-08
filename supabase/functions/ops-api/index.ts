@@ -9867,7 +9867,8 @@ Return ONLY valid JSON in this exact format:
     // Map to scope tool field for pricing feedback loop
     const scopeField = mapScopeToolField(item.description || '', item.material_category || 'other')
 
-    // Look up previous rate: first from PO line items, then from last confirmed ledger entry
+    // Look up previous rate: from last confirmed ledger entry for a DIFFERENT PO
+    // Exclude current PO to prevent self-matching on retries/re-analysis
     let prevRate = item.our_po_price || null
     if (!prevRate) {
       try {
@@ -9876,6 +9877,7 @@ Return ONLY valid JSON in this exact format:
           .eq('org_id', DEFAULT_ORG_ID)
           .eq('supplier_name', po.supplier_name)
           .eq('status', 'confirmed')
+          .neq('po_id', po.id)
           .ilike('item_description', item.description || '')
           .order('captured_at', { ascending: false })
           .limit(1)
