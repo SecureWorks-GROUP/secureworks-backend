@@ -331,6 +331,20 @@ async function processMailbox(
 
     processed++
 
+    // COHESION-4: Log email to job_events so it appears in job timeline
+    if (jobId && classification.classification !== 'outbound') {
+      sb.from('job_events').insert({
+        job_id: jobId,
+        event_type: 'email_received',
+        detail_json: {
+          from: fromEmail, from_name: fromName, subject,
+          classification: classification.classification,
+          priority: classification.priority,
+          mailbox, inbox_event_id: msg.id,
+        },
+      }).then(() => {}).catch(() => {})
+    }
+
     // Capability gap detection: log unclassified emails that look like requests
     if (classification.classification === 'other' && bodyPreview.length > 20) {
       const looksLikeRequest = /\?|please|can you|could you|i need|when will|how do|is it possible/i.test(bodyPreview)
