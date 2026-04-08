@@ -1101,10 +1101,12 @@ serve(async (req: Request) => {
       case 'enrich_debtor_contacts': return json(await enrichDebtorContacts(client))
       case 'list_nudges': {
         const status = url.searchParams.get('status') || 'pending'
-        const { data } = await client.from('smart_nudges')
-          .select('*').eq('org_id', DEFAULT_ORG_ID).eq('status', status)
-          .order('created_at', { ascending: false }).limit(30)
-        return json({ nudges: data || [], count: (data || []).length })
+        const limit = Math.min(Number(url.searchParams.get('limit')) || 10, 30)
+        const { data, count } = await client.from('smart_nudges')
+          .select('id, nudge_type, job_id, contact_name, trigger_rule, suggested_action, suggested_message, created_at', { count: 'exact' })
+          .eq('org_id', DEFAULT_ORG_ID).eq('status', status)
+          .order('created_at', { ascending: false }).limit(limit)
+        return json({ nudges: data || [], showing: (data || []).length, total_pending: count || 0 })
       }
       case 'act_nudge': {
         const { nudge_id, action: nudgeAction } = body
