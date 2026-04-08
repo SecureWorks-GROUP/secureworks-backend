@@ -590,7 +590,35 @@ serve(async (req: Request) => {
       case 'ops_summary': return json(await opsSummary(client))
       case 'calendar': return json(await calendarEvents(client, url.searchParams))
       case 'pipeline': return json(await pipeline(client, url.searchParams))
-      case 'job_detail': return json(await jobDetail(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
+      case 'job_detail': return json(await jobDetail(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || '', url.searchParams.get('include_scope') === 'true'))
+      case 'get_job_materials': {
+        const jId = url.searchParams.get('job_id') || url.searchParams.get('jobId')
+        if (!jId) return json({ error: 'job_id required' }, 400)
+        const { data: job } = await client.from('jobs')
+          .select('id, job_number, client_name, type, status, scope_json, pricing_json')
+          .eq('id', jId).single()
+        if (!job) return json({ error: 'Job not found' }, 404)
+        const scope = typeof job.scope_json === 'string' ? JSON.parse(job.scope_json || '{}') : (job.scope_json || {})
+        // Use pre-computed BOM if available (new saves), otherwise extract from scope
+        let bom = scope._bom || null
+        if (!bom) {
+          const materials = extractMaterialsFromScope(scope, job.pricing_json)
+          bom = { extracted: materials, note: 'Extracted from scope_json (no pre-computed BOM)' }
+        }
+        const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
+        return json({
+          job_id: job.id, job_number: job.job_number, client: job.client_name, type: job.type, status: job.status,
+          bom,
+          config_summary: {
+            roofStyle: scope.config?.roofStyle, roofing: scope.config?.roofing,
+            projection: scope.config?.projection, length: scope.config?.length,
+            sheetColor: scope.config?.sheetColor?.name || scope.config?.sheetColor,
+            steelColor: scope.config?.steelColor?.name || scope.config?.steelColor,
+            connection: scope.config?.connection, postSize: scope.config?.postSize,
+          },
+          pricing_summary: { totalIncGST: pricing.totalIncGST, totalExGST: pricing.totalExGST, materialsCost: pricing.materialsCost },
+        })
+      }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))
@@ -3165,7 +3193,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   return { columns, total: enriched.length }
 }
 
-async function jobDetail(client: any, jobId: string) {
+async function jobDetail(client: any, jobId: string, includeScope = false) {
   if (!jobId) throw new Error('jobId required')
 
   // If job_number passed instead of UUID, resolve it
@@ -3266,6 +3294,7 @@ async function jobDetail(client: any, jobId: string) {
 
   // Strip heavy JSON blobs from response — keep only computed values
   const { scope_json: _s, pricing_json: _p, ...jobLite } = jobRes.data || {}
+  if (includeScope && _s) (jobLite as any).scope_json = _s
 
   // Strip line_items from invoices (huge nested JSON)
   const invoicesLite = invoices.map((inv: any) => {
