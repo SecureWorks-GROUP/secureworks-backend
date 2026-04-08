@@ -1099,6 +1099,42 @@ serve(async (req: Request) => {
       case 'dismiss_price': return json(await dismissPrice(client, body))
       case 'generate_nudges': return json(await generateNudges(client))
       case 'enrich_debtor_contacts': return json(await enrichDebtorContacts(client))
+      case 'batch_intelligence': {
+        // Batch compute job intelligence for jobs missing or stale assessments
+        const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 100)
+        const { data: jobs } = await client.from('jobs')
+          .select('id, job_number')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .not('legacy', 'is', true)
+          .in('status', ['accepted', 'scheduled', 'in_progress', 'complete', 'invoiced', 'quoted'])
+          .order('updated_at', { ascending: false })
+          .limit(limit)
+        // Find which ones need intelligence (missing or stale)
+        const jobIds = (jobs || []).map((j: any) => j.id)
+        const { data: existing } = await client.from('job_intelligence')
+          .select('job_id, computed_at')
+          .in('job_id', jobIds)
+        const existingMap = new Map((existing || []).map((e: any) => [e.job_id, e.computed_at]))
+        const cutoff = new Date(Date.now() - 24 * 3600000).toISOString() // 24h stale
+        const needsUpdate = jobIds.filter(id => {
+          const computed = existingMap.get(id)
+          return !computed || computed < cutoff
+        })
+        // Process up to 20 per run (cost control)
+        const batch = needsUpdate.slice(0, 20)
+        let processed = 0
+        for (const jobId of batch) {
+          try {
+            await fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jobId}`, {
+              headers: { 'x-api-key': SW_API_KEY, 'Content-Type': 'application/json' },
+            })
+            processed++
+          } catch (e) {
+            console.log(`[batch-intel] failed for ${jobId}:`, (e as Error).message)
+          }
+        }
+        return json({ processed, total_needing_update: needsUpdate.length, batch_size: batch.length })
+      }
       case 'list_nudges': {
         const status = url.searchParams.get('status') || 'pending'
         const limit = Math.min(Number(url.searchParams.get('limit')) || 10, 30)
