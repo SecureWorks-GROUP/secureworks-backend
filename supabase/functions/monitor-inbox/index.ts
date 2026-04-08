@@ -27,7 +27,7 @@ const MONITORED_MAILBOXES: Array<{ email: string; type: 'user' | 'group'; groupI
   { email: 'admin@secureworkswa.com.au', type: 'user' },
   { email: 'shaun@secureworkswa.com.au', type: 'user' },
   { email: 'nithin@secureworkswa.com.au', type: 'user' },
-  { email: 'khairo@secureworkswa.com.au', type: 'user' },
+  // khairo@ removed — mailbox invalid in MS365 (T2 Apr 8)
   // MS365 Groups — use group ID (resolve via Graph /groups?$filter=mail eq '...')
   // Group IDs need to be populated after first run — will log errors until set
   { email: 'patios@secureworkswa.com.au', type: 'group', groupId: '' },
