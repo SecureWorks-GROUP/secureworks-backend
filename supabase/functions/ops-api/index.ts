@@ -4131,7 +4131,7 @@ async function pushPOToXero(client: any, body: any) {
     Description: li.description || li.name || '',
     Quantity: li.quantity || 1,
     UnitAmount: li.unit_price || li.unitPrice || 0,
-    AccountCode: li.account_code || '300',
+    AccountCode: li.account_code || '310',
     TaxType: 'INPUT',
     ...(poTracking.length > 0 ? { Tracking: poTracking } : {}),
   }))
@@ -6137,6 +6137,13 @@ async function morningBrief(client: any) {
 function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
   if (!scope_json) return []
   const scope = typeof scope_json === 'string' ? JSON.parse(scope_json) : scope_json
+
+  // Detect fence-designer format: { tool: 'fencing', job: { runs: [...], supplier, profile, colour } }
+  const fenceJob = (scope.tool === 'fencing' && scope.job) ? scope.job : null
+  const fenceColour = fenceJob?.colour || ''
+  const fenceProfile = fenceJob?.profile || ''
+  const fenceSupplier = fenceJob?.supplier || ''
+
   const config = scope.config || scope
 
   const items: any[] = []
@@ -6209,7 +6216,8 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
   }
 
   // ── Fencing materials (detailed extraction from scoping tool) ──
-  const sections = scope.sections || []
+  // fence-designer saves as scope.job.runs[], older format uses scope.sections[]
+  const sections = fenceJob?.runs || scope.sections || []
   if (sections.length > 0) {
     // Group panels by sheet height
     const panelsByHeight: Record<number, number> = {}
@@ -6244,11 +6252,14 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
 
     // Panels by height
     for (const [height, count] of Object.entries(panelsByHeight)) {
+      const profileLabel = fenceProfile || 'Colorbond'
+      const colourLabel = fenceColour ? ` ${fenceColour}` : ''
       items.push({
-        description: `Colorbond fence sheets — ${height}mm high`,
+        description: `${profileLabel} fence sheets — ${height}mm${colourLabel}`,
         quantity: count,
         unit: 'sheets',
         unit_price: 0,
+        supplier_name: fenceSupplier || null,
       })
     }
 
@@ -6296,8 +6307,8 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
       }
     }
 
-    // Gates
-    const gates = scope.gates || []
+    // Gates — fence-designer stores at scope.job.gates
+    const gates = fenceJob?.gates || scope.gates || []
     for (const gate of gates) {
       const gateType = gate.type || 'pedestrian'
       const gateWidth = gate.width || 900
@@ -6330,8 +6341,8 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
       })
     }
 
-    // Removal line items
-    const removal = scope.removal
+    // Removal line items — fence-designer stores at scope.job.removal
+    const removal = fenceJob?.removal || scope.removal
     if (removal && (removal.totalMetres > 0 || removal.length > 0)) {
       items.push({
         description: 'Old fence removal',
@@ -6358,9 +6369,10 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
   // If scope had nothing recognisable but pricing has items, fall back to pricing
   if (items.length === 0 && pricing_json) {
     const pricing = typeof pricing_json === 'string' ? JSON.parse(pricing_json) : pricing_json
-    if (Array.isArray(pricing.items)) {
-      return pricing.items
-        .filter((li: any) => li.description && /material|panel|post|beam|steel|concrete|colorbond/i.test(li.description))
+    const pricingItems = pricing.items || pricing.line_items || []
+    if (Array.isArray(pricingItems) && pricingItems.length > 0) {
+      return pricingItems
+        .filter((li: any) => li.description && /material|panel|post|beam|steel|concrete|colorbond|fence|sameside|harmony|trimclad|plinth|gate/i.test(li.description))
         .map((li: any) => ({
           description: li.description,
           quantity: li.quantity || 1,
