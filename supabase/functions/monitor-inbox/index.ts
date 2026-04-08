@@ -260,7 +260,22 @@ async function processMailbox(
     const bodyPreview = (msg.bodyPreview || '').slice(0, 500)
     const receivedAt = msg.receivedDateTime
 
-    // Classify
+    // Outbound detection: skip classification + Telegram for emails FROM our own domain
+    const isOutbound = fromEmail.toLowerCase().endsWith('@secureworkswa.com.au') || fromEmail.toLowerCase().endsWith('@secureworksgroup.app')
+    if (isOutbound) {
+      // Still store in inbox_events for tracking, but mark as outbound/low priority
+      await sb.from('inbox_events').insert({
+        org_id: DEFAULT_ORG_ID, graph_message_id: msg.id, mailbox,
+        from_email: fromEmail, from_name: fromName, to_email: toEmail,
+        subject, body_preview: bodyPreview, received_at: receivedAt,
+        classification: 'outbound', priority: 'low', action_needed: null,
+        telegram_notified: false, metadata: { is_outbound: true },
+      }).then(() => {}).catch(() => {})
+      processed++
+      continue // Skip classification, routing, and Telegram notification
+    }
+
+    // Classify (only for external emails)
     const classification = await classifyEmail(fromEmail, subject, bodyPreview)
 
     // Try to match to a job
@@ -581,8 +596,21 @@ async function processMailbox(
       }
     }
 
-    // Telegram notification for high priority
+    // Telegram notification for high priority (with cross-mailbox dedup)
     if (classification.priority === 'high') {
+      // Cross-mailbox dedup: check if same subject+sender already notified within 60s
+      const { data: recentDupe } = await sb.from('inbox_events')
+        .select('id')
+        .eq('subject', subject).eq('from_email', fromEmail)
+        .eq('telegram_notified', true)
+        .gte('received_at', new Date(Date.now() - 60000).toISOString())
+        .neq('graph_message_id', msg.id)
+        .limit(1)
+      if (recentDupe && recentDupe.length > 0) {
+        // Already notified from another mailbox — skip
+        processed++
+        continue
+      }
       const emoji = classification.classification === 'complaint' ? '🚨'
         : classification.classification === 'urgent' ? '⚡'
         : classification.classification === 'council' ? '🏛️'
