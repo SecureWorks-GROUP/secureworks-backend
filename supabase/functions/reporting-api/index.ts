@@ -285,6 +285,51 @@ serve(async (req: Request) => {
         return json(await getPortfolioSummary(sb))
       case 'job_intelligence':
         return json(await getJobIntelligence(sb, url.searchParams.get('job_id') || ''))
+      case 'chat_logs': {
+        const since = url.searchParams.get('since') || new Date(Date.now() - 7 * 24 * 3600000).toISOString()
+        const channel = url.searchParams.get('channel')
+        const limit = Math.min(Number(url.searchParams.get('limit')) || 20, 50)
+        let query = sb.from('chat_logs')
+          .select('id, role, query, response, tools_used, channel, created_at')
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(limit)
+        if (channel) query = query.eq('channel', channel)
+        const { data, error } = await query
+        if (error) return json({ error: error.message }, 500)
+        return json({
+          logs: (data || []).map((r: any) => ({
+            id: r.id, role: r.role, query: r.query?.slice(0, 500), response: r.response?.slice(0, 500),
+            tools_used: r.tools_used, channel: r.channel, timestamp: r.created_at,
+          })),
+          total: (data || []).length, period: `Since ${since}`, channel_filter: channel || 'all',
+        })
+      }
+      case 'group_messages': {
+        const since = url.searchParams.get('since') || new Date(Date.now() - 24 * 3600000).toISOString()
+        const group = url.searchParams.get('group')
+        const topic = url.searchParams.get('topic')
+        const limit = Math.min(Number(url.searchParams.get('limit')) || 30, 100)
+        let query = sb.from('business_events')
+          .select('id, event_type, payload, created_at')
+          .in('event_type', ['crew.message', 'crew.photo', 'crew.voice_note'])
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(limit)
+        if (group) query = query.ilike('payload->>chat_title', `%${group}%`)
+        if (topic) query = query.eq('payload->>topic_id', topic)
+        const { data, error } = await query
+        if (error) return json({ error: error.message }, 500)
+        return json({
+          messages: (data || []).map((e: any) => ({
+            id: e.id, type: e.event_type.replace('crew.', ''), from: e.payload?.from,
+            text: e.payload?.text || e.payload?.caption || null,
+            has_photo: e.event_type === 'crew.photo', group: e.payload?.chat_title || 'Unknown',
+            topic_id: e.payload?.topic_id || null, timestamp: e.created_at,
+          })),
+          total: (data || []).length, period: `Since ${since}`, group_filter: group || 'all',
+        })
+      }
       case 'shaun_brief': {
         const since = url.searchParams.get('since') || '2026-03-26'
         const [
