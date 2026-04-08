@@ -695,6 +695,23 @@ serve(async (req: Request) => {
         return json({ success: true, migrated: results })
       }
       case 'create_unified_invoice': return json(await createUnifiedInvoice(client, body))
+      case 'send_invoice_email': return json(await sendInvoiceEmail(client, body))
+      case 'email_xero_invoice': {
+        const xid = body.xero_invoice_id
+        if (!xid) return json({ error: 'xero_invoice_id required' }, 400)
+        const { accessToken: eiAt, tenantId: eiTi } = await getToken(client)
+        const eiResp = await fetch(`${XERO_API_BASE}/Invoices/${xid}/Email`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${eiAt}`, 'Xero-tenant-id': eiTi, 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        if (!eiResp.ok) {
+          const eiErr = await eiResp.text()
+          return json({ error: 'Xero email failed', detail: eiErr }, 500)
+        }
+        await client.from('xero_invoices').update({ status: 'SENT', updated_at: new Date().toISOString() }).eq('xero_invoice_id', xid).eq('status', 'AUTHORISED')
+        return json({ success: true, sent_via: 'xero_native' })
+      }
       case 'reconcile_payment': return json(await reconcilePayment(client, body))
       case 'sync_suppliers': return json(await syncSuppliers(client))
       case 'update_supplier_email': return json(await updateSupplierEmail(client, body))
@@ -4704,6 +4721,74 @@ async function syncJobInvoices(client: any, body: any) {
   return { success: true, synced, job_number: job.job_number, invoices: syncedInvoices }
 }
 
+// ── Send Invoice Email — download Xero PDF and send via Outlook with attachment ──
+async function sendInvoiceEmail(client: any, body: any) {
+  const { xero_invoice_id, job_id, to_email, cc, subject_override } = body
+  if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
+  if (!to_email) throw new ApiError('to_email required', 400)
+
+  // 1. Get invoice details
+  const { data: invoice } = await client.from('xero_invoices')
+    .select('invoice_number, total, reference, contact_name, status')
+    .eq('xero_invoice_id', xero_invoice_id)
+    .maybeSingle()
+  if (!invoice) throw new ApiError('Invoice not found in local database', 404)
+
+  // 2. Download PDF from Xero
+  const { accessToken, tenantId } = await getToken(client)
+  const pdfResp = await fetch(`${XERO_API_BASE}/Invoices/${xero_invoice_id}`, {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Xero-tenant-id': tenantId,
+      'Accept': 'application/pdf',
+    },
+  })
+  if (!pdfResp.ok) throw new ApiError(`Xero PDF download failed: ${pdfResp.status}`, 500)
+
+  const buffer = await pdfResp.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+  const pdf_base64 = btoa(binary)
+  const filename = `${invoice.invoice_number}.pdf`
+
+  // 3. Send via Outlook with PDF attached
+  const subject = subject_override || `SecureWorks Invoice ${invoice.invoice_number}${invoice.reference ? ' — ' + invoice.reference : ''}`
+  const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+    body: JSON.stringify({
+      to: to_email,
+      cc: cc || undefined,
+      subject,
+      htmlBody: `<p>Hi ${invoice.contact_name?.split(' ')[0] || ''},</p>
+<p>Please find attached your invoice <strong>${invoice.invoice_number}</strong> for <strong>$${Number(invoice.total).toLocaleString('en-AU', { minimumFractionDigits: 2 })}</strong>.</p>
+<p>If you have any questions, please reply to this email or call us on <strong>08 6244 0771</strong>.</p>
+<p>Kind regards,<br>SecureWorks Group</p>`,
+      from: 'marnin@secureworkswa.com.au',
+      attachments: [{ contentBytes: pdf_base64, name: filename, contentType: 'application/pdf' }],
+      job_id: job_id || undefined,
+    }),
+  })
+  if (!emailResp.ok) {
+    const errText = await emailResp.text()
+    throw new ApiError(`Email send failed: ${errText}`, 500)
+  }
+
+  // 4. Log event
+  try {
+    await client.from('business_events').insert({
+      event_type: 'invoice.emailed',
+      source: 'ops-api/send_invoice_email',
+      entity_type: 'invoice',
+      entity_id: xero_invoice_id,
+      payload: { invoice_number: invoice.invoice_number, total: invoice.total, to: to_email, cc, pdf_attached: true },
+    })
+  } catch (_) { /* non-blocking */ }
+
+  return { success: true, invoice_number: invoice.invoice_number, to: to_email, cc: cc || null, pdf_attached: true }
+}
+
 // ── Update Invoice — edit line items on an existing Xero invoice ──
 async function updateInvoice(client: any, body: any) {
   const { xero_invoice_id, line_items, due_date, resend_email } = body
@@ -5694,18 +5779,8 @@ async function createDepositInvoice(client: any, body: any) {
     account_code: accountCodeForJob(job.type),
   }]
 
-  // Credit card surcharge — always applied. Bank transfer clients can ignore.
-  const CARD_SURCHARGE_RATE = 0.0175    // 1.75%
-  const CARD_SURCHARGE_FIXED = 0.30     // $0.30
-  const surchargeIncGst = Math.round((depositAmountIncGst * CARD_SURCHARGE_RATE + CARD_SURCHARGE_FIXED) * 100) / 100
-  const surchargeExGst = Math.round((surchargeIncGst / 1.1) * 100) / 100
-  lineItems.push({
-    description: 'Credit card processing fee (1.75% — waived for bank transfer payments)',
-    quantity: 1,
-    unit_price: surchargeExGst,
-    account_code: accountCodeForJob(job.type),
-  })
-  console.log(`[createDepositInvoice] Card surcharge added: $${surchargeIncGst} inc GST on deposit $${depositAmountIncGst}`)
+  // Credit card surcharge — REMOVED. Was adding confusion to invoices.
+  // If CC fees need to be charged, add manually in Xero or build a separate opt-in flag.
 
   // Extra line items (council fees, etc.) — each has amount_inc_gst
   const extras = body.extra_line_items || []
@@ -8809,13 +8884,31 @@ async function generateNudges(client: any) {
 
   // 1. Stale quotes: quoted > 7 days, no activity
   const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000).toISOString()
+  const twoDaysAgoStr = new Date(now.getTime() - 2 * 86400000).toISOString()
   const { data: staleQuotes } = await client.from('jobs')
     .select('id, client_name, job_number, site_suburb, pricing_json, updated_at')
     .eq('org_id', DEFAULT_ORG_ID).eq('status', 'quoted')
     .not('legacy', 'is', true)
     .lt('updated_at', sevenDaysAgo)
     .order('updated_at', { ascending: true }).limit(20)
+
+  // Trust layer: check for recent activity on candidate jobs
+  const candidateIds = (staleQuotes || []).map((j: any) => j.id)
+  let activeJobIds = new Set<string>()
+  if (candidateIds.length > 0) {
+    const [recentEmails, recentEvents] = await Promise.all([
+      client.from('inbox_events').select('job_id').in('job_id', candidateIds).gte('received_at', sevenDaysAgo),
+      client.from('job_events').select('job_id').in('job_id', candidateIds)
+        .in('event_type', ['note_added', 'status_changed', 'sms_sent', 'email_sent', 'client_email_received'])
+        .gte('created_at', sevenDaysAgo),
+    ])
+    for (const r of [...(recentEmails.data || []), ...(recentEvents.data || [])]) {
+      if (r.job_id) activeJobIds.add(r.job_id)
+    }
+  }
+
   for (const j of (staleQuotes || [])) {
+    if (activeJobIds.has(j.id)) continue // Trust layer: recent activity detected, skip
     const value = j.pricing_json?.totalIncGST || j.pricing_json?.total || 0
     const days = Math.ceil((now.getTime() - new Date(j.updated_at).getTime()) / 86400000)
     nudges.push({
