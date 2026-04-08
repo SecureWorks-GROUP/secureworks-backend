@@ -1094,6 +1094,69 @@ async function handleCallbackQuery(client: any, callbackQuery: any) {
     await handleContextCaptureCallback(client, callbackQuery, user, action, payload, chatId, messageId)
   } else if (action.startsWith('grad_')) {
     await handleGraduationCallback(client, callbackQuery, user, action, payload, chatId, messageId)
+  } else if (action === 'action_approve' || action === 'action_skip') {
+    // Proposed action approval/skip from nudge pipeline
+    try {
+      const proposalId = payload
+      const approved = action === 'action_approve'
+      const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+      // Get the proposed action
+      const { data: proposal } = await sb.from('ai_proposed_actions')
+        .select('*').eq('proposal_id', proposalId).single()
+
+      if (!proposal) {
+        await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: callbackQuery.id, text: 'Action not found or expired' }),
+        })
+        return new Response('ok', { status: 200 })
+      }
+
+      if (approved) {
+        // Execute the action
+        const tool = proposal.action_payload?.tool
+        const args = proposal.action_payload?.args || {}
+        if (tool === 'sw_send_chase_sms' && args.ghl_contact_id && args.message) {
+          await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_chase_sms`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+            body: JSON.stringify({ ghl_contact_id: args.ghl_contact_id, message: args.message, job_id: args.job_id }),
+          })
+        }
+        await sb.from('ai_proposed_actions').update({ status: 'approved', sent_at: new Date().toISOString(), resolved_at: new Date().toISOString() }).eq('proposal_id', proposalId)
+      } else {
+        await sb.from('ai_proposed_actions').update({ status: 'rejected', dismissed_at: new Date().toISOString(), resolved_at: new Date().toISOString() }).eq('proposal_id', proposalId)
+      }
+
+      // Log to business_events
+      await sb.from('business_events').insert({
+        event_type: approved ? 'proposed_action.approved' : 'proposed_action.skipped',
+        source: 'telegram_callback',
+        entity_type: 'proposed_action', entity_id: proposalId,
+        job_id: proposal.job_id,
+        payload: { action_type: proposal.action_type, contact_name: proposal.contact_name, approved },
+      }).then(() => {}).catch(() => {})
+
+      const ackText = approved ? 'Sent ✓' : 'Skipped'
+      await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id, text: ackText }),
+      })
+      await fetch(`${TELEGRAM_API}/editMessageText`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId, message_id: messageId,
+          text: `${callbackQuery.message?.text || ''}\n\n${approved ? '✅ Sent' : '⏭ Skipped'}`,
+        }),
+      })
+    } catch (e) {
+      console.error('[telegram-bot] action callback failed:', (e as Error).message)
+      await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id, text: 'Error — try again' }),
+      })
+    }
   } else if (action === 'chase_approve' || action === 'chase_skip') {
     // Debt chase inline approval — calls Railway agent's /api/chase-confirm
     try {
@@ -1723,6 +1786,41 @@ serve(async (req: Request) => {
 
   try {
     const body = await req.json()
+
+    // ── Handle proposed action cards from nudge pipeline ──
+    if (body.type === 'proposed_action_card' && body.chat_id && body.proposal_id) {
+      try {
+        const chatId = Number(body.chat_id)
+        const actionLabel = (body.action_type || 'action').replace(/_/g, ' ')
+        const jobNum = body.job_number || ''
+        const msgPreview = (body.drafted_message || '').slice(0, 120)
+        const text = [
+          `📋 <b>${actionLabel}</b>`,
+          `<b>Client:</b> ${body.contact_name || 'Unknown'}${jobNum ? ` (${jobNum})` : ''}`,
+          msgPreview ? `\n<i>"${msgPreview}${body.drafted_message?.length > 120 ? '...' : ''}"</i>` : '',
+        ].filter(Boolean).join('\n')
+
+        await fetch(`${TELEGRAM_API}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '✅ Send', callback_data: `action_approve:${body.proposal_id}` },
+                { text: '⏭ Skip', callback_data: `action_skip:${body.proposal_id}` },
+              ]],
+            },
+          }),
+        })
+        return new Response(JSON.stringify({ success: true }), { status: 200, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch (e) {
+        console.error('[telegram-bot] proposed action card failed:', (e as Error).message)
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
 
     // ── Handle automation results from Railway scheduler ──
     if (body.type === 'automation_result' && body.chat_id && body.content) {
