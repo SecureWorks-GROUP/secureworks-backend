@@ -6188,7 +6188,7 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
       quantity: postCount,
       unit_price: 0,
       supplier_name: 'CMI',
-      category: 'steel',
+      category: 'patio_steel',
     })
   }
 
@@ -6226,34 +6226,34 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
     const rafterCount = config.rafters || config.rafterCount || (patioLen > 0 ? Math.ceil(patioLen / 0.9) + 1 : 0)
     if (rafterCount > 0) {
       const rafterSize = config.rafterSize || config.purlinSize || '75x50'
-      items.push({ description: `${rafterSize} purlins${steelColour ? ' ' + steelColour : ''} — ${patioProj.toFixed(1)}m`, quantity: rafterCount, unit_price: 0, supplier_name: 'CMI', category: 'steel' })
+      items.push({ description: `${rafterSize} purlins${steelColour ? ' ' + steelColour : ''} — ${patioProj.toFixed(1)}m`, quantity: rafterCount, unit_price: 0, supplier_name: 'CMI', category: 'patio_steel' })
     }
 
     // Gutters
     if (patioLen > 0) {
-      items.push({ description: `Quad gutter${steelColour ? ' ' + steelColour : ''} — ${patioLen.toFixed(1)}m`, quantity: 1, unit_price: 0, supplier_name: 'CMI', category: 'drainage' })
+      items.push({ description: `Quad gutter${steelColour ? ' ' + steelColour : ''} — ${patioLen.toFixed(1)}m`, quantity: 1, unit_price: 0, supplier_name: 'CMI', category: 'patio_drainage' })
       // Downpipes — 1 per ~4m
       const dpCount = Math.max(1, Math.ceil(patioLen / 4))
-      items.push({ description: `90mm downpipe${steelColour ? ' ' + steelColour : ''}`, quantity: dpCount, unit_price: 0, supplier_name: 'CMI', category: 'drainage' })
+      items.push({ description: `90mm downpipe${steelColour ? ' ' + steelColour : ''}`, quantity: dpCount, unit_price: 0, supplier_name: 'CMI', category: 'patio_drainage' })
     }
 
     // Flashings from scope
     const flashings = scope.flashings || []
     for (const f of flashings) {
       if (f.name && f.length) {
-        items.push({ description: `${f.name}${f.colour ? ' ' + f.colour : ''} — ${f.length}m`, quantity: f.qty || 1, unit_price: 0, supplier_name: 'CMI', category: 'flashings' })
+        items.push({ description: `${f.name}${f.colour ? ' ' + f.colour : ''} — ${f.length}m`, quantity: f.qty || 1, unit_price: 0, supplier_name: 'CMI', category: 'patio_flashings' })
       }
     }
 
     // Tek screws
     const panelQty = items.find((i: any) => i.category === 'roofing')?.quantity || 0
     if (panelQty > 0) {
-      items.push({ description: 'Tek screws (12-14x50)', quantity: panelQty * 12, unit_price: 0, supplier_name: 'Bunnings', category: 'fixings' })
+      items.push({ description: 'Tek screws (12-14x50)', quantity: panelQty * 12, unit_price: 0, supplier_name: 'Bunnings', category: 'patio_fixings' })
     }
 
     // Concrete bags for posts
     if (postCount > 0) {
-      items.push({ description: 'Concrete bags (20kg)', quantity: postCount * 3, unit_price: 0, supplier_name: 'Bunnings', category: 'fixings' })
+      items.push({ description: 'Concrete bags (20kg)', quantity: postCount * 3, unit_price: 0, supplier_name: 'Bunnings', category: 'patio_fixings' })
     }
   }
 
