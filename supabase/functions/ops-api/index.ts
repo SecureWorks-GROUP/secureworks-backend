@@ -6164,11 +6164,15 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
       }
       const roofCode = typeof config.roofing === 'string' ? config.roofing : ''
       const panelType = config.panel_type || roofingMap[roofCode] || roofCode || 'Roofing panels'
+      const sheetColour = typeof config.sheetColor === 'object' ? config.sheetColor?.name : config.sheetColor || ''
+      const isInsulated = /solarspan|bondor/i.test(roofCode)
       items.push({
-        description: `${panelType} — ${projection.toFixed(1)}m projection × ${panelCount} panels`,
+        description: `${panelType}${sheetColour ? ' ' + sheetColour : ''} — ${projection.toFixed(1)}m × ${panelCount} panels`,
         quantity: panelCount,
         unit_price: 0,
         notes: `${m2.toFixed(1)}m² total area, ${length.toFixed(1)}m span`,
+        supplier_name: isInsulated ? 'Bondor' : 'CMI',
+        category: 'roofing',
       })
     }
   }
@@ -6176,12 +6180,15 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
   // Posts — handle both camelCase (patio tool) and snake_case
   const postCountRaw = config.post_count || config.postQtyOverride || config.posts?.count || config.posts || 0
   const postCount = typeof postCountRaw === 'number' ? postCountRaw : parseInt(postCountRaw) || 0
+  const steelColour = typeof config.steelColor === 'object' ? config.steelColor?.name : config.steelColor || ''
   if (postCount > 0) {
     const postSize = config.post_size || config.postSize || config.posts?.size || '100x100 SHS'
     items.push({
-      description: `${postSize} posts`,
+      description: `${postSize} posts${steelColour ? ' ' + steelColour : ''}`,
       quantity: postCount,
       unit_price: 0,
+      supplier_name: 'CMI',
+      category: 'steel',
     })
   }
 
@@ -6206,6 +6213,48 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
       quantity: postCount,
       unit_price: 0,
     })
+  }
+
+  // ── Additional patio materials (gutters, flashings, purlins, fixings) ──
+  if (config.roofing || config.length) {
+    let patioLen = typeof config.length === 'string' ? parseFloat(config.length) : (config.length || 0)
+    if (patioLen > 100) patioLen = patioLen / 1000
+    let patioProj = typeof config.projection === 'string' ? parseFloat(config.projection) : (config.projection || 0)
+    if (patioProj > 100) patioProj = patioProj / 1000
+
+    // Purlins/rafters
+    const rafterCount = config.rafters || config.rafterCount || (patioLen > 0 ? Math.ceil(patioLen / 0.9) + 1 : 0)
+    if (rafterCount > 0) {
+      const rafterSize = config.rafterSize || config.purlinSize || '75x50'
+      items.push({ description: `${rafterSize} purlins${steelColour ? ' ' + steelColour : ''} — ${patioProj.toFixed(1)}m`, quantity: rafterCount, unit_price: 0, supplier_name: 'CMI', category: 'steel' })
+    }
+
+    // Gutters
+    if (patioLen > 0) {
+      items.push({ description: `Quad gutter${steelColour ? ' ' + steelColour : ''} — ${patioLen.toFixed(1)}m`, quantity: 1, unit_price: 0, supplier_name: 'CMI', category: 'drainage' })
+      // Downpipes — 1 per ~4m
+      const dpCount = Math.max(1, Math.ceil(patioLen / 4))
+      items.push({ description: `90mm downpipe${steelColour ? ' ' + steelColour : ''}`, quantity: dpCount, unit_price: 0, supplier_name: 'CMI', category: 'drainage' })
+    }
+
+    // Flashings from scope
+    const flashings = scope.flashings || []
+    for (const f of flashings) {
+      if (f.name && f.length) {
+        items.push({ description: `${f.name}${f.colour ? ' ' + f.colour : ''} — ${f.length}m`, quantity: f.qty || 1, unit_price: 0, supplier_name: 'CMI', category: 'flashings' })
+      }
+    }
+
+    // Tek screws
+    const panelQty = items.find((i: any) => i.category === 'roofing')?.quantity || 0
+    if (panelQty > 0) {
+      items.push({ description: 'Tek screws (12-14x50)', quantity: panelQty * 12, unit_price: 0, supplier_name: 'Bunnings', category: 'fixings' })
+    }
+
+    // Concrete bags for posts
+    if (postCount > 0) {
+      items.push({ description: 'Concrete bags (20kg)', quantity: postCount * 3, unit_price: 0, supplier_name: 'Bunnings', category: 'fixings' })
+    }
   }
 
   // ── Fencing materials (detailed extraction from scoping tool) ──
