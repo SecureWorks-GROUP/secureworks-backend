@@ -1117,6 +1117,39 @@ serve(async (req: Request) => {
         await client.from('smart_nudges').update(update).eq('id', nudge_id)
         return json({ success: true })
       }
+      case 'add_manual_context': {
+        const { job_id: ctxJobId, body: ctxBody, user_email } = body
+        if (!ctxJobId || !ctxBody) return json({ error: 'job_id and body required' }, 400)
+        const expiresAt = new Date(Date.now() + 30 * 86400000).toISOString() // 30-day expiry
+        const { data, error } = await client.from('ai_annotations').insert({
+          org_id: DEFAULT_ORG_ID,
+          entity_type: 'job',
+          entity_id: ctxJobId,
+          annotation_type: 'manual_context',
+          category: 'ops',
+          title: 'Manual context from ' + (user_email || 'operator'),
+          body: ctxBody,
+          priority: 90,
+          severity: 'info',
+          source: 'manual',
+          source_ref: `manual:${ctxJobId}:${Date.now()}`,
+          confidence: 1.0,
+          expires_at: expiresAt,
+        }).select('id').single()
+        if (error) return json({ error: error.message }, 500)
+        // Log to job_events for timeline visibility
+        await client.from('job_events').insert({
+          job_id: ctxJobId, event_type: 'manual_context_added',
+          detail_json: { body: ctxBody, expires_at: expiresAt, added_by: user_email || 'operator' },
+        }).then(() => {}).catch(() => {})
+        return json({ success: true, annotation_id: data?.id, expires_at: expiresAt })
+      }
+      case 'dismiss_annotation': {
+        const { annotation_id } = body
+        if (!annotation_id) return json({ error: 'annotation_id required' }, 400)
+        await client.from('ai_annotations').update({ dismissed_at: new Date().toISOString() }).eq('id', annotation_id)
+        return json({ success: true })
+      }
       case 'sync_job_scope': {
         const { job_id, ...scopeFields } = body
         if (!job_id) return json({ error: 'job_id required' }, 400)
