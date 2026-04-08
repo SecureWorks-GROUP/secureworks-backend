@@ -1070,6 +1070,7 @@ serve(async (req: Request) => {
       case 'confirm_price': return json(await confirmPrice(client, body))
       case 'dismiss_price': return json(await dismissPrice(client, body))
       case 'generate_nudges': return json(await generateNudges(client))
+      case 'enrich_debtor_contacts': return json(await enrichDebtorContacts(client))
       case 'list_nudges': {
         const status = url.searchParams.get('status') || 'pending'
         const { data } = await client.from('smart_nudges')
@@ -8878,6 +8879,57 @@ async function extractPOPricing(client: any, body: any) {
   }
 }
 
+async function enrichDebtorContacts(client: any) {
+  // Find overdue invoice contacts with missing GHL/phone/email
+  const today = new Date().toISOString().slice(0, 10)
+  const { data: overdue } = await client.from('xero_invoices')
+    .select('xero_contact_id, contact_name, job_id')
+    .eq('invoice_type', 'ACCREC').in('status', ['AUTHORISED', 'SUBMITTED'])
+    .gt('amount_due', 0).lt('due_date', today)
+
+  const xeroIds = [...new Set((overdue || []).filter((i: any) => i.xero_contact_id).map((i: any) => i.xero_contact_id))]
+  if (xeroIds.length === 0) return { enriched: 0, gaps: [], message: 'No overdue invoices' }
+
+  // Get existing contact_matches
+  const { data: existing } = await client.from('contact_matches')
+    .select('xero_contact_id, ghl_contact_id, phone, email')
+    .in('xero_contact_id', xeroIds)
+  const existingMap = new Map((existing || []).map((c: any) => [c.xero_contact_id, c]))
+
+  // Find gaps: contacts with no GHL ID or no phone
+  const gaps: any[] = []
+  const enriched: any[] = []
+  for (const inv of (overdue || [])) {
+    const match = existingMap.get(inv.xero_contact_id)
+    if (match?.ghl_contact_id && match?.phone) continue // Already has contact info
+
+    // Try to find in jobs table by name
+    const { data: jobMatch } = await client.from('jobs')
+      .select('ghl_contact_id, client_phone, client_email')
+      .ilike('client_name', inv.contact_name)
+      .not('ghl_contact_id', 'is', null)
+      .limit(1)
+
+    if (jobMatch && jobMatch.length > 0) {
+      const j = jobMatch[0]
+      // UPSERT contact_matches with found data
+      await client.from('contact_matches').upsert({
+        org_id: DEFAULT_ORG_ID,
+        xero_contact_id: inv.xero_contact_id,
+        client_name: inv.contact_name,
+        ghl_contact_id: j.ghl_contact_id || match?.ghl_contact_id || null,
+        phone: j.client_phone || match?.phone || null,
+        email: j.client_email || match?.email || null,
+      }, { onConflict: 'xero_contact_id' })
+      enriched.push({ name: inv.contact_name, source: 'job_name_match', ghl: !!j.ghl_contact_id, phone: !!j.client_phone })
+    } else {
+      gaps.push({ name: inv.contact_name, xero_contact_id: inv.xero_contact_id, has_ghl: !!match?.ghl_contact_id, has_phone: !!match?.phone })
+    }
+  }
+
+  return { enriched: enriched.length, remaining_gaps: gaps.length, enriched_details: enriched, gaps }
+}
+
 async function generateNudges(client: any) {
   const now = new Date()
   const nudges: any[] = []
@@ -12534,6 +12586,38 @@ async function handlePaymentEvent(client: any, body: any) {
       console.log(`[ops-api] Thank-you SMS failed for ${ghlContactId}:`, e)
       results.push('thank_you_sms_failed')
     }
+  }
+
+  // 6. Chase outcome tracking — link payment to recent chase if one exists
+  try {
+    const fourteenDaysAgo = new Date(Date.now() - 14 * 86400000).toISOString()
+    const { data: recentChase } = await client.from('payment_chase_logs')
+      .select('id, method, created_at')
+      .eq('xero_invoice_id', xero_invoice_id)
+      .neq('method', 'status_change')  // Don't match this payment event itself
+      .gte('created_at', fourteenDaysAgo)
+      .order('created_at', { ascending: false })
+      .limit(1)
+    if (recentChase && recentChase.length > 0) {
+      const chase = recentChase[0]
+      const daysBetween = Math.ceil((Date.now() - new Date(chase.created_at).getTime()) / 86400000)
+      await client.from('chase_outcomes').insert({
+        org_id: DEFAULT_ORG_ID,
+        chase_log_id: chase.id,
+        job_id: job_id || null,
+        xero_invoice_id,
+        contact_name: contact_name || null,
+        chase_type: chase.method,
+        channel: chase.method === 'sms' ? 'sms' : chase.method === 'email' ? 'email' : 'other',
+        amount_chased: amount_paid || null,
+        amount_paid: amount_paid || null,
+        days_to_payment: daysBetween,
+        outcome: 'paid',
+      })
+      results.push(`chase_outcome_linked:${daysBetween}d`)
+    }
+  } catch (e) {
+    console.log('[ops-api] chase_outcome wiring failed (non-blocking):', (e as Error).message)
   }
 
   return { success: true, invoice_number, contact_name, actions: results }
