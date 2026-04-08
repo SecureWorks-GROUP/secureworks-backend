@@ -6469,7 +6469,30 @@ async function scopeToPO(client: any, params: URLSearchParams) {
   if (error || !job) throw new Error('Job not found')
 
   const materials = extractMaterialsFromScope(job.scope_json, job.pricing_json)
-  return { job_id: jobId, client: job.client_name, type: job.type, materials }
+
+  // Group materials by supplier for PO creation
+  const supplierGroups: Record<string, any[]> = {}
+  const ungrouped: any[] = []
+  for (const item of materials) {
+    const supplier = item.supplier_name || 'Unassigned'
+    if (supplier === 'Unassigned') { ungrouped.push(item); continue }
+    if (!supplierGroups[supplier]) supplierGroups[supplier] = []
+    supplierGroups[supplier].push(item)
+  }
+
+  const grouped = Object.entries(supplierGroups).map(([supplier, items]) => ({
+    supplier,
+    items,
+    item_count: items.length,
+    estimated_total: items.reduce((s: number, i: any) => s + (i.quantity || 0) * (i.unit_price || 0), 0),
+  }))
+
+  return {
+    job_id: jobId, client: job.client_name, type: job.type, suburb: job.site_suburb,
+    materials,
+    supplier_groups: grouped,
+    ungrouped: ungrouped.length > 0 ? ungrouped : undefined,
+  }
 }
 
 // ── Scheduling Capacity Endpoint ──
@@ -8329,6 +8352,27 @@ async function completeJob(client: any, body: any) {
 }
 
 // ── send_payment_link: get Xero online invoice URL + SMS to client ──
+// Outbound dedup — log to outbound_log, return blocked if duplicate
+async function checkOutboundDedup(client: any, opts: { channel: string; recipient: string; action_type: string; idempotency_key: string; job_id?: string; message_preview?: string; sent_by?: string }): Promise<{ blocked: boolean; reason?: string }> {
+  try {
+    const { error } = await client.from('outbound_log').insert({
+      org_id: DEFAULT_ORG_ID,
+      channel: opts.channel,
+      recipient: opts.recipient,
+      action_type: opts.action_type,
+      idempotency_key: opts.idempotency_key,
+      job_id: opts.job_id || null,
+      message_preview: (opts.message_preview || '').slice(0, 200),
+      sent_by: opts.sent_by || 'system',
+    })
+    if (error && error.code === '23505') { // Unique violation = duplicate
+      return { blocked: true, reason: 'Duplicate send blocked — same message already sent today' }
+    }
+    if (error) console.log('[outbound-dedup] insert error (non-blocking):', error.message)
+    return { blocked: false }
+  } catch { return { blocked: false } } // Fail-open
+}
+
 async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -12613,6 +12657,14 @@ async function sendChaseSms(client: any, body: any) {
   const job_id = body.job_id && String(body.job_id).trim() ? String(body.job_id).trim() : null
   const ghl_contact_id = body.ghl_contact_id || body.contact_id
   if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
+
+  // Outbound dedup check
+  const dedup = await checkOutboundDedup(client, {
+    channel: 'sms', recipient: ghl_contact_id, action_type: 'chase_sms',
+    idempotency_key: xero_invoice_id || ghl_contact_id,
+    job_id: job_id || undefined, message_preview: message, sent_by: operator_email || 'system',
+  })
+  if (dedup.blocked) return { success: false, blocked: true, reason: dedup.reason }
 
   // Send via GHL proxy
   const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
