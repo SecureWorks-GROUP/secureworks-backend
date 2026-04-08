@@ -6064,6 +6064,21 @@ async function morningBrief(client: any) {
     accepted_at: j.accepted_at,
   }))
 
+  // Per-job intelligence: top 3 highest risk + top 3 most urgent next actions
+  const { data: riskJobs } = await client.from('job_intelligence')
+    .select('job_id, risk_level, health_score, things_to_know, next_actions, ai_summary')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .in('risk_level', ['high', 'critical'])
+    .order('health_score', { ascending: true })
+    .limit(3)
+  // Enrich with job info
+  const riskJobIds = (riskJobs || []).map((r: any) => r.job_id)
+  let riskJobMap: Record<string, any> = {}
+  if (riskJobIds.length > 0) {
+    const { data: rJobs } = await client.from('jobs').select('id, job_number, client_name, status').in('id', riskJobIds)
+    for (const j of (rJobs || [])) riskJobMap[j.id] = j
+  }
+
   const briefData = {
     ...summary,
     stale_quotes: { count: staleQuotesList.length, total_value: staleQuotesList.reduce((s: number, j: any) => s + j.value, 0), items: staleQuotesList },
@@ -6075,6 +6090,15 @@ async function morningBrief(client: any) {
         value = parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.amount || p.subtotal || 0) || 0
       }
       return { id: j.id, client: j.client_name, job_number: j.job_number, suburb: j.site_suburb, value, completed: j.completed_at }
+    }),
+    risk_alerts: (riskJobs || []).map((r: any) => {
+      const j = riskJobMap[r.job_id] || {}
+      return {
+        job_number: j.job_number, client: j.client_name, status: j.status,
+        risk: r.risk_level, health: r.health_score,
+        why: (r.things_to_know || []).slice(0, 2),
+        action: (r.next_actions || []).slice(0, 1),
+      }
     }),
   }
   return briefData
