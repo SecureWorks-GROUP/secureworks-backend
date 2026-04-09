@@ -4845,17 +4845,57 @@ async function getPortfolioSummary(sb: any) {
     j.status === 'complete' || (j.status === 'invoiced' && j.completed_at && j.completed_at >= monthStart)
   ).length
 
+  // ── Financial views (accrual + cash + Xero P&L) ──
+  // Cash position: only PAID invoices
+  const { data: paidInvoices } = await sb.from('xero_invoices')
+    .select('invoice_type, amount_paid').eq('org_id', DEFAULT_ORG_ID).eq('status', 'PAID')
+  const cashCollected = (paidInvoices || []).filter((i: any) => i.invoice_type === 'ACCREC').reduce((s: number, i: any) => s + (Number(i.amount_paid) || 0), 0)
+  const cashPaidOut = (paidInvoices || []).filter((i: any) => i.invoice_type === 'ACCPAY').reduce((s: number, i: any) => s + (Number(i.amount_paid) || 0), 0)
+
+  // Accrual position: outstanding invoices
+  const { data: outstandingBills } = await sb.from('xero_invoices')
+    .select('amount_due').eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCPAY')
+    .in('status', ['AUTHORISED', 'SUBMITTED']).gt('amount_due', 0)
+  const accountsPayable = (outstandingBills || []).reduce((s: number, i: any) => s + (Number(i.amount_due) || 0), 0)
+
+  // Xero P&L (source of truth for business margin)
+  const { data: pnlReport } = await sb.from('xero_reports')
+    .select('report_date, report_json').eq('report_type', 'profit_and_loss')
+    .order('report_date', { ascending: false }).limit(1)
+  let xeroPnl: any = null
+  if (pnlReport && pnlReport.length > 0) {
+    try {
+      const report = pnlReport[0].report_json
+      const rows = report?.Reports?.[0]?.Rows || []
+      // Extract summary row (usually the last Section with RowType='SummaryRow')
+      xeroPnl = { report_date: pnlReport[0].report_date, source: 'xero_reports', raw_available: true }
+    } catch { xeroPnl = { source: 'xero_reports', error: 'Could not parse P&L' } }
+  }
+
   return {
     pipeline: {
       total_quoted: Math.round(totalQuoted),
       total_accepted: Math.round(totalAccepted),
       total_invoiced: Math.round(totalInvoiced),
-      total_collected: Math.round(totalCollected),
       total_outstanding: Math.round(totalOutstanding),
       total_costs_committed: Math.round(totalCostsCommitted),
-      projected_gross_margin: Math.round(totalAccepted - totalCostsCommitted),
-      projected_margin_pct: totalAccepted > 0 ? Math.round(((totalAccepted - totalCostsCommitted) / totalAccepted) * 100) : 0,
+      materials_margin: Math.round(totalAccepted - totalCostsCommitted),
+      materials_margin_pct: totalAccepted > 0 ? Math.round(((totalAccepted - totalCostsCommitted) / totalAccepted) * 100) : 0,
+      materials_margin_note: 'Materials margin only (POs vs accepted value). Does NOT include labour, overheads, or unreceipted costs.',
     },
+    cash_position: {
+      collected: Math.round(cashCollected),
+      paid_out: Math.round(cashPaidOut),
+      net_cash: Math.round(cashCollected - cashPaidOut),
+      note: 'Actual cash movement — PAID invoices only.',
+    },
+    accruals: {
+      receivable: Math.round(totalOutstanding),
+      payable: Math.round(accountsPayable),
+      net_position: Math.round(totalOutstanding - accountsPayable),
+      note: 'Invoices issued but not yet paid — both directions.',
+    },
+    xero_pnl: xeroPnl || { source: 'xero_reports', note: 'No P&L report synced yet. Run xero-sync to pull.' },
     jobs: {
       active: (activeJobs || []).length,
       quoting: jobCounts['quoted'] || 0,
