@@ -318,6 +318,35 @@ serve(async (req: Request) => {
         }).map(mapContact)
       }
 
+      // Phonetic fallback: if still no results, try common AU name substitutions
+      if (contacts.length === 0) {
+        const subs: [RegExp, string][] = [
+          [/sh/gi, 's'], [/^s(?=[aeiou])/gi, 'sh'],  // Shaun↔Sean
+          [/ph/gi, 'f'], [/^f/gi, 'ph'],              // Phil↔Fil
+          [/ee/gi, 'ea'], [/ea/gi, 'ee'],              // Lee↔Lea
+          [/ck/gi, 'k'], [/(?<=[aeiou])k$/gi, 'ck'],  // Jack↔Jak
+          [/th/gi, 't'], [/^t(?=[aeiou])/gi, 'th'],   // Thomas↔Tomas
+        ]
+        const tried = new Set<string>([q.toLowerCase()])
+        for (const [pattern, replacement] of subs) {
+          if (!pattern.test(q)) continue
+          const variant = q.replace(pattern, replacement)
+          if (tried.has(variant.toLowerCase())) continue
+          tried.add(variant.toLowerCase())
+
+          const fuzzyUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(variant)}&limit=10`
+          try {
+            const fuzzyResult = await ghl(fuzzyUrl)
+            const fuzzyContacts = (fuzzyResult.contacts || []).map((c: any) => ({ ...mapContact(c), fuzzy: true }))
+            if (fuzzyContacts.length > 0) {
+              contacts = fuzzyContacts
+              break // stop on first hit
+            }
+          } catch { /* non-blocking */ }
+          if (tried.size >= 4) break // max 3 variant searches
+        }
+      }
+
       return json({ contacts, total: contacts.length })
     }
 
