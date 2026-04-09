@@ -4861,6 +4861,7 @@ async function getPortfolioSummary(sb: any) {
   // Xero P&L (source of truth for business margin)
   const { data: pnlReport } = await sb.from('xero_reports')
     .select('report_date, report_json').eq('report_type', 'profit_and_loss')
+    .eq('org_id', DEFAULT_ORG_ID)
     .order('report_date', { ascending: false }).limit(1)
   let xeroPnl: any = null
   if (pnlReport && pnlReport.length > 0) {
