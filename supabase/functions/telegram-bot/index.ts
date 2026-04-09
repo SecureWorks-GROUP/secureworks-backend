@@ -1095,7 +1095,7 @@ async function handleCallbackQuery(client: any, callbackQuery: any) {
   } else if (action.startsWith('grad_')) {
     await handleGraduationCallback(client, callbackQuery, user, action, payload, chatId, messageId)
   } else if (action === 'action_approve' || action === 'action_skip') {
-    // Proposed action approval/skip from nudge pipeline
+    // Proposed action approval/skip — generic dispatch for ALL tool types
     try {
       const proposalId = payload
       const approved = action === 'action_approve'
@@ -1113,18 +1113,85 @@ async function handleCallbackQuery(client: any, callbackQuery: any) {
         return new Response('ok', { status: 200 })
       }
 
+      let execResult: { success: boolean; error?: string } = { success: false, error: 'Not executed' }
+
       if (approved) {
-        // Execute the action
-        const tool = proposal.action_payload?.tool
-        const args = proposal.action_payload?.args || {}
-        if (tool === 'sw_send_chase_sms' && args.ghl_contact_id && args.message) {
-          await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_chase_sms`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-            body: JSON.stringify({ ghl_contact_id: args.ghl_contact_id, message: args.message, job_id: args.job_id }),
-          })
+        const tool = proposal.action_payload?.tool as string
+        const args = proposal.action_payload?.args || {} as Record<string, any>
+
+        // ── Generic tool dispatch via edge functions ──
+        // Maps sw_* tool names to the correct edge function + action
+        const EDGE_HEADERS = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` }
+        const opsApi = (act: string, body: Record<string, any>) =>
+          fetch(`${SUPABASE_FUNCTIONS_URL}/ops-api?action=${act}`, { method: 'POST', headers: EDGE_HEADERS, body: JSON.stringify(body) }).then(r => r.json())
+        const ghlProxy = (act: string, body: Record<string, any>) =>
+          fetch(`${SUPABASE_FUNCTIONS_URL}/ghl-proxy?action=${act}`, { method: 'POST', headers: EDGE_HEADERS, body: JSON.stringify(body) }).then(r => r.json())
+
+        try {
+          switch (tool) {
+            case 'sw_send_chase_sms':
+              execResult = await opsApi('send_chase_sms', { ghl_contact_id: args.ghl_contact_id, message: args.message, job_id: args.job_id })
+              break
+            case 'sw_send_sms':
+              execResult = await ghlProxy('send_sms', { contactId: args.contact_id || args.ghl_contact_id, message: args.message, jobId: args.job_id })
+              break
+            case 'sw_send_email':
+              execResult = await fetch(`${SUPABASE_FUNCTIONS_URL}/send-outlook-email`, {
+                method: 'POST', headers: EDGE_HEADERS,
+                body: JSON.stringify({ to: args.to_email || args.to, subject: args.subject, htmlBody: args.htmlBody || args.body, from: args.from || 'marnin@secureworkswa.com.au', cc: args.cc, job_id: args.job_id, ghl_contact_id: args.contact_id, sent_by: 'cowork' }),
+              }).then(r => r.json())
+              break
+            case 'sw_send_invoice_email':
+              execResult = await opsApi('send_invoice_email', args)
+              break
+            case 'sw_send_acceptance_invoice':
+              execResult = await opsApi('send_acceptance_invoice', args)
+              break
+            case 'sw_create_deposit_invoice':
+              execResult = await opsApi('send_acceptance_invoice', args)
+              break
+            case 'sw_move_stage':
+              execResult = await ghlProxy('move_stage', { opportunityId: args.opportunity_id, stageId: args.stage_id })
+              break
+            case 'sw_update_job_status':
+              execResult = await opsApi('update_job_status', args)
+              break
+            case 'sw_complete_job':
+              execResult = await opsApi('complete_job', args)
+              break
+            case 'sw_complete_and_invoice':
+              execResult = await opsApi('complete_job', args)
+              break
+            case 'sw_send_payment_link':
+              execResult = await opsApi('send_payment_link', args)
+              break
+            case 'sw_send_review_request':
+              execResult = await opsApi('send_review_request', args)
+              break
+            case 'sw_create_po':
+              execResult = await opsApi('create_po', args)
+              break
+            case 'sw_send_po_email':
+              execResult = await opsApi('email_po', args)
+              break
+            case 'sw_void_invoice':
+              execResult = await opsApi('void_invoice', args)
+              break
+            default:
+              execResult = { success: false, error: `Tool '${tool}' not mapped for Telegram approval. Please use the ops dashboard.` }
+              console.warn(`[telegram-bot] action_approve: unmapped tool '${tool}'`)
+          }
+        } catch (toolErr) {
+          execResult = { success: false, error: (toolErr as Error).message }
+          console.error(`[telegram-bot] action_approve tool execution failed:`, (toolErr as Error).message)
         }
-        await sb.from('ai_proposed_actions').update({ status: 'approved', sent_at: new Date().toISOString(), resolved_at: new Date().toISOString() }).eq('proposal_id', proposalId)
+
+        const newStatus = execResult.success !== false ? 'executed' : 'failed'
+        await sb.from('ai_proposed_actions').update({
+          status: newStatus,
+          sent_at: newStatus === 'executed' ? new Date().toISOString() : undefined,
+          resolved_at: new Date().toISOString(),
+        }).eq('proposal_id', proposalId)
       } else {
         await sb.from('ai_proposed_actions').update({ status: 'rejected', dismissed_at: new Date().toISOString(), resolved_at: new Date().toISOString() }).eq('proposal_id', proposalId)
       }
@@ -1135,26 +1202,29 @@ async function handleCallbackQuery(client: any, callbackQuery: any) {
         source: 'telegram_callback',
         entity_type: 'proposed_action', entity_id: proposalId,
         job_id: proposal.job_id,
-        payload: { action_type: proposal.action_type, contact_name: proposal.contact_name, approved },
+        payload: { action_type: proposal.action_type, contact_name: proposal.contact_name, approved, tool: proposal.action_payload?.tool, exec_result: execResult },
       }).then(() => {}).catch(() => {})
 
-      const ackText = approved ? 'Sent ✓' : 'Skipped'
+      const execOk = approved && execResult.success !== false
+      const execFail = approved && execResult.success === false
+      const ackText = !approved ? 'Skipped' : execOk ? 'Sent ✓' : `Failed: ${(execResult.error || 'unknown error').slice(0, 60)}`
       await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ callback_query_id: callbackQuery.id, text: ackText }),
       })
+      const statusLine = !approved ? '⏭ Skipped' : execOk ? '✅ Executed' : `❌ Failed: ${execResult.error || 'unknown'}`
       await fetch(`${TELEGRAM_API}/editMessageText`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId, message_id: messageId,
-          text: `${callbackQuery.message?.text || ''}\n\n${approved ? '✅ Sent' : '⏭ Skipped'}`,
+          text: `${callbackQuery.message?.text || ''}\n\n${statusLine}`,
         }),
       })
     } catch (e) {
       console.error('[telegram-bot] action callback failed:', (e as Error).message)
       await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callback_query_id: callbackQuery.id, text: 'Error — try again' }),
+        body: JSON.stringify({ callback_query_id: callbackQuery.id, text: `Error: ${(e as Error).message.slice(0, 60)}` }),
       })
     }
   } else if (action === 'chase_approve' || action === 'chase_skip') {
