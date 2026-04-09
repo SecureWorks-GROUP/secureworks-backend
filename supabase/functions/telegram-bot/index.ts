@@ -1822,6 +1822,50 @@ serve(async (req: Request) => {
       }
     }
 
+    // ── Handle outbound send_message from MCP tool sw_send_telegram_message ──
+    if (body.type === 'send_message' && body.chat_id && body.text) {
+      try {
+        const chatId = Number(body.chat_id)
+        const text = (body.text as string).length > 4000
+          ? (body.text as string).slice(0, 4000) + '\n\n... (truncated)'
+          : body.text as string
+
+        const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text,
+            parse_mode: 'HTML',
+          }),
+        })
+
+        const result = await response.json()
+        const messageId = result?.result?.message_id
+
+        // Log to chat_logs for audit visibility
+        const channel = chatId < 0 ? 'telegram_group' : 'telegram_dm'
+        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        await sb.from('chat_logs').insert({
+          role: 'assistant',
+          query: '(proactive)',
+          response: text.slice(0, 5000),
+          channel,
+          tools_used: ['sw_send_telegram_message'],
+        }).catch((err: Error) => console.warn('[telegram-bot] chat_logs insert failed:', err.message))
+
+        if (!response.ok) {
+          console.error('[telegram-bot] send_message failed:', JSON.stringify(result))
+          return new Response(JSON.stringify({ error: result?.description || 'Send failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+
+        return new Response(JSON.stringify({ success: true, message_id: messageId }), { status: 200, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch (e) {
+        console.error('[telegram-bot] send_message error:', (e as Error).message)
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
     // ── Handle automation results from Railway scheduler ──
     if (body.type === 'automation_result' && body.chat_id && body.content) {
       try {
