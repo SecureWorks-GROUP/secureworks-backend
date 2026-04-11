@@ -318,6 +318,28 @@ serve(async (req: Request) => {
         }).map(mapContact)
       }
 
+      // DEV-L5: If GHL returned 0, fallback to Supabase jobs table
+      if (contacts.length === 0) {
+        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const { data: jobRows } = await sb
+          .from('jobs')
+          .select('client_name, client_phone, client_email, ghl_contact_id, job_number, site_suburb')
+          .or(`client_name.ilike.%${q}%,client_phone.ilike.%${q}%,site_suburb.ilike.%${q}%,client_email.ilike.%${q}%`)
+          .limit(20)
+        contacts = (jobRows || []).map((j: any) => ({
+          id: j.ghl_contact_id || null,
+          name: j.client_name || 'Unknown',
+          email: j.client_email || null,
+          phone: j.client_phone || null,
+          tags: [],
+          source: 'supabase_jobs',
+          dateAdded: null,
+          address: null,
+          city: j.site_suburb || null,
+          job_number: j.job_number,
+        }))
+      }
+
       return json({ contacts, total: contacts.length })
     }
 

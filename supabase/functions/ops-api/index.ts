@@ -590,7 +590,16 @@ serve(async (req: Request) => {
       case 'ops_summary': return json(await opsSummary(client))
       case 'calendar': return json(await calendarEvents(client, url.searchParams))
       case 'pipeline': return json(await pipeline(client, url.searchParams))
-      case 'job_detail': return json(await jobDetail(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
+      case 'job_detail': {
+        let jid = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
+        // If not a UUID, try resolving as job_number (e.g. SWF-26037)
+        if (jid && !jid.match(/^[0-9a-f]{8}-/i)) {
+          const { data: found } = await client.from('jobs').select('id').ilike('job_number', jid).limit(1)
+          if (found?.[0]) jid = found[0].id
+        }
+        if (!jid) return json({ error: 'jobId required' }, 400)
+        return json(await jobDetail(client, jid))
+      }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))

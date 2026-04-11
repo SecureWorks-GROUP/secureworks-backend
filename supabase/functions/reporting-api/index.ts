@@ -285,8 +285,12 @@ serve(async (req: Request) => {
         return json(await getPortfolioSummary(sb))
       case 'job_intelligence':
         return json(await getJobIntelligence(sb, url.searchParams.get('job_id') || ''))
+      case 'group_messages':
+        return json(await getGroupMessages(sb, url.searchParams))
+      case 'chat_logs':
+        return json(await getChatLogs(sb, url.searchParams))
       default:
-        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence' }, 400)
+        return json({ error: 'Unknown action. Use: dashboard_summary, job_profitability, marketing_summary, trends, sales_breakdown, insights, debt_followup, ceo_report, sales_summary, sales_pipeline, sales_performance, sales_leads, sales_alerts, sales_snooze, sales_quick_action, reconcile_transaction, cash_waterfall, cash_leak_detection, performance_benchmarks, job_context, portfolio_summary, job_intelligence, group_messages, chat_logs' }, 400)
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
@@ -4618,4 +4622,73 @@ async function getPortfolioSummary(sb: any) {
     },
     computed_at: now.toISOString(),
   }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// GROUP MESSAGES — Telegram crew messages from business_events
+// ════════════════════════════════════════════════════════════
+
+async function getGroupMessages(sb: any, params: URLSearchParams) {
+  const since = params.get('since') || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const group = params.get('group') || ''
+  const topic = params.get('topic') || ''
+  const limit = Math.min(parseInt(params.get('limit') || '30'), 100)
+
+  let query = sb.from('business_events')
+    .select('id, event_type, source, occurred_at, entity_type, entity_id, payload, metadata')
+    .in('event_type', ['crew.message', 'crew.command', 'crew.photo', 'crew.voice_note'])
+    .gte('occurred_at', since)
+    .order('occurred_at', { ascending: false })
+    .limit(limit)
+
+  if (group) {
+    query = query.ilike('payload->>group_name', `%${group}%`)
+  }
+  if (topic) {
+    query = query.eq('payload->>topic_id', topic)
+  }
+
+  const { data, error } = await query
+  if (error) throw new Error(`group_messages: ${error.message}`)
+
+  return {
+    messages: (data || []).map((e: any) => ({
+      id: e.id,
+      type: e.event_type,
+      occurred_at: e.occurred_at,
+      sender: e.payload?.sender_name || e.payload?.from_name || 'Unknown',
+      group: e.payload?.group_name || e.payload?.chat_title || 'Unknown',
+      topic_id: e.payload?.topic_id || null,
+      text: e.payload?.text || e.payload?.caption || null,
+      has_photo: e.event_type === 'crew.photo' || !!e.payload?.photo,
+      has_voice: e.event_type === 'crew.voice_note' || !!e.payload?.voice,
+    })),
+    total: (data || []).length,
+    since,
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// CHAT LOGS — AI conversation history from chat_logs table
+// ════════════════════════════════════════════════════════════
+
+async function getChatLogs(sb: any, params: URLSearchParams) {
+  const since = params.get('since') || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const channel = params.get('channel') || ''
+  const limit = Math.min(parseInt(params.get('limit') || '20'), 100)
+
+  let query = sb.from('chat_logs')
+    .select('id, user_email, role, query, response, tools_used, created_at, channel, caller_tier')
+    .gte('created_at', since)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (channel) query = query.eq('channel', channel)
+
+  const { data, error } = await query
+  if (error) throw new Error(`chat_logs: ${error.message}`)
+
+  return { logs: data || [], total: (data || []).length, since }
 }
