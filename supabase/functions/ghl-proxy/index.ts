@@ -169,6 +169,121 @@ function mapOpp(opp: any, stages: Record<string, string>) {
   }
 }
 
+// ── Phonetic/fuzzy name variant generator (DEV-CONTACT-FUZZY-SEARCH) ──
+// Generates common phonetic alternatives for Australian names.
+// "Shaun" -> ["Sean", "Shawn"], "Phil" -> ["Fhil"], etc.
+function generatePhoneticVariants(query: string): string[] {
+  const words = query.trim().split(/\s+/)
+  const variants: Set<string> = new Set()
+
+  // Phonetic substitution pairs (applied to each word independently)
+  const substitutions: [RegExp, string][] = [
+    [/^sh(?=[aeiou])/i, 's'],     // Shaun -> Saun
+    [/^s(?=[eai])/i, 'sh'],       // Sean -> Shean
+    [/aun$/i, 'ean'],              // Shaun -> Shean (then combined with above)
+    [/ean$/i, 'aun'],              // Sean -> Saun
+    [/awn$/i, 'aun'],              // Shawn -> Shaun
+    [/aun$/i, 'awn'],              // Shaun -> Shawn
+    [/^ph/i, 'f'],                 // Phil -> Fil
+    [/^f(?=[aeiou])/i, 'ph'],     // Fil -> Phil
+    [/ee/i, 'ea'],                 // Lee -> Lea
+    [/ea(?=[^r])/i, 'ee'],        // Lea -> Lee (but not "ear")
+    [/ck$/i, 'c'],                 // Mick -> Mic
+    [/c$/i, 'ck'],                 // Mic -> Mick
+    [/y$/i, 'ie'],                 // Tony -> Tonie
+    [/ie$/i, 'y'],                 // Katie -> Katy
+    [/^k(?=[aeiou])/i, 'c'],      // Kath -> Cath
+    [/^c(?=[aeiou])/i, 'k'],      // Cath -> Kath
+    [/ough$/i, 'off'],             // enough variants
+    [/ow$/i, 'o'],                 // Harlow -> Harlo
+  ]
+
+  // For each word, generate all single-substitution variants
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]
+    for (const [pattern, replacement] of substitutions) {
+      if (pattern.test(word)) {
+        const newWord = word.replace(pattern, replacement)
+        if (newWord !== word) {
+          const newWords = [...words]
+          newWords[i] = newWord
+          variants.add(newWords.join(' '))
+        }
+      }
+    }
+  }
+
+  // Special compound variants: Shaun -> Sean (sh+aun -> s+ean)
+  const compoundMappings: Record<string, string[]> = {
+    'shaun': ['sean', 'shawn'],
+    'sean': ['shaun', 'shawn'],
+    'shawn': ['shaun', 'sean'],
+    'rachael': ['rachel', 'rachelle'],
+    'rachel': ['rachael', 'rachelle'],
+    'stephen': ['steven', 'stefan'],
+    'steven': ['stephen', 'stefan'],
+    'cath': ['kath'],
+    'kath': ['cath'],
+    'catherine': ['katherine', 'kathryn'],
+    'katherine': ['catherine', 'kathryn'],
+    'jeff': ['geoff', 'geoffrey'],
+    'geoff': ['jeff', 'jeffrey'],
+    'mike': ['mick'],
+    'mick': ['mike'],
+    'jon': ['john'],
+    'john': ['jon'],
+    'tony': ['toni'],
+    'toni': ['tony'],
+    'ann': ['anne'],
+    'anne': ['ann'],
+    'allan': ['alan', 'allen'],
+    'alan': ['allan', 'allen'],
+    'neil': ['neal', 'niel'],
+    'neal': ['neil'],
+    'brian': ['bryan'],
+    'bryan': ['brian'],
+    'stuart': ['stewart'],
+    'stewart': ['stuart'],
+    'grey': ['gray'],
+    'gray': ['grey'],
+  }
+
+  for (let i = 0; i < words.length; i++) {
+    const lower = words[i].toLowerCase()
+    const mappings = compoundMappings[lower]
+    if (mappings) {
+      for (const mapped of mappings) {
+        const newWords = [...words]
+        // Preserve original casing pattern
+        newWords[i] = words[i][0] === words[i][0].toUpperCase()
+          ? mapped.charAt(0).toUpperCase() + mapped.slice(1)
+          : mapped
+        variants.add(newWords.join(' '))
+      }
+    }
+  }
+
+  // Remove O' apostrophe variants: "O Brien" matches "O'Brien"
+  // Apply to both original query AND all existing variants
+  const withApostropheVariants: string[] = []
+  const allCurrent = [query, ...variants]
+  for (const v of allCurrent) {
+    if (v.includes("'")) {
+      const stripped = v.replace(/'/g, '')
+      if (stripped !== v) withApostropheVariants.push(stripped)
+    }
+    if (/\bO\s/i.test(v)) {
+      withApostropheVariants.push(v.replace(/\bO\s/i, "O'"))
+    }
+    if (/\bO'/i.test(v)) {
+      withApostropheVariants.push(v.replace(/\bO'/i, "O "))
+    }
+  }
+  for (const v of withApostropheVariants) variants.add(v)
+
+  return [...variants]
+}
+
 // ════════════════════════════════════════════════════════════
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
@@ -338,6 +453,46 @@ serve(async (req: Request) => {
           city: j.site_suburb || null,
           job_number: j.job_number,
         }))
+      }
+
+      // DEV-CONTACT-FUZZY-SEARCH: phonetic/fuzzy matching when exact search returns 0
+      if (contacts.length === 0 && q) {
+        const fuzzyVariants = generatePhoneticVariants(q)
+        if (fuzzyVariants.length > 0) {
+          const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+          for (const variant of fuzzyVariants) {
+            if (variant === q) continue
+            // Split variant into words and search each word separately to handle apostrophe/space issues
+            // e.g. "Sean O Brien" -> search for names containing BOTH "Sean" AND "Brien"
+            const words = variant.split(/[\s']+/).filter(w => w.length > 1)
+            let query = sb
+              .from('jobs')
+              .select('client_name, client_phone, client_email, ghl_contact_id, job_number, site_suburb')
+            // Chain ilike filters for each significant word (AND logic)
+            for (const word of words) {
+              if (word.length >= 3) { // Skip short words like "O"
+                query = query.ilike('client_name', `%${word}%`)
+              }
+            }
+            const { data: fuzzyRows } = await query.limit(10)
+            if (fuzzyRows && fuzzyRows.length > 0) {
+              contacts = fuzzyRows.map((j: any) => ({
+                id: j.ghl_contact_id || null,
+                name: j.client_name || 'Unknown',
+                email: j.client_email || null,
+                phone: j.client_phone || null,
+                tags: [],
+                source: 'supabase_jobs_fuzzy',
+                dateAdded: null,
+                address: null,
+                city: j.site_suburb || null,
+                job_number: j.job_number,
+                fuzzy: true,
+              }))
+              break // Stop on first match
+            }
+          }
+        }
       }
 
       return json({ contacts, total: contacts.length })
