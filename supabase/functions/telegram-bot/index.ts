@@ -1948,13 +1948,17 @@ serve(async (req: Request) => {
           : content
         await sendMessage(chatId, `📋 <b>${automation}</b>\n\n${text}`)
 
-        // Send action_cards with inline approve/skip buttons (debt-chase)
+        // Send action_cards with inline approve/skip buttons
+        // Handles both chase cards (confirmation_token) and proposed action cards (proposal_id)
         const actionCards = body.action_cards as any[] | undefined
         if (actionCards?.length) {
+          let buttonCount = 0
           for (const card of actionCards) {
+            const desc = card.message || `${card.tool}(${JSON.stringify(card.args || {}).slice(0, 100)})`
+            const truncDesc = desc.length > 200 ? desc.slice(0, 200) + '...' : desc
+
             if (card.confirmation_token) {
-              const desc = card.message || `${card.tool}(${JSON.stringify(card.args).slice(0, 100)})`
-              const truncDesc = desc.length > 200 ? desc.slice(0, 200) + '...' : desc
+              // Debt chase cards — use chase_approve/chase_skip
               await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1970,9 +1974,67 @@ serve(async (req: Request) => {
                   },
                 }),
               })
+              buttonCount++
+            } else if (card.proposal_id) {
+              // Proposed action cards (pipeline-audit, stale-quote-chase) — use action_approve/action_skip
+              const actionLabel = (card.action_type || card.tool || 'action').replace(/_/g, ' ')
+              const jobNum = card.job_number || ''
+              await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: `📋 <b>${actionLabel}</b>${jobNum ? ` (${jobNum})` : ''}\n${truncDesc}`,
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                    inline_keyboard: [[
+                      { text: '✅ Send', callback_data: `action_approve:${card.proposal_id}` },
+                      { text: '⏭ Skip', callback_data: `action_skip:${card.proposal_id}` },
+                    ]],
+                  },
+                }),
+              })
+              buttonCount++
+            } else if (card.tool || card.action) {
+              // Generic action card — store as proposed_action and add buttons
+              try {
+                const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                const proposalId = crypto.randomUUID()
+                await sb.from('ai_proposed_actions').insert({
+                  proposal_id: proposalId,
+                  org_id: DEFAULT_ORG_ID,
+                  action_type: card.tool || card.action,
+                  action_params: card.args || card.params || {},
+                  drafted_message: card.message || null,
+                  contact_name: card.contact_name || null,
+                  job_number: card.job_number || null,
+                  status: 'pending',
+                  source: automation || 'automation',
+                }).then(() => {}).catch(() => {})
+
+                const actionLabel = (card.tool || card.action || 'action').replace(/^sw_/, '').replace(/_/g, ' ')
+                await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    text: `📋 <b>${actionLabel}</b>\n${truncDesc}`,
+                    parse_mode: 'HTML',
+                    reply_markup: {
+                      inline_keyboard: [[
+                        { text: '✅ Approve', callback_data: `action_approve:${proposalId}` },
+                        { text: '⏭ Skip', callback_data: `action_skip:${proposalId}` },
+                      ]],
+                    },
+                  }),
+                })
+                buttonCount++
+              } catch (e) {
+                console.log('[telegram-bot] generic action card failed:', (e as Error).message)
+              }
             }
           }
-          console.log(`[telegram-bot] sent ${actionCards.filter((c: any) => c.confirmation_token).length} chase approval buttons`)
+          console.log(`[telegram-bot] sent ${buttonCount} action approval buttons`)
         }
 
         console.log(`[telegram-bot] delivered automation result: ${automation} to ${body.chat_id}`)

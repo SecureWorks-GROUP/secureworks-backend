@@ -771,10 +771,32 @@ serve(async (req: Request) => {
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body
         if (!ujfJobId || !ujfField) return json({ error: 'job_id and field required' }, 400)
-        const ALLOWED_FIELDS = ['ghl_contact_id', 'ghl_opportunity_id', 'client_phone', 'client_email', 'client_name', 'site_address', 'site_suburb']
+        const ALLOWED_FIELDS = ['ghl_contact_id', 'ghl_opportunity_id', 'client_phone', 'client_email', 'client_name', 'site_address', 'site_suburb', 'job_number']
         if (!ALLOWED_FIELDS.includes(ujfField)) return json({ error: 'Field not allowed: ' + ujfField }, 400)
-        const { error: ujfErr } = await client.from('jobs').update({ [ujfField]: ujfValue, updated_at: new Date().toISOString() }).eq('id', ujfJobId)
+        let ujfNormalisedValue: any = ujfValue
+        if (ujfField === 'job_number') {
+          const v = String(ujfValue || '').trim().toUpperCase()
+          // Allowed prefixes mirror next_job_number() in migrations/20260331000001_general_job_type.sql:
+          //   SWP (patio), SWF (fencing), SWD (decking), SWR (renovation/roofing), SWI (insurance), SWM (miscellaneous), SWG (general), SW- (fallback).
+          // Plus legacy Tradify numbers with no type letter: SW####.
+          if (!/^(SW\d{3,6}|SW[PFDRIMG]-\d{3,6}|SW-\d{3,6})$/.test(v)) {
+            return json({ error: 'Invalid job_number format. Expected SW#### (legacy) or SW[P|F|D|R|I|M|G]-##### (current)' }, 400)
+          }
+          ujfNormalisedValue = v
+        }
+        const { error: ujfErr } = await client.from('jobs').update({ [ujfField]: ujfNormalisedValue, updated_at: new Date().toISOString() }).eq('id', ujfJobId)
         if (ujfErr) return json({ error: ujfErr.message }, 500)
+        if (ujfField === 'job_number') {
+          try {
+            await client.from('business_events').insert({
+              event_type: 'job.number_overridden',
+              source: 'ops-api/update_job_field',
+              entity_type: 'job',
+              entity_id: ujfJobId,
+              payload: { new_job_number: ujfNormalisedValue },
+            })
+          } catch (_) { /* non-blocking audit */ }
+        }
         return json({ success: true })
       }
       case 'update_invoice': return json(await updateInvoice(client, body))
@@ -1079,10 +1101,11 @@ serve(async (req: Request) => {
       // ── PO Management ──
       case 'add_po_event': return json(await addPOEvent(client, body))
       case 'delete_po': return json(await deletePO(client, body))
+      case 'create_draft_wo_and_po': return json(await createDraftWOAndPO(client, body))
 
       // ── AI / Automation ──
       case 'morning_brief': return json(await morningBrief(client))
-      case 'scope_to_po': return json(await scopeToPO(client, url.searchParams))
+      case 'scope_to_po': return json(await scopeToPO(client, url.searchParams, body))
       case 'scheduling_capacity': return json(await schedulingCapacity(client, url.searchParams))
       case 'get_crew_availability': return json(await getCrewAvailability(client, url.searchParams))
       case 'scope_availability': return json(await scopeAvailability(client, url.searchParams))
@@ -3267,8 +3290,8 @@ async function pipeline(client: any, params: URLSearchParams) {
 async function jobDetail(client: any, jobId: string, includeScope = false) {
   if (!jobId) throw new Error('jobId required')
 
-  // If job_number passed instead of UUID, resolve it
-  if (/^SW[PFDRI]-\d+$/i.test(jobId)) {
+  // If job_number passed instead of UUID, resolve it (SW####, SWP-#####, SWF-#####, etc.)
+  if (/^SW[PFDRIMG]?-?\d+$/i.test(jobId)) {
     const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
     if (!found) throw new ApiError(`Job ${jobId} not found`, 404)
     jobId = found.id
@@ -3352,9 +3375,25 @@ async function jobDetail(client: any, jobId: string, includeScope = false) {
 
     if (intelRow) {
       const pJson = typeof job?.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job?.pricing_json || {})
+      // Inject live counts — job_intelligence doesn't persist these, so without
+      // this augmentation crew_assigned / pos_created / work_order would always
+      // evaluate to 0 and falsely report as not met.
+      const liveIntel = {
+        ...intelRow,
+        assignment_count: (assignRes.data || []).length,
+        po_count: (poRes.data || []).length,
+        wo_count: (woRes.data || []).length,
+        deposit_paid: (invoices || []).some((inv: any) => {
+          const ref = String(inv.reference || '').toLowerCase()
+          const isDeposit = ref.includes('deposit') || ref.includes('dep')
+          return isDeposit && Number(inv.amount_paid || 0) > 0
+        }),
+        all_pos_delivery_confirmed: (poRes.data || []).length > 0 &&
+          (poRes.data || []).every((po: any) => !!po.delivery_confirmed_at),
+      }
       jobReadiness = computeReadiness(
         intelRow.job_type || job?.type || 'patio',
-        intelRow,
+        liveIntel,
         job?.scope_json || null,
         pJson,
       )
@@ -4021,6 +4060,41 @@ async function updateJobStatus(client: any, body: any) {
     }
   }
 
+  // DEV-WO-FLOW: On acceptance, auto-approve WO + push labour PO
+  if (status === 'accepted') {
+    try {
+      // Approve draft work orders
+      const { data: draftWOs } = await client.from('work_orders')
+        .select('id, wo_number').eq('job_id', jId).eq('status', 'draft')
+      for (const wo of (draftWOs || [])) {
+        await client.from('work_orders')
+          .update({ status: 'approved', accepted_at: new Date().toISOString() })
+          .eq('id', wo.id)
+        await client.from('job_events').insert({
+          job_id: jId, event_type: 'wo_approved',
+          detail_json: { wo_number: wo.wo_number, source: 'auto_acceptance' },
+        })
+        console.log(`[ops-api] Auto-approved WO ${wo.wo_number} on job acceptance`)
+      }
+
+      // Find draft labour POs and mark as submitted (ready for Xero push)
+      const { data: labourPOs } = await client.from('purchase_orders')
+        .select('id, po_number, total').eq('job_id', jId).eq('po_type', 'labour').eq('status', 'draft')
+      for (const po of (labourPOs || [])) {
+        await client.from('purchase_orders')
+          .update({ status: 'submitted' })
+          .eq('id', po.id)
+        await client.from('job_events').insert({
+          job_id: jId, event_type: 'labour_po_submitted',
+          detail_json: { po_number: po.po_number, total: po.total, source: 'auto_acceptance' },
+        })
+        console.log(`[ops-api] Auto-submitted labour PO ${po.po_number} on job acceptance`)
+      }
+    } catch (e) {
+      console.log('[ops-api] WO/PO auto-approval failed (non-blocking):', (e as Error).message)
+    }
+  }
+
   return { job: data }
 }
 
@@ -4036,7 +4110,9 @@ async function createPO(client: any, body: any) {
 
   const items = line_items || lineItems || []
   const subtotal = items.reduce((s: number, li: any) => s + ((li.quantity || 0) * (li.unit_price || li.unitPrice || 0)), 0)
-  const tax = Math.round(subtotal * 0.1 * 100) / 100 // 10% GST
+  const poType = body.po_type || 'material'
+  // Labour/subcontract POs are GST-free (subcontractors not GST-registered)
+  const tax = poType === 'labour' || poType === 'subcontract' ? 0 : Math.round(subtotal * 0.1 * 100) / 100
   const total = subtotal + tax
 
   const { data, error } = await client
@@ -4049,6 +4125,7 @@ async function createPO(client: any, body: any) {
       xero_contact_id: xero_contact_id || null,
       line_items: items,
       subtotal, tax, total,
+      po_type: poType,
       delivery_date: delivery_date || deliveryDate || null,
       reference: reference || null,
       notes: (delivery_address ? 'Deliver to: ' + delivery_address + (notes ? '\n' + notes : '') : notes) || null,
@@ -4457,6 +4534,124 @@ async function sendWorkOrder(client: any, body: any) {
     success: true,
     message: `Work order ${wo.wo_number} marked as sent`,
     share_token: wo.share_token,
+  }
+}
+
+// DEV-WO-FLOW: Auto-create draft Work Order + draft Labour PO from scope save
+async function createDraftWOAndPO(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new Error('job_id required')
+
+  // If job_number passed instead of UUID, resolve it
+  let resolvedJobId = jId
+  if (/^SW[PFDRIMG]-\d+$/i.test(jId)) {
+    const { data: found } = await client.from('jobs').select('id').ilike('job_number', jId).limit(1).maybeSingle()
+    if (!found) throw new ApiError(`Job ${jId} not found`, 404)
+    resolvedJobId = found.id
+  }
+
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, job_number, client_name, type, site_address, site_suburb, scope_json, pricing_json')
+    .eq('id', resolvedJobId).single()
+  if (jobErr || !job) throw new Error('Job not found')
+
+  const scopeJson = typeof job.scope_json === 'string' ? JSON.parse(job.scope_json || '{}') : (job.scope_json || {})
+  const pricingJson = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
+
+  // Extract materials from scope for WO scope_items
+  const materials = extractMaterialsFromScope(scopeJson, pricingJson)
+
+  // Extract labour amount from pricing_json
+  let labourCost = 0
+  let labourSell = 0
+  let labourDescription = 'Labour'
+  const pricingItems = pricingJson.line_items || pricingJson.items || []
+  for (const item of pricingItems) {
+    if (item.category === 'labour') {
+      labourCost += item.total_cost || 0
+      labourSell += item.total_sell || item.total || 0
+      labourDescription = item.description || labourDescription
+    }
+  }
+  // Fallback: use labourCost from top-level pricing if no line items
+  if (labourSell === 0 && pricingJson.labourCost) {
+    labourSell = pricingJson.labourSell || pricingJson.labourCost || 0
+    labourCost = pricingJson.labourCost || 0
+  }
+
+  const address = [job.site_address, job.site_suburb].filter(Boolean).join(', ')
+  const woNum = `WO-${String(Date.now()).slice(-6)}`
+  const poNum = `PO-${String(Date.now()).slice(-6)}`
+
+  // Check for existing draft WO to avoid duplicates
+  const { data: existingWO } = await client.from('work_orders')
+    .select('id, wo_number')
+    .eq('job_id', resolvedJobId).eq('status', 'draft').limit(1).maybeSingle()
+
+  let woData: any = existingWO
+  if (!existingWO) {
+    const { data: newWO, error: woErr } = await client.from('work_orders').insert({
+      org_id: DEFAULT_ORG_ID,
+      job_id: resolvedJobId,
+      wo_number: woNum,
+      scope_items: materials,
+      site_address: address || null,
+      status: 'draft',
+    }).select().single()
+    if (woErr) throw woErr
+    woData = newWO
+
+    await client.from('job_events').insert({
+      job_id: resolvedJobId,
+      event_type: 'wo_created',
+      detail_json: { wo_number: woNum, source: 'scope_save', auto: true },
+    })
+  }
+
+  // Check for existing draft labour PO to avoid duplicates
+  const { data: existingPO } = await client.from('purchase_orders')
+    .select('id, po_number')
+    .eq('job_id', resolvedJobId).eq('po_type', 'labour').eq('status', 'draft').limit(1).maybeSingle()
+
+  let poData: any = existingPO
+  if (!existingPO && labourSell > 0) {
+    const { data: newPO, error: poErr } = await client.from('purchase_orders').insert({
+      org_id: DEFAULT_ORG_ID,
+      job_id: resolvedJobId,
+      po_number: poNum,
+      supplier_name: 'TBA',
+      po_type: 'labour',
+      line_items: [{
+        description: labourDescription,
+        quantity: 1,
+        unit_price: labourSell,
+      }],
+      subtotal: labourSell,
+      tax: 0, // Labour POs are GST-free (subcontractors not registered)
+      total: labourSell,
+      reference: job.job_number || null,
+      notes: `Labour PO for ${job.client_name || 'job'} at ${address}`,
+      status: 'draft',
+    }).select().single()
+    if (poErr) throw poErr
+    poData = newPO
+
+    await client.from('job_events').insert({
+      job_id: resolvedJobId,
+      event_type: 'po_created',
+      detail_json: { po_number: poNum, supplier: 'TBA', total: labourSell, po_type: 'labour', source: 'scope_save', auto: true },
+    })
+  }
+
+  return {
+    success: true,
+    job_id: resolvedJobId,
+    job_number: job.job_number,
+    work_order: woData ? { id: woData.id, wo_number: woData.wo_number } : null,
+    labour_po: poData ? { id: poData.id, po_number: poData.po_number, total: labourSell } : null,
+    materials_count: materials.length,
+    labour_amount: labourSell,
+    labour_cost: labourCost,
   }
 }
 
@@ -6329,7 +6524,8 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
   }
 
   // ── Fencing materials (detailed extraction from scoping tool) ──
-  const sections = scope.sections || []
+  // fence-designer saves as scope_json.job.runs; legacy format uses scope.sections
+  const sections = scope.sections || scope.job?.runs || []
   if (sections.length > 0) {
     // Group panels by sheet height
     const panelsByHeight: Record<number, number> = {}
@@ -6340,21 +6536,37 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
 
     for (const sec of sections) {
       const panels = sec.panels || []
-      const height = sec.sheetHeight || 1800
-      panelsByHeight[height] = (panelsByHeight[height] || 0) + panels.length
       totalMetres += sec.length || 0
 
-      // Count posts by type
       for (const panel of panels) {
+        // Panel height — new format: panel.height; legacy: sec.sheetHeight
+        const height = panel.height || sec.sheetHeight || 1800
+        panelsByHeight[height] = (panelsByHeight[height] || 0) + 1
+
+        // Count posts by type (legacy format has leftPost/rightPost strings)
         if (panel.leftPost) postsByHeight[panel.leftPost] = (postsByHeight[panel.leftPost] || 0) + 1
+
+        // Retaining — new format: panel.retaining (mm per panel); legacy: sec.retaining (boolean)
+        if (panel.retaining && panel.retaining > 0) {
+          totalPlinths++
+          const sleeperRows = Math.ceil(panel.retaining / 200) || 1
+          totalSleepers += sleeperRows
+        }
       }
-      // Last panel's right post
+
+      // Last panel's right post (legacy format)
       if (panels.length > 0 && panels[panels.length - 1].rightPost) {
         postsByHeight[panels[panels.length - 1].rightPost] = (postsByHeight[panels[panels.length - 1].rightPost] || 0) + 1
       }
 
-      // Plinths and sleepers
-      if (sec.retaining) {
+      // New format: posts = panels + 1 (no leftPost/rightPost fields)
+      const hasLegacyPosts = panels.some((p: any) => p.leftPost || p.rightPost)
+      if (!hasLegacyPosts && panels.length > 0) {
+        postsByHeight['intermediate'] = (postsByHeight['intermediate'] || 0) + panels.length + 1
+      }
+
+      // Legacy section-level retaining
+      if (sec.retaining && typeof sec.retaining === 'boolean') {
         const plinthCount = panels.length
         totalPlinths += plinthCount
         const sleeperRows = sec.retainingHeight ? Math.ceil(sec.retainingHeight / 200) : 1
@@ -6362,13 +6574,18 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
       }
     }
 
+    // Fence colour from scope (if available) — fence-designer stores under scope.job.colour
+    const fenceColour = scope.job?.colour || scope.colour || scope.color || config.colour || config.color || ''
+
     // Panels by height
     for (const [height, count] of Object.entries(panelsByHeight)) {
       items.push({
-        description: `Colorbond fence sheets — ${height}mm high`,
+        description: `Colorbond fence sheets${fenceColour ? ' ' + fenceColour : ''} — ${height}mm high`,
         quantity: count,
         unit: 'sheets',
         unit_price: 0,
+        supplier_name: 'CMI',
+        category: 'fencing_sheets',
       })
     }
 
@@ -6376,11 +6593,13 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
     const totalPosts = Object.values(postsByHeight).reduce((s, n) => s + n, 0)
     if (totalPosts > 0) {
       items.push({
-        description: 'Fence posts (C-section)',
+        description: `Fence posts (C-section)${fenceColour ? ' ' + fenceColour : ''}`,
         quantity: totalPosts,
         unit: 'ea',
         unit_price: 0,
         notes: `End: ${postsByHeight.end || 0}, Corner: ${postsByHeight.corner || 0}, Intermediate: ${postsByHeight.intermediate || 0}`,
+        supplier_name: 'CMI',
+        category: 'fencing_posts',
       })
     }
 
@@ -6391,6 +6610,8 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
         quantity: totalPlinths,
         unit: 'ea',
         unit_price: 0,
+        supplier_name: 'CMI',
+        category: 'fencing_plinths',
       })
     }
 
@@ -6401,6 +6622,8 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
         quantity: totalSleepers,
         unit: 'ea',
         unit_price: 0,
+        supplier_name: 'Bunnings',
+        category: 'fencing_retaining',
       })
     }
 
@@ -6412,20 +6635,24 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
           quantity: Math.ceil((sec.panels || []).length / 3),
           unit: 'ea',
           unit_price: 0,
+          supplier_name: 'CMI',
+          category: 'fencing_steel',
         })
       }
     }
 
-    // Gates
-    const gates = scope.gates || []
+    // Gates — fence-designer stores under scope.job.gates
+    const gates = scope.gates || scope.job?.gates || []
     for (const gate of gates) {
       const gateType = gate.type || 'pedestrian'
       const gateWidth = gate.width || 900
       items.push({
-        description: `${gateType.charAt(0).toUpperCase() + gateType.slice(1)} gate — ${gateWidth}mm`,
+        description: `${gateType.charAt(0).toUpperCase() + gateType.slice(1)} gate${fenceColour ? ' ' + fenceColour : ''} — ${gateWidth}mm`,
         quantity: 1,
         unit: 'ea',
         unit_price: 0,
+        supplier_name: 'CMI',
+        category: 'fencing_gates',
       })
     }
 
@@ -6436,6 +6663,8 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
         quantity: totalPosts * 3, // ~3 bags per post
         unit: 'bags',
         unit_price: 0,
+        supplier_name: 'Bunnings',
+        category: 'fencing_fixings',
       })
     }
 
@@ -6447,17 +6676,23 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
         quantity: totalPanels * 4,
         unit: 'ea',
         unit_price: 0,
+        supplier_name: 'Bunnings',
+        category: 'fencing_fixings',
       })
     }
 
-    // Removal line items
-    const removal = scope.removal
-    if (removal && (removal.totalMetres > 0 || removal.length > 0)) {
+    // Removal line items — fence-designer stores under scope.job.removal
+    const removal = scope.removal || scope.job?.removal
+    if (removal && (removal.removalRequired || removal.totalMetres > 0 || removal.length > 0)) {
+      const removalLen = removal.totalMetres || removal.existingFenceLength || removal.length || totalMetres || 0
+      const fenceType = removal.existingFenceType || 'old fence'
       items.push({
-        description: 'Old fence removal',
-        quantity: removal.totalMetres || removal.length || 0,
+        description: `${fenceType.charAt(0).toUpperCase() + fenceType.slice(1)} fence removal`,
+        quantity: removalLen,
         unit: 'm',
         unit_price: 0,
+        category: 'fencing_removal',
+        notes: removal.asbestosCert ? 'Asbestos certified' : undefined,
       })
     }
   } else if (config.fence_length || config.fencing) {
@@ -6467,10 +6702,10 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
     if (fenceLen > 0) {
       const fencePosts = Math.ceil(fenceLen / 2.4) + 1
       items.push(
-        { description: `Colorbond fence sheets — ${fenceHeight}m high`, quantity: Math.ceil(fenceLen), unit_price: 0, notes: `${fenceLen}m total` },
-        { description: 'Fence posts (C-section)', quantity: fencePosts, unit_price: 0 },
-        { description: 'Concrete bags (20kg)', quantity: fencePosts * 3, unit_price: 0 },
-        { description: 'Tek screws (12-14 x 20)', quantity: Math.ceil(fenceLen) * 4, unit_price: 0 },
+        { description: `Colorbond fence sheets — ${fenceHeight}m high`, quantity: Math.ceil(fenceLen), unit_price: 0, notes: `${fenceLen}m total`, supplier_name: 'CMI', category: 'fencing_sheets' },
+        { description: 'Fence posts (C-section)', quantity: fencePosts, unit_price: 0, supplier_name: 'CMI', category: 'fencing_posts' },
+        { description: 'Concrete bags (20kg)', quantity: fencePosts * 3, unit_price: 0, supplier_name: 'Bunnings', category: 'fencing_fixings' },
+        { description: 'Tek screws (12-14 x 20)', quantity: Math.ceil(fenceLen) * 4, unit_price: 0, supplier_name: 'Bunnings', category: 'fencing_fixings' },
       )
     }
   }
@@ -6493,9 +6728,16 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
 }
 
 // Exposed as API action for PO auto-population
-async function scopeToPO(client: any, params: URLSearchParams) {
-  const jobId = params.get('jobId') || params.get('job_id')
+async function scopeToPO(client: any, params: URLSearchParams, body: any = {}) {
+  let jobId = params.get('jobId') || params.get('job_id') || body.job_id || body.jobId
   if (!jobId) throw new Error('jobId required')
+
+  // If job_number passed instead of UUID, resolve it
+  if (/^SW[PFDRIMG]-\d+$/i.test(jobId)) {
+    const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
+    if (!found) throw new ApiError(`Job ${jobId} not found`, 404)
+    jobId = found.id
+  }
 
   const { data: job, error } = await client
     .from('jobs')

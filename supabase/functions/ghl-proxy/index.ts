@@ -2072,6 +2072,87 @@ serve(async (req: Request) => {
       }
     }
 
+    // ── DEV-CREW-SMS: Send SMS to any phone number (no contact_id needed) ──
+    if (action === 'send_sms_direct' && req.method === 'POST') {
+      const body = await req.json()
+      const { phone, message, jobId, userId, contactName } = body
+      if (!phone || !message) return json({ error: 'phone and message required' }, 400)
+
+      try {
+        // Normalize phone to E.164
+        let normalized = phone.replace(/[\s()-]/g, '')
+        if (normalized.startsWith('04')) normalized = '+61' + normalized.slice(1)
+        else if (!normalized.startsWith('+')) normalized = '+61' + normalized
+
+        // Search for existing GHL contact by phone
+        let contactId: string | null = null
+        try {
+          const searchResult = await ghl(`/contacts/?query=${encodeURIComponent(normalized)}&locationId=${GHL_LOCATION_ID}`, { method: 'GET' })
+          const contacts = searchResult.contacts || []
+          if (contacts.length > 0) {
+            contactId = contacts[0].id
+            console.log(`[ghl-proxy] send_sms_direct: found contact ${contactId} for ${normalized}`)
+          }
+        } catch { /* search failed — will create contact */ }
+
+        // If no contact found, create a minimal one
+        if (!contactId) {
+          try {
+            const createResult = await ghl('/contacts/', {
+              method: 'POST',
+              body: JSON.stringify({
+                phone: normalized,
+                name: contactName || 'Crew Member',
+                firstName: contactName || 'Crew',
+                locationId: GHL_LOCATION_ID,
+                tags: ['crew', 'auto-created'],
+              }),
+            })
+            contactId = createResult.contact?.id || null
+            console.log(`[ghl-proxy] send_sms_direct: created contact ${contactId} for ${normalized}`)
+          } catch (e) {
+            console.log('[ghl-proxy] send_sms_direct: contact creation failed:', (e as Error).message)
+            return json({ success: false, error: `Could not create contact for ${normalized}: ${(e as Error).message}` })
+          }
+        }
+
+        if (!contactId) return json({ success: false, error: 'Could not resolve or create contact' })
+
+        // Send SMS via GHL conversations API
+        const result = await ghl('/conversations/messages', {
+          method: 'POST',
+          body: JSON.stringify({ type: 'SMS', contactId, message }),
+        })
+        console.log(`[ghl-proxy] send_sms_direct: SMS sent to ${normalized} (contact ${contactId})`)
+
+        // Log to business_events
+        try {
+          const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+          await sb.from('business_events').insert({
+            event_type: 'sms_sent',
+            source: 'ghl-proxy',
+            entity_type: 'contact',
+            entity_id: contactId,
+            job_id: jobId || null,
+            payload: { message: message.slice(0, 500), phone: normalized, direct: true },
+          })
+          if (jobId) {
+            await sb.from('job_events').insert({
+              job_id: jobId,
+              user_id: userId || null,
+              event_type: 'sms_sent',
+              detail_json: { contact_id: contactId, phone: normalized, message, direct: true },
+            })
+          }
+        } catch { /* non-blocking */ }
+
+        return json({ success: true, contactId, messageId: result.messageId || result.id, phone: normalized })
+      } catch (e) {
+        console.log('[ghl-proxy] send_sms_direct failed:', e)
+        return json({ success: false, error: (e as Error).message })
+      }
+    }
+
     // ── Send email via GHL conversations API ──
     if (action === 'send_email' && req.method === 'POST') {
       const body = await req.json()
@@ -2289,6 +2370,94 @@ serve(async (req: Request) => {
       } catch (e) {
         console.log('[ghl-proxy] get_my_messages failed:', e)
         return json({ error: (e as Error).message, messages: [] }, 500)
+      }
+    }
+
+    // ── Sync full conversation to cache (for AI context) ──
+    if (action === 'sync_conversation' && req.method === 'POST') {
+      const body = await req.json()
+      const { contact_id, job_id } = body
+      if (!contact_id) return json({ error: 'contact_id required' }, 400)
+
+      try {
+        // Step 1: Find conversation for this contact
+        let conversations: any[] = []
+        try {
+          const searchResult = await ghl(`/conversations/search?contactId=${contact_id}&locationId=${GHL_LOCATION_ID}`)
+          conversations = searchResult.conversations || []
+        } catch (_e) {
+          // Fallback
+          try {
+            const directResult = await ghl(`/conversations?contactId=${contact_id}&locationId=${GHL_LOCATION_ID}`)
+            conversations = directResult.conversations || (Array.isArray(directResult) ? directResult : [])
+          } catch (_e2) { /* noop */ }
+        }
+
+        if (conversations.length === 0) {
+          return json({ messages: [], contact_id, synced: false, reason: 'No conversations found' })
+        }
+
+        const conversationId = conversations[0].id
+
+        // Step 2: Get ALL messages (paginate up to 200)
+        let allMessages: any[] = []
+        let lastMessageId: string | null = null
+        for (let page = 0; page < 4; page++) {
+          let endpoint = `/conversations/${conversationId}/messages?limit=50`
+          if (lastMessageId) endpoint += `&lastMessageId=${lastMessageId}`
+          const msgResult = await ghl(endpoint)
+          let rawMessages: any[] = []
+          if (Array.isArray(msgResult.messages)) rawMessages = msgResult.messages
+          else if (msgResult.messages && Array.isArray(msgResult.messages.messages)) rawMessages = msgResult.messages.messages
+          else if (Array.isArray(msgResult.data)) rawMessages = msgResult.data
+          if (rawMessages.length === 0) break
+          allMessages = allMessages.concat(rawMessages)
+          lastMessageId = rawMessages[rawMessages.length - 1]?.id || null
+          if (rawMessages.length < 50) break
+        }
+
+        // Normalise
+        const normalised = allMessages.map((m: any) => ({
+          id: m.id,
+          type: (m.messageType || m.type || 'SMS').toUpperCase(),
+          direction: m.direction || (m.userId ? 'outbound' : 'inbound'),
+          body: m.body || m.message || m.text || '',
+          timestamp: m.dateAdded || m.createdAt || m.timestamp || '',
+          sender_name: m.userName || m.user?.name || '',
+        }))
+
+        // Sort oldest first
+        normalised.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+
+        // Step 3: Upsert into ghl_conversation_cache
+        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+        // Check for existing record
+        let query = sb.from('ghl_conversation_cache').select('id').eq('contact_id', contact_id)
+        if (job_id) query = query.eq('job_id', job_id)
+        const { data: existing } = await query.limit(1).maybeSingle()
+
+        if (existing) {
+          await sb.from('ghl_conversation_cache').update({
+            messages: normalised,
+            message_count: normalised.length,
+            synced_at: new Date().toISOString(),
+            ...(job_id ? { job_id } : {}),
+          }).eq('id', existing.id)
+        } else {
+          await sb.from('ghl_conversation_cache').insert({
+            contact_id,
+            job_id: job_id || null,
+            messages: normalised,
+            message_count: normalised.length,
+          })
+        }
+
+        console.log(`[ghl-proxy] sync_conversation: cached ${normalised.length} messages for contact ${contact_id}`)
+        return json({ messages: normalised, contact_id, job_id, message_count: normalised.length, synced: true })
+      } catch (e) {
+        console.log('[ghl-proxy] sync_conversation failed:', e)
+        return json({ error: (e as Error).message, synced: false }, 500)
       }
     }
 

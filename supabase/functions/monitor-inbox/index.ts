@@ -501,14 +501,64 @@ async function processMailbox(
             }).then(() => {}).catch(() => {})
           }
 
-          // Call analyse_supplier_quote (non-blocking)
+          // DEV-44b: Fetch PDF attachments from Graph API for supplier quotes
+          let attachmentPdfUrl: string | null = null
+          if (msg.hasAttachments) {
+            try {
+              const attachResp = await fetch(
+                `${graphBase}/messages/${msg.id}/attachments`,
+                { headers: { 'Authorization': `Bearer ${token}` } }
+              )
+              if (attachResp.ok) {
+                const attachData = await attachResp.json()
+                for (const att of (attachData.value || [])) {
+                  if (!att.contentBytes || att.size > 10000000) continue
+                  const isPdf = (att.contentType || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+                  if (!isPdf) continue // Only PDFs for supplier quotes
+
+                  const storagePath = `${DEFAULT_ORG_ID}/${jobId || 'unmatched'}/supplier/${Date.now()}_${(att.name || 'quote.pdf').replace(/[^a-zA-Z0-9._-]/g, '_')}`
+                  const fileBuffer = Uint8Array.from(atob(att.contentBytes), c => c.charCodeAt(0))
+                  const { error: uploadErr } = await sb.storage
+                    .from('job-photos')
+                    .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
+
+                  if (uploadErr) {
+                    console.log(`[monitor-inbox] PO attachment upload failed:`, uploadErr.message)
+                    continue
+                  }
+
+                  const { data: urlData } = sb.storage.from('job-photos').getPublicUrl(storagePath)
+                  const publicUrl = urlData?.publicUrl || ''
+                  if (!attachmentPdfUrl) attachmentPdfUrl = publicUrl
+
+                  // Store as job_document if we have a job_id
+                  if (jobId) {
+                    await sb.from('job_documents').insert({
+                      job_id: jobId,
+                      type: 'supplier_quote',
+                      file_name: att.name || 'Supplier Quote',
+                      storage_url: publicUrl,
+                      pdf_url: publicUrl,
+                      visible_to_trades: true,
+                      version: 1,
+                    }).then(() => {}).catch(() => {})
+                  }
+                  console.log(`[monitor-inbox] PO pipeline: stored PDF ${att.name} for PO ${poNumber}`)
+                }
+              }
+            } catch (e) {
+              console.log('[monitor-inbox] PO attachment fetch failed (non-blocking):', (e as Error).message)
+            }
+          }
+
+          // Call analyse_supplier_quote with PDF URL if available
           try {
             const analysisResp = await fetch(
               `${SUPABASE_URL}/functions/v1/ops-api?action=analyse_supplier_quote`,
               {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-                body: JSON.stringify({ po_id: poId, quote_text: bodyPreview }),
+                body: JSON.stringify({ po_id: poId, quote_text: bodyPreview, pdf_url: attachmentPdfUrl }),
               }
             )
             if (analysisResp.ok) {
@@ -521,11 +571,11 @@ async function processMailbox(
 
           // Update inbox_events with matched PO + job
           await sb.from('inbox_events')
-            .update({ job_id: jobId, metadata: { has_attachments: msg.hasAttachments || false, job_ref: classification.job_ref, po_id: poId, po_number: poNumber } })
+            .update({ job_id: jobId, metadata: { has_attachments: msg.hasAttachments || false, job_ref: classification.job_ref, po_id: poId, po_number: poNumber, pdf_url: attachmentPdfUrl } })
             .eq('graph_message_id', msg.id)
             .then(() => {}).catch(() => {})
 
-          console.log(`[monitor-inbox] PO pipeline: ${fromEmail} → PO ${poNumber} (${poId}), job ${jobId}`)
+          console.log(`[monitor-inbox] PO pipeline: ${fromEmail} → PO ${poNumber} (${poId}), job ${jobId}${attachmentPdfUrl ? ', PDF stored' : ''}`)
         }
       } catch (e) {
         console.log('[monitor-inbox] PO reply pipeline failed (non-blocking):', (e as Error).message)
