@@ -2092,7 +2092,7 @@ serve(async (req: Request) => {
               .select('query, response')
               .eq('channel', channel)
               .order('created_at', { ascending: false })
-              .limit(3)
+              .limit(5)
             // For DMs, filter by user_email (user_id is often NULL)
             if (channel === 'telegram_dm') {
               query = query.eq('user_email', user.email)
