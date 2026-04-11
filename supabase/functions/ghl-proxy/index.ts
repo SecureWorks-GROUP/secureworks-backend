@@ -2248,6 +2248,78 @@ serve(async (req: Request) => {
       }
     }
 
+    // ── Sync conversation to cache ──
+    if (action === 'sync_conversation') {
+      const contactId = url.searchParams.get('contactId') || (body && body.contactId)
+      const jobId = url.searchParams.get('job_id') || (body && body.job_id)
+      if (!contactId) return json({ error: 'contactId required' }, 400)
+
+      try {
+        // Fetch messages from GHL (same logic as get_conversation)
+        let conversations: any[] = []
+        try {
+          const searchResult = await ghl(`/conversations/search?contactId=${contactId}&locationId=${GHL_LOCATION_ID}`)
+          conversations = searchResult.conversations || []
+        } catch (e) {
+          console.log(`[ghl-proxy] sync: conversation search failed: ${(e as Error).message}`)
+        }
+        if (conversations.length === 0) {
+          try {
+            const directResult = await ghl(`/conversations?contactId=${contactId}&locationId=${GHL_LOCATION_ID}`)
+            conversations = directResult.conversations || (Array.isArray(directResult) ? directResult : [])
+          } catch (e) { /* ignore */ }
+        }
+        if (conversations.length === 0) {
+          return json({ synced: false, contactId, message_count: 0, _note: 'No conversations found' })
+        }
+
+        const conversationId = conversations[0].id
+        const msgResult = await ghl(`/conversations/${conversationId}/messages?limit=50&sort=desc&sortBy=dateAdded`)
+        let rawMessages: any[] = []
+        if (Array.isArray(msgResult.messages)) rawMessages = msgResult.messages
+        else if (msgResult.messages && Array.isArray(msgResult.messages.messages)) rawMessages = msgResult.messages.messages
+        else if (Array.isArray(msgResult.data)) rawMessages = msgResult.data
+
+        const messages = rawMessages.map((m: any) => ({
+          id: m.id,
+          type: (m.messageType || m.type || 'SMS').toUpperCase(),
+          direction: m.direction || (m.userId ? 'outbound' : 'inbound'),
+          body: m.body || m.message || m.text || '',
+          timestamp: m.dateAdded || m.createdAt || m.timestamp || '',
+          sender_name: m.userName || m.user?.name || '',
+        }))
+        messages.reverse()
+
+        // Upsert into ghl_conversation_cache
+        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const { error } = await sb.from('ghl_conversation_cache').upsert({
+          job_id: jobId || null,
+          contact_id: contactId,
+          messages: messages,
+          message_count: messages.length,
+          synced_at: new Date().toISOString(),
+        }, { onConflict: 'contact_id' })
+
+        if (error) {
+          console.log('[ghl-proxy] sync_conversation upsert error:', error)
+          // Try insert if upsert fails (no unique constraint on contact_id yet)
+          const { error: insertErr } = await sb.from('ghl_conversation_cache').insert({
+            job_id: jobId || null,
+            contact_id: contactId,
+            messages: messages,
+            message_count: messages.length,
+            synced_at: new Date().toISOString(),
+          })
+          if (insertErr) throw insertErr
+        }
+
+        return json({ synced: true, contactId, job_id: jobId, message_count: messages.length })
+      } catch (e) {
+        console.log('[ghl-proxy] sync_conversation failed:', e)
+        return json({ error: (e as Error).message, synced: false }, 500)
+      }
+    }
+
     // ── Get outbound-only messages for Trade app ──
     if (action === 'get_my_messages') {
       const contactId = url.searchParams.get('contactId')

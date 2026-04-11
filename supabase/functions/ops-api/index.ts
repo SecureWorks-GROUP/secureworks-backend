@@ -1111,6 +1111,10 @@ serve(async (req: Request) => {
       case 'send_proposed_sms': return json(await sendProposedSms(client, body))
       case 'dismiss_proposed_action': return json(await dismissProposedAction(client, body))
 
+      // ── Smart Nudges ──
+      case 'list_nudges': return json(await listNudges(client, url.searchParams))
+      case 'act_nudge': return json(await actNudge(client, body))
+
       // ── Public (no auth) ──
       case 'view_shared_report': return viewSharedReport(client, url.searchParams)
 
@@ -3254,12 +3258,23 @@ async function listInvoices(client: any, params: URLSearchParams) {
   const dateFrom = params.get('date_from')
   const dateTo = params.get('date_to')
 
+  // Resolve job_id — accept UUID or job_number (e.g. SWF-26037)
+  let jobId = params.get('job_id') || ''
+  if (jobId && !jobId.match(/^[0-9a-f]{8}-/i)) {
+    const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1)
+    if (found?.[0]) jobId = found[0].id
+    else return { invoices: [], total: 0, summary: { outstanding: 0, overdue: 0, total: 0 }, _note: `No job found for job_number: ${jobId}` }
+  }
+
   let query = client.from('xero_invoices')
     .select('id, xero_invoice_id, invoice_number, contact_name, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id', { count: 'exact' })
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('invoice_type', type)
     .order('invoice_date', { ascending: false })
     .range(offset, offset + limit - 1)
+
+  // Filter by job if provided
+  if (jobId) query = query.eq('job_id', jobId)
 
   if (status === 'overdue') {
     // 'overdue' is a virtual status — filter by open invoices past due date
@@ -3864,6 +3879,51 @@ async function updateJobStatus(client: any, body: any) {
     } catch (e) {
       console.log('[ops-api] GHL stage push failed (non-blocking):', (e as Error).message)
     }
+  }
+
+  // ── Acceptance trigger: auto-approve draft WOs + push labour POs to Xero (non-blocking) ──
+  if (status === 'accepted') {
+    (async () => {
+      try {
+        // 1. Approve draft work orders for this job
+        const { data: draftWOs } = await client.from('work_orders')
+          .select('id, wo_number')
+          .eq('job_id', jId)
+          .eq('status', 'draft')
+        if (draftWOs && draftWOs.length > 0) {
+          for (const wo of draftWOs) {
+            await client.from('work_orders')
+              .update({ status: 'approved', approved_at: new Date().toISOString() })
+              .eq('id', wo.id)
+            await client.from('job_events').insert({
+              job_id: jId,
+              event_type: 'work_order_approved',
+              detail_json: { wo_number: wo.wo_number, trigger: 'acceptance_auto' },
+            })
+            console.log(`[ops-api] Auto-approved WO ${wo.wo_number} on job acceptance`)
+          }
+        }
+
+        // 2. Push draft labour POs to Xero
+        const { data: draftPOs } = await client.from('purchase_orders')
+          .select('id, po_number')
+          .eq('job_id', jId)
+          .eq('status', 'draft')
+          .is('xero_po_id', null)
+        if (draftPOs && draftPOs.length > 0) {
+          for (const po of draftPOs) {
+            try {
+              await pushPOToXero(client, { id: po.id })
+              console.log(`[ops-api] Auto-pushed PO ${po.po_number} to Xero on job acceptance`)
+            } catch (poErr) {
+              console.log(`[ops-api] Auto-push PO ${po.po_number} to Xero failed (non-blocking):`, (poErr as Error).message)
+            }
+          }
+        }
+      } catch (e) {
+        console.log('[ops-api] Acceptance trigger failed (non-blocking):', (e as Error).message)
+      }
+    })()
   }
 
   return { job: data }
@@ -9594,6 +9654,52 @@ async function dismissProposedAction(client: any, body: any) {
 
   if (error) throw error
   return { success: true, action_id }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// SMART NUDGES
+// ════════════════════════════════════════════════════════════
+
+async function listNudges(client: any, params: URLSearchParams) {
+  const status = params.get('status') || 'pending'
+  const ruleKey = params.get('rule_key')
+  const jobId = params.get('job_id')
+  const since = params.get('since')
+  const limit = Math.min(parseInt(params.get('limit') || '20'), 100)
+
+  let query = client.from('smart_nudges')
+    .select('id, nudge_type, job_id, contact_name, trigger_rule, suggested_action, suggested_message, channel, status, sent_at, acted_at, dismissed_at, created_at')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (status) query = query.eq('status', status)
+  if (ruleKey) query = query.eq('trigger_rule', ruleKey)
+  if (jobId) query = query.eq('job_id', jobId)
+  if (since) query = query.gte('created_at', since)
+
+  const { data, error } = await query
+  if (error) throw error
+  return { nudges: data || [], total: (data || []).length }
+}
+
+async function actNudge(client: any, body: any) {
+  const { nudge_id, action } = body
+  if (!nudge_id) throw new Error('nudge_id required')
+  if (!action || !['act', 'dismiss'].includes(action)) throw new Error('action must be "act" or "dismiss"')
+
+  const now = new Date().toISOString()
+  const update: any = { status: action === 'act' ? 'acted' : 'dismissed' }
+  if (action === 'act') update.acted_at = now
+  else update.dismissed_at = now
+
+  const { error } = await client.from('smart_nudges')
+    .update(update)
+    .eq('id', nudge_id)
+
+  if (error) throw error
+  return { success: true, nudge_id, action }
 }
 
 
