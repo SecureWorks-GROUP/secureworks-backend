@@ -20,9 +20,17 @@ const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Monitored mailboxes
+// Step 17: Expanded from 2 to 7 mailboxes (GRAF Level 6)
+// khairo@ excluded — MS365 mailbox not provisioned (needs admin action)
 const MONITORED_MAILBOXES = [
   'marnin@secureworkswa.com.au',
   'jan@secureworkswa.com.au',
+  'nithin@secureworkswa.com.au',    // Sales (patios) — confirmed working
+  'shaun@secureworkswa.com.au',     // Ops manager — returns Apr 13, mailbox active
+  'admin@secureworkswa.com.au',     // Shared admin inbox
+  'patios@secureworkswa.com.au',    // Group mailbox — patio enquiries
+  'fencing@secureworkswa.com.au',   // Group mailbox — fencing enquiries
+  // 'khairo@secureworkswa.com.au', // NOT provisioned in MS365 — needs admin to create/verify
 ]
 
 // Admin Telegram chat IDs — resolved from users table at runtime
