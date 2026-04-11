@@ -2301,8 +2301,50 @@ serve(async (req: Request) => {
         aiWork.catch(e => console.error('[telegram-bot] background AI error:', e))
         return new Response('ok', { status: 200 })
       } else {
-        // Silent logging (existing behavior)
+        // ── Mode B: Lurker — silent logging of ALL group messages ──
+        // Step 13: Persist every crew group message to chat_logs (passive),
+        // even when the bot isn't mentioned. GRAF sees these via chat_logs
+        // and the event listener reacts to business-relevant ones.
         await handleText(client, message)
+
+        // Also log to chat_logs for GRAF conversational memory
+        if (message.chat.type !== 'private' && text) {
+          const fromName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ')
+          client.from('chat_logs').insert({
+            user_id: null, // passive — may not be a registered user
+            user_email: null,
+            role: 'crew',
+            query: text.slice(0, 500),
+            response: null, // no bot response for passive messages
+            tools_used: [],
+            channel: 'telegram_group_passive',
+          }).then(() => {}).catch(() => {})
+
+          // Lightweight business-relevance classifier for passive messages
+          // If the message mentions ops-relevant topics, also fire a crew.message
+          // business_event so the event listener can react (handleText already
+          // fires crew.message for ALL messages, but we add extra metadata here
+          // for passive messages that mention specific ops topics)
+          const lowerText = text.toLowerCase()
+          const OPS_KEYWORDS = /\b(materials?|deliver|delivery|schedule[d]?|on\s*site|finished|done|complete[d]?|started|problem|issue|rain|weather|no\s*show|running\s*late|delay|short|missing)\b/i
+          if (OPS_KEYWORDS.test(lowerText)) {
+            const refs = text.match(/SW[PFDR]-\d{5}/gi) || []
+            logEvent(client, {
+              event_type: 'crew.message',
+              entity_type: refs.length > 0 ? 'job' : 'crew_chat',
+              entity_id: refs[0] || String(message.chat.id),
+              payload: {
+                text: text.slice(0, 500),
+                from: fromName,
+                telegram_id: message.from?.id,
+                chat_id: message.chat.id,
+                passive: true, // Flag: bot was NOT mentioned
+                ops_relevant: true,
+                job_refs: refs,
+              },
+            }).catch(() => {})
+          }
+        }
       }
     }
 
