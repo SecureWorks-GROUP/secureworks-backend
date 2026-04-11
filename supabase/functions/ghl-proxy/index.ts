@@ -2250,8 +2250,10 @@ serve(async (req: Request) => {
 
     // ── Sync conversation to cache ──
     if (action === 'sync_conversation') {
-      const contactId = url.searchParams.get('contactId') || (body && body.contactId)
-      const jobId = url.searchParams.get('job_id') || (body && body.job_id)
+      let syncBody: any = {}
+      try { if (req.method === 'POST') syncBody = await req.json() } catch { /* no body */ }
+      const contactId = url.searchParams.get('contactId') || syncBody?.contactId
+      const jobId = url.searchParams.get('job_id') || syncBody?.job_id
       if (!contactId) return json({ error: 'contactId required' }, 400)
 
       try {
@@ -2280,15 +2282,29 @@ serve(async (req: Request) => {
         else if (msgResult.messages && Array.isArray(msgResult.messages.messages)) rawMessages = msgResult.messages.messages
         else if (Array.isArray(msgResult.data)) rawMessages = msgResult.data
 
-        const messages = rawMessages.map((m: any) => ({
-          id: m.id,
-          type: (m.messageType || m.type || 'SMS').toUpperCase(),
-          direction: m.direction || (m.userId ? 'outbound' : 'inbound'),
-          body: m.body || m.message || m.text || '',
-          timestamp: m.dateAdded || m.createdAt || m.timestamp || '',
-          sender_name: m.userName || m.user?.name || '',
-        }))
+        const messages = rawMessages.map((m: any) => {
+          const msgType = (m.messageType || m.type || 'SMS').toUpperCase()
+          const isCall = /CALL|VOICEMAIL/i.test(msgType)
+          return {
+            id: m.id,
+            type: msgType,
+            direction: m.direction || (m.userId ? 'outbound' : 'inbound'),
+            body: m.body || m.message || m.text || '',
+            timestamp: m.dateAdded || m.createdAt || m.timestamp || '',
+            sender_name: m.userName || m.user?.name || '',
+            // Step 12: Flag call entries so GRAF knows these are calls, not text
+            ...(isCall ? {
+              source: 'call_transcript',
+              call_duration: m.duration || m.callDuration || null,
+              call_status: m.callStatus || m.status || null,
+              _note: 'GHL call record. Transcripts not available via GHL API -- only call metadata (duration, status, direction). Interpret call entries as "a call happened" rather than what was said.',
+            } : {}),
+          }
+        })
         messages.reverse()
+
+        // Count call entries for metadata
+        const callCount = messages.filter((m: any) => m.source === 'call_transcript').length
 
         // Upsert into ghl_conversation_cache
         const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -2313,7 +2329,7 @@ serve(async (req: Request) => {
           if (insertErr) throw insertErr
         }
 
-        return json({ synced: true, contactId, job_id: jobId, message_count: messages.length })
+        return json({ synced: true, contactId, job_id: jobId, message_count: messages.length, call_count: callCount, _transcript_note: callCount > 0 ? 'GHL does not expose call transcripts via API. Call entries contain metadata only (duration, status, direction). For actual transcript ingestion, a separate recording/transcription service would be needed.' : undefined })
       } catch (e) {
         console.log('[ghl-proxy] sync_conversation failed:', e)
         return json({ error: (e as Error).message, synced: false }, 500)
