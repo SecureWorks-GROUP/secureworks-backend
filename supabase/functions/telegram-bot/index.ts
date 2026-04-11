@@ -293,11 +293,12 @@ async function askOpsAi(text: string, callerContext: CallerContext, view: string
 
   try {
     // Build messages array: conversation history + current message
+    // Keep generous context so the agent can resolve pronouns ("them", "that job", etc.)
     const historyMsgs: Array<{ role: string; content: string }> = []
     if (chatHistory && chatHistory.length > 0) {
       for (const h of chatHistory) {
-        if (h.query) historyMsgs.push({ role: 'user', content: h.query.slice(0, 500) })
-        if (h.response) historyMsgs.push({ role: 'assistant', content: h.response.slice(0, 1000) })
+        if (h.query) historyMsgs.push({ role: 'user', content: h.query.slice(0, 800) })
+        if (h.response) historyMsgs.push({ role: 'assistant', content: h.response.slice(0, 2000) })
       }
     }
 
@@ -2092,18 +2093,19 @@ serve(async (req: Request) => {
               .select('query, response')
               .eq('channel', channel)
               .order('created_at', { ascending: false })
-              .limit(5)
-            // For DMs, filter by user_email (user_id is often NULL)
-            if (channel === 'telegram_dm') {
+              .limit(7)
+            // Filter by user_email so we get THIS user's conversation thread
+            // (user_id is often NULL, so filter by email instead)
+            if (user.email) {
               query = query.eq('user_email', user.email)
             }
             const { data: recentChats } = await query
             if (recentChats && recentChats.length > 0) {
               const reversed = recentChats.reverse()
               recentMessages = reversed.map((c: any) =>
-                `User: ${(c.query || '').slice(0, 150)}\nAI: ${(c.response || '').slice(0, 200)}`
+                `User: ${(c.query || '').slice(0, 200)}\nAI: ${(c.response || '').slice(0, 400)}`
               )
-              // Raw history for messages array injection
+              // Raw history for messages array injection — keep more context for entity resolution
               chatHistoryRaw = reversed.map((c: any) => ({ query: c.query || '', response: c.response || '' }))
             }
           } catch { /* non-blocking — memory is best-effort */ }
