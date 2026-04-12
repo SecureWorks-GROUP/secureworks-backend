@@ -3216,9 +3216,9 @@ async function jobDetail(client: any, jobId: string) {
   // Strip heavy JSON blobs from response — keep only computed values
   const { scope_json: _s, pricing_json: _p, ...jobLite } = jobRes.data || {}
 
-  // Strip line_items from invoices (huge nested JSON)
+  // Strip line_items and raw_json from invoices (huge nested JSON)
   const invoicesLite = invoices.map((inv: any) => {
-    const { line_items: _li, ...rest } = inv
+    const { line_items: _li, raw_json: _rj, ...rest } = inv
     return rest
   })
 
@@ -3926,7 +3926,7 @@ async function updateJobStatus(client: any, body: any) {
     })()
   }
 
-  return { job: data }
+  return { success: true, job_id: jId, new_status: status, job_number: data?.job_number || jobBefore?.job_number }
 }
 
 async function createPO(client: any, body: any) {
