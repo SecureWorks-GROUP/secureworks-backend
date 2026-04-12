@@ -4150,7 +4150,7 @@ async function emailPO(client: any, body: any) {
 
   const { data: po, error } = await client
     .from('purchase_orders')
-    .select('xero_po_id')
+    .select('xero_po_id, po_number, supplier_name, job_id, total')
     .eq('id', id)
     .single()
 
@@ -4159,6 +4159,23 @@ async function emailPO(client: any, body: any) {
 
   const { accessToken, tenantId } = await getToken(client)
   await xeroPost(`/PurchaseOrders/${po.xero_po_id}/Email`, accessToken, tenantId, {}, 'POST')
+
+  // Log to business_events
+  logBusinessEvent(client, {
+    event_type: 'po.sent',
+    entity_type: 'purchase_order',
+    entity_id: id,
+    job_id: po.job_id || null,
+    correlation_id: po.job_id || null,
+    payload: {
+      entity: { id, name: po.po_number || '' },
+      financial: { amount: Number(po.total || 0), currency: 'AUD' },
+      related_entities: [
+        { type: 'supplier', id: null, name: po.supplier_name || '' },
+      ],
+    },
+    metadata: { operator: body.operator_email || body.user_email || null },
+  })
 
   return { success: true }
 }
@@ -4293,6 +4310,23 @@ async function createWorkOrder(client: any, body: any) {
     job_id: jId,
     event_type: 'wo_created',
     detail_json: { wo_number: woNum, trade: body.trade_name || body.tradeName },
+  })
+
+  // Dual-write to business_events
+  logBusinessEvent(client, {
+    event_type: 'wo.created',
+    entity_type: 'work_order',
+    entity_id: data.id,
+    job_id: jId,
+    correlation_id: jId,
+    payload: {
+      entity: { id: data.id, name: woNum },
+      related_entities: [
+        { type: 'job', id: jId },
+        { type: 'trade', id: data.assigned_user_id || null, name: body.trade_name || body.tradeName || '' },
+      ],
+    },
+    metadata: { operator: body.operator_email || body.user_email || null },
   })
 
   // Log to jarvis_event_log (non-blocking, fire-and-forget)
@@ -5780,6 +5814,24 @@ async function createDepositInvoice(client: any, body: any) {
       quoted_total: quotedTotal,
       extra_line_items: extras,
     },
+  })
+
+  // Dual-write to business_events
+  logBusinessEvent(client, {
+    event_type: 'invoice.created',
+    entity_type: 'invoice',
+    entity_id: invoiceResult.xero_invoice_id || jId,
+    job_id: job.job_number || jId,
+    correlation_id: jId,
+    payload: {
+      entity: { id: invoiceResult.xero_invoice_id, name: invoiceResult.invoice_number || '' },
+      financial: { amount: totalInvoiceAmount, currency: 'AUD' },
+      invoice_type: 'deposit',
+      deposit_percent: depositPercent,
+      quoted_total: quotedTotal,
+      related_entities: [{ type: 'job', id: jId, name: job.client_name || '' }],
+    },
+    metadata: { operator: body.operator_email || body.user_email || null },
   })
 
   return {
