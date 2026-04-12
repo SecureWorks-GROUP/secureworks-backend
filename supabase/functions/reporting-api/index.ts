@@ -343,12 +343,11 @@ async function jobContext(sb: any, jobId: string) {
       .eq('job_id', jobId)
       .order('created_at', { ascending: false }).limit(10),
 
-    // 6. Client conversations (business_events)
+    // 6. All business_events for this job (no event_type filter)
     sb.from('business_events')
-      .select('event_type, payload, occurred_at')
+      .select('event_type, source, payload, occurred_at')
       .eq('job_id', jobId)
-      .in('event_type', ['sms_sent', 'email_sent', 'quote_sent', 'quote_accepted'])
-      .order('occurred_at', { ascending: false }).limit(10),
+      .order('occurred_at', { ascending: false }).limit(30),
   ])
 
   // Build timeline from all sources
@@ -356,8 +355,8 @@ async function jobContext(sb: any, jobId: string) {
     ...(events.data || []).map((e: any) => ({ type: e.event_type, who: e.users?.name || 'System', when: e.created_at, detail: typeof e.detail_json === 'string' ? e.detail_json.slice(0, 200) : JSON.stringify(e.detail_json || {}).slice(0, 200), source: 'job_events' })),
     ...(emails.data || []).map((e: any) => ({ type: 'email_' + e.classification, who: e.from_name || e.from_email, when: e.received_at, detail: e.subject, source: 'inbox' })),
     ...(jarvisActions.data || []).map((e: any) => ({ type: e.event_type, who: 'JARVIS', when: e.created_at, detail: (e.message_content || '').slice(0, 200), source: 'jarvis' })),
-    ...(conversations.data || []).map((e: any) => ({ type: e.event_type, who: 'JARVIS', when: e.occurred_at, detail: (e.payload?.message || '').slice(0, 200), source: 'comms' })),
-  ].sort((a, b) => new Date(b.when).getTime() - new Date(a.when).getTime()).slice(0, 30)
+    ...(conversations.data || []).map((e: any) => ({ type: e.event_type, who: e.source || 'system', when: e.occurred_at, detail: (e.payload?.message || e.payload?.changes ? JSON.stringify(e.payload.changes || e.payload).slice(0, 200) : JSON.stringify(e.payload || {}).slice(0, 200)), source: 'business_events' })),
+  ].sort((a, b) => new Date(b.when).getTime() - new Date(a.when).getTime()).slice(0, 50)
 
   return {
     job: job.data,
