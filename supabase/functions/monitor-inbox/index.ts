@@ -330,6 +330,60 @@ async function processMailbox(
       } catch { /* best effort */ }
     }
 
+    // ── Job Memory Loop: create business_event for supplier/client emails ──
+    const isSupplier = ['supplier_quote', 'supplier_response'].includes(classification.classification)
+    const isClient = ['client_reply', 'complaint', 'urgent'].includes(classification.classification)
+    if (isSupplier || isClient) {
+      // For supplier emails without a job match, try PO number from subject
+      let finalJobId = jobId
+      if (!finalJobId && isSupplier) {
+        const poMatch = subject.match(/PO-?\d{6}/i)
+        if (poMatch) {
+          const { data: po } = await sb.from('purchase_orders')
+            .select('job_id')
+            .ilike('po_number', poMatch[0])
+            .limit(1)
+            .maybeSingle()
+          finalJobId = po?.job_id || null
+        }
+      }
+      // If still no match, try client name from subject for non-archived jobs
+      if (!finalJobId && isSupplier) {
+        const cleanSubject = subject.replace(/^(RE|FW|Fwd):\s*/gi, '').trim()
+        const firstWord = cleanSubject.split(' ')[0]
+        if (firstWord && firstWord.length > 2) {
+          const { data: matchedJobs } = await sb.from('jobs')
+            .select('id')
+            .ilike('client_name', `%${firstWord}%`)
+            .eq('org_id', DEFAULT_ORG_ID)
+            .not('archived', 'is', true)
+            .limit(1)
+          finalJobId = matchedJobs?.[0]?.id || null
+        }
+      }
+
+      await sb.from('business_events').insert({
+        event_type: isSupplier ? 'supplier.email_in' : 'client.email_in',
+        source: 'monitor_inbox',
+        entity_type: finalJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
+        entity_id: finalJobId || 'unmatched',
+        job_id: finalJobId || null,
+        payload: {
+          from: fromEmail,
+          subject: subject.slice(0, 200),
+          classification: classification.classification,
+          priority: classification.priority,
+          has_attachments: msg.hasAttachments || false,
+          matched: !!finalJobId,
+          mailbox,
+          job_ref: classification.job_ref || null,
+        },
+        occurred_at: receivedAt || new Date().toISOString(),
+      }).then(() => {}).catch((e: any) => {
+        console.log(`[monitor-inbox] business_event insert failed:`, e?.message)
+      })
+    }
+
     // Telegram notification for high priority
     if (classification.priority === 'high') {
       const emoji = classification.classification === 'complaint' ? '🚨'

@@ -2308,6 +2308,55 @@ serve(async (req: Request) => {
               },
             }).catch(() => {})
           }
+
+          // ── Job Memory Loop: match passive messages to jobs by job ref ──
+          const jobRefMatch = text.match(/SW[PFDR]-?\d{4,6}/i)
+          if (jobRefMatch) {
+            const { data: matchedJob } = await client.from('jobs')
+              .select('id, job_number, client_name')
+              .ilike('job_number', jobRefMatch[0].replace(/-/g, '').replace(/(SW[PFDR])(\d+)/i, '$1-$2'))
+              .limit(1)
+              .maybeSingle()
+
+            if (matchedJob) {
+              const hasMedia = !!(message.photo || message.document || message.video)
+              await client.from('business_events').insert({
+                event_type: hasMedia ? 'crew.photo' : 'crew.message',
+                source: 'telegram/passive',
+                entity_type: 'crew',
+                entity_id: String(message.from?.id || ''),
+                job_id: matchedJob.id,
+                payload: {
+                  sender: message.from?.first_name || 'Unknown',
+                  message_text: text.slice(0, 500),
+                  group_name: message.chat?.title || 'Unknown',
+                  has_media: hasMedia,
+                  job_number: matchedJob.job_number,
+                  client_name: matchedJob.client_name,
+                  passive: true,
+                },
+                occurred_at: new Date().toISOString(),
+              }).then(() => {}).catch(() => {})
+            }
+          }
+
+          // ── Job Memory Loop: crew.alert for issue keywords ──
+          const ISSUE_KEYWORDS = /\b(no materials|not on site|problem|delay|damaged|missing|broken|unsafe|no\s*show|short|wrong)\b/i
+          if (ISSUE_KEYWORDS.test(lowerText)) {
+            await client.from('business_events').insert({
+              event_type: 'crew.alert',
+              source: 'telegram/passive',
+              entity_type: 'crew',
+              entity_id: String(message.from?.id || ''),
+              payload: {
+                sender: message.from?.first_name || 'Unknown',
+                alert_text: text.slice(0, 500),
+                group_name: message.chat?.title || 'Unknown',
+                urgency: 'high',
+              },
+              occurred_at: new Date().toISOString(),
+            }).then(() => {}).catch(() => {})
+          }
         }
       }
     }

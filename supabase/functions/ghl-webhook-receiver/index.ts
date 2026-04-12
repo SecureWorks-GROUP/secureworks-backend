@@ -1,13 +1,14 @@
 // ════════════════════════════════════════════════════════════
-// SecureWorks — GHL Webhook Receiver (Inbound Messages)
+// SecureWorks — GHL Webhook Receiver (All Event Types)
 //
-// Receives webhook payloads from GHL when clients send SMS,
-// email, or chat messages. Creates business_events for the
-// event-listener to react to (Telegram notifications, nudge
-// cancellation, etc.).
+// Receives webhook payloads from GHL for client interactions:
+// InboundMessage, OutboundMessage, CallCompleted,
+// AppointmentCreated, NoteAdded, ContactStageChanged.
+// Creates business_events for the event-listener to react to
+// (Telegram notifications, nudge cancellation, job timeline).
 //
 // Deploy: supabase functions deploy ghl-webhook-receiver --no-verify-jwt
-// GHL Setup: Settings > Integrations > Webhooks > InboundMessage
+// GHL Setup: Settings > Integrations > Webhooks > all 6 event types
 // ════════════════════════════════════════════════════════════
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -53,7 +54,7 @@ serve(async (req) => {
       .from("webhook_log")
       .insert({
         org_id: "00000000-0000-0000-0000-000000000001",
-        source: "ghl_inbound",
+        source: "ghl_webhook",
         event_type: type || "unknown",
         payload: body,
         status: "received",
@@ -61,13 +62,22 @@ serve(async (req) => {
       .then(() => {})
       .catch(() => {});
 
-    // Only process inbound messages
-    if (type !== "InboundMessage") {
-      console.log(`[ghl-webhook-receiver] Skipping non-inbound event: ${type}`);
+    // Supported event types
+    const SUPPORTED_TYPES = [
+      "InboundMessage",
+      "OutboundMessage",
+      "CallCompleted",
+      "AppointmentCreated",
+      "NoteAdded",
+      "ContactStageChanged",
+    ];
+
+    if (!SUPPORTED_TYPES.includes(type)) {
+      console.log(`[ghl-webhook-receiver] Skipping unsupported event: ${type}`);
       return jsonResponse({ received: true, skipped: type });
     }
 
-    // Match to an active job via ghl_contact_id
+    // ── Match to an active job via ghl_contact_id ──
     const { data: jobs } = await supabase
       .from("jobs")
       .select("id, job_number, client_name, type, status")
@@ -78,29 +88,101 @@ serve(async (req) => {
 
     const job = jobs?.[0];
 
-    // Determine channel
-    const channel = phone ? "sms" : email ? "email" : "chat";
+    // ── Build event_type and payload per webhook type ──
+    let eventType = "";
+    let eventPayload: Record<string, unknown> = {};
 
-    // Create business_event for the event-listener to pick up
+    switch (type) {
+      case "InboundMessage": {
+        const channel = phone ? "sms" : email ? "email" : "chat";
+        eventType = "client.reply";
+        eventPayload = {
+          message_text: (message || "").slice(0, 500),
+          phone: phone || null,
+          email: email || null,
+          conversation_id: conversationId || null,
+          channel,
+          source: "ghl_webhook",
+        };
+        break;
+      }
+
+      case "OutboundMessage": {
+        const channel = body.messageType === "Email" || body.channel === "email" ? "email" : "sms";
+        eventType = channel === "email" ? "client.email_out" : "client.sms_out";
+        eventPayload = {
+          message_text: (body.body || body.message || "").slice(0, 500),
+          phone: body.phone || null,
+          email: body.email || null,
+          conversation_id: conversationId || null,
+          channel,
+          sent_by: body.userId || "ghl",
+          source: "ghl_webhook",
+        };
+        break;
+      }
+
+      case "CallCompleted": {
+        eventType = "client.call_complete";
+        eventPayload = {
+          duration: body.duration || body.callDuration || null,
+          direction: body.direction || body.callDirection || null,
+          recording_url: body.recordingUrl || body.recording_url || null,
+          phone: body.phone || body.callerNumber || null,
+          source: "ghl_webhook",
+        };
+        break;
+      }
+
+      case "AppointmentCreated": {
+        eventType = "client.appointment";
+        eventPayload = {
+          date: body.startTime || body.date || null,
+          time: body.startTime || body.time || null,
+          type: body.appointmentType || body.calendarName || null,
+          title: body.title || body.name || null,
+          source: "ghl_webhook",
+        };
+        break;
+      }
+
+      case "NoteAdded": {
+        eventType = "ghl.note_added";
+        eventPayload = {
+          note_text: (body.body || body.note || "").slice(0, 500),
+          added_by: body.userId || body.addedBy || "unknown",
+          source: "ghl_webhook",
+        };
+        break;
+      }
+
+      case "ContactStageChanged": {
+        eventType = "ghl.stage_changed";
+        eventPayload = {
+          old_stage: body.previousStage || body.oldStage || null,
+          new_stage: body.currentStage || body.newStage || body.stage || null,
+          pipeline: body.pipelineName || body.pipeline || null,
+          source: "ghl_webhook",
+        };
+        break;
+      }
+    }
+
+    // Attach job context to payload
+    eventPayload.job_id = job?.id || null;
+    eventPayload.job_number = job?.job_number || null;
+    eventPayload.client_name = job?.client_name || null;
+    eventPayload.job_type = job?.type || null;
+
+    // ── Create business_event ──
     const { error: eventError } = await supabase.from("business_events").insert({
-      event_type: "client.reply",
+      event_type: eventType,
       source: "ghl_webhook_receiver",
-      entity_type: "contact",
+      entity_type: job ? "contact" : "unmatched_contact",
       entity_id: contactId || null,
       job_id: job?.id || null,
       occurred_at: new Date().toISOString(),
-      payload: {
-        message_text: (message || "").slice(0, 500),
-        phone: phone || null,
-        email: email || null,
-        conversation_id: conversationId || null,
-        job_id: job?.id || null,
-        job_number: job?.job_number || null,
-        client_name: job?.client_name || null,
-        job_type: job?.type || null,
-        channel,
-        source: "ghl_webhook",
-      },
+      payload: eventPayload,
     });
 
     if (eventError) {
@@ -108,9 +190,9 @@ serve(async (req) => {
       return jsonResponse({ received: true, event_created: false, error: eventError.message }, 500);
     }
 
-    // Auto-cancel pending nudges/chases for this job
+    // ── Auto-cancel pending nudges/chases on inbound reply ──
     let nudgesCancelled = false;
-    if (job?.id) {
+    if (type === "InboundMessage" && job?.id) {
       // Cancel pending smart_nudges
       await supabase
         .from("smart_nudges")
@@ -133,11 +215,12 @@ serve(async (req) => {
     }
 
     console.log(
-      `[ghl-webhook-receiver] Processed: job_matched=${!!job} job=${job?.job_number || "none"} channel=${channel}`
+      `[ghl-webhook-receiver] Processed: type=${type} event=${eventType} job_matched=${!!job} job=${job?.job_number || "none"}`
     );
 
     return jsonResponse({
       received: true,
+      event_type: eventType,
       event_created: true,
       job_matched: !!job,
       job_number: job?.job_number || null,

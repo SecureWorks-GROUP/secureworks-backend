@@ -2492,6 +2492,23 @@ serve(async (req: Request) => {
       case 'ai_batch_hints': return json(await aiBatchHints(body))
       case 'force_reconcile_invoice': return json(await forceReconcileInvoice(client, body))
 
+      // ── Job Memory Loop: generic business_event logger ──
+      case 'log_business_event': {
+        const { event_type, entity_type, entity_id, job_id, payload } = body
+        if (!event_type) return json({ error: 'event_type required' }, 400)
+        const { error } = await client.from('business_events').insert({
+          event_type,
+          source: 'mcp_agent',
+          entity_type: entity_type || 'unknown',
+          entity_id: entity_id || null,
+          job_id: job_id || null,
+          payload: payload || {},
+          occurred_at: new Date().toISOString(),
+        })
+        if (error) return json({ error: error.message }, 500)
+        return json({ ok: true, event_type })
+      }
+
       default: return json({ error: 'Unknown action' }, 400)
     }
   } catch (err) {
