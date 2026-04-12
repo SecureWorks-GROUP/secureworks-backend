@@ -413,35 +413,61 @@ serve(async (req: Request) => {
         city: c.city || null,
       })
 
-      // GHL contacts search endpoint
-      const searchUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=20`
-      const result = await ghl(searchUrl)
-      let contacts = (result.contacts || []).map(mapContact)
+      // GHL contacts search endpoint — wrapped in try-catch so Supabase fallback always runs
+      let contacts: any[] = []
+      try {
+        const searchUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=20`
+        const result = await ghl(searchUrl)
+        contacts = (result.contacts || []).map(mapContact)
 
-      // DEV-36: If no results and query has multiple words, retry with first word only
-      // Handles cases where GHL contact has empty lastName (e.g. "Louisa Webb" → search "Louisa")
-      if (contacts.length === 0 && q.includes(' ')) {
-        const firstName = q.split(' ')[0]
-        const retryUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(firstName)}&limit=20`
-        const retryResult = await ghl(retryUrl)
-        const allContacts = (retryResult.contacts || [])
-        const qLower = q.toLowerCase()
-        const firstLower = firstName.toLowerCase()
-        contacts = allContacts.filter((c: any) => {
-          const fullName = `${c.firstName || ''} ${c.lastName || ''}`.trim().toLowerCase()
-          return fullName.includes(qLower) || (c.firstName || '').toLowerCase() === firstLower
-        }).map(mapContact)
+        // DEV-36: If no results and query has multiple words, retry with first word only
+        // Handles cases where GHL contact has empty lastName (e.g. "Louisa Webb" -> search "Louisa")
+        if (contacts.length === 0 && q.includes(' ')) {
+          const firstName = q.split(' ')[0]
+          const retryUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(firstName)}&limit=20`
+          const retryResult = await ghl(retryUrl)
+          const allContacts = (retryResult.contacts || [])
+          const qLower = q.toLowerCase()
+          const firstLower = firstName.toLowerCase()
+          contacts = allContacts.filter((c: any) => {
+            const fullName = `${c.firstName || ''} ${c.lastName || ''}`.trim().toLowerCase()
+            return fullName.includes(qLower) || (c.firstName || '').toLowerCase() === firstLower
+          }).map(mapContact)
+        }
+      } catch (ghlErr) {
+        console.error('[ghl-proxy] GHL contact search failed, falling through to Supabase:', (ghlErr as Error).message)
+        // contacts stays empty, Supabase fallback below will handle it
       }
 
-      // DEV-L5: If GHL returned 0, fallback to Supabase jobs table
+      // DEV-L5: If GHL returned 0 (or GHL errored), fallback to Supabase jobs table
       if (contacts.length === 0) {
         const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+        // Strategy 1: exact .or() match
         const { data: jobRows } = await sb
           .from('jobs')
           .select('client_name, client_phone, client_email, ghl_contact_id, job_number, site_suburb')
           .or(`client_name.ilike.%${q}%,client_phone.ilike.%${q}%,site_suburb.ilike.%${q}%,client_email.ilike.%${q}%`)
           .limit(20)
-        contacts = (jobRows || []).map((j: any) => ({
+
+        // Strategy 2: if multi-word query returned 0, try each word as AND filter on client_name
+        // e.g. "Rachael Torre" -> client_name ilike %Rachael% AND client_name ilike %Torre%
+        let rows = jobRows || []
+        if (rows.length === 0 && q.includes(' ')) {
+          const words = q.split(/\s+/).filter((w: string) => w.length >= 2)
+          if (words.length >= 2) {
+            let wordQuery = sb
+              .from('jobs')
+              .select('client_name, client_phone, client_email, ghl_contact_id, job_number, site_suburb')
+            for (const word of words) {
+              wordQuery = wordQuery.ilike('client_name', `%${word}%`)
+            }
+            const { data: wordRows } = await wordQuery.limit(20)
+            rows = wordRows || []
+          }
+        }
+
+        contacts = rows.map((j: any) => ({
           id: j.ghl_contact_id || null,
           name: j.client_name || 'Unknown',
           email: j.client_email || null,
