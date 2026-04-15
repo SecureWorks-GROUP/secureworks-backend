@@ -1954,6 +1954,7 @@ function buildClientPage(doc: any, token: string): string {
             window.location.reload();
           }
         } else {
+          var po = document.getElementById('processingOverlay'); if (po) po.remove();
           var ct = res.headers.get('content-type') || '';
           if (ct.includes('application/json')) {
             var data = await res.json();
@@ -1963,6 +1964,7 @@ function buildClientPage(doc: any, token: string): string {
           }
         }
       } catch(e) {
+        var po = document.getElementById('processingOverlay'); if (po) po.remove();
         alert('Failed to send response. Please try again.');
       }
     }
