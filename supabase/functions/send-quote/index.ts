@@ -1679,7 +1679,7 @@ async function htmlResponse(html: string) {
   // Return a minimal HTML page that fetches the content and renders it
   // This works because the bootstrap page has minimal HTML that Supabase
   // renders as text/plain, but we redirect to our hosted viewer instead
-  const viewerUrl = `https://marninms98-dotcom.github.io/securedash/quote-viewer.html?src=${encodeURIComponent(urlData.publicUrl)}`
+  const viewerUrl = `https://quotes.secureworksgroup.com.au/quote.html?src=${encodeURIComponent(urlData.publicUrl)}`
   return Response.redirect(viewerUrl, 302)
 }
 
