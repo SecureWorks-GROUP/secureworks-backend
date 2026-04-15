@@ -1737,7 +1737,7 @@ function buildQuoteEmail(opts: {
     <!-- Cross-sell footer -->
     <tr><td style="background:#293C46;padding:20px 32px;">
       <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
-        <strong>SecureWorks Group</strong> — Insulated Patios | Fencing &amp; Screening | Composite Decking | Makesafe &amp; Restoration<br>
+        <strong>SecureWorks Group</strong> — Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
         <span style="color:#F15A29;">Transform your entire outdoor space — ask us about a complete package</span>
       </p>
     </td></tr>
@@ -1916,6 +1916,18 @@ function buildClientPage(doc: any, token: string): string {
         showAcceptConfirm(); return;
       }
       if (action === 'accept_confirmed') action = 'accept';
+
+      // Show processing overlay for accept
+      if (action === 'accept') {
+        var overlay = document.createElement('div');
+        overlay.id = 'processingOverlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.95);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;';
+        overlay.innerHTML = '<div style="width:40px;height:40px;border:4px solid #D4DEE4;border-top-color:#F15A29;border-radius:50%;animation:spin 0.8s linear infinite;"></div><div style="color:#293C46;font-size:16px;font-weight:600;">Confirming your acceptance...</div><div style="color:#4C6A7C;font-size:13px;">This may take 10-15 seconds</div>';
+        var style = document.createElement('style');
+        style.textContent = '@keyframes spin{to{transform:rotate(360deg)}}';
+        document.head.appendChild(style);
+        document.body.appendChild(overlay);
+      }
 
       var payload = {};
       if (action === 'decline' && declineData) {
@@ -2894,7 +2906,7 @@ function buildInvoiceEmail(opts: {
     <!-- Cross-sell footer -->
     <tr><td style="background:#293C46;padding:20px 32px;">
       <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
-        <strong>SecureWorks Group</strong> — Insulated Patios | Fencing &amp; Screening | Composite Decking | Makesafe &amp; Restoration<br>
+        <strong>SecureWorks Group</strong> — Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
         <span style="color:#F15A29;">Transform your entire outdoor space — ask us about a complete package</span>
       </p>
     </td></tr>
