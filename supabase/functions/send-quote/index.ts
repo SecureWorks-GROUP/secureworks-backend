@@ -50,7 +50,7 @@ function logEmailToGHL(contactId: string | null, subject: string, recipient: str
       contactId,
       body: `Email sent: "${subject}" to ${recipient}`,
     }),
-  }).catch(() => {})
+  }).then(() => {}, () => {})
 }
 
 // ── Base64 helper for large binary files (chunked to avoid stack overflow) ──
@@ -229,7 +229,7 @@ serve(async (req: Request) => {
             subject: emailSubject, body_html: emailHtml,
             communication_type: 'client', sent_at: new Date().toISOString(),
             message_id: resendData.id, delivery_status: 'sent',
-          }).catch(() => {})
+          }).then(() => {}, () => {})
           // Log note to GHL contact
           logEmailToGHL(doc.jobs?.ghl_contact_id, emailSubject, client_email)
         } else {
@@ -409,7 +409,7 @@ serve(async (req: Request) => {
           job_id: doc.job_id,
           event_type: 'quote_viewed',
           detail_json: { document_id: doc.id },
-        }).then(() => {}).catch(() => {})
+        }).then(() => {}, () => {})
 
         // Also log to email_events for view counting (non-blocking)
         sb.from('email_events').insert({
@@ -418,7 +418,7 @@ serve(async (req: Request) => {
           comms_trigger: 'quote_viewed',
           recipient: 'client',
           subject: 'Quote viewed',
-        }).then(() => {}).catch(() => {})
+        }).then(() => {}, () => {})
       }
 
       // Per-run fencing quote page (multi-neighbour)
@@ -466,7 +466,7 @@ serve(async (req: Request) => {
             entity_type: 'job',
             entity_id: variation.job_id,
             detail_json: { variation_id: variation.id, variation_number: variation.variation_number, amount: variation.amount },
-          }).catch(() => {})
+          }).then(() => {}, () => {})
         }
         return jsonResponse({ success: true, message: 'Variation accepted' }, 200, corsHeaders)
       } else {
@@ -478,7 +478,7 @@ serve(async (req: Request) => {
             entity_type: 'job',
             entity_id: variation.job_id,
             detail_json: { variation_id: variation.id, reason: body.reason || '' },
-          }).catch(() => {})
+          }).then(() => {}, () => {})
         }
         return jsonResponse({ success: true, message: 'Variation declined' }, 200, corsHeaders)
       }
@@ -566,7 +566,7 @@ serve(async (req: Request) => {
             both_accepted: allAccepted,
           },
           metadata: {},
-        }).catch(() => {})
+        }).then(() => {}, () => {})
 
         // Update overall job status
         const { data: allRunAccepts } = await sb.from('run_acceptances')
@@ -606,7 +606,7 @@ serve(async (req: Request) => {
               run_name: runName,
             },
             metadata: {},
-          }).catch(() => {})
+          }).then(() => {}, () => {})
 
           // Create deposit invoices via ops-api for each party
           const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
@@ -941,7 +941,7 @@ serve(async (req: Request) => {
                   council_step_index: 0,
                   sent_at: new Date().toISOString(),
                   delivery_status: 'sent',
-                }).catch(() => {})
+                }).then(() => {}, () => {})
               }
             })
             .catch((e: Error) => console.log('[send-quote] Council email failed (non-blocking):', e.message))
@@ -1058,7 +1058,7 @@ serve(async (req: Request) => {
             job_number: doc.jobs?.job_number || null,
             quoted_amount: quotedAmount,
           },
-        }).catch(() => {}) // non-blocking
+        }).then(() => {}, () => {}) // non-blocking
       }
 
       // ── Notify scoper via business_event (telegram-bot reacts to this) ──
@@ -1076,7 +1076,7 @@ serve(async (req: Request) => {
             client_name: clientName,
             message: `Quote declined by client. Reason: ${reasonLabel}. ${body.comment ? 'Comment: ' + body.comment : ''}Call them now?`,
           },
-        }).catch(() => {})
+        }).then(() => {}, () => {})
       }
 
       return jsonResponse({ success: true, message: 'Quote declined' }, 200, corsHeaders)
@@ -1143,7 +1143,7 @@ serve(async (req: Request) => {
             job_document_id: clientDoc.id,
             run_label: run.run_label,
             status: 'pending',
-          }, { onConflict: 'job_id,job_contact_id,run_label' }).catch(() => {})
+          }, { onConflict: 'job_id,job_contact_id,run_label' }).then(() => {}, () => {})
         }
 
         // Neighbour document for this run (if neighbour exists)
@@ -1174,7 +1174,7 @@ serve(async (req: Request) => {
               job_document_id: nbDoc.id,
               run_label: run.run_label,
               status: 'pending',
-            }, { onConflict: 'job_id,job_contact_id,run_label' }).catch(() => {})
+            }, { onConflict: 'job_id,job_contact_id,run_label' }).then(() => {}, () => {})
           }
         }
 
@@ -1285,7 +1285,7 @@ serve(async (req: Request) => {
         job_id: job.job_number || job.id,
         payload: { run_count: runs.length, docs_created: createdDocs.length, emails_sent: emailsSent },
         metadata: {},
-      }).catch(() => {})
+      }).then(() => {}, () => {})
 
       return jsonResponse({
         success: true,
@@ -1369,7 +1369,7 @@ serve(async (req: Request) => {
             subject: emailSubject, body_html: emailHtml,
             communication_type: 'client', sent_at: new Date().toISOString(),
             message_id: resendMessageId, delivery_status: 'sent',
-          }).catch(() => {})
+          }).then(() => {}, () => {})
           // Log note to GHL contact
           logEmailToGHL(invoiceJob?.ghl_contact_id, emailSubject, client_email)
         } else {
@@ -1429,7 +1429,7 @@ serve(async (req: Request) => {
           job_type: doc.jobs?.type || null,
           address: [doc.jobs?.site_address, doc.jobs?.site_suburb].filter(Boolean).join(', '),
         },
-      }).catch(() => {}) // non-blocking
+      }).then(() => {}, () => {}) // non-blocking
 
       // Return branded success page
       return await htmlResponse(buildPaymentConfirmedPage(firstName))
@@ -1484,7 +1484,7 @@ serve(async (req: Request) => {
         entity_type: 'job',
         entity_id: jId,
         detail_json: { filename, source: 'upload_page', url: urlData?.publicUrl },
-      }).catch(() => {})
+      }).then(() => {}, () => {})
 
       // Annotation
       await sb.from('ai_annotations').insert({
@@ -1501,7 +1501,7 @@ serve(async (req: Request) => {
         source: 'send-quote',
         source_ref: `plans:${jId}:${Date.now()}`,
         confidence: 1.0,
-      }).catch(() => {})
+      }).then(() => {}, () => {})
 
       // Update council submission step 0 if exists
       const { data: submission } = await sb.from('council_submissions')
