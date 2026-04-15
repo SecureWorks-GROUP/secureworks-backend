@@ -28,6 +28,7 @@ const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const FROM_EMAIL = Deno.env.get('FROM_EMAIL') || 'quotes@secureworksgroup.app'
 const FROM_NAME = Deno.env.get('FROM_NAME') || 'SecureWorks Group'
 const BASE_URL = Deno.env.get('PUBLIC_URL') || SUPABASE_URL
+const QUOTE_VIEWER_BASE = Deno.env.get('QUOTE_VIEWER_URL') || 'https://secureworks-website.pages.dev/quote.html'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
@@ -1679,7 +1680,7 @@ async function htmlResponse(html: string) {
   // Return a minimal HTML page that fetches the content and renders it
   // This works because the bootstrap page has minimal HTML that Supabase
   // renders as text/plain, but we redirect to our hosted viewer instead
-  const viewerUrl = `https://quotes.secureworksgroup.com.au/quote.html?src=${encodeURIComponent(urlData.publicUrl)}`
+  const viewerUrl = `${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(urlData.publicUrl)}`
   return Response.redirect(viewerUrl, 302)
 }
 
