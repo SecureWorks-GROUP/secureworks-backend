@@ -1659,13 +1659,20 @@ function jsonResponse(data: any, status: number, headers: Record<string, string>
   })
 }
 
-function htmlResponse(html: string) {
-  // Serve HTML directly — matches the pattern used by accept (line 965)
-  // and upload-plans (line 1457) routes in this same function.
-  return new Response(html, {
-    status: 200,
-    headers: { 'Content-Type': 'text/html' },
+async function htmlResponse(html: string) {
+  // Supabase edge runtime forces text/plain on GET text/html responses (CSP sandbox).
+  // Workaround: store HTML in public bucket, redirect to a viewer page that fetches it.
+  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const pageId = crypto.randomUUID()
+  const fileName = `pages/${pageId}.txt`
+  try { await sb.storage.createBucket('quote-views', { public: true }) } catch { /* exists */ }
+  await sb.storage.from('quote-views').upload(fileName, html, {
+    contentType: 'text/plain',
+    upsert: true,
   })
+  const { data: urlData } = sb.storage.from('quote-views').getPublicUrl(fileName)
+  const viewerUrl = `${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(urlData.publicUrl)}`
+  return Response.redirect(viewerUrl, 302)
 }
 
 // ════════════════════════════════════════════════════════════
