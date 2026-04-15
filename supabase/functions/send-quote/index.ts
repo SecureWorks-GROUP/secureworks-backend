@@ -1659,29 +1659,13 @@ function jsonResponse(data: any, status: number, headers: Record<string, string>
   })
 }
 
-async function htmlResponse(html: string) {
-  // Supabase edge runtime forces text/plain + CSP sandbox on text/html responses.
-  // Workaround: upload to storage with .txt extension but set proper content type,
-  // then use a GitHub Pages hosted wrapper that fetches and renders it.
-  // Simplest: just upload to storage as .txt and return a self-contained page
-  // that the browser can render (Supabase allows data: URIs in responses).
-
-  // Store the HTML in Supabase storage for the view pages
-  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-  const pageId = crypto.randomUUID()
-  const fileName = `pages/${pageId}.txt`
-  try { await sb.storage.createBucket('quote-views', { public: true }) } catch { /* exists */ }
-  await sb.storage.from('quote-views').upload(fileName, html, {
-    contentType: 'text/plain',
-    upsert: true,
+function htmlResponse(html: string) {
+  // Serve HTML directly — matches the pattern used by accept (line 965)
+  // and upload-plans (line 1457) routes in this same function.
+  return new Response(html, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html' },
   })
-  const { data: urlData } = sb.storage.from('quote-views').getPublicUrl(fileName)
-
-  // Return a minimal HTML page that fetches the content and renders it
-  // This works because the bootstrap page has minimal HTML that Supabase
-  // renders as text/plain, but we redirect to our hosted viewer instead
-  const viewerUrl = `${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(urlData.publicUrl)}`
-  return Response.redirect(viewerUrl, 302)
 }
 
 // ════════════════════════════════════════════════════════════
