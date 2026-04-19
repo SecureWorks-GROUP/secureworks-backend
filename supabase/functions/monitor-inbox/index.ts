@@ -101,7 +101,13 @@ Return JSON only: { "classification": "...", "priority": "...", "action_needed":
 Classifications: client_reply, supplier_quote, supplier_response, council, invoice, complaint, urgent, newsletter, spam, other
 Priority: high (complaints, urgent, council deadlines, large invoices), normal (client replies, supplier responses), low (newsletters, marketing, spam)
 action_needed: brief description of recommended action, or null if informational only
-job_ref: extract any job reference (SWP-XXXXX, SWF-XXXXX, SWD-XXXXX) from subject or body, or null`,
+job_ref: extract FIRST match from subject or body, in this priority order, or null:
+  1. Legacy/bare job number: SW\\d{4,} (e.g., SW1895)
+  2. Prefixed: SWP-\\d+, SWF-\\d+, SWD-\\d+ (e.g., SWP-26046)
+  3. PO number: PO-\\d+ (e.g., PO-061378) — return as "PO-XXXXXX"
+  4. Supplier invoice number: INV-\\d+ — return as "INV-XXXXX"
+  5. Supplier quote ref: Quote #\\d+ — return as "Quote#XXX"
+Return the raw matched string preserving case/format. Leave null only if none present.`,
       messages: [{
         role: 'user',
         content: `From: ${from}\nSubject: ${subject}\nPreview: ${bodyPreview}`,
@@ -119,6 +125,141 @@ job_ref: extract any job reference (SWP-XXXXX, SWF-XXXXX, SWD-XXXXX) from subjec
   }
 
   return { classification: 'other', priority: 'normal', action_needed: null, job_ref: null }
+}
+
+// ── Comprehensive job resolution — tries every ref pattern + supplier/client fallbacks.
+//
+// Returns a confidence tier so that downstream logic (e.g. auto-attaching a supplier
+// PDF) can decide whether the match is strong enough to act on:
+//
+//   'high'  — unambiguous reference-based match (explicit job_number / PO number).
+//             Safe to auto-attach PDFs to this job.
+//   'low'   — heuristic match (supplier sender domain or client-name fuzzy match).
+//             Good enough to tag inbox_events for human review, but NOT safe for
+//             auto-attaching files — supplier can have multiple open POs, common
+//             first words can collide, etc. Do not move files on 'low'.
+//
+// When no match is found at all, jobId/matchedVia are null and confidence is 'none'.
+async function resolveJobId(
+  sb: any,
+  fromEmail: string,
+  subject: string,
+  bodyPreview: string,
+  classifierJobRef: string | null,
+): Promise<{ jobId: string | null; matchedVia: string | null; confidence: 'high' | 'low' | 'none' }> {
+  const haystack = `${subject}\n${bodyPreview}`
+
+  // 1. AI classifier job_ref — could be SW####, SW[PFD]-####, PO-######, INV-#####, Quote####
+  if (classifierJobRef) {
+    const ref = classifierJobRef.trim()
+    if (/^PO-?\d+$/i.test(ref)) {
+      const { data } = await sb.from('purchase_orders')
+        .select('job_id').eq('org_id', DEFAULT_ORG_ID)
+        .ilike('po_number', ref.replace(/\s/g, '')).limit(1).maybeSingle()
+      if (data?.job_id) return { jobId: data.job_id, matchedVia: `ai_po:${ref}`, confidence: 'high' }
+    } else if (/^Quote\s*#?\d+$/i.test(ref)) {
+      const num = ref.match(/\d+/)?.[0]
+      if (num) {
+        // Only accept Quote# match if it resolves to exactly ONE PO. If multiple POs
+        // reference the same quote number (e.g. notes text collision across suppliers),
+        // the match is ambiguous — downgrade to 'none' rather than guess.
+        const { data } = await sb.from('purchase_orders')
+          .select('job_id').eq('org_id', DEFAULT_ORG_ID)
+          .or(`notes.ilike.%Quote #${num}%,notes.ilike.%Quote#${num}%`).limit(2)
+        if (data && data.length === 1 && data[0].job_id) {
+          return { jobId: data[0].job_id, matchedVia: `ai_quote:${ref}`, confidence: 'high' }
+        }
+      }
+    } else if (/^INV-?\d+$/i.test(ref)) {
+      // Xero invoice lookup — best effort
+      const { data } = await sb.from('xero_invoices')
+        .select('contact_id, reference').ilike('invoice_number', ref).limit(1).maybeSingle()
+      if (data?.reference) {
+        // Xero reference field often contains SW#### or PO-#### — re-parse
+        const reRef = data.reference.match(/\bSW\d{4,}\b|\bSW[PFD]-\d+\b|\bPO-?\d{6}\b/i)
+        if (reRef) {
+          if (/^PO/i.test(reRef[0])) {
+            const { data: po } = await sb.from('purchase_orders')
+              .select('job_id').ilike('po_number', reRef[0]).limit(1).maybeSingle()
+            if (po?.job_id) return { jobId: po.job_id, matchedVia: `ai_inv_via_po:${ref}`, confidence: 'high' }
+          } else {
+            const { data: job } = await sb.from('jobs')
+              .select('id').eq('org_id', DEFAULT_ORG_ID)
+              .ilike('job_number', reRef[0]).limit(1).maybeSingle()
+            if (job?.id) return { jobId: job.id, matchedVia: `ai_inv_via_job:${ref}`, confidence: 'high' }
+          }
+        }
+      }
+    } else {
+      // Treat as raw job_number (SW####, SW[PFD]-####)
+      const { data } = await sb.from('jobs')
+        .select('id').eq('org_id', DEFAULT_ORG_ID)
+        .ilike('job_number', ref).limit(1).maybeSingle()
+      if (data?.id) return { jobId: data.id, matchedVia: `ai_job_ref:${ref}`, confidence: 'high' }
+    }
+  }
+
+  // 2. Direct scan — legacy SW#### (e.g. SW1895) from subject/body
+  const swLegacy = haystack.match(/\bSW\d{4,}\b/i)
+  if (swLegacy) {
+    const { data } = await sb.from('jobs')
+      .select('id').eq('org_id', DEFAULT_ORG_ID)
+      .ilike('job_number', swLegacy[0]).limit(1).maybeSingle()
+    if (data?.id) return { jobId: data.id, matchedVia: `legacy_sw:${swLegacy[0]}`, confidence: 'high' }
+  }
+
+  // 3. Prefixed SW[PFD]-####
+  const swPrefixed = haystack.match(/\bSW[PFD]-\d+\b/i)
+  if (swPrefixed) {
+    const { data } = await sb.from('jobs')
+      .select('id').eq('org_id', DEFAULT_ORG_ID)
+      .ilike('job_number', swPrefixed[0]).limit(1).maybeSingle()
+    if (data?.id) return { jobId: data.id, matchedVia: `job_ref:${swPrefixed[0]}`, confidence: 'high' }
+  }
+
+  // 4. PO number in subject/body
+  const poMatch = haystack.match(/\bPO-?\d{6}\b/i)
+  if (poMatch) {
+    const { data } = await sb.from('purchase_orders')
+      .select('job_id').eq('org_id', DEFAULT_ORG_ID)
+      .ilike('po_number', poMatch[0]).limit(1).maybeSingle()
+    if (data?.job_id) return { jobId: data.job_id, matchedVia: `po:${poMatch[0]}`, confidence: 'high' }
+  }
+
+  // 5. LOW-CONFIDENCE: supplier sender domain → PO from that supplier.
+  //    Only return if there's exactly ONE open/draft/sent PO from this supplier in
+  //    the last 60 days — otherwise we'd misfile onto whichever PO happens to be
+  //    most recent. With 2+ candidates, treat as no match and let humans link it.
+  if (fromEmail && fromEmail.includes('@')) {
+    const domain = fromEmail.split('@')[1]
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
+    const { data: candidates } = await sb.from('purchase_orders')
+      .select('job_id').eq('org_id', DEFAULT_ORG_ID)
+      .ilike('supplier_email', `%@${domain}%`)
+      .gte('created_at', sixtyDaysAgo)
+      .limit(2)
+    if (candidates && candidates.length === 1 && candidates[0].job_id) {
+      return { jobId: candidates[0].job_id, matchedVia: `supplier_domain_single:${domain}`, confidence: 'low' }
+    }
+  }
+
+  // 6. LOW-CONFIDENCE: client name from cleaned subject.
+  //    Only return if the first word (i) is reasonably specific (>3 chars, not a
+  //    generic greeting) AND (ii) matches exactly ONE non-archived job. Multiple
+  //    matches = ambiguous; return none.
+  const cleanSubject = subject.replace(/^(RE|FW|Fwd):\s*/gi, '').trim()
+  const firstWord = cleanSubject.split(/\s+/)[0]
+  const GENERIC_WORDS = /^(PO|INV|CN|Quote|Re|Fw|Dear|Hello|Hi|Thanks|Thank|Update|Delivery|Order|Notice|Work|Credit|Invoice|Upcoming|New|Your|Our|We|This|From|Subject|Regards)$/i
+  if (firstWord && firstWord.length > 3 && !GENERIC_WORDS.test(firstWord)) {
+    const { data: candidates } = await sb.from('jobs')
+      .select('id').ilike('client_name', `%${firstWord}%`)
+      .eq('org_id', DEFAULT_ORG_ID).not('archived', 'is', true).limit(2)
+    if (candidates && candidates.length === 1) {
+      return { jobId: candidates[0].id, matchedVia: `client_name_single:${firstWord}`, confidence: 'low' }
+    }
+  }
+
+  return { jobId: null, matchedVia: null, confidence: 'none' }
 }
 
 // ── Send Telegram notification ──
@@ -194,18 +335,15 @@ async function processMailbox(
     // Classify
     const classification = await classifyEmail(fromEmail, subject, bodyPreview)
 
-    // Try to match to a job
+    // Try to match to a job — comprehensive ref-based resolution
     let jobId: string | null = null
+    let matchedVia: string | null = null
+    let matchConfidence: 'high' | 'low' | 'none' = 'none'
     let ghlContactId: string | null = null
-    if (classification.job_ref) {
-      const { data: job } = await sb.from('jobs')
-        .select('id')
-        .eq('org_id', DEFAULT_ORG_ID)
-        .ilike('job_number', classification.job_ref)
-        .limit(1)
-        .maybeSingle()
-      jobId = job?.id || null
-    }
+    const resolved = await resolveJobId(sb, fromEmail, subject, bodyPreview, classification.job_ref)
+    jobId = resolved.jobId
+    matchedVia = resolved.matchedVia
+    matchConfidence = resolved.confidence
 
     // Try to match sender to a contact
     if (fromEmail) {
@@ -237,6 +375,8 @@ async function processMailbox(
       metadata: {
         has_attachments: msg.hasAttachments || false,
         job_ref: classification.job_ref,
+        matched_via: matchedVia,
+        match_confidence: matchConfidence,
       },
     })
 
@@ -247,8 +387,11 @@ async function processMailbox(
 
     processed++
 
-    // Download attachments if present and matched to a job
-    if (msg.hasAttachments && jobId) {
+    // Download attachments ONLY when we have a HIGH-confidence job match.
+    // Low-confidence matches (supplier_domain_single, client_name_single) still tag
+    // inbox_events.job_id for human review but must NOT auto-move files, because
+    // the ref-free heuristics can confidently point to the wrong PO/job.
+    if (msg.hasAttachments && jobId && matchConfidence === 'high') {
       try {
         const attachResp = await fetch(
           `https://graph.microsoft.com/v1.0/users/${mailbox}/messages/${msg.id}/attachments`,
@@ -280,26 +423,63 @@ async function processMailbox(
             const publicUrl = urlData?.publicUrl || ''
 
             if (isPdf) {
-              // Store as job_document (visible to trades)
-              await sb.from('job_documents').insert({
+              // Decide doc type + visibility from classification + subject keywords.
+              // Fallback to 'supplier_quote' because that value is guaranteed to exist
+              // in the job_documents.type CHECK constraint across schema revisions.
+              const subjLower = (subject + ' ' + (att.name || '')).toLowerCase()
+              let docType = 'supplier_quote'
+              let visibleToTrades = true
+              if (classification.classification === 'invoice') {
+                docType = 'supplier_invoice'
+                visibleToTrades = false // invoices contain prices — don't show to trades
+              } else if (/work.?order|delivery|install|schedule|dispatch/i.test(subjLower)) {
+                docType = 'supplier_work_order'
+                visibleToTrades = true
+              } else if (classification.classification === 'supplier_response') {
+                docType = 'supplier_work_order' // default inbound supplier response with doc is treated as work-order-adjacent
+                visibleToTrades = true
+              }
+
+              // Insert with visible error handling. If the new type is rejected by the
+              // CHECK constraint (pre-migration DB), fall back to 'supplier_quote' so
+              // the PDF is never silently lost.
+              const baseRow = {
                 job_id: jobId,
-                type: 'supplier_quote',
                 file_name: att.name || 'Supplier Document',
                 storage_url: publicUrl,
                 pdf_url: publicUrl,
-                visible_to_trades: true,
+                visible_to_trades: visibleToTrades,
                 version: 1,
-              }).then(() => {}).catch(() => {})
-              console.log(`[monitor-inbox] Stored supplier PDF: ${att.name} for job ${jobId}`)
+              }
+              const { error: insertDocErr } = await sb.from('job_documents')
+                .insert({ ...baseRow, type: docType })
+              if (insertDocErr) {
+                console.error(`[monitor-inbox] job_documents insert failed for ${att.name} (type=${docType}, job=${jobId}): ${insertDocErr.message}`)
+                // Fallback: retry with legacy-safe type so the PDF is still recorded.
+                if (docType !== 'supplier_quote') {
+                  const { error: retryErr } = await sb.from('job_documents')
+                    .insert({ ...baseRow, type: 'supplier_quote' })
+                  if (retryErr) {
+                    console.error(`[monitor-inbox] job_documents fallback insert ALSO failed for ${att.name}: ${retryErr.message}`)
+                  } else {
+                    console.warn(`[monitor-inbox] Stored supplier PDF: ${att.name} with FALLBACK type=supplier_quote (intended ${docType}) for job ${jobId} via ${matchedVia}`)
+                  }
+                }
+              } else {
+                console.log(`[monitor-inbox] Stored supplier PDF: ${att.name} as ${docType} (trades=${visibleToTrades}) for job ${jobId} via ${matchedVia}`)
+              }
             } else {
-              // Store as job_media
-              await sb.from('job_media').insert({
+              // Store as job_media — surface errors, don't swallow
+              const { error: mediaErr } = await sb.from('job_media').insert({
                 job_id: jobId,
                 phase: 'receipt',
                 type: 'photo',
                 storage_url: publicUrl,
                 label: att.name || 'Supplier attachment',
-              }).then(() => {}).catch(() => {})
+              })
+              if (mediaErr) {
+                console.error(`[monitor-inbox] job_media insert failed for ${att.name} (job=${jobId}): ${mediaErr.message}`)
+              }
             }
           }
         }
@@ -308,27 +488,10 @@ async function processMailbox(
       }
     }
 
-    // Also try to match supplier emails to POs by sender
-    if (msg.hasAttachments && !jobId && fromEmail) {
-      try {
-        // Check if sender email matches any supplier
-        const { data: supplierPOs } = await sb.from('purchase_orders')
-          .select('id, job_id, supplier_name')
-          .eq('org_id', DEFAULT_ORG_ID)
-          .ilike('supplier_email', `%${fromEmail.split('@')[1]}%`)
-          .order('created_at', { ascending: false })
-          .limit(1)
-        if (supplierPOs && supplierPOs.length > 0) {
-          jobId = supplierPOs[0].job_id
-          console.log(`[monitor-inbox] Matched supplier ${fromEmail} to job ${jobId} via PO`)
-          // Re-update inbox_events with the matched job_id
-          await sb.from('inbox_events')
-            .update({ job_id: jobId })
-            .eq('graph_message_id', msg.id)
-            .then(() => {}).catch(() => {})
-        }
-      } catch { /* best effort */ }
-    }
+    // (The legacy supplier-domain "most recent PO" fallback was removed here — it
+    // misfiled attachments onto the wrong PO when a supplier had multiple open jobs.
+    // The new resolveJobId() covers the same case correctly, returning a match only
+    // when there's exactly ONE PO candidate in the last 60 days.)
 
     // ── Job Memory Loop: create business_event for supplier/client emails ──
     const isSupplier = ['supplier_quote', 'supplier_response'].includes(classification.classification)
