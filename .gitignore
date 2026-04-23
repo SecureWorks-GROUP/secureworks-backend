@@ -5,3 +5,17 @@ supabase/.temp/
 .DS_Store
 *.pdf
 reference/
+
+# --- T3 knowledge-architecture (2026-04-23) ---
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Operator-private drafts
+CLAUDE.local.md
+**/CLAUDE.local.md
+
+# Local scratch + drafts — promote to real home or delete
+scratch/
+drafts/
+
