@@ -852,37 +852,46 @@ serve(async (req: Request) => {
         console.log('[ghl-proxy] Job number generation failed (non-blocking):', (e as Error).message)
       }
 
-      // 2026-04-24 Phase 4b fix: ALWAYS write business_events for scope sign-off
-      // (not just first-time). Fires on both first-time assign and re-saves so
-      // downstream consumers (Jarvis polling business_events) see every scope
-      // completion, not just the initial transition. correlation_id = job_id
-      // per ADR 2026-04-24-correlation-id-strategy.
-      try {
-        await sbLink.from('business_events').insert({
-          event_type: 'scope.completed',
-          source: 'scoping_tool',
-          entity_type: 'job',
-          entity_id: jobId,
-          correlation_id: jobId,
-          job_id: jobId,
-          payload: {
-            tool_type: tool,
-            opportunity_id: opportunityId,
-            contact_id: contactId || null,
-            job_number: jobNumber,
-            is_first_time: isFirstTimeSignoff,
-            resulting_status: isFirstTimeSignoff ? 'quoted' : 'existing',
-          },
-          metadata: {
-            scope_url: scopeUrl,
-            stage_moved: stageMoved,
-            note_added: noteAdded,
-            handler: 'ghl-proxy/link',
-          },
-        })
-        console.log(`[ghl-proxy] business_events scope.completed written (first_time=${isFirstTimeSignoff})`)
-      } catch (e) {
-        console.log('[ghl-proxy] business_events scope.completed write failed (non-blocking):', (e as Error).message)
+      // 2026-04-24 Phase 4b fix (rev 3): ALWAYS write business_events for scope sign-off
+      // (first-time + re-save) BUT only when a valid jobNumber exists (transition actually
+      // succeeded). Read actual status from DB instead of assuming, so the emitted event
+      // can't claim a state the DB doesn't reflect. correlation_id = job_id per ADR.
+      if (jobNumber) {
+        let actualStatus: string | null = null
+        try {
+          const { data: postJob } = await sbLink.from('jobs').select('status').eq('id', jobId).single()
+          actualStatus = postJob?.status || null
+        } catch { /* leave actualStatus null so event carries "unknown" rather than lying */ }
+
+        try {
+          await sbLink.from('business_events').insert({
+            event_type: 'scope.completed',
+            source: 'scoping_tool',
+            entity_type: 'job',
+            entity_id: jobId,
+            correlation_id: jobId,
+            job_id: jobId,
+            payload: {
+              tool_type: tool,
+              opportunity_id: opportunityId,
+              contact_id: contactId || null,
+              job_number: jobNumber,
+              is_first_time: isFirstTimeSignoff,
+              resulting_status: actualStatus || 'unknown',
+            },
+            metadata: {
+              scope_url: scopeUrl,
+              stage_moved: stageMoved,
+              note_added: noteAdded,
+              handler: 'ghl-proxy/link',
+            },
+          })
+          console.log(`[ghl-proxy] business_events scope.completed written (first_time=${isFirstTimeSignoff}, status=${actualStatus})`)
+        } catch (e) {
+          console.log('[ghl-proxy] business_events scope.completed write failed (non-blocking):', (e as Error).message)
+        }
+      } else {
+        console.log('[ghl-proxy] Skipping scope.completed emit — jobNumber is null (transition did not complete)')
       }
 
       // ── Get latest job data for Xero contact creation + GHL monetary value ──
@@ -2684,8 +2693,30 @@ serve(async (req: Request) => {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       // Check if job already has a number
-      const { data: existing } = await sb.from('jobs').select('job_number').eq('id', jobId).single()
+      const { data: existing } = await sb.from('jobs').select('job_number, status').eq('id', jobId).single()
       if (existing?.job_number) {
+        // 2026-04-24 fix (rev 3): walk-up re-saves must also emit scope.completed so
+        // Jarvis/downstream sees every walk-up sign-off, not just first-time ones.
+        try {
+          await sb.from('business_events').insert({
+            event_type: 'scope.completed',
+            source: 'scoping_tool_walkup',
+            entity_type: 'job',
+            entity_id: jobId,
+            correlation_id: jobId,
+            job_id: jobId,
+            payload: {
+              tool_type: toolType === 'fencing' ? 'fencing' : 'patio',
+              job_number: existing.job_number,
+              is_first_time: false,
+              resulting_status: existing.status || 'unknown',
+              walkup: true,
+            },
+            metadata: { handler: 'ghl-proxy/assign_job_number (re-save)' },
+          })
+        } catch (e) {
+          console.log('[ghl-proxy] walkup re-save business_events write failed (non-blocking):', (e as Error).message)
+        }
         return json({ jobNumber: existing.job_number, reused: true })
       }
 
@@ -2696,9 +2727,14 @@ serve(async (req: Request) => {
         await sb.from('jobs').update({ job_number: jnData, status: 'quoted' }).eq('id', jobId)
         await sb.from('job_events').insert({ job_id: jobId, event_type: 'status_change', detail_json: { from: 'draft', to: 'quoted', job_number: jnData } })
 
-        // 2026-04-24 Phase 4b fix: also write business_events on walk-up path.
-        // Matches the link handler's scope.completed semantics so Jarvis sees
-        // walk-up quotes too (previously invisible).
+        // 2026-04-24 Phase 4b: write business_events on first-time walk-up.
+        // Read actual status from DB rather than assuming, so false state cannot be emitted.
+        let walkupStatus: string | null = null
+        try {
+          const { data: postJob } = await sb.from('jobs').select('status').eq('id', jobId).single()
+          walkupStatus = postJob?.status || null
+        } catch { /* leave null */ }
+
         try {
           await sb.from('business_events').insert({
             event_type: 'scope.completed',
@@ -2711,10 +2747,10 @@ serve(async (req: Request) => {
               tool_type: jType,
               job_number: jnData,
               is_first_time: true,
-              resulting_status: 'quoted',
+              resulting_status: walkupStatus || 'unknown',
               walkup: true,
             },
-            metadata: { handler: 'ghl-proxy/assign_job_number' },
+            metadata: { handler: 'ghl-proxy/assign_job_number (first-time)' },
           })
         } catch (e) {
           console.log('[ghl-proxy] walkup business_events write failed (non-blocking):', (e as Error).message)
