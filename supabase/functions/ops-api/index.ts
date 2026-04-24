@@ -598,8 +598,8 @@ serve(async (req: Request) => {
           if (found?.[0]) jid = found[0].id
         }
         if (!jid) return json({ error: 'jobId required' }, 400)
-        const includeRaw = url.searchParams.get('include_raw_json') === 'true' || url.searchParams.get('include_raw_json') === '1'
-        return json(await jobDetail(client, jid, includeRaw))
+        const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
+        return json(await jobDetail(client, jid, { slim }))
       }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
@@ -3186,7 +3186,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   return { columns, total: enriched.length }
 }
 
-async function jobDetail(client: any, jobId: string, includeRawJson: boolean = false) {
+async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
   if (!jobId) throw new Error('jobId required')
 
   // If job_number passed instead of UUID, resolve it
@@ -3287,12 +3287,12 @@ async function jobDetail(client: any, jobId: string, includeRawJson: boolean = f
     console.log('[ops-api] readiness computation failed (non-blocking):', (e as Error).message)
   }
 
-  // 2026-04-24 fix: default response strips scope_json + pricing_json (historical behaviour
-  // preserved so dashboard payloads stay small). MCP consumers that need the raw scope/pricing
-  // can pass include_raw_json=true to get the full object.
-  const jobLite = includeRawJson
-    ? (jobRes.data || {})
-    : (() => { const { scope_json: _s, pricing_json: _p, ...rest } = jobRes.data || {}; return rest })()
+  // 2026-04-24 fix: DEFAULT includes scope_json + pricing_json (dashboard + MCP consumers
+  // depend on these for scope summaries, pricing totals, site plans, neighbour splits).
+  // Bulk callers that don't need the raw blobs can pass slim=true to strip them.
+  const jobLite = opts.slim
+    ? (() => { const { scope_json: _s, pricing_json: _p, ...rest } = jobRes.data || {}; return rest })()
+    : (jobRes.data || {})
 
   // Strip line_items and raw_json from invoices (huge nested JSON)
   const invoicesLite = invoices.map((inv: any) => {

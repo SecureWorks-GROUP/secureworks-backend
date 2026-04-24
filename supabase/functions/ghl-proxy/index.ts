@@ -677,28 +677,77 @@ serve(async (req: Request) => {
 
           if (jobData?.scope_json) {
             const scope = jobData.scope_json
-            const config = scope.config || {}
-            const client = scope.client || {}
-            const pricing = scope.pricing || {}
+            // 2026-04-24 fix: toolType-aware note builder. Was hardcoded to patio shape,
+            // so fencing jobs produced blank notes. Now branches on scope.tool (patio|fencing).
+            const scopeToolType = scope.tool || tool
 
-            if (client.name) lines.push(`👤 ${client.name}`)
-            if (client.address || jobData.site_suburb) lines.push(`📍 ${client.address || jobData.site_address || ''} ${jobData.site_suburb || ''}`.trim())
-            lines.push('')
+            if (scopeToolType === 'fencing') {
+              // Fencing shape: scope.job.* with runs[] + colour + profile
+              const job = scope.job || {}
+              const clientName = [job.clientFirstName, job.clientLastName].filter(Boolean).join(' ')
+                || job.client || jobData.client_name || ''
+              if (clientName) lines.push(`👤 ${clientName}`)
+              if (job.address || jobData.site_address) {
+                lines.push(`📍 ${job.address || jobData.site_address || ''} ${jobData.site_suburb || ''}`.trim())
+              }
+              lines.push('')
 
-            // Dimensions & config
-            if (config.length || config.projection) {
-              lines.push(`📐 Size: ${config.length || '?'}m × ${config.projection || '?'}m`)
+              const runs = Array.isArray(job.runs) ? job.runs : []
+              const totalLen = runs.reduce((s: number, r: any) => {
+                const len = parseFloat(r.totalLength) || parseFloat(r.length) || 0
+                return s + len
+              }, 0)
+              if (totalLen > 0) lines.push(`📐 Total length: ${totalLen.toFixed(1)}m`)
+              if (runs.length > 0) lines.push(`🔀 Runs: ${runs.length}`)
+              if (job.colour) lines.push(`🎨 Colour: ${job.colour}`)
+              if (job.profile) lines.push(`🪵 Profile: ${job.profile}`)
+              if (job.supplier) lines.push(`🏭 Supplier: ${job.supplier}`)
+
+              const gates = Array.isArray(job.gates) ? job.gates : []
+              if (gates.length > 0) lines.push(`🚪 Gates: ${gates.length}`)
+              if (job.removal?.removalRequired) lines.push(`🧹 Removal required`)
+              lines.push('')
+              if (job.ref) lines.push(`📝 Job Ref: ${job.ref}`)
+
+            } else {
+              // Patio (v1.0 flat config or v2.0 multi-patio) or other tools
+              let config = scope.config || {}
+              const client = scope.client || {}
+              const pricing = scope.pricing || {}
+
+              // Multi-patio v2.0: scope.patios[0].options[0].config holds the primary patio
+              if (!config.length && Array.isArray(scope.patios) && scope.patios.length > 0) {
+                const firstOption = scope.patios[0]?.options?.[0]
+                if (firstOption?.config) config = firstOption.config
+              }
+
+              if (client.name || jobData.client_name) lines.push(`👤 ${client.name || jobData.client_name}`)
+              if (client.address || jobData.site_suburb || jobData.site_address) {
+                lines.push(`📍 ${client.address || jobData.site_address || ''} ${jobData.site_suburb || ''}`.trim())
+              }
+              lines.push('')
+
+              // Dimensions & config
+              if (config.length || config.projection) {
+                lines.push(`📐 Size: ${config.length || '?'}m × ${config.projection || '?'}m`)
+              }
+              if (config.roofStyle) lines.push(`🏠 Style: ${config.roofStyle}`)
+              if (config.roofing) lines.push(`🔩 Roofing: ${config.roofing}`)
+              if (config.connection) lines.push(`🔗 Connection: ${config.connection}`)
+              if (config.steelColor) lines.push(`🎨 Steel: ${config.steelColor} | Sheet: ${config.sheetColor || ''}`)
+
+              // Multi-patio indicator
+              if (Array.isArray(scope.patios) && scope.patios.length > 1) {
+                lines.push(`🏡 Multi-patio build: ${scope.patios.length} patios`)
+              }
+              lines.push('')
+              if (client.jobRef) lines.push(`📝 Job Ref: ${client.jobRef}`)
             }
-            if (config.roofStyle) lines.push(`🏠 Style: ${config.roofStyle}`)
-            if (config.roofing) lines.push(`🔩 Roofing: ${config.roofing}`)
-            if (config.connection) lines.push(`🔗 Connection: ${config.connection}`)
-            if (config.steelColor) lines.push(`🎨 Steel: ${config.steelColor} | Sheet: ${config.sheetColor || ''}`)
-            lines.push('')
 
-            // Pricing (from scope_json pricing or pricing_json)
-            const pricingData = scope.pricing || {}
-            // Try to extract total from scope data
-            if (client.jobRef) lines.push(`📝 Job Ref: ${client.jobRef}`)
+            // Pricing total (works for both tools — pricing_json is canonical)
+            const pj = jobData.pricing_json || {}
+            const total = pj.totalIncGST || pj.grandTotal || pj.total || null
+            if (total) lines.push(`💰 Quote total: $${Number(total).toFixed(2)}`)
           }
 
           lines.push('')
@@ -794,6 +843,36 @@ serve(async (req: Request) => {
           if (jobNumber) {
             await sbLink.from('jobs').update({ job_number: jobNumber, status: 'quoted' }).eq('id', jobId)
             await sbLink.from('job_events').insert({ job_id: jobId, event_type: 'status_change', detail_json: { from: 'draft', to: 'quoted', job_number: jobNumber } })
+
+            // 2026-04-24 Phase 4b fix: write business_events on scope→quoted transition.
+            // Before this, the link handler only wrote to job_events (legacy). Jarvis polls
+            // business_events and was blind to 100% of new quotes. correlation_id = job_id per
+            // ADR 2026-04-24-correlation-id-strategy (temporary; flow-specific IDs allowed later).
+            try {
+              await sbLink.from('business_events').insert({
+                event_type: 'scope.completed',
+                source: 'scoping_tool',
+                entity_type: 'job',
+                entity_id: jobId,
+                correlation_id: jobId,
+                job_id: jobId,
+                payload: {
+                  tool_type: tool,
+                  opportunity_id: opportunityId,
+                  contact_id: contactId || null,
+                  job_number: jobNumber,
+                  from_status: 'draft',
+                  to_status: 'quoted',
+                },
+                metadata: {
+                  scope_url: scopeUrl,
+                  stage_moved: stageMoved,
+                  note_added: noteAdded,
+                },
+              })
+            } catch (e) {
+              console.log('[ghl-proxy] business_events scope.completed write failed (non-blocking):', (e as Error).message)
+            }
             console.log(`[ghl-proxy] Job number assigned: ${jobNumber}, status → quoted`)
           }
         }
