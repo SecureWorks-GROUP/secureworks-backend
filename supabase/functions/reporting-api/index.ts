@@ -4845,7 +4845,14 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
     }
   }
   function jobHasSignal(j: any): boolean {
-    if (!j.ghl_contact_id) return false  // no GHL link → no signal possible
+    // Relaxed gate (2026-04-24): ghl_contact_id is sufficient.
+    // Reps verify any card in 5s via the "Open in GHL" deep-link and snooze if wrong.
+    // Requiring cache coverage suppressed 62 of 65 active fencing quotes — empty queue kills trust faster than occasional false positives.
+    return !!j.ghl_contact_id
+  }
+  function jobHasStrongSignal(j: any): boolean {
+    // Strong = ghl_contact_id AND cache/cache-event — used for confidence tagging, not fire/no-fire.
+    if (!j.ghl_contact_id) return false
     return hasCacheSignal.has(j.id) || ghlCacheEventJobs.has(j.id)
   }
   // Tally jobs that would match a rule but lack signal — for UI transparency
