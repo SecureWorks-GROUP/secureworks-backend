@@ -824,60 +824,65 @@ serve(async (req: Request) => {
 
       // ── Generate type-prefixed job number (SWP-25001, SWF-25002, etc.) ──
       let jobNumber: string | null = null
+      let isFirstTimeSignoff = false
       try {
         // Check if job already has a number (re-save scenario)
         const { data: existingJob } = await sbLink.from('jobs')
-          .select('job_number')
+          .select('job_number, status')
           .eq('id', jobId)
           .single()
 
         if (existingJob?.job_number) {
           // Job already posted — reuse existing number, just update scope data
           jobNumber = existingJob.job_number
-          console.log(`[ghl-proxy] Job already has number: ${jobNumber}, reusing`)
+          console.log(`[ghl-proxy] Job already has number: ${jobNumber}, reusing (re-save)`)
         } else {
           // First time — assign new job number
+          isFirstTimeSignoff = true
           const jobType = tool || 'patio'
           const { data: jnData } = await sbLink.rpc('next_job_number', { job_type: jobType })
           jobNumber = jnData
           if (jobNumber) {
             await sbLink.from('jobs').update({ job_number: jobNumber, status: 'quoted' }).eq('id', jobId)
             await sbLink.from('job_events').insert({ job_id: jobId, event_type: 'status_change', detail_json: { from: 'draft', to: 'quoted', job_number: jobNumber } })
-
-            // 2026-04-24 Phase 4b fix: write business_events on scope→quoted transition.
-            // Before this, the link handler only wrote to job_events (legacy). Jarvis polls
-            // business_events and was blind to 100% of new quotes. correlation_id = job_id per
-            // ADR 2026-04-24-correlation-id-strategy (temporary; flow-specific IDs allowed later).
-            try {
-              await sbLink.from('business_events').insert({
-                event_type: 'scope.completed',
-                source: 'scoping_tool',
-                entity_type: 'job',
-                entity_id: jobId,
-                correlation_id: jobId,
-                job_id: jobId,
-                payload: {
-                  tool_type: tool,
-                  opportunity_id: opportunityId,
-                  contact_id: contactId || null,
-                  job_number: jobNumber,
-                  from_status: 'draft',
-                  to_status: 'quoted',
-                },
-                metadata: {
-                  scope_url: scopeUrl,
-                  stage_moved: stageMoved,
-                  note_added: noteAdded,
-                },
-              })
-            } catch (e) {
-              console.log('[ghl-proxy] business_events scope.completed write failed (non-blocking):', (e as Error).message)
-            }
             console.log(`[ghl-proxy] Job number assigned: ${jobNumber}, status → quoted`)
           }
         }
       } catch (e) {
         console.log('[ghl-proxy] Job number generation failed (non-blocking):', (e as Error).message)
+      }
+
+      // 2026-04-24 Phase 4b fix: ALWAYS write business_events for scope sign-off
+      // (not just first-time). Fires on both first-time assign and re-saves so
+      // downstream consumers (Jarvis polling business_events) see every scope
+      // completion, not just the initial transition. correlation_id = job_id
+      // per ADR 2026-04-24-correlation-id-strategy.
+      try {
+        await sbLink.from('business_events').insert({
+          event_type: 'scope.completed',
+          source: 'scoping_tool',
+          entity_type: 'job',
+          entity_id: jobId,
+          correlation_id: jobId,
+          job_id: jobId,
+          payload: {
+            tool_type: tool,
+            opportunity_id: opportunityId,
+            contact_id: contactId || null,
+            job_number: jobNumber,
+            is_first_time: isFirstTimeSignoff,
+            resulting_status: isFirstTimeSignoff ? 'quoted' : 'existing',
+          },
+          metadata: {
+            scope_url: scopeUrl,
+            stage_moved: stageMoved,
+            note_added: noteAdded,
+            handler: 'ghl-proxy/link',
+          },
+        })
+        console.log(`[ghl-proxy] business_events scope.completed written (first_time=${isFirstTimeSignoff})`)
+      } catch (e) {
+        console.log('[ghl-proxy] business_events scope.completed write failed (non-blocking):', (e as Error).message)
       }
 
       // ── Get latest job data for Xero contact creation + GHL monetary value ──
@@ -2690,6 +2695,30 @@ serve(async (req: Request) => {
       if (jnData) {
         await sb.from('jobs').update({ job_number: jnData, status: 'quoted' }).eq('id', jobId)
         await sb.from('job_events').insert({ job_id: jobId, event_type: 'status_change', detail_json: { from: 'draft', to: 'quoted', job_number: jnData } })
+
+        // 2026-04-24 Phase 4b fix: also write business_events on walk-up path.
+        // Matches the link handler's scope.completed semantics so Jarvis sees
+        // walk-up quotes too (previously invisible).
+        try {
+          await sb.from('business_events').insert({
+            event_type: 'scope.completed',
+            source: 'scoping_tool_walkup',
+            entity_type: 'job',
+            entity_id: jobId,
+            correlation_id: jobId,
+            job_id: jobId,
+            payload: {
+              tool_type: jType,
+              job_number: jnData,
+              is_first_time: true,
+              resulting_status: 'quoted',
+              walkup: true,
+            },
+            metadata: { handler: 'ghl-proxy/assign_job_number' },
+          })
+        } catch (e) {
+          console.log('[ghl-proxy] walkup business_events write failed (non-blocking):', (e as Error).message)
+        }
       }
 
       return json({ jobNumber: jnData || null })
