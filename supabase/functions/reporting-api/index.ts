@@ -4748,6 +4748,15 @@ function qvOf(j: any): number {
   return parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.subtotal || 0) || 0
 }
 
+// pricing_json.margin_pct is stored as a percentage (e.g. 30.8 means 30.8%).
+// Normalise to decimal. Treat implausible values (>1.5 i.e. >150%) as percentage-form.
+function marginPctDecimal(raw: any): number | null {
+  if (raw === null || raw === undefined || raw === '') return null
+  const n = parseFloat(raw)
+  if (!isFinite(n) || n <= 0) return null
+  return n > 1.5 ? n / 100 : n
+}
+
 async function repQueueAction(sb: any, params: URLSearchParams) {
   // Accept both names so the existing frontend `saleFetch` helper (which sets salesperson_id) just works.
   const repUserId = params.get('rep_user_id') || params.get('salesperson_id') || ''
@@ -4762,7 +4771,8 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
     { org_id: DEFAULT_ORG_ID, legacy: false, archived: false, _in: { status: activeStatuses } }
   )
 
-  const filtered = types ? jobs.filter((j: any) => types.includes(j.type)) : jobs
+  const filtered = (types ? jobs.filter((j: any) => types.includes(j.type)) : jobs)
+    .filter((j: any) => !isTestRecord(j.client_name))  // drop "SHAUN SECUREWORKS TESTER" etc.
   const jobIds = filtered.map((j: any) => j.id)
   if (jobIds.length === 0) return { cards: [], total: 0, rep_user_id: repUserId }
 
@@ -4934,7 +4944,9 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
     'id, type, client_name, job_number, pricing_json, accepted_at',
     { org_id: DEFAULT_ORG_ID, legacy: false, archived: false, _in: { status: ['accepted', 'scheduled', 'in_progress', 'order_materials', 'order_confirmed', 'approvals', 'processing', 'complete', 'invoiced', 'final_payment', 'rectification'] } }
   )
-  const mine = jobs.filter((j: any) => types.includes(j.type))
+  const mine = jobs
+    .filter((j: any) => types.includes(j.type))
+    .filter((j: any) => !isTestRecord(j.client_name))
   const jobIds = mine.map((j: any) => j.id)
   if (jobIds.length === 0) return { period, rep_user_id: repUserId, earned_total: 0, jobs_count: 0, breakdown: [], formula_snapshot: { rep_rate: repRate, fencing_baseline: fencingBaseline, patio_baseline: patioBaseline } }
 
@@ -4965,7 +4977,7 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
     if (!earnedOn) continue
     const value = qvOf(j)
     if (value <= 0) continue
-    const marginPct = (j.pricing_json && j.pricing_json.margin_pct) ? parseFloat(j.pricing_json.margin_pct) : null
+    const marginPct = marginPctDecimal(j.pricing_json && j.pricing_json.margin_pct)
     const marginSource = marginPct != null ? 'pricing_json.margin_pct' : 'type_baseline'
     const gpPct = marginPct != null ? marginPct : (j.type === 'fencing' ? fencingBaseline : patioBaseline)
     const gpAmount = value * gpPct
