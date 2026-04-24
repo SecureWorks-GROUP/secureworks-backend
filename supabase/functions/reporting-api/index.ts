@@ -249,6 +249,10 @@ serve(async (req: Request) => {
         const body = await req.json()
         return json(await salesQuickAction(sb, body))
       }
+      case 'rep_queue':
+        return json(await repQueueAction(sb, url.searchParams))
+      case 'commission_summary':
+        return json(await commissionSummaryAction(sb, url.searchParams))
       case 'reconcile_transaction': {
         if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
         const body = await req.json()
@@ -3664,6 +3668,38 @@ async function salesQuickAction(sb: any, body: any) {
     return { success: true, job_id, action: 'archived' }
   }
 
+  if (action_type === 'mark_lost') {
+    const { reason_code, free_text, rep_user_id } = body
+    const ALLOWED = ['price','timing','ghost','competitor','finance','spouse_veto','site_not_ready','changed_scope','other']
+    if (!reason_code || !ALLOWED.includes(reason_code)) {
+      return { error: 'reason_code required and must be one of: ' + ALLOWED.join(', ') }
+    }
+
+    // Insert lost_reasons row first — this is the audit trail. If it fails, don't change stage.
+    const { error: lrErr } = await sb.from('lost_reasons').insert({
+      org_id: DEFAULT_ORG_ID,
+      job_id,
+      reason_code,
+      free_text: free_text || null,
+      rep_user_id: rep_user_id || null,
+    })
+    if (lrErr) return { error: 'Failed to capture lost reason: ' + lrErr.message }
+
+    // Then flip the stage to cancelled
+    const { error: jErr } = await sb.from('jobs').update({ status: 'cancelled' }).eq('id', job_id)
+    if (jErr) return { error: 'Reason captured but stage update failed: ' + jErr.message, partial: true }
+
+    // Log the timeline event
+    await sb.from('job_events').insert({
+      job_id,
+      event_type: 'status_change',
+      user_id: rep_user_id || null,
+      detail_json: { from: 'quoted', to: 'cancelled', reason_code, free_text: free_text || null, source: 'sale_dashboard_v2' },
+    })
+
+    return { success: true, job_id, action: 'marked_lost', reason_code }
+  }
+
   return { error: 'Unknown action_type: ' + action_type }
 }
 
@@ -4691,4 +4727,279 @@ async function getChatLogs(sb: any, params: URLSearchParams) {
   if (error) throw new Error(`chat_logs: ${error.message}`)
 
   return { logs: data || [], total: (data || []).length, since }
+}
+
+// ════════════════════════════════════════════════════════════
+// SECURESALE V2 — REP QUEUE (R1)
+// Rule-based urgency queue, role-scoped by job.type → rep map.
+// Spec: ~/Projects/secureworks-docs/features/sale-dashboard.md
+// Temporary rep ownership model: job.type map. Long-term: owner_user_id column.
+// ════════════════════════════════════════════════════════════
+
+// Temporary rep ownership map. Replace with owner_user_id column when added.
+const REP_TYPE_MAP: Record<string, string[]> = {
+  'be6c2188-2b7b-49c7-b6e4-5b0d0deb6415': ['fencing'],           // Khairo
+  '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73': ['patio', 'decking'],  // Nithin
+}
+
+function qvOf(j: any): number {
+  const p = j.pricing_json
+  if (!p) return 0
+  return parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.subtotal || 0) || 0
+}
+
+async function repQueueAction(sb: any, params: URLSearchParams) {
+  // Accept both names so the existing frontend `saleFetch` helper (which sets salesperson_id) just works.
+  const repUserId = params.get('rep_user_id') || params.get('salesperson_id') || ''
+  const types = REP_TYPE_MAP[repUserId]  // undefined for admin = see all
+  const now = Date.now()
+
+  // Active pipeline only — drafts + quoted + accepted (scheduled/complete excluded from queue)
+  const activeStatuses = ['draft', 'quoted', 'accepted']
+
+  const jobs = await fetchAll(sb, 'jobs',
+    'id, status, type, client_name, client_phone, site_suburb, pricing_json, ghl_contact_id, ghl_opportunity_id, job_number, created_at, quoted_at, accepted_at, deposit_invoice_id',
+    { org_id: DEFAULT_ORG_ID, legacy: false, archived: false, _in: { status: activeStatuses } }
+  )
+
+  const filtered = types ? jobs.filter((j: any) => types.includes(j.type)) : jobs
+  const jobIds = filtered.map((j: any) => j.id)
+  if (jobIds.length === 0) return { cards: [], total: 0, rep_user_id: repUserId }
+
+  // Latest job_events per job (used for last_touch + stale detection)
+  const { data: events } = await sb.from('job_events')
+    .select('job_id, event_type, created_at')
+    .in('job_id', jobIds)
+    .order('created_at', { ascending: false })
+  const latestByJob: Record<string, any> = {}
+  const lastFollowupAfterQuote: Record<string, string | null> = {}
+  for (const e of (events || [])) {
+    if (!latestByJob[e.job_id]) latestByJob[e.job_id] = e
+  }
+
+  // Check xero_invoices for deposit-paid signal on accepted jobs
+  const acceptedIds = filtered.filter((j: any) => j.status === 'accepted').map((j: any) => j.id)
+  const paidJobIds = new Set<string>()
+  if (acceptedIds.length > 0) {
+    const { data: inv } = await sb.from('xero_invoices')
+      .select('job_id, amount_paid')
+      .in('job_id', acceptedIds)
+      .gt('amount_paid', 0)
+    for (const r of (inv || [])) paidJobIds.add(r.job_id)
+  }
+
+  // Snoozed jobs
+  const { data: snoozed } = await sb.from('sales_snooze')
+    .select('job_id, snoozed_until')
+    .in('job_id', jobIds)
+    .gte('snoozed_until', new Date().toISOString())
+  const snoozedSet = new Set((snoozed || []).map((s: any) => s.job_id))
+
+  // contact_matches for source (hidden in UI until GCLID fix, but pass through so client can decide)
+  const ghlIds = filtered.map((j: any) => j.ghl_contact_id).filter(Boolean)
+  let sourceByGhl: Record<string, string> = {}
+  if (ghlIds.length > 0) {
+    const { data: cm } = await sb.from('contact_matches').select('ghl_contact_id, lead_source').in('ghl_contact_id', ghlIds)
+    for (const r of (cm || [])) if (r.lead_source && r.lead_source !== 'unknown' && r.lead_source !== 'unattributed') sourceByGhl[r.ghl_contact_id] = r.lead_source
+  }
+
+  const cards: any[] = []
+  for (const j of filtered) {
+    if (snoozedSet.has(j.id)) continue
+    const last = latestByJob[j.id] || null
+    const lastTouchAt = last ? new Date(last.created_at).getTime() : new Date(j.created_at).getTime()
+    const minsSinceTouch = Math.floor((now - lastTouchAt) / 60000)
+    const hoursSinceTouch = minsSinceTouch / 60
+    const daysSinceTouch = minsSinceTouch / 1440
+
+    let reason_code: string | null = null
+    let reason_label = ''
+    let urgency_score = 0
+    let urgency_color: 'red' | 'amber' | 'green' = 'green'
+    let primary_action = 'call'
+
+    // Rule 1: NEW_UNCONTACTED — draft, no follow-up events, created long enough ago
+    const minsSinceCreated = Math.floor((now - new Date(j.created_at).getTime()) / 60000)
+    const isUncontactedDraft = j.status === 'draft' && (!last || last.event_type === 'job_created')
+    if (isUncontactedDraft && minsSinceCreated > 15) {
+      reason_code = 'new_uncontacted'
+      reason_label = `New lead, uncontacted ${minsSinceCreated < 60 ? minsSinceCreated + 'min' : Math.floor(minsSinceCreated / 60) + 'h'}`
+      urgency_color = minsSinceCreated > 60 ? 'red' : 'amber'
+      urgency_score = 1000 + Math.min(minsSinceCreated, 2000)
+      primary_action = 'call'
+    }
+
+    // Rule 2: STALE_QUOTE — quoted >3d with no sms_sent/note/payment_link_sent/quote_viewed since
+    if (j.status === 'quoted' && j.quoted_at) {
+      const daysSinceQuote = (now - new Date(j.quoted_at).getTime()) / 86400000
+      const hasFollowup = (events || []).some((e: any) =>
+        e.job_id === j.id &&
+        ['sms_sent', 'note', 'payment_link_sent', 'quote_viewed'].includes(e.event_type) &&
+        new Date(e.created_at).getTime() > new Date(j.quoted_at).getTime()
+      )
+      if (daysSinceQuote > 3 && !hasFollowup) {
+        reason_code = 'stale_quote'
+        reason_label = `Quote sent ${Math.floor(daysSinceQuote)}d ago, no follow-up`
+        urgency_color = daysSinceQuote > 7 ? 'red' : 'amber'
+        urgency_score = Math.max(urgency_score, 800 + Math.min(daysSinceQuote * 10, 500))
+        primary_action = 'send_reminder'
+      }
+    }
+
+    // Rule 3: ACCEPTED_NO_DEPOSIT — accepted, no paid invoice, accepted_at >2d ago
+    if (j.status === 'accepted' && !paidJobIds.has(j.id) && j.accepted_at) {
+      const daysSinceAccept = (now - new Date(j.accepted_at).getTime()) / 86400000
+      if (daysSinceAccept > 2) {
+        reason_code = 'accepted_no_deposit'
+        reason_label = `Accepted ${Math.floor(daysSinceAccept)}d, no deposit`
+        urgency_color = daysSinceAccept > 5 ? 'red' : 'amber'
+        urgency_score = Math.max(urgency_score, 1200 + Math.min(daysSinceAccept * 20, 800))
+        primary_action = 'send_reminder'
+      }
+    }
+
+    // Skip cards that don't match any rule (quiet state — no action needed)
+    if (!reason_code) continue
+
+    cards.push({
+      job_id: j.id,
+      job_number: j.job_number,
+      client_name: j.client_name,
+      client_phone: j.client_phone,
+      site_suburb: j.site_suburb,
+      type: j.type,
+      status: j.status,
+      value: qvOf(j),
+      source: sourceByGhl[j.ghl_contact_id] || null,
+      ghl_contact_id: j.ghl_contact_id,
+      ghl_opportunity_id: j.ghl_opportunity_id,
+      last_event_type: last?.event_type || 'job_created',
+      last_event_at: last?.created_at || j.created_at,
+      days_since_touch: Math.round(daysSinceTouch * 10) / 10,
+      reason_code,
+      reason_label,
+      urgency_color,
+      urgency_score,
+      primary_action,
+    })
+  }
+
+  cards.sort((a, b) => b.urgency_score - a.urgency_score)
+  return {
+    cards: cards.slice(0, 50),
+    total: cards.length,
+    rep_user_id: repUserId,
+    rep_types: types || 'all',
+    generated_at: new Date().toISOString(),
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// SECURESALE V2 — COMMISSION SUMMARY (R1)
+// Earned trigger = deposit paid. Provisional === earned in this model.
+// Formula: rep_rate * (pricing_json.margin_pct || baseline) * totalIncGST
+// ════════════════════════════════════════════════════════════
+
+async function commissionSummaryAction(sb: any, params: URLSearchParams) {
+  const repUserId = params.get('rep_user_id') || params.get('salesperson_id') || ''
+  const period = params.get('period') || 'month'  // week | month | ytd
+  const types = REP_TYPE_MAP[repUserId]
+  if (!types) return { error: 'rep_user_id required and must match a sales rep', breakdown: [], earned_total: 0 }
+
+  // Rates via env with sensible defaults. Real rates live in CLAUDE.local.md — env vars keep them private.
+  const KHAIRO_ID = 'be6c2188-2b7b-49c7-b6e4-5b0d0deb6415'
+  const NITHIN_ID = '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73'
+  const repRate = repUserId === KHAIRO_ID
+    ? parseFloat(Deno.env.get('COMMISSION_KHAIRO_RATE') || '0.15')
+    : parseFloat(Deno.env.get('COMMISSION_NITHIN_RATE') || '0.10')
+  const fencingBaseline = parseFloat(Deno.env.get('COMMISSION_FENCING_GP_BASELINE') || '0.35')
+  const patioBaseline = parseFloat(Deno.env.get('COMMISSION_PATIO_GP_BASELINE') || '0.30')
+
+  // Period start
+  const now = new Date()
+  let periodStart: Date
+  if (period === 'week') {
+    const day = now.getDay() || 7  // Mon=1..Sun=7
+    periodStart = new Date(now); periodStart.setDate(now.getDate() - (day - 1)); periodStart.setHours(0, 0, 0, 0)
+  } else if (period === 'ytd') {
+    periodStart = new Date(now.getFullYear(), 0, 1)
+  } else {
+    periodStart = new Date(now.getFullYear(), now.getMonth(), 1)
+  }
+  const periodStartIso = periodStart.toISOString()
+  const periodStartDate = periodStartIso.slice(0, 10)
+
+  // Pull accepted jobs of this rep's types
+  const jobs = await fetchAll(sb, 'jobs',
+    'id, type, client_name, job_number, pricing_json, accepted_at',
+    { org_id: DEFAULT_ORG_ID, legacy: false, archived: false, _in: { status: ['accepted', 'scheduled', 'in_progress', 'order_materials', 'order_confirmed', 'approvals', 'processing', 'complete', 'invoiced', 'final_payment', 'rectification'] } }
+  )
+  const mine = jobs.filter((j: any) => types.includes(j.type))
+  const jobIds = mine.map((j: any) => j.id)
+  if (jobIds.length === 0) return { period, rep_user_id: repUserId, earned_total: 0, jobs_count: 0, breakdown: [], formula_snapshot: { rep_rate: repRate, fencing_baseline: fencingBaseline, patio_baseline: patioBaseline } }
+
+  // Deposit signal: xero_invoices with amount_paid>0 and fully_paid_on in period, OR job_events.payment_received in period
+  const paidInPeriod: Record<string, string> = {}  // job_id -> iso date of earning
+  const { data: paidInv } = await sb.from('xero_invoices')
+    .select('job_id, fully_paid_on, amount_paid')
+    .in('job_id', jobIds)
+    .gt('amount_paid', 0)
+    .gte('fully_paid_on', periodStartDate)
+  for (const r of (paidInv || [])) {
+    if (!paidInPeriod[r.job_id] || r.fully_paid_on < paidInPeriod[r.job_id]) paidInPeriod[r.job_id] = r.fully_paid_on
+  }
+  const { data: paidEvents } = await sb.from('job_events')
+    .select('job_id, created_at')
+    .in('job_id', jobIds)
+    .in('event_type', ['payment_received', 'deposit_invoice_created'])
+    .gte('created_at', periodStartIso)
+  for (const r of (paidEvents || [])) {
+    const d = (r.created_at || '').slice(0, 10)
+    if (!paidInPeriod[r.job_id] || d < paidInPeriod[r.job_id]) paidInPeriod[r.job_id] = d
+  }
+
+  const breakdown: any[] = []
+  let earnedTotal = 0
+  for (const j of mine) {
+    const earnedOn = paidInPeriod[j.id]
+    if (!earnedOn) continue
+    const value = qvOf(j)
+    if (value <= 0) continue
+    const marginPct = (j.pricing_json && j.pricing_json.margin_pct) ? parseFloat(j.pricing_json.margin_pct) : null
+    const marginSource = marginPct != null ? 'pricing_json.margin_pct' : 'type_baseline'
+    const gpPct = marginPct != null ? marginPct : (j.type === 'fencing' ? fencingBaseline : patioBaseline)
+    const gpAmount = value * gpPct
+    const commission = Math.round(gpAmount * repRate * 100) / 100
+    earnedTotal += commission
+    breakdown.push({
+      job_id: j.id,
+      job_number: j.job_number,
+      client_name: j.client_name,
+      type: j.type,
+      value: Math.round(value * 100) / 100,
+      gp_pct: Math.round(gpPct * 1000) / 1000,
+      gp_source: marginSource,
+      gp_amount: Math.round(gpAmount * 100) / 100,
+      commission,
+      earned_on: earnedOn,
+    })
+  }
+
+  breakdown.sort((a, b) => (a.earned_on < b.earned_on ? 1 : -1))
+
+  return {
+    period,
+    period_start: periodStartIso,
+    rep_user_id: repUserId,
+    earned_total: Math.round(earnedTotal * 100) / 100,
+    jobs_count: breakdown.length,
+    breakdown,
+    formula_snapshot: {
+      rep_rate: repRate,
+      fencing_baseline_gp: fencingBaseline,
+      patio_baseline_gp: patioBaseline,
+      earned_trigger: 'deposit_paid',
+      margin_source: 'pricing_json.margin_pct with type-baseline fallback',
+    },
+  }
 }
