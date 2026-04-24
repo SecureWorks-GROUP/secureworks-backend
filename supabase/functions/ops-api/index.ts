@@ -598,7 +598,8 @@ serve(async (req: Request) => {
           if (found?.[0]) jid = found[0].id
         }
         if (!jid) return json({ error: 'jobId required' }, 400)
-        return json(await jobDetail(client, jid))
+        const includeRaw = url.searchParams.get('include_raw_json') === 'true' || url.searchParams.get('include_raw_json') === '1'
+        return json(await jobDetail(client, jid, includeRaw))
       }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
@@ -755,9 +756,23 @@ serve(async (req: Request) => {
       case 'send_invoice_email': {
         const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
         if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
-        if (!siTo) return json({ error: 'to_email required' }, 400)
 
-        // Get invoice record for number + amount
+        // 2026-04-24 backward-compat fix: if to_email omitted, use Xero-direct email (legacy path).
+        // Dashboard callers pass only xero_invoice_id; MCP sw_send_invoice_email passes to_email for Outlook+PDF.
+        if (!siTo) {
+          const { accessToken: sAt, tenantId: sTi } = await getToken(client)
+          await xeroPost(`/Invoices/${siId}/Email`, sAt, sTi, {}, 'POST')
+          try {
+            await client.from('job_events').insert({
+              job_id: siJobId || null,
+              event_type: 'invoice.emailed',
+              detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
+            })
+          } catch { /* non-blocking */ }
+          return json({ success: true, emailed: true, via: 'xero_direct' })
+        }
+
+        // Enhanced path: to_email provided → download PDF + send via Outlook with attachment
         const { data: siInv } = await client.from('xero_invoices')
           .select('invoice_number, total, amount_due')
           .eq('xero_invoice_id', siId).maybeSingle()
@@ -797,7 +812,7 @@ serve(async (req: Request) => {
           })
         } catch { /* non-blocking */ }
 
-        return json({ success: true, emailed: true, invoice_number: siNum, to: siTo })
+        return json({ success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook' })
       }
 
       case 'approve_and_send_invoice': {
@@ -3171,7 +3186,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   return { columns, total: enriched.length }
 }
 
-async function jobDetail(client: any, jobId: string) {
+async function jobDetail(client: any, jobId: string, includeRawJson: boolean = false) {
   if (!jobId) throw new Error('jobId required')
 
   // If job_number passed instead of UUID, resolve it
@@ -3272,10 +3287,12 @@ async function jobDetail(client: any, jobId: string) {
     console.log('[ops-api] readiness computation failed (non-blocking):', (e as Error).message)
   }
 
-  // 2026-04-24 fix: return full job including scope_json + pricing_json
-  // so MCP consumers (sw_job_detail) can see the raw scope + pricing written by scoping tools.
-  // Size concern documented historically but scope_json is the source of truth for job attributes.
-  const jobLite = jobRes.data || {}
+  // 2026-04-24 fix: default response strips scope_json + pricing_json (historical behaviour
+  // preserved so dashboard payloads stay small). MCP consumers that need the raw scope/pricing
+  // can pass include_raw_json=true to get the full object.
+  const jobLite = includeRawJson
+    ? (jobRes.data || {})
+    : (() => { const { scope_json: _s, pricing_json: _p, ...rest } = jobRes.data || {}; return rest })()
 
   // Strip line_items and raw_json from invoices (huge nested JSON)
   const invoicesLite = invoices.map((inv: any) => {
