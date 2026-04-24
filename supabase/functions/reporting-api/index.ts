@@ -23,7 +23,7 @@ const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
-  !name ? false : /\btest\b/i.test(name) || /^marnin test/i.test(name)
+  !name ? false : /\btest(er|ing)?\b/i.test(name) || /^marnin test/i.test(name)
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
