@@ -317,7 +317,7 @@ async function jobContext(sb: any, jobId: string) {
     if (found) jobId = found.id
   }
 
-  const [job, events, emails, chases, jarvisActions, conversations] = await Promise.all([
+  const [job, events, emails, chases, jarvisActions, conversations, pinsRes] = await Promise.all([
     // 1. Job details including scope_json + pricing_json (2026-04-24 fix: was stripped)
     sb.from('jobs')
       .select('id, job_number, client_name, client_phone, client_email, type, status, site_address, site_suburb, ghl_contact_id, scope_json, pricing_json, created_at, quoted_at, accepted_at, scheduled_at, completed_at')
@@ -353,6 +353,12 @@ async function jobContext(sb: any, jobId: string) {
       .select('event_type, source, payload, occurred_at')
       .eq('job_id', jobId)
       .order('occurred_at', { ascending: false }).limit(30),
+
+    // 7. Pinned context (job_context table) — 2026-04-24 addition for JARVIS tab
+    sb.from('job_context')
+      .select('id, kind, value, provenance, correlation_id, created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }).limit(50),
   ])
 
   // Build timeline from all sources
@@ -363,16 +369,42 @@ async function jobContext(sb: any, jobId: string) {
     ...(conversations.data || []).map((e: any) => ({ type: e.event_type, who: e.source || 'system', when: e.occurred_at, detail: (e.payload?.message || e.payload?.changes ? JSON.stringify(e.payload.changes || e.payload).slice(0, 200) : JSON.stringify(e.payload || {}).slice(0, 200)), source: 'business_events' })),
   ].sort((a, b) => new Date(b.when).getTime() - new Date(a.when).getTime()).slice(0, 50)
 
+  // Pins + derived latest timestamps for the JARVIS UI evidence strip
+  const pins = (pinsRes.data || []).map((p: any) => ({
+    id: p.id,
+    kind: p.kind,
+    value: p.value,
+    writer_role: p.provenance?.writer_role || 'unknown',
+    untrusted: p.provenance?.untrusted !== false,
+    provenance: p.provenance,
+    correlation_id: p.correlation_id,
+    created_at: p.created_at,
+  }))
+
+  const noteEvents = (events.data || []).filter((e: any) => e.event_type === 'note')
+  const latestNoteAt = noteEvents[0]?.created_at || null
+  const latestEventAt = (events.data || [])[0]?.created_at || null
+  const latestEmailAt = (emails.data || [])[0]?.received_at || null
+  const latestCommsAt = (conversations.data || []).find((e: any) => ['sms_sent', 'client.email_in', 'supplier.email_in'].includes(e.event_type))?.occurred_at || null
+
   return {
     job: job.data,
     invoices: (chases.data || []).map((i: any) => ({ number: i.invoice_number, amount_due: Number(i.amount_due) || 0, status: i.status, due_date: i.due_date })),
     timeline,
+    pins,
     summary: {
       total_events: timeline.length,
       emails_received: (emails.data || []).length,
       jarvis_actions: (jarvisActions.data || []).length,
       comms_sent: (conversations.data || []).length,
       has_overdue: (chases.data || []).some((i: any) => i.status !== 'PAID' && i.due_date && new Date(i.due_date) < new Date()),
+      notes_count: noteEvents.length,
+      history_count: (events.data || []).length,
+      pins_count: pins.length,
+      latest_note_at: latestNoteAt,
+      latest_event_at: latestEventAt,
+      latest_email_at: latestEmailAt,
+      latest_comms_at: latestCommsAt,
     },
   }
 }
