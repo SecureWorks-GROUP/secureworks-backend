@@ -4798,6 +4798,31 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
     for (const r of (inv || [])) paidJobIds.add(r.job_id)
   }
 
+  // Cache coverage — jobs where we genuinely have follow-up signal.
+  // Prevents hallucinated "stale quote" / "new uncontacted" cards on leads
+  // whose conversations live outside our reach (common for Nithin/patio).
+  const { data: cacheRows } = await sb.from('ghl_conversation_cache')
+    .select('job_id')
+    .in('job_id', jobIds)
+  const hasCacheSignal = new Set((cacheRows || []).map((r: any) => r.job_id))
+  // job_events sourced from ghl_cache also count as signal (from past syncs)
+  const ghlCacheEventJobs = new Set<string>()
+  for (const e of (events || [])) {
+    if (e.detail_json && typeof e.detail_json === 'object' && e.detail_json.source === 'ghl_cache') {
+      ghlCacheEventJobs.add(e.job_id)
+    }
+  }
+  function jobHasSignal(j: any): boolean {
+    if (!j.ghl_contact_id) return false  // no GHL link → no signal possible
+    return hasCacheSignal.has(j.id) || ghlCacheEventJobs.has(j.id)
+  }
+  // Tally jobs that would match a rule but lack signal — for UI transparency
+  const unmonitored = {
+    stale_quote: 0,
+    new_uncontacted: 0,
+    total_jobs_without_ghl: filtered.filter((j: any) => !j.ghl_contact_id).length,
+  }
+
   // Snoozed jobs
   const { data: snoozed } = await sb.from('sales_snooze')
     .select('job_id, snoozed_until')
@@ -4828,21 +4853,24 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
     let urgency_color: 'red' | 'amber' | 'green' = 'green'
     let primary_action = 'call'
 
-    // Rule 1: NEW_UNCONTACTED — draft, no real touch (ignore internal events), created >15min ago.
-    // Any sms_sent / call_made / client_replied / note counts as contact; scope_saved / job_created do not.
+    // Rule 1: NEW_UNCONTACTED — draft, no real touch, created >15min ago.
+    // Trust-bounded: only fire when we have GHL signal for this job; else we can't prove it's untouched.
     const minsSinceCreated = Math.floor((now - new Date(j.created_at).getTime()) / 60000)
     const hasRealTouch = (events || []).some((e: any) =>
       e.job_id === j.id &&
       ['sms_sent', 'call_made', 'client_replied', 'note', 'payment_link_sent', 'quote_sent', 'quote_generated', 'assignment_created'].includes(e.event_type)
     )
-    // Exclude very old drafts (>30d) — they're probably dead, not just uncontacted.
-    const isUncontactedDraft = j.status === 'draft' && !hasRealTouch && minsSinceCreated > 15 && minsSinceCreated < 30 * 1440
-    if (isUncontactedDraft) {
-      reason_code = 'new_uncontacted'
-      reason_label = `New lead, uncontacted ${minsSinceCreated < 60 ? minsSinceCreated + 'min' : Math.floor(minsSinceCreated / 60) + 'h'}`
-      urgency_color = minsSinceCreated > 60 ? 'red' : 'amber'
-      urgency_score = 1000 + Math.min(minsSinceCreated, 2000)
-      primary_action = 'call'
+    const isUncontactedDraftShape = j.status === 'draft' && !hasRealTouch && minsSinceCreated > 15 && minsSinceCreated < 30 * 1440
+    if (isUncontactedDraftShape) {
+      if (jobHasSignal(j)) {
+        reason_code = 'new_uncontacted'
+        reason_label = `New lead, uncontacted ${minsSinceCreated < 60 ? minsSinceCreated + 'min' : Math.floor(minsSinceCreated / 60) + 'h'}`
+        urgency_color = minsSinceCreated > 60 ? 'red' : 'amber'
+        urgency_score = 1000 + Math.min(minsSinceCreated, 2000)
+        primary_action = 'call'
+      } else {
+        unmonitored.new_uncontacted++
+      }
     }
 
     // Rule 2: STALE_QUOTE — quoted >3d with no sms_sent/call_made/note/payment_link_sent/quote_viewed since.
@@ -4855,12 +4883,17 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
         new Date(e.created_at).getTime() > new Date(j.quoted_at).getTime()
       )
       const looksLikeStub = !j.site_suburb && qvOf(j) < 5000
-      if (daysSinceQuote > 3 && daysSinceQuote <= 60 && !hasFollowup && !looksLikeStub) {
-        reason_code = 'stale_quote'
-        reason_label = `Quote sent ${Math.floor(daysSinceQuote)}d ago, no follow-up`
-        urgency_color = daysSinceQuote > 7 ? 'red' : 'amber'
-        urgency_score = Math.max(urgency_score, 800 + Math.min(daysSinceQuote * 10, 500))
-        primary_action = 'send_reminder'
+      const shape = daysSinceQuote > 3 && daysSinceQuote <= 60 && !hasFollowup && !looksLikeStub
+      if (shape) {
+        if (jobHasSignal(j)) {
+          reason_code = 'stale_quote'
+          reason_label = `Quote sent ${Math.floor(daysSinceQuote)}d ago, no follow-up`
+          urgency_color = daysSinceQuote > 7 ? 'red' : 'amber'
+          urgency_score = Math.max(urgency_score, 800 + Math.min(daysSinceQuote * 10, 500))
+          primary_action = 'send_reminder'
+        } else {
+          unmonitored.stale_quote++
+        }
       }
     }
 
@@ -4908,6 +4941,7 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
     total: cards.length,
     rep_user_id: repUserId,
     rep_types: types || 'all',
+    unmonitored,
     generated_at: new Date().toISOString(),
   }
 }
