@@ -70,11 +70,93 @@ serve(async (req) => {
       "AppointmentCreated",
       "NoteAdded",
       "ContactStageChanged",
+      "ContactCreate",
+      "ContactUpdate",
     ];
 
     if (!SUPPORTED_TYPES.includes(type)) {
       console.log(`[ghl-webhook-receiver] Skipping unsupported event: ${type}`);
       return jsonResponse({ received: true, skipped: type });
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // GCLID + UTM attribution capture (ContactCreate / ContactUpdate)
+    // Spec: secureworks-docs/playbooks/gclid-attribution-runbook.md
+    // Upserts contact_matches with gclid + utm_* from the GHL form payload.
+    // Tolerant of both customFields shapes (object or id-value array).
+    // ════════════════════════════════════════════════════════════
+    if (type === "ContactCreate" || type === "ContactUpdate") {
+      try {
+        const ATTRIBUTION_KEYS = ["gclid", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"];
+        const extracted: Record<string, string | null> = {};
+
+        // Shape A: body.customFields is an object { gclid: "...", utm_source: "..." }
+        const cfObj = (body as any).customFields;
+        if (cfObj && typeof cfObj === "object" && !Array.isArray(cfObj)) {
+          for (const k of ATTRIBUTION_KEYS) {
+            if (cfObj[k]) extracted[k] = String(cfObj[k]).slice(0, 500);
+          }
+        }
+        // Shape B: body.customField is an array [{ id, value }] with the field name elsewhere
+        const cfArr = (body as any).customField || (body as any).customFieldArray;
+        if (Array.isArray(cfArr)) {
+          for (const item of cfArr) {
+            const key = (item?.name || item?.fieldKey || item?.key || "").toLowerCase();
+            if (ATTRIBUTION_KEYS.includes(key) && item?.value) {
+              extracted[key] = String(item.value).slice(0, 500);
+            }
+          }
+        }
+        // Shape C: top-level on body (some GHL configs strip the customFields wrapper)
+        for (const k of ATTRIBUTION_KEYS) {
+          if (!extracted[k] && (body as any)[k]) extracted[k] = String((body as any)[k]).slice(0, 500);
+        }
+
+        if (Object.keys(extracted).length > 0 && contactId) {
+          // Upsert contact_matches keyed on ghl_contact_id. Don't overwrite existing non-null attribution
+          // values unless the incoming value is richer (presence over absence).
+          const { data: existing } = await supabase
+            .from("contact_matches")
+            .select("id, gclid, utm_source, utm_medium, utm_campaign, utm_term, utm_content, lead_source")
+            .eq("ghl_contact_id", contactId)
+            .maybeSingle();
+
+          const patch: Record<string, string | null> = {};
+          for (const k of ATTRIBUTION_KEYS) {
+            const cur = existing ? (existing as any)[k] : null;
+            if (extracted[k] && (!cur || cur === "")) patch[k] = extracted[k];
+          }
+          // Derive lead_source from gclid presence; preserve existing non-placeholder value.
+          const existingLs = existing?.lead_source;
+          if (extracted.gclid && (!existingLs || existingLs === "unknown" || existingLs === "unattributed")) {
+            patch.lead_source = "google_ads";
+          }
+
+          if (Object.keys(patch).length > 0) {
+            if (existing) {
+              await supabase.from("contact_matches").update(patch).eq("id", existing.id);
+            } else {
+              await supabase.from("contact_matches").insert({
+                org_id: "00000000-0000-0000-0000-000000000001",
+                ghl_contact_id: contactId,
+                email: email || null,
+                phone: phone || null,
+                client_name: body.firstName && body.lastName ? `${body.firstName} ${body.lastName}` : (body.name || null),
+                ...patch,
+                matched_at: new Date().toISOString(),
+              });
+            }
+            console.log(`[ghl-webhook-receiver] attribution upsert contactId=${contactId} keys=${Object.keys(patch).join(",")}`);
+          }
+        }
+      } catch (attrErr) {
+        // Never let attribution capture break the main webhook path
+        console.error("[ghl-webhook-receiver] attribution capture failed (non-fatal):", attrErr);
+      }
+
+      // ContactCreate/ContactUpdate don't produce a business_event in the old branching below
+      // unless you want one. Return early — attribution capture is the whole payload for now.
+      return jsonResponse({ received: true, type, attribution_captured: true });
     }
 
     // ── Match to an active job via ghl_contact_id ──
