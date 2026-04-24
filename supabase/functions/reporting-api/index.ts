@@ -4828,10 +4828,16 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
     let urgency_color: 'red' | 'amber' | 'green' = 'green'
     let primary_action = 'call'
 
-    // Rule 1: NEW_UNCONTACTED — draft, no follow-up events, created long enough ago
+    // Rule 1: NEW_UNCONTACTED — draft, no real touch (ignore internal events), created >15min ago.
+    // Any sms_sent / call_made / client_replied / note counts as contact; scope_saved / job_created do not.
     const minsSinceCreated = Math.floor((now - new Date(j.created_at).getTime()) / 60000)
-    const isUncontactedDraft = j.status === 'draft' && (!last || last.event_type === 'job_created')
-    if (isUncontactedDraft && minsSinceCreated > 15) {
+    const hasRealTouch = (events || []).some((e: any) =>
+      e.job_id === j.id &&
+      ['sms_sent', 'call_made', 'client_replied', 'note', 'payment_link_sent', 'quote_sent', 'quote_generated', 'assignment_created'].includes(e.event_type)
+    )
+    // Exclude very old drafts (>30d) — they're probably dead, not just uncontacted.
+    const isUncontactedDraft = j.status === 'draft' && !hasRealTouch && minsSinceCreated > 15 && minsSinceCreated < 30 * 1440
+    if (isUncontactedDraft) {
       reason_code = 'new_uncontacted'
       reason_label = `New lead, uncontacted ${minsSinceCreated < 60 ? minsSinceCreated + 'min' : Math.floor(minsSinceCreated / 60) + 'h'}`
       urgency_color = minsSinceCreated > 60 ? 'red' : 'amber'
@@ -4839,15 +4845,17 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
       primary_action = 'call'
     }
 
-    // Rule 2: STALE_QUOTE — quoted >3d with no sms_sent/note/payment_link_sent/quote_viewed since
+    // Rule 2: STALE_QUOTE — quoted >3d with no sms_sent/call_made/note/payment_link_sent/quote_viewed since.
+    // Exclude: quotes older than 60d (probably dead) and stub rows (no suburb AND value <$5k).
     if (j.status === 'quoted' && j.quoted_at) {
       const daysSinceQuote = (now - new Date(j.quoted_at).getTime()) / 86400000
       const hasFollowup = (events || []).some((e: any) =>
         e.job_id === j.id &&
-        ['sms_sent', 'note', 'payment_link_sent', 'quote_viewed'].includes(e.event_type) &&
+        ['sms_sent', 'call_made', 'note', 'payment_link_sent', 'quote_viewed'].includes(e.event_type) &&
         new Date(e.created_at).getTime() > new Date(j.quoted_at).getTime()
       )
-      if (daysSinceQuote > 3 && !hasFollowup) {
+      const looksLikeStub = !j.site_suburb && qvOf(j) < 5000
+      if (daysSinceQuote > 3 && daysSinceQuote <= 60 && !hasFollowup && !looksLikeStub) {
         reason_code = 'stale_quote'
         reason_label = `Quote sent ${Math.floor(daysSinceQuote)}d ago, no follow-up`
         urgency_color = daysSinceQuote > 7 ? 'red' : 'amber'
