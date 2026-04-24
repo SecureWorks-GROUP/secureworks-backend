@@ -753,11 +753,51 @@ serve(async (req: Request) => {
         return json({ success: true, status: 'AUTHORISED', invoice_number: approved?.InvoiceNumber })
       }
       case 'send_invoice_email': {
-        const sid = body.xero_invoice_id
-        if (!sid) return json({ error: 'xero_invoice_id required' }, 400)
-        const { accessToken: sAt, tenantId: sTi } = await getToken(client)
-        await xeroPost(`/Invoices/${sid}/Email`, sAt, sTi, {}, 'POST')
-        return json({ success: true, emailed: true })
+        const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
+        if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
+        if (!siTo) return json({ error: 'to_email required' }, 400)
+
+        // Get invoice record for number + amount
+        const { data: siInv } = await client.from('xero_invoices')
+          .select('invoice_number, total, amount_due')
+          .eq('xero_invoice_id', siId).maybeSingle()
+        const siNum = siInv?.invoice_number || siId
+
+        // Download PDF from Xero
+        const { accessToken: siAt, tenantId: siTi } = await getToken(client)
+        const siPdfResp = await fetch(`${XERO_API_BASE}/Invoices/${siId}`, {
+          headers: { 'Authorization': `Bearer ${siAt}`, 'Xero-tenant-id': siTi, 'Accept': 'application/pdf' },
+        })
+        if (!siPdfResp.ok) throw new ApiError(`Failed to fetch PDF from Xero: ${siPdfResp.status}`, 502)
+        const siBuffer = await siPdfResp.arrayBuffer()
+        const siBytes = new Uint8Array(siBuffer)
+        let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
+        const siPdfB64 = btoa(siBin)
+
+        // Send via Outlook with PDF attached
+        const siEmailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': Deno.env.get('SW_API_KEY') || '' },
+          body: JSON.stringify({
+            to: siTo,
+            cc: siCc || '',
+            subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
+            htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
+            attachments: [{ contentBytes: siPdfB64, name: `${siNum}.pdf`, contentType: 'application/pdf' }],
+          }),
+        })
+        if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
+
+        // Log (non-blocking)
+        try {
+          await client.from('job_events').insert({
+            job_id: siJobId || null,
+            event_type: 'invoice.emailed',
+            detail_json: { invoice_number: siNum, to: siTo, via: 'outlook' },
+          })
+        } catch { /* non-blocking */ }
+
+        return json({ success: true, emailed: true, invoice_number: siNum, to: siTo })
       }
 
       case 'approve_and_send_invoice': {
@@ -3135,22 +3175,24 @@ async function jobDetail(client: any, jobId: string) {
   if (!jobId) throw new Error('jobId required')
 
   // If job_number passed instead of UUID, resolve it
-  if (/^SW[PFDRI]-\d+$/i.test(jobId)) {
+  // 2026-04-24 fix: widen from [PFDRI] to [A-Z]+ so all prefixes work (SWM, SWG, etc.)
+  if (/^SW[A-Z]+-\d+$/i.test(jobId)) {
     const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
     if (!found) throw new ApiError(`Job ${jobId} not found`, 404)
     jobId = found.id
   }
 
-  const [jobRes, assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes] = await Promise.all([
+  const [jobRes, assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes, bizEventsRes] = await Promise.all([
     client.from('jobs').select('*').eq('id', jobId).single(),
     client.from('job_assignments').select('*, users:user_id(name, phone, email)').eq('job_id', jobId).order('scheduled_date'),
     client.from('job_documents').select('*').eq('job_id', jobId).order('created_at', { ascending: false }),
-    client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
+    client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
     client.from('job_media').select('*').eq('job_id', jobId).order('created_at'),
     client.from('purchase_orders').select('*').eq('job_id', jobId).neq('status', 'deleted').order('created_at', { ascending: false }),
     client.from('work_orders').select('*').eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
+    client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
   ])
 
   if (jobRes.error) throw jobRes.error
@@ -3230,8 +3272,10 @@ async function jobDetail(client: any, jobId: string) {
     console.log('[ops-api] readiness computation failed (non-blocking):', (e as Error).message)
   }
 
-  // Strip heavy JSON blobs from response — keep only computed values
-  const { scope_json: _s, pricing_json: _p, ...jobLite } = jobRes.data || {}
+  // 2026-04-24 fix: return full job including scope_json + pricing_json
+  // so MCP consumers (sw_job_detail) can see the raw scope + pricing written by scoping tools.
+  // Size concern documented historically but scope_json is the source of truth for job attributes.
+  const jobLite = jobRes.data || {}
 
   // Strip line_items and raw_json from invoices (huge nested JSON)
   const invoicesLite = invoices.map((inv: any) => {
@@ -3248,7 +3292,7 @@ async function jobDetail(client: any, jobId: string) {
   return {
     job: jobLite,
     assignments: assignRes.data || [],
-    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: d.name, type: d.type, url: d.url, created_at: d.created_at })),
+    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, type: d.type, version: d.version, url: d.pdf_url, sent_to_client: d.sent_to_client, share_token: d.share_token, created_at: d.created_at })),
     events: eventsRes.data || [],
     media: mediaRes.data || [],
     purchase_orders: posLite,
@@ -3264,6 +3308,7 @@ async function jobDetail(client: any, jobId: string) {
     },
     chase_logs: chaseLogs,
     readiness: jobReadiness,
+    business_events: bizEventsRes.data || [],
   }
 }
 
@@ -4960,25 +5005,53 @@ async function completeAndInvoice(client: any, body: any) {
   }
 
   // Use line_items_override if provided (from invoice creation modal),
-  // otherwise extract from pricing_json
+  // otherwise extract from pricing_json (with fallback to scope_json._pricing_json for fencing jobs)
   let lineItems: any[] = body.line_items_override || []
-  if (lineItems.length === 0 && job.pricing_json) {
-    const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : job.pricing_json
-    if (Array.isArray(pricing.items)) {
-      lineItems = pricing.items.map((li: any) => ({
-        description: li.description || li.name || 'Line item',
-        quantity: li.quantity || li.qty || 1,
-        unit_price: li.unit_price || li.unitPrice || li.price || li.amount || 0,
-        account_code: li.account_code || '200',
-      }))
-    } else if (pricing.total || pricing.amount) {
-      // Single total amount — create one line item with rich description
-      lineItems = [{
-        description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number) || 'Construction'} works`),
-        quantity: 1,
-        unit_price: pricing.total || pricing.amount || 0,
-        account_code: accountCodeForJob(job.type),
-      }]
+  if (lineItems.length === 0) {
+    // Primary: top-level pricing_json column
+    let pricing: any = null
+    if (job.pricing_json && Object.keys(job.pricing_json).length > 0) {
+      pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : job.pricing_json
+    }
+    // Fallback: scope_json.job._pricing_json (fencing scoping tool stores pricing here, not in pricing_json)
+    // When using this fallback, always use totalExGST as a single line item — Xero adds 10% GST on top,
+    // so we pass the ex-GST amount to arrive at the correct totalIncGST. Individual scope line items
+    // are for cost tracking and may not sum exactly to the quoted total due to rounding.
+    if (!pricing && job.scope_json) {
+      const scope = typeof job.scope_json === 'string' ? JSON.parse(job.scope_json) : job.scope_json
+      const jobData = scope.job || scope
+      if (jobData._pricing_json) {
+        const scopePricing = typeof jobData._pricing_json === 'string' ? JSON.parse(jobData._pricing_json) : jobData._pricing_json
+        const exactTotalExGST = scopePricing.totalExGST || scopePricing.subtotal || (scopePricing.totalIncGST ? scopePricing.totalIncGST / 1.1 : 0) || 0
+        if (exactTotalExGST > 0) {
+          lineItems = [{
+            description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number) || 'Construction'} works`),
+            quantity: 1,
+            unit_price: exactTotalExGST,
+            account_code: accountCodeForJob(job.type),
+          }]
+        }
+      }
+    }
+    if (lineItems.length === 0 && pricing) {
+      const itemArray = Array.isArray(pricing.items) ? pricing.items
+        : Array.isArray(pricing.line_items) ? pricing.line_items
+        : null
+      if (itemArray) {
+        lineItems = itemArray.map((li: any) => ({
+          description: li.description || li.name || 'Line item',
+          quantity: li.quantity || li.qty || 1,
+          unit_price: li.unit_price || li.unitPrice || li.price || li.amount || 0,
+          account_code: li.account_code || '200',
+        }))
+      } else if (pricing.totalIncGST || pricing.total || pricing.amount) {
+        lineItems = [{
+          description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number) || 'Construction'} works`),
+          quantity: 1,
+          unit_price: pricing.totalIncGST || pricing.total || pricing.amount || 0,
+          account_code: accountCodeForJob(job.type),
+        }]
+      }
     }
   }
 
@@ -5730,13 +5803,23 @@ async function createDepositInvoice(client: any, body: any) {
     throw new Error(`Deposit invoice already exists: ${existingDep[0].invoice_number} ($${existingDep[0].total}). Void it in Xero before creating a new one.`)
   }
 
-  // Extract total from pricing_json
+  // Extract total from pricing_json (with fallback to scope_json._pricing_json for fencing jobs)
   let quotedTotal = 0
   let jobDescription = ''
-  if (job.pricing_json) {
-    const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : job.pricing_json
-    quotedTotal = pricing.totalIncGST || pricing.total || pricing.amount || 0
-    jobDescription = pricing.description || pricing.jobDescription || ''
+  let pricingDep: any = null
+  if (job.pricing_json && Object.keys(job.pricing_json).length > 0) {
+    pricingDep = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : job.pricing_json
+  }
+  if (!pricingDep && job.scope_json) {
+    const scope = typeof job.scope_json === 'string' ? JSON.parse(job.scope_json) : job.scope_json
+    const jobData = scope.job || scope
+    if (jobData._pricing_json) {
+      pricingDep = typeof jobData._pricing_json === 'string' ? JSON.parse(jobData._pricing_json) : jobData._pricing_json
+    }
+  }
+  if (pricingDep) {
+    quotedTotal = pricingDep.totalIncGST || pricingDep.total || pricingDep.amount || 0
+    jobDescription = pricingDep.description || pricingDep.jobDescription || ''
   }
 
   // Allow override from body

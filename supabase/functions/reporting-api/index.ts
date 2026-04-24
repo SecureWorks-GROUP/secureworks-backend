@@ -307,15 +307,16 @@ async function jobContext(sb: any, jobId: string) {
   if (!jobId) throw new Error('job_id required')
 
   // Resolve job_number to UUID if needed
-  if (/^SW[PFDRI]-\d+$/i.test(jobId)) {
+  // 2026-04-24 fix: widen from [PFDRI] to [A-Z]+ so all prefixes work
+  if (/^SW[A-Z]+-\d+$/i.test(jobId)) {
     const { data: found } = await sb.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
     if (found) jobId = found.id
   }
 
   const [job, events, emails, chases, jarvisActions, conversations] = await Promise.all([
-    // 1. Job details (lite — no scope/pricing)
+    // 1. Job details including scope_json + pricing_json (2026-04-24 fix: was stripped)
     sb.from('jobs')
-      .select('id, job_number, client_name, client_phone, client_email, type, status, site_address, site_suburb, ghl_contact_id, created_at, quoted_at, accepted_at, scheduled_at, completed_at')
+      .select('id, job_number, client_name, client_phone, client_email, type, status, site_address, site_suburb, ghl_contact_id, scope_json, pricing_json, created_at, quoted_at, accepted_at, scheduled_at, completed_at')
       .eq('id', jobId).single(),
 
     // 2. Recent job events (last 20)
