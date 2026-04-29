@@ -843,9 +843,10 @@ serve(async (req: Request) => {
           const { data: jnData } = await sbLink.rpc('next_job_number', { job_type: jobType })
           jobNumber = jnData
           if (jobNumber) {
-            await sbLink.from('jobs').update({ job_number: jobNumber, status: 'quoted' }).eq('id', jobId)
-            await sbLink.from('job_events').insert({ job_id: jobId, event_type: 'status_change', detail_json: { from: 'draft', to: 'quoted', job_number: jobNumber } })
-            console.log(`[ghl-proxy] Job number assigned: ${jobNumber}, status → quoted`)
+            // Per ADR 2026-04-27: job-number assignment does NOT release the quote.
+            // Status stays 'draft' until /send-quote/send confirms client delivery.
+            await sbLink.from('jobs').update({ job_number: jobNumber }).eq('id', jobId)
+            console.log(`[ghl-proxy] Job number assigned: ${jobNumber} (status unchanged — release happens at quote send)`)
           }
         }
       } catch (e) {
@@ -2724,8 +2725,9 @@ serve(async (req: Request) => {
       const jType = toolType === 'fencing' ? 'fencing' : 'patio'
       const { data: jnData } = await sb.rpc('next_job_number', { job_type: jType })
       if (jnData) {
-        await sb.from('jobs').update({ job_number: jnData, status: 'quoted' }).eq('id', jobId)
-        await sb.from('job_events').insert({ job_id: jobId, event_type: 'status_change', detail_json: { from: 'draft', to: 'quoted', job_number: jnData } })
+        // Per ADR 2026-04-27: job-number assignment does NOT release the quote.
+        // Status stays 'draft' until /send-quote/send confirms client delivery.
+        await sb.from('jobs').update({ job_number: jnData }).eq('id', jobId)
 
         // 2026-04-24 Phase 4b: write business_events on first-time walk-up.
         // Read actual status from DB rather than assuming, so false state cannot be emitted.

@@ -251,19 +251,79 @@ serve(async (req: Request) => {
         .update({ sent_to_client: true, sent_at: new Date().toISOString() })
         .eq('id', document_id)
 
-      // Update job status to quoted
+      // Update job status to quoted (release moment per ADR 2026-04-27)
       if (doc.job_id) {
-        await sb
+        // Read job metadata for the canonical event payloads. Status here is informational
+        // only — the source of truth for "did this call cause the release transition?" is
+        // the UPDATE's affected-row count below, which closes the SELECT-then-UPDATE race.
+        const { data: jobBefore } = await sb
+          .from('jobs')
+          .select('job_number, type, pricing_json, client_name')
+          .eq('id', doc.job_id)
+          .single()
+
+        // Conditional UPDATE returning affected rows — only this call's atomic
+        // draft → quoted flip emits canonical release events. If a concurrent writer
+        // already moved the job (or this is a resend), updatedRows is empty and we
+        // skip the canonical emit.
+        const { data: updatedRows } = await sb
           .from('jobs')
           .update({ status: 'quoted', quoted_at: new Date().toISOString() })
           .eq('id', doc.job_id)
           .eq('status', 'draft') // only if still draft
+          .select('id')
+        const transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
 
+        // Legacy event (preserved for back-compat with daily-digest / older readers)
         await sb.from('job_events').insert({
           job_id: doc.job_id,
           event_type: 'quote_sent',
           detail_json: { document_id, sent_to: client_email },
         })
+
+        // Canonical release events — only when this UPDATE actually flipped the row.
+        if (transitioned) {
+          const nowIso = new Date().toISOString()
+          const totalIncGST = jobBefore?.pricing_json?.totalIncGST ?? jobBefore?.pricing_json?.total ?? jobBefore?.pricing_json?.grandTotal ?? 0
+          sb.from('business_events').insert({
+            event_type: 'quote.sent',
+            source: 'send-quote',
+            occurred_at: nowIso,
+            recorded_at: nowIso,
+            entity_type: 'job',
+            entity_id: doc.job_id,
+            correlation_id: doc.job_id,
+            job_id: doc.job_id,
+            payload: {
+              document_id,
+              job_number: jobBefore?.job_number || null,
+              job_type: jobBefore?.type || null,
+              sent_to: client_email,
+              total_inc_gst: totalIncGST,
+            },
+            metadata: { handler: 'send-quote/send' },
+            schema_version: '1.0',
+          }).then(() => {}, () => {})
+
+          sb.from('business_events').insert({
+            event_type: 'job.status_changed',
+            source: 'send-quote',
+            occurred_at: nowIso,
+            recorded_at: nowIso,
+            entity_type: 'job',
+            entity_id: doc.job_id,
+            correlation_id: doc.job_id,
+            job_id: doc.job_id,
+            payload: {
+              entity: { id: doc.job_id, name: jobBefore?.job_number || jobBefore?.client_name || '' },
+              changes: { status: { from: 'draft', to: 'quoted' } },
+              financial: { amount: totalIncGST },
+              related_entities: [{ type: 'job_document', id: document_id }],
+            },
+            metadata: { reason: 'quote_sent', handler: 'send-quote/send' },
+            schema_version: '1.0',
+          }).then(() => {}, () => {})
+        }
 
         // Get full job data for GHL + Xero sync
         const { data: job } = await sb
@@ -1206,6 +1266,8 @@ serve(async (req: Request) => {
       // Send emails grouped by recipient
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
       let emailsSent = 0
+      let primarySent = false
+      const primaryEmail = (primaryContact.client_email || job.client_email || '').toLowerCase()
 
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
@@ -1265,16 +1327,37 @@ serve(async (req: Request) => {
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${RESEND_API_KEY}` },
             body: JSON.stringify(emailPayload)
           })
-          if (resendRes.ok) emailsSent++
+          if (resendRes.ok) {
+            emailsSent++
+            if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
+          }
         } catch (e: any) {
           console.log(`[send-runs] Failed to email ${email}:`, e.message)
         }
       }
 
-      // Update job status
-      await sb.from('jobs').update({ status: 'quoted', quoted_at: new Date().toISOString() }).eq('id', job.id)
+      // Per ADR 2026-04-27: 'quoted' = quote sent to the primary client.
+      // A neighbour-only success does NOT release the quote.
+      // Only flip status from 'draft' to 'quoted' — never regress an already
+      // accepted / scheduled / in_progress / complete / invoiced job back to quoted.
+      // We gate canonical emits on the UPDATE's affected-row count (not a pre-select),
+      // so a concurrent writer that moved the job out of 'draft' between read and write
+      // cannot cause a false canonical release event.
+      let transitioned = false
+      if (primarySent) {
+        const { data: updatedRows } = await sb.from('jobs')
+          .update({ status: 'quoted', quoted_at: new Date().toISOString() })
+          .eq('id', job.id)
+          .eq('status', 'draft')
+          .select('id')
+        transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
+      } else {
+        console.log(`[send-runs] Primary client send did not succeed (primaryEmail=${primaryEmail || '(none)'}, emailsSent=${emailsSent}). Leaving job unquoted.`)
+      }
 
-      // Log event
+      // Analytics event (preserved): records the runs-bundle send attempt regardless of outcome.
+      // job_id is now the row uuid (was previously job_number || id, which wrote a number string
+      // into a uuid column). This adjustment ships with the send-runs release-truth refactor.
       sb.from('business_events').insert({
         event_type: 'quote.runs_sent',
         source: 'send-quote',
@@ -1282,10 +1365,66 @@ serve(async (req: Request) => {
         recorded_at: new Date().toISOString(),
         entity_type: 'job',
         entity_id: job.id,
-        job_id: job.job_number || job.id,
-        payload: { run_count: runs.length, docs_created: createdDocs.length, emails_sent: emailsSent },
+        job_id: job.id,
+        payload: {
+          run_count: runs.length,
+          docs_created: createdDocs.length,
+          emails_sent: emailsSent,
+          primary_sent: primarySent,
+          released: transitioned,
+          job_number: job.job_number,
+        },
         metadata: {},
       }).then(() => {}, () => {})
+
+      // Canonical release events — only when this call's UPDATE actually flipped
+      // the job from 'draft' to 'quoted'. Resends on an already-quoted/accepted/etc.
+      // job no-op the UPDATE (zero affected rows) and emit nothing here.
+      if (transitioned) {
+        const nowIso = new Date().toISOString()
+        const totalIncGST = pj?.totalIncGST ?? pj?.total ?? pj?.grandTotal ?? 0
+        const firstClientDoc = createdDocs[0]
+        sb.from('business_events').insert({
+          event_type: 'quote.sent',
+          source: 'send-quote',
+          occurred_at: nowIso,
+          recorded_at: nowIso,
+          entity_type: 'job',
+          entity_id: job.id,
+          correlation_id: job.id,
+          job_id: job.id,
+          payload: {
+            document_id: firstClientDoc?.id || null,
+            job_number: job.job_number || null,
+            job_type: job.type || 'fencing',
+            sent_to: primaryContact.client_email || job.client_email,
+            total_inc_gst: totalIncGST,
+            run_count: runs.length,
+            docs_created: createdDocs.length,
+          },
+          metadata: { handler: 'send-quote/send-runs' },
+          schema_version: '1.0',
+        }).then(() => {}, () => {})
+
+        sb.from('business_events').insert({
+          event_type: 'job.status_changed',
+          source: 'send-quote',
+          occurred_at: nowIso,
+          recorded_at: nowIso,
+          entity_type: 'job',
+          entity_id: job.id,
+          correlation_id: job.id,
+          job_id: job.id,
+          payload: {
+            entity: { id: job.id, name: job.job_number || job.client_name || '' },
+            changes: { status: { from: 'draft', to: 'quoted' } },
+            financial: { amount: totalIncGST },
+            related_entities: createdDocs.slice(0, 5).map((d: any) => ({ type: 'job_document', id: d.id })),
+          },
+          metadata: { reason: 'quote_sent_runs', handler: 'send-quote/send-runs' },
+          schema_version: '1.0',
+        }).then(() => {}, () => {})
+      }
 
       return jsonResponse({
         success: true,
