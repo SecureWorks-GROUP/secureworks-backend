@@ -419,10 +419,14 @@ Deno.test("A11: override '  Client@EXAMPLE.com  ' matches lowercased allowlist",
 })
 
 // ─────────────────────────────────────────────────────────────────
-// A12 — Non-string override is treated as absent (defensive: a junk value
-// must not crash the verifier; the existing flow handles missing override).
+// A12 — Non-string email_override (object) → reject with email_override_invalid_shape.
+// Closes the shape-bypass class flagged by Codex stop-hook on 2026-04-30:
+// previously a non-string override silently set overrideRaw=null, the verifier
+// returned {ok:true}, and the existing case body trusted `body.email_override || ''`
+// which is truthy for arrays/objects — forwarding an unverified value to
+// the branded send. Mirror of T2's `cc_invalid_shape` pattern.
 // ─────────────────────────────────────────────────────────────────
-Deno.test("A12: non-string email_override → treated as absent, ok=true", async () => {
+Deno.test("A12: non-string email_override (object) → 400 email_override_invalid_shape", async () => {
   const fix = happyFixture()
   const { client } = makeStubClient(fix.seed)
   const { xeroGet, calls } = makeStubXeroGet({ invoices: { "inv-1": fix.xeroInvoice } })
@@ -431,12 +435,62 @@ Deno.test("A12: non-string email_override → treated as absent, ok=true", async
 
   const result = await _verifyApproveAndSendRecipient({
     client,
-    body: { xero_invoice_id: "inv-1", email_override: { not: "valid" } },
+    body: { xero_invoice_id: "inv-1", email_override: { sneaky: "attacker@evil.com" } },
+    getToken, xeroGet, logBusinessEvent,
+  })
+
+  assert(!result.ok)
+  if (!result.ok) {
+    const j = await jsonOf(result.response)
+    assertEquals(j.code, "email_override_invalid_shape")
+  }
+  // Shape gate fires before any Xero call
+  assertEquals(callCount(), 0)
+  assertEquals(calls.length, 0)
+})
+
+// ─────────────────────────────────────────────────────────────────
+// A12b [LOAD-BEARING]: array email_override is the same bypass class —
+// must reject. JSON-stringify of an array is truthy and would forward
+// unverified to the branded send if the shape gate were missing.
+// ─────────────────────────────────────────────────────────────────
+Deno.test("A12b: array email_override → 400 email_override_invalid_shape", async () => {
+  const fix = happyFixture()
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": fix.xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const result = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: ["attacker@evil.com"] },
+    getToken, xeroGet, logBusinessEvent,
+  })
+
+  assert(!result.ok)
+  if (!result.ok) {
+    const j = await jsonOf(result.response)
+    assertEquals(j.code, "email_override_invalid_shape")
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────
+// A12c: undefined email_override remains a valid no-op — verification skips
+// because the override was simply not provided. Confirms the shape gate
+// distinguishes "absent" from "wrong shape".
+// ─────────────────────────────────────────────────────────────────
+Deno.test("A12c: undefined email_override → ok=true (skips verification)", async () => {
+  const fix = happyFixture()
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": fix.xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const result = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1" /* no email_override at all */ },
     getToken, xeroGet, logBusinessEvent,
   })
 
   assertEquals(result.ok, true)
-  // Defensive: non-string treated as absent → no Xero calls
-  assertEquals(callCount(), 0)
-  assertEquals(calls.length, 0)
 })
