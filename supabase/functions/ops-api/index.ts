@@ -997,6 +997,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'list_users': return json(await listUsers(client))
       case 'ops_targets': return json(await opsTargets(client))
       case 'get_email_events': return json(await getEmailEvents(client, url.searchParams))
+      case 'resolve_jobs': return json(await resolveJobs(client, body))
+      case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
 
       // ── Ops Dashboard Write ──
       case 'create_assignment': return json(await createAssignment(client, body))
@@ -3914,6 +3916,38 @@ async function getEmailEvents(client: any, params: URLSearchParams) {
 
   if (error) throw new Error(error.message)
   return data || []
+}
+
+// JARVIS memory retriever helpers (service-role bypass for RLS-blocked tables).
+// `jobs` (org-scoped policy) and `job_context` (no permissive policies) are
+// not readable via the agent's anon key — they have to come through this edge
+// function. See secureworks-docs/cio/evidence/context-loop-v1/jarvis-memory-rls-fix-2026-05-01/.
+
+async function resolveJobs(client: any, body: any) {
+  const jobNumbers: string[] = Array.isArray(body?.job_numbers) ? body.job_numbers : []
+  if (jobNumbers.length === 0) return { jobs: [] }
+  const { data, error } = await client
+    .from('jobs')
+    .select('id, job_number')
+    .in('job_number', jobNumbers)
+  if (error) throw new Error(error.message)
+  return { jobs: data || [] }
+}
+
+async function getJobContextFacts(client: any, body: any) {
+  const jobUuids: string[] = Array.isArray(body?.job_uuids) ? body.job_uuids : []
+  if (jobUuids.length === 0) return { rows: [] }
+  const limit = typeof body?.limit === 'number' && body.limit > 0
+    ? Math.min(body.limit, 100)
+    : 12
+  const { data, error } = await client
+    .from('job_context')
+    .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at')
+    .in('job_id', jobUuids)
+    .order('updated_at', { ascending: false })
+    .limit(limit * jobUuids.length)
+  if (error) throw new Error(error.message)
+  return { rows: data || [] }
 }
 
 // ════════════════════════════════════════════════════════════
