@@ -524,10 +524,248 @@ async function xeroPost(
 }
 
 // ════════════════════════════════════════════════════════════
+// EXPORTED FOR TESTING — send_invoice_email Path B body extracted so
+// unit tests can stub external deps (Xero, Supabase client, fetch,
+// logBusinessEvent). The production handler below calls this helper
+// with real implementations. Behaviour is intentionally identical to
+// the prior inline body; this is a behaviour-preserving extraction.
+// ════════════════════════════════════════════════════════════
+
+export type SendInvoiceVerifyDeps = {
+  client: any
+  body: any
+  getToken: (client: any) => Promise<{ accessToken: string; tenantId: string }>
+  xeroGet: (path: string, accessToken: string, tenantId: string, params?: any) => Promise<any>
+  logBusinessEvent: (client: any, event: any) => Promise<void>
+  fetch: typeof globalThis.fetch
+  env: { XERO_API_BASE: string; SUPABASE_URL: string; SW_API_KEY: string }
+}
+
+export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): Promise<Response> {
+  const { client, body, getToken, xeroGet, logBusinessEvent, fetch: dfetch, env } = deps
+  const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
+
+  // Enhanced path: to_email provided → verify recipient server-side, then PDF + Outlook.
+  // Order matters: local DB-only checks run BEFORE any Xero call so a Xero outage
+  // (token endpoint or /Invoices) cannot mask a structural error like "invoice not in
+  // cache" or "caller passed wrong job_id". Those return their specific 400s without
+  // requiring Xero connectivity.
+  const { data: siInv } = await client.from('xero_invoices')
+    .select('invoice_number, total, amount_due, job_id, xero_contact_id')
+    .eq('xero_invoice_id', siId).maybeSingle()
+  if (!siInv) {
+    return json({
+      error: 'Invoice not found in xero_invoices cache',
+      code: 'invoice_not_cached',
+      xero_invoice_id: siId,
+    }, 400)
+  }
+  const siNum = siInv.invoice_number || siId
+
+  // Cross-check job_id linkage: caller-supplied job_id must match xero_invoices.job_id
+  // when both are present. Older invoices may have null job_id in cache → trust caller.
+  if (siJobId && siInv.job_id && siInv.job_id !== siJobId) {
+    return json({
+      error: 'job_id does not belong to this invoice',
+      code: 'job_invoice_mismatch',
+      xero_invoice_id: siId,
+      received_job_id: siJobId,
+      expected_job_id: siInv.job_id,
+    }, 400)
+  }
+
+  // Recipient resolver. Two sources, kept SEPARATE so we can detect drift between them:
+  //   (a) Xero invoice's Contact.EmailAddress + ContactPersons — canonical: this is the
+  //       contact the invoice was actually issued to in Xero.
+  //   (b) jobs.client_email for xero_invoices.job_id — supporting record. Allowed to
+  //       authorize a send ONLY when (i) Xero responded but had no emails (legacy
+  //       fallback for genuinely empty Xero contact), or (ii) it overlaps with the
+  //       Xero set. A caller-supplied job_id is NOT used here: only the cache linkage
+  //       (verifiedJobId) counts, and that's also the only value written to job_events.
+  // Xero lookup outcome is tracked separately from email count: a thrown call
+  // (network/5xx/auth/rate-limit, including token-acquisition failure) is NOT the
+  // same as "Xero responded with zero emails". A failure must hard-stop — falling back
+  // to a possibly-stale jobs.client_email when we don't actually know what Xero says
+  // would re-open the recipient-drift hole. Token acquisition is folded into the same
+  // try block so getToken outages produce the same code as /Invoices outages.
+  const verifiedJobId = siInv.job_id || null
+  const addToSet = (set: Set<string>, e: unknown) => {
+    if (typeof e !== 'string') return
+    for (const part of e.split(',')) {
+      const norm = part.trim().toLowerCase()
+      if (norm) set.add(norm)
+    }
+  }
+  let siAt = ''
+  let siTi = ''
+  const xeroEmails = new Set<string>()
+  let xeroLookupOk = false
+  let xeroLookupErr: string | null = null
+  try {
+    const tok = await getToken(client)
+    siAt = tok.accessToken
+    siTi = tok.tenantId
+    const xInv = await xeroGet(`/Invoices/${siId}`, siAt, siTi)
+    const xContact = xInv?.Invoices?.[0]?.Contact
+    addToSet(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) addToSet(xeroEmails, cp?.EmailAddress)
+    xeroLookupOk = true
+  } catch (e) {
+    xeroLookupErr = (e as Error).message || 'unknown error'
+    console.log('[send_invoice_email] xero contact lookup failed:', xeroLookupErr)
+  }
+  if (!xeroLookupOk) {
+    return json({
+      error: 'Could not verify recipient — Xero contact lookup failed. Retry, or have an operator confirm the recipient before sending.',
+      code: 'xero_contact_lookup_failed',
+      xero_invoice_id: siId,
+      detail: xeroLookupErr,
+    }, 400)
+  }
+  const jobEmails = new Set<string>()
+  if (verifiedJobId) {
+    const { data: siJob } = await client.from('jobs')
+      .select('client_email').eq('id', verifiedJobId).maybeSingle()
+    addToSet(jobEmails, siJob?.client_email)
+  }
+
+  // Selection rule (option 2 — cross-check):
+  //   - Xero lookup succeeded with ≥1 email → expectedSet = Xero emails. jobs.client_email
+  //     can only authorize a send via overlap; a drifted job email never expands the
+  //     allowlist past what Xero confirms.
+  //   - Xero lookup succeeded with 0 emails → legacy fallback to verified jobs.client_email.
+  //     This branch is ONLY reachable when Xero genuinely has no contact email on file —
+  //     not when the lookup itself failed (handled above).
+  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+
+  if (expectedSet.size === 0) {
+    return json({
+      error: 'Cannot verify recipient — Xero contact has no email on file and no client_email on the linked job',
+      code: 'recipient_unverifiable',
+      xero_invoice_id: siId,
+    }, 400)
+  }
+
+  const driftReject = (received: string, label: 'recipient' | 'cc_recipient') => {
+    // Diagnostic: caller hit a job email that exists but disagrees with Xero contact.
+    // Surface a more specific code so the agent (and Ticket 5 alerting) can flag drift.
+    const recvNorm = received.trim().toLowerCase()
+    if (xeroEmails.size > 0 && jobEmails.has(recvNorm) && !xeroEmails.has(recvNorm)) {
+      return json({
+        error: 'jobs.client_email does not match Xero invoice contact — possible recipient drift',
+        code: 'contact_job_recipient_mismatch',
+        xero_invoice_id: siId,
+        received,
+        expected: Array.from(expectedSet),
+        field: label,
+      }, 400)
+    }
+    return json({
+      error: label === 'cc_recipient'
+        ? 'CC recipient does not match invoice contact'
+        : 'Recipient does not match invoice contact',
+      code: label === 'cc_recipient' ? 'cc_recipient_mismatch' : 'recipient_mismatch',
+      xero_invoice_id: siId,
+      received,
+      expected: Array.from(expectedSet),
+    }, 400)
+  }
+
+  const received = String(siTo).trim().toLowerCase()
+  if (!expectedSet.has(received)) return driftReject(siTo, 'recipient')
+
+  // Verify every CC address against the same allowlist, regardless of input shape.
+  // CC accepts string ("a@x,b@x"), array (["a@x","b@x"]), or absent. Any other shape
+  // is rejected so an unfamiliar wrapper can't smuggle recipients past the gate.
+  const ccRaw: string[] = []
+  if (siCc === undefined || siCc === null || siCc === '') {
+    /* no CC */
+  } else if (typeof siCc === 'string') {
+    for (const part of siCc.split(',')) ccRaw.push(part)
+  } else if (Array.isArray(siCc)) {
+    for (const entry of siCc) {
+      if (typeof entry !== 'string') {
+        return json({
+          error: 'CC entry must be a string',
+          code: 'cc_invalid_shape',
+          xero_invoice_id: siId,
+        }, 400)
+      }
+      for (const part of entry.split(',')) ccRaw.push(part)
+    }
+  } else {
+    return json({
+      error: 'cc must be a string or array of strings',
+      code: 'cc_invalid_shape',
+      xero_invoice_id: siId,
+    }, 400)
+  }
+  const ccVerified: string[] = []
+  for (const part of ccRaw) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    if (!expectedSet.has(trimmed.toLowerCase())) {
+      return driftReject(trimmed, 'cc_recipient')
+    }
+    ccVerified.push(trimmed)
+  }
+  const siCcSafe = ccVerified.join(',')
+
+  // Download PDF from Xero
+  const siPdfResp = await dfetch(`${env.XERO_API_BASE}/Invoices/${siId}`, {
+    headers: { 'Authorization': `Bearer ${siAt}`, 'Xero-tenant-id': siTi, 'Accept': 'application/pdf' },
+  })
+  if (!siPdfResp.ok) throw new ApiError(`Failed to fetch PDF from Xero: ${siPdfResp.status}`, 502)
+  const siBuffer = await siPdfResp.arrayBuffer()
+  const siBytes = new Uint8Array(siBuffer)
+  let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
+  const siPdfB64 = btoa(siBin)
+
+  // Send via Outlook with PDF attached
+  const siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': env.SW_API_KEY },
+    body: JSON.stringify({
+      to: siTo,
+      cc: siCcSafe,
+      subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
+      htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
+      attachments: [{ contentBytes: siPdfB64, name: `${siNum}.pdf`, contentType: 'application/pdf' }],
+    }),
+  })
+  if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
+
+  // Audit (non-blocking).
+  //   - business_events: ALWAYS written. Accepts null job_id, so unlinked invoice sends
+  //     still leave a trail. This is the canonical event store.
+  //   - job_events: only when verifiedJobId is set. job_events.job_id is NOT NULL, so
+  //     unlinked sends would fail this insert; we deliberately skip it rather than
+  //     misattributing the row to a caller-supplied job_id.
+  await logBusinessEvent(client, {
+    event_type: 'invoice.emailed',
+    entity_type: 'xero_invoice',
+    entity_id: siId,
+    job_id: verifiedJobId || undefined,
+    payload: { invoice_number: siNum, to: siTo, via: 'outlook', linked: Boolean(verifiedJobId) },
+  })
+  if (verifiedJobId) {
+    try {
+      await client.from('job_events').insert({
+        job_id: verifiedJobId,
+        event_type: 'invoice.emailed',
+        detail_json: { invoice_number: siNum, to: siTo, via: 'outlook' },
+      })
+    } catch { /* non-blocking */ }
+  }
+
+  return json({ success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook' })
+}
+
+// ════════════════════════════════════════════════════════════
 // REQUEST HANDLER
 // ════════════════════════════════════════════════════════════
 
-serve(async (req: Request) => {
+if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
@@ -772,47 +1010,13 @@ serve(async (req: Request) => {
           return json({ success: true, emailed: true, via: 'xero_direct' })
         }
 
-        // Enhanced path: to_email provided → download PDF + send via Outlook with attachment
-        const { data: siInv } = await client.from('xero_invoices')
-          .select('invoice_number, total, amount_due')
-          .eq('xero_invoice_id', siId).maybeSingle()
-        const siNum = siInv?.invoice_number || siId
-
-        // Download PDF from Xero
-        const { accessToken: siAt, tenantId: siTi } = await getToken(client)
-        const siPdfResp = await fetch(`${XERO_API_BASE}/Invoices/${siId}`, {
-          headers: { 'Authorization': `Bearer ${siAt}`, 'Xero-tenant-id': siTi, 'Accept': 'application/pdf' },
+        // Enhanced path: to_email provided → delegate to extracted, testable helper.
+        return await _verifyAndSendInvoiceEmail({
+          client, body,
+          getToken, xeroGet, logBusinessEvent,
+          fetch: globalThis.fetch.bind(globalThis),
+          env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '' },
         })
-        if (!siPdfResp.ok) throw new ApiError(`Failed to fetch PDF from Xero: ${siPdfResp.status}`, 502)
-        const siBuffer = await siPdfResp.arrayBuffer()
-        const siBytes = new Uint8Array(siBuffer)
-        let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
-        const siPdfB64 = btoa(siBin)
-
-        // Send via Outlook with PDF attached
-        const siEmailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': Deno.env.get('SW_API_KEY') || '' },
-          body: JSON.stringify({
-            to: siTo,
-            cc: siCc || '',
-            subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
-            htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
-            attachments: [{ contentBytes: siPdfB64, name: `${siNum}.pdf`, contentType: 'application/pdf' }],
-          }),
-        })
-        if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
-
-        // Log (non-blocking)
-        try {
-          await client.from('job_events').insert({
-            job_id: siJobId || null,
-            event_type: 'invoice.emailed',
-            detail_json: { invoice_number: siNum, to: siTo, via: 'outlook' },
-          })
-        } catch { /* non-blocking */ }
-
-        return json({ success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook' })
       }
 
       case 'approve_and_send_invoice': {
