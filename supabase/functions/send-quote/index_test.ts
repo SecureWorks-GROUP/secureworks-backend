@@ -242,15 +242,16 @@ async function recordReleasedQuoteRevision(
     })
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
     const manifestPath = `${input.org_id}/${input.job_id}/manifest_v${input.version}_${hash.slice(0, 12)}.json`
-    const manifestBytes = new TextEncoder().encode(canonical)
-    const { error: upErr } = await sb.storage
+    const { data: signed, error: signErr } = await sb.storage
       .from('job-pdfs')
-      .upload(manifestPath, manifestBytes, {
-        cacheControl: 'no-cache', upsert: true, contentType: 'application/json',
-      })
-    if (upErr) {
-      return null
-    }
+      .createSignedUploadUrl(manifestPath)
+    if (signErr || !signed?.signedUrl) return null
+    const putRes = await fetch(signed.signedUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: canonical,
+    })
+    if (!putRes.ok) return null
     const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/${manifestPath}`
     const totals = manifest.totals_snapshot
     const sentAtIso = new Date().toISOString()
@@ -304,6 +305,8 @@ function makeQuoteRevSupabase(opts: {
   const sb = {
     storage: {
       from: (_bucket: string) => ({
+        // Defensive: keep the older direct-upload mock around in case some
+        // future caller switches back. The current helper uses signed URLs.
         upload: async (path: string, body: Uint8Array | Blob, _opts: any) => {
           if (opts.uploadOk === false) return { error: { message: 'upload denied' } }
           const text = body instanceof Uint8Array
@@ -311,6 +314,12 @@ function makeQuoteRevSupabase(opts: {
             : await (body as Blob).text()
           state.uploaded.push({ path, bytes: text })
           return { error: null }
+        },
+        createSignedUploadUrl: async (path: string) => {
+          if (opts.uploadOk === false) return { data: null, error: { message: 'sign denied' } }
+          // Track the path so the test's downstream PUT-mock fills it in.
+          state.uploaded.push({ path, bytes: '' })
+          return { data: { signedUrl: `https://example.test/signed/${encodeURIComponent(path)}` }, error: null }
         },
       }),
     },
@@ -371,6 +380,22 @@ const sampleInput: RecordReleaseQuoteRevisionInput = {
 }
 
 const sampleRevCtx = { handler: 'send-quote/send', job_id: 'aa1da77f-1951-4d64-be86-a810781d9813' }
+
+// Monkey-patch fetch globally for this test module. The helper PUTs the canonical
+// manifest JSON to a signed URL; we intercept those PUTs in-process so tests don't
+// hit the network. Returns 200 OK with body capture by default; returns 502 if the
+// URL contains 'fail-put' (used by upload-failure cases).
+{
+  const origFetch = globalThis.fetch
+  globalThis.fetch = (async (input: any, init?: any): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input?.url || ''
+    if (init?.method === 'PUT' && url.startsWith('https://example.test/signed/')) {
+      const status = url.includes('fail-put') ? 502 : 200
+      return new Response(status === 200 ? 'OK' : 'fail', { status })
+    }
+    return origFetch(input, init)
+  }) as typeof fetch
+}
 
 Deno.test("R1 — recordReleasedQuoteRevision happy path: uploads manifest, inserts row with sent_at NOT NULL, returns revision id", async () => {
   const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r1' })
