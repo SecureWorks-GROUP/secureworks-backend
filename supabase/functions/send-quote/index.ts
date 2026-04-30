@@ -212,10 +212,17 @@ async function recordReleasedQuoteRevision(
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
 
     // 3. Upload canonical manifest JSON to Storage.
+    // NOTE: Pass Uint8Array (not Blob) — Deno's Blob shape doesn't translate
+    // cleanly through @supabase/supabase-js storage upload to the Storage REST
+    // API; first deploy of v84 produced HTTP 400 from /object/<bucket>/<path>
+    // when given a Blob. Uint8Array is the known-good body shape for Deno +
+    // supabase-js storage uploads (verified by aligning with how other Deno
+    // edge functions in this repo upload binary content).
     const manifestPath = `${input.org_id}/${input.job_id}/manifest_v${input.version}_${hash.slice(0, 12)}.json`
+    const manifestBytes = new TextEncoder().encode(canonical)
     const { error: upErr } = await sb.storage
       .from('job-pdfs')
-      .upload(manifestPath, new Blob([canonical], { type: 'application/json' }), {
+      .upload(manifestPath, manifestBytes, {
         cacheControl: 'no-cache',
         upsert: true,
         contentType: 'application/json',
