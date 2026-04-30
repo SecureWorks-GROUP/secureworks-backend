@@ -211,26 +211,39 @@ async function recordReleasedQuoteRevision(
     // 2. Canonicalize + hash (recursive deep-sort + SHA-256).
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
 
-    // 3. Upload canonical manifest JSON to Storage.
-    // NOTE: Pass Uint8Array (not Blob) — Deno's Blob shape doesn't translate
-    // cleanly through @supabase/supabase-js storage upload to the Storage REST
-    // API; first deploy of v84 produced HTTP 400 from /object/<bucket>/<path>
-    // when given a Blob. Uint8Array is the known-good body shape for Deno +
-    // supabase-js storage uploads (verified by aligning with how other Deno
-    // edge functions in this repo upload binary content).
+    // 3. Upload canonical manifest JSON to Storage via signed URL.
+    // NOTE: the `job-pdfs` bucket's INSERT RLS policy requires
+    //   (storage.foldername(name))[1] = auth_org_id()::text
+    // which isn't satisfied by the service role (no auth_org_id() context).
+    // PDFs in this bucket already upload via signed URLs (PDF flow uses
+    // ghl-proxy/prepare_quote -> createSignedUploadUrl -> client PUT). We
+    // mirror that exact pattern: ask Storage to mint a signed upload URL,
+    // then PUT the canonical bytes to it. createSignedUploadUrl is callable
+    // by service role; the resulting signed URL bypasses bucket RLS at
+    // upload time. (Earlier deploy attempts using sb.storage.upload() with
+    // Blob and then Uint8Array both produced HTTP 400 — the issue was RLS,
+    // not the body shape.)
     const manifestPath = `${input.org_id}/${input.job_id}/manifest_v${input.version}_${hash.slice(0, 12)}.json`
-    const manifestBytes = new TextEncoder().encode(canonical)
-    const { error: upErr } = await sb.storage
+    const { data: signed, error: signErr } = await sb.storage
       .from('job-pdfs')
-      .upload(manifestPath, manifestBytes, {
-        cacheControl: 'no-cache',
-        upsert: true,
-        contentType: 'application/json',
-      })
-    if (upErr) {
+      .createSignedUploadUrl(manifestPath)
+    if (signErr || !signed?.signedUrl) {
       console.error('[quote-revision-record-fail]', JSON.stringify({
         job_id: input.job_id, version: input.version, handler: ctx.handler,
-        stage: 'manifest_upload', error: upErr.message ?? String(upErr),
+        stage: 'manifest_signed_url', error: signErr?.message ?? 'no signedUrl',
+      }))
+      return null
+    }
+    const putRes = await fetch(signed.signedUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: canonical,
+    })
+    if (!putRes.ok) {
+      const respText = await putRes.text().catch(() => '')
+      console.error('[quote-revision-record-fail]', JSON.stringify({
+        job_id: input.job_id, version: input.version, handler: ctx.handler,
+        stage: 'manifest_upload_put', status: putRes.status, error: respText.slice(0, 200),
       }))
       return null
     }
