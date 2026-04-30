@@ -97,6 +97,39 @@ async function insertEmailEvent(sb: any, opts: {
   }
 }
 
+// Cap 0 release-truth canonical-event durability (CAP0-QA-CANONICAL-EVENTS-HARDENING).
+// Awaited business_events insert with structured failure logging for Tier-1 release-truth
+// emits. The release moment (the awaited jobs.update + Resend send) is not rolled back on
+// canonical-insert failure: the email already left, status is already 'quoted', and the legacy
+// job_events row is already written. A failure here is RECOVERABLE (canonical row missing while
+// the rest of the release moment is recorded), so we log a [canonical-event-fail] line and
+// return without throwing so the caller's response shape stays unchanged. Per CIO ticket:
+// no retry, no transactional change in this patch — Option B/C are deferred follow-ups.
+async function safeBusinessEventInsert(
+  sb: any,
+  row: Record<string, any>,
+  ctx: { handler: string; job_id: string | null }
+): Promise<void> {
+  try {
+    const { error } = await sb.from('business_events').insert(row)
+    if (error) {
+      console.error('[canonical-event-fail]', JSON.stringify({
+        event_type: row?.event_type ?? null,
+        handler: ctx.handler,
+        job_id: ctx.job_id,
+        error: error.message ?? String(error),
+      }))
+    }
+  } catch (e: any) {
+    console.error('[canonical-event-fail]', JSON.stringify({
+      event_type: row?.event_type ?? null,
+      handler: ctx.handler,
+      job_id: ctx.job_id,
+      error: e?.message ?? String(e),
+    }))
+  }
+}
+
 serve(async (req: Request) => {
   const url = new URL(req.url)
   const path = url.pathname.split('/').pop()
@@ -282,10 +315,12 @@ serve(async (req: Request) => {
         })
 
         // Canonical release events — only when this UPDATE actually flipped the row.
+        // Awaited via safeBusinessEventInsert so transient Supabase failures are logged as
+        // [canonical-event-fail] rather than silently dropped.
         if (transitioned) {
           const nowIso = new Date().toISOString()
           const totalIncGST = jobBefore?.pricing_json?.totalIncGST ?? jobBefore?.pricing_json?.total ?? jobBefore?.pricing_json?.grandTotal ?? 0
-          sb.from('business_events').insert({
+          await safeBusinessEventInsert(sb, {
             event_type: 'quote.sent',
             source: 'send-quote',
             occurred_at: nowIso,
@@ -303,9 +338,9 @@ serve(async (req: Request) => {
             },
             metadata: { handler: 'send-quote/send' },
             schema_version: '1.0',
-          }).then(() => {}, () => {})
+          }, { handler: 'send-quote/send', job_id: doc.job_id })
 
-          sb.from('business_events').insert({
+          await safeBusinessEventInsert(sb, {
             event_type: 'job.status_changed',
             source: 'send-quote',
             occurred_at: nowIso,
@@ -322,7 +357,7 @@ serve(async (req: Request) => {
             },
             metadata: { reason: 'quote_sent', handler: 'send-quote/send' },
             schema_version: '1.0',
-          }).then(() => {}, () => {})
+          }, { handler: 'send-quote/send', job_id: doc.job_id })
         }
 
         // Get full job data for GHL + Xero sync
@@ -1384,7 +1419,7 @@ serve(async (req: Request) => {
         const nowIso = new Date().toISOString()
         const totalIncGST = pj?.totalIncGST ?? pj?.total ?? pj?.grandTotal ?? 0
         const firstClientDoc = createdDocs[0]
-        sb.from('business_events').insert({
+        await safeBusinessEventInsert(sb, {
           event_type: 'quote.sent',
           source: 'send-quote',
           occurred_at: nowIso,
@@ -1404,9 +1439,9 @@ serve(async (req: Request) => {
           },
           metadata: { handler: 'send-quote/send-runs' },
           schema_version: '1.0',
-        }).then(() => {}, () => {})
+        }, { handler: 'send-quote/send-runs', job_id: job.id })
 
-        sb.from('business_events').insert({
+        await safeBusinessEventInsert(sb, {
           event_type: 'job.status_changed',
           source: 'send-quote',
           occurred_at: nowIso,
@@ -1423,7 +1458,7 @@ serve(async (req: Request) => {
           },
           metadata: { reason: 'quote_sent_runs', handler: 'send-quote/send-runs' },
           schema_version: '1.0',
-        }).then(() => {}, () => {})
+        }, { handler: 'send-quote/send-runs', job_id: job.id })
       }
 
       return jsonResponse({
