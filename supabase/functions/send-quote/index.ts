@@ -211,43 +211,29 @@ async function recordReleasedQuoteRevision(
     // 2. Canonicalize + hash (recursive deep-sort + SHA-256).
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
 
-    // 3. Upload canonical manifest JSON to Storage via signed URL.
-    // NOTE: the `job-pdfs` bucket's INSERT RLS policy requires
+    // 3. Manifest "URL" — Cap 0 ships without Storage upload.
+    //
+    // Initial design uploaded canonical manifest JSON to job-pdfs Storage.
+    // Live deploys revealed that the bucket RLS policy requires
     //   (storage.foldername(name))[1] = auth_org_id()::text
     // which isn't satisfied by the service role (no auth_org_id() context).
-    // PDFs in this bucket already upload via signed URLs (PDF flow uses
-    // ghl-proxy/prepare_quote -> createSignedUploadUrl -> client PUT). We
-    // mirror that exact pattern: ask Storage to mint a signed upload URL,
-    // then PUT the canonical bytes to it. createSignedUploadUrl is callable
-    // by service role; the resulting signed URL bypasses bucket RLS at
-    // upload time. (Earlier deploy attempts using sb.storage.upload() with
-    // Blob and then Uint8Array both produced HTTP 400 — the issue was RLS,
-    // not the body shape.)
-    const manifestPath = `${input.org_id}/${input.job_id}/manifest_v${input.version}_${hash.slice(0, 12)}.json`
-    const { data: signed, error: signErr } = await sb.storage
-      .from('job-pdfs')
-      .createSignedUploadUrl(manifestPath)
-    if (signErr || !signed?.signedUrl) {
-      console.error('[quote-revision-record-fail]', JSON.stringify({
-        job_id: input.job_id, version: input.version, handler: ctx.handler,
-        stage: 'manifest_signed_url', error: signErr?.message ?? 'no signedUrl',
-      }))
-      return null
-    }
-    const putRes = await fetch(signed.signedUrl, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: canonical,
-    })
-    if (!putRes.ok) {
-      const respText = await putRes.text().catch(() => '')
-      console.error('[quote-revision-record-fail]', JSON.stringify({
-        job_id: input.job_id, version: input.version, handler: ctx.handler,
-        stage: 'manifest_upload_put', status: putRes.status, error: respText.slice(0, 200),
-      }))
-      return null
-    }
-    const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/${manifestPath}`
+    // Both direct .upload() and createSignedUploadUrl + fetch PUT failed in
+    // production despite signing succeeding. PDFs work because they upload
+    // via the GHL-proxy prepare_quote flow which mints a client-side signed
+    // URL the BROWSER PUTs to — a flow we can't reuse for server-side
+    // manifest writes from inside this Edge Function.
+    //
+    // For Cap 0 release-truth, the manifest content is fully captured in
+    // scope_snapshot_json + pricing_snapshot_json + totals_snapshot_json
+    // columns; the hash provides integrity. manifest_url is forensic-only.
+    // We use an internal stub URL that satisfies the NOT NULL constraint
+    // and lets future consumers reconstruct the manifest from columns +
+    // verify against the hash.
+    //
+    // CAP0-QUOTE-REVISION-MANIFEST-STORAGE is the follow-up ticket to wire
+    // a working manifest object store (likely via a service-role bypass
+    // policy on job-pdfs, or a dedicated manifests bucket).
+    const manifestUrl = `supabase-internal://manifest/${hash}`
 
     // 4. INSERT the released row directly with sent_at = now(). Atomic; no staging.
     const totals = manifest.totals_snapshot
