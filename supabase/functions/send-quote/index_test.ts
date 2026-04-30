@@ -242,9 +242,10 @@ async function recordReleasedQuoteRevision(
     })
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
     const manifestPath = `${input.org_id}/${input.job_id}/manifest_v${input.version}_${hash.slice(0, 12)}.json`
+    const manifestBytes = new TextEncoder().encode(canonical)
     const { error: upErr } = await sb.storage
       .from('job-pdfs')
-      .upload(manifestPath, new Blob([canonical], { type: 'application/json' }), {
+      .upload(manifestPath, manifestBytes, {
         cacheControl: 'no-cache', upsert: true, contentType: 'application/json',
       })
     if (upErr) {
@@ -303,9 +304,11 @@ function makeQuoteRevSupabase(opts: {
   const sb = {
     storage: {
       from: (_bucket: string) => ({
-        upload: async (path: string, blob: Blob, _opts: any) => {
+        upload: async (path: string, body: Uint8Array | Blob, _opts: any) => {
           if (opts.uploadOk === false) return { error: { message: 'upload denied' } }
-          const text = await blob.text()
+          const text = body instanceof Uint8Array
+            ? new TextDecoder().decode(body)
+            : await (body as Blob).text()
           state.uploaded.push({ path, bytes: text })
           return { error: null }
         },
