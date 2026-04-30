@@ -1332,16 +1332,22 @@ serve(async (req: Request) => {
         .update({ declined_at: new Date().toISOString() })
         .eq('id', doc.id)
 
-      // CAP0-DECLINE-STATUS-CASCADE — cascade jobs.status to 'declined' for whole-
+      // CAP0-DECLINE-STATUS-CASCADE — cascade jobs.status to 'lost' for whole-
       // quote declines (no run_label). Operator dashboards filter on jobs.status
       // so without this cascade decline is invisible at the job level (Probe B-prime
       // F1). Race-safe via .eq('status','quoted'): only acts on jobs currently
       // quoted, never regresses accepted / partially_accepted / etc.
+      //
+      // Status value is 'lost' (NOT 'declined') because that's the existing
+      // jobs_status_check constraint convention — customer-declined deals
+      // bucket into 'lost' and the lost_reasons table (migration 20260424055207)
+      // captures the per-decline reason already. Adding 'declined' as a new
+      // status would require a schema migration; out of scope here.
       // Per-run declines stay on the existing `partially_accepted` path below.
       let declineTransitioned = false
       if (doc.job_id && !doc.run_label) {
         const { data: declinedRows } = await sb.from('jobs')
-          .update({ status: 'declined' })
+          .update({ status: 'lost' })
           .eq('id', doc.job_id)
           .eq('status', 'quoted')
           .select('id')
@@ -1421,7 +1427,7 @@ serve(async (req: Request) => {
           job_id: doc.job_id,
           payload: {
             entity: { id: doc.job_id, name: doc.jobs?.job_number || '' },
-            changes: { status: { from: 'quoted', to: 'declined' } },
+            changes: { status: { from: 'quoted', to: 'lost' } },
             related_entities: [{ type: 'job_document', id: doc.id }],
           },
           metadata: { reason: 'quote_declined', handler: 'send-quote/decline' },
