@@ -1332,6 +1332,22 @@ serve(async (req: Request) => {
         .update({ declined_at: new Date().toISOString() })
         .eq('id', doc.id)
 
+      // CAP0-DECLINE-STATUS-CASCADE — cascade jobs.status to 'declined' for whole-
+      // quote declines (no run_label). Operator dashboards filter on jobs.status
+      // so without this cascade decline is invisible at the job level (Probe B-prime
+      // F1). Race-safe via .eq('status','quoted'): only acts on jobs currently
+      // quoted, never regresses accepted / partially_accepted / etc.
+      // Per-run declines stay on the existing `partially_accepted` path below.
+      let declineTransitioned = false
+      if (doc.job_id && !doc.run_label) {
+        const { data: declinedRows } = await sb.from('jobs')
+          .update({ status: 'declined' })
+          .eq('id', doc.job_id)
+          .eq('status', 'quoted')
+          .select('id')
+        declineTransitioned = Array.isArray(declinedRows) && declinedRows.length > 0
+      }
+
       // Per-run decline
       if (doc.run_label && doc.job_id) {
         await sb.from('run_acceptances').upsert({
@@ -1385,6 +1401,32 @@ serve(async (req: Request) => {
             quoted_amount: quotedAmount,
           },
         }).then(() => {}, () => {}) // non-blocking
+      }
+
+      // CAP0-DECLINE-STATUS-CASCADE — canonical job.status_changed event for the
+      // quoted -> declined transition. Mirrors the canonical pair pattern used
+      // by send-quote/send for the draft -> quoted transition. Awaited via
+      // safeBusinessEventInsert so transient Supabase failures are logged
+      // [canonical-event-fail] rather than silently dropped.
+      if (declineTransitioned && doc.job_id) {
+        const nowIso = new Date().toISOString()
+        await safeBusinessEventInsert(sb, {
+          event_type: 'job.status_changed',
+          source: 'send-quote',
+          occurred_at: nowIso,
+          recorded_at: nowIso,
+          entity_type: 'job',
+          entity_id: doc.job_id,
+          correlation_id: doc.job_id,
+          job_id: doc.job_id,
+          payload: {
+            entity: { id: doc.job_id, name: doc.jobs?.job_number || '' },
+            changes: { status: { from: 'quoted', to: 'declined' } },
+            related_entities: [{ type: 'job_document', id: doc.id }],
+          },
+          metadata: { reason: 'quote_declined', handler: 'send-quote/decline' },
+          schema_version: '1.0',
+        }, { handler: 'send-quote/decline', job_id: doc.job_id })
       }
 
       // ── Notify scoper via business_event (telegram-bot reacts to this) ──
