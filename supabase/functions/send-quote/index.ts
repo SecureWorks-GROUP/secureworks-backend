@@ -20,6 +20,9 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
+import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -130,6 +133,180 @@ async function safeBusinessEventInsert(
   }
 }
 
+// ── CAP0-QUOTE-REVISION-MINIMAL — Job Release Packet V1 helper ──────────────
+//
+// recordReleasedQuoteRevision: builds the minimal manifest, computes the hash,
+// uploads canonical manifest JSON to Storage, then INSERTs the quote_revisions
+// row WITH sent_at = now() in a single atomic step.
+//
+// Why no pre-Resend staging: an earlier design wrote a staged row
+// (sent_at = NULL) BEFORE Resend so the hash anchor existed even on Resend
+// failure. Codex stop-gate review (task-molbo0d5-4v6crc) flagged that this
+// produces a stale-snapshot bug — a failed first attempt leaves the staged row
+// keyed only on (job_id, version); a later retry with different content
+// (recipient changed, pricing edited, PDF regenerated) hits ON CONFLICT, blindly
+// reuses the stale row, and releases an immutable revision whose snapshot does
+// NOT match the email that actually shipped. The trigger's immutability still
+// held — but it was protecting the wrong content.
+//
+// Fix: the row is INSERTed only at the release moment, with sent_at = now()
+// directly. A failed Resend produces no row at all. A retry with different
+// content is free to record fresh truth. The released-row contract becomes:
+// row exists ⇒ release happened. No intermediate states.
+//
+// Manifest upload still happens BEFORE the INSERT so manifest_url is reachable
+// as soon as the row exists. If the upload fails we log and return null;
+// the caller's canonical events still emit (release moment is irreversible:
+// email sent, jobs.status flipped) — just without a quote_revision_id.
+type RecordReleaseQuoteRevisionInput = {
+  job_id: string
+  job_document_id: string
+  version: number
+  recipient_email: string
+  recipient_label: string | null
+  build_kind: 'patio' | 'fence' | 'misc'
+  council_status?: CouncilStatus
+  neighbours_required?: boolean | null
+  scope: {
+    client_name: string | null
+    site_address: string | null
+    site_suburb: string | null
+    job_type: string | null
+    job_number: string | null
+    runs?: Array<{
+      run_label: string
+      run_name: string | null
+      neighbour_id: string | null
+      items_count: number
+    }>
+  }
+  pricing_json: unknown
+  pdf_url: string
+  released_via: 'send-quote/send' | 'send-quote/send-runs'
+  org_id: string
+}
+
+async function recordReleasedQuoteRevision(
+  sb: any,
+  input: RecordReleaseQuoteRevisionInput,
+  ctx: { handler: string; job_id: string },
+): Promise<string | null> {
+  try {
+    // 1. Build minimal manifest snapshot at release time.
+    const manifest = buildMinimalReleaseManifest({
+      job_id: input.job_id,
+      job_document_id: input.job_document_id,
+      version: input.version,
+      recipient_email: input.recipient_email,
+      recipient_label: input.recipient_label,
+      build_kind: input.build_kind,
+      council_status: input.council_status,
+      neighbours_required: input.neighbours_required,
+      scope: input.scope,
+      pricing_json: input.pricing_json,
+      pdf_url: input.pdf_url,
+      released_via: input.released_via,
+    })
+
+    // 2. Canonicalize + hash (recursive deep-sort + SHA-256).
+    const { canonical, hash } = await canonicalJsonAndHash(manifest)
+
+    // 3. Upload canonical manifest JSON to Storage.
+    const manifestPath = `${input.org_id}/${input.job_id}/manifest_v${input.version}_${hash.slice(0, 12)}.json`
+    const { error: upErr } = await sb.storage
+      .from('job-pdfs')
+      .upload(manifestPath, new Blob([canonical], { type: 'application/json' }), {
+        cacheControl: 'no-cache',
+        upsert: true,
+        contentType: 'application/json',
+      })
+    if (upErr) {
+      console.error('[quote-revision-record-fail]', JSON.stringify({
+        job_id: input.job_id, version: input.version, handler: ctx.handler,
+        stage: 'manifest_upload', error: upErr.message ?? String(upErr),
+      }))
+      return null
+    }
+    const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/${manifestPath}`
+
+    // 4. INSERT the released row directly with sent_at = now(). Atomic; no staging.
+    const totals = manifest.totals_snapshot
+    const sentAtIso = new Date().toISOString()
+    const { data: inserted, error: insErr } = await sb.from('quote_revisions')
+      .insert({
+        job_id: input.job_id,
+        job_document_id: input.job_document_id,
+        version: input.version,
+        recipient_email: input.recipient_email,
+        recipient_label: input.recipient_label,
+        scope_snapshot_json: manifest.scope_snapshot,
+        pricing_snapshot_json: manifest.pricing_snapshot,
+        totals_snapshot_json: totals,
+        manifest_url: manifestUrl,
+        manifest_hash: hash,
+        pdf_url: input.pdf_url,
+        council_status: input.council_status ?? 'unknown',
+        build_kind: input.build_kind,
+        neighbours_required: input.neighbours_required ?? null,
+        released_via: input.released_via,
+        sent_at: sentAtIso,
+        schema_version: '1.0',
+      })
+      .select('id')
+      .single()
+
+    if (!insErr && inserted) {
+      return inserted.id
+    }
+
+    // INSERT failed — almost certainly a (job_id, version) unique conflict.
+    // In the new lifecycle, a row can only exist at sent_at IS NOT NULL (we
+    // never stage). So a conflict means either (a) a previous release fired
+    // this row — defensive log [quote-revision-duplicate-release], return the
+    // existing released id so canonical events stay coherent — or (b) a stale
+    // staged row from a pre-fix deploy (should not exist in this codebase's
+    // history; defensive only) — log [quote-revision-stale-staged] and return
+    // null so canonical events emit with quote_revision_id=null and the
+    // operator notices.
+    const { data: existing } = await sb.from('quote_revisions')
+      .select('id, sent_at')
+      .eq('job_id', input.job_id)
+      .eq('version', input.version)
+      .maybeSingle()
+    if (existing && existing.sent_at !== null) {
+      console.log('[quote-revision-duplicate-release]', JSON.stringify({
+        job_id: input.job_id, version: input.version,
+        handler: ctx.handler, revision_id: existing.id,
+        note: 'release path fired but row already at sent_at NOT NULL — duplicate release attempt',
+      }))
+      return existing.id
+    }
+    if (existing) {
+      // sent_at IS NULL — should not happen post-this-fix. The
+      // controlled-immutability trigger refuses any UPDATE; the no_delete
+      // trigger refuses any DELETE; so the row is stuck. DB admin must drop
+      // and recreate to clean up.
+      console.error('[quote-revision-stale-staged]', JSON.stringify({
+        job_id: input.job_id, version: input.version,
+        handler: ctx.handler, revision_id: existing.id,
+        note: 'pre-existing staged row blocks new release; DB admin must clean up',
+      }))
+      return null
+    }
+    console.error('[quote-revision-record-fail]', JSON.stringify({
+      job_id: input.job_id, version: input.version, handler: ctx.handler,
+      stage: 'insert_and_no_existing', error: insErr?.message ?? String(insErr),
+    }))
+    return null
+  } catch (e: any) {
+    console.error('[quote-revision-record-fail]', JSON.stringify({
+      job_id: input.job_id, version: input.version, handler: ctx.handler,
+      stage: 'helper_threw', error: e?.message ?? String(e),
+    }))
+    return null
+  }
+}
+
 serve(async (req: Request) => {
   const url = new URL(req.url)
   const path = url.pathname.split('/').pop()
@@ -168,10 +345,12 @@ serve(async (req: Request) => {
         return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
       }
 
-      // Get document record (include job_contact for per-neighbour routing)
+      // Get document record (include job_contact for per-neighbour routing).
+      // Cap 0 Job Release Packet V1: pricing_json + site_address are needed at
+      // staging time for the manifest snapshot.
       const { data: doc, error: docErr } = await sb
         .from('job_documents')
-        .select('*, jobs(client_name, site_suburb, type, job_number, ghl_contact_id), job_contacts(client_name, client_email)')
+        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, pricing_json), job_contacts(client_name, client_email)')
         .eq('id', document_id)
         .single()
 
@@ -190,6 +369,15 @@ serve(async (req: Request) => {
 
       // Build client view URL
       const viewUrl = `${BASE_URL}/functions/v1/send-quote/view?token=${doc.share_token}`
+
+      // ── Cap 0 quote_revision precompute (Job Release Packet V1) ──
+      // Per Codex stop-gate review (task-molbo0d5-4v6crc) we record the
+      // quote_revisions row ONLY at the release moment (post-Resend success +
+      // jobs.status flip), not pre-Resend. This precomputes the build_kind
+      // that the post-flip recordReleasedQuoteRevision call will need.
+      const buildKindForSend: 'patio' | 'fence' | 'misc' =
+        doc.jobs?.type === 'fencing' ? 'fence' :
+        doc.jobs?.type === 'patio' ? 'patio' : 'misc'
 
       // Send email via Resend
       const emailSubject = customSubject || `Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`
@@ -320,6 +508,33 @@ serve(async (req: Request) => {
         if (transitioned) {
           const nowIso = new Date().toISOString()
           const totalIncGST = jobBefore?.pricing_json?.totalIncGST ?? jobBefore?.pricing_json?.total ?? jobBefore?.pricing_json?.grandTotal ?? 0
+
+          // Cap 0 quote_revisions: record the released row HERE, atomic with
+          // the release moment. Builds manifest + uploads + INSERTs sent_at=now()
+          // in one helper call. Returns the new revision id, or null if the
+          // helper failed (release moment is irreversible — email sent and
+          // jobs.status flipped, so canonical events still emit, just with
+          // quote_revision_id=null).
+          const releasedRevisionId = await recordReleasedQuoteRevision(sb, {
+            job_id: doc.job_id,
+            job_document_id: doc.id,
+            version: doc.version || 1,
+            recipient_email: client_email,
+            recipient_label: doc.job_contacts?.client_name || null,
+            build_kind: buildKindForSend,
+            scope: {
+              client_name: doc.jobs?.client_name || null,
+              site_address: doc.jobs?.site_address || null,
+              site_suburb: doc.jobs?.site_suburb || null,
+              job_type: doc.jobs?.type || null,
+              job_number: doc.jobs?.job_number || null,
+            },
+            pricing_json: doc.jobs?.pricing_json || null,
+            pdf_url: doc.pdf_url || '',
+            released_via: 'send-quote/send',
+            org_id: DEFAULT_ORG_ID,
+          }, { handler: 'send-quote/send', job_id: doc.job_id })
+
           await safeBusinessEventInsert(sb, {
             event_type: 'quote.sent',
             source: 'send-quote',
@@ -331,6 +546,7 @@ serve(async (req: Request) => {
             job_id: doc.job_id,
             payload: {
               document_id,
+              quote_revision_id: releasedRevisionId,
               job_number: jobBefore?.job_number || null,
               job_type: jobBefore?.type || null,
               sent_to: client_email,
@@ -353,7 +569,10 @@ serve(async (req: Request) => {
               entity: { id: doc.job_id, name: jobBefore?.job_number || jobBefore?.client_name || '' },
               changes: { status: { from: 'draft', to: 'quoted' } },
               financial: { amount: totalIncGST },
-              related_entities: [{ type: 'job_document', id: document_id }],
+              related_entities: [
+                { type: 'job_document', id: document_id },
+                ...(releasedRevisionId ? [{ type: 'quote_revision', id: releasedRevisionId }] : []),
+              ],
             },
             metadata: { reason: 'quote_sent', handler: 'send-quote/send' },
             schema_version: '1.0',
@@ -1298,6 +1517,22 @@ serve(async (req: Request) => {
         }
       }
 
+      // ── Cap 0 quote_revision precompute for /send-runs (Job Release Packet V1) ──
+      // Per Codex stop-gate review (task-molbo0d5-4v6crc) we record the
+      // quote_revisions row ONLY at the release moment (post-Resend success +
+      // jobs.status flip), not pre-Resend. This precomputes the per-run scope
+      // summary + neighbour flag + first-client-doc reference that the
+      // post-flip recordReleasedQuoteRevision call needs.
+      const firstClientDocForRev = createdDocs[0] || null
+      const anyRunPdfUrl = (run_pdfs && Object.values(run_pdfs).find((u): u is string => typeof u === 'string' && u.length > 0)) || ''
+      const runsScopeSummary = runs.map((r: any) => ({
+        run_label: String(r.run_label),
+        run_name: r.run_name ? String(r.run_name) : null,
+        neighbour_id: r.neighbour_id ? String(r.neighbour_id) : null,
+        items_count: Array.isArray(r.items) ? r.items.length : 0,
+      }))
+      const anyNeighbourBound = runs.some((r: any) => !!r.neighbour_id)
+
       // Send emails grouped by recipient
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
       let emailsSent = 0
@@ -1419,6 +1654,35 @@ serve(async (req: Request) => {
         const nowIso = new Date().toISOString()
         const totalIncGST = pj?.totalIncGST ?? pj?.total ?? pj?.grandTotal ?? 0
         const firstClientDoc = createdDocs[0]
+
+        // Cap 0 quote_revisions: record the released row HERE for /send-runs.
+        // Atomic with the release moment. One revision per call regardless of
+        // run count; manifest captures all runs in scope_snapshot.runs[].
+        let releasedRevisionIdRuns: string | null = null
+        if (firstClientDocForRev?.id) {
+          releasedRevisionIdRuns = await recordReleasedQuoteRevision(sb, {
+            job_id: job.id,
+            job_document_id: firstClientDocForRev.id,
+            version: 1,
+            recipient_email: primaryContact.client_email || job.client_email || '',
+            recipient_label: primaryContact.client_name || null,
+            build_kind: 'fence',
+            neighbours_required: anyNeighbourBound,
+            scope: {
+              client_name: job.client_name || null,
+              site_address: job.site_address || null,
+              site_suburb: job.site_suburb || null,
+              job_type: job.type || 'fencing',
+              job_number: job.job_number || null,
+              runs: runsScopeSummary,
+            },
+            pricing_json: pj,
+            pdf_url: anyRunPdfUrl,
+            released_via: 'send-quote/send-runs',
+            org_id: DEFAULT_ORG_ID,
+          }, { handler: 'send-quote/send-runs', job_id: job.id })
+        }
+
         await safeBusinessEventInsert(sb, {
           event_type: 'quote.sent',
           source: 'send-quote',
@@ -1430,6 +1694,7 @@ serve(async (req: Request) => {
           job_id: job.id,
           payload: {
             document_id: firstClientDoc?.id || null,
+            quote_revision_id: releasedRevisionIdRuns,
             job_number: job.job_number || null,
             job_type: job.type || 'fencing',
             sent_to: primaryContact.client_email || job.client_email,
@@ -1454,7 +1719,10 @@ serve(async (req: Request) => {
             entity: { id: job.id, name: job.job_number || job.client_name || '' },
             changes: { status: { from: 'draft', to: 'quoted' } },
             financial: { amount: totalIncGST },
-            related_entities: createdDocs.slice(0, 5).map((d: any) => ({ type: 'job_document', id: d.id })),
+            related_entities: [
+              ...createdDocs.slice(0, 5).map((d: any) => ({ type: 'job_document', id: d.id })),
+              ...(releasedRevisionIdRuns ? [{ type: 'quote_revision', id: releasedRevisionIdRuns }] : []),
+            ],
           },
           metadata: { reason: 'quote_sent_runs', handler: 'send-quote/send-runs' },
           schema_version: '1.0',
