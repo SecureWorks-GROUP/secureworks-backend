@@ -241,8 +241,9 @@ async function recordReleasedQuoteRevision(
       released_via: input.released_via,
     })
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
-    // Cap 0: skip Storage upload; use internal stub URL.
-    void canonical // keep linter happy; canonical may be revived by follow-up storage ticket
+    // Cap 0: skip Storage upload; use internal stub URL. Canonical bytes are
+    // captured inline as manifest_canonical_text so the hash stays verifiable
+    // without external Storage (Codex stop-gate fix).
     const manifestUrl = `supabase-internal://manifest/${hash}`
     const totals = manifest.totals_snapshot
     const sentAtIso = new Date().toISOString()
@@ -253,7 +254,9 @@ async function recordReleasedQuoteRevision(
         scope_snapshot_json: manifest.scope_snapshot,
         pricing_snapshot_json: manifest.pricing_snapshot,
         totals_snapshot_json: totals,
-        manifest_url: manifestUrl, manifest_hash: hash, pdf_url: input.pdf_url,
+        manifest_url: manifestUrl, manifest_hash: hash,
+        manifest_canonical_text: canonical,
+        pdf_url: input.pdf_url,
         council_status: input.council_status ?? 'unknown',
         build_kind: input.build_kind,
         neighbours_required: input.neighbours_required ?? null,
@@ -541,4 +544,27 @@ Deno.test("R10 — Codex stale-snapshot regression: a failed first attempt leave
   // sent_at must be non-null (this is a release, not a stage).
   assertEquals(typeof insertedPayload.sent_at, 'string')
   assertEquals(insertedPayload.sent_at !== null, true)
+})
+
+Deno.test("R11 — Codex verifiability fix: manifest_canonical_text is stored AND sha256(manifest_canonical_text) === manifest_hash (verifiability without Storage)", async () => {
+  // After PR #6 replaced Storage upload with the supabase-internal://... stub,
+  // the hash was no longer externally verifiable. PR-canonical-bytes captures
+  // the canonical bytes inline. Verify: the helper writes both, and they
+  // satisfy sha256(text) === hash by construction.
+  const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r11' })
+  await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  const insertedPayload = sb._state.inserted[0]
+  // The canonical text must be present and look like JSON.
+  assertEquals(typeof insertedPayload.manifest_canonical_text, 'string')
+  assert(insertedPayload.manifest_canonical_text.length > 0)
+  assert(insertedPayload.manifest_canonical_text.startsWith('{'), 'canonical bytes should start with "{"')
+  assert(insertedPayload.manifest_canonical_text.endsWith('}'), 'canonical bytes should end with "}"')
+  // The independently-computed sha256 of the canonical bytes must match the stored hash.
+  const recomputed = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(insertedPayload.manifest_canonical_text))
+  const recomputedHex = Array.from(new Uint8Array(recomputed))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+  assertEquals(recomputedHex, insertedPayload.manifest_hash, 'sha256(manifest_canonical_text) must equal manifest_hash')
+  // The manifest_url stub URL must also match the hash (consumers can correlate by hash).
+  assertEquals(insertedPayload.manifest_url, `supabase-internal://manifest/${insertedPayload.manifest_hash}`)
 })

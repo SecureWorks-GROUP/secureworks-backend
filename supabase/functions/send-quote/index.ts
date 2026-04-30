@@ -250,6 +250,12 @@ async function recordReleasedQuoteRevision(
         totals_snapshot_json: totals,
         manifest_url: manifestUrl,
         manifest_hash: hash,
+        // Codex stop-gate fix: capture canonical bytes inline so the hash is
+        // verifiable without external Storage. sha256(manifest_canonical_text)
+        // = manifest_hash by construction. Cap 0 schema-version 1.0; column
+        // is nullable for backward compat with rows written before
+        // 20260430170000 migration landed.
+        manifest_canonical_text: canonical,
         pdf_url: input.pdf_url,
         council_status: input.council_status ?? 'unknown',
         build_kind: input.build_kind,
