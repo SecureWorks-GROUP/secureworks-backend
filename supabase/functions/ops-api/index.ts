@@ -5608,6 +5608,19 @@ async function createMiscJob(client: any, body: any) {
   if (!name) throw new Error('Client name required')
   if (!line_items || line_items.length === 0) throw new Error('At least one line item required')
 
+  // Cap 0 release-truth: a Quick Quote is created at status='draft' regardless of what the
+  // caller asked for. Promotion to 'quoted' only happens when sendQuickQuoteEmail successfully
+  // delivers via Resend (mirrors the /send-quote/send and /send-quote/send-runs contract).
+  // Pre-patch behaviour honoured caller-supplied status='quoted' here, which let an operator
+  // create a row that claimed a quote was sent without anyone ever sending one. Logged when
+  // a caller still tries the old shape so we have observability of frontends that need updating.
+  if (reqStatus && reqStatus !== 'draft') {
+    console.log('[ops-api] createMiscJob ignoring caller-supplied status; forced to draft', JSON.stringify({
+      attempted_status: reqStatus,
+      reason: 'cap0-release-truth',
+    }))
+  }
+
   // Calculate totals
   const totalExGST = line_items.reduce((sum: number, li: any) => sum + (Number(li.total) || 0), 0)
   const gst = Math.round(totalExGST * 0.1 * 100) / 100
@@ -5637,7 +5650,8 @@ async function createMiscJob(client: any, body: any) {
     })),
   }
 
-  const finalStatus = reqStatus === 'quoted' ? 'quoted' : 'draft'
+  // Always 'draft' at creation per Cap 0 release-truth contract (see top of function).
+  const finalStatus = 'draft'
 
   // Generate job number — support 'general' type for SWG- prefix
   const jobType = body.job_type || 'general'
@@ -5698,7 +5712,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   if (!job_id) throw new Error('job_id required')
 
   const { data: job, error: jobErr } = await client.from('jobs')
-    .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, pricing_json')
+    .select('id, job_number, type, client_name, client_email, client_phone, site_address, site_suburb, pricing_json')
     .eq('id', job_id)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
@@ -5773,12 +5787,70 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   const resendResult = await resendResp.json()
   if (!resendResp.ok) throw new Error('Email send failed: ' + (resendResult.message || JSON.stringify(resendResult)))
 
-  // Update job with quote_sent_at
-  await client.from('jobs')
-    .update({ quoted_at: new Date().toISOString() })
+  // ── Cap 0 release-truth: atomic draft → quoted transition + canonical events ──
+  // Mirrors /send-quote/send (post-`350e943`) so Quick Quote inherits the same exactly-once
+  // guarantee on the actual transition. The conditional UPDATE returns affected rows; canonical
+  // events fire only when this call's UPDATE flipped the row. Resends on already-quoted jobs
+  // no-op the UPDATE and emit nothing canonical (idempotence).
+  const nowIso = new Date().toISOString()
+  const { data: updatedRows } = await client.from('jobs')
+    .update({ status: 'quoted', quoted_at: nowIso })
     .eq('id', job_id)
+    .eq('status', 'draft')
+    .select('id')
+  const transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
 
-  // Log email event
+  // Legacy event (mirrors /send-quote/send: written whenever a job_id exists, regardless of
+  // transition, so daily-digest and other legacy readers see the send signal on every send).
+  await client.from('job_events').insert({
+    job_id,
+    event_type: 'quote_sent',
+    detail_json: { sent_to: job.client_email, source: 'quick_quote' },
+  })
+
+  // Canonical release events — only on actual draft → quoted transition.
+  // Awaited via the existing logBusinessEvent helper so a transient Supabase failure is logged
+  // (`[ops-api] business_events write failed`) rather than silently dropped.
+  if (transitioned) {
+    const totalIncGSTNum = Number(totalIncGST) || 0
+    await logBusinessEvent(client, {
+      event_type: 'quote.sent',
+      source: 'send-quick-quote-email',
+      entity_type: 'job',
+      entity_id: job_id,
+      correlation_id: job_id,
+      job_id,
+      payload: {
+        job_number: job.job_number || null,
+        // Quick Quote rows carry whatever type the caller passed to create_misc_job
+        // (defaulting to 'general' in createMiscJob); mirror /send-quote/send and pull
+        // from the DB row rather than hardcoding so downstream consumers that filter
+        // on payload.job_type see the real value.
+        job_type: job.type || null,
+        sent_to: job.client_email,
+        total_inc_gst: totalIncGSTNum,
+      },
+      metadata: { handler: 'ops-api/send_quick_quote_email' },
+    })
+
+    await logBusinessEvent(client, {
+      event_type: 'job.status_changed',
+      source: 'send-quick-quote-email',
+      entity_type: 'job',
+      entity_id: job_id,
+      correlation_id: job_id,
+      job_id,
+      payload: {
+        entity: { id: job_id, name: job.job_number || job.client_name || '' },
+        changes: { status: { from: 'draft', to: 'quoted' } },
+        financial: { amount: totalIncGSTNum },
+        related_entities: [],
+      },
+      metadata: { reason: 'quote_sent', handler: 'ops-api/send_quick_quote_email' },
+    })
+  }
+
+  // Log email event (existing behaviour, preserved)
   await client.from('email_events').insert({
     email_type: 'quote',
     entity_type: 'job',
@@ -5792,7 +5864,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     sent_at: new Date().toISOString(),
   })
 
-  return { success: true, resend_id: resendResult.id, sent_to: job.client_email }
+  return { success: true, resend_id: resendResult.id, sent_to: job.client_email, released: transitioned }
 }
 
 // ── Delete PO ──

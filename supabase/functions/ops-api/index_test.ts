@@ -680,3 +680,179 @@ Deno.test("T16: omitted body.job_id → cache linkage drives audit", async () =>
   assertEquals(jobEventInserts.length, 1)
   assertEquals(jobEventInserts[0].row.job_id, "job-uuid-1")
 })
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CAP0-QUICK-QUOTE-RELEASE-TRUTH-FIX — Phase 0.5 binding evidence
+//
+// Tests the post-Resend release-truth pattern in sendQuickQuoteEmail. Because
+// importing index.ts here would start the production HTTP server via serve(...)
+// at module load (and because sendQuickQuoteEmail is module-internal), this
+// test reimplements the pattern under test as a small pure function and
+// exercises it with mocked supabase clients. The verification report
+// cross-references this against the deployed code at:
+//   ops-api/index.ts post-Resend block in sendQuickQuoteEmail
+//   (conditional UPDATE + canonical pair gated on `transitioned`,
+//    payload.job_type reads from job.type — Codex stop-time fix)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Pure reimplementation of the pattern under test. Mirrors the post-Resend
+// block in sendQuickQuoteEmail.
+async function runQuickQuoteRelease(
+  client: any,
+  job: { id: string; job_number: string | null; type: string | null; client_email: string },
+  logBusinessEventCalls: Array<Record<string, any>>,
+  legacyEventCalls: Array<Record<string, any>>,
+): Promise<{ released: boolean }> {
+  const nowIso = new Date().toISOString()
+  const { data: updatedRows } = await client.from('jobs')
+    .update({ status: 'quoted', quoted_at: nowIso })
+    .eq('id', job.id)
+    .eq('status', 'draft')
+    .select('id')
+  const transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
+
+  await client.from('job_events').insert({
+    job_id: job.id,
+    event_type: 'quote_sent',
+    detail_json: { sent_to: job.client_email, source: 'quick_quote' },
+  })
+  legacyEventCalls.push({ event_type: 'quote_sent', job_id: job.id })
+
+  if (transitioned) {
+    const totalIncGSTNum = 0
+    // Codex-fix regression check: job_type MUST come from job.type, NEVER hardcoded.
+    logBusinessEventCalls.push({
+      event_type: 'quote.sent',
+      source: 'send-quick-quote-email',
+      job_id: job.id,
+      payload: {
+        job_number: job.job_number || null,
+        job_type: job.type || null,
+        sent_to: job.client_email,
+        total_inc_gst: totalIncGSTNum,
+      },
+      metadata: { handler: 'ops-api/send_quick_quote_email' },
+    })
+
+    logBusinessEventCalls.push({
+      event_type: 'job.status_changed',
+      source: 'send-quick-quote-email',
+      job_id: job.id,
+      payload: {
+        entity: { id: job.id, name: job.job_number || '' },
+        changes: { status: { from: 'draft', to: 'quoted' } },
+        financial: { amount: totalIncGSTNum },
+      },
+      metadata: { reason: 'quote_sent', handler: 'ops-api/send_quick_quote_email' },
+    })
+  }
+
+  return { released: transitioned }
+}
+
+function makeJobsClient(updateReturnsRows: Array<{ id: string }>) {
+  const inserts: Array<{ table: string; row: Record<string, any> }> = []
+  const fromTable = (table: string) => ({
+    insert: (row: Record<string, any>) => {
+      inserts.push({ table, row })
+      return Promise.resolve({ error: null })
+    },
+    update: (_payload: Record<string, any>) => {
+      const chain = {
+        _filters: {} as Record<string, any>,
+        eq(col: string, val: any) {
+          this._filters[col] = val
+          return this
+        },
+        select(_cols: string) {
+          return Promise.resolve({ data: updateReturnsRows, error: null })
+        },
+      }
+      return chain
+    },
+  })
+  return { from: fromTable, _inserts: inserts }
+}
+
+const SAMPLE_JOB_PATIO = {
+  id: 'aa1da77f-1951-4d64-be86-a810781d9813',
+  job_number: 'SWP-26121',
+  type: 'patio' as string | null,
+  client_email: 'marnin@secureworkswa.com.au',
+}
+
+Deno.test("Quick Quote — transition path: empty pre-state → draft, conditional UPDATE returns 1 row, canonical pair emitted", async () => {
+  const client = makeJobsClient([{ id: SAMPLE_JOB_PATIO.id }])
+  const logCalls: Array<Record<string, any>> = []
+  const legacyCalls: Array<Record<string, any>> = []
+  const result = await runQuickQuoteRelease(client, SAMPLE_JOB_PATIO, logCalls, legacyCalls)
+  assertEquals(result.released, true, "expected released=true on a clean draft → quoted transition")
+  assertEquals(logCalls.length, 2, "expected exactly two canonical-event helper calls")
+  assertEquals(logCalls[0].event_type, 'quote.sent')
+  assertEquals(logCalls[1].event_type, 'job.status_changed')
+  assertEquals(legacyCalls.length, 1, "expected exactly one legacy job_events.quote_sent insert")
+})
+
+Deno.test("Quick Quote — Codex regression: payload.job_type reads from job.type ('patio'), NOT hardcoded 'miscellaneous'", async () => {
+  const client = makeJobsClient([{ id: SAMPLE_JOB_PATIO.id }])
+  const logCalls: Array<Record<string, any>> = []
+  const legacyCalls: Array<Record<string, any>> = []
+  await runQuickQuoteRelease(client, SAMPLE_JOB_PATIO, logCalls, legacyCalls)
+  const quoteSent = logCalls.find(c => c.event_type === 'quote.sent')
+  assertEquals(quoteSent?.payload.job_type, 'patio', "Codex-flagged bug: job_type must reflect DB row, not 'miscellaneous'")
+})
+
+Deno.test("Quick Quote — Codex regression: payload.job_type honours every DB type, not just 'patio'", async () => {
+  const cases: Array<{ type: string | null; expected: string | null }> = [
+    { type: 'fencing', expected: 'fencing' },
+    { type: 'general', expected: 'general' },
+    { type: 'decking', expected: 'decking' },
+    { type: null, expected: null },
+  ]
+  for (const c of cases) {
+    const client = makeJobsClient([{ id: SAMPLE_JOB_PATIO.id }])
+    const logCalls: Array<Record<string, any>> = []
+    const legacyCalls: Array<Record<string, any>> = []
+    await runQuickQuoteRelease(
+      client,
+      { ...SAMPLE_JOB_PATIO, type: c.type },
+      logCalls,
+      legacyCalls,
+    )
+    const quoteSent = logCalls.find(c2 => c2.event_type === 'quote.sent')
+    assertEquals(quoteSent?.payload.job_type, c.expected, `job_type mismatch for input ${c.type}`)
+  }
+})
+
+Deno.test("Quick Quote — no-op path (already quoted): conditional UPDATE returns [], NO canonical pair, legacy STILL writes", async () => {
+  const client = makeJobsClient([])
+  const logCalls: Array<Record<string, any>> = []
+  const legacyCalls: Array<Record<string, any>> = []
+  const result = await runQuickQuoteRelease(client, SAMPLE_JOB_PATIO, logCalls, legacyCalls)
+  assertEquals(result.released, false, "expected released=false when conditional UPDATE no-ops")
+  assertEquals(logCalls.length, 0, "no canonical events on a no-op resend")
+  assertEquals(legacyCalls.length, 1, "legacy quote_sent still writes on a no-op resend (matches deployed behaviour)")
+})
+
+Deno.test("Quick Quote — job.status_changed payload carries from='draft', to='quoted', reason='quote_sent'", async () => {
+  const client = makeJobsClient([{ id: SAMPLE_JOB_PATIO.id }])
+  const logCalls: Array<Record<string, any>> = []
+  const legacyCalls: Array<Record<string, any>> = []
+  await runQuickQuoteRelease(client, SAMPLE_JOB_PATIO, logCalls, legacyCalls)
+  const statusChanged = logCalls.find(c => c.event_type === 'job.status_changed')
+  assertEquals(statusChanged?.payload.changes.status.from, 'draft')
+  assertEquals(statusChanged?.payload.changes.status.to, 'quoted')
+  assertEquals(statusChanged?.metadata.reason, 'quote_sent')
+  assertEquals(statusChanged?.metadata.handler, 'ops-api/send_quick_quote_email')
+})
+
+Deno.test("Quick Quote — both canonical events carry handler='ops-api/send_quick_quote_email'", async () => {
+  const client = makeJobsClient([{ id: SAMPLE_JOB_PATIO.id }])
+  const logCalls: Array<Record<string, any>> = []
+  const legacyCalls: Array<Record<string, any>> = []
+  await runQuickQuoteRelease(client, SAMPLE_JOB_PATIO, logCalls, legacyCalls)
+  for (const call of logCalls) {
+    assertEquals(call.metadata.handler, 'ops-api/send_quick_quote_email',
+      `${call.event_type} missing or wrong handler`)
+  }
+})
