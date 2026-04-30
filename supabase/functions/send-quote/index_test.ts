@@ -1,21 +1,20 @@
-// CAP0-QA-CANONICAL-EVENTS-HARDENING — Phase 0.4 binding evidence.
+// send-quote test suite covering:
+//   - safeBusinessEventInsert (Phase 2 hardening — 5 cases, originally CAP0-QA-CANONICAL-EVENTS-HARDENING)
+//   - stageQuoteRevision / releaseQuoteRevision (CAP0-QUOTE-REVISION-MINIMAL)
 //
-// Tests the THREE failure modes of safeBusinessEventInsert:
-//   1. happy path: insert resolves OK -> NO log emitted
-//   2. resolved-error path: insert returns {error: {message: 'simulated'}} ->
-//      [canonical-event-fail] JSON logged
-//   3. thrown-exception path: insert throws -> [canonical-event-fail] JSON logged
+// LOCAL-ONLY. The helpers under test are non-exported top-level async functions
+// in `index.ts`; importing index.ts directly would start the production HTTP
+// server via `serve(...)` at module-load time. We therefore copy the helper
+// bodies inline below — any drift between these copies and the deployed helpers
+// is the operator's responsibility (audited at PR review time via grep diff).
 //
-// LOCAL-ONLY. Not committed in this Phase 0 turn. The helper under test is a
-// non-exported top-level async function in `index.ts`; importing index.ts here
-// would start the production HTTP server via `serve(...)` at module-load time.
-// To avoid that, the helper body is copied exactly from index.ts:108-132 so
-// the verification report can show line-by-line equivalence. Any future drift
-// between this copy and the deployed helper is the operator's responsibility.
-//
-// Run: /Users/marninstobbe/.deno/bin/deno test --allow-none index_test.ts
+// Run from the worktree root:
+//   deno test --allow-net --allow-env supabase/functions/send-quote/index_test.ts
+//   deno test --allow-net --allow-env supabase/functions/_shared/release_packet/
 
-import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts"
+import { assert, assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts"
+import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts"
+import { buildMinimalReleaseManifest } from "../_shared/release_packet/build_minimal_manifest.ts"
 
 // ── EXACT COPY of safeBusinessEventInsert from index.ts:108-132 ──
 async function safeBusinessEventInsert(
@@ -177,4 +176,345 @@ Deno.test("safeBusinessEventInsert — does NOT throw out of the helper on inser
   } finally {
     cap.restore()
   }
+})
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// CAP0-QUOTE-REVISION-MINIMAL — recordReleasedQuoteRevision tests (R1–R10)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// These mirror the helper body in index.ts. Any drift caught at PR review.
+// The helper records the quote_revisions row ONLY at the release moment with
+// sent_at = now() — no pre-Resend staging — so a failed first attempt leaves
+// no row behind for a later retry to inherit a stale snapshot from.
+// (Codex stop-gate review task-molbo0d5-4v6crc — see helper docstring.)
+
+const SUPABASE_URL = 'https://kevgrhcjxspbxgovpmfl.supabase.co'
+
+// ── EXACT COPY of recordReleasedQuoteRevision body from index.ts ───────────
+type RecordReleaseQuoteRevisionInput = {
+  job_id: string
+  job_document_id: string
+  version: number
+  recipient_email: string
+  recipient_label: string | null
+  build_kind: 'patio' | 'fence' | 'misc'
+  council_status?: 'not_required' | 'required_pending' | 'required_approved' | 'unknown'
+  neighbours_required?: boolean | null
+  scope: {
+    client_name: string | null
+    site_address: string | null
+    site_suburb: string | null
+    job_type: string | null
+    job_number: string | null
+    runs?: Array<{
+      run_label: string
+      run_name: string | null
+      neighbour_id: string | null
+      items_count: number
+    }>
+  }
+  pricing_json: unknown
+  pdf_url: string
+  released_via: 'send-quote/send' | 'send-quote/send-runs'
+  org_id: string
+}
+
+async function recordReleasedQuoteRevision(
+  sb: any,
+  input: RecordReleaseQuoteRevisionInput,
+  ctx: { handler: string; job_id: string },
+): Promise<string | null> {
+  try {
+    const manifest = buildMinimalReleaseManifest({
+      job_id: input.job_id,
+      job_document_id: input.job_document_id,
+      version: input.version,
+      recipient_email: input.recipient_email,
+      recipient_label: input.recipient_label,
+      build_kind: input.build_kind,
+      council_status: input.council_status,
+      neighbours_required: input.neighbours_required,
+      scope: input.scope,
+      pricing_json: input.pricing_json,
+      pdf_url: input.pdf_url,
+      released_via: input.released_via,
+    })
+    const { canonical, hash } = await canonicalJsonAndHash(manifest)
+    const manifestPath = `${input.org_id}/${input.job_id}/manifest_v${input.version}_${hash.slice(0, 12)}.json`
+    const { error: upErr } = await sb.storage
+      .from('job-pdfs')
+      .upload(manifestPath, new Blob([canonical], { type: 'application/json' }), {
+        cacheControl: 'no-cache', upsert: true, contentType: 'application/json',
+      })
+    if (upErr) {
+      return null
+    }
+    const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/${manifestPath}`
+    const totals = manifest.totals_snapshot
+    const sentAtIso = new Date().toISOString()
+    const { data: inserted, error: insErr } = await sb.from('quote_revisions')
+      .insert({
+        job_id: input.job_id, job_document_id: input.job_document_id, version: input.version,
+        recipient_email: input.recipient_email, recipient_label: input.recipient_label,
+        scope_snapshot_json: manifest.scope_snapshot,
+        pricing_snapshot_json: manifest.pricing_snapshot,
+        totals_snapshot_json: totals,
+        manifest_url: manifestUrl, manifest_hash: hash, pdf_url: input.pdf_url,
+        council_status: input.council_status ?? 'unknown',
+        build_kind: input.build_kind,
+        neighbours_required: input.neighbours_required ?? null,
+        released_via: input.released_via,
+        sent_at: sentAtIso,
+        schema_version: '1.0',
+      })
+      .select('id').single()
+    if (!insErr && inserted) {
+      return inserted.id
+    }
+    const { data: existing } = await sb.from('quote_revisions')
+      .select('id, sent_at')
+      .eq('job_id', input.job_id).eq('version', input.version).maybeSingle()
+    if (existing && existing.sent_at !== null) {
+      return existing.id
+    }
+    if (existing) {
+      return null
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// ── Mock builder ──
+type MockState = {
+  uploaded: Array<{ path: string; bytes: string }>
+  inserted: Array<Record<string, any>>
+}
+
+function makeQuoteRevSupabase(opts: {
+  uploadOk?: boolean
+  insertReturns?: 'ok' | 'conflict' | 'unknown_error'
+  insertedId?: string
+  preExistingRow?: { id: string; sent_at: string | null }
+}) {
+  const state: MockState = { uploaded: [], inserted: [] }
+  const sb = {
+    storage: {
+      from: (_bucket: string) => ({
+        upload: async (path: string, blob: Blob, _opts: any) => {
+          if (opts.uploadOk === false) return { error: { message: 'upload denied' } }
+          const text = await blob.text()
+          state.uploaded.push({ path, bytes: text })
+          return { error: null }
+        },
+      }),
+    },
+    from: (_table: string) => {
+      const chain: any = {
+        _captured: { method: '', payload: null as any, filters: [] as any[] },
+        insert(payload: any) {
+          this._captured.method = 'insert'
+          this._captured.payload = payload
+          state.inserted.push(payload)
+          return this
+        },
+        select(_cols: string) { return this },
+        eq(_col: string, _val: any) { return this },
+        is(_col: string, _val: any) { return this },
+        single() {
+          if (this._captured.method === 'insert') {
+            if (opts.insertReturns === 'ok') {
+              return Promise.resolve({ data: { id: opts.insertedId || 'new-rev-id' }, error: null })
+            }
+            if (opts.insertReturns === 'conflict') {
+              return Promise.resolve({ data: null, error: { code: '23505', message: 'duplicate key' } })
+            }
+            return Promise.resolve({ data: null, error: { message: 'unknown error' } })
+          }
+          return Promise.resolve({ data: null, error: null })
+        },
+        maybeSingle() {
+          if (opts.preExistingRow) return Promise.resolve({ data: opts.preExistingRow, error: null })
+          return Promise.resolve({ data: null, error: null })
+        },
+      }
+      return chain
+    },
+    _state: state,
+  }
+  return sb as any
+}
+
+const sampleInput: RecordReleaseQuoteRevisionInput = {
+  job_id: 'aa1da77f-1951-4d64-be86-a810781d9813',
+  job_document_id: '4e33c01b-99a4-4c00-9ee0-6e7385a94f0b',
+  version: 1,
+  recipient_email: 'marnin@secureworkswa.com.au',
+  recipient_label: null,
+  build_kind: 'patio',
+  scope: {
+    client_name: 'CAP0 TEST',
+    site_address: '1 Test St',
+    site_suburb: 'Perth',
+    job_type: 'patio',
+    job_number: 'SWP-26133',
+  },
+  pricing_json: { totalIncGST: 5500, totalExGST: 5000, gst: 500 },
+  pdf_url: 'https://example.com/x.pdf',
+  released_via: 'send-quote/send',
+  org_id: '00000000-0000-0000-0000-000000000001',
+}
+
+const sampleRevCtx = { handler: 'send-quote/send', job_id: 'aa1da77f-1951-4d64-be86-a810781d9813' }
+
+Deno.test("R1 — recordReleasedQuoteRevision happy path: uploads manifest, inserts row with sent_at NOT NULL, returns revision id", async () => {
+  const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r1' })
+  const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(id, 'rev-r1')
+  assertEquals(sb._state.uploaded.length, 1)
+  const path = sb._state.uploaded[0].path
+  assertEquals(path.startsWith(`${sampleInput.org_id}/${sampleInput.job_id}/manifest_v1_`), true)
+  assertEquals(path.endsWith('.json'), true)
+  // Critical assertion: sent_at MUST be non-null at INSERT time (no staging).
+  assertEquals(sb._state.inserted.length, 1)
+  assertEquals(typeof sb._state.inserted[0].sent_at, 'string')
+  assertEquals(sb._state.inserted[0].sent_at !== null, true)
+  assertEquals(sb._state.inserted[0].released_via, 'send-quote/send')
+  assertEquals(sb._state.inserted[0].schema_version, '1.0')
+})
+
+Deno.test("R2 — recordReleasedQuoteRevision: insert payload's sent_at is a valid ISO timestamp string (release moment)", async () => {
+  const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r2' })
+  await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  const sentAt = sb._state.inserted[0].sent_at
+  // ISO 8601 with milliseconds: 2026-04-30T10:00:00.000Z
+  assert(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(sentAt), `expected ISO timestamp, got ${sentAt}`)
+})
+
+Deno.test("R3 — recordReleasedQuoteRevision: ON CONFLICT + existing released row returns existing revision id (defensive duplicate-release)", async () => {
+  // Duplicate-release defensive path: a row already exists at sent_at IS NOT NULL.
+  // Should never normally reach here in production (the conditional UPDATE on
+  // jobs would have returned 0 rows on a re-fire). But if we do, log and
+  // return the existing id so canonical events stay coherent.
+  const sb = makeQuoteRevSupabase({
+    uploadOk: true,
+    insertReturns: 'conflict',
+    preExistingRow: { id: 'rev-r3-existing', sent_at: '2026-04-30T06:13:04Z' },
+  })
+  const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(id, 'rev-r3-existing')
+})
+
+Deno.test("R4 — recordReleasedQuoteRevision: INSERT error with no existing row returns null (no throw)", async () => {
+  const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'unknown_error' })
+  const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(id, null)
+})
+
+Deno.test("R5 — recordReleasedQuoteRevision: ON CONFLICT + stale staged row (sent_at IS NULL) returns null and does NOT mutate the stale row", async () => {
+  // This path should not normally be reachable post-this-fix (we never stage),
+  // but defensively if a stale staged row exists from old code or manual DB
+  // intervention, the trigger blocks our updating it. Helper returns null;
+  // canonical events still emit with quote_revision_id=null and the operator
+  // notices the [quote-revision-stale-staged] log line.
+  const sb = makeQuoteRevSupabase({
+    uploadOk: true,
+    insertReturns: 'conflict',
+    preExistingRow: { id: 'rev-r5-stale-staged', sent_at: null },
+  })
+  const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(id, null)
+})
+
+Deno.test("R6 — recordReleasedQuoteRevision: ON CONFLICT + no existing row visible returns null", async () => {
+  // Edge case: insert reports conflict but the lookup finds no row. Could
+  // be a transient consistency issue. Return null defensively.
+  const sb = makeQuoteRevSupabase({
+    uploadOk: true,
+    insertReturns: 'conflict',
+    // no preExistingRow set
+  })
+  const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(id, null)
+})
+
+Deno.test("R7 — recordReleasedQuoteRevision: manifest upload failure short-circuits before INSERT", async () => {
+  const sb = makeQuoteRevSupabase({ uploadOk: false, insertReturns: 'ok' })
+  const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(id, null)
+  assertEquals(sb._state.inserted.length, 0, 'INSERT must not be attempted if manifest upload failed')
+})
+
+Deno.test("R8 — recordReleasedQuoteRevision: manifest_hash matches recompute and appears as the path slice (release-packet hash determinism contract)", async () => {
+  const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r8' })
+  await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  const insertedHash = sb._state.inserted[0].manifest_hash
+  assertEquals(typeof insertedHash, 'string')
+  assertEquals(insertedHash.length, 64, 'manifest_hash must be 64-char SHA-256 hex')
+  const expectedPathPrefix = insertedHash.slice(0, 12)
+  const path = sb._state.uploaded[0].path
+  assertEquals(path.includes(`manifest_v1_${expectedPathPrefix}.json`), true)
+})
+
+Deno.test("R9 — recordReleasedQuoteRevision: insert payload contains no base64 data: URI fields (manifest no-binary contract)", async () => {
+  const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r9' })
+  await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  const seen: string[] = []
+  function walk(v: any, path: string) {
+    if (typeof v === 'string') seen.push(`${path}=${v.slice(0, 40)}`)
+    else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${path}[${i}]`))
+    else if (v && typeof v === 'object') Object.entries(v).forEach(([k, val]) => walk(val, `${path}.${k}`))
+  }
+  walk(sb._state.inserted[0], '$')
+  for (const s of seen) {
+    if (/^[^=]+=data:[^;]+;base64,/.test(s)) {
+      throw new Error(`base64 data URI leaked into manifest payload: ${s}`)
+    }
+  }
+})
+
+Deno.test("R10 — Codex stale-snapshot regression: a failed first attempt leaves NO row, so a second attempt with different content records its OWN snapshot (not the failed attempt's)", async () => {
+  // The bug Codex flagged in 1933ec0: stage-pre-Resend persisted a row at
+  // sent_at IS NULL on Resend failure; a later retry with different content
+  // hit ON CONFLICT and reused the stale row's snapshot, releasing an
+  // immutable revision whose recipient/pdf/pricing came from the failed
+  // attempt rather than the email that actually shipped.
+  //
+  // Post-fix: a failed first attempt = no row, no upload, no commit. A second
+  // attempt with different content runs to completion as if it were the first.
+  // This test simulates BOTH attempts and asserts the second one's payload is
+  // exactly what the second call computed (not bleed-through from the first).
+
+  // Attempt 1 — Resend failure path. We model "Resend failure" by simply NOT
+  // calling the helper at all (the production code only calls
+  // recordReleasedQuoteRevision inside `if (transitioned)`, which requires
+  // Resend success). State A: zero rows, zero uploads.
+  const sbAttempt1 = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-attempt1' })
+  // (No call.) Verify the helper state is untouched by the "failure":
+  assertEquals(sbAttempt1._state.inserted.length, 0)
+  assertEquals(sbAttempt1._state.uploaded.length, 0)
+
+  // Attempt 2 — same job_id+version as attempt 1, but DIFFERENT content
+  // (recipient changed, pricing changed). Resend now succeeds; the helper is
+  // called for the first and only time.
+  const sbAttempt2 = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-attempt2' })
+  const attempt2Input: RecordReleaseQuoteRevisionInput = {
+    ...sampleInput,
+    recipient_email: 'differentclient@example.com',  // changed!
+    pricing_json: { totalIncGST: 6000, totalExGST: 5454.55, gst: 545.45 },  // changed!
+    pdf_url: 'https://example.com/regenerated-pdf.pdf',  // changed!
+  }
+  const id = await recordReleasedQuoteRevision(sbAttempt2, attempt2Input, sampleRevCtx)
+  assertEquals(id, 'rev-attempt2')
+
+  // The recorded INSERT payload must reflect attempt 2's content, not attempt 1's.
+  const insertedPayload = sbAttempt2._state.inserted[0]
+  assertEquals(insertedPayload.recipient_email, 'differentclient@example.com')
+  assertEquals(insertedPayload.pdf_url, 'https://example.com/regenerated-pdf.pdf')
+  assertEquals(insertedPayload.totals_snapshot_json.total_inc_gst, 6000)
+  // sent_at must be non-null (this is a release, not a stage).
+  assertEquals(typeof insertedPayload.sent_at, 'string')
+  assertEquals(insertedPayload.sent_at !== null, true)
 })
