@@ -762,6 +762,155 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
 }
 
 // ════════════════════════════════════════════════════════════
+// EXPORTED FOR TESTING — approve_and_send_invoice recipient verifier.
+// Runs ONLY when caller passes email_override AND use_branded_email !== false.
+// Verifies the override against canonical sources (Xero contact + linked job)
+// BEFORE the AUTHORISE call, so a mismatch never leaves a stale-AUTHORISED
+// invoice in Xero. Independent local copy — does not depend on Ticket 2's
+// _verifyAndSendInvoiceEmail; both can land in either order.
+// ════════════════════════════════════════════════════════════
+
+export type ApproveSendVerifyDeps = {
+  client: any
+  body: any
+  getToken: (client: any) => Promise<{ accessToken: string; tenantId: string }>
+  xeroGet: (path: string, accessToken: string, tenantId: string, params?: any) => Promise<any>
+  logBusinessEvent: (client: any, event: any) => Promise<void>
+}
+
+export type ApproveSendVerifyResult =
+  | { ok: true }
+  | { ok: false; response: Response }
+
+export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps): Promise<ApproveSendVerifyResult> {
+  const { client, body, getToken, xeroGet, logBusinessEvent } = deps
+  const asId = body.xero_invoice_id as string
+  const useBranded = body.use_branded_email !== false
+  const overrideRaw = typeof body.email_override === 'string' ? body.email_override : null
+  const acknowledged = body.confirm_drifted_recipient === true
+
+  // Verification only runs when caller asked us to redirect (override) AND we are using
+  // the branded path. Plain Xero-direct (use_branded_email: false) is safe by construction —
+  // Xero picks recipient. No-override branded uses jobs.client_email server-side; same
+  // drift class as before, scoped out of this ticket.
+  if (!overrideRaw || !useBranded) return { ok: true }
+
+  // Local DB check — invoice must be in cache so we can resolve verifiedJobId.
+  const { data: asInvVerif } = await client.from('xero_invoices')
+    .select('job_id, xero_contact_id')
+    .eq('xero_invoice_id', asId).maybeSingle()
+  if (!asInvVerif) {
+    return {
+      ok: false,
+      response: json({
+        error: 'Invoice not found in xero_invoices cache',
+        code: 'invoice_not_cached',
+        xero_invoice_id: asId,
+      }, 400),
+    }
+  }
+  const verifiedJobId = asInvVerif.job_id || null
+
+  const addToSetT3 = (set: Set<string>, e: unknown) => {
+    if (typeof e !== 'string') return
+    for (const part of e.split(',')) {
+      const norm = part.trim().toLowerCase()
+      if (norm) set.add(norm)
+    }
+  }
+
+  // Xero contact lookup. Token failure or contact-fetch failure both fold into
+  // xero_contact_lookup_failed — we cannot verify without Xero, so we hard-stop.
+  const xeroEmails = new Set<string>()
+  let xeroLookupOk = false
+  let xeroLookupErr: string | null = null
+  try {
+    const tok = await getToken(client)
+    const xInv = await xeroGet(`/Invoices/${asId}`, tok.accessToken, tok.tenantId)
+    const xContact = xInv?.Invoices?.[0]?.Contact
+    addToSetT3(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) addToSetT3(xeroEmails, cp?.EmailAddress)
+    xeroLookupOk = true
+  } catch (e) {
+    xeroLookupErr = (e as Error).message || 'unknown error'
+    console.log('[approve_and_send_invoice] xero contact lookup failed:', xeroLookupErr)
+  }
+  if (!xeroLookupOk) {
+    return {
+      ok: false,
+      response: json({
+        error: 'Could not verify recipient — Xero contact lookup failed. Retry, or have an operator confirm the recipient before approving.',
+        code: 'xero_contact_lookup_failed',
+        xero_invoice_id: asId,
+        detail: xeroLookupErr,
+      }, 400),
+    }
+  }
+
+  // jobs.client_email via cache linkage only. Caller-supplied job_id is NOT trusted here.
+  const jobEmails = new Set<string>()
+  if (verifiedJobId) {
+    const { data: asJobVerif } = await client.from('jobs')
+      .select('client_email').eq('id', verifiedJobId).maybeSingle()
+    addToSetT3(jobEmails, asJobVerif?.client_email)
+  }
+
+  // Selection rule: Xero canonical when present; jobs.client_email is legacy fallback
+  // only when Xero genuinely has no contact email (lookup succeeded with empty result).
+  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+  if (expectedSet.size === 0) {
+    return {
+      ok: false,
+      response: json({
+        error: 'Cannot verify recipient — Xero contact has no email on file and no client_email on the linked job',
+        code: 'recipient_unverifiable',
+        xero_invoice_id: asId,
+      }, 400),
+    }
+  }
+
+  const recvNorm = overrideRaw.trim().toLowerCase()
+  if (expectedSet.has(recvNorm)) return { ok: true }
+
+  // Mismatch. Caller may opt in to a deliberate override (strata manager etc.) via
+  // confirm_drifted_recipient: true — when present, log an audit row and proceed.
+  if (acknowledged) {
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'invoice.recipient_drift_confirmed',
+        entity_type: 'xero_invoice',
+        entity_id: asId,
+        job_id: verifiedJobId || undefined,
+        payload: {
+          override: overrideRaw,
+          expected: Array.from(expectedSet),
+          confirmed_by_caller: true,
+        },
+      })
+    } catch (e) {
+      console.log('[approve_and_send_invoice] drift audit write failed (non-blocking):', (e as Error).message)
+    }
+    return { ok: true }
+  }
+
+  // Reject with drift-aware code.
+  const isDrift = xeroEmails.size > 0 && jobEmails.has(recvNorm) && !xeroEmails.has(recvNorm)
+  return {
+    ok: false,
+    response: json({
+      error: isDrift
+        ? 'jobs.client_email does not match Xero invoice contact — possible recipient drift'
+        : 'email_override does not match invoice contact',
+      code: isDrift ? 'contact_job_recipient_mismatch' : 'recipient_mismatch',
+      xero_invoice_id: asId,
+      received: overrideRaw,
+      expected: Array.from(expectedSet),
+      field: 'email_override',
+    }, 400),
+  }
+}
+
+// ════════════════════════════════════════════════════════════
 // REQUEST HANDLER
 // ════════════════════════════════════════════════════════════
 
@@ -1022,6 +1171,14 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'approve_and_send_invoice': {
         const asId = body.xero_invoice_id
         if (!asId) return json({ error: 'xero_invoice_id required' }, 400)
+
+        // T3: verify email_override BEFORE any state change. When override is absent or
+        // use_branded_email: false, the verifier returns {ok: true} and we fall through
+        // to the existing flow unchanged.
+        const asVerify = await _verifyApproveAndSendRecipient({
+          client, body, getToken, xeroGet, logBusinessEvent,
+        })
+        if (!asVerify.ok) return asVerify.response
 
         // 1. Approve: DRAFT → AUTHORISED
         const { accessToken: asAt, tenantId: asTi } = await getToken(client)
