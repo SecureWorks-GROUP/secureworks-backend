@@ -1,6 +1,7 @@
 {
   "tasks": {
-    "test:ops-api": "deno test --allow-env --allow-net=127.0.0.1 supabase/functions/ops-api/"
+    "test:ops-api": "deno test --allow-env --allow-net=127.0.0.1 supabase/functions/ops-api/",
+    "test:approve-and-send": "deno test --no-check --allow-env --allow-net=127.0.0.1 supabase/functions/ops-api/approve_and_send_test.ts"
   },
   "fmt": {
     "exclude": ["**/*.md", "supabase/functions/ops-api/index.ts"]
