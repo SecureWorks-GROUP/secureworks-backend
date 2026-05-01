@@ -184,7 +184,9 @@ export type MinimalReleaseManifest = {
   schema_version: '1.0-minimal'
   captured_at: string
   job_id: string
-  job_document_id: string
+  // Nullable since 20260501130000: Quick Quote releases via ops-api don't create
+  // a job_documents row. Patio/Fence sends via send-quote always populate it.
+  job_document_id: string | null
   version: number
   recipient_email: string
   recipient_label: string | null
