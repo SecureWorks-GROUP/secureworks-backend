@@ -786,6 +786,28 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
   const { client, body, getToken, xeroGet, logBusinessEvent } = deps
   const asId = body.xero_invoice_id as string
   const useBranded = body.use_branded_email !== false
+
+  // Shape gate: a non-string `email_override` (array, object, number) would cause
+  // the typeof check below to set `overrideRaw = null`, the function to return
+  // `{ ok: true }`, and the existing case body to evaluate `body.email_override || ''`
+  // — which is truthy for arrays/objects and would forward an unverified value to
+  // the branded send. Reject explicitly with a structured 400. Mirror of T2's
+  // `cc_invalid_shape` pattern.
+  if (
+    body.email_override !== undefined &&
+    body.email_override !== null &&
+    typeof body.email_override !== 'string'
+  ) {
+    return {
+      ok: false,
+      response: json({
+        error: 'email_override must be a string',
+        code: 'email_override_invalid_shape',
+        xero_invoice_id: asId,
+      }, 400),
+    }
+  }
+
   const overrideRaw = typeof body.email_override === 'string' ? body.email_override : null
   const acknowledged = body.confirm_drifted_recipient === true
 
