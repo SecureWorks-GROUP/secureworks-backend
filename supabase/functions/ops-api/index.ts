@@ -3189,11 +3189,20 @@ async function opsSummary(client: any) {
       .limit(20),
 
     // Active jobs for pipeline counts
+    // Cap 1A: widened to canonical ACTIVE_STATUSES (excludes terminal cancelled/lost/archived).
+    // Source: secureworks-site/shared/job-state-machine.ts. The prior 9-value list silently
+    // dropped jobs in `awaiting_deposit, order_materials, awaiting_supplier, order_confirmed,
+    // partially_accepted, schedule_install, rectification, final_payment, get_review`.
     client.from('jobs')
       .select('id, status, type, accepted_at, completed_at, pricing_json')
       .eq('org_id', DEFAULT_ORG_ID)
       .not('legacy', 'is', true)
-      .in('status', ['quoted', 'accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced'])
+      .in('status', [
+        'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
+        'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
+        'schedule_install', 'scheduled', 'in_progress', 'rectification',
+        'complete', 'final_payment', 'invoiced', 'get_review'
+      ])
       .not('job_number', 'is', null),
 
     // Overdue receivable invoices
@@ -3614,7 +3623,13 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (statusFilter) {
     query = query.eq('status', statusFilter)
   } else {
-    query = query.in('status', ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced'])
+    // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
+    query = query.in('status', [
+      'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
+      'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
+      'schedule_install', 'scheduled', 'in_progress', 'rectification',
+      'complete', 'final_payment', 'invoiced', 'get_review'
+    ])
   }
   if (typeFilter) query = query.eq('type', typeFilter)
 
@@ -4456,22 +4471,27 @@ async function assembleJobDossier(client: any, body: any) {
     throw new Error('assemble_job_dossier requires job_id or job_number')
   }
 
+  // Production jobs schema (verified via information_schema 2026-05-01) does
+  // not expose `value_inc_gst` or `sent_at` columns. Cockpit + T4 contract
+  // treat the value field as optional (optional-chaining); the closest
+  // equivalent of `sent_at` lives in business_events.quote.sent. Selecting
+  // missing columns made the read fail silently and the assembler threw
+  // "could not resolve job" even for jobs that existed.
+  const JOB_COLS = 'id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, deposit_amount, created_at, quoted_at, accepted_at, scheduled_at, completed_at, updated_at, ghl_contact_id, org_id'
   let jobRow: any = null
+  let jobReadError: string | null = null
   if (inputJobId) {
-    const { data } = await client.from('jobs')
-      .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, value_inc_gst, created_at, quoted_at, sent_at, accepted_at, updated_at, ghl_contact_id, org_id')
-      .eq('id', inputJobId)
-      .maybeSingle()
+    const { data, error } = await client.from('jobs').select(JOB_COLS).eq('id', inputJobId).maybeSingle()
+    if (error) jobReadError = error.message
     jobRow = data || null
   } else if (inputJobNumber) {
-    const { data } = await client.from('jobs')
-      .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, value_inc_gst, created_at, quoted_at, sent_at, accepted_at, updated_at, ghl_contact_id, org_id')
-      .ilike('job_number', inputJobNumber)
-      .limit(1)
+    const { data, error } = await client.from('jobs').select(JOB_COLS).ilike('job_number', inputJobNumber).limit(1)
+    if (error) jobReadError = error.message
     jobRow = data?.[0] || null
   }
   if (!jobRow) {
-    throw new Error(`assemble_job_dossier could not resolve job: ${inputJobId || inputJobNumber}`)
+    const detail = jobReadError ? ` (${jobReadError})` : ''
+    throw new Error(`assemble_job_dossier could not resolve job: ${inputJobId || inputJobNumber}${detail}`)
   }
 
   const jobId: string = jobRow.id
@@ -4618,6 +4638,10 @@ async function assembleJobDossier(client: any, body: any) {
   for (const f of factsRead.data) evidenceRefs.push({ type: 'fact', source_table: 'job_context', id: f.id })
 
   // ── Strip internal-only columns from job before returning ──
+  // Production jobs schema does not expose `value_inc_gst` or `sent_at`;
+  // omit rather than synthesise. T4 contract treats job.value field and
+  // sent_at as optional, so callers that already use optional-chaining
+  // (cockpit reducer, retriever formatter) handle absence gracefully.
   const job = {
     id: jobRow.id,
     job_number: jobRow.job_number,
@@ -4628,11 +4652,12 @@ async function assembleJobDossier(client: any, body: any) {
     client_email: jobRow.client_email,
     site_address: jobRow.site_address,
     site_suburb: jobRow.site_suburb,
-    value_inc_gst: jobRow.value_inc_gst,
+    deposit_amount: jobRow.deposit_amount,
     created_at: jobRow.created_at,
     quoted_at: jobRow.quoted_at,
-    sent_at: jobRow.sent_at,
     accepted_at: jobRow.accepted_at,
+    scheduled_at: jobRow.scheduled_at,
+    completed_at: jobRow.completed_at,
     updated_at: jobRow.updated_at,
   }
 
@@ -4972,7 +4997,18 @@ async function updateJobStatus(client: any, body: any) {
   const status = body.status
   if (!jId || !status) throw new Error('jobId and status required')
 
-  const validStatuses = ['draft', 'quoted', 'accepted', 'approvals', 'deposit', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced', 'cancelled', 'lost']
+  // Cap 1A: aligned to canonical ALL_CANONICAL_STATUSES from
+  // secureworks-site/shared/job-state-machine.ts. Per-type validity (fencing ≠ approvals,
+  // patio ≠ partially_accepted) is enforced server-side in Cap 1E via
+  // validate_job_status_and_type trigger; for now this validator accepts any value the live
+  // prod CHECK admits.
+  const validStatuses = [
+    'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
+    'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
+    'schedule_install', 'scheduled', 'in_progress', 'rectification',
+    'complete', 'final_payment', 'invoiced', 'get_review',
+    'cancelled', 'lost', 'archived'
+  ]
   if (!validStatuses.includes(status)) throw new Error('Invalid status: ' + status)
 
   // Capture old status + job data for business_events dual-write
