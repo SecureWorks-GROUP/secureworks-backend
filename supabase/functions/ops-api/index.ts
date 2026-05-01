@@ -1193,6 +1193,9 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'resolve_jobs': return json(await resolveJobs(client, body))
       case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
       case 'get_job_conversation': return json(await getJobConversation(client, body))
+      case 'assemble_job_dossier':
+      case 'assemble_job_brain':
+        return json(await assembleJobDossier(client, body))
 
       // ── Ops Dashboard Write ──
       case 'create_assignment': return json(await createAssignment(client, body))
@@ -4379,6 +4382,293 @@ async function getJobConversation(client: any, body: any) {
     job_number: jobNumber,
   }
   return { messages: sliced, summary }
+}
+
+// ════════════════════════════════════════════════════════════
+// JOB DOSSIER ASSEMBLER (read-only)
+//
+// `ops-api?action=assemble_job_dossier` (alias: assemble_job_brain) is
+// the single authoritative shape for "everything we know about a job"
+// across Railway JARVIS, Secure Sale, Secure Ops, and Cap 1 readiness.
+//
+// HARD CONTRACT (enforced by smoke regressions in secureworks-agent):
+//   - SELECT-only. NO INSERT / UPDATE / DELETE / UPSERT.
+//   - NO fact extraction (job_context is read, never written here).
+//   - NO proposed-action creation (ai_proposed_actions is read).
+//   - NO GHL / Xero / Telegram / customer-facing calls.
+//   - NO transcript storage / Whisper.
+//   - NO mutation of jobs.status or any operational truth field.
+//
+// Per the JARVIS Memory Extraction Canon (2026-05-01):
+// raw evidence -> async extraction queue -> extractor worker
+// -> custom context facts -> Job Dossier assembler -> loop/JARVIS
+// -> proposed action -> policy/approval -> real action.
+// The assembler is the read-only step.
+// ════════════════════════════════════════════════════════════
+
+const DOSSIER_MODE_BOUNDS = {
+  chat_summary:     { conversation: 20,  events: 30,  facts: 12 },
+  full_job_review:  { conversation: 100, events: 200, facts: 50 },
+  secure_sale_card: { conversation: 30,  events: 50,  facts: 24 },
+  readiness_review: { conversation: 10,  events: 100, facts: 30 },
+} as const
+
+type DossierMode = keyof typeof DOSSIER_MODE_BOUNDS
+
+function clampDossierLimit(requested: number | undefined, modeCap: number): number {
+  if (typeof requested !== 'number' || !isFinite(requested) || requested <= 0) return modeCap
+  return Math.min(requested, modeCap)
+}
+
+interface SourceStatus {
+  ok: boolean
+  count: number
+  error?: string
+}
+
+async function safeRead(label: string, fn: () => Promise<any>): Promise<{ data: any[]; status: SourceStatus }> {
+  try {
+    const result = await fn()
+    const data: any[] = Array.isArray(result) ? result : []
+    return { data, status: { ok: true, count: data.length } }
+  } catch (e) {
+    const error = (e as Error).message || String(e)
+    console.log(`[assemble_job_dossier] ${label} read failed:`, error)
+    return { data: [] as any[], status: { ok: false, count: 0, error } }
+  }
+}
+
+async function assembleJobDossier(client: any, body: any) {
+  const requestedMode = String(body?.mode || 'chat_summary') as DossierMode
+  const mode: DossierMode = requestedMode in DOSSIER_MODE_BOUNDS ? requestedMode : 'chat_summary'
+  const modeCaps = DOSSIER_MODE_BOUNDS[mode]
+  const conversationLimit = clampDossierLimit(body?.conversation_limit, modeCaps.conversation)
+  const eventsLimit = clampDossierLimit(body?.events_limit, modeCaps.events)
+  const factsLimit = clampDossierLimit(body?.facts_limit, modeCaps.facts)
+  const since: string | null = typeof body?.since === 'string' && body.since ? body.since : null
+
+  // Resolve job_id (uuid). Accept job_id or job_number. Throw on invalid input
+  // or unresolved job — the caller should not get an empty dossier without
+  // knowing why.
+  const inputJobId: string | null = typeof body?.job_id === 'string' && body.job_id ? body.job_id : null
+  const inputJobNumber: string | null = typeof body?.job_number === 'string' && body.job_number ? body.job_number : null
+  if (!inputJobId && !inputJobNumber) {
+    throw new Error('assemble_job_dossier requires job_id or job_number')
+  }
+
+  let jobRow: any = null
+  if (inputJobId) {
+    const { data } = await client.from('jobs')
+      .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, value_inc_gst, created_at, quoted_at, sent_at, accepted_at, updated_at, ghl_contact_id, org_id')
+      .eq('id', inputJobId)
+      .maybeSingle()
+    jobRow = data || null
+  } else if (inputJobNumber) {
+    const { data } = await client.from('jobs')
+      .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, value_inc_gst, created_at, quoted_at, sent_at, accepted_at, updated_at, ghl_contact_id, org_id')
+      .ilike('job_number', inputJobNumber)
+      .limit(1)
+    jobRow = data?.[0] || null
+  }
+  if (!jobRow) {
+    throw new Error(`assemble_job_dossier could not resolve job: ${inputJobId || inputJobNumber}`)
+  }
+
+  const jobId: string = jobRow.id
+  const jobNumber: string = jobRow.job_number
+  const ghlContactId: string | null = jobRow.ghl_contact_id || null
+
+  const sourceStatus: Record<string, SourceStatus> = {
+    jobs:            { ok: true,  count: 1 },
+    invoices:        { ok: true,  count: 0 },
+    purchaseOrders:  { ok: true,  count: 0 },
+    workOrders:      { ok: true,  count: 0 },
+    assignments:     { ok: true,  count: 0 },
+    council:         { ok: true,  count: 0 },
+    businessEvents:  { ok: true,  count: 0 },
+    conversation:    { ok: true,  count: 0 },
+    facts:           { ok: true,  count: 0 },
+    proposedActions: { ok: true,  count: 0 },
+  }
+
+  // ── Operational truth ──
+  const invoicesRead = await safeRead('xero_invoices', async () => {
+    const { data, error } = await client.from('xero_invoices')
+      .select('id, invoice_number, status, total, amount_due, amount_paid, due_date, issue_date, contact_name, type')
+      .eq('job_id', jobId)
+      .order('issue_date', { ascending: false })
+      .limit(50)
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.invoices = invoicesRead.status
+
+  const posRead = await safeRead('purchase_orders', async () => {
+    const { data, error } = await client.from('purchase_orders')
+      .select('id, po_number, supplier_name, status, total_amount, expected_date, created_at, po_type')
+      .eq('job_id', jobId)
+      .neq('status', 'deleted')
+      .order('created_at', { ascending: false })
+      .limit(50)
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.purchaseOrders = posRead.status
+
+  const wosRead = await safeRead('work_orders', async () => {
+    const { data, error } = await client.from('work_orders')
+      .select('id, wo_number, contractor_name, status, total_amount, scheduled_date, created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.workOrders = wosRead.status
+
+  const assignmentsRead = await safeRead('job_assignments', async () => {
+    const { data, error } = await client.from('job_assignments')
+      .select('id, scheduled_date, scheduled_end, start_time, end_time, assignment_type, crew_name, role, notes, confirmation_status, user_id, created_at')
+      .eq('job_id', jobId)
+      .order('scheduled_date', { ascending: false })
+      .limit(100)
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.assignments = assignmentsRead.status
+
+  const councilRead = await safeRead('council_submissions', async () => {
+    const { data, error } = await client.from('council_submissions')
+      .select('id, council_name, status, current_step, submitted_at, approved_at, metadata, created_at, updated_at')
+      .eq('job_id', jobId)
+      .order('updated_at', { ascending: false })
+      .limit(10)
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.council = councilRead.status
+
+  // ── Raw evidence: business_events ──
+  const eventsRead = await safeRead('business_events', async () => {
+    let q = client.from('business_events')
+      .select('id, event_type, source, occurred_at, payload, correlation_id')
+      .eq('job_id', jobId)
+      .order('occurred_at', { ascending: false })
+      .limit(eventsLimit)
+    if (since) q = q.gt('occurred_at', since)
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.businessEvents = eventsRead.status
+
+  // ── Conversation: 5-source merge (reuses getJobConversation internal helper) ──
+  const conversationRead = await safeRead('conversation', async () => {
+    const { messages } = await getJobConversation(client, {
+      job_id: jobId,
+      limit: conversationLimit,
+      since,
+    })
+    return messages || []
+  })
+  sourceStatus.conversation = conversationRead.status
+  // Validator expects oldest-first; getJobConversation returns DESC.
+  const conversationAsc = [...conversationRead.data].reverse()
+
+  // ── Extracted facts: job_context ──
+  const factsRead = await safeRead('job_context', async () => {
+    const { data, error } = await client.from('job_context')
+      .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at')
+      .eq('job_id', jobId)
+      .order('updated_at', { ascending: false })
+      .limit(factsLimit)
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.facts = factsRead.status
+
+  // ── Proposed actions: ai_proposed_actions (status=proposed only by default) ──
+  const nowIso = new Date().toISOString()
+  const proposedRead = await safeRead('ai_proposed_actions', async () => {
+    const { data, error } = await client.from('ai_proposed_actions')
+      .select('proposal_id, action_type, action_payload, confidence_score, status, job_id, expires_at, created_at, drafted_message, contact_id')
+      .eq('job_id', jobId)
+      .eq('status', 'proposed')
+      .gt('expires_at', nowIso)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    if (error) throw new Error(error.message)
+    return data
+  })
+  sourceStatus.proposedActions = proposedRead.status
+
+  // ── Diagnostics ──
+  const warnings: string[] = []
+  if (factsRead.status.ok && factsRead.status.count === 0) {
+    warnings.push('facts: 0 rows — extractor may not have written for this job yet')
+  }
+  warnings.push('transcripts: not yet implemented (M4 deferred — privacy/consent decision required)')
+  warnings.push('reasoning/outcomes: Layer 7 schema not yet job-linked')
+  const diagnosticsOk = Object.values(sourceStatus).every((s) => s.ok)
+
+  // ── Evidence refs ──
+  const evidenceRefs: { type: string; source_table: string; id: string }[] = []
+  for (const r of eventsRead.data) evidenceRefs.push({ type: 'event', source_table: 'business_events', id: r.id })
+  for (const m of conversationAsc) evidenceRefs.push({ type: 'message', source_table: m.source_system || 'conversation', id: String(m.source_ref || m.id || '') })
+  for (const f of factsRead.data) evidenceRefs.push({ type: 'fact', source_table: 'job_context', id: f.id })
+
+  // ── Strip internal-only columns from job before returning ──
+  const job = {
+    id: jobRow.id,
+    job_number: jobRow.job_number,
+    type: jobRow.type,
+    status: jobRow.status,
+    client_name: jobRow.client_name,
+    client_phone: jobRow.client_phone,
+    client_email: jobRow.client_email,
+    site_address: jobRow.site_address,
+    site_suburb: jobRow.site_suburb,
+    value_inc_gst: jobRow.value_inc_gst,
+    created_at: jobRow.created_at,
+    quoted_at: jobRow.quoted_at,
+    sent_at: jobRow.sent_at,
+    accepted_at: jobRow.accepted_at,
+    updated_at: jobRow.updated_at,
+  }
+
+  return {
+    job,
+    operationalTruth: {
+      invoices: invoicesRead.data,
+      purchaseOrders: posRead.data,
+      workOrders: wosRead.data,
+      assignments: assignmentsRead.data,
+      council: councilRead.data,
+    },
+    events: eventsRead.data,
+    conversation: conversationAsc,
+    facts: factsRead.data,
+    proposedActions: proposedRead.data,
+    transcripts: [] as any[],
+    reasoning: [] as any[],
+    outcomes: [] as any[],
+    evidenceRefs,
+    diagnostics: {
+      ok: diagnosticsOk,
+      sourceStatus,
+      warnings,
+    },
+    generatedAt: new Date().toISOString(),
+    mode,
+    bounds: {
+      conversationLimit,
+      eventsLimit,
+      factsLimit,
+    },
+    // Provenance hint for the canon: the assembler is read-only.
+    _kind: 'job_dossier_v1',
+    _ghlContactId: ghlContactId,
+  }
 }
 
 // ════════════════════════════════════════════════════════════
