@@ -241,10 +241,27 @@ async function recordReleasedQuoteRevision(
       released_via: input.released_via,
     })
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
-    // Cap 0: skip Storage upload; use internal stub URL. Canonical bytes are
-    // captured inline as manifest_canonical_text so the hash stays verifiable
-    // without external Storage (Codex stop-gate fix).
-    const manifestUrl = `supabase-internal://manifest/${hash}`
+    // CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload canonical bytes to private
+    // release-manifests bucket. Service role bypasses RLS. Real URL on
+    // success; falls back to stub on upload failure (manifest_canonical_text
+    // is the inline verification source either way).
+    const objectPath = `${hash}.json`
+    const realManifestUrl = `${SUPABASE_URL}/storage/v1/object/release-manifests/${objectPath}`
+    const stubManifestUrl = `supabase-internal://manifest/${hash}`
+    let manifestUrl = stubManifestUrl
+    try {
+      const bytes = new TextEncoder().encode(canonical)
+      const { error: upErr } = await sb.storage
+        .from('release-manifests')
+        .upload(objectPath, bytes, { contentType: 'application/json', upsert: false })
+      if (!upErr) {
+        manifestUrl = realManifestUrl
+      } else {
+        const dup = (upErr as any)?.statusCode === '409'
+          || /duplicate|already exists/i.test(upErr.message ?? '')
+        if (dup) manifestUrl = realManifestUrl
+      }
+    } catch { /* swallow; stub URL fallback is in place */ }
     const totals = manifest.totals_snapshot
     const sentAtIso = new Date().toISOString()
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
@@ -391,21 +408,24 @@ const sampleRevCtx = { handler: 'send-quote/send', job_id: 'aa1da77f-1951-4d64-b
   }) as typeof fetch
 }
 
-Deno.test("R1 — recordReleasedQuoteRevision happy path: inserts row with sent_at NOT NULL, returns revision id", async () => {
+Deno.test("R1 — recordReleasedQuoteRevision happy path: uploads canonical to release-manifests bucket, inserts row with sent_at NOT NULL + real URL, returns revision id", async () => {
   const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r1' })
   const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
   assertEquals(id, 'rev-r1')
-  // Cap 0: no Storage upload — manifest_url is an internal stub.
-  assertEquals(sb._state.uploaded.length, 0, 'Storage upload deferred to CAP0-QUOTE-REVISION-MANIFEST-STORAGE')
+  // CAP0-QUOTE-REVISION-MANIFEST-STORAGE: Storage upload happens BEFORE INSERT.
+  assertEquals(sb._state.uploaded.length, 1, 'one upload to release-manifests bucket')
+  // Path is hash-named JSON.
+  assert(/^[0-9a-f]{64}\.json$/.test(sb._state.uploaded[0].path), `expected <hash>.json, got ${sb._state.uploaded[0].path}`)
   // Critical assertion: sent_at MUST be non-null at INSERT time (no staging).
   assertEquals(sb._state.inserted.length, 1)
   assertEquals(typeof sb._state.inserted[0].sent_at, 'string')
   assertEquals(sb._state.inserted[0].sent_at !== null, true)
   assertEquals(sb._state.inserted[0].released_via, 'send-quote/send')
   assertEquals(sb._state.inserted[0].schema_version, '1.0')
-  // manifest_url is the internal stub, manifest_hash is real.
-  assertEquals(sb._state.inserted[0].manifest_url.startsWith('supabase-internal://manifest/'), true)
-  assertEquals(sb._state.inserted[0].manifest_hash.length, 64)
+  // manifest_url is the real private-bucket object URL.
+  const hash = sb._state.inserted[0].manifest_hash
+  assertEquals(hash.length, 64)
+  assertEquals(sb._state.inserted[0].manifest_url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${hash}.json`)
 })
 
 Deno.test("R2 — recordReleasedQuoteRevision: insert payload's sent_at is a valid ISO timestamp string (release moment)", async () => {
@@ -463,16 +483,17 @@ Deno.test("R6 — recordReleasedQuoteRevision: ON CONFLICT + no existing row vis
   assertEquals(id, null)
 })
 
-Deno.test("R7 — recordReleasedQuoteRevision: manifest_url is an internal stub (CAP0; storage deferred)", async () => {
-  // Cap 0 ships with manifest_url = supabase-internal://manifest/<hash>.
-  // The Storage-backed manifest is deferred to CAP0-QUOTE-REVISION-MANIFEST-STORAGE.
-  // The release-truth contract is preserved: manifest_hash uniquely identifies
-  // the canonical content; row's snapshot_json columns capture the data.
+Deno.test("R7 — recordReleasedQuoteRevision: manifest_url is the real private-bucket object URL on successful upload", async () => {
+  // CAP0-QUOTE-REVISION-MANIFEST-STORAGE: post-2026-05-01, manifest_url points
+  // at the private release-manifests bucket. Direct GET returns 401 to
+  // anon/authenticated; only service-role + future signed-URL read API can
+  // fetch the bytes. manifest_canonical_text remains the inline verification
+  // source (defence-in-depth).
   const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r7' })
   await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
   const url = sb._state.inserted[0].manifest_url
   const hash = sb._state.inserted[0].manifest_hash
-  assertEquals(url, `supabase-internal://manifest/${hash}`)
+  assertEquals(url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${hash}.json`)
 })
 
 Deno.test("R8 — recordReleasedQuoteRevision: manifest_hash is 64-char SHA-256 hex (release-packet hash determinism contract)", async () => {
@@ -481,8 +502,9 @@ Deno.test("R8 — recordReleasedQuoteRevision: manifest_hash is 64-char SHA-256 
   const insertedHash = sb._state.inserted[0].manifest_hash
   assertEquals(typeof insertedHash, 'string')
   assertEquals(insertedHash.length, 64, 'manifest_hash must be 64-char SHA-256 hex')
-  // manifest_url embeds the hash so consumers can correlate even without storage.
-  assertEquals(sb._state.inserted[0].manifest_url, `supabase-internal://manifest/${insertedHash}`)
+  // manifest_url embeds the hash as the storage path so consumers can
+  // correlate without an external lookup.
+  assertEquals(sb._state.inserted[0].manifest_url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${insertedHash}.json`)
 })
 
 Deno.test("R9 — recordReleasedQuoteRevision: insert payload contains no base64 data: URI fields (manifest no-binary contract)", async () => {
@@ -565,6 +587,48 @@ Deno.test("R11 — Codex verifiability fix: manifest_canonical_text is stored AN
     .map(b => b.toString(16).padStart(2, '0'))
     .join('')
   assertEquals(recomputedHex, insertedPayload.manifest_hash, 'sha256(manifest_canonical_text) must equal manifest_hash')
-  // The manifest_url stub URL must also match the hash (consumers can correlate by hash).
-  assertEquals(insertedPayload.manifest_url, `supabase-internal://manifest/${insertedPayload.manifest_hash}`)
+  // After CAP0-QUOTE-REVISION-MANIFEST-STORAGE: manifest_url is the real
+  // private-bucket object URL, hash-keyed.
+  assertEquals(insertedPayload.manifest_url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${insertedPayload.manifest_hash}.json`)
+})
+
+Deno.test("R12 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload failure falls back to stub URL; row is still INSERTed; manifest_canonical_text remains the verification source", async () => {
+  // Failure-mode contract: if the Storage upload fails (network blip, bucket
+  // missing, transient outage), the helper does NOT fail the release. The row
+  // is INSERTed with manifest_url = supabase-internal://manifest/<hash> as a
+  // fallback. manifest_canonical_text + manifest_hash still let consumers
+  // verify the bytes locally — the storage object is best-effort, not
+  // load-bearing.
+  const sb = makeQuoteRevSupabase({ uploadOk: false, insertReturns: 'ok', insertedId: 'rev-r12' })
+  const id = await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(id, 'rev-r12', 'release moment proceeds; helper returns id')
+  // Upload was ATTEMPTED (mock records the path even on failure for
+  // observability) — but here uploadOk:false short-circuits before the push,
+  // so state.uploaded stays empty.
+  assertEquals(sb._state.uploaded.length, 0, 'no successful upload')
+  // Row is still INSERTed.
+  assertEquals(sb._state.inserted.length, 1)
+  // manifest_url falls back to the internal stub.
+  const hash = sb._state.inserted[0].manifest_hash
+  assertEquals(sb._state.inserted[0].manifest_url, `supabase-internal://manifest/${hash}`)
+  // manifest_canonical_text is preserved → hash stays verifiable.
+  const recomputed = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sb._state.inserted[0].manifest_canonical_text))
+  const recomputedHex = Array.from(new Uint8Array(recomputed)).map(b => b.toString(16).padStart(2, '0')).join('')
+  assertEquals(recomputedHex, hash, 'verifiability survives upload failure')
+})
+
+Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canonical bytes verbatim (sha256 of uploaded body matches manifest_hash)", async () => {
+  // Storage round-trip integrity: the bytes uploaded to the bucket must be
+  // EXACTLY the canonical bytes (not the manifest object pre-stringify).
+  // sha256(uploaded.bytes) === manifest_hash by construction.
+  const sb = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-r13' })
+  await recordReleasedQuoteRevision(sb, sampleInput, sampleRevCtx)
+  assertEquals(sb._state.uploaded.length, 1)
+  const uploadedBytes = sb._state.uploaded[0].bytes
+  const recomputed = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(uploadedBytes))
+  const recomputedHex = Array.from(new Uint8Array(recomputed)).map(b => b.toString(16).padStart(2, '0')).join('')
+  assertEquals(recomputedHex, sb._state.inserted[0].manifest_hash, 'sha256(uploaded body) === manifest_hash')
+  // And the uploaded body equals manifest_canonical_text exactly (hash-only
+  // equality is necessary but not sufficient; verify byte equality too).
+  assertEquals(uploadedBytes, sb._state.inserted[0].manifest_canonical_text)
 })

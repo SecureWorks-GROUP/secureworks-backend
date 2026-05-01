@@ -27,6 +27,10 @@ import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts"
 import { buildMinimalReleaseManifest } from "../_shared/release_packet/build_minimal_manifest.ts"
 import type { CouncilStatus } from "../_shared/release_packet/manifest_types.ts"
 
+// In production this comes from Deno.env.get('SUPABASE_URL'); here we hardcode
+// the project URL so the manifest_url assertions are stable.
+const SUPABASE_URL = 'https://kevgrhcjxspbxgovpmfl.supabase.co'
+
 // ── Mirror of recordReleasedQuoteRevision body from index.ts ───────────────
 type QuickQuoteRecordReleaseInput = {
   job_id: string
@@ -71,7 +75,26 @@ async function recordReleasedQuoteRevision(
       released_via: input.released_via,
     })
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
-    const manifestUrl = `supabase-internal://manifest/${hash}`
+    // CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload canonical bytes to private
+    // release-manifests bucket. Real URL on success; falls back to stub on
+    // upload failure (manifest_canonical_text is the inline verification source).
+    const objectPath = `${hash}.json`
+    const realManifestUrl = `${SUPABASE_URL}/storage/v1/object/release-manifests/${objectPath}`
+    const stubManifestUrl = `supabase-internal://manifest/${hash}`
+    let manifestUrl = stubManifestUrl
+    try {
+      const bytes = new TextEncoder().encode(canonical)
+      const { error: upErr } = await sb.storage
+        .from('release-manifests')
+        .upload(objectPath, bytes, { contentType: 'application/json', upsert: false })
+      if (!upErr) {
+        manifestUrl = realManifestUrl
+      } else {
+        const dup = (upErr as any)?.statusCode === '409'
+          || /duplicate|already exists/i.test(upErr.message ?? '')
+        if (dup) manifestUrl = realManifestUrl
+      }
+    } catch { /* swallow; stub fallback in place */ }
     const totals = manifest.totals_snapshot
     const sentAtIso = new Date().toISOString()
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
@@ -122,6 +145,7 @@ type MockState = {
   quoteRevisionInserts: Array<Record<string, unknown>>
   businessEventsInserts: Array<Record<string, unknown>>
   emailEventsInserts: Array<Record<string, unknown>>
+  uploaded: Array<{ bucket: string; path: string; bytes: string }>
 }
 
 function makeStubClient(opts: {
@@ -130,6 +154,11 @@ function makeStubClient(opts: {
   // Whether the quote_revisions INSERT succeeds.
   quoteRevInsertOk?: boolean
   insertedRevisionId?: string
+  // Storage upload behaviour:
+  //   undefined or 'ok' → upload returns {error:null}
+  //   'fail'            → returns {error:{message:'upload denied', statusCode:'500'}}
+  //   'duplicate'       → returns {error:{message:'The resource already exists', statusCode:'409'}}
+  uploadResult?: 'ok' | 'fail' | 'duplicate'
 }) {
   const state: MockState = {
     jobsUpdates: [],
@@ -137,6 +166,7 @@ function makeStubClient(opts: {
     quoteRevisionInserts: [],
     businessEventsInserts: [],
     emailEventsInserts: [],
+    uploaded: [],
   }
 
   const makeChain = (table: string) => {
@@ -192,6 +222,22 @@ function makeStubClient(opts: {
 
   const sb = {
     from: (table: string) => makeChain(table),
+    storage: {
+      from: (bucket: string) => ({
+        upload: async (path: string, body: Uint8Array, _opts: any) => {
+          const text = new TextDecoder().decode(body)
+          if (opts.uploadResult === 'fail') {
+            return { data: null, error: { message: 'upload denied', statusCode: '500' } }
+          }
+          if (opts.uploadResult === 'duplicate') {
+            // Don't record bytes — the existing object is already there.
+            return { data: null, error: { message: 'The resource already exists', statusCode: '409' } }
+          }
+          state.uploaded.push({ bucket, path, bytes: text })
+          return { data: { path }, error: null }
+        },
+      }),
+    },
     _state: state,
   }
   return sb as any
@@ -438,7 +484,8 @@ Deno.test("Q2.a — successful release writes one quote_revisions row with sent_
   assertEquals(rev.schema_version, '1.0')
   assertEquals(rev.version, 1)
   assertEquals(rev.manifest_hash.length, 64)
-  assertEquals(rev.manifest_url.startsWith('supabase-internal://manifest/'), true)
+  // CAP0-QUOTE-REVISION-MANIFEST-STORAGE: real private-bucket object URL on success.
+  assertEquals(rev.manifest_url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${rev.manifest_hash}.json`)
   assertEquals(rev.recipient_email, 'marnin@secureworkswa.com.au')
 })
 
@@ -574,4 +621,97 @@ Deno.test("Q2.f — build_kind derives from POST-UPDATE jobs.type: patio→patio
     const rev = sb._state.quoteRevisionInserts[0] as any
     assertEquals(rev.build_kind, expected, `type=${type} → build_kind=${expected}`)
   }
+})
+
+// ────────────────────────────────────────────────────────────────────────────
+// Q3 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE
+// ────────────────────────────────────────────────────────────────────────────
+
+Deno.test("Q3.a — successful upload: bytes land in release-manifests bucket at <hash>.json, manifest_url is the real private object URL", async () => {
+  const sb = makeStubClient({
+    updateReturns: [{
+      id: 'job-q3a', job_number: 'SWP-3300', type: 'patio',
+      client_name: 'CAP0 TEST Q3.a', pricing_json: { totalIncGST: 5500 },
+    }],
+    quoteRevInsertOk: true,
+    insertedRevisionId: 'rev-q3a',
+    uploadResult: 'ok',
+  })
+  await runReleaseBlock(sb, {
+    job_id: 'job-q3a',
+    job: { client_email: 'marnin@secureworkswa.com.au', site_address: '1 Test St', site_suburb: 'Perth' },
+    pdf_url: undefined,
+    totalIncGST: 5500,
+  })
+  // Exactly one upload to the dedicated bucket.
+  assertEquals(sb._state.uploaded.length, 1)
+  assertEquals(sb._state.uploaded[0].bucket, 'release-manifests')
+  // Path is <hash>.json (sha256 hex + extension).
+  assert(/^[0-9a-f]{64}\.json$/.test(sb._state.uploaded[0].path), `expected <hash>.json, got ${sb._state.uploaded[0].path}`)
+  // Uploaded bytes hash to the stored manifest_hash (round-trip integrity).
+  const rev = sb._state.quoteRevisionInserts[0] as any
+  const recomputed = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sb._state.uploaded[0].bytes))
+  const recomputedHex = Array.from(new Uint8Array(recomputed)).map((b) => b.toString(16).padStart(2, '0')).join('')
+  assertEquals(recomputedHex, rev.manifest_hash, 'sha256(uploaded body) === manifest_hash')
+  // manifest_url is the real private object URL.
+  assertEquals(rev.manifest_url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${rev.manifest_hash}.json`)
+})
+
+Deno.test("Q3.b — upload failure: manifest_url falls back to internal stub; row is still INSERTed; canonical events still emit", async () => {
+  // Upload failure (non-409) is best-effort: log [quote-revision-upload-fail],
+  // fall back to stub URL, INSERT row with canonical bytes inline.
+  const sb = makeStubClient({
+    updateReturns: [{
+      id: 'job-q3b', job_number: 'SWP-3400', type: 'patio',
+      client_name: 'CAP0 TEST Q3.b', pricing_json: { totalIncGST: 5500 },
+    }],
+    quoteRevInsertOk: true,
+    insertedRevisionId: 'rev-q3b',
+    uploadResult: 'fail',
+  })
+  const { transitioned, releasedRevisionId } = await runReleaseBlock(sb, {
+    job_id: 'job-q3b',
+    job: { client_email: 'marnin@secureworkswa.com.au', site_address: null, site_suburb: null },
+    pdf_url: undefined,
+    totalIncGST: 5500,
+  })
+  // Release moment NOT rolled back.
+  assertEquals(transitioned, true)
+  assertEquals(releasedRevisionId, 'rev-q3b')
+  // No bytes recorded (upload failed).
+  assertEquals(sb._state.uploaded.length, 0)
+  // Row is INSERTed with stub URL fallback.
+  const rev = sb._state.quoteRevisionInserts[0] as any
+  assertEquals(rev.manifest_url, `supabase-internal://manifest/${rev.manifest_hash}`)
+  // Canonical bytes preserved inline → hash still verifiable.
+  const recomputed = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rev.manifest_canonical_text))
+  const recomputedHex = Array.from(new Uint8Array(recomputed)).map((b) => b.toString(16).padStart(2, '0')).join('')
+  assertEquals(recomputedHex, rev.manifest_hash)
+  // Canonical events still fired with revision id.
+  assertEquals(sb._state.businessEventsInserts.length, 2)
+  const quoteSent = sb._state.businessEventsInserts.find((e: any) => e.event_type === 'quote.sent') as any
+  assertEquals(quoteSent.payload.quote_revision_id, 'rev-q3b')
+})
+
+Deno.test("Q3.c — duplicate upload (409): treated as success, manifest_url is the real URL (same hash = same content)", async () => {
+  // A retry with identical input produces the same hash; upload returns 409.
+  // The existing object IS our content (sha256 collision-free assumption), so
+  // we use the real URL — falling back to the stub would be a regression.
+  const sb = makeStubClient({
+    updateReturns: [{
+      id: 'job-q3c', job_number: 'SWP-3500', type: 'patio',
+      client_name: 'CAP0 TEST Q3.c', pricing_json: { totalIncGST: 5500 },
+    }],
+    quoteRevInsertOk: true,
+    insertedRevisionId: 'rev-q3c',
+    uploadResult: 'duplicate',
+  })
+  await runReleaseBlock(sb, {
+    job_id: 'job-q3c',
+    job: { client_email: 'marnin@secureworkswa.com.au', site_address: null, site_suburb: null },
+    pdf_url: undefined,
+    totalIncGST: 5500,
+  })
+  const rev = sb._state.quoteRevisionInserts[0] as any
+  assertEquals(rev.manifest_url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${rev.manifest_hash}.json`)
 })

@@ -214,29 +214,61 @@ async function recordReleasedQuoteRevision(
     // 2. Canonicalize + hash (recursive deep-sort + SHA-256).
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
 
-    // 3. Manifest "URL" — Cap 0 ships without Storage upload.
+    // 3. Manifest URL — CAP0-QUOTE-REVISION-MANIFEST-STORAGE (2026-05-01).
     //
-    // Initial design uploaded canonical manifest JSON to job-pdfs Storage.
-    // Live deploys revealed that the bucket RLS policy requires
-    //   (storage.foldername(name))[1] = auth_org_id()::text
-    // which isn't satisfied by the service role (no auth_org_id() context).
-    // Both direct .upload() and createSignedUploadUrl + fetch PUT failed in
-    // production despite signing succeeding. PDFs work because they upload
-    // via the GHL-proxy prepare_quote flow which mints a client-side signed
-    // URL the BROWSER PUTs to — a flow we can't reuse for server-side
-    // manifest writes from inside this Edge Function.
+    // The dedicated PRIVATE `release-manifests` bucket (migration
+    // 20260501140000) holds canonical JSON keyed by sha256 hash. Service role
+    // is the only writer; service role + future release-packet read API are
+    // the only readers. The object URL returns 401 to anon/authenticated.
     //
-    // For Cap 0 release-truth, the manifest content is fully captured in
-    // scope_snapshot_json + pricing_snapshot_json + totals_snapshot_json
-    // columns; the hash provides integrity. manifest_url is forensic-only.
-    // We use an internal stub URL that satisfies the NOT NULL constraint
-    // and lets future consumers reconstruct the manifest from columns +
-    // verify against the hash.
+    // The earlier failure mode (job-pdfs RLS expecting auth_org_id()) does not
+    // apply: the new bucket has NO RLS policies, so the storage default
+    // (deny-all to non-service roles, service-role bypass) is the entire
+    // access model.
     //
-    // CAP0-QUOTE-REVISION-MANIFEST-STORAGE is the follow-up ticket to wire
-    // a working manifest object store (likely via a service-role bypass
-    // policy on job-pdfs, or a dedicated manifests bucket).
-    const manifestUrl = `supabase-internal://manifest/${hash}`
+    // Failure-mode policy: if upload fails (network, transient outage, etc),
+    // the helper falls back to writing manifest_url = stub and logs
+    // [quote-revision-upload-fail]. The row is still INSERTed because
+    // manifest_canonical_text is the inline verification source — the hash is
+    // verifiable without Storage. A 409 "duplicate" upload error is treated
+    // as success (same hash means same content; the existing object IS our
+    // content), so retries with identical input don't fall back to stub.
+    const objectPath = `${hash}.json`
+    const realManifestUrl = `${SUPABASE_URL}/storage/v1/object/release-manifests/${objectPath}`
+    const stubManifestUrl = `supabase-internal://manifest/${hash}`
+    let manifestUrl = stubManifestUrl
+    try {
+      const bytes = new TextEncoder().encode(canonical)
+      const { error: upErr } = await sb.storage
+        .from('release-manifests')
+        .upload(objectPath, bytes, {
+          contentType: 'application/json',
+          upsert: false,
+        })
+      if (!upErr) {
+        manifestUrl = realManifestUrl
+      } else {
+        const dup = (upErr as any)?.statusCode === '409'
+          || /duplicate|already exists/i.test(upErr.message ?? '')
+        if (dup) {
+          // Same hash = same content, by sha256. The existing object IS our
+          // content. Use the real URL anyway.
+          manifestUrl = realManifestUrl
+        } else {
+          console.error('[quote-revision-upload-fail]', JSON.stringify({
+            job_id: input.job_id, version: input.version, handler: ctx.handler,
+            error: upErr.message ?? String(upErr),
+            note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
+          }))
+        }
+      }
+    } catch (e: any) {
+      console.error('[quote-revision-upload-fail]', JSON.stringify({
+        job_id: input.job_id, version: input.version, handler: ctx.handler,
+        error: e?.message ?? String(e),
+        note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
+      }))
+    }
 
     // 4. INSERT the released row directly with sent_at = now(). Atomic; no staging.
     const totals = manifest.totals_snapshot

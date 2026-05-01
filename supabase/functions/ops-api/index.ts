@@ -245,9 +245,49 @@ async function recordReleasedQuoteRevision(
       released_via: input.released_via,
     })
     const { canonical, hash } = await canonicalJsonAndHash(manifest)
-    // Cap 0: stub URL — manifest_canonical_text inline preserves verifiability.
-    // Real Storage moves to private release-manifests bucket in a follow-up slice.
-    const manifestUrl = `supabase-internal://manifest/${hash}`
+
+    // Manifest URL — CAP0-QUOTE-REVISION-MANIFEST-STORAGE (2026-05-01).
+    // Mirror of send-quote/recordReleasedQuoteRevision. Private bucket
+    // `release-manifests` (migration 20260501140000); no RLS policies, so
+    // service-role-only via implicit bypass. Direct GET returns 401 to
+    // anon/authenticated. 409 "duplicate" → same hash = same content; use
+    // real URL. Other failures → fall back to stub URL, log
+    // [quote-revision-upload-fail], INSERT proceeds (manifest_canonical_text
+    // is the verification source).
+    const objectPath = `${hash}.json`
+    const realManifestUrl = `${SUPABASE_URL}/storage/v1/object/release-manifests/${objectPath}`
+    const stubManifestUrl = `supabase-internal://manifest/${hash}`
+    let manifestUrl = stubManifestUrl
+    try {
+      const bytes = new TextEncoder().encode(canonical)
+      const { error: upErr } = await sb.storage
+        .from('release-manifests')
+        .upload(objectPath, bytes, {
+          contentType: 'application/json',
+          upsert: false,
+        })
+      if (!upErr) {
+        manifestUrl = realManifestUrl
+      } else {
+        const dup = (upErr as any)?.statusCode === '409'
+          || /duplicate|already exists/i.test(upErr.message ?? '')
+        if (dup) {
+          manifestUrl = realManifestUrl
+        } else {
+          console.error('[quote-revision-upload-fail]', JSON.stringify({
+            job_id: input.job_id, version: input.version, handler: ctx.handler,
+            error: upErr.message ?? String(upErr),
+            note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
+          }))
+        }
+      }
+    } catch (e: any) {
+      console.error('[quote-revision-upload-fail]', JSON.stringify({
+        job_id: input.job_id, version: input.version, handler: ctx.handler,
+        error: e?.message ?? String(e),
+        note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
+      }))
+    }
     const totals = manifest.totals_snapshot
     const sentAtIso = new Date().toISOString()
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
