@@ -196,9 +196,12 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
         .eq('type', 'ACCREC'),
 
       // 7. Margin trends — completed jobs with costs
+      // Cap 1A fix: 'completed' typo → 'complete'. Canonical status is 'complete'; the prior
+      // 'completed' literal silently returned zero rows for ~18 months. Verified via
+      // `cio/evidence/cap1-stage-engine-audit-2026-05-01/hardcoded-list-inventory.md` §11.
       sb.from('jobs')
         .select('id, job_number, job_type, quoted_value, status, completed_at')
-        .eq('status', 'completed')
+        .eq('status', 'complete')
         .gte('completed_at', new Date(now.getTime() - 180 * 86400000).toISOString().slice(0, 10)),
 
       // 8. Supplier cost trends
@@ -243,13 +246,30 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
     )
 
     // 4. Sales conversion
+    // Cap 1A fix: prior code used 'completed' typo (canonical is 'complete') AND missed every
+    // post-accept substage (`partially_accepted, awaiting_deposit, approvals, order_materials,
+    // awaiting_supplier, order_confirmed`). Result was silent undercount for sales metrics.
+    // Canonical status set is sourced from `secureworks-site/shared/job-state-machine.ts` —
+    // see Cap 1 stage-gate contract.
+    const QUOTED_OR_PAST: ReadonlySet<string> = new Set([
+      'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
+      'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
+      'schedule_install', 'scheduled', 'in_progress', 'rectification',
+      'complete', 'final_payment', 'invoiced', 'get_review'
+    ])
+    const ACCEPTED_OR_PAST: ReadonlySet<string> = new Set([
+      'accepted', 'awaiting_deposit', 'deposit',
+      'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
+      'schedule_install', 'scheduled', 'in_progress', 'rectification',
+      'complete', 'final_payment', 'invoiced', 'get_review'
+    ])
     const salesByPerson: Record<string, { leads: number; quoted: number; accepted: number; total_value: number }> = {}
     for (const j of (salesJobs90d.data || [])) {
       const p = j.created_by || 'unknown'
       if (!salesByPerson[p]) salesByPerson[p] = { leads: 0, quoted: 0, accepted: 0, total_value: 0 }
       salesByPerson[p].leads++
-      if (['quoted', 'accepted', 'scheduled', 'in_progress', 'completed'].includes(j.status)) salesByPerson[p].quoted++
-      if (['accepted', 'scheduled', 'in_progress', 'completed'].includes(j.status)) {
+      if (QUOTED_OR_PAST.has(j.status)) salesByPerson[p].quoted++
+      if (ACCEPTED_OR_PAST.has(j.status)) {
         salesByPerson[p].accepted++
         salesByPerson[p].total_value += j.quoted_value || 0
       }
