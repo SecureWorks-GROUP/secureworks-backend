@@ -355,8 +355,8 @@ async function processMailbox(
       ghlContactId = contact?.ghl_contact_id || null
     }
 
-    // Store in inbox_events
-    const { error: insertErr } = await sb.from('inbox_events').insert({
+    // Store in inbox_events; capture id for the business_events payload backref.
+    const { data: inboxRow, error: insertErr } = await sb.from('inbox_events').insert({
       org_id: DEFAULT_ORG_ID,
       graph_message_id: msg.id,
       mailbox,
@@ -378,12 +378,14 @@ async function processMailbox(
         matched_via: matchedVia,
         match_confidence: matchConfidence,
       },
-    })
+    }).select('id').single()
 
     if (insertErr) {
       console.log(`[monitor-inbox] Insert failed for ${msg.id}:`, insertErr.message)
       continue
     }
+
+    const inboxEventId = inboxRow?.id || null
 
     processed++
 
@@ -534,6 +536,8 @@ async function processMailbox(
         payload: {
           from: fromEmail,
           subject: subject.slice(0, 200),
+          body_preview: bodyPreview,
+          inbox_events_id: inboxEventId,
           classification: classification.classification,
           priority: classification.priority,
           has_attachments: msg.hasAttachments || false,
