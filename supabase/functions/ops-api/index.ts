@@ -1021,6 +1021,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'get_email_events': return json(await getEmailEvents(client, url.searchParams))
       case 'resolve_jobs': return json(await resolveJobs(client, body))
       case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
+      case 'get_job_conversation': return json(await getJobConversation(client, body))
 
       // ── Ops Dashboard Write ──
       case 'create_assignment': return json(await createAssignment(client, body))
@@ -3970,6 +3971,243 @@ async function getJobContextFacts(client: any, body: any) {
     .limit(limit * jobUuids.length)
   if (error) throw new Error(error.message)
   return { rows: data || [] }
+}
+
+// Conversation reader for the Job Brain. 5-source merge into a normalized
+// Message[] shape so JARVIS / Secure Sale can read the per-job thread without
+// learning every source's column topology. Read-only, service-role bypass.
+async function getJobConversation(client: any, body: any) {
+  const limit = typeof body?.limit === 'number' && body.limit > 0
+    ? Math.min(body.limit, 200)
+    : 50
+  const since = typeof body?.since === 'string' && body.since ? body.since : null
+
+  // Resolve job_id (uuid) — accept job_id or job_number.
+  let jobId: string | null = body?.job_id || null
+  let jobNumber: string | null = body?.job_number || null
+  let ghlContactId: string | null = null
+
+  if (!jobId && jobNumber) {
+    const { data: found } = await client.from('jobs')
+      .select('id, job_number, ghl_contact_id')
+      .ilike('job_number', jobNumber)
+      .limit(1)
+    if (found?.[0]) {
+      jobId = found[0].id
+      jobNumber = found[0].job_number
+      ghlContactId = found[0].ghl_contact_id || null
+    }
+  } else if (jobId) {
+    const { data: jobRow } = await client.from('jobs')
+      .select('job_number, ghl_contact_id')
+      .eq('id', jobId)
+      .maybeSingle()
+    if (jobRow) {
+      jobNumber = jobRow.job_number
+      ghlContactId = jobRow.ghl_contact_id || null
+    }
+  }
+  if (!jobId) return { messages: [], summary: { count: 0, channels: {}, since, until: null } }
+
+  const sinceFilter = since || null
+  const messages: any[] = []
+
+  // 1. GHL conversation cache (sms / email / call metadata) — by job_id first,
+  //    falling back to contact_id if cache row was synced before job_id link.
+  try {
+    let ghlRow: any = null
+    if (ghlContactId) {
+      const { data: byContact } = await client.from('ghl_conversation_cache')
+        .select('messages, message_count, synced_at')
+        .eq('contact_id', ghlContactId)
+        .maybeSingle()
+      ghlRow = byContact || null
+    }
+    if (!ghlRow) {
+      const { data: byJob } = await client.from('ghl_conversation_cache')
+        .select('messages, message_count, synced_at')
+        .eq('job_id', jobId)
+        .maybeSingle()
+      ghlRow = byJob || null
+    }
+    const ghlMsgs: any[] = Array.isArray(ghlRow?.messages) ? ghlRow.messages : []
+    for (const m of ghlMsgs) {
+      const ts = m.timestamp || ''
+      if (sinceFilter && ts && ts < sinceFilter) continue
+      const isCall = m.source === 'call_transcript' || /CALL|VOICEMAIL/i.test(String(m.type || ''))
+      const channel = isCall ? 'call' : (String(m.type || '').toUpperCase().includes('EMAIL') ? 'email' : 'sms')
+      messages.push({
+        id: `ghl:${m.id}`,
+        job_id: jobId,
+        channel,
+        direction: m.direction || 'inbound',
+        occurred_at: ts || null,
+        author: m.sender_name || null,
+        body: String(m.body || ''),
+        preview: String(m.body || '').slice(0, 500),
+        subject: undefined,
+        source_system: 'ghl_cache',
+        source_ref: m.id || '',
+        ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
+      })
+    }
+  } catch (e) {
+    console.log('[ops-api] get_job_conversation ghl_cache read failed:', (e as Error).message)
+  }
+
+  // 2. inbox_events — email evidence (subject + body preview).
+  try {
+    let q = client.from('inbox_events')
+      .select('id, from_email, from_name, to_email, subject, body_preview, received_at, classification, mailbox')
+      .eq('job_id', jobId)
+      .order('received_at', { ascending: false })
+      .limit(limit)
+    if (sinceFilter) q = q.gt('received_at', sinceFilter)
+    const { data: inbox } = await q
+    for (const r of (inbox || [])) {
+      messages.push({
+        id: `inbox:${r.id}`,
+        job_id: jobId,
+        channel: 'email',
+        direction: 'inbound',
+        occurred_at: r.received_at,
+        author: r.from_name || r.from_email || null,
+        body: String(r.body_preview || ''),
+        preview: String(r.body_preview || '').slice(0, 500),
+        subject: r.subject || null,
+        source_system: 'inbox',
+        source_ref: r.id,
+      })
+    }
+  } catch (e) {
+    console.log('[ops-api] get_job_conversation inbox read failed:', (e as Error).message)
+  }
+
+  // 3. job_events staff notes — full text in detail_json.
+  try {
+    let q = client.from('job_events')
+      .select('id, event_type, detail_json, user_id, created_at')
+      .eq('job_id', jobId)
+      .eq('event_type', 'note')
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    if (sinceFilter) q = q.gt('created_at', sinceFilter)
+    const { data: notes } = await q
+    for (const r of (notes || [])) {
+      const text = String(r?.detail_json?.text || '')
+      messages.push({
+        id: `note:${r.id}`,
+        job_id: jobId,
+        channel: 'note',
+        direction: 'internal',
+        occurred_at: r.created_at,
+        author: r.user_id || null,
+        body: text,
+        preview: text.slice(0, 500),
+        subject: undefined,
+        source_system: 'job_events',
+        source_ref: r.id,
+      })
+    }
+  } catch (e) {
+    console.log('[ops-api] get_job_conversation job_events notes read failed:', (e as Error).message)
+  }
+
+  // 4. business_events — message-shaped rows (sms/email/note/call).
+  try {
+    const messageEventTypes = [
+      'client.reply', 'client.email_in', 'client.email_out',
+      'client.sms_in', 'client.sms_out',
+      'client.call_complete', 'client.message_in',
+      'supplier.email_in', 'ghl.note_added',
+    ]
+    let q = client.from('business_events')
+      .select('id, event_type, source, occurred_at, payload, correlation_id')
+      .eq('job_id', jobId)
+      .in('event_type', messageEventTypes)
+      .order('occurred_at', { ascending: false })
+      .limit(limit)
+    if (sinceFilter) q = q.gt('occurred_at', sinceFilter)
+    const { data: bev } = await q
+    for (const r of (bev || [])) {
+      const p: any = r.payload || {}
+      const channel: string = r.event_type.includes('sms') ? 'sms'
+        : r.event_type.includes('call') ? 'call'
+        : r.event_type.includes('note') ? 'note'
+        : 'email'
+      const direction: string = r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'ghl.note_added' || r.event_type === 'supplier.email_in'
+        ? 'inbound'
+        : 'outbound'
+      const body = String(p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
+      messages.push({
+        id: `bev:${r.id}`,
+        job_id: jobId,
+        channel,
+        direction,
+        occurred_at: r.occurred_at,
+        author: p.from || p.sender_name || p.added_by || null,
+        body,
+        preview: body.slice(0, 500),
+        subject: p.subject || null,
+        source_system: 'business_events',
+        source_ref: r.id,
+      })
+    }
+  } catch (e) {
+    console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
+  }
+
+  // 5. chat_logs — JARVIS / crew dialogue referencing this job (lower priority).
+  try {
+    let q = client.from('chat_logs')
+      .select('id, role, query, response, user_email, created_at, job_ids_referenced')
+      .contains('job_ids_referenced', [jobId])
+      .order('created_at', { ascending: false })
+      .limit(Math.min(limit, 25))
+    if (sinceFilter) q = q.gt('created_at', sinceFilter)
+    const { data: logs } = await q
+    for (const r of (logs || [])) {
+      const body = String(r.query || '') + (r.response ? `\n\n${r.response}` : '')
+      messages.push({
+        id: `chat:${r.id}`,
+        job_id: jobId,
+        channel: 'crew',
+        direction: 'internal',
+        occurred_at: r.created_at,
+        author: r.user_email || r.role || null,
+        body,
+        preview: body.slice(0, 500),
+        subject: undefined,
+        source_system: 'chat_logs',
+        source_ref: r.id,
+      })
+    }
+  } catch (e) {
+    console.log('[ops-api] get_job_conversation chat_logs read failed:', (e as Error).message)
+  }
+
+  messages.sort((a, b) => {
+    const ax = a.occurred_at || ''
+    const bx = b.occurred_at || ''
+    if (ax < bx) return 1
+    if (ax > bx) return -1
+    return 0
+  })
+  const sliced = messages.slice(0, limit)
+
+  const channels: Record<string, number> = {}
+  for (const m of sliced) channels[m.channel] = (channels[m.channel] || 0) + 1
+  const occurredTimes = sliced.map((m) => m.occurred_at).filter(Boolean) as string[]
+  occurredTimes.sort()
+  const summary = {
+    count: sliced.length,
+    channels,
+    since: occurredTimes[0] || since || null,
+    until: occurredTimes[occurredTimes.length - 1] || null,
+    job_id: jobId,
+    job_number: jobNumber,
+  }
+  return { messages: sliced, summary }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -7279,7 +7517,11 @@ async function addNote(client: any, body: any, isAdmin = false) {
 
   if (error) throw error
 
-  // Dual-write to business_events
+  // Dual-write to business_events. Note text now lands in payload so the
+  // evidence spine carries staff knowledge directly (extractors no longer have
+  // to join job_events.detail_json to read it). Full text + 500c preview both
+  // stored: full text for downstream classifiers, preview for memory layer.
+  const noteText = String(text || '')
   logBusinessEvent(client, {
     event_type: 'note.added',
     source: 'app/field',
@@ -7290,6 +7532,9 @@ async function addNote(client: any, body: any, isAdmin = false) {
     payload: {
       entity: { id: jId },
       related_entities: [{ type: 'user', id: uId || null }],
+      note_text: noteText,
+      note_preview: noteText.slice(0, 500),
+      source_job_event_id: data?.id || null,
     },
   })
 
