@@ -675,3 +675,153 @@ Deno.test('Validator direct — empty override allowlist + non-empty overrides �
     assert(r.errors.some((e) => e.rule === 'qa.overrides_operator_allowed'))
   }
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// B: Override-bypass regressions (non-overridable rules)
+// ─────────────────────────────────────────────────────────────────────────────
+
+Deno.test('B1 — Recursive bypass attempt: overriding qa.overrides_operator_allowed itself does NOT grant authority', async () => {
+  // This is the bypass Codex flagged: an attacker adds an override entry
+  // for `qa.overrides_operator_allowed` so the allowlist check is treated
+  // as "passed", allowing an unauthorised operator to slip through. The
+  // fix marks `qa.overrides_operator_allowed` as non-overridable, so an
+  // override entry for it is ignored.
+  const bad = clone(patioInputValid)
+  bad.adapter_output.qa_facts.council_status = 'unknown'
+  bad.overrides = [
+    {
+      rule_name: 'qa.council_status_known',
+      category: 'council_unresponsive',
+      reason: 'rogue tries to bypass council check',
+      operator_user_id: '99999999-9999-9999-9999-999999999999',
+      operator_role: 'rogue',
+      timestamp: STUB_RELEASED_AT,
+    },
+    {
+      // The recursive bypass: rogue tries to override the allowlist gate too.
+      rule_name: 'qa.overrides_operator_allowed',
+      category: 'self_authorise',
+      reason: 'rogue tries to override the override gate',
+      operator_user_id: '99999999-9999-9999-9999-999999999999',
+      operator_role: 'rogue',
+      timestamp: STUB_RELEASED_AT,
+    },
+  ]
+  const r = await buildFullReleasePacket(bad)
+  assert(!r.ok, 'recursive bypass MUST fail — qa.overrides_operator_allowed is non-overridable')
+  if (!r.ok) {
+    assert(
+      r.errors.some((e) => e.rule === 'qa.overrides_operator_allowed'),
+      'allowlist gate must reject the rogue operator',
+    )
+  }
+})
+
+Deno.test('B2 — Overriding a structural rule (pricing.reconciles) is IGNORED', async () => {
+  const bad = clone(patioInputValid)
+  // Break pricing reconciliation deliberately.
+  bad.adapter_output.pricing_public.totals.subtotal_ex_gst = 99999
+  bad.adapter_output.pricing_public.totals.total_ex_gst = 99999
+  bad.adapter_output.pricing_public.totals.total_inc_gst = 99999 + 9999.9
+  bad.adapter_output.pricing_public.totals.gst = 9999.9
+  // Try to override pricing.reconciles — this is a structural integrity
+  // check, NOT a business judgment, and should never be overridable.
+  bad.overrides = [{
+    rule_name: 'pricing.reconciles',
+    category: 'we_know_better',
+    reason: 'numbers do not have to add up',
+    operator_user_id: STUB_USER_ID_MARNIN, // even Marnin can't override structural integrity
+    operator_role: 'Marnin',
+    timestamp: STUB_RELEASED_AT,
+  }]
+  const r = await buildFullReleasePacket(bad)
+  assert(!r.ok, 'structural pricing.reconciles cannot be overridden')
+  if (!r.ok) {
+    assert(r.errors.some((e) => e.rule === 'pricing.reconciles'))
+  }
+})
+
+Deno.test('B3 — Overriding envelope.schema_version is IGNORED', async () => {
+  const bad = clone(patioInputValid)
+  // Force a wrong schema version.
+  ;(bad.adapter_output.scope as unknown as { schema_version: string }).schema_version = '2.0'
+  const r = await buildFullReleasePacket(bad)
+  assert(r.ok, 'baseline still ok before tamper')
+
+  const tampered = clone(patioInputValid)
+  tampered.overrides = [{
+    rule_name: 'envelope.schema_version',
+    category: 'attempt_to_change_schema',
+    reason: 'try',
+    operator_user_id: STUB_USER_ID_MARNIN,
+    operator_role: 'Marnin',
+    timestamp: STUB_RELEASED_AT,
+  }]
+  // Manually tamper the manifest's schema_version BEFORE the validator runs.
+  // The builder hard-codes schema_version='2.0' on construction, so we
+  // simulate the tamper by directly testing the validator on a manifest with
+  // a wrong schema_version.
+  const builtOk = await buildFullReleasePacket(tampered)
+  assert(builtOk.ok)
+  if (builtOk.ok) {
+    const tamperedManifest = { ...builtOk.manifest, schema_version: '0.0' as '2.0' }
+    const v = validatePacketV2(tamperedManifest, builtOk.internal_cost_snapshot, {
+      mode: 'enforce',
+      override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
+    })
+    assert(!v.ok, 'envelope.schema_version cannot be overridden')
+    assert(v.errors.some((e) => e.rule === 'envelope.schema_version'))
+  }
+})
+
+Deno.test('B4 — Overriding pricing.totals_consistency is IGNORED', async () => {
+  const bad = clone(patioInputValid)
+  // Break totals consistency: total_inc_gst != total_ex_gst + gst.
+  bad.adapter_output.pricing_public.totals.total_inc_gst = 99999
+  bad.overrides = [{
+    rule_name: 'pricing.totals_consistency',
+    category: 'try',
+    reason: 'try',
+    operator_user_id: STUB_USER_ID_MARNIN,
+    operator_role: 'Marnin',
+    timestamp: STUB_RELEASED_AT,
+  }]
+  const r = await buildFullReleasePacket(bad)
+  assert(!r.ok, 'pricing.totals_consistency is structural; not overridable')
+})
+
+Deno.test('B5 — Overriding documents.quote_pdf_hashed is IGNORED', async () => {
+  const bad = clone(patioInputValid)
+  bad.documents.quote_pdf.sha256 = 'not-a-real-hash'
+  bad.overrides = [{
+    rule_name: 'documents.quote_pdf_hashed',
+    category: 'try',
+    reason: 'try',
+    operator_user_id: STUB_USER_ID_MARNIN,
+    operator_role: 'Marnin',
+    timestamp: STUB_RELEASED_AT,
+  }]
+  const r = await buildFullReleasePacket(bad)
+  assert(!r.ok, 'documents.quote_pdf_hashed is structural; not overridable')
+})
+
+Deno.test('B6 — Overridable rules still allow legitimate overrides', async () => {
+  // Sanity check: the fix must NOT regress the legitimate override path.
+  // V12 above already covers council_status_known via the builder; this
+  // test re-covers it for completeness alongside customer.mobile_set.
+  const bad = clone(patioInputValid)
+  bad.customer.mobile = null
+  bad.overrides = [{
+    rule_name: 'customer.mobile_set',
+    category: 'customer_refused_mobile',
+    reason: 'Customer flat-out refused to provide mobile; standard practice override.',
+    operator_user_id: STUB_USER_ID_MARNIN,
+    operator_role: 'Marnin',
+    timestamp: STUB_RELEASED_AT,
+  }]
+  const r = await buildFullReleasePacket(bad)
+  assert(r.ok, 'overridable rule with valid allowlisted override should pass')
+  if (r.ok) {
+    assert(r.soft_warnings.includes('customer.mobile_set'))
+  }
+})

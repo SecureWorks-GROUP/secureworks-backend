@@ -54,6 +54,13 @@ type RuleSeverity = 'hard' | 'soft'
 type Rule = {
   id: string
   severity: RuleSeverity
+  // Whether a `qa.overrides[]` entry whose rule_name matches this rule's id
+  // is allowed to bypass a failure. Default is **false** (non-overridable)
+  // for safety — most rules are structural / load-bearing and must never be
+  // bypassed. Only a tight set of business-judgment rules opt in. Critically,
+  // `qa.overrides_operator_allowed` itself is non-overridable so a malformed
+  // override entry cannot recursively grant itself authority.
+  overridable?: boolean
   // Returns null if pass; returns a message string if fail.
   check: (
     packet: QuoteReleasePacketV2,
@@ -94,6 +101,9 @@ const envelopeRules: Rule[] = [
   {
     id: 'customer.mobile_set',
     severity: 'hard',
+    // Overridable: customer occasionally refuses to give mobile; allowlisted
+    // operator can accept the risk.
+    overridable: true,
     check: (p) =>
       p.customer.mobile && p.customer.mobile.length > 0
         ? null
@@ -102,6 +112,9 @@ const envelopeRules: Rule[] = [
   {
     id: 'qa.customer_facing_summary_min_length',
     severity: 'hard',
+    // Overridable: rare cases where a genuinely short but complete summary
+    // is appropriate (e.g. one-line repair scope). Allowlisted operator only.
+    overridable: true,
     check: (p) => {
       const s = p.qa.customer_facing_summary ?? ''
       return s.length >= 40 ? null : `qa.customer_facing_summary must be ≥40 chars (got ${s.length})`
@@ -110,6 +123,9 @@ const envelopeRules: Rule[] = [
   {
     id: 'qa.council_status_known',
     severity: 'hard',
+    // Overridable: council unresponsive but customer wants to proceed at-risk.
+    // Allowlisted operator only.
+    overridable: true,
     check: (p) =>
       p.qa.council_status === 'unknown'
         ? `qa.council_status='unknown' — capture during scoping or apply override`
@@ -159,6 +175,10 @@ const envelopeRules: Rule[] = [
   {
     id: 'pricing.material_lines_have_supplier',
     severity: 'hard',
+    // Overridable: emergency send during a supplier-database outage.
+    // Allowlisted operator only. Note: NOT a free pass — the override is
+    // permanently sealed in the manifest and finance reviews them.
+    overridable: true,
     check: (p, ic) => {
       // Cross-checks pricing_public.line_items[category=material] against
       // internal_cost.line_costs[].supplier_name. The internal snapshot is the
@@ -373,12 +393,21 @@ function adapterRulesFor(kind: ScopeBlock['kind']): Rule[] {
 // ── Override resolution ─────────────────────────────────────────────────────
 //
 // A hard-blocker can be bypassed by an entry in `qa.overrides[]` whose
-// `rule_name` matches the rule id. The override-allowlist gate (above) still
-// has to pass. When a rule is overridden, it's removed from `errors` and the
-// override is sealed in the manifest.
+// `rule_name` matches the rule id, but ONLY if the rule itself is marked
+// `overridable: true`. Most rules — including `qa.overrides_operator_allowed`,
+// the schema/identity envelope rules, and the structural pricing/document/
+// media checks — are non-overridable. This closes the recursive bypass where
+// an attacker would otherwise add an override entry for the rule that
+// validates overrides and grant themselves authority.
+//
+// When a rule IS overridable and an entry exists, the rule is treated as
+// passed but a warning is logged so audits can see that it was bypassed.
+// The override-allowlist gate (`qa.overrides_operator_allowed`) still has
+// to pass independently — that rule cannot itself be overridden.
 
-function isOverridden(packet: QuoteReleasePacketV2, ruleId: string): boolean {
-  return packet.qa.overrides.some((ov) => ov.rule_name === ruleId)
+function isOverridden(packet: QuoteReleasePacketV2, rule: Rule): boolean {
+  if (rule.overridable !== true) return false
+  return packet.qa.overrides.some((ov) => ov.rule_name === rule.id)
 }
 
 // ── Top-level entry point ───────────────────────────────────────────────────
@@ -411,8 +440,12 @@ export function validatePacketV2(
       continue
     }
 
-    // Rule failed. Apply override + mode logic.
-    const overridden = isOverridden(packet, rule.id)
+    // Rule failed. Apply override + mode logic. Override only applies if the
+    // rule is explicitly marked `overridable: true` AND a matching entry
+    // exists in `qa.overrides[]`. Non-overridable rules (the default,
+    // including `qa.overrides_operator_allowed` itself) cannot be bypassed
+    // even if an override entry exists for them.
+    const overridden = isOverridden(packet, rule)
     if (overridden) {
       // Override is honoured; rule is treated as passed but flagged in
       // warnings so audits can see it was bypassed.
