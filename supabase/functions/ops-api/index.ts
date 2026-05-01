@@ -1194,8 +1194,22 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
       case 'get_job_conversation': return json(await getJobConversation(client, body))
       case 'assemble_job_dossier':
-      case 'assemble_job_brain':
-        return json(await assembleJobDossier(client, body))
+      case 'assemble_job_brain': {
+        try {
+          return json(await assembleJobDossier(client, body))
+        } catch (e) {
+          const msg = (e as Error).message || 'assemble failed'
+          // Input/resolution failures are caller-fixable → 400. Per-source
+          // read errors do not throw (they populate diagnostics.sourceStatus
+          // with ok:false), so anything reaching here is a structural
+          // mistake by the caller.
+          if (msg.startsWith('assemble_job_dossier requires') ||
+              msg.startsWith('assemble_job_dossier could not resolve')) {
+            return json({ error: msg }, 400)
+          }
+          throw e
+        }
+      }
 
       // ── Ops Dashboard Write ──
       case 'create_assignment': return json(await createAssignment(client, body))
@@ -4512,11 +4526,18 @@ async function assembleJobDossier(client: any, body: any) {
   }
 
   // ── Operational truth ──
+  // Column lists below verified against information_schema 2026-05-01.
+  // Schema notes:
+  //   xero_invoices: invoice_date (not issue_date), invoice_type (not type)
+  //   purchase_orders: total (not total_amount), delivery_date (not expected_date)
+  //   work_orders: trade_name (not contractor_name), no total column
+  //   council_submissions: template_type/overall_status/current_step_index
+  //                        (no council_name/status/current_step/submitted_at/approved_at)
   const invoicesRead = await safeRead('xero_invoices', async () => {
     const { data, error } = await client.from('xero_invoices')
-      .select('id, invoice_number, status, total, amount_due, amount_paid, due_date, issue_date, contact_name, type')
+      .select('id, invoice_number, status, invoice_type, total, amount_due, amount_paid, invoice_date, due_date, contact_name, fully_paid_on')
       .eq('job_id', jobId)
-      .order('issue_date', { ascending: false })
+      .order('invoice_date', { ascending: false })
       .limit(50)
     if (error) throw new Error(error.message)
     return data
@@ -4525,7 +4546,7 @@ async function assembleJobDossier(client: any, body: any) {
 
   const posRead = await safeRead('purchase_orders', async () => {
     const { data, error } = await client.from('purchase_orders')
-      .select('id, po_number, supplier_name, status, total_amount, expected_date, created_at, po_type')
+      .select('id, po_number, supplier_name, status, total, delivery_date, confirmed_delivery_date, po_type, created_at, sent_at:created_at')
       .eq('job_id', jobId)
       .neq('status', 'deleted')
       .order('created_at', { ascending: false })
@@ -4537,7 +4558,7 @@ async function assembleJobDossier(client: any, body: any) {
 
   const wosRead = await safeRead('work_orders', async () => {
     const { data, error } = await client.from('work_orders')
-      .select('id, wo_number, contractor_name, status, total_amount, scheduled_date, created_at')
+      .select('id, wo_number, trade_name, status, scheduled_date, sent_at, accepted_at, completed_at, created_at')
       .eq('job_id', jobId)
       .order('created_at', { ascending: false })
       .limit(50)
@@ -4548,7 +4569,7 @@ async function assembleJobDossier(client: any, body: any) {
 
   const assignmentsRead = await safeRead('job_assignments', async () => {
     const { data, error } = await client.from('job_assignments')
-      .select('id, scheduled_date, scheduled_end, start_time, end_time, assignment_type, crew_name, role, notes, confirmation_status, user_id, created_at')
+      .select('id, scheduled_date, scheduled_end, start_time, end_time, assignment_type, crew_name, role, notes, confirmation_status, status, user_id, created_at')
       .eq('job_id', jobId)
       .order('scheduled_date', { ascending: false })
       .limit(100)
@@ -4559,7 +4580,7 @@ async function assembleJobDossier(client: any, body: any) {
 
   const councilRead = await safeRead('council_submissions', async () => {
     const { data, error } = await client.from('council_submissions')
-      .select('id, council_name, status, current_step, submitted_at, approved_at, metadata, created_at, updated_at')
+      .select('id, template_type, overall_status, current_step_index, steps, created_at, updated_at')
       .eq('job_id', jobId)
       .order('updated_at', { ascending: false })
       .limit(10)
