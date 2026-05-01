@@ -22,7 +22,9 @@ import type { MinimalReleaseManifest, CouncilStatus } from './manifest_types.ts'
 
 export type BuildMinimalManifestInput = {
   job_id: string
-  job_document_id: string
+  // Nullable: Quick Quote releases (`ops-api/send_quick_quote_email`) don't have
+  // a corresponding job_documents row. Send-quote /send + /send-runs always do.
+  job_document_id: string | null
   version: number
   recipient_email: string
   recipient_label: string | null

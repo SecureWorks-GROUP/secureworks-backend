@@ -87,6 +87,11 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+// CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
+// records the same immutable quote_revisions row shape as send-quote /send.
+import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
+import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -182,6 +187,132 @@ async function logBusinessEvent(client: any, event: {
   } catch (e) {
     // Non-blocking — log but don't fail the main operation
     console.log('[ops-api] business_events write failed (table may not exist yet):', (e as Error).message)
+  }
+}
+
+// ── CAP0-QUOTE-REVISION-QUICKQUOTE — Job Release Packet V1 helper ───────────
+//
+// Records an immutable quote_revisions row for the Quick Quote release path.
+// Inline copy of send-quote/index.ts's recordReleasedQuoteRevision (intentional
+// duplication: matches the existing safeBusinessEventInsert pattern; drift is
+// caught at PR review). Quick Quote passes job_document_id=null because there
+// is no job_documents row for this release path (the FK is nullable per
+// migration 20260501130000).
+//
+// The helper INSERTs the released row directly with sent_at = now() — no
+// pre-Resend staging — to avoid the Codex-flagged stale-snapshot class of bug
+// (a failed first attempt leaving a stale row that a retry inherits).
+type QuickQuoteRecordReleaseInput = {
+  job_id: string
+  job_document_id: string | null
+  version: number
+  recipient_email: string
+  recipient_label: string | null
+  build_kind: 'patio' | 'fence' | 'misc'
+  council_status?: CouncilStatus
+  neighbours_required?: boolean | null
+  scope: {
+    client_name: string | null
+    site_address: string | null
+    site_suburb: string | null
+    job_type: string | null
+    job_number: string | null
+  }
+  pricing_json: unknown
+  pdf_url: string
+  released_via: 'ops-api/send_quick_quote_email'
+  org_id: string
+}
+
+async function recordReleasedQuoteRevision(
+  sb: any,
+  input: QuickQuoteRecordReleaseInput,
+  ctx: { handler: string; job_id: string },
+): Promise<string | null> {
+  try {
+    const manifest = buildMinimalReleaseManifest({
+      job_id: input.job_id,
+      job_document_id: input.job_document_id,
+      version: input.version,
+      recipient_email: input.recipient_email,
+      recipient_label: input.recipient_label,
+      build_kind: input.build_kind,
+      council_status: input.council_status,
+      neighbours_required: input.neighbours_required,
+      scope: input.scope,
+      pricing_json: input.pricing_json,
+      pdf_url: input.pdf_url,
+      released_via: input.released_via,
+    })
+    const { canonical, hash } = await canonicalJsonAndHash(manifest)
+    // Cap 0: stub URL — manifest_canonical_text inline preserves verifiability.
+    // Real Storage moves to private release-manifests bucket in a follow-up slice.
+    const manifestUrl = `supabase-internal://manifest/${hash}`
+    const totals = manifest.totals_snapshot
+    const sentAtIso = new Date().toISOString()
+    const { data: inserted, error: insErr } = await sb.from('quote_revisions')
+      .insert({
+        job_id: input.job_id,
+        job_document_id: input.job_document_id,
+        version: input.version,
+        recipient_email: input.recipient_email,
+        recipient_label: input.recipient_label,
+        scope_snapshot_json: manifest.scope_snapshot,
+        pricing_snapshot_json: manifest.pricing_snapshot,
+        totals_snapshot_json: totals,
+        manifest_url: manifestUrl,
+        manifest_hash: hash,
+        manifest_canonical_text: canonical,
+        pdf_url: input.pdf_url,
+        council_status: input.council_status ?? 'unknown',
+        build_kind: input.build_kind,
+        neighbours_required: input.neighbours_required ?? null,
+        released_via: input.released_via,
+        sent_at: sentAtIso,
+        schema_version: '1.0',
+      })
+      .select('id')
+      .single()
+
+    if (!insErr && inserted) {
+      return inserted.id
+    }
+
+    // INSERT failed — most likely (job_id, version) unique conflict from a
+    // duplicate-release attempt. Look up the existing row and decide what to
+    // return based on its sent_at state.
+    const { data: existing } = await sb.from('quote_revisions')
+      .select('id, sent_at')
+      .eq('job_id', input.job_id)
+      .eq('version', input.version)
+      .maybeSingle()
+    if (existing && existing.sent_at !== null) {
+      console.log('[quote-revision-duplicate-release]', JSON.stringify({
+        job_id: input.job_id, version: input.version,
+        handler: ctx.handler, revision_id: existing.id,
+        note: 'release path fired but row already at sent_at NOT NULL — duplicate release attempt',
+      }))
+      return existing.id
+    }
+    if (existing) {
+      console.error('[quote-revision-stale-staged]', JSON.stringify({
+        job_id: input.job_id, version: input.version,
+        handler: ctx.handler, revision_id: existing.id,
+        note: 'pre-existing staged row blocks new release; DB admin must clean up',
+      }))
+      return null
+    }
+    console.error('[quote-revision-record-fail]', JSON.stringify({
+      job_id: input.job_id, version: input.version, handler: ctx.handler,
+      stage: 'insert_and_no_existing', error: insErr?.message ?? String(insErr),
+    }))
+    return null
+  } catch (e: any) {
+    console.error('[quote-revision-record-fail]', JSON.stringify({
+      job_id: input.job_id, version: input.version, handler: ctx.handler,
+      stage: 'helper_threw', error: e?.message ?? String(e),
+    }))
+    return null
   }
 }
 
@@ -6005,12 +6136,21 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   // guarantee on the actual transition. The conditional UPDATE returns affected rows; canonical
   // events fire only when this call's UPDATE flipped the row. Resends on already-quoted jobs
   // no-op the UPDATE and emit nothing canonical (idempotence).
+  //
+  // CAP0-QUICKQUOTE-FRESH-SELECT-RACE-SAFETY (2026-05-01): the conditional UPDATE
+  // also returns the post-UPDATE row state via .select(...). Canonical event
+  // payloads use those FRESH values for job_number, type, client_name, and
+  // pricing_json — NOT the function-entry SELECT at line ~6058 — so an edit to
+  // the row between entry and UPDATE (e.g. a parallel writer changing type)
+  // can't poison the canonical bus with stale state. `sent_to` and the email
+  // body still reflect entry-time values because that's what was actually
+  // dispatched to Resend.
   const nowIso = new Date().toISOString()
   const { data: updatedRows } = await client.from('jobs')
     .update({ status: 'quoted', quoted_at: nowIso })
     .eq('id', job_id)
     .eq('status', 'draft')
-    .select('id')
+    .select('id, job_number, type, client_name, pricing_json')
   const transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
 
   // Legacy event (mirrors /send-quote/send: written whenever a job_id exists, regardless of
@@ -6025,7 +6165,48 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   // Awaited via the existing logBusinessEvent helper so a transient Supabase failure is logged
   // (`[ops-api] business_events write failed`) rather than silently dropped.
   if (transitioned) {
-    const totalIncGSTNum = Number(totalIncGST) || 0
+    const fresh = updatedRows[0] as {
+      id: string
+      job_number: string | null
+      type: string | null
+      client_name: string | null
+      pricing_json: Record<string, unknown> | null
+    }
+    const freshPricing = (fresh.pricing_json ?? {}) as Record<string, unknown>
+    const freshTotalIncGSTRaw = freshPricing.totalIncGST ?? freshPricing.total ?? freshPricing.grandTotal
+    const totalIncGSTNum = typeof freshTotalIncGSTRaw === 'number' && Number.isFinite(freshTotalIncGSTRaw)
+      ? freshTotalIncGSTRaw
+      : (Number(totalIncGST) || 0)
+
+    // CAP0-QUOTE-REVISION-QUICKQUOTE: record the immutable revision row at the
+    // release moment. job_document_id is null because Quick Quote doesn't have
+    // a job_documents row (FK relaxed in migration 20260501130000). build_kind
+    // derives from the post-UPDATE type so a Quick Quote that the user
+    // re-classified before send carries the correct kind in its manifest.
+    const buildKind: 'patio' | 'fence' | 'misc' =
+      fresh.type === 'fencing' ? 'fence' :
+      fresh.type === 'patio' ? 'patio' : 'misc'
+
+    const releasedRevisionId = await recordReleasedQuoteRevision(client, {
+      job_id,
+      job_document_id: null,
+      version: 1,
+      recipient_email: job.client_email,
+      recipient_label: null,
+      build_kind: buildKind,
+      scope: {
+        client_name: fresh.client_name,
+        site_address: job.site_address || null,
+        site_suburb: job.site_suburb || null,
+        job_type: fresh.type,
+        job_number: fresh.job_number,
+      },
+      pricing_json: fresh.pricing_json ?? null,
+      pdf_url: pdf_url || '',
+      released_via: 'ops-api/send_quick_quote_email',
+      org_id: DEFAULT_ORG_ID,
+    }, { handler: 'ops-api/send_quick_quote_email', job_id })
+
     await logBusinessEvent(client, {
       event_type: 'quote.sent',
       source: 'send-quick-quote-email',
@@ -6034,12 +6215,11 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       correlation_id: job_id,
       job_id,
       payload: {
-        job_number: job.job_number || null,
-        // Quick Quote rows carry whatever type the caller passed to create_misc_job
-        // (defaulting to 'general' in createMiscJob); mirror /send-quote/send and pull
-        // from the DB row rather than hardcoding so downstream consumers that filter
-        // on payload.job_type see the real value.
-        job_type: job.type || null,
+        // Race-safety: fresh post-UPDATE values, not entry-time ones. See
+        // CAP0-QUICKQUOTE-FRESH-SELECT-RACE-SAFETY note above.
+        quote_revision_id: releasedRevisionId,
+        job_number: fresh.job_number || null,
+        job_type: fresh.type || null,
         sent_to: job.client_email,
         total_inc_gst: totalIncGSTNum,
       },
@@ -6054,10 +6234,12 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       correlation_id: job_id,
       job_id,
       payload: {
-        entity: { id: job_id, name: job.job_number || job.client_name || '' },
+        entity: { id: job_id, name: fresh.job_number || fresh.client_name || '' },
         changes: { status: { from: 'draft', to: 'quoted' } },
         financial: { amount: totalIncGSTNum },
-        related_entities: [],
+        related_entities: releasedRevisionId
+          ? [{ type: 'quote_revision', id: releasedRevisionId }]
+          : [],
       },
       metadata: { reason: 'quote_sent', handler: 'ops-api/send_quick_quote_email' },
     })

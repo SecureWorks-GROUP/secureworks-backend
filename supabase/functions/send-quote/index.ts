@@ -160,7 +160,10 @@ async function safeBusinessEventInsert(
 // email sent, jobs.status flipped) — just without a quote_revision_id.
 type RecordReleaseQuoteRevisionInput = {
   job_id: string
-  job_document_id: string
+  // Nullable since CAP0-QUOTE-REVISION-QUICKQUOTE: Quick Quote releases pass
+  // null because there's no job_documents row. Send-quote always passes the
+  // doc id.
+  job_document_id: string | null
   version: number
   recipient_email: string
   recipient_label: string | null
