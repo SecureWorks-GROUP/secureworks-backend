@@ -22,6 +22,39 @@
 
 import type { CouncilStatus } from './manifest_types.ts'
 
+// ── Sentinel values that indicate adapter-side data integrity failures ─────
+//
+// Adapters MUST NEVER fabricate a contact_id. When the primary contact
+// cannot be resolved from `supplemental.contacts` for a shared/neighbour
+// fence line, the adapter writes the client share with this sentinel id
+// rather than (a) dropping the share entirely (silent loss of customer
+// liability) or (b) writing a literal like 'primary' (looks like data,
+// doesn't dereference).
+//
+// The envelope-level validator rule `pricing.per_contact_ids_resolved`
+// hard-fails any release packet that contains this sentinel anywhere in
+// `pricing_public.line_items[].per_contact[].contact_id` or
+// `pricing_public.per_contact_totals[].contact_id`. The rule is
+// non-overridable. Releases with unresolved primary contacts therefore
+// CANNOT ship — the bug surfaces as a structured error at send time
+// instead of escaping into the sealed manifest.
+//
+// The sentinel intentionally uses double-underscore prefix + double-
+// underscore suffix to be obviously not-a-real-uuid to a reviewer.
+export const UNRESOLVED_PRIMARY_CONTACT_ID = '__unresolved_primary_contact__'
+
+// Reserved synthetic-id values that adapters must never write. Validator
+// rejects any contact_id matching one of these. New synthetic-ids should
+// be added here as bugs are caught.
+export const RESERVED_SYNTHETIC_CONTACT_IDS: ReadonlySet<string> = new Set([
+  UNRESOLVED_PRIMARY_CONTACT_ID,
+  'primary',          // historical bug — see commit 4efe23c
+  'neighbour',        // defensive: never let bare role-words land as ids
+  'client',
+  'unknown',
+  '',                 // empty string is not an id
+])
+
 // ── Core identity + provenance ───────────────────────────────────────────────
 
 export type ReleasedVia =

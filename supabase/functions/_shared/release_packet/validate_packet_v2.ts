@@ -14,12 +14,13 @@
 // Dispatch on scope.kind for adapter-specific rules. Envelope rules are
 // common across kinds.
 
-import type {
-  QuoteReleasePacketV2,
-  ScopeBlock,
-  PatioScopeBlock,
-  FenceScopeBlock,
-  QuickQuoteScopeBlock,
+import {
+  RESERVED_SYNTHETIC_CONTACT_IDS,
+  type QuoteReleasePacketV2,
+  type ScopeBlock,
+  type PatioScopeBlock,
+  type FenceScopeBlock,
+  type QuickQuoteScopeBlock,
 } from './manifest_v2_types.ts'
 import type { InternalCostSnapshot } from './internal_cost_types.ts'
 
@@ -257,6 +258,44 @@ const envelopeRules: Rule[] = [
       for (const m of p.media) {
         if (!/^[0-9a-f]{64}$/.test(m.sha256)) {
           return `media[id=${m.id}].sha256 must be 64-char SHA-256 hex (got '${m.sha256}')`
+        }
+      }
+      return null
+    },
+  },
+  {
+    // Non-overridable structural integrity rule. Adapters that cannot
+    // resolve a real contact_id for a per-contact split write a sentinel
+    // (`__unresolved_primary_contact__`) rather than (a) silently drop
+    // the financial liability or (b) fabricate a literal like 'primary'.
+    // This rule catches every reserved synthetic id and refuses the
+    // release until adapter inputs include proper job_contacts.id values.
+    //
+    // History (each closed by a regression test in fence adapter tests):
+    //   1) Adapter wrote literal 'primary' as a contact_id
+    //      (Codex flag — silently un-dereferenceable downstream)
+    //   2) Adapter dropped the client share when primary unresolved
+    //      (Codex flag — silent loss of customer liability)
+    //   3) Current: adapter writes sentinel + this rule hard-blocks any
+    //      release containing it. Sentinel preserves financial info AND
+    //      surfaces the bug as a structured error at send time.
+    //
+    // NOT in the `overridable: true` list — this is structural, not a
+    // business judgment call. No allowlisted operator can grant
+    // permission to ship a release with unresolvable contact ids.
+    id: 'pricing.per_contact_ids_resolved',
+    severity: 'hard',
+    check: (p) => {
+      for (const li of p.pricing_public.line_items) {
+        for (const split of li.per_contact) {
+          if (RESERVED_SYNTHETIC_CONTACT_IDS.has(split.contact_id)) {
+            return `pricing_public.line_items[line_id=${li.line_id}].per_contact[].contact_id='${split.contact_id}' is a reserved sentinel — primary contact could not be resolved from supplemental.contacts`
+          }
+        }
+      }
+      for (const t of p.pricing_public.per_contact_totals) {
+        if (RESERVED_SYNTHETIC_CONTACT_IDS.has(t.contact_id)) {
+          return `pricing_public.per_contact_totals[].contact_id='${t.contact_id}' is a reserved sentinel — primary contact could not be resolved from supplemental.contacts`
         }
       }
       return null
