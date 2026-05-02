@@ -12,10 +12,15 @@
 // so we can verify the shape against real production sends without any
 // risk to release-truth contract.
 //
-// Storage uploads happen here too: internal_cost_canonical_text uploaded
-// to the same private release-manifests bucket, hash-keyed at
-// `<internal_cost_hash>.json`. Manifest_canonical_text upload is the V1
-// helper's responsibility (already uploaded by V1).
+// Storage uploads happen here too. Two parallel canonical texts go to the
+// same private release-manifests bucket, hash-keyed:
+//   • `<v2_manifest_hash>.json`     — V2 envelope canonical text. Required
+//     for T7 evidence-spine verification: the sealed event's manifest_hash
+//     must resolve to recoverable bytes. The V1 helper also uploads a
+//     V1-shape manifest under a DIFFERENT hash; both coexist by design.
+//   • `<internal_cost_hash>.json`   — internal cost canonical text.
+//     Verifiable independently of manifest_hash. Inline column persists
+//     a second copy as belt-and-braces.
 //
 // T7 evidence-spine compatibility: the returned column values include
 // stable identifiers (release_id, manifest_hash, internal_cost_hash) and
@@ -151,6 +156,13 @@ export type V2AugmentationResult = {
   internal_cost_snapshot_json: unknown
   internal_cost_canonical_text: string
   internal_cost_hash: string
+  // V2 envelope canonical bytes — surfaced so callers can log/audit and so
+  // tests can assert sha256(manifest_canonical_text) === manifest_hash. Not
+  // persisted inline in a quote_revisions column today (no V2-shape column
+  // exists; V1's manifest_canonical_text column belongs to the V1 hash).
+  // Stored in the private release-manifests bucket at <manifest_hash>.json
+  // by buildV2Augmentation step 4.
+  manifest_canonical_text: string
   // Hashes also exposed at the top level so callers can use them
   // for the canonical event without re-deriving.
   manifest_hash: string
@@ -360,39 +372,43 @@ export async function buildV2Augmentation(
     }
   }
 
-  // 4. Upload internal_cost_canonical_text to the private bucket.
-  // Best-effort; if upload fails we still return the column values so the
-  // V2 row is INSERTed (the canonical text stays inline in the column).
-  try {
-    const objectPath = `${built.internal_cost_hash}.json`
-    const bytes = new TextEncoder().encode(built.internal_cost_canonical_text)
-    const { error: upErr } = await sb.storage
-      .from('release-manifests')
-      .upload(objectPath, bytes, {
-        contentType: 'application/json',
-        upsert: false,
-      })
-    if (upErr) {
-      const dup = (upErr as any)?.statusCode === '409'
-        || /duplicate|already exists/i.test(upErr.message ?? '')
-      if (!dup) {
-        console.error('[v2-internal-cost-upload-fail]', JSON.stringify({
-          job_id: input.job_id,
-          version: input.version,
-          internal_cost_hash: built.internal_cost_hash,
-          error: upErr.message ?? String(upErr),
-          note: 'falling back to inline canonical text only; no Storage object',
-        }))
-      }
-    }
-  } catch (e: any) {
-    console.error('[v2-internal-cost-upload-fail]', JSON.stringify({
+  // 4. Upload V2 manifest_canonical_text + internal_cost_canonical_text to
+  //    the private release-manifests bucket. Both keyed by their hash.
+  //
+  //    The V2 manifest upload is what makes the sealed event's manifest_hash
+  //    citeable by T7: without these bytes in the bucket, T7 cannot verify
+  //    that the V2 hash in the timeline matches anything. We do NOT
+  //    duplicate the bytes inline — there's no V2-shape manifest column
+  //    today (the existing manifest_canonical_text column is V1's, hashed
+  //    to the V1 manifest_hash). T7 verification is therefore Storage-
+  //    dependent for the V2 envelope; it is double-buffered (inline +
+  //    Storage) for internal_cost_canonical_text.
+  //
+  //    Best-effort uploads; on failure the V2 row still INSERTs and we log
+  //    a structured error. Loop 4 (enforce mode) can promote upload
+  //    failure to a hard-block — out of scope for Loop 3.
+  await uploadCanonicalText(sb, {
+    object_path: `${built.manifest_hash}.json`,
+    canonical_text: built.manifest_canonical_text,
+    log_tag: '[v2-manifest-upload-fail]',
+    log_extra: {
+      job_id: input.job_id,
+      version: input.version,
+      manifest_hash: built.manifest_hash,
+    },
+  })
+
+  await uploadCanonicalText(sb, {
+    object_path: `${built.internal_cost_hash}.json`,
+    canonical_text: built.internal_cost_canonical_text,
+    log_tag: '[v2-internal-cost-upload-fail]',
+    log_extra: {
       job_id: input.job_id,
       version: input.version,
       internal_cost_hash: built.internal_cost_hash,
-      error: e?.message ?? String(e),
-    }))
-  }
+      note: 'falling back to inline canonical text only; no Storage object',
+    },
+  })
 
   // 5. Return column values + observability.
   return {
@@ -408,6 +424,7 @@ export async function buildV2Augmentation(
     internal_cost_snapshot_json: built.internal_cost_snapshot,
     internal_cost_canonical_text: built.internal_cost_canonical_text,
     internal_cost_hash: built.internal_cost_hash,
+    manifest_canonical_text: built.manifest_canonical_text,
     manifest_hash: built.manifest_hash,
     release_id: input.release_id,
     hard_blockers_passed: built.hard_blockers_passed,
@@ -476,6 +493,53 @@ export async function emitV2SealedEvent(
     console.error('[v2-sealed-event-fail]', JSON.stringify({
       job_id: input.job_id,
       quote_revision_id: input.quote_revision_id,
+      error: e?.message ?? String(e),
+    }))
+  }
+}
+
+// ── Internal: Storage upload helper ────────────────────────────────────────
+
+type UploadCanonicalTextArgs = {
+  object_path: string
+  canonical_text: string
+  log_tag: string
+  log_extra: Record<string, unknown>
+}
+
+/**
+ * Best-effort hash-keyed canonical-text upload. Treats 409/duplicate as
+ * benign idempotent re-runs (same hash → same bytes). Any other failure
+ * is logged structurally and swallowed; the V2 row INSERT must still
+ * complete so V1 release-truth stays intact.
+ */
+async function uploadCanonicalText(
+  sb: any,
+  args: UploadCanonicalTextArgs,
+): Promise<void> {
+  try {
+    const bytes = new TextEncoder().encode(args.canonical_text)
+    const { error: upErr } = await sb.storage
+      .from('release-manifests')
+      .upload(args.object_path, bytes, {
+        contentType: 'application/json',
+        upsert: false,
+      })
+    if (upErr) {
+      const dup = (upErr as any)?.statusCode === '409'
+        || /duplicate|already exists/i.test(upErr.message ?? '')
+      if (!dup) {
+        console.error(args.log_tag, JSON.stringify({
+          ...args.log_extra,
+          object_path: args.object_path,
+          error: upErr.message ?? String(upErr),
+        }))
+      }
+    }
+  } catch (e: any) {
+    console.error(args.log_tag, JSON.stringify({
+      ...args.log_extra,
+      object_path: args.object_path,
       error: e?.message ?? String(e),
     }))
   }
