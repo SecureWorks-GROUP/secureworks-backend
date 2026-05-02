@@ -601,26 +601,115 @@ Deno.test('FenceAdapter — per_contact_totals contact_ids are REAL UUIDs (no sy
   }
 })
 
-Deno.test('FenceAdapter — empty contacts array → no synthetic id; client share is OMITTED rather than fabricated', () => {
-  // Edge case: no contacts at all (shouldn't happen in production but the
-  // adapter must NEVER fabricate a contact_id). Verifies the fix returns
-  // an empty per_contact for shared lines + omits client-share aggregate
-  // from per_contact_totals when no primary contact exists.
+Deno.test('FenceAdapter — empty contacts: client share is PRESERVED with sentinel id (NOT silently dropped, NOT fabricated)', () => {
+  // History (Codex flags closed by this test):
+  //   v1: adapter wrote literal 'primary' (un-dereferenceable downstream)
+  //   v2: adapter SKIPPED the client share entirely (silent loss of
+  //       customer liability — the customer's $$ vanished from the manifest)
+  //   v3 (current): adapter writes the sentinel UNRESOLVED_PRIMARY_CONTACT_ID
+  //       and the validator hard-blocks the release.
   const inputs = buildFenceInputs()
   inputs.supplemental = { contacts: [] }
   const r = dispatchAdapter(inputs)
   assert(r.ok)
   if (r.ok) {
-    for (const li of r.output.pricing_public.line_items) {
+    // Shared lines must STILL include the client share — preserved as
+    // sentinel-marked entries.
+    const sharedLines = r.output.pricing_public.line_items.filter((li) => li.allocation === 'shared')
+    assert(sharedLines.length > 0)
+    let foundSentinel = false
+    for (const li of sharedLines) {
       for (const split of li.per_contact) {
-        assert(split.contact_id !== 'primary', 'never fabricate a synthetic id even with empty contacts')
+        // Never the historic 'primary' literal.
+        assert(split.contact_id !== 'primary', 'never fabricate the literal "primary"')
+        if (split.contact_id === '__unresolved_primary_contact__') {
+          foundSentinel = true
+          // The financial value MUST be preserved alongside the sentinel.
+          assert(split.amount_ex > 0, 'client share must be non-zero — sentinel preserves the financial liability')
+        }
       }
     }
-    // per_contact_totals only contains the neighbour share for REAR
-    // (since LHS is client-only and no primary-contact bucket exists).
-    const ids = r.output.pricing_public.per_contact_totals.map((t) => t.contact_id)
-    for (const id of ids) {
-      assert(id !== 'primary')
+    assert(foundSentinel, 'shared-line client share must be preserved with sentinel id when primary unresolved')
+
+    // per_contact_totals MUST include the client-share aggregate under the
+    // sentinel id rather than silently dropping it.
+    const sentinelTotal = r.output.pricing_public.per_contact_totals.find(
+      (t) => t.contact_id === '__unresolved_primary_contact__',
+    )
+    assert(sentinelTotal, 'per_contact_totals must include sentinel bucket for unresolved client share')
+    assert(sentinelTotal!.total_ex_gst > 0, 'sentinel-bucket total must be non-zero')
+
+    // And per_contact_totals across all buckets MUST sum to the subtotal
+    // (no silent loss).
+    const sum = r.output.pricing_public.per_contact_totals.reduce((a, x) => a + x.total_ex_gst, 0)
+    assertEquals(sum, r.output.pricing_public.totals.subtotal_ex_gst,
+      'per_contact_totals must sum to subtotal — financial liability cannot vanish')
+  }
+})
+
+Deno.test('Validator — release with sentinel contact_id is HARD-BLOCKED (non-overridable)', async () => {
+  // The whole point of the sentinel architecture: it preserves financial
+  // info but the release CANNOT ship. Validator hard-fails on
+  // pricing.per_contact_ids_resolved.
+  const inputs = buildFenceInputs()
+  inputs.supplemental = { contacts: [] }
+  const adapterOut = dispatchAdapter(inputs)
+  assert(adapterOut.ok)
+  if (adapterOut.ok) {
+    // Run the adapter output through the FULL builder (which calls the
+    // validator in 'enforce' mode by default).
+    const built = await runFullBuilder(adapterOut.output, 'send-quote/send-runs', inputs)
+    assert(!built.ok, 'release with sentinel contact_id MUST be hard-blocked')
+    if (!built.ok) {
+      assert(
+        built.errors.some((e) => e.rule === 'pricing.per_contact_ids_resolved'),
+        `expected pricing.per_contact_ids_resolved error; got ${built.errors.map((e) => e.rule).join(',')}`,
+      )
+    }
+  }
+})
+
+Deno.test('Validator — sentinel contact_id is NOT overridable (even Marnin/Shaun cannot bypass)', async () => {
+  const inputs = buildFenceInputs()
+  inputs.supplemental = { contacts: [] }
+  const adapterOut = dispatchAdapter(inputs)
+  assert(adapterOut.ok)
+  if (adapterOut.ok) {
+    // Try to override the rule via qa.overrides[]. The rule is non-
+    // overridable, so the override entry is ignored.
+    const built = await runFullBuilderWithOverride(
+      adapterOut.output,
+      'send-quote/send-runs',
+      inputs,
+      [{
+        rule_name: 'pricing.per_contact_ids_resolved',
+        category: 'attempted_bypass',
+        reason: 'try',
+        operator_user_id: '66666666-6666-6666-6666-666666666666', // Marnin
+        operator_role: 'Marnin',
+        timestamp: '2026-05-01T12:00:00.000Z',
+      }],
+    )
+    assert(!built.ok, 'sentinel rule must be non-overridable; override entry must NOT pass the release')
+  }
+})
+
+Deno.test('Validator — RESERVED synthetic ids ("primary", "neighbour", "client", empty) all hard-block', async () => {
+  // Defensive coverage: even if a future bug writes 'primary'/'neighbour'/
+  // empty string, the validator catches it. Constructed test that injects
+  // each reserved id into a built packet and verifies the validator rejects.
+  const inputs = buildFenceInputs()
+  const adapterOut = dispatchAdapter(inputs)
+  assert(adapterOut.ok)
+  if (adapterOut.ok) {
+    for (const reservedId of ['primary', 'neighbour', 'client', '', '__unresolved_primary_contact__']) {
+      const tampered: typeof adapterOut.output = JSON.parse(JSON.stringify(adapterOut.output))
+      // Inject the reserved id into a per_contact entry.
+      const sharedLine = tampered.pricing_public.line_items.find((li) => li.allocation === 'shared')
+      assert(sharedLine, 'fixture must have a shared line')
+      sharedLine!.per_contact[0].contact_id = reservedId
+      const built = await runFullBuilder(tampered, 'send-quote/send-runs', inputs)
+      assert(!built.ok, `reserved id '${reservedId}' MUST hard-block`)
     }
   }
 })
@@ -834,6 +923,15 @@ async function runFullBuilder(
   releasedVia: 'send-quote/send' | 'send-quote/send-runs' | 'ops-api/send_quick_quote_email',
   inputs: AdapterInputs,
 ) {
+  return await runFullBuilderWithOverride(output, releasedVia, inputs, [])
+}
+
+async function runFullBuilderWithOverride(
+  output: import('../adapter_interface.ts').AdapterOutput,
+  releasedVia: 'send-quote/send' | 'send-quote/send-runs' | 'ops-api/send_quick_quote_email',
+  inputs: AdapterInputs,
+  overrides: import('../manifest_v2_types.ts').QaOverride[],
+) {
   const stitched = stitchManifestForValidation(output, inputs)
   const buildInput: BuildFullReleasePacketInput = {
     release_id: STUB_RELEASE_ID,
@@ -853,7 +951,7 @@ async function runFullBuilder(
     provenance: stitched.manifest.provenance,
     option_label: null,
     superseded_by_revision_id: null,
-    overrides: [],
+    overrides,
     override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
   }
   return await buildFullReleasePacket(buildInput)

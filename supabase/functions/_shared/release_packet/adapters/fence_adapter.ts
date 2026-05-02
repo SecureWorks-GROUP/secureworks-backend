@@ -51,16 +51,17 @@
 //     `pricing.materialCostEstimate / labourCostEstimate / commissionCostEstimate`.
 
 import type { AdapterInputs, AdapterOutput, BuildScopeBlock } from '../adapter_interface.ts'
-import type {
-  FenceScopeBlock,
-  FenceRun,
-  FenceGate,
-  PricingPublic,
-  PricingLineItem,
-  PerContactTotal,
-  PerContactSplit,
-  LineCategory,
-  LineAllocation,
+import {
+  UNRESOLVED_PRIMARY_CONTACT_ID,
+  type FenceScopeBlock,
+  type FenceRun,
+  type FenceGate,
+  type PricingPublic,
+  type PricingLineItem,
+  type PerContactTotal,
+  type PerContactSplit,
+  type LineCategory,
+  type LineAllocation,
 } from '../manifest_v2_types.ts'
 import type { InternalCostSnapshot } from '../internal_cost_types.ts'
 import {
@@ -257,14 +258,19 @@ function buildFenceLineItems(
   // accurate.
   //
   // PRIMARY CONTACT INVARIANT: per_contact[].contact_id MUST be a real
-  // job_contacts.id (UUID). Codex stop-time review caught a regression
-  // where the prior version of this function wrote the literal string
-  // 'primary' when it couldn't resolve the actual primary contact id —
-  // that's a synthetic id that no downstream consumer can dereference.
-  // Fix: look up the real primary contact id from supplemental.contacts;
-  // if no primary contact is present, SKIP the client-share entry rather
-  // than synthesize an id. Better an incomplete per_contact[] (the
-  // adapter then surfaces this via the presence report) than a fake id.
+  // job_contacts.id (UUID) on the happy path.
+  //
+  // History: an early version wrote the literal 'primary' (Codex flag #1).
+  // The next version SKIPPED the client share when no primary was found
+  // (Codex flag #2 — silently dropped customer liability).
+  //
+  // Current behaviour: when the primary contact can't be resolved AND the
+  // line has a non-zero client share, write the share with the sentinel
+  // UNRESOLVED_PRIMARY_CONTACT_ID and let the envelope-level validator
+  // hard-fail the release via `pricing.per_contact_ids_resolved`. The
+  // financial information is preserved AND the bug surfaces as a
+  // structured error at send time — the sentinel can never escape into
+  // a sealed quote_revisions row because the rule is non-overridable.
   const primaryContactId = findPrimaryContactId(contacts)
 
   const pricingRuns = asArray(pricingJson.runs)
@@ -287,13 +293,18 @@ function buildFenceLineItems(
       const neighbourAmountEx = asNumber(li.neighbour_amount_ex, 0)
 
       const per_contact: PerContactSplit[] = []
-      // Build the per-contact list using REAL contact ids. Order is
-      // [primary, neighbour] for shared lines, [neighbour] for
-      // neighbour-only lines, [] for client-only lines.
+      // Build the per-contact list. Order is [primary, neighbour] for
+      // shared lines, [neighbour] for neighbour-only lines, [] for
+      // client-only lines.
+      //
+      // When the primary contact is unresolved AND the line carries a
+      // non-zero client share, we write the share with the sentinel id
+      // rather than dropping it. The validator hard-fails any release
+      // containing the sentinel.
       if (allocation === 'shared') {
-        if (primaryContactId !== null) {
+        if (clientAmountEx > 0) {
           per_contact.push({
-            contact_id: primaryContactId,
+            contact_id: primaryContactId ?? UNRESOLVED_PRIMARY_CONTACT_ID,
             amount_ex: Math.round(clientAmountEx * 100) / 100,
           })
         }
@@ -312,7 +323,8 @@ function buildFenceLineItems(
         }
       }
       // allocation === 'client' → per_contact stays empty; whole line goes
-      // to the primary via per_contact_totals.
+      // to the primary via per_contact_totals (which uses the same
+      // sentinel rule when primary is unresolved).
 
       items.push({
         line_id: `fence-L-${lineCounter++}-${runLabel}`,
@@ -366,12 +378,14 @@ function buildPerContactTotals(
   // primary-contact id for the client share.
   //
   // PRIMARY CONTACT INVARIANT (same as buildFenceLineItems): contact_id
-  // MUST be a real UUID. If no primary contact is present in
-  // supplemental.contacts, skip the client-share aggregate entry rather
-  // than synthesize an id. The presence report surfaces missing primary
-  // contacts as a GAP.
+  // is a real UUID on the happy path. When the primary contact is
+  // unresolved AND there is a non-zero client share to record, we use
+  // the sentinel UNRESOLVED_PRIMARY_CONTACT_ID rather than drop the
+  // aggregate entirely — the validator hard-blocks any release where
+  // the sentinel appears.
   const totalsExByContact = new Map<string, number>()
   const primaryContactId = findPrimaryContactId(contacts)
+  const primaryBucketId = primaryContactId ?? UNRESOLVED_PRIMARY_CONTACT_ID
 
   for (const rawRun of asArray(pricingJson.runs)) {
     const run = asObject(rawRun)
@@ -381,8 +395,8 @@ function buildPerContactTotals(
     const clientShareEx = asNumber(totals.client_share_ex, 0)
     const neighbourShareEx = asNumber(totals.neighbour_share_ex, 0)
 
-    if (clientShareEx > 0 && primaryContactId !== null) {
-      totalsExByContact.set(primaryContactId, (totalsExByContact.get(primaryContactId) ?? 0) + clientShareEx)
+    if (clientShareEx > 0) {
+      totalsExByContact.set(primaryBucketId, (totalsExByContact.get(primaryBucketId) ?? 0) + clientShareEx)
     }
     if (neighbourShareEx > 0 && neighbourId) {
       totalsExByContact.set(neighbourId, (totalsExByContact.get(neighbourId) ?? 0) + neighbourShareEx)
