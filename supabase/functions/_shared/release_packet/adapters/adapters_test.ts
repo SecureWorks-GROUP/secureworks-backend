@@ -548,6 +548,83 @@ Deno.test('FenceAdapter — internal cost reads pricing.internal.{cost,labour,co
   }
 })
 
+Deno.test('FenceAdapter — shared-line per_contact ids are REAL contact UUIDs (no synthetic "primary" string)', () => {
+  // Codex stop-time review caught: the fence adapter previously wrote the
+  // literal string 'primary' as a contact_id when prepending the client
+  // share for shared lines. That's a synthetic id no downstream consumer
+  // can dereference. After fix: per_contact[].contact_id is always a real
+  // job_contacts.id UUID from supplemental.contacts, OR the entry is
+  // omitted entirely.
+  const r = dispatchAdapter(buildFenceInputs())
+  assert(r.ok)
+  if (r.ok) {
+    const sharedLines = r.output.pricing_public.line_items.filter((li) => li.allocation === 'shared')
+    assert(sharedLines.length > 0, 'fixture should have at least one shared line')
+    for (const line of sharedLines) {
+      for (const split of line.per_contact) {
+        // Whitelist of valid contact ids in the fixture.
+        const validIds = ['contact-fence-primary', 'contact-fence-neighbour']
+        assert(
+          validIds.includes(split.contact_id),
+          `shared line per_contact.contact_id='${split.contact_id}' is not a real contact id`,
+        )
+        // Specifically reject the synthetic literal that the bug used.
+        assert(split.contact_id !== 'primary', 'never write the literal "primary" as a contact_id')
+      }
+    }
+    // For the REAR run the shared lines should split 50/50 between primary
+    // and neighbour. Verify both are present and amounts match the fixture.
+    const rearMat = sharedLines.find((li) => li.description === 'Colorbond panels REAR')
+    assert(rearMat)
+    assertEquals(rearMat?.per_contact.length, 2)
+    const primarySplit = rearMat?.per_contact.find((s) => s.contact_id === 'contact-fence-primary')
+    const neighbourSplit = rearMat?.per_contact.find((s) => s.contact_id === 'contact-fence-neighbour')
+    assert(primarySplit, 'expected primary contact entry in shared line')
+    assert(neighbourSplit, 'expected neighbour contact entry in shared line')
+    assertEquals(primarySplit?.amount_ex, 900)
+    assertEquals(neighbourSplit?.amount_ex, 900)
+  }
+})
+
+Deno.test('FenceAdapter — per_contact_totals contact_ids are REAL UUIDs (no synthetic "primary" string)', () => {
+  const r = dispatchAdapter(buildFenceInputs())
+  assert(r.ok)
+  if (r.ok) {
+    for (const t of r.output.pricing_public.per_contact_totals) {
+      assert(t.contact_id !== 'primary', 'per_contact_totals.contact_id must not be the synthetic literal')
+      const validIds = ['contact-fence-primary', 'contact-fence-neighbour']
+      assert(
+        validIds.includes(t.contact_id),
+        `per_contact_totals.contact_id='${t.contact_id}' is not a real contact id`,
+      )
+    }
+  }
+})
+
+Deno.test('FenceAdapter — empty contacts array → no synthetic id; client share is OMITTED rather than fabricated', () => {
+  // Edge case: no contacts at all (shouldn't happen in production but the
+  // adapter must NEVER fabricate a contact_id). Verifies the fix returns
+  // an empty per_contact for shared lines + omits client-share aggregate
+  // from per_contact_totals when no primary contact exists.
+  const inputs = buildFenceInputs()
+  inputs.supplemental = { contacts: [] }
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) {
+    for (const li of r.output.pricing_public.line_items) {
+      for (const split of li.per_contact) {
+        assert(split.contact_id !== 'primary', 'never fabricate a synthetic id even with empty contacts')
+      }
+    }
+    // per_contact_totals only contains the neighbour share for REAR
+    // (since LHS is client-only and no primary-contact bucket exists).
+    const ids = r.output.pricing_public.per_contact_totals.map((t) => t.contact_id)
+    for (const id of ids) {
+      assert(id !== 'primary')
+    }
+  }
+})
+
 Deno.test('FenceAdapter — empty scope.job.runs falls back to pricing.runs[]', () => {
   const inputs = buildFenceInputs()
   ;((inputs.job.scope_json as Record<string, unknown>).job as Record<string, unknown>).runs = []

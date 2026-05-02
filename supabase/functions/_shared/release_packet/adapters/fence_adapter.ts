@@ -152,7 +152,7 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
   }
 
   // ── Build pricing_public from pricing.runs[].items[] (canonical) ────────
-  const lineItems = buildFenceLineItems(pricingJson)
+  const lineItems = buildFenceLineItems(pricingJson, asArray(inputs.supplemental.contacts))
   const subtotal = asNumber(
     pricingJson.totalExGST ?? pricingJson.subtotal,
     lineItems.reduce((a, x) => a + x.line_total_ex, 0),
@@ -248,12 +248,25 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
 
 function buildFenceLineItems(
   pricingJson: Record<string, unknown>,
+  contacts: unknown[],
 ): PricingLineItem[] {
   // Canonical source: pricing.runs[].items[]. Each item carries
   // unit_price_ex, line_total_ex, allocation, split_pct, client_amount_ex,
   // neighbour_amount_ex — which maps directly to V2's PricingLineItem.
   // Also resolve neighbour_id at the run level so per_contact splits are
   // accurate.
+  //
+  // PRIMARY CONTACT INVARIANT: per_contact[].contact_id MUST be a real
+  // job_contacts.id (UUID). Codex stop-time review caught a regression
+  // where the prior version of this function wrote the literal string
+  // 'primary' when it couldn't resolve the actual primary contact id —
+  // that's a synthetic id that no downstream consumer can dereference.
+  // Fix: look up the real primary contact id from supplemental.contacts;
+  // if no primary contact is present, SKIP the client-share entry rather
+  // than synthesize an id. Better an incomplete per_contact[] (the
+  // adapter then surfaces this via the presence report) than a fake id.
+  const primaryContactId = findPrimaryContactId(contacts)
+
   const pricingRuns = asArray(pricingJson.runs)
   const items: PricingLineItem[] = []
   let lineCounter = 0
@@ -274,16 +287,32 @@ function buildFenceLineItems(
       const neighbourAmountEx = asNumber(li.neighbour_amount_ex, 0)
 
       const per_contact: PerContactSplit[] = []
-      // Primary contact takes the client share. Neighbour takes the neighbour
-      // share when neighbour_id is set on the run. We can't always resolve
-      // the primary contact_id from inputs without `inputs.supplemental.contacts`;
-      // the empty array is acceptable for fall-back behaviour, the validator
-      // tolerates per_contact splits being empty when allocation='client'.
-      if (allocation === 'shared' || allocation === 'neighbour') {
+      // Build the per-contact list using REAL contact ids. Order is
+      // [primary, neighbour] for shared lines, [neighbour] for
+      // neighbour-only lines, [] for client-only lines.
+      if (allocation === 'shared') {
+        if (primaryContactId !== null) {
+          per_contact.push({
+            contact_id: primaryContactId,
+            amount_ex: Math.round(clientAmountEx * 100) / 100,
+          })
+        }
         if (neighbourId) {
-          per_contact.push({ contact_id: neighbourId, amount_ex: Math.round(neighbourAmountEx * 100) / 100 })
+          per_contact.push({
+            contact_id: neighbourId,
+            amount_ex: Math.round(neighbourAmountEx * 100) / 100,
+          })
+        }
+      } else if (allocation === 'neighbour') {
+        if (neighbourId) {
+          per_contact.push({
+            contact_id: neighbourId,
+            amount_ex: Math.round(neighbourAmountEx * 100) / 100,
+          })
         }
       }
+      // allocation === 'client' → per_contact stays empty; whole line goes
+      // to the primary via per_contact_totals.
 
       items.push({
         line_id: `fence-L-${lineCounter++}-${runLabel}`,
@@ -297,13 +326,6 @@ function buildFenceLineItems(
         split_pct: splitPct,
         per_contact,
       })
-      // Capture client share separately under the same allocation if shared.
-      // (Test fixtures expect at least one entry per non-client allocation;
-      // this keeps the existing 50/50 contract.)
-      if ((allocation === 'shared') && per_contact.length > 0) {
-        // The first entry above is the neighbour amount; prepend the client.
-        per_contact.unshift({ contact_id: 'primary', amount_ex: Math.round(clientAmountEx * 100) / 100 })
-      }
     }
   }
 
@@ -340,12 +362,16 @@ function buildPerContactTotals(
   contacts: unknown[],
 ): PerContactTotal[] {
   // Per-run totals are pre-computed in pricing.runs[].totals. Aggregate
-  // across runs grouped by the run's neighbour_id (if any) + a synthetic
-  // 'primary' bucket for the client share.
+  // across runs grouped by the run's neighbour_id (if any) + the real
+  // primary-contact id for the client share.
+  //
+  // PRIMARY CONTACT INVARIANT (same as buildFenceLineItems): contact_id
+  // MUST be a real UUID. If no primary contact is present in
+  // supplemental.contacts, skip the client-share aggregate entry rather
+  // than synthesize an id. The presence report surfaces missing primary
+  // contacts as a GAP.
   const totalsExByContact = new Map<string, number>()
-  const primaryContactId = contacts.length > 0
-    ? asString(asObject(contacts[0]).id) || 'primary'
-    : 'primary'
+  const primaryContactId = findPrimaryContactId(contacts)
 
   for (const rawRun of asArray(pricingJson.runs)) {
     const run = asObject(rawRun)
@@ -355,7 +381,7 @@ function buildPerContactTotals(
     const clientShareEx = asNumber(totals.client_share_ex, 0)
     const neighbourShareEx = asNumber(totals.neighbour_share_ex, 0)
 
-    if (clientShareEx > 0) {
+    if (clientShareEx > 0 && primaryContactId !== null) {
       totalsExByContact.set(primaryContactId, (totalsExByContact.get(primaryContactId) ?? 0) + clientShareEx)
     }
     if (neighbourShareEx > 0 && neighbourId) {
@@ -368,6 +394,33 @@ function buildPerContactTotals(
     total_ex_gst: Math.round(total_ex_gst * 100) / 100,
     total_inc_gst: Math.round(total_ex_gst * 1.1 * 100) / 100,
   }))
+}
+
+/**
+ * Finds the primary contact's id from `supplemental.contacts`. Returns
+ * null if no contact is marked `is_primary=true`.
+ *
+ * NEVER returns a synthetic literal like 'primary'. Callers must handle
+ * null gracefully (typically by skipping the client-share entry).
+ */
+function findPrimaryContactId(contacts: unknown[]): string | null {
+  for (const c of contacts) {
+    const o = asObject(c)
+    if (asBool(o.is_primary)) {
+      const id = asString(o.id)
+      if (id.length > 0) return id
+    }
+  }
+  // Fallback: if no contact has `is_primary=true` but contacts[] is
+  // non-empty, treat the first one as primary by convention. This matches
+  // the existing job_contacts.is_primary discipline (always-set in newly-
+  // created rows; legacy rows may have it null where the first row is
+  // primary by ordering). Returns null only when contacts[] is empty.
+  if (contacts.length > 0) {
+    const id = asString(asObject(contacts[0]).id)
+    if (id.length > 0) return id
+  }
+  return null
 }
 
 function findRawLineForCost(
