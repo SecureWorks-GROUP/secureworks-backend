@@ -92,6 +92,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
+// Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
+import {
+  buildV2Augmentation,
+  emitV2SealedEvent,
+  type V2AugmentationInput,
+} from '../_shared/release_packet/build_v2_augmentation.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -222,6 +228,11 @@ type QuickQuoteRecordReleaseInput = {
   pdf_url: string
   released_via: 'ops-api/send_quick_quote_email'
   org_id: string
+
+  // Loop 3 / P2 V2 augmentation. When provided, V2 envelope is built in
+  // mode='warn' and column values land in the same INSERT as V1 columns.
+  // V1 release-truth path proceeds unconditionally if V2 build fails.
+  v2_inputs?: Omit<V2AugmentationInput, 'release_id'> | null
 }
 
 async function recordReleasedQuoteRevision(
@@ -290,8 +301,71 @@ async function recordReleasedQuoteRevision(
     }
     const totals = manifest.totals_snapshot
     const sentAtIso = new Date().toISOString()
+
+    // ── Loop 3 / P2 V2 augmentation (Quick Quote) ──
+    // Pre-allocate the row id so the V2 release_id matches quote_revisions.id
+    // (T7 evidence-spine compatibility: stable identifier across event +
+    // canonical bytes + DB row).
+    const releaseId = crypto.randomUUID()
+
+    let v2Cols: Record<string, unknown> = {}
+    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null = null
+    if (input.v2_inputs) {
+      try {
+        const v2 = await buildV2Augmentation(sb, {
+          ...input.v2_inputs,
+          release_id: releaseId,
+        })
+        if (v2.ok) {
+          v2Cols = {
+            contacts_snapshot_json: v2.contacts_snapshot_json,
+            documents_snapshot_json: v2.documents_snapshot_json,
+            media_snapshot_json: v2.media_snapshot_json,
+            qa_snapshot_json: v2.qa_snapshot_json,
+            send_snapshot_json: v2.send_snapshot_json,
+            terms_snapshot_json: v2.terms_snapshot_json,
+            provenance_snapshot_json: v2.provenance_snapshot_json,
+            option_label: v2.option_label,
+            internal_cost_snapshot_json: v2.internal_cost_snapshot_json,
+            internal_cost_canonical_text: v2.internal_cost_canonical_text,
+            internal_cost_hash: v2.internal_cost_hash,
+          }
+          v2EmitInputs = {
+            manifest_hash: v2.manifest_hash,
+            internal_cost_hash: v2.internal_cost_hash,
+          }
+          if (v2.soft_warnings.length > 0) {
+            console.log('[v2-soft-warnings]', JSON.stringify({
+              job_id: input.job_id,
+              version: input.version,
+              handler: ctx.handler,
+              warnings: v2.soft_warnings,
+              hard_blockers_passed_count: v2.hard_blockers_passed.length,
+            }))
+          }
+        } else {
+          console.error('[v2-augmentation-fail]', JSON.stringify({
+            job_id: input.job_id,
+            version: input.version,
+            handler: ctx.handler,
+            reason: v2.reason,
+            note: 'V1 release-truth path proceeds; V2 columns left NULL on this row',
+          }))
+        }
+      } catch (e: any) {
+        console.error('[v2-augmentation-fail]', JSON.stringify({
+          job_id: input.job_id,
+          version: input.version,
+          handler: ctx.handler,
+          stage: 'helper_threw',
+          error: e?.message ?? String(e),
+        }))
+      }
+    }
+
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({
+        id: releaseId,
         job_id: input.job_id,
         job_document_id: input.job_document_id,
         version: input.version,
@@ -310,11 +384,23 @@ async function recordReleasedQuoteRevision(
         released_via: input.released_via,
         sent_at: sentAtIso,
         schema_version: '1.0',
+        ...v2Cols,
       })
       .select('id')
       .single()
 
     if (!insErr && inserted) {
+      if (v2EmitInputs) {
+        await emitV2SealedEvent(sb, {
+          job_id: input.job_id,
+          quote_revision_id: inserted.id,
+          release_id: releaseId,
+          version: input.version,
+          manifest_hash: v2EmitInputs.manifest_hash,
+          internal_cost_hash: v2EmitInputs.internal_cost_hash,
+          released_via: input.released_via,
+        })
+      }
       return inserted.id
     }
 
@@ -6812,6 +6898,71 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       fresh.type === 'fencing' ? 'fence' :
       fresh.type === 'patio' ? 'patio' : 'misc'
 
+    // ── Loop 3 / P2 V2 augmentation prep (Quick Quote) ──
+    let v2InputsQq: Omit<V2AugmentationInput, 'release_id'> | null = null
+    try {
+      const [{ data: contactRows }, { data: mediaRows }] = await Promise.all([
+        client.from('job_contacts')
+          .select('id, contact_type, is_primary, contact_label, client_name, client_email, client_phone, assigned_runs, share_percentage')
+          .eq('job_id', job_id),
+        client.from('job_media')
+          .select('id, type, phase, storage_url, label, taken_at, lat, lng')
+          .eq('job_id', job_id),
+      ])
+      v2InputsQq = {
+        job_id,
+        version: 1,
+        released_via: 'ops-api/send_quick_quote_email',
+        released_at: nowIso,
+        released_by_user_id: null,
+        job_row: {
+          id: job_id,
+          type: fresh.type ?? job.type ?? 'general',
+          org_id: DEFAULT_ORG_ID,
+          client_name: fresh.client_name ?? job.client_name ?? null,
+          client_email: job.client_email ?? null,
+          client_phone: job.client_phone ?? null,
+          site_address: job.site_address ?? null,
+          site_suburb: job.site_suburb ?? null,
+          site_lat: null,
+          site_lng: null,
+          job_number: fresh.job_number ?? job.job_number ?? null,
+          ghl_contact_id: null,
+          xero_contact_id: null,
+          scope_json: null,
+          pricing_json: (fresh.pricing_json ?? job.pricing_json) as Record<string, unknown> | null,
+          notes: null,
+        },
+        contacts: contactRows ?? [],
+        media: mediaRows ?? [],
+        quote_pdf_url: pdf_url || '',
+        quote_pdf_size_bytes: null,
+        email_subject: emailPayload.subject,
+        email_custom_message: '',
+        email_template_version: 'v1',
+        scoper_name: 'SecureWorks Group',
+        resend_message_id: resendResult.id ?? null,
+        primary_recipient_email: job.client_email,
+        per_contact_pdfs: [],
+        terms_valid_days: validDays,
+        terms_payment_terms: paymentTerms,
+        terms_deposit_pct: 50,
+        scoper_user_id: null,
+        scoper_user_name: null,
+        scoped_at: null,
+        override_operator_allowlist: [],
+        pdf_sha256: '',
+        email_html_sha256: '',
+      }
+    } catch (e: any) {
+      console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({
+        job_id,
+        handler: 'ops-api/send_quick_quote_email',
+        error: e?.message ?? String(e),
+        note: 'V2 columns left NULL; V1 release-truth path proceeds',
+      }))
+    }
+
     const releasedRevisionId = await recordReleasedQuoteRevision(client, {
       job_id,
       job_document_id: null,
@@ -6830,6 +6981,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       pdf_url: pdf_url || '',
       released_via: 'ops-api/send_quick_quote_email',
       org_id: DEFAULT_ORG_ID,
+      v2_inputs: v2InputsQq,
     }, { handler: 'ops-api/send_quick_quote_email', job_id })
 
     await logBusinessEvent(client, {

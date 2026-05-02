@@ -1,10 +1,11 @@
--- Cap 0 Full Release Packet V2 — quote_revisions schema additions (DRAFT).
+-- Cap 0 Full Release Packet V2 — quote_revisions schema additions.
+-- APPLIED 2026-05-02 (Loop 3 / P2 of the V2 plan) via Supabase MCP under
+-- migration name `quote_revisions_v2_columns_and_supersession`.
 --
--- DO NOT APPLY. This file lives in `_drafts/` so the Supabase CLI does not
--- auto-pick it up via `db push`. It is the migration plan for Loop 3 (P2)
--- of the V2 plan; Loop 1 (P0, this PR) only ships the contract/types/
--- validator/fixtures/tests. Loop 3 takes this draft, renames it with a real
--- timestamp, moves it to `supabase/migrations/`, and applies it.
+-- This file is the canonical source-of-truth for the migration; the live
+-- database state matches what's below. Future deploys via `supabase db
+-- push` will skip it because the migration is already in the
+-- supabase_migrations.schema_migrations table.
 --
 -- What this migration does:
 --   1. Add 8 new jsonb snapshot columns + 2 internal-cost columns to

@@ -64,6 +64,13 @@ export type BuildFullReleasePacketInput = {
   // an allowlist of operator UUIDs supplied by the caller.
   overrides: QaOverride[]
   override_operator_allowlist: string[]
+
+  // Validator mode. 'enforce' (default) refuses the build with errors when
+  // hard-blockers fail. 'warn' demotes hard-blockers to warnings so the
+  // build always returns ok=true with a populated warnings list — used by
+  // the Loop 3 / P2 soft-warn write path that runs the V2 builder alongside
+  // the existing V1 path without refusing any release.
+  mode?: 'enforce' | 'warn'
 }
 
 export type BuildResultOk = {
@@ -167,9 +174,11 @@ export async function buildFullReleasePacket(
 
   // 4. Run the validator. It looks at the manifest + internal_cost together
   //    and returns hard-blocker results. Adapter-specific rules dispatch on
-  //    scope.kind inside the validator.
+  //    scope.kind inside the validator. Mode is caller-controlled; default
+  //    'enforce' preserves original behaviour. Loop 3 / P2 write path passes
+  //    'warn' so the build always succeeds with a warnings list.
   const validation = validatePacketV2(preliminaryManifest, internal_cost, {
-    mode: 'enforce',
+    mode: input.mode ?? 'enforce',
     override_operator_allowlist: input.override_operator_allowlist,
   })
 
