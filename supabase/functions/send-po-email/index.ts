@@ -12,15 +12,36 @@
 //   From domain: orders@secureworkswa.com.au (must be verified in Resend)
 //
 // Params (POST body):
-//   po_id         — UUID of purchase order
-//   job_id        — UUID of job (optional, looked up from PO if omitted)
-//   to_email      — Supplier email address
+//   po_id         — UUID of purchase order (REQUIRED — primary anchor)
+//   job_id        — UUID of job (optional, looked up from PO if omitted;
+//                   if provided, MUST match purchase_orders.job_id)
+//   supplier      — Supplier name (optional, drift-check; if provided
+//                   MUST match purchase_orders.supplier_name)
+//   to_email      — Supplier email address (optional; if provided MUST
+//                   match suppliers.email for the resolved supplier;
+//                   recommended pattern is to omit and let server resolve)
 //   subject       — Email subject (auto-appends PO/job ref if missing)
 //   body_html     — HTML email body
 //   body_text     — Plain text fallback (optional)
 //   attachments   — Array of { filename, storage_url, content_type } (optional)
 //   attach_po_pdf — Boolean, attach PO PDF (implemented — requires pdf_url)
 //   dry_run       — Boolean, skip actual send but store the record
+//
+// ── Recipient verification (FV Loop 3, 2026-05-02) ──
+// Mirrors T2's _verifyAndSendInvoiceEmail pattern. Server-side verification
+// happens BEFORE any external send. Rejection codes:
+//
+//   po_not_found                 po_id not in purchase_orders
+//   supplier_email_unverifiable  PO has no supplier_name OR suppliers row
+//                                has no email on file
+//   supplier_name_mismatch       caller's `supplier` ≠ PO's supplier_name
+//   job_po_mismatch              caller's job_id ≠ PO's job_id
+//   recipient_lookup_failed      DB error during suppliers query
+//   recipient_mismatch           caller's to_email ≠ resolved supplier email
+//
+// Caller-supplied to_email is REJECTED if it doesn't match the resolved
+// supplier email. To bypass legitimately, omit to_email and let the server
+// resolve it from the suppliers table.
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -45,7 +66,142 @@ function json(data: unknown, status = 200) {
   })
 }
 
-serve(async (req: Request) => {
+// ════════════════════════════════════════════════════════════
+// EXPORTED FOR TESTING — recipient verification + supplier resolution.
+// Mirrors T2's _verifyAndSendInvoiceEmail pattern.
+//
+// Returns either:
+//   { ok: true, verifiedJobId, supplierName, finalToEmail, poRow }
+// or
+//   { ok: false, response }   — Response object the caller should return.
+//
+// Caller still owns the side-effects (Resend send, po_communications insert,
+// email_events insert, job_events insert). This helper ONLY enforces the
+// verification gate before any of those run.
+// ════════════════════════════════════════════════════════════
+
+export type VerifyDeps = {
+  client: any   // Supabase service-role client (with .from().select() etc.)
+}
+
+export type VerifyArgs = {
+  po_id: string
+  job_id?: string
+  supplier?: string
+  to_email?: string
+}
+
+export type VerifyResult =
+  | { ok: true; verifiedJobId: string | null; supplierName: string; finalToEmail: string; poRow: any }
+  | { ok: false; response: Response }
+
+export async function _verifyPoEmailRecipient(
+  deps: VerifyDeps,
+  args: VerifyArgs,
+): Promise<VerifyResult> {
+  const { client } = deps
+  const { po_id, job_id, supplier, to_email } = args
+
+  // 1. PO must exist in purchase_orders
+  const { data: po, error: poErr } = await client
+    .from('purchase_orders')
+    .select('id, po_number, job_id, supplier_name, reference')
+    .eq('id', po_id)
+    .maybeSingle()
+
+  if (poErr || !po) {
+    return { ok: false, response: json({
+      error: 'PO not found',
+      code: 'po_not_found',
+      po_id,
+      detail: poErr?.message || null,
+    }, poErr ? 400 : 404) }
+  }
+
+  // 2. PO must have a supplier_name on file
+  const supplierName = (po.supplier_name || '').toString().trim()
+  if (!supplierName) {
+    return { ok: false, response: json({
+      error: 'PO has no supplier_name on file — cannot resolve recipient',
+      code: 'supplier_email_unverifiable',
+      po_id,
+    }, 400) }
+  }
+
+  // 3. Caller-supplied supplier name must match (drift check)
+  const callerSupplier = (supplier || '').toString().trim()
+  if (callerSupplier && callerSupplier.toLowerCase() !== supplierName.toLowerCase()) {
+    return { ok: false, response: json({
+      error: 'Caller-supplied supplier name does not match PO',
+      code: 'supplier_name_mismatch',
+      po_id,
+      received: callerSupplier,
+      expected: supplierName,
+    }, 400) }
+  }
+
+  // 4. Caller-supplied job_id must match PO's job_id (mirror T2 job_invoice_mismatch)
+  if (job_id && po.job_id && job_id !== po.job_id) {
+    return { ok: false, response: json({
+      error: 'job_id does not belong to this PO',
+      code: 'job_po_mismatch',
+      po_id,
+      received_job_id: job_id,
+      expected_job_id: po.job_id,
+    }, 400) }
+  }
+  const verifiedJobId: string | null = po.job_id || null
+
+  // 5. Resolve supplier email server-side (caller cannot override; case-insensitive
+  //    name match mirrors the existing updateSupplierEmail pattern in ops-api)
+  const { data: supplierRow, error: suppErr } = await client
+    .from('suppliers')
+    .select('id, name, email')
+    .ilike('name', supplierName)
+    .maybeSingle()
+
+  if (suppErr) {
+    return { ok: false, response: json({
+      error: 'Supplier lookup failed',
+      code: 'recipient_lookup_failed',
+      po_id,
+      detail: suppErr.message,
+    }, 400) }
+  }
+
+  if (!supplierRow || typeof supplierRow.email !== 'string' || !supplierRow.email.trim()) {
+    return { ok: false, response: json({
+      error: 'Supplier has no email on file',
+      code: 'supplier_email_unverifiable',
+      po_id,
+      supplier_name: supplierName,
+    }, 400) }
+  }
+
+  const resolvedEmail = supplierRow.email.trim()
+  const resolvedNorm = resolvedEmail.toLowerCase()
+
+  // 6. Caller-supplied to_email must match resolved supplier email (drift check).
+  //    Recommended pattern is to omit to_email entirely; server uses the resolved
+  //    canonical email in either case.
+  const callerToEmail = (to_email || '').toString().trim()
+  if (callerToEmail && callerToEmail.toLowerCase() !== resolvedNorm) {
+    return { ok: false, response: json({
+      error: 'Caller-supplied to_email does not match supplier on file',
+      code: 'recipient_mismatch',
+      po_id,
+      received: callerToEmail,
+      expected: resolvedEmail,
+    }, 400) }
+  }
+
+  return { ok: true, verifiedJobId, supplierName, finalToEmail: resolvedEmail, poRow: po }
+}
+
+// Only start the HTTP server when this module is the entry point — lets the
+// test file import `_verifyPoEmailRecipient` without spinning up the server
+// (mirrors the ops-api `if (import.meta.main) serve(...)` pattern).
+if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── API Key Authentication ──
@@ -76,26 +232,30 @@ serve(async (req: Request) => {
     let { job_id } = body
     const cc: string[] = body.cc || []
 
-    if (!po_id || !to_email) {
-      return json({ error: 'po_id and to_email required' }, 400)
+    if (!po_id) {
+      return json({ error: 'po_id required', code: 'po_id_missing' }, 400)
     }
     if (!rawSubject || (!body_html && !body_text)) {
       return json({ error: 'subject and body_html (or body_text) required' }, 400)
     }
 
-    // Look up PO for number and job reference
-    const { data: po, error: poErr } = await sb
-      .from('purchase_orders')
-      .select('id, po_number, job_id, supplier_name, reference')
-      .eq('id', po_id)
-      .single()
+    // ── Server-side recipient verification (FV Loop 3) ──
+    // Look up PO + supplier; verify caller-supplied supplier/job_id/to_email
+    // match canonical sources before any external send.
+    const verify = await _verifyPoEmailRecipient({ client: sb }, {
+      po_id,
+      job_id: job_id || undefined,
+      supplier: body.supplier || undefined,
+      to_email: to_email || undefined,
+    })
+    if (!verify.ok) return verify.response
 
-    if (poErr || !po) {
-      return json({ error: 'PO not found: ' + (poErr?.message || po_id) }, 404)
-    }
-
-    // Get job_id from PO if not provided
-    if (!job_id) job_id = po.job_id
+    const po = verify.poRow
+    // Inherit PO's job_id if caller omitted it
+    if (!job_id) job_id = verify.verifiedJobId
+    // Use the canonical supplier email; reject silently overrides any caller value
+    // because verify() already enforced equality (or accepted absence).
+    const verifiedToEmail = verify.finalToEmail
 
     // Look up job number for subject tagging
     let jobNumber = ''
@@ -172,7 +332,7 @@ serve(async (req: Request) => {
 
       const resendPayload: any = {
         from: `${FROM_NAME} <${FROM_EMAIL}>`,
-        to: [to_email],
+        to: [verifiedToEmail],
         reply_to: replyTo,
         subject,
         html: fullHtml,
@@ -201,9 +361,9 @@ serve(async (req: Request) => {
       }
 
       resendId = resendResult.id
-      console.log(`[send-po-email] Sent email for PO ${poRef} to ${to_email}, resend_id=${resendId}`)
+      console.log(`[send-po-email] Sent email for PO ${poRef} to ${verifiedToEmail}, resend_id=${resendId}`)
     } else {
-      console.log(`[send-po-email] DRY RUN — would send to ${to_email} for PO ${poRef}`)
+      console.log(`[send-po-email] DRY RUN — would send to ${verifiedToEmail} for PO ${poRef}`)
     }
 
     // Store in po_communications with threading metadata
@@ -219,7 +379,7 @@ serve(async (req: Request) => {
         job_id: job_id || null,
         direction: 'outbound',
         from_email: FROM_EMAIL,
-        to_email,
+        to_email: verifiedToEmail,
         subject,
         body_text: body_text || null,
         body_html: fullHtml,
@@ -248,7 +408,7 @@ serve(async (req: Request) => {
         entity_type: 'purchase_order',
         entity_id: po_id,
         job_id: job_id || null,
-        recipient: to_email,
+        recipient: verifiedToEmail,
         sender: FROM_EMAIL,
         subject,
         resend_message_id: resendId,
@@ -276,7 +436,7 @@ serve(async (req: Request) => {
         detail_json: {
           po_id,
           po_number: poRef,
-          to_email,
+          to_email: verifiedToEmail,
           subject,
           communication_id: comm?.id || null,
           email_event_id: emailEvent?.id || null,
