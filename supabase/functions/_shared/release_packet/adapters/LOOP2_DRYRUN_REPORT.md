@@ -240,12 +240,83 @@ Given the GAP audit, Loop 3 should:
 - **Customer-facing dossier.** Deferred per V2 plan §9.
 - **Lifecycle checkpoints (Acceptance/Invoice/WO/Completion).** Loop 5 (P4).
 
-## 8. Status
+## 8. Sentinel pattern + reserved synthetic contact ids (final PR #21 state)
+
+Three Codex stop-time review rounds shaped the per-contact handling in fence releases. Each round caught a real bug:
+
+| Round | Bug | Fix | Why it matters |
+|---|---|---|---|
+| 1 | Adapter wrote literal `'primary'` as `contact_id` for shared-line client share | Refused synthetic literals; fall back to real UUID lookup | Downstream (T5 Job Dossier, JARVIS, future T7 evidence spine) cannot dereference `'primary'` against `job_contacts` — silent broken reference |
+| 2 | Refusing the synthetic literal caused the adapter to **silently drop the client share** when the primary couldn't be resolved | Preserve the share but mark it with a sentinel id | Customer's portion vanishing from `pricing_public.line_items[].per_contact[]` and `per_contact_totals[]` is undetectable downstream — `per_contact_totals.sum() ≠ subtotal_ex_gst` was the only structural tell |
+| 3 (final) | Need a structural integrity rule that hard-blocks any release containing the sentinel | Non-overridable validator rule `pricing.per_contact_ids_resolved` + reserved-id whitelist | Sentinel preserves financial info; validator refuses to ship; the bug surfaces as a structured error at send time and CANNOT escape into a sealed `quote_revisions` row |
+
+### The sentinel pattern (final architecture)
+
+```ts
+// manifest_v2_types.ts
+export const UNRESOLVED_PRIMARY_CONTACT_ID = '__unresolved_primary_contact__'
+
+export const RESERVED_SYNTHETIC_CONTACT_IDS: ReadonlySet<string> = new Set([
+  UNRESOLVED_PRIMARY_CONTACT_ID,
+  'primary',     // historical bug — see commit 4efe23c
+  'neighbour',   // defensive
+  'client',      // defensive
+  'unknown',     // defensive
+  '',            // empty string is not an id
+])
+```
+
+**Adapter behaviour** (fence): when the primary contact cannot be resolved from `supplemental.contacts` AND the line carries a non-zero client share, the adapter writes the share with `UNRESOLVED_PRIMARY_CONTACT_ID` rather than (a) dropping it or (b) fabricating a literal. Same rule applies to `pricing_public.per_contact_totals[]`.
+
+**Validator behaviour**: the envelope rule `pricing.per_contact_ids_resolved` walks every `per_contact[]` entry and every `per_contact_totals[]` entry and refuses the release if any `contact_id` matches a reserved synthetic value.
+
+**Critically: this rule is NOT overridable.** Even an allowlisted operator (Marnin or Shaun) cannot grant permission to ship a release containing the sentinel. It is a structural integrity rule, not a business judgment call. Releases with unresolved primary contacts CANNOT ship — operators see a structured error pointing them at the missing contact data, fix it, retry.
+
+### Why this pattern is required for downstream evidence/JARVIS correctness
+
+The sealed `quote_revisions` row + canonical-text manifest + `manifest_hash` are the **raw evidence source** for everything downstream:
+
+- **T5 Job Dossier** assembles operational truth by joining `quote_revisions` + `business_events` + per-contact data. Synthetic / dropped contact references break the dossier's integrity guarantees.
+- **JARVIS** queries the dossier for natural-language responses (e.g. "what did neighbour B agree to pay on the Rear run?"). A sentinel that escaped or a missing share would produce confidently wrong answers — far worse than a refusal.
+- **Future T7 evidence spine** (see § 10 below) will treat each released revision as a citeable raw evidence source. Anything written to `quote_revisions` becomes evidence forever. The cost of letting a dirty row escape is unbounded — no future cleanup pass can know whether `'primary'` was a real id or a bug.
+
+The sentinel pattern guarantees a **single invariant**: any row that survives the validator and lands in `quote_revisions` has a fully-resolved per-contact financial picture. The downstream surface can trust the evidence.
+
+## 9. Status (final PR #21)
 
 - **Loop 1 / P0** — PR #18 open, mergeable, 54 tests (was 48, +6 bypass regression after Codex fix).
-- **Loop 2 / P1** — this PR. 27 adapter integration tests + dry-run report. Builds on PR #18.
-- **Total V2 test count:** 97/97 PASS (54 P0 + 27 P1 + 16 V1 shared regression-clean).
+- **Loop 2 / P1** — PR #21 stacked on #18. Initial 27 adapter integration tests + dry-run report; **+13 regression tests across 3 Codex rounds** (shape misreads, synthetic ids, missing-primary liability preservation).
+- **Total V2 test count: 110/110 PASS** (54 P0 + 40 P1 + 16 V1 shared regression-clean).
+- **Final PR #21 commits:**
+  - `2abeef8` initial Loop 2 / P1 adapters + dry-run report (had misreads)
+  - `3e21b56` Codex shape-misread fix (fence runs construction; Quick Quote dispatch via `pricing.source`)
+  - `4efe23c` Codex synthetic-id fix (no literal `'primary'`)
+  - `8b3cbdd` Codex liability-preservation fix (sentinel + non-overridable validator rule)
 
-Stop gate for Loop 2: Marnin reviews this report + the three adapters + decides which §5 capture work happens before Loop 3 vs after.
+Stop gate for Loop 2: Marnin reviews this report + the four adapter modules + decides which § 5 capture work happens before Loop 3 vs after.
 
 Once approved, Loop 3 (P2) applies the migration and wires the V2 write path in soft-warn mode.
+
+## 10. Loop 3 / P2 alignment requirement — T7 evidence spine consumability
+
+V2 release packets must become a clean raw evidence source for the future T7 evidence spine. The Loop 3 write path must satisfy three properties so T7 can consume it without rework:
+
+1. **Citeable via `evidence_refs`.** Each released `quote_revisions` row must be addressable by a stable identifier the future evidence spine can use. The `release_id` UUID + `manifest_hash` together form that identifier; the write path must persist both inline (already in the V2 envelope's `release_id` and the `manifest_hash` column) and ensure they cannot mutate post-release.
+2. **Emit or be indexable as a quote-release evidence event.** Loop 3's V2 write path must either:
+   - emit a canonical `business_events` row with `event_type='quote.release_packet.v2.sealed'` (or similar — exact name TBD with T7) carrying `{quote_revision_id, manifest_hash, internal_cost_hash, release_id, version}` in the payload, OR
+   - leave a stable, append-only index on `quote_revisions` that T7's later read path can scan in chronological order without ambiguity.
+3. **No V2 path that T7 cannot consume.** Loop 3 MUST NOT introduce shapes that are read-only via Cap 0–internal helpers. Anything sealed in `quote_revisions` (the V2 jsonb columns) and anything referenced by `manifest_url` / `internal_cost_url` must be reachable by a future T7 reader using service-role auth + the documented read primitive (`get_release_packet_v2`).
+
+T7 itself is **out of scope** for Loop 3. We do not build the evidence spine, the spine reader, or the citation API in this loop. We only ensure the V2 write path is shaped so T7 can plug in later without a Cap 0 redesign.
+
+This is a forward-compatibility constraint, not a build target. Failing to satisfy it during Loop 3 means re-engineering the V2 write path when T7 starts — exactly the kind of rework the V2 envelope was designed to prevent.
+
+## 11. Merge readiness (PR #18 → main → PR #21 → main)
+
+Sequencing constraint:
+
+- **PR #18 (Loop 1 / P0) must merge to `main` first.** PR #21 currently targets `cap0-v2-p0-contract` (PR #18's branch) because it depends on the V2 types/validator/builder shipped there.
+- **After PR #18 merges**, GitHub will automatically retarget PR #21 to `main`. The PR diff will then show only Loop 2 / P1 changes. If GitHub doesn't auto-retarget cleanly, manually `git rebase --onto main cap0-v2-p0-contract cap0-v2-p1-adapters` and force-push.
+- **Re-run V2 test sweep + deno check after rebase** to confirm zero regression. Both should remain green.
+
+No deploy. No migration applied. No production write path. PR #18 + #21 are pure local artefacts — types, validator, adapters, tests, dry-run report, draft migration in `_drafts/`.
