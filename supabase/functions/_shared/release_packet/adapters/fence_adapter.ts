@@ -1,22 +1,54 @@
-// Fence adapter — folds fence-designer's `jobs.scope_json` + `pricing_json`
-// shape into the V2 envelope's scope/pricing blocks.
+// Fence adapter — folds fence-designer's actual production shape into the
+// V2 envelope's scope/pricing blocks.
 //
-// Real production keys (sampled 2026-05-01 from `jobs.scope_json` rows where
-// jobs.type='fencing'):
-//   job, savedAt, scopeMedia, tool, version
+// Production reality (sampled 2026-05-01, drilled 2026-05-01 round 2):
 //
-// And `jobs.pricing_json`:
+// `jobs.scope_json` keys: `job, savedAt, scopeMedia, tool, version`
+//
+// `jobs.scope_json.job` keys (this is where construction details live):
+//   _addressComponents, _latlng, _materialOverrides, _placeId, _poApproved,
+//   _pricing_json, address, checklist, client, clientFirstName,
+//   clientLastName, colour, date, email, gates, gatesRequired, installation,
+//   materialVerification, neighbours, neighboursRequired, phone,
+//   pricePerMetre, profile, quote, ref, removal, runs, scoper, siteNotes,
+//   suburb, supplier, supplierNotes
+//
+// `jobs.scope_json.job.runs[]` per-run construction keys:
+//   extension, id, length, name, neighbourId, panels, sheetHeight, slope
+//
+// `jobs.pricing_json` top-level keys:
 //   commissionCostEstimate, deposit, generated_at, gst, internal,
 //   job_description, labourCostEstimate, line_items, margin_pct,
 //   materialCostEstimate, neighbour_splits, runs, source, subtotal,
 //   totalCostEstimate, totalExGST, totalIncGST, version
 //
-// Critical for fence: the per-run breakdown is in `pricing_json.runs[]`,
-// each run's per-line allocation is via `run_line_items` table (live-joined
-// for V2), and per-contact splits are in `pricing_json.neighbour_splits`.
-// Adapters draw the fence runs from `pricing_json.runs[]` (the canonical
-// source) — `scope_json.job` may also carry data but `pricing_json.runs[]`
-// is what every release path emits.
+// `jobs.pricing_json.runs[]` keys:
+//   default_split_pct, items, neighbour_address, neighbour_id, neighbour_name,
+//   run_label, run_name, totals
+//
+// `jobs.pricing_json.runs[].items[]` keys (the canonical client-side line shape):
+//   allocation, allocation_note, client_amount_ex, description, line_total_ex,
+//   neighbour_amount_ex, quantity, sort_order, split_pct, unit, unit_price_ex
+//
+// `jobs.pricing_json.runs[].totals` keys:
+//   client_share_ex, client_share_inc, neighbour_share_ex, neighbour_share_inc,
+//   run_total_ex, run_total_inc
+//
+// `jobs.pricing_json.internal` is a flat object of scalars:
+//   commission: number, cost: number, labour: number, margin: number
+//
+// Adapter strategy:
+//   - Read construction details from `scope_json.job.runs[]` (length →
+//     lineal_m, sheetHeight → height_mm, name → run_label, panels → panels).
+//   - Read fence-job-wide attributes (profile, colour, removal, gates) from
+//     `scope_json.job` and apply per-run defaults.
+//   - Read line items from `pricing.runs[].items[]` using the V1 minimal
+//     manifest's per-run line shape (matches `run_line_items` table).
+//   - Use `pricing.runs[].totals` for per-contact totals (client_share_ex
+//     + neighbour_share_ex).
+//   - Read internal cost estimates from `pricing.internal.{cost, labour,
+//     commission, margin}` (scalars), falling back to top-level
+//     `pricing.materialCostEstimate / labourCostEstimate / commissionCostEstimate`.
 
 import type { AdapterInputs, AdapterOutput, BuildScopeBlock } from '../adapter_interface.ts'
 import type {
@@ -43,36 +75,71 @@ import {
 export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): AdapterOutput => {
   const scopeJson = asObject(inputs.job.scope_json)
   const pricingJson = asObject(inputs.job.pricing_json)
+  const jobBlock = asObject(scopeJson.job)
 
-  // Build per-run scope block.
-  const runsRaw = asArray(pricingJson.runs)
-  const runs: FenceRun[] = runsRaw.map((rawRun) => {
-    const run = asObject(rawRun)
-    const gates = asArray(run.gates).map((rawGate): FenceGate => {
-      const g = asObject(rawGate)
-      return {
-        type: asString(g.type, 'unknown'),
-        width_mm: asNumber(g.width_mm, 0),
-        height_mm: asNumber(g.height_mm, 0),
-        hardware: asString(g.hardware) || null,
-      }
-    })
+  // ── Build FenceRun[] from scope_json.job.runs[], indexed by name+id ─────
+  const scopeRuns = asArray(jobBlock.runs)
+  const pricingRuns = asArray(pricingJson.runs)
+
+  // Default fence attributes derived from the job-wide block.
+  const fenceProfile = asString(jobBlock.profile, 'colorbond')
+  const fenceColour = asString(jobBlock.colour) || null
+  const fenceFinish = asString(jobBlock.supplier) || null
+  const removalEnabled = asBool(jobBlock.removal)
+  const jobGatesRaw = asArray(jobBlock.gates)
+  const jobGates = jobGatesRaw.map((g): FenceGate => {
+    const o = asObject(g)
     return {
-      run_label: asString(run.run_label, 'UNNAMED'),
-      type: asString(run.type, 'colorbond'),
-      height_mm: asNumber(run.height_mm, 0),
-      lineal_m: asNumber(run.lineal_m ?? run.length_m, 0),
-      panels: asNumberOrNull(run.panels),
-      posts: asNumberOrNull(run.posts),
-      infill: asString(run.infill) || null,
-      finish: asString(run.finish) || null,
-      demo: asBool(run.demo),
-      gates,
+      type: asString(o.type, 'pedestrian'),
+      width_mm: asNumber(o.width_mm ?? o.width, 0),
+      height_mm: asNumber(o.height_mm ?? o.height, 0),
+      hardware: asString(o.hardware) || null,
     }
   })
 
-  // scope_json.scopeMedia indicates whether boundary plans/photos were
-  // uploaded; the actual media flows through job_media (live-joined).
+  const runs: FenceRun[] = scopeRuns.map((rawRun): FenceRun => {
+    const r = asObject(rawRun)
+    return {
+      run_label: asString(r.name, 'UNNAMED'),
+      type: fenceProfile,
+      // scope_json.job.runs[].sheetHeight is in mm.
+      height_mm: asNumber(r.sheetHeight ?? r.height_mm, 0),
+      // scope_json.job.runs[].length is in metres.
+      lineal_m: asNumber(r.length ?? r.lineal_m, 0),
+      panels: asNumberOrNull(r.panels),
+      posts: asNumberOrNull(r.posts),
+      infill: fenceColour,
+      finish: fenceFinish,
+      // Per-run demo flag: fence-designer doesn't capture a per-run demo
+      // today; fall back to the job-wide `removal` flag.
+      demo: removalEnabled,
+      // Job-wide gates today; per-run gate assignment is a future capture.
+      gates: jobGates,
+    }
+  })
+
+  // If scope_json.job.runs is empty/absent, fall back to deriving runs from
+  // pricing_json.runs[]. This happens for older or partially-scoped rows.
+  if (runs.length === 0 && pricingRuns.length > 0) {
+    for (const rawRun of pricingRuns) {
+      const r = asObject(rawRun)
+      runs.push({
+        run_label: asString(r.run_label ?? r.run_name, 'UNNAMED'),
+        type: fenceProfile,
+        height_mm: 0,
+        lineal_m: 0,
+        panels: null,
+        posts: null,
+        infill: fenceColour,
+        finish: fenceFinish,
+        demo: removalEnabled,
+        gates: [],
+      })
+    }
+  }
+
+  // Boundary plan attached: scope_json.scopeMedia.drawings or
+  // scope_json.scopeMedia.boundary_plans non-empty.
   const scopeMedia = asObject(scopeJson.scopeMedia)
   const boundaryPlanAttached = asArray(scopeMedia.drawings).length > 0 ||
     asArray(scopeMedia.boundary_plans).length > 0
@@ -84,18 +151,14 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     boundary_plan_attached: boundaryPlanAttached,
   }
 
-  // Pricing_public: aggregate across runs. Each line in pricing_json.line_items
-  // refers back to a run via run_label. Per-contact split derived from
-  // neighbour_splits + supplemental.contacts (V2 expects these joined upstream).
-  const lineItems = buildFenceLineItems(pricingJson, asArray(inputs.supplemental.contacts))
-
+  // ── Build pricing_public from pricing.runs[].items[] (canonical) ────────
+  const lineItems = buildFenceLineItems(pricingJson)
   const subtotal = asNumber(
     pricingJson.totalExGST ?? pricingJson.subtotal,
     lineItems.reduce((a, x) => a + x.line_total_ex, 0),
   )
   const gst = asNumber(pricingJson.gst, Math.round(subtotal * 0.1 * 100) / 100)
   const totalInc = asNumber(pricingJson.totalIncGST, Math.round((subtotal + gst) * 100) / 100)
-
   const perContactTotals = buildPerContactTotals(pricingJson, asArray(inputs.supplemental.contacts))
 
   const pricingPublic: PricingPublic = {
@@ -109,22 +172,24 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     per_contact_totals: perContactTotals,
   }
 
-  // Internal cost snapshot.
+  // ── Internal cost snapshot (uses pricing.internal scalars + top-level) ──
   const lineCosts = lineItems.map((li) => {
-    const raw = findRawLine(pricingJson, li.line_id)
+    const raw = findRawLineForCost(pricingJson, li.line_id)
     const unitCost = asNumber(raw.cost_price ?? raw.unit_cost, 0)
     return {
       line_id: li.line_id,
       unit_cost: unitCost,
       line_cost_total_ex: Math.round(unitCost * li.qty * 100) / 100,
-      supplier_name: asString(raw.supplier_name) || null,
+      supplier_name: asString(raw.supplier_name) || asString(jobBlock.supplier) || null,
     }
   })
 
-  const materialTotal = asNumber(pricingJson.materialCostEstimate, 0)
-  const labourTotal = asNumber(pricingJson.labourCostEstimate, 0)
-  const commissionTotal = asNumber(pricingJson.commissionCostEstimate, 0)
-  const marginPct = asNumber(pricingJson.margin_pct, 0)
+  const internal = asObject(pricingJson.internal)
+  // pricing.internal scalars; fallback to top-level estimates.
+  const materialTotal = asNumber(internal.cost ?? pricingJson.materialCostEstimate, 0)
+  const labourTotal = asNumber(internal.labour ?? pricingJson.labourCostEstimate, 0)
+  const commissionTotal = asNumber(internal.commission ?? pricingJson.commissionCostEstimate, 0)
+  const marginPct = asNumber(internal.margin ?? pricingJson.margin_pct, 0)
 
   const internal_cost: InternalCostSnapshot = {
     schema_version: '2.0',
@@ -155,11 +220,11 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
   const totalLineal = runs.reduce((a, r) => a + r.lineal_m, 0)
   const summary = baseDescription.length >= 40
     ? baseDescription
-    : `${totalLineal}m of ${asString(runs[0]?.type, 'colorbond')} fencing across ${runs.length} run${runs.length === 1 ? '' : 's'}. ${baseDescription}`
+    : `${totalLineal}m of ${fenceProfile} fencing across ${runs.length} run${runs.length === 1 ? '' : 's'}. ${baseDescription}`
 
-  // Council status: fence-designer's scope_json.job carries council fields
-  // when captured. Default 'unknown' (validator hard-fails until captured).
-  const jobBlock = asObject(scopeJson.job)
+  // Council status — fence-designer doesn't currently capture this in
+  // scope_json.job; default 'unknown' so the validator hard-fails until
+  // capture lands.
   const councilRaw = asString(jobBlock.council_status).toLowerCase()
   const councilStatus =
     councilRaw === 'not_required' ? 'not_required' :
@@ -183,113 +248,118 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
 
 function buildFenceLineItems(
   pricingJson: Record<string, unknown>,
-  contacts: unknown[],
 ): PricingLineItem[] {
-  // Fence pricing has BOTH a top-level `line_items` array (used for totals
-  // recon) AND per-run `runs[].items` (the per-run breakdown). The top-level
-  // line_items is canonical for totals; the per-run items inform allocation.
-  // For V2 we use the top-level line_items and look up per-run allocation
-  // via the line's `run_label` field plus `neighbour_splits`.
-  const raw = asArray(pricingJson.line_items)
-  const splitsByRun = buildSplitsByRunLabel(pricingJson, contacts)
+  // Canonical source: pricing.runs[].items[]. Each item carries
+  // unit_price_ex, line_total_ex, allocation, split_pct, client_amount_ex,
+  // neighbour_amount_ex — which maps directly to V2's PricingLineItem.
+  // Also resolve neighbour_id at the run level so per_contact splits are
+  // accurate.
+  const pricingRuns = asArray(pricingJson.runs)
+  const items: PricingLineItem[] = []
+  let lineCounter = 0
+  for (const rawRun of pricingRuns) {
+    const run = asObject(rawRun)
+    const runLabel = asString(run.run_label ?? run.run_name, 'UNNAMED')
+    const neighbourId = asString(run.neighbour_id) || null
+    for (const rawItem of asArray(run.items)) {
+      const li = asObject(rawItem)
+      const category = (asString(li.category) || guessCategory(asString(li.description))) as LineCategory
+      const qty = asNumber(li.quantity ?? li.qty, 1)
+      const unitSell = asNumber(li.unit_price_ex ?? li.unit_price ?? li.sell_price, 0)
+      const lineTotal = asNumber(li.line_total_ex ?? li.total_sell ?? li.total, qty * unitSell)
+      const allocation = (asString(li.allocation) || 'client') as LineAllocation
+      const splitPct = asNumber(li.split_pct, 100)
 
-  return raw.map((rawLine, idx) => {
-    const li = asObject(rawLine)
-    const category = (asString(li.category) || guessCategory(asString(li.description))) as LineCategory
-    const qty = asNumber(li.quantity ?? li.qty, 1)
-    const unitSell = asNumber(li.unit_price_ex ?? li.unit_price ?? li.unit_sell, 0)
-    const lineTotal = asNumber(li.line_total_ex ?? li.total, qty * unitSell)
-    const allocation = (asString(li.allocation) || 'client') as LineAllocation
-    const splitPct = asNumber(li.split_pct, 100)
-    const runLabel = asString(li.run_label)
+      const clientAmountEx = asNumber(li.client_amount_ex, lineTotal)
+      const neighbourAmountEx = asNumber(li.neighbour_amount_ex, 0)
 
-    // Per-contact split for this line: lookup the per-run splits.
-    const runSplits = splitsByRun.get(runLabel) ?? []
-    const per_contact: PerContactSplit[] = runSplits.length > 0
-      ? runSplits.map((s) => ({
-          contact_id: s.contact_id,
-          amount_ex: Math.round(lineTotal * s.share * 100) / 100,
-        }))
-      : []
-
-    return {
-      line_id: `fence-L-${idx}`,
-      category,
-      description: asString(li.description),
-      qty,
-      unit: asString(li.unit, 'm'),
-      unit_sell: unitSell,
-      line_total_ex: lineTotal,
-      allocation,
-      split_pct: splitPct,
-      per_contact,
-    }
-  })
-}
-
-function buildSplitsByRunLabel(
-  pricingJson: Record<string, unknown>,
-  contacts: unknown[],
-): Map<string, Array<{ contact_id: string; share: number }>> {
-  // neighbour_splits shape varies; we tolerate both:
-  //   { 'REAR': [{contact_id, pct}, ...], ... }
-  // and:
-  //   [{run_label, contact_id, pct}, ...]
-  const result = new Map<string, Array<{ contact_id: string; share: number }>>()
-  const splits = pricingJson.neighbour_splits
-
-  // Helper to get default contact id (primary).
-  const primaryId = contacts.length > 0 ? asString(asObject(contacts[0]).id) : ''
-
-  if (Array.isArray(splits)) {
-    for (const rawEntry of splits) {
-      const e = asObject(rawEntry)
-      const runLabel = asString(e.run_label)
-      const contactId = asString(e.contact_id) || primaryId
-      const pct = asNumber(e.pct ?? e.split_pct, 100) / 100
-      const arr = result.get(runLabel) ?? []
-      arr.push({ contact_id: contactId, share: pct })
-      result.set(runLabel, arr)
-    }
-  } else if (splits && typeof splits === 'object') {
-    for (const [runLabel, raw] of Object.entries(splits as Record<string, unknown>)) {
-      const arr: Array<{ contact_id: string; share: number }> = []
-      for (const rawEntry of asArray(raw)) {
-        const e = asObject(rawEntry)
-        const contactId = asString(e.contact_id) || primaryId
-        const pct = asNumber(e.pct ?? e.split_pct, 100) / 100
-        arr.push({ contact_id: contactId, share: pct })
+      const per_contact: PerContactSplit[] = []
+      // Primary contact takes the client share. Neighbour takes the neighbour
+      // share when neighbour_id is set on the run. We can't always resolve
+      // the primary contact_id from inputs without `inputs.supplemental.contacts`;
+      // the empty array is acceptable for fall-back behaviour, the validator
+      // tolerates per_contact splits being empty when allocation='client'.
+      if (allocation === 'shared' || allocation === 'neighbour') {
+        if (neighbourId) {
+          per_contact.push({ contact_id: neighbourId, amount_ex: Math.round(neighbourAmountEx * 100) / 100 })
+        }
       }
-      result.set(runLabel, arr)
+
+      items.push({
+        line_id: `fence-L-${lineCounter++}-${runLabel}`,
+        category,
+        description: asString(li.description),
+        qty,
+        unit: asString(li.unit, 'm'),
+        unit_sell: unitSell,
+        line_total_ex: lineTotal,
+        allocation,
+        split_pct: splitPct,
+        per_contact,
+      })
+      // Capture client share separately under the same allocation if shared.
+      // (Test fixtures expect at least one entry per non-client allocation;
+      // this keeps the existing 50/50 contract.)
+      if ((allocation === 'shared') && per_contact.length > 0) {
+        // The first entry above is the neighbour amount; prepend the client.
+        per_contact.unshift({ contact_id: 'primary', amount_ex: Math.round(clientAmountEx * 100) / 100 })
+      }
     }
   }
-  return result
+
+  // Fallback: if pricing.runs[].items[] is empty, try the top-level
+  // pricing.line_items[] (older fence shape with sell_price/total_sell).
+  if (items.length === 0) {
+    const flat = asArray(pricingJson.line_items)
+    for (let idx = 0; idx < flat.length; idx++) {
+      const li = asObject(flat[idx])
+      const category = (asString(li.category) || guessCategory(asString(li.description))) as LineCategory
+      const qty = asNumber(li.quantity ?? li.qty, 1)
+      const unitSell = asNumber(li.unit_price_ex ?? li.sell_price ?? li.unit_price, 0)
+      const lineTotal = asNumber(li.line_total_ex ?? li.total_sell ?? li.total, qty * unitSell)
+      items.push({
+        line_id: `fence-L-flat-${idx}`,
+        category,
+        description: asString(li.description),
+        qty,
+        unit: asString(li.unit, 'm'),
+        unit_sell: unitSell,
+        line_total_ex: lineTotal,
+        allocation: 'client',
+        split_pct: 100,
+        per_contact: [],
+      })
+    }
+  }
+
+  return items
 }
 
 function buildPerContactTotals(
   pricingJson: Record<string, unknown>,
   contacts: unknown[],
 ): PerContactTotal[] {
-  // Sum line_items per contact via neighbour_splits.
-  const splitsByRun = buildSplitsByRunLabel(pricingJson, contacts)
+  // Per-run totals are pre-computed in pricing.runs[].totals. Aggregate
+  // across runs grouped by the run's neighbour_id (if any) + a synthetic
+  // 'primary' bucket for the client share.
   const totalsExByContact = new Map<string, number>()
+  const primaryContactId = contacts.length > 0
+    ? asString(asObject(contacts[0]).id) || 'primary'
+    : 'primary'
 
-  for (const rawLine of asArray(pricingJson.line_items)) {
-    const li = asObject(rawLine)
-    const lineTotal = asNumber(li.line_total_ex ?? li.total, 0)
-    const runLabel = asString(li.run_label)
-    const splits = splitsByRun.get(runLabel) ?? []
-    if (splits.length === 0) {
-      // Whole line goes to primary.
-      const primaryId = contacts.length > 0 ? asString(asObject(contacts[0]).id) : ''
-      if (primaryId) {
-        totalsExByContact.set(primaryId, (totalsExByContact.get(primaryId) ?? 0) + lineTotal)
-      }
-    } else {
-      for (const s of splits) {
-        const portion = Math.round(lineTotal * s.share * 100) / 100
-        totalsExByContact.set(s.contact_id, (totalsExByContact.get(s.contact_id) ?? 0) + portion)
-      }
+  for (const rawRun of asArray(pricingJson.runs)) {
+    const run = asObject(rawRun)
+    const totals = asObject(run.totals)
+    const neighbourId = asString(run.neighbour_id) || null
+
+    const clientShareEx = asNumber(totals.client_share_ex, 0)
+    const neighbourShareEx = asNumber(totals.neighbour_share_ex, 0)
+
+    if (clientShareEx > 0) {
+      totalsExByContact.set(primaryContactId, (totalsExByContact.get(primaryContactId) ?? 0) + clientShareEx)
+    }
+    if (neighbourShareEx > 0 && neighbourId) {
+      totalsExByContact.set(neighbourId, (totalsExByContact.get(neighbourId) ?? 0) + neighbourShareEx)
     }
   }
 
@@ -300,11 +370,31 @@ function buildPerContactTotals(
   }))
 }
 
-function findRawLine(pricingJson: Record<string, unknown>, line_id: string): Record<string, unknown> {
-  const idxMatch = /^fence-L-(\d+)$/.exec(line_id)
-  if (!idxMatch) return {}
-  const idx = parseInt(idxMatch[1], 10)
-  return asObject(asArray(pricingJson.line_items)[idx])
+function findRawLineForCost(
+  pricingJson: Record<string, unknown>,
+  line_id: string,
+): Record<string, unknown> {
+  // Walk pricing.runs[].items[] then top-level fallback to find the line
+  // matching our derived line_id. The id format is 'fence-L-<idx>-<label>'
+  // for run-items and 'fence-L-flat-<idx>' for flat fallback.
+  const runItemMatch = /^fence-L-(\d+)-/.exec(line_id)
+  if (runItemMatch) {
+    const idx = parseInt(runItemMatch[1], 10)
+    let counter = 0
+    for (const rawRun of asArray(pricingJson.runs)) {
+      const items = asArray(asObject(rawRun).items)
+      for (const it of items) {
+        if (counter === idx) return asObject(it)
+        counter++
+      }
+    }
+  }
+  const flatMatch = /^fence-L-flat-(\d+)$/.exec(line_id)
+  if (flatMatch) {
+    const idx = parseInt(flatMatch[1], 10)
+    return asObject(asArray(pricingJson.line_items)[idx])
+  }
+  return {}
 }
 
 function guessCategory(description: string): LineCategory {
@@ -315,7 +405,7 @@ function guessCategory(description: string): LineCategory {
   return 'material'
 }
 
-// Soft-warn presence audit for the dry-run tool.
+// ── Presence audit (updated to reflect production reality) ─────────────────
 export function _fencePresenceReport(inputs: AdapterInputs): {
   captured: string[]
   missing: string[]
@@ -329,21 +419,40 @@ export function _fencePresenceReport(inputs: AdapterInputs): {
   const missing: string[] = []
   const partial: string[] = []
 
-  ;(asArray(pricingJson.runs).length > 0 ? captured : missing).push('scope.runs')
-  ;(asArray(pricingJson.line_items).length > 0 ? captured : missing).push('pricing.line_items')
+  // Construction details (scope_json.job.runs[]).
+  ;(asArray(jobBlock.runs).length > 0 ? captured : missing)
+    .push('scope.runs (from scope_json.job.runs[])')
+  ;(asArray(pricingJson.runs).length > 0 ? captured : partial)
+    .push('pricing.runs[].items[] (per-run line items)')
   ;(asNumberOrNull(pricingJson.totalIncGST) !== null ? captured : missing).push('pricing.totals')
-  ;(pricingJson.neighbour_splits ? captured : missing).push('pricing.neighbour_splits')
-  ;(asObject(scopeJson.scopeMedia) ? captured : partial).push('scope.scopeMedia')
-  ;(asString(jobBlock.council_status).length > 0 ? captured : missing).push('site.council_status')
+
+  ;(asString(jobBlock.profile).length > 0 ? captured : partial).push('scope.runs[].type (from job.profile)')
+  ;(asString(jobBlock.colour).length > 0 ? captured : partial).push('scope.runs[].infill (from job.colour)')
+  ;(asString(jobBlock.supplier).length > 0 ? captured : partial).push('scope.runs[].finish (from job.supplier)')
+
+  // Per-contact totals from pricing.runs[].totals.
+  const hasTotals = asArray(pricingJson.runs).some((r) =>
+    Object.keys(asObject(asObject(r).totals)).length > 0
+  )
+  ;(hasTotals ? captured : partial).push('pricing.per_contact_totals (from runs[].totals)')
+
+  // Internal cost (pricing.internal scalars).
+  const internal = asObject(pricingJson.internal)
+  ;(typeof internal.cost === 'number' ? captured : partial).push('internal_cost.cost (from pricing.internal.cost)')
+  ;(typeof internal.margin === 'number' ? captured : partial).push('internal_cost.margin.pct (from pricing.internal.margin)')
 
   // Always-GAP fields for Fence today:
+  ;(asString(jobBlock.council_status).length > 0 ? captured : missing).push('site.council_status')
   missing.push('site.access (chips/notes — currently ad-hoc)')
-  missing.push('site.handover_instructions')
-  missing.push('qa.customer_facing_summary (reconstructed from description)')
-  missing.push('media sha256 (job_media has no sha256 column today)')
-  missing.push('per-contact authority {can_view, can_accept, pays} (default-derived from contact role)')
-  partial.push('internal_cost.line_costs[].supplier_name (often blank)')
-  partial.push('provenance.tool_version')
+  missing.push('site.handover_instructions (jobs.notes free-form)')
+  missing.push('qa.customer_facing_summary (reconstructed from description, not curated)')
+  missing.push('media[].sha256 (job_media has no sha256 column today)')
+  missing.push('per-contact authority {can_view, can_accept, pays} (no structured field)')
+  missing.push('per-run demo flag (currently job-wide jobBlock.removal)')
+  missing.push('per-run gate assignment (currently job-wide jobBlock.gates)')
+  partial.push('internal_cost.line_costs[].supplier_name (per-line if present, else jobBlock.supplier)')
+  partial.push('provenance.tool_version (scope_json.tool + version exist but not split)')
+  partial.push('scope.runs[].posts (not currently captured per run)')
 
   return { captured, missing, partial }
 }

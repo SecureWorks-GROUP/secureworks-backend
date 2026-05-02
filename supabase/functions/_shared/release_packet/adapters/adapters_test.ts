@@ -96,6 +96,16 @@ function buildPatioInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs
 }
 
 function buildFenceInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs {
+  // Production-realistic fence shape (sampled 2026-05-01 round 2):
+  //   - scope_json.job.runs[] holds construction details
+  //     (length / sheetHeight / panels / name / neighbourId)
+  //   - scope_json.job carries job-wide profile / colour / removal / gates
+  //   - pricing_json.runs[].items[] holds the canonical client-side line items
+  //     (unit_price_ex / line_total_ex / allocation / split_pct /
+  //     client_amount_ex / neighbour_amount_ex)
+  //   - pricing_json.runs[].totals holds the pre-computed per-run shares
+  //   - pricing_json.internal is a flat object of scalars
+  //     (commission / cost / labour / margin)
   return {
     job: {
       id: 'job-fence-1',
@@ -114,7 +124,38 @@ function buildFenceInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs
         tool: 'fence-designer',
         savedAt: '2026-05-01T08:00:00Z',
         scopeMedia: { drawings: [{ id: 'media-1' }], boundary_plans: [] },
-        job: { council_status: 'not_required' },
+        job: {
+          council_status: 'not_required',
+          profile: 'colorbond',
+          colour: 'Surfmist',
+          supplier: 'Metroll',
+          removal: false,
+          gatesRequired: false,
+          gates: [],
+          neighboursRequired: true,
+          runs: [
+            {
+              id: 'run-1',
+              name: 'REAR',
+              length: 15,
+              sheetHeight: 1800,
+              panels: 7,
+              extension: 0,
+              slope: 0,
+              neighbourId: 'contact-fence-neighbour',
+            },
+            {
+              id: 'run-2',
+              name: 'LHS',
+              length: 8,
+              sheetHeight: 1800,
+              panels: 4,
+              extension: 0,
+              slope: 0,
+              neighbourId: null,
+            },
+          ],
+        },
       },
       pricing_json: {
         source: 'fence-designer',
@@ -123,41 +164,53 @@ function buildFenceInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs
         runs: [
           {
             run_label: 'REAR',
-            type: 'colorbond',
-            height_mm: 1800,
-            lineal_m: 15,
-            panels: 7,
-            posts: 8,
-            infill: 'Surfmist',
-            finish: 'Powdercoat',
-            demo: false,
-            gates: [],
+            run_name: 'Rear boundary',
+            neighbour_id: 'contact-fence-neighbour',
+            neighbour_name: 'Neighbour Smith',
+            neighbour_address: '36 Fence Way',
+            default_split_pct: 50,
+            items: [
+              { description: 'Colorbond panels REAR', category: 'material', quantity: 15, unit: 'm', unit_price_ex: 120, line_total_ex: 1800, allocation: 'shared', split_pct: 50, client_amount_ex: 900, neighbour_amount_ex: 900, sort_order: 1, cost_price: 80, supplier_name: 'Metroll' },
+              { description: 'Install REAR', category: 'labour', quantity: 1, unit: 'job', unit_price_ex: 700, line_total_ex: 700, allocation: 'shared', split_pct: 50, client_amount_ex: 350, neighbour_amount_ex: 350, sort_order: 2, cost_price: 500 },
+            ],
+            totals: {
+              client_share_ex: 1250,
+              client_share_inc: 1375,
+              neighbour_share_ex: 1250,
+              neighbour_share_inc: 1375,
+              run_total_ex: 2500,
+              run_total_inc: 2750,
+            },
           },
           {
             run_label: 'LHS',
-            type: 'colorbond',
-            height_mm: 1800,
-            lineal_m: 8,
-            panels: 4,
-            posts: 5,
-            infill: 'Surfmist',
-            finish: 'Powdercoat',
-            demo: true,
-            gates: [{ type: 'pedestrian', width_mm: 900, height_mm: 1800, hardware: 'standard' }],
+            run_name: 'Left side return',
+            neighbour_id: null,
+            neighbour_name: null,
+            neighbour_address: null,
+            default_split_pct: 100,
+            items: [
+              { description: 'Colorbond panels LHS', category: 'material', quantity: 8, unit: 'm', unit_price_ex: 120, line_total_ex: 960, allocation: 'client', split_pct: 100, client_amount_ex: 960, neighbour_amount_ex: 0, sort_order: 1, cost_price: 80, supplier_name: 'Metroll' },
+              { description: 'Install LHS', category: 'labour', quantity: 1, unit: 'job', unit_price_ex: 540, line_total_ex: 540, allocation: 'client', split_pct: 100, client_amount_ex: 540, neighbour_amount_ex: 0, sort_order: 2, cost_price: 400 },
+            ],
+            totals: {
+              client_share_ex: 1500,
+              client_share_inc: 1650,
+              neighbour_share_ex: 0,
+              neighbour_share_inc: 0,
+              run_total_ex: 1500,
+              run_total_inc: 1650,
+            },
           },
         ],
-        line_items: [
-          { description: 'Colorbond panels REAR', category: 'material', quantity: 15, unit: 'm', unit_price_ex: 120, line_total_ex: 1800, run_label: 'REAR', allocation: 'shared', split_pct: 50, cost_price: 80, supplier_name: 'Metroll' },
-          { description: 'Install REAR', category: 'labour', quantity: 1, unit: 'job', unit_price_ex: 700, line_total_ex: 700, run_label: 'REAR', allocation: 'shared', split_pct: 50, cost_price: 500 },
-          { description: 'Colorbond panels LHS', category: 'material', quantity: 8, unit: 'm', unit_price_ex: 120, line_total_ex: 960, run_label: 'LHS', allocation: 'client', split_pct: 100, cost_price: 80, supplier_name: 'Metroll' },
-          { description: 'Install LHS', category: 'labour', quantity: 1, unit: 'job', unit_price_ex: 540, line_total_ex: 540, run_label: 'LHS', allocation: 'client', split_pct: 100, cost_price: 400 },
-        ],
-        neighbour_splits: {
-          'REAR': [
-            { contact_id: 'contact-fence-primary', pct: 50 },
-            { contact_id: 'contact-fence-neighbour', pct: 50 },
-          ],
-        },
+        // Top-level line_items used to exist as a flattened summary alongside
+        // runs[].items[]. Kept in fixture for back-compat; adapter prefers
+        // runs[].items[].
+        line_items: [],
+        neighbour_splits: {},
+        // Internal cost as flat scalars (pricing.internal shape).
+        internal: { commission: 210, cost: 1840, labour: 900, margin: 0.31 },
+        // Top-level cost-estimate fields ALSO present for back-compat.
         materialCostEstimate: 1840,
         labourCostEstimate: 900,
         commissionCostEstimate: 210,
@@ -176,6 +229,48 @@ function buildFenceInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs
       ],
     },
     ...overrides,
+  }
+}
+
+function buildQuickQuoteInputsProductionShape(): AdapterInputs {
+  // Production-realistic Quick Quote shape: jobs.type='patio' (legacy from
+  // createMiscJob default) AND pricing_json.source='quick_quote'. The
+  // dispatcher must route this to the quick_quote adapter via the
+  // pricing.source discriminator regardless of jobs.type.
+  return {
+    job: {
+      id: 'job-qq-prod-1',
+      type: 'patio',
+      org_id: '00000000-0000-0000-0000-000000000001',
+      client_name: 'Sample QQ Prod Client',
+      client_email: 'sample-qq-prod@example.com',
+      client_phone: '0400000444',
+      site_address: '7 QQ Prod Lane',
+      site_suburb: 'Perth',
+      site_lat: null,
+      site_lng: null,
+      job_number: 'SWG-99002',
+      scope_json: null,
+      pricing_json: {
+        source: 'quick_quote',
+        version: '1.0',
+        job_description: 'Replace damaged 6m section of slimline gutter on the front of the house.',
+        job_type_label: 'Repair gutter',
+        line_items: [
+          { description: 'Slimline gutter 6m', quantity: 1, unit: 'job', unit_price: 350, total: 350, cost_price: 200 },
+          { description: 'Install + dispose', quantity: 1, unit: 'job', unit_price: 250, total: 250, cost_price: 150 },
+        ],
+        totalExGST: 600,
+        gst: 60,
+        totalIncGST: 660,
+        valid_days: 30,
+        payment_terms: '50/50',
+      },
+      notes: '',
+    },
+    supplemental: {
+      contacts: [{ id: 'contact-qq-prod-primary', is_primary: true }],
+    },
   }
 }
 
@@ -239,9 +334,60 @@ Deno.test('dispatch — unknown jobs.type returns null', () => {
 Deno.test('dispatch — unknown jobs.type → DispatchFail', () => {
   const inputs = buildPatioInputs()
   inputs.job.type = 'bogus'
+  ;(inputs.job.pricing_json as Record<string, unknown>).source = 'patio-tool'
   const r = dispatchAdapter(inputs)
   assert(!r.ok)
   if (!r.ok) assertEquals(r.matched_kind, null)
+})
+
+// ── Quick Quote discriminator (production reality 2026-05-01) ───────────────
+//
+// Quick Quote rows in production carry jobs.type='patio' (legacy from
+// createMiscJob's default) AND pricing_json.source='quick_quote'. Without a
+// pricing.source-first discriminator, dispatch would route them to the
+// patio adapter and fail because Quick Quote pricing has no patios[].config.
+
+Deno.test('dispatch — pricing.source=quick_quote routes to quick_quote even when jobs.type=patio (production reality)', () => {
+  const r = dispatchAdapter(buildQuickQuoteInputsProductionShape())
+  assert(r.ok, JSON.stringify(r, null, 2))
+  if (r.ok) {
+    assertEquals(r.matched_kind, 'quick_quote')
+    assertEquals(r.output.scope.kind, 'quick_quote')
+  }
+})
+
+Deno.test('dispatch — pricing.source=quick_quote wins over jobs.type=fencing (defensive)', () => {
+  // Synthetic edge case: hypothetically if a Quick Quote row had
+  // type='fencing', pricing.source still wins.
+  const inputs = buildQuickQuoteInputsProductionShape()
+  inputs.job.type = 'fencing'
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) assertEquals(r.matched_kind, 'quick_quote')
+})
+
+Deno.test('dispatch — pricing.source=patio-tool with jobs.type=patio routes to patio (NOT quick_quote)', () => {
+  const inputs = buildPatioInputs()
+  ;(inputs.job.pricing_json as Record<string, unknown>).source = 'patio-tool'
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) assertEquals(r.matched_kind, 'patio')
+})
+
+Deno.test('mapJobTypeToKind — pricingSource overrides jobType', () => {
+  assertEquals(mapJobTypeToKind('patio', 'quick_quote'), 'quick_quote')
+  assertEquals(mapJobTypeToKind('fencing', 'quick_quote'), 'quick_quote')
+  assertEquals(mapJobTypeToKind('patio', 'patio-tool'), 'patio')
+  assertEquals(mapJobTypeToKind('patio', undefined), 'patio')
+})
+
+Deno.test('QuickQuoteAdapter — production-shape (type=patio + source=quick_quote) extracts label + description', () => {
+  const r = dispatchAdapter(buildQuickQuoteInputsProductionShape())
+  assert(r.ok)
+  if (r.ok && r.output.scope.kind === 'quick_quote') {
+    assertEquals(r.output.scope.label, 'Repair gutter')
+    assert(r.output.scope.description.toLowerCase().includes('slimline gutter'))
+  }
 })
 
 // ── Patio adapter tests ─────────────────────────────────────────────────────
@@ -321,16 +467,31 @@ Deno.test('FenceAdapter — produces fence scope kind', () => {
   if (r.ok) assertEquals(r.output.scope.kind, 'fence')
 })
 
-Deno.test('FenceAdapter — extracts runs[] from pricing_json.runs', () => {
+Deno.test('FenceAdapter — extracts runs[] construction details from scope_json.job.runs[]', () => {
+  // length → lineal_m, sheetHeight → height_mm, name → run_label, panels → panels.
   const r = dispatchAdapter(buildFenceInputs())
   assert(r.ok)
   if (r.ok && r.output.scope.kind === 'fence') {
     assertEquals(r.output.scope.runs.length, 2)
     assertEquals(r.output.scope.runs[0].run_label, 'REAR')
     assertEquals(r.output.scope.runs[0].lineal_m, 15)
+    assertEquals(r.output.scope.runs[0].height_mm, 1800)
+    assertEquals(r.output.scope.runs[0].panels, 7)
     assertEquals(r.output.scope.runs[1].run_label, 'LHS')
-    assertEquals(r.output.scope.runs[1].demo, true)
-    assertEquals(r.output.scope.runs[1].gates.length, 1)
+    assertEquals(r.output.scope.runs[1].lineal_m, 8)
+  }
+})
+
+Deno.test('FenceAdapter — fence-wide attributes (profile, colour, supplier, removal) flow into runs', () => {
+  // Per-run type/infill/finish/demo are derived from scope_json.job-level
+  // attributes since fence-designer doesn't capture them per-run today.
+  const r = dispatchAdapter(buildFenceInputs())
+  assert(r.ok)
+  if (r.ok && r.output.scope.kind === 'fence') {
+    assertEquals(r.output.scope.runs[0].type, 'colorbond')
+    assertEquals(r.output.scope.runs[0].infill, 'Surfmist')
+    assertEquals(r.output.scope.runs[0].finish, 'Metroll')
+    assertEquals(r.output.scope.runs[0].demo, false)
   }
 })
 
@@ -342,40 +503,63 @@ Deno.test('FenceAdapter — boundary_plan_attached reflects scopeMedia.drawings'
   }
 })
 
-Deno.test('FenceAdapter — per-contact splits derived from neighbour_splits', () => {
+Deno.test('FenceAdapter — line items come from pricing.runs[].items[] with unit_price_ex/line_total_ex', () => {
   const r = dispatchAdapter(buildFenceInputs())
   assert(r.ok)
   if (r.ok) {
+    // 4 lines total (2 per run × 2 runs).
+    assertEquals(r.output.pricing_public.line_items.length, 4)
     const rearMatLine = r.output.pricing_public.line_items.find(
       (li) => li.description === 'Colorbond panels REAR',
     )
     assert(rearMatLine)
     assertEquals(rearMatLine?.allocation, 'shared')
-    // 50/50 split between primary + neighbour
-    assertEquals(rearMatLine?.per_contact.length, 2)
-    assertEquals(rearMatLine?.per_contact[0].amount_ex, 900)
-    assertEquals(rearMatLine?.per_contact[1].amount_ex, 900)
+    assertEquals(rearMatLine?.unit_sell, 120)
+    assertEquals(rearMatLine?.line_total_ex, 1800)
   }
 })
 
-Deno.test('FenceAdapter — per_contact_totals sum to subtotal', () => {
+Deno.test('FenceAdapter — per_contact_totals derived from pricing.runs[].totals.client_share_ex / neighbour_share_ex', () => {
+  // REAR: client_share_ex=1250, neighbour_share_ex=1250
+  // LHS:  client_share_ex=1500, neighbour_share_ex=0
+  // → primary=1250+1500=2750, neighbour=1250
   const r = dispatchAdapter(buildFenceInputs())
   assert(r.ok)
   if (r.ok) {
-    const totalsSum = r.output.pricing_public.per_contact_totals.reduce(
-      (a, x) => a + x.total_ex_gst, 0,
+    const byId = new Map(
+      r.output.pricing_public.per_contact_totals.map((t) => [t.contact_id, t.total_ex_gst]),
     )
-    assertEquals(totalsSum, r.output.pricing_public.totals.subtotal_ex_gst)
+    assertEquals(byId.get('contact-fence-primary'), 2750)
+    assertEquals(byId.get('contact-fence-neighbour'), 1250)
+    // And they sum to the subtotal.
+    const sum = Array.from(byId.values()).reduce((a, x) => a + x, 0)
+    assertEquals(sum, r.output.pricing_public.totals.subtotal_ex_gst)
   }
 })
 
-Deno.test('FenceAdapter — empty runs array → zero-run scope (validator catches it)', () => {
+Deno.test('FenceAdapter — internal cost reads pricing.internal.{cost,labour,commission,margin} scalars', () => {
+  const r = dispatchAdapter(buildFenceInputs())
+  assert(r.ok)
+  if (r.ok) {
+    assertEquals(r.output.internal_cost.cost_estimates.material_total, 1840)
+    assertEquals(r.output.internal_cost.cost_estimates.labour_total, 900)
+    assertEquals(r.output.internal_cost.cost_estimates.subcontract_commission_total, 210)
+    assertEquals(r.output.internal_cost.margin.pct, 0.31)
+  }
+})
+
+Deno.test('FenceAdapter — empty scope.job.runs falls back to pricing.runs[]', () => {
   const inputs = buildFenceInputs()
-  ;(inputs.job.pricing_json as Record<string, unknown>).runs = []
+  ;((inputs.job.scope_json as Record<string, unknown>).job as Record<string, unknown>).runs = []
   const r = dispatchAdapter(inputs)
   assert(r.ok)
   if (r.ok && r.output.scope.kind === 'fence') {
-    assertEquals(r.output.scope.runs.length, 0)
+    // Falls back to pricing.runs[] which still has 2 entries (REAR + LHS).
+    assertEquals(r.output.scope.runs.length, 2)
+    // But construction details (length/sheetHeight/panels) are 0 since the
+    // pricing-side runs don't carry them — this is the realistic fallback.
+    assertEquals(r.output.scope.runs[0].lineal_m, 0)
+    assertEquals(r.output.scope.runs[0].height_mm, 0)
   }
 })
 
@@ -470,9 +654,11 @@ Deno.test('PresenceReport — patio fixture shows expected captures + GAPs', () 
 Deno.test('PresenceReport — fence fixture shows expected captures + GAPs', () => {
   const r = dispatchPresenceReport(buildFenceInputs())
   assertEquals(r.matched_kind, 'fence')
-  assert(r.captured.includes('scope.runs'))
-  assert(r.captured.includes('pricing.neighbour_splits'))
+  assert(r.captured.some((s) => s.includes('scope.runs')))
+  assert(r.captured.some((s) => s.includes('pricing.runs[].items[]')))
+  assert(r.captured.some((s) => s.includes('internal_cost.cost')))
   assert(r.missing.some((s) => s.includes('per-contact authority')))
+  assert(r.missing.some((s) => s.includes('per-run demo flag')))
 })
 
 Deno.test('PresenceReport — quick_quote fixture shows expected captures + GAPs', () => {

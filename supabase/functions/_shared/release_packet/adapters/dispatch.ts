@@ -28,19 +28,35 @@ export type DispatchOk = { ok: true; output: AdapterOutput; matched_kind: string
 export type DispatchFail = { ok: false; reason: string; matched_kind: string | null }
 
 /**
- * Dispatch on `jobs.type`. Returns `{ok:true, output}` when an adapter is
- * registered for the matching kind, otherwise `{ok:false, reason}`. The
- * caller decides how to handle unknown kinds (typically: refuse the send).
+ * Dispatch on `jobs.type` AND `pricing_json.source`. Returns `{ok:true, output}`
+ * when an adapter is registered for the matching kind, otherwise
+ * `{ok:false, reason}`.
+ *
+ * IMPORTANT discriminator order (validated against 2026-05-01 production):
+ *   1. If `pricing_json.source === 'quick_quote'`, route to quick_quote
+ *      regardless of `jobs.type`. Quick Quote rows in production carry
+ *      `jobs.type='patio'` (legacy from createMiscJob) but they are NOT
+ *      patio jobs — they're free-form quotes. Without this discriminator,
+ *      they would route to the patio adapter and fail because Quick Quote
+ *      pricing has no `patios[].config`.
+ *   2. Otherwise fall back to `jobs.type` mapping.
  */
 export function dispatchAdapter(
   inputs: AdapterInputs,
   registry: AdapterRegistry = defaultAdapterRegistry,
 ): DispatchOk | DispatchFail {
-  const kind = mapJobTypeToKind(inputs.job.type)
+  const pricingJson = inputs.job.pricing_json ?? {}
+  const pricingSource = typeof pricingJson === 'object' && pricingJson !== null
+    ? (pricingJson as Record<string, unknown>).source
+    : undefined
+  const kind = mapJobTypeToKind(
+    inputs.job.type,
+    typeof pricingSource === 'string' ? pricingSource : undefined,
+  )
   if (!kind) {
     return {
       ok: false,
-      reason: `unknown jobs.type='${inputs.job.type}' — no V2 adapter registered`,
+      reason: `unknown jobs.type='${inputs.job.type}' (pricing.source='${pricingSource ?? ''}') — no V2 adapter registered`,
       matched_kind: null,
     }
   }
@@ -51,8 +67,17 @@ export function dispatchAdapter(
   return { ok: true, output: adapter(inputs), matched_kind: kind }
 }
 
-/** Maps `jobs.type` to the V2 `scope.kind`. Open list — extend per service. */
-export function mapJobTypeToKind(jobType: string): string | null {
+/**
+ * Maps `jobs.type` + optional `pricing.source` to the V2 `scope.kind`.
+ * Open list — extend per service.
+ *
+ * Quick Quote discriminator: `pricing.source='quick_quote'` always wins,
+ * regardless of `jobs.type`. This handles the production reality that
+ * Quick Quote rows carry `jobs.type='patio'` (legacy from createMiscJob's
+ * default).
+ */
+export function mapJobTypeToKind(jobType: string, pricingSource?: string): string | null {
+  if (pricingSource === 'quick_quote') return 'quick_quote'
   switch (jobType) {
     case 'patio':
       return 'patio'
@@ -89,7 +114,14 @@ export type PresenceReport = {
 }
 
 export function dispatchPresenceReport(inputs: AdapterInputs): PresenceReport {
-  const kind = mapJobTypeToKind(inputs.job.type)
+  const pricingJson = inputs.job.pricing_json ?? {}
+  const pricingSource = typeof pricingJson === 'object' && pricingJson !== null
+    ? (pricingJson as Record<string, unknown>).source
+    : undefined
+  const kind = mapJobTypeToKind(
+    inputs.job.type,
+    typeof pricingSource === 'string' ? pricingSource : undefined,
+  )
   if (kind === 'patio') return { matched_kind: 'patio', ..._patioPresenceReport(inputs) }
   if (kind === 'fence') return { matched_kind: 'fence', ..._fencePresenceReport(inputs) }
   if (kind === 'quick_quote') return { matched_kind: 'quick_quote', ..._quickQuotePresenceReport(inputs) }

@@ -1,4 +1,30 @@
-# V2 Loop 2 Dry-Run Report — 2026-05-01
+# V2 Loop 2 Dry-Run Report — 2026-05-01 (rev 2 after Codex shape audit)
+
+> **Rev 2 corrections** (2026-05-02 after Codex stop-time review flagged adapter
+> misreads): the prior draft of this report misread the actual production
+> fence shape and the Quick Quote dispatch discriminator. Both have been
+> corrected against deeper schema audits run on 2026-05-01.
+>
+> Specifically:
+> - **Quick Quote dispatch:** production rows carry `jobs.type='patio'` AND
+>   `pricing_json.source='quick_quote'`, NOT `jobs.type='general'`. Dispatch
+>   now uses `pricing.source` as the primary discriminator. There is no
+>   `general` type in production for Quick Quote.
+> - **Fence runs construction details** live in `scope_json.job.runs[]` with
+>   keys `id, name, length, sheetHeight, panels, neighbourId, extension, slope`,
+>   NOT `pricing_json.runs[]` with `lineal_m, height_mm, run_label, type, infill,
+>   finish, demo, gates`.
+> - **Fence per-run attributes** (type, infill, finish, demo, gates) live in
+>   `scope_json.job` top-level (`profile, colour, supplier, removal, gates`).
+> - **Fence per-run pricing items** live in `pricing.runs[].items[]` with the
+>   V1 `run_line_items` shape (`unit_price_ex, line_total_ex, allocation,
+>   split_pct, client_amount_ex, neighbour_amount_ex, sort_order`), NOT in a
+>   top-level `pricing.line_items[]` with `run_label`/cross-references.
+> - **Fence per-contact totals** are pre-computed in `pricing.runs[].totals`
+>   (`client_share_ex, neighbour_share_ex, run_total_ex, run_total_inc`).
+> - **Fence pricing.internal** is a flat object of scalars
+>   (`commission: number, cost: number, labour: number, margin: number`),
+>   NOT a nested object with sub-fields.
 
 > Loop 2 (P1) of the Full Release Packet V2 plan
 > (`~/.claude/plans/cap0-full-release-packet-v2.md`).
@@ -38,8 +64,17 @@ Real production keys observed across `jobs.scope_json` and `jobs.pricing_json`:
 | Path | Sample size | scope_json keys | pricing_json keys |
 |---|---|---|---|
 | Patio | 199 rows scope / 341 rows pricing | `_pricing_json`, `client`, `complexity`, `config`, `customer`, `job_costs`, `notes`, `patios`, `pricing`, `savedAt`, `siteDetails`, `tool`, `verification`, `version` | `client_notes`, `commissionCostEstimate`, `deposit`, `generated_at`, `gst`, `internal_notes`, `items`, `job_costs`, `job_description`, `job_type_label`, `labourCostEstimate`, `line_items`, `margin_pct`, `materialCostEstimate`, `patios`, `payment_terms`, `reference`, `shared_costs_total`, `source`, `totalCostEstimate`, `totalExGST`, `totalIncGST`, `valid_days`, `version` |
-| Fencing | 204 rows scope / 981 rows pricing | `job`, `savedAt`, `scopeMedia`, `tool`, `version` | `commissionCostEstimate`, `deposit`, `generated_at`, `gst`, `internal`, `job_description`, `labourCostEstimate`, `line_items`, `margin_pct`, `materialCostEstimate`, `neighbour_splits`, `runs`, `source`, `subtotal`, `totalCostEstimate`, `totalExGST`, `totalIncGST`, `version` |
-| Quick Quote (`type='general'`) | n/a — created by ops-api, no scope_json | `client_notes`, `internal_notes`, `job_description`, `job_type_label`, `line_items`, `payment_terms`, `reference`, `source`, `totalExGST`, `gst`, `totalIncGST`, `valid_days`, `version` |
+| Fencing | 204 rows scope / 981 rows pricing | `job` (with deep keys: `_addressComponents, _latlng, _materialOverrides, _placeId, _poApproved, _pricing_json, address, checklist, client, clientFirstName, clientLastName, colour, date, email, gates, gatesRequired, installation, materialVerification, neighbours, neighboursRequired, phone, pricePerMetre, profile, quote, ref, removal, runs, scoper, siteNotes, suburb, supplier, supplierNotes`), `savedAt`, `scopeMedia`, `tool`, `version` | `commissionCostEstimate`, `deposit`, `generated_at`, `gst`, `internal` (flat scalars: `commission, cost, labour, margin`), `job_description`, `labourCostEstimate`, `line_items`, `margin_pct`, `materialCostEstimate`, `neighbour_splits`, `runs` (with per-run keys: `default_split_pct, items, neighbour_address, neighbour_id, neighbour_name, run_label, run_name, totals`), `source`, `subtotal`, `totalCostEstimate`, `totalExGST`, `totalIncGST`, `version` |
+| Quick Quote (`type='patio'` + `pricing.source='quick_quote'`) | n/a — created by ops-api, no scope_json | `client_notes`, `internal_notes`, `job_description`, `job_type_label`, `line_items`, `payment_terms`, `reference`, `source`, `totalExGST`, `gst`, `totalIncGST`, `valid_days`, `version` |
+
+**Fence per-run construction keys** (in `scope_json.job.runs[]`):
+`extension, id, length, name, neighbourId, panels, sheetHeight, slope`
+
+**Fence per-run pricing items** (in `pricing.runs[].items[]`):
+`allocation, allocation_note, client_amount_ex, description, line_total_ex, neighbour_amount_ex, quantity, sort_order, split_pct, unit, unit_price_ex`
+
+**Fence per-run totals** (in `pricing.runs[].totals`):
+`client_share_ex, client_share_inc, neighbour_share_ex, neighbour_share_inc, run_total_ex, run_total_inc`
 
 ## 3. Field presence per adapter — what's captured today vs GAP
 
@@ -71,42 +106,57 @@ Real production keys observed across `jobs.scope_json` and `jobs.pricing_json`:
 | `provenance.pricing_engine_version` | `jobs.pricing_json.version` | **CAPTURED** but conflated with tool version |
 | `provenance.scoper_user_id / scoper_name` | `jobs.created_by` | **PARTIAL** — sometimes null |
 
-### 3.2 Fence adapter
+### 3.2 Fence adapter (rev 2 — corrected source paths)
 
 | V2 field | Source today | Status |
 |---|---|---|
-| `scope.runs[]` | `jobs.pricing_json.runs[]` | **CAPTURED** |
-| `scope.runs[].run_label / type / height_mm / lineal_m / panels / posts / infill / finish` | `…runs[].*` | **CAPTURED** |
-| `scope.runs[].demo` | `…runs[].demo` | **CAPTURED** |
-| `scope.runs[].gates[]` | `…runs[].gates` | **CAPTURED** when present |
-| `scope.boundary_plan_attached` | derived from `jobs.scope_json.scopeMedia.drawings` | **PARTIAL** — depends on tool actually pinning to scopeMedia |
-| `pricing_public.line_items[]` | `jobs.pricing_json.line_items` | **CAPTURED** |
-| `pricing_public.line_items[].allocation` (client/shared/neighbour) | `jobs.pricing_json.line_items[].allocation` | **CAPTURED** |
-| `pricing_public.line_items[].split_pct` | `jobs.pricing_json.line_items[].split_pct` | **CAPTURED** |
-| `pricing_public.line_items[].per_contact[]` | derived from `pricing_json.neighbour_splits` + supplemental contacts | **CAPTURED** when neighbour_splits present |
-| `pricing_public.per_contact_totals[]` | derived from above | **CAPTURED** |
-| `internal_cost.line_costs[].supplier_name` | `pricing_json.line_items[].supplier_name` | **PARTIAL** (often blank) |
-| `qa.council_status` | `jobs.scope_json.job.council_status` | **GAP** |
-| `contacts[].authority.{can_view,can_accept,pays}` | derived from `job_contacts.contact_type + assigned_runs` | **GAP** — no structured authority today; need scoper-set field |
-| `media[].sha256` | not computed | **GAP** |
-| `documents.email.html_sha256` | not computed | **GAP** |
-| `provenance.tool_name+version` | `jobs.scope_json.tool` + `version` | **PARTIAL** |
+| `scope.runs[].run_label` | `scope_json.job.runs[].name` | **CAPTURED** |
+| `scope.runs[].lineal_m` | `scope_json.job.runs[].length` | **CAPTURED** |
+| `scope.runs[].height_mm` | `scope_json.job.runs[].sheetHeight` | **CAPTURED** |
+| `scope.runs[].panels` | `scope_json.job.runs[].panels` | **CAPTURED** |
+| `scope.runs[].posts` | not captured per run today | **GAP** |
+| `scope.runs[].type` | `scope_json.job.profile` (job-wide, applied per-run) | **CAPTURED** (job-wide) |
+| `scope.runs[].infill` | `scope_json.job.colour` (job-wide) | **CAPTURED** (job-wide) |
+| `scope.runs[].finish` | `scope_json.job.supplier` (job-wide) | **CAPTURED** (job-wide) |
+| `scope.runs[].demo` | `scope_json.job.removal` (job-wide flag) | **CAPTURED** but **per-run granularity is a GAP** |
+| `scope.runs[].gates[]` | `scope_json.job.gates` (job-wide); per-run gate assignment is a GAP | **PARTIAL** |
+| `scope.boundary_plan_attached` | `scope_json.scopeMedia.drawings.length > 0` | **CAPTURED** when the tool pins drawings |
+| `pricing_public.line_items[]` | `pricing_json.runs[].items[]` (canonical, V1 `run_line_items` shape) | **CAPTURED** |
+| `pricing_public.line_items[].allocation` | `pricing_json.runs[].items[].allocation` | **CAPTURED** |
+| `pricing_public.line_items[].split_pct` | `pricing_json.runs[].items[].split_pct` | **CAPTURED** |
+| `pricing_public.line_items[].per_contact[]` | derived from `runs[].items[].client_amount_ex/neighbour_amount_ex` + `runs[].neighbour_id` | **CAPTURED** |
+| `pricing_public.per_contact_totals[]` | derived from `pricing_json.runs[].totals.client_share_ex/neighbour_share_ex` (pre-computed!) | **CAPTURED** |
+| `internal_cost.cost_estimates.material_total` | `pricing_json.internal.cost` scalar (with top-level fallback) | **CAPTURED** |
+| `internal_cost.cost_estimates.labour_total` | `pricing_json.internal.labour` scalar | **CAPTURED** |
+| `internal_cost.cost_estimates.subcontract_commission_total` | `pricing_json.internal.commission` scalar | **CAPTURED** |
+| `internal_cost.margin.pct` | `pricing_json.internal.margin` scalar | **CAPTURED** |
+| `internal_cost.line_costs[].supplier_name` | `runs[].items[].supplier_name` per-line OR `scope_json.job.supplier` job-wide fallback | **PARTIAL** (per-line often blank, job-wide present) |
+| `qa.council_status` | `scope_json.job.council_status` | **GAP** — fence-designer doesn't structurally capture this; defaults to `unknown` |
+| `contacts[].authority.{can_view,can_accept,pays}` | derived from `job_contacts.contact_type` + `assigned_runs` | **GAP** — no structured authority field today |
+| `media[].sha256` | not computed | **GAP** — `job_media` has no `bytes_sha256` column |
+| `documents.email.html_sha256` | not computed | **GAP** — must hash rendered HTML at send time |
+| `provenance.tool_name + tool_version + pricing_engine_version` | `scope_json.tool` + `scope_json.version` (combined) | **PARTIAL** — not split into three fields |
 
-### 3.3 Quick Quote adapter
+### 3.3 Quick Quote adapter (rev 2 — discriminator corrected)
+
+**Production reality:** Quick Quote rows carry `jobs.type='patio'` (legacy from `createMiscJob`'s default) AND `pricing.source='quick_quote'`. Dispatch uses `pricing.source` as the primary discriminator regardless of `jobs.type`. There is no `general` type for Quick Quote in production.
 
 | V2 field | Source today | Status |
 |---|---|---|
-| `scope.label` | `jobs.pricing_json.job_type_label` | **CAPTURED** when caller supplies it |
-| `scope.description` | `jobs.pricing_json.job_description` | **CAPTURED** |
-| `pricing_public.line_items[]` | `jobs.pricing_json.line_items[]` | **CAPTURED** |
-| `pricing_public.totals` | `jobs.pricing_json.totalExGST/gst/totalIncGST` | **CAPTURED** |
-| `internal_cost.line_costs[].unit_cost` | `jobs.pricing_json.line_items[].cost_price` | **PARTIAL** |
-| `internal_cost.line_costs[].supplier_name` | not captured by `createMiscJob` | **GAP** — Quick Quote rarely captures supplier; hard-blocker `pricing.material_lines_have_supplier` will fail unless overridden by Marnin/Shaun |
+| `scope.label` | `pricing_json.job_type_label` | **CAPTURED** when caller supplies it |
+| `scope.description` | `pricing_json.job_description` | **CAPTURED** |
+| `pricing_public.line_items[]` | `pricing_json.line_items[]` (keys: `cost_price, description, quantity, total, unit, unit_price`) | **CAPTURED** |
+| `pricing_public.line_items[].category` | not present in `createMiscJob` line input | **GAP** — adapter currently defaults to `'extra'`, which means `pricing.material_lines_have_supplier` validator does NOT fire for Quick Quote (no material lines). This is technically correct but means supplier-name capture is a non-issue for Quick Quote until line categorization is added |
+| `pricing_public.totals` | `pricing_json.totalExGST/gst/totalIncGST` | **CAPTURED** |
+| `internal_cost.line_costs[].unit_cost` | `pricing_json.line_items[].cost_price` | **PARTIAL** (caller-optional) |
+| `internal_cost.line_costs[].supplier_name` | not captured by `createMiscJob` | **GAP** but *non-blocking* given the category default — see above |
+| `internal_cost.cost_estimates.*` | not captured by Quick Quote | **PARTIAL** — adapter sums per-line costs and emits zeros for the rest |
+| `internal_cost.commission.rule` | not captured | **CAPTURED** by adapter as `'other'` (Quick Quote default) |
 | `media[]` | not captured today | **GAP** — Quick Quote has no scoping-tool media flow |
-| `provenance.tool_name + tool_version` | not captured (createMiscJob doesn't record tool) | **GAP** |
-| `qa.customer_facing_summary` | reconstructed from `job_description + job_type_label` | **PARTIAL** — usable but unstructured |
-| `qa.council_status` | n/a — defaults to `not_required` | **CAPTURED** (default) |
-| `site.lat / lng` | not captured | **GAP** |
+| `provenance.tool_name + tool_version` | `createMiscJob` doesn't record tool | **GAP** |
+| `qa.customer_facing_summary` | reconstructed from `job_description + job_type_label` | **PARTIAL** |
+| `qa.council_status` | not captured; adapter defaults to `'not_required'` | **CAPTURED** (default) |
+| `site.lat / lng` | not captured by `createMiscJob` | **GAP** |
 
 ## 4. Hard-blocker impact assessment
 
@@ -120,7 +170,7 @@ When Loop 4 (P3) flips the validator from `mode='warn'` to `mode='enforce'`, eve
 | `qa.council_status_known` | **MOST FAIL** (council_status not captured) | **MOST FAIL** | OK (default 'not_required') | **Need patio-tool + fence-designer capture for council enum** |
 | `pricing.reconciles` | OK | OK | OK | — |
 | `pricing.totals_consistency` | OK | OK | OK | — |
-| `pricing.material_lines_have_supplier` | **PARTIAL FAIL** (often blank) | **PARTIAL FAIL** | **MOST FAIL** for Quick Quote | **Need supplier-name capture in scoping tools + ops-api** |
+| `pricing.material_lines_have_supplier` | **PARTIAL FAIL** (often blank) | **PARTIAL FAIL** (per-line blank, but `scope_json.job.supplier` is a job-wide fallback the adapter consults) | OK — Quick Quote line items have no `category`, so they default to `'extra'` and the rule doesn't fire. Adding line categorization to `createMiscJob` later would surface this. | **Need per-line supplier_name capture in scoping tools** |
 | `internal_cost.margin_override_required_when_breached` | OK when margin floor not breached | OK | OK | — |
 | `qa.overrides_operator_allowed` | n/a (no overrides yet) | n/a | n/a | — |
 | `send.recipients_present` | OK | OK | OK | — |
