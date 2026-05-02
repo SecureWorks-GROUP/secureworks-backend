@@ -5120,9 +5120,122 @@ async function updateJobStatus(client: any, body: any) {
 
   // Capture old status + job data for business_events dual-write
   const { data: jobBefore } = await client.from('jobs')
-    .select('status, job_number, client_name, pricing_json')
+    .select('status, type, job_number, client_name, pricing_json')
     .eq('id', jId).single()
   const oldStatus = jobBefore?.status || 'unknown'
+
+  // ════════════════════════════════════════════════════════════════
+  // Cap 1C — Shadow-mode evaluation (advisory, NEVER enforces)
+  //
+  // When STATE_ENGINE_SHADOW=on, evaluate the stage-gate engine
+  // BEFORE the existing write logic and append an observation row.
+  // Behaviour contract:
+  //   • Engine eval runs in a try/catch — any throw is logged as a
+  //     shadow_error and control falls through to existing write
+  //     logic UNCHANGED.
+  //   • Observation insert runs in a try/catch — a missing table or
+  //     a perms error is silently swallowed.
+  //   • This wrapper NEVER blocks, NEVER alters status writes, and
+  //     NEVER calls any external system.
+  //   • Default: STATE_ENGINE_SHADOW unset → wrapper is a no-op.
+  //
+  // Rollback: set STATE_ENGINE_SHADOW=off and redeploy.
+  //
+  // Authority:
+  //   • secureworks-docs/decisions/2026-05-02-cap1c-observations-surface.md
+  //   • secureworks-docs/cio/evidence/cap1c-shadow-mode-2026-05-02/
+  // ════════════════════════════════════════════════════════════════
+  const _capShadowFlag = (Deno.env.get('STATE_ENGINE_SHADOW') || '').toLowerCase()
+  const _capShadowEnabled = _capShadowFlag === 'on' || _capShadowFlag === '1' || _capShadowFlag === 'true'
+  if (_capShadowEnabled) {
+    try {
+      const { evaluateStageGates } = await import('../../../shared/stage-gate-engine.ts')
+      const _writerSource = body.source || body.writer_source || 'ops_dashboard'
+      const _actorEmail = body.operator_email || body.user_email || null
+      const _correlationId = body.correlation_id || jId
+
+      const _miniPacket = {
+        revision: null,
+        document: null,
+        purchase_orders: [],
+        work_order: null,
+        events: [],
+        customer: { name: jobBefore?.client_name, mobile: null, email: null },
+        site: { address: null, suburb: null, lat: null, lng: null },
+        job: {
+          id: jId,
+          job_number: jobBefore?.job_number,
+          type: jobBefore?.type,
+          status: status,
+          accepted_at: null,
+          completed_at: null,
+        },
+      }
+      const _miniSupplemental = { assignments: [], job_context: [], deposit: null }
+      // deno-lint-ignore no-explicit-any
+      const _sgr: any = evaluateStageGates(
+        { id: jId, type: jobBefore?.type },
+        _miniPacket,
+        _miniSupplemental,
+      )
+      // deno-lint-ignore no-explicit-any
+      const _blockers = _sgr.blockers.map((b: any) => ({ gate_id: b.gate_id, severity: b.severity, reason: b.reason }))
+      // deno-lint-ignore no-explicit-any
+      const _warnings = _sgr.warnings.map((w: any) => ({ gate_id: w.gate_id, severity: w.severity, reason: w.reason }))
+      // deno-lint-ignore no-explicit-any
+      const _overrides = _sgr.overrides.map((o: any) => ({ gate_id: o.gate_id, reason: o.reason }))
+      let _verdict: 'allow' | 'block' | 'warn' | 'overridden' = 'allow'
+      if (_overrides.length > 0) _verdict = 'overridden'
+      else if (_blockers.length > 0) _verdict = 'block'
+      else if (_warnings.length > 0) _verdict = 'warn'
+
+      try {
+        await client.from('state_engine_observations').insert({
+          job_id: jobBefore?.job_number || jId,
+          from_status: oldStatus,
+          to_status: status,
+          writer_source: _writerSource,
+          engine_verdict: _verdict,
+          hard_blocked: false,
+          requires_override: false,
+          blockers: _blockers,
+          warnings: _warnings,
+          overrides: _overrides,
+          current_stage: _sgr.current_stage,
+          frontend_bucket: _sgr.frontend_bucket,
+          evidence_refs: _sgr.evidence_refs,
+          engine_version: 'cap1c-shadow-mode-2026-05-02',
+          shadow_error: null,
+          correlation_id: _correlationId,
+          actual_write_succeeded: null,
+          actor_email: _actorEmail,
+          metadata: { transition_attempt_id: _correlationId, observed_only: true, no_enforcement: true },
+        })
+      } catch (insertErr) {
+        // Table may not exist yet, or RLS may block. Cap 1C NEVER
+        // lets observation failures break the transition.
+        console.warn('[Cap 1C shadow] observation insert failed:', (insertErr as Error).message)
+      }
+    } catch (evalErr) {
+      // Engine throw OR dynamic import error. Log shadow_error if
+      // the observations table exists; otherwise skip silently.
+      try {
+        await client.from('state_engine_observations').insert({
+          job_id: jobBefore?.job_number || jId,
+          from_status: oldStatus,
+          to_status: status,
+          writer_source: body.source || 'ops_dashboard',
+          engine_verdict: 'error',
+          shadow_error: (evalErr as Error).message,
+          engine_version: 'cap1c-shadow-mode-2026-05-02',
+          metadata: { observed_only: true, no_enforcement: true, eval_failed: true },
+        })
+      } catch { /* truly silent — never block transition */ }
+    }
+  }
+  // ════════════════════════════════════════════════════════════════
+  // End Cap 1C shadow-mode wrapper. Existing write logic unchanged.
+  // ════════════════════════════════════════════════════════════════
 
   const update: Record<string, unknown> = { status }
   if (status === 'quoted') update.quoted_at = new Date().toISOString()
