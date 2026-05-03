@@ -11798,7 +11798,9 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
     reasoning_summary: 'Marnin clicked Send test SMS button — controlled POC test send',
     confidence_score:  1.0,
     status:            'completed',
-    storage_tier:      'minimal',
+    // CHECK constraint: storage_tier ∈ ('full','summarized','archived').
+    // 'summarized' fits — we set reasoning_summary but not reasoning_full.
+    storage_tier:      'summarized',
     tags:              ['marnin_poc', 'manual_button', 'canary'],
   }).select('id').single()
   if (traceErr || !traceRow) {
