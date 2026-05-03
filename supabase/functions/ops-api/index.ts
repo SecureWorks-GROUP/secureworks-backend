@@ -1833,6 +1833,14 @@ if (import.meta.main) serve(async (req: Request) => {
       // Loop 6.5 manual-live bridge — single canary / per-message manual approval.
       // Allowlist: first_contact_sms ONLY (canary scope). All gates server-side.
       case 'manual_dispatch': return json(await manualDispatch(client, body))
+      // Loop 6.5 cockpit POC — Marnin-only browser-button path.
+      // JWT auth required (NO service-role key in browser). Hardcoded:
+      //   - email gate: marnin@secureworkswa.com.au
+      //   - recipient: contact Zjy5PehQRogjwyNhZZbt only
+      //   - label: MARNIN_MEMORY_POC
+      // Seeds + dispatches one row in a single call. Cadence-capped to
+      // 3 sends per rolling hour even for Marnin.
+      case 'manual_dispatch_marnin_poc': return json(await manualDispatchMarninPoc(client, body, authUser))
 
       // ── Smart Nudges ──
       case 'list_nudges': return json(await listNudges(client, url.searchParams))
@@ -11686,6 +11694,218 @@ export async function _manualDispatchAt(client: any, body: any, now: Date) {
     action_id,
     approval_method,
     ghl_message_id: ghlMessageId,
+    audit_chain: [
+      'proposed_action.manually_approved',
+      'sms_sent (via ghl-proxy)',
+      'proposed_action.dispatched',
+    ],
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// MARNIN MEMORY POC (Loop 6.5 cockpit-button path)
+//
+// Browser-driven Marnin-only test send. JWT auth (no service_role
+// key in the browser). Seeds + dispatches one ai_proposed_actions
+// row in a single call. Hardcoded constraints prevent any drift:
+//
+//   - JWT user.email MUST be 'marnin@secureworkswa.com.au'
+//   - recipient ALWAYS contact_id 'Zjy5PehQRogjwyNhZZbt' (Marnin's
+//     own GHL contact 'marnin test22' with phone +61404777984)
+//   - drafted_message ALWAYS '[MARNIN_MEMORY_POC] hello from Secure
+//     Sale cockpit'
+//   - action_type ALWAYS 'first_contact_sms'
+//   - action_payload.label ALWAYS 'MARNIN_MEMORY_POC'
+//   - quiet hours [07:00, 20:00) Perth
+//   - rate-cap: 3 dispatches per rolling 1-hour window
+//
+// Audit chain mirrors manual_dispatch:
+//   1. proposed_action.manually_approved (BEFORE send)
+//   2. sms_sent (written by ghl-proxy)
+//   3. proposed_action.dispatched (AFTER send)
+//
+// Body of the POST is ignored — all fields are server-determined.
+// This is intentional: the browser cannot influence recipient or body.
+// ════════════════════════════════════════════════════════════
+
+const MARNIN_POC_EMAIL = 'marnin@secureworkswa.com.au'
+const MARNIN_POC_CONTACT_ID = 'Zjy5PehQRogjwyNhZZbt'
+const MARNIN_POC_CONTACT_NAME = 'Marnin Stobbe'
+const MARNIN_POC_CONTACT_PHONE = '+61404777984'
+const MARNIN_POC_MESSAGE = '[MARNIN_MEMORY_POC] hello from Secure Sale cockpit'
+const MARNIN_POC_LABEL = 'MARNIN_MEMORY_POC'
+const MARNIN_POC_RATE_LIMIT_PER_HOUR = 3
+
+async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
+  const now = new Date()
+
+  // ── Gate A: must be JWT-auth'd Marnin (not service-to-service) ──
+  if (!authUser || typeof authUser !== 'object') {
+    throw new ApiError('marnin_poc_unauthorized: jwt_required', 403)
+  }
+  const callerEmail = String(authUser.email || '').toLowerCase()
+  if (callerEmail !== MARNIN_POC_EMAIL) {
+    throw new ApiError('marnin_poc_unauthorized: not_marnin', 403)
+  }
+
+  // ── Gate B: quiet hours (Perth 07:00–20:00) ──
+  const perthHour = new Date(now.getTime() + 8 * 3600 * 1000).getUTCHours()
+  if (perthHour < 7 || perthHour >= 20) {
+    throw new ApiError(`quiet_hours: Perth hour ${perthHour} outside [7,20)`, 400)
+  }
+
+  // ── Gate C: rate-limit per rolling hour ──
+  const oneHourAgo = new Date(now.getTime() - 3600_000).toISOString()
+  const { data: recent, error: countErr } = await client.from('business_events')
+    .select('id')
+    .eq('event_type', 'proposed_action.dispatched')
+    .eq('source', 'ops-api/manual_dispatch_marnin_poc')
+    .gte('occurred_at', oneHourAgo)
+  if (countErr) throw new ApiError(`rate_limit_check_failed: ${countErr.message}`, 500)
+  const recentCount = (recent || []).length
+  if (recentCount >= MARNIN_POC_RATE_LIMIT_PER_HOUR) {
+    throw new ApiError(
+      `marnin_poc_rate_limit: ${recentCount} sends in last hour (max ${MARNIN_POC_RATE_LIMIT_PER_HOUR})`,
+      429,
+    )
+  }
+
+  // ── Seed canary row (server-determined fields only) ──
+  const actionId = crypto.randomUUID()
+  const seededAt = now.toISOString()
+  const { error: insErr } = await client.from('ai_proposed_actions').insert({
+    id:                actionId,
+    job_id:            null,
+    contact_id:        MARNIN_POC_CONTACT_ID,
+    contact_name:      MARNIN_POC_CONTACT_NAME,
+    contact_phone:     MARNIN_POC_CONTACT_PHONE,
+    action_type:       'first_contact_sms',
+    channel:           'sms',
+    drafted_message:   MARNIN_POC_MESSAGE,
+    status:            'pending',
+    expires_at:        new Date(now.getTime() + 3600_000).toISOString(),
+    created_at:        seededAt,
+    action_payload:    {
+      label:             MARNIN_POC_LABEL,
+      seeded_at:         seededAt,
+      seeded_by_user_id: authUser.id || null,
+      seeded_by_email:   callerEmail,
+      origin:            'ops-api/manual_dispatch_marnin_poc',
+    },
+  })
+  if (insErr) throw new ApiError(`seed_failed: ${insErr.message}`, 500)
+
+  // ── Audit chain row 1 — manually_approved (BEFORE send) ──
+  const { error: approvalErr } = await client.from('business_events').insert({
+    event_type:   'proposed_action.manually_approved',
+    source:       'ops-api/manual_dispatch_marnin_poc',
+    entity_type:  'ai_proposed_action',
+    entity_id:    actionId,
+    job_id:       null,
+    occurred_at:  seededAt,
+    payload: {
+      action_id:         actionId,
+      label:             MARNIN_POC_LABEL,
+      approval_method:   'marnin_poc',
+      approved_by_email: callerEmail,
+      approved_by_user_id: authUser.id || null,
+      drafted_message_preview: MARNIN_POC_MESSAGE,
+    },
+  })
+  if (approvalErr) throw new ApiError(`approval_record_failed: ${approvalErr.message}`, 500)
+
+  // ── Idempotent status flip (optimistic on status='pending') ──
+  const { data: flipResult, error: flipErr } = await client.from('ai_proposed_actions')
+    .update({
+      status:    'sent',
+      sent_at:   seededAt,
+      action_payload: {
+        label:             MARNIN_POC_LABEL,
+        seeded_at:         seededAt,
+        seeded_by_email:   callerEmail,
+        approval: {
+          approval_method:   'marnin_poc',
+          approved_at:       seededAt,
+          approved_by_email: callerEmail,
+          approved_via:      'ops-api/manual_dispatch_marnin_poc',
+        },
+      },
+    })
+    .eq('id', actionId)
+    .eq('status', 'pending')
+    .select('id')
+  if (flipErr) throw new ApiError(`status_flip_failed: ${flipErr.message}`, 500)
+  if (!flipResult || (Array.isArray(flipResult) && flipResult.length === 0)) {
+    throw new ApiError('race: status flip lost', 409)
+  }
+
+  // ── Call ghl-proxy?action=send_sms ──
+  const ghlBase = (Deno.env.get('SUPABASE_URL') || '').replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+  let ghlMessageId: string | null = null
+  let ghlError: string | null = null
+  let ghlStatus = 0
+  try {
+    const ghlResp = await fetch(`${ghlBase}?action=send_sms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ghlKey}` },
+      body: JSON.stringify({
+        contactId: MARNIN_POC_CONTACT_ID,
+        message:   MARNIN_POC_MESSAGE,
+        jobId:     null,
+      }),
+    })
+    ghlStatus = ghlResp.status
+    const j: any = await ghlResp.json().catch(() => ({}))
+    if (!ghlResp.ok) {
+      ghlError = j?.error || `ghl-proxy returned ${ghlResp.status}`
+    } else if (j?.success === false) {
+      ghlError = j?.error || 'ghl-proxy reported success=false'
+    } else if (j?.dedup_blocked === true) {
+      ghlError = j?.error || 'ghl-proxy dedup_blocked'
+    } else {
+      ghlMessageId = j?.messageId || j?.message_id || j?.id || null
+      if (!ghlMessageId) ghlError = 'ghl-proxy returned 200 but no messageId'
+    }
+  } catch (e: any) {
+    ghlError = `ghl_proxy_fetch_failed: ${e?.message || String(e)}`
+  }
+
+  // ── Audit chain row 3 — dispatched (or dispatch_failed) ──
+  await client.from('business_events').insert({
+    event_type:   ghlError ? 'proposed_action.dispatch_failed' : 'proposed_action.dispatched',
+    source:       'ops-api/manual_dispatch_marnin_poc',
+    entity_type:  'ai_proposed_action',
+    entity_id:    actionId,
+    job_id:       null,
+    occurred_at:  new Date().toISOString(),
+    payload: {
+      action_id:         actionId,
+      label:             MARNIN_POC_LABEL,
+      approval_method:   'marnin_poc',
+      approved_by_email: callerEmail,
+      ghl_message_id:    ghlMessageId,
+      ghl_status:        ghlStatus,
+      error:             ghlError,
+    },
+  })
+
+  if (ghlError) {
+    await client.from('ai_proposed_actions')
+      .update({ status: 'pending', sent_at: null })
+      .eq('id', actionId)
+    throw new ApiError(`ghl_proxy_send_failed: ${ghlError}`, 502)
+  }
+
+  return {
+    success:           true,
+    action_id:         actionId,
+    label:             MARNIN_POC_LABEL,
+    approval_method:   'marnin_poc',
+    approved_by_email: callerEmail,
+    contact_id:        MARNIN_POC_CONTACT_ID,
+    ghl_message_id:    ghlMessageId,
     audit_chain: [
       'proposed_action.manually_approved',
       'sms_sent (via ghl-proxy)',
