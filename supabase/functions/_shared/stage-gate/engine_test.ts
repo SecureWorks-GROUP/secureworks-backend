@@ -1,19 +1,20 @@
 /* ════════════════════════════════════════════════════════════════
-   stage-gate-engine_test.ts — Deno tests for the Cap 1C TS port
+   engine_test.ts — Deno tests for the Cap 1C TS port
 
    Runs the same fixture set as the Cap 1B browser harness against
    the TS engine. Establishes parity between the JS browser engine
    (`securedash/modules/ops-stage-gate-engine.js`) and the Deno
-   TS engine (`stage-gate-engine.ts`). Cap 1D will land an
-   automated cross-runtime parity test; for Cap 1C we manually
-   verify identical verdicts.
+   TS engine (`engine.ts`). Cap 1D will land an automated
+   cross-runtime parity test; for Cap 1C we manually verify
+   identical verdicts.
 
    Run:
-     deno test --no-check --allow-env shared/stage-gate-engine_test.ts
+     deno test --no-check --allow-env --allow-read \
+       supabase/functions/_shared/stage-gate/engine_test.ts
    ════════════════════════════════════════════════════════════════ */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { evaluateStageGates, canTransition, VERSION } from './stage-gate-engine.ts';
+import { evaluateStageGates, canTransition, VERSION } from './engine.ts';
 
 const NOW_ISO = '2026-05-02T00:00:00.000Z';
 
@@ -219,7 +220,7 @@ Deno.test('canTransition: archived is one-way (cannot transition out)', () => {
 });
 
 Deno.test('Read-only purity: engine has no fetch / write surface', async () => {
-  const src = await Deno.readTextFile(new URL('./stage-gate-engine.ts', import.meta.url));
+  const src = await Deno.readTextFile(new URL('./engine.ts', import.meta.url));
   // Allow `evaluate(`, `fetch...` in comments only via word boundary check.
   const codeOnly = src
     .split('\n')

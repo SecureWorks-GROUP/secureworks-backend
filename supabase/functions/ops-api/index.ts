@@ -99,6 +99,11 @@ import {
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 
+// Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
+// wrapper inside updateJobStatus. Static import so the Supabase deploy
+// bundler reliably includes the module bytes.
+import { evaluateStageGates } from '../_shared/stage-gate/engine.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -3290,7 +3295,7 @@ async function opsSummary(client: any) {
 
     // Active jobs for pipeline counts
     // Cap 1A: widened to canonical ACTIVE_STATUSES (excludes terminal cancelled/lost/archived).
-    // Source: secureworks-site/shared/job-state-machine.ts. The prior 9-value list silently
+    // Source: supabase/functions/_shared/stage-gate/job-state-machine.ts. The prior 9-value list silently
     // dropped jobs in `awaiting_deposit, order_materials, awaiting_supplier, order_confirmed,
     // partially_accepted, schedule_install, rectification, final_payment, get_review`.
     client.from('jobs')
@@ -5105,7 +5110,7 @@ async function updateJobStatus(client: any, body: any) {
   if (!jId || !status) throw new Error('jobId and status required')
 
   // Cap 1A: aligned to canonical ALL_CANONICAL_STATUSES from
-  // secureworks-site/shared/job-state-machine.ts. Per-type validity (fencing ≠ approvals,
+  // supabase/functions/_shared/stage-gate/job-state-machine.ts. Per-type validity (fencing ≠ approvals,
   // patio ≠ partially_accepted) is enforced server-side in Cap 1E via
   // validate_job_status_and_type trigger; for now this validator accepts any value the live
   // prod CHECK admits.
@@ -5149,7 +5154,6 @@ async function updateJobStatus(client: any, body: any) {
   const _capShadowEnabled = _capShadowFlag === 'on' || _capShadowFlag === '1' || _capShadowFlag === 'true'
   if (_capShadowEnabled) {
     try {
-      const { evaluateStageGates } = await import('../../../shared/stage-gate-engine.ts')
       const _writerSource = body.source || body.writer_source || 'ops_dashboard'
       const _actorEmail = body.operator_email || body.user_email || null
       const _correlationId = body.correlation_id || jId
