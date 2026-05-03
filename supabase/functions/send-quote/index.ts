@@ -28,6 +28,11 @@ import {
   emitV2SealedEvent,
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
+// T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
+// safeBusinessEventInsert flows through recordEvidence (full envelope +
+// match_status + extraction enqueue). When OFF, legacy raw insert.
+import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
+import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -113,18 +118,86 @@ async function insertEmailEvent(sb: any, opts: {
 // the rest of the release moment is recorded), so we log a [canonical-event-fail] line and
 // return without throwing so the caller's response shape stays unchanged. Per CIO ticket:
 // no retry, no transactional change in this patch — Option B/C are deferred follow-ups.
+//
+// T7 Loop 3 — atomic cutover. When evidence_capture_v1 is OFF, the legacy
+// raw insert below runs unchanged (Tier-1 release-truth path is preserved).
+// When ON, recordEvidence is the canonical writer with full envelope:
+//   - source_table = 'quote_revisions' (the manifest is the source of truth)
+//   - source_id    = row.payload.quote_revision_id when present
+//   - channel      = 'quote'
+//   - direction    = 'outbound'
+//   - thread_key   = correlation_id when present
+// recordEvidence already enforces append-only and conditionally enqueues
+// extraction_jobs for client.email_in / note.added only — quote.sent stays
+// off the extraction allowlist.
 async function safeBusinessEventInsert(
   sb: any,
   row: Record<string, any>,
   ctx: { handler: string; job_id: string | null }
 ): Promise<void> {
+  // Tier-1 release-truth invariant: this function MUST emit a canonical
+  // business_events row whenever called. The T7 path is preferred when
+  // evidence_capture_v1 is ON, but a T7 failure must NEVER silently drop
+  // the row — fall back to the legacy raw insert.
+  let t7Failed = false
   try {
+    const t7Enabled = await isFlagOn(sb, 'evidence_capture_v1', DEFAULT_ORG_ID)
+    if (t7Enabled) {
+      const sourceId = String(
+        row?.payload?.quote_revision_id ??
+        row?.payload?.entity_id ??
+        row?.entity_id ??
+        ctx.job_id ??
+        crypto.randomUUID()
+      )
+      try {
+        await recordEvidence(sb, {
+          event_type: String(row?.event_type ?? 'quote.event'),
+          source: ctx.handler || 'send-quote',
+          channel: 'quote',
+          direction: 'outbound',
+          occurred_at: row?.occurred_at ?? new Date().toISOString(),
+          source_table: 'quote_revisions',
+          source_id: sourceId,
+          job_id: ctx.job_id,
+          entity_type: row?.entity_type ?? 'quote',
+          entity_id: row?.entity_id ?? sourceId,
+          match_method: ctx.job_id ? 'direct_job_id' : 'none',
+          thread_key: row?.correlation_id ?? null,
+          privacy_classification: 'staff_only',
+          retention_class: '7y_audit',
+          body_preview: typeof row?.payload?.subject === 'string'
+            ? `quote: ${row.payload.subject}`.slice(0, 500)
+            : `quote ${row?.event_type ?? ''} ${ctx.job_id ?? ''}`.slice(0, 500),
+          payload: row?.payload ?? {},
+          metadata: row?.metadata ?? {},
+        }, {
+          org_id: DEFAULT_ORG_ID,
+          storage_client: sb.storage,
+        })
+        return
+      } catch (e: any) {
+        // T7 helper threw. Log the failure with the canonical-event-fail
+        // tag and fall through to the legacy raw insert so Tier-1
+        // release-truth still has a row.
+        console.error('[canonical-event-fail]', JSON.stringify({
+          event_type: row?.event_type ?? null,
+          handler: ctx.handler,
+          job_id: ctx.job_id,
+          stage: 't7_recordEvidence',
+          error: e?.message ?? String(e),
+        }))
+        t7Failed = true
+      }
+    }
+    // Legacy path. Runs when (a) flag OFF or (b) T7 path threw.
     const { error } = await sb.from('business_events').insert(row)
     if (error) {
       console.error('[canonical-event-fail]', JSON.stringify({
         event_type: row?.event_type ?? null,
         handler: ctx.handler,
         job_id: ctx.job_id,
+        stage: t7Failed ? 'legacy_after_t7_fallback' : 'legacy',
         error: error.message ?? String(error),
       }))
     }
@@ -133,6 +206,7 @@ async function safeBusinessEventInsert(
       event_type: row?.event_type ?? null,
       handler: ctx.handler,
       job_id: ctx.job_id,
+      stage: 'outer',
       error: e?.message ?? String(e),
     }))
   }
@@ -1024,6 +1098,87 @@ serve(async (req: Request) => {
         .from('job_documents')
         .update({ accepted_at: new Date().toISOString() })
         .eq('id', doc.id)
+
+      // ── T7 Loop 5 — closes G3 (quote.accepted missing from spine) ──
+      // Iter-2 audit: quote.accepted lives only in job_events; the canonical
+      // business_events spine never received this event. Sales/follow-up
+      // loops polling the spine for buying signals miss every acceptance.
+      // We always emit the canonical row from this point forward; the T7
+      // wrapper picks recordEvidence (full envelope) when the flag is ON.
+      try {
+        const acceptedAt = new Date().toISOString()
+        const t7Enabled = await isFlagOn(sb, 'evidence_capture_v1', DEFAULT_ORG_ID)
+        const acceptanceJobId = doc.job_id || null
+        const sharedPayload = {
+          quote_revision_id: doc.id,
+          quote_number: doc.quote_number || null,
+          accepted_via: 'public_link',
+          contact_id: doc.job_contact_id || null,
+          contact_name: doc.job_contacts?.client_name || null,
+          run_label: doc.run_label || null,
+          quote_value_ex_gst: doc.job_contacts?.quote_value_ex_gst ?? null,
+        }
+        const legacyAcceptRow = {
+          event_type: 'quote.accepted',
+          source: 'send-quote/accept',
+          occurred_at: acceptedAt,
+          recorded_at: acceptedAt,
+          entity_type: 'quote',
+          entity_id: doc.id,
+          job_id: acceptanceJobId,
+          payload: sharedPayload,
+        }
+        let acceptT7Failed = false
+        if (t7Enabled && acceptanceJobId) {
+          try {
+            await recordEvidence(sb, {
+              event_type: 'quote.accepted',
+              source: 'send-quote/accept',
+              channel: 'quote',
+              direction: 'inbound',                  // client-initiated
+              occurred_at: acceptedAt,
+              source_table: 'job_documents',
+              source_id: String(doc.id),
+              job_id: acceptanceJobId,
+              contact_id: doc.job_contact_id || null,
+              entity_type: 'quote',
+              entity_id: doc.id,
+              match_method: 'direct_job_id',
+              body_preview: `Client accepted quote ${doc.quote_number || doc.id}${doc.run_label ? ` (run ${doc.run_label})` : ''}`,
+              safe_summary: `Client accepted quote ${doc.quote_number || ''}`.trim(),
+              thread_key: doc.share_token || null,
+              privacy_classification: 'staff_only',
+              retention_class: '7y_audit',
+              payload: sharedPayload,
+            }, {
+              org_id: DEFAULT_ORG_ID,
+              storage_client: sb.storage,
+            })
+          } catch (e: any) {
+            // G3 closure must hold even when T7 throws — fall back to
+            // legacy raw insert. Without this, an acceptance event could
+            // still be lost from the spine on a transient T7 failure.
+            console.error('[canonical-event-fail]', JSON.stringify({
+              event_type: 'quote.accepted',
+              handler: 'send-quote/accept',
+              job_id: acceptanceJobId,
+              stage: 't7_recordEvidence',
+              error: e?.message ?? String(e),
+            }))
+            acceptT7Failed = true
+          }
+        }
+        if (!t7Enabled || !acceptanceJobId || acceptT7Failed) {
+          await sb.from('business_events').insert(legacyAcceptRow)
+        }
+      } catch (e: any) {
+        console.error('[canonical-event-fail]', JSON.stringify({
+          event_type: 'quote.accepted',
+          handler: 'send-quote/accept',
+          job_id: doc.job_id || null,
+          error: e?.message ?? String(e),
+        }))
+      }
 
       // ── PER-RUN ACCEPTANCE (multi-neighbour fencing) ──
       if (doc.run_label && doc.job_id) {
