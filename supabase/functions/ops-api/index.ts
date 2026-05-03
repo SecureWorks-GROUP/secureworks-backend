@@ -11772,22 +11772,27 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
   }
 
   // ── Seed canary row (server-determined fields only) ──
+  // Schema-aware: ai_proposed_actions uses 'proposal_id' (not 'id'),
+  // requires 'trace_id', and has no 'channel' column. Channel info
+  // moves into action_payload for audit purposes.
   const actionId = crypto.randomUUID()
+  const traceId = crypto.randomUUID()
   const seededAt = now.toISOString()
   const { error: insErr } = await client.from('ai_proposed_actions').insert({
-    id:                actionId,
+    proposal_id:       actionId,
+    trace_id:          traceId,
     job_id:            null,
     contact_id:        MARNIN_POC_CONTACT_ID,
     contact_name:      MARNIN_POC_CONTACT_NAME,
     contact_phone:     MARNIN_POC_CONTACT_PHONE,
     action_type:       'first_contact_sms',
-    channel:           'sms',
     drafted_message:   MARNIN_POC_MESSAGE,
     status:            'pending',
     expires_at:        new Date(now.getTime() + 3600_000).toISOString(),
     created_at:        seededAt,
     action_payload:    {
       label:             MARNIN_POC_LABEL,
+      channel:           'sms',
       seeded_at:         seededAt,
       seeded_by_user_id: authUser.id || null,
       seeded_by_email:   callerEmail,
@@ -11816,14 +11821,17 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
   if (approvalErr) throw new ApiError(`approval_record_failed: ${approvalErr.message}`, 500)
 
   // ── Idempotent status flip (optimistic on status='pending') ──
+  // PK column is 'proposal_id', not 'id'.
   const { data: flipResult, error: flipErr } = await client.from('ai_proposed_actions')
     .update({
       status:    'sent',
       sent_at:   seededAt,
       action_payload: {
         label:             MARNIN_POC_LABEL,
+        channel:           'sms',
         seeded_at:         seededAt,
         seeded_by_email:   callerEmail,
+        trace_id:          traceId,
         approval: {
           approval_method:   'marnin_poc',
           approved_at:       seededAt,
@@ -11832,9 +11840,9 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
         },
       },
     })
-    .eq('id', actionId)
+    .eq('proposal_id', actionId)
     .eq('status', 'pending')
-    .select('id')
+    .select('proposal_id')
   if (flipErr) throw new ApiError(`status_flip_failed: ${flipErr.message}`, 500)
   if (!flipResult || (Array.isArray(flipResult) && flipResult.length === 0)) {
     throw new ApiError('race: status flip lost', 409)
@@ -11894,7 +11902,7 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
   if (ghlError) {
     await client.from('ai_proposed_actions')
       .update({ status: 'pending', sent_at: null })
-      .eq('id', actionId)
+      .eq('proposal_id', actionId)
     throw new ApiError(`ghl_proxy_send_failed: ${ghlError}`, 502)
   }
 
