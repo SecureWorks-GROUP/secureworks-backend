@@ -718,11 +718,13 @@ interface FakeProposalSupabase {
 function makeProposalFake(refsMode: "off" | "soft-warn" | "strict"): FakeProposalSupabase {
   _resetFlagCache();
   const inserts: Array<{ table: string; values: Record<string, unknown> }> = [];
-  const flagRow = refsMode === "strict"
-    ? { enabled: true, shadow_mode: false }
-    : refsMode === "soft-warn"
-    ? { enabled: false, shadow_mode: true }
-    : { enabled: false, shadow_mode: false };
+  // refsMode test fixture mapping post-shadow_mode-removal:
+  //   'strict'    => evidence_refs_strict_mode = true
+  //   'soft-warn' => evidence_refs_soft_warn   = true (strict false)
+  //   'off'       => both false / absent
+  // The mock keys feature_flags rows by the flag_name passed to the .eq()
+  // chain so getRefsValidatorMode's two isFlagOn calls resolve correctly.
+  let lastFlagName = "";
   // deno-lint-ignore no-explicit-any
   const client: any = {
     from(table: string) {
@@ -730,11 +732,19 @@ function makeProposalFake(refsMode: "off" | "soft-warn" | "strict"): FakeProposa
         select(_cols: string) {
           return {
             // deno-lint-ignore no-explicit-any
-            eq(_col: string, _val: unknown): any { return chain.select(_cols); },
+            eq(col: string, val: unknown): any {
+              if (table === "feature_flags" && col === "flag_name") {
+                lastFlagName = String(val);
+              }
+              return chain.select(_cols);
+            },
             // deno-lint-ignore no-explicit-any
             limit(_n: number): any {
               if (table === "feature_flags") {
-                return Promise.resolve({ data: [flagRow], error: null });
+                let enabled = false;
+                if (lastFlagName === "evidence_refs_strict_mode" && refsMode === "strict") enabled = true;
+                if (lastFlagName === "evidence_refs_soft_warn" && refsMode === "soft-warn") enabled = true;
+                return Promise.resolve({ data: [{ enabled }], error: null });
               }
               return Promise.resolve({ data: [], error: null });
             },

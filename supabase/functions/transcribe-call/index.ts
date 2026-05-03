@@ -141,10 +141,17 @@ serve(async (req) => {
 
   // 2. Persist audio to evidence-audio bucket. Path:
   //    evidence-audio/<org>/call/<source_id>.<ext>
-  const ext = contentType.includes('mp3') ? 'mp3'
+  // Whisper detects format from filename extension. Must be one of:
+  //   flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm
+  // Default to mp3 for unknown content-types — most call recording
+  // services emit mp3, and Whisper is forgiving about misnamed mp3-ish bytes.
+  const ext = contentType.includes('flac') ? 'flac'
+            : contentType.includes('mp3') || contentType.includes('mpeg') ? 'mp3'
             : contentType.includes('wav') ? 'wav'
             : contentType.includes('mp4') || contentType.includes('m4a') ? 'm4a'
-            : 'audio'
+            : contentType.includes('ogg') || contentType.includes('oga') ? 'ogg'
+            : contentType.includes('webm') ? 'webm'
+            : 'mp3'
   const audioPath = `${DEFAULT_ORG_ID}/call/${source_id}.${ext}`
   try {
     const { error: upErr } = await sb.storage
@@ -201,8 +208,17 @@ serve(async (req) => {
       channel,
       direction,
       occurred_at,
-      source_table: 'transcribed_call',
-      source_id,
+      // T5 extractor's loadSourceRow allowlist: business_events,
+      // inbox_events, job_events, ghl_conversation_cache. The synthetic
+      // 'transcribed_call' table doesn't exist; using business_events as
+      // source means the extractor re-reads our own spine row's payload.
+      // We can't know spine_event_id before recordEvidence runs, so we
+      // suppress its built-in enqueue (enqueueExtraction:false) and do
+      // the enqueue manually below, pointing source_id at the just-
+      // returned spine_event_id.
+      source_table: 'business_events',
+      source_id,                                                    // placeholder; replaced post-insert
+      enqueueExtraction: false,
       job_id: input.job_id || null,
       contact_id: input.contact_id || null,
       entity_type: input.job_id ? 'job' : 'contact',
@@ -217,6 +233,9 @@ serve(async (req) => {
       privacy_classification: 'staff_only',
       retention_class: '7y_audit',
       payload: {
+        // transcript_text lives in payload so the T5 extractor (which
+        // reads business_events.payload via loadSourceRow) can pull it.
+        transcript_text,
         recording_url_hash: (await sha256Hex(input.recording_url)).slice(0, 16),
         audio_pointer: `evidence-audio://${audioPath}`,
         audio_content_type: contentType,
@@ -226,20 +245,51 @@ serve(async (req) => {
         whisper_model: WHISPER_MODEL,
         char_count: transcript_text.length,
         ghl_call_id: input.ghl_call_id || null,
+        whisperflow_synthetic_source_id: source_id,
       },
       metadata: {
         provider: 'openai-whisper',
+        whisperflow_synthetic_source_id: source_id,
       },
     }, {
       org_id: DEFAULT_ORG_ID,
       bypass_feature_flag: true,                                    // we already gated on evidence_transcript_capture above
-      extractor_eligible_channels: ['email', 'note', 'call'],       // local override so transcript flows to extractor
       storage_client: sb.storage,
     })
+    // Manual extraction_jobs enqueue with source pointing at the spine
+    // row that recordEvidence just inserted. Idempotent via the
+    // (source_table, source_id, extractor_version) unique key.
+    let extraction_job_id: string | null = null
+    if (input.job_id) {
+      const { data: enqueueData, error: enqueueErr } = await sb
+        .from('extraction_jobs')
+        .insert({
+          job_id: input.job_id,
+          source_table: 'business_events',
+          source_id: result.spine_event_id,
+          source_event_type: 'call.transcript_completed',
+          extractor_version: 'context-fact-extractor:v1',
+          priority: 5,
+          status: 'pending',
+          metadata: {
+            spine_event_id: result.spine_event_id,
+            channel: 'call',
+            direction,
+            transcript_chars: transcript_text.length,
+            provider: 'openai-whisper',
+          },
+        })
+        .select('id')
+      if (enqueueErr) {
+        console.warn('[transcribe-call] manual extraction enqueue failed (non-fatal):', enqueueErr.message)
+      } else if (enqueueData && enqueueData.length > 0) {
+        extraction_job_id = enqueueData[0].id
+      }
+    }
     return jsonResponse({
       ok: true,
       spine_event_id: result.spine_event_id,
-      extraction_job_id: result.extraction_job_id ?? null,
+      extraction_job_id,
       match_status: result.spine_row.match_status,
       audio_pointer: `evidence-audio://${audioPath}`,
       transcript_chars: transcript_text.length,

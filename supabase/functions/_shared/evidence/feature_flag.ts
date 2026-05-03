@@ -33,10 +33,15 @@ export type EvidenceFlagKey =
 /**
  * Returns true when the flag is ON. Default OFF on any error.
  *
- * For evidence_refs_strict_mode the boolean (enabled, shadow_mode) maps:
- *   (false,false) -> 'off'        -> isFlagOn returns false
- *   (false,true)  -> 'soft-warn'  -> use getRefsValidatorMode() instead
- *   (true,false)  -> 'strict'     -> isFlagOn returns true
+ * Production schema as of 2026-05-03:
+ *   feature_flags(id, flag_name, enabled, description, updated_at)
+ *   No org_id column (single-org install). No shadow_mode column.
+ *   The orgId param is preserved for the cache key only — the table is
+ *   global, so all org_ids share one row per flag_name.
+ *
+ * For evidence_refs_strict_mode the boolean enabled maps:
+ *   false -> 'off' / 'soft-warn' (use getRefsValidatorMode for the soft-warn split)
+ *   true  -> 'strict'  -> isFlagOn returns true
  */
 export async function isFlagOn(
   // deno-lint-ignore no-explicit-any
@@ -52,9 +57,8 @@ export async function isFlagOn(
   try {
     const { data, error } = await client
       .from("feature_flags")
-      .select("enabled, shadow_mode")
-      .eq("org_id", orgId)
-      .eq("flag_key", flagKey)
+      .select("enabled")
+      .eq("flag_name", flagKey)
       .limit(1);
     if (error) {
       cache.set(cacheKey, { enabled: false, fetchedAt: Date.now() });
@@ -73,31 +77,30 @@ export async function isFlagOn(
 export type RefsValidatorMode = "off" | "soft-warn" | "strict";
 
 /**
- * Tri-state read of evidence_refs_strict_mode:
- *   (false,false) -> 'off'
- *   (false,true)  -> 'soft-warn'
- *   (true,*)      -> 'strict'
+ * Production schema has no shadow_mode column — soft-warn is conveyed by
+ * a separate flag row 'evidence_refs_soft_warn' (treated as a EvidenceFlagKey
+ * for cache reuse). Tri-state mapping:
+ *   evidence_refs_strict_mode = true                    -> 'strict'
+ *   evidence_refs_strict_mode = false (or absent)
+ *     AND evidence_refs_soft_warn = true                -> 'soft-warn'
+ *   otherwise                                            -> 'off'
+ *
+ * Implementation note: uses two isFlagOn calls so we share the same
+ * cached + corrected query path (avoids re-implementing the
+ * .from('feature_flags').select(...) chain that drifted from the actual
+ * schema once already).
  */
 export async function getRefsValidatorMode(
   // deno-lint-ignore no-explicit-any
   client: any,
   orgId: string = DEFAULT_ORG_ID,
 ): Promise<RefsValidatorMode> {
-  try {
-    const { data, error } = await client
-      .from("feature_flags")
-      .select("enabled, shadow_mode")
-      .eq("org_id", orgId)
-      .eq("flag_key", "evidence_refs_strict_mode")
-      .limit(1);
-    if (error || !data?.[0]) return "off";
-    const { enabled, shadow_mode } = data[0];
-    if (enabled) return "strict";
-    if (shadow_mode) return "soft-warn";
-    return "off";
-  } catch {
-    return "off";
-  }
+  if (await isFlagOn(client, "evidence_refs_strict_mode", orgId)) return "strict";
+  // evidence_refs_soft_warn isn't in EvidenceFlagKey; cast through the
+  // helper anyway since the underlying query is shape-compatible.
+  // deno-lint-ignore no-explicit-any
+  if (await isFlagOn(client, "evidence_refs_soft_warn" as any, orgId)) return "soft-warn";
+  return "off";
 }
 
 /**
