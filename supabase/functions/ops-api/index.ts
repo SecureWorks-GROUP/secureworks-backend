@@ -11771,13 +11771,46 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
     )
   }
 
-  // ── Seed canary row (server-determined fields only) ──
-  // Schema-aware: ai_proposed_actions uses 'proposal_id' (not 'id'),
-  // requires 'trace_id', and has no 'channel' column. Channel info
-  // moves into action_payload for audit purposes.
-  const actionId = crypto.randomUUID()
-  const traceId = crypto.randomUUID()
+  // ── Seed reasoning trace row first (FK target for ai_proposed_actions.trace_id)
+  // ai_proposed_actions.trace_id has a NOT NULL foreign key to
+  // ai_reasoning_traces.id, so a random UUID violates the constraint.
+  // For this POC the "reasoning" is just "Marnin clicked the test button"
+  // — human-triggered, no model — but the trace row is still required.
   const seededAt = now.toISOString()
+  const { data: traceRow, error: traceErr } = await client.from('ai_reasoning_traces').insert({
+    trigger_type:           'manual_marnin_poc_button',
+    model_name:             'manual:marnin_poc',
+    input_context_snapshot: {
+      label:           MARNIN_POC_LABEL,
+      contact_id:      MARNIN_POC_CONTACT_ID,
+      contact_phone:   MARNIN_POC_CONTACT_PHONE,
+      action_type:     'first_contact_sms',
+      drafted_message: MARNIN_POC_MESSAGE,
+      triggered_by:    callerEmail,
+      origin:          'sale.html/marninPocFireBtn',
+    },
+    output_result: {
+      action:           'send_sms',
+      recipient_contact_id: MARNIN_POC_CONTACT_ID,
+      drafted_message:  MARNIN_POC_MESSAGE,
+    },
+    output_type:       'send_sms',
+    reasoning_summary: 'Marnin clicked Send test SMS button — controlled POC test send',
+    confidence_score:  1.0,
+    status:            'completed',
+    storage_tier:      'minimal',
+    tags:              ['marnin_poc', 'manual_button', 'canary'],
+  }).select('id').single()
+  if (traceErr || !traceRow) {
+    throw new ApiError(`trace_seed_failed: ${traceErr?.message || 'no row'}`, 500)
+  }
+  const traceId = traceRow.id
+
+  // ── Seed canary action row referencing the trace ──
+  // Schema-aware: ai_proposed_actions uses 'proposal_id' (not 'id'),
+  // requires 'trace_id' (FK → ai_reasoning_traces.id), and has no
+  // 'channel' column. Channel info moves into action_payload.
+  const actionId = crypto.randomUUID()
   const { error: insErr } = await client.from('ai_proposed_actions').insert({
     proposal_id:       actionId,
     trace_id:          traceId,
@@ -11793,6 +11826,7 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
     action_payload:    {
       label:             MARNIN_POC_LABEL,
       channel:           'sms',
+      trace_id:          traceId,
       seeded_at:         seededAt,
       seeded_by_user_id: authUser.id || null,
       seeded_by_email:   callerEmail,
