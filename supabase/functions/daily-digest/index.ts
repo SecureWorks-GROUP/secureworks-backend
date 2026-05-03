@@ -249,7 +249,7 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
     // Cap 1A fix: prior code used 'completed' typo (canonical is 'complete') AND missed every
     // post-accept substage (`partially_accepted, awaiting_deposit, approvals, order_materials,
     // awaiting_supplier, order_confirmed`). Result was silent undercount for sales metrics.
-    // Canonical status set is sourced from `secureworks-site/shared/job-state-machine.ts` —
+    // Canonical status set is sourced from `supabase/functions/_shared/stage-gate/job-state-machine.ts` —
     // see Cap 1 stage-gate contract.
     const QUOTED_OR_PAST: ReadonlySet<string> = new Set([
       'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
