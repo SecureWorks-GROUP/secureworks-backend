@@ -381,6 +381,42 @@ serve(async (req) => {
       return jsonResponse({ received: true, event_created: false, error: eventError.message }, 500);
     }
 
+    // ── T7 Loop 7 — auto-invoke transcribe-call for CallCompleted events ──
+    // Fire-and-forget. The transcribe-call function:
+    //   - Re-checks evidence_transcript_capture flag (so OFF means no-op)
+    //   - Downloads audio from recording_url
+    //   - Calls OpenAI Whisper API
+    //   - Writes transcript via recordEvidence (channel='call')
+    //   - Enqueues to extraction_jobs → context_fact → JARVIS citation
+    // We don't block the webhook response on this — Twilio recording URLs
+    // expire within minutes so the worker must be quick anyway, but the
+    // webhook returns immediately to keep GHL happy.
+    if (type === "CallCompleted") {
+      const recording_url = (eventPayload.recording_url as string) || null;
+      if (recording_url) {
+        const transcribePayload = {
+          recording_url,
+          job_id: job?.id || null,
+          contact_id: contactId || null,
+          call_direction: (eventPayload.direction as string) || "internal",
+          occurred_at: new Date().toISOString(),
+          duration_seconds: eventPayload.duration as number || null,
+          phone: (eventPayload.phone as string) || null,
+          ghl_call_id: (body as { eventId?: string; id?: string }).eventId
+                        || (body as { id?: string }).id
+                        || null,
+        };
+        // Fire-and-forget invoke. We use the supabase Functions client
+        // so auth + URL are resolved automatically.
+        supabase.functions.invoke("transcribe-call", { body: transcribePayload })
+          .then((r) => {
+            if (r.error) console.error("[ghl-webhook-receiver] transcribe-call invoke error:", r.error);
+            else console.log("[ghl-webhook-receiver] transcribe-call invoked", r.data?.spine_event_id || "(no id)");
+          })
+          .catch((e: unknown) => console.error("[ghl-webhook-receiver] transcribe-call invoke threw:", (e as Error).message));
+      }
+    }
+
     // ── Auto-cancel pending nudges/chases on inbound reply ──
     let nudgesCancelled = false;
     if (type === "InboundMessage" && job?.id) {
