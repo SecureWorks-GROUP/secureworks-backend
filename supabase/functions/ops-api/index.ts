@@ -11857,10 +11857,14 @@ async function manualDispatchMarninPoc(client: any, _body: any, authUser: any) {
   if (approvalErr) throw new ApiError(`approval_record_failed: ${approvalErr.message}`, 500)
 
   // ── Idempotent status flip (optimistic on status='pending') ──
-  // PK column is 'proposal_id', not 'id'.
+  // PK column is 'proposal_id'. status CHECK constraint only permits
+  // ('pending','auto_approved','approved','rejected','expired') — NO
+  // 'sent' state. For a manual-click POC, 'approved' is the right
+  // status (human approved → dispatched). sent_at column still records
+  // the dispatch timestamp.
   const { data: flipResult, error: flipErr } = await client.from('ai_proposed_actions')
     .update({
-      status:    'sent',
+      status:    'approved',
       sent_at:   seededAt,
       action_payload: {
         label:             MARNIN_POC_LABEL,
