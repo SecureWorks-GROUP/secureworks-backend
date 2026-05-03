@@ -1302,8 +1302,54 @@ if (import.meta.main) serve(async (req: Request) => {
       // signing a URL; body bytes never returned inline.
       case 'get_evidence_body': {
         // Caller identity comes from the same Supabase JWT validation as
-        // the rest of ops-api. The role lookup uses the existing user row;
-        // we look it up here by user_id.
+        // the rest of ops-api. Role + is_admin + assigned_job_ids are all
+        // sourced server-side from the users + assignments tables — never
+        // from request input — per body_handler's AUTHORIZATION CONTRACT.
+        let role = ''
+        let isAdmin = false
+        let userId: string | undefined
+        let assignedJobIds: string[] = []
+        try {
+          const auth = req.headers.get('authorization') || ''
+          const token = auth.replace(/^Bearer\s+/i, '')
+          if (token) {
+            const { data: u } = await client.auth.getUser(token)
+            userId = u?.user?.id
+            if (userId) {
+              const { data: profile } = await client.from('users').select('role').eq('id', userId).limit(1)
+              role = (profile?.[0]?.role as string) || ''
+              isAdmin = role === 'admin' || role === 'owner'
+              if (!isAdmin) {
+                const { data: asgn } = await client.from('assignments').select('job_id').eq('user_id', userId)
+                assignedJobIds = (asgn || []).map((a: any) => a.job_id).filter(Boolean)
+              }
+            }
+          }
+        } catch (_e) { /* role stays '' → default-deny in handler */ }
+        const storage = client.storage
+        return json(await getEvidenceBody(client, storage, body, {
+          user_id: userId,
+          role,
+          is_admin: isAdmin,
+          assigned_job_ids: assignedJobIds,
+        }))
+      }
+      // T7 Loop 9 — Controlled transcript ingest.
+      // Admin/owner-only. Bypasses the global evidence_capture_v1 flag
+      // because access is structurally controlled by role gate (parallel
+      // to agent_audit_log). Used for the JARVIS memory proof: WhisperFlow
+      // transcript text -> spine row -> extraction_jobs -> context_fact ->
+      // Job Brain -> JARVIS citation.
+      //
+      // POST body: {
+      //   job_id: string,                  required
+      //   transcript_text: string,         required, non-empty
+      //   source_label?: string,           e.g. 'whisperflow', 'manual'
+      //   occurred_at?: string,            ISO; defaults to now
+      //   consent_confirmed: true,         required; explicit boolean
+      //   call_direction?: 'inbound'|'outbound'|'internal'  default 'internal'
+      // }
+      case 'ingest_transcript': {
         let role = ''
         let userId: string | undefined
         try {
@@ -1317,9 +1363,11 @@ if (import.meta.main) serve(async (req: Request) => {
               role = (profile?.[0]?.role as string) || ''
             }
           }
-        } catch (_e) { /* role stays '' → default-deny in handler */ }
-        const storage = client.storage
-        return json(await getEvidenceBody(client, storage, body, { user_id: userId, role }))
+        } catch (_e) { /* role stays '' → deny */ }
+        if (role !== 'admin' && role !== 'owner') {
+          return json({ ok: false, reason: 'admin or owner role required' }, 403)
+        }
+        return json(await ingestTranscript(client, body, { user_id: userId!, role }))
       }
       case 'resolve_jobs': return json(await resolveJobs(client, body))
       case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
@@ -8527,6 +8575,105 @@ async function addNote(client: any, body: any, isAdmin = false) {
   }
 
   return { note: data }
+}
+
+// T7 Loop 9 — Controlled transcript ingest handler.
+// Caller has already passed the admin/owner role check at the dispatch
+// site. This handler validates input, computes the envelope, calls
+// recordEvidence with bypass_feature_flag=true, and returns the spine
+// event id + extraction job id for downstream verification.
+async function ingestTranscript(
+  client: any,
+  body: any,
+  caller: { user_id: string; role: string },
+): Promise<any> {
+  const job_id = String(body?.job_id || '').trim()
+  const transcript_text = String(body?.transcript_text || '')
+  const source_label = String(body?.source_label || 'whisperflow').slice(0, 64)
+  const occurred_at = (body?.occurred_at && typeof body.occurred_at === 'string')
+    ? body.occurred_at
+    : new Date().toISOString()
+  const consent_confirmed = body?.consent_confirmed === true
+  const call_direction = (body?.call_direction === 'inbound' || body?.call_direction === 'outbound')
+    ? body.call_direction
+    : 'internal'
+
+  if (!job_id) return { ok: false, reason: 'job_id required' }
+  if (transcript_text.trim().length === 0) return { ok: false, reason: 'transcript_text required (non-empty)' }
+  if (!consent_confirmed) return { ok: false, reason: 'consent_confirmed must be explicitly true' }
+
+  // Confirm the job exists. Avoids creating spine rows pointing at junk ids.
+  const { data: jobRow, error: jobErr } = await client
+    .from('jobs')
+    .select('id, job_number')
+    .eq('id', job_id)
+    .limit(1)
+  if (jobErr) return { ok: false, reason: `job lookup failed: ${jobErr.message}` }
+  if (!jobRow || jobRow.length === 0) return { ok: false, reason: `job_id '${job_id}' not found` }
+
+  // Build a deterministic-ish source id so reruns dedupe at the
+  // (source_table, source_id) level rather than minting a new spine row
+  // every paste. Hash of (job_id, occurred_at, first 64 chars).
+  const source_id = `transcript-${job_id}-${occurred_at}-${transcript_text.slice(0, 64).replace(/\s+/g, '_').slice(0, 32)}`
+
+  const safe_summary = transcript_text.slice(0, 280).replace(/\s+/g, ' ').trim()
+  const body_filename = `transcript-${job_id}-${Date.now()}.txt`
+
+  try {
+    const result = await recordEvidence(
+      client,
+      {
+        event_type: 'call.transcript_ingested',
+        source: 'ops-api/ingest_transcript',
+        channel: 'call',
+        direction: call_direction as any,
+        occurred_at,
+        source_table: 'admin_transcript',
+        source_id,
+        job_id,
+        entity_type: 'job',
+        entity_id: job_id,
+        match_method: 'manual',
+        match_confidence: 1.0,
+        body_preview: transcript_text.slice(0, 500),
+        body_full: transcript_text,
+        body_filename,
+        body_mime: 'text/plain; charset=utf-8',
+        safe_summary,
+        privacy_classification: 'staff_only',
+        retention_class: '7y_audit',
+        payload: {
+          source_label,
+          call_direction,
+          ingested_by: { user_id: caller.user_id, role: caller.role },
+          ingested_at: new Date().toISOString(),
+          char_count: transcript_text.length,
+          consent_confirmed: true,
+        },
+        metadata: {
+          ingest_action: 'ingest_transcript',
+        },
+      },
+      {
+        org_id: DEFAULT_ORG_ID,
+        bypass_feature_flag: true,                       // structurally controlled (admin only)
+        extractor_eligible_channels: ['email', 'note', 'call'],   // local override; lets transcripts flow to extractor
+        storage_client: client.storage,
+      },
+    )
+    return {
+      ok: true,
+      spine_event_id: result.spine_event_id,
+      extraction_job_id: result.extraction_job_id ?? null,
+      body_pointer: result.body_pointer ?? null,
+      match_status: result.spine_row.match_status,
+      job_number: jobRow[0].job_number,
+      source_id,
+      warnings: result.warnings,
+    }
+  } catch (e: any) {
+    return { ok: false, reason: `ingestTranscript: recordEvidence failed: ${e?.message ?? e}` }
+  }
 }
 
 async function uploadPhoto(client: any, body: any) {
