@@ -1930,6 +1930,12 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'assign_scoper':                return json(await assignScoper(client, body))
       case 'book_scope':                   return json(await bookScope(client, body))
 
+      // ── Slice 3: Brain backfill ──
+      // Marnin-only. Defaults to dry_run=true. Pulls historical GHL
+      // conversations into business_events so JARVIS sees real chat
+      // history when proposing follow-ups + booking nudges.
+      case 'backfill_ghl_conversations':   return json(await backfillGhlConversations(client, body, req))
+
       // ── Smart Nudges ──
       case 'list_nudges': return json(await listNudges(client, url.searchParams))
       case 'act_nudge': return json(await actNudge(client, body))
@@ -11692,7 +11698,7 @@ async function listProposedActions(client: any, params: URLSearchParams) {
     .lt('expires_at', new Date(Date.now() + 48 * 3600000).toISOString()) // not expired
     .gt('expires_at', new Date().toISOString())
     .order('created_at', { ascending: false })
-    .limit(50)
+    .limit(200)
 
   if (actionType) query = query.eq('action_type', actionType)
 
@@ -12274,6 +12280,234 @@ async function bookScope(client: any, body: any): Promise<any> {
   } catch (_e) { /* best-effort */ }
 
   return { success: true, action_id, scope_window: scope_window_iso, confirmation_proposal_id }
+}
+
+// ════════════════════════════════════════════════════════════
+// SLICE 3 — GHL conversation backfill into brain (business_events)
+//
+// Goal: JARVIS today only sees comms captured AFTER 2026-05-04 (when
+// evidence_capture_v1 flipped on). All historical SMS/email per opp is
+// invisible to the loops, so booking + follow-up suggestions are
+// stage+age templates instead of grounded in actual conversation.
+//
+// This action pulls historical GHL conversation messages for active
+// opportunities into business_events with the canonical evidence
+// envelope. Existing extractor (every 15 min) digests them into
+// job_context. Loops then read job_context → smarter proposals.
+//
+// SAFETY:
+//   - Marnin-only (email gate)
+//   - dry_run=true by default — counts what WOULD be inserted
+//   - Idempotent: skips messages whose body_hash already exists for
+//     the same contact_id + occurred_at minute
+//   - Capped at max_opportunities=10 per call by default (so first
+//     runs can't accidentally dump 3000 rows)
+//   - Hits ghl-proxy get_conversation per opp — same path the cockpit
+//     already uses, no new GHL API surface
+// ════════════════════════════════════════════════════════════
+
+const BACKFILL_MARNIN_EMAIL = 'marnin@secureworkswa.com.au'
+const GHL_FENCING_PIPELINE_ID = 'I9t8njpuR0Dm7B2NDcvI'
+const GHL_PATIO_PIPELINE_ID = 'OGZLpPPVWVarN94HL6af'
+
+async function backfillGhlConversations(client: any, body: any, req: Request): Promise<any> {
+  // ── Auth gate (marnin-only) ──
+  const authHeader = req.headers.get('authorization') || ''
+  const jwt = authHeader.replace(/^Bearer\s+/i, '').trim()
+  if (!jwt) throw new ApiError('login_required', 401)
+  const { data: { user }, error: authErr } = await client.auth.getUser(jwt)
+  if (authErr || !user) throw new ApiError('session_expired', 401)
+  if ((user.email || '').toLowerCase() !== BACKFILL_MARNIN_EMAIL) {
+    throw new ApiError('backfill_unauthorized: marnin only', 403)
+  }
+
+  // ── Params ──
+  const dry_run = body?.dry_run !== false  // default TRUE — must explicitly pass false to write
+  const pipeline = (body?.pipeline || 'both').toLowerCase()
+  const max_opportunities = Math.min(Number(body?.max_opportunities) || 10, 50)
+  const window_days = Math.min(Number(body?.opportunity_window_days) || 30, 90)
+
+  if (!['fencing', 'patio', 'both'].includes(pipeline)) {
+    throw new ApiError(`pipeline must be fencing|patio|both, got '${pipeline}'`, 400)
+  }
+
+  const ghlBase = (Deno.env.get('SUPABASE_URL') || '').replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+
+  // ── Fetch opportunities for selected pipelines ──
+  const lanes = pipeline === 'both' ? ['fencing', 'patio'] : [pipeline]
+  const opportunities: Array<{ id: string; contactId: string; contactName: string; pipeline: string; updatedAt: string }> = []
+  for (const lane of lanes) {
+    try {
+      const r = await fetch(`${ghlBase}?action=opportunities&pipeline=${lane}`, {
+        headers: { 'Authorization': `Bearer ${ghlKey}` },
+      })
+      if (!r.ok) {
+        console.warn(`[backfill] opps fetch failed for ${lane}: HTTP ${r.status}`)
+        continue
+      }
+      const j: any = await r.json()
+      for (const o of (j.opportunities || [])) {
+        if (o.contactId && o.id) {
+          opportunities.push({
+            id: o.id,
+            contactId: o.contactId,
+            contactName: o.contactName || o.name || '',
+            pipeline: lane,
+            updatedAt: o.updatedAt || o.createdAt || new Date().toISOString(),
+          })
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[backfill] opps fetch threw for ${lane}: ${e?.message}`)
+    }
+  }
+
+  // ── Filter by activity window + cap ──
+  const cutoff = Date.now() - window_days * 86400000
+  const recentOpps = opportunities
+    .filter(o => Date.parse(o.updatedAt) >= cutoff)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, max_opportunities)
+
+  // ── Iterate, fetch conversation per opp, plan inserts ──
+  const summary = {
+    dry_run,
+    pipeline,
+    opps_total_fetched: opportunities.length,
+    opps_in_window: recentOpps.length,
+    max_opportunities,
+    opportunity_window_days: window_days,
+    messages_found: 0,
+    messages_dedupe_skipped: 0,
+    messages_would_insert: 0,
+    messages_inserted: 0,
+    errors: [] as Array<{ opp_id: string; reason: string }>,
+    per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; messages: number; would_insert: number; dedupe_skipped: number }>,
+  }
+
+  for (const opp of recentOpps) {
+    try {
+      const r = await fetch(`${ghlBase}?action=get_conversation&contactId=${opp.contactId}`, {
+        headers: { 'Authorization': `Bearer ${ghlKey}` },
+      })
+      if (!r.ok) {
+        summary.errors.push({ opp_id: opp.id, reason: `get_conversation HTTP ${r.status}` })
+        continue
+      }
+      const j: any = await r.json()
+      const messages: Array<any> = j.messages || []
+      summary.messages_found += messages.length
+
+      // Try to resolve a Supabase job_id for this opp (best effort)
+      let job_id: string | null = null
+      try {
+        const { data: jobRow } = await client.from('jobs')
+          .select('id').eq('ghl_opportunity_id', opp.id).limit(1).single()
+        job_id = jobRow?.id || null
+      } catch { /* no linked job */ }
+
+      let oppWouldInsert = 0
+      let oppDedupeSkipped = 0
+
+      for (const m of messages) {
+        const body_text: string = (m.body || '').trim()
+        if (!body_text) continue
+
+        const occurred_at = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString()
+
+        // ── Idempotency check: same contact + same occurred_at minute + same body_preview already in spine? ──
+        const minuteKey = occurred_at.slice(0, 16)  // YYYY-MM-DDTHH:MM
+        const previewKey = body_text.slice(0, 100)
+        const { data: dup } = await client.from('business_events')
+          .select('id')
+          .eq('contact_id', opp.contactId)
+          .gte('occurred_at', minuteKey + ':00.000Z')
+          .lt('occurred_at', minuteKey + ':59.999Z')
+          .ilike('body_preview', `${previewKey}%`)
+          .limit(1)
+
+        if (dup && dup.length) {
+          oppDedupeSkipped++
+          summary.messages_dedupe_skipped++
+          continue
+        }
+
+        oppWouldInsert++
+        summary.messages_would_insert++
+
+        if (!dry_run) {
+          const channel = (m.type || 'SMS').toLowerCase() === 'email' ? 'email' : 'sms'
+          const direction = m.direction === 'outbound' ? 'outbound' : 'inbound'
+          // Direct insert into business_events — bypasses recordEvidence
+          // helper because we don't need body storage for short SMS bodies,
+          // and the helper requires full envelope plumbing not worth it for
+          // a one-shot backfill. Match canonical column names.
+          const { error: insErr } = await client.from('business_events').insert({
+            event_type: 'comms.message',
+            source: 'ops-api/backfill_ghl_conversations',
+            entity_type: 'ghl_message',
+            entity_id: m.id || `${opp.contactId}-${minuteKey}`,
+            job_id: job_id,
+            contact_id: opp.contactId,
+            channel: channel,
+            direction: direction,
+            occurred_at: occurred_at,
+            body_preview: body_text.slice(0, 500),
+            safe_summary: body_text.slice(0, 280),
+            match_status: job_id ? 'matched' : 'unresolved',
+            match_method: job_id ? 'contact_id' : 'none',
+            match_confidence: job_id ? 0.85 : null,
+            payload: {
+              ghl_opportunity_id: opp.id,
+              ghl_contact_name: opp.contactName,
+              pipeline: opp.pipeline,
+              ghl_message_id: m.id,
+              ghl_message_type: m.type,
+              backfill_run_at: new Date().toISOString(),
+            },
+            metadata: {
+              source: 'backfill',
+              backfill_version: 'v1',
+            },
+          })
+          if (insErr) {
+            summary.errors.push({ opp_id: opp.id, reason: `insert: ${insErr.message}` })
+          } else {
+            summary.messages_inserted++
+            // Best-effort: enqueue extraction for messages on a linked job.
+            // SMS/call channels are NOT in EXTRACTOR_ELIGIBLE_CHANNELS by
+            // default — without this, the spine row sits unread.
+            if (job_id) {
+              try {
+                await client.from('extraction_jobs').insert({
+                  source_table: 'business_events',
+                  source_id: m.id || `${opp.contactId}-${minuteKey}`,
+                  source_event_type: 'comms.message',
+                  job_id: job_id,
+                  status: 'pending',
+                  priority: 5,
+                  attempts: 0,
+                  max_attempts: 3,
+                  extractor_version: 'context-fact-extractor:v1',
+                  metadata: { source: 'backfill_ghl_conversations', channel, contact_id: opp.contactId },
+                })
+              } catch { /* best-effort enqueue */ }
+            }
+          }
+        }
+      }
+
+      summary.per_opp.push({
+        opp_id: opp.id, contactId: opp.contactId, pipeline: opp.pipeline,
+        messages: messages.length, would_insert: oppWouldInsert, dedupe_skipped: oppDedupeSkipped,
+      })
+    } catch (e: any) {
+      summary.errors.push({ opp_id: opp.id, reason: `loop: ${e?.message || String(e)}` })
+    }
+  }
+
+  return summary
 }
 
 // ════════════════════════════════════════════════════════════
