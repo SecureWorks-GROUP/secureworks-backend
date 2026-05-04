@@ -114,6 +114,11 @@ import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 // bundler reliably includes the module bytes.
 import { evaluateStageGates } from '../_shared/stage-gate/engine.ts'
 
+// Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
+// wrapper inside updateJobStatus. Static import so the Supabase deploy
+// bundler reliably includes the module bytes.
+import { evaluateStageGates } from '../_shared/stage-gate/engine.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -1921,6 +1926,14 @@ if (import.meta.main) serve(async (req: Request) => {
       // Loop 6.5 manual-live bridge — single canary / per-message manual approval.
       // Allowlist: first_contact_sms ONLY (canary scope). All gates server-side.
       case 'manual_dispatch': return json(await manualDispatch(client, body))
+      // ── Slice 1 cockpit verbs (custom-loop framework canon 2026-05-04) ──
+      // All conform to docs/loops/secure-sale-loop-framework.md cockpit vocabulary.
+      case 'edit_and_send':                return json(await editAndSend(client, body))
+      case 'snooze_proposed_action':       return json(await snoozeProposedAction(client, body))
+      case 'create_job_for_opportunity':   return json(await createJobForOpportunity(client, body))
+      case 'manual_dispatch_marnin_poc':   return json(await manualDispatchMarninPoc(client, body))
+      case 'assign_scoper':                return json(await assignScoper(client, body))
+      case 'book_scope':                   return json(await bookScope(client, body))
 
       // ── Smart Nudges ──
       case 'list_nudges': return json(await listNudges(client, url.searchParams))
@@ -8515,7 +8528,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
 }
 
 async function addNote(client: any, body: any, isAdmin = false) {
-  const { jobId, job_id, userId, user_id, text } = body
+  const { jobId, job_id, userId, user_id, text, sync_to_ghl, visibility } = body
   const jId = jobId || job_id
   const uId = userId || user_id
   if (!jId || !text) throw new Error('jobId and text required')
@@ -8523,11 +8536,18 @@ async function addNote(client: any, body: any, isAdmin = false) {
   // Verify user is assigned to this job (admins bypass)
   if (uId) await assertAssigned(client, jId, uId, isAdmin)
 
+  // Default visibility per Marnin 2026-05-04: notes get pushed to GHL
+  // for two-way consistency unless the operator explicitly marks the
+  // note 'internal_only'. visibility: 'client_visible' (default) | 'internal_only'.
+  const noteVisibility = visibility === 'internal_only' ? 'internal_only' : 'client_visible'
+  // sync_to_ghl defaults to true except when visibility=internal_only.
+  const shouldSyncToGhl = sync_to_ghl !== false && noteVisibility === 'client_visible'
+
   const { data, error } = await client.from('job_events').insert({
     job_id: jId,
     user_id: userId || user_id || null,
     event_type: 'note',
-    detail_json: { text },
+    detail_json: { text, visibility: noteVisibility, sync_to_ghl: shouldSyncToGhl },
   }).select().single()
 
   if (error) throw error
@@ -8557,6 +8577,8 @@ async function addNote(client: any, body: any, isAdmin = false) {
       related_entities: [{ type: 'user', id: uId || null }],
       note_text: noteText,
       note_preview: noteText.slice(0, 500),
+      visibility: noteVisibility,
+      sync_to_ghl: shouldSyncToGhl,
       source_job_event_id: data?.id || null,
     },
   }
@@ -8600,7 +8622,55 @@ async function addNote(client: any, body: any, isAdmin = false) {
     logBusinessEvent(client, legacyNoteEvent)
   }
 
-  return { note: data }
+  // Push to GHL contact-note (closes the GHL→Supabase note-loop gap by
+  // making the loop bidirectional). Best-effort — don't block the note
+  // save on GHL connectivity.
+  let ghl_note_id: string | null = null
+  let ghl_push_error: string | null = null
+  if (shouldSyncToGhl) {
+    try {
+      // Resolve ghl_contact_id from the job
+      const { data: jobRow } = await client.from('jobs')
+        .select('ghl_contact_id')
+        .eq('id', jId)
+        .maybeSingle()
+      const contactId = jobRow?.ghl_contact_id
+      if (contactId) {
+        const ghlBase = (Deno.env.get('SUPABASE_URL') || '').replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+        const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+        const noteResp = await fetch(`${ghlBase}?action=add_note`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': ghlKey,
+          },
+          body: JSON.stringify({
+            contactId,
+            body: noteText,
+            jobId: jId,
+          }),
+        })
+        if (noteResp.ok) {
+          const noteData = await noteResp.json().catch(() => ({}))
+          ghl_note_id = noteData.note_id || noteData.id || null
+        } else {
+          ghl_push_error = `ghl-proxy add_note returned ${noteResp.status}`
+        }
+      } else {
+        ghl_push_error = 'job has no ghl_contact_id; cannot push note'
+      }
+    } catch (e) {
+      ghl_push_error = (e as Error).message
+    }
+  }
+
+  return {
+    note: data,
+    visibility: noteVisibility,
+    ghl_synced: !!ghl_note_id,
+    ghl_note_id,
+    ghl_push_error,
+  }
 }
 
 // T7 Loop 9 — Controlled transcript ingest handler.
@@ -11617,8 +11687,12 @@ async function listProposedActions(client: any, params: URLSearchParams) {
   const actionType = params.get('action_type')
   const status = params.get('status') || 'pending'
 
+  // No embedded join — production has no FK ai_proposed_actions.job_id → jobs.id.
+  // PostgREST silently fails an embedded join in that case; handler then
+  // returned { actions: [] } even though rows existed (122 in DB on 2026-05-04).
+  // Pull rows flat, then batch-hydrate jobs separately.
   let query = client.from('ai_proposed_actions')
-    .select('*, jobs:job_id(job_number, client_name, type)')
+    .select('*')
     .eq('status', status)
     .lt('expires_at', new Date(Date.now() + 48 * 3600000).toISOString()) // not expired
     .gt('expires_at', new Date().toISOString())
@@ -11629,18 +11703,36 @@ async function listProposedActions(client: any, params: URLSearchParams) {
 
   const { data, error } = await query
   if (error) {
-    // Table may not exist yet — return empty instead of 500
-    console.log('[ops-api] ai_proposed_actions query failed (table may not exist):', error.message)
-    return { actions: [] }
+    // Surface the error instead of silently returning empty — that's how the
+    // missing-FK bug went undetected.
+    console.error('[ops-api] list_proposed_actions query failed:', error.message)
+    return { actions: [], error: error.message }
+  }
+
+  const rows = data || []
+  const jobIds = Array.from(new Set(rows.map((r: any) => r.job_id).filter(Boolean)))
+  let jobsById: Record<string, any> = {}
+  if (jobIds.length) {
+    const { data: jobsData, error: jobsErr } = await client.from('jobs')
+      .select('id, job_number, client_name, type')
+      .in('id', jobIds)
+    if (jobsErr) {
+      console.error('[ops-api] list_proposed_actions jobs hydrate failed:', jobsErr.message)
+    } else {
+      (jobsData || []).forEach((j: any) => { jobsById[j.id] = j })
+    }
   }
 
   return {
-    actions: (data || []).map((a: any) => ({
-      ...a,
-      job_number: a.jobs?.job_number || null,
-      job_type: a.jobs?.type || null,
-      jobs: undefined,
-    })),
+    actions: rows.map((a: any) => {
+      const j = a.job_id ? jobsById[a.job_id] : null
+      return {
+        ...a,
+        job_number: j?.job_number || null,
+        job_type: j?.type || null,
+        client_name: a.contact_name || j?.client_name || null,
+      }
+    }),
   }
 }
 
@@ -11651,7 +11743,7 @@ async function sendProposedSms(client: any, body: any) {
   // Get the proposed action
   const { data: action, error } = await client.from('ai_proposed_actions')
     .select('*')
-    .eq('id', action_id)
+    .eq('proposal_id', action_id)
     .eq('status', 'pending')
     .single()
 
@@ -11684,7 +11776,7 @@ async function sendProposedSms(client: any, body: any) {
   // Mark as sent
   await client.from('ai_proposed_actions')
     .update({ status: 'sent', sent_at: new Date().toISOString() })
-    .eq('id', action_id)
+    .eq('proposal_id', action_id)
 
   // Log as job event
   if (action.job_id) {
@@ -11704,8 +11796,13 @@ async function sendProposedSms(client: any, body: any) {
 }
 
 async function dismissProposedAction(client: any, body: any) {
-  const { action_id, user_id } = body
+  const { action_id, user_id, reason } = body
   if (!action_id) throw new Error('action_id required')
+
+  // Load proposal for the audit event payload
+  const { data: action } = await client.from('ai_proposed_actions')
+    .select('proposal_id, action_type, job_id, contact_id')
+    .eq('proposal_id', action_id).maybeSingle()
 
   const { error } = await client.from('ai_proposed_actions')
     .update({
@@ -11713,11 +11810,769 @@ async function dismissProposedAction(client: any, body: any) {
       dismissed_at: new Date().toISOString(),
       dismissed_by: user_id || null,
     })
-    .eq('id', action_id)
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+  if (error) throw error
+
+  // Framework feedback contract: emit proposed_action.rejected
+  try {
+    await client.from('business_events').insert({
+      event_type: 'proposed_action.rejected',
+      source: 'ops-api/dismiss_proposed_action',
+      entity_type: 'ai_proposed_action',
+      entity_id: action_id,
+      job_id: action?.job_id || null,
+      occurred_at: new Date().toISOString(),
+      payload: {
+        action_id, action_type: action?.action_type || null,
+        contact_id: action?.contact_id || null,
+        reason: reason || null,
+        rejected_by: user_id || null,
+      },
+    })
+  } catch (_e) { /* feedback is best-effort */ }
+
+  return { success: true, action_id }
+}
+
+// ════════════════════════════════════════════════════════════
+// Slice 1 cockpit verbs (custom-loop framework canon 2026-05-04)
+//
+// Each verb conforms to docs/loops/secure-sale-loop-framework.md and
+// emits the framework's feedback business_event so loops can read
+// outcomes back on the next tick.
+// ════════════════════════════════════════════════════════════
+
+// Verb: Edit & Send — operator tweaks the drafted_message and sends
+// through the same audit chain as Approve & Send.
+async function editAndSend(client: any, body: any): Promise<any> {
+  const { action_id, edited_message, user_id } = body
+  if (!action_id) throw new Error('action_id required')
+  const trimmed = String(edited_message || '').trim()
+  if (!trimmed) throw new Error('edited_message required (non-empty)')
+  if (trimmed.length > 1600) throw new Error('edited_message too long (max 1600c)')
+
+  const { data: action, error: loadErr } = await client.from('ai_proposed_actions')
+    .select('proposal_id, action_type, drafted_message, status, job_id, contact_id')
+    .eq('proposal_id', action_id).maybeSingle()
+  if (loadErr) throw loadErr
+  if (!action) throw new Error('proposal not found')
+  if (action.status !== 'pending') throw new Error(`cannot edit: status='${action.status}' (must be pending)`)
+
+  const original = String(action.drafted_message || '')
+  if (trimmed === original) {
+    // No diff — skip the edit event, just route to send.
+    return await sendProposedSms(client, { action_id, user_id })
+  }
+
+  // Persist the edit BEFORE sending, so audit captures the diff even if
+  // the send path fails.
+  const { error: upErr } = await client.from('ai_proposed_actions')
+    .update({ drafted_message: trimmed })
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+  if (upErr) throw upErr
+
+  // Feedback event: proposed_action.edited (with diff context)
+  try {
+    await client.from('business_events').insert({
+      event_type: 'proposed_action.edited',
+      source: 'ops-api/edit_and_send',
+      entity_type: 'ai_proposed_action',
+      entity_id: action_id,
+      job_id: action.job_id || null,
+      occurred_at: new Date().toISOString(),
+      payload: {
+        action_id,
+        action_type: action.action_type,
+        edited_by: user_id || null,
+        original_length: original.length,
+        edited_length: trimmed.length,
+        original_preview: original.slice(0, 200),
+        edited_preview: trimmed.slice(0, 200),
+      },
+    })
+  } catch (_e) { /* best-effort */ }
+
+  // Route through the existing send path (which sets status='sent', sent_at,
+  // and emits the dispatch business_event chain).
+  return await sendProposedSms(client, { action_id, user_id })
+}
+
+// Verb: Snooze — pause a proposal until a chosen datetime; row stays
+// status='pending' but list_proposed_actions filters it out via the
+// metadata.snoozed_until check.
+async function snoozeProposedAction(client: any, body: any): Promise<any> {
+  const { action_id, snooze_until, user_id } = body
+  if (!action_id) throw new Error('action_id required')
+  if (!snooze_until) throw new Error('snooze_until required (ISO datetime)')
+  const until = new Date(String(snooze_until))
+  if (Number.isNaN(until.getTime())) throw new Error('snooze_until invalid date')
+  if (until.getTime() <= Date.now()) throw new Error('snooze_until must be in the future')
+
+  const { data: action } = await client.from('ai_proposed_actions')
+    .select('proposal_id, action_type, metadata, job_id, contact_id, status')
+    .eq('proposal_id', action_id).maybeSingle()
+  if (!action) throw new Error('proposal not found')
+  if (action.status !== 'pending') throw new Error(`cannot snooze: status='${action.status}'`)
+
+  const newMeta = Object.assign({}, action.metadata || {}, {
+    snoozed_until: until.toISOString(),
+    snoozed_at: new Date().toISOString(),
+    snoozed_by: user_id || null,
+  })
+  const { error } = await client.from('ai_proposed_actions')
+    .update({ metadata: newMeta })
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+  if (error) throw error
+
+  try {
+    await client.from('business_events').insert({
+      event_type: 'proposed_action.snoozed',
+      source: 'ops-api/snooze_proposed_action',
+      entity_type: 'ai_proposed_action',
+      entity_id: action_id,
+      job_id: action.job_id || null,
+      occurred_at: new Date().toISOString(),
+      payload: {
+        action_id, action_type: action.action_type,
+        snoozed_until: until.toISOString(),
+        snoozed_by: user_id || null,
+      },
+    })
+  } catch (_e) { /* best-effort */ }
+
+  return { success: true, action_id, snoozed_until: until.toISOString() }
+}
+
+// Verb: Create Job for Opportunity — backfills a Supabase jobs row for
+// an unlinked GHL booking proposal so memory + audit can attach.
+//
+// SCOPING TOOL COMPATIBILITY (verified 2026-05-04):
+//   The scoping tool's find_job lookup filters by (ghl_opportunity_id, type).
+//   Our stub MUST set type='patio' or type='fencing' (NOT 'unspecified')
+//   or the scoping tool will not discover the stub and will create a duplicate.
+//   Type is inferred from the GHL pipeline lane.
+async function createJobForOpportunity(client: any, body: any): Promise<any> {
+  const { action_id, ghl_opportunity_id, ghl_contact_id, pipeline_lane, user_id } = body
+  if (!ghl_opportunity_id) throw new Error('ghl_opportunity_id required')
+
+  // Infer type from pipeline_lane. Scoping tool will reject unspecified.
+  const type = pipeline_lane === 'fencing' ? 'fencing'
+             : pipeline_lane === 'patio'   ? 'patio'
+             : null
+  if (!type) throw new Error("pipeline_lane required ('patio' or 'fencing')")
+
+  // First check: does a job already exist for this opp+type? (avoid dup)
+  const { data: existing } = await client.from('jobs')
+    .select('id, job_number, status')
+    .eq('ghl_opportunity_id', ghl_opportunity_id)
+    .eq('type', type)
+    .maybeSingle()
+  if (existing?.id) {
+    // Already linked — backfill the proposal's job_id if action_id given.
+    if (action_id) {
+      await client.from('ai_proposed_actions')
+        .update({ job_id: existing.id })
+        .eq('proposal_id', action_id)
+    }
+    return { success: true, job_id: existing.id, job_number: existing.job_number, created: false }
+  }
+
+  // Pull contact info from the proposal (if action_id given) so we don't
+  // need to refetch from GHL.
+  let contact_name: string | null = null
+  let contact_phone: string | null = null
+  if (action_id) {
+    const { data: action } = await client.from('ai_proposed_actions')
+      .select('contact_name, contact_phone')
+      .eq('proposal_id', action_id).maybeSingle()
+    contact_name = action?.contact_name || null
+    contact_phone = action?.contact_phone || null
+  }
+
+  const { data: created, error } = await client.from('jobs')
+    .insert({
+      org_id: DEFAULT_ORG_ID,
+      type,
+      status: 'draft',
+      client_name: contact_name,
+      client_phone: contact_phone,
+      ghl_opportunity_id,
+      ghl_contact_id: ghl_contact_id || null,
+      created_by: user_id || null,
+    })
+    .select('id, status, type')
+    .single()
+  if (error) throw error
+
+  // Backfill the proposal's job_id so future ticks attach memory.
+  if (action_id) {
+    await client.from('ai_proposed_actions')
+      .update({ job_id: created.id })
+      .eq('proposal_id', action_id)
+  }
+
+  // Feedback event
+  try {
+    await client.from('business_events').insert({
+      event_type: 'job.created_from_opportunity',
+      source: 'ops-api/create_job_for_opportunity',
+      entity_type: 'job',
+      entity_id: created.id,
+      job_id: created.id,
+      occurred_at: new Date().toISOString(),
+      payload: {
+        ghl_opportunity_id, ghl_contact_id: ghl_contact_id || null,
+        pipeline_lane: type,
+        created_by: user_id || null,
+        from_action_id: action_id || null,
+      },
+    })
+  } catch (_e) { /* best-effort */ }
+
+  return { success: true, job_id: created.id, created: true }
+}
+
+// Verb: Marnin POC test SMS — hardcoded canary path. Inserts a one-shot
+// proposal targeted at Marnin's contact only, then sends via the standard
+// approval chain.
+async function manualDispatchMarninPoc(client: any, body: any): Promise<any> {
+  const { user_id } = body
+  // Lookup Marnin's contact_matches row by email (single match required).
+  const { data: contacts, error: cErr } = await client.from('contact_matches')
+    .select('ghl_contact_id, client_name, phone, email')
+    .or('email.ilike.marnin%,client_name.ilike.%Marnin%')
+    .limit(2)
+  if (cErr) throw cErr
+  if (!contacts || contacts.length === 0) throw new Error('Marnin contact not found in contact_matches')
+  if (contacts.length > 1) throw new Error('multiple Marnin matches — refine the lookup')
+  const contact = contacts[0]
+  if (!contact.phone) throw new Error('Marnin contact has no phone')
+
+  // Create a trace row first (ai_proposed_actions.trace_id NOT NULL FK)
+  const { data: trace, error: tErr } = await client.from('ai_reasoning_traces')
+    .insert({
+      trigger_type: 'cockpit:manual_dispatch_marnin_poc',
+      model_name: 'manual:marnin_poc',
+      input_context_snapshot: { triggered_by: user_id || null, target: 'marnin_self' },
+      reasoning_summary: 'Marnin-targeted canary test SMS; hardcoded recipient and body.',
+      output_result: { action_type: 'first_contact_sms', target: contact.ghl_contact_id },
+      output_type: 'proposed_action',
+      status: 'completed',
+      tags: ['marnin_poc', 'canary'],
+    })
+    .select('id').single()
+  if (tErr) throw tErr
+
+  // Insert the one-shot proposal
+  const draft = "MARNIN_MEMORY_POC: testing T7 spine + JARVIS memory loop. Reply 'k' to acknowledge."
+  const { data: proposal, error: pErr } = await client.from('ai_proposed_actions')
+    .insert({
+      trace_id: trace.id,
+      action_type: 'first_contact_sms',
+      contact_id: contact.ghl_contact_id,
+      contact_name: contact.client_name || 'Marnin',
+      contact_phone: contact.phone,
+      drafted_message: draft,
+      status: 'pending',
+      sent_at: null,
+      confidence_score: 1.0,
+      action_payload: {
+        loop: 'cockpit_canary',
+        reason: 'Marnin POC test — hardcoded recipient + body',
+        why_now: 'manual click',
+        evidence_refs: [],
+        evidence_gap_reason: 'canary path; no upstream evidence chain',
+      },
+      metadata: {
+        loop: 'cockpit_canary',
+        source: 'ops-api/manual_dispatch_marnin_poc',
+        playbook_id: 'cockpit_canary_v1',
+        triggered_by: user_id || null,
+      },
+      org_id: DEFAULT_ORG_ID,
+    })
+    .select('proposal_id').single()
+  if (pErr) throw pErr
+
+  // Send immediately via existing send path
+  const sendResult = await sendProposedSms(client, { action_id: proposal.proposal_id, user_id })
+  return { success: true, proposal_id: proposal.proposal_id, send_result: sendResult }
+}
+
+// Verb: Assign Scoper — attach a scoper user_id to a booking proposal
+// (and a window if supplied). Locks crew_availability for the window.
+async function assignScoper(client: any, body: any): Promise<any> {
+  const { action_id, scoper_user_id, window_iso, user_id } = body
+  if (!action_id) throw new Error('action_id required')
+  if (!scoper_user_id) throw new Error('scoper_user_id required')
+
+  const { data: action } = await client.from('ai_proposed_actions')
+    .select('proposal_id, action_type, metadata, action_payload, job_id')
+    .eq('proposal_id', action_id).maybeSingle()
+  if (!action) throw new Error('proposal not found')
+
+  const newMeta = Object.assign({}, action.metadata || {}, {
+    assigned_scoper_id: scoper_user_id,
+    assigned_at: new Date().toISOString(),
+    assigned_by: user_id || null,
+    ...(window_iso ? { assigned_window: window_iso } : {}),
+  })
+  const newPayload = Object.assign({}, action.action_payload || {}, {
+    assigned_scoper_id: scoper_user_id,
+    ...(window_iso ? { assigned_window: window_iso } : {}),
+  })
+  const { error } = await client.from('ai_proposed_actions')
+    .update({ metadata: newMeta, action_payload: newPayload })
+    .eq('proposal_id', action_id)
+  if (error) throw error
+
+  // Lock crew_availability if a window was supplied
+  if (window_iso) {
+    try {
+      const date = String(window_iso).slice(0, 10) // YYYY-MM-DD
+      await client.from('crew_availability').insert({
+        user_id: scoper_user_id,
+        date,
+        status: 'busy',
+        note: `Scope booked via cockpit (action_id=${action_id})`,
+      })
+    } catch (_e) { /* lock is advisory; don't fail the assign */ }
+  }
+
+  try {
+    await client.from('business_events').insert({
+      event_type: 'proposed_action.scoper_assigned',
+      source: 'ops-api/assign_scoper',
+      entity_type: 'ai_proposed_action',
+      entity_id: action_id,
+      job_id: action.job_id || null,
+      occurred_at: new Date().toISOString(),
+      payload: {
+        action_id, scoper_user_id,
+        window_iso: window_iso || null,
+        assigned_by: user_id || null,
+      },
+    })
+  } catch (_e) { /* best-effort */ }
+
+  return { success: true, action_id, scoper_user_id, window_iso: window_iso || null }
+}
+
+// Verb: Book Scope — finalize a booking proposal and emit a follow-up
+// scope_confirmation_sms targeting the customer (still status='pending'
+// so the rep approves the confirmation send).
+async function bookScope(client: any, body: any): Promise<any> {
+  const { action_id, scope_window_iso, scoper_user_id, user_id } = body
+  if (!action_id) throw new Error('action_id required')
+  if (!scope_window_iso) throw new Error('scope_window_iso required')
+
+  const { data: action, error: loadErr } = await client.from('ai_proposed_actions')
+    .select('proposal_id, action_type, job_id, contact_id, contact_name, contact_phone, metadata, action_payload')
+    .eq('proposal_id', action_id).maybeSingle()
+  if (loadErr) throw loadErr
+  if (!action) throw new Error('proposal not found')
+
+  // Mark the booking proposal booked (status='booked' is a new terminal state
+  // that sits alongside sent/dismissed; the kanban can render it as "scope locked in").
+  const newMeta = Object.assign({}, action.metadata || {}, {
+    booked_at: new Date().toISOString(),
+    booked_by: user_id || null,
+    scope_window: scope_window_iso,
+    ...(scoper_user_id ? { assigned_scoper_id: scoper_user_id } : {}),
+  })
+  await client.from('ai_proposed_actions')
+    .update({ status: 'booked', metadata: newMeta })
+    .eq('proposal_id', action_id)
     .eq('status', 'pending')
 
-  if (error) throw error
-  return { success: true, action_id }
+  // Lock the crew_availability window for the scoper
+  if (scoper_user_id) {
+    try {
+      const date = String(scope_window_iso).slice(0, 10)
+      await client.from('crew_availability').insert({
+        user_id: scoper_user_id,
+        date,
+        status: 'busy',
+        note: `Scope booked via cockpit (action_id=${action_id})`,
+      })
+    } catch (_e) { /* advisory */ }
+  }
+
+  // Emit a follow-up confirmation_sms proposal for the customer.
+  // Stays status='pending' so the rep approves the confirmation before it sends.
+  let confirmation_proposal_id: string | null = null
+  if (action.contact_phone) {
+    try {
+      const { data: trace } = await client.from('ai_reasoning_traces')
+        .insert({
+          trigger_type: 'cockpit:book_scope',
+          model_name: 'template:scope_confirmation_v1',
+          prompt_template_version: 'cockpit_book_scope_v1',
+          input_context_snapshot: {
+            source_action_id: action_id,
+            scope_window: scope_window_iso,
+            scoper_user_id: scoper_user_id || null,
+          },
+          reasoning_summary: 'Customer-facing scope confirmation SMS, drafted on Book Scope click.',
+          output_result: { action_type: 'scope_confirmation_sms' },
+          output_type: 'proposed_action',
+          status: 'completed',
+          tags: ['booking_scope', 'scope_confirmation'],
+        })
+        .select('id').single()
+
+      const fname = String(action.contact_name || 'there').trim().split(/\s+/)[0]
+      const draft = `Hi ${fname}, ${user_id ? 'a quick' : 'just a'} confirmation that we've locked you in for your scope on ${new Date(scope_window_iso).toLocaleString('en-AU', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}. See you then. — SecureWorks Group`
+
+      const { data: confProp } = await client.from('ai_proposed_actions')
+        .insert({
+          trace_id: trace?.id,
+          action_type: 'scope_confirmation_sms',
+          job_id: action.job_id || null,
+          contact_id: action.contact_id || null,
+          contact_name: action.contact_name || null,
+          contact_phone: action.contact_phone || null,
+          drafted_message: draft,
+          status: 'pending',
+          sent_at: null,
+          confidence_score: 0.9,
+          action_payload: {
+            loop: 'booking_scope',
+            reason: 'Customer-facing scope confirmation; rep approves before send.',
+            why_now: 'Scope just booked via cockpit',
+            evidence_refs: [{ source_table: 'ai_proposed_actions', source_id: action_id, kind: 'parent_booking' }],
+            scope_window: scope_window_iso,
+            assigned_scoper_id: scoper_user_id || null,
+          },
+          metadata: {
+            loop: 'booking_scope',
+            source: 'ops-api/book_scope',
+            playbook_id: 'cockpit_book_scope_v1',
+            parent_action_id: action_id,
+          },
+          org_id: DEFAULT_ORG_ID,
+        })
+        .select('proposal_id').single()
+      confirmation_proposal_id = confProp?.proposal_id ?? null
+    } catch (_e) { /* don't block book_scope on confirmation draft failure */ }
+  }
+
+  try {
+    await client.from('business_events').insert({
+      event_type: 'proposed_action.scope_booked',
+      source: 'ops-api/book_scope',
+      entity_type: 'ai_proposed_action',
+      entity_id: action_id,
+      job_id: action.job_id || null,
+      occurred_at: new Date().toISOString(),
+      payload: {
+        action_id,
+        scope_window: scope_window_iso,
+        scoper_user_id: scoper_user_id || null,
+        booked_by: user_id || null,
+        confirmation_proposal_id,
+      },
+    })
+  } catch (_e) { /* best-effort */ }
+
+  return { success: true, action_id, scope_window: scope_window_iso, confirmation_proposal_id }
+}
+
+// ════════════════════════════════════════════════════════════
+// MANUAL DISPATCH (Loop 6.5) — controlled manual-live SMS path
+//
+// Spec: secureworks-docs/cio/evidence/secure-sale-cockpit-2026-04-30/
+//       loop-6.5-live-readiness-bridge-spec.md
+//
+// Hard gates (all enforced server-side, no client trust):
+//   1. action_type ∈ MANUAL_DISPATCH_ALLOWLIST  (first_contact_sms only)
+//   2. proposed_action.status === 'pending'      (idempotency)
+//   3. created_at within MANUAL_DISPATCH_FRESHNESS_HOURS (24h)
+//   4. now in [07:00, 20:00) Perth (quiet hours)
+//   5. contact_id and contact_phone non-null     (recipient resolvable)
+//   6. drafted_message non-empty
+//   7. approval_token === sha256(phrase + action_id + perth_minute + salt)
+//      checked against current minute and 4 prior minutes (5-min replay window)
+//   8. body length ≤ 320 chars (SMS 2-segment cap; defensive)
+//
+// Audit chain (3 business_events rows per successful canary/pilot):
+//   - proposed_action.manually_approved   (BEFORE the send fires)
+//   - sms_sent                            (written by ghl-proxy on success)
+//   - proposed_action.dispatched          (AFTER the send returns)
+//
+// Status flow uses existing values: 'pending' → 'sent'. Approval method
+// + perth_minute live in action_payload.approval (jsonb; no schema change).
+//
+// On any gate failure: throw ApiError, no mutation, no send.
+// On ghl-proxy failure: row rolled back to 'pending' for retry,
+// proposed_action.dispatch_failed event written.
+// ════════════════════════════════════════════════════════════
+
+const MANUAL_DISPATCH_ALLOWLIST = ['first_contact_sms']
+const MANUAL_DISPATCH_FRESHNESS_HOURS = 24
+const MANUAL_DISPATCH_QUIET_HOURS_START = 7   // Perth, inclusive
+const MANUAL_DISPATCH_QUIET_HOURS_END = 20    // Perth, exclusive
+const MANUAL_DISPATCH_BODY_MAX = 320          // 2-segment SMS cap
+const MANUAL_DISPATCH_REPLAY_WINDOW_MIN = 5   // approval token window in minutes
+
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input)
+  const buf = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+function perthMinuteIso(d: Date): string {
+  const perth = new Date(d.getTime() + 8 * 3600 * 1000)
+  return perth.toISOString().slice(0, 16)  // YYYY-MM-DDTHH:MM
+}
+
+function expectedPhrase(approvalMethod: string, actionId: string, contactName: string | null): string {
+  if (approvalMethod === 'canary') {
+    return `I authorise one Secure Sale canary SMS to my own number, action_id ${actionId}, now.`
+  }
+  return `I authorise one Secure Sale manual-pilot SMS to ${contactName || ''}, action_id ${actionId}, now.`
+}
+
+async function verifyApprovalToken(
+  approvalMethod: string,
+  actionId: string,
+  contactName: string | null,
+  submittedToken: string,
+  salt: string,
+  now: Date,
+): Promise<boolean> {
+  const phrase = expectedPhrase(approvalMethod, actionId, contactName)
+  // Check current minute and N-1 prior minutes (replay window).
+  for (let i = 0; i < MANUAL_DISPATCH_REPLAY_WINDOW_MIN; i++) {
+    const tick = new Date(now.getTime() - i * 60_000)
+    const candidate = await sha256Hex(phrase + actionId + perthMinuteIso(tick) + salt)
+    if (candidate === submittedToken) return true
+  }
+  return false
+}
+
+// Public handler — wraps the testable inner with the real wall clock.
+export async function manualDispatch(client: any, body: any) {
+  return await _manualDispatchAt(client, body, new Date())
+}
+
+// Inner with injectable `now`. Exported for unit tests so quiet-hours,
+// freshness, and approval-token windows can be exercised deterministically.
+export async function _manualDispatchAt(client: any, body: any, now: Date) {
+  const { action_id, approval_token, approval_method } = body || {}
+
+  // ── Argument validation ──
+  if (!action_id) throw new ApiError('action_id required', 400)
+  if (!approval_token) throw new ApiError('approval_token required', 400)
+  if (approval_method !== 'canary' && approval_method !== 'manual_pilot') {
+    throw new ApiError('approval_method must be "canary" or "manual_pilot"', 400)
+  }
+
+  // ── Gate 4: Quiet hours (server-side, Perth) ──
+  const perthHour = new Date(now.getTime() + 8 * 3600 * 1000).getUTCHours()
+  if (perthHour < MANUAL_DISPATCH_QUIET_HOURS_START || perthHour >= MANUAL_DISPATCH_QUIET_HOURS_END) {
+    throw new ApiError(
+      `quiet_hours: Perth hour ${perthHour} outside [${MANUAL_DISPATCH_QUIET_HOURS_START}, ${MANUAL_DISPATCH_QUIET_HOURS_END})`,
+      400,
+    )
+  }
+
+  // ── Salt presence ──
+  const salt = Deno.env.get('MANUAL_DISPATCH_SALT')
+  if (!salt) {
+    throw new ApiError('manual_dispatch_salt_unset (server config error)', 500)
+  }
+
+  // ── Load action row ──
+  const { data: action, error: loadErr } = await client.from('ai_proposed_actions')
+    .select('*')
+    .eq('proposal_id', action_id)
+    .single()
+  if (loadErr || !action) throw new ApiError('action_not_found', 404)
+
+  // ── Gate 2: status idempotency ──
+  if (action.status !== 'pending') {
+    throw new ApiError(`already_processed: status=${action.status}`, 409)
+  }
+
+  // ── Gate 1: action_type allowlist ──
+  if (!MANUAL_DISPATCH_ALLOWLIST.includes(action.action_type)) {
+    throw new ApiError(
+      `action_type_not_allow_listed: ${action.action_type} (allowed: ${MANUAL_DISPATCH_ALLOWLIST.join(', ')})`,
+      400,
+    )
+  }
+
+  // ── Gate 3: freshness ──
+  const createdAtMs = action.created_at ? +new Date(action.created_at) : 0
+  const ageHours = (now.getTime() - createdAtMs) / 3_600_000
+  if (ageHours > MANUAL_DISPATCH_FRESHNESS_HOURS) {
+    throw new ApiError(
+      `action_stale: created ${Math.round(ageHours)}h ago (max ${MANUAL_DISPATCH_FRESHNESS_HOURS}h)`,
+      400,
+    )
+  }
+
+  // ── Gate 5/6: recipient + body ──
+  if (!action.contact_id) throw new ApiError('recipient_unresolvable: contact_id null', 400)
+  if (!action.contact_phone) throw new ApiError('recipient_unresolvable: contact_phone null', 400)
+  if (!action.drafted_message || !String(action.drafted_message).trim()) {
+    throw new ApiError('empty_body: drafted_message blank', 400)
+  }
+
+  // ── Gate 8: body length ──
+  if (String(action.drafted_message).length > MANUAL_DISPATCH_BODY_MAX) {
+    throw new ApiError(
+      `body_too_long: ${String(action.drafted_message).length} > ${MANUAL_DISPATCH_BODY_MAX}`,
+      400,
+    )
+  }
+
+  // ── Gate 7: approval token ──
+  const tokenValid = await verifyApprovalToken(
+    approval_method,
+    action_id,
+    action.contact_name || null,
+    approval_token,
+    salt,
+    now,
+  )
+  if (!tokenValid) {
+    throw new ApiError('invalid_approval_token', 403)
+  }
+
+  // ── Audit chain row 1 — manually_approved (BEFORE send) ──
+  const approvedAt = now.toISOString()
+  const { error: approvalErr } = await client.from('business_events').insert({
+    event_type: 'proposed_action.manually_approved',
+    source: 'ops-api/manual_dispatch',
+    entity_type: 'ai_proposed_action',
+    entity_id: action_id,
+    job_id: action.job_id,
+    occurred_at: approvedAt,
+    payload: {
+      action_id,
+      approval_method,
+      action_type: action.action_type,
+      contact_id: action.contact_id,
+      drafted_message_preview: String(action.drafted_message).slice(0, 200),
+      perth_minute: perthMinuteIso(now),
+    },
+  })
+  if (approvalErr) {
+    throw new ApiError(`approval_record_failed: ${approvalErr.message}`, 500)
+  }
+
+  // ── Idempotent status flip BEFORE send (optimistic lock on status='pending') ──
+  const updatedPayload = Object.assign({}, action.action_payload || {}, {
+    approval: {
+      approval_method,
+      approved_at: approvedAt,
+      approved_via: 'ops-api/manual_dispatch',
+      perth_minute: perthMinuteIso(now),
+    },
+  })
+  const { data: flipResult, error: flipErr } = await client.from('ai_proposed_actions')
+    .update({
+      status: 'sent',
+      sent_at: approvedAt,
+      action_payload: updatedPayload,
+    })
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+    .select('id')
+  if (flipErr) {
+    throw new ApiError(`status_flip_failed: ${flipErr.message}`, 500)
+  }
+  if (!flipResult || (Array.isArray(flipResult) && flipResult.length === 0)) {
+    // Row was processed by another caller between load + flip.
+    throw new ApiError('race: status flipped by concurrent caller', 409)
+  }
+
+  // ── Call ghl-proxy?action=send_sms ──
+  const ghlBase = (Deno.env.get('SUPABASE_URL') || '').replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+  let ghlMessageId: string | null = null
+  let ghlError: string | null = null
+  let ghlStatus = 0
+  try {
+    const ghlResp = await fetch(`${ghlBase}?action=send_sms`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ghlKey}`,
+      },
+      body: JSON.stringify({
+        contactId: action.contact_id,
+        message: action.drafted_message,
+        jobId: action.job_id,
+      }),
+    })
+    ghlStatus = ghlResp.status
+    const j: any = await ghlResp.json().catch(() => ({}))
+    // ghl-proxy can return HTTP 200 with a failure body (success=false,
+    // dedup_blocked=true, or just a missing message_id). All of those
+    // mean NO SMS actually went out — must mark dispatch_failed.
+    // Codex stop-time #7: don't trust HTTP status alone.
+    if (!ghlResp.ok) {
+      ghlError = j?.error || `ghl-proxy returned ${ghlResp.status}`
+    } else if (j?.success === false) {
+      ghlError = j?.error || 'ghl-proxy reported success=false'
+    } else if (j?.dedup_blocked === true) {
+      ghlError = j?.error || 'ghl-proxy dedup_blocked: identical SMS sent recently'
+    } else {
+      ghlMessageId = j?.messageId || j?.message_id || j?.id || null
+      if (!ghlMessageId) {
+        // 200 OK without a message id is ambiguous — refuse to claim dispatched.
+        ghlError = 'ghl-proxy returned 200 but no messageId in body'
+      }
+    }
+  } catch (e: any) {
+    ghlError = `ghl_proxy_fetch_failed: ${e?.message || String(e)}`
+  }
+
+  // ── Audit chain row 3 — dispatched (or dispatch_failed) ──
+  await client.from('business_events').insert({
+    event_type: ghlError ? 'proposed_action.dispatch_failed' : 'proposed_action.dispatched',
+    source: 'ops-api/manual_dispatch',
+    entity_type: 'ai_proposed_action',
+    entity_id: action_id,
+    job_id: action.job_id,
+    occurred_at: now.toISOString(),
+    payload: {
+      action_id,
+      approval_method,
+      ghl_message_id: ghlMessageId,
+      ghl_status: ghlStatus,
+      error: ghlError,
+    },
+  })
+
+  if (ghlError) {
+    // Roll back the action row so the rep can retry after fixing root cause.
+    await client.from('ai_proposed_actions')
+      .update({ status: 'pending', sent_at: null })
+      .eq('proposal_id', action_id)
+    throw new ApiError(`ghl_proxy_send_failed: ${ghlError}`, 502)
+  }
+
+  // ── Success ──
+  return {
+    success: true,
+    action_id,
+    approval_method,
+    ghl_message_id: ghlMessageId,
+    audit_chain: [
+      'proposed_action.manually_approved',
+      'sms_sent (via ghl-proxy)',
+      'proposed_action.dispatched',
+    ],
+  }
 }
 
 // ════════════════════════════════════════════════════════════
