@@ -11687,8 +11687,12 @@ async function listProposedActions(client: any, params: URLSearchParams) {
   const actionType = params.get('action_type')
   const status = params.get('status') || 'pending'
 
+  // No embedded join — production has no FK ai_proposed_actions.job_id → jobs.id.
+  // PostgREST silently fails an embedded join in that case; handler then
+  // returned { actions: [] } even though rows existed (122 in DB on 2026-05-04).
+  // Pull rows flat, then batch-hydrate jobs separately.
   let query = client.from('ai_proposed_actions')
-    .select('*, jobs:job_id(job_number, client_name, type)')
+    .select('*')
     .eq('status', status)
     .lt('expires_at', new Date(Date.now() + 48 * 3600000).toISOString()) // not expired
     .gt('expires_at', new Date().toISOString())
@@ -11699,18 +11703,36 @@ async function listProposedActions(client: any, params: URLSearchParams) {
 
   const { data, error } = await query
   if (error) {
-    // Table may not exist yet — return empty instead of 500
-    console.log('[ops-api] ai_proposed_actions query failed (table may not exist):', error.message)
-    return { actions: [] }
+    // Surface the error instead of silently returning empty — that's how the
+    // missing-FK bug went undetected.
+    console.error('[ops-api] list_proposed_actions query failed:', error.message)
+    return { actions: [], error: error.message }
+  }
+
+  const rows = data || []
+  const jobIds = Array.from(new Set(rows.map((r: any) => r.job_id).filter(Boolean)))
+  let jobsById: Record<string, any> = {}
+  if (jobIds.length) {
+    const { data: jobsData, error: jobsErr } = await client.from('jobs')
+      .select('id, job_number, client_name, type')
+      .in('id', jobIds)
+    if (jobsErr) {
+      console.error('[ops-api] list_proposed_actions jobs hydrate failed:', jobsErr.message)
+    } else {
+      (jobsData || []).forEach((j: any) => { jobsById[j.id] = j })
+    }
   }
 
   return {
-    actions: (data || []).map((a: any) => ({
-      ...a,
-      job_number: a.jobs?.job_number || null,
-      job_type: a.jobs?.type || null,
-      jobs: undefined,
-    })),
+    actions: rows.map((a: any) => {
+      const j = a.job_id ? jobsById[a.job_id] : null
+      return {
+        ...a,
+        job_number: j?.job_number || null,
+        job_type: j?.type || null,
+        client_name: a.contact_name || j?.client_name || null,
+      }
+    }),
   }
 }
 
