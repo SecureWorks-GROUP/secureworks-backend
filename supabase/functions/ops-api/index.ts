@@ -12791,7 +12791,8 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
   const dry_run = body?.dry_run !== false
   const pipeline = (body?.pipeline || 'both').toLowerCase()
   const max_opportunities = Math.min(Number(body?.max_opportunities) || 100, 200)
-  const window_days = Math.min(Number(body?.opportunity_window_days) || 90, 180)
+  // Default 30 days for calls (Marnin: "for the past 30 days for a hard stop").
+  const window_days = Math.min(Number(body?.opportunity_window_days) || 30, 180)
   // Hard cap on transcribe-call POSTs PER INVOCATION. Even with fire-and-forget
   // we don't want one click to spawn hundreds of concurrent Whisper jobs and
   // melt the OpenAI quota. Marnin re-runs to drain remaining calls (dedupe
@@ -12878,8 +12879,12 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
     }
   }
 
-  // Fetch conversations in batches of 5.
-  const FETCH_BATCH = 5
+  // Fetch conversations in batches of 3 with a small inter-batch pause.
+  // The previous run hit Supabase per-function rate limits at batch=5 — got
+  // "Rate limit exceeded for function. Retry after 45s" on 42 of 100 opps.
+  // 3 concurrent + 250ms pause keeps us under the limit.
+  const FETCH_BATCH = 3
+  const FETCH_PAUSE_MS = 250
   const oppBatches: Array<typeof recentOpps> = []
   for (let i = 0; i < recentOpps.length; i += FETCH_BATCH) {
     oppBatches.push(recentOpps.slice(i, i + FETCH_BATCH))
@@ -12899,7 +12904,8 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
   const candidates: CallCandidate[] = []
   const perOppCounts: Record<string, { calls: number; with_recording: number; would_queue: number; dedupe_skipped: number }> = {}
 
-  for (const batch of oppBatches) {
+  for (let bi = 0; bi < oppBatches.length; bi++) {
+    const batch = oppBatches[bi]
     const fetched = await Promise.all(batch.map(async (opp) => {
       try {
         const r = await fetch(`${ghlBase}?action=get_conversation&contactId=${opp.contactId}`, {
@@ -12923,6 +12929,8 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
         continue
       }
 
+      // Step 1: collect all CALL message IDs in this conversation.
+      const callMsgs: Array<{ id: string; direction: string; duration: number | null; timestamp: string | null }> = []
       for (const m of (item.messages as any[])) {
         const t = (m.type || '').toUpperCase()
         const isCall = t.includes('CALL') || t.includes('VOICEMAIL')
@@ -12930,18 +12938,10 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
         counts.calls++
         summary.calls_found++
 
-        const recording_url: string | null = m.recording_url || null
-        if (!recording_url) {
-          summary.calls_without_recording++
-          continue
-        }
-        counts.with_recording++
-        summary.calls_with_recording++
-
         const ghl_message_id: string = m.id || ''
         if (!ghl_message_id) continue
 
-        // Idempotency: do we already have a transcript spine row for this GHL call?
+        // Idempotency: skip if already transcribed.
         try {
           const { data: existing } = await client.from('business_events')
             .select('id')
@@ -12953,22 +12953,59 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
             summary.calls_dedupe_skipped++
             continue
           }
-        } catch { /* lookup failure shouldn't block — assume not duplicate */ }
+        } catch { /* lookup failure shouldn't block */ }
 
-        counts.would_queue++
-        summary.calls_would_queue++
-
-        candidates.push({
-          opp,
-          job_id: oppJobMap[opp.id],
-          ghl_message_id,
-          recording_url,
-          direction: m.direction === 'outbound' ? 'outbound' : 'inbound',
-          occurred_at: m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString(),
-          duration_seconds: typeof m.duration === 'number' ? m.duration : null,
-          phone: null,
+        callMsgs.push({
+          id: ghl_message_id,
+          direction: m.direction || 'inbound',
+          duration: typeof m.duration === 'number' ? m.duration : null,
+          timestamp: m.timestamp || null,
         })
       }
+
+      // Step 2: enrich each CALL message via GHL message-detail endpoint
+      // to get recording_url. The conversation-list API doesn't include
+      // it. Sequential per opp to keep ghl-proxy under rate limits — we
+      // already have inter-batch pacing at the outer loop.
+      for (const cm of callMsgs) {
+        try {
+          const r = await fetch(`${ghlBase}?action=get_call_recording&messageId=${cm.id}`, {
+            headers: { 'Authorization': `Bearer ${ghlKey}` },
+          })
+          if (!r.ok) {
+            summary.calls_without_recording++
+            continue
+          }
+          const j: any = await r.json()
+          const rec: string | null = j?.recording_url || null
+          if (!rec) {
+            summary.calls_without_recording++
+            continue
+          }
+          counts.with_recording++
+          summary.calls_with_recording++
+          counts.would_queue++
+          summary.calls_would_queue++
+          candidates.push({
+            opp,
+            job_id: oppJobMap[opp.id],
+            ghl_message_id: cm.id,
+            recording_url: rec,
+            direction: (j?.direction === 'outbound' || cm.direction === 'outbound') ? 'outbound' : 'inbound',
+            occurred_at: cm.timestamp ? new Date(cm.timestamp).toISOString()
+                       : (j?.occurred_at ? new Date(j.occurred_at).toISOString() : new Date().toISOString()),
+            duration_seconds: cm.duration ?? (typeof j?.duration === 'number' ? j.duration : null),
+            phone: null,
+          })
+        } catch (e: any) {
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: ${e?.message || String(e)}` })
+        }
+      }
+    }
+
+    // Inter-batch pause to stay under Supabase per-function rate limit.
+    if (bi + 1 < oppBatches.length) {
+      await new Promise(r => setTimeout(r, FETCH_PAUSE_MS))
     }
   }
 

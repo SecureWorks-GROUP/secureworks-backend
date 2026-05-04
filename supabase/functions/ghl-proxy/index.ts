@@ -2671,6 +2671,42 @@ serve(async (req: Request) => {
       }
     }
 
+    // ── Get full call message detail (incl. recording URL) ──
+    // The conversation messages LIST endpoint returns slim records
+    // without recording URLs. Per-message detail returns full payload.
+    // GHL API v2 path: GET /conversations/messages/{messageId}
+    if (action === 'get_call_recording') {
+      const messageId = url.searchParams.get('messageId')
+      if (!messageId) return json({ error: 'messageId required' }, 400)
+      try {
+        const data = await ghl(`/conversations/messages/${messageId}`)
+        // Recording URL field varies — check all known shapes.
+        const recording_url =
+          data?.recordingUrl ||
+          data?.recording_url ||
+          data?.attachments?.[0]?.url ||
+          data?.callRecording?.url ||
+          data?.call?.recordingUrl ||
+          data?.message?.recordingUrl ||
+          data?.message?.attachments?.[0]?.url ||
+          null
+        const direction = data?.direction || data?.message?.direction || null
+        const duration = data?.duration || data?.callDuration || data?.message?.duration || null
+        const occurred_at = data?.dateAdded || data?.createdAt || data?.message?.dateAdded || null
+        return json({
+          messageId,
+          recording_url,
+          direction,
+          duration,
+          occurred_at,
+          // Surface the raw shape on first failure for debugging — strip on second pass.
+          _raw_keys: recording_url ? undefined : Object.keys(data || {}),
+        })
+      } catch (e) {
+        return json({ error: (e as Error).message, messageId }, 500)
+      }
+    }
+
     // ── Sync conversation to cache ──
     if (action === 'sync_conversation') {
       let syncBody: any = {}
