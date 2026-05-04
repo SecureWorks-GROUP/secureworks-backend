@@ -13,6 +13,15 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+// T7 Loop 4 — atomic cutover to recordEvidence when evidence_capture_v1
+// is ON. Wraps the single business_events insert below. Inbound SMS,
+// inbound email, calls, and GHL notes all get the full envelope
+// (channel/direction/source_table/source_id/match_status) when ON.
+import { recordEvidence } from "../_shared/evidence/record_evidence.ts";
+import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
+import type { Channel, Direction } from "../_shared/evidence/types.ts";
+
+const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -256,8 +265,17 @@ serve(async (req) => {
     eventPayload.client_name = job?.client_name || null;
     eventPayload.job_type = job?.type || null;
 
-    // ── Create business_event ──
-    const { error: eventError } = await supabase.from("business_events").insert({
+    // ── Create business_event (T7 atomic cutover) ──
+    // Map the GHL webhook type onto the T7 channel + direction envelope.
+    // Inbound: client.reply (SMS/email/chat). Outbound: client.sms_out / client.email_out.
+    // Call: client.call_complete. Note: ghl.note_added. Stage: ghl.stage_changed.
+    // Appointment: client.appointment.
+    const t7Enabled = await isFlagOn(supabase, "evidence_capture_v1", DEFAULT_ORG_ID);
+    let eventError: { message: string } | null = null;
+
+    // Legacy spine row shape — emitted either by the T7 fallback path
+    // OR when the flag is OFF. Defined once so both paths stay in lockstep.
+    const legacySpineRow = {
       event_type: eventType,
       source: "ghl_webhook_receiver",
       entity_type: job ? "contact" : "unmatched_contact",
@@ -265,11 +283,138 @@ serve(async (req) => {
       job_id: job?.id || null,
       occurred_at: new Date().toISOString(),
       payload: eventPayload,
-    });
+    };
+
+    let t7Failed = false;
+    if (t7Enabled) {
+      let channel: Channel = "system";
+      let direction: Direction = "system";
+      let conversationKey: string | null = (conversationId as string) || null;
+      switch (type) {
+        case "InboundMessage": {
+          const ch = (eventPayload.channel as string) || "sms";
+          channel = ch === "email" ? "email" : ch === "chat" ? "chat" : "sms";
+          direction = "inbound";
+          break;
+        }
+        case "OutboundMessage": {
+          const ch = (eventPayload.channel as string) || "sms";
+          channel = ch === "email" ? "email" : "sms";
+          direction = "outbound";
+          break;
+        }
+        case "CallCompleted":
+          channel = "call";
+          direction = (eventPayload.direction as string) === "outbound" ? "outbound" : "inbound";
+          break;
+        case "AppointmentCreated":
+          channel = "status";
+          direction = "internal";
+          break;
+        case "NoteAdded":
+          channel = "note";
+          direction = "internal";
+          break;
+        case "ContactStageChanged":
+          channel = "status";
+          direction = "internal";
+          break;
+      }
+      try {
+        await recordEvidence(supabase, {
+          event_type: eventType,
+          source: "ghl-webhook-receiver",
+          channel,
+          direction,
+          occurred_at: new Date().toISOString(),
+          // Source: GHL conversation cache when conversation_id present;
+          // else the webhook event id when GHL supplies one; else a synthetic.
+          source_table: "ghl_webhook",
+          source_id: String(
+            (body as { eventId?: string; id?: string }).eventId ??
+            (body as { id?: string }).id ??
+            conversationKey ??
+            crypto.randomUUID(),
+          ),
+          job_id: job?.id || null,
+          contact_id: contactId || null,
+          entity_type: job ? "contact" : "unmatched_contact",
+          entity_id: contactId || null,
+          match_method: job?.id ? "contact_id" : "none",
+          match_confidence: job?.id ? 0.85 : undefined,
+          body_preview: typeof eventPayload.message_text === "string"
+            ? (eventPayload.message_text as string).slice(0, 500)
+            : typeof eventPayload.note_text === "string"
+            ? (eventPayload.note_text as string).slice(0, 500)
+            : undefined,
+          thread_key: conversationKey,
+          // Inbound client comms: 7y; system events: 12m.
+          retention_class: (direction === "inbound" || direction === "outbound") ? "7y_audit" : "12m_default",
+          privacy_classification: "staff_only",
+          payload: eventPayload,
+        }, {
+          org_id: DEFAULT_ORG_ID,
+          storage_client: supabase.storage,
+        });
+      } catch (e) {
+        // T7 path failed (helper threw, validator rejected, transient
+        // Postgres error, etc.). Mark for fallback so the canonical event
+        // still lands via the legacy raw insert below. Without this, an
+        // inbound reply / outbound SMS / call event could be dropped from
+        // the spine on a T7 failure — exactly the regression the
+        // stop-time review caught.
+        console.error(
+          "[ghl-webhook-receiver] T7 recordEvidence failed; falling back to legacy:",
+          (e as Error).message,
+        );
+        t7Failed = true;
+      }
+    }
+
+    if (!t7Enabled || t7Failed) {
+      const { error } = await supabase.from("business_events").insert(legacySpineRow);
+      eventError = error;
+    }
 
     if (eventError) {
       console.error(`[ghl-webhook-receiver] business_event insert failed:`, eventError.message);
       return jsonResponse({ received: true, event_created: false, error: eventError.message }, 500);
+    }
+
+    // ── T7 Loop 7 — auto-invoke transcribe-call for CallCompleted events ──
+    // Fire-and-forget. The transcribe-call function:
+    //   - Re-checks evidence_transcript_capture flag (so OFF means no-op)
+    //   - Downloads audio from recording_url
+    //   - Calls OpenAI Whisper API
+    //   - Writes transcript via recordEvidence (channel='call')
+    //   - Enqueues to extraction_jobs → context_fact → JARVIS citation
+    // We don't block the webhook response on this — Twilio recording URLs
+    // expire within minutes so the worker must be quick anyway, but the
+    // webhook returns immediately to keep GHL happy.
+    if (type === "CallCompleted") {
+      const recording_url = (eventPayload.recording_url as string) || null;
+      if (recording_url) {
+        const transcribePayload = {
+          recording_url,
+          job_id: job?.id || null,
+          contact_id: contactId || null,
+          call_direction: (eventPayload.direction as string) || "internal",
+          occurred_at: new Date().toISOString(),
+          duration_seconds: eventPayload.duration as number || null,
+          phone: (eventPayload.phone as string) || null,
+          ghl_call_id: (body as { eventId?: string; id?: string }).eventId
+                        || (body as { id?: string }).id
+                        || null,
+        };
+        // Fire-and-forget invoke. We use the supabase Functions client
+        // so auth + URL are resolved automatically.
+        supabase.functions.invoke("transcribe-call", { body: transcribePayload })
+          .then((r) => {
+            if (r.error) console.error("[ghl-webhook-receiver] transcribe-call invoke error:", r.error);
+            else console.log("[ghl-webhook-receiver] transcribe-call invoked", r.data?.spine_event_id || "(no id)");
+          })
+          .catch((e: unknown) => console.error("[ghl-webhook-receiver] transcribe-call invoke threw:", (e as Error).message));
+      }
     }
 
     // ── Auto-cancel pending nudges/chases on inbound reply ──

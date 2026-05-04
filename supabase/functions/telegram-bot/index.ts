@@ -32,6 +32,13 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+// T7 Loop 6 — closes the Telegram audit hole. Every sendMessage now
+// produces a spine row via logEvent (which is wrapped to T7 cutover).
+// channel='telegram', direction='outbound'. Inbound Telegram crew handlers
+// already write business_events.crew.message; T7 envelope upgrade for
+// those is a follow-up (lower priority — low volume per audit G7).
+import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
+import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -595,19 +602,39 @@ async function sendMessage(chatId: number, text: string, client?: any) {
         parse_mode: 'HTML',
       }),
     })
-    
+
     const result = await response.json()
-    
-    // Store bot message ID for threading
-    if (client && result?.result?.message_id) {
-      await logEvent(client, {
+
+    // T7 Loop 6 — closes the Telegram audit hole. Every Telegram outbound
+    // produces a spine row, regardless of whether the caller passed a
+    // client. We construct a service-role client when needed; the cost of
+    // the additional logEvent insert is negligible and the audit
+    // completeness gain is worth it.
+    const sb = client ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    if (result?.result?.message_id) {
+      await logEvent(sb, {
         event_type: 'telegram_bot_reply',
         entity_type: 'message',
         entity_id: String(result.result.message_id),
         payload: {
           telegram_message_id: result.result.message_id,
           chat_id: chatId,
-          text_preview: text.substring(0, 200),
+          text_preview: text.substring(0, 500),
+          full_text: text,                  // logEvent T7 path uses this for body_preview
+        },
+      }).catch(() => {})
+    } else {
+      // Telegram API rejected/dropped; log the attempt anyway with no
+      // message_id so we can detect Telegram-side failures from the
+      // Health page.
+      await logEvent(sb, {
+        event_type: 'telegram_bot_send_failed',
+        entity_type: 'chat',
+        entity_id: String(chatId),
+        payload: {
+          chat_id: chatId,
+          text_preview: text.substring(0, 500),
+          telegram_response: result,
         },
       }).catch(() => {})
     }
@@ -699,7 +726,16 @@ async function logEvent(client: any, event: {
   payload?: any;
 }) {
   try {
-    await client.from('business_events').insert({
+    // T7 Loop 6 — atomic cutover. When evidence_capture_v1 is ON, every
+    // Telegram-bot business_events emit goes through recordEvidence with
+    // channel='telegram', direction='outbound' (or 'inbound' when the
+    // event_type indicates an incoming message — currently telegram-bot
+    // rarely emits these but the helper handles either).
+    const t7Enabled = await isFlagOn(client, 'evidence_capture_v1', DEFAULT_ORG_ID)
+    // Legacy row shape — emitted either by the T7 fallback path OR when
+    // the flag is OFF. Defined once so a T7 failure cannot silently drop
+    // the canonical telegram event row.
+    const legacyRow = {
       event_type: event.event_type,
       source: 'telegram/bot',
       entity_type: event.entity_type,
@@ -709,7 +745,49 @@ async function logEvent(client: any, event: {
       payload: event.payload || {},
       metadata: {},
       schema_version: '1.0',
-    })
+    }
+    let t7Failed = false
+    if (t7Enabled) {
+      const isInbound = event.event_type.includes('_inbound') ||
+                        event.event_type.includes('crew.message')
+      const fullText = event.payload?.full_text ?? event.payload?.text_preview ?? ''
+      const isLongBody = typeof fullText === 'string' && fullText.length > 500
+      try {
+        await recordEvidence(client, {
+          event_type: event.event_type,
+          source: 'telegram-bot',
+          channel: 'telegram',
+          direction: isInbound ? 'inbound' : 'outbound',
+          source_table: 'business_events',
+          source_id: event.entity_id,
+          job_id: event.job_id || null,
+          entity_type: event.entity_type,
+          entity_id: event.entity_id,
+          match_method: event.job_id ? 'direct_job_id' : 'none',
+          body_preview: typeof fullText === 'string' ? fullText.slice(0, 500) : undefined,
+          body_full: isLongBody ? fullText : undefined,
+          body_filename: isLongBody ? `telegram-${event.entity_id}.txt` : undefined,
+          body_mime: isLongBody ? 'text/plain; charset=utf-8' : undefined,
+          privacy_classification: 'staff_only',
+          retention_class: '12m_default',         // crew chatter is shorter retention than client comms
+          payload: event.payload || {},
+        }, {
+          org_id: DEFAULT_ORG_ID,
+          storage_client: client.storage,
+        })
+        return
+      } catch (e: any) {
+        // T7 path failed — fall back to legacy raw insert below so the
+        // canonical Telegram event still lands. Without this fallback,
+        // a Telegram crew message could be silently dropped from the
+        // spine when evidence_capture_v1 is ON.
+        console.error('[telegram-bot] T7 recordEvidence failed; falling back to legacy:', e?.message)
+        t7Failed = true
+      }
+    }
+    if (!t7Enabled || t7Failed) {
+      await client.from('business_events').insert(legacyRow)
+    }
   } catch (e) {
     console.log('[telegram-bot] business_events write failed:', (e as Error).message)
   }

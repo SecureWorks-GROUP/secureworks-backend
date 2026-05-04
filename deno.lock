@@ -81,6 +81,7 @@
     "https://deno.land/std@0.224.0/internal/diff.ts": "6234a4b493ebe65dc67a18a0eb97ef683626a1166a1906232ce186ae9f65f4e6",
     "https://deno.land/std@0.224.0/internal/format.ts": "0a98ee226fd3d43450245b1844b47003419d34d210fa989900861c79820d21c2",
     "https://deno.land/std@0.224.0/internal/mod.ts": "534125398c8e7426183e12dc255bb635d94e06d0f93c60a297723abe69d3b22e",
+    "https://esm.sh/@anthropic-ai/sdk@0.39.0": "063508334fb72da1dc091fd51266e2c4e055019fdf95e287976bcb3ac9228795",
     "https://esm.sh/@supabase/auth-js@2.99.3/denonext/auth-js.mjs": "7221b207de0fcf66b12ab365ce1249f6c822c9c94e90330998f3bd96d42497e2",
     "https://esm.sh/@supabase/functions-js@2.99.3/denonext/functions-js.mjs": "5f507faa54f4e788c3a3e02b22deb4ef19f5e6366ae2201c52c0417ceb4680fd",
     "https://esm.sh/@supabase/postgrest-js@2.99.3/denonext/postgrest-js.mjs": "066eb7abbe2bf2f477719afef31dc0038fb996f71ada53c5744f115960e08d05",

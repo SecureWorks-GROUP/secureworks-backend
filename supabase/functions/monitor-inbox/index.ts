@@ -11,6 +11,13 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.39.0'
+// T7 Loop 3 — single capture choke point. Atomic cutover on
+// evidence_capture_v1 flag: when ON, recordEvidence runs (full envelope,
+// match_status, body_pointer); when OFF, the legacy business_events
+// insert below runs unchanged. No dual-write.
+import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
+import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_KEY')!
@@ -527,7 +534,19 @@ async function processMailbox(
         }
       }
 
-      await sb.from('business_events').insert({
+      // T7 Loop 3 — atomic cutover. When evidence_capture_v1 is OFF, the
+      // legacy insert below runs unchanged (zero risk during rollout).
+      // When ON, recordEvidence becomes the single canonical writer with
+      // full envelope (source_table/source_id/direction/channel/
+      // match_status/match_confidence/match_method/body_preview/
+      // privacy_classification/retention_class) and conditionally
+      // enqueues an extraction_jobs row.
+      const t7Enabled = await isFlagOn(sb, 'evidence_capture_v1', DEFAULT_ORG_ID)
+
+      // Legacy spine row shape — emitted either by the T7 fallback path
+      // OR when t7Enabled is false. Defined once so both branches stay
+      // in lockstep on shape.
+      const legacySpineRow = {
         event_type: isSupplier ? 'supplier.email_in' : 'client.email_in',
         source: 'monitor_inbox',
         entity_type: finalJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
@@ -546,9 +565,85 @@ async function processMailbox(
           job_ref: classification.job_ref || null,
         },
         occurred_at: receivedAt || new Date().toISOString(),
-      }).then(() => {}).catch((e: any) => {
-        console.log(`[monitor-inbox] business_event insert failed:`, e?.message)
-      })
+      }
+
+      let t7Failed = false
+      if (t7Enabled && inboxEventId) {
+        // Privacy: personal mailboxes (Marnin, Jan) carry stricter
+        // classification than the shared/group mailboxes.
+        const personalMailboxes = new Set([
+          'marnin@secureworkswa.com.au',
+          'jan@secureworkswa.com.au',
+        ])
+        const privacy = personalMailboxes.has(mailbox)
+          ? 'restricted_pii' as const
+          : 'staff_only' as const
+
+        // Match method/confidence translation from monitor-inbox's existing
+        // signals. matchedVia comes from the upstream classifier (e.g.
+        // 'ai_job_ref', 'po', 'legacy_sw'); matchConfidence is 'high'/'low'/'none'.
+        let matchMethod: MatchMethod = 'none'
+        let matchConfidenceNum: number | undefined = undefined
+        if (finalJobId) {
+          if (matchConfidence === 'high') {
+            matchMethod = matchedVia?.includes('ref') ? 'direct_reference'
+                        : matchedVia?.includes('po')  ? 'direct_reference'
+                        : 'contact_id'
+            matchConfidenceNum = 0.92
+          } else {
+            matchMethod = 'single_recent_active_job'
+            matchConfidenceNum = 0.55  // below floor; recordEvidence will quarantine
+          }
+        }
+
+        try {
+          await recordEvidence(sb, {
+            event_type: isSupplier ? 'supplier.email_in' : 'client.email_in',
+            source: 'monitor-inbox',
+            channel: 'email' as Channel,
+            direction: 'inbound' as Direction,
+            occurred_at: legacySpineRow.occurred_at,
+            source_table: 'inbox_events',
+            source_id: inboxEventId,
+            job_id: finalJobId || null,
+            contact_id: ghlContactId,
+            entity_type: finalJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
+            entity_id: finalJobId || inboxEventId,
+            match_method: matchMethod,
+            match_confidence: matchConfidenceNum,
+            body_preview: bodyPreview,
+            // Loop 3: full body persistence is intentionally NOT enabled
+            // here yet — Microsoft Graph's /messages endpoint returns
+            // bodyPreview only (500c) unless we explicitly request body.
+            // Full body fetch is a separate change inside the existing
+            // Graph fetcher that requires its own performance review.
+            // For now we record the preview only; body_pointer stays NULL.
+            // body_full: undefined,
+            thread_key: msg.conversationId || null,
+            privacy_classification: privacy,
+            retention_class: '7y_audit',
+            payload: legacySpineRow.payload,
+          }, {
+            org_id: DEFAULT_ORG_ID,
+            storage_client: sb.storage,
+          })
+        } catch (e: any) {
+          // T7 path failed (helper threw, validator rejected, transient
+          // Postgres error, etc.). Record the failure and fall back to
+          // the legacy raw insert so the canonical event still lands.
+          // Without this fallback we would silently drop the row —
+          // exactly the regression the stop-time review caught.
+          console.error('[monitor-inbox] T7 recordEvidence failed; falling back to legacy:', e?.message)
+          t7Failed = true
+        }
+      }
+
+      if (!t7Enabled || !inboxEventId || t7Failed) {
+        const { error: legacyErr } = await sb.from('business_events').insert(legacySpineRow)
+        if (legacyErr) {
+          console.error('[monitor-inbox] legacy business_event insert failed:', legacyErr.message)
+        }
+      }
     }
 
     // Telegram notification for high priority
@@ -613,17 +708,52 @@ Deno.serve(async (req) => {
     let totalProcessed = 0
     let totalNotified = 0
 
-    for (const mailbox of MONITORED_MAILBOXES) {
+    // T7 Loop 8 — mailbox list as data, not code.
+    // When monitored_mailboxes table is present and has enabled rows,
+    // we iterate those (with per-mailbox last_polled_at as cursor).
+    // Falls back to the hard-coded MONITORED_MAILBOXES on any error or
+    // when the table is empty — preserves the existing behavior during
+    // rollout. Loop 8 ships the migration draft AND seeds the table
+    // separately; this function adapts to whichever is present.
+    let activeMailboxes: string[] = MONITORED_MAILBOXES
+    let configRows: Array<{ id: string; email: string }> = []
+    try {
+      const { data: rows, error } = await sb
+        .from('monitored_mailboxes')
+        .select('id, email, enabled, status, last_polled_at')
+        .eq('enabled', true)
+        .neq('status', 'paused')
+      if (!error && Array.isArray(rows) && rows.length > 0) {
+        configRows = rows.map((r: any) => ({ id: r.id, email: r.email }))
+        activeMailboxes = configRows.map((r) => r.email)
+        console.log(`[monitor-inbox] using monitored_mailboxes config: ${activeMailboxes.length} mailboxes`)
+      }
+    } catch {
+      // Table doesn't exist yet (Loop 1 draft not applied). Stay on the
+      // hard-coded list. No error — this is the expected pre-Loop-8 path.
+    }
+
+    for (const mailbox of activeMailboxes) {
       const { processed, notified } = await processMailbox(sb, token, mailbox, adminTelegramIds)
       totalProcessed += processed
       totalNotified += notified
+      // Per-mailbox cursor update (only when monitored_mailboxes is live).
+      const cfg = configRows.find((r) => r.email === mailbox)
+      if (cfg) {
+        try {
+          await sb.from('monitored_mailboxes')
+            .update({ last_polled_at: new Date().toISOString() })
+            .eq('id', cfg.id)
+        } catch { /* non-fatal */ }
+      }
     }
 
     const result = {
       success: true,
       processed: totalProcessed,
       notified: totalNotified,
-      mailboxes: MONITORED_MAILBOXES.length,
+      mailboxes: activeMailboxes.length,
+      mailbox_source: configRows.length > 0 ? 'monitored_mailboxes' : 'hard_coded',
       timestamp: new Date().toISOString(),
     }
 
