@@ -12792,6 +12792,11 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
   const pipeline = (body?.pipeline || 'both').toLowerCase()
   const max_opportunities = Math.min(Number(body?.max_opportunities) || 100, 200)
   const window_days = Math.min(Number(body?.opportunity_window_days) || 90, 180)
+  // Hard cap on transcribe-call POSTs PER INVOCATION. Even with fire-and-forget
+  // we don't want one click to spawn hundreds of concurrent Whisper jobs and
+  // melt the OpenAI quota. Marnin re-runs to drain remaining calls (dedupe
+  // makes that safe).
+  const max_calls_per_run = Math.min(Number(body?.max_calls_per_run) || 50, 100)
 
   if (!['fencing', 'patio', 'both'].includes(pipeline)) {
     throw new ApiError(`pipeline must be fencing|patio|both, got '${pipeline}'`, 400)
@@ -12801,6 +12806,9 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
   const ghlBase = fnBase + '/ghl-proxy'
   const transcribeUrl = fnBase + '/transcribe-call'
   const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+  // Sanity check OpenAI key presence — transcribe-call will 500 every POST
+  // if missing, so detect early in dry-run too.
+  const openai_key_present = !!Deno.env.get('OPENAI_API_KEY')
 
   // ── Fetch opps for selected pipelines ──
   const lanes = pipeline === 'both' ? ['fencing', 'patio'] : [pipeline]
@@ -12838,15 +12846,24 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
     opps_in_window: recentOpps.length,
     max_opportunities,
     opportunity_window_days: window_days,
+    max_calls_per_run,
+    openai_key_present,
     calls_found: 0,
     calls_with_recording: 0,
     calls_without_recording: 0,
     calls_dedupe_skipped: 0,
     calls_would_queue: 0,
     calls_queued: 0,
+    calls_capped_for_next_run: 0,
     transcribe_call_failures: 0,
     errors: [] as Array<{ opp_id: string; reason: string }>,
     per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; calls: number; with_recording: number; would_queue: number; dedupe_skipped: number }>,
+  }
+
+  // Pre-flight: if going live and the OpenAI key isn't configured, refuse
+  // before issuing any POST. transcribe-call would just 500 every request.
+  if (!dry_run && !openai_key_present) {
+    throw new ApiError('OPENAI_API_KEY not set in environment — transcribe-call would fail every request', 503)
   }
 
   // Resolve job_id for each opp once.
@@ -12965,12 +12982,34 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
     })
   }
 
-  // ── Live: fire transcribe-call POSTs in parallel batches of 5 ──
+  // ── Live: fire transcribe-call POSTs ──
+  //
+  // Each transcribe-call invocation downloads audio + runs Whisper +
+  // writes spine row. Wall time per call: 10-30s. If we awaited those
+  // serially or even in batches of 5, the BACKFILL function would hit
+  // its own ~150s edge-function timeout and die mid-stream.
+  //
+  // Fire-and-forget pattern: send the POST but only wait long enough
+  // for the request to be RECEIVED by Supabase routing (which then
+  // dispatches it to a fresh transcribe-call invocation with its own
+  // timeout budget). Once dispatched, transcribe-call runs to
+  // completion independently of our connection. We give each POST
+  // 8s before aborting — enough for Supabase to receive + start
+  // dispatch.
+  //
+  // Hard cap calls_queued at max_calls_per_run. Marnin re-runs if
+  // there are more (dedupe makes re-runs safe).
   if (!dry_run && candidates.length) {
+    const toFire = candidates.slice(0, max_calls_per_run)
+    summary.calls_capped_for_next_run = Math.max(0, candidates.length - toFire.length)
+
     const POST_BATCH = 5
-    for (let i = 0; i < candidates.length; i += POST_BATCH) {
-      const slice = candidates.slice(i, i + POST_BATCH)
+    const POST_ABORT_MS = 8000
+    for (let i = 0; i < toFire.length; i += POST_BATCH) {
+      const slice = toFire.slice(i, i + POST_BATCH)
       const results = await Promise.all(slice.map(async (c) => {
+        const ctl = new AbortController()
+        const t = setTimeout(() => ctl.abort(), POST_ABORT_MS)
         try {
           const r = await fetch(transcribeUrl, {
             method: 'POST',
@@ -12988,11 +13027,22 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
               phone: c.phone || undefined,
               ghl_call_id: c.ghl_message_id,
             }),
+            signal: ctl.signal,
           })
-          if (!r.ok) return { ok: false, ghl_message_id: c.ghl_message_id, status: r.status }
-          return { ok: true }
+          clearTimeout(t)
+          // 2xx = transcribe-call accepted and at least started; treat as queued.
+          // 4xx/5xx = real failure (auth, missing OPENAI_API_KEY, etc.) — visible.
+          if (r.ok) return { ok: true as const }
+          let errBody = ''
+          try { errBody = (await r.text()).slice(0, 200) } catch { /* ignore */ }
+          return { ok: false as const, ghl_message_id: c.ghl_message_id, status: r.status, error: errBody }
         } catch (e: any) {
-          return { ok: false, ghl_message_id: c.ghl_message_id, error: e?.message || String(e) }
+          clearTimeout(t)
+          // AbortError = request was sent but transcribe-call still working
+          // when our 8s deadline hit. transcribe-call continues server-side.
+          // Count as queued (best-effort).
+          if (e?.name === 'AbortError') return { ok: true as const, queued_via_abort: true as const }
+          return { ok: false as const, ghl_message_id: c.ghl_message_id, error: e?.message || String(e) }
         }
       }))
       for (const res of results) {
@@ -13002,7 +13052,7 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
           summary.transcribe_call_failures++
           summary.errors.push({
             opp_id: '(transcribe)',
-            reason: `transcribe-call POST failed for ${(res as any).ghl_message_id}: HTTP ${(res as any).status || (res as any).error}`,
+            reason: `transcribe-call POST failed for ${(res as any).ghl_message_id}: ${(res as any).status ? 'HTTP ' + (res as any).status : ''} ${(res as any).error || ''}`.trim(),
           })
         }
       }
