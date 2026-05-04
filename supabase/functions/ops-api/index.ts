@@ -114,6 +114,22 @@ import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 // bundler reliably includes the module bytes.
 import { evaluateStageGates } from '../_shared/stage-gate/engine.ts'
 
+// Scope-Memory-Saving Loop 1 — frozen-scope helper primitives. Backs the
+// freeze_scope / clone_scope_for_edit POST actions.
+import {
+  freezeScope as _freezeScope,
+  cloneScopeForEdit as _cloneScopeForEdit,
+  healFrozenInvariant as _healFrozenInvariant,
+  isToolKind as _isToolKind,
+} from '../_shared/scope_freeze/scope_freeze.ts'
+// Scope-Memory-Saving Loop 1, step 5 — render artefact persistence. Backs
+// the record_scope_artifact POST action used by patio-tool + fence-designer
+// freeze flows.
+import {
+  recordScopeArtifact as _recordScopeArtifact,
+  isArtifactType as _isArtifactType,
+} from '../_shared/scope_freeze/record_scope_artifact.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -1402,6 +1418,132 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'create_work_order': return json(await createWorkOrder(client, body))
       case 'update_work_order': return json(await updateWorkOrder(client, body))
       case 'send_work_order': return json(await sendWorkOrder(client, body))
+
+      // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
+      // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
+      //   a frozen scope_revisions row (and supersede the prior frozen row if
+      //   one exists). Requires { job_id, tool_kind } in the POST body.
+      // clone_scope_for_edit: clone the latest frozen scope_revision into a
+      //   new draft row and refresh jobs.scope_json / pricing_json so the
+      //   tool's working state matches the cloned-from frozen content.
+      //   Requires { scope_revision_id } in the POST body.
+      // Responses are intentionally small (ids + status + hashes + structured
+      // error codes) so callers can render minimal UI without parsing prose.
+      case 'freeze_scope': {
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const job_id = body.job_id || body.jobId
+        if (!job_id || typeof job_id !== 'string') return json({ error: 'job_id required' }, 400)
+        const tool_kind = body.tool_kind ?? body.toolKind
+        if (!_isToolKind(tool_kind)) {
+          return json({ error: 'tool_kind required (one of patio, fencing, decking, quick_quote, gate, repair, general)' }, 400)
+        }
+        const result = await _freezeScope(client, {
+          job_id,
+          tool_kind,
+          renderer_version: body.renderer_version ?? body.rendererVersion,
+          tool_version: body.tool_version ?? body.toolVersion,
+          frozen_by_user_id:
+            authMode === 'jwt' ? authUser!.id : (body.frozen_by_user_id ?? body.userId ?? null),
+        })
+        if (!result.ok) {
+          const status =
+            result.error.code === 'job_not_found' ? 404
+            : result.error.code === 'invalid_tool_kind' ? 400
+            : result.error.code === 'job_missing_scope' || result.error.code === 'job_missing_pricing' ? 422
+            : result.error.code === 'inconsistent_state' ? 409
+            : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
+      case 'clone_scope_for_edit': {
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const scope_revision_id = body.scope_revision_id || body.scopeRevisionId
+        if (!scope_revision_id || typeof scope_revision_id !== 'string') {
+          return json({ error: 'scope_revision_id required' }, 400)
+        }
+        const result = await _cloneScopeForEdit(client, {
+          scope_revision_id,
+          write_jobs_working_state:
+            body.write_jobs_working_state === false || body.writeJobsWorkingState === false ? false : true,
+        })
+        if (!result.ok) {
+          const status =
+            result.error.code === 'source_not_found' ? 404
+            : result.error.code === 'source_not_frozen' || result.error.code === 'source_not_latest' ? 409
+            : result.error.code === 'draft_already_exists' ? 409
+            : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
+      // Admin/recovery: idempotently re-establish the "≤1 frozen scope_revisions
+      // row per job" invariant. Used out-of-band when a partial-failure
+      // incident left more than one frozen row for a job. Safe to call any
+      // time; no-op when invariant already holds. Requires { job_id }.
+      //
+      // Admin gate (matches add_note pattern): API-key callers (MCP / Cowork)
+      // are treated as admin; JWT callers must have users.role='admin'. Any
+      // other principal gets 403. The gate is enforced because the heal
+      // mutates scope_revisions rows by transitioning them to 'superseded' —
+      // a one-way trigger transition that frozen→superseded explicitly
+      // permits but cannot be reversed.
+      case 'heal_scope_revisions': {
+        const isAdmin = authMode === 'api_key' || authUser?.role === 'admin'
+        if (!isAdmin) {
+          return json({ error: 'forbidden: heal_scope_revisions requires admin role' }, 403)
+        }
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const job_id = body.job_id || body.jobId
+        if (!job_id || typeof job_id !== 'string') return json({ error: 'job_id required' }, 400)
+        const result = await _healFrozenInvariant(client, job_id, new Date().toISOString())
+        if (!result.ok) {
+          return json({ error: { code: 'heal_failed', message: result.message, superseded_so_far: result.superseded_so_far } }, 500)
+        }
+        return json(result)
+      }
+      // Persist a single scope_artifacts row for a frozen scope_revision.
+      // Operator action — patio-tool / fence-designer call this once per
+      // canonical render at freeze time. Body shape:
+      //   { scope_revision_id, artifact_type, content_base64, content_type, sha256, label? }
+      // The helper validates the artifact_type enum, content_type allowlist,
+      // sha256 format, decoded byte size (≤ 25 MB), and recomputes sha256
+      // server-side as a tamper guard. Refuses to attach to a non-frozen
+      // revision so callers cannot ship renders against a mutable draft.
+      case 'record_scope_artifact': {
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const scope_revision_id = body.scope_revision_id || body.scopeRevisionId
+        if (!scope_revision_id || typeof scope_revision_id !== 'string') {
+          return json({ error: 'scope_revision_id required' }, 400)
+        }
+        if (!_isArtifactType(body.artifact_type)) {
+          return json({ error: 'artifact_type required (one of render_hero, render_front, render_side, render_site_plan, render_riser, render_post_detail, render_profile, render_3d_scene, quote_pdf, per_contact_pdf, work_order_pdf, material_order_pdf, model_glb, drawing)' }, 400)
+        }
+        const result = await _recordScopeArtifact(client, {
+          scope_revision_id,
+          artifact_type: body.artifact_type,
+          content_base64: body.content_base64,
+          content_type: body.content_type,
+          sha256: body.sha256,
+          label: body.label ?? null,
+        })
+        if (!result.ok) {
+          const status =
+            result.error.code === 'scope_revision_not_found' ? 404
+            : result.error.code === 'invalid_input' ? 400
+            : result.error.code === 'invalid_artifact_type' ? 400
+            : result.error.code === 'invalid_content_type' ? 400
+            : result.error.code === 'invalid_sha256_format' ? 400
+            : result.error.code === 'bytes_empty' ? 400
+            : result.error.code === 'bytes_too_large' ? 413
+            : result.error.code === 'sha256_mismatch' ? 422
+            : result.error.code === 'scope_revision_not_frozen' ? 409
+            : result.error.code === 'storage_upload_failed' ? 502
+            : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
       case 'add_note': {
         // Dual auth: API key callers (MCP/Cowork) pass as admin, JWT callers pass their userId
         const noteUserId = authMode === 'jwt' ? authUser!.id : (body.userId || body.user_id || null)
@@ -1929,6 +2071,18 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'manual_dispatch_marnin_poc':   return json(await manualDispatchMarninPoc(client, body))
       case 'assign_scoper':                return json(await assignScoper(client, body))
       case 'book_scope':                   return json(await bookScope(client, body))
+
+      // ── Slice 3: Brain backfill ──
+      // Marnin-only. Defaults to dry_run=true. Pulls historical GHL
+      // conversations into business_events so JARVIS sees real chat
+      // history when proposing follow-ups + booking nudges.
+      case 'backfill_ghl_conversations':   return json(await backfillGhlConversations(client, body, req))
+      // Slice 3.5 — WhisperFlow historical transcript backfill.
+      // For each active opp, finds CALL messages with recording URLs,
+      // POSTs each to transcribe-call which fires OpenAI Whisper and
+      // writes the transcript into business_events via recordEvidence.
+      // Same auth gate (Marnin-only) and dry-run-by-default safety.
+      case 'backfill_call_transcripts':    return json(await backfillCallTranscripts(client, body, req))
 
       // ── Smart Nudges ──
       case 'list_nudges': return json(await listNudges(client, url.searchParams))
@@ -11692,7 +11846,7 @@ async function listProposedActions(client: any, params: URLSearchParams) {
     .lt('expires_at', new Date(Date.now() + 48 * 3600000).toISOString()) // not expired
     .gt('expires_at', new Date().toISOString())
     .order('created_at', { ascending: false })
-    .limit(50)
+    .limit(200)
 
   if (actionType) query = query.eq('action_type', actionType)
 
@@ -12274,6 +12428,712 @@ async function bookScope(client: any, body: any): Promise<any> {
   } catch (_e) { /* best-effort */ }
 
   return { success: true, action_id, scope_window: scope_window_iso, confirmation_proposal_id }
+}
+
+// ════════════════════════════════════════════════════════════
+// SLICE 3 — GHL conversation backfill into brain (business_events)
+//
+// Goal: JARVIS today only sees comms captured AFTER 2026-05-04 (when
+// evidence_capture_v1 flipped on). All historical SMS/email per opp is
+// invisible to the loops, so booking + follow-up suggestions are
+// stage+age templates instead of grounded in actual conversation.
+//
+// This action pulls historical GHL conversation messages for active
+// opportunities into business_events with the canonical evidence
+// envelope. Existing extractor (every 15 min) digests them into
+// job_context. Loops then read job_context → smarter proposals.
+//
+// SAFETY:
+//   - Marnin-only (email gate)
+//   - dry_run=true by default — counts what WOULD be inserted
+//   - Idempotent: skips messages whose body_hash already exists for
+//     the same contact_id + occurred_at minute
+//   - Capped at max_opportunities=10 per call by default (so first
+//     runs can't accidentally dump 3000 rows)
+//   - Hits ghl-proxy get_conversation per opp — same path the cockpit
+//     already uses, no new GHL API surface
+// ════════════════════════════════════════════════════════════
+
+const BACKFILL_MARNIN_EMAIL = 'marnin@secureworkswa.com.au'
+const GHL_FENCING_PIPELINE_ID = 'I9t8njpuR0Dm7B2NDcvI'
+const GHL_PATIO_PIPELINE_ID = 'OGZLpPPVWVarN94HL6af'
+
+async function backfillGhlConversations(client: any, body: any, req: Request): Promise<any> {
+  // ── Auth gate (marnin-only) ──
+  const authHeader = req.headers.get('authorization') || ''
+  const jwt = authHeader.replace(/^Bearer\s+/i, '').trim()
+  if (!jwt) throw new ApiError('login_required', 401)
+  const { data: { user }, error: authErr } = await client.auth.getUser(jwt)
+  if (authErr || !user) throw new ApiError('session_expired', 401)
+  if ((user.email || '').toLowerCase() !== BACKFILL_MARNIN_EMAIL) {
+    throw new ApiError('backfill_unauthorized: marnin only', 403)
+  }
+
+  // ── Params ──
+  const dry_run = body?.dry_run !== false  // default TRUE — must explicitly pass false to write
+  const pipeline = (body?.pipeline || 'both').toLowerCase()
+  const max_opportunities = Math.min(Number(body?.max_opportunities) || 10, 50)
+  const window_days = Math.min(Number(body?.opportunity_window_days) || 30, 90)
+
+  if (!['fencing', 'patio', 'both'].includes(pipeline)) {
+    throw new ApiError(`pipeline must be fencing|patio|both, got '${pipeline}'`, 400)
+  }
+
+  const ghlBase = (Deno.env.get('SUPABASE_URL') || '').replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+
+  // ── Fetch opportunities for selected pipelines ──
+  const lanes = pipeline === 'both' ? ['fencing', 'patio'] : [pipeline]
+  const opportunities: Array<{ id: string; contactId: string; contactName: string; pipeline: string; updatedAt: string }> = []
+  for (const lane of lanes) {
+    try {
+      const r = await fetch(`${ghlBase}?action=opportunities&pipeline=${lane}`, {
+        headers: { 'Authorization': `Bearer ${ghlKey}` },
+      })
+      if (!r.ok) {
+        console.warn(`[backfill] opps fetch failed for ${lane}: HTTP ${r.status}`)
+        continue
+      }
+      const j: any = await r.json()
+      for (const o of (j.opportunities || [])) {
+        if (o.contactId && o.id) {
+          opportunities.push({
+            id: o.id,
+            contactId: o.contactId,
+            contactName: o.contactName || o.name || '',
+            pipeline: lane,
+            updatedAt: o.updatedAt || o.createdAt || new Date().toISOString(),
+          })
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[backfill] opps fetch threw for ${lane}: ${e?.message}`)
+    }
+  }
+
+  // ── Filter by activity window + cap ──
+  const cutoff = Date.now() - window_days * 86400000
+  const recentOpps = opportunities
+    .filter(o => Date.parse(o.updatedAt) >= cutoff)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, max_opportunities)
+
+  // ── Iterate, fetch conversation per opp, plan inserts ──
+  const summary = {
+    dry_run,
+    pipeline,
+    opps_total_fetched: opportunities.length,
+    opps_in_window: recentOpps.length,
+    max_opportunities,
+    opportunity_window_days: window_days,
+    messages_found: 0,
+    messages_dedupe_skipped: 0,
+    messages_would_insert: 0,
+    messages_inserted: 0,
+    // Channel/event breakdown — populated for EVERY message including dry-run.
+    // Lets you see "would insert 80 sms_in + 20 email_out + 5 call" before
+    // committing to live, and surfaces type misclassification immediately.
+    classified_by_channel: { sms: 0, email: 0, call: 0 } as Record<string, number>,
+    classified_by_event_type: {} as Record<string, number>,
+    unrecognised_message_types: {} as Record<string, number>,
+    errors: [] as Array<{ opp_id: string; reason: string }>,
+    per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; messages: number; would_insert: number; dedupe_skipped: number }>,
+  }
+
+  // Parallelize ghl-proxy fetches in batches to avoid edge function timeout.
+  // Each get_conversation takes ~700ms; 200 opps serial = 140s + DB time would
+  // exceed the 150s function cap. Batches of 5 cuts wall time ~5x. Inserts
+  // remain serial so per-opp accounting stays consistent and we don't
+  // hammer the DB with 200 concurrent inserts.
+  const BATCH_SIZE = 5
+  const batches: Array<typeof recentOpps> = []
+  for (let i = 0; i < recentOpps.length; i += BATCH_SIZE) {
+    batches.push(recentOpps.slice(i, i + BATCH_SIZE))
+  }
+
+  for (const batch of batches) {
+    // Fetch this batch's conversations in parallel.
+    const fetched = await Promise.all(batch.map(async (opp) => {
+      try {
+        const r = await fetch(`${ghlBase}?action=get_conversation&contactId=${opp.contactId}`, {
+          headers: { 'Authorization': `Bearer ${ghlKey}` },
+        })
+        if (!r.ok) return { opp, ok: false, error: `get_conversation HTTP ${r.status}`, messages: [] as any[] }
+        const jb: any = await r.json()
+        return { opp, ok: true, messages: jb.messages || [] }
+      } catch (e: any) {
+        return { opp, ok: false, error: `fetch threw: ${e?.message || String(e)}`, messages: [] as any[] }
+      }
+    }))
+
+    for (const item of fetched) {
+      const opp = item.opp
+      if (!item.ok) {
+        summary.errors.push({ opp_id: opp.id, reason: item.error || 'unknown' })
+        continue
+      }
+      try {
+      const j: any = { messages: item.messages }
+      const messages: Array<any> = j.messages || []
+      summary.messages_found += messages.length
+
+      // Try to resolve a Supabase job_id for this opp (best effort)
+      let job_id: string | null = null
+      try {
+        const { data: jobRow } = await client.from('jobs')
+          .select('id').eq('ghl_opportunity_id', opp.id).limit(1).single()
+        job_id = jobRow?.id || null
+      } catch { /* no linked job */ }
+
+      let oppWouldInsert = 0
+      let oppDedupeSkipped = 0
+
+      for (const m of messages) {
+        const body_text: string = (m.body || '').trim()
+        if (!body_text) continue
+
+        const occurred_at = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString()
+
+        // ── Idempotency check: same contact + same occurred_at minute + same body_preview already in spine? ──
+        const minuteKey = occurred_at.slice(0, 16)  // YYYY-MM-DDTHH:MM
+        const previewKey = body_text.slice(0, 100)
+        const { data: dup } = await client.from('business_events')
+          .select('id')
+          .eq('contact_id', opp.contactId)
+          .gte('occurred_at', minuteKey + ':00.000Z')
+          .lt('occurred_at', minuteKey + ':59.999Z')
+          .ilike('body_preview', `${previewKey}%`)
+          .limit(1)
+
+        if (dup && dup.length) {
+          oppDedupeSkipped++
+          summary.messages_dedupe_skipped++
+          continue
+        }
+
+        oppWouldInsert++
+        summary.messages_would_insert++
+
+        // ── Classify EVERY message (dry-run too) so the summary surfaces
+        //    channel mix + unrecognised types BEFORE committing to live. ──
+        //
+        // GHL normalises messageType as 'TYPE_SMS' | 'TYPE_EMAIL' | 'TYPE_CALL'
+        // | 'TYPE_VOICEMAIL' | 'TYPE_FACEBOOK' | 'TYPE_INSTAGRAM' | 'TYPE_WEBCHAT'
+        // | 'TYPE_LIVE_CHAT' | etc. (per GHL conversations API v2). Older API
+        // versions sometimes return 'SMS' / 'EMAIL' without the prefix.
+        // Match by substring so both work.
+        const channelType = (m.type || '').toUpperCase()
+        const channel: 'email' | 'call' | 'sms' | 'note' =
+          channelType.includes('EMAIL') ? 'email'
+          : (channelType.includes('CALL') || channelType.includes('VOICEMAIL')) ? 'call'
+          : (channelType.includes('SMS') || channelType.includes('WEBCHAT') ||
+             channelType.includes('FACEBOOK') || channelType.includes('INSTAGRAM') ||
+             channelType.includes('LIVE_CHAT') || channelType.includes('CHAT')) ? 'sms'
+          : 'sms' // fallback — most GHL messages we'll see ARE SMS
+
+        // Track unrecognised types so the summary surfaces them rather than
+        // silently miscoding everything as SMS. Aggregates across the whole run.
+        const isRecognised = channelType &&
+          ['EMAIL','CALL','VOICEMAIL','SMS','WEBCHAT','FACEBOOK','INSTAGRAM','LIVE_CHAT','CHAT']
+            .some(t => channelType.includes(t))
+        if (!isRecognised) {
+          const key = m.type ? String(m.type) : '(empty)'
+          summary.unrecognised_message_types[key] = (summary.unrecognised_message_types[key] || 0) + 1
+        }
+
+        const direction = m.direction === 'outbound' ? 'outbound' : 'inbound'
+
+        // event_type MUST be one of extraction-enqueuer's ALLOWED_EVENT_TYPES
+        // for downstream JARVIS observability (and so the worker's
+        // source_event_type field carries a meaningful tag).
+        const eventType =
+          channel === 'email'
+            ? (direction === 'inbound' ? 'client.email_in' : 'client.email_out')
+            : channel === 'call'
+            ? 'call.transcript_completed'
+            : (direction === 'inbound' ? 'client.sms_in' : 'client.sms_out')
+
+        // Aggregate classifications for the summary (every message, every run).
+        summary.classified_by_channel[channel] = (summary.classified_by_channel[channel] || 0) + 1
+        summary.classified_by_event_type[eventType] = (summary.classified_by_event_type[eventType] || 0) + 1
+
+        if (!dry_run) {
+
+          // The worker (extraction-worker.ts) loads the source row by:
+          //   client.from('business_events').select('id, event_type, source,
+          //     occurred_at, job_id, payload').eq('id', extraction_jobs.source_id)
+          // That means:
+          //   1. extraction_jobs.source_id MUST be business_events.id (uuid),
+          //      NOT the GHL message id. Fixed below by capturing the
+          //      .select('id') return.
+          //   2. The worker reads body from `payload`, NOT the top-level
+          //      body_preview column. Fixed below by mirroring body_preview
+          //      into payload.body_preview so the extractor can see it.
+          const { data: insertedRow, error: insErr } = await client.from('business_events').insert({
+            event_type: eventType,
+            source: 'ops-api/backfill_ghl_conversations',
+            entity_type: 'ghl_message',
+            entity_id: m.id || `${opp.contactId}-${minuteKey}`,
+            job_id: job_id,
+            contact_id: opp.contactId,
+            channel: channel,
+            direction: direction,
+            occurred_at: occurred_at,
+            body_preview: body_text.slice(0, 500),
+            safe_summary: body_text.slice(0, 280),
+            match_status: job_id ? 'matched' : 'unresolved',
+            match_method: job_id ? 'contact_id' : 'none',
+            match_confidence: job_id ? 0.85 : null,
+            payload: {
+              // Worker reads body from payload — see worker.loadSourceRow
+              // for source_table='business_events': it returns payload as-is.
+              body_preview: body_text.slice(0, 500),
+              safe_summary: body_text.slice(0, 280),
+              ghl_opportunity_id: opp.id,
+              ghl_contact_name: opp.contactName,
+              pipeline: opp.pipeline,
+              ghl_message_id: m.id,
+              ghl_message_type: m.type,
+              direction,
+              channel,
+              backfill_run_at: new Date().toISOString(),
+            },
+            metadata: {
+              source: 'backfill',
+              backfill_version: 'v1',
+            },
+          }).select('id').single()
+
+          if (insErr || !insertedRow) {
+            summary.errors.push({ opp_id: opp.id, reason: `insert: ${insErr?.message || 'no row returned'}` })
+          } else {
+            summary.messages_inserted++
+            const spineId: string = insertedRow.id
+
+            // Enqueue for the existing extractor (won't pick this up via
+            // its cursor because occurred_at is historical, hence direct
+            // insert). source_id = business_events.id so the worker can
+            // load it back.
+            if (job_id) {
+              try {
+                await client.from('extraction_jobs').insert({
+                  source_table: 'business_events',
+                  source_id: spineId,
+                  source_event_type: eventType,
+                  job_id: job_id,
+                  status: 'pending',
+                  priority: 5,
+                  attempts: 0,
+                  max_attempts: 3,
+                  extractor_version: 'context-fact-extractor:v1',
+                  metadata: { source: 'backfill_ghl_conversations', channel, contact_id: opp.contactId },
+                })
+              } catch { /* best-effort enqueue; idempotency unique-conflict expected on re-run */ }
+            }
+          }
+        }
+      }
+
+      summary.per_opp.push({
+        opp_id: opp.id, contactId: opp.contactId, pipeline: opp.pipeline,
+        messages: messages.length, would_insert: oppWouldInsert, dedupe_skipped: oppDedupeSkipped,
+      })
+      } catch (e: any) {
+        summary.errors.push({ opp_id: opp.id, reason: `loop: ${e?.message || String(e)}` })
+      }
+    } // end for (const item of fetched)
+  } // end for (const batch of batches)
+
+  return summary
+}
+
+// ════════════════════════════════════════════════════════════
+// SLICE 3.5 — WhisperFlow historical call-transcript backfill
+//
+// Companion to backfill_ghl_conversations. SMS/email come in via the
+// conversation messages endpoint with body text inline. CALLS come in
+// as conversation messages with channel CALL but body=empty + a
+// recording_url field. To get the actual TRANSCRIPT, each recording
+// must be POSTed to transcribe-call, which downloads the audio and
+// runs OpenAI Whisper, then writes a call.transcript_completed row to
+// business_events via recordEvidence.
+//
+// Cost: ~$0.006/min audio (Whisper API). Typical sales call 2-5min.
+// Per-call latency: ~5s of Whisper + ~1s of upload/storage.
+//
+// Concurrency: transcribe-call invocations are fired in parallel
+// batches. Each transcribe-call runs as its own edge function with
+// its own timeout — the backfill returns as soon as ALL POSTs have
+// been ack'd (typically 1-2s per ack), not when transcription
+// completes. Transcripts land in business_events asynchronously
+// over the next ~1-2 minutes.
+//
+// SAFETY:
+//   - Marnin-only auth (same gate as SMS backfill)
+//   - dry_run=true by default — counts what WOULD be queued, no spend
+//   - Idempotent: checks business_events for an existing row keyed by
+//     ghl_message_id before queueing
+//   - Skips messages where recording_url is null
+// ════════════════════════════════════════════════════════════
+
+async function backfillCallTranscripts(client: any, body: any, req: Request): Promise<any> {
+  // ── Auth gate (marnin-only) ──
+  const authHeader = req.headers.get('authorization') || ''
+  const jwt = authHeader.replace(/^Bearer\s+/i, '').trim()
+  if (!jwt) throw new ApiError('login_required', 401)
+  const { data: { user }, error: authErr } = await client.auth.getUser(jwt)
+  if (authErr || !user) throw new ApiError('session_expired', 401)
+  if ((user.email || '').toLowerCase() !== BACKFILL_MARNIN_EMAIL) {
+    throw new ApiError('backfill_unauthorized: marnin only', 403)
+  }
+
+  // ── Params ──
+  const dry_run = body?.dry_run !== false
+  const pipeline = (body?.pipeline || 'both').toLowerCase()
+  const max_opportunities = Math.min(Number(body?.max_opportunities) || 100, 200)
+  // Default 30 days for calls (Marnin: "for the past 30 days for a hard stop").
+  const window_days = Math.min(Number(body?.opportunity_window_days) || 30, 180)
+  // Hard cap on transcribe-call POSTs PER INVOCATION. Even with fire-and-forget
+  // we don't want one click to spawn hundreds of concurrent Whisper jobs and
+  // melt the OpenAI quota. Marnin re-runs to drain remaining calls (dedupe
+  // makes that safe).
+  const max_calls_per_run = Math.min(Number(body?.max_calls_per_run) || 50, 100)
+
+  if (!['fencing', 'patio', 'both'].includes(pipeline)) {
+    throw new ApiError(`pipeline must be fencing|patio|both, got '${pipeline}'`, 400)
+  }
+
+  const fnBase = (Deno.env.get('SUPABASE_URL') || '').replace('/rest/v1', '') + '/functions/v1'
+  const ghlBase = fnBase + '/ghl-proxy'
+  const transcribeUrl = fnBase + '/transcribe-call'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+  // Sanity check OpenAI key presence — transcribe-call will 500 every POST
+  // if missing, so detect early in dry-run too.
+  const openai_key_present = !!Deno.env.get('OPENAI_API_KEY')
+
+  // ── Fetch opps for selected pipelines ──
+  const lanes = pipeline === 'both' ? ['fencing', 'patio'] : [pipeline]
+  const opportunities: Array<{ id: string; contactId: string; contactName: string; pipeline: string; updatedAt: string }> = []
+  for (const lane of lanes) {
+    try {
+      const r = await fetch(`${ghlBase}?action=opportunities&pipeline=${lane}`, {
+        headers: { 'Authorization': `Bearer ${ghlKey}` },
+      })
+      if (!r.ok) continue
+      const j: any = await r.json()
+      for (const o of (j.opportunities || [])) {
+        if (o.contactId && o.id) {
+          opportunities.push({
+            id: o.id, contactId: o.contactId,
+            contactName: o.contactName || o.name || '',
+            pipeline: lane,
+            updatedAt: o.updatedAt || o.createdAt || new Date().toISOString(),
+          })
+        }
+      }
+    } catch { /* skip lane on error */ }
+  }
+
+  const cutoff = Date.now() - window_days * 86400000
+  const recentOpps = opportunities
+    .filter(o => Date.parse(o.updatedAt) >= cutoff)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, max_opportunities)
+
+  const summary = {
+    dry_run,
+    pipeline,
+    opps_total_fetched: opportunities.length,
+    opps_in_window: recentOpps.length,
+    max_opportunities,
+    opportunity_window_days: window_days,
+    max_calls_per_run,
+    openai_key_present,
+    calls_found: 0,
+    calls_with_recording: 0,
+    // `recording_absent` = GHL responded 200 but recording_url field was empty
+    //                     (genuine: no recording exists for this call).
+    calls_recording_absent: 0,
+    // `lookup_failed` = ghl-proxy returned non-200 (rate limit, 5xx, etc.) —
+    //                   we DON'T KNOW if a recording exists. Re-run can retry.
+    calls_lookup_failed: 0,
+    calls_dedupe_skipped: 0,
+    calls_would_queue: 0,
+    calls_queued: 0,
+    calls_capped_for_next_run: 0,
+    transcribe_call_failures: 0,
+    errors: [] as Array<{ opp_id: string; reason: string }>,
+    per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; calls: number; with_recording: number; recording_absent: number; lookup_failed: number; would_queue: number; dedupe_skipped: number }>,
+  }
+
+  // Pre-flight: if going live and the OpenAI key isn't configured, refuse
+  // before issuing any POST. transcribe-call would just 500 every request.
+  if (!dry_run && !openai_key_present) {
+    throw new ApiError('OPENAI_API_KEY not set in environment — transcribe-call would fail every request', 503)
+  }
+
+  // Resolve job_id for each opp once.
+  const oppJobMap: Record<string, string | null> = {}
+  for (const opp of recentOpps) {
+    try {
+      const { data: jobRow } = await client.from('jobs')
+        .select('id').eq('ghl_opportunity_id', opp.id).limit(1).single()
+      oppJobMap[opp.id] = jobRow?.id || null
+    } catch {
+      oppJobMap[opp.id] = null
+    }
+  }
+
+  // Fetch conversations in batches of 3 with a small inter-batch pause.
+  // The previous run hit Supabase per-function rate limits at batch=5 — got
+  // "Rate limit exceeded for function. Retry after 45s" on 42 of 100 opps.
+  // 3 concurrent + 250ms pause keeps us under the limit.
+  const FETCH_BATCH = 3
+  const FETCH_PAUSE_MS = 250
+  const oppBatches: Array<typeof recentOpps> = []
+  for (let i = 0; i < recentOpps.length; i += FETCH_BATCH) {
+    oppBatches.push(recentOpps.slice(i, i + FETCH_BATCH))
+  }
+
+  // Collect ALL call candidates first, then either count (dry-run) or fire transcribe-call POSTs in parallel batches.
+  type CallCandidate = {
+    opp: typeof recentOpps[number]
+    job_id: string | null
+    ghl_message_id: string
+    recording_url: string
+    direction: 'inbound' | 'outbound'
+    occurred_at: string
+    duration_seconds: number | null
+    phone: string | null
+  }
+  const candidates: CallCandidate[] = []
+  const perOppCounts: Record<string, { calls: number; with_recording: number; recording_absent: number; lookup_failed: number; would_queue: number; dedupe_skipped: number }> = {}
+
+  for (let bi = 0; bi < oppBatches.length; bi++) {
+    const batch = oppBatches[bi]
+    const fetched = await Promise.all(batch.map(async (opp) => {
+      try {
+        const r = await fetch(`${ghlBase}?action=get_conversation&contactId=${opp.contactId}`, {
+          headers: { 'Authorization': `Bearer ${ghlKey}` },
+        })
+        if (!r.ok) return { opp, ok: false, error: `get_conversation HTTP ${r.status}`, messages: [] as any[] }
+        const jb: any = await r.json()
+        return { opp, ok: true, messages: jb.messages || [] }
+      } catch (e: any) {
+        return { opp, ok: false, error: `fetch threw: ${e?.message || String(e)}`, messages: [] as any[] }
+      }
+    }))
+
+    for (const item of fetched) {
+      const opp = item.opp
+      const counts = { calls: 0, with_recording: 0, recording_absent: 0, lookup_failed: 0, would_queue: 0, dedupe_skipped: 0 }
+      perOppCounts[opp.id] = counts
+
+      if (!item.ok) {
+        summary.errors.push({ opp_id: opp.id, reason: item.error || 'unknown' })
+        continue
+      }
+
+      // Step 1: collect all CALL message IDs in this conversation.
+      const callMsgs: Array<{ id: string; direction: string; duration: number | null; timestamp: string | null }> = []
+      for (const m of (item.messages as any[])) {
+        const t = (m.type || '').toUpperCase()
+        const isCall = t.includes('CALL') || t.includes('VOICEMAIL')
+        if (!isCall) continue
+        counts.calls++
+        summary.calls_found++
+
+        const ghl_message_id: string = m.id || ''
+        if (!ghl_message_id) continue
+
+        // Idempotency: skip if already transcribed.
+        try {
+          const { data: existing } = await client.from('business_events')
+            .select('id')
+            .eq('event_type', 'call.transcript_completed')
+            .filter('payload->>ghl_call_id', 'eq', ghl_message_id)
+            .limit(1)
+          if (existing && existing.length) {
+            counts.dedupe_skipped++
+            summary.calls_dedupe_skipped++
+            continue
+          }
+        } catch { /* lookup failure shouldn't block */ }
+
+        callMsgs.push({
+          id: ghl_message_id,
+          direction: m.direction || 'inbound',
+          duration: typeof m.duration === 'number' ? m.duration : null,
+          timestamp: m.timestamp || null,
+        })
+      }
+
+      // Step 2: enrich each CALL message via GHL message-detail endpoint
+      // to get recording_url. The conversation-list API doesn't include
+      // it. Sequential per opp + small pause to keep ghl-proxy under
+      // Supabase per-function rate limit. Three distinct outcomes —
+      // tracked separately so re-runs target only the right bucket:
+      //   1. with_recording  → candidate added for transcribe-call POST
+      //   2. recording_absent → GHL 200 but recording_url empty (real "no recording")
+      //   3. lookup_failed   → ghl-proxy non-200 / threw (transient — re-run may succeed)
+      const PER_CALL_PAUSE_MS = 100
+      for (const cm of callMsgs) {
+        let r: Response
+        try {
+          r = await fetch(`${ghlBase}?action=get_call_recording&messageId=${cm.id}`, {
+            headers: { 'Authorization': `Bearer ${ghlKey}` },
+          })
+        } catch (e: any) {
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id} threw: ${e?.message || String(e)}` })
+          continue
+        }
+        if (!r.ok) {
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          let body = ''
+          try { body = (await r.text()).slice(0, 200) } catch { /* ignore */ }
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: HTTP ${r.status} ${body}` })
+          continue
+        }
+        let j: any
+        try {
+          j = await r.json()
+        } catch (e: any) {
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: invalid JSON` })
+          continue
+        }
+        // ghl-proxy may return {error: '...'} with status 200 in some paths;
+        // treat any explicit error as a lookup failure.
+        if (j && typeof j === 'object' && j.error) {
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: ${String(j.error).slice(0, 200)}` })
+          continue
+        }
+        const rec: string | null = j?.recording_url || null
+        if (!rec) {
+          counts.recording_absent++
+          summary.calls_recording_absent++
+          continue
+        }
+        counts.with_recording++
+        summary.calls_with_recording++
+        counts.would_queue++
+        summary.calls_would_queue++
+        candidates.push({
+          opp,
+          job_id: oppJobMap[opp.id],
+          ghl_message_id: cm.id,
+          recording_url: rec,
+          direction: (j?.direction === 'outbound' || cm.direction === 'outbound') ? 'outbound' : 'inbound',
+          occurred_at: cm.timestamp ? new Date(cm.timestamp).toISOString()
+                     : (j?.occurred_at ? new Date(j.occurred_at).toISOString() : new Date().toISOString()),
+          duration_seconds: cm.duration ?? (typeof j?.duration === 'number' ? j.duration : null),
+          phone: null,
+        })
+        await new Promise(rs => setTimeout(rs, PER_CALL_PAUSE_MS))
+      }
+    }
+
+    // Inter-batch pause to stay under Supabase per-function rate limit.
+    if (bi + 1 < oppBatches.length) {
+      await new Promise(r => setTimeout(r, FETCH_PAUSE_MS))
+    }
+  }
+
+  // Build per_opp list for the summary.
+  for (const opp of recentOpps) {
+    const c = perOppCounts[opp.id] || { calls: 0, with_recording: 0, recording_absent: 0, lookup_failed: 0, would_queue: 0, dedupe_skipped: 0 }
+    summary.per_opp.push({
+      opp_id: opp.id, contactId: opp.contactId, pipeline: opp.pipeline,
+      calls: c.calls, with_recording: c.with_recording,
+      recording_absent: c.recording_absent, lookup_failed: c.lookup_failed,
+      would_queue: c.would_queue, dedupe_skipped: c.dedupe_skipped,
+    })
+  }
+
+  // ── Live: fire transcribe-call POSTs ──
+  //
+  // Each transcribe-call invocation downloads audio + runs Whisper +
+  // writes spine row. Wall time per call: 10-30s. If we awaited those
+  // serially or even in batches of 5, the BACKFILL function would hit
+  // its own ~150s edge-function timeout and die mid-stream.
+  //
+  // Fire-and-forget pattern: send the POST but only wait long enough
+  // for the request to be RECEIVED by Supabase routing (which then
+  // dispatches it to a fresh transcribe-call invocation with its own
+  // timeout budget). Once dispatched, transcribe-call runs to
+  // completion independently of our connection. We give each POST
+  // 8s before aborting — enough for Supabase to receive + start
+  // dispatch.
+  //
+  // Hard cap calls_queued at max_calls_per_run. Marnin re-runs if
+  // there are more (dedupe makes re-runs safe).
+  if (!dry_run && candidates.length) {
+    const toFire = candidates.slice(0, max_calls_per_run)
+    summary.calls_capped_for_next_run = Math.max(0, candidates.length - toFire.length)
+
+    const POST_BATCH = 5
+    const POST_ABORT_MS = 8000
+    for (let i = 0; i < toFire.length; i += POST_BATCH) {
+      const slice = toFire.slice(i, i + POST_BATCH)
+      const results = await Promise.all(slice.map(async (c) => {
+        const ctl = new AbortController()
+        const t = setTimeout(() => ctl.abort(), POST_ABORT_MS)
+        try {
+          const r = await fetch(transcribeUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${ghlKey}`,
+            },
+            body: JSON.stringify({
+              recording_url: c.recording_url,
+              job_id: c.job_id || undefined,
+              contact_id: c.opp.contactId,
+              call_direction: c.direction,
+              occurred_at: c.occurred_at,
+              duration_seconds: c.duration_seconds || undefined,
+              phone: c.phone || undefined,
+              ghl_call_id: c.ghl_message_id,
+            }),
+            signal: ctl.signal,
+          })
+          clearTimeout(t)
+          // 2xx = transcribe-call accepted and at least started; treat as queued.
+          // 4xx/5xx = real failure (auth, missing OPENAI_API_KEY, etc.) — visible.
+          if (r.ok) return { ok: true as const }
+          let errBody = ''
+          try { errBody = (await r.text()).slice(0, 200) } catch { /* ignore */ }
+          return { ok: false as const, ghl_message_id: c.ghl_message_id, status: r.status, error: errBody }
+        } catch (e: any) {
+          clearTimeout(t)
+          // AbortError = request was sent but transcribe-call still working
+          // when our 8s deadline hit. transcribe-call continues server-side.
+          // Count as queued (best-effort).
+          if (e?.name === 'AbortError') return { ok: true as const, queued_via_abort: true as const }
+          return { ok: false as const, ghl_message_id: c.ghl_message_id, error: e?.message || String(e) }
+        }
+      }))
+      for (const res of results) {
+        if (res.ok) {
+          summary.calls_queued++
+        } else {
+          summary.transcribe_call_failures++
+          summary.errors.push({
+            opp_id: '(transcribe)',
+            reason: `transcribe-call POST failed for ${(res as any).ghl_message_id}: ${(res as any).status ? 'HTTP ' + (res as any).status : ''} ${(res as any).error || ''}`.trim(),
+          })
+        }
+      }
+    }
+  }
+
+  return summary
 }
 
 // ════════════════════════════════════════════════════════════
