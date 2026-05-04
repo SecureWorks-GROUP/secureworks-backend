@@ -12437,8 +12437,30 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
         summary.messages_would_insert++
 
         if (!dry_run) {
-          const channelType = (m.type || 'SMS').toUpperCase()
-          const channel = channelType === 'EMAIL' ? 'email' : channelType === 'CALL' ? 'call' : 'sms'
+          // GHL normalises messageType as 'TYPE_SMS' | 'TYPE_EMAIL' | 'TYPE_CALL'
+          // | 'TYPE_VOICEMAIL' | 'TYPE_FACEBOOK' | 'TYPE_INSTAGRAM' | 'TYPE_WEBCHAT'
+          // | 'TYPE_LIVE_CHAT' | etc. (per GHL conversations API v2). Older API
+          // versions sometimes return 'SMS' / 'EMAIL' without the prefix.
+          // Match by substring so both work; default to 'sms' only when nothing
+          // else fits AND length is short enough to be plausibly an SMS.
+          const channelType = (m.type || '').toUpperCase()
+          const channel: 'email' | 'call' | 'sms' | 'note' =
+            channelType.includes('EMAIL') ? 'email'
+            : (channelType.includes('CALL') || channelType.includes('VOICEMAIL')) ? 'call'
+            : (channelType.includes('SMS') || channelType.includes('WEBCHAT') ||
+               channelType.includes('FACEBOOK') || channelType.includes('INSTAGRAM') ||
+               channelType.includes('LIVE_CHAT') || channelType.includes('CHAT')) ? 'sms'
+            : 'sms' // fallback — most GHL messages we'll see ARE SMS
+
+          // Track unrecognised types so the dry-run summary surfaces them
+          // rather than silently miscoding everything as SMS.
+          if (!channelType ||
+              !['EMAIL','CALL','VOICEMAIL','SMS','WEBCHAT','FACEBOOK','INSTAGRAM','LIVE_CHAT','CHAT']
+                .some(t => channelType.includes(t))) {
+            // best-effort: log to summary errors as a soft signal
+            summary.errors.push({ opp_id: opp.id, reason: `unrecognised_message_type: '${m.type}' — defaulted to sms` })
+          }
+
           const direction = m.direction === 'outbound' ? 'outbound' : 'inbound'
 
           // event_type MUST be one of extraction-enqueuer's ALLOWED_EVENT_TYPES
