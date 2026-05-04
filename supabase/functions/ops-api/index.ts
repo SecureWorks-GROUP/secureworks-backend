@@ -3855,11 +3855,37 @@ async function pipeline(client: any, params: URLSearchParams) {
       || (j.job_number || '').toLowerCase().includes(s)
   })
 
+  // Cap 1A follow-up fix (2026-05-04): pre-allocate every active canonical
+  // status as its own column key. The widened .in('status', [...]) filter
+  // above pulls jobs in all 19 active substages, but the previous 8-key
+  // column object silently dropped jobs in: partially_accepted,
+  // awaiting_deposit, order_materials, awaiting_supplier, order_confirmed,
+  // schedule_install, rectification, final_payment, get_review.
+  // ~20 jobs were missing from the kanban as a result. Source of truth for
+  // the canonical status set: supabase/functions/_shared/stage-gate/job-state-machine.ts.
+  // The legacy `deposit → accepted` and `scheduled → processing` merges
+  // are preserved deliberately; existing frontend column headers depend on them.
   const columns: Record<string, any[]> = {
-    draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [],
+    draft: [],
+    quoted: [],
+    partially_accepted: [],
+    accepted: [],
+    awaiting_deposit: [],
+    approvals: [],
+    order_materials: [],
+    processing: [],
+    awaiting_supplier: [],
+    order_confirmed: [],
+    schedule_install: [],
+    in_progress: [],
+    rectification: [],
+    complete: [],
+    final_payment: [],
+    invoiced: [],
+    get_review: [],
   }
   for (const j of enriched) {
-    // Merge deposit → accepted column, scheduled → processing column
+    // Legacy merges preserved: deposit → accepted, scheduled → processing.
     const col = j.status === 'deposit' ? 'accepted'
       : j.status === 'scheduled' ? 'processing'
       : j.status
