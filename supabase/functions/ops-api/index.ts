@@ -12851,14 +12851,19 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
     openai_key_present,
     calls_found: 0,
     calls_with_recording: 0,
-    calls_without_recording: 0,
+    // `recording_absent` = GHL responded 200 but recording_url field was empty
+    //                     (genuine: no recording exists for this call).
+    calls_recording_absent: 0,
+    // `lookup_failed` = ghl-proxy returned non-200 (rate limit, 5xx, etc.) —
+    //                   we DON'T KNOW if a recording exists. Re-run can retry.
+    calls_lookup_failed: 0,
     calls_dedupe_skipped: 0,
     calls_would_queue: 0,
     calls_queued: 0,
     calls_capped_for_next_run: 0,
     transcribe_call_failures: 0,
     errors: [] as Array<{ opp_id: string; reason: string }>,
-    per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; calls: number; with_recording: number; would_queue: number; dedupe_skipped: number }>,
+    per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; calls: number; with_recording: number; recording_absent: number; lookup_failed: number; would_queue: number; dedupe_skipped: number }>,
   }
 
   // Pre-flight: if going live and the OpenAI key isn't configured, refuse
@@ -12921,7 +12926,7 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
 
     for (const item of fetched) {
       const opp = item.opp
-      const counts = { calls: 0, with_recording: 0, would_queue: 0, dedupe_skipped: 0 }
+      const counts = { calls: 0, with_recording: 0, recording_absent: 0, lookup_failed: 0, would_queue: 0, dedupe_skipped: 0 }
       perOppCounts[opp.id] = counts
 
       if (!item.ok) {
@@ -12965,41 +12970,72 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
 
       // Step 2: enrich each CALL message via GHL message-detail endpoint
       // to get recording_url. The conversation-list API doesn't include
-      // it. Sequential per opp to keep ghl-proxy under rate limits — we
-      // already have inter-batch pacing at the outer loop.
+      // it. Sequential per opp + small pause to keep ghl-proxy under
+      // Supabase per-function rate limit. Three distinct outcomes —
+      // tracked separately so re-runs target only the right bucket:
+      //   1. with_recording  → candidate added for transcribe-call POST
+      //   2. recording_absent → GHL 200 but recording_url empty (real "no recording")
+      //   3. lookup_failed   → ghl-proxy non-200 / threw (transient — re-run may succeed)
+      const PER_CALL_PAUSE_MS = 100
       for (const cm of callMsgs) {
+        let r: Response
         try {
-          const r = await fetch(`${ghlBase}?action=get_call_recording&messageId=${cm.id}`, {
+          r = await fetch(`${ghlBase}?action=get_call_recording&messageId=${cm.id}`, {
             headers: { 'Authorization': `Bearer ${ghlKey}` },
           })
-          if (!r.ok) {
-            summary.calls_without_recording++
-            continue
-          }
-          const j: any = await r.json()
-          const rec: string | null = j?.recording_url || null
-          if (!rec) {
-            summary.calls_without_recording++
-            continue
-          }
-          counts.with_recording++
-          summary.calls_with_recording++
-          counts.would_queue++
-          summary.calls_would_queue++
-          candidates.push({
-            opp,
-            job_id: oppJobMap[opp.id],
-            ghl_message_id: cm.id,
-            recording_url: rec,
-            direction: (j?.direction === 'outbound' || cm.direction === 'outbound') ? 'outbound' : 'inbound',
-            occurred_at: cm.timestamp ? new Date(cm.timestamp).toISOString()
-                       : (j?.occurred_at ? new Date(j.occurred_at).toISOString() : new Date().toISOString()),
-            duration_seconds: cm.duration ?? (typeof j?.duration === 'number' ? j.duration : null),
-            phone: null,
-          })
         } catch (e: any) {
-          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: ${e?.message || String(e)}` })
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id} threw: ${e?.message || String(e)}` })
+          continue
         }
+        if (!r.ok) {
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          let body = ''
+          try { body = (await r.text()).slice(0, 200) } catch { /* ignore */ }
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: HTTP ${r.status} ${body}` })
+          continue
+        }
+        let j: any
+        try {
+          j = await r.json()
+        } catch (e: any) {
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: invalid JSON` })
+          continue
+        }
+        // ghl-proxy may return {error: '...'} with status 200 in some paths;
+        // treat any explicit error as a lookup failure.
+        if (j && typeof j === 'object' && j.error) {
+          counts.lookup_failed++
+          summary.calls_lookup_failed++
+          summary.errors.push({ opp_id: opp.id, reason: `get_call_recording ${cm.id}: ${String(j.error).slice(0, 200)}` })
+          continue
+        }
+        const rec: string | null = j?.recording_url || null
+        if (!rec) {
+          counts.recording_absent++
+          summary.calls_recording_absent++
+          continue
+        }
+        counts.with_recording++
+        summary.calls_with_recording++
+        counts.would_queue++
+        summary.calls_would_queue++
+        candidates.push({
+          opp,
+          job_id: oppJobMap[opp.id],
+          ghl_message_id: cm.id,
+          recording_url: rec,
+          direction: (j?.direction === 'outbound' || cm.direction === 'outbound') ? 'outbound' : 'inbound',
+          occurred_at: cm.timestamp ? new Date(cm.timestamp).toISOString()
+                     : (j?.occurred_at ? new Date(j.occurred_at).toISOString() : new Date().toISOString()),
+          duration_seconds: cm.duration ?? (typeof j?.duration === 'number' ? j.duration : null),
+          phone: null,
+        })
+        await new Promise(rs => setTimeout(rs, PER_CALL_PAUSE_MS))
       }
     }
 
@@ -13011,10 +13047,11 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
 
   // Build per_opp list for the summary.
   for (const opp of recentOpps) {
-    const c = perOppCounts[opp.id] || { calls: 0, with_recording: 0, would_queue: 0, dedupe_skipped: 0 }
+    const c = perOppCounts[opp.id] || { calls: 0, with_recording: 0, recording_absent: 0, lookup_failed: 0, would_queue: 0, dedupe_skipped: 0 }
     summary.per_opp.push({
       opp_id: opp.id, contactId: opp.contactId, pipeline: opp.pipeline,
       calls: c.calls, with_recording: c.with_recording,
+      recording_absent: c.recording_absent, lookup_failed: c.lookup_failed,
       would_queue: c.would_queue, dedupe_skipped: c.dedupe_skipped,
     })
   }
