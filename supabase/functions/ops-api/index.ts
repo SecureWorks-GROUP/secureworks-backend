@@ -115,15 +115,20 @@ import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { evaluateStageGates } from '../_shared/stage-gate/engine.ts'
 
 // Scope-Memory-Saving Loop 1 — frozen-scope helper primitives. Backs the
-// freeze_scope / clone_scope_for_edit POST actions. No UI / render-upload
-// wiring in this leg; the actions exist so future Patio/Fence freeze buttons
-// have a stable, tested API to call.
+// freeze_scope / clone_scope_for_edit POST actions.
 import {
   freezeScope as _freezeScope,
   cloneScopeForEdit as _cloneScopeForEdit,
   healFrozenInvariant as _healFrozenInvariant,
   isToolKind as _isToolKind,
 } from '../_shared/scope_freeze/scope_freeze.ts'
+// Scope-Memory-Saving Loop 1, step 5 — render artefact persistence. Backs
+// the record_scope_artifact POST action used by patio-tool + fence-designer
+// freeze flows.
+import {
+  recordScopeArtifact as _recordScopeArtifact,
+  isArtifactType as _isArtifactType,
+} from '../_shared/scope_freeze/record_scope_artifact.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -1497,6 +1502,48 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(result)
       }
+      // Persist a single scope_artifacts row for a frozen scope_revision.
+      // Operator action — patio-tool / fence-designer call this once per
+      // canonical render at freeze time. Body shape:
+      //   { scope_revision_id, artifact_type, content_base64, content_type, sha256, label? }
+      // The helper validates the artifact_type enum, content_type allowlist,
+      // sha256 format, decoded byte size (≤ 25 MB), and recomputes sha256
+      // server-side as a tamper guard. Refuses to attach to a non-frozen
+      // revision so callers cannot ship renders against a mutable draft.
+      case 'record_scope_artifact': {
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const scope_revision_id = body.scope_revision_id || body.scopeRevisionId
+        if (!scope_revision_id || typeof scope_revision_id !== 'string') {
+          return json({ error: 'scope_revision_id required' }, 400)
+        }
+        if (!_isArtifactType(body.artifact_type)) {
+          return json({ error: 'artifact_type required (one of render_hero, render_front, render_side, render_site_plan, render_riser, render_post_detail, render_profile, render_3d_scene, quote_pdf, per_contact_pdf, work_order_pdf, material_order_pdf, model_glb, drawing)' }, 400)
+        }
+        const result = await _recordScopeArtifact(client, {
+          scope_revision_id,
+          artifact_type: body.artifact_type,
+          content_base64: body.content_base64,
+          content_type: body.content_type,
+          sha256: body.sha256,
+          label: body.label ?? null,
+        })
+        if (!result.ok) {
+          const status =
+            result.error.code === 'scope_revision_not_found' ? 404
+            : result.error.code === 'invalid_input' ? 400
+            : result.error.code === 'invalid_artifact_type' ? 400
+            : result.error.code === 'invalid_content_type' ? 400
+            : result.error.code === 'invalid_sha256_format' ? 400
+            : result.error.code === 'bytes_empty' ? 400
+            : result.error.code === 'bytes_too_large' ? 413
+            : result.error.code === 'sha256_mismatch' ? 422
+            : result.error.code === 'scope_revision_not_frozen' ? 409
+            : result.error.code === 'storage_upload_failed' ? 502
+            : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
       case 'add_note': {
         // Dual auth: API key callers (MCP/Cowork) pass as admin, JWT callers pass their userId
         const noteUserId = authMode === 'jwt' ? authUser!.id : (body.userId || body.user_id || null)
@@ -2030,6 +2077,12 @@ if (import.meta.main) serve(async (req: Request) => {
       // conversations into business_events so JARVIS sees real chat
       // history when proposing follow-ups + booking nudges.
       case 'backfill_ghl_conversations':   return json(await backfillGhlConversations(client, body, req))
+      // Slice 3.5 — WhisperFlow historical transcript backfill.
+      // For each active opp, finds CALL messages with recording URLs,
+      // POSTs each to transcribe-call which fires OpenAI Whisper and
+      // writes the transcript into business_events via recordEvidence.
+      // Same auth gate (Marnin-only) and dry-run-by-default safety.
+      case 'backfill_call_transcripts':    return json(await backfillCallTranscripts(client, body, req))
 
       // ── Smart Nudges ──
       case 'list_nudges': return json(await listNudges(client, url.searchParams))
@@ -12690,6 +12743,271 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
       }
     } // end for (const item of fetched)
   } // end for (const batch of batches)
+
+  return summary
+}
+
+// ════════════════════════════════════════════════════════════
+// SLICE 3.5 — WhisperFlow historical call-transcript backfill
+//
+// Companion to backfill_ghl_conversations. SMS/email come in via the
+// conversation messages endpoint with body text inline. CALLS come in
+// as conversation messages with channel CALL but body=empty + a
+// recording_url field. To get the actual TRANSCRIPT, each recording
+// must be POSTed to transcribe-call, which downloads the audio and
+// runs OpenAI Whisper, then writes a call.transcript_completed row to
+// business_events via recordEvidence.
+//
+// Cost: ~$0.006/min audio (Whisper API). Typical sales call 2-5min.
+// Per-call latency: ~5s of Whisper + ~1s of upload/storage.
+//
+// Concurrency: transcribe-call invocations are fired in parallel
+// batches. Each transcribe-call runs as its own edge function with
+// its own timeout — the backfill returns as soon as ALL POSTs have
+// been ack'd (typically 1-2s per ack), not when transcription
+// completes. Transcripts land in business_events asynchronously
+// over the next ~1-2 minutes.
+//
+// SAFETY:
+//   - Marnin-only auth (same gate as SMS backfill)
+//   - dry_run=true by default — counts what WOULD be queued, no spend
+//   - Idempotent: checks business_events for an existing row keyed by
+//     ghl_message_id before queueing
+//   - Skips messages where recording_url is null
+// ════════════════════════════════════════════════════════════
+
+async function backfillCallTranscripts(client: any, body: any, req: Request): Promise<any> {
+  // ── Auth gate (marnin-only) ──
+  const authHeader = req.headers.get('authorization') || ''
+  const jwt = authHeader.replace(/^Bearer\s+/i, '').trim()
+  if (!jwt) throw new ApiError('login_required', 401)
+  const { data: { user }, error: authErr } = await client.auth.getUser(jwt)
+  if (authErr || !user) throw new ApiError('session_expired', 401)
+  if ((user.email || '').toLowerCase() !== BACKFILL_MARNIN_EMAIL) {
+    throw new ApiError('backfill_unauthorized: marnin only', 403)
+  }
+
+  // ── Params ──
+  const dry_run = body?.dry_run !== false
+  const pipeline = (body?.pipeline || 'both').toLowerCase()
+  const max_opportunities = Math.min(Number(body?.max_opportunities) || 100, 200)
+  const window_days = Math.min(Number(body?.opportunity_window_days) || 90, 180)
+
+  if (!['fencing', 'patio', 'both'].includes(pipeline)) {
+    throw new ApiError(`pipeline must be fencing|patio|both, got '${pipeline}'`, 400)
+  }
+
+  const fnBase = (Deno.env.get('SUPABASE_URL') || '').replace('/rest/v1', '') + '/functions/v1'
+  const ghlBase = fnBase + '/ghl-proxy'
+  const transcribeUrl = fnBase + '/transcribe-call'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+
+  // ── Fetch opps for selected pipelines ──
+  const lanes = pipeline === 'both' ? ['fencing', 'patio'] : [pipeline]
+  const opportunities: Array<{ id: string; contactId: string; contactName: string; pipeline: string; updatedAt: string }> = []
+  for (const lane of lanes) {
+    try {
+      const r = await fetch(`${ghlBase}?action=opportunities&pipeline=${lane}`, {
+        headers: { 'Authorization': `Bearer ${ghlKey}` },
+      })
+      if (!r.ok) continue
+      const j: any = await r.json()
+      for (const o of (j.opportunities || [])) {
+        if (o.contactId && o.id) {
+          opportunities.push({
+            id: o.id, contactId: o.contactId,
+            contactName: o.contactName || o.name || '',
+            pipeline: lane,
+            updatedAt: o.updatedAt || o.createdAt || new Date().toISOString(),
+          })
+        }
+      }
+    } catch { /* skip lane on error */ }
+  }
+
+  const cutoff = Date.now() - window_days * 86400000
+  const recentOpps = opportunities
+    .filter(o => Date.parse(o.updatedAt) >= cutoff)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, max_opportunities)
+
+  const summary = {
+    dry_run,
+    pipeline,
+    opps_total_fetched: opportunities.length,
+    opps_in_window: recentOpps.length,
+    max_opportunities,
+    opportunity_window_days: window_days,
+    calls_found: 0,
+    calls_with_recording: 0,
+    calls_without_recording: 0,
+    calls_dedupe_skipped: 0,
+    calls_would_queue: 0,
+    calls_queued: 0,
+    transcribe_call_failures: 0,
+    errors: [] as Array<{ opp_id: string; reason: string }>,
+    per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; calls: number; with_recording: number; would_queue: number; dedupe_skipped: number }>,
+  }
+
+  // Resolve job_id for each opp once.
+  const oppJobMap: Record<string, string | null> = {}
+  for (const opp of recentOpps) {
+    try {
+      const { data: jobRow } = await client.from('jobs')
+        .select('id').eq('ghl_opportunity_id', opp.id).limit(1).single()
+      oppJobMap[opp.id] = jobRow?.id || null
+    } catch {
+      oppJobMap[opp.id] = null
+    }
+  }
+
+  // Fetch conversations in batches of 5.
+  const FETCH_BATCH = 5
+  const oppBatches: Array<typeof recentOpps> = []
+  for (let i = 0; i < recentOpps.length; i += FETCH_BATCH) {
+    oppBatches.push(recentOpps.slice(i, i + FETCH_BATCH))
+  }
+
+  // Collect ALL call candidates first, then either count (dry-run) or fire transcribe-call POSTs in parallel batches.
+  type CallCandidate = {
+    opp: typeof recentOpps[number]
+    job_id: string | null
+    ghl_message_id: string
+    recording_url: string
+    direction: 'inbound' | 'outbound'
+    occurred_at: string
+    duration_seconds: number | null
+    phone: string | null
+  }
+  const candidates: CallCandidate[] = []
+  const perOppCounts: Record<string, { calls: number; with_recording: number; would_queue: number; dedupe_skipped: number }> = {}
+
+  for (const batch of oppBatches) {
+    const fetched = await Promise.all(batch.map(async (opp) => {
+      try {
+        const r = await fetch(`${ghlBase}?action=get_conversation&contactId=${opp.contactId}`, {
+          headers: { 'Authorization': `Bearer ${ghlKey}` },
+        })
+        if (!r.ok) return { opp, ok: false, error: `get_conversation HTTP ${r.status}`, messages: [] as any[] }
+        const jb: any = await r.json()
+        return { opp, ok: true, messages: jb.messages || [] }
+      } catch (e: any) {
+        return { opp, ok: false, error: `fetch threw: ${e?.message || String(e)}`, messages: [] as any[] }
+      }
+    }))
+
+    for (const item of fetched) {
+      const opp = item.opp
+      const counts = { calls: 0, with_recording: 0, would_queue: 0, dedupe_skipped: 0 }
+      perOppCounts[opp.id] = counts
+
+      if (!item.ok) {
+        summary.errors.push({ opp_id: opp.id, reason: item.error || 'unknown' })
+        continue
+      }
+
+      for (const m of (item.messages as any[])) {
+        const t = (m.type || '').toUpperCase()
+        const isCall = t.includes('CALL') || t.includes('VOICEMAIL')
+        if (!isCall) continue
+        counts.calls++
+        summary.calls_found++
+
+        const recording_url: string | null = m.recording_url || null
+        if (!recording_url) {
+          summary.calls_without_recording++
+          continue
+        }
+        counts.with_recording++
+        summary.calls_with_recording++
+
+        const ghl_message_id: string = m.id || ''
+        if (!ghl_message_id) continue
+
+        // Idempotency: do we already have a transcript spine row for this GHL call?
+        try {
+          const { data: existing } = await client.from('business_events')
+            .select('id')
+            .eq('event_type', 'call.transcript_completed')
+            .filter('payload->>ghl_call_id', 'eq', ghl_message_id)
+            .limit(1)
+          if (existing && existing.length) {
+            counts.dedupe_skipped++
+            summary.calls_dedupe_skipped++
+            continue
+          }
+        } catch { /* lookup failure shouldn't block — assume not duplicate */ }
+
+        counts.would_queue++
+        summary.calls_would_queue++
+
+        candidates.push({
+          opp,
+          job_id: oppJobMap[opp.id],
+          ghl_message_id,
+          recording_url,
+          direction: m.direction === 'outbound' ? 'outbound' : 'inbound',
+          occurred_at: m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString(),
+          duration_seconds: typeof m.duration === 'number' ? m.duration : null,
+          phone: null,
+        })
+      }
+    }
+  }
+
+  // Build per_opp list for the summary.
+  for (const opp of recentOpps) {
+    const c = perOppCounts[opp.id] || { calls: 0, with_recording: 0, would_queue: 0, dedupe_skipped: 0 }
+    summary.per_opp.push({
+      opp_id: opp.id, contactId: opp.contactId, pipeline: opp.pipeline,
+      calls: c.calls, with_recording: c.with_recording,
+      would_queue: c.would_queue, dedupe_skipped: c.dedupe_skipped,
+    })
+  }
+
+  // ── Live: fire transcribe-call POSTs in parallel batches of 5 ──
+  if (!dry_run && candidates.length) {
+    const POST_BATCH = 5
+    for (let i = 0; i < candidates.length; i += POST_BATCH) {
+      const slice = candidates.slice(i, i + POST_BATCH)
+      const results = await Promise.all(slice.map(async (c) => {
+        try {
+          const r = await fetch(transcribeUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${ghlKey}`,
+            },
+            body: JSON.stringify({
+              recording_url: c.recording_url,
+              job_id: c.job_id || undefined,
+              contact_id: c.opp.contactId,
+              call_direction: c.direction,
+              occurred_at: c.occurred_at,
+              duration_seconds: c.duration_seconds || undefined,
+              phone: c.phone || undefined,
+              ghl_call_id: c.ghl_message_id,
+            }),
+          })
+          if (!r.ok) return { ok: false, ghl_message_id: c.ghl_message_id, status: r.status }
+          return { ok: true }
+        } catch (e: any) {
+          return { ok: false, ghl_message_id: c.ghl_message_id, error: e?.message || String(e) }
+        }
+      }))
+      for (const res of results) {
+        if (res.ok) {
+          summary.calls_queued++
+        } else {
+          summary.transcribe_call_failures++
+          summary.errors.push({
+            opp_id: '(transcribe)',
+            reason: `transcribe-call POST failed for ${(res as any).ghl_message_id}: HTTP ${(res as any).status || (res as any).error}`,
+          })
+        }
+      }
+    }
+  }
 
   return summary
 }

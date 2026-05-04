@@ -2637,16 +2637,29 @@ serve(async (req: Request) => {
           console.log(`[ghl-proxy] No messages returned but conversation has lastMessageBody: ${lastMsg.slice(0, 50)}`)
         }
 
-        // Normalise message format
-        const messages = rawMessages.map((m: any) => ({
-          id: m.id,
-          type: (m.messageType || m.type || 'SMS').toUpperCase(),
-          direction: m.direction || (m.userId ? 'outbound' : 'inbound'),
-          body: m.body || m.message || m.text || '',
-          timestamp: m.dateAdded || m.createdAt || m.timestamp || '',
-          sender_name: m.userName || m.user?.name || '',
-          duration: m.duration || null,
-        }))
+        // Normalise message format. For CALL records we also expose the
+        // recording_url so a downstream backfill can hand it to
+        // transcribe-call. GHL puts the URL in different fields depending
+        // on API version — check all known shapes.
+        const messages = rawMessages.map((m: any) => {
+          const recording_url =
+            m.recordingUrl ||
+            m.recording_url ||
+            m.attachments?.[0]?.url ||
+            m.callRecording?.url ||
+            m.call?.recordingUrl ||
+            null
+          return {
+            id: m.id,
+            type: (m.messageType || m.type || 'SMS').toUpperCase(),
+            direction: m.direction || (m.userId ? 'outbound' : 'inbound'),
+            body: m.body || m.message || m.text || '',
+            timestamp: m.dateAdded || m.createdAt || m.timestamp || '',
+            sender_name: m.userName || m.user?.name || '',
+            duration: m.duration || null,
+            recording_url,
+          }
+        })
 
         // Reverse so messages display oldest-first (chat order) — API returns newest first
         messages.reverse()
