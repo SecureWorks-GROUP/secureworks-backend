@@ -114,6 +114,17 @@ import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 // bundler reliably includes the module bytes.
 import { evaluateStageGates } from '../_shared/stage-gate/engine.ts'
 
+// Scope-Memory-Saving Loop 1 — frozen-scope helper primitives. Backs the
+// freeze_scope / clone_scope_for_edit POST actions. No UI / render-upload
+// wiring in this leg; the actions exist so future Patio/Fence freeze buttons
+// have a stable, tested API to call.
+import {
+  freezeScope as _freezeScope,
+  cloneScopeForEdit as _cloneScopeForEdit,
+  healFrozenInvariant as _healFrozenInvariant,
+  isToolKind as _isToolKind,
+} from '../_shared/scope_freeze/scope_freeze.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -1402,6 +1413,90 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'create_work_order': return json(await createWorkOrder(client, body))
       case 'update_work_order': return json(await updateWorkOrder(client, body))
       case 'send_work_order': return json(await sendWorkOrder(client, body))
+
+      // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
+      // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
+      //   a frozen scope_revisions row (and supersede the prior frozen row if
+      //   one exists). Requires { job_id, tool_kind } in the POST body.
+      // clone_scope_for_edit: clone the latest frozen scope_revision into a
+      //   new draft row and refresh jobs.scope_json / pricing_json so the
+      //   tool's working state matches the cloned-from frozen content.
+      //   Requires { scope_revision_id } in the POST body.
+      // Responses are intentionally small (ids + status + hashes + structured
+      // error codes) so callers can render minimal UI without parsing prose.
+      case 'freeze_scope': {
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const job_id = body.job_id || body.jobId
+        if (!job_id || typeof job_id !== 'string') return json({ error: 'job_id required' }, 400)
+        const tool_kind = body.tool_kind ?? body.toolKind
+        if (!_isToolKind(tool_kind)) {
+          return json({ error: 'tool_kind required (one of patio, fencing, decking, quick_quote, gate, repair, general)' }, 400)
+        }
+        const result = await _freezeScope(client, {
+          job_id,
+          tool_kind,
+          renderer_version: body.renderer_version ?? body.rendererVersion,
+          tool_version: body.tool_version ?? body.toolVersion,
+          frozen_by_user_id:
+            authMode === 'jwt' ? authUser!.id : (body.frozen_by_user_id ?? body.userId ?? null),
+        })
+        if (!result.ok) {
+          const status =
+            result.error.code === 'job_not_found' ? 404
+            : result.error.code === 'invalid_tool_kind' ? 400
+            : result.error.code === 'job_missing_scope' || result.error.code === 'job_missing_pricing' ? 422
+            : result.error.code === 'inconsistent_state' ? 409
+            : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
+      case 'clone_scope_for_edit': {
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const scope_revision_id = body.scope_revision_id || body.scopeRevisionId
+        if (!scope_revision_id || typeof scope_revision_id !== 'string') {
+          return json({ error: 'scope_revision_id required' }, 400)
+        }
+        const result = await _cloneScopeForEdit(client, {
+          scope_revision_id,
+          write_jobs_working_state:
+            body.write_jobs_working_state === false || body.writeJobsWorkingState === false ? false : true,
+        })
+        if (!result.ok) {
+          const status =
+            result.error.code === 'source_not_found' ? 404
+            : result.error.code === 'source_not_frozen' || result.error.code === 'source_not_latest' ? 409
+            : result.error.code === 'draft_already_exists' ? 409
+            : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
+      // Admin/recovery: idempotently re-establish the "≤1 frozen scope_revisions
+      // row per job" invariant. Used out-of-band when a partial-failure
+      // incident left more than one frozen row for a job. Safe to call any
+      // time; no-op when invariant already holds. Requires { job_id }.
+      //
+      // Admin gate (matches add_note pattern): API-key callers (MCP / Cowork)
+      // are treated as admin; JWT callers must have users.role='admin'. Any
+      // other principal gets 403. The gate is enforced because the heal
+      // mutates scope_revisions rows by transitioning them to 'superseded' —
+      // a one-way trigger transition that frozen→superseded explicitly
+      // permits but cannot be reversed.
+      case 'heal_scope_revisions': {
+        const isAdmin = authMode === 'api_key' || authUser?.role === 'admin'
+        if (!isAdmin) {
+          return json({ error: 'forbidden: heal_scope_revisions requires admin role' }, 403)
+        }
+        if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
+        const job_id = body.job_id || body.jobId
+        if (!job_id || typeof job_id !== 'string') return json({ error: 'job_id required' }, 400)
+        const result = await _healFrozenInvariant(client, job_id, new Date().toISOString())
+        if (!result.ok) {
+          return json({ error: { code: 'heal_failed', message: result.message, superseded_so_far: result.superseded_so_far } }, 500)
+        }
+        return json(result)
+      }
       case 'add_note': {
         // Dual auth: API key callers (MCP/Cowork) pass as admin, JWT callers pass their userId
         const noteUserId = authMode === 'jwt' ? authUser!.id : (body.userId || body.user_id || null)
@@ -12392,16 +12487,40 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
     per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; messages: number; would_insert: number; dedupe_skipped: number }>,
   }
 
-  for (const opp of recentOpps) {
-    try {
-      const r = await fetch(`${ghlBase}?action=get_conversation&contactId=${opp.contactId}`, {
-        headers: { 'Authorization': `Bearer ${ghlKey}` },
-      })
-      if (!r.ok) {
-        summary.errors.push({ opp_id: opp.id, reason: `get_conversation HTTP ${r.status}` })
+  // Parallelize ghl-proxy fetches in batches to avoid edge function timeout.
+  // Each get_conversation takes ~700ms; 200 opps serial = 140s + DB time would
+  // exceed the 150s function cap. Batches of 5 cuts wall time ~5x. Inserts
+  // remain serial so per-opp accounting stays consistent and we don't
+  // hammer the DB with 200 concurrent inserts.
+  const BATCH_SIZE = 5
+  const batches: Array<typeof recentOpps> = []
+  for (let i = 0; i < recentOpps.length; i += BATCH_SIZE) {
+    batches.push(recentOpps.slice(i, i + BATCH_SIZE))
+  }
+
+  for (const batch of batches) {
+    // Fetch this batch's conversations in parallel.
+    const fetched = await Promise.all(batch.map(async (opp) => {
+      try {
+        const r = await fetch(`${ghlBase}?action=get_conversation&contactId=${opp.contactId}`, {
+          headers: { 'Authorization': `Bearer ${ghlKey}` },
+        })
+        if (!r.ok) return { opp, ok: false, error: `get_conversation HTTP ${r.status}`, messages: [] as any[] }
+        const jb: any = await r.json()
+        return { opp, ok: true, messages: jb.messages || [] }
+      } catch (e: any) {
+        return { opp, ok: false, error: `fetch threw: ${e?.message || String(e)}`, messages: [] as any[] }
+      }
+    }))
+
+    for (const item of fetched) {
+      const opp = item.opp
+      if (!item.ok) {
+        summary.errors.push({ opp_id: opp.id, reason: item.error || 'unknown' })
         continue
       }
-      const j: any = await r.json()
+      try {
+      const j: any = { messages: item.messages }
       const messages: Array<any> = j.messages || []
       summary.messages_found += messages.length
 
@@ -12566,10 +12685,11 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
         opp_id: opp.id, contactId: opp.contactId, pipeline: opp.pipeline,
         messages: messages.length, would_insert: oppWouldInsert, dedupe_skipped: oppDedupeSkipped,
       })
-    } catch (e: any) {
-      summary.errors.push({ opp_id: opp.id, reason: `loop: ${e?.message || String(e)}` })
-    }
-  }
+      } catch (e: any) {
+        summary.errors.push({ opp_id: opp.id, reason: `loop: ${e?.message || String(e)}` })
+      }
+    } // end for (const item of fetched)
+  } // end for (const batch of batches)
 
   return summary
 }
