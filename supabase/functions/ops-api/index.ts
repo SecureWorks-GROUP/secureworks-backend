@@ -12382,6 +12382,12 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
     messages_dedupe_skipped: 0,
     messages_would_insert: 0,
     messages_inserted: 0,
+    // Channel/event breakdown — populated for EVERY message including dry-run.
+    // Lets you see "would insert 80 sms_in + 20 email_out + 5 call" before
+    // committing to live, and surfaces type misclassification immediately.
+    classified_by_channel: { sms: 0, email: 0, call: 0 } as Record<string, number>,
+    classified_by_event_type: {} as Record<string, number>,
+    unrecognised_message_types: {} as Record<string, number>,
     errors: [] as Array<{ opp_id: string; reason: string }>,
     per_opp: [] as Array<{ opp_id: string; contactId: string; pipeline: string; messages: number; would_insert: number; dedupe_skipped: number }>,
   }
@@ -12436,42 +12442,50 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
         oppWouldInsert++
         summary.messages_would_insert++
 
+        // ── Classify EVERY message (dry-run too) so the summary surfaces
+        //    channel mix + unrecognised types BEFORE committing to live. ──
+        //
+        // GHL normalises messageType as 'TYPE_SMS' | 'TYPE_EMAIL' | 'TYPE_CALL'
+        // | 'TYPE_VOICEMAIL' | 'TYPE_FACEBOOK' | 'TYPE_INSTAGRAM' | 'TYPE_WEBCHAT'
+        // | 'TYPE_LIVE_CHAT' | etc. (per GHL conversations API v2). Older API
+        // versions sometimes return 'SMS' / 'EMAIL' without the prefix.
+        // Match by substring so both work.
+        const channelType = (m.type || '').toUpperCase()
+        const channel: 'email' | 'call' | 'sms' | 'note' =
+          channelType.includes('EMAIL') ? 'email'
+          : (channelType.includes('CALL') || channelType.includes('VOICEMAIL')) ? 'call'
+          : (channelType.includes('SMS') || channelType.includes('WEBCHAT') ||
+             channelType.includes('FACEBOOK') || channelType.includes('INSTAGRAM') ||
+             channelType.includes('LIVE_CHAT') || channelType.includes('CHAT')) ? 'sms'
+          : 'sms' // fallback — most GHL messages we'll see ARE SMS
+
+        // Track unrecognised types so the summary surfaces them rather than
+        // silently miscoding everything as SMS. Aggregates across the whole run.
+        const isRecognised = channelType &&
+          ['EMAIL','CALL','VOICEMAIL','SMS','WEBCHAT','FACEBOOK','INSTAGRAM','LIVE_CHAT','CHAT']
+            .some(t => channelType.includes(t))
+        if (!isRecognised) {
+          const key = m.type ? String(m.type) : '(empty)'
+          summary.unrecognised_message_types[key] = (summary.unrecognised_message_types[key] || 0) + 1
+        }
+
+        const direction = m.direction === 'outbound' ? 'outbound' : 'inbound'
+
+        // event_type MUST be one of extraction-enqueuer's ALLOWED_EVENT_TYPES
+        // for downstream JARVIS observability (and so the worker's
+        // source_event_type field carries a meaningful tag).
+        const eventType =
+          channel === 'email'
+            ? (direction === 'inbound' ? 'client.email_in' : 'client.email_out')
+            : channel === 'call'
+            ? 'call.transcript_completed'
+            : (direction === 'inbound' ? 'client.sms_in' : 'client.sms_out')
+
+        // Aggregate classifications for the summary (every message, every run).
+        summary.classified_by_channel[channel] = (summary.classified_by_channel[channel] || 0) + 1
+        summary.classified_by_event_type[eventType] = (summary.classified_by_event_type[eventType] || 0) + 1
+
         if (!dry_run) {
-          // GHL normalises messageType as 'TYPE_SMS' | 'TYPE_EMAIL' | 'TYPE_CALL'
-          // | 'TYPE_VOICEMAIL' | 'TYPE_FACEBOOK' | 'TYPE_INSTAGRAM' | 'TYPE_WEBCHAT'
-          // | 'TYPE_LIVE_CHAT' | etc. (per GHL conversations API v2). Older API
-          // versions sometimes return 'SMS' / 'EMAIL' without the prefix.
-          // Match by substring so both work; default to 'sms' only when nothing
-          // else fits AND length is short enough to be plausibly an SMS.
-          const channelType = (m.type || '').toUpperCase()
-          const channel: 'email' | 'call' | 'sms' | 'note' =
-            channelType.includes('EMAIL') ? 'email'
-            : (channelType.includes('CALL') || channelType.includes('VOICEMAIL')) ? 'call'
-            : (channelType.includes('SMS') || channelType.includes('WEBCHAT') ||
-               channelType.includes('FACEBOOK') || channelType.includes('INSTAGRAM') ||
-               channelType.includes('LIVE_CHAT') || channelType.includes('CHAT')) ? 'sms'
-            : 'sms' // fallback — most GHL messages we'll see ARE SMS
-
-          // Track unrecognised types so the dry-run summary surfaces them
-          // rather than silently miscoding everything as SMS.
-          if (!channelType ||
-              !['EMAIL','CALL','VOICEMAIL','SMS','WEBCHAT','FACEBOOK','INSTAGRAM','LIVE_CHAT','CHAT']
-                .some(t => channelType.includes(t))) {
-            // best-effort: log to summary errors as a soft signal
-            summary.errors.push({ opp_id: opp.id, reason: `unrecognised_message_type: '${m.type}' — defaulted to sms` })
-          }
-
-          const direction = m.direction === 'outbound' ? 'outbound' : 'inbound'
-
-          // event_type MUST be one of extraction-enqueuer's ALLOWED_EVENT_TYPES
-          // for downstream JARVIS observability (and so the worker's
-          // source_event_type field carries a meaningful tag).
-          const eventType =
-            channel === 'email'
-              ? (direction === 'inbound' ? 'client.email_in' : 'client.email_out')
-              : channel === 'call'
-              ? 'call.transcript_completed'
-              : (direction === 'inbound' ? 'client.sms_in' : 'client.sms_out')
 
           // The worker (extraction-worker.ts) loads the source row by:
           //   client.from('business_events').select('id, event_type, source,
