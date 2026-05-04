@@ -12907,7 +12907,7 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
     phone: string | null
   }
   const candidates: CallCandidate[] = []
-  const perOppCounts: Record<string, { calls: number; with_recording: number; would_queue: number; dedupe_skipped: number }> = {}
+  const perOppCounts: Record<string, { calls: number; with_recording: number; recording_absent: number; lookup_failed: number; would_queue: number; dedupe_skipped: number }> = {}
 
   for (let bi = 0; bi < oppBatches.length; bi++) {
     const batch = oppBatches[bi]
