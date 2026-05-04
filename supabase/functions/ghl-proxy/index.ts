@@ -333,6 +333,33 @@ serve(async (req: Request) => {
       return json(data)
     }
 
+    // ── GHL location/business profile summary (sw_get_profile) ──
+    if (action === 'get_profile') {
+      try {
+        const data = await ghl(`/locations/${GHL_LOCATION_ID}`)
+        const loc = data.location || data
+        return json({
+          location: {
+            id: loc.id || GHL_LOCATION_ID,
+            name: loc.name || null,
+            email: loc.email || null,
+            phone: loc.phone || null,
+            address: loc.address || null,
+            city: loc.city || null,
+            state: loc.state || null,
+            country: loc.country || null,
+            postalCode: loc.postalCode || null,
+            timezone: loc.timezone || null,
+            website: loc.website || null,
+            business: loc.business || null,
+          }
+        })
+      } catch (e) {
+        console.log('[ghl-proxy] get_profile failed:', e)
+        return json({ error: (e as Error).message }, 500)
+      }
+    }
+
     // ── Get stage mappings (for webhook handler reverse lookups) ──
     if (action === 'stage_map') {
       return json({
@@ -1033,22 +1060,30 @@ serve(async (req: Request) => {
     // ── Move opportunity to a specific GHL stage (used by ops-api sync) ──
     if (action === 'move_stage' && req.method === 'POST') {
       const body = await req.json()
-      const { opportunityId, status, jobType } = body
-      if (!opportunityId || !status) return json({ error: 'opportunityId and status required' }, 400)
+      const { opportunityId, status, stageId, jobType } = body
+      if (!opportunityId) return json({ error: 'opportunityId required' }, 400)
+      if (!status && !stageId) return json({ error: 'status or stageId required' }, 400)
 
-      const type = jobType || 'patio'
-      const stages = OPS_TO_GHL_STAGES[type]
-      if (!stages) return json({ error: `No stage mapping for type "${type}"` }, 400)
-
-      const targetStageId = stages[status]
-      if (!targetStageId) return json({ error: `No GHL stage for status "${status}" in ${type}` }, 400)
+      // Two callers: ops-api sync passes a canonical `status` and we look up the
+      // GHL stage UUID; MCP `sw_move_stage` lets the agent pass a `stageId` directly
+      // for cases where it already knows the destination stage.
+      let targetStageId: string | undefined
+      if (stageId) {
+        targetStageId = stageId
+      } else {
+        const type = jobType || 'patio'
+        const stages = OPS_TO_GHL_STAGES[type]
+        if (!stages) return json({ error: `No stage mapping for type "${type}"` }, 400)
+        targetStageId = stages[status]
+        if (!targetStageId) return json({ error: `No GHL stage for status "${status}" in ${type}` }, 400)
+      }
 
       try {
         await ghl(`/opportunities/${opportunityId}`, {
           method: 'PUT',
           body: JSON.stringify({ pipelineStageId: targetStageId }),
         })
-        console.log(`[ghl-proxy] move_stage: ${opportunityId} → ${status} (${targetStageId})`)
+        console.log(`[ghl-proxy] move_stage: ${opportunityId} → ${status || stageId} (${targetStageId})`)
         return json({ success: true, stageId: targetStageId })
       } catch (e) {
         console.log('[ghl-proxy] move_stage failed:', e)
