@@ -12437,14 +12437,32 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
         summary.messages_would_insert++
 
         if (!dry_run) {
-          const channel = (m.type || 'SMS').toLowerCase() === 'email' ? 'email' : 'sms'
+          const channelType = (m.type || 'SMS').toUpperCase()
+          const channel = channelType === 'EMAIL' ? 'email' : channelType === 'CALL' ? 'call' : 'sms'
           const direction = m.direction === 'outbound' ? 'outbound' : 'inbound'
-          // Direct insert into business_events — bypasses recordEvidence
-          // helper because we don't need body storage for short SMS bodies,
-          // and the helper requires full envelope plumbing not worth it for
-          // a one-shot backfill. Match canonical column names.
-          const { error: insErr } = await client.from('business_events').insert({
-            event_type: 'comms.message',
+
+          // event_type MUST be one of extraction-enqueuer's ALLOWED_EVENT_TYPES
+          // for downstream JARVIS observability (and so the worker's
+          // source_event_type field carries a meaningful tag).
+          const eventType =
+            channel === 'email'
+              ? (direction === 'inbound' ? 'client.email_in' : 'client.email_out')
+              : channel === 'call'
+              ? 'call.transcript_completed'
+              : (direction === 'inbound' ? 'client.sms_in' : 'client.sms_out')
+
+          // The worker (extraction-worker.ts) loads the source row by:
+          //   client.from('business_events').select('id, event_type, source,
+          //     occurred_at, job_id, payload').eq('id', extraction_jobs.source_id)
+          // That means:
+          //   1. extraction_jobs.source_id MUST be business_events.id (uuid),
+          //      NOT the GHL message id. Fixed below by capturing the
+          //      .select('id') return.
+          //   2. The worker reads body from `payload`, NOT the top-level
+          //      body_preview column. Fixed below by mirroring body_preview
+          //      into payload.body_preview so the extractor can see it.
+          const { data: insertedRow, error: insErr } = await client.from('business_events').insert({
+            event_type: eventType,
             source: 'ops-api/backfill_ghl_conversations',
             entity_type: 'ghl_message',
             entity_id: m.id || `${opp.contactId}-${minuteKey}`,
@@ -12459,31 +12477,41 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
             match_method: job_id ? 'contact_id' : 'none',
             match_confidence: job_id ? 0.85 : null,
             payload: {
+              // Worker reads body from payload — see worker.loadSourceRow
+              // for source_table='business_events': it returns payload as-is.
+              body_preview: body_text.slice(0, 500),
+              safe_summary: body_text.slice(0, 280),
               ghl_opportunity_id: opp.id,
               ghl_contact_name: opp.contactName,
               pipeline: opp.pipeline,
               ghl_message_id: m.id,
               ghl_message_type: m.type,
+              direction,
+              channel,
               backfill_run_at: new Date().toISOString(),
             },
             metadata: {
               source: 'backfill',
               backfill_version: 'v1',
             },
-          })
-          if (insErr) {
-            summary.errors.push({ opp_id: opp.id, reason: `insert: ${insErr.message}` })
+          }).select('id').single()
+
+          if (insErr || !insertedRow) {
+            summary.errors.push({ opp_id: opp.id, reason: `insert: ${insErr?.message || 'no row returned'}` })
           } else {
             summary.messages_inserted++
-            // Best-effort: enqueue extraction for messages on a linked job.
-            // SMS/call channels are NOT in EXTRACTOR_ELIGIBLE_CHANNELS by
-            // default — without this, the spine row sits unread.
+            const spineId: string = insertedRow.id
+
+            // Enqueue for the existing extractor (won't pick this up via
+            // its cursor because occurred_at is historical, hence direct
+            // insert). source_id = business_events.id so the worker can
+            // load it back.
             if (job_id) {
               try {
                 await client.from('extraction_jobs').insert({
                   source_table: 'business_events',
-                  source_id: m.id || `${opp.contactId}-${minuteKey}`,
-                  source_event_type: 'comms.message',
+                  source_id: spineId,
+                  source_event_type: eventType,
                   job_id: job_id,
                   status: 'pending',
                   priority: 5,
@@ -12492,7 +12520,7 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
                   extractor_version: 'context-fact-extractor:v1',
                   metadata: { source: 'backfill_ghl_conversations', channel, contact_id: opp.contactId },
                 })
-              } catch { /* best-effort enqueue */ }
+              } catch { /* best-effort enqueue; idempotency unique-conflict expected on re-run */ }
             }
           }
         }
