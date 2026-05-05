@@ -112,6 +112,20 @@ function getClientReplyTo(jobType: string | null, jobNumber?: string): string {
   return `${dept}${tag}@secureworkswa.com.au`
 }
 
+// ── Internal group-copy routing: every successful client quote send is BCC'd
+// to the corresponding division inbox so the team has a thread copy without
+// the customer seeing the internal address. Fencing → fencing@; patio →
+// patios@. Unknown / misc types get no group copy (returns null). The caller
+// MUST treat null-on-known-type as a configuration failure (fail-closed) so a
+// silent constant clear doesn't quietly drop the team copy.
+function groupCopyAddress(jobType: string | null | undefined): string | null {
+  switch (jobType) {
+    case 'fencing': return 'fencing@secureworks.com.au'
+    case 'patio':   return 'patios@secureworks.com.au'
+    default:        return null
+  }
+}
+
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
 function logEmailToGHL(contactId: string | null, subject: string, recipient: string) {
   if (!contactId) return
@@ -608,8 +622,8 @@ serve(async (req: Request) => {
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   try {
-    // ── API Key Auth (only for send/send-invoice — view/accept/decline are public client endpoints) ──
-    if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
+    // ── API Key Auth (only for send/send-invoice/inspect — view/accept/decline are public client endpoints) ──
+    if (path === 'send' || path === 'send-invoice' || path === 'send-runs' || path === 'inspect') {
       const apiKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
       const validKey = Deno.env.get('SW_API_KEY')
       const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -618,6 +632,61 @@ serve(async (req: Request) => {
           status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         })
       }
+    }
+
+    // ── INSPECT — read-only diagnostic timeline for a quote number ──
+    // Track D (Q-0108 reliability work). Returns the job_documents +
+    // email_events for a given quote_number so an operator can answer "did
+    // this quote ever get sent, and if not, why?" without opening the SQL
+    // console. Pure read; no writes, no Resend, no external calls.
+    if (path === 'inspect' && req.method === 'GET') {
+      const quoteNumber = url.searchParams.get('quote_number')
+      if (!quoteNumber) {
+        return jsonResponse({ error: 'quote_number required' }, 400, corsHeaders)
+      }
+
+      const { data: docs } = await sb
+        .from('job_documents')
+        .select('id, job_id, job_contact_id, quote_number, sent_at, sent_to_client, share_token, pdf_url, created_at, type, run_label')
+        .eq('quote_number', quoteNumber)
+        .order('created_at', { ascending: true })
+
+      const docList = docs || []
+      const jobIds = Array.from(new Set(docList.map((d: any) => d.job_id).filter(Boolean)))
+
+      let events: any[] = []
+      if (jobIds.length > 0) {
+        const { data: ev } = await sb
+          .from('email_events')
+          .select('id, recipient, subject, status, failure_reason, resend_message_id, created_at, sent_at, failed_at, metadata, job_id')
+          .in('job_id', jobIds)
+          .order('created_at', { ascending: false })
+          .limit(50)
+        events = ev || []
+      }
+
+      let jobs: any[] = []
+      if (jobIds.length > 0) {
+        const { data: j } = await sb
+          .from('jobs')
+          .select('id, type, job_number, status, client_name, client_email')
+          .in('id', jobIds)
+        jobs = j || []
+      }
+
+      return jsonResponse({
+        quote_number: quoteNumber,
+        documents: docList,
+        jobs,
+        email_events: events,
+        summary: {
+          documents_found: docList.length,
+          jobs_found: jobs.length,
+          email_events_found: events.length,
+          events_sent: events.filter((e: any) => e.status === 'sent').length,
+          events_failed: events.filter((e: any) => e.status === 'failed').length,
+        },
+      }, 200, corsHeaders)
     }
 
     // ── SEND QUOTE EMAIL ──
@@ -667,6 +736,15 @@ serve(async (req: Request) => {
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
+      // Internal group BCC. Fail-closed when the job is fencing/patio but the
+      // address constant is unset — better to refuse the send than to deliver
+      // to the customer with no team copy and no warning.
+      const groupCopy = groupCopyAddress(doc.jobs?.type)
+      if ((doc.jobs?.type === 'fencing' || doc.jobs?.type === 'patio') && !groupCopy) {
+        return jsonResponse({
+          error: `Group copy address not configured for type=${doc.jobs?.type}. Refusing to send without team copy.`,
+        }, 500, corsHeaders)
+      }
       {
         const emailHtml = buildQuoteEmail({
           clientName: client_name,
@@ -714,6 +792,7 @@ serve(async (req: Request) => {
             subject: emailSubject,
             html: emailHtml,
             ...(cc_emails && cc_emails.length > 0 ? { cc: cc_emails } : {}),
+            ...(groupCopy ? { bcc: [groupCopy] } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
           }),
         })
@@ -724,7 +803,7 @@ serve(async (req: Request) => {
             emailType: 'quote', jobId: doc.job_id, recipient: client_email,
             subject: emailSubject, resendMessageId: resendData.id,
             status: 'sent',
-            metadata: { document_id: doc.id, quote_number: doc.quote_number, client_name: client_name, job_type: doc.jobs?.type, cc_emails: cc_emails || [] },
+            metadata: { document_id: doc.id, quote_number: doc.quote_number, client_name: client_name, job_type: doc.jobs?.type, cc_emails: cc_emails || [], group_bcc: groupCopy || null },
           })
           // Log to po_communications for client email thread
           sb.from('po_communications').insert({
@@ -2027,11 +2106,22 @@ serve(async (req: Request) => {
       }))
       const anyNeighbourBound = runs.some((r: any) => !!r.neighbour_id)
 
+      // Internal group BCC for the whole runs bundle. Single resolution per
+      // job (job.type is invariant across runs). Fail-closed when fencing/patio
+      // but the constant is unset — refuse before any customer email leaves.
+      const groupCopyRuns = groupCopyAddress(job?.type)
+      if ((job?.type === 'fencing' || job?.type === 'patio') && !groupCopyRuns) {
+        return jsonResponse({
+          error: `Group copy address not configured for type=${job?.type}. Refusing to send without team copy.`,
+        }, 500, corsHeaders)
+      }
+
       // Send emails grouped by recipient
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
       let emailsSent = 0
       let primarySent = false
       const primaryEmail = (primaryContact.client_email || job.client_email || '').toLowerCase()
+      const failedRecipients: Array<{ email: string, reason: string }> = []
 
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
@@ -2085,6 +2175,7 @@ serve(async (req: Request) => {
             html: emailHtml,
           }
           if (attachments.length > 0) emailPayload.attachments = attachments
+          if (groupCopyRuns) emailPayload.bcc = [groupCopyRuns]
 
           const resendRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
@@ -2094,8 +2185,14 @@ serve(async (req: Request) => {
           if (resendRes.ok) {
             emailsSent++
             if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
+          } else {
+            const errData = await resendRes.json().catch(() => ({}))
+            const reason = errData.message || `HTTP ${resendRes.status}`
+            failedRecipients.push({ email, reason })
+            console.log(`[send-runs] Resend rejected ${email}:`, JSON.stringify(errData))
           }
         } catch (e: any) {
+          failedRecipients.push({ email, reason: e?.message || 'network error' })
           console.log(`[send-runs] Failed to email ${email}:`, e.message)
         }
       }
@@ -2309,11 +2406,32 @@ serve(async (req: Request) => {
         }, { handler: 'send-quote/send-runs', job_id: job.id })
       }
 
+      // Track E — zero-sent hardening. If we had recipients but every Resend
+      // call failed, do NOT return success: true. The previous shape masked a
+      // total delivery failure as "Done!" in the UI. Documents and run rows
+      // remain in place (rolling them back is out of scope for this patch);
+      // the UI will show "Send Failed" with the per-recipient reason list.
+      const totalRecipients = Object.keys(emailsByRecipient).length
+      if (totalRecipients > 0 && emailsSent === 0) {
+        return jsonResponse({
+          success: false,
+          error: 'No quote emails were delivered',
+          runs_sent: runs.length,
+          documents_created: createdDocs.length,
+          emails_sent: 0,
+          recipients_attempted: totalRecipients,
+          failed_recipients: failedRecipients,
+          documents: createdDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
+        }, 502, corsHeaders)
+      }
+
       return jsonResponse({
         success: true,
         runs_sent: runs.length,
         documents_created: createdDocs.length,
         emails_sent: emailsSent,
+        recipients_attempted: totalRecipients,
+        failed_recipients: failedRecipients,
         documents: createdDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
       }, 200, corsHeaders)
     }
