@@ -60,15 +60,51 @@ CREATE TABLE IF NOT EXISTS bookings (
   created_at            timestamptz NOT NULL DEFAULT now(),
   updated_at            timestamptz NOT NULL DEFAULT now(),
 
-  -- One active handshake at a time per opportunity. A previous booking
-  -- cancelled / declined / done can coexist with a new one but only one
-  -- in any non-terminal state.
+  -- picked_slot must include the three fields scoring + calendar both
+  -- need to read; enforced because the planning pass is the only writer.
   CONSTRAINT bookings_picked_slot_shape CHECK (
     picked_slot IS NULL OR (
       picked_slot ? 'start_iso' AND picked_slot ? 'end_iso' AND picked_slot ? 'scoper_user_id'
     )
+  ),
+
+  -- State-shape invariants. These catch any code path that tries to
+  -- advance state without populating the row fields the cockpit + audit
+  -- + calendar paths depend on. Caught before apply by Codex stop-time
+  -- review (otherwise a buggy handshake worker could leave a row in
+  -- 'calendar_written' with no google_calendar_event_id and the cockpit
+  -- would render a confirmed booking the customer never sees on the
+  -- scoper's calendar).
+  CONSTRAINT bookings_calendar_written_requires_event_id CHECK (
+    state <> 'calendar_written' OR google_calendar_event_id IS NOT NULL
+  ),
+  CONSTRAINT bookings_confirmed_or_later_requires_picked_slot CHECK (
+    state NOT IN ('confirmed', 'calendar_written') OR picked_slot IS NOT NULL
+  ),
+  CONSTRAINT bookings_windows_received_requires_customer_windows CHECK (
+    state NOT IN ('windows_received', 'awaiting_customer_confirmation', 'confirmed', 'calendar_written')
+    OR customer_windows IS NOT NULL
   )
 );
+
+-- ────────────────────────────────────────────────────────────
+-- ACTIVE-HANDSHAKE INVARIANT (Codex stop-time review fix)
+-- ────────────────────────────────────────────────────────────
+-- Only one bookings row per opportunity_id may be in a non-terminal
+-- state at any time. Multiple terminal rows for the same opportunity
+-- are allowed (historical re-bookings).
+--
+-- Partial unique index because the constraint applies only to the
+-- in-flight rows; calendar_written / cancelled / declined are
+-- archival and may pile up over time.
+--
+-- A buggy worker that tries to start a second handshake for an
+-- opportunity that already has an in-flight one will trip this with a
+-- unique violation rather than silently spamming the customer twice.
+
+CREATE UNIQUE INDEX IF NOT EXISTS bookings_one_active_per_opportunity
+  ON bookings (opportunity_id)
+  WHERE state NOT IN ('calendar_written', 'cancelled', 'declined');
 
 COMMENT ON TABLE bookings IS
   'JARVIS booking handshake state. One row per attempted handshake. State machine transitions append to bookings_events.';
