@@ -1299,6 +1299,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await jobDetail(client, jid, { slim }))
       }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
+      case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))
       case 'list_pos': return json(await listPOs(client, url.searchParams))
@@ -4341,6 +4342,154 @@ async function listInvoices(client: any, params: URLSearchParams) {
     .reduce((s: number, i: any) => s + (i.amount_due || 0), 0)
 
   return { invoices: data || [], total: count || 0, summary: { outstanding, overdue, total: count || 0 } }
+}
+
+// ── Finance Health summary (read-only) ──
+// Backs the ops.html "Finance Health" tab. Surfaces invoice-data-quality
+// holes documented in the 2026-05-05 invoice-creation audit (cio/operations/
+// board/Finance-AI-First/finance-loop0-signoff/invoice-creation-audit.md §6).
+// SELECT-only: no mutation of any row.
+async function financeHealthSummary(client: any, params: URLSearchParams) {
+  const limit = Math.min(parseInt(params.get('limit') || '50'), 200)
+  const orgFilter = (q: any) => q.eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCREC')
+
+  // Headline ACCREC count
+  const { count: totalAccrec } = await orgFilter(
+    client.from('xero_invoices').select('id', { count: 'exact', head: true })
+  )
+
+  // ── Card 1: division-tag holes (AccountCode missing OR Tracking missing) ──
+  // Inspect line_items JSON in TypeScript because PostgREST cannot express
+  // a per-array-element check across all active ACCREC.
+  const { data: activeLines } = await orgFilter(
+    client.from('xero_invoices')
+      .select('xero_invoice_id, invoice_number, contact_name, total, status, invoice_date, reference, line_items')
+      .not('status', 'in', '("VOIDED","DELETED")')
+      .not('line_items', 'is', null)
+  )
+
+  let card1TotalLines = 0
+  const card1Offenders: any[] = []
+  const today = new Date()
+  const ageDays = (d: string | null) => d ? Math.floor((today.getTime() - new Date(d).getTime()) / 86400000) : null
+
+  for (const inv of activeLines || []) {
+    const items = Array.isArray(inv.line_items) ? inv.line_items : []
+    if (items.length === 0) continue
+    let invHasHole = false
+    const missing: string[] = []
+    for (const li of items) {
+      card1TotalLines++
+      const noCode = !li.AccountCode
+      const noTrack = !Array.isArray(li.Tracking) || li.Tracking.length === 0
+      if (noCode || noTrack) {
+        invHasHole = true
+        if (noCode && !missing.includes('account_code')) missing.push('account_code')
+        if (noTrack && !missing.includes('tracking')) missing.push('tracking')
+      }
+    }
+    if (invHasHole && card1Offenders.length < limit) {
+      card1Offenders.push({
+        xero_invoice_id: inv.xero_invoice_id,
+        invoice_number: inv.invoice_number,
+        contact_name: inv.contact_name,
+        total: inv.total,
+        status: inv.status,
+        reference: inv.reference,
+        age_days: ageDays(inv.invoice_date),
+        missing,
+      })
+    }
+  }
+  const card1HolesLines = (activeLines || []).reduce((acc: number, inv: any) => {
+    const items = Array.isArray(inv.line_items) ? inv.line_items : []
+    return acc + items.reduce((n: number, li: any) =>
+      n + ((!li.AccountCode || !Array.isArray(li.Tracking) || li.Tracking.length === 0) ? 1 : 0), 0)
+  }, 0)
+
+  // ── Card 2: job-link holes (job_id IS NULL) ──
+  const { count: card2Count } = await orgFilter(
+    client.from('xero_invoices').select('id', { count: 'exact', head: true }).is('job_id', null)
+  )
+  const { data: card2Offenders } = await orgFilter(
+    client.from('xero_invoices')
+      .select('xero_invoice_id, xero_contact_id, invoice_number, reference, contact_name, total, status, invoice_date')
+      .is('job_id', null)
+      .order('invoice_date', { ascending: false })
+      .limit(limit)
+  )
+
+  // ── Card 3: quote-link holes (quote_document_ids missing) ──
+  const { count: card3Count } = await orgFilter(
+    client.from('xero_invoices').select('id', { count: 'exact', head: true }).is('quote_document_ids', null)
+  )
+
+  // ── Card 4: schema integrity (due_date NULL, due_date < invoice_date, reference empty) ──
+  const { count: card4DueDateNull } = await orgFilter(
+    client.from('xero_invoices').select('id', { count: 'exact', head: true }).is('due_date', null)
+  )
+  const { data: card4DueBeforeRows } = await orgFilter(
+    client.from('xero_invoices')
+      .select('xero_invoice_id, invoice_number, status, invoice_date, due_date')
+      .not('due_date', 'is', null)
+      .not('invoice_date', 'is', null)
+  )
+  const card4DueBefore = (card4DueBeforeRows || []).filter((r: any) => r.due_date < r.invoice_date)
+  const { count: card4RefNull } = await orgFilter(
+    client.from('xero_invoices').select('id', { count: 'exact', head: true }).is('reference', null)
+  )
+  const { count: card4RefEmpty } = await orgFilter(
+    client.from('xero_invoices').select('id', { count: 'exact', head: true }).eq('reference', '')
+  )
+  const { data: card4Sample } = await orgFilter(
+    client.from('xero_invoices')
+      .select('xero_invoice_id, invoice_number, status, invoice_date, due_date, reference')
+      .or('due_date.is.null,reference.is.null,reference.eq.')
+      .order('invoice_date', { ascending: false })
+      .limit(limit)
+  )
+  const card4Offenders = [
+    ...(card4Sample || []).map((r: any) => ({
+      ...r,
+      issue: r.due_date == null
+        ? 'due_date_null'
+        : (r.reference == null || r.reference === ''
+            ? 'reference_empty'
+            : 'unknown'),
+    })),
+    ...card4DueBefore.slice(0, limit).map((r: any) => ({ ...r, issue: 'due_date_before_invoice_date' })),
+  ]
+
+  return {
+    as_of: new Date().toISOString(),
+    total_accrec: totalAccrec || 0,
+    card1_division_tag_holes: {
+      total_active_lines: card1TotalLines,
+      lines_with_hole: card1HolesLines,
+      percentage: card1TotalLines > 0 ? Math.round((card1HolesLines / card1TotalLines) * 1000) / 10 : 0,
+      offenders: card1Offenders,
+    },
+    card2_job_link_holes: {
+      total_accrec: totalAccrec || 0,
+      missing_job_id: card2Count || 0,
+      percentage: (totalAccrec || 0) > 0 ? Math.round(((card2Count || 0) / (totalAccrec || 0)) * 1000) / 10 : 0,
+      offenders: (card2Offenders || []).map((r: any) => ({
+        ...r,
+        age_days: ageDays(r.invoice_date),
+      })),
+    },
+    card3_quote_link_holes: {
+      total_accrec: totalAccrec || 0,
+      missing_quote_link: card3Count || 0,
+      percentage: (totalAccrec || 0) > 0 ? Math.round(((card3Count || 0) / (totalAccrec || 0)) * 1000) / 10 : 0,
+    },
+    card4_schema_integrity: {
+      due_date_null: card4DueDateNull || 0,
+      due_date_before_invoice_date: card4DueBefore.length,
+      reference_null_or_empty: (card4RefNull || 0) + (card4RefEmpty || 0),
+      offenders: card4Offenders,
+    },
+  }
 }
 
 async function listQuotes(client: any, params: URLSearchParams) {
