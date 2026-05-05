@@ -1669,10 +1669,41 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'approve_invoice': {
         const aid = body.xero_invoice_id
         if (!aid) return json({ error: 'xero_invoice_id required' }, 400)
+
+        // H3 (Loop 1B-a): capture previous status + linked job for the business_events row.
+        const { data: aPrevInv } = await client.from('xero_invoices')
+          .select('status, total, invoice_number, job_id')
+          .eq('xero_invoice_id', aid)
+          .maybeSingle()
+        const aPreviousStatus = aPrevInv?.status || 'UNKNOWN'
+
         const { accessToken: aAt, tenantId: aTi } = await getToken(client)
         const aRes = await xeroPost(`/Invoices/${aid}`, aAt, aTi, { Invoices: [{ InvoiceID: aid, Status: 'AUTHORISED' }] }, 'POST')
         const approved = aRes?.Invoices?.[0]
         await client.from('xero_invoices').update({ status: 'AUTHORISED', updated_at: new Date().toISOString() }).eq('xero_invoice_id', aid)
+
+        // H3: write business_events.invoice.authorised — mirrors void_invoice's existing pattern.
+        // Wrapped in try/catch so a business_events outage does not break the customer-side AUTHORISE.
+        try {
+          await client.from('business_events').insert({
+            event_type: 'invoice.authorised',
+            source: 'ops-api/approve_invoice',
+            entity_type: 'invoice',
+            entity_id: aid,
+            job_id: aPrevInv?.job_id || null,
+            correlation_id: aPrevInv?.job_id || null,
+            payload: {
+              previous_status: aPreviousStatus,
+              new_status: 'AUTHORISED',
+              invoice_number: aPrevInv?.invoice_number || approved?.InvoiceNumber || null,
+              total: aPrevInv?.total ?? approved?.Total ?? null,
+            },
+            metadata: { operator: body.operator_email || null },
+          })
+        } catch (e) {
+          console.log('[ops-api] business_events insert failed (approve_invoice):', (e as Error).message)
+        }
+
         return json({ success: true, status: 'AUTHORISED', invoice_number: approved?.InvoiceNumber })
       }
       case 'send_invoice_email': {
@@ -1715,6 +1746,13 @@ if (import.meta.main) serve(async (req: Request) => {
         })
         if (!asVerify.ok) return asVerify.response
 
+        // H3 (Loop 1B-a): capture previous status + linked job for the business_events row.
+        const { data: asPrevInv } = await client.from('xero_invoices')
+          .select('status, total, invoice_number, job_id')
+          .eq('xero_invoice_id', asId)
+          .maybeSingle()
+        const asPreviousStatus = asPrevInv?.status || 'UNKNOWN'
+
         // 1. Approve: DRAFT → AUTHORISED
         const { accessToken: asAt, tenantId: asTi } = await getToken(client)
         const asRes = await xeroPost(`/Invoices/${asId}`, asAt, asTi, { Invoices: [{ InvoiceID: asId, Status: 'AUTHORISED' }] }, 'POST')
@@ -1724,6 +1762,27 @@ if (import.meta.main) serve(async (req: Request) => {
 
         // Update local record
         await client.from('xero_invoices').update({ status: 'AUTHORISED', updated_at: new Date().toISOString() }).eq('xero_invoice_id', asId)
+
+        // H3 (Loop 1B-a): write business_events.invoice.authorised — same shape as approve_invoice.
+        try {
+          await client.from('business_events').insert({
+            event_type: 'invoice.authorised',
+            source: 'ops-api/approve_and_send_invoice',
+            entity_type: 'invoice',
+            entity_id: asId,
+            job_id: asPrevInv?.job_id || null,
+            correlation_id: asPrevInv?.job_id || null,
+            payload: {
+              previous_status: asPreviousStatus,
+              new_status: 'AUTHORISED',
+              invoice_number: asPrevInv?.invoice_number || asInvNumber || null,
+              total: asPrevInv?.total ?? asTotal ?? null,
+            },
+            metadata: { operator: body.operator_email || null },
+          })
+        } catch (e) {
+          console.log('[ops-api] business_events insert failed (approve_and_send_invoice):', (e as Error).message)
+        }
 
         // 2. Get OnlineInvoiceUrl for payment link
         let asPaymentUrl = ''
@@ -6566,9 +6625,11 @@ async function createInvoice(client: any, body: any) {
         invoice_date: new Date().toISOString().slice(0, 10),
         due_date: due_date || dueDate || null,
         job_id: jId || null,
-        job_contact_id: job_contact_id || null,
+        // H1 (Loop 1B-a): job_contact_id and reference_suffix removed from upsert because those
+        // columns do not exist on xero_invoices. They are silently dropped by Postgrest today.
+        // Re-added by Loop 1B-a-apply once the traceability migration adds them as real columns.
+        // See cio/operations/board/Finance-AI-First/finance-loop0-signoff/loop-1b-a-migration-design.md.
         run_label: body.run_label || null,
-        reference_suffix: (reference || '').includes('-') ? (reference || '').split('-').slice(2).join('-') || null : null,
         synced_at: new Date().toISOString(),
       }, { onConflict: 'org_id,xero_invoice_id' })
     } catch (upsertErr: any) {
@@ -6714,6 +6775,34 @@ async function updateInvoice(client: any, body: any) {
 
   const { accessToken, tenantId } = await getToken(client)
 
+  // H2 (Loop 1B-a): re-derive Tracking from the invoice's reference so edits
+  // do not strip the division tag. Xero POST /Invoices/{id} REPLACES the line
+  // items array — without an explicit Tracking entry on each line, every edit
+  // silently drops the Business Unit option. Pattern mirrors createInvoice's
+  // existing fail-soft Tracking lookup (validate against /TrackingCategories,
+  // skip if Xero returns nothing or throws).
+  let updateTracking: any[] = []
+  try {
+    const { data: invForTracking } = await client.from('xero_invoices')
+      .select('reference')
+      .eq('xero_invoice_id', xero_invoice_id)
+      .maybeSingle()
+    const updateRef = invForTracking?.reference || ''
+    if (updateRef) {
+      const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
+      const divisionCat = (trackingCats?.TrackingCategories || []).find(
+        (tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE'
+      )
+      if (divisionCat) {
+        const optionName = trackingCategoryForJob(updateRef)
+        const validOption = (divisionCat.Options || []).find(
+          (o: any) => o.Name === optionName && o.Status === 'ACTIVE'
+        )
+        if (validOption) updateTracking = [{ Name: 'Business Unit', Option: optionName }]
+      }
+    }
+  } catch { /* skip Tracking if lookup fails — same fail-soft as createInvoice */ }
+
   const payload: any = {
     InvoiceID: xero_invoice_id,
     LineItems: line_items.map((li: any) => ({
@@ -6722,6 +6811,7 @@ async function updateInvoice(client: any, body: any) {
       UnitAmount: li.unit_price || 0,
       AccountCode: li.account_code || '200',
       TaxType: 'OUTPUT',
+      ...(updateTracking.length > 0 ? { Tracking: updateTracking } : {}),
     })),
   }
   if (due_date) payload.DueDate = due_date
