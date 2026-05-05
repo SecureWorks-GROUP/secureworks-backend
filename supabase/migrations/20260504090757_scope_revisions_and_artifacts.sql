@@ -2,10 +2,14 @@
 --
 -- Status: APPLIED 2026-05-04 to project kevgrhcjxspbxgovpmfl
 --   Supabase ledger: version=20260504090757 name=scope_revisions_and_artifacts
---   Approval phrase used by Marnin: "apply 20260504000001_scope_revisions_and_artifacts.sql"
---   Promoted out of supabase/migrations/_drafts/ on 2026-05-05 after Codex
---   stop-time review flagged that an applied migration should not stay in
---   the drafts directory.
+--   Filename: was authored as 20260504000001_scope_revisions_and_artifacts.sql
+--     in supabase/migrations/_drafts/. After apply, promoted to
+--     supabase/migrations/ on 2026-05-05 (Codex stop-time review #1) and
+--     then renamed to 20260504090757_scope_revisions_and_artifacts.sql so
+--     the filename prefix matches the Supabase ledger version exactly
+--     (Codex stop-time review #2). Marnin's literal approval phrase
+--     used the original draft name: "apply 20260504000001_scope_revisions_and_artifacts.sql"
+--     — preserved verbatim here for the audit record.
 --
 -- Re-apply safety: this migration is idempotent. CREATE TABLE IF NOT EXISTS,
 -- DROP TRIGGER IF EXISTS + CREATE TRIGGER, INSERT ... ON CONFLICT DO NOTHING
@@ -449,7 +453,7 @@ COMMENT ON COLUMN public.scope_artifacts.spine_event_id IS
   'T7 backref: business_events.id of the scope.artifact_uploaded spine row. NULL until recordEvidence is taught channel=scope artifact events.';
 
 COMMENT ON COLUMN storage.buckets.id IS
-  'Supabase Storage buckets. scope-artifacts (added 20260504000001 draft): private, service-role-only, holds frozen-scope render PNGs, work-order PDFs, quote PDFs, material-order PDFs, GLB exports. Indexed by public.scope_artifacts (sha256 mandatory).';
+  'Supabase Storage buckets. scope-artifacts (added 2026-05-04 by migration scope_revisions_and_artifacts): private, service-role-only, holds frozen-scope render PNGs, work-order PDFs, quote PDFs, material-order PDFs, GLB exports. Indexed by public.scope_artifacts (sha256 mandatory).';
 
 COMMIT;
 

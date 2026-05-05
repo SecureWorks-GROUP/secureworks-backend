@@ -1,15 +1,17 @@
 // Scope-Memory-Saving Loop 1, step 4 — frozen-scope helper primitives.
 //
 // Two pure-ish helpers that own the freeze + clone-to-edit semantics for
-// scope_revisions / scope_artifacts (migration 20260504000001). Both helpers
-// take an injected Supabase client (PostgREST builder shape) so they unit
-// test cleanly against the in-memory mock used elsewhere in supabase/functions
-// and run against the real service-role client when wired through ops-api.
+// scope_revisions / scope_artifacts (migration scope_revisions_and_artifacts,
+// applied 2026-05-04, file: supabase/migrations/20260504090757_scope_revisions_and_artifacts.sql).
+// Both helpers take an injected Supabase client (PostgREST builder shape) so
+// they unit-test cleanly against the in-memory mock used elsewhere in
+// supabase/functions and run against the real service-role client when
+// wired through ops-api.
 //
 // The semantics are the contract that every later phase depends on
 // (V2 release-packet citation, work-order PDF generation, read-only viewer,
 // T7 evidence_refs[]). Once frozen, a revision row is locked by trigger
-// (see migrations/_drafts/20260504000001_scope_revisions_and_artifacts.sql,
+// (see migrations/20260504090757_scope_revisions_and_artifacts.sql,
 // trg_scope_revisions_controlled_immutable). These helpers respect that
 // surface — they never attempt to mutate a frozen contract column.
 //

@@ -555,8 +555,9 @@ Deno.test('freezeScope — bad sha256 from a tampered hash function would be rej
   // The trigger guards `scope_hash ~ '^[0-9a-f]{64}$'` and the mock mirrors
   // the regex. We simulate a tampered insert by going around the helper and
   // calling .insert with a non-hex hash directly. This proves the guard
-  // exists at the database layer (per migration 20260504000001) and via the
-  // mock representation that future test cases rely on.
+  // exists at the database layer (per migration scope_revisions_and_artifacts,
+  // file 20260504090757_scope_revisions_and_artifacts.sql) and via the mock
+  // representation that future test cases rely on.
   const client = makeMockClient({})
   let threw = false
   try {

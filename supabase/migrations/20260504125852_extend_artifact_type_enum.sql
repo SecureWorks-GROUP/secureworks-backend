@@ -3,10 +3,14 @@
 --
 -- Status: APPLIED 2026-05-04 to project kevgrhcjxspbxgovpmfl
 --   Supabase ledger: version=20260504125852 name=extend_artifact_type_enum
---   Approval phrase used by Marnin: "apply 20260504000002_extend_artifact_type_enum.sql"
---   Promoted out of supabase/migrations/_drafts/ on 2026-05-05 alongside
---   companion 20260504000001 after Codex stop-time review flagged that an
---   applied migration should not stay in the drafts directory.
+--   Filename: was authored as 20260504000002_extend_artifact_type_enum.sql
+--     in supabase/migrations/_drafts/. After apply, promoted to
+--     supabase/migrations/ on 2026-05-05 (Codex stop-time review #1) and
+--     then renamed to 20260504125852_extend_artifact_type_enum.sql so the
+--     filename prefix matches the Supabase ledger version exactly (Codex
+--     stop-time review #2). Marnin's literal approval phrase used the
+--     original draft name: "apply 20260504000002_extend_artifact_type_enum.sql"
+--     — preserved verbatim here for the audit record.
 --
 -- Re-apply safety: idempotent. The migration DROPs the existing CHECK
 -- constraint and re-ADDs it with the extended value list (every prior value
@@ -16,7 +20,7 @@
 --
 -- Roadmap : cio/operations/board/Scope-Memory-Saving/scope-freeze-end-to-end/roadmap.md (step 5)
 -- Strategy: strategy/scope-freeze-lifecycle-evidence.md (Loop 0 §3-§4)
--- Companion: 20260504000001_scope_revisions_and_artifacts.sql (the substrate this extends)
+-- Companion: 20260504090757_scope_revisions_and_artifacts.sql (the substrate this extends; renamed from the original 20260504000001_*.sql draft per the same Codex review)
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Why
@@ -100,17 +104,17 @@
 --   -- BEFORE rolling back.
 --
 -- ─────────────────────────────────────────────────────────────────────────────
--- Apply notes (NOT executed by this file)
+-- Apply notes (historical — this migration HAS BEEN APPLIED; see Status block)
 -- ─────────────────────────────────────────────────────────────────────────────
--- 1. Approval phrase: "apply 20260504000002_extend_artifact_type_enum.sql"
--- 2. Apply via the same path used for 20260504000001:
---    mcp__claude_ai_Supabase__apply_migration with name
---    'extend_artifact_type_enum'.
--- 3. Postflight verification (read-only):
---      SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
---      WHERE conname = 'scope_artifacts_artifact_type_check';
---    Expect a CHECK definition that includes 'render_gutter_detail' and
---    'render_ridge_detail' alongside the existing 14 values.
+-- The pre-apply approval phrase Marnin used at the protected gate was
+-- "apply 20260504000002_extend_artifact_type_enum.sql", referencing the
+-- original draft filename. Apply was via mcp__claude_ai_Supabase__apply_migration
+-- with name='extend_artifact_type_enum' against project kevgrhcjxspbxgovpmfl.
+-- Postflight verification (read-only):
+--   SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+--   WHERE conname = 'scope_artifacts_artifact_type_check';
+-- — confirmed render_gutter_detail and render_ridge_detail present alongside
+-- the existing 14 values.
 
 BEGIN;
 
@@ -136,7 +140,7 @@ ALTER TABLE public.scope_artifacts
       'material_order_pdf',
       'model_glb',
       'drawing',
-      -- New (added 20260504000002 — Patio gable + gutter detail renders):
+      -- New (added by this migration on 2026-05-04 — Patio gable + gutter detail renders):
       'render_gutter_detail',
       'render_ridge_detail'
     ]::text[])

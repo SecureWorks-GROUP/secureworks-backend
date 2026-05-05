@@ -40,10 +40,12 @@ export type ArtifactType =
   | 'model_glb'
   | 'drawing'
   // Added 2026-05-04 alongside the additive enum migration
-  // 20260504000002_extend_artifact_type_enum.sql so Patio's gable-only
-  // gutter and ridge details can persist with proper semantics rather than
-  // being lossy-mapped onto 'drawing'. ridge is gable-only (the patio code
-  // only emits ridgeDetail when the roof style is gable).
+  // extend_artifact_type_enum (file:
+  // supabase/migrations/20260504125852_extend_artifact_type_enum.sql) so
+  // Patio's gable-only gutter and ridge details can persist with proper
+  // semantics rather than being lossy-mapped onto 'drawing'. ridge is
+  // gable-only (the patio code only emits ridgeDetail when the roof style
+  // is gable).
   | 'render_gutter_detail'
   | 'render_ridge_detail'
 
