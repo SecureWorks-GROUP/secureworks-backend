@@ -78,8 +78,12 @@ CREATE TABLE IF NOT EXISTS bookings (
   CONSTRAINT bookings_calendar_written_requires_event_id CHECK (
     state <> 'calendar_written' OR google_calendar_event_id IS NOT NULL
   ),
-  CONSTRAINT bookings_confirmed_or_later_requires_picked_slot CHECK (
-    state NOT IN ('confirmed', 'calendar_written') OR picked_slot IS NOT NULL
+  -- M2 carries the picked slot. We cannot be 'awaiting_customer_confirmation'
+  -- without picked_slot (the planning pass that produced M2 fills it). And
+  -- 'confirmed' / 'calendar_written' inherit the same requirement.
+  CONSTRAINT bookings_picked_slot_required_after_planning CHECK (
+    state NOT IN ('awaiting_customer_confirmation', 'confirmed', 'calendar_written')
+    OR picked_slot IS NOT NULL
   ),
   CONSTRAINT bookings_windows_received_requires_customer_windows CHECK (
     state NOT IN ('windows_received', 'awaiting_customer_confirmation', 'confirmed', 'calendar_written')
