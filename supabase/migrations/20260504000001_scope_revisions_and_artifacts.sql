@@ -1,7 +1,16 @@
--- Scope-Memory-Saving Loop 1 — scope_revisions + scope_artifacts substrate (DRAFT — NOT YET APPLIED)
+-- Scope-Memory-Saving Loop 1 — scope_revisions + scope_artifacts substrate
 --
--- Status: draft only. Apply only after explicit Marnin approval naming this
--- migration ("apply 20260504000001_scope_revisions_and_artifacts.sql").
+-- Status: APPLIED 2026-05-04 to project kevgrhcjxspbxgovpmfl
+--   Supabase ledger: version=20260504090757 name=scope_revisions_and_artifacts
+--   Approval phrase used by Marnin: "apply 20260504000001_scope_revisions_and_artifacts.sql"
+--   Promoted out of supabase/migrations/_drafts/ on 2026-05-05 after Codex
+--   stop-time review flagged that an applied migration should not stay in
+--   the drafts directory.
+--
+-- Re-apply safety: this migration is idempotent. CREATE TABLE IF NOT EXISTS,
+-- DROP TRIGGER IF EXISTS + CREATE TRIGGER, INSERT ... ON CONFLICT DO NOTHING
+-- on the storage bucket. A `supabase db push` against a fresh branch that
+-- replays the migration will no-op safely against the existing schema.
 --
 -- Roadmap : cio/operations/board/Scope-Memory-Saving/scope-freeze-end-to-end/roadmap.md (steps 1-3)
 -- Strategy: strategy/scope-freeze-lifecycle-evidence.md (Loop 0 deliverable, §3-§4 SQL appendices)

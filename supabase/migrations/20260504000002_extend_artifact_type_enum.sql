@@ -1,8 +1,18 @@
 -- Scope-Memory-Saving Loop 1, step 5 / Gate 1a — extend scope_artifacts.artifact_type
--- to cover Patio's gutter and ridge canonical renders (DRAFT — NOT YET APPLIED)
+-- to cover Patio's gutter and ridge canonical renders
 --
--- Status: draft only. Apply only after explicit Marnin approval naming this
--- migration ("apply 20260504000002_extend_artifact_type_enum.sql").
+-- Status: APPLIED 2026-05-04 to project kevgrhcjxspbxgovpmfl
+--   Supabase ledger: version=20260504125852 name=extend_artifact_type_enum
+--   Approval phrase used by Marnin: "apply 20260504000002_extend_artifact_type_enum.sql"
+--   Promoted out of supabase/migrations/_drafts/ on 2026-05-05 alongside
+--   companion 20260504000001 after Codex stop-time review flagged that an
+--   applied migration should not stay in the drafts directory.
+--
+-- Re-apply safety: idempotent. The migration DROPs the existing CHECK
+-- constraint and re-ADDs it with the extended value list (every prior value
+-- preserved + render_gutter_detail + render_ridge_detail). A `supabase db
+-- push` against a fresh branch that replays this migration arrives at the
+-- same constraint shape.
 --
 -- Roadmap : cio/operations/board/Scope-Memory-Saving/scope-freeze-end-to-end/roadmap.md (step 5)
 -- Strategy: strategy/scope-freeze-lifecycle-evidence.md (Loop 0 §3-§4)
