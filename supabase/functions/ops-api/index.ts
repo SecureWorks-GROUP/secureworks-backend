@@ -6085,37 +6085,53 @@ async function createWorkOrder(client: any, body: any) {
   }
 
   // ── Scope-Memory-Saving Loop 1, step 7 ──
-  // When the caller supplies scope_revision_id, the WO row is bound to a
-  // frozen revision and scope_items is sourced from the canonical bytes
-  // of that revision rather than from caller-supplied JSON. This is the
-  // strategy doc § 6 step 6 hard rule: no work order generated from
-  // mutable jobs.scope_json when a frozen revision is cited.
+  // When the caller supplies scope_revision_id, the WO row is BOUND to a
+  // frozen revision via the new work_orders.scope_revision_id FK column.
+  // The strategy doc § 6 step 6 hard rule — "no work order generated from
+  // mutable jobs.scope_json when a frozen revision is cited" — applies to
+  // the WO PDF GENERATOR (which reads frozen scope/pricing/artifacts via
+  // load_frozen_work_order_inputs.ts). It does NOT apply to the
+  // work_orders.scope_items column shape: scope_items is a free-form jsonb
+  // array that downstream readers (reporting-api, ops-api list_work_orders,
+  // trade-api, etc.) iterate via .reduce / array indexing. Codex stop-time
+  // review caught that overwriting scope_items with the parsed scope_json
+  // (a plain object, not an array) would crash any downstream consumer
+  // that calls .reduce on it.
   //
-  // When scope_revision_id is null/absent, behaviour is unchanged —
-  // the row continues to carry caller-supplied scope_items. Pre-step-7
-  // callers (and the tools until they wire the new field) keep working.
+  // So this branch:
+  //   * keeps scope_items as the caller-supplied array shape (legacy contract),
+  //   * persists scope_revision_id + quote_revision_id as the AUTHORITATIVE
+  //     citation (any consumer that wants the frozen content reads it via
+  //     load_frozen_work_order_inputs(scope_revision_id)),
+  //   * still validates the caller's scope_revision_id (cross-job guard,
+  //     superseded refusal, integrity check) before persisting the row,
+  //   * still surfaces the citation + frozen metadata in the wo.created
+  //     business_event payload so T7 readers can index without a join.
+  //
+  // When scope_revision_id is null/absent, behaviour is identical to before.
   const scopeRevisionId: string | null = body.scope_revision_id || body.scopeRevisionId || null
   const quoteRevisionId: string | null = body.quote_revision_id || body.quoteRevisionId || null
 
-  let resolvedScopeItems: unknown = body.scope_items || body.scopeItems || []
+  // scope_items: array-shaped per the existing column contract. Callers
+  // (typically the dashboard / securedash UI) build this array; the WO
+  // PDF generator uses load_frozen_work_order_inputs separately when it
+  // needs the canonical frozen content.
+  const resolvedScopeItems: unknown = body.scope_items || body.scopeItems || []
   let frozenWoMetadata: Record<string, unknown> | null = null
 
   if (scopeRevisionId) {
     // Pass job_id through so the helper enforces the cross-job guard.
     // Without this, a caller mixing job_id=JOB-A with scope_revision_id
-    // from JOB-B would create a WO whose scope_items describe a different
-    // customer's project. Codex stop-time review caught this; the helper
-    // returns code='cross_job_mismatch' on divergence.
+    // from JOB-B would create a WO bound to JOB-A but citing JOB-B's
+    // frozen scope. The helper returns code='cross_job_mismatch' on
+    // divergence; we surface it as HTTP 409.
     const frozen = await _loadFrozenWorkOrderInputs(client, {
       scope_revision_id: scopeRevisionId,
       job_id: jId,
     })
     if (!frozen.ok) {
-      // No silent fallback to jobs.scope_json. Surface the error so the
-      // caller can decide (refreeze, retry with the correct job, or fall
-      // back to legacy mode by omitting scope_revision_id).
       // Throw ApiError so the outer ops-api catch preserves the HTTP status
-      // (instanceof ApiError check at line ~3494). Plain Error gets 500.
+      // (instanceof ApiError check at line ~3494). Plain Error → generic 500.
       const httpHint =
         frozen.error.code === 'scope_revision_not_found' ? 404
         : frozen.error.code === 'cross_job_mismatch' ? 409
@@ -6129,16 +6145,19 @@ async function createWorkOrder(client: any, body: any) {
       )
     }
     if (frozen.status !== 'frozen') {
-      // The helper allows superseded for read-only viewer use, but ops-api
-      // create_work_order MUST refuse superseded sources — operators should
-      // re-freeze (or cite the latest frozen revision) before generating a
-      // new WO at a stale point in history.
+      // The helper allows superseded for read-only viewer use (step 8),
+      // but ops-api create_work_order MUST refuse superseded sources —
+      // operators should re-freeze (or cite the latest frozen revision)
+      // before generating a new WO at a stale point in history.
       throw new ApiError(
         `scope_revision_id ${scopeRevisionId} has status='${frozen.status}'; only 'frozen' revisions can back a new work order. Re-freeze the latest scope before generating a new WO.`,
         409,
       )
     }
-    resolvedScopeItems = frozen.scope_json
+    // Capture the citation metadata for the business_event payload. The
+    // WO row itself binds to the frozen revision via scope_revision_id;
+    // T7 readers can dereference back to scope/pricing/artifacts via
+    // load_frozen_work_order_inputs without ever touching jobs.scope_json.
     frozenWoMetadata = {
       revision_number: frozen.revision_number,
       tool_kind: frozen.tool_kind,
