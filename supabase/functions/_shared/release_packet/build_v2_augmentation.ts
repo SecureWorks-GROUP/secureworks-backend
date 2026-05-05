@@ -138,6 +138,16 @@ export type V2AugmentationInput = {
   // Loop 3 callers pass empty placeholders; the validator warns.
   pdf_sha256: string
   email_html_sha256: string
+
+  // Scope-Memory-Saving Loop 1, step 6 — citation of the frozen
+  // scope_revisions row that this release packet describes. The send-quote
+  // caller looks up the latest frozen revision for the job and passes its
+  // id here for non-Quick-Quote releases. Quick Quote remains a documented
+  // shortcut path and passes null. Backward compatible: nullable everywhere.
+  // No validator hard-block in this leg; Cap 0 V2 enforce-mode (separate
+  // future gate) is what would refuse non-Quick-Quote releases lacking
+  // this id.
+  scope_revision_id?: string | null
 }
 
 // ── Output: column values for the same INSERT as V1 ────────────────────────
@@ -167,6 +177,11 @@ export type V2AugmentationResult = {
   // for the canonical event without re-deriving.
   manifest_hash: string
   release_id: string
+  // Scope-Memory-Saving step 6 — echo of the citation that landed in the
+  // sealed packet. Caller forwards this into the V2 sealed business event
+  // payload so T7 can index releases by scope_revision_id without parsing
+  // the canonical text.
+  scope_revision_id: string | null
   // Warnings for log/observation.
   hard_blockers_passed: string[]
   soft_warnings: string[]
@@ -358,6 +373,7 @@ export async function buildV2Augmentation(
     provenance,
     option_label: null,
     superseded_by_revision_id: null,
+    scope_revision_id: input.scope_revision_id ?? null,
     overrides: [],
     override_operator_allowlist: input.override_operator_allowlist,
     mode: 'warn',
@@ -427,6 +443,7 @@ export async function buildV2Augmentation(
     manifest_canonical_text: built.manifest_canonical_text,
     manifest_hash: built.manifest_hash,
     release_id: input.release_id,
+    scope_revision_id: built.manifest.scope_revision_id,
     hard_blockers_passed: built.hard_blockers_passed,
     soft_warnings: built.soft_warnings,
   }
@@ -450,6 +467,11 @@ export type V2SealedEventInput = {
   manifest_hash: string
   internal_cost_hash: string
   released_via: ReleasedVia
+  // Scope-Memory-Saving step 6 — echo of the frozen scope revision id this
+  // packet cites. Optional so older callers (and Quick Quote) keep working;
+  // T7 evidence_refs[] consumers can scan business_events for releases that
+  // cite a specific scope_revision_id without parsing the canonical text.
+  scope_revision_id?: string | null
 }
 
 export async function emitV2SealedEvent(
@@ -475,6 +497,7 @@ export async function emitV2SealedEvent(
         internal_cost_hash: input.internal_cost_hash,
         released_via: input.released_via,
         v2_schema_version: '2.0',
+        scope_revision_id: input.scope_revision_id ?? null,
       },
       metadata: {
         handler: input.released_via,

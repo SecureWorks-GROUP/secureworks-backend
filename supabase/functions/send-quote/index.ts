@@ -28,6 +28,11 @@ import {
   emitV2SealedEvent,
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
+// Scope-Memory-Saving step 6 — hash-verified citation. Replaces the naive
+// "latest frozen id" lookup so the V2 packet only cites a frozen revision
+// when the live scope+pricing actually match its hashes (no false citation
+// after operator edits).
+import { resolveScopeRevisionCitation } from '../_shared/release_packet/resolve_scope_revision_citation.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -45,6 +50,60 @@ const QUOTE_VIEWER_BASE = Deno.env.get('QUOTE_VIEWER_URL') || 'https://securewor
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
+
+// ── Scope-Memory-Saving step 6 ──
+// Resolves the verified scope_revision_id citation for a job at quote-send
+// time. Wraps resolveScopeRevisionCitation with the soft-warn logging the
+// rest of send-quote uses: any DB error, hash mismatch, or "no frozen
+// revision yet" results in null + a structured log line, never a thrown
+// error or a release-truth regression.
+//
+// Why hash verification: Codex stop-time review (2026-05-04) flagged that
+// citing the bare "latest frozen revision id" could be a lie when the
+// operator has since edited jobs.scope_json (clone-then-edit-without-
+// re-freeze, or a direct save_scope path). Citing only when both
+// scope_hash and pricing_hash match the live values keeps the citation
+// truthful: if scope_revision_id is non-null in the V2 packet, the
+// scope_snapshot/pricing_snapshot in the same packet canonical-hash
+// to the values recorded on that frozen row.
+async function resolveCitationForRelease(
+  sb: any,
+  args: {
+    job_id: string
+    scope_json: Record<string, unknown> | null
+    pricing_json: Record<string, unknown> | null
+    handler: string
+  },
+): Promise<string | null> {
+  const result = await resolveScopeRevisionCitation(sb, {
+    job_id: args.job_id,
+    scope_json: args.scope_json,
+    pricing_json: args.pricing_json,
+  })
+  if (result.scope_revision_id !== null) return result.scope_revision_id
+
+  // Surface the structured outcome so an operator (and any later T7 audit)
+  // can spot when a release shipped without a verified citation.
+  if (result.reason === 'scope_hash_mismatch' || result.reason === 'pricing_hash_mismatch') {
+    console.warn('[scope-revision-stale-citation-skipped]', JSON.stringify({
+      job_id: args.job_id,
+      handler: args.handler,
+      reason: result.reason,
+      detail: result.detail ?? {},
+      note: 'Live scope or pricing has drifted from the latest frozen revision. V2 packet ships with scope_revision_id=null. Operator should re-freeze to re-establish citation.',
+    }))
+  } else if (result.reason === 'db_error' || result.reason === 'hash_error') {
+    console.error('[scope-revision-lookup-fail]', JSON.stringify({
+      job_id: args.job_id,
+      handler: args.handler,
+      reason: result.reason,
+      detail: result.detail ?? {},
+      note: 'V2 packet will cite scope_revision_id=null; V1 release-truth proceeds',
+    }))
+  }
+  // 'no_frozen_revision' / 'no_jobs_input' are routine — no log needed.
+  return null
+}
 
 // ── Reply-to routing: fencing jobs → fencing@, everything else → patios@ ──
 function getClientReplyTo(jobType: string | null, jobNumber?: string): string {
@@ -378,7 +437,7 @@ async function recordReleasedQuoteRevision(
     const releaseId = crypto.randomUUID()
 
     let v2Cols: Record<string, unknown> = {}
-    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null = null
+    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string; scope_revision_id: string | null } | null = null
     if (input.v2_inputs) {
       try {
         const v2 = await buildV2Augmentation(sb, {
@@ -402,6 +461,7 @@ async function recordReleasedQuoteRevision(
           v2EmitInputs = {
             manifest_hash: v2.manifest_hash,
             internal_cost_hash: v2.internal_cost_hash,
+            scope_revision_id: v2.scope_revision_id,
           }
           if (v2.soft_warnings.length > 0) {
             console.log('[v2-soft-warnings]', JSON.stringify({
@@ -476,6 +536,7 @@ async function recordReleasedQuoteRevision(
           manifest_hash: v2EmitInputs.manifest_hash,
           internal_cost_hash: v2EmitInputs.internal_cost_hash,
           released_via: input.released_via,
+          scope_revision_id: v2EmitInputs.scope_revision_id,
         })
       }
       return inserted.id
@@ -737,7 +798,11 @@ serve(async (req: Request) => {
           // V2 columns NULL and the V1 release-truth path proceeds untouched.
           let v2Inputs: Omit<V2AugmentationInput, 'release_id'> | null = null
           try {
-            const [{ data: fullJobRow }, { data: contactRows }, { data: mediaRows }] = await Promise.all([
+            const [
+              { data: fullJobRow },
+              { data: contactRows },
+              { data: mediaRows },
+            ] = await Promise.all([
               sb.from('jobs')
                 .select('id, type, org_id, client_name, client_email, client_phone, site_address, site_suburb, site_lat, site_lng, job_number, ghl_contact_id, xero_contact_id, scope_json, pricing_json, notes, created_by')
                 .eq('id', doc.job_id).maybeSingle(),
@@ -748,6 +813,17 @@ serve(async (req: Request) => {
                 .select('id, type, phase, storage_url, label, taken_at, lat, lng')
                 .eq('job_id', doc.job_id),
             ])
+            // Hash-verified citation lookup runs after the jobs row is
+            // available — we need the live scope_json + pricing_json to
+            // canonical-hash and compare against the frozen row's hashes.
+            const verifiedScopeRevisionId = fullJobRow
+              ? await resolveCitationForRelease(sb, {
+                  job_id: doc.job_id,
+                  scope_json: fullJobRow.scope_json ?? null,
+                  pricing_json: fullJobRow.pricing_json ?? null,
+                  handler: 'send-quote/send',
+                })
+              : null
             if (fullJobRow) {
               v2Inputs = {
                 job_id: doc.job_id,
@@ -776,6 +852,16 @@ serve(async (req: Request) => {
                 override_operator_allowlist: [],
                 pdf_sha256: '',
                 email_html_sha256: '',
+                // Scope-Memory-Saving step 6 — non-Quick-Quote release path.
+                // HASH-VERIFIED citation: only set when canonical-hash of the
+                // live scope_json + pricing_json matches the latest frozen
+                // revision's recorded hashes. Drift (e.g. operator edited
+                // jobs.scope_json after freezing without re-freezing) drops
+                // the citation to null with a structured warning instead of
+                // shipping a false claim. Pre-step-5 jobs and jobs with no
+                // frozen revision yet also pass null — V1 release-truth
+                // proceeds either way.
+                scope_revision_id: verifiedScopeRevisionId,
               }
             }
           } catch (e: any) {
@@ -2066,7 +2152,10 @@ serve(async (req: Request) => {
         // ── Loop 3 / P2 V2 augmentation prep (send-runs) ──
         let v2InputsRuns: Omit<V2AugmentationInput, 'release_id'> | null = null
         try {
-          const [{ data: contactRows }, { data: mediaRows }] = await Promise.all([
+          const [
+            { data: contactRows },
+            { data: mediaRows },
+          ] = await Promise.all([
             sb.from('job_contacts')
               .select('id, contact_type, is_primary, contact_label, client_name, client_email, client_phone, assigned_runs, share_percentage')
               .eq('job_id', job.id),
@@ -2074,6 +2163,16 @@ serve(async (req: Request) => {
               .select('id, type, phase, storage_url, label, taken_at, lat, lng')
               .eq('job_id', job.id),
           ])
+          // Hash-verified citation lookup. job is already in scope from the
+          // outer handler; pj is the latest pricing_json computed earlier in
+          // /send-runs. We canonical-hash both against the latest frozen
+          // revision's recorded hashes.
+          const verifiedScopeRevisionIdRuns = await resolveCitationForRelease(sb, {
+            job_id: job.id,
+            scope_json: ((job as any).scope_json ?? null) as Record<string, unknown> | null,
+            pricing_json: (pj ?? null) as Record<string, unknown> | null,
+            handler: 'send-quote/send-runs',
+          })
           v2InputsRuns = {
             job_id: job.id,
             version: 1,
@@ -2118,6 +2217,13 @@ serve(async (req: Request) => {
             override_operator_allowlist: [],
             pdf_sha256: '',
             email_html_sha256: '',
+            // Scope-Memory-Saving step 6 — non-Quick-Quote release path
+            // (multi-run fence quote). HASH-VERIFIED citation: only set
+            // when canonical-hash of the live scope_json + pricing_json
+            // matches the latest frozen revision's recorded hashes. Drift
+            // drops to null + structured warning rather than a false
+            // claim.
+            scope_revision_id: verifiedScopeRevisionIdRuns,
           }
         } catch (e: any) {
           console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({

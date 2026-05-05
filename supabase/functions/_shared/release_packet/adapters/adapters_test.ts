@@ -909,6 +909,7 @@ function stitchManifestForValidation(output: import('../adapter_interface.ts').A
       },
       option_label: null,
       superseded_by_revision_id: null,
+      scope_revision_id: null,
     },
     internal_cost: {
       ...output.internal_cost,
@@ -951,6 +952,7 @@ async function runFullBuilderWithOverride(
     provenance: stitched.manifest.provenance,
     option_label: null,
     superseded_by_revision_id: null,
+    scope_revision_id: null,
     overrides,
     override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
   }

@@ -340,7 +340,7 @@ async function recordReleasedQuoteRevision(
     const releaseId = crypto.randomUUID()
 
     let v2Cols: Record<string, unknown> = {}
-    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null = null
+    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string; scope_revision_id: string | null } | null = null
     if (input.v2_inputs) {
       try {
         const v2 = await buildV2Augmentation(sb, {
@@ -364,6 +364,7 @@ async function recordReleasedQuoteRevision(
           v2EmitInputs = {
             manifest_hash: v2.manifest_hash,
             internal_cost_hash: v2.internal_cost_hash,
+            scope_revision_id: v2.scope_revision_id,
           }
           if (v2.soft_warnings.length > 0) {
             console.log('[v2-soft-warnings]', JSON.stringify({
@@ -430,6 +431,7 @@ async function recordReleasedQuoteRevision(
           manifest_hash: v2EmitInputs.manifest_hash,
           internal_cost_hash: v2EmitInputs.internal_cost_hash,
           released_via: input.released_via,
+          scope_revision_id: v2EmitInputs.scope_revision_id,
         })
       }
       return inserted.id
@@ -1517,7 +1519,7 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'scope_revision_id required' }, 400)
         }
         if (!_isArtifactType(body.artifact_type)) {
-          return json({ error: 'artifact_type required (one of render_hero, render_front, render_side, render_site_plan, render_riser, render_post_detail, render_profile, render_3d_scene, quote_pdf, per_contact_pdf, work_order_pdf, material_order_pdf, model_glb, drawing)' }, 400)
+          return json({ error: 'artifact_type required (one of render_hero, render_front, render_side, render_site_plan, render_riser, render_post_detail, render_profile, render_3d_scene, render_gutter_detail, render_ridge_detail, quote_pdf, per_contact_pdf, work_order_pdf, material_order_pdf, model_glb, drawing)' }, 400)
         }
         const result = await _recordScopeArtifact(client, {
           scope_revision_id,
@@ -7409,6 +7411,12 @@ async function sendQuickQuoteEmail(client: any, body: any) {
         override_operator_allowlist: [],
         pdf_sha256: '',
         email_html_sha256: '',
+        // Scope-Memory-Saving step 6 — Quick Quote is a documented shortcut
+        // path that does NOT go through scope_revisions. The freeze flow is
+        // not invoked for Quick Quote, so there is no frozen revision to
+        // cite. Explicit null here makes the intent obvious to future
+        // readers; build_v2_augmentation accepts null without warning.
+        scope_revision_id: null,
       }
     } catch (e: any) {
       console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({

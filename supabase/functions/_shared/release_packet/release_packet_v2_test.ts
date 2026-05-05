@@ -12,7 +12,7 @@
 // beyond crypto (SHA-256). Run via:
 //   deno test --allow-all supabase/functions/_shared/release_packet/release_packet_v2_test.ts
 
-import { assert, assertEquals, assertRejects } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assert, assertEquals, assertNotEquals, assertRejects } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 
 import { buildFullReleasePacket } from './build_full_release_packet.ts'
 import {
@@ -442,6 +442,97 @@ Deno.test('S5 — superseded_by_revision_id can be null', async () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SR (Scope-Memory-Saving step 6) — scope_revision_id citation
+// ─────────────────────────────────────────────────────────────────────────────
+
+Deno.test('SR1 — scope_revision_id defaults to null when not supplied (Quick Quote / pre-step-6)', async () => {
+  const r = await buildFullReleasePacket(patioInputValid)
+  assert(r.ok)
+  if (!r.ok) return
+  assertEquals(r.manifest.scope_revision_id, null)
+  // Canonical text includes the field with null so the shape is deterministic.
+  const txt = r.manifest_canonical_text
+  assert(txt.includes('"scope_revision_id":null'), 'canonical text should serialize the null field')
+})
+
+Deno.test('SR2 — scope_revision_id appears in V2 manifest + canonical text + hash when supplied', async () => {
+  const REV_ID = '00000000-0000-0000-0000-000000abcdef'
+  const withRev = { ...patioInputValid, scope_revision_id: REV_ID }
+  const r = await buildFullReleasePacket(withRev)
+  assert(r.ok)
+  if (!r.ok) return
+  assertEquals(r.manifest.scope_revision_id, REV_ID)
+  assert(r.manifest_canonical_text.includes(`"scope_revision_id":"${REV_ID}"`),
+    'canonical text should serialize scope_revision_id verbatim')
+  // The hash must differ from the null-revision baseline because the canonical
+  // bytes differ. Pinning this stops a regression where the field is dropped
+  // before canonicalisation.
+  const baseline = await buildFullReleasePacket(patioInputValid)
+  assert(baseline.ok)
+  if (!baseline.ok) return
+  assertNotEquals(r.manifest_hash, baseline.manifest_hash)
+})
+
+Deno.test('SR3 — manifest_hash is stable across V2 envelope key reordering with scope_revision_id present', async () => {
+  // Recursively-canonicalised hashes must be insensitive to the textual order
+  // in which fields appear in the input. The release-packet builder does the
+  // canonicalise on its OWN object construction; this test asserts that two
+  // semantically equivalent inputs hash identically — protecting the
+  // determinism guarantee for scope_revision_id.
+  const REV_ID = '11111111-2222-3333-4444-555555555555'
+  const withRev1 = { ...patioInputValid, scope_revision_id: REV_ID, option_label: null, superseded_by_revision_id: null }
+  const withRev2 = { ...patioInputValid, superseded_by_revision_id: null, option_label: null, scope_revision_id: REV_ID }
+  const a = await buildFullReleasePacket(withRev1)
+  const b = await buildFullReleasePacket(withRev2)
+  assert(a.ok && b.ok)
+  if (!a.ok || !b.ok) return
+  assertEquals(a.manifest_hash, b.manifest_hash)
+})
+
+Deno.test('SR4 — Quick Quote path with scope_revision_id=null is accepted by the validator', async () => {
+  // Quick Quote remains the documented shortcut path; the validator must NOT
+  // refuse a release just because scope_revision_id is null. Soft-warn mode
+  // (the only mode used by ops-api/send-quote in production today) leaves
+  // validation permissive; this test pins it.
+  const qq = { ...qqInputValid, scope_revision_id: null }
+  const r = await buildFullReleasePacket(qq)
+  assert(r.ok, 'Quick Quote without scope_revision_id must build successfully')
+  if (!r.ok) return
+  assertEquals(r.manifest.scope_revision_id, null)
+})
+
+Deno.test('SR5 — V2 packet sealed event payload carries scope_revision_id when supplied (T7-citable)', () => {
+  // Surface-level shape contract for the emitV2SealedEvent input. Confirms
+  // the field is wired all the way to the T7 timeline payload so downstream
+  // evidence_refs[] can index releases by the cited frozen revision without
+  // fetching the canonical text from Storage.
+  // Type-only check: assigning scope_revision_id should compile.
+  const sealedPayload: import('./build_v2_augmentation.ts').V2SealedEventInput = {
+    job_id: 'job-1',
+    quote_revision_id: 'qr-1',
+    release_id: 'rel-1',
+    version: 1,
+    manifest_hash: 'a'.repeat(64),
+    internal_cost_hash: 'b'.repeat(64),
+    released_via: 'send-quote/send',
+    scope_revision_id: 'rev-1',
+  }
+  assertEquals(sealedPayload.scope_revision_id, 'rev-1')
+  // Quick Quote variant — null is also valid.
+  const qqSealedPayload: import('./build_v2_augmentation.ts').V2SealedEventInput = {
+    job_id: 'job-1',
+    quote_revision_id: 'qr-1',
+    release_id: 'rel-1',
+    version: 1,
+    manifest_hash: 'a'.repeat(64),
+    internal_cost_hash: 'b'.repeat(64),
+    released_via: 'ops-api/send_quick_quote_email',
+    scope_revision_id: null,
+  }
+  assertEquals(qqSealedPayload.scope_revision_id, null)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // I: Internal cost privacy + correctness
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -621,6 +712,7 @@ Deno.test('Validator direct — warn mode demotes hard rules to warnings', () =>
     provenance: { tool_name: 'x', tool_version: '1', pricing_engine_version: '1', scoper_user_id: null, scoper_name: null, scoped_at: null },
     option_label: null,
     superseded_by_revision_id: null,
+    scope_revision_id: null,
   }
   const ic: InternalCostSnapshot = {
     schema_version: '2.0', release_id: 'rel-1', job_id: 'job-1', version: 1, captured_at: STUB_RELEASED_AT,

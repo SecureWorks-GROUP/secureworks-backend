@@ -176,6 +176,36 @@ Deno.test('T7-B — V2AugmentationResult surfaces manifest_canonical_text for ca
   assert(result.manifest_canonical_text.length > 0)
 })
 
+Deno.test('SR-A — buildV2Augmentation echoes scope_revision_id back through the result and into the canonical text', async () => {
+  const REV_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  const { fakeSb, uploads } = makeFakeSb()
+  const input = { ...fixtureInput('55555555-5555-5555-5555-555555555555'), scope_revision_id: REV_ID }
+  const result = await buildV2Augmentation(fakeSb, input)
+  assert(result.ok)
+  if (!result.ok) return
+  // Top-level result echoes the value the caller will forward to emitV2SealedEvent.
+  assertEquals(result.scope_revision_id, REV_ID)
+  // Canonical bytes the bucket received include the citation verbatim.
+  const manifestBytes = new TextDecoder().decode(uploads[0].bytes)
+  assert(manifestBytes.includes(`"scope_revision_id":"${REV_ID}"`),
+    'manifest canonical text must contain the cited scope_revision_id')
+})
+
+Deno.test('SR-B — buildV2Augmentation tolerates a missing scope_revision_id (Quick Quote / pre-step-6)', async () => {
+  const { fakeSb, uploads } = makeFakeSb()
+  // Note: omitting scope_revision_id from the input — the field is optional
+  // on V2AugmentationInput so this exercises the default-null path that
+  // ops-api Quick Quote and pre-step-6 send-quote callers exercise today.
+  const input = fixtureInput('66666666-6666-6666-6666-666666666666')
+  const result = await buildV2Augmentation(fakeSb, input)
+  assert(result.ok)
+  if (!result.ok) return
+  assertEquals(result.scope_revision_id, null)
+  const manifestBytes = new TextDecoder().decode(uploads[0].bytes)
+  assert(manifestBytes.includes('"scope_revision_id":null'),
+    'manifest canonical text must serialize scope_revision_id as null when not supplied')
+})
+
 Deno.test('T7-C — Storage upload failure does NOT block the augmentation result', async () => {
   // Best-effort upload contract: V2 column values must still come back
   // even if the bucket is unhappy. Loop 3 stays soft-warn — Loop 4 may
