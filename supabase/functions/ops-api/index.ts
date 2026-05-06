@@ -1819,7 +1819,7 @@ if (import.meta.main) serve(async (req: Request) => {
 
         // Get the invoice + lines + user
         const { data: inv } = await client.from('trade_invoices')
-          .select('*, user:user_id(name, email, abn, default_hourly_rate, payment_terms_days)')
+          .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
           .eq('id', invoice_id)
           .maybeSingle()
         if (!inv) throw new ApiError('Invoice not found', 404)
@@ -1833,15 +1833,20 @@ if (import.meta.main) serve(async (req: Request) => {
         const { accessToken, tenantId } = await getToken(client)
 
         // Resolve Xero contact for the trade
+        // Order: cached users.xero_contact_id -> email lookup -> create.
+        // The cached path lets recovery succeed when the user's Supabase email
+        // does not match the Xero contact's primary EmailAddress.
         const tradeName = inv.user?.name || 'Unknown Trade'
         const tradeEmail = inv.user?.email || ''
-        let xeroContactId = null
+        const cachedContactId: string | null = inv.user?.xero_contact_id || null
+        let xeroContactId: string | null = cachedContactId
 
-        // Search for existing contact
-        try {
-          const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
-          if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
-        } catch (e) { /* fallback to create */ }
+        if (!xeroContactId) {
+          try {
+            const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
+            if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+          } catch (e) { /* fallback to create */ }
+        }
 
         if (!xeroContactId) {
           // Create contact
@@ -1852,6 +1857,11 @@ if (import.meta.main) serve(async (req: Request) => {
         }
 
         if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
+
+        // Cache the resolved ContactID for next time so future runs skip lookup/create.
+        if (xeroContactId && !cachedContactId && inv.user_id) {
+          await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', inv.user_id)
+        }
 
         // Build line items
         const weekNum = Math.ceil((new Date(inv.week_start).getTime() - new Date(new Date(inv.week_start).getFullYear(), 0, 1).getTime()) / (7 * 86400000))
@@ -1869,19 +1879,49 @@ if (import.meta.main) serve(async (req: Request) => {
           if (divisionCat) tracking = divisionCat
         } catch (e) { /* skip tracking */ }
 
+        // trade_invoice_lines come in two shapes:
+        //   - "labour" (legacy): total_hours / hourly_rate populated; quantity/unit_rate may be 0
+        //   - "extras" (current): quantity / unit_rate / line_total_ex populated; total_hours/hourly_rate are 0
+        // The auto-push code path (generate_trade_invoice) reads the request body directly, so it
+        // never hit this. The retry path reads from trade_invoice_lines and must support both shapes
+        // or it pushes $0 bills with empty descriptions for any "extras"-shape invoice.
         const xeroLineItems = (lines || []).map((line: any) => {
-          const desc = (line.job_number || '') + ' ' + (line.client_name || '') + ' — ' + line.total_hours + 'h @ $' + line.hourly_rate + '/hr'
-          const trackingOption = trackingCategoryForJob(line.job_number || '')
+          const hours = Number(line.total_hours || 0)
+          const hRate = Number(line.hourly_rate || 0)
+          const qty = Number(line.quantity || 0)
+          const uRate = Number(line.unit_rate || 0)
+          const isLabour = hours > 0 && hRate > 0
+          const useQty = isLabour ? hours : qty
+          const useRate = isLabour ? hRate : uRate
+          const desc = isLabour
+            ? ((line.job_number || '') + ' ' + (line.client_name || '') + ' — ' + hours + 'h @ $' + hRate + '/hr')
+            : (line.description || ((line.line_type || 'Extra') + (line.division ? ' (' + line.division + ')' : '')))
+          let trackingOption = trackingCategoryForJob(line.job_number || '')
+          if (!trackingOption && line.division) {
+            const divMap: Record<string, string> = {
+              'Patio': 'SW - PATIOS', 'Fencing': 'SW - FENCING', 'Decking': 'SW - DECKING',
+              'Make Safe': 'SW - INSURANCE WORK', 'General Labour': 'SW - GROUP',
+            }
+            trackingOption = divMap[line.division] || ''
+          }
           const lineTracking = tracking && trackingOption ? [{ Name: 'Business Unit', Option: trackingOption }] : []
           return {
             Description: desc,
-            Quantity: line.total_hours,
-            UnitAmount: line.hourly_rate,
+            Quantity: useQty,
+            UnitAmount: useRate,
             AccountCode: '620', // Subcontractor expense
             TaxType: 'INPUT',
             Tracking: lineTracking,
           }
         })
+
+        // Reconciliation guard: if computed line subtotal disagrees with the parent invoice's
+        // subtotal_ex, abort BEFORE touching Xero. Catches schema drift / bad line shape.
+        const computedSubtotal = xeroLineItems.reduce((sum: number, li: any) => sum + (Number(li.Quantity) * Number(li.UnitAmount)), 0)
+        const expectedSubtotal = Number(inv.subtotal_ex || 0)
+        if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
+          throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
+        }
 
         const xeroPayload = {
           Invoices: [{
@@ -3031,12 +3071,13 @@ if (import.meta.main) serve(async (req: Request) => {
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
             let xeroBillId = null
             let xeroBillNumber = null
+            // Declared outside the try so the catch block can record which phase failed.
+            let xeroContactId: string | null = null
             try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
               // Resolve Xero supplier contact (search by email, create if not found)
-              let xeroContactId = null
               try {
                 const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
                 if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
@@ -3142,7 +3183,27 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
               }
             } catch (e) {
-              console.log('[ops-api] Xero auto-push failed (non-blocking):', (e as Error).message)
+              const errMsg = (e as Error).message
+              console.log('[ops-api] Xero auto-push failed (non-blocking):', errMsg)
+              // Persist the failure so admin has an audit trail (the user-visible
+              // "Saved locally — admin will sync manually" message used to be the
+              // ONLY signal that the push failed). Non-blocking — invoice insert is
+              // already committed; we want the response to keep being 200.
+              try {
+                await client.from('business_events').insert({
+                  event_type: 'trade.xero_push_failed',
+                  source: 'ops-api/generate_trade_invoice',
+                  entity_type: 'trade_invoice',
+                  entity_id: invoice.id,
+                  payload: {
+                    invoice_number: invoiceNumber,
+                    user_id: tradeUser.id,
+                    error_message: errMsg,
+                    error_phase: xeroContactId ? 'bill_creation' : 'contact_resolution',
+                  },
+                  schema_version: '1.0',
+                })
+              } catch (logErr) { console.log('[ops-api] Failed to record xero_push_failed event:', (logErr as Error).message) }
             }
 
             return json({ success: true, invoice_id: invoice.id, invoice_number: invoiceNumber, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length + extraLineItems.length, xero_bill_id: xeroBillId, xero_bill_number: xeroBillNumber, xero_warning: !xeroBillId ? 'Invoice saved but could not push to Xero — admin will push manually' : undefined })
