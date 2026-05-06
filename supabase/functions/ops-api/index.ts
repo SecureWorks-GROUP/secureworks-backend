@@ -2163,11 +2163,13 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'confirmed_prices': return json(await getConfirmedPrices(client))
 
       // ── Spine: Expenses ──
-      case 'submit_expense': return json(await submitExpense(client, body))
-      case 'approve_expense': return json(await approveExpense(client, body))
-      case 'push_expense_to_xero': return json(await pushExpenseToXero(client, body))
+      case 'submit_expense': return json(await submitExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
+      case 'approve_expense': return json(await approveExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
+      case 'push_expense_to_xero': return json(await pushExpenseToXero(client, body, { mode: authMode, user: authUser ?? undefined }))
       case 'list_expenses': return json(await listExpenses(client, url.searchParams))
       case 'list_unreconciled_transactions': return json(await listUnreconciledTransactions(client, url.searchParams))
+      case 'suggest_job_for_expense': return json(await suggestJobForExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
+      case 'update_expense': return json(await updateExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
 
       // ── Spine: Council/Engineering ──
       case 'create_council_submission': return json(await createCouncilSubmission(client, body))
@@ -10025,17 +10027,39 @@ async function deleteDocument(client: any, body: any) {
 
 // ── Signed upload URL (trade uploads photo directly to Storage) ──
 async function getUploadUrl(client: any, body: any, userId: string, isAdmin = false) {
-  const { jobId, job_id, fileName, contentType } = body
+  const { jobId, job_id, fileName, contentType, purpose } = body
   const jId = jobId || job_id
-  if (!jId || !fileName) throw new Error('jobId and fileName required')
 
-  // Verify user is assigned to this job (admins bypass)
-  await assertAssigned(client, jId, userId, isAdmin)
+  // 'expense_receipt' uploads can be detached from a job (general business
+  // expense). All other purposes still require a job_id and assignment check.
+  const isExpenseReceipt = purpose === 'expense_receipt'
 
-  const bucket = 'job-photos'
-  const photoId = crypto.randomUUID()
-  const ext = fileName.split('.').pop() || 'jpg'
-  const path = `${DEFAULT_ORG_ID}/${jId}/photos/${photoId}.${ext}`
+  if (!fileName) throw new Error('fileName required')
+  if (!isExpenseReceipt && !jId) throw new Error('jobId required')
+
+  if (jId && !isExpenseReceipt) {
+    await assertAssigned(client, jId, userId, isAdmin)
+  }
+
+  const ext = (fileName.split('.').pop() || 'jpg').toLowerCase()
+  let bucket: string
+  let path: string
+
+  if (isExpenseReceipt) {
+    // {org_id}/{yyyy}/{mm}/{photoId}-{rand}.{ext}
+    // Random suffix on the filename means a leaked path prefix does not
+    // collide with an existing receipt. UUID alone gives ~122 bits of entropy.
+    bucket = 'expense-receipts'
+    const photoId = crypto.randomUUID()
+    const now = new Date()
+    const yyyy = now.getUTCFullYear()
+    const mm = String(now.getUTCMonth() + 1).padStart(2, '0')
+    path = `${DEFAULT_ORG_ID}/${yyyy}/${mm}/${photoId}.${ext}`
+  } else {
+    bucket = 'job-photos'
+    const photoId = crypto.randomUUID()
+    path = `${DEFAULT_ORG_ID}/${jId}/photos/${photoId}.${ext}`
+  }
 
   try { await client.storage.createBucket(bucket, { public: true }) } catch { /* exists */ }
 
@@ -10052,13 +10076,87 @@ async function getUploadUrl(client: any, body: any, userId: string, isAdmin = fa
     token: data.token,
     path,
     publicUrl: urlData.publicUrl,
+    bucket,
+    purpose: purpose || 'photo',
   }
 }
 
 // ── Confirm upload (create media record after direct upload) ──
 async function confirmUpload(client: any, body: any, userId: string, isAdmin = false) {
-  const { jobId, job_id, publicUrl, path, label, phase, po_id } = body
+  const { jobId, job_id, publicUrl, path, label, phase, po_id, purpose, bucket } = body
   const jId = jobId || job_id
+
+  // Expense-receipt uploads land in a dedicated bucket and do NOT create a
+  // job_media row (receipts are evidence, not job photos). Server downloads
+  // the bytes from storage, computes SHA256, and returns the hash + storage
+  // info to the caller, which passes them to submit_expense.
+  const isExpenseReceipt = purpose === 'expense_receipt' || bucket === 'expense-receipts'
+
+  if (isExpenseReceipt) {
+    if (!path) throw new ApiError('path required for expense receipt confirm', 400)
+    const useBucket = bucket || 'expense-receipts'
+
+    // Compute SHA256 of the just-uploaded bytes. We download via the storage
+    // service-role client to avoid public-URL caching/CDN edge cases. If the
+    // download fails we still return the URL — the caller can submit without
+    // a hash and preflight will reject the row at push time, surfacing the
+    // gap to the operator rather than silently dropping it.
+    let sha256: string | null = null
+    let bytesLength: number | null = null
+    try {
+      const { data: blob, error: dlErr } = await client.storage
+        .from(useBucket)
+        .download(path)
+      if (!dlErr && blob) {
+        const buf = await blob.arrayBuffer()
+        bytesLength = buf.byteLength
+        const digest = await crypto.subtle.digest('SHA-256', buf)
+        sha256 = Array.from(new Uint8Array(digest))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join('')
+      }
+    } catch (e) {
+      console.log('[ops-api] expense_receipt sha256 compute failed:', (e as Error).message)
+    }
+
+    // Resolve a public URL if the caller did not pass one (defensive).
+    let resolvedUrl = publicUrl
+    if (!resolvedUrl) {
+      const { data: urlData } = client.storage.from(useBucket).getPublicUrl(path)
+      resolvedUrl = urlData?.publicUrl || ''
+    }
+
+    // Optional job_event for traceability when a job was supplied.
+    if (jId) {
+      try {
+        await client.from('job_events').insert({
+          job_id: jId,
+          user_id: userId,
+          event_type: 'receipt_added',
+          detail_json: {
+            phase: 'receipt',
+            bucket: useBucket,
+            path,
+            sha256,
+            bytes: bytesLength,
+            uploader_is_admin: !!isAdmin,
+          },
+        })
+      } catch (_e) { /* job_events insert is best-effort */ }
+    }
+
+    return {
+      url: resolvedUrl,
+      publicUrl: resolvedUrl,
+      bucket: useBucket,
+      path,
+      sha256,
+      bytes: bytesLength,
+      purpose: 'expense_receipt',
+    }
+  }
+
+  // ── Standard photo path (unchanged behaviour) ──
   if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
 
   // Verify user is assigned to this job (admins bypass)
@@ -14646,22 +14744,115 @@ async function createJobAnnotations(
 // SPINE INFRASTRUCTURE — Expense Management
 // ════════════════════════════════════════════════════════════
 
-async function submitExpense(client: any, body: any) {
-  const { job_id, receipt_photo_url, submitted_by, po_id } = body
-  if (!receipt_photo_url) throw new Error('receipt_photo_url required')
+// Resolve the user that approval should route to. The legacy text label
+// ('shaun'/'jan') is kept; the new approval_routed_to_user_id column carries
+// the actual uuid so JWT-based auth in approveExpense can validate the caller.
+// If no user is found by name, the user_id stays null and elevated roles
+// (admin/owner/ops_manager) can still approve.
+async function resolveApproverUserId(client: any, label: string): Promise<string | null> {
+  if (!label) return null
+  // Match on lowercased first-name fragment of users.name. Tight enough that
+  // 'shaun' picks Shaun and not someone named 'Shauna' (we use ilike with
+  // the label as a prefix). Returns the first match deterministically.
+  const { data } = await client.from('users')
+    .select('id, name')
+    .ilike('name', `${label}%`)
+    .limit(1)
+    .maybeSingle()
+  return data?.id || null
+}
+
+async function submitExpense(
+  client: any,
+  body: any,
+  authCtx?: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
+) {
+  const {
+    job_id,
+    receipt_photo_url,
+    receipt_storage_path,
+    receipt_storage_bucket,
+    receipt_sha256,
+    submitted_by,
+    po_id,
+    flow,
+    category,
+    payment_method,
+    business_category,
+    gst_status,
+    no_receipt_reason,
+    field_confidence,
+    jarvis_job_suggestion,
+  } = body
+
+  // A receipt photo URL is the canonical evidence path. The no-receipt path
+  // (no photo, explicit reason) is still allowed — it just means the row will
+  // fail preflight unless no_receipt_reason is set.
+  if (!receipt_photo_url && !no_receipt_reason) {
+    throw new ApiError('receipt_photo_url or no_receipt_reason required', 400)
+  }
+
+  // Snapshot submitter info from JWT first, fall back to body for api_key calls.
+  const submitterId =
+    (authCtx?.mode === 'jwt' ? authCtx.user?.id : null) ||
+    submitted_by ||
+    null
+
+  let submitterName: string | null = null
+  let submitterRole: string | null = (authCtx?.user?.role || null) as string | null
+  if (submitterId) {
+    const { data: u } = await client.from('users')
+      .select('name, role')
+      .eq('id', submitterId)
+      .maybeSingle()
+    if (u) {
+      submitterName = u.name || null
+      submitterRole = u.role || submitterRole
+    }
+  }
+
+  // Routing label: job-linked → shaun, non-job → jan. (Existing convention.)
+  const routedLabel = job_id ? 'shaun' : 'jan'
+  const routedUserId = await resolveApproverUserId(client, routedLabel)
+
+  // Flow inference if caller didn't set it explicitly.
+  const inferredFlow = flow
+    || (payment_method === 'supplier_invoice' ? 'supplier_bill'
+        : payment_method === 'company_card' || payment_method === 'cash' ? 'company_expense'
+        : payment_method === 'personal_card' ? 'reimbursement'
+        : 'unknown')
 
   // Insert receipt FIRST — saved regardless of AI extraction success
-  const { data: expense, error: insertErr } = await client.from('expense_receipts').insert({
+  const insertRow: Record<string, any> = {
     org_id: DEFAULT_ORG_ID,
     job_id: job_id || null,
     po_id: po_id || null,
-    submitted_by: submitted_by || null,
-    receipt_photo_url,
-    status: 'pending_extraction',
+    submitted_by: submitterId,
+    submitter_display_name: submitterName,
+    submitter_role_at_submission: submitterRole,
+    receipt_photo_url: receipt_photo_url || '',
+    receipt_storage_path: receipt_storage_path || null,
+    receipt_storage_bucket: receipt_storage_bucket || (receipt_photo_url ? 'expense-receipts' : null),
+    receipt_sha256: receipt_sha256 || null,
+    no_receipt_reason: no_receipt_reason || null,
+    flow: inferredFlow,
+    category: category || 'unknown',
+    payment_method: payment_method || 'unknown',
+    business_category: business_category || null,
+    gst_status: gst_status || 'unknown',
+    field_confidence: field_confidence || {},
+    jarvis_job_suggestion: jarvis_job_suggestion || {},
+    status: receipt_photo_url ? 'pending_extraction' : 'pending',
     match_type: job_id ? 'ad_hoc' : 'non_job',
     expense_tier: job_id ? 'tier_2' : 'tier_3',
-    approval_routed_to: job_id ? 'shaun' : 'jan',
-  }).select('id').single()
+    approval_routed_to: routedLabel,
+    approval_routed_to_user_id: routedUserId,
+  }
+
+  const { data: expense, error: insertErr } = await client.from('expense_receipts')
+    .insert(insertRow)
+    .select('id')
+    .single()
   if (insertErr) throw insertErr
 
   // Non-blocking Haiku vision extraction
@@ -14696,6 +14887,28 @@ async function submitExpense(client: any, body: any) {
         if (jsonMatch) {
           extraction = JSON.parse(jsonMatch[0])
 
+          // Build field_confidence. Caller-provided values (from the Trade UI
+          // after the user has reviewed the parsed fields) take priority over
+          // the server-side default. Defaults reflect what the extractor saw:
+          // present field → 0.8 (we cannot get a real confidence from Haiku
+          // without an explicit prompt change). Present, valid number → 0.85.
+          // Once the prompt is upgraded to ask for self-rated confidence,
+          // these defaults become a fallback only.
+          const defaultFc: Record<string, number> = {}
+          if (extraction.vendor_name) defaultFc.vendor_name = 0.8
+          if (extraction.receipt_date) defaultFc.receipt_date = 0.8
+          if (extraction.total_amount) defaultFc.total_amount = 0.85
+          if (extraction.gst_amount) defaultFc.gst_amount = 0.75
+          if (Array.isArray(extraction.line_items) && extraction.line_items.length > 0) {
+            defaultFc.line_items = 0.7
+          }
+          const mergedFc = { ...defaultFc, ...(field_confidence || {}) }
+          // Single rolled-up value: minimum across present fields. Surfaces the
+          // weakest field so the UI / preflight can highlight it.
+          const rolledUp = Object.values(mergedFc).length
+            ? Math.min(...Object.values(mergedFc).map(Number))
+            : null
+
           // Update expense with extracted data
           const updateFields: any = {
             vendor_name: extraction.vendor_name || null,
@@ -14704,7 +14917,8 @@ async function submitExpense(client: any, body: any) {
             gst_amount: extraction.gst_amount ? Number(extraction.gst_amount) : null,
             line_items: extraction.line_items || [],
             extraction_raw: visionResult,
-            extraction_confidence: 0.8,
+            extraction_confidence: rolledUp,
+            field_confidence: mergedFc,
             status: 'pending',
             updated_at: new Date().toISOString(),
           }
@@ -14765,33 +14979,294 @@ async function submitExpense(client: any, body: any) {
     entity_type: 'expense_receipt',
     entity_id: expense.id,
     job_id: jobInfo?.job_number || job_id || '',
-    payload: { extraction, routed_to: routedTo },
-    metadata: { operator: submitted_by || null },
+    payload: { extraction, routed_to: routedTo, flow: inferredFlow, payment_method, category },
+    metadata: { operator: submitterId, auth_mode: authCtx?.mode || 'api_key' },
   })
 
   return {
     expense_id: expense.id,
     extraction,
-    status: extraction ? 'pending' : 'pending_extraction',
+    status: receipt_photo_url
+      ? (extraction ? 'pending' : 'pending_extraction')
+      : 'pending',
     routed_to: routedTo,
+    flow: inferredFlow,
   }
 }
 
-async function approveExpense(client: any, body: any) {
-  const { expense_id, approved_by, approved } = body
-  if (!expense_id) throw new Error('expense_id required')
+// updateExpense — let the submitter (or admin) correct fields on an expense
+// row that has not yet been pushed to Xero. Used by the Trade UI's review
+// step to record the user's job/category/payment_method choices on top of
+// what Haiku extracted. Whitelisted fields only — no schema poking.
+async function updateExpense(
+  client: any,
+  body: any,
+  authCtx?: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
+) {
+  const { expense_id } = body
+  if (!expense_id) throw new ApiError('expense_id required', 400)
 
-  const status = approved === false ? 'queried' : 'approved'
-  await client.from('expense_receipts').update({
+  const { data: row, error: loadErr } = await client.from('expense_receipts')
+    .select('id, submitted_by, status, receipt_sha256')
+    .eq('id', expense_id)
+    .maybeSingle()
+  if (loadErr) throw loadErr
+  if (!row) throw new ApiError('Expense not found', 404)
+
+  // Authz: submitter on JWT path, OR elevated role, OR api_key. Block once
+  // the expense has been pushed to Xero — at that point edits go via Xero.
+  if (authCtx?.mode === 'jwt') {
+    const role = (authCtx.user?.role || '').toLowerCase()
+    const elevated = role === 'admin' || role === 'owner' || role === 'ops_manager'
+    if (!elevated && row.submitted_by !== authCtx.user?.id) {
+      throw new ApiError('Not authorised to edit this expense', 403)
+    }
+  }
+  if (row.status === 'pushed_to_xero') {
+    throw new ApiError('Expense already pushed to Xero — edit in Xero', 409)
+  }
+
+  // Whitelist: fields that are safe to update from a client.
+  const allowed: Record<string, boolean> = {
+    vendor_name: true,
+    receipt_date: true,
+    total_amount: true,
+    gst_amount: true,
+    line_items: true,
+    job_id: true,
+    flow: true,
+    category: true,
+    payment_method: true,
+    business_category: true,
+    gst_status: true,
+    no_receipt_reason: true,
+    jarvis_job_suggestion: true,
+    field_confidence: true,
+  }
+  const updates: Record<string, any> = {}
+  for (const [k, v] of Object.entries(body)) {
+    if (k === 'expense_id') continue
+    if (!allowed[k]) continue
+    updates[k] = v
+  }
+
+  // Receipt evidence is immutable once set. The hash only flips from null
+  // to the first computed value; we never overwrite a non-null hash.
+  if (body.receipt_sha256 && !row.receipt_sha256) {
+    updates.receipt_sha256 = body.receipt_sha256
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return { success: true, updated_fields: [], expense_id }
+  }
+
+  updates.updated_at = new Date().toISOString()
+  await client.from('expense_receipts').update(updates).eq('id', expense_id)
+
+  logBusinessEvent(client, {
+    event_type: 'expense.updated',
+    entity_type: 'expense_receipt',
+    entity_id: expense_id,
+    payload: { updated_fields: Object.keys(updates).filter(k => k !== 'updated_at') },
+    metadata: { auth_mode: authCtx?.mode || 'api_key', operator: authCtx?.user?.id || null },
+  })
+
+  return { success: true, expense_id, updated_fields: Object.keys(updates).filter(k => k !== 'updated_at') }
+}
+
+// suggestJobForExpense — ranks likely jobs for an expense submission.
+// Read-only; cheap; called by the Trade UI as soon as Haiku extraction lands
+// so the worker sees a preselected suggestion. Returns up to 5 ranked
+// candidates plus a 'general business' fallback. The UI is responsible for
+// recording which option the human chose into expense_receipts.jarvis_job_suggestion.
+async function suggestJobForExpense(
+  client: any,
+  body: any,
+  authCtx?: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
+) {
+  const {
+    submitter_id,
+    merchant,
+    receipt_date,
+    total_amount,
+  } = body
+
+  // Resolve submitter — JWT first, fall back to body for api_key callers.
+  const userId = (authCtx?.mode === 'jwt' ? authCtx.user?.id : null) || submitter_id || null
+
+  type Suggestion = { job_id: string; job_number: string; client_name: string; site_suburb: string | null; score: number; reason: string }
+  const byId = new Map<string, Suggestion>()
+
+  function bump(j: any, score: number, reason: string) {
+    if (!j?.id) return
+    const existing = byId.get(j.id)
+    if (!existing || existing.score < score) {
+      byId.set(j.id, {
+        job_id: j.id,
+        job_number: j.job_number || '',
+        client_name: j.client_name || '',
+        site_suburb: j.site_suburb || null,
+        score,
+        reason: existing && existing.score >= score ? existing.reason : reason,
+      })
+    }
+  }
+
+  // 1. Currently clocked-on assignment (highest signal — the worker is on site).
+  if (userId) {
+    try {
+      const { data: clocked } = await client.from('clock_events')
+        .select('job_id, event_type, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (clocked?.event_type === 'clock_on' && clocked?.job_id) {
+        const { data: j } = await client.from('jobs')
+          .select('id, job_number, client_name, site_suburb')
+          .eq('id', clocked.job_id)
+          .maybeSingle()
+        if (j) bump(j, 0.95, 'currently clocked on')
+      }
+    } catch (_e) { /* fail-graceful: no clock_events table or column */ }
+  }
+
+  // 2. Active assignments around the receipt date.
+  if (userId) {
+    try {
+      const targetDate = receipt_date || new Date().toISOString().slice(0, 10)
+      const dayMs = 24 * 60 * 60 * 1000
+      const lo = new Date(new Date(targetDate).getTime() - 7 * dayMs).toISOString().slice(0, 10)
+      const hi = new Date(new Date(targetDate).getTime() + 1 * dayMs).toISOString().slice(0, 10)
+      const { data: assigns } = await client.from('job_assignments')
+        .select('job_id, scheduled_date, jobs:job_id(id, job_number, client_name, site_suburb)')
+        .eq('user_id', userId)
+        .gte('scheduled_date', lo)
+        .lte('scheduled_date', hi)
+        .limit(5)
+      for (const a of (assigns || [])) {
+        if (a.jobs) bump(a.jobs, 0.8, `assigned to job around ${a.scheduled_date}`)
+      }
+    } catch (_e) { /* graceful — schema variants */ }
+  }
+
+  // 3. Suppliers on existing POs that match the merchant name.
+  if (merchant && typeof merchant === 'string' && merchant.trim().length >= 3) {
+    try {
+      const needle = merchant.trim().slice(0, 24)
+      const { data: pos } = await client.from('purchase_orders')
+        .select('job_id, supplier_name, total, jobs:job_id(id, job_number, client_name, site_suburb)')
+        .ilike('supplier_name', `%${needle}%`)
+        .order('created_at', { ascending: false })
+        .limit(10)
+      for (const po of (pos || [])) {
+        if (!po.jobs) continue
+        // Stronger signal if amount also roughly matches.
+        const amountMatch = total_amount && po.total
+          ? Math.abs(Number(po.total) - Number(total_amount)) < Math.max(5, Number(po.total) * 0.05)
+          : false
+        bump(po.jobs, amountMatch ? 0.85 : 0.7,
+          amountMatch ? `PO with same supplier and amount` : `PO with same supplier`)
+      }
+    } catch (_e) { /* graceful */ }
+  }
+
+  // 4. Worker's recent active jobs (fallback if everything above is empty).
+  if (userId && byId.size === 0) {
+    try {
+      const { data: recent } = await client.from('job_assignments')
+        .select('job_id, jobs:job_id(id, job_number, client_name, site_suburb, status)')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(10)
+      for (const a of (recent || [])) {
+        const j: any = a.jobs
+        if (j && !['lost', 'cancelled', 'complete'].includes((j.status || '').toLowerCase())) {
+          bump(j, 0.5, 'recent assignment')
+        }
+      }
+    } catch (_e) { /* graceful */ }
+  }
+
+  const suggestions = Array.from(byId.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+
+  return {
+    suggestions,
+    fallback: { label: 'General business (no job)', score: 0.3 },
+    generated_at: new Date().toISOString(),
+  }
+}
+
+// approveExpense validates the caller against the row's approval routing.
+// authCtx carries the auth state from the main router:
+//   - api_key: server-to-server (allowed; e.g. JARVIS automation)
+//   - jwt:     browser/Trade caller. Must be admin/owner/ops_manager OR the
+//              user this row was routed to (approval_routed_to_user_id).
+// approved_by is now ALWAYS taken from the JWT (or 'system' for api_key),
+// never from the request body. Prevents callers spoofing approver identity.
+async function approveExpense(
+  client: any,
+  body: any,
+  authCtx: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
+) {
+  const { expense_id, approved, query_reason, rejection_reason } = body
+  if (!expense_id) throw new ApiError('expense_id required', 400)
+
+  // Decide intent: approve (default) | query | reject. Backwards-compat:
+  //   approved === false (legacy) → queried
+  //   intent === 'queried' / 'rejected' (new) → that exact status
+  let status: 'approved' | 'queried' | 'rejected' = 'approved'
+  if (body.intent === 'queried' || (approved === false && !body.intent)) status = 'queried'
+  if (body.intent === 'rejected') status = 'rejected'
+
+  // Load the row up front so we can authorise the caller against the routing.
+  const { data: existing, error: loadErr } = await client.from('expense_receipts')
+    .select('id, status, approval_routed_to, approval_routed_to_user_id, submitted_by')
+    .eq('id', expense_id)
+    .maybeSingle()
+  if (loadErr) throw loadErr
+  if (!existing) throw new ApiError('Expense not found', 404)
+
+  // Auth gate.
+  let approverId: string | null = null
+  let approverLabel = 'system'
+  if (authCtx.mode === 'jwt') {
+    const u = authCtx.user
+    if (!u) throw new ApiError('Authentication required', 401)
+    const role = (u.role || '').toLowerCase()
+    const elevated = role === 'admin' || role === 'owner' || role === 'ops_manager'
+    const routedToThisUser = existing.approval_routed_to_user_id === u.id
+    if (!elevated && !routedToThisUser) {
+      throw new ApiError(
+        `Not authorised — this expense was routed to ${existing.approval_routed_to || 'someone else'} (${role || 'no role'} cannot approve)`,
+        403,
+      )
+    }
+    // A submitter cannot approve their own row even if they hold the role.
+    if (existing.submitted_by === u.id && !elevated) {
+      throw new ApiError('Cannot approve your own submission', 403)
+    }
+    approverId = u.id
+    approverLabel = u.email || u.id
+  }
+  // api_key path: server-to-server (e.g. automated JARVIS). Allowed; approverId stays null.
+
+  const updates: Record<string, any> = {
     status,
-    approved_by: approved_by || null,
+    approved_by: approverId,
     approved_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-  }).eq('id', expense_id)
+  }
+  if (status === 'queried' && query_reason) updates.query_reason = String(query_reason).slice(0, 500)
+  if (status === 'rejected' && rejection_reason) updates.rejection_reason = String(rejection_reason).slice(0, 500)
+
+  await client.from('expense_receipts').update(updates).eq('id', expense_id)
 
   // Resolve the annotation
   await client.from('ai_annotations')
-    .update({ resolved_at: new Date().toISOString(), resolved_by: approved_by || null })
+    .update({ resolved_at: new Date().toISOString(), resolved_by: approverId })
     .eq('source_ref', `expense:${expense_id}`)
     .is('resolved_at', null)
 
@@ -14799,33 +15274,30 @@ async function approveExpense(client: any, body: any) {
     event_type: `expense.${status}`,
     entity_type: 'expense_receipt',
     entity_id: expense_id,
-    metadata: { operator: approved_by || null },
+    metadata: { operator: approverId, operator_label: approverLabel, auth_mode: authCtx.mode },
+    payload: status === 'queried' ? { query_reason: updates.query_reason || null }
+           : status === 'rejected' ? { rejection_reason: updates.rejection_reason || null }
+           : undefined,
   })
 
-  return { success: true, status }
+  return { success: true, status, approved_by: approverId }
 }
 
-async function pushExpenseToXero(client: any, body: any) {
-  const { expense_id } = body
-  if (!expense_id) throw new Error('expense_id required')
-
-  const { data: expense } = await client.from('expense_receipts')
-    .select('*, jobs:job_id(job_number, xero_contact_id)')
-    .eq('id', expense_id)
-    .single()
-  if (!expense) throw new Error('Expense not found')
-  if (expense.status !== 'approved') throw new Error('Expense must be approved before pushing to Xero')
-
-  const { accessToken, tenantId } = await getToken(client)
-
-  const billBody = {
+// ── buildXeroExpenseBillBody: pure builder, exported via mirror-test pattern.
+// Always emits Status: 'DRAFT' so finance reviews/authorises in Xero. There is
+// no AUTHORISED path from SecureSuite for expense receipts.
+function buildXeroExpenseBillBody(expense: any): any {
+  const today = new Date().toISOString().split('T')[0]
+  const lines = Array.isArray(expense.line_items) ? expense.line_items : []
+  return {
     Type: 'ACCPAY',
+    Status: 'DRAFT',
     Contact: { Name: expense.vendor_name || 'Unknown Vendor' },
-    Date: expense.receipt_date || new Date().toISOString().split('T')[0],
-    DueDate: expense.receipt_date || new Date().toISOString().split('T')[0],
+    Date: expense.receipt_date || today,
+    DueDate: expense.receipt_date || today,
     Reference: expense.jobs?.job_number ? `${expense.jobs.job_number} — Receipt` : 'Receipt',
-    LineItems: (expense.line_items || []).length > 0
-      ? expense.line_items.map((li: any) => ({
+    LineItems: lines.length > 0
+      ? lines.map((li: any) => ({
           Description: li.description || 'Receipt line item',
           Quantity: li.quantity || 1,
           UnitAmount: li.unit_price || li.total || 0,
@@ -14838,13 +15310,130 @@ async function pushExpenseToXero(client: any, body: any) {
           AccountCode: '400',
         }],
   }
+}
+
+// ── Preflight: lightweight data-quality checks before creating a Xero DRAFT bill.
+// Failure means we have junk data (empty vendor, zero total, future date, etc.)
+// and pushing would create a junk DRAFT that finance has to clean up in Xero.
+// We refuse the push, persist the reasons on the row, and emit a business event.
+// The row stays in 'approved' state so the user can fix and retry.
+function preflightExpense(expense: any): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = []
+
+  const vendor = (expense.vendor_name || '').trim()
+  if (vendor.length < 2) reasons.push('vendor_name missing or too short')
+
+  const total = Number(expense.total_amount)
+  if (!isFinite(total) || total <= 0) reasons.push('total_amount must be > 0')
+  else if (total > 50000) reasons.push('total_amount exceeds $50,000 sanity cap')
+
+  if (!expense.receipt_date) {
+    reasons.push('receipt_date missing')
+  } else {
+    const d = new Date(expense.receipt_date + 'T00:00:00Z')
+    if (isNaN(d.getTime())) {
+      reasons.push('receipt_date not parseable')
+    } else {
+      const now = Date.now()
+      const oneYearAgo = now - 366 * 24 * 60 * 60 * 1000
+      const sevenDaysAhead = now + 7 * 24 * 60 * 60 * 1000
+      if (d.getTime() < oneYearAgo) reasons.push('receipt_date older than 12 months')
+      if (d.getTime() > sevenDaysAhead) reasons.push('receipt_date more than 7 days in the future')
+    }
+  }
+
+  // Evidence integrity: either a hashed receipt OR an explicit no-receipt reason.
+  if (!expense.receipt_sha256 && !expense.no_receipt_reason) {
+    reasons.push('receipt_sha256 or no_receipt_reason required')
+  }
+
+  // Classification — required for Xero AccountCode mapping and later bank-rec.
+  if (!expense.category || expense.category === 'unknown') {
+    reasons.push('category required')
+  }
+  if (!expense.payment_method || expense.payment_method === 'unknown') {
+    reasons.push('payment_method required')
+  }
+  if (!expense.gst_status || expense.gst_status === 'unknown') {
+    reasons.push('gst_status required')
+  }
+
+  // Cost destination — every expense lands somewhere.
+  if (!expense.job_id && !expense.business_category) {
+    reasons.push('job_id or business_category required')
+  }
+
+  // Line items must roughly add up. OCR mis-reads sometimes drop a digit.
+  const lines = Array.isArray(expense.line_items) ? expense.line_items : []
+  if (lines.length > 0 && isFinite(total) && total > 0) {
+    const sumLines = lines.reduce((acc: number, li: any) => {
+      const qty = Number(li.quantity ?? 1)
+      const unit = Number(li.unit_price ?? li.unitPrice ?? 0)
+      const lineTotal = Number(li.total ?? qty * unit)
+      return acc + (isFinite(lineTotal) ? lineTotal : 0)
+    }, 0)
+    if (Math.abs(sumLines - total) > 1.01) {
+      reasons.push(`line_items sum ($${sumLines.toFixed(2)}) does not match total ($${total.toFixed(2)})`)
+    }
+  }
+
+  return { ok: reasons.length === 0, reasons }
+}
+
+async function pushExpenseToXero(
+  client: any,
+  body: any,
+  authCtx: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
+) {
+  const { expense_id } = body
+  if (!expense_id) throw new ApiError('expense_id required', 400)
+
+  // Auth gate. Push creates a real (DRAFT) Xero bill — admin/owner/ops_manager
+  // role only on JWT path. api_key (server-to-server) is allowed for automation.
+  if (authCtx.mode === 'jwt') {
+    const role = (authCtx.user?.role || '').toLowerCase()
+    if (role !== 'admin' && role !== 'owner' && role !== 'ops_manager') {
+      throw new ApiError('Not authorised to push expenses to Xero', 403)
+    }
+  }
+
+  const { data: expense } = await client.from('expense_receipts')
+    .select('*, jobs:job_id(job_number, xero_contact_id)')
+    .eq('id', expense_id)
+    .single()
+  if (!expense) throw new ApiError('Expense not found', 404)
+  if (expense.status !== 'approved') throw new ApiError('Expense must be approved before pushing to Xero', 409)
+
+  // Preflight gate — prevent junk OCR from creating junk Xero drafts.
+  const preflight = preflightExpense(expense)
+  if (!preflight.ok) {
+    await client.from('expense_receipts').update({
+      preflight_failed_reasons: { reasons: preflight.reasons, checked_at: new Date().toISOString() },
+      updated_at: new Date().toISOString(),
+    }).eq('id', expense_id)
+
+    logBusinessEvent(client, {
+      event_type: 'expense.preflight_failed',
+      entity_type: 'expense_receipt',
+      entity_id: expense_id,
+      payload: { reasons: preflight.reasons },
+    })
+
+    throw new ApiError('Preflight failed: ' + preflight.reasons.join('; '), 400)
+  }
+
+  const { accessToken, tenantId } = await getToken(client)
+
+  const billBody = buildXeroExpenseBillBody(expense)
 
   const result = await xeroPost('/Invoices', accessToken, tenantId, { Invoices: [billBody] }, 'POST', `expense-${expense_id}`)
   const xeroBillId = result?.Invoices?.[0]?.InvoiceID
 
   await client.from('expense_receipts').update({
     xero_bill_id: xeroBillId,
+    xero_status: 'draft',
     status: 'pushed_to_xero',
+    preflight_failed_reasons: null,
     updated_at: new Date().toISOString(),
   }).eq('id', expense_id)
 
@@ -14852,10 +15441,10 @@ async function pushExpenseToXero(client: any, body: any) {
     event_type: 'expense.pushed_to_xero',
     entity_type: 'expense_receipt',
     entity_id: expense_id,
-    payload: { xero_bill_id: xeroBillId },
+    payload: { xero_bill_id: xeroBillId, xero_status: 'draft' },
   })
 
-  return { success: true, xero_bill_id: xeroBillId }
+  return { success: true, xero_bill_id: xeroBillId, xero_status: 'draft' }
 }
 
 async function listExpenses(client: any, params: URLSearchParams) {
