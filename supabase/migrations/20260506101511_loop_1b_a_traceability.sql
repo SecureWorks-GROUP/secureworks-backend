@@ -1,6 +1,10 @@
--- Loop 1B-a traceability migration. DRAFT only.
+-- Loop 1B-a traceability migration.
 --
--- Apply: Loop 1B-a-apply (separate gate; requires Marnin migration-approval phrase).
+-- Applied: 2026-05-06T10:15Z via mcp__supabase__apply_migration as
+--   20260506101511_loop_1b_a_traceability. This file is the canonical
+--   migrations/ copy of the draft Marnin merged in PR #40 (under the
+--   _drafts/ filename 20260505110000_loop_1b_traceability.sql). Renamed
+--   here to match the remote ledger timestamp.
 --
 -- Source of truth: cio/operations/board/Finance-AI-First/finance-loop0-signoff/
 --   loop-1b-a-migration-design.md

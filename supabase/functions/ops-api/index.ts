@@ -1552,6 +1552,35 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await addNote(client, { ...body, userId: noteUserId }, noteIsAdmin))
       }
       case 'create_invoice': return json(await createInvoice(client, body))
+      case 'preflight_invoice': {
+        // Read-only preflight check. No Xero call, no writes.
+        // Used by ops UI and MCP tools to gate invoice creation before any
+        // Xero traffic. Returns { ok, missing_dimensions[], warnings[],
+        // context: { job_number, customer_name, suburb, division, ... } }.
+        const pre = await preflightInvoiceCreation(client, body)
+        return json({
+          ok: pre.ok,
+          missing_dimensions: pre.missing_dimensions,
+          warnings: pre.warnings,
+          // Trim context to the fields the caller actually needs (avoid
+          // leaking the whole job row).
+          context: pre.context ? {
+            job_id: pre.context.job?.id || null,
+            job_number: pre.context.job_number,
+            customer_name: pre.context.customer_name,
+            suburb: pre.context.suburb,
+            division: pre.context.division,
+            account_code: pre.context.account_code,
+            tracking_option: pre.context.tracking_option,
+            quote_revision_id: pre.context.quote_revision_id,
+            scope_revision_id: pre.context.scope_revision_id,
+            payment_terms_text: pre.context.payment_terms_text,
+            payment_terms_source: pre.context.payment_terms_source,
+            due_date: pre.context.due_date,
+            xero_project_manual_status: pre.context.xero_project_manual_status,
+          } : null,
+        })
+      }
       case 'sync_job_invoices': return json(await syncJobInvoices(client, body))
       case 'update_invoice_job_link': {
         const xiid = body.xero_invoice_id
@@ -6557,6 +6586,213 @@ async function getInvoicePdf(client: any, params: URLSearchParams) {
   return { success: true, pdf_base64, filename, content_type: 'application/pdf' }
 }
 
+// ── Loop 1B-a-apply: invoice preflight contract ──
+//
+// Read-only check that gathers the dimensions a "ready to invoice" job must
+// carry so the resulting Xero invoice arrives with enough detail for finance
+// to reconcile without leaving Xero. Surfaces three things:
+//
+//   missing_dimensions[] — hard blockers. createInvoice will refuse unless
+//                          body.bypass_preflight === true (override is logged
+//                          to business_events as an explicit operator action).
+//   warnings[]           — soft advisories. Don't block creation; bookkeeper
+//                          should be aware (e.g. no frozen quote/scope yet,
+//                          payment_terms falling back to division default).
+//   context{}            — the resolved trace context. createInvoice reuses
+//                          this so we don't re-read the same rows twice.
+//
+// Per Marnin's 2026-05-06 directive (four-pillars-progress-2026-05-06.md §5):
+// "design/implement the preflight contract enough to prevent weak invoice
+//  creation paths from shipping bad invoices."
+async function preflightInvoiceCreation(client: any, body: any): Promise<{
+  ok: boolean,
+  missing_dimensions: string[],
+  warnings: string[],
+  context: {
+    job: any,
+    job_contact: any | null,
+    job_number: string | null,
+    customer_name: string | null,
+    suburb: string | null,
+    division: string | null,
+    account_code: string,
+    tracking_option: string,
+    quote_revision_id: string | null,
+    scope_revision_id: string | null,
+    payment_terms_text: string,
+    payment_terms_source: 'body_override' | 'jobs.payment_terms' | 'pricing_json.payment_terms' | 'division_default',
+    due_date: string,
+    xero_project_manual_status: string,
+  } | null,
+}> {
+  const jobId = body.job_id || body.jobId
+  const jobContactId = body.job_contact_id || null
+  const missing: string[] = []
+  const warnings: string[] = []
+
+  if (!jobId) {
+    // No job context — degraded preflight. Caller is doing ad-hoc invoicing.
+    // We still surface the dimension gaps so MCP / ops UI can react, but
+    // there is no context to populate.
+    missing.push('job_id')
+    return { ok: false, missing_dimensions: missing, warnings, context: null }
+  }
+
+  // Single round-trip for everything we need.
+  const { data: job, error: jobErr } = await client
+    .from('jobs')
+    .select('id, job_number, type, status, client_name, client_email, client_phone, ' +
+            'site_address, site_suburb, xero_contact_id, pricing_json, payment_terms')
+    .eq('id', jobId)
+    .single()
+  if (jobErr || !job) {
+    missing.push('job_not_found')
+    return { ok: false, missing_dimensions: missing, warnings, context: null }
+  }
+
+  let jobContact: any = null
+  if (jobContactId) {
+    const { data: jc } = await client.from('job_contacts')
+      .select('id, client_name, client_email, client_phone, site_address, contact_label, xero_contact_id')
+      .eq('id', jobContactId)
+      .maybeSingle()
+    jobContact = jc || null
+    if (!jobContact) warnings.push('job_contact_id_provided_but_not_found')
+  }
+
+  // Resolve customer name. Prefer neighbour contact when provided.
+  const customerName = (jobContact?.client_name || job.client_name || '').trim() || null
+  if (!customerName) missing.push('customer_name')
+
+  // Resolve suburb. job.site_suburb is the canonical source today.
+  // job_contacts.site_address is a free-text field; we don't parse a suburb
+  // out of it — we rely on the parent job's site_suburb for now.
+  const suburb = (job.site_suburb || '').trim() || null
+  if (!suburb) missing.push('suburb')
+
+  // Job number — required on every ACCREC invoice for division reporting.
+  const jobNumber = (job.job_number || '').trim() || null
+  if (!jobNumber) missing.push('job_number')
+
+  // Division — derived from job.type.
+  const knownDivisions = new Set(['patio', 'fencing', 'decking', 'roofing', 'insurance', 'renovation', 'combo', 'general'])
+  const divisionRaw = (job.type || '').toLowerCase().trim()
+  const division = knownDivisions.has(divisionRaw) ? divisionRaw : null
+  if (!division) missing.push('division')
+
+  // Account code — accountCodeForJob always returns a string but we want the
+  // mapping to be EXPLICIT not fallback for a known division.
+  const accountCode = accountCodeForJob(job.type)
+
+  // Tracking option — derived from job_number prefix.
+  const trackingOption = trackingCategoryForJob(jobNumber || '')
+  if (!trackingOption && division !== 'general') missing.push('tracking_option_unresolvable')
+
+  // Frozen quote / scope revisions. These are SOFT — invoices for ad-hoc
+  // jobs may not have a frozen quote/scope, but the bookkeeper benefits when
+  // they do.
+  let quoteRevisionId: string | null = null
+  let scopeRevisionId: string | null = null
+  try {
+    const { data: qr } = await client.from('quote_revisions')
+      .select('id')
+      .eq('job_id', jobId)
+      .is('superseded_at', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    quoteRevisionId = qr?.id || null
+  } catch { /* table may not exist in some envs */ }
+  if (!quoteRevisionId) warnings.push('quote_revision_id_missing')
+
+  try {
+    const { data: sr } = await client.from('scope_revisions')
+      .select('id')
+      .eq('job_id', jobId)
+      .is('superseded_at', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    scopeRevisionId = sr?.id || null
+  } catch { /* table may not exist in some envs */ }
+  if (!scopeRevisionId) warnings.push('scope_revision_id_missing')
+
+  // Payment-terms text. Source priority: body override > job-level > pricing-level > division default.
+  const pricing = (typeof job.pricing_json === 'string'
+    ? JSON.parse(job.pricing_json || '{}')
+    : (job.pricing_json || {})) as Record<string, any>
+  const PAYMENT_TERMS_DEFAULTS: Record<string, string> = {
+    patio:      'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+    fencing:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+    decking:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+    roofing:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+    insurance:  'Payable on completion of works per insurance scope. Bank transfer or credit card (1.75% surcharge).',
+    renovation: 'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+    combo:      'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+    general:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+  }
+  let paymentTermsText = ''
+  let paymentTermsSource: 'body_override' | 'jobs.payment_terms' | 'pricing_json.payment_terms' | 'division_default' = 'division_default'
+  if (typeof body.terms_override === 'string' && body.terms_override.trim()) {
+    paymentTermsText = body.terms_override.trim()
+    paymentTermsSource = 'body_override'
+  } else if (typeof job.payment_terms === 'string' && job.payment_terms.trim()) {
+    paymentTermsText = job.payment_terms.trim()
+    paymentTermsSource = 'jobs.payment_terms'
+  } else if (typeof pricing.payment_terms === 'string' && pricing.payment_terms.trim()) {
+    paymentTermsText = pricing.payment_terms.trim()
+    paymentTermsSource = 'pricing_json.payment_terms'
+  } else {
+    paymentTermsText = PAYMENT_TERMS_DEFAULTS[division || 'general'] || PAYMENT_TERMS_DEFAULTS.general
+    paymentTermsSource = 'division_default'
+    warnings.push('payment_terms_using_division_default')
+  }
+
+  // Due date. body.due_date wins; otherwise today + 14 days (existing default).
+  const dueDate = body.due_date || body.dueDate
+    || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10)
+
+  // Xero Project manual-fill default for new invoices. The 2026-04-09 ADR
+  // declared Xero Projects API unreliable; we surface a manual-fill queue.
+  const xeroProjectManualStatus = 'needs_manual_fill'
+
+  return {
+    ok: missing.length === 0,
+    missing_dimensions: missing,
+    warnings,
+    context: {
+      job,
+      job_contact: jobContact,
+      job_number: jobNumber,
+      customer_name: customerName,
+      suburb,
+      division,
+      account_code: accountCode,
+      tracking_option: trackingOption,
+      quote_revision_id: quoteRevisionId,
+      scope_revision_id: scopeRevisionId,
+      payment_terms_text: paymentTermsText,
+      payment_terms_source: paymentTermsSource,
+      due_date: dueDate,
+      xero_project_manual_status: xeroProjectManualStatus,
+    },
+  }
+}
+
+// Computes the typed reference suffix for an invoice. Mirrors the createDepositInvoice
+// builder shape and the H1 fix family. Used by createInvoice to stamp xero_invoices.reference_suffix.
+function computeReferenceSuffix(jobNumber: string, reference: string): string | null {
+  if (!reference) return null
+  const trimmed = reference.trim()
+  if (!trimmed) return null
+  const prefix = (jobNumber || '').trim()
+  if (prefix && trimmed.toUpperCase().startsWith(prefix.toUpperCase())) {
+    const suffix = trimmed.slice(prefix.length).replace(/^[-\s]+/, '').trim()
+    return suffix || null
+  }
+  return trimmed
+}
+
 async function createInvoice(client: any, body: any) {
   const { job_id, jobId, contact_name, contactName, xero_contact_id, job_contact_id,
           line_items, lineItems, due_date, dueDate, reference,
@@ -6566,6 +6802,41 @@ async function createInvoice(client: any, body: any) {
   if (!items || items.length === 0) throw new Error('line_items required')
   const contact = contact_name || contactName
   if (!contact && !xero_contact_id) throw new Error('contact_name or xero_contact_id required')
+
+  // Loop 1B-a-apply preflight gate. Block creation when required dimensions are
+  // missing unless the caller passes bypass_preflight: true. Soft warnings do
+  // NOT block. The override is logged to business_events so we have a trail
+  // every time someone created an invoice with incomplete trace context.
+  const preflight = await preflightInvoiceCreation(client, body)
+  if (!preflight.ok && !body.bypass_preflight) {
+    const err: any = new Error(
+      'Invoice preflight failed: ' + preflight.missing_dimensions.join(', ') +
+      '. Set the missing fields on the job, or re-call with bypass_preflight=true to override.'
+    )
+    err.code = 'PREFLIGHT_FAILED'
+    err.missing_dimensions = preflight.missing_dimensions
+    err.warnings = preflight.warnings
+    throw err
+  }
+  if (!preflight.ok && body.bypass_preflight) {
+    // Override taken — log so we have an audit trail.
+    logBusinessEvent(client, {
+      event_type: 'invoice.preflight_override',
+      entity_type: 'job',
+      entity_id: (job_id || jobId || 'unknown'),
+      job_id: (job_id || jobId || undefined),
+      payload: {
+        missing_dimensions: preflight.missing_dimensions,
+        warnings: preflight.warnings,
+        reason: body.bypass_reason || null,
+      },
+      metadata: {
+        operator: body.operator || null,
+        source: 'createInvoice',
+      },
+    })
+  }
+  const traceCtx = preflight.context // null only if no job_id provided
 
   const { accessToken, tenantId } = await getToken(client)
 
@@ -6658,6 +6929,15 @@ async function createInvoice(client: any, body: any) {
   // Use requested status — DRAFT (for bookkeeper review) or AUTHORISED (approve & send)
   const invoiceStatus = xero_status || 'DRAFT'
 
+  // Loop 1B-a-apply: Terms text comes from the preflight context (which
+  // already resolved override > jobs.payment_terms > pricing_json.payment_terms
+  // > division-default). DueDate prefers preflight context too so the body
+  // override flows through one resolution path.
+  const xeroTermsText = traceCtx?.payment_terms_text || ''
+  const xeroDueDate = traceCtx?.due_date
+    || due_date || dueDate
+    || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10)
+
   const invoice = {
     Invoices: [{
       Type: 'ACCREC',
@@ -6667,8 +6947,9 @@ async function createInvoice(client: any, body: any) {
       LineAmountTypes: 'Exclusive',
       LineItems: xeroLineItems,
       Reference: reference || '',
-      DueDate: due_date || dueDate || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
+      DueDate: xeroDueDate,
       Status: invoiceStatus,
+      ...(xeroTermsText ? { Terms: xeroTermsText } : {}),
     }],
   }
 
@@ -6698,6 +6979,12 @@ async function createInvoice(client: any, body: any) {
   const invSubTotal = xeroInv?.SubTotal ?? items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0)
   if (xeroInvId) {
     try {
+      // Loop 1B-a-apply: stamp the eleven traceability columns added by
+      // migration 20260506101511_loop_1b_a_traceability. Eight columns come
+      // from the strategy doc's W2 traceability set; two close H1's silent
+      // drop (job_contact_id, reference_suffix); one surfaces the Xero
+      // Project manual-fill queue per the 2026-04-09 ADR.
+      const referenceSuffix = computeReferenceSuffix(traceCtx?.job_number || '', reference || '')
       await client.from('xero_invoices').upsert({
         org_id: DEFAULT_ORG_ID,
         xero_invoice_id: xeroInvId,
@@ -6713,13 +7000,21 @@ async function createInvoice(client: any, body: any) {
         amount_due: invTotal,
         amount_paid: 0,
         invoice_date: new Date().toISOString().slice(0, 10),
-        due_date: due_date || dueDate || null,
+        due_date: xeroDueDate,
         job_id: jId || null,
-        // H1 (Loop 1B-a): job_contact_id and reference_suffix removed from upsert because those
-        // columns do not exist on xero_invoices. They are silently dropped by Postgrest today.
-        // Re-added by Loop 1B-a-apply once the traceability migration adds them as real columns.
-        // See cio/operations/board/Finance-AI-First/finance-loop0-signoff/loop-1b-a-migration-design.md.
         run_label: body.run_label || null,
+        // Loop 1B-a-apply traceability columns (NULL when no job context).
+        job_number:                 traceCtx?.job_number || null,
+        customer_name:              traceCtx?.customer_name || contact || null,
+        suburb:                     traceCtx?.suburb || null,
+        division:                   traceCtx?.division || null,
+        account_code:               traceCtx?.account_code || null,
+        tracking_option:            traceCtx?.tracking_option || null,
+        xero_project_manual_status: traceCtx?.xero_project_manual_status || 'needs_manual_fill',
+        quote_revision_id:          traceCtx?.quote_revision_id || null,
+        scope_revision_id:          traceCtx?.scope_revision_id || null,
+        job_contact_id:             job_contact_id || null,
+        reference_suffix:           referenceSuffix,
         synced_at: new Date().toISOString(),
       }, { onConflict: 'org_id,xero_invoice_id' })
     } catch (upsertErr: any) {
@@ -10965,6 +11260,33 @@ async function sendAcceptanceInvoice(client: any, body: any) {
       payment_url: paymentUrl,
       sms_sent: smsSent,
       branded_email_sent: brandedEmailSent,
+    },
+  })
+
+  // Loop 1B-a-apply: dual-write to business_events.invoice.created so the
+  // acceptance-hyperlink path matches completeAndInvoice's audit trail. Without
+  // this, F14 (zero invoice.authorised events historically) had a sibling gap
+  // where deposit invoices created via the customer hyperlink left no
+  // business_events row at all. Non-blocking on failure.
+  logBusinessEvent(client, {
+    event_type: 'invoice.created',
+    entity_type: 'xero_invoice',
+    entity_id: invoiceResult.xero_invoice_id || jId,
+    correlation_id: jId,
+    job_id: job?.job_number || jId,
+    payload: {
+      invoice_number: invoiceResult.invoice_number,
+      total: invoiceResult.deposit_amount,
+      status: 'AUTHORISED',
+      flow: 'acceptance_hyperlink',
+      deposit_percent: depositPercent,
+      council_fees: councilFees,
+      job_contact_id: body.job_contact_id || null,
+      run_label: body.run_label || null,
+    },
+    metadata: {
+      operator: body.operator || 'customer_acceptance',
+      source: 'sendAcceptanceInvoice',
     },
   })
 
