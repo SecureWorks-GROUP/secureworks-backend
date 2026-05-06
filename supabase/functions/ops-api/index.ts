@@ -1830,12 +1830,12 @@ if (import.meta.main) serve(async (req: Request) => {
           .select('*')
           .eq('trade_invoice_id', invoice_id)
 
-        // Read-only setup. Nothing here touches Xero or mutates Supabase.
+        // Pure read-only setup. Nothing here touches Xero or mutates Supabase.
+        // (getToken() is intentionally deferred — it can upsert xero_tokens on
+        // refresh, which would be a side effect before the reconciliation guard.)
         const tradeName = inv.user?.name || 'Unknown Trade'
         const tradeEmail = inv.user?.email || ''
         const cachedContactId: string | null = inv.user?.xero_contact_id || null
-
-        const { accessToken, tenantId } = await getToken(client)
 
         const weekNum = Math.ceil((new Date(inv.week_start).getTime() - new Date(new Date(inv.week_start).getFullYear(), 0, 1).getTime()) / (7 * 86400000))
         const year = new Date(inv.week_start).getFullYear()
@@ -1844,7 +1844,29 @@ if (import.meta.main) serve(async (req: Request) => {
         const paymentDays = inv.user?.payment_terms_days || 7
         const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
 
-        // Look up tracking categories (Xero read; no side effects).
+        // Reconciliation guard runs BEFORE getToken (which can upsert xero_tokens),
+        // before any Xero call, and before any users/trade_invoices mutation.
+        // Computes the per-line value directly from raw trade_invoice_lines rows
+        // using the labour-vs-extras detection — same algorithm the line builder
+        // below uses, just without the Tracking enrichment that needs accessToken.
+        // A malformed-line-shape invoice throws here with zero side effects.
+        const computedSubtotal = (lines || []).reduce((sum: number, line: any) => {
+          const hours = Number(line.total_hours || 0)
+          const hRate = Number(line.hourly_rate || 0)
+          const qty = Number(line.quantity || 0)
+          const uRate = Number(line.unit_rate || 0)
+          const isLabour = hours > 0 && hRate > 0
+          return sum + (isLabour ? hours * hRate : qty * uRate)
+        }, 0)
+        const expectedSubtotal = Number(inv.subtotal_ex || 0)
+        if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
+          throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
+        }
+
+        // Past the guard. From here side effects are allowed.
+        const { accessToken, tenantId } = await getToken(client)
+
+        // Look up tracking categories (Xero read).
         let tracking: any[] = []
         try {
           const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
@@ -1887,16 +1909,6 @@ if (import.meta.main) serve(async (req: Request) => {
             Tracking: lineTracking,
           }
         })
-
-        // Reconciliation guard runs BEFORE any side effect (Xero contact create/update,
-        // users.xero_contact_id cache write, Xero invoice push). Order is intentional:
-        // read invoice+lines+user → build xeroLineItems → guard → resolve/cache contact → POST /Invoices.
-        // A malformed-line-shape invoice fails here without producing any Xero or Supabase mutation.
-        const computedSubtotal = xeroLineItems.reduce((sum: number, li: any) => sum + (Number(li.Quantity) * Number(li.UnitAmount)), 0)
-        const expectedSubtotal = Number(inv.subtotal_ex || 0)
-        if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
-          throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
-        }
 
         // Resolve Xero contact for the trade
         // Order: cached users.xero_contact_id -> email lookup -> create.
@@ -2841,9 +2853,9 @@ if (import.meta.main) serve(async (req: Request) => {
             const hasExtras = Array.isArray(extra_items) && extra_items.length > 0
             if (assignments.length === 0 && !hasExtras) throw new ApiError('No completed assignments or line items to invoice', 400)
 
-            // Get user's default rate
+            // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below)
             const { data: userProfile } = await client.from('users')
-              .select('default_hourly_rate, name')
+              .select('default_hourly_rate, name, xero_contact_id')
               .eq('id', tradeUser.id)
               .maybeSingle()
 
@@ -3080,11 +3092,21 @@ if (import.meta.main) serve(async (req: Request) => {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
-              // Resolve Xero supplier contact (search by email, create if not found)
-              try {
-                const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
-                if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
-              } catch (e) { /* fallback to create */ }
+              // Resolve Xero supplier contact.
+              // Order: cached users.xero_contact_id -> email lookup -> create.
+              // Cached path is critical for users whose Supabase email does not
+              // match the Xero contact's primary EmailAddress (e.g. Jean Crous
+              // — Supabase jeancrous44@gmail.com vs Xero jeancrous@gmail.com).
+              // Without this, name-uniqueness in Xero blocks the create-PUT and
+              // the auto-push silently fails forever.
+              const cachedAutoContactId: string | null = userProfile?.xero_contact_id || null
+              xeroContactId = cachedAutoContactId
+              if (!xeroContactId) {
+                try {
+                  const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
+                  if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+                } catch (e) { /* fallback to create */ }
+              }
               if (!xeroContactId) {
                 const createRes = await xeroPost('/Contacts', accessToken, tenantId, {
                   Contacts: [{ Name: userProfile?.name || 'Trade', EmailAddress: tradeEmail, IsSupplier: true }]
@@ -3092,8 +3114,8 @@ if (import.meta.main) serve(async (req: Request) => {
                 xeroContactId = createRes?.Contacts?.[0]?.ContactID
               }
 
-              // Save contact ID for next time
-              if (xeroContactId && !tradeUser.xero_contact_id) {
+              // Save contact ID for next time (only if not already cached on the user row).
+              if (xeroContactId && !cachedAutoContactId) {
                 await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', tradeUser.id)
               }
               if (!xeroContactId) {
