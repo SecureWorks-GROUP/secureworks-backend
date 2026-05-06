@@ -1830,40 +1830,13 @@ if (import.meta.main) serve(async (req: Request) => {
           .select('*')
           .eq('trade_invoice_id', invoice_id)
 
-        const { accessToken, tenantId } = await getToken(client)
-
-        // Resolve Xero contact for the trade
-        // Order: cached users.xero_contact_id -> email lookup -> create.
-        // The cached path lets recovery succeed when the user's Supabase email
-        // does not match the Xero contact's primary EmailAddress.
+        // Read-only setup. Nothing here touches Xero or mutates Supabase.
         const tradeName = inv.user?.name || 'Unknown Trade'
         const tradeEmail = inv.user?.email || ''
         const cachedContactId: string | null = inv.user?.xero_contact_id || null
-        let xeroContactId: string | null = cachedContactId
 
-        if (!xeroContactId) {
-          try {
-            const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
-            if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
-          } catch (e) { /* fallback to create */ }
-        }
+        const { accessToken, tenantId } = await getToken(client)
 
-        if (!xeroContactId) {
-          // Create contact
-          const createRes = await xeroPost('/Contacts', accessToken, tenantId, {
-            Contacts: [{ Name: tradeName, EmailAddress: tradeEmail, IsSupplier: true }]
-          }, 'PUT')
-          xeroContactId = createRes?.Contacts?.[0]?.ContactID
-        }
-
-        if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
-
-        // Cache the resolved ContactID for next time so future runs skip lookup/create.
-        if (xeroContactId && !cachedContactId && inv.user_id) {
-          await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', inv.user_id)
-        }
-
-        // Build line items
         const weekNum = Math.ceil((new Date(inv.week_start).getTime() - new Date(new Date(inv.week_start).getFullYear(), 0, 1).getTime()) / (7 * 86400000))
         const year = new Date(inv.week_start).getFullYear()
         const reference = 'TRADE-' + tradeName.split(' ')[0] + '-WK' + weekNum + '-' + year
@@ -1871,7 +1844,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const paymentDays = inv.user?.payment_terms_days || 7
         const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
 
-        // Look up tracking categories
+        // Look up tracking categories (Xero read; no side effects).
         let tracking: any[] = []
         try {
           const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
@@ -1915,12 +1888,42 @@ if (import.meta.main) serve(async (req: Request) => {
           }
         })
 
-        // Reconciliation guard: if computed line subtotal disagrees with the parent invoice's
-        // subtotal_ex, abort BEFORE touching Xero. Catches schema drift / bad line shape.
+        // Reconciliation guard runs BEFORE any side effect (Xero contact create/update,
+        // users.xero_contact_id cache write, Xero invoice push). Order is intentional:
+        // read invoice+lines+user → build xeroLineItems → guard → resolve/cache contact → POST /Invoices.
+        // A malformed-line-shape invoice fails here without producing any Xero or Supabase mutation.
         const computedSubtotal = xeroLineItems.reduce((sum: number, li: any) => sum + (Number(li.Quantity) * Number(li.UnitAmount)), 0)
         const expectedSubtotal = Number(inv.subtotal_ex || 0)
         if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
           throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
+        }
+
+        // Resolve Xero contact for the trade
+        // Order: cached users.xero_contact_id -> email lookup -> create.
+        // The cached path lets recovery succeed when the user's Supabase email
+        // does not match the Xero contact's primary EmailAddress.
+        let xeroContactId: string | null = cachedContactId
+
+        if (!xeroContactId) {
+          try {
+            const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
+            if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+          } catch (e) { /* fallback to create */ }
+        }
+
+        if (!xeroContactId) {
+          // Create contact
+          const createRes = await xeroPost('/Contacts', accessToken, tenantId, {
+            Contacts: [{ Name: tradeName, EmailAddress: tradeEmail, IsSupplier: true }]
+          }, 'PUT')
+          xeroContactId = createRes?.Contacts?.[0]?.ContactID
+        }
+
+        if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
+
+        // Cache the resolved ContactID for next time so future runs skip lookup/create.
+        if (xeroContactId && !cachedContactId && inv.user_id) {
+          await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', inv.user_id)
         }
 
         const xeroPayload = {
