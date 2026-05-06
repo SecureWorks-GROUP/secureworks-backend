@@ -2186,6 +2186,10 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'manual_dispatch_marnin_poc':   return json(await manualDispatchMarninPoc(client, body))
       case 'assign_scoper':                return json(await assignScoper(client, body))
       case 'book_scope':                   return json(await bookScope(client, body))
+      // Quote Follow-Up Loop send path (atomic-claim per parent card B4).
+      // Only fires when sale.html dispatches a send_quote_followup_sms
+      // proposal. Customer-facing send is gated by Marnin's cockpit click.
+      case 'send_quote_followup_sms':      return json(await sendQuoteFollowupSms(client, body))
 
       // ── Slice 3: Brain backfill ──
       // Marnin-only. Defaults to dry_run=true. Pulls historical GHL
@@ -12267,6 +12271,116 @@ async function sendProposedSms(client: any, body: any) {
   }
 
   return { success: true, action_id }
+}
+
+// ════════════════════════════════════════════════════════════
+// Quote Follow-Up send handler (atomic-claim per memory
+// feedback_atomic_claim_pattern_for_proposal_handlers).
+//
+// Mirrors sendProposedSms's envelope but adds a real claim-then-side-effect
+// pattern so concurrent approvals can't double-send the customer:
+//   1) UPDATE … WHERE status='pending' AND action_type='send_quote_followup_sms'
+//      RETURNING * — claims the row atomically.
+//   2) Send SMS via ghl-proxy.
+//   3) UPDATE … WHERE status='approved' RETURNING * — finalizes status='sent'.
+// ════════════════════════════════════════════════════════════
+async function sendQuoteFollowupSms(client: any, body: any) {
+  const { action_id, user_id } = body
+  if (!action_id) throw new Error('action_id required')
+
+  // Step 1: atomic claim — UPDATE pending → approved with returning.
+  // If zero rows returned, another worker already claimed (or row absent).
+  const { data: claimed, error: claimErr } = await client
+    .from('ai_proposed_actions')
+    .update({
+      status: 'approved',
+      approved_at: new Date().toISOString(),
+      approved_by: user_id || null,
+    })
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+    .eq('action_type', 'send_quote_followup_sms')
+    .select('proposal_id, action_type, contact_id, contact_name, contact_phone, drafted_message, job_id, action_payload')
+    .limit(1)
+  if (claimErr) throw claimErr
+  if (!claimed || claimed.length === 0) {
+    // 409: either not found, already-claimed, wrong status, or wrong action_type.
+    return { success: false, action_id, error: 'claim_failed', reason: 'proposal not found or already claimed (status != pending or action_type != send_quote_followup_sms)' }
+  }
+  const action = claimed[0]
+
+  // Step 2: customer-facing side effect — SMS via ghl-proxy.
+  // If this throws, the row stays in status='approved' (not 'sent') so the
+  // audit trail shows the claim happened but the send didn't. Operator sees
+  // an "approved-not-sent" row in the cockpit and can investigate.
+  if (!action.contact_id || !action.drafted_message) {
+    // Roll back the claim — no contact to send to.
+    await client.from('ai_proposed_actions')
+      .update({ status: 'pending', approved_at: null, approved_by: null })
+      .eq('proposal_id', action_id)
+      .eq('status', 'approved')
+    throw new Error('contact_id and drafted_message required to send')
+  }
+  const ghlUrl = Deno.env.get('SUPABASE_URL')?.replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+  let sendResult: any = null
+  try {
+    const resp = await fetch(`${ghlUrl}?action=send_sms`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ghlKey}`,
+      },
+      body: JSON.stringify({
+        contactId: action.contact_id,
+        message: action.drafted_message,
+        jobId: action.job_id,
+      }),
+    })
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '')
+      throw new Error(`ghl-proxy returned ${resp.status}: ${txt.slice(0, 200)}`)
+    }
+    sendResult = await resp.json().catch(() => ({}))
+  } catch (e: any) {
+    console.error('[ops-api/send_quote_followup_sms] SMS send failed:', e.message)
+    throw new Error('SMS sending failed — check ghl-proxy logs (proposal stays at status=approved for audit)')
+  }
+
+  // Step 3: finalize — UPDATE approved → sent with returning. If zero rows,
+  // a race or concurrent finalize occurred; log and return success-with-warning.
+  const { data: finalized, error: finErr } = await client
+    .from('ai_proposed_actions')
+    .update({ status: 'sent', sent_at: new Date().toISOString() })
+    .eq('proposal_id', action_id)
+    .eq('status', 'approved')
+    .select('proposal_id')
+    .limit(1)
+  if (finErr) {
+    console.error('[ops-api/send_quote_followup_sms] finalize update failed:', finErr.message)
+  }
+  if (!finalized || finalized.length === 0) {
+    console.warn('[ops-api/send_quote_followup_sms] finalize matched 0 rows for', action_id)
+  }
+
+  // Mirror sendProposedSms: log job_event for audit on the spine
+  if (action.job_id) {
+    try {
+      await client.from('job_events').insert({
+        job_id: action.job_id,
+        event_type: 'sms_sent',
+        detail_json: {
+          type: action.action_type,
+          message: action.drafted_message,
+          contact_name: action.contact_name,
+          source: 'ai_proposed_action',
+          loop: 'quote_followup',
+        },
+      })
+    } catch (_e) { /* spine log is best-effort */ }
+  }
+
+  return { success: true, action_id, send_result: sendResult }
 }
 
 async function dismissProposedAction(client: any, body: any) {
