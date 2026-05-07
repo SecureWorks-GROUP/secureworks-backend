@@ -71,6 +71,11 @@ interface TranscribeCallInput {
   duration_seconds?: number
   phone?: string
   ghl_call_id?: string
+  // Optional bearer token for the recording fetch — set when the URL is a
+  // GHL-hosted authenticated audio endpoint (e.g.
+  // https://services.leadconnectorhq.com/conversations/messages/{id}/locations/{loc}/audio).
+  // Twilio public URLs do not need this and the field stays unset.
+  fetch_auth_bearer?: string
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -122,10 +127,21 @@ serve(async (req) => {
 
   // 1. Download audio from recording_url. Twilio URLs are temp-signed; this
   //    must run before the URL expires (typically minutes after CallCompleted).
+  // GHL-hosted audio endpoints require the GHL bearer token; the receiver
+  // passes it through as input.fetch_auth_bearer when applicable. If unset
+  // for a leadconnectorhq URL, fall back to GHL_API_TOKEN env so direct
+  // invocations work too.
   let audioBytes: Uint8Array
   let contentType = 'audio/mpeg'
   try {
-    const resp = await fetch(input.recording_url)
+    const fetchHeaders: Record<string, string> = {}
+    const isGhlUrl = input.recording_url.startsWith('https://services.leadconnectorhq.com/')
+    const ghlBearer = input.fetch_auth_bearer || (isGhlUrl ? (Deno.env.get('GHL_API_TOKEN') || '') : '')
+    if (ghlBearer) {
+      fetchHeaders['Authorization'] = `Bearer ${ghlBearer}`
+      fetchHeaders['Version'] = '2021-04-15'
+    }
+    const resp = await fetch(input.recording_url, { headers: fetchHeaders })
     if (!resp.ok) {
       return jsonResponse({ ok: false, reason: `audio download failed: HTTP ${resp.status}` }, 502)
     }
@@ -152,7 +168,11 @@ serve(async (req) => {
             : contentType.includes('ogg') || contentType.includes('oga') ? 'ogg'
             : contentType.includes('webm') ? 'webm'
             : 'mp3'
-  const audioPath = `${DEFAULT_ORG_ID}/call/${source_id}.${ext}`
+  // Scope audio path by job_id when available so audit/dashboards can list
+  // a job's audio without scanning the org-wide bucket. Falls back to org id
+  // when the call could not be matched to a job.
+  const pathScope = input.job_id || DEFAULT_ORG_ID
+  const audioPath = `${pathScope}/call/${source_id}.${ext}`
   try {
     const { error: upErr } = await sb.storage
       .from('evidence-audio')
@@ -233,9 +253,19 @@ serve(async (req) => {
       privacy_classification: 'staff_only',
       retention_class: '7y_audit',
       payload: {
-        // transcript_text lives in payload so the T5 extractor (which
-        // reads business_events.payload via loadSourceRow) can pull it.
+        // The T5 extractor's `buildSourceText` (context-fact-extractor.ts:111)
+        // looks for `body / text / message / note_text / body_preview /
+        // summary` in payload. Mirror the transcript into ALL the canonical
+        // field names the prefilter recognises, so the LLM extractor sees
+        // usable text and produces job_context facts. transcript_text retained
+        // for backwards-compat with anything that already reads that key.
+        body: transcript_text,
+        text: transcript_text,
+        message: transcript_text,
+        transcript: transcript_text,
         transcript_text,
+        body_preview: safe_summary,
+        summary: safe_summary,
         recording_url_hash: (await sha256Hex(input.recording_url)).slice(0, 16),
         audio_pointer: `evidence-audio://${audioPath}`,
         audio_content_type: contentType,
