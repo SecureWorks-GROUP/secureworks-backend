@@ -2204,6 +2204,11 @@ if (import.meta.main) serve(async (req: Request) => {
 
       // ── Proposed Actions (SMS drafts etc.) ──
       case 'list_proposed_actions': return json(await listProposedActions(client, url.searchParams))
+      // Quote-nurture cadence v3 — read-only stale review tasks (>3 days
+      // pending). sale.html uses this to render the ESCALATED badge on D30
+      // review cards. NO state change, NO mutation, NO email.
+      // Per parent card secure-sale-quote-followup-loop reframe v3.
+      case 'list_stale_quote_review_tasks': return json(await listStaleQuoteReviewTasks(client, url.searchParams))
       case 'send_proposed_sms': return json(await sendProposedSms(client, body))
       case 'dismiss_proposed_action': return json(await dismissProposedAction(client, body))
       // Loop 6.5 manual-live bridge — single canary / per-message manual approval.
@@ -2221,6 +2226,13 @@ if (import.meta.main) serve(async (req: Request) => {
       // Only fires when sale.html dispatches a send_quote_followup_sms
       // proposal. Customer-facing send is gated by Marnin's cockpit click.
       case 'send_quote_followup_sms':      return json(await sendQuoteFollowupSms(client, body))
+      // Quote-nurture cadence v3 — internal task approval handlers.
+      // Atomic-claim pattern (memory feedback_atomic_claim_pattern_for_proposal_handlers).
+      // NEITHER fires SMS, GHL mutation, or any external API. They only
+      // mark the proposal approved and emit a business_event for the spine.
+      // Per parent card secure-sale-quote-followup-loop reframe v3.
+      case 'approve_scoper_call_task':     return json(await approveScoperCallTask(client, body))
+      case 'approve_quote_review_task':    return json(await approveQuoteReviewTask(client, body))
 
       // ── Slice 3: Brain backfill ──
       // Marnin-only. Defaults to dry_run=true. Pulls historical GHL
@@ -12801,6 +12813,271 @@ async function sendQuoteFollowupSms(client: any, body: any) {
   }
 
   return { success: true, action_id, send_result: sendResult }
+}
+
+// ════════════════════════════════════════════════════════════
+// Quote-nurture cadence v3 — internal task approval handlers.
+//
+// Atomic-claim pattern (memory feedback_atomic_claim_pattern_for_proposal_handlers).
+// Both handlers:
+//   1) Validate-and-claim: UPDATE … WHERE status='pending' AND
+//      action_type='<expected>' RETURNING * — claims the row atomically.
+//   2) Customer-visible side effect (NONE for these handlers — internal
+//      task creators only). Optional state flip on archive_lost.
+//   3) Emit business_event + job_event for the spine.
+//
+// CRITICAL: NEITHER handler fires SMS, GHL, email, or any external API.
+// They emit events for the spine and (for archive_lost) flip jobs.status
+// to 'lost' with lost_reason. That's it.
+//
+// Per parent card secure-sale-quote-followup-loop reframe v3
+// (secureworks-docs/cio/operations/board/Secure-Sale-Automation/
+//  secure-sale-quote-followup-loop/quote-nurture-reframe-2026-05-07.md).
+// ════════════════════════════════════════════════════════════
+async function approveScoperCallTask(client: any, body: any) {
+  const { action_id, user_id } = body
+  if (!action_id) throw new Error('action_id required')
+
+  // Step 1: atomic validate-and-claim. We require status='pending' AND
+  // action_type='propose_scoper_call_task' so a concurrent approve on the
+  // wrong proposal type can't slip through.
+  const nowIso = new Date().toISOString()
+  const { data: claimed, error: claimErr } = await client
+    .from('ai_proposed_actions')
+    .update({
+      status: 'approved',
+      approved_at: nowIso,
+      approved_by: user_id || null,
+    })
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+    .eq('action_type', 'propose_scoper_call_task')
+    .select('proposal_id, action_type, contact_id, contact_name, job_id, action_payload, drafted_message, metadata')
+    .limit(1)
+  if (claimErr) throw claimErr
+  if (!claimed || claimed.length === 0) {
+    return {
+      success: false,
+      action_id,
+      error: 'claim_failed',
+      reason: 'proposal not found or already claimed (status != pending or action_type != propose_scoper_call_task)',
+    }
+  }
+  const action = claimed[0]
+  const ap = (action.action_payload || {}) as Record<string, any>
+  const slot_day = ap.slot_day || null
+  const voice_anchor = ap.voice_anchor || null
+  const ticket_tier = ap.ticket_tier || null
+
+  // Step 2: NO customer-facing side effect. (This is the whole point.)
+
+  // Step 3: emit business_event for the spine.
+  try {
+    await client.from('business_events').insert({
+      event_type: 'scoper_call_task_approved',
+      job_id: action.job_id || null,
+      contact_id: action.contact_id || null,
+      occurred_at: nowIso,
+      direction: 'internal',
+      channel: 'task',
+      payload: {
+        proposal_id: action.proposal_id,
+        action_type: 'propose_scoper_call_task',
+        slot_day,
+        voice_anchor,
+        ticket_tier,
+        approved_by: user_id || null,
+        loop: 'quote_followup',
+      },
+      source_table: 'ai_proposed_actions',
+      source_id: action.proposal_id,
+    })
+  } catch (e: any) {
+    console.warn('[ops-api/approve_scoper_call_task] business_event insert failed:', e.message)
+  }
+
+  // job_event mirror for the audit spine on the job
+  if (action.job_id) {
+    try {
+      await client.from('job_events').insert({
+        job_id: action.job_id,
+        event_type: 'scoper_call_task_approved',
+        detail_json: {
+          proposal_id: action.proposal_id,
+          slot_day,
+          voice_anchor,
+          ticket_tier,
+          approved_by: user_id || null,
+        },
+      })
+    } catch (_e) { /* spine log is best-effort */ }
+  }
+
+  return { success: true, action_id, sub_action: null }
+}
+
+async function approveQuoteReviewTask(client: any, body: any) {
+  const { action_id, user_id, sub_action, lost_reason } = body
+  if (!action_id) throw new Error('action_id required')
+
+  const VALID_SUB_ACTIONS = ['refresh_price', 'archive_lost', 'reactivate']
+  if (!sub_action || !VALID_SUB_ACTIONS.includes(sub_action)) {
+    throw new Error(`sub_action required (one of ${VALID_SUB_ACTIONS.join(', ')})`)
+  }
+  if (sub_action === 'archive_lost' && (!lost_reason || !String(lost_reason).trim())) {
+    throw new Error('lost_reason required when sub_action=archive_lost')
+  }
+
+  // Step 1: atomic validate-and-claim.
+  const nowIso = new Date().toISOString()
+  const { data: claimed, error: claimErr } = await client
+    .from('ai_proposed_actions')
+    .update({
+      status: 'approved',
+      approved_at: nowIso,
+      approved_by: user_id || null,
+    })
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+    .eq('action_type', 'propose_quote_review_task')
+    .select('proposal_id, action_type, contact_id, contact_name, job_id, action_payload, drafted_message, metadata')
+    .limit(1)
+  if (claimErr) throw claimErr
+  if (!claimed || claimed.length === 0) {
+    return {
+      success: false,
+      action_id,
+      error: 'claim_failed',
+      reason: 'proposal not found or already claimed (status != pending or action_type != propose_quote_review_task)',
+    }
+  }
+  const action = claimed[0]
+  const ap = (action.action_payload || {}) as Record<string, any>
+  const slot_day = ap.slot_day || null
+  const voice_anchor = ap.voice_anchor || null
+  const assigned_rep = ap.assigned_rep || null
+
+  // Step 2: optional job state flip on archive_lost. NO customer SMS, NO GHL.
+  let jobUpdateApplied = false
+  if (sub_action === 'archive_lost' && action.job_id) {
+    try {
+      const reasonStr = String(lost_reason).trim()
+      const { error: jobErr } = await client
+        .from('jobs')
+        .update({
+          status: 'lost',
+          lost_reason: reasonStr,
+          lost_at: nowIso,
+        })
+        .eq('id', action.job_id)
+      if (jobErr) {
+        // If lost_reason / lost_at columns don't exist on jobs (pending
+        // migration), fall back to status-only flip.
+        console.warn('[ops-api/approve_quote_review_task] full job archive failed, attempting status-only:', jobErr.message)
+        const { error: jobErr2 } = await client
+          .from('jobs')
+          .update({ status: 'lost' })
+          .eq('id', action.job_id)
+        if (jobErr2) console.warn('[ops-api/approve_quote_review_task] status-only flip also failed:', jobErr2.message)
+        else jobUpdateApplied = true
+      } else {
+        jobUpdateApplied = true
+      }
+    } catch (e: any) {
+      console.warn('[ops-api/approve_quote_review_task] job archive error:', e.message)
+    }
+  }
+
+  // Step 3: emit business_event for the spine.
+  try {
+    await client.from('business_events').insert({
+      event_type: `quote_review_task_${sub_action}`,
+      job_id: action.job_id || null,
+      contact_id: action.contact_id || null,
+      occurred_at: nowIso,
+      direction: 'internal',
+      channel: 'task',
+      payload: {
+        proposal_id: action.proposal_id,
+        action_type: 'propose_quote_review_task',
+        sub_action,
+        lost_reason: lost_reason || null,
+        job_archived: jobUpdateApplied,
+        slot_day,
+        voice_anchor,
+        assigned_rep,
+        approved_by: user_id || null,
+        loop: 'quote_followup',
+      },
+      source_table: 'ai_proposed_actions',
+      source_id: action.proposal_id,
+    })
+  } catch (e: any) {
+    console.warn('[ops-api/approve_quote_review_task] business_event insert failed:', e.message)
+  }
+
+  // job_event mirror for the audit spine
+  if (action.job_id) {
+    try {
+      await client.from('job_events').insert({
+        job_id: action.job_id,
+        event_type: `quote_review_task_${sub_action}`,
+        detail_json: {
+          proposal_id: action.proposal_id,
+          sub_action,
+          lost_reason: lost_reason || null,
+          job_archived: jobUpdateApplied,
+          slot_day,
+          voice_anchor,
+          approved_by: user_id || null,
+        },
+      })
+    } catch (_e) { /* spine log is best-effort */ }
+  }
+
+  return { success: true, action_id, sub_action, job_archived: jobUpdateApplied }
+}
+
+// ════════════════════════════════════════════════════════════
+// Quote-nurture cadence v3 — read-only stale review tasks list.
+//
+// Returns propose_quote_review_task proposals that have been pending for
+// > 3 days. sale.html uses this to render an ESCALATED badge so the
+// human operator knows Shaun is the next pair of eyes (with Marnin CC'd
+// at his discretion). Per Marnin's brief: NO background magic — this is
+// purely a read so the renderer can show the badge.
+// ════════════════════════════════════════════════════════════
+async function listStaleQuoteReviewTasks(client: any, _params: URLSearchParams) {
+  const cutoffIso = new Date(Date.now() - 3 * 86400 * 1000).toISOString()
+  const { data, error } = await client
+    .from('ai_proposed_actions')
+    .select('proposal_id, action_type, contact_id, contact_name, job_id, created_at, action_payload, metadata')
+    .eq('action_type', 'propose_quote_review_task')
+    .eq('status', 'pending')
+    .lt('created_at', cutoffIso)
+    .order('created_at', { ascending: true })
+    .limit(100)
+  if (error) throw error
+  const tasks = (data || []).map((r: any) => {
+    const ap = (r.action_payload || {}) as Record<string, any>
+    const meta = (r.metadata || {}) as Record<string, any>
+    const ageMs = Date.now() - Date.parse(r.created_at)
+    return {
+      proposal_id: r.proposal_id,
+      action_type: r.action_type,
+      job_id: r.job_id,
+      contact_id: r.contact_id,
+      contact_name: r.contact_name,
+      created_at: r.created_at,
+      age_days: Math.floor(ageMs / 86400000),
+      assigned_rep: ap.assigned_rep || meta.rep || null,
+      voice_anchor: ap.voice_anchor || null,
+      slot_day: ap.slot_day || null,
+      ticket_tier: ap.ticket_tier || null,
+      job_number: meta.job_number || null,
+    }
+  })
+  return { tasks }
 }
 
 async function dismissProposedAction(client: any, body: any) {
