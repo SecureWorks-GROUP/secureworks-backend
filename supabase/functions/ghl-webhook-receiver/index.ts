@@ -215,11 +215,117 @@ serve(async (req) => {
 
       case "CallCompleted": {
         eventType = "client.call_complete";
+
+        // F2 — recording_url null-string normalization.
+        // GHL templates `{{phoneCall.recordingUrl}}` to the literal string
+        // "null" (or "", "undefined", "NULL") when the recording variable
+        // doesn't resolve in the workflow scope. Treat all of those as null
+        // so downstream `if (recording_url)` checks correctly skip transcribe.
+        const rawRecording = body.recordingUrl ?? body.recording_url ?? null;
+        const recordingNormalized = (() => {
+          if (rawRecording === null || rawRecording === undefined) return null;
+          const s = String(rawRecording).trim();
+          if (!s) return null;
+          const lower = s.toLowerCase();
+          if (lower === "null" || lower === "undefined") return null;
+          return s;
+        })();
+
+        // F3 — line attribution + voicemail + status enrichment.
+        // Compute line_label / department by matching `to` (inbound) or
+        // `from` (outbound) against telephony-lines-canon.md. Surface
+        // event_id, call_status, voicemail boolean, to/from on the spine
+        // so JARVIS can answer "which line did the client call?".
+        const fromRaw = body.from ?? body.fromNumber ?? body.callerNumber ?? null;
+        const toRaw = body.to ?? body.toNumber ?? body.calledNumber ?? null;
+        const callDirection = body.direction || body.callDirection || null;
+        const callStatusRaw = body.callStatus || body.call_status || body.status || null;
+        // Voicemail flag: GHL workflow body sometimes sends literal boolean,
+        // sometimes the string "true"/"false", sometimes only callStatus
+        // signals it. Normalize to a real boolean | null.
+        const voicemailRaw = body.voicemail ?? body.isVoicemail ?? null;
+        let voicemailNormalized: boolean | null = null;
+        if (typeof voicemailRaw === "boolean") {
+          voicemailNormalized = voicemailRaw;
+        } else if (typeof voicemailRaw === "string") {
+          const v = voicemailRaw.trim().toLowerCase();
+          if (v === "true") voicemailNormalized = true;
+          else if (v === "false") voicemailNormalized = false;
+        }
+        if (voicemailNormalized === null && typeof callStatusRaw === "string") {
+          if (callStatusRaw.toLowerCase() === "voicemail") voicemailNormalized = true;
+        }
+
+        // Normalize a phone string to E.164 AU. Accepts `+61...`, `0...`
+        // local, and digit-only forms. Returns null on garbage.
+        const normalizePhone = (raw: unknown): string | null => {
+          if (raw === null || raw === undefined) return null;
+          const s = String(raw).trim();
+          if (!s) return null;
+          if (s.toLowerCase() === "null" || s.toLowerCase() === "undefined") return null;
+          // Strip everything that isn't a digit or leading +.
+          const hasPlus = s.startsWith("+");
+          const digits = s.replace(/[^0-9]/g, "");
+          if (!digits) return null;
+          if (hasPlus) return "+" + digits;
+          // Local AU `0489...` → `+61489...`
+          if (digits.startsWith("0") && digits.length >= 9) return "+61" + digits.slice(1);
+          if (digits.startsWith("61") && digits.length >= 11) return "+" + digits;
+          // Already digits, no plus, no 0/61 prefix — return as-is with +.
+          return "+" + digits;
+        };
+
+        // Canonical line table. Keep in lockstep with
+        // `cio/operations/board/.../telephony-lines-canon.md`.
+        const LINE_CANON: Record<string, { line_label: string; department: string }> = {
+          "+61489267776": { line_label: "admin", department: "ops" },
+          "+61489267772": { line_label: "fencing", department: "sales-fencing" },
+          "+61489267774": { line_label: "patios", department: "sales-patios" },
+          "+61489267778": { line_label: "fencing-mgmt", department: "mgmt-fencing" },
+          "+61489267771": { line_label: "shaun-ops-mgr", department: "ops-mgr" },
+        };
+
+        const fromE164 = normalizePhone(fromRaw);
+        const toE164 = normalizePhone(toRaw);
+        // Inbound: `to` is one of our lines. Outbound: `from` is one of our
+        // lines. Default to inbound if direction missing.
+        const isOutbound = (typeof callDirection === "string" && callDirection.toLowerCase() === "outbound");
+        const lineCandidate = isOutbound ? fromE164 : toE164;
+        const lineMeta = (lineCandidate && LINE_CANON[lineCandidate]) || null;
+        const line_label = lineMeta?.line_label || "unknown";
+        const department = lineMeta?.department || "unknown";
+        if (!lineMeta) {
+          console.warn(
+            `[ghl-webhook-receiver] CallCompleted: no canon match for line (direction=${callDirection || "?"} from=${fromE164 || "?"} to=${toE164 || "?"})`,
+          );
+        }
+
+        // Resolve a stable event_id for dedupe. GHL has been observed to
+        // template `{{phoneCall.eventId}}` to the literal string "null" — same
+        // pattern as recordingUrl. Apply the same normalization.
+        const rawEventId = body.eventId ?? body.callId ?? body.id ?? null;
+        const eventIdNormalized = (() => {
+          if (rawEventId === null || rawEventId === undefined) return null;
+          const s = String(rawEventId).trim();
+          if (!s) return null;
+          const lower = s.toLowerCase();
+          if (lower === "null" || lower === "undefined") return null;
+          return s;
+        })();
+
         eventPayload = {
           duration: body.duration || body.callDuration || null,
-          direction: body.direction || body.callDirection || null,
-          recording_url: body.recordingUrl || body.recording_url || null,
-          phone: body.phone || body.callerNumber || null,
+          direction: callDirection,
+          recording_url: recordingNormalized,
+          phone: normalizePhone(body.phone) || fromE164 || null,
+          // F3 enrichment
+          from: fromE164,
+          to: toE164,
+          call_status: callStatusRaw,
+          voicemail: voicemailNormalized,
+          line_label,
+          department,
+          event_id: eventIdNormalized,
           source: "ghl_webhook",
         };
         break;
@@ -402,13 +508,19 @@ serve(async (req) => {
           occurred_at: new Date().toISOString(),
           duration_seconds: eventPayload.duration as number || null,
           phone: (eventPayload.phone as string) || null,
-          ghl_call_id: (body as { eventId?: string; id?: string }).eventId
-                        || (body as { id?: string }).id
-                        || null,
+          // Use the F2-normalized event_id (already filters out string "null").
+          ghl_call_id: (eventPayload.event_id as string | null) || null,
         };
-        // Fire-and-forget invoke. We use the supabase Functions client
-        // so auth + URL are resolved automatically.
-        supabase.functions.invoke("transcribe-call", { body: transcribePayload })
+        // F1 — explicit Bearer header. The Deno supabase-js client's
+        // `functions.invoke()` does not reliably propagate the auth header
+        // to a sibling function with `verify_jwt:true` in the same project,
+        // so we pass the service-role JWT explicitly. Without this the
+        // receiver-to-transcribe-call hop returns 401 and the chain dies.
+        const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+        supabase.functions.invoke("transcribe-call", {
+          body: transcribePayload,
+          headers: { Authorization: `Bearer ${serviceRoleKey}` },
+        })
           .then((r) => {
             if (r.error) console.error("[ghl-webhook-receiver] transcribe-call invoke error:", r.error);
             else console.log("[ghl-webhook-receiver] transcribe-call invoked", r.data?.spine_event_id || "(no id)");
