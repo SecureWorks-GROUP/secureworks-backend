@@ -29,6 +29,159 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Webhook-Secret",
 };
 
+// SecureWorks Group telephony lines canon — see
+// secureworks-docs/cio/operations/board/Evidence-Spine-JARVIS-Memory/
+//   call-transcript-ingestion-activation/telephony-lines-canon.md
+// Match body.to (inbound) or body.from (outbound) against E.164 OR local form.
+const TELEPHONY_LINES: Array<{ e164: string; local: string; line_label: string; department: string }> = [
+  { e164: "+61489267776", local: "0489267776", line_label: "admin",          department: "ops"           },
+  { e164: "+61489267772", local: "0489267772", line_label: "fencing",        department: "sales-fencing" },
+  { e164: "+61489267774", local: "0489267774", line_label: "patios",         department: "sales-patios"  },
+  { e164: "+61489267778", local: "0489267778", line_label: "fencing-mgmt",   department: "mgmt-fencing"  },
+  { e164: "+61489267771", local: "0489267771", line_label: "shaun-ops-mgr",  department: "ops-mgr"       },
+];
+
+function normalisePhone(raw: string | null | undefined): string {
+  if (!raw) return "";
+  const digits = String(raw).replace(/\D/g, "");
+  return digits.replace(/^0/, "61");
+}
+
+function attributeLine(toRaw: string | null | undefined, fromRaw: string | null | undefined, direction: string | null | undefined): { line_label: string; department: string; matched_field: "to" | "from" | null } {
+  const toN = normalisePhone(toRaw);
+  const fromN = normalisePhone(fromRaw);
+  // Inbound: client → us, so match `to` against our lines.
+  // Outbound: us → client, so match `from` against our lines.
+  // Default to checking both for robustness.
+  const candidates: Array<["to" | "from", string]> = direction === "outbound"
+    ? [["from", fromN], ["to", toN]]
+    : [["to", toN], ["from", fromN]];
+  for (const [field, n] of candidates) {
+    if (!n) continue;
+    for (const line of TELEPHONY_LINES) {
+      if (n === normalisePhone(line.e164) || n === normalisePhone(line.local)) {
+        return { line_label: line.line_label, department: line.department, matched_field: field };
+      }
+    }
+  }
+  return { line_label: "unknown", department: "unknown", matched_field: null };
+}
+
+// GHL templating renders missing variables as the literal 4-char string "null".
+// Treat string "null" / "" / "undefined" as null so downstream truthy checks behave.
+function nullableString(raw: unknown): string | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (s === "" || s === "null" || s === "undefined") return null;
+  return s;
+}
+
+function nullableBool(raw: unknown): boolean | null {
+  if (raw == null) return null;
+  if (typeof raw === "boolean") return raw;
+  const s = String(raw).trim().toLowerCase();
+  if (s === "true") return true;
+  if (s === "false") return false;
+  return null;
+}
+
+function nullableNumber(raw: unknown): number | null {
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Best-effort GHL recording lookup. Used when the workflow body did not carry a
+// resolvable recordingUrl (typical: GHL's `{{phoneCall.recordingUrl}}` renders
+// to literal "null" because Twilio hasn't finalised the recording at trigger
+// time, or the operator bound a non-existent variable).
+//
+// Strategy: list the contact's conversations, pull the most recent call-type
+// message, return its recording-bearing attachment URL. Returns null on any
+// failure — never throws (this is fire-and-forget instrumentation, not a
+// blocking dependency).
+async function lookupGhlCallRecording(
+  contactId: string | null,
+  locationId: string | null,
+  ghlToken: string,
+  webhookOccurredAt: Date,
+): Promise<{ recording_url: string | null; message_id: string | null; conversation_id: string | null; lookup_status: string }> {
+  if (!contactId || !ghlToken) {
+    return { recording_url: null, message_id: null, conversation_id: null, lookup_status: "skipped:missing_contact_or_token" };
+  }
+  const headers = {
+    Authorization: `Bearer ${ghlToken}`,
+    Version: "2021-04-15",
+    Accept: "application/json",
+  };
+  try {
+    // 1. Find the contact's most recent conversation. If locationId is
+    // available we use the v2 search endpoint; otherwise fall back to the
+    // contacts/{id}/conversations alias.
+    let conversationId: string | null = null;
+    if (locationId) {
+      const searchUrl = `https://services.leadconnectorhq.com/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}&limit=1&sort=desc&sortBy=last_message_date`;
+      const resp = await fetch(searchUrl, { headers });
+      if (resp.ok) {
+        const j = await resp.json() as { conversations?: Array<{ id: string }> };
+        conversationId = j.conversations?.[0]?.id || null;
+      }
+    }
+    if (!conversationId) {
+      return { recording_url: null, message_id: null, conversation_id: null, lookup_status: "no_conversation_found" };
+    }
+    // 2. List recent messages, find the most recent CALL-type message within
+    // ±15 minutes of the webhook timestamp.
+    const msgsUrl = `https://services.leadconnectorhq.com/conversations/${conversationId}/messages?limit=20&type=TYPE_CALL`;
+    const msgsResp = await fetch(msgsUrl, { headers });
+    if (!msgsResp.ok) {
+      return { recording_url: null, message_id: null, conversation_id: conversationId, lookup_status: `messages_fetch_failed:${msgsResp.status}` };
+    }
+    const msgsJson = await msgsResp.json() as { messages?: { messages?: Array<{ id: string; type: string; messageType?: string; dateAdded?: string; meta?: Record<string, unknown>; attachments?: string[] | Array<{ url?: string }> }> } };
+    const messages = msgsJson.messages?.messages || [];
+    const window = 15 * 60 * 1000; // 15 minutes
+    const candidates = messages.filter((m) => {
+      const isCall = m.type === "TYPE_CALL" || m.messageType === "TYPE_CALL" || (typeof m.type === "string" && m.type.toUpperCase().includes("CALL"));
+      if (!isCall) return false;
+      if (!m.dateAdded) return true;
+      const t = Date.parse(m.dateAdded);
+      return !Number.isNaN(t) && Math.abs(t - webhookOccurredAt.getTime()) <= window;
+    });
+    if (candidates.length === 0) {
+      return { recording_url: null, message_id: null, conversation_id: conversationId, lookup_status: "no_call_message_in_window" };
+    }
+    // Pick the most recent.
+    candidates.sort((a, b) => (Date.parse(b.dateAdded || "") || 0) - (Date.parse(a.dateAdded || "") || 0));
+    const msg = candidates[0];
+    // 3. Recording URL extraction. GHL surfaces it via attachments[] (string URLs)
+    // OR via meta.call.recording_url / meta.recordingUrl on newer payloads.
+    let recording_url: string | null = null;
+    if (Array.isArray(msg.attachments)) {
+      for (const att of msg.attachments) {
+        const url = typeof att === "string" ? att : (att?.url || null);
+        if (url && /\.(mp3|wav|m4a|ogg|flac|webm)/i.test(url)) {
+          recording_url = url;
+          break;
+        }
+        if (url && !recording_url) recording_url = url; // best fallback
+      }
+    }
+    const meta = msg.meta as Record<string, any> | undefined;
+    if (!recording_url && meta) {
+      recording_url = (meta.call?.recordingUrl as string) || (meta.call?.recording_url as string) || (meta.recordingUrl as string) || null;
+    }
+    if (!recording_url) {
+      // 4. Last resort: derive the canonical recording fetch endpoint by
+      // message id. This URL streams the audio binary when fetched with the
+      // GHL bearer token. (Verified working via the ghl-call-data edge fn.)
+      recording_url = `https://services.leadconnectorhq.com/conversations/messages/${msg.id}/locations/${locationId}/recording`;
+    }
+    return { recording_url, message_id: msg.id, conversation_id: conversationId, lookup_status: "ok" };
+  } catch (e) {
+    return { recording_url: null, message_id: null, conversation_id: null, lookup_status: `threw:${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -215,117 +368,38 @@ serve(async (req) => {
 
       case "CallCompleted": {
         eventType = "client.call_complete";
-
-        // F2 — recording_url null-string normalization.
-        // GHL templates `{{phoneCall.recordingUrl}}` to the literal string
-        // "null" (or "", "undefined", "NULL") when the recording variable
-        // doesn't resolve in the workflow scope. Treat all of those as null
-        // so downstream `if (recording_url)` checks correctly skip transcribe.
-        const rawRecording = body.recordingUrl ?? body.recording_url ?? null;
-        const recordingNormalized = (() => {
-          if (rawRecording === null || rawRecording === undefined) return null;
-          const s = String(rawRecording).trim();
-          if (!s) return null;
-          const lower = s.toLowerCase();
-          if (lower === "null" || lower === "undefined") return null;
-          return s;
-        })();
-
-        // F3 — line attribution + voicemail + status enrichment.
-        // Compute line_label / department by matching `to` (inbound) or
-        // `from` (outbound) against telephony-lines-canon.md. Surface
-        // event_id, call_status, voicemail boolean, to/from on the spine
-        // so JARVIS can answer "which line did the client call?".
-        const fromRaw = body.from ?? body.fromNumber ?? body.callerNumber ?? null;
-        const toRaw = body.to ?? body.toNumber ?? body.calledNumber ?? null;
-        const callDirection = body.direction || body.callDirection || null;
-        const callStatusRaw = body.callStatus || body.call_status || body.status || null;
-        // Voicemail flag: GHL workflow body sometimes sends literal boolean,
-        // sometimes the string "true"/"false", sometimes only callStatus
-        // signals it. Normalize to a real boolean | null.
-        const voicemailRaw = body.voicemail ?? body.isVoicemail ?? null;
-        let voicemailNormalized: boolean | null = null;
-        if (typeof voicemailRaw === "boolean") {
-          voicemailNormalized = voicemailRaw;
-        } else if (typeof voicemailRaw === "string") {
-          const v = voicemailRaw.trim().toLowerCase();
-          if (v === "true") voicemailNormalized = true;
-          else if (v === "false") voicemailNormalized = false;
-        }
-        if (voicemailNormalized === null && typeof callStatusRaw === "string") {
-          if (callStatusRaw.toLowerCase() === "voicemail") voicemailNormalized = true;
-        }
-
-        // Normalize a phone string to E.164 AU. Accepts `+61...`, `0...`
-        // local, and digit-only forms. Returns null on garbage.
-        const normalizePhone = (raw: unknown): string | null => {
-          if (raw === null || raw === undefined) return null;
-          const s = String(raw).trim();
-          if (!s) return null;
-          if (s.toLowerCase() === "null" || s.toLowerCase() === "undefined") return null;
-          // Strip everything that isn't a digit or leading +.
-          const hasPlus = s.startsWith("+");
-          const digits = s.replace(/[^0-9]/g, "");
-          if (!digits) return null;
-          if (hasPlus) return "+" + digits;
-          // Local AU `0489...` → `+61489...`
-          if (digits.startsWith("0") && digits.length >= 9) return "+61" + digits.slice(1);
-          if (digits.startsWith("61") && digits.length >= 11) return "+" + digits;
-          // Already digits, no plus, no 0/61 prefix — return as-is with +.
-          return "+" + digits;
-        };
-
-        // Canonical line table. Keep in lockstep with
-        // `cio/operations/board/.../telephony-lines-canon.md`.
-        const LINE_CANON: Record<string, { line_label: string; department: string }> = {
-          "+61489267776": { line_label: "admin", department: "ops" },
-          "+61489267772": { line_label: "fencing", department: "sales-fencing" },
-          "+61489267774": { line_label: "patios", department: "sales-patios" },
-          "+61489267778": { line_label: "fencing-mgmt", department: "mgmt-fencing" },
-          "+61489267771": { line_label: "shaun-ops-mgr", department: "ops-mgr" },
-        };
-
-        const fromE164 = normalizePhone(fromRaw);
-        const toE164 = normalizePhone(toRaw);
-        // Inbound: `to` is one of our lines. Outbound: `from` is one of our
-        // lines. Default to inbound if direction missing.
-        const isOutbound = (typeof callDirection === "string" && callDirection.toLowerCase() === "outbound");
-        const lineCandidate = isOutbound ? fromE164 : toE164;
-        const lineMeta = (lineCandidate && LINE_CANON[lineCandidate]) || null;
-        const line_label = lineMeta?.line_label || "unknown";
-        const department = lineMeta?.department || "unknown";
-        if (!lineMeta) {
-          console.warn(
-            `[ghl-webhook-receiver] CallCompleted: no canon match for line (direction=${callDirection || "?"} from=${fromE164 || "?"} to=${toE164 || "?"})`,
-          );
-        }
-
-        // Resolve a stable event_id for dedupe. GHL has been observed to
-        // template `{{phoneCall.eventId}}` to the literal string "null" — same
-        // pattern as recordingUrl. Apply the same normalization.
-        const rawEventId = body.eventId ?? body.callId ?? body.id ?? null;
-        const eventIdNormalized = (() => {
-          if (rawEventId === null || rawEventId === undefined) return null;
-          const s = String(rawEventId).trim();
-          if (!s) return null;
-          const lower = s.toLowerCase();
-          if (lower === "null" || lower === "undefined") return null;
-          return s;
-        })();
-
+        // Normalise all GHL-templated fields. GHL renders missing variables as
+        // the literal string "null"; treat that as null. F2 fix.
+        const callTo        = nullableString(body.to);
+        const callFrom      = nullableString(body.from);
+        const callDirection = nullableString(body.direction || body.callDirection);
+        const callStatusRaw = nullableString(body.callStatus || body.status);
+        const callDuration  = nullableNumber(body.duration ?? body.callDuration);
+        const callPhone     = nullableString(body.phone || body.callerNumber);
+        const callRecordingUrl = nullableString(body.recordingUrl || body.recording_url);
+        const callEventId   = nullableString(body.eventId || body.callId || body.messageId || body.id);
+        const callVoicemail = nullableBool(body.voicemail);
+        // Line attribution from canon (F3 enrichment).
+        const attribution = attributeLine(callTo, callFrom, callDirection);
         eventPayload = {
-          duration: body.duration || body.callDuration || null,
+          // Backwards-compatible primary fields:
+          duration: callDuration,
           direction: callDirection,
-          recording_url: recordingNormalized,
-          phone: normalizePhone(body.phone) || fromE164 || null,
-          // F3 enrichment
-          from: fromE164,
-          to: toE164,
+          recording_url: callRecordingUrl,
+          phone: callPhone,
+          // F3 enrichment — full call envelope so JARVIS dossier sees everything:
+          to: callTo,
+          from: callFrom,
           call_status: callStatusRaw,
-          voicemail: voicemailNormalized,
-          line_label,
-          department,
-          event_id: eventIdNormalized,
+          voicemail: callVoicemail,
+          line_label: attribution.line_label,
+          department: attribution.department,
+          line_matched_field: attribution.matched_field,
+          event_id: callEventId,
+          location_id: nullableString(body.locationId),
+          workflow_id: nullableString(body.workflowId),
+          contact_name: nullableString(body.contactName),
+          contact_email: nullableString(body.contactEmail),
           source: "ghl_webhook",
         };
         break;
@@ -494,38 +568,98 @@ serve(async (req) => {
     //   - Calls OpenAI Whisper API
     //   - Writes transcript via recordEvidence (channel='call')
     //   - Enqueues to extraction_jobs → context_fact → JARVIS citation
-    // We don't block the webhook response on this — Twilio recording URLs
-    // expire within minutes so the worker must be quick anyway, but the
-    // webhook returns immediately to keep GHL happy.
+    // We don't block the webhook response on this. Twilio/GHL recording URLs
+    // can take 10-30s to finalise; we fork off, optionally do a short delayed
+    // GHL lookup if the workflow body lacked a real recordingUrl, then invoke.
     if (type === "CallCompleted") {
-      const recording_url = (eventPayload.recording_url as string) || null;
-      if (recording_url) {
-        const transcribePayload = {
-          recording_url,
-          job_id: job?.id || null,
-          contact_id: contactId || null,
-          call_direction: (eventPayload.direction as string) || "internal",
-          occurred_at: new Date().toISOString(),
-          duration_seconds: eventPayload.duration as number || null,
-          phone: (eventPayload.phone as string) || null,
-          // Use the F2-normalized event_id (already filters out string "null").
-          ghl_call_id: (eventPayload.event_id as string | null) || null,
-        };
-        // F1 — explicit Bearer header. The Deno supabase-js client's
-        // `functions.invoke()` does not reliably propagate the auth header
-        // to a sibling function with `verify_jwt:true` in the same project,
-        // so we pass the service-role JWT explicitly. Without this the
-        // receiver-to-transcribe-call hop returns 401 and the chain dies.
-        const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
-        supabase.functions.invoke("transcribe-call", {
-          body: transcribePayload,
-          headers: { Authorization: `Bearer ${serviceRoleKey}` },
-        })
-          .then((r) => {
-            if (r.error) console.error("[ghl-webhook-receiver] transcribe-call invoke error:", r.error);
-            else console.log("[ghl-webhook-receiver] transcribe-call invoked", r.data?.spine_event_id || "(no id)");
-          })
-          .catch((e: unknown) => console.error("[ghl-webhook-receiver] transcribe-call invoke threw:", (e as Error).message));
+      // Capture closure-stable copies before the async block.
+      const initialRecordingUrl = nullableString(eventPayload.recording_url);
+      const ghlEventId = nullableString(eventPayload.event_id);
+      const _job_id = job?.id || null;
+      const _contact_id = contactId || null;
+      const _direction = nullableString(eventPayload.direction) || "internal";
+      const _duration = (eventPayload.duration as number | null);
+      const _phone = nullableString(eventPayload.phone);
+      const _location_id = nullableString(eventPayload.location_id);
+      const _ghlToken = Deno.env.get("GHL_API_TOKEN") || "";
+      const _serviceJwt = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+      const _supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+      const webhookOccurredAt = new Date();
+      // Source-id anchor — used by transcribe-call for spine dedupe.
+      const callSourceId = ghlEventId || (_contact_id ? `${_contact_id}:${webhookOccurredAt.toISOString()}` : null);
+
+      // Fire-and-forget chain. If recording_url was supplied + non-null, invoke
+      // immediately. Otherwise wait 25s then look up via GHL conversations API.
+      // Use EdgeRuntime.waitUntil so Supabase keeps the worker alive past the
+      // HTTP response. Without this, the async IIFE is killed when the
+      // response is sent (~1-2s) and the 25s sleep + lookup never run.
+      const transcribeChain = (async () => {
+        try {
+          let recording_url = initialRecordingUrl;
+          let lookup_status = recording_url ? "from_webhook_body" : "missing";
+          let message_id: string | null = null;
+          let conversation_id: string | null = null;
+          if (!recording_url && _ghlToken && _contact_id) {
+            // Wait briefly for Twilio to finalise the recording.
+            await new Promise((r) => setTimeout(r, 25_000));
+            const lookup = await lookupGhlCallRecording(_contact_id, _location_id, _ghlToken, webhookOccurredAt);
+            recording_url = lookup.recording_url;
+            message_id = lookup.message_id;
+            conversation_id = lookup.conversation_id;
+            lookup_status = lookup.lookup_status;
+            console.log(`[ghl-webhook-receiver] ghl recording lookup contactId=${_contact_id} status=${lookup_status} found=${recording_url ? "yes" : "no"} message_id=${message_id || "n/a"}`);
+          }
+          if (!recording_url) {
+            console.warn(`[ghl-webhook-receiver] CallCompleted with no recoverable recording_url; skipping transcribe-call. lookup_status=${lookup_status}`);
+            return;
+          }
+          // Build transcribe-call payload.
+          const transcribePayload: Record<string, unknown> = {
+            recording_url,
+            job_id: _job_id,
+            contact_id: _contact_id,
+            call_direction: _direction,
+            occurred_at: webhookOccurredAt.toISOString(),
+            duration_seconds: _duration,
+            phone: _phone,
+            ghl_call_id: callSourceId,
+          };
+          // GHL audio URLs require the bearer token; pass it through so
+          // transcribe-call can fetch with it.
+          if (recording_url.startsWith("https://services.leadconnectorhq.com/")) {
+            transcribePayload.fetch_auth_bearer = _ghlToken;
+          }
+          // Direct fetch instead of supabase.functions.invoke() — explicitly
+          // attach the service-role JWT so transcribe-call's verify_jwt:true
+          // ingress accepts the call (F1 fix). The supabase-js Deno client did
+          // not propagate auth on inter-function invokes (cf. 401 logs).
+          const tcResp = await fetch(`${_supabaseUrl}/functions/v1/transcribe-call`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${_serviceJwt}`,
+              "apikey": _serviceJwt,
+            },
+            body: JSON.stringify(transcribePayload),
+          });
+          const tcText = await tcResp.text();
+          if (!tcResp.ok) {
+            console.error(`[ghl-webhook-receiver] transcribe-call HTTP ${tcResp.status}: ${tcText.slice(0, 500)}`);
+          } else {
+            console.log(`[ghl-webhook-receiver] transcribe-call invoked ok: ${tcText.slice(0, 200)}`);
+          }
+        } catch (e) {
+          console.error("[ghl-webhook-receiver] transcribe-call chain threw:", (e as Error).message);
+        }
+      })();
+      // EdgeRuntime is a Supabase-injected global. waitUntil(promise) keeps the
+      // worker alive until the promise settles, so the 25s sleep + GHL lookup
+      // + transcribe-call invoke actually complete after we return 200 to GHL.
+      try {
+        // deno-lint-ignore no-explicit-any
+        (globalThis as any).EdgeRuntime?.waitUntil?.(transcribeChain);
+      } catch (_e) {
+        // No-op if EdgeRuntime is not available (e.g. local Deno).
       }
     }
 
