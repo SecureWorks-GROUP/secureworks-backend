@@ -139,6 +139,32 @@ function normalizeAUPhone(phone: string): string {
   return clean
 }
 
+function cleanIdentity(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length ? trimmed : null
+}
+
+function normalizeIdentity(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+function extractScopeIdentity(scopeJson: any, meta: any = {}) {
+  const job = scopeJson?.job || {}
+  const client = scopeJson?.client || {}
+  const combinedJobClient = [job.clientFirstName, job.clientLastName].filter(Boolean).join(' ')
+  const scopeClient = job.client || combinedJobClient || client.name || meta?.client_name
+
+  return {
+    ref: cleanIdentity(job.ref ?? job.jobRef ?? client.jobRef ?? meta?.job_number ?? meta?.jobNumber),
+    client: cleanIdentity(scopeClient),
+    email: cleanIdentity(job.email ?? client.email ?? meta?.client_email),
+    phone: cleanIdentity(job.phone ?? client.phone ?? meta?.client_phone),
+    address: cleanIdentity(job.address ?? client.address ?? meta?.site_address),
+  }
+}
+
 // ── Stage name cache (all pipelines loaded at once) ──
 let stageCache: Record<string, Record<string, string>> = {}
 let stageCacheLoaded = false
@@ -1475,14 +1501,83 @@ serve(async (req: Request) => {
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-      // Snapshot previous scope_json hash for audit trail (non-blocking)
+      const { data: targetJob, error: targetError } = await sb.from('jobs')
+        .select('id, job_number, client_name, client_phone, client_email, site_address, scope_json')
+        .eq('id', jobId)
+        .single()
+
+      if (targetError || !targetJob) {
+        console.log('[ghl-proxy] save_scope target lookup error:', targetError)
+        return json({ error: targetError?.message || 'Job not found' }, 404)
+      }
+
+      const incomingIdentity = extractScopeIdentity(scopeJson || {}, meta || {})
+      const targetJobNumber = cleanIdentity(targetJob.job_number)
+      const incomingScopeSize = JSON.stringify(scopeJson || {}).length
+
+      if (
+        incomingIdentity.ref &&
+        targetJobNumber &&
+        normalizeIdentity(incomingIdentity.ref) !== normalizeIdentity(targetJobNumber)
+      ) {
+        await sb.from('job_events').insert({
+          job_id: jobId,
+          event_type: 'scope_save_rejected',
+          detail_json: {
+            source: 'tool',
+            reason: 'scope_ref_mismatch',
+            target_job_number: targetJobNumber,
+            incoming_ref: incomingIdentity.ref,
+            target_client_name: targetJob.client_name || null,
+            incoming_client: incomingIdentity.client,
+            incoming_scope_size: incomingScopeSize,
+          }
+        })
+
+        return json({
+          error: `Scope payload belongs to ${incomingIdentity.ref}; refusing to save it to ${targetJobNumber}`,
+          code: 'scope_ref_mismatch',
+          target_job_number: targetJobNumber,
+          incoming_ref: incomingIdentity.ref,
+        }, 409)
+      }
+
+      const identityWarnings: string[] = []
+      if (
+        incomingIdentity.email &&
+        targetJob.client_email &&
+        normalizeIdentity(incomingIdentity.email) !== normalizeIdentity(targetJob.client_email)
+      ) {
+        identityWarnings.push('email_mismatch')
+      }
+      if (
+        incomingIdentity.phone &&
+        targetJob.client_phone &&
+        normalizeAUPhone(incomingIdentity.phone) !== normalizeAUPhone(targetJob.client_phone)
+      ) {
+        identityWarnings.push('phone_mismatch')
+      }
+
+      if (identityWarnings.length > 0) {
+        await sb.from('job_events').insert({
+          job_id: jobId,
+          event_type: 'scope_save_identity_warning',
+          detail_json: {
+            source: 'tool',
+            warnings: identityWarnings,
+            target_job_number: targetJobNumber,
+            incoming_ref: incomingIdentity.ref,
+            target_client_name: targetJob.client_name || null,
+            incoming_client: incomingIdentity.client,
+          }
+        })
+      }
+
+      // Snapshot previous scope_json hash for audit trail
       let prevHash = null
-      try {
-        const { data: prev } = await sb.from('jobs').select('scope_json').eq('id', jobId).single()
-        if (prev && prev.scope_json && Object.keys(prev.scope_json).length > 0) {
-          prevHash = JSON.stringify(prev.scope_json).length // lightweight size fingerprint
-        }
-      } catch (_) { /* non-blocking */ }
+      if (targetJob.scope_json && Object.keys(targetJob.scope_json).length > 0) {
+        prevHash = JSON.stringify(targetJob.scope_json).length // lightweight size fingerprint
+      }
 
       const update: Record<string, any> = { scope_json: scopeJson || {}, legacy: false }
       if (meta) {
@@ -1510,7 +1605,15 @@ serve(async (req: Request) => {
       await sb.from('job_events').insert({
         job_id: jobId,
         event_type: 'scope_saved',
-        detail_json: { source: 'tool', prev_scope_size: prevHash, new_scope_size: JSON.stringify(scopeJson || {}).length }
+        detail_json: {
+          source: 'tool',
+          prev_scope_size: prevHash,
+          new_scope_size: incomingScopeSize,
+          target_job_number: targetJobNumber,
+          incoming_ref: incomingIdentity.ref,
+          incoming_client: incomingIdentity.client,
+          identity_warnings: identityWarnings,
+        }
       })
 
       return json({ job: data })
