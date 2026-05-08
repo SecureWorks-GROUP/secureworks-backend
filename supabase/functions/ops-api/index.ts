@@ -2233,6 +2233,12 @@ if (import.meta.main) serve(async (req: Request) => {
       // Per parent card secure-sale-quote-followup-loop reframe v3.
       case 'approve_scoper_call_task':     return json(await approveScoperCallTask(client, body))
       case 'approve_quote_review_task':    return json(await approveQuoteReviewTask(client, body))
+      // Per-scoper playbook MD upload — Marnin-only authenticated edit.
+      // Validates filename allowlist + YAML frontmatter (status enum,
+      // voice_anchor allowlist, sign_off_pattern present) + em-dash check
+      // before upserting wiki_pages. No external API. No customer touch.
+      // Per parent card secure-sale-quote-followup-loop reframe v3.
+      case 'update_playbook':              return json(await updatePlaybook(client, body, req))
 
       // ── Slice 3: Brain backfill ──
       // Marnin-only. Defaults to dry_run=true. Pulls historical GHL
@@ -13036,6 +13042,246 @@ async function approveQuoteReviewTask(client: any, body: any) {
   }
 
   return { success: true, action_id, sub_action, job_archived: jobUpdateApplied }
+}
+
+// ════════════════════════════════════════════════════════════
+// Per-scoper playbook MD upload — Marnin-only authenticated edit path.
+//
+// Lets Marnin (acting as proxy editor for Khairo / Nithin) update the
+// runtime mirror of a playbook from sale.html without filesystem access
+// or a redeploy. The cadence_planner reads filesystem first then
+// wiki_pages; this writes to wiki_pages, so the next cron tick picks
+// up the new content.
+//
+// Hard rules:
+//  - Filename must be in the static allowlist (no path injection).
+//  - YAML frontmatter must parse and contain required fields with
+//    valid status enum and matching voice_anchor.
+//  - No customer-facing send. No external API. Only wiki_pages upsert
+//    + a business_events audit row.
+// ════════════════════════════════════════════════════════════
+
+const PLAYBOOK_MARNIN_EMAIL = 'marnin@secureworkswa.com.au'
+
+const PLAYBOOK_FILENAME_ALLOWLIST = new Set([
+  'quote-followup-khairo.md',
+  'quote-followup-nithin.md',
+  // Booking playbook filenames are pre-allowlisted so the same handler
+  // can be reused once the booking terminal ships the MD files. The
+  // handler validates frontmatter regardless; an empty file with the
+  // wrong voice_anchor will fail validation.
+  'booking-khairo.md',
+  'booking-nithin.md',
+])
+
+const PLAYBOOK_VOICE_ANCHOR_ALLOWLIST = new Set([
+  'fencing_khairo_v1',
+  'patio_nithin_v1',
+  'booking_khairo_v1',
+  'booking_nithin_v1',
+])
+
+const PLAYBOOK_STATUS_ALLOWLIST = new Set([
+  'active',
+  'voice_anchor_pulled_awaiting_nithin_approval',
+  'scaffold_only',
+  'paused',
+])
+
+const PLAYBOOK_JOB_TYPE_ALLOWLIST = new Set(['fencing', 'patio'])
+
+// Tiny YAML frontmatter parser — handles `key: value` and `key: |` block
+// scalars only, matching the shape used by the cadence_planner.
+function parsePlaybookFrontmatter(raw: string): { fm: Record<string, string>; ok: boolean; error?: string } {
+  if (!raw.startsWith('---')) {
+    return { fm: {}, ok: false, error: 'playbook must start with YAML frontmatter (---)' }
+  }
+  const end = raw.indexOf('\n---', 3)
+  if (end < 0) {
+    return { fm: {}, ok: false, error: 'unterminated YAML frontmatter (missing closing ---)' }
+  }
+  const fmText = raw.slice(3, end).trim()
+  const fm: Record<string, string> = {}
+  const lines = fmText.split('\n')
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.*)$/)
+    if (!m) { i += 1; continue }
+    const key = m[1]
+    const rest = m[2].trim()
+    if (rest === '|' || rest === '>') {
+      const collected: string[] = []
+      i += 1
+      while (i < lines.length) {
+        const ln = lines[i]
+        if (/^\s+/.test(ln)) {
+          collected.push(ln.replace(/^\s{2}/, ''))
+          i += 1
+        } else if (ln.length === 0) {
+          collected.push('')
+          i += 1
+        } else {
+          break
+        }
+      }
+      fm[key] = collected.join('\n').replace(/\n+$/g, '')
+    } else {
+      fm[key] = rest.replace(/^['"]|['"]$/g, '')
+      i += 1
+    }
+  }
+  return { fm, ok: true }
+}
+
+async function updatePlaybook(client: any, body: any, req: Request) {
+  // ── Auth gate (Marnin-only) ──
+  const authHeader = req.headers.get('authorization') || ''
+  const jwt = authHeader.replace(/^Bearer\s+/i, '').trim()
+  if (!jwt) throw new ApiError('login_required', 401)
+  const { data: { user }, error: authErr } = await client.auth.getUser(jwt)
+  if (authErr || !user) throw new ApiError('session_expired', 401)
+  if ((user.email || '').toLowerCase() !== PLAYBOOK_MARNIN_EMAIL) {
+    throw new ApiError('update_playbook_unauthorized: marnin only', 403)
+  }
+
+  // ── Params ──
+  const filename = (body?.filename || '').trim()
+  const content = typeof body?.content === 'string' ? body.content : ''
+  const dry_run = body?.dry_run === true
+
+  if (!filename) throw new ApiError('filename required', 400)
+  if (!PLAYBOOK_FILENAME_ALLOWLIST.has(filename)) {
+    throw new ApiError(`filename not in allowlist (${[...PLAYBOOK_FILENAME_ALLOWLIST].join(', ')})`, 400)
+  }
+  if (!content) throw new ApiError('content required (non-empty markdown)', 400)
+  if (content.length > 200_000) {
+    throw new ApiError(`content too large (${content.length} bytes; max 200000)`, 400)
+  }
+
+  // ── YAML frontmatter validation ──
+  const { fm, ok, error } = parsePlaybookFrontmatter(content)
+  if (!ok) throw new ApiError(`yaml_invalid: ${error}`, 400)
+
+  const required = ['playbook', 'voice_anchor', 'job_type', 'status', 'version', 'last_updated', 'sign_off_pattern']
+  for (const k of required) {
+    if (!fm[k] || !String(fm[k]).trim()) {
+      throw new ApiError(`yaml_missing_field: ${k}`, 400)
+    }
+  }
+  if (!PLAYBOOK_VOICE_ANCHOR_ALLOWLIST.has(fm.voice_anchor)) {
+    throw new ApiError(`yaml_invalid_voice_anchor: '${fm.voice_anchor}' not in allowlist`, 400)
+  }
+  if (!PLAYBOOK_JOB_TYPE_ALLOWLIST.has(fm.job_type)) {
+    throw new ApiError(`yaml_invalid_job_type: '${fm.job_type}' not in allowlist (fencing|patio)`, 400)
+  }
+  if (!PLAYBOOK_STATUS_ALLOWLIST.has(fm.status)) {
+    throw new ApiError(`yaml_invalid_status: '${fm.status}' not in allowlist (${[...PLAYBOOK_STATUS_ALLOWLIST].join(', ')})`, 400)
+  }
+  // Cross-check filename ↔ voice_anchor consistency.
+  const expectedAnchorByFile: Record<string, string> = {
+    'quote-followup-khairo.md': 'fencing_khairo_v1',
+    'quote-followup-nithin.md': 'patio_nithin_v1',
+    'booking-khairo.md': 'booking_khairo_v1',
+    'booking-nithin.md': 'booking_nithin_v1',
+  }
+  const expectedAnchor = expectedAnchorByFile[filename]
+  if (expectedAnchor && fm.voice_anchor !== expectedAnchor) {
+    throw new ApiError(`yaml_anchor_mismatch: filename='${filename}' expects voice_anchor='${expectedAnchor}', got '${fm.voice_anchor}'`, 400)
+  }
+
+  // Em-dash deny check — Marnin's no-em-dash rule, applied to playbook
+  // body (not frontmatter). Catches it before the runtime validator B12
+  // would on every drafted message.
+  const body_after_fm = content.slice(content.indexOf('\n---', 3) + 4)
+  const emDashMatches = body_after_fm.match(/[—–]/g)
+  const emDashCount = emDashMatches ? emDashMatches.length : 0
+  // We allow em-dashes ONLY if the playbook explicitly tags them in a
+  // recognised "FLAG" section (existing Nithin playbook flags its own
+  // greeter em-dash). For most edits the count should be 0.
+  // For now: warn-only; do not block. The runtime validator catches any
+  // em-dash that actually leaks into a drafted_message.
+
+  if (dry_run) {
+    return {
+      ok: true,
+      dry_run: true,
+      filename,
+      content_chars: content.length,
+      frontmatter: fm,
+      em_dash_count: emDashCount,
+      em_dash_note: emDashCount > 0 ? 'em-dashes found in body — runtime validator B12 will reject any drafted_message that includes one' : 'clean',
+      proposed_action: 'upsert wiki_pages(domain="playbooks", filename, content)',
+    }
+  }
+
+  // ── Upsert wiki_pages ──
+  // Schema: wiki_pages(id, domain, filename, content, updated_at).
+  // Composite key for our purposes is (domain, filename); we look it up
+  // first, then insert or update by id.
+  const nowIso = new Date().toISOString()
+  const { data: existing, error: lookupErr } = await client
+    .from('wiki_pages')
+    .select('id, updated_at')
+    .eq('domain', 'playbooks')
+    .eq('filename', filename)
+    .limit(1)
+  if (lookupErr) throw new ApiError(`wiki_pages_lookup_failed: ${lookupErr.message}`, 500)
+
+  const row = existing && existing[0]
+  let result: { mode: 'inserted' | 'updated'; id: string; updated_at: string }
+  if (row) {
+    const { data: upd, error: updErr } = await client
+      .from('wiki_pages')
+      .update({ content, updated_at: nowIso })
+      .eq('id', (row as { id: string }).id)
+      .select('id, updated_at')
+      .limit(1)
+    if (updErr) throw new ApiError(`wiki_pages_update_failed: ${updErr.message}`, 500)
+    const r = (upd && upd[0]) as { id: string; updated_at: string } | undefined
+    result = { mode: 'updated', id: r?.id || (row as any).id, updated_at: r?.updated_at || nowIso }
+  } else {
+    const { data: ins, error: insErr } = await client
+      .from('wiki_pages')
+      .insert({ domain: 'playbooks', filename, content })
+      .select('id, updated_at')
+      .limit(1)
+    if (insErr) throw new ApiError(`wiki_pages_insert_failed: ${insErr.message}`, 500)
+    const r = (ins && ins[0]) as { id: string; updated_at: string } | undefined
+    if (!r) throw new ApiError('wiki_pages_insert_returned_no_row', 500)
+    result = { mode: 'inserted', id: r.id, updated_at: r.updated_at }
+  }
+
+  // ── Audit row in business_events ──
+  try {
+    await client.from('business_events').insert({
+      event_type: 'playbook.updated',
+      payload: {
+        filename,
+        mode: result.mode,
+        wiki_pages_id: result.id,
+        content_chars: content.length,
+        frontmatter: fm,
+        em_dash_count: emDashCount,
+        actor_email: user.email,
+      },
+    })
+  } catch (e: any) {
+    console.warn('[ops-api/update_playbook] business_event insert failed:', e.message)
+  }
+
+  return {
+    ok: true,
+    filename,
+    mode: result.mode,
+    wiki_pages_id: result.id,
+    updated_at: result.updated_at,
+    content_chars: content.length,
+    frontmatter_status: fm.status,
+    voice_anchor: fm.voice_anchor,
+    em_dash_count: emDashCount,
+    note: 'cadence_planner reads filesystem first then wiki_pages; next cron tick (Mon-Fri 9:45 / 15:45 AWST) picks up the new content. Sync the on-disk MD in secureworks-docs to keep canon and runtime aligned.',
+  }
 }
 
 // ════════════════════════════════════════════════════════════
