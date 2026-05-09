@@ -206,6 +206,35 @@ async function logBusinessEvent(client: any, event: {
   metadata?: any;
 }) {
   try {
+    const payload = event.payload || {}
+    const eventType = String(event.event_type || '')
+    const inferredChannel =
+      eventType.includes('email') ? 'email'
+      : eventType.includes('sms') || eventType.includes('reply') ? 'sms'
+      : eventType.includes('call') || eventType.includes('transcript') ? 'call'
+      : eventType.includes('note') ? 'note'
+      : null
+    const inferredDirection =
+      eventType.endsWith('_in') || eventType === 'client.reply' ? 'inbound'
+      : eventType.endsWith('_out') ? 'outbound'
+      : inferredChannel === 'note' ? 'internal'
+      : inferredChannel === 'call' && typeof payload.direction === 'string' ? payload.direction
+      : null
+    const textish = String(
+      payload.body_preview ||
+      payload.note_text ||
+      payload.note_preview ||
+      payload.message_text ||
+      payload.body ||
+      payload.text ||
+      payload.message ||
+      ''
+    )
+    const sourceTable =
+      payload.inbox_events_id ? 'inbox_events'
+      : payload.source_job_event_id ? 'job_events'
+      : null
+    const sourceId = payload.inbox_events_id || payload.source_job_event_id || null
     await client.from('business_events').insert({
       event_type: event.event_type,
       source: event.source || 'app/office',
@@ -214,10 +243,20 @@ async function logBusinessEvent(client: any, event: {
       correlation_id: event.correlation_id || null,
       causation_id: event.causation_id || null,
       job_id: event.job_id || null,
-      payload: event.payload || {},
+      channel: inferredChannel,
+      direction: inferredDirection,
+      source_table: sourceTable,
+      source_id: sourceId,
+      body_preview: textish ? textish.slice(0, 500) : null,
+      safe_summary: textish ? textish.slice(0, 280) : null,
+      match_status: event.job_id ? 'matched' : null,
+      match_method: event.job_id ? 'direct_job_id' : null,
+      match_confidence: event.job_id ? 1.0 : null,
+      payload,
       metadata: {
         ...(event.metadata || {}),
         operator: event.metadata?.operator || null,
+        legacy_envelope_inferred: true,
       },
       schema_version: '1.0',
     })
