@@ -13377,7 +13377,7 @@ async function dismissProposedAction(client: any, body: any) {
 
   const { error } = await client.from('ai_proposed_actions')
     .update({
-      status: 'dismissed',
+      status: 'rejected',
       dismissed_at: new Date().toISOString(),
       dismissed_by: user_id || null,
     })
