@@ -42,23 +42,25 @@ create table if not exists public.job_temporary_context (
   updated_at      timestamptz   not null default now()
 );
 
--- Active rows (most reads filter on this).
-create index if not exists idx_jtc_job_active
-  on public.job_temporary_context (job_id, expires_at)
-  where expires_at > now();
+-- Active-row reads filter `expires_at > now()` in the query. Do not put
+-- now() in a partial-index predicate: Postgres requires index predicates to be
+-- immutable. A plain (job_id, expires_at) index supports the same read shape.
+create index if not exists idx_jtc_job_expires
+  on public.job_temporary_context (job_id, expires_at);
 
 -- Per-kind reads for dossier sub-panels.
 create index if not exists idx_jtc_kind on public.job_temporary_context (kind);
 
--- Idempotency check: same fact text on same job within last 14 days
--- (Slice 4 will add semantic dedupe; for now this is a tight string match).
-create unique index if not exists idx_jtc_job_kind_value_hash
+-- String-hash lookup for application-level idempotency. This is intentionally
+-- non-unique: the same temporary note may legitimately recur after an earlier
+-- row expires.
+create index if not exists idx_jtc_job_kind_value_hash
   on public.job_temporary_context (
     job_id,
     kind,
-    md5(coalesce(value->>'text', ''))
-  )
-  where expires_at > now();
+    md5(coalesce(value->>'text', '')),
+    expires_at desc
+  );
 
 -- Updated-at trigger reuses the existing public.set_updated_at() function
 -- if present in this project; otherwise this block is a no-op (the function
@@ -66,7 +68,12 @@ create unique index if not exists idx_jtc_job_kind_value_hash
 -- migration set).
 do $$
 begin
-  if exists (select 1 from pg_proc where proname = 'set_updated_at') then
+  if exists (select 1 from pg_proc where proname = 'set_updated_at')
+     and not exists (
+       select 1 from pg_trigger
+       where tgname = 'trg_jtc_updated_at'
+         and tgrelid = 'public.job_temporary_context'::regclass
+     ) then
     create trigger trg_jtc_updated_at
       before update on public.job_temporary_context
       for each row execute function public.set_updated_at();
@@ -77,11 +84,22 @@ end$$;
 -- job_context. Apply the existing org-scoped read policy.
 alter table public.job_temporary_context enable row level security;
 
-create policy if not exists "service_role_all_jtc"
-  on public.job_temporary_context for all
-  to service_role
-  using (true)
-  with check (true);
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'public'
+      and tablename = 'job_temporary_context'
+      and policyname = 'service_role_all_jtc'
+  ) then
+    create policy "service_role_all_jtc"
+      on public.job_temporary_context for all
+      to service_role
+      using (true)
+      with check (true);
+  end if;
+end$$;
 
 comment on table public.job_temporary_context is
   'Temporary context layer — Slice 2 of fact-extractor v2 hardening. '
