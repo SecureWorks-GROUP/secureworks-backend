@@ -225,6 +225,7 @@ async function logBusinessEvent(client: any, event: {
       payload.note_text ||
       payload.note_preview ||
       payload.message_text ||
+      payload.message_preview ||
       payload.body ||
       payload.text ||
       payload.message ||

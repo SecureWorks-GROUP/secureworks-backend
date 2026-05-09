@@ -19,6 +19,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 // (channel/direction/source_table/source_id/match_status) when ON.
 import { recordEvidence } from "../_shared/evidence/record_evidence.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
+import { resolveMatch } from "../_shared/evidence/match.ts";
 import type { Channel, Direction, MatchMethod } from "../_shared/evidence/types.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
@@ -89,6 +90,21 @@ function nullableNumber(raw: unknown): number | null {
   if (raw == null) return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+function previewFromPayload(payload: Record<string, unknown>): string | null {
+  const raw =
+    payload.message_text ??
+    payload.note_text ??
+    payload.body_preview ??
+    payload.message_preview ??
+    payload.body ??
+    payload.text ??
+    payload.message ??
+    null;
+  if (raw == null) return null;
+  const text = String(raw).trim();
+  return text ? text.slice(0, 500) : null;
 }
 
 interface WebhookJobCandidate {
@@ -338,17 +354,19 @@ serve(async (req) => {
     );
 
     // Log raw webhook for debugging (non-blocking)
-    supabase
-      .from("webhook_log")
-      .insert({
-        org_id: "00000000-0000-0000-0000-000000000001",
-        source: "ghl_webhook",
-        event_type: type || "unknown",
-        payload: body,
-        status: "received",
-      })
-      .then(() => {})
-      .catch(() => {});
+    void (async () => {
+      try {
+        await supabase.from("webhook_log").insert({
+          org_id: "00000000-0000-0000-0000-000000000001",
+          source: "ghl_webhook",
+          event_type: type || "unknown",
+          payload: body,
+          status: "received",
+        });
+      } catch {
+        // Debug logging must not block webhook ingestion.
+      }
+    })();
 
     // Supported event types
     const SUPPORTED_TYPES = [
@@ -587,81 +605,105 @@ serve(async (req) => {
     // Appointment: client.appointment.
     const t7Enabled = await isFlagOn(supabase, "evidence_capture_v1", DEFAULT_ORG_ID);
     let eventError: { message: string } | null = null;
+    const occurredAt = new Date().toISOString();
+    const sourceId = String(
+      (body as { eventId?: string; id?: string }).eventId ??
+      (body as { id?: string }).id ??
+      conversationId ??
+      crypto.randomUUID(),
+    );
+    let channel: Channel = "system";
+    let direction: Direction = "system";
+    let conversationKey: string | null = (conversationId as string) || null;
+    switch (type) {
+      case "InboundMessage": {
+        const ch = (eventPayload.channel as string) || "sms";
+        channel = ch === "email" ? "email" : ch === "chat" ? "chat" : "sms";
+        direction = "inbound";
+        break;
+      }
+      case "OutboundMessage": {
+        const ch = (eventPayload.channel as string) || "sms";
+        channel = ch === "email" ? "email" : "sms";
+        direction = "outbound";
+        break;
+      }
+      case "CallCompleted":
+        channel = "call";
+        direction = (eventPayload.direction as string) === "outbound" ? "outbound" : "inbound";
+        break;
+      case "AppointmentCreated":
+        channel = "status";
+        direction = "internal";
+        break;
+      case "NoteAdded":
+        channel = "note";
+        direction = "internal";
+        break;
+      case "ContactStageChanged":
+        channel = "status";
+        direction = "internal";
+        break;
+    }
+    const match = resolveMatch({
+      job_id: job?.id || null,
+      match_method: jobMatch.match_method,
+      match_confidence: jobMatch.match_confidence,
+    });
+    const bodyPreview = previewFromPayload(eventPayload);
 
     // Legacy spine row shape — emitted either by the T7 fallback path
-    // OR when the flag is OFF. Defined once so both paths stay in lockstep.
+    // OR when the flag is OFF. It still carries the extractor-readable
+    // envelope so fallback rows do not become unreadable evidence shells.
     const legacySpineRow = {
       event_type: eventType,
       source: "ghl_webhook_receiver",
       entity_type: job ? "contact" : "unmatched_contact",
       entity_id: contactId || null,
-      job_id: job?.id || null,
-      occurred_at: new Date().toISOString(),
+      job_id: match.job_id,
+      occurred_at: occurredAt,
+      source_table: "ghl_webhook",
+      source_id: sourceId,
+      channel,
+      direction,
+      contact_id: contactId || null,
+      thread_key: conversationKey,
+      conversation_key: conversationKey,
+      body_preview: bodyPreview,
+      safe_summary: bodyPreview ? bodyPreview.slice(0, 280) : null,
+      match_status: match.match_status,
+      match_method: match.match_method,
+      match_confidence: match.match_confidence,
+      privacy_classification: "staff_only",
+      retention_class: (direction === "inbound" || direction === "outbound") ? "7y_audit" : "12m_default",
       payload: eventPayload,
+      metadata: {
+        t7_fallback_envelope: true,
+        match_notes: match.notes,
+      },
+      schema_version: "1.0",
     };
 
     let t7Failed = false;
     if (t7Enabled) {
-      let channel: Channel = "system";
-      let direction: Direction = "system";
-      let conversationKey: string | null = (conversationId as string) || null;
-      switch (type) {
-        case "InboundMessage": {
-          const ch = (eventPayload.channel as string) || "sms";
-          channel = ch === "email" ? "email" : ch === "chat" ? "chat" : "sms";
-          direction = "inbound";
-          break;
-        }
-        case "OutboundMessage": {
-          const ch = (eventPayload.channel as string) || "sms";
-          channel = ch === "email" ? "email" : "sms";
-          direction = "outbound";
-          break;
-        }
-        case "CallCompleted":
-          channel = "call";
-          direction = (eventPayload.direction as string) === "outbound" ? "outbound" : "inbound";
-          break;
-        case "AppointmentCreated":
-          channel = "status";
-          direction = "internal";
-          break;
-        case "NoteAdded":
-          channel = "note";
-          direction = "internal";
-          break;
-        case "ContactStageChanged":
-          channel = "status";
-          direction = "internal";
-          break;
-      }
       try {
         await recordEvidence(supabase, {
           event_type: eventType,
           source: "ghl-webhook-receiver",
           channel,
           direction,
-          occurred_at: new Date().toISOString(),
+          occurred_at: occurredAt,
           // Source: GHL conversation cache when conversation_id present;
           // else the webhook event id when GHL supplies one; else a synthetic.
           source_table: "ghl_webhook",
-          source_id: String(
-            (body as { eventId?: string; id?: string }).eventId ??
-            (body as { id?: string }).id ??
-            conversationKey ??
-            crypto.randomUUID(),
-          ),
+          source_id: sourceId,
           job_id: job?.id || null,
           contact_id: contactId || null,
           entity_type: job ? "contact" : "unmatched_contact",
           entity_id: contactId || null,
           match_method: jobMatch.match_method,
           match_confidence: jobMatch.match_confidence,
-          body_preview: typeof eventPayload.message_text === "string"
-            ? (eventPayload.message_text as string).slice(0, 500)
-            : typeof eventPayload.note_text === "string"
-            ? (eventPayload.note_text as string).slice(0, 500)
-            : undefined,
+          body_preview: bodyPreview || undefined,
           thread_key: conversationKey,
           // Inbound client comms: 7y; system events: 12m.
           retention_class: (direction === "inbound" || direction === "outbound") ? "7y_audit" : "12m_default",
