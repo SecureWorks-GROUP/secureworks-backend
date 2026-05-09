@@ -19,7 +19,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 // (channel/direction/source_table/source_id/match_status) when ON.
 import { recordEvidence } from "../_shared/evidence/record_evidence.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
-import type { Channel, Direction } from "../_shared/evidence/types.ts";
+import type { Channel, Direction, MatchMethod } from "../_shared/evidence/types.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -89,6 +89,132 @@ function nullableNumber(raw: unknown): number | null {
   if (raw == null) return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+interface WebhookJobCandidate {
+  id: string;
+  job_number: string | null;
+  client_name: string | null;
+  type: string | null;
+  status: string | null;
+  site_suburb: string | null;
+  created_at: string | null;
+}
+
+interface WebhookJobMatch {
+  job: WebhookJobCandidate | null;
+  match_method: MatchMethod;
+  match_confidence: number | undefined;
+  match_reason: string;
+  candidate_count: number;
+  candidates: Array<{
+    id: string;
+    job_number: string | null;
+    type: string | null;
+    status: string | null;
+    site_suburb: string | null;
+  }>;
+}
+
+function normaliseLoose(raw: string | null | undefined): string {
+  return (raw || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function resolveWebhookJobMatch(
+  jobs: WebhookJobCandidate[] | null | undefined,
+  body: Record<string, unknown>,
+): WebhookJobMatch {
+  const candidates = (jobs || []).map((j) => ({
+    id: j.id,
+    job_number: j.job_number || null,
+    type: j.type || null,
+    status: j.status || null,
+    site_suburb: j.site_suburb || null,
+  }));
+  const candidate_count = candidates.length;
+  const directJobId = nullableString(body.supabase_job_id ?? body.job_id ?? body.jobId);
+  const directJobNumber = nullableString(body.job_number ?? body.jobNumber ?? body.jobNo);
+
+  if (directJobId) {
+    const direct = (jobs || []).find((j) => j.id === directJobId);
+    if (direct) {
+      return {
+        job: direct,
+        match_method: "direct_job_id",
+        match_confidence: 0.99,
+        match_reason: "webhook carried direct Supabase job_id",
+        candidate_count,
+        candidates,
+      };
+    }
+  }
+
+  if (directJobNumber) {
+    const direct = (jobs || []).filter((j) => normaliseLoose(j.job_number) === normaliseLoose(directJobNumber));
+    if (direct.length === 1) {
+      return {
+        job: direct[0],
+        match_method: "direct_reference",
+        match_confidence: 0.95,
+        match_reason: "webhook carried direct job_number",
+        candidate_count,
+        candidates,
+      };
+    }
+  }
+
+  if (!jobs || jobs.length === 0) {
+    return {
+      job: null,
+      match_method: "none",
+      match_confidence: undefined,
+      match_reason: "no active Supabase job for GHL contact",
+      candidate_count,
+      candidates,
+    };
+  }
+
+  if (jobs.length === 1) {
+    return {
+      job: jobs[0],
+      match_method: "contact_id",
+      match_confidence: 0.85,
+      match_reason: "single active Supabase job for GHL contact",
+      candidate_count,
+      candidates,
+    };
+  }
+
+  const contactName = nullableString(
+    body.contactName ?? body.contact_name ?? body.name ??
+      [body.firstName, body.lastName].filter(Boolean).join(" "),
+  );
+  if (contactName) {
+    const nameMatches = jobs.filter((j) => {
+      const lhs = normaliseLoose(j.client_name);
+      const rhs = normaliseLoose(contactName);
+      return lhs.length > 0 && rhs.length > 0 && (lhs === rhs || lhs.includes(rhs) || rhs.includes(lhs));
+    });
+    if (nameMatches.length === 1) {
+      return {
+        job: nameMatches[0],
+        match_method: "contact_id",
+        match_confidence: 0.78,
+        match_reason: "multiple active jobs for contact; client name narrowed to one job",
+        candidate_count,
+        candidates,
+      };
+    }
+  }
+
+  return {
+    job: null,
+    match_method: "contact_id",
+    match_confidence: 0.5,
+    match_reason: "multiple active jobs for GHL contact; transcript/message must identify job before durable extraction",
+    candidate_count,
+    candidates,
+  };
 }
 
 // Best-effort GHL recording lookup. Used when the workflow body did not carry a
@@ -322,15 +448,21 @@ serve(async (req) => {
     }
 
     // ── Match to an active job via ghl_contact_id ──
+    // Conservative by design: a phone/contact can own multiple active jobs.
+    // In that case we keep the evidence on the contact and mark the job as
+    // ambiguous unless the webhook carries a direct job reference or the
+    // client name narrows it to exactly one job. This prevents call
+    // transcripts from polluting the wrong permanent job memory.
     const { data: jobs } = await supabase
       .from("jobs")
-      .select("id, job_number, client_name, type, status")
+      .select("id, job_number, client_name, type, status, site_suburb, created_at")
       .eq("ghl_contact_id", contactId)
       .not("status", "in", '("cancelled","complete")')
       .order("created_at", { ascending: false })
-      .limit(1);
+      .limit(10);
 
-    const job = jobs?.[0];
+    const jobMatch = resolveWebhookJobMatch((jobs || []) as WebhookJobCandidate[], body as Record<string, unknown>);
+    const job = jobMatch.job;
 
     // ── Build event_type and payload per webhook type ──
     let eventType = "";
@@ -444,6 +576,9 @@ serve(async (req) => {
     eventPayload.job_number = job?.job_number || null;
     eventPayload.client_name = job?.client_name || null;
     eventPayload.job_type = job?.type || null;
+    eventPayload.match_reason = jobMatch.match_reason;
+    eventPayload.match_candidate_count = jobMatch.candidate_count;
+    eventPayload.match_candidates = jobMatch.candidates;
 
     // ── Create business_event (T7 atomic cutover) ──
     // Map the GHL webhook type onto the T7 channel + direction envelope.
@@ -520,8 +655,8 @@ serve(async (req) => {
           contact_id: contactId || null,
           entity_type: job ? "contact" : "unmatched_contact",
           entity_id: contactId || null,
-          match_method: job?.id ? "contact_id" : "none",
-          match_confidence: job?.id ? 0.85 : undefined,
+          match_method: jobMatch.match_method,
+          match_confidence: jobMatch.match_confidence,
           body_preview: typeof eventPayload.message_text === "string"
             ? (eventPayload.message_text as string).slice(0, 500)
             : typeof eventPayload.note_text === "string"
@@ -688,7 +823,7 @@ serve(async (req) => {
     }
 
     console.log(
-      `[ghl-webhook-receiver] Processed: type=${type} event=${eventType} job_matched=${!!job} job=${job?.job_number || "none"}`
+      `[ghl-webhook-receiver] Processed: type=${type} event=${eventType} job_matched=${!!job} job=${job?.job_number || "none"} match_reason=${jobMatch.match_reason}`
     );
 
     return jsonResponse({
