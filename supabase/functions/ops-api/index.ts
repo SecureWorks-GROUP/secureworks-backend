@@ -139,6 +139,8 @@ const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
+const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env.get('RAILWAY_AGENT_URL') || 'https://secureworks-agent-production.up.railway.app').replace(/\/+$/, '')
+const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
@@ -2262,14 +2264,19 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'manual_dispatch_marnin_poc':   return json(await manualDispatchMarninPoc(client, body))
       case 'assign_scoper':                return json(await assignScoper(client, body))
       case 'book_scope':                   return json(await bookScope(client, body))
+      // Booking approval bridge — browser/ops-api calls Railway, Railway calls
+      // the existing sw_approve_booking_proposal path. Keeps Graph/calendar
+      // logic in one place instead of duplicating it in Deno.
+      case 'approve_booking_proposal':      return json(await approveBookingProposalViaAgent(body, { mode: authMode, user: authUser }))
       // Quote Follow-Up Loop send path (atomic-claim per parent card B4).
       // Only fires when sale.html dispatches a send_quote_followup_sms
       // proposal. Customer-facing send is gated by Marnin's cockpit click.
       case 'send_quote_followup_sms':      return json(await sendQuoteFollowupSms(client, body))
       // Quote-nurture cadence v3 — internal task approval handlers.
       // Atomic-claim pattern (memory feedback_atomic_claim_pattern_for_proposal_handlers).
-      // NEITHER fires SMS, GHL mutation, or any external API. They only
-      // mark the proposal approved and emit a business_event for the spine.
+      // NEITHER fires customer SMS. Scoper call approval records a manual
+      // call outcome and best-effort internal GHL note; review approval stays
+      // local except its optional archive_lost job status flip.
       // Per parent card secure-sale-quote-followup-loop reframe v3.
       case 'approve_scoper_call_task':     return json(await approveScoperCallTask(client, body))
       case 'approve_quote_review_task':    return json(await approveQuoteReviewTask(client, body))
@@ -9369,12 +9376,11 @@ async function addNote(client: any, body: any, isAdmin = false) {
   // Verify user is assigned to this job (admins bypass)
   if (uId) await assertAssigned(client, jId, uId, isAdmin)
 
-  // Default visibility per Marnin 2026-05-04: notes get pushed to GHL
-  // for two-way consistency unless the operator explicitly marks the
-  // note 'internal_only'. visibility: 'client_visible' (default) | 'internal_only'.
+  // Sales cockpit notes are staff-only by default. GHL contact notes are CRM
+  // notes, not customer messages; when explicitly requested, mirror there too
+  // so the salesmen see the same context in LeadConnector/GHL.
   const noteVisibility = visibility === 'internal_only' ? 'internal_only' : 'client_visible'
-  // sync_to_ghl defaults to true except when visibility=internal_only.
-  const shouldSyncToGhl = sync_to_ghl !== false && noteVisibility === 'client_visible'
+  const shouldSyncToGhl = sync_to_ghl === true || (sync_to_ghl !== false && noteVisibility === 'client_visible')
 
   const { data, error } = await client.from('job_events').insert({
     job_id: jId,
@@ -12869,20 +12875,68 @@ async function sendQuoteFollowupSms(client: any, body: any) {
 //   1) Validate-and-claim: UPDATE … WHERE status='pending' AND
 //      action_type='<expected>' RETURNING * — claims the row atomically.
 //   2) Customer-visible side effect (NONE for these handlers — internal
-//      task creators only). Optional state flip on archive_lost.
+//      task creators only). Scoper calls record a manual outcome + internal
+//      CRM note. Optional state flip on archive_lost.
 //   3) Emit business_event + job_event for the spine.
 //
-// CRITICAL: NEITHER handler fires SMS, GHL, email, or any external API.
-// They emit events for the spine and (for archive_lost) flip jobs.status
-// to 'lost' with lost_reason. That's it.
+// CRITICAL: NEITHER handler fires customer SMS, email, or an automated call.
+// Scoper call approval may write a GHL internal contact note. Review approval
+// emits events and (for archive_lost) flips jobs.status to 'lost'.
 //
 // Per parent card secure-sale-quote-followup-loop reframe v3
 // (secureworks-docs/cio/operations/board/Secure-Sale-Automation/
 //  secure-sale-quote-followup-loop/quote-nurture-reframe-2026-05-07.md).
 // ════════════════════════════════════════════════════════════
+async function pushGhlContactNoteBestEffort(client: any, opts: {
+  contact_id?: string | null;
+  job_id?: string | null;
+  note_text: string;
+}) {
+  let contactId = opts.contact_id || null
+  if (!contactId && opts.job_id) {
+    const { data: jobRow, error: jobErr } = await client.from('jobs')
+      .select('ghl_contact_id')
+      .eq('id', opts.job_id)
+      .maybeSingle()
+    if (jobErr) return { ghl_synced: false, ghl_note_id: null, ghl_push_error: jobErr.message }
+    contactId = jobRow?.ghl_contact_id || null
+  }
+  if (!contactId) return { ghl_synced: false, ghl_note_id: null, ghl_push_error: 'no GHL contact id available for note mirror' }
+
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') || ''
+  const ghlBase = supabaseUrl.replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+  if (!supabaseUrl || !ghlKey) return { ghl_synced: false, ghl_note_id: null, ghl_push_error: 'ghl-proxy env missing' }
+
+  try {
+    const noteResp = await fetch(`${ghlBase}?action=add_note`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ghlKey,
+      },
+      body: JSON.stringify({
+        contactId,
+        body: opts.note_text,
+        jobId: opts.job_id || undefined,
+      }),
+    })
+    if (!noteResp.ok) {
+      return { ghl_synced: false, ghl_note_id: null, ghl_push_error: `ghl-proxy add_note returned ${noteResp.status}` }
+    }
+    const noteData = await noteResp.json().catch(() => ({}))
+    return { ghl_synced: true, ghl_note_id: noteData.note_id || noteData.id || null, ghl_push_error: null }
+  } catch (e: any) {
+    return { ghl_synced: false, ghl_note_id: null, ghl_push_error: e?.message || String(e) }
+  }
+}
+
 async function approveScoperCallTask(client: any, body: any) {
-  const { action_id, user_id } = body
+  const { action_id, user_id, outcome, note } = body
   if (!action_id) throw new Error('action_id required')
+  const callOutcome = ['called', 'voicemail', 'no_answer'].includes(String(outcome || ''))
+    ? String(outcome)
+    : 'called'
 
   // Step 1: atomic validate-and-claim. We require status='pending' AND
   // action_type='propose_scoper_call_task' so a concurrent approve on the
@@ -12898,7 +12952,7 @@ async function approveScoperCallTask(client: any, body: any) {
     .eq('proposal_id', action_id)
     .eq('status', 'pending')
     .eq('action_type', 'propose_scoper_call_task')
-    .select('proposal_id, action_type, contact_id, contact_name, job_id, action_payload, drafted_message, metadata')
+    .select('proposal_id, action_type, contact_id, contact_name, contact_phone, job_id, action_payload, drafted_message, metadata')
     .limit(1)
   if (claimErr) throw claimErr
   if (!claimed || claimed.length === 0) {
@@ -12914,8 +12968,93 @@ async function approveScoperCallTask(client: any, body: any) {
   const slot_day = ap.slot_day || null
   const voice_anchor = ap.voice_anchor || null
   const ticket_tier = ap.ticket_tier || null
+  const talkTrack = Array.isArray(ap.talk_track)
+    ? ap.talk_track.map((line: any) => String(line || '').trim()).filter(Boolean).slice(0, 6)
+    : []
+  const operatorNote = String(note || '').trim()
+  const callNoteText = [
+    `Quote follow-up call task marked ${callOutcome}.`,
+    action.contact_name ? `Contact: ${action.contact_name}` : null,
+    action.contact_phone ? `Phone: ${action.contact_phone}` : null,
+    slot_day ? `Cadence slot: D${slot_day}` : null,
+    voice_anchor ? `Voice anchor: ${voice_anchor}` : null,
+    ticket_tier ? `Ticket tier: ${ticket_tier}` : null,
+    talkTrack.length ? `Talk-track:\n- ${talkTrack.join('\n- ')}` : null,
+    operatorNote ? `Operator note: ${operatorNote}` : null,
+    `Proposal: ${action.proposal_id}`,
+  ].filter(Boolean).join('\n')
 
-  // Step 2: NO customer-facing side effect. (This is the whole point.)
+  // Step 2: NO customer-facing SMS/call automation. Record the manual call
+  // outcome locally, then mirror a CRM contact note through the existing
+  // ghl-proxy add_note helper. This is a GHL internal note only, not a
+  // customer message.
+  let internalNoteId: string | null = null
+  let internalNoteError: string | null = null
+  if (action.job_id) {
+    try {
+      const { data: noteRow, error: noteErr } = await client.from('job_events').insert({
+        job_id: action.job_id,
+        user_id: user_id || null,
+        event_type: 'note',
+        detail_json: {
+          text: callNoteText,
+          visibility: 'internal_only',
+          sync_to_ghl: true,
+          source: 'quote_followup_call_task',
+          proposal_id: action.proposal_id,
+          call_outcome: callOutcome,
+        },
+      }).select('id').single()
+      if (noteErr) throw noteErr
+      internalNoteId = noteRow?.id || null
+    } catch (e: any) {
+      internalNoteError = e?.message || String(e)
+      console.warn('[ops-api/approve_scoper_call_task] internal note insert failed:', internalNoteError)
+    }
+  } else {
+    internalNoteError = 'no job_id on proposal; skipped job_events internal note'
+  }
+
+  let callEventRecorded = false
+  try {
+    await client.from('business_events').insert({
+      event_type: 'client.call_complete',
+      source: 'ops-api/approve_scoper_call_task',
+      entity_type: action.job_id ? 'job' : 'ai_proposed_action',
+      entity_id: action.job_id || action.proposal_id,
+      job_id: action.job_id || null,
+      contact_id: action.contact_id || null,
+      occurred_at: nowIso,
+      direction: 'outbound',
+      channel: 'call',
+      body_preview: callNoteText.slice(0, 500),
+      safe_summary: `Quote follow-up call task marked ${callOutcome}`,
+      source_table: 'ai_proposed_actions',
+      source_id: action.proposal_id,
+      payload: {
+        proposal_id: action.proposal_id,
+        action_type: 'propose_scoper_call_task',
+        call_outcome: callOutcome,
+        note_text: callNoteText,
+        internal_note_id: internalNoteId,
+        slot_day,
+        voice_anchor,
+        ticket_tier,
+        talk_track: talkTrack,
+        approved_by: user_id || null,
+        loop: 'quote_followup',
+      },
+    })
+    callEventRecorded = true
+  } catch (e: any) {
+    console.warn('[ops-api/approve_scoper_call_task] client.call_complete business_event insert failed:', e.message)
+  }
+
+  const ghlNoteResult = await pushGhlContactNoteBestEffort(client, {
+    contact_id: action.contact_id || null,
+    job_id: action.job_id || null,
+    note_text: callNoteText,
+  })
 
   // Step 3: emit business_event for the spine.
   try {
@@ -12959,7 +13098,16 @@ async function approveScoperCallTask(client: any, body: any) {
     } catch (_e) { /* spine log is best-effort */ }
   }
 
-  return { success: true, action_id, sub_action: null }
+  return {
+    success: true,
+    action_id,
+    sub_action: null,
+    call_outcome: callOutcome,
+    internal_note_id: internalNoteId,
+    internal_note_error: internalNoteError,
+    call_event_recorded: callEventRecorded,
+    ...ghlNoteResult,
+  }
 }
 
 async function approveQuoteReviewTask(client: any, body: any) {
@@ -13082,6 +13230,60 @@ async function approveQuoteReviewTask(client: any, body: any) {
   }
 
   return { success: true, action_id, sub_action, job_archived: jobUpdateApplied }
+}
+
+async function approveBookingProposalViaAgent(
+  body: any,
+  caller: { mode: 'api_key' | 'jwt'; user: { id: string; email: string; role: string } | null },
+) {
+  const proposal_id = String(body?.proposal_id || body?.action_id || '').trim()
+  if (!proposal_id) throw new ApiError('proposal_id required', 400)
+
+  const commit = body?.commit === true
+  const approver_user_id = caller.mode === 'jwt'
+    ? caller.user?.id
+    : String(body?.approver_user_id || body?.user_id || '').trim() || undefined
+
+  if (caller.mode === 'jwt' && !approver_user_id) {
+    throw new ApiError('authenticated user required for booking approval', 401)
+  }
+  if (!SECUREWORKS_AGENT_BEARER) {
+    throw new ApiError('secureworks agent bearer not configured', 500)
+  }
+
+  const payload: Record<string, any> = {
+    proposal_id,
+    commit,
+  }
+  if (approver_user_id) payload.approver_user_id = approver_user_id
+  const m2 = String(body?.m2_drafted_message || body?.drafted_message || '').trim()
+  if (m2) payload.m2_drafted_message = m2
+
+  const url = `${SECUREWORKS_AGENT_URL}/api/booking-approvals/approve`
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SECUREWORKS_AGENT_BEARER}`,
+    },
+    body: JSON.stringify(payload),
+  })
+
+  const text = await resp.text()
+  let data: any = null
+  try { data = text ? JSON.parse(text) : {} } catch { data = { raw: text } }
+  if (!resp.ok) {
+    throw new ApiError(`booking approval bridge failed (${resp.status}): ${data?.error || text || resp.statusText}`, resp.status)
+  }
+
+  return {
+    success: data?.ok !== false,
+    proposal_id,
+    commit,
+    dry_run: !commit,
+    agent_url: SECUREWORKS_AGENT_URL,
+    result: data,
+  }
 }
 
 // ════════════════════════════════════════════════════════════
