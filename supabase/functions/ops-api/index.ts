@@ -12648,18 +12648,32 @@ Return ONLY valid JSON in this exact format:
 async function listProposedActions(client: any, params: URLSearchParams) {
   const actionType = params.get('action_type')
   const status = params.get('status') || 'pending'
+  const requestedLimit = parseInt(params.get('limit') || '500', 10)
+  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 500, 1), 500)
+  const nowMs = Date.now()
+
+  const effectiveExpiresAt = (row: any): string | null => {
+    if (row.expires_at) return row.expires_at
+    const createdMs = new Date(row.created_at || nowMs).getTime()
+    if (!Number.isFinite(createdMs)) return null
+    const ttlHours =
+      row.action_type === 'propose_quote_review_task' ? 7 * 24 :
+      row.action_type === 'propose_scoper_booking_approval' ? 24 :
+      12
+    return new Date(createdMs + ttlHours * 3600000).toISOString()
+  }
 
   // No embedded join — production has no FK ai_proposed_actions.job_id → jobs.id.
   // PostgREST silently fails an embedded join in that case; handler then
   // returned { actions: [] } even though rows existed (122 in DB on 2026-05-04).
-  // Pull rows flat, then batch-hydrate jobs separately.
+  // Pull rows flat, apply expiry semantics in JS, then batch-hydrate jobs
+  // separately. Some live quote-followup rows were written without expires_at;
+  // treating null as expired inside the SQL query hid real work from sale.html.
   let query = client.from('ai_proposed_actions')
     .select('*')
     .eq('status', status)
-    .lt('expires_at', new Date(Date.now() + 48 * 3600000).toISOString()) // not expired
-    .gt('expires_at', new Date().toISOString())
     .order('created_at', { ascending: false })
-    .limit(200)
+    .limit(limit)
 
   if (actionType) query = query.eq('action_type', actionType)
 
@@ -12671,7 +12685,14 @@ async function listProposedActions(client: any, params: URLSearchParams) {
     return { actions: [], error: error.message }
   }
 
-  const rows = data || []
+  const rows = (data || [])
+    .map((row: any) => ({ ...row, expires_at: effectiveExpiresAt(row) }))
+    .filter((row: any) => {
+      if (status !== 'pending' && status !== 'approved') return true
+      if (status === 'pending' && row.sent_at) return false
+      if (!row.expires_at) return false
+      return new Date(row.expires_at).getTime() > nowMs
+    })
   const jobIds = Array.from(new Set(rows.map((r: any) => r.job_id).filter(Boolean)))
   let jobsById: Record<string, any> = {}
   if (jobIds.length) {
