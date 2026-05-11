@@ -189,16 +189,29 @@ async function resolveStages(pipelineId: string) {
 }
 
 function mapOpp(opp: any, stages: Record<string, string>) {
+  const updatedAt =
+    opp.updatedAt ||
+    opp.updated_at ||
+    opp.dateUpdated ||
+    opp.lastStatusChangeAt ||
+    opp.lastStageChangeAt ||
+    opp.createdAt ||
+    null
+
   return {
     id: opp.id,
     name: opp.name || opp.contact?.name || 'Unknown',
     contactName: opp.contact?.name || opp.name || '',
     contactEmail: opp.contact?.email || '',
     contactPhone: opp.contact?.phone || '',
+    contactAddress: opp.contact?.address1 || opp.contact?.address || '',
+    contactCity: opp.contact?.city || '',
     stageName: stages[opp.pipelineStageId] || opp.status || '',
     status: opp.status,
     monetaryValue: opp.monetaryValue || 0,
     createdAt: opp.createdAt,
+    updatedAt,
+    lastActivityAt: updatedAt,
     contactId: opp.contact?.id || '',
   }
 }
@@ -449,12 +462,29 @@ serve(async (req: Request) => {
       const pipelineId = PIPELINES[pipeline] || EXECUTION_PIPELINES[pipeline]
       if (!pipelineId) return json({ error: 'Invalid pipeline. Use: fencing, patio, fencing_exec, patio_exec' }, 400)
 
-      const [stages, data] = await Promise.all([
-        resolveStages(pipelineId),
-        ghl(`/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_id=${pipelineId}&limit=50`),
-      ])
-      const opps = (data.opportunities || []).map((o: any) => mapOpp(o, stages))
-      return json({ opportunities: opps })
+      const maxPages = Math.min(Number(url.searchParams.get('max_pages')) || 20, 20)
+      const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 100)
+      const [stages] = await Promise.all([resolveStages(pipelineId)])
+      const opportunities: any[] = []
+      const seenIds = new Set<string>()
+
+      for (let page = 1; page <= maxPages; page++) {
+        const data = await ghl(`/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_id=${pipelineId}&limit=${limit}&page=${page}`)
+        const rows = data.opportunities || []
+        if (!rows.length) break
+
+        let newRows = 0
+        for (const opp of rows) {
+          if (opp?.id && seenIds.has(opp.id)) continue
+          if (opp?.id) seenIds.add(opp.id)
+          opportunities.push(opp)
+          newRows++
+        }
+        if (newRows === 0 || rows.length < limit) break
+      }
+
+      const opps = opportunities.map((o: any) => mapOpp(o, stages))
+      return json({ opportunities: opps, count: opps.length, pages_scanned: Math.ceil(opportunities.length / limit) })
     }
 
     // ── Search Contacts (dedicated contact search, not opportunities) ──

@@ -13728,7 +13728,19 @@ async function snoozeProposedAction(client: any, body: any): Promise<any> {
 //   or the scoping tool will not discover the stub and will create a duplicate.
 //   Type is inferred from the GHL pipeline lane.
 async function createJobForOpportunity(client: any, body: any): Promise<any> {
-  const { action_id, ghl_opportunity_id, ghl_contact_id, pipeline_lane, user_id } = body
+  const {
+    action_id,
+    ghl_opportunity_id,
+    ghl_contact_id,
+    pipeline_lane,
+    user_id,
+    contact_name: body_contact_name,
+    contact_phone: body_contact_phone,
+    contact_email: body_contact_email,
+    site_address,
+    site_suburb,
+    monetary_value,
+  } = body
   if (!ghl_opportunity_id) throw new Error('ghl_opportunity_id required')
 
   // Infer type from pipeline_lane. Scoping tool will reject unspecified.
@@ -13755,14 +13767,15 @@ async function createJobForOpportunity(client: any, body: any): Promise<any> {
 
   // Pull contact info from the proposal (if action_id given) so we don't
   // need to refetch from GHL.
-  let contact_name: string | null = null
-  let contact_phone: string | null = null
+  let contact_name: string | null = body_contact_name || null
+  let contact_phone: string | null = body_contact_phone || null
+  let contact_email: string | null = body_contact_email || null
   if (action_id) {
     const { data: action } = await client.from('ai_proposed_actions')
       .select('contact_name, contact_phone')
       .eq('proposal_id', action_id).maybeSingle()
-    contact_name = action?.contact_name || null
-    contact_phone = action?.contact_phone || null
+    contact_name = contact_name || action?.contact_name || null
+    contact_phone = contact_phone || action?.contact_phone || null
   }
 
   const { data: created, error } = await client.from('jobs')
@@ -13772,6 +13785,10 @@ async function createJobForOpportunity(client: any, body: any): Promise<any> {
       status: 'draft',
       client_name: contact_name,
       client_phone: contact_phone,
+      client_email: contact_email,
+      site_address: site_address || null,
+      site_suburb: site_suburb || null,
+      pricing_json: monetary_value ? { totalIncGST: monetary_value, source: 'ghl_opportunity' } : {},
       ghl_opportunity_id,
       ghl_contact_id: ghl_contact_id || null,
       created_by: user_id || null,
@@ -13799,6 +13816,11 @@ async function createJobForOpportunity(client: any, body: any): Promise<any> {
       payload: {
         ghl_opportunity_id, ghl_contact_id: ghl_contact_id || null,
         pipeline_lane: type,
+        contact_name,
+        contact_phone,
+        contact_email,
+        site_address: site_address || null,
+        site_suburb: site_suburb || null,
         created_by: user_id || null,
         from_action_id: action_id || null,
       },
@@ -14096,7 +14118,7 @@ async function backfillGhlConversations(client: any, body: any, req: Request): P
   // ── Params ──
   const dry_run = body?.dry_run !== false  // default TRUE — must explicitly pass false to write
   const pipeline = (body?.pipeline || 'both').toLowerCase()
-  const max_opportunities = Math.min(Number(body?.max_opportunities) || 10, 50)
+  const max_opportunities = Math.min(Number(body?.max_opportunities) || 100, 200)
   const window_days = Math.min(Number(body?.opportunity_window_days) || 30, 90)
 
   if (!['fencing', 'patio', 'both'].includes(pipeline)) {
