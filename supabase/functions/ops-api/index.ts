@@ -141,6 +141,9 @@ const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env.get('RAILWAY_AGENT_URL') || 'https://secureworks-agent-production.up.railway.app').replace(/\/+$/, '')
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
+const OPS_API_SOURCE_REPO = 'secureworks-site'
+const OPS_API_BUILD_LABEL = 'canonical-secureworks-site-2026-05-11'
+const OPS_API_EXPECTED_ACTION_COUNT = 223
 
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
@@ -192,6 +195,26 @@ function json(data: unknown, status = 200) {
 
 function sb() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+}
+
+function opsApiVersion() {
+  return {
+    ok: true,
+    source_repo: OPS_API_SOURCE_REPO,
+    build_label: OPS_API_BUILD_LABEL,
+    expected_action_count: OPS_API_EXPECTED_ACTION_COUNT,
+    commit_sha:
+      Deno.env.get('GITHUB_SHA')
+      || Deno.env.get('VERCEL_GIT_COMMIT_SHA')
+      || Deno.env.get('RAILWAY_GIT_COMMIT_SHA')
+      || Deno.env.get('COMMIT_SHA')
+      || null,
+    deployed_at:
+      Deno.env.get('DEPLOYED_AT')
+      || Deno.env.get('BUILD_TIMESTAMP')
+      || null,
+    canonical_note: 'Production ops-api deploys from secureworks-site/supabase/functions/ops-api only.',
+  }
 }
 
 // Dual-write: log to business_events (CloudEvents pattern)
@@ -1325,6 +1348,8 @@ if (import.meta.main) serve(async (req: Request) => {
     const client = sb()
 
     switch (action) {
+      case 'ops_api_version': return json(opsApiVersion())
+
       // ── Ops Dashboard Read ──
       case 'ops_summary': return json(await opsSummary(client))
       case 'calendar': return json(await calendarEvents(client, url.searchParams))
@@ -1593,6 +1618,13 @@ if (import.meta.main) serve(async (req: Request) => {
         const noteIsAdmin = authMode === 'api_key' || authUser?.role === 'admin'
         return json(await addNote(client, { ...body, userId: noteUserId }, noteIsAdmin))
       }
+      case 'delete_note': {
+        const eventId = body.event_id || body.eventId
+        if (!eventId) return json({ error: 'event_id required' }, 400)
+        const { error: delErr } = await client.from('job_events').delete().eq('id', eventId)
+        if (delErr) return json({ error: delErr.message }, 500)
+        return json({ success: true })
+      }
       case 'create_invoice': return json(await createInvoice(client, body))
       case 'preflight_invoice': {
         // Read-only preflight check. No Xero call, no writes.
@@ -1637,6 +1669,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'complete_and_invoice': return json(await completeAndInvoice(client, body))
       case 'create_deposit_invoice': return json(await createDepositInvoice(client, body))
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
+      case 'get_comms_upload_url': return json(await getCommsUploadUrl(client, body))
+      case 'send_comms_message': return json(await sendCommsMessageAction(body))
       case 'create_trade_user': {
         const { email, password, name, role, phone } = body
         if (!email || !password || !name) return json({ error: 'email, password, name required' }, 400)
@@ -2243,6 +2277,13 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'confirm_document_upload': return json(await confirmDocumentUpload(client, body))
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
       case 'delete_document': return json(await deleteDocument(client, body))
+
+      // ── Ops Notes (ops dashboard per-job notes) ──
+      case 'list_ops_notes': return json(await listOpsNotes(client, url.searchParams))
+      case 'upsert_ops_note': return json(await upsertOpsNote(client, body))
+      case 'delete_ops_note': return json(await deleteOpsNote(client, body))
+      case 'get_ops_upload_url': return json(await getOpsUploadUrl(client, body))
+      case 'send_ops_note_to_trade': return json(await sendOpsNoteToTrade(client, body))
 
       // ── Proposed Actions (SMS drafts etc.) ──
       case 'list_proposed_actions': return json(await listProposedActions(client, url.searchParams))
@@ -4252,15 +4293,17 @@ async function pipeline(client: any, params: URLSearchParams) {
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: any = { data: [] }, poRes: any = { data: [] }, woRes: any = { data: [] }
   let councilRes: any = { data: [] }, emailRes: any = { data: [] }, invoiceRes: any = { data: [] }
+  let opsNotesRes: any = { data: [] }
 
   if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes] = await Promise.all([
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes] = await Promise.all([
       client.from('job_assignments').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
       client.from('purchase_orders').select('job_id').in('job_id', jobIds).neq('status', 'deleted'),
       client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
       client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', jobIds),
       client.from('po_communications').select('job_id, direction, created_at').in('job_id', jobIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false }).limit(500),
       client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
+      client.from('ops_notes').select('job_id').in('job_id', jobIds),
     ])
   }
 
@@ -4272,6 +4315,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   const assignMap = countMap(assignRes.data || [])
   const poMap = countMap(poRes.data || [])
   const woMap = countMap(woRes.data || [])
+  const opsNotesMap = countMap(opsNotesRes.data || [])
 
   // Council: count + best status + step info per job
   const councilMap: Record<string, number> = {}
@@ -4328,6 +4372,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       assignment_count: assignMap[j.id] || 0,
       po_count: poMap[j.id] || 0,
       wo_count: woMap[j.id] || 0,
+      ops_notes_count: opsNotesMap[j.id] || 0,
       council_count: councilMap[j.id] || 0,
       council_status: councilInfo?.status || null,
       council_step: councilInfo?.step || null,
@@ -9948,7 +9993,7 @@ async function uploadDocument(client: any, body: any) {
   const fName = fileName || file_name
   if (!jId || !fName) throw new Error('jobId and fileName required')
 
-  const allowedTypes = ['work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
+  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
   const docType = allowedTypes.includes(type) ? type : 'general'
 
   const bucket = 'job-documents'
@@ -9977,11 +10022,11 @@ async function confirmDocumentUpload(client: any, body: any) {
   const jId = jobId || job_id
   if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
 
-  // Default visibility: on for site_photo, council_plans, engineering, work_order. Off for supplier_quote, quote
-  const defaultVisible = ['site_photo', 'council_plans', 'engineering', 'work_order', 'approval'].includes(type)
+  // Default visibility: on for field/useful trade docs. Off for quote/client-only docs.
+  const defaultVisible = ['site_photo', 'council_plans', 'engineering', 'work_order', 'supplier_work_order', 'supplier_quote', 'approval'].includes(type)
   const isVisible = visible_to_trades != null ? visible_to_trades : defaultVisible
 
-  const allowedTypes = ['work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
+  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
   const docType = allowedTypes.includes(type) ? type : 'general'
 
   const insertData: any = {
@@ -10087,6 +10132,170 @@ async function deleteDocument(client: any, body: any) {
   })
 
   return { success: true }
+}
+
+// ── Ops Notes (ops dashboard per-job notes) ──
+async function listOpsNotes(client: any, params: URLSearchParams) {
+  const jobId = params.get('jobId') || params.get('job_id')
+  if (!jobId) throw new ApiError('jobId required', 400)
+  const { data, error } = await client.from('ops_notes')
+    .select('*')
+    .eq('job_id', jobId)
+    .order('created_at', { ascending: false })
+  if (error) throw new ApiError(error.message, 500)
+  return { notes: data || [] }
+}
+
+async function upsertOpsNote(client: any, body: any) {
+  const { job_id, note, note_id, attachment_url, attachment_type, attachment_filename } = body
+  if (!job_id || (!note && !attachment_url)) throw new ApiError('job_id and (note or attachment) required', 400)
+
+  if (note_id) {
+    const { data, error } = await client.from('ops_notes')
+      .update({
+        note: note || null,
+        attachment_url,
+        attachment_type,
+        attachment_filename,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', note_id)
+      .select()
+      .single()
+    if (error) throw new ApiError(error.message, 500)
+    return { ok: true, note: data }
+  }
+
+  const row: Record<string, any> = { job_id, note: note || null }
+  if (attachment_url) {
+    row.attachment_url = attachment_url
+    row.attachment_type = attachment_type
+    row.attachment_filename = attachment_filename
+  }
+  const { data, error } = await client.from('ops_notes')
+    .insert(row)
+    .select()
+    .single()
+  if (error) throw new ApiError(error.message, 500)
+  return { ok: true, note: data }
+}
+
+async function deleteOpsNote(client: any, body: any) {
+  const { note_id } = body
+  if (!note_id) throw new ApiError('note_id required', 400)
+  const { error } = await client.from('ops_notes').delete().eq('id', note_id)
+  if (error) throw new ApiError(error.message, 500)
+  return { ok: true }
+}
+
+async function getOpsUploadUrl(client: any, body: any) {
+  const { fileName, jobId } = body
+  if (!fileName || !jobId) throw new ApiError('fileName and jobId required', 400)
+  const bucket = 'job-documents'
+  const fileId = crypto.randomUUID()
+  const ext = fileName.includes('.') ? fileName.split('.').pop() : ''
+  const safeName = ext ? `${fileId}.${ext}` : fileId
+  const path = `ops-notes/${jobId}/${safeName}`
+  const { data, error } = await client.storage.from(bucket).createSignedUploadUrl(path)
+  if (error) throw new ApiError(error.message, 500)
+  const { data: urlData } = client.storage.from(bucket).getPublicUrl(path)
+  return { signedUrl: data.signedUrl, publicUrl: urlData.publicUrl, path, token: data.token }
+}
+
+async function sendOpsNoteToTrade(client: any, body: any) {
+  const { note_id } = body
+  if (!note_id) throw new ApiError('note_id required', 400)
+  const { data: note, error: fetchErr } = await client.from('ops_notes').select('*').eq('id', note_id).single()
+  if (fetchErr || !note) throw new ApiError('Note not found', 404)
+
+  if (note.attachment_url) {
+    const isImage = (note.attachment_type || '').startsWith('image/')
+    if (isImage) {
+      await client.from('job_media').insert({
+        job_id: note.job_id,
+        phase: 'scope',
+        type: 'image',
+        storage_url: note.attachment_url,
+        thumbnail_url: note.attachment_url,
+        label: note.attachment_filename || 'Ops attachment',
+        notes: note.note || null,
+      })
+    } else {
+      await client.from('job_documents').insert({
+        job_id: note.job_id,
+        type: 'ops_attachment',
+        storage_url: note.attachment_url,
+        file_name: note.attachment_filename || 'attachment',
+        visible_to_trades: true,
+      })
+    }
+  }
+
+  if (note.note) {
+    await client.from('job_events').insert({
+      job_id: note.job_id,
+      event_type: 'note',
+      detail_json: { text: note.note, from_ops: true },
+    })
+  }
+
+  await client.from('ops_notes').update({ sent_to_trade: true, updated_at: new Date().toISOString() }).eq('id', note_id)
+  return { ok: true }
+}
+
+// ── Comms attachment upload URL (ops dashboard → Storage) ──
+async function getCommsUploadUrl(client: any, body: any) {
+  const { fileName, jobId } = body
+  if (!fileName || !jobId) throw new Error('fileName and jobId required')
+
+  const bucket = 'comms-attachments'
+  const fileId = crypto.randomUUID()
+  const ext = fileName.includes('.') ? fileName.split('.').pop() : ''
+  const safeName = ext ? `${fileId}.${ext}` : fileId
+  const path = `jobs/${jobId}/${safeName}`
+
+  try { await client.storage.createBucket(bucket, { public: true }) } catch { /* exists */ }
+
+  const { data, error } = await client.storage.from(bucket).createSignedUploadUrl(path)
+  if (error) throw error
+
+  const { data: urlData } = client.storage.from(bucket).getPublicUrl(path)
+  return { signedUrl: data.signedUrl, publicUrl: urlData.publicUrl, path }
+}
+
+async function sendCommsMessageAction(body: any) {
+  const { contactId, type, message, attachmentUrls = [], subject, htmlBody } = body
+  if (!contactId || !type) throw new Error('contactId and type required')
+
+  const payload: any = { type, contactId }
+
+  if (type === 'SMS') {
+    if (!message) throw new Error('message required for SMS')
+    payload.message = message
+    if (attachmentUrls.length > 0) payload.attachments = attachmentUrls
+  } else if (type === 'Email') {
+    if (!subject || !htmlBody) throw new Error('subject and htmlBody required for Email')
+    payload.subject = subject
+    payload.html = htmlBody
+    if (attachmentUrls.length > 0) payload.attachments = attachmentUrls
+  } else {
+    throw new Error('type must be SMS or Email')
+  }
+
+  const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GHL_API_TOKEN}`,
+      'Content-Type': 'application/json',
+      'Version': '2021-07-28',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  const data = await resp.json()
+  if (!resp.ok) throw new Error(data?.message || `GHL error ${resp.status}`)
+
+  return { success: true, messageId: data.id }
 }
 
 // ── Signed upload URL (trade uploads photo directly to Storage) ──

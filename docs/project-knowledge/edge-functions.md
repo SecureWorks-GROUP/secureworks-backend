@@ -55,6 +55,11 @@ All in `supabase/functions/`. Deploy with:
 - **Purpose**: Ops dashboard CRUD — scheduling, POs, WOs, pipeline, job detail, Xero push
 - **Also**: Trade mobile endpoints (my_jobs, upload_photo, service_report)
 - **Also**: AI/automation (morning_brief, scope_to_po, complete_and_invoice)
+- **Canonical source**: `secureworks-site/supabase/functions/ops-api`
+- **Deploy guard**: Do not deploy `ops-api` from `securedash` or any dashboard
+  submodule/worktree. Stale dashboard copies previously omitted newer site
+  actions, and stale site copies omitted dashboard actions such as
+  `list_ops_notes`; either direction can overwrite the one live function.
 
 ### ops-ai `--no-verify-jwt`
 - **Purpose**: Claude AI assistant for dashboards
