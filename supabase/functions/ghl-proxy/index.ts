@@ -216,6 +216,60 @@ function mapOpp(opp: any, stages: Record<string, string>) {
   }
 }
 
+async function fetchOpportunityPages(args: {
+  pipelineId?: string
+  q?: string
+  limit?: number
+  maxPages?: number
+}) {
+  const limit = Math.min(args.limit || 100, 100)
+  const maxPages = Math.min(args.maxPages || 20, 50)
+  const opportunities: any[] = []
+  const seenIds = new Set<string>()
+  let startAfter: string | number | null = null
+  let startAfterId: string | null = null
+  let pagesScanned = 0
+  let total: number | null = null
+
+  for (let page = 1; page <= maxPages; page++) {
+    const params = new URLSearchParams({
+      location_id: GHL_LOCATION_ID,
+      limit: String(limit),
+    })
+    if (args.pipelineId) params.set('pipeline_id', args.pipelineId)
+    if (args.q) params.set('q', args.q)
+    if (startAfter != null) params.set('startAfter', String(startAfter))
+    if (startAfterId) params.set('startAfterId', startAfterId)
+
+    const data = await ghl(`/opportunities/search?${params.toString()}`)
+    const rows = data.opportunities || []
+    const meta = data.meta || {}
+    pagesScanned++
+    if (typeof meta.total === 'number') total = meta.total
+    if (!rows.length) break
+
+    let newRows = 0
+    for (const opp of rows) {
+      if (opp?.id && seenIds.has(opp.id)) continue
+      if (opp?.id) seenIds.add(opp.id)
+      opportunities.push(opp)
+      newRows++
+    }
+
+    const nextStartAfter = meta.startAfter ?? rows[rows.length - 1]?.sort?.[0] ?? null
+    const nextStartAfterId =
+      meta.startAfterId ??
+      rows[rows.length - 1]?.sort?.[1] ??
+      rows[rows.length - 1]?.contactId ??
+      null
+    if (newRows === 0 || !nextStartAfter || !nextStartAfterId || rows.length < limit) break
+    startAfter = nextStartAfter
+    startAfterId = String(nextStartAfterId)
+  }
+
+  return { opportunities, pagesScanned, total }
+}
+
 // ── Phonetic/fuzzy name variant generator (DEV-CONTACT-FUZZY-SEARCH) ──
 // Generates common phonetic alternatives for Australian names.
 // "Shaun" -> ["Sean", "Shawn"], "Phil" -> ["Fhil"], etc.
@@ -465,26 +519,10 @@ serve(async (req: Request) => {
       const maxPages = Math.min(Number(url.searchParams.get('max_pages')) || 20, 20)
       const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 100)
       const [stages] = await Promise.all([resolveStages(pipelineId)])
-      const opportunities: any[] = []
-      const seenIds = new Set<string>()
+      const paged = await fetchOpportunityPages({ pipelineId, limit, maxPages })
 
-      for (let page = 1; page <= maxPages; page++) {
-        const data = await ghl(`/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_id=${pipelineId}&limit=${limit}&page=${page}`)
-        const rows = data.opportunities || []
-        if (!rows.length) break
-
-        let newRows = 0
-        for (const opp of rows) {
-          if (opp?.id && seenIds.has(opp.id)) continue
-          if (opp?.id) seenIds.add(opp.id)
-          opportunities.push(opp)
-          newRows++
-        }
-        if (newRows === 0 || rows.length < limit) break
-      }
-
-      const opps = opportunities.map((o: any) => mapOpp(o, stages))
-      return json({ opportunities: opps, count: opps.length, pages_scanned: Math.ceil(opportunities.length / limit) })
+      const opps = paged.opportunities.map((o: any) => mapOpp(o, stages))
+      return json({ opportunities: opps, count: opps.length, total: paged.total, pages_scanned: paged.pagesScanned })
     }
 
     // ── Search Contacts (dedicated contact search, not opportunities) ──
@@ -621,19 +659,14 @@ serve(async (req: Request) => {
       const pipeline = url.searchParams.get('pipeline') || ''
       const pipelineId = pipeline ? (PIPELINES[pipeline] || EXECUTION_PIPELINES[pipeline]) : ''
 
-      // Build GHL search URL
-      let searchUrl = `/opportunities/search?location_id=${GHL_LOCATION_ID}&limit=50`
-      if (pipelineId) searchUrl += `&pipeline_id=${pipelineId}`
-      if (q) searchUrl += `&q=${encodeURIComponent(q)}`
-
       // If no query AND no pipeline, return empty (original behaviour)
       if (!q && !pipelineId) return json({ opportunities: [] })
 
-      const [stages, data] = await Promise.all([
+      const [stages, paged] = await Promise.all([
         pipelineId ? resolveStages(pipelineId) : Promise.resolve({} as Record<string, string>),
-        ghl(searchUrl),
+        fetchOpportunityPages({ pipelineId: pipelineId || undefined, q: q || undefined, limit: 100, maxPages: 10 }),
       ])
-      const opps = (data.opportunities || []).map((o: any) => mapOpp(o, stages))
+      const opps = (paged.opportunities || []).map((o: any) => mapOpp(o, stages))
 
       // Cross-reference with Supabase jobs to annotate linked leads
       const oppIds = opps.map((o: any) => o.id).filter(Boolean)
@@ -2160,7 +2193,7 @@ serve(async (req: Request) => {
 
     // ── Job Detail — documents, invoices, events for panel ──
     if (action === 'job_detail') {
-      const jobId = params.get('jobId') || params.get('job_id')
+      const jobId = url.searchParams.get('jobId') || url.searchParams.get('job_id')
       if (!jobId) return json({ error: 'jobId required' }, 400)
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -2190,6 +2223,8 @@ serve(async (req: Request) => {
     // ── Sync all GHL opportunities into Supabase jobs table ──
     if (action === 'sync_ghl') {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const sinceDays = Math.min(Number(url.searchParams.get('since_days')) || 0, 365)
+      const cutoffMs = sinceDays > 0 ? Date.now() - sinceDays * 86400000 : 0
 
       // GHL stage name → Supabase job status mapping
       const STAGE_MAP: Record<string, string> = {
@@ -2270,32 +2305,14 @@ serve(async (req: Request) => {
         // Load stage names for this pipeline
         const stages = await resolveStages(pipelineId)
 
-        // Paginate through all opportunities (GHL returns max 50 per page)
-        let hasMore = true
-        let pageCount = 0
-        const seenIds = new Set<string>()
+        const paged = await fetchOpportunityPages({ pipelineId, limit: 100, maxPages: 20 })
 
-        while (hasMore && pageCount < 20) { // Safety limit: 20 pages = 1000 opps
-          pageCount++
-          const searchUrl = `/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_id=${pipelineId}&limit=100&page=${pageCount}`
-
-          const data = await ghl(searchUrl)
-          const opps = data.opportunities || []
-
-          if (opps.length === 0) {
-            hasMore = false
-            break
-          }
-
-          // Detect duplicate pages (GHL sometimes loops)
-          const newOpps = opps.filter((o: any) => !seenIds.has(o.id))
-          if (newOpps.length === 0) {
-            hasMore = false
-            break
-          }
-          opps.forEach((o: any) => seenIds.add(o.id))
-
-          for (const opp of opps) {
+        for (const opp of paged.opportunities) {
+            const oppTime = Date.parse(opp.updatedAt || opp.lastStatusChangeAt || opp.lastStageChangeAt || opp.createdAt || '')
+            if (cutoffMs && Number.isFinite(oppTime) && oppTime < cutoffMs) {
+              totalSkipped++
+              continue
+            }
             const stageName = stages[opp.pipelineStageId] || opp.status || ''
             const mappedStatus = STAGE_MAP[stageName] || 'draft'
 
@@ -2401,10 +2418,6 @@ serve(async (req: Request) => {
                 totalSynced++
               }
             }
-          }
-
-          // If we got fewer than 100, we've reached the end
-          hasMore = opps.length >= 100
         }
       }
 
@@ -2413,7 +2426,7 @@ serve(async (req: Request) => {
         org_id: DEFAULT_ORG_ID,
         source: 'ghl',
         event_type: 'sync_opportunities',
-        payload: { synced: totalSynced, updated: totalUpdated, skipped: totalSkipped, errors },
+        payload: { synced: totalSynced, updated: totalUpdated, skipped: totalSkipped, since_days: sinceDays || null, errors },
         status: 'processed',
       })
 
@@ -2422,6 +2435,7 @@ serve(async (req: Request) => {
         created: totalSynced,
         updated: totalUpdated,
         skipped: totalSkipped,
+        since_days: sinceDays || null,
         errors: errors.length > 0 ? errors : undefined,
       })
     }
@@ -2599,7 +2613,7 @@ serve(async (req: Request) => {
           triggered_by: userId || 'jarvis',
           message_content: message.slice(0, 2000),
           metadata: { message_id: result.messageId || result.id },
-        }).then(() => {}).catch(() => {})
+        }).then(() => {}, () => {})
 
         return json({ success: true, messageId: result.messageId || result.id })
       } catch (e) {
@@ -2636,7 +2650,7 @@ serve(async (req: Request) => {
             triggered_by: 'jarvis',
             message_content: (subject + '\n' + htmlBody).slice(0, 2000),
             metadata: { subject, message_id: result.messageId || result.id },
-          }).then(() => {}).catch(() => {})
+          }).then(() => {}, () => {})
         } catch { /* non-blocking */ }
 
         return json({ success: true, messageId: result.messageId || result.id })
@@ -2666,7 +2680,7 @@ serve(async (req: Request) => {
             job_id: jobId,
             event_type: 'ghl_note_added',
             detail_json: { contact_id: contactId, note_preview: noteBody.slice(0, 200) },
-          }).catch(() => {})
+          })
         }
 
         return json({ success: true, noteId: result.id || null })
