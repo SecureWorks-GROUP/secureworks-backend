@@ -12659,7 +12659,7 @@ async function listProposedActions(client: any, params: URLSearchParams) {
     const ttlHours =
       row.action_type === 'propose_quote_review_task' ? 7 * 24 :
       row.action_type === 'propose_scoper_booking_approval' ? 24 :
-      12
+      36
     return new Date(createdMs + ttlHours * 3600000).toISOString()
   }
 
