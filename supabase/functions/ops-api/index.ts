@@ -13308,6 +13308,7 @@ const PLAYBOOK_MARNIN_EMAIL = 'marnin@secureworkswa.com.au'
 const PLAYBOOK_FILENAME_ALLOWLIST = new Set([
   'quote-followup-khairo.md',
   'quote-followup-nithin.md',
+  'quote-followup-decking.md',
   // Booking playbook filenames are pre-allowlisted so the same handler
   // can be reused once the booking terminal ships the MD files. The
   // handler validates frontmatter regardless; an empty file with the
@@ -13319,6 +13320,7 @@ const PLAYBOOK_FILENAME_ALLOWLIST = new Set([
 const PLAYBOOK_VOICE_ANCHOR_ALLOWLIST = new Set([
   'fencing_khairo_v1',
   'patio_nithin_v1',
+  'decking_nithin_v1',
   'booking_khairo_v1',
   'booking_nithin_v1',
 ])
@@ -13330,7 +13332,7 @@ const PLAYBOOK_STATUS_ALLOWLIST = new Set([
   'paused',
 ])
 
-const PLAYBOOK_JOB_TYPE_ALLOWLIST = new Set(['fencing', 'patio'])
+const PLAYBOOK_JOB_TYPE_ALLOWLIST = new Set(['fencing', 'patio', 'decking'])
 
 // Tiny YAML frontmatter parser — handles `key: value` and `key: |` block
 // scalars only, matching the shape used by the cadence_planner.
@@ -13415,7 +13417,7 @@ async function updatePlaybook(client: any, body: any, req: Request) {
     throw new ApiError(`yaml_invalid_voice_anchor: '${fm.voice_anchor}' not in allowlist`, 400)
   }
   if (!PLAYBOOK_JOB_TYPE_ALLOWLIST.has(fm.job_type)) {
-    throw new ApiError(`yaml_invalid_job_type: '${fm.job_type}' not in allowlist (fencing|patio)`, 400)
+    throw new ApiError(`yaml_invalid_job_type: '${fm.job_type}' not in allowlist (${[...PLAYBOOK_JOB_TYPE_ALLOWLIST].join('|')})`, 400)
   }
   if (!PLAYBOOK_STATUS_ALLOWLIST.has(fm.status)) {
     throw new ApiError(`yaml_invalid_status: '${fm.status}' not in allowlist (${[...PLAYBOOK_STATUS_ALLOWLIST].join(', ')})`, 400)
@@ -13424,6 +13426,7 @@ async function updatePlaybook(client: any, body: any, req: Request) {
   const expectedAnchorByFile: Record<string, string> = {
     'quote-followup-khairo.md': 'fencing_khairo_v1',
     'quote-followup-nithin.md': 'patio_nithin_v1',
+    'quote-followup-decking.md': 'decking_nithin_v1',
     'booking-khairo.md': 'booking_khairo_v1',
     'booking-nithin.md': 'booking_nithin_v1',
   }
