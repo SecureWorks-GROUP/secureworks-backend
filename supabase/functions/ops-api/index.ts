@@ -2287,6 +2287,11 @@ if (import.meta.main) serve(async (req: Request) => {
 
       // ── Proposed Actions (SMS drafts etc.) ──
       case 'list_proposed_actions': return json(await listProposedActions(client, url.searchParams))
+      // Daily proposal coverage audit — read-only snapshot + assertions +
+      // business_events emission. Designed to be called daily by cron/JARVIS.
+      // No customer comms, no GHL writes. See urgency-ordering-coverage-audit-
+      // and-hygiene-lane.md §2 for the contract.
+      case 'daily_coverage_audit': return json(await dailyCoverageAudit(client, url.searchParams))
       // Quote-nurture cadence v3 — read-only stale review tasks (>3 days
       // pending). sale.html uses this to render the ESCALATED badge on D30
       // review cards. NO state change, NO mutation, NO email.
@@ -3779,6 +3784,159 @@ if (import.meta.main) serve(async (req: Request) => {
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
 })
+
+
+// ════════════════════════════════════════════════════════════
+// DAILY PROPOSAL COVERAGE AUDIT — read-only contract
+// ════════════════════════════════════════════════════════════
+//
+// Read-only snapshot of the sales-truth coverage state. Returns counts +
+// asserts thresholds, emits ONE business_events row per call for trend
+// tracking. No customer comms, no GHL writes, no destructive backfill.
+//
+// Designed to be called daily by a cron / GitHub Action / JARVIS loop.
+// On-demand invocation is also supported (idempotent within a run).
+//
+// Contract:
+//   - Run the same SQL probes the launch packet uses (A, F, G, J, K).
+//   - Emit a snapshot in JSON.
+//   - Emit a business_events row with event_type='coverage_audit_snapshot'.
+//   - Fail assertions are recorded in the response and the event payload,
+//     never throw — the audit is informational.
+//
+// Schema-free: no migrations. Uses existing tables only.
+
+const COVERAGE_AUDIT_THRESHOLDS = {
+  linkage_health_min: 0.80,
+  quote_coverage_min: 0.70,
+  cap_headroom_max:   0.80, // pending_in_window / cap should stay below this
+  cockpit_cap: 1000,        // matches ops-api listProposedActions cap
+} as const
+
+async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
+  const windowDays = 45
+  const windowCutoff = new Date(Date.now() - windowDays * 86400000).toISOString()
+
+  // Universe + linkage (probe A/G)
+  const { count: total45 } = await client.from('jobs')
+    .select('*', { count: 'exact', head: true })
+    .gte('created_at', windowCutoff)
+
+  const { count: linked45 } = await client.from('jobs')
+    .select('*', { count: 'exact', head: true })
+    .gte('created_at', windowCutoff)
+    .not('ghl_opportunity_id', 'is', null)
+
+  const { count: quotedOpen45 } = await client.from('jobs')
+    .select('*', { count: 'exact', head: true })
+    .gte('created_at', windowCutoff)
+    .eq('status', 'quoted')
+
+  // Pull recent jobs + recent pending proposals to compute coverage in JS
+  const { data: recentQuotedRows } = await client.from('jobs')
+    .select('id, ghl_opportunity_id')
+    .gte('created_at', windowCutoff)
+    .eq('status', 'quoted')
+
+  const { data: pendingProps } = await client.from('ai_proposed_actions')
+    .select('proposal_id, action_type, job_id, sent_at, created_at, expires_at')
+    .eq('status', 'pending')
+    .is('sent_at', null)
+    .limit(2000)
+
+  const nowMs = Date.now()
+  const ttlFor = (t: string) =>
+    t === 'propose_quote_review_task' ? 7 * 24 * 3600000 :
+    t === 'propose_scoper_booking_approval' ? 24 * 3600000 :
+    36 * 3600000
+
+  const effectiveExpires = (row: any): number => {
+    if (row.expires_at) return new Date(row.expires_at).getTime()
+    return new Date(row.created_at).getTime() + ttlFor(row.action_type)
+  }
+
+  const inWindow = (pendingProps || []).filter((p: any) => {
+    const eff = effectiveExpires(p)
+    return eff > nowMs && eff < nowMs + 48 * 3600000
+  })
+
+  const jobsWithProposal = new Set(
+    (pendingProps || []).filter((p: any) => p.job_id).map((p: any) => p.job_id)
+  )
+  const quotedWithProposal = (recentQuotedRows || []).filter(
+    (j: any) => jobsWithProposal.has(j.id)
+  ).length
+  const unlinkedQuoted = (recentQuotedRows || []).filter(
+    (j: any) => !j.ghl_opportunity_id
+  ).length
+
+  const byActionType: Record<string, number> = {}
+  for (const p of pendingProps || []) {
+    byActionType[p.action_type] = (byActionType[p.action_type] || 0) + 1
+  }
+
+  const universeSize = total45 || 0
+  const linkedSize = linked45 || 0
+  const quotedSize = quotedOpen45 || 0
+  const linkagePct = universeSize > 0 ? linkedSize / universeSize : 0
+  const quoteCoveragePct = quotedSize > 0 ? quotedWithProposal / quotedSize : 0
+  const capHeadroom = inWindow.length / COVERAGE_AUDIT_THRESHOLDS.cockpit_cap
+
+  const assertions = [
+    {
+      name: 'linkage_health',
+      passed: linkagePct >= COVERAGE_AUDIT_THRESHOLDS.linkage_health_min,
+      value: Number(linkagePct.toFixed(3)),
+      threshold: COVERAGE_AUDIT_THRESHOLDS.linkage_health_min,
+    },
+    {
+      name: 'quote_coverage',
+      passed: quoteCoveragePct >= COVERAGE_AUDIT_THRESHOLDS.quote_coverage_min,
+      value: Number(quoteCoveragePct.toFixed(3)),
+      threshold: COVERAGE_AUDIT_THRESHOLDS.quote_coverage_min,
+    },
+    {
+      name: 'cap_headroom',
+      passed: capHeadroom <= COVERAGE_AUDIT_THRESHOLDS.cap_headroom_max,
+      value: Number(capHeadroom.toFixed(3)),
+      threshold: COVERAGE_AUDIT_THRESHOLDS.cap_headroom_max,
+    },
+  ]
+
+  const snapshot = {
+    snapshot_id: crypto.randomUUID(),
+    ran_at: new Date().toISOString(),
+    window_days: windowDays,
+    universe: {
+      supabase_jobs_45d: universeSize,
+      linked_45d: linkedSize,
+      unlinked_45d: universeSize - linkedSize,
+      linkage_pct: Number(linkagePct.toFixed(3)),
+    },
+    queue: {
+      pending_total: (pendingProps || []).length,
+      in_window: inWindow.length,
+      cap: COVERAGE_AUDIT_THRESHOLDS.cockpit_cap,
+      cap_headroom: Number(capHeadroom.toFixed(3)),
+    },
+    coverage_by_action_type: byActionType,
+    hygiene_queue: {
+      unlinked_quoted: unlinkedQuoted,
+    },
+    assertions,
+    events_emitted: ['coverage_audit_snapshot'],
+  }
+
+  await logBusinessEvent(client, {
+    event_type: 'coverage_audit_snapshot',
+    source: 'ops-api/daily_coverage_audit',
+    entity_type: 'audit',
+    entity_id: snapshot.snapshot_id,
+    payload: snapshot,
+  })
+
+  return snapshot
+}
 
 
 // ════════════════════════════════════════════════════════════
