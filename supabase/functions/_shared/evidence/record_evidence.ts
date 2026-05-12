@@ -267,16 +267,19 @@ export async function recordEvidence(
     const enqueueResult = await supabase.from("extraction_jobs")
       .insert({
         job_id: match.job_id,
-        source_table: capture.source_table,
-        source_id: capture.source_id,
+        source_table: "business_events",
+        source_id: spine_event_id,
         source_event_type: capture.event_type,
         extractor_version: options.extractor_version ?? DEFAULT_EXTRACTOR_VERSION,
         priority: capture.extractor_priority ?? 5,
         status: "pending",
         metadata: {
           spine_event_id,
+          occurred_at: inserted_occurred_at,
           channel: capture.channel,
           direction: capture.direction,
+          original_source_table: capture.source_table,
+          original_source_id: capture.source_id,
         },
       })
       .select("id");
@@ -360,7 +363,7 @@ function deriveSafeSummary(preview: string): string {
   if (!preview) return "";
   const collapsed = preview
     // deno-lint-ignore no-control-regex
-    .replace(/[ -]+/g, " ")
+    .replace(/[\x00-\x1F]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   // Cut at first sentence terminator if reasonable.
