@@ -12857,8 +12857,8 @@ Return ONLY valid JSON in this exact format:
 async function listProposedActions(client: any, params: URLSearchParams) {
   const actionType = params.get('action_type')
   const status = params.get('status') || 'pending'
-  const requestedLimit = parseInt(params.get('limit') || '500', 10)
-  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 500, 1), 500)
+  const requestedLimit = parseInt(params.get('limit') || '1000', 10)
+  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 1000, 1), 1000)
   const nowMs = Date.now()
 
   const effectiveExpiresAt = (row: any): string | null => {
