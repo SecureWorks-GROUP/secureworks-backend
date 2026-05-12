@@ -12894,6 +12894,25 @@ async function listProposedActions(client: any, params: URLSearchParams) {
     return { actions: [], error: error.message }
   }
 
+  // Urgency ordering: revenue-loaded chases first (deposit > quote > followup),
+  // booking actions next, cold call_now last. Within each priority bucket,
+  // closer-to-expiry rises, then older-created rises. Unknown types land
+  // at the bottom (weight 200) so they're visibly deprioritised, not dropped.
+  const ACTION_PRIORITY: Record<string, number> = {
+    deposit_followup: 10,
+    propose_quote_review_task: 20,
+    send_quote_followup_sms: 30,
+    send_followup_sms: 40,
+    scope_confirmation: 50,
+    propose_scoper_booking_approval: 60,
+    propose_scoper_call_task: 70,
+    book_scope: 80,
+    send_booking_sms: 90,
+    call_now: 100,
+  }
+  const priorityFor = (actionType: string) =>
+    ACTION_PRIORITY[actionType] ?? 200
+
   const rows = (data || [])
     .map((row: any) => ({ ...row, expires_at: effectiveExpiresAt(row) }))
     .filter((row: any) => {
@@ -12901,6 +12920,17 @@ async function listProposedActions(client: any, params: URLSearchParams) {
       if (status === 'pending' && row.sent_at) return false
       if (!row.expires_at) return false
       return new Date(row.expires_at).getTime() > nowMs
+    })
+    .sort((a: any, b: any) => {
+      const pa = priorityFor(a.action_type)
+      const pb = priorityFor(b.action_type)
+      if (pa !== pb) return pa - pb
+      const ea = a.expires_at ? new Date(a.expires_at).getTime() : Infinity
+      const eb = b.expires_at ? new Date(b.expires_at).getTime() : Infinity
+      if (ea !== eb) return ea - eb
+      const ca = new Date(a.created_at).getTime()
+      const cb = new Date(b.created_at).getTime()
+      return ca - cb
     })
   const jobIds = Array.from(new Set(rows.map((r: any) => r.job_id).filter(Boolean)))
   let jobsById: Record<string, any> = {}
