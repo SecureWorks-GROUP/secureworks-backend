@@ -41,7 +41,11 @@ All in `supabase/functions/`. Deploy with:
 
 ### send-quote
 - **Purpose**: PDF quote distribution + client portal + GHL monetary value push
-- **Deploy**: NO --no-verify-jwt
+- **Deploy**: `--no-verify-jwt` REQUIRED. This function has mixed routes:
+  internal send routes use in-handler `x-api-key` auth, while public quote
+  links (`/view`, `/accept`, `/decline`) are protected by share tokens. If the
+  Supabase gateway JWT gate is on, quote links and fencing `/send-runs` calls
+  fail before the function code runs.
 
 ### google-ads-ingest
 - **Purpose**: Receives daily Google Ads metrics from Apps Script
@@ -60,6 +64,9 @@ All in `supabase/functions/`. Deploy with:
   submodule/worktree. Stale dashboard copies previously omitted newer site
   actions, and stale site copies omitted dashboard actions such as
   `list_ops_notes`; either direction can overwrite the one live function.
+- **Deploy command**: use `scripts/deploy-edge-function.sh ops-api` from the
+  canonical release worktree. Do not run raw Supabase deploys from feature
+  worktrees.
 
 ### ops-ai `--no-verify-jwt`
 - **Purpose**: Claude AI assistant for dashboards

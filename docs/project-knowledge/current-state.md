@@ -77,7 +77,7 @@
 | ops-api | YES | Ops dashboard needs it |
 | ops-ai | YES | AI chat endpoints |
 | xero-sync | NO | Service role key required |
-| send-quote | NO | Auth required |
+| send-quote | YES | Mixed public token routes + internal x-api-key routes; gateway JWT must stay off |
 | google-ads-ingest | NO | Script sends API key |
 | daily-digest | NO | Called by pg_cron with service key |
 

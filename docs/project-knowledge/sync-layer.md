@@ -93,8 +93,8 @@ Enhanced response includes: jobNumber, xeroContact, monetaryValue
 /Users/marninstobbe/.local/bin/supabase functions deploy xero-sync --project-ref kevgrhcjxspbxgovpmfl
 /Users/marninstobbe/.local/bin/supabase functions deploy ghl-proxy --no-verify-jwt --project-ref kevgrhcjxspbxgovpmfl
 /Users/marninstobbe/.local/bin/supabase functions deploy reporting-api --no-verify-jwt --project-ref kevgrhcjxspbxgovpmfl
-/Users/marninstobbe/.local/bin/supabase functions deploy send-quote --project-ref kevgrhcjxspbxgovpmfl
-/Users/marninstobbe/.local/bin/supabase functions deploy ops-api --no-verify-jwt --project-ref kevgrhcjxspbxgovpmfl
+scripts/deploy-edge-function.sh send-quote
+scripts/deploy-edge-function.sh ops-api
 ```
 
 ## Not Yet Built

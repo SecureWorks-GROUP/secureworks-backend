@@ -100,7 +100,7 @@ supabase secrets set FROM_NAME="SecureWorks WA"
 ### Deploy
 ```bash
 supabase functions deploy ghl-webhook
-supabase functions deploy send-quote
+scripts/deploy-edge-function.sh send-quote
 ```
 
 ### GHL Webhook URL
