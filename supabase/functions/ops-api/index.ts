@@ -232,6 +232,10 @@ async function logBusinessEvent(client: any, event: {
   job_id?: string;
   payload?: any;
   metadata?: any;
+  // N2 — caller-supplied body_preview wins over derivation from payload
+  // when present. Used by quote.sent emitters so the v2 extractor's
+  // pre-filter sees a structured one-line summary, not the UUID stub.
+  body_preview?: string;
 }) {
   try {
     const payload = event.payload || {}
@@ -249,6 +253,7 @@ async function logBusinessEvent(client: any, event: {
       : inferredChannel === 'call' && typeof payload.direction === 'string' ? payload.direction
       : null
     const textish = String(
+      event.body_preview ||
       payload.body_preview ||
       payload.note_text ||
       payload.note_preview ||
@@ -8337,6 +8342,14 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       v2_inputs: v2InputsQq,
     }, { handler: 'ops-api/send_quick_quote_email', job_id })
 
+    // N2 — see send-quote handlers. Structured body_preview so the extractor
+    // pre-filter doesn't skip with the auto-generated "quote quote.sent <UUID>".
+    const qsBodyPreviewQuick = [
+      `Quote ${fresh.job_number || ''} → ${fresh.client_name || ''} (${fresh.type || ''})`.replace(/\s+\(\)$/, '').trim(),
+      totalIncGSTNum ? `$${Number(totalIncGSTNum).toFixed(2)} inc GST` : '',
+      job.site_address ? `at ${job.site_address}` : '',
+      job.site_suburb || '',
+    ].filter(Boolean).join(' · ').slice(0, 400)
     await logBusinessEvent(client, {
       event_type: 'quote.sent',
       source: 'send-quick-quote-email',
@@ -8344,6 +8357,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       entity_id: job_id,
       correlation_id: job_id,
       job_id,
+      body_preview: qsBodyPreviewQuick,
       payload: {
         // Race-safety: fresh post-UPDATE values, not entry-time ones. See
         // CAP0-QUICKQUOTE-FRESH-SELECT-RACE-SAFETY note above.
