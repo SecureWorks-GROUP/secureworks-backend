@@ -69,6 +69,12 @@
 | Trade App | dashboard/trade.html | Supabase magic link (JWT) | Built — PWA, 3 tabs, receipts, GPS, signatures |
 
 ## Edge Functions — Deploy Flags
+
+Production `ops-api` and `send-quote` deploys must only run from
+`secureworks-site/main` or
+`/Users/marninstobbe/Projects/_release/secureworks-site-main` using
+`scripts/deploy-edge-function.sh`. See `EDGE_DEPLOY_LANE.md`.
+
 | Function | --no-verify-jwt | Notes |
 |----------|-----------------|-------|
 | ghl-proxy | YES | Scoping tools call without auth |

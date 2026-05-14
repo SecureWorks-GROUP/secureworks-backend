@@ -4,7 +4,10 @@
 // Sends a quote PDF to the client via email and provides
 // a client-facing acceptance page.
 //
-// Deploy: supabase functions deploy send-quote
+// Deploy: SW_API_KEY=... scripts/deploy-edge-function.sh send-quote
+//
+// Production deploys must only run from secureworks-site/main or the canonical
+// release worktree: /Users/marninstobbe/Projects/_release/secureworks-site-main
 //
 // Endpoints:
 //   POST /send - Send quote email to client

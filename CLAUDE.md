@@ -1,5 +1,30 @@
 # SECUREWORKS WA — WEBSITE PROJECT CONTEXT
 
+## CRITICAL PRODUCTION EDGE DEPLOY RULE
+
+`ops-api` and `send-quote` must have one deployable reality only.
+
+Production deploys are allowed only from:
+
+- GitHub repo: `marninms98-dotcom/secureworks-site`
+- Branch: `main`
+- Local release worktree: `/Users/marninstobbe/Projects/_release/secureworks-site-main`
+
+Do not deploy `ops-api` or `send-quote` from stale worktrees, dashboard repos,
+feature folders, copied repos, `/private/tmp`, or any folder other than the
+canonical release worktree.
+
+Allowed local deploy command:
+
+```bash
+cd /Users/marninstobbe/Projects/_release/secureworks-site-main
+SW_API_KEY=... scripts/deploy-edge-function.sh ops-api
+SW_API_KEY=... scripts/deploy-edge-function.sh send-quote
+```
+
+If you are Claude/Codex/Shaun/Marnin in another terminal and you are unsure, do
+not deploy. Open a PR or run the read-only smoke script instead.
+
 ## WHAT THIS PROJECT IS
 
 Building a landing page / website for SecureWorks WA's insulated patio division. Single-page HTML site designed to convert visitors into quote requests. The site is embedded/hosted via GoHighLevel (GHL) and the lead capture form is a GHL form embed.

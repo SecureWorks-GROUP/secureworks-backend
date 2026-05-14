@@ -100,8 +100,14 @@ supabase secrets set FROM_NAME="SecureWorks WA"
 ### Deploy
 ```bash
 supabase functions deploy ghl-webhook
+scripts/deploy-edge-function.sh ops-api
 scripts/deploy-edge-function.sh send-quote
 ```
+
+`ops-api` and `send-quote` are production-critical and must not be deployed with
+raw `supabase functions deploy` from feature branches or stale worktrees. Use the
+guarded script from `/Users/marninstobbe/Projects/_release/secureworks-site-main`
+or the GitHub Actions production edge deploy workflow on `secureworks-site/main`.
 
 ### GHL Webhook URL
 After deploying, your GHL webhook URL will be:

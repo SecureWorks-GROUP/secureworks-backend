@@ -62,6 +62,13 @@ const actions = [...new Set([...text.matchAll(/case\s+['"]([^'"]+)['"]\s*:/g)].m
 const required = [
   'ops_api_version',
   'list_ops_notes',
+  'upsert_ops_note',
+  'delete_ops_note',
+  'get_ops_upload_url',
+  'send_ops_note_to_trade',
+  'get_comms_upload_url',
+  'send_comms_message',
+  'delete_note',
   'list_proposed_actions',
   'send_quote_followup_sms',
   'approve_scoper_call_task',

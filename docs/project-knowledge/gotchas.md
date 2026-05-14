@@ -2,6 +2,20 @@
 
 ## CRITICAL — Will Break Things If Ignored
 
+### ops-api and send-quote have one production deploy lane
+Production `ops-api` and `send-quote` deploys are allowed only from
+`marninms98-dotcom/secureworks-site/main` or the local release worktree:
+`/Users/marninstobbe/Projects/_release/secureworks-site-main`.
+
+Do not deploy these functions from dashboard repos, stale worktrees, feature
+folders, copied repos, or `/private/tmp`. There is one live Supabase function
+slug and the last deploy wins. A stale deploy can remove actions used by Ops,
+Sales, Finance, Evidence, Scope Freeze, or quote sending.
+
+Use `scripts/deploy-edge-function.sh ops-api` and
+`scripts/deploy-edge-function.sh send-quote`. See
+`docs/project-knowledge/EDGE_DEPLOY_LANE.md`.
+
 ### Supabase PostgrestFilterBuilder has no .catch()
 `sb.from('table').insert({...}).catch(() => {})` will CRASH with "catch is not a function".
 **Fix**: Use `try { await sb.from('table').insert({...}) } catch (_) { }` instead.
@@ -26,7 +40,7 @@ Same `const` variable name in the same function scope causes Deno BOOT_ERROR. Th
 
 ### --no-verify-jwt on deploy
 Some functions MUST be deployed with `--no-verify-jwt` or they'll return 401:
-- ghl-proxy, reporting-api, ops-api, ops-ai
+- ghl-proxy, reporting-api, ops-api, ops-ai, send-quote
 If you redeploy without the flag, the dashboard/scoping tools break with 401 errors.
 
 ## DATA QUALITY
