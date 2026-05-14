@@ -2329,6 +2329,14 @@ if (import.meta.main) serve(async (req: Request) => {
       // Per parent card secure-sale-quote-followup-loop reframe v3.
       case 'approve_scoper_call_task':     return json(await approveScoperCallTask(client, body))
       case 'approve_quote_review_task':    return json(await approveQuoteReviewTask(client, body))
+      // S2 (G-2): cockpit bridge for sw_approve_booking_proposal.
+      // Forwards the body to the Railway agent's
+      // /api/booking-approvals/approve endpoint, which fronts
+      // sw_approve_booking_proposal (booking-approval-http-bridge.ts).
+      // Dry-run by default (commit=false); cockpit double-confirms before
+      // sending commit=true. No customer-facing side effect lives here —
+      // the agent owns Microsoft Graph + the M2 SMS proposal queue write.
+      case 'approve_booking_proposal':     return json(await approveBookingProposalBridge(body, req))
       // Per-scoper playbook MD upload — Marnin-only authenticated edit.
       // Validates filename allowlist + YAML frontmatter (status enum,
       // voice_anchor allowlist, sign_off_pattern present) + em-dash check
@@ -13286,6 +13294,103 @@ async function sendQuoteFollowupSms(client: any, body: any) {
   }
 
   return { success: true, action_id, send_result: sendResult }
+}
+
+// ════════════════════════════════════════════════════════════
+// S2 G-2: cockpit bridge for sw_approve_booking_proposal.
+//
+// The cockpit's "Review slot" button calls ops-api action
+// 'approve_booking_proposal'. Prior to S2 this dispatch fell through
+// to the default 'Unknown action' branch (S1 audit G-2).
+//
+// This handler is a thin proxy: it POSTs the cockpit's body to the
+// Railway agent's /api/booking-approvals/approve endpoint
+// (booking-approval-http-bridge.ts), which already fronts
+// sw_approve_booking_proposal. No Microsoft Graph, no Supabase address
+// fallback, no SMS — the agent owns all of those.
+//
+// Why proxy instead of port: a second Graph + Supabase implementation
+// in the edge function would drift. The bridge already exists. Owning
+// only the cockpit-token → service-token swap here keeps the trust
+// boundary tight.
+//
+// Env vars required at deploy time:
+//   * RAILWAY_AGENT_URL  — https://secureworks-agent-production.up.railway.app
+//   * SW_API_KEY         — Bearer token the Railway agent's requireAgentAuth accepts
+// (Same env pair telegram-bot/index.ts already uses for /api/chat.)
+//
+// Dry-run vs commit:
+//   * Body MAY include commit:true to actually fire the side effects.
+//     Default is dry-run (commit:false). The cockpit double-confirms
+//     before sending commit:true (sale.html:3056).
+// ════════════════════════════════════════════════════════════
+async function approveBookingProposalBridge(body: any, req: Request) {
+  const proposalId = body?.proposal_id
+  if (!proposalId || typeof proposalId !== 'string') {
+    return { ok: false, error: 'proposal_id required' }
+  }
+
+  const agentUrl = Deno.env.get('RAILWAY_AGENT_URL') || Deno.env.get('SECUREWORKS_AGENT_URL') || ''
+  const apiKey = Deno.env.get('SW_API_KEY') || ''
+  if (!agentUrl || !apiKey) {
+    return {
+      ok: false,
+      error: 'approve_booking_proposal bridge unconfigured: RAILWAY_AGENT_URL or SW_API_KEY env missing',
+    }
+  }
+
+  const upstream = `${agentUrl.replace(/\/+$/, '')}/api/booking-approvals/approve`
+  const payload = {
+    proposal_id: proposalId,
+    approver_user_id: typeof body.approver_user_id === 'string' ? body.approver_user_id : undefined,
+    m2_drafted_message: typeof body.m2_drafted_message === 'string' ? body.m2_drafted_message : undefined,
+    commit: body.commit === true,
+  }
+
+  let res: Response
+  try {
+    res = await fetch(upstream, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        // Forward the original caller's user id where the agent can use
+        // it for the audit trail (booking-approval-handler emits
+        // approver_user_id into the bookings_events payload).
+        'X-Forwarded-For-User': req.headers.get('x-user-id') ?? '',
+      },
+      body: JSON.stringify(payload),
+    })
+  } catch (e: any) {
+    return { ok: false, error: `bridge fetch failed: ${e?.message ?? 'unknown'}` }
+  }
+
+  let data: any = null
+  try {
+    data = await res.json()
+  } catch {
+    data = { ok: res.ok, raw_status: res.status }
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: data?.error ?? `agent bridge HTTP ${res.status}`,
+      status: res.status,
+      detail: data,
+    }
+  }
+
+  // Mirror the agent response, plus a small ops-api breadcrumb the
+  // cockpit can use for telemetry. The cockpit reads {result, ok} —
+  // both are passed through verbatim from the agent.
+  return {
+    ok: true,
+    bridge: 'ops-api → railway-agent /api/booking-approvals/approve',
+    commit: payload.commit,
+    dry_run: !payload.commit,
+    result: data,
+  }
 }
 
 // ════════════════════════════════════════════════════════════
