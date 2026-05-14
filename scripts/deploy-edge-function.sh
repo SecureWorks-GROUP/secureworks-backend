@@ -109,11 +109,11 @@ case "$FUNCTION_NAME" in
   ops-api)
     require_ops_actions
     stamp_deploy_env
-    "$SUPABASE_CLI" functions deploy ops-api --no-verify-jwt --project-ref "$PROJECT_REF"
+    SECUREWORKS_GUARDED_EDGE_DEPLOY=1 "$SUPABASE_CLI" functions deploy ops-api --no-verify-jwt --project-ref "$PROJECT_REF"
     ;;
   send-quote)
     stamp_deploy_env
-    "$SUPABASE_CLI" functions deploy send-quote --no-verify-jwt --project-ref "$PROJECT_REF"
+    SECUREWORKS_GUARDED_EDGE_DEPLOY=1 "$SUPABASE_CLI" functions deploy send-quote --no-verify-jwt --project-ref "$PROJECT_REF"
     ;;
 esac
 
