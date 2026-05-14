@@ -169,9 +169,14 @@ async function safeBusinessEventInsert(
           thread_key: row?.correlation_id ?? null,
           privacy_classification: 'staff_only',
           retention_class: '7y_audit',
-          body_preview: typeof row?.payload?.subject === 'string'
-            ? `quote: ${row.payload.subject}`.slice(0, 500)
-            : `quote ${row?.event_type ?? ''} ${ctx.job_id ?? ''}`.slice(0, 500),
+          // N2 — prefer the caller-supplied body_preview (structured one-line
+          // summary used by the v2 extractor's pre-filter). Falls back to the
+          // legacy subject-or-uuid stub when the caller doesn't supply one.
+          body_preview: typeof row?.body_preview === 'string' && row.body_preview.length > 0
+            ? row.body_preview.slice(0, 500)
+            : typeof row?.payload?.subject === 'string'
+              ? `quote: ${row.payload.subject}`.slice(0, 500)
+              : `quote ${row?.event_type ?? ''} ${ctx.job_id ?? ''}`.slice(0, 500),
           payload: row?.payload ?? {},
           metadata: row?.metadata ?? {},
         }, {
@@ -817,6 +822,19 @@ serve(async (req: Request) => {
             v2_inputs: v2Inputs,
           }, { handler: 'send-quote/send', job_id: doc.job_id })
 
+          // N2 — body_preview carries a one-line structured summary so the
+          // extractor pre-filter has substance to chew on. Loop-1 S1 audit
+          // on the sibling card observed 20/20 quote.sent rows skipped at
+          // prefilter because body_preview was the auto-generated
+          // "quote quote.sent <UUID>" stub. The structured line below lets
+          // the v2 extractor lift scope_spec (job_number, type, total,
+          // payment terms) and access_note (address) cleanly.
+          const qsBodyPreviewSend = [
+            `Quote ${jobBefore?.job_number || ''} → ${doc.jobs?.client_name || ''} (${jobBefore?.type || ''})`.replace(/\s+\(\)$/, '').trim(),
+            totalIncGST ? `$${Number(totalIncGST).toFixed(2)} inc GST` : '',
+            doc.jobs?.site_address ? `at ${doc.jobs.site_address}` : '',
+            doc.jobs?.site_suburb || '',
+          ].filter(Boolean).join(' · ').slice(0, 400)
           await safeBusinessEventInsert(sb, {
             event_type: 'quote.sent',
             source: 'send-quote',
@@ -826,6 +844,7 @@ serve(async (req: Request) => {
             entity_id: doc.job_id,
             correlation_id: doc.job_id,
             job_id: doc.job_id,
+            body_preview: qsBodyPreviewSend,
             payload: {
               document_id,
               quote_revision_id: releasedRevisionId,
@@ -2160,6 +2179,15 @@ serve(async (req: Request) => {
           }, { handler: 'send-quote/send-runs', job_id: job.id })
         }
 
+        // N2 — see send-quote/send above. Structured body_preview so the
+        // extractor pre-filter doesn't skip with "quote quote.sent <UUID>".
+        const qsBodyPreviewRuns = [
+          `Quote ${job.job_number || ''} → ${job.client_name || ''} (${job.type || 'fencing'})`.trim(),
+          totalIncGST ? `$${Number(totalIncGST).toFixed(2)} inc GST` : '',
+          job.site_address ? `at ${job.site_address}` : '',
+          job.site_suburb || '',
+          runs.length > 1 ? `${runs.length} runs` : '',
+        ].filter(Boolean).join(' · ').slice(0, 400)
         await safeBusinessEventInsert(sb, {
           event_type: 'quote.sent',
           source: 'send-quote',
@@ -2169,6 +2197,7 @@ serve(async (req: Request) => {
           entity_id: job.id,
           correlation_id: job.id,
           job_id: job.id,
+          body_preview: qsBodyPreviewRuns,
           payload: {
             document_id: firstClientDoc?.id || null,
             quote_revision_id: releasedRevisionIdRuns,
