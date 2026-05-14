@@ -54,46 +54,67 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
+# Single source of truth for required ops-api actions. Both this script
+# (pre-deploy source-side gate) and scripts/smoke-edge-functions.sh
+# (post-deploy live binary check) read the same file. Add or remove actions
+# there, not here.
+REQUIRED_ACTIONS_FILE="${REQUIRED_ACTIONS_FILE:-scripts/_ops-api-required-actions.txt}"
+
+# Read the canonical action list (strips comments + blank lines).
+read_required_actions() {
+  if [[ ! -f "$REQUIRED_ACTIONS_FILE" ]]; then
+    echo "Required-actions manifest missing: $REQUIRED_ACTIONS_FILE" >&2
+    exit 1
+  fi
+  grep -vE '^\s*(#|$)' "$REQUIRED_ACTIONS_FILE" | awk '{print $1}'
+}
+
 require_ops_actions() {
-  node <<'NODE'
+  REQUIRED_ACTIONS_FILE="$REQUIRED_ACTIONS_FILE" node <<'NODE'
 const fs = require('fs');
+const manifest = process.env.REQUIRED_ACTIONS_FILE;
 const text = fs.readFileSync('supabase/functions/ops-api/index.ts', 'utf8');
 const actions = [...new Set([...text.matchAll(/case\s+['"]([^'"]+)['"]\s*:/g)].map(m => m[1]))];
-const required = [
-  'ops_api_version',
-  'list_ops_notes',
-  'upsert_ops_note',
-  'delete_ops_note',
-  'get_ops_upload_url',
-  'send_ops_note_to_trade',
-  'get_comms_upload_url',
-  'send_comms_message',
-  'delete_note',
-  'list_proposed_actions',
-  'send_quote_followup_sms',
-  'approve_scoper_call_task',
-  'approve_quote_review_task',
-  'list_stale_quote_review_tasks',
-  'finance_health_summary',
-  'daily_coverage_audit',
-  'freeze_scope',
-  'record_scope_artifact',
-  'get_evidence_health',
-];
+const required = fs.readFileSync(manifest, 'utf8')
+  .split('\n')
+  .map(l => l.replace(/#.*$/, '').trim())
+  .filter(Boolean);
 const missing = required.filter(a => !actions.includes(a));
-console.log(JSON.stringify({ actions: actions.length, missing }, null, 2));
+console.log(JSON.stringify({ actions: actions.length, required: required.length, missing }, null, 2));
 if (missing.length) process.exit(1);
 NODE
+}
+
+# Stamp commit_sha + deployed_at into the deployed function's runtime env so
+# opsApiVersion() can return them and smoke-edge-functions can verify the
+# binary matches the canonical commit. supabase secrets set is the supported
+# path for Edge Function runtime env. If the CLI version doesn't accept the
+# args, the deploy still proceeds; the smoke commit-sha assertion will then
+# warn-skip instead of failing.
+stamp_deploy_env() {
+  local commit deployed_at
+  commit="$(git rev-parse HEAD)"
+  deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if "$SUPABASE_CLI" secrets set \
+      "COMMIT_SHA=${commit}" \
+      "DEPLOYED_AT=${deployed_at}" \
+      --project-ref "$PROJECT_REF" >/dev/null 2>&1; then
+    echo "Stamped deploy env: COMMIT_SHA=${commit:0:8} DEPLOYED_AT=${deployed_at}"
+  else
+    echo "[warn] supabase secrets set failed; commit_sha assertion in smoke will warn-skip" >&2
+  fi
 }
 
 case "$FUNCTION_NAME" in
   ops-api)
     require_ops_actions
+    stamp_deploy_env
     "$SUPABASE_CLI" functions deploy ops-api --no-verify-jwt --project-ref "$PROJECT_REF"
     ;;
   send-quote)
+    stamp_deploy_env
     "$SUPABASE_CLI" functions deploy send-quote --no-verify-jwt --project-ref "$PROJECT_REF"
     ;;
 esac
 
-scripts/smoke-edge-functions.sh
+EXPECTED_COMMIT_SHA="$(git rev-parse HEAD)" scripts/smoke-edge-functions.sh

@@ -80,27 +80,56 @@ ops_version="$(json_get "${BASE}/ops-api?action=ops_api_version")"
 assert_not_unknown "ops-api ops_api_version recognised" "$ops_version"
 assert_contains "ops-api canonical source" "$ops_version" '"source_repo":"secureworks-site"'
 
-for action in \
-  list_proposed_actions \
-  list_stale_quote_review_tasks \
-  finance_health_summary \
-  daily_coverage_audit \
-  get_evidence_health
-do
-  body="$(json_get "${BASE}/ops-api?action=${action}")"
-  assert_not_unknown "ops-api ${action}" "$body"
-done
+# S6 drift detection — commit_sha assertion.
+#
+# The deploy script stamps COMMIT_SHA into the edge function's runtime env
+# (via supabase secrets set) before deploy. opsApiVersion() reads it from
+# Deno.env and returns it in the response. If EXPECTED_COMMIT_SHA is set by
+# the caller (deploy-edge-function.sh exports it before invoking smoke), we
+# assert the deployed binary's commit matches the canonical worktree HEAD.
+# When unset (manual smoke runs, CI without git context), we warn-skip
+# rather than fail so the check isn't false-alarm noise.
+if [[ -n "${EXPECTED_COMMIT_SHA:-}" ]]; then
+  if printf '%s' "$ops_version" | grep -q "\"commit_sha\":\"${EXPECTED_COMMIT_SHA}\""; then
+    record_pass "ops-api commit_sha matches expected ${EXPECTED_COMMIT_SHA:0:8}"
+  else
+    actual_block="$(printf '%s' "$ops_version" | grep -oE '"commit_sha":[^,}]*' || echo '"commit_sha":<missing>')"
+    record_fail "ops-api commit_sha mismatch: deployed has ${actual_block}, expected ${EXPECTED_COMMIT_SHA:0:8}"
+  fi
+else
+  echo "[warn] EXPECTED_COMMIT_SHA not set; skipping commit_sha drift assertion"
+fi
 
-for action in \
-  send_quote_followup_sms \
-  approve_scoper_call_task \
-  approve_quote_review_task \
-  freeze_scope \
-  record_scope_artifact
-do
-  body="$(json_post "${BASE}/ops-api?action=${action}" '{}')"
-  assert_not_unknown "ops-api ${action} validation" "$body"
-done
+# S6 drift detection — full action-surface iteration.
+#
+# Reads scripts/_ops-api-required-actions.txt (single source of truth shared
+# with deploy-edge-function.sh's source-side require_ops_actions check). For
+# every required action, fires a no-op request and asserts no "Unknown
+# action" in the response. Detects stale-binary drift where the deployed
+# function is missing a handler that exists in source.
+REQUIRED_ACTIONS_FILE="${REQUIRED_ACTIONS_FILE:-scripts/_ops-api-required-actions.txt}"
+if [[ -f "$REQUIRED_ACTIONS_FILE" ]]; then
+  drift=0
+  total=0
+  while IFS= read -r action; do
+    [[ -z "$action" ]] && continue
+    total=$((total + 1))
+    body="$(json_get "${BASE}/ops-api?action=${action}")"
+    if printf '%s' "$body" | grep -qi 'Unknown action'; then
+      # Try POST as some action handlers gate on method.
+      body="$(json_post "${BASE}/ops-api?action=${action}" '{}')"
+      if printf '%s' "$body" | grep -qi 'Unknown action'; then
+        record_fail "ops-api drift: action '${action}' returns Unknown action"
+        drift=$((drift + 1))
+      fi
+    fi
+  done < <(grep -vE '^\s*(#|$)' "$REQUIRED_ACTIONS_FILE" | awk '{print $1}')
+  if [[ "$drift" -eq 0 ]]; then
+    record_pass "ops-api action-surface: all ${total} required actions recognised"
+  fi
+else
+  echo "[warn] required-actions manifest missing at $REQUIRED_ACTIONS_FILE; skipping action-surface drift check"
+fi
 
 quote_view_code="$(curl -sS -o /tmp/send_quote_view_smoke.out -w '%{http_code}' --max-time 30 --max-redirs 0 "${BASE}/send-quote/view?token=definitely-invalid" || true)"
 if [[ "$quote_view_code" == "401" ]]; then

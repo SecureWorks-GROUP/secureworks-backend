@@ -1,0 +1,63 @@
+# Canonical required ops-api action surface.
+#
+# Single source of truth for both scripts/deploy-edge-function.sh (source-side
+# pre-deploy gate via require_ops_actions) and scripts/smoke-edge-functions.sh
+# (deployed-binary post-deploy verification via action-surface iteration).
+#
+# Format: one action name per line. Lines starting with '#' and blank lines are
+# ignored. Add the action name (no quotes, no commas), nothing else.
+#
+# When you add a handler to supabase/functions/ops-api/index.ts that JARVIS,
+# the cockpit, or the canonical reader (sw_job_context_v2) depends on, add it
+# here too. The deploy guard then refuses to deploy a source tree missing the
+# action; smoke then refuses to mark the deploy green if the deployed binary
+# returns "Unknown action" for it.
+#
+# Drift history: on 2026-05-14 the deployed binary returned "Unknown action"
+# for ops_api_version, daily_coverage_audit, and assemble_job_dossier despite
+# all three being in source. Codex redeployed canonical to fix. This file +
+# the smoke iteration are the post-deploy detective control.
+
+# ── Self-identification ──
+ops_api_version
+
+# ── Ops notes / comms primitives ──
+list_ops_notes
+upsert_ops_note
+delete_ops_note
+get_ops_upload_url
+send_ops_note_to_trade
+get_comms_upload_url
+send_comms_message
+delete_note
+add_note
+
+# ── Proposal / approval queue ──
+list_proposed_actions
+send_quote_followup_sms
+approve_scoper_call_task
+approve_quote_review_task
+list_stale_quote_review_tasks
+
+# ── Finance + audit reads ──
+finance_health_summary
+daily_coverage_audit
+
+# ── Scope freeze + artifact recording ──
+freeze_scope
+record_scope_artifact
+
+# ── Evidence health ──
+get_evidence_health
+
+# ── JARVIS canonical reader path (sw_job_context_v2) ──
+assemble_job_dossier
+assemble_job_brain
+
+# ── Sales cockpit / Secure Sale core reads ──
+pipeline
+job_detail
+
+# ── Sales-action write surfaces JARVIS depends on ──
+update_job_status
+log_business_event
