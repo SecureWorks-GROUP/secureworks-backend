@@ -1,0 +1,50 @@
+name: edge function guard
+
+on:
+  pull_request:
+    paths:
+      - 'supabase/functions/ops-api/**'
+      - 'supabase/functions/send-quote/**'
+      - 'supabase/functions/_shared/**'
+      - 'scripts/deploy-edge-function.sh'
+      - 'scripts/smoke-edge-functions.sh'
+      - 'scripts/check-edge-deploy-guardrails.sh'
+      - '.github/workflows/**'
+      - 'docs/project-knowledge/EDGE_DEPLOY_LANE.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+  push:
+    branches:
+      - main
+    paths:
+      - 'supabase/functions/ops-api/**'
+      - 'supabase/functions/send-quote/**'
+      - 'supabase/functions/_shared/**'
+      - 'scripts/deploy-edge-function.sh'
+      - 'scripts/smoke-edge-functions.sh'
+      - 'scripts/check-edge-deploy-guardrails.sh'
+      - '.github/workflows/**'
+      - 'docs/project-knowledge/EDGE_DEPLOY_LANE.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Shell syntax
+        run: |
+          bash -n scripts/deploy-edge-function.sh
+          bash -n scripts/smoke-edge-functions.sh
+          bash -n scripts/check-edge-deploy-guardrails.sh
+
+      - name: Edge deploy guardrails
+        run: scripts/check-edge-deploy-guardrails.sh

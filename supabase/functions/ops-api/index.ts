@@ -5,7 +5,10 @@
 // and Trade mobile view. All data access uses service_role.
 //
 // Deploy:
-//   /Users/marninstobbe/.local/bin/supabase functions deploy ops-api --no-verify-jwt
+//   SW_API_KEY=... scripts/deploy-edge-function.sh ops-api
+//
+// Production deploys must only run from secureworks-site/main or the canonical
+// release worktree: /Users/marninstobbe/Projects/_release/secureworks-site-main
 //
 // Actions (via ?action= query param):
 //
