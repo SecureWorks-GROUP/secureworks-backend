@@ -13141,6 +13141,84 @@ async function listProposedActions(client: any, params: URLSearchParams) {
   }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Canary SMS guard
+//
+// Per validator hard-blocker 2026-05-14: before any booking canary
+// commit, the SMS-send paths in ops-api must refuse real-customer
+// recipients when BOOKING_CANARY_MODE=1.
+//
+// Contract (tightened per validator review):
+//   - BOOKING_CANARY_MODE unset / falsy → guard is a no-op (returns ok).
+//   - BOOKING_CANARY_MODE in {"1","true","yes"} (case-insensitive) →
+//     recipient.contact_phone MUST be present AND match (after digit-
+//     only normalization) an entry in BOOKING_CANARY_PHONE_ALLOWLIST.
+//     Nothing else (no SECURE_SALE_TEST marker, no metadata flag) is
+//     sufficient to bypass — phone-in-allowlist is the only gate.
+//
+//     SECURE_SALE_TEST / test_archived markers are logged into the
+//     refusal reason for telemetry only; future iterations may require
+//     BOTH phone allowlist AND marker for additional safety.
+//
+//   Normalization: phone comparison is digit-only ("+61 400 111 222"
+//   normalises to "61400111222"); accepts allowlist entries in any
+//   format. Empty result after normalization is treated as "no phone".
+//
+// Pure function; no I/O. Tests mirror this body in
+// supabase/functions/ops-api/canary_sms_guard_test.ts (drift caught
+// by PR review per local convention).
+// ────────────────────────────────────────────────────────────────────
+export function validateCanarySmsRecipient(args: {
+  contact_phone: string | null | undefined
+  metadata?: Record<string, unknown> | null
+  action_payload?: Record<string, unknown> | null
+}): { ok: boolean; reason?: string } {
+  const rawMode = String(Deno.env.get('BOOKING_CANARY_MODE') ?? '').toLowerCase()
+  const canaryOn = rawMode === '1' || rawMode === 'true' || rawMode === 'yes'
+  if (!canaryOn) return { ok: true }
+
+  const normalize = (s: string): string => s.replace(/\D+/g, '')
+
+  const allowRaw = String(Deno.env.get('BOOKING_CANARY_PHONE_ALLOWLIST') ?? '')
+  const allowedNorm = allowRaw
+    .split(',')
+    .map((s) => normalize(s))
+    .filter((s) => s.length > 0)
+  const phoneRaw = String(args.contact_phone ?? '').trim()
+  const phoneNorm = normalize(phoneRaw)
+
+  // Hard requirement #1: phone must be present (post-normalization).
+  if (!phoneNorm) {
+    return {
+      ok: false,
+      reason:
+        `BOOKING_CANARY_MODE=on: recipient has no phone (raw=${JSON.stringify(phoneRaw)}); ` +
+        `phone-in-BOOKING_CANARY_PHONE_ALLOWLIST is the only gate. Refused.`,
+    }
+  }
+
+  // Hard requirement #2: phone must match an allowlist entry exactly
+  // (digit-only normalized). Empty allowlist → reject every send.
+  if (allowedNorm.length === 0 || !allowedNorm.includes(phoneNorm)) {
+    const meta = (args.metadata ?? {}) as Record<string, unknown>
+    const ap = (args.action_payload ?? {}) as Record<string, unknown>
+    const markerNote =
+      meta.SECURE_SALE_TEST === true ||
+      ap.SECURE_SALE_TEST === true ||
+      meta.test_archived === true
+        ? ' (SECURE_SALE_TEST marker present on proposal — logged but NOT sufficient to bypass per validator review)'
+        : ''
+    return {
+      ok: false,
+      reason:
+        `BOOKING_CANARY_MODE=on: recipient phone "${phoneRaw}" (normalized "${phoneNorm}") ` +
+        `not in BOOKING_CANARY_PHONE_ALLOWLIST` + markerNote + '.',
+    }
+  }
+
+  return { ok: true }
+}
+
 async function sendProposedSms(client: any, body: any) {
   const { action_id } = body
   if (!action_id) throw new Error('action_id required')
@@ -13153,6 +13231,25 @@ async function sendProposedSms(client: any, body: any) {
     .single()
 
   if (error || !action) throw new Error('Action not found or already processed')
+
+  // ── Canary safety guard (validator hard-block 2026-05-14) ──
+  // When BOOKING_CANARY_MODE=1, refuse before any external API call so
+  // no real-customer SMS can be sent. Returns a structured error the
+  // cockpit / caller can surface; status stays 'pending' so the row is
+  // not silently consumed.
+  const canaryCheck = validateCanarySmsRecipient({
+    contact_phone: action.contact_phone,
+    metadata: action.metadata,
+    action_payload: action.action_payload,
+  })
+  if (!canaryCheck.ok) {
+    return {
+      success: false,
+      action_id,
+      error: 'canary_recipient_blocked',
+      reason: canaryCheck.reason ?? 'canary guard refused recipient',
+    }
+  }
 
   // Send SMS via ghl-proxy
   const ghlUrl = Deno.env.get('SUPABASE_URL')?.replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
@@ -13235,6 +13332,29 @@ async function sendQuoteFollowupSms(client: any, body: any) {
     return { success: false, action_id, error: 'claim_failed', reason: 'proposal not found or already claimed (status != pending or action_type != send_quote_followup_sms)' }
   }
   const action = claimed[0]
+
+  // ── Canary safety guard (validator hard-block 2026-05-14) ──
+  // Same contract as sendProposedSms: when BOOKING_CANARY_MODE=1,
+  // refuse before any external API call. Row was just claimed
+  // (status='approved') — roll it back to 'pending' so it isn't
+  // silently consumed.
+  const canaryCheck = validateCanarySmsRecipient({
+    contact_phone: (action as any).contact_phone,
+    metadata: (action as any).metadata,
+    action_payload: (action as any).action_payload,
+  })
+  if (!canaryCheck.ok) {
+    await client.from('ai_proposed_actions')
+      .update({ status: 'pending', approved_at: null, approved_by: null })
+      .eq('proposal_id', action_id)
+      .eq('status', 'approved')
+    return {
+      success: false,
+      action_id,
+      error: 'canary_recipient_blocked',
+      reason: canaryCheck.reason ?? 'canary guard refused recipient',
+    }
+  }
 
   // Step 2: customer-facing side effect — SMS via ghl-proxy.
   // If this throws, the row stays in status='approved' (not 'sent') so the
