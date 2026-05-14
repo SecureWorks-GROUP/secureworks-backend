@@ -206,6 +206,28 @@ async function resolveJobId(
     }
   }
 
+  // 1b. E1 — Direct client_email lookup. Loop-1 S1 audit of card
+  // Secure-Sale-Automation/evidence-ingestion-fact-trust-95 found 19 of 33
+  // queued client.email_in extraction jobs skipped with no_job_id because
+  // the matcher only checked supplier_email (step 5) and haystack tokens
+  // (steps 2-4) — never the most obvious signal: does fromEmail match a
+  // job's client_email? Most "no_job_id" client emails in the sample were
+  // direct customer replies (andyhicks@ymail.com, vickifulwood@gmail.com,
+  // etc.). High-confidence ONLY when exactly ONE non-archived job matches
+  // the address (multiple matches = ambiguous, fall through and let later
+  // tiers or human review handle it). NO schema change — uses existing
+  // jobs.client_email column.
+  if (fromEmail && fromEmail.includes('@')) {
+    const { data: clientCandidates } = await sb.from('jobs')
+      .select('id').eq('org_id', DEFAULT_ORG_ID)
+      .ilike('client_email', fromEmail)
+      .not('archived', 'is', true)
+      .limit(2)
+    if (clientCandidates && clientCandidates.length === 1) {
+      return { jobId: clientCandidates[0].id, matchedVia: `client_email:${fromEmail}`, confidence: 'high' }
+    }
+  }
+
   // 2. Direct scan — legacy SW#### (e.g. SW1895) from subject/body
   const swLegacy = haystack.match(/\bSW\d{4,}\b/i)
   if (swLegacy) {
