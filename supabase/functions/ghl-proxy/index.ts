@@ -44,6 +44,22 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
+// Per-pipeline salesperson UUIDs (public.users.id) — mirrors the auto-assign
+// in ghl-webhook/index.ts. Without this, new jobs created via create_job
+// (scoping tool path) and sync_ghl (bulk import path) land with
+// created_by = NULL, which breaks every per-rep view in sale.html.
+// Keep this map in sync with ghl-webhook/index.ts SALESPERSON_BY_TYPE.
+const SALESPERSON_BY_TYPE: Record<string, string> = {
+  patio:   '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73',  // Nithin
+  combo:   '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73',  // Nithin
+  decking: '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73',  // Nithin (Nithin owns decking too)
+  fencing: 'be6c2188-2b7b-49c7-b6e4-5b0d0deb6415',  // Khairo
+}
+function salespersonFor(type: string | null | undefined): string | null {
+  if (!type) return null
+  return SALESPERSON_BY_TYPE[String(type).toLowerCase()] || null
+}
+
 // Sales pipelines (leads → quotes)
 const PIPELINES: Record<string, string> = {
   fencing: 'I9t8njpuR0Dm7B2NDcvI',
@@ -1400,9 +1416,10 @@ serve(async (req: Request) => {
       // Default org
       const orgId = '00000000-0000-0000-0000-000000000001'
 
+      const resolvedType = toolType || 'patio'
       const insertData: Record<string, unknown> = {
         org_id: orgId,
-        type: toolType || 'patio',
+        type: resolvedType,
         status: 'draft',
         legacy: false,
         client_name: clientName || '',
@@ -1410,6 +1427,7 @@ serve(async (req: Request) => {
         client_email: clientEmail || '',
         site_address: siteAddress || '',
         site_suburb: siteSuburb || '',
+        created_by: salespersonFor(resolvedType),
       }
       // GHL link is optional — walk-up scopes may not have an opportunity
       if (opportunityId) insertData.ghl_opportunity_id = opportunityId
@@ -2409,6 +2427,10 @@ serve(async (req: Request) => {
                 pricing_json: pricingJson,
                 notes: `Synced from GHL ${pipelineName} pipeline. Stage: ${stageName}`,
                 created_at: createdAt,
+                // Auto-assign owner per pipeline (was the F1 root-cause: bulk
+                // sync omitted created_by entirely, leading to 100% NULL on
+                // 45d jobs). Mirrors ghl-webhook auto-assign.
+                created_by: salespersonFor(jobType),
                 ...timestamps,
               })
 
