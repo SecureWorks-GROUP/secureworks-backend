@@ -3865,6 +3865,17 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
     .is('sent_at', null)
     .limit(2000)
 
+  const { data: quoteLoopTraces, error: quoteLoopTraceErr } = await client.from('ai_reasoning_traces')
+    .select('id, created_at, output_type, input_context_snapshot, output_result')
+    .eq('trigger_type', 'automation:quote-nurture-cadence')
+    .gte('created_at', windowCutoff)
+    .order('created_at', { ascending: false })
+    .limit(5000)
+
+  if (quoteLoopTraceErr) {
+    console.error('[ops-api] daily_coverage_audit quote trace query failed:', quoteLoopTraceErr.message)
+  }
+
   const nowMs = Date.now()
   const ttlFor = (t: string) =>
     t === 'propose_quote_review_task' ? 7 * 24 * 3600000 :
@@ -3884,6 +3895,11 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
   const jobsWithProposal = new Set(
     (pendingProps || []).filter((p: any) => p.job_id).map((p: any) => p.job_id)
   )
+  const jobsWithQuoteLoopTrace = new Set(
+    (quoteLoopTraces || [])
+      .map((t: any) => t?.input_context_snapshot?.job_id)
+      .filter(Boolean)
+  )
 
   const rawRows = recentRows || []
   const realRows = rawRows.filter((j: any) => !isSalesTestRow(j))
@@ -3896,8 +3912,17 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
   const quotedWithProposal = realQuotedRows.filter(
     (j: any) => jobsWithProposal.has(j.id)
   ).length
+  const quotedWithTrace = realQuotedRows.filter(
+    (j: any) => jobsWithQuoteLoopTrace.has(j.id)
+  ).length
+  const quotedHandled = realQuotedRows.filter(
+    (j: any) => jobsWithProposal.has(j.id) || jobsWithQuoteLoopTrace.has(j.id)
+  ).length
   const rawQuotedWithProposal = rawQuotedRows.filter(
     (j: any) => jobsWithProposal.has(j.id)
+  ).length
+  const rawQuotedHandled = rawQuotedRows.filter(
+    (j: any) => jobsWithProposal.has(j.id) || jobsWithQuoteLoopTrace.has(j.id)
   ).length
   const unlinkedQuoted = realQuotedRows.filter(
     (j: any) => !j.ghl_opportunity_id
@@ -3912,7 +3937,7 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
   const linkedSize = realLinkedSize
   const quotedSize = realQuotedRows.length
   const linkagePct = universeSize > 0 ? linkedSize / universeSize : 0
-  const quoteCoveragePct = quotedSize > 0 ? quotedWithProposal / quotedSize : 0
+  const quoteCoveragePct = quotedSize > 0 ? quotedHandled / quotedSize : 0
   const capHeadroom = inWindow.length / COVERAGE_AUDIT_THRESHOLDS.cockpit_cap
 
   const assertions = [
@@ -3955,7 +3980,8 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
       linkage_pct: rawRows.length > 0 ? Number((rawLinkedSize / rawRows.length).toFixed(3)) : 0,
       quoted_45d: rawQuotedRows.length,
       quoted_with_proposal: rawQuotedWithProposal,
-      quote_coverage_pct: rawQuotedRows.length > 0 ? Number((rawQuotedWithProposal / rawQuotedRows.length).toFixed(3)) : 0,
+      quoted_handled_by_proposal_or_trace: rawQuotedHandled,
+      quote_coverage_pct: rawQuotedRows.length > 0 ? Number((rawQuotedHandled / rawQuotedRows.length).toFixed(3)) : 0,
     },
     queue: {
       pending_total: (pendingProps || []).length,
@@ -3965,8 +3991,11 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
     },
     quote_coverage: {
       quoted_45d: quotedSize,
-      quoted_with_proposal: quotedWithProposal,
+      quoted_with_live_proposal: quotedWithProposal,
+      quoted_with_quote_loop_trace: quotedWithTrace,
+      quoted_handled_by_proposal_or_trace: quotedHandled,
       quote_coverage_pct: Number(quoteCoveragePct.toFixed(3)),
+      semantics: 'real quoted jobs with either a live proposal or a current quote-nurture suppression/decision trace',
     },
     coverage_by_action_type: byActionType,
     hygiene_queue: {
