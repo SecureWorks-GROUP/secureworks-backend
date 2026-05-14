@@ -3843,7 +3843,7 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
   }
 
   const { data: recentRows, error: recentRowsErr } = await client.from('jobs')
-    .select('id, job_number, client_name, status, ghl_opportunity_id')
+    .select('id, job_number, client_name, status, ghl_opportunity_id, quoted_at')
     .gte('created_at', windowCutoff)
     .limit(2000)
 
@@ -3903,28 +3903,36 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
 
   const rawRows = recentRows || []
   const realRows = rawRows.filter((j: any) => !isSalesTestRow(j))
+  const minQuoteAgeMs = 2 * 86400000
+  const isQuoteTooFresh = (row: any): boolean => {
+    const quotedMs = row?.quoted_at ? new Date(row.quoted_at).getTime() : NaN
+    return Number.isFinite(quotedMs) && (nowMs - quotedMs) < minQuoteAgeMs
+  }
   const rawQuotedRows = rawRows.filter((j: any) => j.status === 'quoted')
   const realQuotedRows = realRows.filter((j: any) => j.status === 'quoted')
+  const rawEligibleQuotedRows = rawQuotedRows.filter((j: any) => !isQuoteTooFresh(j))
+  const realEligibleQuotedRows = realQuotedRows.filter((j: any) => !isQuoteTooFresh(j))
+  const realTooFreshQuoted = realQuotedRows.length - realEligibleQuotedRows.length
 
   const rawLinkedSize = rawRows.filter((j: any) => !!j.ghl_opportunity_id).length
   const realLinkedSize = realRows.filter((j: any) => !!j.ghl_opportunity_id).length
 
-  const quotedWithProposal = realQuotedRows.filter(
+  const quotedWithProposal = realEligibleQuotedRows.filter(
     (j: any) => jobsWithProposal.has(j.id)
   ).length
-  const quotedWithTrace = realQuotedRows.filter(
+  const quotedWithTrace = realEligibleQuotedRows.filter(
     (j: any) => jobsWithQuoteLoopTrace.has(j.id)
   ).length
-  const quotedHandled = realQuotedRows.filter(
+  const quotedHandled = realEligibleQuotedRows.filter(
     (j: any) => jobsWithProposal.has(j.id) || jobsWithQuoteLoopTrace.has(j.id)
   ).length
-  const rawQuotedWithProposal = rawQuotedRows.filter(
+  const rawQuotedWithProposal = rawEligibleQuotedRows.filter(
     (j: any) => jobsWithProposal.has(j.id)
   ).length
-  const rawQuotedHandled = rawQuotedRows.filter(
+  const rawQuotedHandled = rawEligibleQuotedRows.filter(
     (j: any) => jobsWithProposal.has(j.id) || jobsWithQuoteLoopTrace.has(j.id)
   ).length
-  const unlinkedQuoted = realQuotedRows.filter(
+  const unlinkedQuoted = realEligibleQuotedRows.filter(
     (j: any) => !j.ghl_opportunity_id
   ).length
 
@@ -3935,7 +3943,7 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
 
   const universeSize = realRows.length
   const linkedSize = realLinkedSize
-  const quotedSize = realQuotedRows.length
+  const quotedSize = realEligibleQuotedRows.length
   const linkagePct = universeSize > 0 ? linkedSize / universeSize : 0
   const quoteCoveragePct = quotedSize > 0 ? quotedHandled / quotedSize : 0
   const capHeadroom = inWindow.length / COVERAGE_AUDIT_THRESHOLDS.cockpit_cap
@@ -3979,9 +3987,10 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
       unlinked_45d: rawRows.length - rawLinkedSize,
       linkage_pct: rawRows.length > 0 ? Number((rawLinkedSize / rawRows.length).toFixed(3)) : 0,
       quoted_45d: rawQuotedRows.length,
+      eligible_quoted_45d: rawEligibleQuotedRows.length,
       quoted_with_proposal: rawQuotedWithProposal,
       quoted_handled_by_proposal_or_trace: rawQuotedHandled,
-      quote_coverage_pct: rawQuotedRows.length > 0 ? Number((rawQuotedHandled / rawQuotedRows.length).toFixed(3)) : 0,
+      quote_coverage_pct: rawEligibleQuotedRows.length > 0 ? Number((rawQuotedHandled / rawEligibleQuotedRows.length).toFixed(3)) : 0,
     },
     queue: {
       pending_total: (pendingProps || []).length,
@@ -3990,12 +3999,14 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
       cap_headroom: Number(capHeadroom.toFixed(3)),
     },
     quote_coverage: {
-      quoted_45d: quotedSize,
+      quoted_45d: realQuotedRows.length,
+      eligible_quoted_45d: quotedSize,
+      too_fresh_quoted: realTooFreshQuoted,
       quoted_with_live_proposal: quotedWithProposal,
       quoted_with_quote_loop_trace: quotedWithTrace,
       quoted_handled_by_proposal_or_trace: quotedHandled,
       quote_coverage_pct: Number(quoteCoveragePct.toFixed(3)),
-      semantics: 'real quoted jobs with either a live proposal or a current quote-nurture suppression/decision trace',
+      semantics: 'real quoted jobs old enough for the quote-nurture loop, with either a live proposal or a current quote-nurture suppression/decision trace',
     },
     coverage_by_action_type: byActionType,
     hygiene_queue: {
