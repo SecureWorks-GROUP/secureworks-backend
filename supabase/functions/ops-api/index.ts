@@ -3823,8 +3823,8 @@ if (import.meta.main) serve(async (req: Request) => {
 // Schema-free: no migrations. Uses existing tables only.
 
 const COVERAGE_AUDIT_THRESHOLDS = {
-  linkage_health_min: 0.80,
-  quote_coverage_min: 0.70,
+  linkage_health_min: 0.95,
+  quote_coverage_min: 0.95,
   cap_headroom_max:   0.80, // pending_in_window / cap should stay below this
   cockpit_cap: 1000,        // matches ops-api listProposedActions cap
 } as const
@@ -3833,26 +3833,31 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
   const windowDays = 45
   const windowCutoff = new Date(Date.now() - windowDays * 86400000).toISOString()
 
-  // Universe + linkage (probe A/G)
-  const { count: total45 } = await client.from('jobs')
-    .select('*', { count: 'exact', head: true })
-    .gte('created_at', windowCutoff)
+  // The launch proof is measured against the same real-customer universe that
+  // sale.html renders. CAP0/canary/test rows stay visible in raw diagnostics
+  // below, but they do not decide the health assertion salespeople rely on.
+  const isSalesTestRow = (row: any): boolean => {
+    const haystack = `${row?.client_name || ''} ${row?.job_number || ''}`.toLowerCase()
+    return /\b(cap0|canary|marnin\s+test|test22)\b/.test(haystack) ||
+      /internal\s+test/.test(haystack)
+  }
 
-  const { count: linked45 } = await client.from('jobs')
-    .select('*', { count: 'exact', head: true })
+  const { data: recentRows, error: recentRowsErr } = await client.from('jobs')
+    .select('id, job_number, client_name, status, ghl_opportunity_id')
     .gte('created_at', windowCutoff)
-    .not('ghl_opportunity_id', 'is', null)
+    .limit(2000)
 
-  const { count: quotedOpen45 } = await client.from('jobs')
-    .select('*', { count: 'exact', head: true })
-    .gte('created_at', windowCutoff)
-    .eq('status', 'quoted')
-
-  // Pull recent jobs + recent pending proposals to compute coverage in JS
-  const { data: recentQuotedRows } = await client.from('jobs')
-    .select('id, ghl_opportunity_id')
-    .gte('created_at', windowCutoff)
-    .eq('status', 'quoted')
+  if (recentRowsErr) {
+    console.error('[ops-api] daily_coverage_audit jobs query failed:', recentRowsErr.message)
+    return {
+      snapshot_id: crypto.randomUUID(),
+      ran_at: new Date().toISOString(),
+      window_days: windowDays,
+      error: recentRowsErr.message,
+      assertions: [],
+      events_emitted: [],
+    }
+  }
 
   const { data: pendingProps } = await client.from('ai_proposed_actions')
     .select('proposal_id, action_type, job_id, sent_at, created_at, expires_at')
@@ -3879,10 +3884,22 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
   const jobsWithProposal = new Set(
     (pendingProps || []).filter((p: any) => p.job_id).map((p: any) => p.job_id)
   )
-  const quotedWithProposal = (recentQuotedRows || []).filter(
+
+  const rawRows = recentRows || []
+  const realRows = rawRows.filter((j: any) => !isSalesTestRow(j))
+  const rawQuotedRows = rawRows.filter((j: any) => j.status === 'quoted')
+  const realQuotedRows = realRows.filter((j: any) => j.status === 'quoted')
+
+  const rawLinkedSize = rawRows.filter((j: any) => !!j.ghl_opportunity_id).length
+  const realLinkedSize = realRows.filter((j: any) => !!j.ghl_opportunity_id).length
+
+  const quotedWithProposal = realQuotedRows.filter(
     (j: any) => jobsWithProposal.has(j.id)
   ).length
-  const unlinkedQuoted = (recentQuotedRows || []).filter(
+  const rawQuotedWithProposal = rawQuotedRows.filter(
+    (j: any) => jobsWithProposal.has(j.id)
+  ).length
+  const unlinkedQuoted = realQuotedRows.filter(
     (j: any) => !j.ghl_opportunity_id
   ).length
 
@@ -3891,9 +3908,9 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
     byActionType[p.action_type] = (byActionType[p.action_type] || 0) + 1
   }
 
-  const universeSize = total45 || 0
-  const linkedSize = linked45 || 0
-  const quotedSize = quotedOpen45 || 0
+  const universeSize = realRows.length
+  const linkedSize = realLinkedSize
+  const quotedSize = realQuotedRows.length
   const linkagePct = universeSize > 0 ? linkedSize / universeSize : 0
   const quoteCoveragePct = quotedSize > 0 ? quotedWithProposal / quotedSize : 0
   const capHeadroom = inWindow.length / COVERAGE_AUDIT_THRESHOLDS.cockpit_cap
@@ -3928,12 +3945,28 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
       linked_45d: linkedSize,
       unlinked_45d: universeSize - linkedSize,
       linkage_pct: Number(linkagePct.toFixed(3)),
+      scope: 'real_customer_sales_rows',
+      excluded_test_rows: rawRows.length - realRows.length,
+    },
+    raw_unfiltered_universe: {
+      supabase_jobs_45d: rawRows.length,
+      linked_45d: rawLinkedSize,
+      unlinked_45d: rawRows.length - rawLinkedSize,
+      linkage_pct: rawRows.length > 0 ? Number((rawLinkedSize / rawRows.length).toFixed(3)) : 0,
+      quoted_45d: rawQuotedRows.length,
+      quoted_with_proposal: rawQuotedWithProposal,
+      quote_coverage_pct: rawQuotedRows.length > 0 ? Number((rawQuotedWithProposal / rawQuotedRows.length).toFixed(3)) : 0,
     },
     queue: {
       pending_total: (pendingProps || []).length,
       in_window: inWindow.length,
       cap: COVERAGE_AUDIT_THRESHOLDS.cockpit_cap,
       cap_headroom: Number(capHeadroom.toFixed(3)),
+    },
+    quote_coverage: {
+      quoted_45d: quotedSize,
+      quoted_with_proposal: quotedWithProposal,
+      quote_coverage_pct: Number(quoteCoveragePct.toFixed(3)),
     },
     coverage_by_action_type: byActionType,
     hygiene_queue: {
