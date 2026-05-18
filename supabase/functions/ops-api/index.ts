@@ -145,8 +145,8 @@ const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env.get('RAILWAY_AGENT_URL') || 'https://secureworks-agent-production.up.railway.app').replace(/\/+$/, '')
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
-const OPS_API_BUILD_LABEL = 'canonical-secureworks-site-2026-05-11'
-const OPS_API_EXPECTED_ACTION_COUNT = 223
+const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
+const OPS_API_EXPECTED_ACTION_COUNT = 224
 
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
@@ -6074,19 +6074,10 @@ async function updateJobStatus(client: any, body: any) {
   const status = body.status
   if (!jId || !status) throw new Error('jobId and status required')
 
-  // Cap 1A: aligned to canonical ALL_CANONICAL_STATUSES from
-  // supabase/functions/_shared/stage-gate/job-state-machine.ts. Per-type validity (fencing ≠ approvals,
-  // patio ≠ partially_accepted) is enforced server-side in Cap 1E via
-  // validate_job_status_and_type trigger; for now this validator accepts any value the live
-  // prod CHECK admits.
-  const validStatuses = [
-    'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
-    'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
-    'schedule_install', 'scheduled', 'in_progress', 'rectification',
-    'complete', 'final_payment', 'invoiced', 'get_review',
-    'cancelled', 'lost', 'archived'
-  ]
-  if (!validStatuses.includes(status)) throw new Error('Invalid status: ' + status)
+  // Live trusted baseline 2026-05-18 accepted new stages without an edge
+  // redeploy. Preserve that behaviour here and let database constraints /
+  // stage-gate shadow observations catch invalid transitions downstream.
+  if (!status || typeof status !== 'string' || status.length > 50) throw new Error('Invalid status')
 
   // Capture old status + job data for business_events dual-write
   const { data: jobBefore } = await client.from('jobs')
@@ -9612,7 +9603,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, ghl_opportunity_id, ghl_contact_id')
       .eq('id', jobId).single(),
     client.from('job_documents')
-      .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, created_at')
+      .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
       .eq('job_id', jobId).order('created_at', { ascending: false }),
     client.from('job_media')
       .select('id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at')

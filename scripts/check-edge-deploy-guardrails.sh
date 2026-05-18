@@ -27,12 +27,19 @@ const required = [
   'send_quote_followup_sms',
   'approve_scoper_call_task',
   'approve_quote_review_task',
+  'approve_booking_proposal',
   'list_stale_quote_review_tasks',
+  'update_playbook',
   'finance_health_summary',
   'daily_coverage_audit',
   'freeze_scope',
   'record_scope_artifact',
   'get_evidence_health',
+  'get_evidence_body',
+  'assemble_job_dossier',
+  'assemble_job_brain',
+  'get_job_context_facts',
+  'get_job_conversation',
 ];
 const missing = required.filter(a => !actions.includes(a));
 console.log(JSON.stringify({ ops_api_actions: actions.length, missing }, null, 2));

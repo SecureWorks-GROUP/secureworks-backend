@@ -37,7 +37,9 @@ list_proposed_actions
 send_quote_followup_sms
 approve_scoper_call_task
 approve_quote_review_task
+approve_booking_proposal
 list_stale_quote_review_tasks
+update_playbook
 
 # ── Finance + audit reads ──
 finance_health_summary
@@ -49,10 +51,13 @@ record_scope_artifact
 
 # ── Evidence health ──
 get_evidence_health
+get_evidence_body
 
 # ── JARVIS canonical reader path (sw_job_context_v2) ──
 assemble_job_dossier
 assemble_job_brain
+get_job_context_facts
+get_job_conversation
 
 # ── Sales cockpit / Secure Sale core reads ──
 pipeline
