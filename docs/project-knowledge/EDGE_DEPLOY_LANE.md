@@ -11,6 +11,9 @@ Production `ops-api` and `send-quote` must only deploy from one place:
 This is a hard operational boundary for Marnin, Shaun, Codex, Claude, and any
 other terminal or agent.
 
+For the short source-of-truth contract that future agents should read first,
+see `docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md`.
+
 ## Why This Exists
 
 Supabase has one live function slug named `ops-api` and one named `send-quote`.
@@ -36,8 +39,7 @@ Approved local break-glass path:
 
 ```bash
 cd /Users/marninstobbe/Projects/_release/secureworks-site-main
-git fetch origin --prune
-git status --short --branch
+scripts/ops-api-preflight.sh
 SW_API_KEY=... scripts/deploy-edge-function.sh ops-api
 SW_API_KEY=... scripts/deploy-edge-function.sh send-quote
 ```
@@ -81,6 +83,22 @@ The guard only blocks protected production deploys:
 It allows all other Supabase commands to pass through normally. Protected deploys
 are allowed only from the canonical release worktree when it is clean and exactly
 at `origin/main`.
+
+The guard is not a replacement for GitHub secret lockdown. A machine with an old
+Supabase token can still bypass local shell wrappers by using another CLI,
+`supabase.real`, direct API calls, or the Supabase dashboard. Production deploy
+tokens must therefore live only in the `secureworks-site` production environment.
+
+## GitHub Secret Policy
+
+Only `marninms98-dotcom/secureworks-site` may hold the production
+`SUPABASE_ACCESS_TOKEN`, and it should be environment-scoped to `production`.
+
+Caller repos such as `securedash`, `secureworks-agent`, `secureworks-ops`, and
+`secureworks-sale` must not hold production Supabase deploy tokens. If any
+non-owner repo is found with such a token, remove it, rotate the token in
+Supabase, and set the replacement only in the `secureworks-site` production
+environment.
 
 ## Required Smoke Checks
 
