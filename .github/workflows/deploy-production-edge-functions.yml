@@ -10,6 +10,10 @@ on:
         options:
           - ops-api
           - send-quote
+      approval_phrase:
+        description: Type exactly "approve secureworks production edge deploy"
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -27,6 +31,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Human approval phrase
+        run: |
+          if [ "${{ inputs.approval_phrase }}" != "approve secureworks production edge deploy" ]; then
+            echo "Refusing production edge deploy: approval phrase did not match." >&2
+            exit 1
+          fi
 
       - name: Install Supabase CLI
         run: npm install -g supabase

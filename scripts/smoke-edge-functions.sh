@@ -41,6 +41,8 @@ assert_not_unknown() {
   local body="$2"
   if printf '%s' "$body" | grep -qi 'Unknown action'; then
     record_fail "${label}: Unknown action"
+  elif printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
+    record_fail "${label}: gateway/JWT error"
   else
     record_pass "${label}"
   fi
@@ -79,6 +81,7 @@ assert_function_jwt "send-quote" "false"
 ops_version="$(json_get "${BASE}/ops-api?action=ops_api_version")"
 assert_not_unknown "ops-api ops_api_version recognised" "$ops_version"
 assert_contains "ops-api canonical source" "$ops_version" '"source_repo":"secureworks-site"'
+assert_contains "ops-api version includes build label" "$ops_version" '"build_label":'
 
 # S6 drift detection — commit_sha assertion.
 #
@@ -115,10 +118,16 @@ if [[ -f "$REQUIRED_ACTIONS_FILE" ]]; then
     [[ -z "$action" ]] && continue
     total=$((total + 1))
     body="$(json_get "${BASE}/ops-api?action=${action}")"
-    if printf '%s' "$body" | grep -qi 'Unknown action'; then
+    if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
+      record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
+      drift=$((drift + 1))
+    elif printf '%s' "$body" | grep -qi 'Unknown action'; then
       # Try POST as some action handlers gate on method.
       body="$(json_post "${BASE}/ops-api?action=${action}" '{}')"
-      if printf '%s' "$body" | grep -qi 'Unknown action'; then
+      if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
+        record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
+        drift=$((drift + 1))
+      elif printf '%s' "$body" | grep -qi 'Unknown action'; then
         record_fail "ops-api drift: action '${action}' returns Unknown action"
         drift=$((drift + 1))
       fi
