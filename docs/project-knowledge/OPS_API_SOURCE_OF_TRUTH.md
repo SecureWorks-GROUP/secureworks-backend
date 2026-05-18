@@ -35,6 +35,10 @@ scripts/ops-api-preflight.sh
 
 If the preflight fails, do not edit or deploy `ops-api`.
 
+If the only warning is that the local Supabase CLI is logged out, that is
+acceptable for coding/review work. Production deploy proof must then come from
+the GitHub production workflow and smoke checks, not from a local CLI session.
+
 ## Allowed Deploy Paths
 
 Normal path:

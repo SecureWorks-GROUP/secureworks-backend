@@ -47,6 +47,11 @@ SW_API_KEY=... scripts/deploy-edge-function.sh send-quote
 The guarded script refuses to deploy unless the worktree is clean and exactly at
 `origin/main`.
 
+If the local Supabase CLI is logged out, `scripts/ops-api-preflight.sh` still
+passes the canonical-folder and Git checks but warns that live function metadata
+could not be read. That is acceptable for coding/review work. Production deploy
+proof should come from the GitHub workflow and smoke checks.
+
 ## Disallowed Deploy Paths
 
 Do not deploy `ops-api` or `send-quote` from:

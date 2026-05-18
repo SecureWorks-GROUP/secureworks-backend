@@ -49,8 +49,18 @@ scripts/check-edge-deploy-guardrails.sh
 
 echo
 echo "== live function metadata =="
-"$SUPABASE_CLI" functions list --project-ref "$PROJECT_REF" -o json \
-  | node -e "
+set +e
+functions_json="$("$SUPABASE_CLI" functions list --project-ref "$PROJECT_REF" -o json 2>/tmp/ops-api-preflight-supabase.err)"
+functions_status=$?
+set -e
+
+if [[ "$functions_status" -ne 0 ]]; then
+  echo "WARN could not read live Supabase function metadata."
+  echo "     This is expected if the local CLI is logged out; production deploys"
+  echo "     should use the GitHub production environment token instead."
+  sed -n '1,4p' /tmp/ops-api-preflight-supabase.err | sed 's/^/     /'
+else
+  printf '%s' "$functions_json" | node -e "
 let s='';
 process.stdin.on('data', d => s += d);
 process.stdin.on('end', () => {
@@ -70,6 +80,7 @@ process.stdin.on('end', () => {
     }, null, 2));
   }
 })"
+fi
 
 echo
 echo "PASS ops-api preflight"
