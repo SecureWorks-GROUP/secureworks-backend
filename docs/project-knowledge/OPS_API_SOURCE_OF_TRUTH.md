@@ -77,6 +77,15 @@ supabase functions deploy ops-api
 
 Only `secureworks-site` may hold the production Supabase deploy token.
 
+Current production deploy token state as of 2026-05-18:
+
+- Token name in Supabase: `secureworks-site-prod-edge-18MAY`
+- GitHub storage: `marninms98-dotcom/secureworks-site` production
+  environment secret `SUPABASE_ACCESS_TOKEN`
+- Expiry: 2026-06-17
+- Local Supabase CLI on Marnin's Mac: logged out after token rotation, so
+  stale local worktrees cannot deploy unless a human deliberately logs in again
+
 No production `SUPABASE_ACCESS_TOKEN` is allowed in:
 
 - `securedash`
@@ -113,4 +122,3 @@ Old worktrees are not automatically wrong, but they are not deploy sources.
 Before deletion, audit them for useful stranded work. If a stale copy contains
 Trade App, Xero, supplier, work order, PO, Sales, booking, evidence, or JARVIS
 changes that are missing from canonical, produce a review packet before porting.
-

@@ -94,6 +94,12 @@ tokens must therefore live only in the `secureworks-site` production environment
 Only `marninms98-dotcom/secureworks-site` may hold the production
 `SUPABASE_ACCESS_TOKEN`, and it should be environment-scoped to `production`.
 
+As of 2026-05-18, the active production deploy token is named
+`secureworks-site-prod-edge-18MAY`, expires on 2026-06-17, and is stored only in
+the `secureworks-site` `production` environment. Marnin's local Supabase CLI was
+logged out after the rotation so local stale worktrees cannot deploy without a
+deliberate new login.
+
 Caller repos such as `securedash`, `secureworks-agent`, `secureworks-ops`, and
 `secureworks-sale` must not hold production Supabase deploy tokens. If any
 non-owner repo is found with such a token, remove it, rotate the token in
