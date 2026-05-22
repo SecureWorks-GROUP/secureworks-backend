@@ -2468,6 +2468,26 @@ serve(async (req: Request) => {
       const { contactId, message, jobId, userId } = body
       if (!contactId || !message) return json({ error: 'contactId and message required' }, 400)
 
+      // Contact-job mismatch guard: if both contactId and jobId supplied, verify they match
+      if (contactId && jobId) {
+        try {
+          const sbCheck = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+          const { data: job } = await sbCheck.from('jobs')
+            .select('ghl_contact_id, client_name')
+            .eq('id', jobId)
+            .single()
+          if (job && job.ghl_contact_id && job.ghl_contact_id !== contactId) {
+            console.error(`[ghl-proxy] CONTACT MISMATCH BLOCKED: contactId=${contactId} does not match job ${jobId} contact=${job.ghl_contact_id} (${job.client_name})`)
+            return json({
+              error: 'Contact mismatch: contactId does not match the job contact. SMS blocked.',
+              expected_contact: job.ghl_contact_id,
+              expected_name: job.client_name,
+              supplied_contact: contactId,
+            }, 409)
+          }
+        } catch { /* non-blocking — if lookup fails, allow send */ }
+      }
+
       // Dedup: check for identical SMS to same contact within last 10 minutes
       // Only blocks exact same message — different messages to same contact are allowed
       try {
