@@ -1,5 +1,17 @@
 # SECUREWORKS WA — WEBSITE PROJECT CONTEXT
 
+## Trunk Worktree (Do Not Work Here)
+
+This directory (`/Users/marninstobbe/Projects/secureworks-site`) is the trunk worktree. It must always be on `main` and clean. A pre-commit hook will refuse commits here.
+
+For any work, create a named worktree:
+- Via `gstack` (preferred): see `gstack` docs.
+- Via raw git: `git worktree add ../secureworks-site-<feature-name> -b <branch-name>`.
+
+Why: previously, deploys from stale base worktrees caused production breakage. See `secureworks-docs/architecture/deploy-lane.md`.
+
+> **Note:** This repo does not yet use Husky. The trunk guard is installed as a `.git/hooks/pre-commit` (per-clone, not tracked by git). Adopting Husky would make this hook portable across clones — tracked as a recommended follow-up.
+
 ## CRITICAL PRODUCTION EDGE DEPLOY RULE
 
 `ops-api` and `send-quote` must have one deployable reality only.
