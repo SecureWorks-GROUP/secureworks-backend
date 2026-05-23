@@ -16,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: denoland/setup-deno@v2
         with:
@@ -24,9 +26,13 @@ jobs:
       - name: Identify changed function files
         id: changed
         run: |
+          # Use the PR base SHA for diffing (more reliable in CI)
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
           # Get the list of changed function index.ts files in the PR
-          CHANGED=$(git diff --name-only origin/main...HEAD -- 'supabase/functions/*/index.ts' | sort -u)
-          SHARED=$(git diff --name-only origin/main...HEAD -- 'supabase/functions/_shared/*.ts' 'supabase/functions/_shared/**/*.ts' | sort -u)
+          CHANGED=$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" -- 'supabase/functions/*/index.ts' | sort -u)
+          SHARED=$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" -- 'supabase/functions/_shared/*.ts' 'supabase/functions/_shared/**/*.ts' | sort -u)
 
           if [ -z "$CHANGED" ] && [ -z "$SHARED" ]; then
             echo "No edge function files changed"
