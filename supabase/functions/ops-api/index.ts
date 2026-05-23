@@ -5,10 +5,11 @@
 // and Trade mobile view. All data access uses service_role.
 //
 // Deploy:
-//   SW_API_KEY=... scripts/deploy-edge-function.sh ops-api
+//   supabase functions deploy ops-api --no-verify-jwt --project-ref kevgrhcjxspbxgovpmfl
+//   (CI deploys automatically on push to main via .github/workflows/deploy-edge-functions.yml)
+//   (Laptop deploys must use scripts/deploy-edge.sh with SECUREWORKS_LAPTOP_DEPLOY_OVERRIDE=1)
 //
-// Production deploys must only run from secureworks-site/main or the canonical
-// release worktree: /Users/marninstobbe/Projects/_release/secureworks-site-main
+// JWT flag: --no-verify-jwt (dashboard calls use x-api-key auth, not Supabase JWT)
 //
 // Actions (via ?action= query param):
 //

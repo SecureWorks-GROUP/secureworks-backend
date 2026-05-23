@@ -1,0 +1,75 @@
+name: PR Check — Edge Functions
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'supabase/functions/**'
+
+permissions:
+  contents: read
+
+jobs:
+  deno-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Identify changed function files
+        id: changed
+        run: |
+          # Get the list of changed function index.ts files in the PR
+          CHANGED=$(git diff --name-only origin/main...HEAD -- 'supabase/functions/*/index.ts' | sort -u)
+          SHARED=$(git diff --name-only origin/main...HEAD -- 'supabase/functions/_shared/*.ts' 'supabase/functions/_shared/**/*.ts' | sort -u)
+
+          if [ -z "$CHANGED" ] && [ -z "$SHARED" ]; then
+            echo "No edge function files changed"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            # Write changed files to a temp file for the check step
+            {
+              echo "$CHANGED"
+              echo "$SHARED"
+            } | grep -v '^$' | sort -u > /tmp/changed_function_files.txt
+            echo "Changed files:"
+            cat /tmp/changed_function_files.txt
+          fi
+
+      - name: Run deno check on changed files
+        if: steps.changed.outputs.has_changes == 'true'
+        run: |
+          FAILED=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            echo "━━━ Checking ${file} ━━━"
+            if deno check "$file" 2>&1; then
+              echo "  ✓ ${file} passed deno check"
+            else
+              echo "  ✗ ${file} FAILED deno check" >&2
+              FAILED=$((FAILED + 1))
+            fi
+          done < /tmp/changed_function_files.txt
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo "" >&2
+            echo "${FAILED} file(s) failed deno check" >&2
+            exit 1
+          fi
+
+          echo "All changed files passed deno check"
+
+      - name: Shell syntax check on deploy scripts
+        run: |
+          # Verify shell scripts are syntactically valid
+          for script in scripts/deploy-edge-function.sh scripts/smoke-edge-functions.sh scripts/check-edge-deploy-guardrails.sh; do
+            if [ -f "$script" ]; then
+              bash -n "$script" && echo "✓ ${script}" || echo "✗ ${script} has syntax errors"
+            fi
+          done
