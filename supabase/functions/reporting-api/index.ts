@@ -3356,16 +3356,32 @@ async function salesPerformanceAction(sb: any, params: URLSearchParams) {
     ? Math.round(withAccepted.reduce((s: number, j: any) => s + (new Date(j.accepted_at).getTime() - new Date(j.quoted_at).getTime()) / 86400000, 0) / withAccepted.length)
     : 0
 
-  // Weekly trend: last 8 weeks
+  // Weekly trend: last 12 weeks (Mon-Sun, types broken out additively for the by-type panel)
   const weeklyTrend: any[] = []
-  for (let w = 7; w >= 0; w--) {
+  const sumByType = (rows: any[]) => ({
+    fencing: rows.filter((j: any) => j.type === 'fencing').reduce((s: number, j: any) => s + qv(j), 0),
+    patio:   rows.filter((j: any) => j.type === 'patio').reduce((s: number, j: any) => s + qv(j), 0),
+  })
+  const countByType = (rows: any[]) => ({
+    fencing: rows.filter((j: any) => j.type === 'fencing').length,
+    patio:   rows.filter((j: any) => j.type === 'patio').length,
+  })
+  for (let w = 11; w >= 0; w--) {
     const ws = new Date(now.getTime() - (w * 7 + (now.getUTCDay() || 7) - 1) * 86400000)
     const we = new Date(ws.getTime() + 6 * 86400000)
     const wsStr = ws.toISOString().slice(0, 10)
     const weStr = we.toISOString().slice(0, 10) + 'T23:59:59'
     const wQuoted = jobs.filter((j: any) => j.quoted_at && j.quoted_at >= wsStr && j.quoted_at <= weStr)
     const wBooked = jobs.filter((j: any) => j.status === 'accepted' && j.accepted_at && j.accepted_at >= wsStr && j.accepted_at <= weStr)
-    weeklyTrend.push({ week: wsStr, quoted_value: wQuoted.reduce((s: number, j: any) => s + qv(j), 0), booked_value: wBooked.reduce((s: number, j: any) => s + qv(j), 0) })
+    weeklyTrend.push({
+      week: wsStr,
+      quoted_value: wQuoted.reduce((s: number, j: any) => s + qv(j), 0),
+      booked_value: wBooked.reduce((s: number, j: any) => s + qv(j), 0),
+      quoted_by_type: sumByType(wQuoted),
+      booked_by_type: sumByType(wBooked),
+      quoted_count_by_type: countByType(wQuoted),
+      booked_count_by_type: countByType(wBooked),
+    })
   }
 
   // By type
