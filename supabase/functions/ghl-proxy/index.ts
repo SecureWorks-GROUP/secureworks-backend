@@ -22,8 +22,13 @@
 //   GET  ?action=search_jobs&q=smith&type=patio&limit=30  — search Supabase jobs
 //
 // Deploy:
-//   supabase functions deploy ghl-proxy --no-verify-jwt
-//   supabase secrets set GHL_API_TOKEN="pit-..." GHL_LOCATION_ID="..."
+//   supabase functions deploy ghl-proxy --no-verify-jwt --project-ref kevgrhcjxspbxgovpmfl
+//   (CI deploys automatically on push to main via .github/workflows/deploy-edge-functions.yml)
+//   (Laptop deploys must use scripts/deploy-edge.sh with SECUREWORKS_LAPTOP_DEPLOY_OVERRIDE=1)
+//
+// JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
+//
+// Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
