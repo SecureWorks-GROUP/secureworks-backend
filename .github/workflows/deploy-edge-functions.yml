@@ -1,0 +1,124 @@
+name: Deploy Edge Functions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'supabase/functions/**'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.repository == 'marninms98-dotcom/secureworks-site'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Identify changed function directories
+        id: changed
+        run: |
+          # Handle first push to main (before is all zeros)
+          BEFORE="${{ github.event.before }}"
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "Initial push — listing all function directories"
+            CHANGED=$(find supabase/functions -mindepth 1 -maxdepth 1 -type d ! -name '_shared' -exec basename {} \; | sort -u | tr '\n' ' ')
+          else
+            # Diff against the previous commit on main
+            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/*/index.ts' | awk -F/ '{print $3}' | sort -u | tr '\n' ' ')
+          fi
+
+          echo "functions=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "Changed functions: $CHANGED"
+
+          # Also check if _shared changed — warn but don't auto-deploy all
+          SHARED_CHANGED=""
+          if [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            SHARED_CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/_shared/**' | head -1)
+          fi
+          if [ -n "$SHARED_CHANGED" ]; then
+            echo "::warning::_shared directory changed — functions that import from it may need manual redeployment"
+          fi
+
+      - name: Deploy changed edge functions
+        if: steps.changed.outputs.functions != ''
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          PROJECT_REF="kevgrhcjxspbxgovpmfl"
+          DEPLOYED_ANY=false
+
+          for func in ${{ steps.changed.outputs.functions }}; do
+            echo "━━━ Deploying ${func} ━━━"
+
+            # Read the JWT flag from the function's header comment (first 30 lines).
+            # If the header contains '--no-verify-jwt', deploy without JWT verification.
+            # Otherwise, deploy with default JWT verification enabled.
+            JWT_FLAG=""
+            if head -30 "supabase/functions/${func}/index.ts" 2>/dev/null | grep -q -- '--no-verify-jwt'; then
+              JWT_FLAG="--no-verify-jwt"
+              echo "  JWT flag: --no-verify-jwt (from header comment)"
+            else
+              echo "  JWT flag: default (verify-jwt enabled)"
+            fi
+
+            if supabase functions deploy "${func}" ${JWT_FLAG} --project-ref "${PROJECT_REF}"; then
+              echo "  ✓ ${func} deployed successfully"
+              DEPLOYED_ANY=true
+            else
+              echo "  ✗ ${func} deploy FAILED" >&2
+              exit 1
+            fi
+          done
+
+          if [ "$DEPLOYED_ANY" = true ]; then
+            echo "All function deploys completed"
+          fi
+
+      - name: Smoke test ops-api
+        if: steps.changed.outputs.functions != ''
+        run: |
+          # Check if ops-api was among the deployed functions
+          DEPLOYED_OPS_API=false
+          for func in ${{ steps.changed.outputs.functions }}; do
+            if [ "$func" = "ops-api" ]; then
+              DEPLOYED_OPS_API=true
+              break
+            fi
+          done
+
+          if [ "$DEPLOYED_OPS_API" = false ]; then
+            echo "ops-api was not deployed — skipping smoke test"
+            exit 0
+          fi
+
+          echo "━━━ Smoke testing ops-api ━━━"
+          BASE_URL="https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api"
+
+          # Allow a short warm-up period after deploy
+          sleep 5
+
+          # ops-api uses x-api-key auth (--no-verify-jwt). An unauthenticated
+          # request will reach the function but return an auth error (400/401),
+          # which proves the function is live and accepting traffic.
+          # 5xx = function is down or broken.
+          HTTP_CODE=$(curl -sw "%{http_code}" -o /tmp/ops-api-smoke.out --max-time 30 "${BASE_URL}" 2>/dev/null || echo "000")
+
+          echo "  HTTP status: ${HTTP_CODE}"
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "  ✓ ops-api smoke test passed (HTTP ${HTTP_CODE})"
+          else
+            echo "  ✗ ops-api smoke test FAILED (HTTP ${HTTP_CODE})" >&2
+            BODY=$(cat /tmp/ops-api-smoke.out 2>/dev/null | head -c 500)
+            echo "  Response body: ${BODY}" >&2
+            exit 1
+          fi
