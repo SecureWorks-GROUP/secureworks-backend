@@ -84,41 +84,56 @@ jobs:
             echo "All function deploys completed"
           fi
 
-      - name: Smoke test ops-api
+      - name: Smoke test deployed functions
         if: steps.changed.outputs.functions != ''
         run: |
-          # Check if ops-api was among the deployed functions
-          DEPLOYED_OPS_API=false
-          for func in ${{ steps.changed.outputs.functions }}; do
-            if [ "$func" = "ops-api" ]; then
-              DEPLOYED_OPS_API=true
-              break
-            fi
-          done
+          PROJECT_HOST="https://kevgrhcjxspbxgovpmfl.supabase.co"
 
-          if [ "$DEPLOYED_OPS_API" = false ]; then
-            echo "ops-api was not deployed — skipping smoke test"
-            exit 0
-          fi
-
-          echo "━━━ Smoke testing ops-api ━━━"
-          BASE_URL="https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api"
+          # Production-critical functions that get a post-deploy smoke test.
+          # Each entry: FUNCTION_NAME  SAFE_PROBE_PATH
+          # The probe path should be a lightweight endpoint that returns
+          # 2xx/4xx when the function is live (NOT 5xx, which means broken).
+          declare -A SMOKE_ENDPOINTS=(
+            [ops-api]="/functions/v1/ops-api"
+            [ghl-proxy]="/functions/v1/ghl-proxy"
+            [send-quote]="/functions/v1/send-quote"
+          )
 
           # Allow a short warm-up period after deploy
           sleep 5
 
-          # ops-api uses x-api-key auth (--no-verify-jwt). An unauthenticated
-          # request will reach the function but return an auth error (400/401),
-          # which proves the function is live and accepting traffic.
-          # 5xx = function is down or broken.
-          HTTP_CODE=$(curl -sw "%{http_code}" -o /tmp/ops-api-smoke.out --max-time 30 "${BASE_URL}" 2>/dev/null || echo "000")
+          OVERALL_PASS=true
 
-          echo "  HTTP status: ${HTTP_CODE}"
-          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
-            echo "  ✓ ops-api smoke test passed (HTTP ${HTTP_CODE})"
-          else
-            echo "  ✗ ops-api smoke test FAILED (HTTP ${HTTP_CODE})" >&2
-            BODY=$(cat /tmp/ops-api-smoke.out 2>/dev/null | head -c 500)
-            echo "  Response body: ${BODY}" >&2
+          for func in ${{ steps.changed.outputs.functions }}; do
+            # Only smoke-test functions that have a defined endpoint
+            if [ -z "${SMOKE_ENDPOINTS[$func]+x}" ]; then
+              echo "  → ${func}: no smoke endpoint defined — skipping"
+              continue
+            fi
+
+            echo "━━━ Smoke testing ${func} ━━━"
+            URL="${PROJECT_HOST}${SMOKE_ENDPOINTS[$func]}"
+
+            # These functions use --no-verify-jwt so an unauthenticated
+            # request reaches the function. A 4xx (auth/action error)
+            # proves the function is live; 5xx = broken deploy.
+            HTTP_CODE=$(curl -sw "%{http_code}" -o "/tmp/${func}-smoke.out" --max-time 30 "${URL}" 2>/dev/null || echo "000")
+
+            echo "  HTTP status: ${HTTP_CODE}"
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+              echo "  ✓ ${func} smoke test passed (HTTP ${HTTP_CODE})"
+            else
+              echo "  ✗ ${func} smoke test FAILED (HTTP ${HTTP_CODE})" >&2
+              BODY=$(cat "/tmp/${func}-smoke.out" 2>/dev/null | head -c 500)
+              echo "  Response body: ${BODY}" >&2
+              OVERALL_PASS=false
+            fi
+          done
+
+          if [ "$OVERALL_PASS" = false ]; then
+            echo "" >&2
+            echo "One or more smoke tests failed — deploy may be broken" >&2
             exit 1
           fi
+
+          echo "All smoke tests passed"
