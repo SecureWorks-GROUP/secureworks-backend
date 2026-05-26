@@ -2775,7 +2775,8 @@ function buildClientPage(doc: any, token: string): string {
       <div class="pdf-mobile">
         <div class="pdf-mobile-icon">📄</div>
         <p>Your detailed quote is ready to view</p>
-        <a href="${doc.pdf_url}" target="_blank" class="btn btn-view-pdf">View Quote PDF</a>
+        <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn btn-view-pdf">View Quote PDF</a>
+        <a href="${doc.pdf_url}" download style="display:block;margin-top:8px;color:#4C6A7C;font-size:13px;text-decoration:underline;">Download PDF</a>
       </div>
       ` : '<p style="color:#4C6A7C;text-align:center;padding:20px;">PDF not available</p>'}
 
