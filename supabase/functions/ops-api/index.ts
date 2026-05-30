@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Ops API Edge Function
-// deploy-lane-validate: 2026-05-30.v2
+// deploy-lane-validate: 2026-05-30.v4
 //
 // Backend for the Ops Dashboard (scheduling, POs, WOs, pipeline)
 // and Trade mobile view. All data access uses service_role.
