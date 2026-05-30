@@ -391,3 +391,4 @@ When building or reviewing visual collateral, score each dimension 1-5:
 - Format: PNG only (JPEG artifacts hurt text analysis)
 - Review pages individually, not full-document screenshots
 - Always compare against a reference image when available
+# validation test 1780128628
