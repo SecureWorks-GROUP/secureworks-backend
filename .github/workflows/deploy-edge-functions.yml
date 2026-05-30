@@ -13,7 +13,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: github.repository == 'marninms98-dotcom/secureworks-site'
+    if: github.repository == 'SecureWorks-GROUP/secureworks-backend'
 
     steps:
       - uses: actions/checkout@v4
