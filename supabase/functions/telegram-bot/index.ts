@@ -2326,7 +2326,7 @@ serve(async (req: Request) => {
             } else if (errMsg.includes('429') || errMsg.includes('rate')) {
               userError = "I'm experiencing high demand at the moment. Please try again in 30 seconds, sir."
             } else if (errMsg.includes('500') || errMsg.includes('502') || errMsg.includes('503')) {
-              userError = "The backend service is temporarily unavailable. The dashboard remains operational: marninms98-dotcom.github.io/securedash/ops.html"
+              userError = "The backend service is temporarily unavailable. The dashboard remains operational: secureworks-group.github.io/securedash/ops.html"
             }
             await sendMessage(message.chat.id, userError)
             // Log error

@@ -4,7 +4,7 @@
 
 ### ops-api and send-quote have one production deploy lane
 Production `ops-api` and `send-quote` deploys are allowed only from
-`marninms98-dotcom/secureworks-site/main` or the local release worktree:
+`SecureWorks-GROUP/secureworks-site/main` or the local release worktree:
 `/Users/marninstobbe/Projects/_release/secureworks-site-main`.
 
 Do not deploy these functions from dashboard repos, stale worktrees, feature

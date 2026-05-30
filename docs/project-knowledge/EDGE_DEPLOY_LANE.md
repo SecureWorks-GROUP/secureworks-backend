@@ -4,7 +4,7 @@
 
 Production `ops-api` and `send-quote` must only deploy from one place:
 
-- GitHub: `marninms98-dotcom/secureworks-site`
+- GitHub: `SecureWorks-GROUP/secureworks-site`
 - Branch: `main`
 - Local release worktree: `/Users/marninstobbe/Projects/_release/secureworks-site-main`
 
@@ -96,7 +96,7 @@ tokens must therefore live only in the `secureworks-site` production environment
 
 ## GitHub Secret Policy
 
-Only `marninms98-dotcom/secureworks-site` may hold the production
+Only `SecureWorks-GROUP/secureworks-site` may hold the production
 `SUPABASE_ACCESS_TOKEN`, and it should be environment-scoped to `production`.
 
 As of 2026-05-18, the active production deploy token is named

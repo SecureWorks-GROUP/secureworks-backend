@@ -7,7 +7,7 @@ deployable reality only.
 
 Production deploys are allowed only from:
 
-- GitHub repo: `marninms98-dotcom/secureworks-site`
+- GitHub repo: `SecureWorks-GROUP/secureworks-site`
 - Branch: `main`
 - Local release worktree: `/Users/marninstobbe/Projects/_release/secureworks-site-main`
 

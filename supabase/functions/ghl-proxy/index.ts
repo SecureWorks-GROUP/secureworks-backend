@@ -776,8 +776,8 @@ serve(async (req: Request) => {
       const tool = toolType === 'fencing' ? 'fencing' : 'patio'
       // GitHub Pages hosts the tools
       const toolUrls: Record<string, string> = {
-        patio: 'https://marninms98-dotcom.github.io/patio/',
-        fencing: 'https://marninms98-dotcom.github.io/fence-designer/',
+        patio: 'https://secureworks-group.github.io/patio/',
+        fencing: 'https://secureworks-group.github.io/fence-designer/',
       }
       const scopeUrl = `${toolUrls[tool] || toolUrls.patio}?jobId=${jobId}`
 

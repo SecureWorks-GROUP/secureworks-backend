@@ -1,4 +1,4 @@
 [submodule "dashboard"]
 	path = dashboard
-	url = https://github.com/marninms98-dotcom/securedash.git
+	url = https://github.com/SecureWorks-GROUP/securedash.git
 	ignore = untracked
