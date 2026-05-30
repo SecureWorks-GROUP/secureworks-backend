@@ -1302,6 +1302,14 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
+  // ── Unauthenticated deploy-lane version probe ──
+  const _preAuthUrl = new URL(req.url)
+  if (_preAuthUrl.searchParams.get('action') === 'deploy-lane-version') {
+    return new Response(JSON.stringify({ version: '2026-05-30.v2', function: 'ops-api' }), {
+      status: 200, headers: { ...CORS, 'Content-Type': 'application/json' }
+    })
+  }
+
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
