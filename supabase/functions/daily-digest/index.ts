@@ -4659,3 +4659,4 @@ function fmtDollar(n: number): string {
   if (!n || isNaN(n)) return '$0'
   return '$' + Math.round(n).toLocaleString()
 }
+// branch-protection test: v2026.05.30-bp1
