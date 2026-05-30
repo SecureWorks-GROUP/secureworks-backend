@@ -236,10 +236,10 @@ Telegram message arrives
 | Project | Path | Deployed On |
 |---------|------|-------------|
 | Edge Functions | `~/Projects/secureworks-site/supabase/functions/` | Supabase |
-| Dashboards (CEO, Ops, Trade) | GitHub: `marninms98-dotcom/securedash` | GitHub Pages |
-| Sale Dashboard | GitHub: `marninms98-dotcom/secureworks-sale` | GitHub Pages |
+| Dashboards (CEO, Ops, Trade) | GitHub: `SecureWorks-GROUP/securedash` | GitHub Pages |
+| Sale Dashboard | GitHub: `SecureWorks-GROUP/secureworks-sale` | GitHub Pages |
 | Patio Scoping Tool | `~/Projects/patio-tool/` | GitHub Pages |
-| Fencing Scoping Tool | GitHub: `marninms98-dotcom/fence-designer` | GitHub Pages |
+| Fencing Scoping Tool | GitHub: `SecureWorks-GROUP/fence-designer` | GitHub Pages |
 | Astro Website | `~/Projects/secureworks-website/` | Cloudflare Pages |
 | Marketing Generator | `~/Projects/secureworks-marketing/` | Not deployed |
 | Railway MCP Agent | Railway | Railway (production) |

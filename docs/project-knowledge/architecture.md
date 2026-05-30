@@ -46,7 +46,7 @@ AI Chat → ops-ai → Claude API with tool_use calling ops-api + reporting-api
 - GHL Materials Pipeline: `SkgfC3nzTsOHqTSv9LNl`
 
 ## Scoping Tools (GitHub Pages)
-- Patio: `https://marninms98-dotcom.github.io/patio/`
-- Fencing: `https://marninms98-dotcom.github.io/fence-designer/`
+- Patio: `https://secureworks-group.github.io/patio/`
+- Fencing: `https://secureworks-group.github.io/fence-designer/`
 - Shared code: `tools/shared/cloud.js` + `tools/shared/integration.js`
 - ALL Supabase queries go through edge functions (RLS blocks direct client calls)

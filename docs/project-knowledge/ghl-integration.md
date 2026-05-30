@@ -9,10 +9,10 @@
 - GHL API token: Private Integration Token with all scopes enabled
 
 ## Key URLs
-- Patio tool: `https://marninms98-dotcom.github.io/patio/`
-- Fencing tool: `https://marninms98-dotcom.github.io/fence-designer/`
-- Patio repo: `https://github.com/marninms98-dotcom/patio.git`
-- Fencing repo: `https://github.com/marninms98-dotcom/fence-designer.git`
+- Patio tool: `https://secureworks-group.github.io/patio/`
+- Fencing tool: `https://secureworks-group.github.io/fence-designer/`
+- Patio repo: `https://github.com/SecureWorks-GROUP/patio.git`
+- Fencing repo: `https://github.com/SecureWorks-GROUP/fence-designer.git`
 
 ## Edge Function Endpoints
 - `opportunities`, `search`, `contact`, `update_contact` — GHL API

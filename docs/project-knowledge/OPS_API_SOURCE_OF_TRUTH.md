@@ -4,7 +4,7 @@
 
 Production `ops-api` is owned by one repository and one deploy lane:
 
-- GitHub repo: `marninms98-dotcom/secureworks-site`
+- GitHub repo: `SecureWorks-GROUP/secureworks-site`
 - Branch: `main`
 - Local release worktree: `/Users/marninstobbe/Projects/_release/secureworks-site-main`
 - Supabase function slug: `/functions/v1/ops-api`
@@ -84,7 +84,7 @@ Only `secureworks-site` may hold the production Supabase deploy token.
 Current production deploy token state as of 2026-05-18:
 
 - Token name in Supabase: `secureworks-site-prod-edge-18MAY`
-- GitHub storage: `marninms98-dotcom/secureworks-site` production
+- GitHub storage: `SecureWorks-GROUP/secureworks-site` production
   environment secret `SUPABASE_ACCESS_TOKEN`
 - Expiry: 2026-06-17
 - Local Supabase CLI on Marnin's Mac: logged out after token rotation, so

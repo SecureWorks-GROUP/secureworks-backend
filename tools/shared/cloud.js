@@ -166,7 +166,7 @@
       if (redirectUrl.startsWith('file:') || redirectUrl.includes('127.0.0.1') || redirectUrl.includes('localhost')) {
         // Local dev — redirect to GitHub Pages so the link actually works
         var title = (document.title || '').toLowerCase();
-        redirectUrl = title.includes('fence') ? 'https://marninms98-dotcom.github.io/fence-designer/' : 'https://marninms98-dotcom.github.io/patio/';
+        redirectUrl = title.includes('fence') ? 'https://secureworks-group.github.io/fence-designer/' : 'https://secureworks-group.github.io/patio/';
       }
       var result = await sb.auth.signInWithOtp({
         email: email,
