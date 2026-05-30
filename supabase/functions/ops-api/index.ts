@@ -1305,7 +1305,7 @@ if (import.meta.main) serve(async (req: Request) => {
   // ── Unauthenticated deploy-lane version probe ──
   const _preAuthUrl = new URL(req.url)
   if (_preAuthUrl.searchParams.get('action') === 'deploy-lane-version') {
-    return new Response(JSON.stringify({ version: '2026-05-30.v2', function: 'ops-api' }), {
+    return new Response(JSON.stringify({ version: '2026-05-30.v3', function: 'ops-api' }), {
       status: 200, headers: { ...CORS, 'Content-Type': 'application/json' }
     })
   }
