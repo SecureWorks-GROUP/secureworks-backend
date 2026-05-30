@@ -58,6 +58,10 @@ export type BuildFullReleasePacketInput = {
   // Optional structural fields.
   option_label: string | null
   superseded_by_revision_id: string | null
+  // Scope-Memory-Saving step 6 — citation of the frozen scope_revisions row
+  // this packet describes. Non-Quick-Quote callers pass the looked-up id;
+  // Quick Quote and any pre-step-6 caller pass null (backward-compatible).
+  scope_revision_id: string | null
 
   // Hard-blocker overrides issued by Marnin/Shaun (per §9 default). When
   // empty, no overrides are in play. The validator checks each entry against
@@ -170,6 +174,7 @@ export async function buildFullReleasePacket(
 
     option_label: input.option_label,
     superseded_by_revision_id: input.superseded_by_revision_id,
+    scope_revision_id: input.scope_revision_id,
   }
 
   // 4. Run the validator. It looks at the manifest + internal_cost together

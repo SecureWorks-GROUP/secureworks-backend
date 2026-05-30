@@ -418,4 +418,14 @@ export type QuoteReleasePacketV2 = {
   // Populated by the supersession trigger when a higher-version row INSERTs
   // for the same job. Lifecycle implementation in P4 (Loop 5).
   superseded_by_revision_id: string | null
+
+  // Scope-Memory-Saving Loop 1, step 6 — citation of the frozen
+  // scope_revisions row this packet describes. Non-Quick-Quote callers
+  // (send-quote/send, send-quote/send-runs) look up the latest frozen
+  // revision for the job and pass it through; Quick Quote remains a
+  // documented shortcut path and writes null. Backward compatible:
+  // packets sealed before Loop 1 ship with null and validate fine. The
+  // Cap 0 V2 enforce-mode flip (Loop 6 of the substrate roadmap) is the
+  // gate that will refuse non-Quick-Quote releases without this id.
+  scope_revision_id: string | null
 }

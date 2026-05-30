@@ -262,6 +262,7 @@ export const patioInputValid: BuildFullReleasePacketInput = {
   provenance: stubProvenance,
   option_label: null,
   superseded_by_revision_id: null,
+  scope_revision_id: null,
   overrides: [],
   override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
 }

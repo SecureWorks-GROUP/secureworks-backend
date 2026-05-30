@@ -133,6 +133,10 @@ import {
   recordScopeArtifact as _recordScopeArtifact,
   isArtifactType as _isArtifactType,
 } from '../_shared/scope_freeze/record_scope_artifact.ts'
+// Scope-Memory-Saving Loop 1, step 7 — frozen WO inputs loader. Backs
+// create_work_order's authoritative "read frozen, never fall back to
+// jobs.scope_json" path when scope_revision_id is supplied.
+import { loadFrozenWorkOrderInputs as _loadFrozenWorkOrderInputs } from '../_shared/scope_freeze/load_frozen_work_order_inputs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -414,7 +418,7 @@ async function recordReleasedQuoteRevision(
     const releaseId = crypto.randomUUID()
 
     let v2Cols: Record<string, unknown> = {}
-    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null = null
+    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string; scope_revision_id: string | null } | null = null
     if (input.v2_inputs) {
       try {
         const v2 = await buildV2Augmentation(sb, {
@@ -438,6 +442,7 @@ async function recordReleasedQuoteRevision(
           v2EmitInputs = {
             manifest_hash: v2.manifest_hash,
             internal_cost_hash: v2.internal_cost_hash,
+            scope_revision_id: v2.scope_revision_id,
           }
           if (v2.soft_warnings.length > 0) {
             console.log('[v2-soft-warnings]', JSON.stringify({
@@ -504,6 +509,7 @@ async function recordReleasedQuoteRevision(
           manifest_hash: v2EmitInputs.manifest_hash,
           internal_cost_hash: v2EmitInputs.internal_cost_hash,
           released_via: input.released_via,
+          scope_revision_id: v2EmitInputs.scope_revision_id,
         })
       }
       return inserted.id
@@ -1594,7 +1600,7 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'scope_revision_id required' }, 400)
         }
         if (!_isArtifactType(body.artifact_type)) {
-          return json({ error: 'artifact_type required (one of render_hero, render_front, render_side, render_site_plan, render_riser, render_post_detail, render_profile, render_3d_scene, quote_pdf, per_contact_pdf, work_order_pdf, material_order_pdf, model_glb, drawing)' }, 400)
+          return json({ error: 'artifact_type required (one of render_hero, render_front, render_side, render_site_plan, render_riser, render_post_detail, render_profile, render_3d_scene, render_gutter_detail, render_ridge_detail, quote_pdf, per_contact_pdf, work_order_pdf, material_order_pdf, model_glb, drawing)' }, 400)
         }
         const result = await _recordScopeArtifact(client, {
           scope_revision_id,
@@ -6756,23 +6762,152 @@ async function createWorkOrder(client: any, body: any) {
     if (job) address = [job.site_address, job.site_suburb].filter(Boolean).join(', ')
   }
 
+  // ── Scope-Memory-Saving Loop 1, step 7 ──
+  // When the caller supplies scope_revision_id, the WO row is BOUND to a
+  // frozen revision via the new work_orders.scope_revision_id FK column.
+  // The strategy doc § 6 step 6 hard rule — "no work order generated from
+  // mutable jobs.scope_json when a frozen revision is cited" — applies to
+  // the WO PDF GENERATOR (which reads frozen scope/pricing/artifacts via
+  // load_frozen_work_order_inputs.ts). It does NOT apply to the
+  // work_orders.scope_items column shape: scope_items is a free-form jsonb
+  // array that downstream readers (reporting-api, ops-api list_work_orders,
+  // trade-api, etc.) iterate via .reduce / array indexing. Codex stop-time
+  // review caught that overwriting scope_items with the parsed scope_json
+  // (a plain object, not an array) would crash any downstream consumer
+  // that calls .reduce on it.
+  //
+  // So this branch:
+  //   * keeps scope_items as the caller-supplied array shape (legacy contract),
+  //   * persists scope_revision_id + quote_revision_id as the AUTHORITATIVE
+  //     citation (any consumer that wants the frozen content reads it via
+  //     load_frozen_work_order_inputs(scope_revision_id)),
+  //   * still validates the caller's scope_revision_id (cross-job guard,
+  //     superseded refusal, integrity check) before persisting the row,
+  //   * still surfaces the citation + frozen metadata in the wo.created
+  //     business_event payload so T7 readers can index without a join.
+  //
+  // When scope_revision_id is null/absent, behaviour is identical to before.
+  const scopeRevisionId: string | null = body.scope_revision_id || body.scopeRevisionId || null
+  const quoteRevisionId: string | null = body.quote_revision_id || body.quoteRevisionId || null
+
+  // scope_items: array-shaped per the existing column contract. Callers
+  // (typically the dashboard / securedash UI) build this array; the WO
+  // PDF generator uses load_frozen_work_order_inputs separately when it
+  // needs the canonical frozen content.
+  const resolvedScopeItems: unknown = body.scope_items || body.scopeItems || []
+  let frozenWoMetadata: Record<string, unknown> | null = null
+
+  if (scopeRevisionId) {
+    // Pass job_id through so the helper enforces the cross-job guard.
+    // Without this, a caller mixing job_id=JOB-A with scope_revision_id
+    // from JOB-B would create a WO bound to JOB-A but citing JOB-B's
+    // frozen scope. The helper returns code='cross_job_mismatch' on
+    // divergence; we surface it as HTTP 409.
+    const frozen = await _loadFrozenWorkOrderInputs(client, {
+      scope_revision_id: scopeRevisionId,
+      job_id: jId,
+    })
+    if (!frozen.ok) {
+      // Throw ApiError so the outer ops-api catch preserves the HTTP status
+      // (instanceof ApiError check at line ~3494). Plain Error → generic 500.
+      const httpHint =
+        frozen.error.code === 'scope_revision_not_found' ? 404
+        : frozen.error.code === 'cross_job_mismatch' ? 409
+        : frozen.error.code === 'scope_revision_not_frozen' ? 409
+        : frozen.error.code === 'invalid_input' ? 400
+        : frozen.error.code === 'integrity_error' ? 500
+        : 500
+      throw new ApiError(
+        `scope_revision_id ${scopeRevisionId} could not be loaded for job ${jId}: ${JSON.stringify(frozen.error)}`,
+        httpHint,
+      )
+    }
+    if (frozen.status !== 'frozen') {
+      // The helper allows superseded for read-only viewer use (step 8),
+      // but ops-api create_work_order MUST refuse superseded sources —
+      // operators should re-freeze (or cite the latest frozen revision)
+      // before generating a new WO at a stale point in history.
+      throw new ApiError(
+        `scope_revision_id ${scopeRevisionId} has status='${frozen.status}'; only 'frozen' revisions can back a new work order. Re-freeze the latest scope before generating a new WO.`,
+        409,
+      )
+    }
+    // Capture the citation metadata for the business_event payload. The
+    // WO row itself binds to the frozen revision via scope_revision_id;
+    // T7 readers can dereference back to scope/pricing/artifacts via
+    // load_frozen_work_order_inputs without ever touching jobs.scope_json.
+    frozenWoMetadata = {
+      revision_number: frozen.revision_number,
+      tool_kind: frozen.tool_kind,
+      scope_hash: frozen.scope_hash,
+      pricing_hash: frozen.pricing_hash,
+      renderer_version: frozen.renderer_version,
+      tool_version: frozen.tool_version,
+      artifact_count: frozen.artifacts.length,
+    }
+  }
+
+  // Mirror the same cross-job guard for quote_revision_id so a caller can't
+  // bind a WO to JOB-A's scope while citing JOB-B's quote (or vice versa).
+  // quote_revisions is the existing release-truth table; we just verify
+  // the cited row's job_id matches. All throws use ApiError so the outer
+  // ops-api catch preserves the HTTP status code (404 / 409 / 500).
+  if (quoteRevisionId) {
+    let qrRow: { id: string; job_id: string } | null = null
+    try {
+      const { data, error: qrErr } = await client.from('quote_revisions')
+        .select('id, job_id')
+        .eq('id', quoteRevisionId)
+        .maybeSingle()
+      if (qrErr) {
+        throw new ApiError(
+          `quote_revision_id ${quoteRevisionId} lookup failed: ${qrErr.message ?? qrErr}`,
+          500,
+        )
+      }
+      qrRow = (data as { id: string; job_id: string } | null) ?? null
+    } catch (e: any) {
+      if (e instanceof ApiError) throw e
+      throw new ApiError(
+        `quote_revision_id ${quoteRevisionId} verification failed: ${e?.message ?? e}`,
+        500,
+      )
+    }
+    if (!qrRow) {
+      throw new ApiError(`quote_revision_id ${quoteRevisionId} not found`, 404)
+    }
+    if (qrRow.job_id !== jId) {
+      throw new ApiError(
+        `quote_revision_id ${quoteRevisionId} belongs to job ${qrRow.job_id}, not ${jId} — cross-job citation refused`,
+        409,
+      )
+    }
+  }
+
+  // Build the insert payload conditionally — scope_revision_id is only
+  // included when present so tests / callers running against schemas that
+  // pre-date the work_orders_scope_revision_id migration still succeed.
+  const insertPayload: Record<string, unknown> = {
+    org_id: DEFAULT_ORG_ID,
+    job_id: jId,
+    wo_number: woNum,
+    trade_name: body.trade_name || body.tradeName || null,
+    trade_phone: body.trade_phone || body.tradePhone || null,
+    trade_email: body.trade_email || body.tradeEmail || null,
+    assigned_user_id: body.assigned_user_id || body.assignedUserId || null,
+    scope_items: resolvedScopeItems,
+    special_instructions: body.special_instructions || body.specialInstructions || null,
+    scheduled_date: body.scheduled_date || body.scheduledDate || null,
+    site_address: address || null,
+    status: 'draft',
+    created_by: body.operator_email || body.user_email || null,
+  }
+  if (scopeRevisionId) insertPayload.scope_revision_id = scopeRevisionId
+  if (quoteRevisionId) insertPayload.quote_revision_id = quoteRevisionId
+
   const { data, error } = await client
     .from('work_orders')
-    .insert({
-      org_id: DEFAULT_ORG_ID,
-      job_id: jId,
-      wo_number: woNum,
-      trade_name: body.trade_name || body.tradeName || null,
-      trade_phone: body.trade_phone || body.tradePhone || null,
-      trade_email: body.trade_email || body.tradeEmail || null,
-      assigned_user_id: body.assigned_user_id || body.assignedUserId || null,
-      scope_items: body.scope_items || body.scopeItems || [],
-      special_instructions: body.special_instructions || body.specialInstructions || null,
-      scheduled_date: body.scheduled_date || body.scheduledDate || null,
-      site_address: address || null,
-      status: 'draft',
-      created_by: body.operator_email || body.user_email || null,
-    })
+    .insert(insertPayload)
     .select()
     .single()
 
@@ -6784,7 +6919,16 @@ async function createWorkOrder(client: any, body: any) {
     detail_json: { wo_number: woNum, trade: body.trade_name || body.tradeName },
   })
 
-  // Dual-write to business_events
+  // Dual-write to business_events. Scope-Memory-Saving step 7 adds
+  // scope_revision_id + frozen metadata to the payload so a future T7
+  // reader can index WO creations by the frozen revision they cite without
+  // joining work_orders.
+  const woEventRelated: Array<{ type: string; id: string | null; name?: string }> = [
+    { type: 'job', id: jId },
+    { type: 'trade', id: data.assigned_user_id || null, name: body.trade_name || body.tradeName || '' },
+  ]
+  if (scopeRevisionId) woEventRelated.push({ type: 'scope_revision', id: scopeRevisionId })
+  if (quoteRevisionId) woEventRelated.push({ type: 'quote_revision', id: quoteRevisionId })
   logBusinessEvent(client, {
     event_type: 'wo.created',
     entity_type: 'work_order',
@@ -6793,10 +6937,10 @@ async function createWorkOrder(client: any, body: any) {
     correlation_id: jId,
     payload: {
       entity: { id: data.id, name: woNum },
-      related_entities: [
-        { type: 'job', id: jId },
-        { type: 'trade', id: data.assigned_user_id || null, name: body.trade_name || body.tradeName || '' },
-      ],
+      related_entities: woEventRelated,
+      scope_revision_id: scopeRevisionId,
+      quote_revision_id: quoteRevisionId,
+      frozen: frozenWoMetadata,
     },
     metadata: { operator: body.operator_email || body.user_email || null },
   })
@@ -8384,6 +8528,12 @@ async function sendQuickQuoteEmail(client: any, body: any) {
         override_operator_allowlist: [],
         pdf_sha256: '',
         email_html_sha256: '',
+        // Scope-Memory-Saving step 6 — Quick Quote is a documented shortcut
+        // path that does NOT go through scope_revisions. The freeze flow is
+        // not invoked for Quick Quote, so there is no frozen revision to
+        // cite. Explicit null here makes the intent obvious to future
+        // readers; build_v2_augmentation accepts null without warning.
+        scope_revision_id: null,
       }
     } catch (e: any) {
       console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({

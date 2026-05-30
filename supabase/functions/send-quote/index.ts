@@ -34,6 +34,11 @@ import {
   emitV2SealedEvent,
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
+// Scope-Memory-Saving step 6 — hash-verified citation. Replaces the naive
+// "latest frozen id" lookup so the V2 packet only cites a frozen revision
+// when the live scope+pricing actually match its hashes (no false citation
+// after operator edits).
+import { resolveScopeRevisionCitation } from '../_shared/release_packet/resolve_scope_revision_citation.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -52,11 +57,79 @@ const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
+// ── Scope-Memory-Saving step 6 ──
+// Resolves the verified scope_revision_id citation for a job at quote-send
+// time. Wraps resolveScopeRevisionCitation with the soft-warn logging the
+// rest of send-quote uses: any DB error, hash mismatch, or "no frozen
+// revision yet" results in null + a structured log line, never a thrown
+// error or a release-truth regression.
+//
+// Why hash verification: Codex stop-time review (2026-05-04) flagged that
+// citing the bare "latest frozen revision id" could be a lie when the
+// operator has since edited jobs.scope_json (clone-then-edit-without-
+// re-freeze, or a direct save_scope path). Citing only when both
+// scope_hash and pricing_hash match the live values keeps the citation
+// truthful: if scope_revision_id is non-null in the V2 packet, the
+// scope_snapshot/pricing_snapshot in the same packet canonical-hash
+// to the values recorded on that frozen row.
+async function resolveCitationForRelease(
+  sb: any,
+  args: {
+    job_id: string
+    scope_json: Record<string, unknown> | null
+    pricing_json: Record<string, unknown> | null
+    handler: string
+  },
+): Promise<string | null> {
+  const result = await resolveScopeRevisionCitation(sb, {
+    job_id: args.job_id,
+    scope_json: args.scope_json,
+    pricing_json: args.pricing_json,
+  })
+  if (result.scope_revision_id !== null) return result.scope_revision_id
+
+  // Surface the structured outcome so an operator (and any later T7 audit)
+  // can spot when a release shipped without a verified citation.
+  if (result.reason === 'scope_hash_mismatch' || result.reason === 'pricing_hash_mismatch') {
+    console.warn('[scope-revision-stale-citation-skipped]', JSON.stringify({
+      job_id: args.job_id,
+      handler: args.handler,
+      reason: result.reason,
+      detail: result.detail ?? {},
+      note: 'Live scope or pricing has drifted from the latest frozen revision. V2 packet ships with scope_revision_id=null. Operator should re-freeze to re-establish citation.',
+    }))
+  } else if (result.reason === 'db_error' || result.reason === 'hash_error') {
+    console.error('[scope-revision-lookup-fail]', JSON.stringify({
+      job_id: args.job_id,
+      handler: args.handler,
+      reason: result.reason,
+      detail: result.detail ?? {},
+      note: 'V2 packet will cite scope_revision_id=null; V1 release-truth proceeds',
+    }))
+  }
+  // 'no_frozen_revision' / 'no_jobs_input' are routine — no log needed.
+  return null
+}
+
 // ── Reply-to routing: fencing jobs → fencing@, everything else → patios@ ──
 function getClientReplyTo(jobType: string | null, jobNumber?: string): string {
   const dept = jobType === 'fencing' ? 'fencing' : 'patios'
   const tag = jobNumber ? `+${jobNumber}` : ''
   return `${dept}${tag}@secureworkswa.com.au`
+}
+
+// ── Internal group-copy routing: every successful client quote send is BCC'd
+// to the corresponding division inbox so the team has a thread copy without
+// the customer seeing the internal address. Fencing → fencing@; patio →
+// patios@. Unknown / misc types get no group copy (returns null). The caller
+// MUST treat null-on-known-type as a configuration failure (fail-closed) so a
+// silent constant clear doesn't quietly drop the team copy.
+function groupCopyAddress(jobType: string | null | undefined): string | null {
+  switch (jobType) {
+    case 'fencing': return 'fencing@secureworks.com.au'
+    case 'patio':   return 'patios@secureworks.com.au'
+    default:        return null
+  }
 }
 
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
@@ -389,7 +462,7 @@ async function recordReleasedQuoteRevision(
     const releaseId = crypto.randomUUID()
 
     let v2Cols: Record<string, unknown> = {}
-    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null = null
+    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string; scope_revision_id: string | null } | null = null
     if (input.v2_inputs) {
       try {
         const v2 = await buildV2Augmentation(sb, {
@@ -413,6 +486,7 @@ async function recordReleasedQuoteRevision(
           v2EmitInputs = {
             manifest_hash: v2.manifest_hash,
             internal_cost_hash: v2.internal_cost_hash,
+            scope_revision_id: v2.scope_revision_id,
           }
           if (v2.soft_warnings.length > 0) {
             console.log('[v2-soft-warnings]', JSON.stringify({
@@ -487,6 +561,7 @@ async function recordReleasedQuoteRevision(
           manifest_hash: v2EmitInputs.manifest_hash,
           internal_cost_hash: v2EmitInputs.internal_cost_hash,
           released_via: input.released_via,
+          scope_revision_id: v2EmitInputs.scope_revision_id,
         })
       }
       return inserted.id
@@ -558,8 +633,8 @@ serve(async (req: Request) => {
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   try {
-    // ── API Key Auth (only for send/send-invoice — view/accept/decline are public client endpoints) ──
-    if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
+    // ── API Key Auth (only for send/send-invoice/inspect — view/accept/decline are public client endpoints) ──
+    if (path === 'send' || path === 'send-invoice' || path === 'send-runs' || path === 'inspect') {
       const apiKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
       const validKey = Deno.env.get('SW_API_KEY')
       const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -568,6 +643,61 @@ serve(async (req: Request) => {
           status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         })
       }
+    }
+
+    // ── INSPECT — read-only diagnostic timeline for a quote number ──
+    // Track D (Q-0108 reliability work). Returns the job_documents +
+    // email_events for a given quote_number so an operator can answer "did
+    // this quote ever get sent, and if not, why?" without opening the SQL
+    // console. Pure read; no writes, no Resend, no external calls.
+    if (path === 'inspect' && req.method === 'GET') {
+      const quoteNumber = url.searchParams.get('quote_number')
+      if (!quoteNumber) {
+        return jsonResponse({ error: 'quote_number required' }, 400, corsHeaders)
+      }
+
+      const { data: docs } = await sb
+        .from('job_documents')
+        .select('id, job_id, job_contact_id, quote_number, sent_at, sent_to_client, share_token, pdf_url, created_at, type, run_label')
+        .eq('quote_number', quoteNumber)
+        .order('created_at', { ascending: true })
+
+      const docList = docs || []
+      const jobIds = Array.from(new Set(docList.map((d: any) => d.job_id).filter(Boolean)))
+
+      let events: any[] = []
+      if (jobIds.length > 0) {
+        const { data: ev } = await sb
+          .from('email_events')
+          .select('id, recipient, subject, status, failure_reason, resend_message_id, created_at, sent_at, failed_at, metadata, job_id')
+          .in('job_id', jobIds)
+          .order('created_at', { ascending: false })
+          .limit(50)
+        events = ev || []
+      }
+
+      let jobs: any[] = []
+      if (jobIds.length > 0) {
+        const { data: j } = await sb
+          .from('jobs')
+          .select('id, type, job_number, status, client_name, client_email')
+          .in('id', jobIds)
+        jobs = j || []
+      }
+
+      return jsonResponse({
+        quote_number: quoteNumber,
+        documents: docList,
+        jobs,
+        email_events: events,
+        summary: {
+          documents_found: docList.length,
+          jobs_found: jobs.length,
+          email_events_found: events.length,
+          events_sent: events.filter((e: any) => e.status === 'sent').length,
+          events_failed: events.filter((e: any) => e.status === 'failed').length,
+        },
+      }, 200, corsHeaders)
     }
 
     // ── SEND QUOTE EMAIL ──
@@ -617,6 +747,15 @@ serve(async (req: Request) => {
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
+      // Internal group BCC. Fail-closed when the job is fencing/patio but the
+      // address constant is unset — better to refuse the send than to deliver
+      // to the customer with no team copy and no warning.
+      const groupCopy = groupCopyAddress(doc.jobs?.type)
+      if ((doc.jobs?.type === 'fencing' || doc.jobs?.type === 'patio') && !groupCopy) {
+        return jsonResponse({
+          error: `Group copy address not configured for type=${doc.jobs?.type}. Refusing to send without team copy.`,
+        }, 500, corsHeaders)
+      }
       {
         const emailHtml = buildQuoteEmail({
           clientName: client_name,
@@ -664,6 +803,7 @@ serve(async (req: Request) => {
             subject: emailSubject,
             html: emailHtml,
             ...(cc_emails && cc_emails.length > 0 ? { cc: cc_emails } : {}),
+            ...(groupCopy ? { bcc: [groupCopy] } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
           }),
         })
@@ -674,7 +814,7 @@ serve(async (req: Request) => {
             emailType: 'quote', jobId: doc.job_id, recipient: client_email,
             subject: emailSubject, resendMessageId: resendData.id,
             status: 'sent',
-            metadata: { document_id: doc.id, quote_number: doc.quote_number, client_name: client_name, job_type: doc.jobs?.type, cc_emails: cc_emails || [] },
+            metadata: { document_id: doc.id, quote_number: doc.quote_number, client_name: client_name, job_type: doc.jobs?.type, cc_emails: cc_emails || [], group_bcc: groupCopy || null },
           })
           // Log to po_communications for client email thread
           sb.from('po_communications').insert({
@@ -748,7 +888,11 @@ serve(async (req: Request) => {
           // V2 columns NULL and the V1 release-truth path proceeds untouched.
           let v2Inputs: Omit<V2AugmentationInput, 'release_id'> | null = null
           try {
-            const [{ data: fullJobRow }, { data: contactRows }, { data: mediaRows }] = await Promise.all([
+            const [
+              { data: fullJobRow },
+              { data: contactRows },
+              { data: mediaRows },
+            ] = await Promise.all([
               sb.from('jobs')
                 .select('id, type, org_id, client_name, client_email, client_phone, site_address, site_suburb, site_lat, site_lng, job_number, ghl_contact_id, xero_contact_id, scope_json, pricing_json, notes, created_by')
                 .eq('id', doc.job_id).maybeSingle(),
@@ -759,6 +903,17 @@ serve(async (req: Request) => {
                 .select('id, type, phase, storage_url, label, taken_at, lat, lng')
                 .eq('job_id', doc.job_id),
             ])
+            // Hash-verified citation lookup runs after the jobs row is
+            // available — we need the live scope_json + pricing_json to
+            // canonical-hash and compare against the frozen row's hashes.
+            const verifiedScopeRevisionId = fullJobRow
+              ? await resolveCitationForRelease(sb, {
+                  job_id: doc.job_id,
+                  scope_json: fullJobRow.scope_json ?? null,
+                  pricing_json: fullJobRow.pricing_json ?? null,
+                  handler: 'send-quote/send',
+                })
+              : null
             if (fullJobRow) {
               v2Inputs = {
                 job_id: doc.job_id,
@@ -787,6 +942,16 @@ serve(async (req: Request) => {
                 override_operator_allowlist: [],
                 pdf_sha256: '',
                 email_html_sha256: '',
+                // Scope-Memory-Saving step 6 — non-Quick-Quote release path.
+                // HASH-VERIFIED citation: only set when canonical-hash of the
+                // live scope_json + pricing_json matches the latest frozen
+                // revision's recorded hashes. Drift (e.g. operator edited
+                // jobs.scope_json after freezing without re-freezing) drops
+                // the citation to null with a structured warning instead of
+                // shipping a false claim. Pre-step-5 jobs and jobs with no
+                // frozen revision yet also pass null — V1 release-truth
+                // proceeds either way.
+                scope_revision_id: verifiedScopeRevisionId,
               }
             }
           } catch (e: any) {
@@ -1966,11 +2131,22 @@ serve(async (req: Request) => {
       }))
       const anyNeighbourBound = runs.some((r: any) => !!r.neighbour_id)
 
+      // Internal group BCC for the whole runs bundle. Single resolution per
+      // job (job.type is invariant across runs). Fail-closed when fencing/patio
+      // but the constant is unset — refuse before any customer email leaves.
+      const groupCopyRuns = groupCopyAddress(job?.type)
+      if ((job?.type === 'fencing' || job?.type === 'patio') && !groupCopyRuns) {
+        return jsonResponse({
+          error: `Group copy address not configured for type=${job?.type}. Refusing to send without team copy.`,
+        }, 500, corsHeaders)
+      }
+
       // Send emails grouped by recipient
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
       let emailsSent = 0
       let primarySent = false
       const primaryEmail = (primaryContact.client_email || job.client_email || '').toLowerCase()
+      const failedRecipients: Array<{ email: string, reason: string }> = []
 
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
@@ -2024,6 +2200,7 @@ serve(async (req: Request) => {
             html: emailHtml,
           }
           if (attachments.length > 0) emailPayload.attachments = attachments
+          if (groupCopyRuns) emailPayload.bcc = [groupCopyRuns]
 
           const resendRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
@@ -2033,8 +2210,14 @@ serve(async (req: Request) => {
           if (resendRes.ok) {
             emailsSent++
             if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
+          } else {
+            const errData = await resendRes.json().catch(() => ({}))
+            const reason = errData.message || `HTTP ${resendRes.status}`
+            failedRecipients.push({ email, reason })
+            console.log(`[send-runs] Resend rejected ${email}:`, JSON.stringify(errData))
           }
         } catch (e: any) {
+          failedRecipients.push({ email, reason: e?.message || 'network error' })
           console.log(`[send-runs] Failed to email ${email}:`, e.message)
         }
       }
@@ -2091,7 +2274,10 @@ serve(async (req: Request) => {
         // ── Loop 3 / P2 V2 augmentation prep (send-runs) ──
         let v2InputsRuns: Omit<V2AugmentationInput, 'release_id'> | null = null
         try {
-          const [{ data: contactRows }, { data: mediaRows }] = await Promise.all([
+          const [
+            { data: contactRows },
+            { data: mediaRows },
+          ] = await Promise.all([
             sb.from('job_contacts')
               .select('id, contact_type, is_primary, contact_label, client_name, client_email, client_phone, assigned_runs, share_percentage')
               .eq('job_id', job.id),
@@ -2099,6 +2285,16 @@ serve(async (req: Request) => {
               .select('id, type, phase, storage_url, label, taken_at, lat, lng')
               .eq('job_id', job.id),
           ])
+          // Hash-verified citation lookup. job is already in scope from the
+          // outer handler; pj is the latest pricing_json computed earlier in
+          // /send-runs. We canonical-hash both against the latest frozen
+          // revision's recorded hashes.
+          const verifiedScopeRevisionIdRuns = await resolveCitationForRelease(sb, {
+            job_id: job.id,
+            scope_json: ((job as any).scope_json ?? null) as Record<string, unknown> | null,
+            pricing_json: (pj ?? null) as Record<string, unknown> | null,
+            handler: 'send-quote/send-runs',
+          })
           v2InputsRuns = {
             job_id: job.id,
             version: 1,
@@ -2143,6 +2339,13 @@ serve(async (req: Request) => {
             override_operator_allowlist: [],
             pdf_sha256: '',
             email_html_sha256: '',
+            // Scope-Memory-Saving step 6 — non-Quick-Quote release path
+            // (multi-run fence quote). HASH-VERIFIED citation: only set
+            // when canonical-hash of the live scope_json + pricing_json
+            // matches the latest frozen revision's recorded hashes. Drift
+            // drops to null + structured warning rather than a false
+            // claim.
+            scope_revision_id: verifiedScopeRevisionIdRuns,
           }
         } catch (e: any) {
           console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({
@@ -2238,11 +2441,32 @@ serve(async (req: Request) => {
         }, { handler: 'send-quote/send-runs', job_id: job.id })
       }
 
+      // Track E — zero-sent hardening. If we had recipients but every Resend
+      // call failed, do NOT return success: true. The previous shape masked a
+      // total delivery failure as "Done!" in the UI. Documents and run rows
+      // remain in place (rolling them back is out of scope for this patch);
+      // the UI will show "Send Failed" with the per-recipient reason list.
+      const totalRecipients = Object.keys(emailsByRecipient).length
+      if (totalRecipients > 0 && emailsSent === 0) {
+        return jsonResponse({
+          success: false,
+          error: 'No quote emails were delivered',
+          runs_sent: runs.length,
+          documents_created: createdDocs.length,
+          emails_sent: 0,
+          recipients_attempted: totalRecipients,
+          failed_recipients: failedRecipients,
+          documents: createdDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
+        }, 502, corsHeaders)
+      }
+
       return jsonResponse({
         success: true,
         runs_sent: runs.length,
         documents_created: createdDocs.length,
         emails_sent: emailsSent,
+        recipients_attempted: totalRecipients,
+        failed_recipients: failedRecipients,
         documents: createdDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
       }, 200, corsHeaders)
     }

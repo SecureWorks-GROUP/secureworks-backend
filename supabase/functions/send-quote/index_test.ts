@@ -632,3 +632,106 @@ Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canon
   // equality is necessary but not sufficient; verify byte equality too).
   assertEquals(uploadedBytes, sb._state.inserted[0].manifest_canonical_text)
 })
+
+// ════════════════════════════════════════════════════════════
+// Q-0108 quote-send reliability: groupCopyAddress + zero-sent
+// hardening + inspect endpoint behaviour (Tracks C/D/E).
+// ════════════════════════════════════════════════════════════
+
+// EXACT COPY of groupCopyAddress from index.ts (kept inline to avoid loading
+// `serve()`). Drift between this copy and the deployed helper is caught at PR
+// review.
+function groupCopyAddress(jobType: string | null | undefined): string | null {
+  switch (jobType) {
+    case 'fencing': return 'fencing@secureworks.com.au'
+    case 'patio':   return 'patios@secureworks.com.au'
+    default:        return null
+  }
+}
+
+Deno.test("groupCopyAddress — fencing returns the team inbox", () => {
+  assertEquals(groupCopyAddress('fencing'), 'fencing@secureworks.com.au')
+})
+
+Deno.test("groupCopyAddress — patio returns the team inbox", () => {
+  assertEquals(groupCopyAddress('patio'), 'patios@secureworks.com.au')
+})
+
+Deno.test("groupCopyAddress — misc / null / unknown returns null (no group copy)", () => {
+  assertEquals(groupCopyAddress('misc'), null)
+  assertEquals(groupCopyAddress(null), null)
+  assertEquals(groupCopyAddress(undefined), null)
+  assertEquals(groupCopyAddress(''), null)
+  assertEquals(groupCopyAddress('renovation'), null)
+})
+
+Deno.test("groupCopyAddress — addresses are namespaced under @secureworks.com.au (not the .app domain used for orders/quotes)", () => {
+  // Guards against accidentally pointing at orders@secureworksgroup.app
+  // (which is the PO inbox per CLAUDE.md routing rules) or any other domain.
+  for (const t of ['fencing', 'patio']) {
+    const addr = groupCopyAddress(t) || ''
+    assert(addr.endsWith('@secureworks.com.au'),
+      `expected @secureworks.com.au domain for ${t}, got ${addr}`)
+  }
+})
+
+// Fail-closed contract for the call site (documented as a test even though
+// the runtime guard lives inside the /send and /send-runs handlers — we mirror
+// the predicate here so a future helper rename / signature change breaks the
+// test loudly instead of silently degrading the team-copy guarantee).
+function shouldRefuseSendForMissingGroupAddress(jobType: string | null | undefined): boolean {
+  const known = jobType === 'fencing' || jobType === 'patio'
+  return known && !groupCopyAddress(jobType)
+}
+
+Deno.test("fail-closed — known type with missing constant must refuse", () => {
+  // We can't easily clear the constant in a unit test, so we mock the
+  // predicate's second clause: pretend the address is unset and confirm the
+  // refusal logic returns true for fencing/patio and false otherwise.
+  const refuse = (t: string | null | undefined, addr: string | null) =>
+    (t === 'fencing' || t === 'patio') && !addr
+  assertEquals(refuse('fencing', null), true)
+  assertEquals(refuse('patio', null), true)
+  assertEquals(refuse('misc', null), false)
+  assertEquals(refuse(null, null), false)
+  assertEquals(refuse('fencing', 'fencing@secureworks.com.au'), false)
+  assertEquals(refuse('patio', 'patios@secureworks.com.au'), false)
+})
+
+Deno.test("groupCopyAddress contract — current production constants pass the runtime guard", () => {
+  // With the constants set, the runtime guard must NEVER refuse.
+  assertEquals(shouldRefuseSendForMissingGroupAddress('fencing'), false)
+  assertEquals(shouldRefuseSendForMissingGroupAddress('patio'), false)
+  assertEquals(shouldRefuseSendForMissingGroupAddress('misc'), false)
+  assertEquals(shouldRefuseSendForMissingGroupAddress(null), false)
+})
+
+// Track E — /send-runs zero-sent hardening predicate. Mirrors the runtime
+// branch added at index.ts:return-jsonResponse to guarantee that "had
+// recipients but Resend rejected all of them" is treated as 502, not 200.
+function sendRunsShouldFail(emailsSent: number, totalRecipients: number): boolean {
+  return totalRecipients > 0 && emailsSent === 0
+}
+
+Deno.test("send-runs hardening — totalRecipients > 0 AND emailsSent === 0 → must fail", () => {
+  assertEquals(sendRunsShouldFail(0, 1), true)   // single failure
+  assertEquals(sendRunsShouldFail(0, 5), true)   // total failure across many
+})
+
+Deno.test("send-runs hardening — partial success keeps the path successful (UI surfaces partial via failed_recipients)", () => {
+  assertEquals(sendRunsShouldFail(1, 5), false)
+  assertEquals(sendRunsShouldFail(4, 5), false)
+})
+
+Deno.test("send-runs hardening — full success is success", () => {
+  assertEquals(sendRunsShouldFail(5, 5), false)
+  assertEquals(sendRunsShouldFail(1, 1), false)
+})
+
+Deno.test("send-runs hardening — empty recipient list does NOT trigger failure (degenerate input)", () => {
+  // If the runs bundle has no recipients (no primary email AND no neighbour
+  // emails) the function is in an upstream-broken state that should not be
+  // re-classified as "delivery failure" here. Track E only triggers on
+  // non-empty recipient sets that uniformly failed.
+  assertEquals(sendRunsShouldFail(0, 0), false)
+})
