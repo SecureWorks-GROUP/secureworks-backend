@@ -1383,6 +1383,10 @@ if (import.meta.main) serve(async (req: Request) => {
         const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
         return json(await jobDetail(client, jid, { slim }))
       }
+      case 'search_jobs': return json(await searchJobs(client, url.searchParams))
+      case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
+      case 'my_actions': return json(await myActions(client))
+      case 'list_job_actions': return json(await listJobActions(client, url.searchParams))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
@@ -5781,6 +5785,158 @@ async function assembleJobDossier(client: any, body: any) {
     _kind: 'job_dossier_v1',
     _ghlContactId: ghlContactId,
   }
+}
+
+
+// ── Dashboard source-alignment actions (Mission 1.5C) ──
+// These handlers were preserved from the dashboard-side ops-api copy so the
+// backend can become the only switchboard without removing current dashboard
+// reads. Keep them in the required-action manifest before production deploy.
+
+async function searchJobs(client: any, params: URLSearchParams) {
+  const q = (params.get('q') || '').trim()
+  if (!q || q.length < 2) return { results: [] }
+
+  const term = `%${q}%`
+
+  // Search across jobs, invoices, quotes, contacts in parallel
+  const [jobRes, invoiceRes, contactRes, quoteRes] = await Promise.all([
+    // Direct job fields: client name, job number, address, suburb, email, phone
+    client.from('jobs')
+      .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, type, status')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .or('legacy.is.null,legacy.eq.false')
+      .or(`client_name.ilike.${term},job_number.ilike.${term},site_address.ilike.${term},site_suburb.ilike.${term},client_email.ilike.${term},client_phone.ilike.${term}`)
+      .not('status', 'in', '("lost","cancelled","draft")')
+      .order('updated_at', { ascending: false })
+      .limit(20),
+    // Xero invoices: reference or invoice number
+    client.from('xero_invoices')
+      .select('job_id, reference, invoice_number, status, invoice_type')
+      .or(`reference.ilike.${term},invoice_number.ilike.${term}`)
+      .not('status', 'in', '("VOIDED","DELETED")')
+      .limit(10),
+    // Job contacts (neighbours etc): name, email, phone
+    client.from('job_contacts')
+      .select('job_id, client_name, contact_label, client_email, client_phone')
+      .eq('status', 'active')
+      .or(`client_name.ilike.${term},client_email.ilike.${term},client_phone.ilike.${term}`)
+      .limit(10),
+    // Quote revisions: quote number
+    client.from('quote_revisions')
+      .select('job_id, quote_number')
+      .ilike('quote_number', term)
+      .limit(10),
+  ])
+
+  // Collect all matched job IDs from secondary tables
+  const secondaryJobIds = new Set<string>()
+  const matchContext: Record<string, string> = {} // jobId -> why it matched
+
+  for (const inv of (invoiceRes.data || [])) {
+    if (inv.job_id) {
+      secondaryJobIds.add(inv.job_id)
+      matchContext[inv.job_id] = `Invoice: ${inv.invoice_number || inv.reference || ''}`
+    }
+  }
+  for (const c of (contactRes.data || [])) {
+    if (c.job_id) {
+      secondaryJobIds.add(c.job_id)
+      matchContext[c.job_id] = `Contact: ${c.client_name || ''} (${c.contact_label || 'neighbour'})`
+    }
+  }
+  for (const qr of (quoteRes.data || [])) {
+    if (qr.job_id) {
+      secondaryJobIds.add(qr.job_id)
+      matchContext[qr.job_id] = `Quote: ${qr.quote_number}`
+    }
+  }
+
+  // Remove IDs already in direct results
+  const directIds = new Set((jobRes.data || []).map((j: any) => j.id))
+  const extraIds = [...secondaryJobIds].filter(id => !directIds.has(id))
+
+  // Fetch job info for secondary matches
+  let extraJobs: any[] = []
+  if (extraIds.length > 0) {
+    const { data } = await client.from('jobs')
+      .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, type, status')
+      .in('id', extraIds)
+      .not('status', 'in', '("lost","cancelled","draft")')
+    extraJobs = data || []
+  }
+
+  // Combine and format results
+  const results = [
+    ...(jobRes.data || []).map((j: any) => ({ ...j, match_source: 'job' })),
+    ...extraJobs.map((j: any) => ({ ...j, match_source: matchContext[j.id] || 'related' })),
+  ].filter((j: any) => !isTestRecord(j.client_name)).slice(0, 15)
+
+  return { results }
+}
+
+async function getOrgEvents(client: any, params: URLSearchParams) {
+  const from = params.get('from') || new Date().toISOString().slice(0, 10)
+  const to = params.get('to') || (() => {
+    const d = new Date(from); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0, 10)
+  })()
+
+  const { data, error } = await client
+    .from('org_events')
+    .select('*')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .gte('event_date', from)
+    .lte('event_date', to)
+    .order('event_date', { ascending: true })
+
+  if (error) throw error
+  return data || []
+}
+
+async function myActions(client: any) {
+  const today = new Date().toISOString().slice(0, 10)
+  const { data, error } = await client
+    .from('job_actions')
+    .select('*')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('status', 'pending')
+    .order('due_date', { ascending: true, nullsFirst: false })
+
+  if (error) throw error
+  const items = data || []
+
+  const overdue: any[] = []
+  const due_today: any[] = []
+  const upcoming: any[] = []
+  const no_date: any[] = []
+
+  for (const a of items) {
+    if (!a.due_date) no_date.push(a)
+    else if (a.due_date < today) overdue.push(a)
+    else if (a.due_date === today) due_today.push(a)
+    else upcoming.push(a)
+  }
+
+  return { overdue, due_today, upcoming, no_date }
+}
+
+async function listJobActions(client: any, params: URLSearchParams) {
+  const jobId = params.get('job_id')
+  if (!jobId) throw new Error('job_id required')
+
+  const statusFilter = params.get('status')
+  let query = client.from('job_actions')
+    .select('*')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('job_id', jobId)
+
+  if (statusFilter && statusFilter !== 'all') {
+    query = query.eq('status', statusFilter)
+  }
+
+  const { data, error } = await query.order('created_at', { ascending: false })
+  if (error) throw error
+  return data || []
 }
 
 // ════════════════════════════════════════════════════════════

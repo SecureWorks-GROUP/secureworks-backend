@@ -21,6 +21,12 @@
 # ── Self-identification ──
 ops_api_version
 
+# ── Mission 1.5C dashboard-read actions being absorbed into backend ──
+search_jobs
+get_org_events
+my_actions
+list_job_actions
+
 # ── Ops notes / comms primitives ──
 list_ops_notes
 upsert_ops_note
