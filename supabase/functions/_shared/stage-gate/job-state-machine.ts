@@ -24,7 +24,7 @@
    Inherits: secureworks-docs/operations/phase-c-jobs-status-spec.md
    ════════════════════════════════════════════════════════════════ */
 
-export type JobType = 'fencing' | 'patio' | 'quick_quote' | 'decking';
+export type JobType = 'fencing' | 'patio' | 'quick_quote' | 'decking' | 'makesafe';
 
 /** Every value the live prod CHECK admits. Order is canonical board order. */
 export type CanonicalStatus =
@@ -138,6 +138,15 @@ export const QUICK_QUOTE_STAGES: CanonicalStatus[] = [
   'draft', 'quoted', 'accepted', 'cancelled', 'archived'
 ];
 
+/** Make-safe jobs are work-order driven, not quote/deposit/material driven.
+    Substage detail such as "company contact required", "waiting on trade
+    report", and "admin to send report" lives in the make-safe overlay table;
+    the core jobs.status remains the simple high-level pipeline stage. */
+export const MAKESAFE_STAGES: CanonicalStatus[] = [
+  'accepted', 'scheduled', 'in_progress', 'complete', 'invoiced',
+  'cancelled', 'archived'
+];
+
 /** Type-stage validity — true if the status is allowed for the given type. */
 export function isLegalForType(status: string, type: JobType | string | null | undefined): boolean {
   const arr = getStagesForType(type);
@@ -150,6 +159,7 @@ export function getStagesForType(type: JobType | string | null | undefined): Can
     case 'patio':       return PATIO_STAGES;
     case 'decking':     return DECKING_STAGES;
     case 'quick_quote': return QUICK_QUOTE_STAGES;
+    case 'makesafe':    return MAKESAFE_STAGES;
     default:            return PATIO_STAGES; // safest default
   }
 }

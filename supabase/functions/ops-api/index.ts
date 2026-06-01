@@ -4806,6 +4806,19 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     console.log('[ops-api] readiness computation failed (non-blocking):', (e as Error).message)
   }
 
+  let makesafeDetails: any = null
+  if ((jobRes.data?.type || '').toLowerCase() === 'makesafe') {
+    try {
+      const { data: ms } = await client.from('makesafe_job_details')
+        .select('*, makesafe_companies:requesting_company_id(*)')
+        .eq('job_id', jobId)
+        .maybeSingle()
+      makesafeDetails = ms || null
+    } catch (e) {
+      console.log('[ops-api] makesafe details fetch skipped (non-blocking):', (e as Error).message)
+    }
+  }
+
   // 2026-04-24 fix: DEFAULT includes scope_json + pricing_json (dashboard + MCP consumers
   // depend on these for scope summaries, pricing totals, site plans, neighbour splits).
   // Bulk callers that don't need the raw blobs can pass slim=true to strip them.
@@ -4842,6 +4855,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
       paid_total: paidTotal,
       remaining_to_invoice: Math.max(0, quotedTotal - invoicedTotal),
     },
+    makesafe_details: makesafeDetails,
     chase_logs: chaseLogs,
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
@@ -6447,19 +6461,35 @@ async function createMakesafeJob(client: any, body: any) {
     companyData = co
   }
 
-  // Generate job number: SWMS-XXXXX
-  const { data: lastJob } = await client.from('jobs')
-    .select('job_number')
-    .ilike('job_number', 'SWMS-%')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  let nextNum = 26001
-  if (lastJob?.job_number) {
-    const num = parseInt(lastJob.job_number.replace('SWMS-', ''), 10)
-    if (!isNaN(num)) nextNum = num + 1
+  // Generate job number through the shared database helper once the make-safe
+  // contract migration is applied. Fallback preserves the previous SWMS-26001
+  // behaviour for review/test environments that have not run the migration yet.
+  let jobNumber: string | null = null
+  try {
+    const { data: jnData } = await client.rpc('next_job_number', { job_type: 'makesafe' })
+    const candidate = String(jnData || '')
+    if (candidate.toUpperCase().startsWith('SWMS-')) {
+      jobNumber = candidate
+    } else if (candidate) {
+      console.log('[ops-api] next_job_number(makesafe) returned non-SWMS prefix; falling back:', candidate)
+    }
+  } catch (e) {
+    console.log('[ops-api] next_job_number(makesafe) failed; falling back:', (e as Error)?.message)
   }
-  const jobNumber = `SWMS-${nextNum}`
+  if (!jobNumber) {
+    const { data: lastJob } = await client.from('jobs')
+      .select('job_number')
+      .ilike('job_number', 'SWMS-%')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    let nextNum = 26001
+    if (lastJob?.job_number) {
+      const num = parseInt(lastJob.job_number.replace('SWMS-', ''), 10)
+      if (!isNaN(num)) nextNum = num + 1
+    }
+    jobNumber = `SWMS-${nextNum}`
+  }
 
   // Build metadata
   const metadata: any = {
@@ -6486,6 +6516,27 @@ async function createMakesafeJob(client: any, body: any) {
   }).select().single()
 
   if (jobErr) throw jobErr
+
+  // Make-safe overlay details: keeps requesting-company refs, substatus,
+  // safety notes, report handoff and invoice notes out of patio/fencing scope.
+  try {
+    await client.from('makesafe_job_details').insert({
+      job_id: job.id,
+      requesting_company_id: companyData?.id || null,
+      requesting_company_slug: companyData?.slug || requesting_company_slug || null,
+      requesting_company_name: companyData?.name || null,
+      external_ref: external_ref || null,
+      substatus: 'company_contact_required',
+      safety_requirements: companyData?.safety_requirements || null,
+      special_instructions: companyData?.special_instructions || null,
+      external_links: external_links || companyData?.external_links || [],
+      billing_rules: companyData?.billing_rules || {},
+    })
+  } catch (e: any) {
+    // Non-blocking until the migration is deployed everywhere. The base job
+    // remains visible and the PR/migration note makes this gap explicit.
+    console.log('[ops-api] makesafe_job_details insert skipped:', e?.message)
+  }
 
   // If PDF provided, upload to storage and create job_documents record
   if (pdf_base64) {
@@ -7788,7 +7839,7 @@ async function preflightInvoiceCreation(client: any, body: any): Promise<{
   if (!jobNumber) missing.push('job_number')
 
   // Division — derived from job.type.
-  const knownDivisions = new Set(['patio', 'fencing', 'decking', 'roofing', 'insurance', 'renovation', 'combo', 'general'])
+  const knownDivisions = new Set(['patio', 'fencing', 'decking', 'roofing', 'insurance', 'renovation', 'combo', 'general', 'makesafe'])
   const divisionRaw = (job.type || '').toLowerCase().trim()
   const division = knownDivisions.has(divisionRaw) ? divisionRaw : null
   if (!division) missing.push('division')
@@ -9294,7 +9345,9 @@ async function addPOEvent(client: any, body: any) {
 // Maps job number prefix to Xero tracking category option name
 function trackingCategoryForJob(jobNumber: string): string {
   if (!jobNumber) return ''
-  const prefix = jobNumber.slice(0, 3).toUpperCase()
+  const upper = jobNumber.toUpperCase()
+  if (upper.startsWith('SWMS-')) return 'SW - MAKESAFES'
+  const prefix = upper.slice(0, 3)
   if (prefix === 'SWP') return 'SW - PATIOS'
   if (prefix === 'SWF') return 'SW - FENCING'
   if (prefix === 'SWD') return 'SW - DECKING'
@@ -9321,6 +9374,7 @@ function accountCodeForJob(jobType: string, fallback = '200'): string {
     decking: '205',
     roofing: '209',
     insurance: '210',
+    makesafe: '210',
     renovation: '201',
     combo: '200',
   }
@@ -9342,6 +9396,7 @@ function buildRichDescription(job: any, prefix: string): string {
   const typeLabel = (job.type || '').toLowerCase()
   if (typeLabel === 'fencing') typeParts.push('Colorbond Fencing Installation')
   else if (typeLabel === 'decking') typeParts.push('Composite Decking Installation')
+  else if (typeLabel === 'makesafe') typeParts.push('Make-Safe Works')
   else typeParts.push('Insulated Patio Installation')
   lines.push(typeParts.join(' | '))
 

@@ -328,6 +328,16 @@ export const QUICK_QUOTE_TRANSITIONS: TransitionGraph = {
   archived: { forward: [], backward: [] },
 };
 
+export const MAKESAFE_TRANSITIONS: TransitionGraph = {
+  accepted: { forward: ['scheduled'], backward: [] },
+  scheduled: { forward: ['in_progress'], backward: ['accepted'] },
+  in_progress: { forward: ['complete'], backward: ['scheduled'] },
+  complete: { forward: ['invoiced', 'archived'], backward: ['in_progress'] },
+  invoiced: { forward: ['archived'], backward: [] },
+  cancelled: { forward: ['archived'], backward: [] },
+  archived: { forward: [], backward: [] },
+};
+
 export function transitionsFor(type: string | null | undefined): TransitionGraph {
   switch (type) {
     case 'fencing':
@@ -338,6 +348,8 @@ export function transitionsFor(type: string | null | undefined): TransitionGraph
       return PATIO_TRANSITIONS;
     case 'quick_quote':
       return QUICK_QUOTE_TRANSITIONS;
+    case 'makesafe':
+      return MAKESAFE_TRANSITIONS;
     default:
       return PATIO_TRANSITIONS;
   }
@@ -409,6 +421,11 @@ function gate_status_mapped_for_pipeline(ctx: GateContext): GateResult {
 }
 
 function gate_revision_present(ctx: GateContext): GateResult {
+  if (ctx.type === 'makesafe') {
+    return gateResult('revision_present', 'not_applicable', 'blocker', 'cap0_release', 'sales',
+      { source: 'job.type', ref: null, value: 'makesafe' },
+      'Make-safe jobs are created from a work order/request, not a quote revision');
+  }
   const applies = ctx.currentStage !== 'draft' && ctx.currentStage !== null;
   if (!applies) return gateResult('revision_present', 'not_applicable', 'blocker', 'cap0_release', 'sales');
   const rev = safe(ctx.packet, 'revision', null);
@@ -424,6 +441,11 @@ function gate_revision_present(ctx: GateContext): GateResult {
 }
 
 function gate_revision_released(ctx: GateContext): GateResult {
+  if (ctx.type === 'makesafe') {
+    return gateResult('revision_released', 'not_applicable', 'blocker', 'cap0_release', 'sales',
+      { source: 'job.type', ref: null, value: 'makesafe' },
+      'Make-safe jobs do not require quote-release evidence');
+  }
   const applies = ctx.currentStage && ctx.currentStage !== 'draft' && ctx.currentStage !== 'quoted';
   if (!applies) return gateResult('revision_released', 'not_applicable', 'blocker', 'cap0_release', 'sales');
   const sentAt = safe(ctx.packet, 'revision.sent_at', null);
@@ -439,6 +461,11 @@ function gate_revision_released(ctx: GateContext): GateResult {
 }
 
 function gate_accepted_at(ctx: GateContext): GateResult {
+  if (ctx.type === 'makesafe') {
+    return gateResult('accepted_at', 'not_applicable', 'blocker', 'acceptance', 'sales',
+      { source: 'job.type', ref: null, value: 'makesafe' },
+      'Make-safe acceptance is the requesting-company work order, not a client quote acceptance');
+  }
   const applies = ctx.currentStage && isStageAtOrAfter(ctx.currentStage, 'accepted', ctx.type) &&
     ctx.currentStage !== 'cancelled' && ctx.currentStage !== 'archived' && ctx.currentStage !== 'lost';
   if (!applies) return gateResult('accepted_at', 'not_applicable', 'blocker', 'acceptance', 'sales');
