@@ -89,7 +89,11 @@ else
       elif printf '%s' "$body" | grep -qi 'Unknown action'; then
         record_fail "ops-api drift: action '${action}' returns Unknown action"
         drift=$((drift + 1))
+      else
+        record_pass "ops-api action '${action}' recognised"
       fi
+    else
+      record_pass "ops-api action '${action}' recognised"
     fi
   done < <(grep -vE '^\s*(#|$)' "$REQUIRED_ACTIONS_FILE" | awk '{print $1}')
 
