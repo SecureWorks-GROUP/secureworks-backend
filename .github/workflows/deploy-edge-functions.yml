@@ -50,6 +50,11 @@ jobs:
             echo "::warning::_shared directory changed — functions that import from it may need manual redeployment"
           fi
 
+      - name: Pre-deploy check ops-api source action surface
+        if: contains(steps.changed.outputs.functions, 'ops-api')
+        run: |
+          bash scripts/check-ops-api-source-actions.sh
+
       - name: Deploy changed edge functions
         if: steps.changed.outputs.functions != ''
         env:

@@ -6,6 +6,13 @@ on:
       - main
     paths:
       - 'supabase/functions/**'
+      - 'scripts/deploy-edge-function.sh'
+      - 'scripts/smoke-edge-functions.sh'
+      - 'scripts/smoke-ops-api-action-surface.sh'
+      - 'scripts/check-edge-deploy-guardrails.sh'
+      - 'scripts/check-ops-api-source-actions.sh'
+      - '.github/workflows/deploy-edge-functions.yml'
+      - '.github/workflows/pr-check.yml'
 
 permissions:
   contents: read
@@ -108,7 +115,7 @@ jobs:
       - name: Shell syntax check on deploy scripts
         run: |
           # Verify shell scripts are syntactically valid
-          for script in scripts/deploy-edge-function.sh scripts/smoke-edge-functions.sh scripts/check-edge-deploy-guardrails.sh; do
+          for script in scripts/deploy-edge-function.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/check-edge-deploy-guardrails.sh scripts/check-ops-api-source-actions.sh; do
             if [ -f "$script" ]; then
               if bash -n "$script"; then
                 echo "✓ ${script}"
