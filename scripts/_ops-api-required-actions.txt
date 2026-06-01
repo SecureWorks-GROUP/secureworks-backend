@@ -26,6 +26,14 @@ search_jobs
 get_org_events
 my_actions
 list_job_actions
+create_makesafe_job
+jump_council_step
+delete_media
+generate_work_order_doc
+update_job_action
+create_job_action
+delete_org_event
+create_org_event
 
 # ── Ops notes / comms primitives ──
 list_ops_notes

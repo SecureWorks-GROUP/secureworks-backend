@@ -1387,6 +1387,14 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
       case 'list_job_actions': return json(await listJobActions(client, url.searchParams))
+      case 'create_org_event': return json(await createOrgEvent(client, body))
+      case 'delete_org_event': return json(await deleteOrgEvent(client, body))
+      case 'create_job_action': return json(await createJobAction(client, body))
+      case 'update_job_action': return json(await updateJobAction(client, body))
+      case 'generate_work_order_doc': return json(await generateWorkOrderDoc(client, body))
+      case 'delete_media': return json(await deleteMedia(client, body))
+      case 'jump_council_step': return json(await jumpCouncilStep(client, body))
+      case 'create_makesafe_job': return json(await createMakesafeJob(client, body))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
@@ -5942,6 +5950,595 @@ async function listJobActions(client: any, params: URLSearchParams) {
 // ════════════════════════════════════════════════════════════
 // OPS DASHBOARD — WRITE ACTIONS
 // ════════════════════════════════════════════════════════════
+
+async function createOrgEvent(client: any, body: any) {
+  const { title, event_date, event_end, event_type, description, visible_to_trades } = body
+  if (!title || !event_date || !event_type) throw new Error('title, event_date, and event_type required')
+  if (!['public_holiday', 'company_day'].includes(event_type)) throw new Error('event_type must be public_holiday or company_day')
+
+  const { data, error } = await client.from('org_events').insert({
+    org_id: DEFAULT_ORG_ID,
+    title,
+    event_date,
+    event_end: event_end || null,
+    event_type,
+    description: description || null,
+    visible_to_trades: visible_to_trades !== false,
+  }).select().single()
+
+  if (error) throw error
+  return data
+}
+
+async function deleteOrgEvent(client: any, body: any) {
+  const id = body.id || body.event_id
+  if (!id) throw new Error('id required')
+
+  const { error } = await client.from('org_events').delete().eq('id', id).eq('org_id', DEFAULT_ORG_ID)
+  if (error) throw error
+  return { ok: true }
+}
+
+async function createJobAction(client: any, body: any) {
+  const { title, description, job_number, job_id, due_date, due_time, priority, source, category, sub_category } = body
+  if (!title) throw new Error('title required')
+
+  // If job_number provided but no job_id, look up the job
+  let resolvedJobId = job_id || null
+  let resolvedJobNumber = job_number || null
+  let clientName: string | null = null
+
+  if (job_number && !job_id) {
+    const { data: job } = await client.from('jobs')
+      .select('id, job_number, client_name, type')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('job_number', job_number)
+      .maybeSingle()
+    if (job) {
+      resolvedJobId = job.id
+      resolvedJobNumber = job.job_number
+      clientName = job.client_name
+    }
+  } else if (job_id) {
+    const { data: job } = await client.from('jobs')
+      .select('job_number, client_name, type')
+      .eq('id', job_id)
+      .maybeSingle()
+    if (job) {
+      resolvedJobNumber = job.job_number
+      clientName = job.client_name
+    }
+  }
+
+  // Infer category from job type + title if not provided
+  let cat = category || 'general_ops'
+  let subCat = sub_category || 'tasks'
+  if (!category && resolvedJobNumber) {
+    if (resolvedJobNumber.startsWith('SWF-')) cat = 'fencing'
+    else if (resolvedJobNumber.startsWith('SWP-')) cat = 'patio'
+    else if (resolvedJobNumber.startsWith('SWMS-')) cat = 'makesafes'
+  }
+  if (!sub_category && title) {
+    const t = title.toLowerCase()
+    if (t.includes('invoice') || t.includes('payment') || t.includes('chase') || t.includes('deposit')) subCat = 'invoices'
+    else if (t.includes('material') || t.includes('order') || t.includes('supplier') || t.includes('ampelite') || t.includes('steel')) subCat = 'materials'
+    else if (t.includes('schedule') || t.includes('reschedule') || t.includes('assign')) subCat = 'scheduling'
+    else if (t.includes('doc') || t.includes('work order') || t.includes('wo ') || t.includes('council')) subCat = 'docs'
+  }
+
+  const row = {
+    org_id: DEFAULT_ORG_ID,
+    job_id: resolvedJobId,
+    job_number: resolvedJobNumber,
+    client_name: clientName || body.client_name || null,
+    title,
+    description: description || null,
+    due_date: due_date || null,
+    due_time: due_time || null,
+    priority: priority || 'normal',
+    source: source || 'manual',
+    category: cat,
+    sub_category: subCat,
+  }
+
+  const { data, error } = await client.from('job_actions').insert(row).select().single()
+  if (error) throw error
+  return data
+}
+
+async function updateJobAction(client: any, body: any) {
+  const actionId = body.action_id || body.id
+  if (!actionId) throw new Error('action_id required')
+
+  const updates: any = { updated_at: new Date().toISOString() }
+  if (body.status === 'done') {
+    updates.status = 'done'
+    updates.completed_at = new Date().toISOString()
+  } else if (body.status === 'dismissed') {
+    updates.status = 'dismissed'
+    updates.dismissed_at = new Date().toISOString()
+  } else if (body.status) {
+    updates.status = body.status
+  }
+  if (body.due_date !== undefined) updates.due_date = body.due_date
+  if (body.due_time !== undefined) updates.due_time = body.due_time
+  if (body.priority) updates.priority = body.priority
+  if (body.title) updates.title = body.title
+
+  const { data, error } = await client.from('job_actions')
+    .update(updates)
+    .eq('id', actionId)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+async function generateWorkOrderDoc(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new ApiError('job_id required', 400)
+
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, job_number, type, client_name, client_phone, client_email, site_address, site_suburb, scope_json, pricing_json, created_at')
+    .eq('id', jId).single()
+  if (jobErr || !job) throw new ApiError('Job not found', 404)
+  if (job.type !== 'fencing') throw new ApiError('Work order doc only supported for fencing jobs', 400)
+
+  const sj = job.scope_json?.job
+  if (!sj?.runs?.length) throw new ApiError('No fencing scope data on this job', 400)
+
+  // Get media for site photos
+  const { data: media } = await client.from('job_media')
+    .select('label, storage_url, thumbnail_url, phase')
+    .eq('job_id', jId)
+  const sitePhotos = (media || []).filter((m: any) => m.phase !== 'receipt')
+
+  // ── Constants (from fence designer) ──
+  const POST_LOOKUP: Record<number, {ret:number,post:number}[]> = {
+    1200:[{ret:0,post:2400},{ret:150,post:2400},{ret:300,post:2400},{ret:450,post:2400},{ret:600,post:2400}],
+    1500:[{ret:0,post:2400},{ret:150,post:2400},{ret:300,post:2400},{ret:450,post:2700},{ret:600,post:2700}],
+    1800:[{ret:0,post:2400},{ret:150,post:2700},{ret:300,post:2700},{ret:450,post:3000},{ret:600,post:3000}],
+    2100:[{ret:0,post:2700},{ret:150,post:3000},{ret:300,post:3000},{ret:450,post:3000},{ret:600,post:3000}]
+  }
+  const SUPPLIER_PW: Record<string, number> = { RNR:2380, Metroll:2365, Lysaght:2360, Stratco:2350 }
+  const CP = {
+    panelKit1800_2400:185, panelKit1800_2700:210, panelKit1800_3000:235,
+    panelKit1500_2400:165, panelKit1200_2400:145, panelKit2100_2700:230, panelKit2100_3000:255,
+    plinth:28, patioTube:45, gateKitPed:320, gateKitDbl:580, gatePost:85,
+    concrete:9.50, tekBox:18, labourPerM:35, delivery:250
+  }
+  const ACCESS_RATE: Record<string,number> = { easy:0, moderate:0.10, difficult:0.20 }
+
+  function lookupPost(sh: number, ret: number) {
+    const t = POST_LOOKUP[sh] || POST_LOOKUP[1800]
+    const e = t.find(x => x.ret === ret)
+    if (e) return e.post
+    const req = sh + ret + 600
+    return req <= 2400 ? 2400 : req <= 2700 ? 2700 : 3000
+  }
+
+  const esc = (s: string) => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  const fmt = (n: number) => n.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+  // ── Collect data ──
+  const removal = sj.removal || {}
+  const access = removal.access || 'easy'
+  const accessRate = ACCESS_RATE[access] || 0
+  const panelWidthMm = SUPPLIER_PW[sj.supplier] || 2365
+  let totalMetres = 0, totalPanels = 0, totalPosts = 0, totalPlinths = 0, totalPatioTubes = 0
+  const postGroups: Record<string, {sheetH:number, postH:number, count:number}> = {}
+  const runDetails: any[] = []
+
+  for (const run of sj.runs) {
+    const panels = run.panels || []
+    const panelCount = panels.length
+    totalMetres += run.length || 0
+    totalPanels += panelCount
+    totalPosts += panelCount + 1
+    let runPlinths = 0, panelsWithPatio = 0
+    const panelDetails: any[] = []
+    for (let idx = 0; idx < panels.length; idx++) {
+      const p = panels[idx]
+      const slopePl = p.slopePlinths || 0
+      const manualPl = p.retaining / 150
+      const totalPl = Math.min(4, slopePl + manualPl)
+      const totalRet = totalPl * 150
+      runPlinths += totalPl
+      const postH = lookupPost(p.height, totalRet)
+      const patio = totalPl >= 3 && totalPl <= 4
+      if (patio) panelsWithPatio++
+      const key = `${p.height}_${postH}`
+      if (!postGroups[key]) postGroups[key] = { sheetH: p.height, postH, count: 0 }
+      postGroups[key].count++
+      panelDetails.push({ num: idx+1, height: p.height, retaining: totalRet, totalH: p.height+totalRet, postH, patio, stepMm: p.stepMm||0 })
+    }
+    const patioTubes = panelsWithPatio > 0 ? panelsWithPatio + 1 : 0
+    totalPlinths += runPlinths
+    totalPatioTubes += patioTubes
+    const hasRetaining = panels.some((p: any) => (p.slopePlinths||0) + (p.retaining/150) > 0)
+    runDetails.push({ name: run.name, length: run.length||0, panelCount, plinths: runPlinths, patioTubes, hasRetaining, panels: panelDetails })
+  }
+  if (sj.runs.length > 1) totalPosts -= (sj.runs.length - 1)
+
+  let gatePosts = 0
+  const gateItems: string[] = []
+  for (const g of (sj.gates || [])) {
+    const gp = g.type === 'double' ? 4 : 2
+    gatePosts += gp
+    gateItems.push(g.type === 'double' ? `Double swing gate ${g.width||''}mm` : `Pedestrian gate ${g.width||900}mm`)
+  }
+  const allPosts = totalPosts + gatePosts
+  const concreteBags = Math.ceil(allPosts * 2 * 1.1 / 2) * 2
+  const tekBoxes = totalPanels > 0 ? Math.max(1, Math.ceil(totalPanels / 4)) : 0
+
+  // Post breakdown
+  const heightCounts: Record<number,number> = {}
+  for (const r of runDetails) for (const p of r.panels) heightCounts[p.postH] = (heightCounts[p.postH]||0) + 1
+  const postBreakdown = Object.keys(heightCounts).sort().map(h => `${heightCounts[Number(h)]} @ ${h}mm`).join(', ')
+
+  // Internal costs
+  let internalCost = 0
+  for (const g of Object.values(postGroups)) {
+    let uc = CP.panelKit1800_2400
+    if (g.sheetH===1200) uc=CP.panelKit1200_2400
+    else if (g.sheetH===1500) uc=CP.panelKit1500_2400
+    else if (g.sheetH===1800) { uc = g.postH<=2400?CP.panelKit1800_2400:g.postH<=2700?CP.panelKit1800_2700:CP.panelKit1800_3000 }
+    else if (g.sheetH===2100) { uc = g.postH<=2700?CP.panelKit2100_2700:CP.panelKit2100_3000 }
+    internalCost += g.count * uc
+  }
+  internalCost += totalPlinths*CP.plinth + totalPatioTubes*CP.patioTube + concreteBags*CP.concrete + tekBoxes*CP.tekBox
+  for (const g of (sj.gates||[])) internalCost += g.type==='double'?(CP.gateKitDbl+4*CP.gatePost):(CP.gateKitPed+2*CP.gatePost)
+  const labourBase = totalMetres * CP.labourPerM
+  const internalLabour = labourBase * (1 + accessRate)
+  const totalCostBase = internalCost + internalLabour + CP.delivery
+  const pricing = sj._pricing_json || job.pricing_json || {}
+  const quoteTotalExGST = pricing.totalExGST || (pricing.totalIncGST ? pricing.totalIncGST / 1.1 : 0)
+  const margin = quoteTotalExGST - totalCostBase
+
+  const dateStr = sj.date || job.created_at
+  const fmtDate = dateStr ? new Date(dateStr).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }) : ''
+
+  // ── Build HTML ──
+  const LOGO = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 490 79.55" style="height:28px;width:auto;"><defs><style>.c1{fill:#fff}.c3{fill:rgba(255,255,255,0.6)}</style></defs><path class="c1" d="M85.11,46.94c.24,1.73,.73,3.02,1.44,3.88,1.31,1.56,3.56,2.34,6.74,2.34,1.91,0,3.45-.21,4.64-.62,2.26-.79,3.38-2.25,3.38-4.39,0-1.25-.55-2.22-1.66-2.9-1.11-.67-2.86-1.26-5.26-1.77l-4.1-.9c-4.03-.89-6.8-1.86-8.3-2.9-2.55-1.75-3.83-4.48-3.83-8.19,0-3.39,1.25-6.21,3.74-8.45s6.16-3.36,11-3.36c4.04,0,7.48,1.06,10.33,3.17,2.85,2.11,4.35,5.18,4.48,9.21h-7.6c-.14-2.28-1.16-3.89-3.05-4.85-1.26-.63-2.83-.95-4.71-.95-2.09,0-3.76,.41-5,1.23-1.25,.82-1.87,1.97-1.87,3.44,0,1.35,.61,2.36,1.84,3.03,.79,.45,2.47,.97,5.03,1.57l6.64,1.57c2.91,.69,5.09,1.6,6.55,2.75,2.26,1.78,3.38,4.36,3.38,7.73s-1.34,6.33-4.01,8.62c-2.67,2.29-6.45,3.43-11.33,3.43s-8.9-1.13-11.76-3.38c-2.86-2.25-4.28-5.35-4.28-9.28h7.55Z"/><path class="c1" d="M130.99,31.2c1.95,.87,3.57,2.26,4.84,4.14,1.15,1.66,1.89,3.59,2.23,5.79,.2,1.29,.28,3.14,.24,5.56h-20.39c.11,2.81,1.09,4.78,2.93,5.91,1.12,.7,2.46,1.05,4.04,1.05,1.67,0,3.02-.43,4.06-1.28,.57-.46,1.07-1.1,1.51-1.93h7.47c-.2,1.66-1.1,3.35-2.71,5.06-2.51,2.72-6.02,4.08-10.53,4.08-3.73,0-7.01-1.15-9.86-3.44-2.85-2.3-4.27-6.03-4.27-11.21,0-4.85,1.28-8.57,3.86-11.16,2.57-2.59,5.91-3.88,10.01-3.88,2.44,0,4.63,.44,6.58,1.31Zm-10.95,6.32c-1.03,1.07-1.68,2.51-1.95,4.33h12.61c-.13-1.94-.78-3.42-1.95-4.42s-2.61-1.51-4.34-1.51c-1.88,0-3.34,.53-4.37,1.6Z"/><polygon class="c1" points="53.4 30.35 53.4 22.29 31.41 8.51 8.87 22.26 8.87 34.53 45.59 42.34 45.59 52.83 38.55 52.83 31.39 45.47 24.15 52.83 16.68 52.83 16.68 39 8.87 37.4 8.87 60.64 27.43 60.64 31.36 56.65 35.25 60.64 53.4 60.64 53.4 36.01 16.68 28.21 16.68 26.65 31.35 17.69 45.59 26.61 45.59 31.95 53.4 33.41 53.4 30.35"/><rect fill="#F15A29" x="8.96" y="62.99" width="44.53" height="7.77"/><text class="c3" x="406" y="52" font-family="Helvetica Neue,Helvetica,Arial,sans-serif" font-size="21" font-weight="400" letter-spacing="0.5">Group</text></svg>'
+
+  // CSS
+  const css = `*{box-sizing:border-box}body{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;color:#293C46;margin:0;padding:0;font-size:13px;line-height:1.5}.page{max-width:820px;margin:0 auto;padding:0 40px 40px}.header-band{background:#293C46;padding:0;margin:0}.header-accent{height:4px;background:#F15A29}.header-inner{max-width:820px;margin:0 auto;padding:16px 40px;display:flex;align-items:center;justify-content:space-between}.header-meta{text-align:right;color:#fff}.header-meta .ref{font-size:13px;font-weight:700}.header-meta .date{font-size:11px;opacity:0.7;margin-top:2px}.doc-title{padding:16px 0 12px;border-bottom:3px solid #F15A29;margin-bottom:24px}.doc-title h1{font-size:22px;margin:0;color:#293C46;text-transform:uppercase;letter-spacing:1px}.section{margin-bottom:22px}.section h2{font-size:13px;text-transform:uppercase;letter-spacing:0.8px;font-weight:700;color:#293C46;margin:0 0 8px 0;padding:6px 0 6px 10px;border-left:3px solid #F15A29;background:#f0f4f7}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-bottom:14px}.info-grid .label{font-weight:700;font-size:10px;text-transform:uppercase;color:#4C6A7C;letter-spacing:0.5px}.info-grid .value{font-size:13px}table{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:12px}th{background:#293C46;color:#fff;padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;font-weight:700}td{padding:7px 10px;border-bottom:1px solid #e5e7eb}tr:nth-child(even) td{background:#f8fafb}.text-right{text-align:right}.total-row td{font-weight:700;border-top:2px solid #293C46;background:#fff !important}.checklist{padding-left:20px}.checklist li{margin-bottom:5px;font-size:12px}.patio-flag{color:#F15A29;font-weight:700}.confidential{background:#fef2f2;border:2px solid #dc2626;padding:3px 10px;display:inline-block;font-size:10px;font-weight:700;color:#dc2626;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}.footer{border-top:1px solid #c8c8c8;padding-top:12px;margin-top:30px;text-align:center;font-size:10px;color:#4C6A7C;line-height:1.6}@media print{body{padding:0}.page{padding:0 20px 20px}.header-inner{padding:12px 20px}.no-print{display:none !important}.header-band,.header-accent,th,.section h2{-webkit-print-color-adjust:exact;print-color-adjust:exact}}.print-btn{position:fixed;top:12px;right:12px;padding:10px 20px;background:#F15A29;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.15);z-index:100}`
+
+  // Runs HTML
+  let runsHtml = ''
+  for (const r of runDetails) {
+    runsHtml += `<div class="section"><h2>${esc(r.name)} (${r.panelCount} panels, ${r.length}m)`
+    if (r.patioTubes > 0) runsHtml += ` <span class="patio-flag">[${r.patioTubes} patio tubes]</span>`
+    runsHtml += '</h2>'
+    if (r.hasRetaining) {
+      runsHtml += '<table><thead><tr><th>Panel</th><th>Fence</th><th>Ret.</th><th>Total</th><th>Post</th><th>Notes</th></tr></thead><tbody>'
+      for (const p of r.panels) {
+        let notes = ''
+        if (p.patio) notes += '<span class="patio-flag">PATIO TUBE</span> '
+        if (p.stepMm !== 0) notes += (p.stepMm < 0 ? '\u2193' : '\u2191') + Math.abs(p.stepMm) + 'mm'
+        runsHtml += `<tr><td>P${p.num}</td><td>${p.height}mm</td><td>${p.retaining}mm</td><td>${p.totalH}mm</td><td>${p.postH}mm</td><td>${notes}</td></tr>`
+      }
+      runsHtml += '</tbody></table>'
+    } else {
+      const pH = r.panels[0]?.postH || 2400, sH = r.panels[0]?.height || 1800
+      runsHtml += `<p style="padding-left:12px;">P1\u2013P${r.panelCount}: ${sH}mm fence, 0mm retaining | Post height: ${pH}mm</p>`
+    }
+    runsHtml += '</div>'
+  }
+
+  // Gates
+  const gatesHtml = gateItems.length > 0 ? gateItems.map(g => `<p style="padding-left:12px;">${esc(g)} \u2014 90\u00D790mm SHS gate posts</p>`).join('') : '<p style="padding-left:12px;">None</p>'
+
+  // Scope checklist
+  const scopeList = ['Install COLORBOND\u00AE fencing per specification', 'Set all posts in concrete (2 bags/post)']
+  if (totalPlinths > 0) scopeList.push(`Install ${totalPlinths} retaining plinths`)
+  if (totalPatioTubes > 0) scopeList.push(`Install ${totalPatioTubes} patio tubes at retained sections`)
+  if (removal.removalRequired && removal.existingFenceType) scopeList.push(`Remove existing ${removal.existingFenceType} fencing (${removal.existingFenceLength||0}m)`)
+  for (const g of gateItems) scopeList.push(g)
+  scopeList.push('Site clean-up and rubbish removal')
+
+  // Site plan
+  const sitePlan = sj._latlng?.lat ? `<img src="https://maps.googleapis.com/maps/api/staticmap?center=${sj._latlng.lat},${sj._latlng.lng}&zoom=19&size=800x400&maptype=satellite&key=AIzaSyCVNUaGS6k6MBG6_-MbCyiIGUajnzHU7DM" style="width:100%;border-radius:4px">` : ''
+
+  // Photos
+  let photosHtml = ''
+  if (sitePhotos.length > 0) {
+    photosHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">'
+    for (const m of sitePhotos) {
+      const src = m.thumbnail_url || m.storage_url
+      photosHtml += `<div style="text-align:center"><img src="${esc(src)}" style="width:100%;max-height:200px;object-fit:cover;border-radius:4px"><div style="font-size:10px;color:#666;margin-top:2px">${esc(m.label||'')}</div></div>`
+    }
+    photosHtml += '</div>'
+  }
+
+  // Cost breakdown
+  const costHtml = `<table><thead><tr><th>Item</th><th class="text-right">Cost</th></tr></thead><tbody>
+<tr><td>Materials (panels, posts, plinths, concrete, fixings)</td><td class="text-right">$${fmt(internalCost)}</td></tr>
+<tr><td>Labour base (${totalMetres.toFixed(1)}m @ $${CP.labourPerM}/m${accessRate>0?' + '+(accessRate*100)+'% access':''})</td><td class="text-right">$${fmt(internalLabour)}</td></tr>
+<tr><td>Delivery</td><td class="text-right">$${fmt(CP.delivery)}</td></tr>
+<tr class="total-row"><td>Total cost</td><td class="text-right">$${fmt(totalCostBase)}</td></tr>
+<tr><td>Quote total (excl. GST)</td><td class="text-right">$${fmt(quoteTotalExGST)}</td></tr>
+<tr style="font-weight:700"><td>Margin</td><td class="text-right">$${fmt(margin)}</td></tr>
+</tbody></table>`
+
+  // Assemble
+  const jn = job.job_number || sj.ref || ''
+  let html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Work Order \u2014 ${esc(jn)}</title><style>${css}</style></head><body>`
+  html += '<button class="print-btn no-print" onclick="window.print()">Print / PDF</button>'
+  html += `<div class="header-accent"></div><div class="header-band"><div class="header-inner"><div class="header-logo">${LOGO}</div><div class="header-meta"><div class="ref">${esc(jn)}</div><div class="date">${fmtDate}</div></div></div></div>`
+  html += '<div class="page">'
+  html += `<div class="doc-title"><h1>Work Order \u2014 ${esc(jn)}</h1></div>`
+  html += `<div class="section"><div class="info-grid"><div><span class="label">Client</span><br><span class="value">${esc(job.client_name||sj.client)}</span></div><div><span class="label">Job Ref</span><br><span class="value">${esc(jn)}</span></div><div><span class="label">Address</span><br><span class="value">${esc(job.site_address||sj.address)}</span></div><div><span class="label">Date</span><br><span class="value">${fmtDate}</span></div><div><span class="label">Phone</span><br><span class="value">${esc(job.client_phone||sj.phone)}</span></div><div><span class="label">Email</span><br><span class="value">${esc(job.client_email||sj.email)}</span></div><div><span class="label">Scoper</span><br><span class="value">${esc(sj.scoper||'')}</span></div><div><span class="label">Access</span><br><span class="value">${esc(access)}</span></div></div></div>`
+  if (sitePlan) html += `<div class="section"><h2>Site Plan</h2>${sitePlan}</div>`
+  html += `<div class="section"><h2>Fence Specification</h2><div class="info-grid"><div><span class="label">Supplier</span><br><span class="value">${esc(sj.supplier||'')}</span></div><div><span class="label">Profile</span><br><span class="value">${esc(sj.profile||'')}</span></div><div><span class="label">Colour</span><br><span class="value">${esc(sj.colour||'')}</span></div><div><span class="label">Panel Width</span><br><span class="value">${panelWidthMm}mm</span></div></div></div>`
+  html += runsHtml
+  html += `<div class="section"><h2>Gates</h2>${gatesHtml}</div>`
+  html += `<div class="section"><h2>Summary</h2><div class="info-grid"><div><span class="label">Total Length</span><br><span class="value">${totalMetres.toFixed(1)}m</span></div><div><span class="label">Panels</span><br><span class="value">${totalPanels}</span></div><div><span class="label">Posts</span><br><span class="value">${totalPosts} (${postBreakdown})</span></div><div><span class="label">Gate Posts</span><br><span class="value">${gatePosts} \u00D7 90\u00D790mm SHS</span></div><div><span class="label">Plinths</span><br><span class="value">${totalPlinths}</span></div><div><span class="label">Patio Tubes</span><br><span class="value">${totalPatioTubes}</span></div><div><span class="label">Concrete</span><br><span class="value">${concreteBags} bags</span></div><div><span class="label">Tek Screws</span><br><span class="value">${tekBoxes} boxes</span></div></div></div>`
+  html += `<div class="section"><h2>Scope of Work</h2><ul class="checklist">${scopeList.map(s => `<li>${s}</li>`).join('')}</ul></div>`
+  html += `<div class="section"><h2>Safety &amp; Compliance</h2><ul class="checklist"><li>Dial Before You Dig check completed: <strong>___</strong></li><li>PPE: steel-cap boots, gloves, safety glasses, ear protection</li><li>First aid kit on site</li>${removal.existingFenceType==='asbestos'?'<li style="color:#dc2626;font-weight:700">ASBESTOS: Licensed removal required. Do NOT break sheets.</li>':''}<li>No overhead power lines within 3m of work area confirmed: <strong>___</strong></li></ul></div>`
+  html += `<div class="section"><h2>Completion Requirements</h2><ul class="checklist"><li>QC photos of every post alignment and panel fit</li><li>Client walkthrough and sign-off</li><li>Tradify job completion sign-off</li><li>All rubbish removed from site</li></ul></div>`
+  if (sj.siteNotes) html += `<div class="section"><h2>Site Notes</h2><p style="padding-left:12px;">${esc(sj.siteNotes).replace(/\n/g,'<br>')}</p></div>`
+  if (photosHtml) html += `<div class="section"><h2>Site Photos</h2>${photosHtml}</div>`
+  html += `<div class="section" style="margin-top:30px"><span class="confidential">Confidential \u2014 Internal Use Only</span><h2 style="border-left:none;background:none;padding-left:0">Cost Breakdown</h2>${costHtml}</div>`
+  html += '<div class="footer">SecureWorks WA Pty Ltd | ABN 64 689 223 416<br>fencing@secureworkswa.com.au | 0489 267 772<br>Fully Licensed | Quality Guaranteed</div>'
+  html += '</div></body></html>'
+
+  // ── Upload to storage ──
+  const bucket = 'job-documents'
+  try { await client.storage.createBucket(bucket, { public: true }) } catch { /* exists */ }
+
+  const fileName = `WO-${jn}.html`
+  const path = `${jId}/${Date.now()}-${fileName}`
+  const encoded = new TextEncoder().encode(html)
+
+  const { error: uploadErr } = await client.storage.from(bucket).upload(path, encoded, { contentType: 'text/html; charset=utf-8', upsert: true })
+  if (uploadErr) throw new Error('Storage upload failed: ' + uploadErr.message)
+
+  const { data: urlData } = client.storage.from(bucket).getPublicUrl(path)
+  const publicUrl = urlData.publicUrl
+
+  // ── Create job_documents record (or update existing) ──
+  // Check if one already exists for this job
+  const { data: existing } = await client.from('job_documents')
+    .select('id').eq('job_id', jId).eq('type', 'work_order').eq('file_name', fileName).limit(1)
+
+  let docId: string
+  if (existing && existing.length > 0) {
+    await client.from('job_documents').update({ storage_url: publicUrl, version: 2 }).eq('id', existing[0].id)
+    docId = existing[0].id
+  } else {
+    const { data: newDoc, error: docErr } = await client.from('job_documents')
+      .insert({ job_id: jId, type: 'work_order', file_name: fileName, storage_url: publicUrl, visible_to_trades: true, version: 1, metadata: {} })
+      .select('id').single()
+    if (docErr) throw new Error('Document record failed: ' + docErr.message)
+    docId = newDoc.id
+  }
+
+  return { document_id: docId, url: publicUrl, file_name: fileName }
+}
+
+async function deleteMedia(client: any, body: any) {
+  const mediaId = body.mediaId || body.media_id
+  if (!mediaId) throw new Error('mediaId required')
+
+  const { data: media, error: fetchErr } = await client
+    .from('job_media')
+    .select('id, job_id, storage_url, label, phase')
+    .eq('id', mediaId)
+    .single()
+
+  if (fetchErr) throw fetchErr
+  if (!media) throw new Error('Media not found')
+
+  // Delete from storage
+  if (media.storage_url) {
+    try {
+      const bucket = 'job-photos'
+      const urlParts = media.storage_url.split(`/storage/v1/object/public/${bucket}/`)
+      if (urlParts.length > 1) {
+        await client.storage.from(bucket).remove([urlParts[1]])
+      }
+    } catch (e) {
+      console.log('[ops-api] Storage delete failed (non-blocking):', (e as Error).message)
+    }
+  }
+
+  const { error: delErr } = await client.from('job_media').delete().eq('id', mediaId)
+  if (delErr) throw delErr
+
+  await client.from('job_events').insert({
+    job_id: media.job_id,
+    event_type: 'media_deleted',
+    detail_json: { media_id: mediaId, label: media.label, phase: media.phase },
+  })
+
+  logBusinessEvent(client, {
+    event_type: 'media.deleted',
+    entity_type: 'job_media',
+    entity_id: mediaId,
+    job_id: media.job_id,
+    payload: { label: media.label, phase: media.phase },
+    metadata: { operator: body.operator_email || null },
+  })
+
+  return { success: true }
+}
+
+async function jumpCouncilStep(client: any, body: any) {
+  const { submission_id, target_step_index } = body
+  if (!submission_id || target_step_index == null) throw new Error('submission_id and target_step_index required')
+
+  const { data: sub } = await client.from('council_submissions')
+    .select('id, job_id, steps, current_step_index')
+    .eq('id', submission_id)
+    .single()
+  if (!sub) throw new Error('Submission not found')
+
+  const steps = sub.steps || []
+  const target = Number(target_step_index)
+  if (target < 0 || target >= steps.length) throw new Error('target_step_index out of range')
+
+  const now = new Date().toISOString()
+
+  // Steps before target -> complete (skipped gaps only for Development Approval)
+  for (let i = 0; i < target; i++) {
+    if (steps[i].status === 'complete' || steps[i].status === 'skipped') {
+      // Already complete/skipped -> leave as is
+    } else if (steps[i].name === 'Development Approval' && steps[i].status === 'pending') {
+      // Development Approval skipped only if never touched (still pending)
+      steps[i].status = 'skipped'
+      steps[i].started_at = null
+      steps[i].completed_at = null
+    } else {
+      steps[i].status = 'complete'
+      if (!steps[i].completed_at) steps[i].completed_at = now
+      if (!steps[i].started_at) steps[i].started_at = now
+    }
+  }
+
+  // Target step -> in_progress
+  steps[target].status = 'in_progress'
+  if (!steps[target].started_at) steps[target].started_at = now
+  steps[target].completed_at = null
+
+  // Steps after target -> pending (reset)
+  for (let i = target + 1; i < steps.length; i++) {
+    steps[i].status = 'pending'
+    steps[i].started_at = null
+    steps[i].completed_at = null
+  }
+
+  const overallStatus = target === 0 && steps.length > 1 ? 'in_progress' : steps.every((s: any) => s.status === 'complete') ? 'complete' : 'in_progress'
+
+  await client.from('council_submissions').update({
+    steps,
+    current_step_index: target,
+    overall_status: overallStatus,
+    updated_at: now,
+  }).eq('id', submission_id)
+
+  const { data: job } = await client.from('jobs').select('job_number').eq('id', sub.job_id).maybeSingle()
+
+  logBusinessEvent(client, {
+    event_type: 'council.step_jumped',
+    entity_type: 'council_submission',
+    entity_id: submission_id,
+    job_id: job?.job_number || sub.job_id,
+    payload: { target_step: target, step_name: steps[target].name, overall_status: overallStatus },
+  })
+
+  return { success: true, overall_status: overallStatus, current_step_index: target, steps }
+}
+
+async function createMakesafeJob(client: any, body: any) {
+  const {
+    client_name, site_address, suburb, phone, mobile,
+    requesting_company_slug, external_ref, description,
+    pdf_base64, external_links
+  } = body
+
+  if (!client_name || !site_address) throw new Error('client_name and site_address required')
+
+  // Look up requesting company
+  let companyData: any = null
+  if (requesting_company_slug) {
+    const { data: co } = await client.from('makesafe_companies')
+      .select('*').eq('slug', requesting_company_slug).maybeSingle()
+    companyData = co
+  }
+
+  // Generate job number: SWMS-XXXXX
+  const { data: lastJob } = await client.from('jobs')
+    .select('job_number')
+    .ilike('job_number', 'SWMS-%')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  let nextNum = 26001
+  if (lastJob?.job_number) {
+    const num = parseInt(lastJob.job_number.replace('SWMS-', ''), 10)
+    if (!isNaN(num)) nextNum = num + 1
+  }
+  const jobNumber = `SWMS-${nextNum}`
+
+  // Build metadata
+  const metadata: any = {
+    requesting_company: companyData ? { slug: companyData.slug, name: companyData.name } : null,
+    external_ref: external_ref || null,
+    invoice_email: companyData?.invoice_email || null,
+    special_instructions: companyData?.special_instructions || null,
+    safety_requirements: companyData?.safety_requirements || null,
+    external_links: external_links || null,
+  }
+
+  // Create the job
+  const { data: job, error: jobErr } = await client.from('jobs').insert({
+    org_id: DEFAULT_ORG_ID,
+    type: 'makesafe',
+    status: 'accepted',
+    client_name,
+    client_phone: phone || mobile || null,
+    site_address,
+    site_suburb: suburb || null,
+    job_number: jobNumber,
+    notes: description || null,
+    metadata,
+  }).select().single()
+
+  if (jobErr) throw jobErr
+
+  // If PDF provided, upload to storage and create job_documents record
+  if (pdf_base64) {
+    try {
+      const pdfBuffer = Uint8Array.from(atob(pdf_base64), c => c.charCodeAt(0))
+      const pdfPath = `${job.id}/work-order-${jobNumber}.pdf`
+      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const { error: upErr } = await adminClient.storage
+        .from('job-documents')
+        .upload(pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
+      if (!upErr) {
+        const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(pdfPath)
+        await client.from('job_documents').insert({
+          job_id: job.id,
+          type: 'work_order',
+          file_name: `work-order-${jobNumber}.pdf`,
+          storage_url: pdfPath,
+          pdf_url: urlData?.publicUrl || null,
+          visible_to_trades: true,
+        })
+      }
+    } catch (e: any) {
+      console.log('[ops-api] PDF upload failed for makesafe:', e?.message)
+    }
+  }
+
+  // Log job event
+  await client.from('job_events').insert({
+    job_id: job.id,
+    event_type: 'makesafe_created',
+    detail_json: { job_number: jobNumber, requesting_company: companyData?.name || null, external_ref },
+  })
+
+  // Telegram notification to Shaun
+  const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
+  if (TELEGRAM_BOT_TOKEN) {
+    try {
+      const { data: shaun } = await client.from('users')
+        .select('telegram_id').ilike('email', '%shaun%')
+        .not('telegram_id', 'is', null).limit(1).maybeSingle()
+      if (shaun?.telegram_id) {
+        const msg = `New Make-Safe: ${jobNumber}\n${client_name}\n${site_address}${companyData ? '\nFrom: ' + companyData.name : ''}${external_ref ? '\nRef: ' + external_ref : ''}`
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: shaun.telegram_id, text: msg }),
+        })
+      }
+    } catch (_) { /* non-critical */ }
+  }
+
+  return { ok: true, job }
+}
 
 async function createAssignment(client: any, body: any) {
   const { jobId, job_id, userId, user_id, scheduledDate, scheduled_date, date,
