@@ -13,6 +13,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
     if: github.repository == 'SecureWorks-GROUP/secureworks-backend'
 
     steps:
@@ -137,3 +138,10 @@ jobs:
           fi
 
           echo "All smoke tests passed"
+
+      - name: Smoke test ops-api action surface
+        if: contains(steps.changed.outputs.functions, 'ops-api')
+        env:
+          SW_API_KEY: ${{ secrets.SW_API_KEY }}
+        run: |
+          bash scripts/smoke-ops-api-action-surface.sh
