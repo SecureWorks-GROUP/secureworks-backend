@@ -7101,7 +7101,7 @@ async function scanSesMakesafes(client: any) {
   const graphUrl = `https://graph.microsoft.com/v1.0/users/${SES_MAILBOX}/mailFolders/inbox/messages` +
     `?$filter=receivedDateTime ge ${sevenDaysAgo}` +
     `&$top=50` +
-    `&$select=id,internetMessageId,conversationId,from,subject,bodyPreview,receivedDateTime,hasAttachments` +
+    `&$select=id,internetMessageId,conversationId,from,subject,bodyPreview,body,receivedDateTime,hasAttachments` +
     `&$orderby=receivedDateTime desc`
 
   const mailResp = await fetch(graphUrl, {
@@ -7146,7 +7146,13 @@ async function scanSesMakesafes(client: any) {
     const fromEmail = msg.from?.emailAddress?.address || ''
     const fromName = msg.from?.emailAddress?.name || ''
     const subject = msg.subject || ''
-    const bodyPreview = (msg.bodyPreview || '').slice(0, 1000)
+    // Use full body text for extraction (phone numbers are often past the 500-char preview cutoff)
+    let bodyText = (msg.bodyPreview || '').slice(0, 1000)
+    if (msg.body?.content) {
+      // Strip HTML tags to get plain text, take first 2000 chars for Haiku
+      bodyText = msg.body.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 2000)
+    }
+    const bodyPreview = bodyText
 
     // Match sender to company
     let matchedCompany: { slug: string; name: string } | null = null
