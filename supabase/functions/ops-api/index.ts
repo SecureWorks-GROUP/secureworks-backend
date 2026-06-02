@@ -6563,7 +6563,7 @@ async function createMakesafeJob(client: any, body: any) {
       requesting_company_slug: companyData?.slug || requesting_company_slug || null,
       requesting_company_name: companyData?.name || null,
       external_ref: external_ref || null,
-      substatus: 'company_contact_required',
+      substatus: 'pending_allocation',
       safety_requirements: companyData?.safety_requirements || null,
       special_instructions: companyData?.special_instructions || null,
       external_links: external_links || companyData?.external_links || [],
@@ -6675,7 +6675,7 @@ async function updateMakesafeSubstatus(client: any, body: any) {
   if (!jId || !substatus) throw new Error('job_id and substatus required')
 
   const validSubstatuses = [
-    'company_contact_required', 'company_contact_done',
+    'pending_allocation',
     'waiting_on_trade_report', 'admin_to_send_report',
     'ready_to_invoice', 'complete',
   ]
@@ -6688,7 +6688,6 @@ async function updateMakesafeSubstatus(client: any, body: any) {
     updated_at: new Date().toISOString(),
   }
   // Auto-set timestamps based on substatus transition
-  if (substatus === 'company_contact_done') updates.company_contacted_at = new Date().toISOString()
   if (substatus === 'admin_to_send_report') updates.report_received_at = new Date().toISOString()
   if (substatus === 'ready_to_invoice') updates.report_sent_at = new Date().toISOString()
   if (substatus === 'complete') updates.invoice_ready_at = new Date().toISOString()
@@ -7101,7 +7100,7 @@ async function scanSesMakesafes(client: any) {
   const graphUrl = `https://graph.microsoft.com/v1.0/users/${SES_MAILBOX}/mailFolders/inbox/messages` +
     `?$filter=receivedDateTime ge ${sevenDaysAgo}` +
     `&$top=50` +
-    `&$select=id,internetMessageId,conversationId,from,subject,bodyPreview,receivedDateTime,hasAttachments` +
+    `&$select=id,internetMessageId,conversationId,from,subject,bodyPreview,body,receivedDateTime,hasAttachments` +
     `&$orderby=receivedDateTime desc`
 
   const mailResp = await fetch(graphUrl, {
@@ -7146,7 +7145,12 @@ async function scanSesMakesafes(client: any) {
     const fromEmail = msg.from?.emailAddress?.address || ''
     const fromName = msg.from?.emailAddress?.name || ''
     const subject = msg.subject || ''
-    const bodyPreview = (msg.bodyPreview || '').slice(0, 1000)
+    // Use full body for extraction (phone numbers are often past the 500-char preview cutoff)
+    let bodyText = (msg.bodyPreview || '').slice(0, 1000)
+    if (msg.body?.content) {
+      bodyText = msg.body.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 2000)
+    }
+    const bodyPreview = bodyText
 
     // Match sender to company
     let matchedCompany: { slug: string; name: string } | null = null
