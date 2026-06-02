@@ -6563,7 +6563,7 @@ async function createMakesafeJob(client: any, body: any) {
       requesting_company_slug: companyData?.slug || requesting_company_slug || null,
       requesting_company_name: companyData?.name || null,
       external_ref: external_ref || null,
-      substatus: 'company_contact_required',
+      substatus: 'pending_allocation',
       safety_requirements: companyData?.safety_requirements || null,
       special_instructions: companyData?.special_instructions || null,
       external_links: external_links || companyData?.external_links || [],
@@ -6675,7 +6675,7 @@ async function updateMakesafeSubstatus(client: any, body: any) {
   if (!jId || !substatus) throw new Error('job_id and substatus required')
 
   const validSubstatuses = [
-    'company_contact_required', 'company_contact_done',
+    'pending_allocation',
     'waiting_on_trade_report', 'admin_to_send_report',
     'ready_to_invoice', 'complete',
   ]
