@@ -1395,6 +1395,17 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'delete_media': return json(await deleteMedia(client, body))
       case 'jump_council_step': return json(await jumpCouncilStep(client, body))
       case 'create_makesafe_job': return json(await createMakesafeJob(client, body))
+      case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
+      case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
+      case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
+      case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
+      case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
+      case 'list_intake_drafts': return json(await listIntakeDrafts(client, url.searchParams))
+      case 'approve_intake_draft': return json(await approveIntakeDraft(client, body))
+      case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
+      case 'create_intake_draft': return json(await createIntakeDraft(client, body))
+      case 'scan_ses_makesafes': return json(await scanSesMakesafes(client))
+      case 'submit_makesafe_report': return json(await submitMakesafeReport(client, body))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
@@ -2589,7 +2600,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'generate_trade_invoice':
       case 'my_invoices':
       case 'acknowledge_invoice_line':
-      case 'clock_event': {
+      case 'clock_event':
+      case 'submit_makesafe_report': {
         const tradeUser = await authTrade(req, client)
         // Look up user role for admin visibility
         const { data: userRec } = await client.from('users').select('role').eq('id', tradeUser.id).maybeSingle()
@@ -3758,6 +3770,8 @@ if (import.meta.main) serve(async (req: Request) => {
 
             return json({ success: true, assignment: updated, event_id: null, net_hours: updateFields.hours_worked || null })
           }
+
+          case 'submit_makesafe_report': return json(await submitMakesafeReport(client, { ...body, userId: tradeUser.id }))
         }
       }
 
@@ -4709,6 +4723,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     awaiting_supplier: [],
     order_confirmed: [],
     schedule_install: [],
+    scheduled: [],
     in_progress: [],
     rectification: [],
     complete: [],
@@ -4717,9 +4732,9 @@ async function pipeline(client: any, params: URLSearchParams) {
     get_review: [],
   }
   for (const j of enriched) {
-    // Legacy merges preserved: deposit → accepted, scheduled → processing.
+    // Legacy merge preserved: deposit → accepted.
+    // 2026-06-02: removed scheduled → processing merge so Scheduled column renders its own jobs.
     const col = j.status === 'deposit' ? 'accepted'
-      : j.status === 'scheduled' ? 'processing'
       : j.status
     if (columns[col]) columns[col].push(j)
   }
@@ -6611,6 +6626,660 @@ async function createMakesafeJob(client: any, body: any) {
   }
 
   return { ok: true, job }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Make-Safe Slices 2-7 — API endpoints
+// ══════════════════════════════════════════════════════════════
+
+// ── Slice 2: list requesting companies ──
+async function listMakesafeCompanies(client: any) {
+  const { data, error } = await client.from('makesafe_companies')
+    .select('*')
+    .eq('active', true)
+    .order('name')
+  if (error) throw error
+  return { companies: data || [] }
+}
+
+// ── Slice 2: update make-safe overlay details ──
+async function updateMakesafeDetails(client: any, body: any) {
+  const { job_id, jobId } = body
+  const jId = job_id || jobId
+  if (!jId) throw new Error('job_id required')
+
+  const allowed = [
+    'requesting_company_id', 'requesting_company_slug', 'requesting_company_name',
+    'external_ref', 'substatus', 'safety_requirements', 'special_instructions',
+    'external_links', 'billing_rules', 'invoice_notes',
+    'company_contacted_at', 'report_received_at', 'report_sent_at', 'invoice_ready_at',
+  ]
+  const updates: Record<string, any> = { updated_at: new Date().toISOString() }
+  for (const key of allowed) {
+    if (body[key] !== undefined) updates[key] = body[key]
+  }
+
+  const { data, error } = await client.from('makesafe_job_details')
+    .update(updates)
+    .eq('job_id', jId)
+    .select()
+    .single()
+  if (error) throw error
+  return { ok: true, details: data }
+}
+
+// ── Slice 2: move substatus forward with timestamp tracking ──
+async function updateMakesafeSubstatus(client: any, body: any) {
+  const { job_id, jobId, substatus } = body
+  const jId = job_id || jobId
+  if (!jId || !substatus) throw new Error('job_id and substatus required')
+
+  const validSubstatuses = [
+    'company_contact_required', 'company_contact_done',
+    'waiting_on_trade_report', 'admin_to_send_report',
+    'ready_to_invoice', 'complete',
+  ]
+  if (!validSubstatuses.includes(substatus)) {
+    throw new Error('Invalid substatus: ' + substatus + '. Allowed: ' + validSubstatuses.join(', '))
+  }
+
+  const updates: Record<string, any> = {
+    substatus,
+    updated_at: new Date().toISOString(),
+  }
+  // Auto-set timestamps based on substatus transition
+  if (substatus === 'company_contact_done') updates.company_contacted_at = new Date().toISOString()
+  if (substatus === 'admin_to_send_report') updates.report_received_at = new Date().toISOString()
+  if (substatus === 'ready_to_invoice') updates.report_sent_at = new Date().toISOString()
+  if (substatus === 'complete') updates.invoice_ready_at = new Date().toISOString()
+
+  const { data, error } = await client.from('makesafe_job_details')
+    .update(updates)
+    .eq('job_id', jId)
+    .select()
+    .single()
+  if (error) throw error
+
+  // Log event
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'makesafe_substatus_changed',
+    detail_json: { substatus, changed_at: updates.updated_at },
+  }).catch(() => {})
+
+  return { ok: true, details: data }
+}
+
+// ── Slice 3: dedicated make-safe pipeline ──
+async function makesafePipeline(client: any, params: URLSearchParams) {
+  const { data: jobs, error } = await client.from('jobs')
+    .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at')
+    .eq('type', 'makesafe')
+    .not('status', 'in', '("cancelled","archived","lost")')
+    .order('created_at', { ascending: false })
+    .limit(200)
+  if (error) throw error
+
+  // Fetch all makesafe_job_details for these jobs
+  const jobIds = (jobs || []).map((j: any) => j.id)
+  let detailsMap: Record<string, any> = {}
+  if (jobIds.length > 0) {
+    const { data: details } = await client.from('makesafe_job_details')
+      .select('*, makesafe_companies:requesting_company_id(slug, name)')
+      .in('job_id', jobIds)
+    for (const d of (details || [])) {
+      detailsMap[d.job_id] = d
+    }
+  }
+
+  // Fetch assignments for these jobs
+  let assignMap: Record<string, any[]> = {}
+  if (jobIds.length > 0) {
+    const { data: assigns } = await client.from('job_assignments')
+      .select('job_id, user_id, scheduled_date, status, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
+      .in('job_id', jobIds)
+      .neq('status', 'cancelled')
+      .order('scheduled_date', { ascending: true })
+    for (const a of (assigns || [])) {
+      if (!assignMap[a.job_id]) assignMap[a.job_id] = []
+      assignMap[a.job_id].push(a)
+    }
+  }
+
+  // Business stage mapping for make-safe kanban
+  // Core status -> business stage label
+  const MAKESAFE_STAGE_LABELS: Record<string, string> = {
+    accepted: 'New',
+    scheduled: 'Allocated',
+    in_progress: 'In Progress',
+    complete: 'Works Complete',
+    invoiced: 'Invoiced',
+  }
+
+  // Build columns
+  const columns: Record<string, any[]> = {
+    accepted: [],
+    scheduled: [],
+    in_progress: [],
+    complete: [],
+    invoiced: [],
+  }
+
+  for (const j of (jobs || [])) {
+    const detail = detailsMap[j.id] || null
+    const assigns = assignMap[j.id] || []
+    const enriched = {
+      ...j,
+      makesafe_details: detail,
+      substatus: detail?.substatus || null,
+      requesting_company: detail?.requesting_company_name || detail?.makesafe_companies?.name || j.metadata?.requesting_company?.name || null,
+      external_ref: detail?.external_ref || j.metadata?.external_ref || null,
+      assignments: assigns,
+      assigned_trade: assigns.length > 0 ? assigns[0]?.users?.name || null : null,
+      age_hours: Math.round((Date.now() - new Date(j.created_at).getTime()) / 3600000),
+    }
+    const col = columns[j.status] ? j.status : 'accepted'
+    columns[col].push(enriched)
+  }
+
+  return { columns, stage_labels: MAKESAFE_STAGE_LABELS, total: (jobs || []).length }
+}
+
+// ── Slice 5: make-safe completion report ──
+async function submitMakesafeReport(client: any, body: any) {
+  const {
+    job_id, jobId, userId, user_id,
+    work_done, materials_used, labour_hours, trade_count,
+    access_issues, follow_up_required, invoice_notes,
+    status: reportStatus,
+  } = body
+  const jId = job_id || jobId
+  const uId = userId || user_id || null
+  if (!jId) throw new Error('job_id required')
+
+  const reportFields: Record<string, any> = {
+    checklist_json: {
+      work_done: work_done || '',
+      materials_used: materials_used || [],
+      labour_hours: labour_hours || 0,
+      trade_count: trade_count || 1,
+      access_issues: access_issues || '',
+      follow_up_required: follow_up_required || false,
+      invoice_notes: invoice_notes || '',
+    },
+    notes: work_done || null,
+    status: reportStatus || 'submitted',
+    submitted_by: uId,
+    submitted_at: (reportStatus || 'submitted') === 'submitted' ? new Date().toISOString() : null,
+  }
+
+  // Check for existing report
+  const { data: existing } = await client.from('job_service_reports')
+    .select('id, status').eq('job_id', jId).limit(1).maybeSingle()
+
+  let report
+  if (existing) {
+    if (existing.status === 'approved') throw new Error('Report already approved')
+    const { data, error } = await client.from('job_service_reports')
+      .update(reportFields).eq('id', existing.id).select().single()
+    if (error) throw error
+    report = data
+  } else {
+    const { data, error } = await client.from('job_service_reports')
+      .insert({ job_id: jId, ...reportFields }).select().single()
+    if (error) throw error
+    report = data
+  }
+
+  // Auto-update makesafe substatus
+  if ((reportStatus || 'submitted') === 'submitted') {
+    try {
+      await client.from('makesafe_job_details')
+        .update({
+          substatus: 'waiting_on_trade_report',
+          report_received_at: new Date().toISOString(),
+          invoice_notes: invoice_notes || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('job_id', jId)
+    } catch (_) { /* non-blocking if overlay table not populated */ }
+
+    await client.from('job_events').insert({
+      job_id: jId,
+      user_id: uId,
+      event_type: 'makesafe_report_submitted',
+      detail_json: { report_id: report.id, labour_hours, trade_count, materials_used },
+    }).catch(() => {})
+  }
+
+  return { ok: true, report }
+}
+
+// ── Slice 6: make-safe map data ──
+async function makesafeMap(client: any, params: URLSearchParams) {
+  const filter = params.get('filter') || 'active' // active|today|unassigned|waiting_report|to_invoice
+  const tradeId = params.get('trade_id') || null
+
+  let query = client.from('jobs')
+    .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at')
+    .eq('type', 'makesafe')
+    .not('status', 'in', '("cancelled","archived","lost")')
+    .order('created_at', { ascending: false })
+    .limit(300)
+
+  const { data: jobs, error } = await query
+  if (error) throw error
+
+  const jobIds = (jobs || []).map((j: any) => j.id)
+  if (jobIds.length === 0) return { jobs: [], no_location: [] }
+
+  // Fetch details + assignments in parallel
+  const [detailsRes, assignsRes] = await Promise.all([
+    client.from('makesafe_job_details')
+      .select('job_id, substatus, requesting_company_name, external_ref')
+      .in('job_id', jobIds),
+    client.from('job_assignments')
+      .select('job_id, user_id, scheduled_date, status, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
+      .in('job_id', jobIds)
+      .neq('status', 'cancelled')
+      .order('scheduled_date', { ascending: true }),
+  ])
+
+  const detailsMap: Record<string, any> = {}
+  for (const d of (detailsRes.data || [])) detailsMap[d.job_id] = d
+  const assignMap: Record<string, any[]> = {}
+  for (const a of (assignsRes.data || [])) {
+    if (!assignMap[a.job_id]) assignMap[a.job_id] = []
+    assignMap[a.job_id].push(a)
+  }
+
+  const today = new Date().toISOString().slice(0, 10)
+  const enriched = (jobs || []).map((j: any) => {
+    const detail = detailsMap[j.id] || null
+    const assigns = assignMap[j.id] || []
+    const todayAssigns = assigns.filter((a: any) => a.scheduled_date === today)
+    const onRoad = todayAssigns.some((a: any) => a.travel_started_at && !a.completed_at)
+    return {
+      ...j,
+      substatus: detail?.substatus || null,
+      requesting_company: detail?.requesting_company_name || j.metadata?.requesting_company?.name || null,
+      external_ref: detail?.external_ref || j.metadata?.external_ref || null,
+      assigned_trade: assigns[0]?.users?.name || null,
+      assigned_trade_phone: assigns[0]?.users?.phone || null,
+      assignments: assigns,
+      on_road: onRoad,
+      has_location: !!(j.site_lat && j.site_lng),
+    }
+  })
+
+  // Apply filters
+  let filtered = enriched
+  if (filter === 'today') filtered = enriched.filter((j: any) => j.assignments.some((a: any) => a.scheduled_date === today))
+  if (filter === 'unassigned') filtered = enriched.filter((j: any) => j.assignments.length === 0)
+  if (filter === 'waiting_report') filtered = enriched.filter((j: any) => j.substatus === 'waiting_on_trade_report' || j.substatus === 'admin_to_send_report')
+  if (filter === 'to_invoice') filtered = enriched.filter((j: any) => j.substatus === 'ready_to_invoice')
+  if (filter === 'on_road') filtered = enriched.filter((j: any) => j.on_road)
+  if (tradeId) filtered = filtered.filter((j: any) => j.assignments.some((a: any) => a.user_id === tradeId))
+
+  const withLocation = filtered.filter((j: any) => j.has_location)
+  const noLocation = filtered.filter((j: any) => !j.has_location)
+
+  return { jobs: withLocation, no_location: noLocation }
+}
+
+// ── Slice 7: list intake drafts ──
+async function listIntakeDrafts(client: any, params: URLSearchParams) {
+  const status = params.get('status') || 'draft,needs_review'
+  const statuses = status.split(',').map((s: string) => s.trim())
+
+  const { data, error } = await client.from('makesafe_intake_drafts')
+    .select('*')
+    .in('status', statuses)
+    .order('received_at', { ascending: false })
+    .limit(50)
+  if (error) throw error
+  return { drafts: data || [] }
+}
+
+// ── Slice 7: approve intake draft -> create job ──
+async function approveIntakeDraft(client: any, body: any) {
+  const { draft_id, approved_by } = body
+  if (!draft_id) throw new Error('draft_id required')
+
+  // Load the draft
+  const { data: draft, error: dErr } = await client.from('makesafe_intake_drafts')
+    .select('*').eq('id', draft_id).single()
+  if (dErr || !draft) throw new Error('Draft not found')
+  if (draft.status === 'approved') throw new Error('Draft already approved')
+
+  // Create the make-safe job using existing logic
+  const jobResult = await createMakesafeJob(client, {
+    client_name: draft.client_name || 'Unknown',
+    site_address: draft.site_address || draft.subject || 'Address TBC',
+    suburb: draft.site_suburb || null,
+    phone: draft.client_phone || null,
+    requesting_company_slug: draft.requesting_company_slug || null,
+    external_ref: draft.external_ref || null,
+    description: draft.description || draft.body_preview || null,
+  })
+
+  // Link draft to created job
+  await client.from('makesafe_intake_drafts').update({
+    status: 'approved',
+    approved_job_id: jobResult.job.id,
+    approved_at: new Date().toISOString(),
+    approved_by: approved_by || null,
+    updated_at: new Date().toISOString(),
+  }).eq('id', draft_id)
+
+  // Download and attach any PDF attachments from the original email
+  if (draft.attachments_json && Array.isArray(draft.attachments_json)) {
+    for (const att of draft.attachments_json) {
+      if (att.storage_url || att.pdf_url) {
+        try {
+          await client.from('job_documents').insert({
+            job_id: jobResult.job.id,
+            type: 'work_order',
+            file_name: att.file_name || att.name || 'work-order.pdf',
+            storage_url: att.storage_url || att.pdf_url,
+            pdf_url: att.pdf_url || att.storage_url,
+            visible_to_trades: true,
+          })
+        } catch (_) { /* non-blocking */ }
+      }
+    }
+  }
+
+  return { ok: true, job: jobResult.job, draft_id }
+}
+
+// ── Slice 7: reject intake draft ──
+async function rejectIntakeDraft(client: any, body: any) {
+  const { draft_id, rejected_by, review_notes } = body
+  if (!draft_id) throw new Error('draft_id required')
+
+  const { data, error } = await client.from('makesafe_intake_drafts')
+    .update({
+      status: 'rejected',
+      rejected_at: new Date().toISOString(),
+      rejected_by: rejected_by || null,
+      review_notes: review_notes || null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', draft_id)
+    .select()
+    .single()
+  if (error) throw error
+  return { ok: true, draft: data }
+}
+
+// ── Slice 7: create intake draft (from agent/email parser) ──
+async function createIntakeDraft(client: any, body: any) {
+  const {
+    mailbox, graph_message_id, internet_message_id, conversation_id,
+    received_at, from_email, from_name, subject, body_preview,
+    requesting_company_slug, requesting_company_name, external_ref,
+    client_name, client_phone, client_email, site_address, site_suburb,
+    description, safety_requirements, special_instructions,
+    confidence, missing_fields, extraction_json, attachments_json,
+  } = body
+
+  if (!graph_message_id) throw new Error('graph_message_id required')
+
+  const { data, error } = await client.from('makesafe_intake_drafts').insert({
+    org_id: DEFAULT_ORG_ID,
+    mailbox: mailbox || 'ses@secureworkswa.com.au',
+    graph_message_id,
+    internet_message_id: internet_message_id || null,
+    conversation_id: conversation_id || null,
+    received_at: received_at || new Date().toISOString(),
+    from_email: from_email || null,
+    from_name: from_name || null,
+    subject: subject || null,
+    body_preview: body_preview || null,
+    requesting_company_slug: requesting_company_slug || null,
+    requesting_company_name: requesting_company_name || null,
+    external_ref: external_ref || null,
+    client_name: client_name || null,
+    client_phone: client_phone || null,
+    client_email: client_email || null,
+    site_address: site_address || null,
+    site_suburb: site_suburb || null,
+    description: description || null,
+    safety_requirements: safety_requirements || null,
+    special_instructions: special_instructions || null,
+    confidence: confidence || 'low',
+    missing_fields: missing_fields || [],
+    extraction_json: extraction_json || {},
+    attachments_json: attachments_json || [],
+  }).select().single()
+
+  if (error) throw error
+  return { ok: true, draft: data }
+}
+
+// ── Slice 7: scan SES mailbox for make-safe work orders ──
+async function scanSesMakesafes(client: any) {
+  const SES_MAILBOX = 'ses@secureworkswa.com.au'
+
+  // Get Graph token
+  const tenantId = Deno.env.get('MICROSOFT_TENANT_ID')
+  const clientId = Deno.env.get('MICROSOFT_CLIENT_ID')
+  const clientSecret = Deno.env.get('MICROSOFT_CLIENT_SECRET')
+  if (!tenantId || !clientId || !clientSecret) {
+    throw new Error('Microsoft Graph credentials not configured')
+  }
+
+  const tokenResp = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: clientId,
+      client_secret: clientSecret,
+      scope: 'https://graph.microsoft.com/.default',
+    }),
+  })
+  if (!tokenResp.ok) throw new Error('Graph token request failed: ' + tokenResp.status)
+  const tokenData = await tokenResp.json()
+  const token = tokenData.access_token
+
+  // Load known make-safe company sender patterns
+  const { data: companies } = await client.from('makesafe_companies')
+    .select('slug, name, sender_patterns')
+    .eq('active', true)
+  const senderPatterns: Array<{ slug: string; name: string; pattern: string }> = []
+  for (const co of (companies || [])) {
+    for (const p of (co.sender_patterns || [])) {
+      senderPatterns.push({ slug: co.slug, name: co.name, pattern: p.toLowerCase() })
+    }
+  }
+
+  // Fetch recent emails from SES inbox (last 7 days, up to 50)
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const graphUrl = `https://graph.microsoft.com/v1.0/users/${SES_MAILBOX}/mailFolders/inbox/messages` +
+    `?$filter=receivedDateTime ge ${sevenDaysAgo}` +
+    `&$top=50` +
+    `&$select=id,internetMessageId,conversationId,from,subject,bodyPreview,receivedDateTime,hasAttachments` +
+    `&$orderby=receivedDateTime desc`
+
+  const mailResp = await fetch(graphUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  })
+  if (!mailResp.ok) {
+    const err = await mailResp.text()
+    throw new Error('Graph inbox fetch failed: ' + mailResp.status + ' ' + err)
+  }
+
+  const mailData = await mailResp.json()
+  const messages = mailData.value || []
+
+  // Filter to known make-safe senders
+  const makesafeEmails = messages.filter((msg: any) => {
+    const fromEmail = (msg.from?.emailAddress?.address || '').toLowerCase()
+    const subject = (msg.subject || '').toLowerCase()
+    // Match if sender matches a known pattern OR subject contains work order keywords
+    const senderMatch = senderPatterns.some(sp => fromEmail.includes(sp.pattern))
+    const subjectMatch = /work\s*order|make\s*safe|emergency|storm|urgent\s*(attend|repair)/i.test(subject)
+    return senderMatch || (subjectMatch && fromEmail.includes('.build'))
+  })
+
+  // Dedup against existing drafts
+  const graphIds = makesafeEmails.map((m: any) => m.id)
+  const { data: existing } = await client.from('makesafe_intake_drafts')
+    .select('graph_message_id')
+    .in('graph_message_id', graphIds.length > 0 ? graphIds : ['__none__'])
+  const existingSet = new Set((existing || []).map((e: any) => e.graph_message_id))
+  // Also dedup against already-created jobs with matching external ref
+  const { data: existingJobs } = await client.from('makesafe_job_details')
+    .select('external_ref')
+    .not('external_ref', 'is', null)
+  const existingRefs = new Set((existingJobs || []).map((j: any) => j.external_ref?.toUpperCase()))
+
+  const newDrafts: any[] = []
+  const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
+
+  for (const msg of makesafeEmails) {
+    if (existingSet.has(msg.id)) continue
+
+    const fromEmail = msg.from?.emailAddress?.address || ''
+    const fromName = msg.from?.emailAddress?.name || ''
+    const subject = msg.subject || ''
+    const bodyPreview = (msg.bodyPreview || '').slice(0, 1000)
+
+    // Match sender to company
+    let matchedCompany: { slug: string; name: string } | null = null
+    for (const sp of senderPatterns) {
+      if (fromEmail.toLowerCase().includes(sp.pattern)) {
+        matchedCompany = { slug: sp.slug, name: sp.name }
+        break
+      }
+    }
+
+    // Extract fields using Claude
+    let extraction: any = {}
+    let confidence = 'low'
+    let missingFields: string[] = []
+    if (ANTHROPIC_API_KEY) {
+      try {
+        const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+        const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
+        const resp = await anthropic.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 500,
+          system: `You extract make-safe work order details from emails for a Perth construction company.
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Extract the company reference number (e.g. AJBR XXXXX), homeowner/client name, site address, and work description.
+If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
+          messages: [{ role: 'user', content: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` }],
+        })
+        const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
+        const jsonMatch = text.match(/\{[\s\S]*\}/)
+        if (jsonMatch) {
+          extraction = JSON.parse(jsonMatch[0])
+          confidence = extraction.confidence || 'low'
+          missingFields = extraction.missing_fields || []
+        }
+      } catch (e) {
+        console.log('[ops-api] make-safe extraction failed:', (e as Error).message)
+      }
+    }
+
+    // Skip if not actually a work order
+    if (missingFields.includes('not_a_work_order')) continue
+
+    // Skip if we already have a job with this external ref
+    const extractedRef = extraction.external_ref || null
+    if (extractedRef && existingRefs.has(extractedRef.toUpperCase())) continue
+
+    // Download PDF attachments
+    const attachments: any[] = []
+    if (msg.hasAttachments) {
+      try {
+        const attResp = await fetch(
+          `https://graph.microsoft.com/v1.0/users/${SES_MAILBOX}/messages/${msg.id}/attachments`,
+          { headers: { 'Authorization': `Bearer ${token}` } }
+        )
+        if (attResp.ok) {
+          const attData = await attResp.json()
+          for (const att of (attData.value || [])) {
+            const isPdf = (att.contentType || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+            if (!isPdf || !att.contentBytes || att.size > 15000000) continue
+
+            // Upload PDF to Supabase storage
+            const storagePath = `makesafe-intake/${msg.id}/${(att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_')}`
+            try {
+              const fileBuffer = Uint8Array.from(atob(att.contentBytes), (c: string) => c.charCodeAt(0))
+              const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+              await adminClient.storage
+                .from('job-documents')
+                .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
+              const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(storagePath)
+
+              attachments.push({
+                name: att.name,
+                file_name: att.name,
+                storage_url: storagePath,
+                pdf_url: urlData?.publicUrl || null,
+                size: att.size,
+              })
+            } catch (e) {
+              console.log('[ops-api] PDF upload failed for intake:', (e as Error).message)
+            }
+          }
+        }
+      } catch (e) {
+        console.log('[ops-api] Attachment fetch failed:', (e as Error).message)
+      }
+    }
+
+    // Create draft
+    const draft = {
+      org_id: DEFAULT_ORG_ID,
+      mailbox: SES_MAILBOX,
+      graph_message_id: msg.id,
+      internet_message_id: msg.internetMessageId || null,
+      conversation_id: msg.conversationId || null,
+      received_at: msg.receivedDateTime || null,
+      from_email: fromEmail,
+      from_name: fromName,
+      subject,
+      body_preview: bodyPreview,
+      requesting_company_slug: matchedCompany?.slug || null,
+      requesting_company_name: matchedCompany?.name || null,
+      external_ref: extractedRef,
+      client_name: extraction.client_name || null,
+      client_phone: extraction.client_phone || null,
+      client_email: null,
+      site_address: extraction.site_address || null,
+      site_suburb: extraction.site_suburb || null,
+      description: extraction.description || null,
+      safety_requirements: extraction.safety_requirements || null,
+      special_instructions: null,
+      confidence,
+      missing_fields: missingFields,
+      extraction_json: extraction,
+      attachments_json: attachments,
+    }
+
+    const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')
+      .insert(draft).select().single()
+    if (insErr) {
+      console.log('[ops-api] intake draft insert failed:', insErr.message)
+      continue
+    }
+
+    newDrafts.push(inserted)
+  }
+
+  return {
+    ok: true,
+    scanned: messages.length,
+    makesafe_candidates: makesafeEmails.length,
+    already_processed: makesafeEmails.length - newDrafts.length - makesafeEmails.filter((m: any) => existingSet.has(m.id)).length,
+    new_drafts: newDrafts,
+    new_count: newDrafts.length,
+  }
 }
 
 async function createAssignment(client: any, body: any) {
@@ -10487,6 +11156,20 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
       .catch(e => console.log('[ops-api] scope photo extraction failed:', e?.message))
   }
 
+  // Make-safe overlay details for trade view
+  let makesafeDetails: any = null
+  if ((jobRes.data?.type || '').toLowerCase() === 'makesafe') {
+    try {
+      const { data: ms } = await client.from('makesafe_job_details')
+        .select('*, makesafe_companies:requesting_company_id(*)')
+        .eq('job_id', jobId)
+        .maybeSingle()
+      makesafeDetails = ms || null
+    } catch (e) {
+      console.log('[ops-api] trade makesafe details fetch skipped:', (e as Error).message)
+    }
+  }
+
   return {
     job: jobRes.data,
     documents: docsRes.data || [],
@@ -10496,6 +11179,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
     workOrder: (woRes.data || [])[0] || null,
     crew: crewRes.data || [],
     purchaseOrders: safePOs,
+    makesafe_details: makesafeDetails,
   }
 }
 
