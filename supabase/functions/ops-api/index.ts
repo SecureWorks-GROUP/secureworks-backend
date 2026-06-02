@@ -6678,7 +6678,7 @@ async function createAssignment(client: any, body: any) {
               text,
               parse_mode: 'HTML',
               reply_markup: { inline_keyboard: [[
-                { text: '🔗 Open in Trade', url: `https://secureworks-group.github.io/securedash/trade.html#job/${jId}` }
+                { text: '🔗 Open in Trade', url: `https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}` }
               ]] }
             })
           }).catch(() => {})
@@ -18238,7 +18238,7 @@ async function sendVariation(client: any, body: any) {
   if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY not configured')
 
   // Build variation email
-  const viewUrl = `https://secureworks-group.github.io/securedash/quote-viewer.html?token=${variation.share_token}&type=variation`
+  const viewUrl = `https://secureworks-group.github.io/secureworks-ux/quote-viewer.html?token=${variation.share_token}&type=variation`
 
   const html = `
     <div style="font-family: Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto;">
