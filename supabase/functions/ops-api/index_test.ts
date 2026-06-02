@@ -806,6 +806,7 @@ Deno.test("Quick Quote — Codex regression: payload.job_type honours every DB t
   const cases: Array<{ type: string | null; expected: string | null }> = [
     { type: 'fencing', expected: 'fencing' },
     { type: 'general', expected: 'general' },
+    { type: 'makesafe', expected: 'makesafe' },
     { type: 'decking', expected: 'decking' },
     { type: null, expected: null },
   ]

@@ -14,7 +14,7 @@
    ════════════════════════════════════════════════════════════════ */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { evaluateStageGates, canTransition, VERSION } from './engine.ts';
+import { evaluateStageGates, canTransition, transitionsFor, VERSION } from './engine.ts';
 
 const NOW_ISO = '2026-05-02T00:00:00.000Z';
 
@@ -211,6 +211,43 @@ Deno.test('canTransition: any non-terminal → cancelled is always allowed', () 
     const ct = canTransition({ type: 'patio' }, from, 'cancelled');
     assertEquals(ct.allowed, true, `${from} → cancelled should be allowed`);
   }
+});
+
+Deno.test('canTransition: makesafe follows the simple allocation/report/invoice path', () => {
+  assertEquals(canTransition({ type: 'makesafe' }, 'accepted', 'scheduled').allowed, true);
+  assertEquals(canTransition({ type: 'makesafe' }, 'scheduled', 'in_progress').allowed, true);
+  assertEquals(canTransition({ type: 'makesafe' }, 'in_progress', 'complete').allowed, true);
+  assertEquals(canTransition({ type: 'makesafe' }, 'complete', 'invoiced').allowed, true);
+  assertEquals(canTransition({ type: 'makesafe' }, 'invoiced', 'archived').allowed, true);
+
+  const quoteLike = canTransition({ type: 'makesafe' }, 'accepted', 'awaiting_deposit');
+  assertEquals(quoteLike.allowed, false);
+  assertEquals(quoteLike.hard_blocked, true);
+
+  assertEquals(transitionsFor('makesafe').accepted.forward, ['scheduled']);
+});
+
+Deno.test('Fixture: makesafe accepted skips quote/deposit/material gates', () => {
+  const r = evaluateStageGates(
+    { id: 'ms-1', type: 'makesafe' },
+    makePacket({
+      revision: null,
+      document: null,
+      job: { id: 'ms-1', job_number: 'SWMS-26001', type: 'makesafe', status: 'accepted' },
+      customer: { name: 'Owner A', email: null, mobile: '+61400000001' },
+      site: { address: '10 Test St', suburb: 'Perth', lat: null, lng: null },
+    }),
+    { assignments: [], job_context: [], deposit: { deposit_paid: false } },
+    { now: NOW_ISO },
+  );
+
+  assertEquals(r.current_stage, 'accepted');
+  const blockerIds = r.blockers.map((b) => b.gate_id);
+  assert(!blockerIds.includes('revision_present'));
+  assert(!blockerIds.includes('revision_released'));
+  assert(!blockerIds.includes('accepted_at'));
+  assert(!blockerIds.includes('deposit_paid'));
+  assert(!blockerIds.includes('materials_ordered'));
 });
 
 Deno.test('canTransition: archived is one-way (cannot transition out)', () => {
