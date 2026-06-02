@@ -4562,17 +4562,18 @@ async function pipeline(client: any, params: URLSearchParams) {
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: any = { data: [] }, poRes: any = { data: [] }, woRes: any = { data: [] }
   let councilRes: any = { data: [] }, emailRes: any = { data: [] }, invoiceRes: any = { data: [] }
-  let opsNotesRes: any = { data: [] }
+  let opsNotesRes: any = { data: [] }, neighbourContactRes: any = { data: [] }
 
   if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes] = await Promise.all([
-      client.from('job_assignments').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes] = await Promise.all([
+      client.from('job_assignments').select('job_id, scheduled_date').in('job_id', jobIds).neq('status', 'cancelled'),
       client.from('purchase_orders').select('job_id').in('job_id', jobIds).neq('status', 'deleted'),
       client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
       client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', jobIds),
       client.from('po_communications').select('job_id, direction, created_at').in('job_id', jobIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false }).limit(500),
       client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
       client.from('ops_notes').select('job_id').in('job_id', jobIds),
+      client.from('job_contacts').select('job_id').in('job_id', jobIds).eq('status', 'active').eq('is_primary', false),
     ])
   }
 
@@ -4582,9 +4583,17 @@ async function pipeline(client: any, params: URLSearchParams) {
     return m
   }
   const assignMap = countMap(assignRes.data || [])
+  // Earliest scheduled_date per job
+  const schedDateMap: Record<string, string> = {}
+  for (const a of (assignRes.data || [])) {
+    if (a.scheduled_date && (!schedDateMap[a.job_id] || a.scheduled_date < schedDateMap[a.job_id])) {
+      schedDateMap[a.job_id] = a.scheduled_date
+    }
+  }
   const poMap = countMap(poRes.data || [])
   const woMap = countMap(woRes.data || [])
   const opsNotesMap = countMap(opsNotesRes.data || [])
+  const neighbourContactMap = countMap(neighbourContactRes.data || [])
 
   // Council: count + best status + step info per job
   const councilMap: Record<string, number> = {}
@@ -4621,6 +4630,18 @@ async function pipeline(client: any, params: URLSearchParams) {
 
   const enriched = jobs.map((j: any) => {
     const value = j.pricing_json?.totalIncGST || j.pricing_json?.total || 0
+    // Neighbour count for fencing shared fence badge
+    let neighbourCount = 0
+    if (j.type === 'fencing') {
+      if (j.pricing_json) {
+        try {
+          const pj = typeof j.pricing_json === 'string' ? JSON.parse(j.pricing_json) : j.pricing_json
+          const ns = pj?.neighbour_splits?.neighbours || pj?.job?.neighbours
+          if (Array.isArray(ns)) neighbourCount = ns.length
+        } catch (_) {}
+      }
+      if (neighbourCount === 0) neighbourCount = neighbourContactMap[j.id] || 0
+    }
     const stageStart = j.status === 'accepted' ? j.accepted_at
       : j.status === 'approvals' ? j.approvals_at
       : j.status === 'deposit' ? j.deposit_at
@@ -4637,8 +4658,9 @@ async function pipeline(client: any, params: URLSearchParams) {
     // Strip pricing_json from response — value already extracted
     const { pricing_json: _p, ...jLite } = j
     return {
-      ...jLite, value, days_in_stage: daysInStage,
+      ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,
+      first_scheduled_date: schedDateMap[j.id] || null,
       po_count: poMap[j.id] || 0,
       wo_count: woMap[j.id] || 0,
       ops_notes_count: opsNotesMap[j.id] || 0,
@@ -4841,7 +4863,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
   return {
     job: jobLite,
     assignments: assignRes.data || [],
-    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number })),
+    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, thumbnail_url: d.thumbnail_url, label: d.label, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, accepted_at: d.accepted_at, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number })),
     events: eventsRes.data || [],
     media: mediaRes.data || [],
     purchase_orders: posLite,
