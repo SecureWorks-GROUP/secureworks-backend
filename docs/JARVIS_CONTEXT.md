@@ -236,7 +236,7 @@ Telegram message arrives
 | Project | Path | Deployed On |
 |---------|------|-------------|
 | Edge Functions | `~/Projects/secureworks-site/supabase/functions/` | Supabase |
-| Dashboards (CEO, Ops, Trade) | GitHub: `SecureWorks-GROUP/securedash` | GitHub Pages |
+| Dashboards (CEO, Ops, Trade) | GitHub: `SecureWorks-GROUP/secureworks-ux` | GitHub Pages |
 | Sale Dashboard | GitHub: `SecureWorks-GROUP/secureworks-sale` | GitHub Pages |
 | Patio Scoping Tool | `~/Projects/patio-tool/` | GitHub Pages |
 | Fencing Scoping Tool | GitHub: `SecureWorks-GROUP/fence-designer` | GitHub Pages |
