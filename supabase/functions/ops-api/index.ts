@@ -4841,7 +4841,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
   return {
     job: jobLite,
     assignments: assignRes.data || [],
-    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, type: d.type, version: d.version, url: d.pdf_url, sent_to_client: d.sent_to_client, share_token: d.share_token, created_at: d.created_at })),
+    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number })),
     events: eventsRes.data || [],
     media: mediaRes.data || [],
     purchase_orders: posLite,
