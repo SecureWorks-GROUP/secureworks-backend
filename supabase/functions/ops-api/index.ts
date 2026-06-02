@@ -7060,7 +7060,8 @@ async function createIntakeDraft(client: any, body: any) {
 
 // ── Slice 7: scan SES mailbox for make-safe work orders ──
 async function scanSesMakesafes(client: any) {
-  const SES_MAILBOX = 'ses@secureworkswa.com.au'
+  // ses@ is a distribution group tied to admin@ in M365
+  const SES_MAILBOX = 'admin@secureworkswa.com.au'
 
   // Get Graph token
   const tenantId = Deno.env.get('MICROSOFT_TENANT_ID')
