@@ -1804,7 +1804,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body
         if (!ujfJobId || !ujfField) return json({ error: 'job_id and field required' }, 400)
-        const ALLOWED_FIELDS = ['ghl_contact_id', 'ghl_opportunity_id', 'client_phone', 'client_email', 'client_name', 'site_address', 'site_suburb']
+        const ALLOWED_FIELDS = ['ghl_contact_id', 'ghl_opportunity_id', 'client_phone', 'client_email', 'client_name', 'site_address', 'site_suburb', 'council_required']
         if (!ALLOWED_FIELDS.includes(ujfField)) return json({ error: 'Field not allowed: ' + ujfField }, 400)
         const { error: ujfErr } = await client.from('jobs').update({ [ujfField]: ujfValue, updated_at: new Date().toISOString() }).eq('id', ujfJobId)
         if (ujfErr) return json({ error: ujfErr.message }, 500)
