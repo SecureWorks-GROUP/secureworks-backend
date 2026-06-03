@@ -6921,18 +6921,23 @@ async function submitMakesafeReport(client: any, body: any) {
     report = data
   }
 
-  // Auto-update makesafe substatus
+  // Auto-update makesafe substatus + job status on report submission
   if ((reportStatus || 'submitted') === 'submitted') {
     try {
       await client.from('makesafe_job_details')
         .update({
-          substatus: 'waiting_on_trade_report',
+          substatus: 'admin_to_send_report',
           report_received_at: new Date().toISOString(),
           invoice_notes: invoice_notes || null,
           updated_at: new Date().toISOString(),
         })
         .eq('job_id', jId)
     } catch (_) { /* non-blocking if overlay table not populated */ }
+
+    // Move job to complete (Works Complete on kanban)
+    try {
+      await client.from('jobs').update({ status: 'complete', completed_at: new Date().toISOString() }).eq('id', jId)
+    } catch (_) { /* non-blocking */ }
 
     try {
       await client.from('job_events').insert({
