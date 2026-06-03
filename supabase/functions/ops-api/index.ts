@@ -4556,7 +4556,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
       'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
       'schedule_install', 'scheduled', 'in_progress', 'rectification',
-      'complete', 'final_payment', 'invoiced', 'get_review'
+      'complete', 'final_payment', 'invoiced', 'get_review', 'archived'
     ])
   }
   if (typeFilter) query = query.eq('type', typeFilter)
