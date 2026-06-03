@@ -3749,6 +3749,21 @@ if (import.meta.main) serve(async (req: Request) => {
               })
             } catch (e) { console.log('[clock_event] event log error:', e) }
 
+            // Auto-advance make-safe job status when trade clocks on
+            if (event === 'clock_on' || event === 'start_travel') {
+              try {
+                const { data: clockJob } = await client.from('jobs')
+                  .select('id, type, status').eq('id', assignment.job_id).maybeSingle()
+                if (clockJob?.type === 'makesafe' && clockJob.status === 'scheduled') {
+                  await client.from('jobs').update({ status: 'in_progress' }).eq('id', clockJob.id)
+                  await client.from('job_events').insert({
+                    job_id: clockJob.id, event_type: 'status_changed',
+                    detail_json: { from: 'scheduled', to: 'in_progress', trigger: 'trade_clock_on' },
+                  })
+                }
+              } catch (e) { console.log('[clock_event] makesafe auto-advance error:', e) }
+            }
+
             // Log business event for clock_on and clock_off
             if (event === 'clock_on' || event === 'clock_off' || event === 'start_travel' || event === 'undo_travel') {
               try {
