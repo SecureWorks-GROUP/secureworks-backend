@@ -4745,6 +4745,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     final_payment: [],
     invoiced: [],
     get_review: [],
+    archived: [],
   }
   for (const j of enriched) {
     // Legacy merge preserved: deposit → accepted.
