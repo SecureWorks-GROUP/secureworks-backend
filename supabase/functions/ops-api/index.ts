@@ -4909,6 +4909,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
       remaining_to_invoice: Math.max(0, quotedTotal - invoicedTotal),
     },
     makesafe_details: makesafeDetails,
+    service_reports: serviceReportsRes.data || [],
     chase_logs: chaseLogs,
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
