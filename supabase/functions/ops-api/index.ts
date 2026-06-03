@@ -6875,6 +6875,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
 async function submitMakesafeReport(client: any, body: any) {
   const {
     job_id, jobId, userId, user_id,
+    arrival_time, damage_description, damage_cause,
     work_done, materials_used, labour_hours, trade_count,
     access_issues, follow_up_required, invoice_notes,
     status: reportStatus,
@@ -6885,6 +6886,9 @@ async function submitMakesafeReport(client: any, body: any) {
 
   const reportFields: Record<string, any> = {
     checklist_json: {
+      arrival_time: arrival_time || '',
+      damage_description: damage_description || '',
+      damage_cause: damage_cause || '',
       work_done: work_done || '',
       materials_used: materials_used || [],
       labour_hours: labour_hours || 0,
@@ -9432,6 +9436,8 @@ async function completeAndInvoice(client: any, body: any) {
     due_date: dueDate,
     xero_status: body.xero_status || 'DRAFT',
     send_email: body.send_email || false,
+    bypass_preflight: body.bypass_preflight || false,
+    bypass_reason: body.bypass_reason || undefined,
   })
 
   // Dual-write to business_events
@@ -10131,7 +10137,7 @@ async function addPOEvent(client: any, body: any) {
 function trackingCategoryForJob(jobNumber: string): string {
   if (!jobNumber) return ''
   const upper = jobNumber.toUpperCase()
-  if (upper.startsWith('SWMS-')) return 'SW - MAKESAFES'
+  if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
   const prefix = upper.slice(0, 3)
   if (prefix === 'SWP') return 'SW - PATIOS'
   if (prefix === 'SWF') return 'SW - FENCING'
