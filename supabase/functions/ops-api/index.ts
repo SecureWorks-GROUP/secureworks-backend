@@ -4769,7 +4769,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     jobId = found.id
   }
 
-  const [jobRes, assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes, bizEventsRes] = await Promise.all([
+  const [jobRes, assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes, bizEventsRes, serviceReportsRes] = await Promise.all([
     client.from('jobs').select('*').eq('id', jobId).single(),
     client.from('job_assignments').select('*, users:user_id(name, phone, email)').eq('job_id', jobId).order('scheduled_date'),
     client.from('job_documents').select('*').eq('job_id', jobId).order('created_at', { ascending: false }),
@@ -4780,6 +4780,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
+    client.from('job_service_reports').select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(5),
   ])
 
   if (jobRes.error) throw jobRes.error
