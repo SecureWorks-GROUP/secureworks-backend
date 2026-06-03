@@ -1400,6 +1400,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
+      case 'geocode_job': return json(await geocodeJob(client, body))
+      case 'geocode_missing_makesafes': return json(await geocodeMissingMakesafes(client))
       case 'list_intake_drafts': return json(await listIntakeDrafts(client, url.searchParams))
       case 'approve_intake_draft': return json(await approveIntakeDraft(client, body))
       case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
@@ -6499,6 +6501,70 @@ async function jumpCouncilStep(client: any, body: any) {
   return { success: true, overall_status: overallStatus, current_step_index: target, steps }
 }
 
+// ── Geocoding helper (Nominatim, free, no API key) ──
+async function geocodeAddress(address: string, suburb?: string): Promise<{ lat: number, lng: number } | null> {
+  try {
+    const query = (address || '') + (suburb ? ', ' + suburb : '') + ', Western Australia'
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&countrycodes=au`
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'SecureWorks-OpsAPI/1.0 (admin@secureworkswa.com.au)' }
+    })
+    if (!resp.ok) return null
+    const results = await resp.json()
+    if (results && results.length > 0) {
+      return { lat: parseFloat(results[0].lat), lng: parseFloat(results[0].lon) }
+    }
+    return null
+  } catch (e) {
+    console.log('[ops-api] geocode failed (non-blocking):', (e as Error).message)
+    return null
+  }
+}
+
+async function geocodeAndUpdateJob(client: any, jobId: string, address: string, suburb?: string) {
+  try {
+    const coords = await geocodeAddress(address, suburb)
+    if (coords) {
+      await client.from('jobs').update({ site_lat: coords.lat, site_lng: coords.lng }).eq('id', jobId)
+    }
+  } catch (e) {
+    console.log('[ops-api] geocode update failed (non-blocking):', (e as Error).message)
+  }
+}
+
+async function geocodeJob(client: any, body: any) {
+  const jId = body.jobId || body.job_id
+  if (!jId) throw new Error('jobId required')
+  const { data: job } = await client.from('jobs').select('id, site_address, site_suburb, site_lat, site_lng').eq('id', jId).single()
+  if (!job) throw new Error('Job not found')
+  const coords = await geocodeAddress(job.site_address, job.site_suburb)
+  if (!coords) return { ok: false, message: 'Could not geocode address: ' + (job.site_address || '') }
+  await client.from('jobs').update({ site_lat: coords.lat, site_lng: coords.lng }).eq('id', jId)
+  return { ok: true, lat: coords.lat, lng: coords.lng }
+}
+
+// Bulk geocode all make-safe jobs missing coordinates
+async function geocodeMissingMakesafes(client: any) {
+  const { data: jobs } = await client.from('jobs')
+    .select('id, site_address, site_suburb')
+    .eq('type', 'makesafe')
+    .is('site_lat', null)
+    .not('site_address', 'is', null)
+    .limit(20)
+  if (!jobs || jobs.length === 0) return { ok: true, geocoded: 0 }
+  let geocoded = 0
+  for (const j of jobs) {
+    const coords = await geocodeAddress(j.site_address, j.site_suburb)
+    if (coords) {
+      await client.from('jobs').update({ site_lat: coords.lat, site_lng: coords.lng }).eq('id', j.id)
+      geocoded++
+    }
+    // Nominatim rate limit: 1 req/sec
+    await new Promise(r => setTimeout(r, 1100))
+  }
+  return { ok: true, geocoded, total: jobs.length }
+}
+
 async function createMakesafeJob(client: any, body: any) {
   const {
     client_name, site_address, suburb, phone, mobile,
@@ -6571,6 +6637,9 @@ async function createMakesafeJob(client: any, body: any) {
   }).select().single()
 
   if (jobErr) throw jobErr
+
+  // Geocode address (fire-and-forget, non-blocking)
+  geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
 
   // Make-safe overlay details: keeps requesting-company refs, substatus,
   // safety notes, report handoff and invoice notes out of patio/fencing scope.
