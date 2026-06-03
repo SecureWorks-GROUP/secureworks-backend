@@ -6861,12 +6861,14 @@ async function submitMakesafeReport(client: any, body: any) {
         .eq('job_id', jId)
     } catch (_) { /* non-blocking if overlay table not populated */ }
 
-    await client.from('job_events').insert({
-      job_id: jId,
-      user_id: uId,
-      event_type: 'makesafe_report_submitted',
-      detail_json: { report_id: report.id, labour_hours, trade_count, materials_used },
-    }).catch(() => {})
+    try {
+      await client.from('job_events').insert({
+        job_id: jId,
+        user_id: uId,
+        event_type: 'makesafe_report_submitted',
+        detail_json: { report_id: report.id, labour_hours, trade_count, materials_used },
+      })
+    } catch (_) { /* non-blocking */ }
   }
 
   return { ok: true, report }
