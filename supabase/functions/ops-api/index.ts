@@ -9321,6 +9321,21 @@ async function completeAndInvoice(client: any, body: any) {
   // Use line_items_override if provided (from invoice creation modal),
   // otherwise extract from pricing_json (with fallback to scope_json._pricing_json for fencing jobs)
   let lineItems: any[] = body.line_items_override || []
+  // Normalise override items: accept amount_inc_gst as convenience field
+  if (lineItems.length > 0) {
+    lineItems = lineItems.map((li: any, i: number) => {
+      // If caller passed amount_inc_gst (convenience), convert to ex-GST unit_price
+      if (li.amount_inc_gst != null && li.unit_price == null) {
+        li.unit_price = Math.round((li.amount_inc_gst / 1.1) * 100) / 100
+      }
+      if (!li.quantity) li.quantity = 1
+      if (!li.unit_price || isNaN(li.unit_price)) {
+        throw new Error(`line_items_override[${i}] missing unit_price or amount_inc_gst`)
+      }
+      if (!li.account_code) li.account_code = accountCodeForJob(job.type)
+      return li
+    })
+  }
   if (lineItems.length === 0) {
     // Primary: top-level pricing_json column
     let pricing: any = null
@@ -9373,7 +9388,10 @@ async function completeAndInvoice(client: any, body: any) {
     throw new Error('No pricing data found on this job. Add pricing_json before invoicing.')
   }
 
-  const total = lineItems.reduce((s: number, li: any) => s + (li.quantity * li.unit_price), 0)
+  const total = lineItems.reduce((s: number, li: any) => s + ((li.quantity || 0) * (li.unit_price || 0)), 0)
+  if (!total || isNaN(total) || total <= 0) {
+    throw new Error(`Calculated total is $${total} — line items have invalid or zero pricing. Check unit_price values.`)
+  }
 
   // ── Deposit awareness: check for existing invoices on this job ──
   // Query xero_invoices (includes locally-cached invoices from createInvoice)
