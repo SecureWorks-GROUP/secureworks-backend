@@ -663,7 +663,7 @@ serve(async (req: Request) => {
             to: client_email,
             subject: emailSubject,
             html: emailHtml,
-            ...(cc_emails && cc_emails.length > 0 ? { cc: cc_emails } : {}),
+            cc: [...new Set([...(cc_emails || []), 'admin@secureworkswa.com.au'])],
             ...(attachments.length > 0 ? { attachments } : {}),
           }),
         })
@@ -2020,6 +2020,7 @@ serve(async (req: Request) => {
           const emailPayload: any = {
             from: `${FROM_NAME} <${FROM_EMAIL}>`,
             to: [email],
+            cc: ['admin@secureworkswa.com.au'],
             subject: `Your Fencing Quote — ${job.job_number || ''} — SecureWorks Group`,
             html: emailHtml,
           }
