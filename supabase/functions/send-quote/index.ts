@@ -979,6 +979,7 @@ serve(async (req: Request) => {
         .select('*, jobs(client_name, site_suburb, type, status)')
         .eq('share_token', token)
         .eq('sent_to_client', true)
+        .is('superseded_at', null)
         .single()
 
       // Fallback: check job_variations table for variation acceptance links
@@ -1011,6 +1012,7 @@ serve(async (req: Request) => {
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
+          .is('superseded_at', null)
           .neq('id', doc.id)
           .order('created_at')
 
