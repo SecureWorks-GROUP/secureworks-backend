@@ -7272,7 +7272,7 @@ async function scanSesMakesafes(client: any) {
     // Match if sender matches a known pattern OR subject contains work order keywords
     const senderMatch = senderPatterns.some(sp => fromEmail.includes(sp.pattern))
     const subjectMatch = /work\s*order|make\s*safe|emergency|storm|urgent\s*(attend|repair)/i.test(subject)
-    return senderMatch || (subjectMatch && fromEmail.includes('.build'))
+    return senderMatch || (subjectMatch && (fromEmail.includes('.build') || fromEmail.includes('primeeco.tech')))
   })
 
   // Dedup against existing drafts
@@ -7312,44 +7312,9 @@ async function scanSesMakesafes(client: any) {
       }
     }
 
-    // Extract fields using Claude
-    let extraction: any = {}
-    let confidence = 'low'
-    let missingFields: string[] = []
-    if (ANTHROPIC_API_KEY) {
-      try {
-        const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
-        const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
-        const resp = await anthropic.messages.create({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 500,
-          system: `You extract make-safe work order details from emails for a Perth construction company.
-Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
-Extract the company reference number (e.g. AJBR XXXXX), homeowner/client name, site address, and work description.
-If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
-          messages: [{ role: 'user', content: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` }],
-        })
-        const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
-        const jsonMatch = text.match(/\{[\s\S]*\}/)
-        if (jsonMatch) {
-          extraction = JSON.parse(jsonMatch[0])
-          confidence = extraction.confidence || 'low'
-          missingFields = extraction.missing_fields || []
-        }
-      } catch (e) {
-        console.log('[ops-api] make-safe extraction failed:', (e as Error).message)
-      }
-    }
-
-    // Skip if not actually a work order
-    if (missingFields.includes('not_a_work_order')) continue
-
-    // Skip if we already have a job with this external ref
-    const extractedRef = extraction.external_ref || null
-    if (extractedRef && existingRefs.has(extractedRef.toUpperCase())) continue
-
-    // Download PDF attachments
+    // Download PDF attachments FIRST so we can feed them to Haiku
     const attachments: any[] = []
+    const pdfBase64List: Array<{ name: string; base64: string }> = []
     if (msg.hasAttachments) {
       try {
         const attResp = await fetch(
@@ -7361,6 +7326,11 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           for (const att of (attData.value || [])) {
             const isPdf = (att.contentType || '').includes('pdf') || (att.name || '').endsWith('.pdf')
             if (!isPdf || !att.contentBytes || att.size > 15000000) continue
+
+            // Keep base64 for Haiku extraction (limit to first 2 PDFs, under 5MB each)
+            if (pdfBase64List.length < 2 && att.size < 5000000) {
+              pdfBase64List.push({ name: att.name, base64: att.contentBytes })
+            }
 
             // Upload PDF to Supabase storage
             const storagePath = `makesafe-intake/${msg.id}/${(att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_')}`
@@ -7388,6 +7358,56 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         console.log('[ops-api] Attachment fetch failed:', (e as Error).message)
       }
     }
+
+    // Extract fields using Claude (email body + PDF attachments)
+    let extraction: any = {}
+    let confidence = 'low'
+    let missingFields: string[] = []
+    if (ANTHROPIC_API_KEY) {
+      try {
+        const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+        const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
+
+        // Build message content: email text + any PDF documents
+        const userContent: any[] = [
+          { type: 'text', text: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` },
+        ]
+        for (const pdf of pdfBase64List) {
+          userContent.push({
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 },
+          })
+          userContent.push({ type: 'text', text: `[Attached PDF: ${pdf.name}]` })
+        }
+
+        const resp = await anthropic.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 500,
+          system: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
+Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
+If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
+          messages: [{ role: 'user', content: userContent }],
+        })
+        const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
+        const jsonMatch = text.match(/\{[\s\S]*\}/)
+        if (jsonMatch) {
+          extraction = JSON.parse(jsonMatch[0])
+          confidence = extraction.confidence || 'low'
+          missingFields = extraction.missing_fields || []
+        }
+      } catch (e) {
+        console.log('[ops-api] make-safe extraction failed:', (e as Error).message)
+      }
+    }
+
+    // Skip if not actually a work order
+    if (missingFields.includes('not_a_work_order')) continue
+
+    // Skip if we already have a job with this external ref
+    const extractedRef = extraction.external_ref || null
+    if (extractedRef && existingRefs.has(extractedRef.toUpperCase())) continue
 
     // Create draft
     const draft = {
