@@ -4538,7 +4538,7 @@ async function calendarEvents(client: any, params: URLSearchParams) {
     .eq('org_id', DEFAULT_ORG_ID)
     .neq('assignment_status', 'cancelled')
     .order('scheduled_date', { ascending: true })
-    .limit(100)
+    .limit(500)
 
   if (jobType) query = query.eq('job_type', jobType)
 
