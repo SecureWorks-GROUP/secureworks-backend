@@ -6703,7 +6703,7 @@ async function createMakesafeJob(client: any, body: any) {
       requesting_company_slug: companyData?.slug || requesting_company_slug || null,
       requesting_company_name: companyData?.name || null,
       external_ref: external_ref || null,
-      substatus: 'pending_allocation',
+      substatus: 'company_contact_required',
       safety_requirements: companyData?.safety_requirements || null,
       special_instructions: companyData?.special_instructions || null,
       external_links: external_links || companyData?.external_links || [],
@@ -6796,7 +6796,7 @@ async function updateMakesafeDetails(client: any, body: any) {
   ]
   const updates: Record<string, any> = { updated_at: new Date().toISOString() }
   for (const key of allowed) {
-    if (body[key] !== undefined) updates[key] = body[key]
+    if (body[key] !== undefined) updates[key] = key === 'substatus' ? requireValidMakesafeSubstatus(body[key]) : body[key]
   }
 
   const { data, error } = await client.from('makesafe_job_details')
@@ -6809,28 +6809,161 @@ async function updateMakesafeDetails(client: any, body: any) {
 }
 
 // ── Slice 2: move substatus forward with timestamp tracking ──
+const MAKESAFE_BOARD_STAGE_LABELS: Record<string, string> = {
+  new: 'New',
+  allocated: 'Allocated',
+  report_ready: 'Report Ready',
+  to_invoice: 'To Invoice',
+  completed: 'Completed',
+}
+const MAKESAFE_BOARD_STAGES = Object.keys(MAKESAFE_BOARD_STAGE_LABELS)
+const MAKESAFE_VALID_SUBSTATUSES = [
+  'company_contact_required', 'company_contact_done',
+  'waiting_on_trade_report', 'admin_to_send_report',
+  'ready_to_invoice', 'complete',
+]
+
+export function _normalizeMakesafeSubstatus(substatus: string | null | undefined): string | null {
+  if (!substatus) return null
+  const trimmed = String(substatus).trim()
+  if (trimmed === 'pending_allocation') return 'company_contact_required'
+  return trimmed || null
+}
+
+function normalizeMakesafeSubstatus(substatus: string | null | undefined): string | null {
+  return _normalizeMakesafeSubstatus(substatus)
+}
+
+function requireValidMakesafeSubstatus(substatus: string | null | undefined): string {
+  const normalized = normalizeMakesafeSubstatus(substatus)
+  if (!normalized) throw new Error('substatus required')
+  if (!MAKESAFE_VALID_SUBSTATUSES.includes(normalized)) {
+    throw new Error('Invalid substatus: ' + substatus + '. Allowed: ' + MAKESAFE_VALID_SUBSTATUSES.join(', '))
+  }
+  return normalized
+}
+
+function hasActiveMakesafeInvoice(invoice: any): boolean {
+  return !!invoice && !['VOIDED', 'DELETED'].includes(String(invoice.status || '').toUpperCase())
+}
+
+export function _deriveMakesafeBoardStage(job: any, detail: any, assignments: any[] = [], report?: any, invoice?: any): string {
+  const normalizedSub = normalizeMakesafeSubstatus(detail?.substatus)
+  const jobStatus = String(job?.status || '').toLowerCase()
+  const hasAssignments = assignments.length > 0
+  const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice' || normalizedSub === 'complete'
+  const reportSentToBuilder = !!detail?.report_sent_at || normalizedSub === 'ready_to_invoice' || normalizedSub === 'complete'
+  const invoiceDone = hasActiveMakesafeInvoice(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
+
+  // Highest-to-lowest business precedence. A submitted report must remain in
+  // report_ready until admin sends it/marks it ready to invoice; otherwise
+  // admin_to_send_report is accidentally swallowed by the generic "has report"
+  // condition and appears too far along the board.
+  if (invoiceDone) return 'completed'
+  if (reportSentToBuilder) return 'to_invoice'
+  if (hasSubmittedReport || jobStatus === 'complete') return 'report_ready'
+  if (hasAssignments || normalizedSub === 'waiting_on_trade_report' || normalizedSub === 'company_contact_done' || jobStatus === 'scheduled' || jobStatus === 'in_progress') return 'allocated'
+  return 'new'
+}
+
+function deriveMakesafeBoardStage(job: any, detail: any, assignments: any[] = [], report?: any, invoice?: any): string {
+  return _deriveMakesafeBoardStage(job, detail, assignments, report, invoice)
+}
+
+function makesafeAge(createdAt: string | null | undefined, boardStage: string) {
+  const timestamp = createdAt ? new Date(createdAt).getTime() : NaN
+  const ageHours = Number.isFinite(timestamp) ? Math.max(0, Math.round((Date.now() - timestamp) / 3600000)) : 0
+  const ageDays = Math.floor(ageHours / 24)
+  const health = boardStage === 'completed' ? 'closed' : ageHours < 24 ? 'green' : ageHours < 48 ? 'yellow' : 'red'
+  return { age_hours: ageHours, age_days: ageDays, health }
+}
+
+function firstByJobId(rows: any[] | null | undefined): Record<string, any> {
+  const map: Record<string, any> = {}
+  for (const row of (rows || [])) {
+    if (row?.job_id && !map[row.job_id]) map[row.job_id] = row
+  }
+  return map
+}
+
+function makesafeCrew(assignments: any[] = []) {
+  const names = assignments.map((a: any) => a?.users?.name).filter(Boolean)
+  const uniqueNames = Array.from(new Set(names))
+  const crewNames = assignments.map((a: any) => a?.crew_name).filter(Boolean)
+  const uniqueCrews = Array.from(new Set(crewNames))
+  const firstDate = assignments.map((a: any) => a?.scheduled_date).filter(Boolean).sort()[0] || null
+  const labelBase = uniqueCrews.length > 0 ? uniqueCrews.join(', ') : uniqueNames.length > 0 ? uniqueNames.join(', ') : 'Unassigned'
+  return {
+    crew_label: firstDate && labelBase !== 'Unassigned' ? `${labelBase} — ${firstDate}` : labelBase,
+    crew_members: uniqueNames,
+  }
+}
+
+function makesafeReportStatus(boardStage: string, detail: any, report: any): string {
+  if (boardStage === 'completed' || boardStage === 'to_invoice') return 'sent_to_builder'
+  if (boardStage === 'report_ready' || report || detail?.report_received_at) return 'ready_to_send'
+  return 'waiting_on_trade_report'
+}
+
+function makesafeInvoiceStatus(boardStage: string, invoice: any): string {
+  if (hasActiveMakesafeInvoice(invoice)) {
+    const status = String(invoice.status || '').toUpperCase()
+    if (status === 'PAID') return 'paid'
+    if (status === 'AUTHORISED' || status === 'SUBMITTED') return 'invoiced'
+    return status.toLowerCase() || 'invoiced'
+  }
+  if (boardStage === 'completed') return 'invoiced'
+  if (boardStage === 'to_invoice') return 'ready_to_invoice'
+  return 'not_ready'
+}
+
+function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], report?: any, invoice?: any) {
+  const boardStage = deriveMakesafeBoardStage(j, detail, assignments, report, invoice)
+  const age = makesafeAge(j.created_at, boardStage)
+  const crew = makesafeCrew(assignments)
+  const requestingCompany = detail?.requesting_company_name || detail?.makesafe_companies?.name || j.metadata?.requesting_company?.name || null
+  const requestingCompanySlug = detail?.requesting_company_slug || detail?.makesafe_companies?.slug || j.metadata?.requesting_company?.slug || null
+  return {
+    ...j,
+    makesafe_details: detail,
+    substatus: normalizeMakesafeSubstatus(detail?.substatus) || null,
+    board_stage: boardStage,
+    board_label: MAKESAFE_BOARD_STAGE_LABELS[boardStage],
+    intake_at: j.created_at,
+    age_hours: age.age_hours,
+    age_days: age.age_days,
+    health: age.health,
+    requesting_company: requestingCompany,
+    requesting_company_name: requestingCompany,
+    requesting_company_slug: requestingCompanySlug,
+    builder_company: requestingCompany,
+    external_ref: detail?.external_ref || j.metadata?.external_ref || null,
+    assignments,
+    assigned_trade: assignments.length > 0 ? assignments[0]?.users?.name || null : null,
+    assigned_trade_phone: assignments.length > 0 ? assignments[0]?.users?.phone || null : null,
+    crew_label: crew.crew_label,
+    crew_members: crew.crew_members,
+    report_status: makesafeReportStatus(boardStage, detail, report),
+    invoice_status: makesafeInvoiceStatus(boardStage, invoice),
+  }
+}
+
 async function updateMakesafeSubstatus(client: any, body: any) {
   const { job_id, jobId, substatus } = body
   const jId = job_id || jobId
   if (!jId || !substatus) throw new Error('job_id and substatus required')
-
-  const validSubstatuses = [
-    'pending_allocation',
-    'waiting_on_trade_report', 'admin_to_send_report',
-    'ready_to_invoice', 'complete',
-  ]
-  if (!validSubstatuses.includes(substatus)) {
-    throw new Error('Invalid substatus: ' + substatus + '. Allowed: ' + validSubstatuses.join(', '))
-  }
+  const nextSubstatus = requireValidMakesafeSubstatus(substatus)
 
   const updates: Record<string, any> = {
-    substatus,
+    substatus: nextSubstatus,
     updated_at: new Date().toISOString(),
   }
   // Auto-set timestamps based on substatus transition
-  if (substatus === 'admin_to_send_report') updates.report_received_at = new Date().toISOString()
-  if (substatus === 'ready_to_invoice') updates.report_sent_at = new Date().toISOString()
-  if (substatus === 'complete') updates.invoice_ready_at = new Date().toISOString()
+  const now = new Date().toISOString()
+  if (nextSubstatus === 'company_contact_done') updates.company_contacted_at = now
+  if (nextSubstatus === 'admin_to_send_report') updates.report_received_at = now
+  if (nextSubstatus === 'ready_to_invoice') updates.report_sent_at = now
+  if (nextSubstatus === 'complete') updates.invoice_ready_at = now
 
   const { data, error } = await client.from('makesafe_job_details')
     .update(updates)
@@ -6843,7 +6976,7 @@ async function updateMakesafeSubstatus(client: any, body: any) {
   await client.from('job_events').insert({
     job_id: jId,
     event_type: 'makesafe_substatus_changed',
-    detail_json: { substatus, changed_at: updates.updated_at },
+    detail_json: { substatus: nextSubstatus, changed_at: updates.updated_at },
   }).catch(() => {})
 
   return { ok: true, details: data }
@@ -6862,6 +6995,8 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   // Fetch all makesafe_job_details for these jobs
   const jobIds = (jobs || []).map((j: any) => j.id)
   let detailsMap: Record<string, any> = {}
+  let reportMap: Record<string, any> = {}
+  let invoiceMap: Record<string, any> = {}
   if (jobIds.length > 0) {
     const { data: details } = await client.from('makesafe_job_details')
       .select('*, makesafe_companies:requesting_company_id(slug, name)')
@@ -6869,13 +7004,29 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
     for (const d of (details || [])) {
       detailsMap[d.job_id] = d
     }
+
+    const [reportsRes, invoicesRes] = await Promise.all([
+      client.from('job_service_reports')
+        .select('job_id, status, submitted_at, created_at')
+        .in('job_id', jobIds)
+        .neq('status', 'draft')
+        .order('submitted_at', { ascending: false }),
+      client.from('xero_invoices')
+        .select('job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date')
+        .in('job_id', jobIds)
+        .eq('invoice_type', 'ACCREC')
+        .not('status', 'in', '("VOIDED","DELETED")')
+        .order('invoice_date', { ascending: false }),
+    ])
+    reportMap = firstByJobId(reportsRes.data || [])
+    invoiceMap = firstByJobId(invoicesRes.data || [])
   }
 
   // Fetch assignments for these jobs
   let assignMap: Record<string, any[]> = {}
   if (jobIds.length > 0) {
     const { data: assigns } = await client.from('job_assignments')
-      .select('job_id, user_id, scheduled_date, status, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
+      .select('job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
       .in('job_id', jobIds)
       .neq('status', 'cancelled')
       .order('scheduled_date', { ascending: true })
@@ -6885,43 +7036,20 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
     }
   }
 
-  // Business stage mapping for make-safe kanban
-  // Core status -> business stage label
-  const MAKESAFE_STAGE_LABELS: Record<string, string> = {
-    accepted: 'New',
-    scheduled: 'Allocated',
-    in_progress: 'In Progress',
-    complete: 'Works Complete',
-    invoiced: 'Invoiced',
-  }
-
-  // Build columns
   const columns: Record<string, any[]> = {
-    accepted: [],
-    scheduled: [],
-    in_progress: [],
-    complete: [],
-    invoiced: [],
+    new: [],
+    allocated: [],
+    report_ready: [],
+    to_invoice: [],
+    completed: [],
   }
 
   for (const j of (jobs || [])) {
-    const detail = detailsMap[j.id] || null
-    const assigns = assignMap[j.id] || []
-    const enriched = {
-      ...j,
-      makesafe_details: detail,
-      substatus: detail?.substatus || null,
-      requesting_company: detail?.requesting_company_name || detail?.makesafe_companies?.name || j.metadata?.requesting_company?.name || null,
-      external_ref: detail?.external_ref || j.metadata?.external_ref || null,
-      assignments: assigns,
-      assigned_trade: assigns.length > 0 ? assigns[0]?.users?.name || null : null,
-      age_hours: Math.round((Date.now() - new Date(j.created_at).getTime()) / 3600000),
-    }
-    const col = columns[j.status] ? j.status : 'accepted'
-    columns[col].push(enriched)
+    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id])
+    columns[enriched.board_stage].push(enriched)
   }
 
-  return { columns, stage_labels: MAKESAFE_STAGE_LABELS, total: (jobs || []).length }
+  return { columns, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: (jobs || []).length }
 }
 
 // ── Slice 5: make-safe completion report ──
@@ -7007,7 +7135,7 @@ async function submitMakesafeReport(client: any, body: any) {
 
 // ── Slice 6: make-safe map data ──
 async function makesafeMap(client: any, params: URLSearchParams) {
-  const filter = params.get('filter') || 'active' // active|today|unassigned|waiting_report|to_invoice
+  const filter = params.get('filter') || 'active' // active|today|unassigned|new|allocated|report_ready|to_invoice|completed|waiting_report|on_road
   const tradeId = params.get('trade_id') || null
 
   let query = client.from('jobs')
@@ -7021,18 +7149,30 @@ async function makesafeMap(client: any, params: URLSearchParams) {
   if (error) throw error
 
   const jobIds = (jobs || []).map((j: any) => j.id)
-  if (jobIds.length === 0) return { jobs: [], no_location: [] }
+  if (jobIds.length === 0) return { jobs: [], no_location: [], stage_labels: MAKESAFE_BOARD_STAGE_LABELS }
 
-  // Fetch details + assignments in parallel
-  const [detailsRes, assignsRes] = await Promise.all([
+  // Fetch details, assignments, reports, and invoices in parallel. These are
+  // read-only enrichment queries for the map; write mutations remain untouched.
+  const [detailsRes, assignsRes, reportsRes, invoicesRes] = await Promise.all([
     client.from('makesafe_job_details')
-      .select('job_id, substatus, requesting_company_name, external_ref')
+      .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_ready_at, makesafe_companies:requesting_company_id(slug, name)')
       .in('job_id', jobIds),
     client.from('job_assignments')
-      .select('job_id, user_id, scheduled_date, status, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
+      .select('job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
       .in('job_id', jobIds)
       .neq('status', 'cancelled')
       .order('scheduled_date', { ascending: true }),
+    client.from('job_service_reports')
+      .select('job_id, status, submitted_at, created_at')
+      .in('job_id', jobIds)
+      .neq('status', 'draft')
+      .order('submitted_at', { ascending: false }),
+    client.from('xero_invoices')
+      .select('job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date')
+      .in('job_id', jobIds)
+      .eq('invoice_type', 'ACCREC')
+      .not('status', 'in', '("VOIDED","DELETED")')
+      .order('invoice_date', { ascending: false }),
   ])
 
   const detailsMap: Record<string, any> = {}
@@ -7042,39 +7182,37 @@ async function makesafeMap(client: any, params: URLSearchParams) {
     if (!assignMap[a.job_id]) assignMap[a.job_id] = []
     assignMap[a.job_id].push(a)
   }
+  const reportMap = firstByJobId(reportsRes.data || [])
+  const invoiceMap = firstByJobId(invoicesRes.data || [])
 
   const today = new Date().toISOString().slice(0, 10)
   const enriched = (jobs || []).map((j: any) => {
-    const detail = detailsMap[j.id] || null
     const assigns = assignMap[j.id] || []
     const todayAssigns = assigns.filter((a: any) => a.scheduled_date === today)
     const onRoad = todayAssigns.some((a: any) => a.travel_started_at && !a.completed_at)
     return {
-      ...j,
-      substatus: detail?.substatus || null,
-      requesting_company: detail?.requesting_company_name || j.metadata?.requesting_company?.name || null,
-      external_ref: detail?.external_ref || j.metadata?.external_ref || null,
-      assigned_trade: assigns[0]?.users?.name || null,
-      assigned_trade_phone: assigns[0]?.users?.phone || null,
-      assignments: assigns,
+      ...enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assigns, reportMap[j.id], invoiceMap[j.id]),
       on_road: onRoad,
       has_location: !!(j.site_lat && j.site_lng),
     }
   })
 
-  // Apply filters
+  // Apply filters. Board-stage names are the primary filters; the older
+  // waiting_report alias is kept for compatibility but is derived from the same
+  // normalized board state rather than raw migration substatuses only.
   let filtered = enriched
+  if (MAKESAFE_BOARD_STAGES.includes(filter)) filtered = enriched.filter((j: any) => j.board_stage === filter)
   if (filter === 'today') filtered = enriched.filter((j: any) => j.assignments.some((a: any) => a.scheduled_date === today))
   if (filter === 'unassigned') filtered = enriched.filter((j: any) => j.assignments.length === 0)
-  if (filter === 'waiting_report') filtered = enriched.filter((j: any) => j.substatus === 'waiting_on_trade_report' || j.substatus === 'admin_to_send_report')
-  if (filter === 'to_invoice') filtered = enriched.filter((j: any) => j.substatus === 'ready_to_invoice')
+  if (filter === 'waiting_report') filtered = enriched.filter((j: any) => j.substatus === 'waiting_on_trade_report' || j.board_stage === 'report_ready')
+  if (filter === 'to_invoice') filtered = enriched.filter((j: any) => j.board_stage === 'to_invoice')
   if (filter === 'on_road') filtered = enriched.filter((j: any) => j.on_road)
   if (tradeId) filtered = filtered.filter((j: any) => j.assignments.some((a: any) => a.user_id === tradeId))
 
   const withLocation = filtered.filter((j: any) => j.has_location)
   const noLocation = filtered.filter((j: any) => !j.has_location)
 
-  return { jobs: withLocation, no_location: noLocation }
+  return { jobs: withLocation, no_location: noLocation, stage_labels: MAKESAFE_BOARD_STAGE_LABELS }
 }
 
 // ── Slice 7: list intake drafts ──
