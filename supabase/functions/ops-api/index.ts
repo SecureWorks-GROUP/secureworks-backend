@@ -4949,7 +4949,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
   }
 
   let makesafeDetails: any = null
-  if ((jobRes.data?.type || '').toLowerCase() === 'makesafe') {
+  if (await isMakesafeAccessJobForClient(client, jobRes.data)) {
     try {
       const { data: ms } = await client.from('makesafe_job_details')
         .select('*, makesafe_companies:requesting_company_id(*)')
@@ -11303,15 +11303,47 @@ async function assertAssigned(client: any, jobId: string, userId: string, isAdmi
   if (!data) throw new Error('You are not assigned to this job')
 }
 
-async function getTradeJobTypeForAccess(client: any, jobId: string): Promise<string> {
+function isMakesafeAccessJob(job: any): boolean {
+  if (!job) return false
+  const type = String(job.type || '').toLowerCase().replace(/[\s_-]+/g, '')
+  if (type === 'makesafe') return true
+  // Some imported MakeSafes are identifiable by their SWMS job number even if
+  // the legacy/placeholder job type has not been normalised to `makesafe` yet.
+  if (/^SWMS-/i.test(String(job.job_number || ''))) return true
+  return false
+}
+
+async function hasMakesafeDetailForAccess(client: any, jobId: string): Promise<boolean> {
+  const { data, error } = await client
+    .from('makesafe_job_details')
+    .select('job_id')
+    .eq('job_id', jobId)
+    .limit(1)
+    .maybeSingle()
+  if (error) throw error
+  return !!data
+}
+
+async function isMakesafeAccessJobForClient(client: any, job: any): Promise<boolean> {
+  if (isMakesafeAccessJob(job)) return true
+  if (!job?.id) return false
+  return hasMakesafeDetailForAccess(client, job.id)
+}
+
+async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   const { data, error } = await client
     .from('jobs')
-    .select('id, type')
+    .select('id, type, job_number, status')
     .eq('id', jobId)
     .maybeSingle()
   if (error) throw error
   if (!data) throw new Error('Job not found')
-  return String(data.type || '').toLowerCase()
+  return data
+}
+
+async function getTradeJobTypeForAccess(client: any, jobId: string): Promise<string> {
+  const job = await getTradeJobForAccess(client, jobId)
+  return String(job.type || '').toLowerCase()
 }
 
 async function assertAssignedOrMakesafeAccess(client: any, jobId: string, userId: string, isAdmin = false) {
@@ -11320,15 +11352,19 @@ async function assertAssignedOrMakesafeAccess(client: any, jobId: string, userId
     return
   } catch (err) {
     if (isAdmin) return
-    const type = await getTradeJobTypeForAccess(client, jobId)
-    if (type === 'makesafe') return
+    const job = await getTradeJobForAccess(client, jobId)
+    if (await isMakesafeAccessJobForClient(client, job)) return
     throw err
   }
 }
 
 async function assertMakesafeJob(client: any, jobId: string) {
-  const type = await getTradeJobTypeForAccess(client, jobId)
-  if (type !== 'makesafe') throw new Error('MakeSafe job required')
+  const job = await getTradeJobForAccess(client, jobId)
+  if (!(await isMakesafeAccessJobForClient(client, job))) throw new Error('MakeSafe job required')
+}
+
+export function _isMakesafeAccessJobForTest(job: any): boolean {
+  return isMakesafeAccessJob(job)
 }
 
 async function myJobs(client: any, userId: string, showAll = false) {
@@ -11385,15 +11421,44 @@ async function myJobs(client: any, userId: string, showAll = false) {
   // the mobile job list already uses.
   if (!showAll) {
     const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
-    const { data: openMakesafes, error: msErr } = await client
+    const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
-      .eq('type', 'makesafe')
+      .or('type.eq.makesafe,job_number.ilike.SWMS-%')
       .not('status', 'in', '("cancelled","archived","lost","complete","completed","invoiced")')
       .order('created_at', { ascending: false })
       .limit(80)
     if (msErr) throw msErr
-    for (const job of (openMakesafes || [])) {
+
+    const openMakesafeById: Record<string, any> = {}
+    for (const job of (openMakesafesByShape || [])) if (job?.id) openMakesafeById[job.id] = job
+
+    // Backstop for legacy imports: if a job has a makesafe_job_details row but
+    // its jobs.type/job_number has not been normalised, still expose it to the
+    // open MakeSafe pool instead of requiring a named assignment.
+    const { data: detailRows, error: detailErr } = await client
+      .from('makesafe_job_details')
+      .select('job_id')
+      .limit(120)
+    if (detailErr) throw detailErr
+    const detailJobIds = Array.from(new Set((detailRows || []).map((r: any) => r.job_id).filter(Boolean)))
+      .filter((id: string) => !openMakesafeById[id])
+    if (detailJobIds.length > 0) {
+      const { data: detailJobs, error: detailJobsErr } = await client
+        .from('jobs')
+        .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+        .in('id', detailJobIds)
+        .not('status', 'in', '("cancelled","archived","lost","complete","completed","invoiced")')
+        .order('created_at', { ascending: false })
+        .limit(80)
+      if (detailJobsErr) throw detailJobsErr
+      for (const job of (detailJobs || [])) if (job?.id) openMakesafeById[job.id] = job
+    }
+
+    const openMakesafes = Object.values(openMakesafeById)
+      .sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+      .slice(0, 80)
+    for (const job of openMakesafes) {
       if (!job?.id || assignedJobIds.has(job.id)) continue
       assignments.push({
         id: `makesafe-open-${job.id}`,
@@ -11595,7 +11660,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
 
   // Make-safe overlay details for trade view
   let makesafeDetails: any = null
-  if ((jobRes.data?.type || '').toLowerCase() === 'makesafe') {
+  if (await isMakesafeAccessJobForClient(client, jobRes.data)) {
     try {
       const { data: ms } = await client.from('makesafe_job_details')
         .select('*, makesafe_companies:requesting_company_id(*)')
@@ -11924,8 +11989,8 @@ async function submitServiceReport(client: any, body: any) {
   const reportStatus = status || 'submitted'
   const uId = userId || user_id || null
 
-  // Verify user is assigned to this job
-  if (uId) await assertAssigned(client, jId, uId)
+  // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
+  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId)
 
   // Upload signature to storage if provided (instead of storing base64 in DB)
   let signatureUrl: string | null = null
@@ -12034,8 +12099,8 @@ async function getServiceReport(client: any, params: URLSearchParams, userId: st
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
 
-  // Verify user is assigned to this job
-  await assertAssigned(client, jobId, userId)
+  // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
+  await assertAssignedOrMakesafeAccess(client, jobId, userId)
 
   const { data: report } = await client
     .from('job_service_reports')
