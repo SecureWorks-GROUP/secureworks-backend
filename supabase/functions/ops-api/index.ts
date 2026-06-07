@@ -7064,6 +7064,7 @@ async function submitMakesafeReport(client: any, body: any) {
   const jId = job_id || jobId
   const uId = userId || user_id || null
   if (!jId) throw new Error('job_id required')
+  await assertMakesafeJob(client, jId)
 
   const reportFields: Record<string, any> = {
     checklist_json: {
@@ -11252,8 +11253,10 @@ async function bulkLegacyToInvoiced(client: any, params: URLSearchParams) {
 // TRADE ENDPOINTS (mobile) — JWT auth required
 // ════════════════════════════════════════════════════════════
 
-// Verify trade user is assigned to a job before allowing access
-// Admin users bypass this check
+// Verify trade user is assigned to a job before allowing access.
+// Admin users bypass this check. MakeSafe field-report jobs are a special
+// dispatch flow: any logged-in trade may read/upload/report them, but this
+// exception must not loosen ordinary patio/fencing/decking job access.
 async function assertAssigned(client: any, jobId: string, userId: string, isAdmin = false) {
   if (isAdmin) return // Admins can view any job
   const { data } = await client
@@ -11265,6 +11268,34 @@ async function assertAssigned(client: any, jobId: string, userId: string, isAdmi
     .limit(1)
     .maybeSingle()
   if (!data) throw new Error('You are not assigned to this job')
+}
+
+async function getTradeJobTypeForAccess(client: any, jobId: string): Promise<string> {
+  const { data, error } = await client
+    .from('jobs')
+    .select('id, type')
+    .eq('id', jobId)
+    .maybeSingle()
+  if (error) throw error
+  if (!data) throw new Error('Job not found')
+  return String(data.type || '').toLowerCase()
+}
+
+async function assertAssignedOrMakesafeAccess(client: any, jobId: string, userId: string, isAdmin = false) {
+  try {
+    await assertAssigned(client, jobId, userId, isAdmin)
+    return
+  } catch (err) {
+    if (isAdmin) return
+    const type = await getTradeJobTypeForAccess(client, jobId)
+    if (type === 'makesafe') return
+    throw err
+  }
+}
+
+async function assertMakesafeJob(client: any, jobId: string) {
+  const type = await getTradeJobTypeForAccess(client, jobId)
+  if (type !== 'makesafe') throw new Error('MakeSafe job required')
 }
 
 async function myJobs(client: any, userId: string, showAll = false) {
@@ -11314,6 +11345,45 @@ async function myJobs(client: any, userId: string, showAll = false) {
   }
 
   if (error) throw error
+
+  // MakeSafe dispatch flow: active MakeSafes are visible to any logged-in
+  // trade as open field-report cards, even before a named assignment exists.
+  // Keep this specific to MakeSafe and expose only the same slim job fields
+  // the mobile job list already uses.
+  if (!showAll) {
+    const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+    const { data: openMakesafes, error: msErr } = await client
+      .from('jobs')
+      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+      .eq('type', 'makesafe')
+      .not('status', 'in', '("cancelled","archived","lost","complete","completed","invoiced")')
+      .order('created_at', { ascending: false })
+      .limit(80)
+    if (msErr) throw msErr
+    for (const job of (openMakesafes || [])) {
+      if (!job?.id || assignedJobIds.has(job.id)) continue
+      assignments.push({
+        id: `makesafe-open-${job.id}`,
+        scheduled_date: today,
+        scheduled_end: null,
+        start_time: null,
+        status: 'available',
+        role: 'makesafe_open',
+        notes: null,
+        assignment_type: 'makesafe_open',
+        crew_name: null,
+        started_at: null,
+        completed_at: null,
+        clocked_on_at: null,
+        clocked_off_at: null,
+        travel_started_at: null,
+        arrived_at: null,
+        break_minutes: null,
+        job_phase: null,
+        jobs: job,
+      })
+    }
+  }
 
   const weekEnd = getAWSTWeekEnd()
 
@@ -11438,8 +11508,8 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
 
-  // Verify user is assigned to this job (admins bypass)
-  await assertAssigned(client, jobId, userId, isAdmin)
+  // Verify user is assigned, or this is a MakeSafe field-report job.
+  await assertAssignedOrMakesafeAccess(client, jobId, userId, isAdmin)
 
   const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes] = await Promise.all([
     client.from('jobs')
@@ -11767,8 +11837,8 @@ async function uploadPhoto(client: any, body: any) {
   const uId = userId || user_id
   if (!jId || !dataUrl) throw new Error('jobId and dataUrl required')
 
-  // Verify user is assigned to this job
-  if (uId) await assertAssigned(client, jId, uId)
+  // Verify user is assigned, or this is a MakeSafe field-report job.
+  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId)
 
   const base64 = dataUrl.split(',')[1]
   const mimeMatch = dataUrl.match(/data:([^;]+);/)
@@ -12416,7 +12486,7 @@ async function getUploadUrl(client: any, body: any, userId: string, isAdmin = fa
   if (!isExpenseReceipt && !jId) throw new Error('jobId required')
 
   if (jId && !isExpenseReceipt) {
-    await assertAssigned(client, jId, userId, isAdmin)
+    await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin)
   }
 
   const ext = (fileName.split('.').pop() || 'jpg').toLowerCase()
@@ -12537,8 +12607,8 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
   // ── Standard photo path (unchanged behaviour) ──
   if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
 
-  // Verify user is assigned to this job (admins bypass)
-  await assertAssigned(client, jId, userId, isAdmin)
+  // Verify user is assigned, or this is a MakeSafe field-report job.
+  await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin)
 
   const insertData: any = {
     job_id: jId,
