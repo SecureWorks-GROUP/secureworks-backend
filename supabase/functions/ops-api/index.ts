@@ -11367,6 +11367,26 @@ export function _isMakesafeAccessJobForTest(job: any): boolean {
   return isMakesafeAccessJob(job)
 }
 
+export function _backfillOpenMakesafeContactsForTest(openMakesafes: any[], contacts: any[]) {
+  const contactByJob: Record<string, any> = {}
+  for (const c of (contacts || [])) {
+    if (!c?.job_id || !c.client_phone) continue
+    const existing = contactByJob[c.job_id]
+    if (!existing || c.is_primary || (!existing.is_primary && String(c.contact_label || '').localeCompare(String(existing.contact_label || '')) < 0)) {
+      contactByJob[c.job_id] = c
+    }
+  }
+  for (const job of (openMakesafes || []) as any[]) {
+    const c = contactByJob[job.id]
+    if (!c) continue
+    job.client_phone = job.client_phone || c.client_phone || null
+    job.client_email = job.client_email || c.client_email || null
+    job.contact_phone = c.client_phone || null
+    job.contact_name = c.client_name || null
+  }
+  return openMakesafes
+}
+
 async function myJobs(client: any, userId: string, showAll = false) {
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
@@ -11441,7 +11461,7 @@ async function myJobs(client: any, userId: string, showAll = false) {
       .select('job_id')
       .limit(120)
     if (detailErr) throw detailErr
-    const detailJobIds = Array.from(new Set((detailRows || []).map((r: any) => r.job_id).filter(Boolean)))
+    const detailJobIds = Array.from(new Set<string>((detailRows || []).map((r: any) => String(r.job_id || '')).filter(Boolean)))
       .filter((id: string) => !openMakesafeById[id])
     if (detailJobIds.length > 0) {
       const { data: detailJobs, error: detailJobsErr } = await client
@@ -11458,6 +11478,27 @@ async function myJobs(client: any, userId: string, showAll = false) {
     const openMakesafes = Object.values(openMakesafeById)
       .sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
       .slice(0, 80)
+
+    // Open MakeSafe cards are synthetic pool cards, not normal assigned cards.
+    // Some imported MakeSafes have the client phone in job_contacts rather than
+    // jobs.client_phone, which made the trade app show Navigate only. Backfill
+    // the slim phone/contact fields before handing the pool cards to trade.html.
+    const phoneMissingJobIds = openMakesafes
+      .filter((job: any) => job?.id && !job.client_phone)
+      .map((job: any) => job.id)
+    if (phoneMissingJobIds.length > 0) {
+      try {
+        const { data: contacts, error: contactErr } = await client.from('job_contacts')
+          .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
+          .in('job_id', phoneMissingJobIds)
+          .eq('status', 'active')
+        if (contactErr) throw contactErr
+        _backfillOpenMakesafeContactsForTest(openMakesafes as any[], contacts || [])
+      } catch (e: any) {
+        console.log('[ops-api] open MakeSafe contact backfill skipped:', e?.message)
+      }
+    }
+
     for (const job of openMakesafes) {
       if (!job?.id || assignedJobIds.has(job.id)) continue
       assignments.push({
