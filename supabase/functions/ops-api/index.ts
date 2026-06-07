@@ -886,6 +886,64 @@ async function xeroPost(
   return resp.json()
 }
 
+function xeroContactWherePath(field: string, value: string): string {
+  const escaped = String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return '/Contacts?where=' + encodeURIComponent(`${field}=="${escaped}"`)
+}
+
+async function resolveTradeXeroSupplierContact(
+  client: any,
+  args: {
+    userId?: string | null
+    name?: string | null
+    email?: string | null
+    cachedContactId?: string | null
+    accessToken: string
+    tenantId: string
+  },
+): Promise<string | null> {
+  const cachedContactId = (args.cachedContactId || '').trim()
+  if (cachedContactId) return cachedContactId
+
+  const tradeName = (args.name || 'Trade').trim() || 'Trade'
+  const tradeEmail = (args.email || '').trim()
+  let xeroContactId: string | null = null
+
+  // 1) Email match covers the normal path where the Supabase login email is
+  // the same as the Xero supplier contact email.
+  if (tradeEmail) {
+    try {
+      const contacts = await xeroGet(xeroContactWherePath('EmailAddress', tradeEmail), args.accessToken, args.tenantId)
+      if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+    } catch { /* fallback to name lookup/create */ }
+  }
+
+  // 2) Exact name match covers Jean-style contacts where the Xero supplier
+  // already exists under the trade name but has a different primary email.
+  // Without this, the create step hits Xero's duplicate-name validation and
+  // the mobile invoice is only saved locally.
+  if (!xeroContactId && tradeName) {
+    try {
+      const contacts = await xeroGet(xeroContactWherePath('Name', tradeName), args.accessToken, args.tenantId)
+      if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+    } catch { /* fallback to create */ }
+  }
+
+  // 3) Create only when the contact is genuinely absent.
+  if (!xeroContactId) {
+    const createRes = await xeroPost('/Contacts', args.accessToken, args.tenantId, {
+      Contacts: [{ Name: tradeName, EmailAddress: tradeEmail || undefined, IsSupplier: true }],
+    }, 'PUT')
+    xeroContactId = createRes?.Contacts?.[0]?.ContactID || null
+  }
+
+  if (xeroContactId && args.userId) {
+    await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', args.userId)
+  }
+
+  return xeroContactId
+}
+
 // ════════════════════════════════════════════════════════════
 // EXPORTED FOR TESTING — send_invoice_email Path B body extracted so
 // unit tests can stub external deps (Xero, Supabase client, fetch,
@@ -2117,33 +2175,19 @@ if (import.meta.main) serve(async (req: Request) => {
           }
         })
 
-        // Resolve Xero contact for the trade
-        // Order: cached users.xero_contact_id -> email lookup -> create.
-        // The cached path lets recovery succeed when the user's Supabase email
-        // does not match the Xero contact's primary EmailAddress.
-        let xeroContactId: string | null = cachedContactId
-
-        if (!xeroContactId) {
-          try {
-            const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
-            if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
-          } catch (e) { /* fallback to create */ }
-        }
-
-        if (!xeroContactId) {
-          // Create contact
-          const createRes = await xeroPost('/Contacts', accessToken, tenantId, {
-            Contacts: [{ Name: tradeName, EmailAddress: tradeEmail, IsSupplier: true }]
-          }, 'PUT')
-          xeroContactId = createRes?.Contacts?.[0]?.ContactID
-        }
+        // Resolve Xero contact for the trade. Name fallback is important for
+        // Jean-style suppliers whose Supabase login email differs from the
+        // existing Xero supplier contact email.
+        const xeroContactId = await resolveTradeXeroSupplierContact(client, {
+          userId: inv.user_id,
+          name: tradeName,
+          email: tradeEmail,
+          cachedContactId,
+          accessToken,
+          tenantId,
+        })
 
         if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
-
-        // Cache the resolved ContactID for next time so future runs skip lookup/create.
-        if (xeroContactId && !cachedContactId && inv.user_id) {
-          await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', inv.user_id)
-        }
 
         const xeroPayload = {
           Invoices: [{
@@ -3403,31 +3447,20 @@ if (import.meta.main) serve(async (req: Request) => {
               const tradeEmail = tradeUser.email || ''
 
               // Resolve Xero supplier contact.
-              // Order: cached users.xero_contact_id -> email lookup -> create.
-              // Cached path is critical for users whose Supabase email does not
+              // Order: cached users.xero_contact_id -> email lookup -> exact name lookup -> create.
+              // Name fallback is critical for users whose Supabase email does not
               // match the Xero contact's primary EmailAddress (e.g. Jean Crous
               // — Supabase jeancrous44@gmail.com vs Xero jeancrous@gmail.com).
               // Without this, name-uniqueness in Xero blocks the create-PUT and
               // the auto-push silently fails forever.
-              const cachedAutoContactId: string | null = userProfile?.xero_contact_id || null
-              xeroContactId = cachedAutoContactId
-              if (!xeroContactId) {
-                try {
-                  const contacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(tradeEmail) + '%22', accessToken, tenantId)
-                  if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
-                } catch (e) { /* fallback to create */ }
-              }
-              if (!xeroContactId) {
-                const createRes = await xeroPost('/Contacts', accessToken, tenantId, {
-                  Contacts: [{ Name: userProfile?.name || 'Trade', EmailAddress: tradeEmail, IsSupplier: true }]
-                }, 'PUT')
-                xeroContactId = createRes?.Contacts?.[0]?.ContactID
-              }
-
-              // Save contact ID for next time (only if not already cached on the user row).
-              if (xeroContactId && !cachedAutoContactId) {
-                await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', tradeUser.id)
-              }
+              xeroContactId = await resolveTradeXeroSupplierContact(client, {
+                userId: tradeUser.id,
+                name: userProfile?.name || 'Trade',
+                email: tradeEmail,
+                cachedContactId: userProfile?.xero_contact_id || null,
+                accessToken,
+                tenantId,
+              })
               if (!xeroContactId) {
                 console.error('[ops-api] Could not resolve Xero contact for trade', tradeUser.id)
                 // Mark invoice as needing manual Xero push
@@ -12942,28 +12975,19 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const stGstRegistered = tradeUser?.trade_details?.gstRegistered !== false
   const stTaxType = stGstRegistered ? 'INPUT' : 'NONE'
 
-  // Resolve Xero supplier contact — auto-create if not linked
+  // Resolve Xero supplier contact — auto-create only if absent.
+  // Exact name lookup handles suppliers whose Supabase login email differs from
+  // the existing Xero contact email, avoiding duplicate-name create failures.
   const { accessToken: stAt, tenantId: stTi } = await getToken(client)
-  let stXeroContactId = tradeUser?.xero_contact_id || null
-  if (!stXeroContactId) {
-    const stEmail = tradeUser?.email || ''
-    if (stEmail) {
-      try {
-        const stContacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(stEmail) + '%22', stAt, stTi)
-        if (stContacts?.Contacts?.length > 0) stXeroContactId = stContacts.Contacts[0].ContactID
-      } catch { /* fallback to create */ }
-    }
-    if (!stXeroContactId) {
-      const stCreateRes = await xeroPost('/Contacts', stAt, stTi, {
-        Contacts: [{ Name: tradeUser?.name || 'Trade', EmailAddress: tradeUser?.email || undefined, IsSupplier: true }]
-      }, 'PUT')
-      stXeroContactId = stCreateRes?.Contacts?.[0]?.ContactID
-    }
-    if (stXeroContactId) {
-      await client.from('users').update({ xero_contact_id: stXeroContactId }).eq('id', userId)
-    }
-    if (!stXeroContactId) throw new Error('Could not create Xero supplier contact')
-  }
+  const stXeroContactId = await resolveTradeXeroSupplierContact(client, {
+    userId,
+    name: tradeUser?.name || 'Trade',
+    email: tradeUser?.email || '',
+    cachedContactId: tradeUser?.xero_contact_id || null,
+    accessToken: stAt,
+    tenantId: stTi,
+  })
+  if (!stXeroContactId) throw new Error('Could not create Xero supplier contact')
 
   const tradeName = tradeUser?.name || 'Trade'
 
