@@ -2683,15 +2683,17 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'search_all_jobs': {
             const q = (url.searchParams.get('q') || '').toLowerCase().trim()
             let jobQuery = client.from('jobs')
-              .select('id, job_number, client_name, site_suburb, type, status')
-              .not('status', 'in', '("lost","cancelled")')
+              .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
+              .not('status', 'in', '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
               .order('created_at', { ascending: false })
               .limit(200)
             if (q) {
               jobQuery = jobQuery.or(`job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%`)
             }
-            const { data: allJobs } = await jobQuery
-            return json({ jobs: allJobs || [] })
+            const { data: allJobs, error: allJobsErr } = await jobQuery
+            if (allJobsErr) throw allJobsErr
+            const jobs = await enrichTradeMakesafeJobs(client, allJobs || [])
+            return json({ jobs })
           }
           case 'crew_charges_on_my_jobs': {
             const ccWeekStart = url.searchParams.get('week_start') || body?.week_start
@@ -7092,6 +7094,7 @@ async function submitMakesafeReport(client: any, body: any) {
     arrival_time, damage_description, damage_cause,
     work_done, materials_used, labour_hours, trade_count,
     access_issues, follow_up_required, invoice_notes,
+    job_type, job_type_detail, makesafe_type_detail,
     status: reportStatus,
   } = body
   const jId = job_id || jobId
@@ -7103,6 +7106,9 @@ async function submitMakesafeReport(client: any, body: any) {
     checklist_json: {
       arrival_time: arrival_time || '',
       damage_description: damage_description || '',
+      job_type: job_type || '',
+      job_type_detail: job_type_detail || makesafe_type_detail || '',
+      makesafe_type_detail: makesafe_type_detail || job_type_detail || '',
       damage_cause: damage_cause || '',
       work_done: work_done || '',
       materials_used: materials_used || [],
@@ -7122,6 +7128,24 @@ async function submitMakesafeReport(client: any, body: any) {
   const { data: existing } = await client.from('job_service_reports')
     .select('id, status').eq('job_id', jId).limit(1).maybeSingle()
 
+  const submittingFinal = (reportStatus || 'submitted') === 'submitted'
+  if (submittingFinal) {
+    if (existing?.status === 'submitted') throw new Error('Report already submitted')
+    const { data: mediaRows, error: mediaErr } = await client.from('job_media')
+      .select('phase')
+      .eq('job_id', jId)
+      .eq('type', 'photo')
+      .limit(200)
+    if (mediaErr) throw mediaErr
+    const count = (phaseNames: string[]) => (mediaRows || []).filter((m: any) => phaseNames.includes(String(m.phase || ''))).length
+    const frontCount = count(['front_elevation', 'front'])
+    const beforeCount = count(['scope'])
+    const afterCount = count(['completion'])
+    if (frontCount < 1 || beforeCount < 3 || afterCount < 3) {
+      throw new ApiError(`MakeSafe report needs 1 front, 3 before, and 3 after photos (found ${frontCount}/${beforeCount}/${afterCount})`, 400)
+    }
+  }
+
   let report
   if (existing) {
     if (existing.status === 'approved') throw new Error('Report already approved')
@@ -7137,7 +7161,7 @@ async function submitMakesafeReport(client: any, body: any) {
   }
 
   // Auto-update makesafe substatus + job status on report submission
-  if ((reportStatus || 'submitted') === 'submitted') {
+  if (submittingFinal) {
     try {
       await client.from('makesafe_job_details')
         .update({
@@ -7149,11 +7173,8 @@ async function submitMakesafeReport(client: any, body: any) {
         .eq('job_id', jId)
     } catch (_) { /* non-blocking if overlay table not populated */ }
 
-    // Move job to complete (Works Complete on kanban)
-    try {
-      await client.from('jobs').update({ status: 'complete', completed_at: new Date().toISOString() }).eq('id', jId)
-    } catch (_) { /* non-blocking */ }
-
+    // Do not mark the job final complete/invoiced here. The MakeSafe ops board
+    // derives its report_ready stage from substatus=admin_to_send_report above.
     try {
       await client.from('job_events').insert({
         job_id: jId,
@@ -11330,6 +11351,14 @@ async function isMakesafeAccessJobForClient(client: any, job: any): Promise<bool
   return hasMakesafeDetailForAccess(client, job.id)
 }
 
+function isOpenTradeMakesafeDetail(detail: any): boolean {
+  if (!detail) return true
+  const sub = String(detail.substatus || '').toLowerCase()
+  if (['admin_to_send_report', 'ready_to_invoice', 'complete', 'completed', 'report_ready', 'to_invoice', 'invoiced'].includes(sub)) return false
+  if (detail.report_received_at || detail.report_sent_at || detail.invoice_ready_at) return false
+  return true
+}
+
 async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   const { data, error } = await client
     .from('jobs')
@@ -11367,6 +11396,10 @@ export function _isMakesafeAccessJobForTest(job: any): boolean {
   return isMakesafeAccessJob(job)
 }
 
+export function _isOpenTradeMakesafeDetailForTest(detail: any): boolean {
+  return isOpenTradeMakesafeDetail(detail)
+}
+
 export function _backfillOpenMakesafeContactsForTest(openMakesafes: any[], contacts: any[]) {
   const contactByJob: Record<string, any> = {}
   for (const c of (contacts || [])) {
@@ -11385,6 +11418,59 @@ export function _backfillOpenMakesafeContactsForTest(openMakesafes: any[], conta
     job.contact_name = c.client_name || null
   }
   return openMakesafes
+}
+
+async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
+  const list = (jobs || []).filter(Boolean)
+  const jobIds = list.map((job: any) => job?.id).filter(Boolean)
+  if (jobIds.length === 0) return list
+
+  const detailByJobId: Record<string, any> = {}
+  try {
+    const { data: details } = await client.from('makesafe_job_details')
+      .select('*, makesafe_companies:requesting_company_id(slug, name)')
+      .in('job_id', jobIds)
+    for (const row of (details || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
+    for (const job of list) {
+      if (job?.id && detailByJobId[job.id]) job.makesafe_details = detailByJobId[job.id]
+    }
+  } catch (e: any) {
+    console.log('[ops-api] trade MakeSafe detail enrichment skipped:', e?.message)
+  }
+
+  const phoneMissingJobIds = list
+    .filter((job: any) => job?.id && (isMakesafeAccessJob(job) || detailByJobId[job.id]) && !job.client_phone)
+    .map((job: any) => job.id)
+  if (phoneMissingJobIds.length > 0) {
+    try {
+      const { data: contacts, error: contactErr } = await client.from('job_contacts')
+        .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
+        .in('job_id', phoneMissingJobIds)
+        .eq('status', 'active')
+      if (contactErr) throw contactErr
+      _backfillOpenMakesafeContactsForTest(list as any[], contacts || [])
+    } catch (e: any) {
+      console.log('[ops-api] trade MakeSafe contact enrichment skipped:', e?.message)
+    }
+  }
+
+  return list
+}
+
+export function _groupTradeAssignmentsForTest(assignments: any[], today: string, weekEnd: string) {
+  const grouped: any = { today: [] as any[], thisWeek: [] as any[], upcoming: [] as any[], recent: [] as any[], makesafePool: [] as any[] }
+  for (const a of (assignments || [])) {
+    if (a?.assignment_type === 'makesafe_open' || a?.role === 'makesafe_open') {
+      grouped.makesafePool.push(a)
+      continue
+    }
+    const d = a?.scheduled_date || ''
+    if (d < today) grouped.recent.push(a)
+    else if (d === today) grouped.today.push(a)
+    else if (d <= weekEnd) grouped.thisWeek.push(a)
+    else grouped.upcoming.push(a)
+  }
+  return grouped
 }
 
 async function myJobs(client: any, userId: string, showAll = false) {
@@ -11443,9 +11529,9 @@ async function myJobs(client: any, userId: string, showAll = false) {
     const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
-      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
       .or('type.eq.makesafe,job_number.ilike.SWMS-%')
-      .not('status', 'in', '("cancelled","archived","lost","complete","completed","invoiced")')
+      .not('status', 'in', '("cancelled","archived","lost","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
       .order('created_at', { ascending: false })
       .limit(80)
     if (msErr) throw msErr
@@ -11458,21 +11544,32 @@ async function myJobs(client: any, userId: string, showAll = false) {
     // open MakeSafe pool instead of requiring a named assignment.
     const { data: detailRows, error: detailErr } = await client
       .from('makesafe_job_details')
-      .select('job_id')
+      .select('*, makesafe_companies:requesting_company_id(slug, name)')
       .limit(120)
     if (detailErr) throw detailErr
-    const detailJobIds = Array.from(new Set<string>((detailRows || []).map((r: any) => String(r.job_id || '')).filter(Boolean)))
+    const detailByJobId: Record<string, any> = {}
+    for (const row of (detailRows || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
+    for (const id of Object.keys(openMakesafeById)) {
+      if (!isOpenTradeMakesafeDetail(detailByJobId[id])) delete openMakesafeById[id]
+    }
+    const detailJobIds = Array.from(new Set<string>((detailRows || [])
+      .filter((r: any) => isOpenTradeMakesafeDetail(r))
+      .map((r: any) => String(r.job_id || '')).filter(Boolean)))
       .filter((id: string) => !openMakesafeById[id])
     if (detailJobIds.length > 0) {
       const { data: detailJobs, error: detailJobsErr } = await client
         .from('jobs')
-        .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+        .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
         .in('id', detailJobIds)
-        .not('status', 'in', '("cancelled","archived","lost","complete","completed","invoiced")')
+        .not('status', 'in', '("cancelled","archived","lost","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
         .order('created_at', { ascending: false })
         .limit(80)
       if (detailJobsErr) throw detailJobsErr
       for (const job of (detailJobs || [])) if (job?.id) openMakesafeById[job.id] = job
+    }
+
+    for (const id of Object.keys(openMakesafeById)) {
+      if (detailByJobId[id]) openMakesafeById[id].makesafe_details = detailByJobId[id]
     }
 
     const openMakesafes = Object.values(openMakesafeById)
@@ -11565,14 +11662,7 @@ async function myJobs(client: any, userId: string, showAll = false) {
     }
   }
 
-  const grouped: any = { today: [] as any[], thisWeek: [] as any[], upcoming: [] as any[], recent: [] as any[] }
-  for (const a of (assignments || [])) {
-    const d = a.scheduled_date
-    if (d < today) grouped.recent.push(a)
-    else if (d === today) grouped.today.push(a)
-    else if (d <= weekEnd) grouped.thisWeek.push(a)
-    else grouped.upcoming.push(a)
-  }
+  const grouped: any = _groupTradeAssignmentsForTest(assignments || [], today, weekEnd)
 
   // Flag so frontend knows this is admin/all-jobs view
   if (showAll) grouped._adminView = true
@@ -11732,8 +11822,9 @@ async function addNote(client: any, body: any, isAdmin = false) {
   const uId = userId || user_id
   if (!jId || !text) throw new Error('jobId and text required')
 
-  // Verify user is assigned to this job (admins bypass)
-  if (uId) await assertAssigned(client, jId, uId, isAdmin)
+  // Verify user is assigned to this job (admins bypass). Open MakeSafe field-report jobs
+  // may receive trade admin notes before a named assignment exists.
+  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, isAdmin)
 
   // Sales cockpit notes are staff-only by default. GHL contact notes are CRM
   // notes, not customer messages; when explicitly requested, mirror there too
