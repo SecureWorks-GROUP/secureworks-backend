@@ -2939,15 +2939,23 @@ if (import.meta.main) serve(async (req: Request) => {
               }
             }
 
-            // Calculate totals
+            // Calculate totals. GST must match the trade profile, not a frontend flag.
+            const { data: draftUserProfile } = await client.from('users')
+              .select('trade_details')
+              .eq('id', tradeUser.id)
+              .maybeSingle()
+            const draftGstRegistered = draftUserProfile?.trade_details?.gstRegistered === true
+
             let labourTotal = 0
             const labourLines = Array.isArray(draftLabour) ? draftLabour : []
             for (const l of labourLines) labourTotal += Number(l.line_total_ex || 0)
             let extraTotal = 0
-            const extras = Array.isArray(draftExtras) ? draftExtras : []
+            const extras = Array.isArray(draftExtras)
+              ? draftExtras.filter((e: any) => e?.source !== 'clock' && e?._source !== 'clock' && e?.source !== 'server_labour')
+              : []
             for (const e of extras) extraTotal += Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100
             const draftSubtotal = labourTotal + extraTotal
-            const draftGst = Math.round(draftSubtotal * 0.1 * 100) / 100
+            const draftGst = draftGstRegistered ? Math.round(draftSubtotal * 0.1 * 100) / 100 : 0
 
             if (draftId) {
               // Update existing draft
@@ -3055,8 +3063,7 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
-            const { week_start, extra_items, notes: invoiceNotes, gst_registered } = body
-            const taxType = gst_registered === false ? 'NONE' : 'INPUT'
+            const { week_start, extra_items, notes: invoiceNotes, draft_id } = body
 
             // Miscellaneous invoice (no week) or weekly invoice
             let weekEnd: string | null = null
@@ -3065,7 +3072,7 @@ if (import.meta.main) serve(async (req: Request) => {
               const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
               weekEnd = weekEndDate.toISOString().slice(0, 10)
 
-              // No duplicate check — trades can submit multiple invoices per week
+              // Weekly uniqueness is enforced by the DB. If a draft exists, submit promotes it below.
             }
 
             // Get completed assignments (only if weekly invoice)
@@ -3084,11 +3091,14 @@ if (import.meta.main) serve(async (req: Request) => {
             const hasExtras = Array.isArray(extra_items) && extra_items.length > 0
             if (assignments.length === 0 && !hasExtras) throw new ApiError('No completed assignments or line items to invoice', 400)
 
-            // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below)
+            // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below).
+            // GST registration is a server-side profile fact; do not trust a frontend boolean.
             const { data: userProfile } = await client.from('users')
-              .select('default_hourly_rate, name, xero_contact_id')
+              .select('default_hourly_rate, name, xero_contact_id, trade_details')
               .eq('id', tradeUser.id)
               .maybeSingle()
+            const gstRegistered = userProfile?.trade_details?.gstRegistered === true
+            const taxType = gstRegistered ? 'INPUT' : 'NONE'
 
             // Group by job
             const jobGroups: Record<string, any[]> = {}
@@ -3149,6 +3159,9 @@ if (import.meta.main) serve(async (req: Request) => {
             let extraSubtotal = 0
             if (hasExtras) {
               for (const item of extra_items) {
+                // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
+                // They must never be accepted as extra items, or normal weekly hours are double-counted.
+                if (item?.source === 'clock' || item?._source === 'clock' || item?.source === 'server_labour') continue
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 extraSubtotal += amt
                 extraLineItems.push({
@@ -3162,13 +3175,19 @@ if (import.meta.main) serve(async (req: Request) => {
                   division: item.division || null,
                   job_id: item.job_id || null,
                   job_number: item.job_number || null,
+                  client_name: item.client_name || null,
+                  site_address: item.site_address || null,
                 })
               }
             }
 
+            if (lineItems.length === 0 && extraLineItems.length === 0) {
+              throw new ApiError('No billable invoice lines after filtering clocked review rows', 400)
+            }
+
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
             const subtotal = labourSubtotal + extraSubtotal
-            const gst = Math.round(subtotal * 0.1 * 100) / 100
+            const gst = gstRegistered ? Math.round(subtotal * 0.1 * 100) / 100 : 0
             const totalInc = Math.round((subtotal + gst) * 100) / 100
 
             // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq} (global sequence, never reused)
@@ -3181,8 +3200,34 @@ if (import.meta.main) serve(async (req: Request) => {
             const seq = String((totalCount || 0) + 1).padStart(3, '0')
             const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
 
-            // Create invoice + line items
-            const { data: invoice, error: invErr } = await client.from('trade_invoices').insert({
+            // Create or promote invoice + line items. If the user saved a weekly draft, submit must
+            // update that same row; inserting a second row conflicts with the weekly unique index.
+            let invoice: any = null
+            if (draft_id) {
+              const { data: draftToSubmit } = await client.from('trade_invoices')
+                .select('id, status, week_start')
+                .eq('id', draft_id)
+                .eq('user_id', tradeUser.id)
+                .maybeSingle()
+              if (draftToSubmit?.status === 'draft') {
+                invoice = { id: draftToSubmit.id }
+                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', invoice.id)
+              }
+            }
+            if (!invoice && week_start) {
+              const { data: existingDraft } = await client.from('trade_invoices')
+                .select('id, status')
+                .eq('user_id', tradeUser.id)
+                .eq('week_start', week_start)
+                .eq('status', 'draft')
+                .maybeSingle()
+              if (existingDraft) {
+                invoice = { id: existingDraft.id }
+                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', invoice.id)
+              }
+            }
+
+            const invoicePayload = {
               user_id: tradeUser.id,
               week_start: week_start || null,
               week_end: weekEnd,
@@ -3196,9 +3241,17 @@ if (import.meta.main) serve(async (req: Request) => {
               notes: invoiceNotes || null,
               invoice_number: invoiceNumber,
               submitted_at: new Date().toISOString(),
-            }).select('id').single()
+              status: 'pending_acknowledgment',
+            }
 
-            if (invErr) throw new Error('Failed to create invoice: ' + invErr.message)
+            if (invoice) {
+              const { error: updErr } = await client.from('trade_invoices').update(invoicePayload).eq('id', invoice.id)
+              if (updErr) throw new Error('Failed to submit draft invoice: ' + updErr.message)
+            } else {
+              const { data: newInvoice, error: invErr } = await client.from('trade_invoices').insert(invoicePayload).select('id').single()
+              if (invErr) throw new Error('Failed to create invoice: ' + invErr.message)
+              invoice = newInvoice
+            }
 
             // Insert labour line items
             for (const line of lineItems) {
@@ -3407,7 +3460,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
-                    LineAmountTypes: gst_registered === false ? 'NoTax' : 'Exclusive',
+                    LineAmountTypes: gstRegistered ? 'Exclusive' : 'NoTax',
                     LineItems: allLines,
                   }],
                 }

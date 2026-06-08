@@ -207,6 +207,7 @@ serve(async (req: Request) => {
       job_id,
       ghl_contact_id,
       sent_by,
+      appendSignature = true,
     } = body
 
     if (!to || !subject || !htmlBody) {
@@ -236,7 +237,7 @@ serve(async (req: Request) => {
     // Build message
     const message: Record<string, unknown> = {
       subject,
-      body: { contentType: 'HTML', content: htmlBody + getSignature(from) },
+      body: { contentType: 'HTML', content: htmlBody + (appendSignature === false ? '' : getSignature(from)) },
       toRecipients,
     }
     if (ccRecipients) message.ccRecipients = ccRecipients
