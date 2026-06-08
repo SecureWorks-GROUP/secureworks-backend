@@ -2362,6 +2362,8 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── Document Upload Management ──
       case 'upload_document': return json(await uploadDocument(client, body))
       case 'confirm_document_upload': return json(await confirmDocumentUpload(client, body))
+      case 'update_document_type': return json(await updateDocumentType(client, body))
+      case 'reconcile_makesafe_documents': return json(await reconcileMakesafeDocuments(client, body))
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
       case 'delete_document': return json(await deleteDocument(client, body))
 
@@ -12301,14 +12303,34 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;c
 }
 
 // ── Document Upload Management ──
+const JOB_DOCUMENT_TYPES = [
+  'work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general',
+  'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos',
+  'other', 'service_report', 'report', 'makesafe_report', 'invoice', 'tax_invoice', 'swms',
+]
+
+function normaliseJobDocumentType(type: any) {
+  return JOB_DOCUMENT_TYPES.includes(type) ? type : 'general'
+}
+
+function inferMakesafeDocumentType(fileName: any, currentType: any) {
+  const current = String(currentType || '').trim()
+  const name = String(fileName || '').toLowerCase()
+  if (!name) return normaliseJobDocumentType(current)
+  if (/\bswms\b|safe work method statement/.test(name)) return 'swms'
+  if (/invoice|tax invoice|xero/.test(name)) return 'invoice'
+  if (/make[\s_-]*safe.*report|report.*make[\s_-]*safe|completion report|make safe report/.test(name)) return 'makesafe_report'
+  if (/service report|trade report/.test(name)) return 'service_report'
+  return normaliseJobDocumentType(current)
+}
+
 async function uploadDocument(client: any, body: any) {
   const { jobId, job_id, fileName, file_name, contentType, content_type, type, visible_to_trades } = body
   const jId = jobId || job_id
   const fName = fileName || file_name
   if (!jId || !fName) throw new Error('jobId and fileName required')
 
-  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
-  const docType = allowedTypes.includes(type) ? type : 'general'
+  const docType = normaliseJobDocumentType(type)
 
   const bucket = 'job-documents'
   try { await client.storage.createBucket(bucket, { public: true }) } catch { /* exists */ }
@@ -12340,8 +12362,7 @@ async function confirmDocumentUpload(client: any, body: any) {
   const defaultVisible = ['site_photo', 'council_plans', 'engineering', 'work_order', 'supplier_work_order', 'supplier_quote', 'approval'].includes(type)
   const isVisible = visible_to_trades != null ? visible_to_trades : defaultVisible
 
-  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
-  const docType = allowedTypes.includes(type) ? type : 'general'
+  const docType = normaliseJobDocumentType(type)
 
   const insertData: any = {
     job_id: jId,
@@ -12381,6 +12402,136 @@ async function confirmDocumentUpload(client: any, body: any) {
   })
 
   return { success: true, document_id: doc?.id, url: publicUrl }
+}
+
+async function updateDocumentType(client: any, body: any) {
+  const dId = body.documentId || body.document_id
+  const type = normaliseJobDocumentType(body.type)
+  const operator = body.operator_email || body.operator || null
+  if (!dId || !type) throw new Error('documentId and type required')
+
+  const { data: existing, error: fetchErr } = await client.from('job_documents')
+    .select('id, job_id, type, file_name, visible_to_trades')
+    .eq('id', dId)
+    .single()
+  if (fetchErr) throw fetchErr
+  if (!existing) throw new Error('Document not found')
+
+  const { data: doc, error } = await client.from('job_documents')
+    .update({ type })
+    .eq('id', dId)
+    .select('id, job_id, type, file_name, visible_to_trades')
+    .single()
+  if (error) throw error
+
+  await client.from('job_events').insert({
+    job_id: existing.job_id,
+    event_type: 'document_type_updated',
+    detail_json: { document_id: dId, previous_type: existing.type, new_type: type, file_name: existing.file_name, operator },
+  })
+  logBusinessEvent(client, {
+    event_type: 'document.type_updated',
+    entity_type: 'job_document',
+    entity_id: dId,
+    job_id: existing.job_id,
+    payload: { previous_type: existing.type, new_type: type, file_name: existing.file_name },
+    metadata: { operator },
+  })
+
+  return { success: true, document: doc, previous_type: existing.type }
+}
+
+async function reconcileMakesafeDocuments(client: any, body: any) {
+  const commit = body.commit === true
+  const since = body.since || null
+  const jobIds = Array.isArray(body.job_ids || body.jobIds) ? (body.job_ids || body.jobIds) : []
+  const statuses = Array.isArray(body.statuses) && body.statuses.length
+    ? body.statuses
+    : ['complete', 'invoiced', 'archived', 'processing', 'scheduled']
+  const operator = body.operator_email || body.operator || 'ops-api.reconcile_makesafe_documents'
+
+  let jobsQuery = client.from('jobs')
+    .select('id, job_number, client_name, site_address, site_suburb, status, type, created_at, updated_at')
+    .eq('type', 'makesafe')
+    .in('status', statuses)
+    .order('updated_at', { ascending: false })
+    .limit(500)
+  if (jobIds.length) jobsQuery = jobsQuery.in('id', jobIds)
+  if (since) jobsQuery = jobsQuery.gte('created_at', since)
+  const { data: jobs, error: jobsErr } = await jobsQuery
+  if (jobsErr) throw jobsErr
+
+  const ids = (jobs || []).map((j: any) => j.id)
+  if (!ids.length) return { success: true, commit, scanned_jobs: 0, candidates: [], updated: [] }
+
+  const { data: docs, error: docsErr } = await client.from('job_documents')
+    .select('id, job_id, type, file_name, storage_url, pdf_url, visible_to_trades, created_at')
+    .in('job_id', ids)
+    .order('created_at', { ascending: false })
+  if (docsErr) throw docsErr
+
+  const jobById: Record<string, any> = {}
+  ;(jobs || []).forEach((j: any) => { jobById[j.id] = j })
+
+  const candidates: any[] = []
+  for (const doc of (docs || [])) {
+    const inferred = inferMakesafeDocumentType(doc.file_name, doc.type)
+    if (inferred && inferred !== doc.type && ['makesafe_report', 'service_report', 'invoice', 'swms'].includes(inferred)) {
+      const job = jobById[doc.job_id] || {}
+      candidates.push({
+        document_id: doc.id,
+        job_id: doc.job_id,
+        job_number: job.job_number,
+        job_status: job.status,
+        suburb: job.site_suburb,
+        file_name: doc.file_name,
+        previous_type: doc.type,
+        new_type: inferred,
+        visible_to_trades: doc.visible_to_trades,
+      })
+    }
+  }
+
+  const updated: any[] = []
+  const errors: any[] = []
+  if (commit) {
+    for (const c of candidates) {
+      try {
+        const { error } = await client.from('job_documents')
+          .update({ type: c.new_type })
+          .eq('id', c.document_id)
+        if (error) throw error
+        await client.from('job_events').insert({
+          job_id: c.job_id,
+          event_type: 'document_type_updated',
+          detail_json: { document_id: c.document_id, previous_type: c.previous_type, new_type: c.new_type, file_name: c.file_name, operator },
+        })
+        logBusinessEvent(client, {
+          event_type: 'document.type_updated',
+          entity_type: 'job_document',
+          entity_id: c.document_id,
+          job_id: c.job_id,
+          payload: { previous_type: c.previous_type, new_type: c.new_type, file_name: c.file_name },
+          metadata: { operator },
+        })
+        updated.push(c)
+      } catch (e: any) {
+        errors.push({ ...c, error: e?.message || String(e) })
+      }
+    }
+  }
+
+  return {
+    success: errors.length === 0,
+    commit,
+    scanned_jobs: ids.length,
+    scanned_documents: (docs || []).length,
+    candidate_count: candidates.length,
+    updated_count: updated.length,
+    candidates,
+    updated,
+    errors,
+  }
 }
 
 async function toggleDocumentVisibility(client: any, body: any) {
