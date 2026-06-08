@@ -7092,6 +7092,7 @@ async function submitMakesafeReport(client: any, body: any) {
     arrival_time, damage_description, damage_cause,
     work_done, materials_used, labour_hours, trade_count,
     access_issues, follow_up_required, invoice_notes,
+    job_type, job_type_detail, makesafe_type_detail,
     status: reportStatus,
   } = body
   const jId = job_id || jobId
@@ -7103,6 +7104,9 @@ async function submitMakesafeReport(client: any, body: any) {
     checklist_json: {
       arrival_time: arrival_time || '',
       damage_description: damage_description || '',
+      job_type: job_type || '',
+      job_type_detail: job_type_detail || makesafe_type_detail || '',
+      makesafe_type_detail: makesafe_type_detail || job_type_detail || '',
       damage_cause: damage_cause || '',
       work_done: work_done || '',
       materials_used: materials_used || [],
@@ -7149,11 +7153,8 @@ async function submitMakesafeReport(client: any, body: any) {
         .eq('job_id', jId)
     } catch (_) { /* non-blocking if overlay table not populated */ }
 
-    // Move job to complete (Works Complete on kanban)
-    try {
-      await client.from('jobs').update({ status: 'complete', completed_at: new Date().toISOString() }).eq('id', jId)
-    } catch (_) { /* non-blocking */ }
-
+    // Do not mark the job final complete/invoiced here. The MakeSafe ops board
+    // derives its report_ready stage from substatus=admin_to_send_report above.
     try {
       await client.from('job_events').insert({
         job_id: jId,
@@ -11330,6 +11331,14 @@ async function isMakesafeAccessJobForClient(client: any, job: any): Promise<bool
   return hasMakesafeDetailForAccess(client, job.id)
 }
 
+function isOpenTradeMakesafeDetail(detail: any): boolean {
+  if (!detail) return true
+  const sub = String(detail.substatus || '').toLowerCase()
+  if (['admin_to_send_report', 'ready_to_invoice', 'complete', 'completed', 'report_ready', 'to_invoice', 'invoiced'].includes(sub)) return false
+  if (detail.report_received_at || detail.report_sent_at || detail.invoice_ready_at) return false
+  return true
+}
+
 async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   const { data, error } = await client
     .from('jobs')
@@ -11458,10 +11467,17 @@ async function myJobs(client: any, userId: string, showAll = false) {
     // open MakeSafe pool instead of requiring a named assignment.
     const { data: detailRows, error: detailErr } = await client
       .from('makesafe_job_details')
-      .select('job_id')
+      .select('job_id, substatus, report_received_at, report_sent_at, invoice_ready_at')
       .limit(120)
     if (detailErr) throw detailErr
-    const detailJobIds = Array.from(new Set<string>((detailRows || []).map((r: any) => String(r.job_id || '')).filter(Boolean)))
+    const detailByJobId: Record<string, any> = {}
+    for (const row of (detailRows || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
+    for (const id of Object.keys(openMakesafeById)) {
+      if (!isOpenTradeMakesafeDetail(detailByJobId[id])) delete openMakesafeById[id]
+    }
+    const detailJobIds = Array.from(new Set<string>((detailRows || [])
+      .filter((r: any) => isOpenTradeMakesafeDetail(r))
+      .map((r: any) => String(r.job_id || '')).filter(Boolean)))
       .filter((id: string) => !openMakesafeById[id])
     if (detailJobIds.length > 0) {
       const { data: detailJobs, error: detailJobsErr } = await client
@@ -11732,8 +11748,9 @@ async function addNote(client: any, body: any, isAdmin = false) {
   const uId = userId || user_id
   if (!jId || !text) throw new Error('jobId and text required')
 
-  // Verify user is assigned to this job (admins bypass)
-  if (uId) await assertAssigned(client, jId, uId, isAdmin)
+  // Verify user is assigned to this job (admins bypass). Open MakeSafe field-report jobs
+  // may receive trade admin notes before a named assignment exists.
+  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, isAdmin)
 
   // Sales cockpit notes are staff-only by default. GHL contact notes are CRM
   // notes, not customer messages; when explicitly requested, mirror there too
