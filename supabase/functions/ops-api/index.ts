@@ -6655,8 +6655,10 @@ async function geocodeMissingMakesafes(client: any) {
 
 async function createMakesafeJob(client: any, body: any) {
   const {
-    client_name, site_address, suburb, phone, mobile,
-    requesting_company_slug, external_ref, description,
+    client_name, site_address, suburb, phone, mobile, email,
+    requesting_company_slug, requesting_company_name, external_ref, description,
+    makesafe_type, job_type_detail, makesafe_type_detail,
+    safety_requirements, special_instructions,
     pdf_base64, external_links
   } = body
 
@@ -6701,12 +6703,19 @@ async function createMakesafeJob(client: any, body: any) {
   }
 
   // Build metadata
+  const reviewedCompanyName = requesting_company_name || companyData?.name || null
+  const reviewedMakeSafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
+  const reviewedSafety = safety_requirements || companyData?.safety_requirements || null
+  const reviewedSpecialInstructions = special_instructions || companyData?.special_instructions || null
+
   const metadata: any = {
-    requesting_company: companyData ? { slug: companyData.slug, name: companyData.name } : null,
+    requesting_company: companyData ? { slug: companyData.slug, name: companyData.name } : reviewedCompanyName ? { slug: requesting_company_slug || null, name: reviewedCompanyName } : null,
     external_ref: external_ref || null,
+    makesafe_type: reviewedMakeSafeType,
+    job_type_detail: reviewedMakeSafeType,
     invoice_email: companyData?.invoice_email || null,
-    special_instructions: companyData?.special_instructions || null,
-    safety_requirements: companyData?.safety_requirements || null,
+    special_instructions: reviewedSpecialInstructions,
+    safety_requirements: reviewedSafety,
     external_links: external_links || null,
   }
 
@@ -6717,6 +6726,7 @@ async function createMakesafeJob(client: any, body: any) {
     status: 'accepted',
     client_name,
     client_phone: phone || mobile || null,
+    client_email: email || null,
     site_address,
     site_suburb: suburb || null,
     job_number: jobNumber,
@@ -6736,11 +6746,11 @@ async function createMakesafeJob(client: any, body: any) {
       job_id: job.id,
       requesting_company_id: companyData?.id || null,
       requesting_company_slug: companyData?.slug || requesting_company_slug || null,
-      requesting_company_name: companyData?.name || null,
+      requesting_company_name: reviewedCompanyName,
       external_ref: external_ref || null,
       substatus: 'company_contact_required',
-      safety_requirements: companyData?.safety_requirements || null,
-      special_instructions: companyData?.special_instructions || null,
+      safety_requirements: reviewedSafety,
+      special_instructions: reviewedSpecialInstructions,
       external_links: external_links || companyData?.external_links || [],
       billing_rules: companyData?.billing_rules || {},
     })
@@ -6782,8 +6792,9 @@ async function createMakesafeJob(client: any, body: any) {
     detail_json: { job_number: jobNumber, requesting_company: companyData?.name || null, external_ref },
   })
 
-  // Telegram notification to Shaun
-  const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
+  // Telegram notification to Shaun. Intake approval can suppress this so a
+  // human review tick does not unexpectedly broadcast from a draft workflow.
+  const TELEGRAM_BOT_TOKEN = body.suppress_notifications ? '' : (Deno.env.get('TELEGRAM_BOT_TOKEN') || '')
   if (TELEGRAM_BOT_TOKEN) {
     try {
       const { data: shaun } = await client.from('users')
@@ -7284,6 +7295,35 @@ async function listIntakeDrafts(client: any, params: URLSearchParams) {
   return { drafts: data || [] }
 }
 
+function parseJsonObject(value: any): Record<string, any> {
+  if (!value) return {}
+  if (typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch (_) { return {} }
+  }
+  return {}
+}
+
+function parseJsonArray(value: any): any[] {
+  if (!value) return []
+  if (Array.isArray(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return Array.isArray(parsed) ? parsed : []
+    } catch (_) { return [] }
+  }
+  return []
+}
+
+function cleanReviewedString(value: any): string | null {
+  const text = value == null ? '' : String(value).trim()
+  return text || null
+}
+
 // ── Slice 7: approve intake draft -> create job ──
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
@@ -7295,45 +7335,102 @@ async function approveIntakeDraft(client: any, body: any) {
   if (dErr || !draft) throw new Error('Draft not found')
   if (draft.status === 'approved') throw new Error('Draft already approved')
 
-  // Create the make-safe job using existing logic
+  const extraction = parseJsonObject(draft.extraction_json)
+  const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
+  const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
+
+  const approvedFields = {
+    requesting_company_slug: choose('requesting_company_slug'),
+    requesting_company_name: choose('requesting_company_name'),
+    external_ref: choose('external_ref'),
+    client_name: choose('client_name'),
+    client_phone: choose('client_phone'),
+    client_email: choose('client_email'),
+    site_address: choose('site_address'),
+    site_suburb: choose('site_suburb'),
+    makesafe_type: choose('makesafe_type') || choose('job_type_detail') || choose('makesafe_type_detail'),
+    description: choose('description') || choose('wo_summary') || cleanReviewedString(draft.body_preview),
+    safety_requirements: choose('safety_requirements'),
+    special_instructions: choose('special_instructions'),
+  }
+
+  const attachments = parseJsonArray(draft.attachments_json)
+  const missing: string[] = []
+  if (!approvedFields.requesting_company_slug && !approvedFields.requesting_company_name) missing.push('requesting_company')
+  if (!approvedFields.external_ref) missing.push('external_ref')
+  if (!approvedFields.client_name) missing.push('client_name')
+  if (!approvedFields.site_address) missing.push('site_address')
+  if (attachments.length === 0) missing.push('work_order_pdf')
+  if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
+
+  // Duplicate guard: warn/block same external ref already live before creating another job.
+  if (approvedFields.external_ref) {
+    const { data: existingDetail } = await client.from('makesafe_job_details')
+      .select('job_id, external_ref, jobs(job_number, client_name, site_address, status)')
+      .ilike('external_ref', approvedFields.external_ref)
+      .limit(1)
+      .maybeSingle()
+    if (existingDetail?.job_id) {
+      const existingJob = Array.isArray(existingDetail.jobs) ? existingDetail.jobs[0] : existingDetail.jobs
+      throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || existingDetail.job_id))
+    }
+  }
+
+  // Create the make-safe job using reviewed/edited fields, not stale extraction data.
   const jobResult = await createMakesafeJob(client, {
-    client_name: draft.client_name || 'Unknown',
-    site_address: draft.site_address || draft.subject || 'Address TBC',
-    suburb: draft.site_suburb || null,
-    phone: draft.client_phone || null,
-    requesting_company_slug: draft.requesting_company_slug || null,
-    external_ref: draft.external_ref || null,
-    description: draft.description || draft.body_preview || null,
+    client_name: approvedFields.client_name,
+    site_address: approvedFields.site_address,
+    suburb: approvedFields.site_suburb,
+    phone: approvedFields.client_phone,
+    email: approvedFields.client_email,
+    requesting_company_slug: approvedFields.requesting_company_slug,
+    requesting_company_name: approvedFields.requesting_company_name,
+    external_ref: approvedFields.external_ref,
+    description: approvedFields.description,
+    makesafe_type: approvedFields.makesafe_type,
+    safety_requirements: approvedFields.safety_requirements,
+    special_instructions: approvedFields.special_instructions,
+    suppress_notifications: true,
   })
 
-  // Link draft to created job
+  // Link draft to created job and preserve the reviewed values on the draft audit row.
   await client.from('makesafe_intake_drafts').update({
     status: 'approved',
     approved_job_id: jobResult.job.id,
     approved_at: new Date().toISOString(),
     approved_by: approved_by || null,
+    review_notes: body.review_notes || body.reviewNotes || 'Approved in Ops intake review gate after PDF/source comparison.',
+    requesting_company_slug: approvedFields.requesting_company_slug,
+    requesting_company_name: approvedFields.requesting_company_name,
+    external_ref: approvedFields.external_ref,
+    client_name: approvedFields.client_name,
+    client_phone: approvedFields.client_phone,
+    client_email: approvedFields.client_email,
+    site_address: approvedFields.site_address,
+    site_suburb: approvedFields.site_suburb,
+    description: approvedFields.description,
+    safety_requirements: approvedFields.safety_requirements,
+    special_instructions: approvedFields.special_instructions,
     updated_at: new Date().toISOString(),
   }).eq('id', draft_id)
 
-  // Download and attach any PDF attachments from the original email
-  if (draft.attachments_json && Array.isArray(draft.attachments_json)) {
-    for (const att of draft.attachments_json) {
-      if (att.storage_url || att.pdf_url) {
-        try {
-          await client.from('job_documents').insert({
-            job_id: jobResult.job.id,
-            type: 'work_order',
-            file_name: att.file_name || att.name || 'work-order.pdf',
-            storage_url: att.storage_url || att.pdf_url,
-            pdf_url: att.pdf_url || att.storage_url,
-            visible_to_trades: true,
-          })
-        } catch (_) { /* non-blocking */ }
-      }
+  // Attach any PDF attachments from the original email as visible work orders.
+  for (const att of attachments) {
+    if (att.storage_url || att.pdf_url) {
+      try {
+        await client.from('job_documents').insert({
+          job_id: jobResult.job.id,
+          type: 'work_order',
+          file_name: att.file_name || att.name || 'work-order.pdf',
+          storage_url: att.storage_url || att.pdf_url,
+          pdf_url: att.pdf_url || att.storage_url,
+          visible_to_trades: true,
+        })
+      } catch (_) { /* non-blocking */ }
     }
   }
 
-  return { ok: true, job: jobResult.job, draft_id }
+  return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields }
 }
 
 // ── Slice 7: reject intake draft ──
