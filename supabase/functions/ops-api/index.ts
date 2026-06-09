@@ -6859,8 +6859,8 @@ const MAKESAFE_BOARD_STAGE_LABELS: Record<string, string> = {
   new: 'New',
   allocated: 'Allocated',
   report_ready: 'Report Ready',
-  to_invoice: 'To Invoice',
-  completed: 'Completed',
+  completed: 'Completed This Week',
+  archive: 'Archive',
 }
 const MAKESAFE_BOARD_STAGES = Object.keys(MAKESAFE_BOARD_STAGE_LABELS)
 const MAKESAFE_VALID_SUBSTATUSES = [
@@ -6893,20 +6893,60 @@ function hasActiveMakesafeInvoice(invoice: any): boolean {
   return !!invoice && !['VOIDED', 'DELETED'].includes(String(invoice.status || '').toUpperCase())
 }
 
-export function _deriveMakesafeBoardStage(job: any, detail: any, assignments: any[] = [], report?: any, invoice?: any): string {
+function perthYmd(date: Date): { y: number; m: number; d: number } | null {
+  if (Number.isNaN(date.getTime())) return null
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Australia/Perth',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)
+  const val = (type: string) => Number(parts.find((p) => p.type === type)?.value || 0)
+  const y = val('year')
+  const m = val('month')
+  const d = val('day')
+  return y && m && d ? { y, m, d } : null
+}
+
+function utcMidnight(parts: { y: number; m: number; d: number }): number {
+  return Date.UTC(parts.y, parts.m - 1, parts.d)
+}
+
+export function _isMakesafeCompletedThisWeek(completedAt: string | null | undefined, nowIso?: string): boolean {
+  // Unknown completion dates stay visible as Completed This Week rather than
+  // disappearing into Archive. Ops can then fix the missing timestamp manually.
+  if (!completedAt) return true
+  const completedParts = perthYmd(new Date(completedAt))
+  const nowParts = perthYmd(nowIso ? new Date(nowIso) : new Date())
+  if (!completedParts || !nowParts) return true
+  const nowDayStart = utcMidnight(nowParts)
+  const day = new Date(nowDayStart).getUTCDay()
+  const daysSinceMonday = (day + 6) % 7
+  const weekStart = nowDayStart - daysSinceMonday * 86400000
+  const weekEnd = weekStart + 7 * 86400000
+  const completedDayStart = utcMidnight(completedParts)
+  return completedDayStart >= weekStart && completedDayStart < weekEnd
+}
+
+function makesafeCompletedAt(job: any, detail: any, invoice: any): string | null {
+  return invoice?.invoice_date || invoice?.created_at || detail?.invoice_ready_at || job?.completed_at || job?.updated_at || null
+}
+
+export function _deriveMakesafeBoardStage(job: any, detail: any, assignments: any[] = [], report?: any, invoice?: any, nowIso?: string): string {
   const normalizedSub = normalizeMakesafeSubstatus(detail?.substatus)
   const jobStatus = String(job?.status || '').toLowerCase()
   const hasAssignments = assignments.length > 0
-  const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice' || normalizedSub === 'complete'
-  const reportSentToBuilder = !!detail?.report_sent_at || normalizedSub === 'ready_to_invoice' || normalizedSub === 'complete'
+  const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
   const invoiceDone = hasActiveMakesafeInvoice(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
 
-  // Highest-to-lowest business precedence. A submitted report must remain in
-  // report_ready until admin sends it/marks it ready to invoice; otherwise
-  // admin_to_send_report is accidentally swallowed by the generic "has report"
-  // condition and appears too far along the board.
-  if (invoiceDone) return 'completed'
-  if (reportSentToBuilder) return 'to_invoice'
+  // Canonical MakeSafe command flow:
+  // Intake drafts live outside this board until approved.
+  // New -> Allocated -> Report Ready -> Completed This Week -> Archive.
+  // `ready_to_invoice` is a legacy/admin substatus and now stays actionable in
+  // Report Ready unless an invoice/complete signal proves the MakeSafe is done.
+  if (invoiceDone) {
+    return _isMakesafeCompletedThisWeek(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
+  }
   if (hasSubmittedReport || jobStatus === 'complete') return 'report_ready'
   if (hasAssignments || normalizedSub === 'waiting_on_trade_report' || normalizedSub === 'company_contact_done' || jobStatus === 'scheduled' || jobStatus === 'in_progress') return 'allocated'
   return 'new'
@@ -6946,8 +6986,8 @@ function makesafeCrew(assignments: any[] = []) {
 }
 
 function makesafeReportStatus(boardStage: string, detail: any, report: any): string {
-  if (boardStage === 'completed' || boardStage === 'to_invoice') return 'sent_to_builder'
-  if (boardStage === 'report_ready' || report || detail?.report_received_at) return 'ready_to_send'
+  if (boardStage === 'completed' || boardStage === 'archive') return 'processed'
+  if (boardStage === 'report_ready' || report || detail?.report_received_at) return 'ready_for_reporting_skill'
   return 'waiting_on_trade_report'
 }
 
@@ -6958,8 +6998,8 @@ function makesafeInvoiceStatus(boardStage: string, invoice: any): string {
     if (status === 'AUTHORISED' || status === 'SUBMITTED') return 'invoiced'
     return status.toLowerCase() || 'invoiced'
   }
-  if (boardStage === 'completed') return 'invoiced'
-  if (boardStage === 'to_invoice') return 'ready_to_invoice'
+  if (boardStage === 'completed' || boardStage === 'archive') return 'invoiced'
+  if (boardStage === 'report_ready') return 'report_ready'
   return 'not_ready'
 }
 
@@ -7031,7 +7071,7 @@ async function updateMakesafeSubstatus(client: any, body: any) {
 // ── Slice 3: dedicated make-safe pipeline ──
 async function makesafePipeline(client: any, params: URLSearchParams) {
   const { data: jobs, error } = await client.from('jobs')
-    .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at')
+    .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
     .eq('type', 'makesafe')
     .not('status', 'in', '("cancelled","archived","lost")')
     .order('created_at', { ascending: false })
@@ -7058,7 +7098,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
         .neq('status', 'draft')
         .order('submitted_at', { ascending: false }),
       client.from('xero_invoices')
-        .select('job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date')
+        .select('job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at')
         .in('job_id', jobIds)
         .eq('invoice_type', 'ACCREC')
         .not('status', 'in', '("VOIDED","DELETED")')
@@ -7086,8 +7126,8 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
     new: [],
     allocated: [],
     report_ready: [],
-    to_invoice: [],
     completed: [],
+    archive: [],
   }
 
   for (const j of (jobs || [])) {
@@ -7201,11 +7241,11 @@ async function submitMakesafeReport(client: any, body: any) {
 
 // ── Slice 6: make-safe map data ──
 async function makesafeMap(client: any, params: URLSearchParams) {
-  const filter = params.get('filter') || 'active' // active|today|unassigned|new|allocated|report_ready|to_invoice|completed|waiting_report|on_road
+  const filter = params.get('filter') || 'active' // active|today|unassigned|new|allocated|report_ready|completed|archive|waiting_report|on_road
   const tradeId = params.get('trade_id') || null
 
   let query = client.from('jobs')
-    .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at')
+    .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
     .eq('type', 'makesafe')
     .not('status', 'in', '("cancelled","archived","lost")')
     .order('created_at', { ascending: false })
@@ -7234,7 +7274,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
       .neq('status', 'draft')
       .order('submitted_at', { ascending: false }),
     client.from('xero_invoices')
-      .select('job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date')
+      .select('job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at')
       .in('job_id', jobIds)
       .eq('invoice_type', 'ACCREC')
       .not('status', 'in', '("VOIDED","DELETED")')
@@ -7270,8 +7310,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
   if (MAKESAFE_BOARD_STAGES.includes(filter)) filtered = enriched.filter((j: any) => j.board_stage === filter)
   if (filter === 'today') filtered = enriched.filter((j: any) => j.assignments.some((a: any) => a.scheduled_date === today))
   if (filter === 'unassigned') filtered = enriched.filter((j: any) => j.assignments.length === 0)
-  if (filter === 'waiting_report') filtered = enriched.filter((j: any) => j.substatus === 'waiting_on_trade_report' || j.board_stage === 'report_ready')
-  if (filter === 'to_invoice') filtered = enriched.filter((j: any) => j.board_stage === 'to_invoice')
+  if (filter === 'waiting_report') filtered = enriched.filter((j: any) => j.substatus === 'waiting_on_trade_report' || j.board_stage === 'allocated' || j.board_stage === 'report_ready')
   if (filter === 'on_road') filtered = enriched.filter((j: any) => j.on_road)
   if (tradeId) filtered = filtered.filter((j: any) => j.assignments.some((a: any) => a.user_id === tradeId))
 
