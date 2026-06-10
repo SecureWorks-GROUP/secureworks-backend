@@ -140,6 +140,12 @@ import {
 import {
   listScopeRevisionsForJob as _listScopeRevisionsForJob,
 } from '../_shared/scope_freeze/list_scope_revisions.ts'
+// Scope-Memory-Saving M1 (issue #127) — full-content single-revision reader
+// backing the frozen-revision viewer. Hash-verifies canonical text, then
+// signs short-lived URLs for the private scope-artifacts bucket. Read-only.
+import {
+  getScopeRevisionForViewer as _getScopeRevisionForViewer,
+} from '../_shared/scope_freeze/get_scope_revision_for_viewer.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -154,7 +160,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 225
+const OPS_API_EXPECTED_ACTION_COUNT = 226
 
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
@@ -1724,8 +1730,8 @@ if (import.meta.main) serve(async (req: Request) => {
       // (toggleFrozenRevisions — Scope-Memory-Saving step 8 Option B), which
       // POSTs { job_id } and renders { ok, revisions: [...] } with revisions
       // ordered revision_number DESC. Hashes + metadata only — canonical
-      // text bytes and signed artefact URLs stay behind future
-      // get_scope_revision_for_viewer / get_scope_artifact actions.
+      // text bytes and signed artefact URLs live behind the
+      // get_scope_revision_for_viewer action below.
       case 'list_scope_revisions_for_job': {
         const job_id = (body && (body.job_id || body.jobId))
           || url.searchParams.get('job_id') || url.searchParams.get('jobId')
@@ -1733,6 +1739,31 @@ if (import.meta.main) serve(async (req: Request) => {
         const result = await _listScopeRevisionsForJob(client, { job_id })
         if (!result.ok) {
           const status = result.error.code === 'job_not_found' ? 404 : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
+      // Read-only full content of ONE scope revision for the frozen-revision
+      // viewer. patio-tool / fence-designer integration.js POST
+      // { scope_revision_id } when opened with ?scope_revision_id=<uuid>
+      // (links rendered by the ops.html picker above). Returns the revision
+      // row INCLUDING canonical text (hash-verified server-side before
+      // anything is returned), parsed scope_json / pricing_json_public for
+      // tool hydration, and the revision's scope_artifacts each carrying a
+      // short-lived (300 s) signed URL into the private scope-artifacts
+      // bucket. Same auth posture as every ops-api action: the global
+      // x-api-key / JWT gate above — no extra role gate, matching
+      // list_scope_revisions_for_job. No secrets or service keys in the
+      // response; signed URLs expire server-side.
+      case 'get_scope_revision_for_viewer': {
+        const scope_revision_id = (body && (body.scope_revision_id || body.scopeRevisionId))
+          || url.searchParams.get('scope_revision_id') || url.searchParams.get('scopeRevisionId')
+        if (!scope_revision_id || typeof scope_revision_id !== 'string') {
+          return json({ error: 'scope_revision_id required' }, 400)
+        }
+        const result = await _getScopeRevisionForViewer(client, client.storage, { scope_revision_id })
+        if (!result.ok) {
+          const status = result.error.code === 'revision_not_found' ? 404 : 500
           return json({ error: result.error }, status)
         }
         return json(result)

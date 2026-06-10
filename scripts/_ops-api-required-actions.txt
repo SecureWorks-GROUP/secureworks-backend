@@ -63,6 +63,7 @@ daily_coverage_audit
 freeze_scope
 record_scope_artifact
 list_scope_revisions_for_job
+get_scope_revision_for_viewer
 
 # ── Evidence health ──
 get_evidence_health
