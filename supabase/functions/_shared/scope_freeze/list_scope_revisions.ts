@@ -13,8 +13,9 @@
 //     scope_artifacts rows (created_at ASC) under `artifacts`.
 //   * scope_canonical_text / pricing_canonical_text are intentionally
 //     EXCLUDED — they are the multi-KB byte contracts; the list view needs
-//     hashes + metadata only. A future get_scope_revision_for_viewer action
-//     owns full-content reads (hash-verified) and signed artefact URLs.
+//     hashes + metadata only. The get_scope_revision_for_viewer action
+//     (./get_scope_revision_for_viewer.ts) owns full-content reads
+//     (hash-verified) and signed artefact URLs.
 //   * Unknown job_id → { code: 'job_not_found' } so the UI can distinguish
 //     "bad id" from "no revisions yet".
 
