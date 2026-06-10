@@ -7222,15 +7222,21 @@ async function updateMakesafeSubstatus(client: any, body: any) {
     .single()
   if (error) throw error
 
-  // Log event
+  // Log event (fire-and-forget). A PostgREST insert builder is thenable but has no `.catch`
+  // method, so `.insert(...).catch(...)` throws "catch is not a function" AFTER the update above
+  // has already committed — surfacing a spurious 500 on an otherwise-successful substatus change
+  // (and silently defeating advanceMakesafeSubstatusOnInvoice). Convert to the .then().catch()
+  // form (matches the established fire-and-forget idiom elsewhere in this file).
   await client.from('job_events').insert({
     job_id: jId,
     event_type: 'makesafe_substatus_changed',
     detail_json: { substatus: nextSubstatus, changed_at: updates.updated_at },
-  }).catch(() => {})
+  }).then(() => {}).catch(() => {})
 
   return { ok: true, details: data }
 }
+// Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
+export const _updateMakesafeSubstatus = updateMakesafeSubstatus
 
 // ── Slice 3: dedicated make-safe pipeline ──
 async function makesafePipeline(client: any, params: URLSearchParams) {
