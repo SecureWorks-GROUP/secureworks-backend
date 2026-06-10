@@ -14,6 +14,7 @@ import {
   _isMakesafeMlbCompany,
   _makesafeMissingCloseoutDocs,
   _makesafePipelineForTest,
+  _updateMakesafeSubstatus,
 } from "./index.ts";
 
 // ── Chainable Supabase query stub ──────────────────────────────────────────
@@ -237,7 +238,9 @@ function makeUpdateClient() {
         },
         insert(row: any) {
           inserts.push({ table, row });
-          return { catch: (_fn: any) => Promise.resolve({ error: null }) };
+          // Realistic PostgREST builder: a thenable (delegates to a real Promise) with NO `.catch`.
+          const p = Promise.resolve({ error: null });
+          return { then: p.then.bind(p) };
         },
       };
     },
@@ -289,4 +292,49 @@ Deno.test("makesafe substatus advance never throws when the update fails", async
   };
   const advanced = await _advanceMakesafeSubstatusOnInvoice(client, { type: "makesafe" }, "job-z");
   assertEquals(advanced, false);
+});
+
+Deno.test("updateMakesafeSubstatus tolerates a PostgREST insert builder that lacks .catch", async () => {
+  // Regression: the real supabase-js insert() returns a thenable that has NO `.catch` method, so
+  // `client.from('job_events').insert(...).catch(...)` threw "catch is not a function" AFTER the
+  // makesafe_job_details update had already committed — surfacing a spurious 500 on a successful
+  // substatus change (and silently defeating advanceMakesafeSubstatusOnInvoice). The event-log
+  // insert must be fire-and-forget via `.then().catch()`. This mock reproduces the real builder:
+  // a thenable (delegates to a real Promise) with no `.catch`. The OLD code throws here; the fix
+  // resolves cleanly with { ok: true }.
+  let eventInserted = false;
+  const client: any = {
+    from(table: string) {
+      if (table === "job_events") {
+        return {
+          insert(_row: any) {
+            eventInserted = true;
+            const p = Promise.resolve({ error: null });
+            return { then: p.then.bind(p) }; // thenable, intentionally NO `.catch`
+          },
+        };
+      }
+      return {
+        update() {
+          return {
+            eq() {
+              return {
+                select() {
+                  return {
+                    single: async () => ({
+                      data: { job_id: "job-a", substatus: "complete" },
+                      error: null,
+                    }),
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  const res = await _updateMakesafeSubstatus(client, { job_id: "job-a", substatus: "complete" });
+  assertEquals(res.ok, true);
+  assertEquals(eventInserted, true);
 });
