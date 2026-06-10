@@ -134,6 +134,12 @@ import {
   recordScopeArtifact as _recordScopeArtifact,
   isArtifactType as _isArtifactType,
 } from '../_shared/scope_freeze/record_scope_artifact.ts'
+// Scope-Memory-Saving M1 (issue #127) — read-only revision lister backing
+// the ops.html "View Frozen Revisions" picker, which has been calling
+// list_scope_revisions_for_job since step 8 Option B with no handler.
+import {
+  listScopeRevisionsForJob as _listScopeRevisionsForJob,
+} from '../_shared/scope_freeze/list_scope_revisions.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -148,7 +154,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 224
+const OPS_API_EXPECTED_ACTION_COUNT = 225
 
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
@@ -1709,6 +1715,24 @@ if (import.meta.main) serve(async (req: Request) => {
             : result.error.code === 'scope_revision_not_frozen' ? 409
             : result.error.code === 'storage_upload_failed' ? 502
             : 500
+          return json({ error: result.error }, status)
+        }
+        return json(result)
+      }
+      // Read-only list of frozen-scope revisions + their scope_artifacts rows
+      // for one job. Backs the ops.html "View Frozen Revisions" picker
+      // (toggleFrozenRevisions — Scope-Memory-Saving step 8 Option B), which
+      // POSTs { job_id } and renders { ok, revisions: [...] } with revisions
+      // ordered revision_number DESC. Hashes + metadata only — canonical
+      // text bytes and signed artefact URLs stay behind future
+      // get_scope_revision_for_viewer / get_scope_artifact actions.
+      case 'list_scope_revisions_for_job': {
+        const job_id = (body && (body.job_id || body.jobId))
+          || url.searchParams.get('job_id') || url.searchParams.get('jobId')
+        if (!job_id || typeof job_id !== 'string') return json({ error: 'job_id required' }, 400)
+        const result = await _listScopeRevisionsForJob(client, { job_id })
+        if (!result.ok) {
+          const status = result.error.code === 'job_not_found' ? 404 : 500
           return json({ error: result.error }, status)
         }
         return json(result)
