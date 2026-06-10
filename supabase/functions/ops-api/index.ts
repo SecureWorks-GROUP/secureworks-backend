@@ -6928,11 +6928,66 @@ export function _isMakesafeCompletedThisWeek(completedAt: string | null | undefi
   return completedDayStart >= weekStart && completedDayStart < weekEnd
 }
 
+// Canonical complete-vs-archive split: completed within the last 7 days stays in
+// `completed`, older rolls to `archive`. Replaces the old Perth-calendar-week
+// rule so a make-safe completed late in a week is not archived the next Monday.
+// Unknown/unparseable completion dates stay in `completed` (same fallback as the
+// week rule) so ops can fix the missing timestamp rather than losing the card.
+// nowMs minus completedMs uses a strict 7x86400000ms window (>= 7 days archives).
+export function _isMakesafeCompletedWithin7Days(completedAt: string | null | undefined, nowIso?: string): boolean {
+  if (!completedAt) return true
+  const completedMs = new Date(completedAt).getTime()
+  const nowMs = nowIso ? new Date(nowIso).getTime() : Date.now()
+  if (Number.isNaN(completedMs) || Number.isNaN(nowMs)) return true
+  return nowMs - completedMs < 7 * 86400000
+}
+
 function makesafeCompletedAt(job: any, detail: any, invoice: any): string | null {
   return invoice?.invoice_date || invoice?.created_at || detail?.invoice_ready_at || job?.completed_at || job?.updated_at || null
 }
 
-export function _deriveMakesafeBoardStage(job: any, detail: any, assignments: any[] = [], report?: any, invoice?: any, nowIso?: string): string {
+// MLB (ML Builders / Major Loss Builders) identity. SWMS is a hard close-out
+// requirement only for MLB-company make-safes, not universally. We detect MLB
+// defensively from slug, company name, or the builder reference prefix because
+// the canonical company slug is not hard-coded here (see PR notes for review).
+export function _isMakesafeMlbCompany(detail: any, job: any): boolean {
+  const slug = String(
+    detail?.requesting_company_slug || detail?.makesafe_companies?.slug || job?.metadata?.requesting_company?.slug || ''
+  ).toLowerCase()
+  const name = String(
+    detail?.requesting_company_name || detail?.makesafe_companies?.name || job?.metadata?.requesting_company?.name || ''
+  ).toLowerCase()
+  const ref = String(detail?.external_ref || job?.metadata?.external_ref || '').toUpperCase()
+  if (slug.includes('mlb') || slug.includes('ml-builders') || slug.includes('major-loss')) return true
+  if (name.includes('ml builders') || name.includes('major loss')) return true
+  if (/\bMLB[-\s]?\d/.test(ref)) return true
+  return false
+}
+
+// Close-out doc gate. A make-safe may only resolve to completed/archive once its
+// invoice + report PDFs are attached. SWMS is additionally required for MLB jobs.
+// Returns the set of docs that are still missing (empty => gate satisfied).
+export function _makesafeMissingCloseoutDocs(
+  docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
+  requiresSwms: boolean,
+): string[] {
+  const d = docs || {}
+  const missing: string[] = []
+  if (!d.has_invoice_doc) missing.push('invoice')
+  if (!d.has_report_doc) missing.push('report')
+  if (requiresSwms && !d.has_swms_doc) missing.push('swms')
+  return missing
+}
+
+export function _deriveMakesafeBoardStage(
+  job: any,
+  detail: any,
+  assignments: any[] = [],
+  report?: any,
+  invoice?: any,
+  nowIso?: string,
+  docs?: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null,
+): string {
   const normalizedSub = normalizeMakesafeSubstatus(detail?.substatus)
   const jobStatus = String(job?.status || '').toLowerCase()
   const hasAssignments = assignments.length > 0
@@ -6941,19 +6996,35 @@ export function _deriveMakesafeBoardStage(job: any, detail: any, assignments: an
 
   // Canonical MakeSafe command flow:
   // Intake drafts live outside this board until approved.
-  // New -> Allocated -> Report Ready -> Completed This Week -> Archive.
+  // New -> Allocated -> Report Ready -> Completed (<=7 days) -> Archive (>7 days).
   // `ready_to_invoice` is a legacy/admin substatus and now stays actionable in
   // Report Ready unless an invoice/complete signal proves the MakeSafe is done.
   if (invoiceDone) {
-    return _isMakesafeCompletedThisWeek(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
+    // Hard close-out gate: only resolve to completed/archive once the invoice +
+    // report PDFs (and SWMS for MLB) are attached. When a docs map is supplied
+    // and the gate is unmet, hold the job in report_ready rather than silently
+    // marking it complete. When no docs map is supplied (callers that do not
+    // load job_documents), preserve the prior behaviour and skip the gate.
+    if (docs !== undefined && docs !== null) {
+      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job))
+      if (missing.length > 0) return 'report_ready'
+    }
+    return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
   }
   if (hasSubmittedReport || jobStatus === 'complete') return 'report_ready'
   if (hasAssignments || normalizedSub === 'waiting_on_trade_report' || normalizedSub === 'company_contact_done' || jobStatus === 'scheduled' || jobStatus === 'in_progress') return 'allocated'
   return 'new'
 }
 
-function deriveMakesafeBoardStage(job: any, detail: any, assignments: any[] = [], report?: any, invoice?: any): string {
-  return _deriveMakesafeBoardStage(job, detail, assignments, report, invoice)
+function deriveMakesafeBoardStage(
+  job: any,
+  detail: any,
+  assignments: any[] = [],
+  report?: any,
+  invoice?: any,
+  docs?: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null,
+): string {
+  return _deriveMakesafeBoardStage(job, detail, assignments, report, invoice, undefined, docs)
 }
 
 function makesafeAge(createdAt: string | null | undefined, boardStage: string) {
@@ -7003,12 +7074,47 @@ function makesafeInvoiceStatus(boardStage: string, invoice: any): string {
   return 'not_ready'
 }
 
-function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], report?: any, invoice?: any) {
-  const boardStage = deriveMakesafeBoardStage(j, detail, assignments, report, invoice)
+// Build the per-job close-out doc booleans from this job's job_documents rows.
+// has_wo: a work order doc; has_report_doc / has_invoice_doc / has_swms_doc:
+// matched by file_name (the PDFs the reporting skill attaches at close-out).
+function makesafeDocBooleans(docRows: any[] | null | undefined) {
+  const rows = docRows || []
+  const nameMatches = (needle: string) =>
+    rows.some((d: any) => String(d?.file_name || '').toLowerCase().includes(needle))
+  // SWMS match must NOT catch the make-safe job-number prefix `SWMS-NNNNN`, which
+  // appears in most attached filenames. Match "swms" only when it is not the
+  // job-number token (i.e. not immediately followed by a hyphen + digit).
+  const hasSwms = rows.some((d: any) => /swms(?![-\s]?\d)/i.test(String(d?.file_name || '')))
+  return {
+    has_wo: rows.some((d: any) => String(d?.type || '').toLowerCase() === 'work_order'),
+    has_report_doc: nameMatches('make safe report'),
+    has_invoice_doc: nameMatches('invoice'),
+    has_swms_doc: hasSwms,
+  }
+}
+
+function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], report?: any, invoice?: any, docRows?: any[] | null) {
+  // Only engage the close-out doc gate when the caller actually loaded
+  // job_documents. Callers that pass nothing keep the prior (ungated) behaviour.
+  const docFlags = docRows !== undefined ? makesafeDocBooleans(docRows) : null
+  const boardStage = deriveMakesafeBoardStage(j, detail, assignments, report, invoice, docFlags)
   const age = makesafeAge(j.created_at, boardStage)
   const crew = makesafeCrew(assignments)
   const requestingCompany = detail?.requesting_company_name || detail?.makesafe_companies?.name || j.metadata?.requesting_company?.name || null
   const requestingCompanySlug = detail?.requesting_company_slug || detail?.makesafe_companies?.slug || j.metadata?.requesting_company?.slug || null
+  // Surface which docs are still missing for the close-out gate. Only meaningful
+  // once a job is otherwise ready to complete (an active invoice / complete
+  // signal); we compute it whenever a docs map was supplied so the board can
+  // explain why an invoiced job is still sitting in Report Ready.
+  let docsMissing: string[] | null = null
+  if (docFlags) {
+    const invoiceDone = hasActiveMakesafeInvoice(invoice) ||
+      String(j?.status || '').toLowerCase() === 'invoiced' ||
+      normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
+    if (invoiceDone) {
+      docsMissing = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j))
+    }
+  }
   return {
     ...j,
     makesafe_details: detail,
@@ -7031,6 +7137,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     crew_members: crew.crew_members,
     report_status: makesafeReportStatus(boardStage, detail, report),
     invoice_status: makesafeInvoiceStatus(boardStage, invoice),
+    ...(docFlags || {}),
+    docs_missing: docsMissing != null && docsMissing.length > 0,
+    missing_docs: docsMissing != null && docsMissing.length > 0 ? docsMissing : undefined,
   }
 }
 
@@ -7083,6 +7192,8 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   let detailsMap: Record<string, any> = {}
   let reportMap: Record<string, any> = {}
   let invoiceMap: Record<string, any> = {}
+  // docsMap: per-job array of job_documents rows, used for the close-out gate.
+  let docsMap: Record<string, any[]> = {}
   if (jobIds.length > 0) {
     const { data: details } = await client.from('makesafe_job_details')
       .select('*, makesafe_companies:requesting_company_id(slug, name)')
@@ -7091,7 +7202,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
       detailsMap[d.job_id] = d
     }
 
-    const [reportsRes, invoicesRes] = await Promise.all([
+    const [reportsRes, invoicesRes, docsRes] = await Promise.all([
       client.from('job_service_reports')
         .select('job_id, status, submitted_at, created_at')
         .in('job_id', jobIds)
@@ -7103,9 +7214,17 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
         .eq('invoice_type', 'ACCREC')
         .not('status', 'in', '("VOIDED","DELETED")')
         .order('invoice_date', { ascending: false }),
+      client.from('job_documents')
+        .select('job_id, type, file_name')
+        .in('job_id', jobIds),
     ])
     reportMap = firstByJobId(reportsRes.data || [])
     invoiceMap = firstByJobId(invoicesRes.data || [])
+    for (const doc of (docsRes.data || [])) {
+      if (!doc?.job_id) continue
+      if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
+      docsMap[doc.job_id].push(doc)
+    }
   }
 
   // Fetch assignments for these jobs
@@ -7131,12 +7250,16 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   }
 
   for (const j of (jobs || [])) {
-    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id])
+    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [])
     columns[enriched.board_stage].push(enriched)
   }
 
   return { columns, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: (jobs || []).length }
 }
+
+// Test-only export alias (mirrors the `_`-prefixed export convention used for
+// the other make-safe helpers). Production routes still call makesafePipeline.
+export const _makesafePipelineForTest = makesafePipeline
 
 // ── Slice 5: make-safe completion report ──
 async function submitMakesafeReport(client: any, body: any) {
@@ -9698,6 +9821,22 @@ async function syncSuppliers(client: any) {
 //              Scope-to-PO Extraction, Assignment Cascade
 // ════════════════════════════════════════════════════════════
 
+// Advance the canonical make-safe substatus to 'complete' once an invoice has
+// been created. No-op for non-make-safe jobs. Never throws: a substatus write
+// failure must not break the (already-completed) invoice flow. Exported for
+// tests as `_advanceMakesafeSubstatusOnInvoice`.
+async function advanceMakesafeSubstatusOnInvoice(client: any, job: any, jId: string): Promise<boolean> {
+  if (String(job?.type || '').toLowerCase() !== 'makesafe') return false
+  try {
+    await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' })
+    return true
+  } catch (e) {
+    console.log('[completeAndInvoice] makesafe substatus advance failed (non-blocking):', (e as Error).message)
+    return false
+  }
+}
+export const _advanceMakesafeSubstatusOnInvoice = advanceMakesafeSubstatusOnInvoice
+
 // Feature 4: Complete a job AND create a Xero invoice in one step.
 // 1. Sets job status to "complete" + completed_at
 // 2. Reads pricing_json for line items
@@ -9886,6 +10025,14 @@ async function completeAndInvoice(client: any, body: any) {
     message_content: `Job completed and invoice created`,
     metadata: {},
   }).then(() => {}).catch(() => {})
+
+  // ── Stop the make-safe substatus drift at source ──
+  // jobs.status flips to 'invoiced' inside createInvoice, but makesafe_job_details
+  // .substatus was never advanced, leaving invoiced make-safes stuck at an early
+  // substatus (73/75 jobs). For make-safe jobs only, advance the canonical
+  // substatus to 'complete'. Guarded + non-throwing so a substatus write failure
+  // never breaks the (already-completed) invoice flow.
+  await advanceMakesafeSubstatusOnInvoice(client, job, jId)
 
   return {
     success: true,
