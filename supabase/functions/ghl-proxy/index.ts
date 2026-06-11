@@ -171,6 +171,18 @@ function normalizeIdentity(value: unknown): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
 }
 
+// A "real" job ref is an assigned, type-prefixed job number (SWP-25001, SWF-26002,
+// and tolerant variants like SW-3100 / SWP3100). Draft/local/blank refs the tool
+// uses before a job number is assigned (e.g. "draft-abc123", "local", "", a bare
+// contact id) are NOT real job refs. The scope_ref_mismatch guard must only fire
+// when a scope carrying one REAL job number is being saved onto a DIFFERENT real
+// job — never on the normal first-save flow where the scope still carries its
+// draft/local ref. Pattern matches the next_job_number output (see ~line 970).
+function isRealJobRef(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  return /^SW[PF]?-?\d/i.test(value.trim())
+}
+
 function extractScopeIdentity(scopeJson: any, meta: any = {}) {
   const job = scopeJson?.job || {}
   const client = scopeJson?.client || {}
@@ -1601,9 +1613,15 @@ serve(async (req: Request) => {
       const targetJobNumber = cleanIdentity(targetJob.job_number)
       const incomingScopeSize = JSON.stringify(scopeJson || {}).length
 
+      // Cross-job protection. Only reject when the scope carries a REAL job number
+      // (SWP-/SWF-…) that differs from the target's REAL job number — i.e. someone
+      // is saving one job's scope onto a genuinely different job. The normal flow,
+      // where the scope still carries a draft/local/blank ref because the SWP was
+      // only just assigned, must NOT be rejected: that scope is simply being
+      // attached to its newly-assigned job. (See isRealJobRef above.)
       if (
-        incomingIdentity.ref &&
-        targetJobNumber &&
+        isRealJobRef(incomingIdentity.ref) &&
+        isRealJobRef(targetJobNumber) &&
         normalizeIdentity(incomingIdentity.ref) !== normalizeIdentity(targetJobNumber)
       ) {
         await sb.from('job_events').insert({
