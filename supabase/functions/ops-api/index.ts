@@ -2133,6 +2133,42 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'list_trade_invoices': return json(await listTradeInvoices(client, url.searchParams))
       case 'labour_reconciliation': return json(await labourReconciliation(client, url.searchParams))
       case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body))
+      case 'approve_trade_invoice': {
+        // Ops (Shaun) approves a pending_ops_review trade invoice after verifying
+        // manual hours against the schedule. Moves it to 'approved' so the Xero
+        // push gate (push_trade_invoice_to_xero) will fire. Option A money gate. [F6]
+        const { invoice_id: aprInvId } = body
+        if (!aprInvId) throw new ApiError('invoice_id required', 400)
+        const { data: aprInv } = await client.from('trade_invoices')
+          .select('id, status').eq('id', aprInvId).maybeSingle()
+        if (!aprInv) throw new ApiError('Invoice not found', 404)
+        if (aprInv.status !== 'pending_ops_review' && aprInv.status !== 'queried') {
+          throw new ApiError('Only invoices pending ops review can be approved (status: ' + aprInv.status + ')', 400)
+        }
+        const { error: aprErr } = await client.from('trade_invoices')
+          .update({ status: 'approved', acknowledged_at: new Date().toISOString() })
+          .eq('id', aprInvId)
+        if (aprErr) throw new Error('Failed to approve: ' + aprErr.message)
+        return json({ success: true, invoice_id: aprInvId, status: 'approved' })
+      }
+      case 'reject_trade_invoice': {
+        // Ops rejects a pending_ops_review invoice. Sets terminal 'ops-reject' so
+        // its assignments are RELEASED (myHours re-shows them, dup index ignores
+        // it) and the trade can re-submit corrected hours.                    [D6]
+        const { invoice_id: rejInvId, note: rejNote } = body
+        if (!rejInvId) throw new ApiError('invoice_id required', 400)
+        const { data: rejInv } = await client.from('trade_invoices')
+          .select('id, status').eq('id', rejInvId).maybeSingle()
+        if (!rejInv) throw new ApiError('Invoice not found', 404)
+        if (rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
+          throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
+        }
+        const { error: rejErr } = await client.from('trade_invoices')
+          .update({ status: 'ops-reject', query_note: rejNote || 'Rejected by ops — re-submit corrected hours.' })
+          .eq('id', rejInvId)
+        if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
+        return json({ success: true, invoice_id: rejInvId, status: 'ops-reject' })
+      }
       case 'push_trade_invoice_to_xero': {
         const { invoice_id } = body
         if (!invoice_id) throw new ApiError('invoice_id required', 400)
@@ -3190,28 +3226,136 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
-            const { week_start, extra_items, notes: invoiceNotes, draft_id } = body
+            const { week_start, extra_items, notes: invoiceNotes, draft_id, manual_assignments } = body
+
+            // ── Manual-assignment money-path guards ──────────────────────────
+            // manual_assignments is the job-centric prefill payload:
+            //   [{ assignment_id, hours }]  — rate is DELIBERATELY ABSENT.
+            // The server resolves the rate from trade_rates. A client that sends
+            // a `rate` on any manual_assignment is rejected outright (422): a
+            // trade must never be able to set their own pay rate.            [F2]
+            const manualAssignmentsIn: any[] = Array.isArray(manual_assignments) ? manual_assignments : []
+            for (const ma of manualAssignmentsIn) {
+              if (ma && Object.prototype.hasOwnProperty.call(ma, 'rate')) {
+                throw new ApiError('manual_assignments must not include a rate — the rate is resolved server-side', 422)
+              }
+              if (!ma || !ma.assignment_id) {
+                throw new ApiError('Each manual assignment requires an assignment_id', 422)
+              }
+            }
+            const hasManualAssignments = manualAssignmentsIn.length > 0
 
             // Miscellaneous invoice (no week) or weekly invoice
             let weekEnd: string | null = null
             if (week_start) {
+              // week_start MUST be a Monday. A non-Monday key (e.g. a Sunday)
+              // bypasses both the partial unique index and the dup-week 409,
+              // and the legacy Sunday-keyed prod row proves it can happen.   [D2]
               const weekStartDate = new Date(week_start + 'T00:00:00Z')
+              if (Number.isNaN(weekStartDate.getTime())) {
+                throw new ApiError('Invalid week_start date', 422)
+              }
+              if (weekStartDate.getUTCDay() !== 1) {
+                throw new ApiError('week_start must be a Monday (week_start is Monday-keyed)', 422)
+              }
               const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
               weekEnd = weekEndDate.toISOString().slice(0, 10)
 
-              // Weekly uniqueness is enforced by the DB. If a draft exists, submit promotes it below.
+              // ── Duplicate-week guard (Layer A, app side) ──────────────────
+              // The DB partial unique index is the hard guarantee; this app-side
+              // check returns a friendly 409 before we do any work. A draft for
+              // this week is fine (submit promotes it below); any non-failed,
+              // non-draft invoice for the same (user, week) is a duplicate.  [F3]
+              const { data: dupWeek } = await client.from('trade_invoices')
+                .select('id, status')
+                .eq('user_id', tradeUser.id)
+                .eq('week_start', week_start)
+                .not('status', 'in', '("draft","failed","ops-reject")')
+                .maybeSingle()
+              if (dupWeek && dupWeek.id !== draft_id) {
+                throw new ApiError('An invoice has already been submitted for this week', 409)
+              }
             }
 
-            // Get completed assignments (only if weekly invoice)
-            let assignments: any[] = []
+            // Resolve the server-side hourly rate for this trade for this week.
+            // trade_rates is the ONLY live rate source (job_assignments.hourly_rate
+            // and users.default_hourly_rate are NULL for every trade). rate==0
+            // (missing/corrupt window) blocks any hours-bearing submission.   [F2/F5]
+            let resolvedRate = 0
             if (week_start && weekEnd) {
+              const { data: rateRow } = await client.from('trade_rates')
+                .select('hourly_rate, effective_from')
+                .eq('user_id', tradeUser.id)
+                .lte('effective_from', weekEnd)
+                .or(`effective_to.is.null,effective_to.gte.${week_start}`)
+                .order('effective_from', { ascending: false })
+                .limit(1)
+                .maybeSingle()
+              resolvedRate = rateRow ? Number(rateRow.hourly_rate) : 0
+            }
+
+            // Get assignments to bill. Two sources:
+            //   • manual_assignments — the trade typed hours per job card (new path)
+            //   • completed clocked assignments — legacy auto-fill (still honoured)
+            // Either way the rate comes from the server, never the client.
+            let assignments: any[] = []
+            let reviewFlag: string | null = null
+            if (week_start && weekEnd && hasManualAssignments) {
+              if (resolvedRate <= 0) {
+                throw new ApiError('Rate not configured for trade — contact office', 422)
+              }
+              const wantedIds = manualAssignmentsIn.map((m: any) => m.assignment_id)
+              const { data: asn } = await client.from('job_assignments')
+                .select('id, job_id, scheduled_date, status, invoiced_in')
+                .eq('user_id', tradeUser.id)            // ownership check (unchanged)  [F2]
+                .in('id', wantedIds)
+              const HOURLY_STATUS_WHITELIST = ['scheduled', 'confirmed', 'in_progress', 'complete']
+              const RELEASED = ['draft', 'failed', 'ops-reject']
+              // Resolve referencing-invoice statuses for the dup-assignment guard.
+              const refIds = [...new Set((asn || []).map((a: any) => a.invoiced_in).filter(Boolean))]
+              let liveRefIds = new Set<string>()
+              if (refIds.length > 0) {
+                const { data: refInv } = await client.from('trade_invoices')
+                  .select('id, status').in('id', refIds)
+                liveRefIds = new Set((refInv || [])
+                  .filter((ti: any) => !RELEASED.includes(ti.status)).map((ti: any) => ti.id))
+              }
+              const hoursById: Record<string, number> = {}
+              for (const m of manualAssignmentsIn) hoursById[m.assignment_id] = Number(m.hours) || 0
+              for (const a of (asn || [])) {
+                if (!HOURLY_STATUS_WHITELIST.includes(a.status)) {
+                  throw new ApiError('Assignment ' + a.id + ' has status "' + a.status + '" and cannot be invoiced', 422)
+                }
+                // Layer B: reject an assignment already on a live invoice.      [F3]
+                if (a.invoiced_in && liveRefIds.has(a.invoiced_in)) {
+                  throw new ApiError('Assignment ' + a.id + ' has already been invoiced', 409)
+                }
+                const h = hoursById[a.id] || 0
+                // hours>16/day is implausible — flag for ops review, do not reject. [F2]
+                if (h > 16) reviewFlag = 'hours_excess'
+                assignments.push({
+                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: resolvedRate,
+                  break_minutes: 0, manual_override_flag: false,
+                  scheduled_date: a.scheduled_date, status: a.status,
+                })
+              }
+              if ((asn || []).length !== wantedIds.length) {
+                throw new ApiError('One or more assignments do not belong to you or do not exist', 422)
+              }
+            } else if (week_start && weekEnd) {
+              // Legacy clocked path: re-query completed assignments server-side.
               const { data: asn } = await client.from('job_assignments')
                 .select('id, job_id, clocked_on_at, clocked_off_at, hours_worked, hourly_rate, break_minutes, manual_override_flag, scheduled_date, status')
                 .eq('user_id', tradeUser.id)
                 .gte('scheduled_date', week_start)
                 .lte('scheduled_date', weekEnd)
                 .eq('status', 'complete')
-              assignments = asn || []
+              // Stamp the server-resolved rate so clocked lines never trust a
+              // client/stale assignment rate for pricing.                     [F2]
+              assignments = (asn || []).map((a: any) => ({
+                ...a,
+                hourly_rate: resolvedRate > 0 ? resolvedRate : (a.hourly_rate || 0),
+              }))
             }
 
             // Must have either hours or extra items
@@ -3376,7 +3520,16 @@ if (import.meta.main) serve(async (req: Request) => {
               if (updErr) throw new Error('Failed to submit draft invoice: ' + updErr.message)
             } else {
               const { data: newInvoice, error: invErr } = await client.from('trade_invoices').insert(invoicePayload).select('id').single()
-              if (invErr) throw new Error('Failed to create invoice: ' + invErr.message)
+              if (invErr) {
+                // Map the partial-unique-index race (two submits for the same week
+                // land between the app-side dup check and the insert) to a friendly
+                // 409 rather than a raw 500.                                    [D6]
+                const m = (invErr.message || '').toLowerCase()
+                if (invErr.code === '23505' || m.includes('duplicate key') || m.includes('unique')) {
+                  throw new ApiError('An invoice has already been submitted for this week', 409)
+                }
+                throw new Error('Failed to create invoice: ' + invErr.message)
+              }
               invoice = newInvoice
             }
 
@@ -3397,72 +3550,37 @@ if (import.meta.main) serve(async (req: Request) => {
               })
             }
 
-            // Auto-acknowledge for lead installers if hours within WO allocation
-            const { data: userRoleCheck } = await client.from('users').select('role').eq('id', tradeUser.id).maybeSingle()
-            if (userRoleCheck?.role === 'lead_installer') {
-              let allAutoAcked = true
-              let anyOverWO = false
+            // ── Layer B: stamp invoiced_in on every included assignment ──────
+            // Marks each manual/clocked assignment as belonging to this invoice so
+            // myHours() and the dup-assignment guard hide it from future weeks
+            // (covers rescheduling across a week boundary). Non-blocking.     [F3]
+            const includedAssignmentIds = lineItems
+              .flatMap((l: any) => Array.isArray(l.assignment_ids) ? l.assignment_ids : [])
+              .filter(Boolean)
+            if (includedAssignmentIds.length > 0) {
+              try {
+                await client.from('job_assignments')
+                  .update({ invoiced_in: invoice.id })
+                  .in('id', includedAssignmentIds)
+              } catch (e) { /* non-blocking */ }
+            }
 
-              for (const line of lineItems) {
-                // Look up work order for this job
-                const { data: wo } = await client.from('work_orders')
-                  .select('estimated_hours')
-                  .eq('job_id', line.job_id)
-                  .limit(1)
-                  .maybeSingle()
-
-                const woHours = wo?.estimated_hours || 0
-
-                if (woHours > 0 && line.total_hours <= Math.max(woHours * 1.1, woHours + 1)) {
-                  // Within 110% OR within 1 hour of WO (whichever is more generous) — auto-acknowledge
-                  await client.from('trade_invoice_lines')
-                    .update({
-                      acknowledgment_status: 'acknowledged',
-                      acknowledged_by: tradeUser.id,
-                      acknowledged_at: new Date().toISOString(),
-                    })
-                    .eq('trade_invoice_id', invoice.id)
-                    .eq('job_id', line.job_id)
-
-                  line.work_order_hours = woHours
-                } else if (woHours > 0) {
-                  // Over WO — flag for ops review
-                  anyOverWO = true
-                  allAutoAcked = false
-                } else {
-                  // No WO — can't auto-ack
-                  allAutoAcked = false
-                }
-              }
-
-              if (allAutoAcked) {
-                await client.from('trade_invoices').update({
-                  status: 'acknowledged',
-                  acknowledged_at: new Date().toISOString(),
-                }).eq('id', invoice.id)
-              } else if (anyOverWO) {
-                await client.from('trade_invoices').update({
-                  status: 'pending_ops_review',
-                }).eq('id', invoice.id)
-
-                // Notify Shaun about over-WO invoice
-                const WO_TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-                if (WO_TELEGRAM_BOT_TOKEN) {
-                  try {
-                    const { data: shaun } = await client.from('users').select('telegram_id').ilike('email', '%shaun%').not('telegram_id', 'is', null).limit(1).maybeSingle()
-                    if (shaun?.telegram_id) {
-                      await fetch('https://api.telegram.org/bot' + WO_TELEGRAM_BOT_TOKEN + '/sendMessage', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          chat_id: shaun.telegram_id,
-                          text: (userProfile?.name || 'Lead trade') + ' invoice for WK' + week_start.slice(5) + ' exceeds work order hours — needs review.',
-                        }),
-                      })
-                    }
-                  } catch (e) { /* non-blocking */ }
-                }
-              }
+            // ── Ops review gate (Option A) ───────────────────────────────────
+            // Clock-off used to be the implicit "work happened" proof. With manual
+            // hours that proof is gone, so any invoice carrying manual (typed)
+            // hours, or flagged hours_excess, lands in pending_ops_review. Shaun
+            // verifies against the schedule and approves before the Xero draft is
+            // pushed (push_trade_invoice_to_xero gates on acknowledged/approved).
+            // Fully-clocked / extras-only invoices keep prior auto-push behaviour.
+            //   [F6 / Q4 Option A]  (Marnin can switch to Option B by removing this)
+            const needsOpsReview = hasManualAssignments || reviewFlag === 'hours_excess'
+            if (needsOpsReview) {
+              await client.from('trade_invoices').update({
+                status: 'pending_ops_review',
+                query_note: reviewFlag === 'hours_excess'
+                  ? 'Auto-flagged: an assignment exceeds 16h — verify hours.'
+                  : 'Manual hours entered — verify against schedule before approval.',
+              }).eq('id', invoice.id)
             }
 
             // Log business event
@@ -3495,11 +3613,15 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
+            // Skipped when the invoice is in pending_ops_review (Option A): the
+            // push fires later, after Shaun approves, via push_trade_invoice_to_xero
+            // (which gates on acknowledged/approved). This is the replacement for
+            // the deleted clock-off "work happened" gate.                      [F6]
             let xeroBillId = null
             let xeroBillNumber = null
             // Declared outside the try so the catch block can record which phase failed.
             let xeroContactId: string | null = null
-            try {
+            if (!needsOpsReview) try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
@@ -3631,7 +3753,23 @@ if (import.meta.main) serve(async (req: Request) => {
               } catch (logErr) { console.log('[ops-api] Failed to record xero_push_failed event:', (logErr as Error).message) }
             }
 
-            return json({ success: true, invoice_id: invoice.id, invoice_number: invoiceNumber, total_hours: totalHours, total_inc: totalInc, line_count: lineItems.length + extraLineItems.length, xero_bill_id: xeroBillId, xero_bill_number: xeroBillNumber, xero_warning: !xeroBillId ? 'Invoice saved but could not push to Xero — admin will push manually' : undefined })
+            return json({
+              success: true,
+              invoice_id: invoice.id,
+              invoice_number: invoiceNumber,
+              total_hours: totalHours,
+              total_inc: totalInc,
+              line_count: lineItems.length + extraLineItems.length,
+              xero_bill_id: xeroBillId,
+              xero_bill_number: xeroBillNumber,
+              // pending_ops_review = held for Shaun (not a Xero failure). Lets the
+              // UI show "sent for review" instead of the manual-sync warning.   [F6]
+              pending_ops_review: needsOpsReview,
+              review_flag: reviewFlag,
+              xero_warning: (!xeroBillId && !needsOpsReview)
+                ? 'Invoice saved but could not push to Xero — admin will push manually'
+                : undefined,
+            })
           }
 
           case 'my_invoices': {
@@ -13395,25 +13533,70 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   const weekEnding = params.get('week_ending') || getAWSTWeekEnd()
   const weekStart = weekStartFromEnd(weekEnding)
 
-  // Get completed assignments in this week with clock times
-  const { data: assignments, error } = await client
+  // Per-metre users (Henry) keep the strict complete-only filter so their
+  // per-metre view never lists scheduled-but-unworked fencing jobs as
+  // invoiceable. invoice_type on the users row is the primary signal.   [F4 / M1]
+  const { data: userRow } = await client
+    .from('users')
+    .select('invoice_type')
+    .eq('id', userId)
+    .maybeSingle()
+  const isPerMetre = userRow?.invoice_type === 'per_metre'
+
+  // Status whitelist for hourly trades. We deliberately do NOT remove the status
+  // filter outright — that would prefill `cancelled` (and any decline/no-show)
+  // assignments as invoiceable cards, paying for work that was called off.  [F1]
+  const HOURLY_STATUS_WHITELIST = ['scheduled', 'confirmed', 'in_progress', 'complete']
+
+  // Build the assignment query. Hourly trades see scheduled/confirmed/in_progress/
+  // complete with NO clock-data guard (hours are typed manually, clock may be
+  // dead). Per-metre keeps complete-only + clock guards unchanged.
+  let asnQuery = client
     .from('job_assignments')
     .select(`
       id, scheduled_date, start_time, status, role, assignment_type, crew_name,
       started_at, completed_at, hours_worked, break_minutes, clocked_on_at, clocked_off_at,
+      invoiced_in,
       jobs:job_id (
         id, type, job_number, client_name, site_address, site_suburb
       )
     `)
     .eq('user_id', userId)
-    .eq('status', 'complete')
     .gte('scheduled_date', weekStart)
     .lte('scheduled_date', weekEnding)
-    .not('started_at', 'is', null)
-    .not('completed_at', 'is', null)
-    .order('scheduled_date', { ascending: true })
+
+  if (isPerMetre) {
+    asnQuery = asnQuery
+      .eq('status', 'complete')
+      .not('started_at', 'is', null)
+      .not('completed_at', 'is', null)
+  } else {
+    asnQuery = asnQuery.in('status', HOURLY_STATUS_WHITELIST)
+  }
+
+  const { data: rawAssignments, error } = await asnQuery.order('scheduled_date', { ascending: true })
 
   if (error) throw error
+
+  // Layer B double-invoice guard: hide assignments already on a LIVE invoice.
+  // An assignment whose referencing invoice is terminal (failed/ops-reject) or a
+  // draft is released and may be re-invoiced. We resolve the referenced invoice
+  // statuses in one batch.                                                  [F3]
+  const RELEASED_INVOICE_STATUSES = ['draft', 'failed', 'ops-reject']
+  const referencedInvoiceIds = [...new Set((rawAssignments || [])
+    .map((a: any) => a.invoiced_in).filter(Boolean))]
+  let liveInvoiceIds = new Set<string>()
+  if (referencedInvoiceIds.length > 0) {
+    const { data: refInvoices } = await client
+      .from('trade_invoices')
+      .select('id, status')
+      .in('id', referencedInvoiceIds)
+    liveInvoiceIds = new Set((refInvoices || [])
+      .filter((ti: any) => !RELEASED_INVOICE_STATUSES.includes(ti.status))
+      .map((ti: any) => ti.id))
+  }
+  const assignments = (rawAssignments || [])
+    .filter((a: any) => !(a.invoiced_in && liveInvoiceIds.has(a.invoiced_in)))
 
   // Look up current rate
   const { data: rateRow } = await client
@@ -13442,6 +13625,9 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
     return {
       ...a,
       hours,
+      // null hours_worked means no clock data — the client renders an editable
+      // (required) hours field for this card instead of a read-only value.
+      hours_worked: a.hours_worked != null ? parseFloat(a.hours_worked) : null,
       amount: Math.round(hours * rate * 100) / 100,
     }
   })
@@ -13464,6 +13650,10 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   return {
     assignments: enriched,
     rate,
+    // rate_resolved=false signals the client to show a "Rate not set — contact
+    // office" card state and BLOCK that card's inclusion (never a silent $0).  [F5]
+    rate_resolved: rate > 0,
+    is_per_metre: isPerMetre,
     week_ending: weekEnding,
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
@@ -13763,10 +13953,14 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   const limit = parseInt(params.get('limit') || '50')
   const status = params.get('status')
 
+  // Select the LIVE weekly-invoice columns (week_start/subtotal_ex/total_inc and
+  // relational trade_invoice_lines), not the legacy week_ending/line_items shape.
+  // This is the surface the inline ops.html review queue reads, so it must carry
+  // pending_ops_review invoices with their totals + query_note.            [D3]
   let query = client
     .from('trade_invoices')
-    .select('id, week_ending, subtotal, gst, total, line_items, xero_bill_number, xero_invoice_id, status, created_at, notes, users:user_id(name)')
-    .order('week_ending', { ascending: false })
+    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, total_inc, status, query_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_number, client_name, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit_rate)')
+    .order('week_start', { ascending: false, nullsFirst: false })
     .limit(limit)
 
   if (status) query = query.eq('status', status)
