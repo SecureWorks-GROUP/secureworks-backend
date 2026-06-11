@@ -3457,19 +3457,18 @@ if (import.meta.main) serve(async (req: Request) => {
             if (hasExtras) {
               const requestedJobIds = [...new Set((extra_items || []).map((i: any) => i?.job_id).filter(Boolean))]
               const requestedJobNumbers = [...new Set((extra_items || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
-              let extraJobsQuery = client.from('jobs')
-                .select('id, job_number, client_name, type, site_address, site_suburb, status')
-                .not('status', 'in', '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
-              if (requestedJobIds.length > 0 && requestedJobNumbers.length > 0) {
-                extraJobsQuery = extraJobsQuery.or(`id.in.(${requestedJobIds.join(',')}),job_number.in.(${requestedJobNumbers.join(',')})`)
-              } else if (requestedJobIds.length > 0) {
-                extraJobsQuery = extraJobsQuery.in('id', requestedJobIds)
-              } else if (requestedJobNumbers.length > 0) {
-                extraJobsQuery = extraJobsQuery.in('job_number', requestedJobNumbers)
+              const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
+              const activeJobStatusExclude = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+              const extraJobReads: PromiseLike<any>[] = []
+              if (requestedJobIds.length > 0) {
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('id', requestedJobIds))
               }
-              const { data: extraJobs, error: extraJobsErr } = (requestedJobIds.length > 0 || requestedJobNumbers.length > 0)
-                ? await extraJobsQuery
-                : { data: [], error: null }
+              if (requestedJobNumbers.length > 0) {
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('job_number', requestedJobNumbers))
+              }
+              const extraJobResults = extraJobReads.length > 0 ? await Promise.all(extraJobReads) : []
+              const extraJobs = extraJobResults.flatMap((r: any) => r.data || [])
+              const extraJobsErr = extraJobResults.find((r: any) => r.error)?.error
               if (extraJobsErr) throw extraJobsErr
               const jobById: Record<string, any> = {}
               const jobByNumber: Record<string, any> = {}
