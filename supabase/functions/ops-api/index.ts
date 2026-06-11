@@ -2773,13 +2773,15 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'search_all_jobs': {
             const q = (url.searchParams.get('q') || '').toLowerCase().trim()
-            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+            // 'complete','completed','invoiced' intentionally excluded from the exclusion list so
+            // invoicing searches show all active + completed jobs (ops queue is the dup-bill guard).
+            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
             const { data: assignedRows } = await client.from('job_assignments')
               .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
               .eq('user_id', tradeUser.id)
             const assignedJobs = (assignedRows || [])
               .map((r: any) => r.jobs)
-              .filter((j: any) => j && !['lost','cancelled','archived','deleted','complete','completed','invoiced','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+              .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
 
             let jobQuery = client.from('jobs')
               .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
