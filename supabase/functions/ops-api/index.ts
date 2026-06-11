@@ -2773,9 +2773,17 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'search_all_jobs': {
             const q = (url.searchParams.get('q') || '').toLowerCase().trim()
+            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+            const { data: assignedRows } = await client.from('job_assignments')
+              .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
+              .eq('user_id', tradeUser.id)
+            const assignedJobs = (assignedRows || [])
+              .map((r: any) => r.jobs)
+              .filter((j: any) => j && !['lost','cancelled','archived','deleted','complete','completed','invoiced','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+
             let jobQuery = client.from('jobs')
               .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
-              .not('status', 'in', '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
+              .not('status', 'in', ACTIVE_JOB_STATUS_EXCLUDE)
               .order('created_at', { ascending: false })
               .limit(200)
             if (q) {
@@ -2783,7 +2791,11 @@ if (import.meta.main) serve(async (req: Request) => {
             }
             const { data: allJobs, error: allJobsErr } = await jobQuery
             if (allJobsErr) throw allJobsErr
-            const jobs = await enrichTradeMakesafeJobs(client, allJobs || [])
+            const byId: Record<string, any> = {}
+            for (const j of [...assignedJobs, ...(allJobs || [])]) {
+              if (j?.id) byId[j.id] = j
+            }
+            const jobs = await enrichTradeMakesafeJobs(client, Object.values(byId))
             return json({ jobs })
           }
           case 'crew_charges_on_my_jobs': {
@@ -3229,16 +3241,11 @@ if (import.meta.main) serve(async (req: Request) => {
             const { week_start, extra_items, notes: invoiceNotes, draft_id, manual_assignments } = body
 
             // ── Manual-assignment money-path guards ──────────────────────────
-            // manual_assignments is the job-centric prefill payload:
-            //   [{ assignment_id, hours }]  — rate is DELIBERATELY ABSENT.
-            // The server resolves the rate from trade_rates. A client that sends
-            // a `rate` on any manual_assignment is rejected outright (422): a
-            // trade must never be able to set their own pay rate.            [F2]
+            // manual_assignments is the job-centric prefill payload. Trades may
+            // now submit an editable rate; server rates remain the prefill/default
+            // and client-entered rates are flagged for ops review.
             const manualAssignmentsIn: any[] = Array.isArray(manual_assignments) ? manual_assignments : []
             for (const ma of manualAssignmentsIn) {
-              if (ma && Object.prototype.hasOwnProperty.call(ma, 'rate')) {
-                throw new ApiError('manual_assignments must not include a rate — the rate is resolved server-side', 422)
-              }
               if (!ma || !ma.assignment_id) {
                 throw new ApiError('Each manual assignment requires an assignment_id', 422)
               }
@@ -3297,11 +3304,14 @@ if (import.meta.main) serve(async (req: Request) => {
             // Get assignments to bill. Two sources:
             //   • manual_assignments — the trade typed hours per job card (new path)
             //   • completed clocked assignments — legacy auto-fill (still honoured)
-            // Either way the rate comes from the server, never the client.
+            // Client-entered rates are allowed for manual rows and flagged below.
             let assignments: any[] = []
             let reviewFlag: string | null = null
             if (week_start && weekEnd && hasManualAssignments) {
-              if (resolvedRate <= 0) {
+              // Rate guard: reject only if server rate is missing AND no client rate provided.
+              // If the trade enters their own rate, allow it — it flags pending_ops_review below.
+              const anyClientRate = manualAssignmentsIn.some((m: any) => Number(m.rate) > 0)
+              if (resolvedRate <= 0 && !anyClientRate) {
                 throw new ApiError('Rate not configured for trade — contact office', 422)
               }
               const wantedIds = manualAssignmentsIn.map((m: any) => m.assignment_id)
@@ -3321,7 +3331,11 @@ if (import.meta.main) serve(async (req: Request) => {
                   .filter((ti: any) => !RELEASED.includes(ti.status)).map((ti: any) => ti.id))
               }
               const hoursById: Record<string, number> = {}
-              for (const m of manualAssignmentsIn) hoursById[m.assignment_id] = Number(m.hours) || 0
+              const manualById: Record<string, any> = {}
+              for (const m of manualAssignmentsIn) {
+                hoursById[m.assignment_id] = Number(m.hours) || 0
+                manualById[m.assignment_id] = m
+              }
               for (const a of (asn || [])) {
                 if (!HOURLY_STATUS_WHITELIST.includes(a.status)) {
                   throw new ApiError('Assignment ' + a.id + ' has status "' + a.status + '" and cannot be invoiced', 422)
@@ -3333,8 +3347,13 @@ if (import.meta.main) serve(async (req: Request) => {
                 const h = hoursById[a.id] || 0
                 // hours>16/day is implausible — flag for ops review, do not reject. [F2]
                 if (h > 16) reviewFlag = 'hours_excess'
+                const manualRow = manualById[a.id] || {}
+                const clientRateProvided = Object.prototype.hasOwnProperty.call(manualRow, 'rate') && Number(manualRow.rate) > 0
+                const appliedRate = clientRateProvided ? Number(manualRow.rate) : resolvedRate
                 assignments.push({
-                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: resolvedRate,
+                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: appliedRate,
+                  rate_source: clientRateProvided ? 'client_entered' : 'server_resolved',
+                  description: manualRow.description || null,
                   break_minutes: 0, manual_override_flag: false,
                   scheduled_date: a.scheduled_date, status: a.status,
                 })
@@ -3410,6 +3429,8 @@ if (import.meta.main) serve(async (req: Request) => {
               }
 
               const rate = assigns[0]?.hourly_rate || userProfile?.default_hourly_rate || 0
+              const rateSource = assigns.some((a: any) => a.rate_source === 'client_entered') ? 'client_entered' : 'server_resolved'
+              const descriptions = [...new Set(assigns.map((a: any) => a.description).filter(Boolean))]
               const lineTotal = Math.round(jobHours * rate * 100) / 100
               totalHours += jobHours
 
@@ -3422,17 +3443,56 @@ if (import.meta.main) serve(async (req: Request) => {
                 line_total_ex: lineTotal,
                 days_worked: assigns.length,
                 assignment_ids: assignmentIds,
+                description: descriptions.length > 0 ? descriptions.join('; ') : null,
+                query_note: rateSource === 'client_entered'
+                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                  : 'Server-resolved rate from trade_rates.',
               })
             }
 
             // Build extra line items from client-sent extras
             const extraLineItems: any[] = []
             let extraSubtotal = 0
+            let clientPricedExtraCount = 0
             if (hasExtras) {
+              const requestedJobIds = [...new Set((extra_items || []).map((i: any) => i?.job_id).filter(Boolean))]
+              const requestedJobNumbers = [...new Set((extra_items || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
+              const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
+              const activeJobStatusExclude = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+              const extraJobReads: PromiseLike<any>[] = []
+              if (requestedJobIds.length > 0) {
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('id', requestedJobIds))
+              }
+              if (requestedJobNumbers.length > 0) {
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('job_number', requestedJobNumbers))
+              }
+              const extraJobResults = extraJobReads.length > 0 ? await Promise.all(extraJobReads) : []
+              const extraJobs = extraJobResults.flatMap((r: any) => r.data || [])
+              const extraJobsErr = extraJobResults.find((r: any) => r.error)?.error
+              if (extraJobsErr) throw extraJobsErr
+              const jobById: Record<string, any> = {}
+              const jobByNumber: Record<string, any> = {}
+              for (const j of (extraJobs || [])) {
+                if (j.id) jobById[j.id] = j
+                if (j.job_number) jobByNumber[String(j.job_number)] = j
+              }
+
               for (const item of extra_items) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
                 if (item?.source === 'clock' || item?._source === 'clock' || item?.source === 'server_labour') continue
+                const qty = Number(item.quantity || 0)
+                const rate = Number(item.rate || 0)
+                if (week_start) {
+                  if (!item.job_id && !item.job_number) throw new ApiError('Manual invoice rows require a job number', 422)
+                  if (!item.description) throw new ApiError('Manual invoice rows require a description', 422)
+                  if (qty <= 0) throw new ApiError('Manual invoice rows require hours greater than zero', 422)
+                  if (rate <= 0) throw new ApiError('Manual invoice rows require a rate greater than zero', 422)
+                }
+                const resolvedJob = item.job_id ? jobById[item.job_id] : jobByNumber[String(item.job_number || '')]
+                if (week_start && !resolvedJob) throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
+                const rateSource = item.rate_source || (item.client_rate_entered ? 'client_entered' : 'client_entered')
+                if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 extraSubtotal += amt
                 extraLineItems.push({
@@ -3443,11 +3503,16 @@ if (import.meta.main) serve(async (req: Request) => {
                   unit_rate: Number(item.rate || 0),
                   line_total_ex: amt,
                   line_date: item.date || null,
-                  division: item.division || null,
-                  job_id: item.job_id || null,
-                  job_number: item.job_number || null,
-                  client_name: item.client_name || null,
-                  site_address: item.site_address || null,
+                  division: item.division || resolvedJob?.type || null,
+                  job_id: resolvedJob?.id || item.job_id || null,
+                  job_number: resolvedJob?.job_number || item.job_number || null,
+                  client_name: resolvedJob?.client_name || item.client_name || null,
+                  site_address: resolvedJob
+                    ? [resolvedJob.site_address, resolvedJob.site_suburb].filter(Boolean).join(', ')
+                    : (item.site_address || null),
+                  query_note: rateSource === 'client_entered'
+                    ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                    : 'Server-resolved rate from trade_rates.',
                 })
               }
             }
@@ -3573,12 +3638,14 @@ if (import.meta.main) serve(async (req: Request) => {
             // pushed (push_trade_invoice_to_xero gates on acknowledged/approved).
             // Fully-clocked / extras-only invoices keep prior auto-push behaviour.
             //   [F6 / Q4 Option A]  (Marnin can switch to Option B by removing this)
-            const needsOpsReview = hasManualAssignments || reviewFlag === 'hours_excess'
+            const needsOpsReview = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess'
             if (needsOpsReview) {
               await client.from('trade_invoices').update({
                 status: 'pending_ops_review',
                 query_note: reviewFlag === 'hours_excess'
                   ? 'Auto-flagged: an assignment exceeds 16h — verify hours.'
+                  : clientPricedExtraCount > 0
+                    ? 'Manual hours/rates entered by trade — verify job, description, hours and rate before approval.'
                   : 'Manual hours entered — verify against schedule before approval.',
               }).eq('id', invoice.id)
             }
@@ -3590,7 +3657,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 source: 'ops-api/generate_trade_invoice',
                 entity_type: 'trade_invoice',
                 entity_id: invoice.id,
-                payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, total_inc: totalInc },
+                payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, total_inc: totalInc, client_priced_lines: clientPricedExtraCount },
               })
             } catch (e) { /* non-blocking */ }
 
