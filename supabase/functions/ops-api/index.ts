@@ -9975,11 +9975,19 @@ async function completeAndInvoice(client: any, body: any) {
           unit_price: li.unit_price || li.unitPrice || li.price || li.amount || 0,
           account_code: li.account_code || '200',
         }))
-      } else if (pricing.totalIncGST || pricing.total || pricing.amount) {
+      } else if (pricing.totalExGST || pricing.totalIncGST || pricing.total || pricing.amount) {
+        // GST owner = backend. Xero invoices are LineAmountTypes 'Exclusive' (createInvoice
+        // adds 10% GST on top), and the balance maths below also does `total * 1.1`. So the
+        // single-line fallback MUST be ex-GST. pricing.totalIncGST / .total / .amount are
+        // inc-GST snapshots (e.g. GHL-sourced jobs store { totalIncGST }); divide once here
+        // or Xero double-applies GST. Prefer the explicit ex-GST figure when the tool stored it.
+        const fallbackExGST = pricing.totalExGST != null
+          ? pricing.totalExGST
+          : Math.round(((pricing.totalIncGST || pricing.total || pricing.amount || 0) / 1.1) * 100) / 100
         lineItems = [{
           description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number) || 'Construction'} works`),
           quantity: 1,
-          unit_price: pricing.totalIncGST || pricing.total || pricing.amount || 0,
+          unit_price: fallbackExGST,
           account_code: accountCodeForJob(job.type),
         }]
       }
