@@ -59,6 +59,25 @@ function getClientReplyTo(jobType: string | null, jobNumber?: string): string {
   return `${dept}${tag}@secureworkswa.com.au`
 }
 
+// ── Division CC: fencing jobs → fencing@, everything else → patios@ ──
+function getDivisionInbox(jobType: string | null | undefined): string {
+  return jobType === 'fencing' ? 'fencing@secureworkswa.com.au' : 'patios@secureworkswa.com.au'
+}
+
+// ── Default deposit % by job type (mirrors ops-api:14211-14213) ──
+// pricing_json.deposit.percent is the authoritative source when present.
+// Falls back to type-based default: fencing 50%, patio/decking 20%.
+function getDepositPct(jobType: string | null | undefined, pricingJson: any): number {
+  const fromData = pricingJson?.deposit?.percent
+  if (typeof fromData === 'number' && fromData > 0) return fromData
+  return jobType === 'fencing' ? 50 : 20
+}
+
+function getDepositTermsString(depositPct: number): string {
+  const remaining = 100 - depositPct
+  return `${depositPct}% deposit + ${remaining}% on completion`
+}
+
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
 function logEmailToGHL(contactId: string | null, subject: string, recipient: string) {
   if (!contactId) return
@@ -663,7 +682,7 @@ serve(async (req: Request) => {
             to: client_email,
             subject: emailSubject,
             html: emailHtml,
-            cc: [...new Set([...(cc_emails || []), 'admin@secureworkswa.com.au'])],
+            cc: [...new Set([...(cc_emails || []), getDivisionInbox(doc.jobs?.type), 'admin@secureworkswa.com.au'])],
             ...(attachments.length > 0 ? { attachments } : {}),
           }),
         })
@@ -674,7 +693,7 @@ serve(async (req: Request) => {
             emailType: 'quote', jobId: doc.job_id, recipient: client_email,
             subject: emailSubject, resendMessageId: resendData.id,
             status: 'sent',
-            metadata: { document_id: doc.id, quote_number: doc.quote_number, client_name: client_name, job_type: doc.jobs?.type, cc_emails: cc_emails || [] },
+            metadata: { document_id: doc.id, quote_number: doc.quote_number, client_name: client_name, job_type: doc.jobs?.type, cc_emails: [...new Set([...(cc_emails || []), getDivisionInbox(doc.jobs?.type), 'admin@secureworkswa.com.au'])] },
           })
           // Log to po_communications for client email thread
           sb.from('po_communications').insert({
@@ -779,8 +798,8 @@ serve(async (req: Request) => {
                 primary_recipient_email: client_email,
                 per_contact_pdfs: [],
                 terms_valid_days: 30,
-                terms_payment_terms: '50% deposit + 50% on completion',
-                terms_deposit_pct: 50,
+                terms_payment_terms: getDepositTermsString(getDepositPct(doc.jobs?.type, doc.jobs?.pricing_json)),
+                terms_deposit_pct: getDepositPct(doc.jobs?.type, doc.jobs?.pricing_json),
                 scoper_user_id: fullJobRow.created_by ?? null,
                 scoper_user_name: scoper_name || null,
                 scoped_at: null,
@@ -1621,13 +1640,13 @@ serve(async (req: Request) => {
                 from: 'SecureWorks Group <approvals@secureworksgroup.app>',
                 reply_to: getClientReplyTo(job?.type, job?.job_number),
                 to: [job.client_email || doc.job_contacts?.client_email || ''],
-                subject: `Your Patio Project — Next Steps & What We Need From You`,
+                subject: `Your Patio Project - Next Steps & What We Need From You`,
                 html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '', uploadUrl),
               }),
             })
             .then(() => {
               console.log(`[send-quote] Council kickoff email sent for ${job.job_number}`)
-              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff — Next Steps & House Plans', job.client_email || '')
+              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff - Next Steps & House Plans', job.client_email || '')
               // Record in po_communications for council thread
               if (councilSubmissionId) {
                 sb.from('po_communications').insert({
@@ -1635,7 +1654,7 @@ serve(async (req: Request) => {
                   direction: 'outbound',
                   from_email: 'approvals@secureworksgroup.app',
                   to_email: job.client_email || '',
-                  subject: 'Your Patio Project — Next Steps & What We Need From You',
+                  subject: 'Your Patio Project - Next Steps & What We Need From You',
                   body_text: 'House plans request sent to client on acceptance',
                   communication_type: 'council',
                   council_submission_id: councilSubmissionId,
@@ -1977,7 +1996,7 @@ serve(async (req: Request) => {
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
           const run = recipient.runs[i]
-          return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label} — View & Accept →</a>`
+          return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label} - View &amp; Accept &rarr;</a>`
         }).join('')
 
         const emailHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
@@ -1994,7 +2013,7 @@ serve(async (req: Request) => {
   ${message ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${message}</p>` : ''}
   <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
     Thank you for giving us the opportunity to quote on your fencing project${job.site_suburb ? ' in ' + job.site_suburb : ''}.
-    This job has ${recipient.runs.length} fence run${recipient.runs.length > 1 ? 's' : ''} — each with its own quote below.
+    This job has ${recipient.runs.length} fence run${recipient.runs.length > 1 ? 's' : ''} - each with its own quote below.
   </p>
   ${runLinks}
   <p style="color:#4C6A7C;font-size:13px;margin-top:24px;">Each quote is valid for 30 days. You can accept or decline each run independently.</p>
@@ -2022,8 +2041,8 @@ serve(async (req: Request) => {
           const emailPayload: any = {
             from: `${FROM_NAME} <${FROM_EMAIL}>`,
             to: [email],
-            cc: ['admin@secureworkswa.com.au'],
-            subject: `Your Fencing Quote — ${job.job_number || ''} — SecureWorks Group`,
+            cc: [getDivisionInbox(job.type), 'admin@secureworkswa.com.au'],
+            subject: `Your Fencing Quote - ${job.job_number || ''} - SecureWorks Group`,
             html: emailHtml,
           }
           if (attachments.length > 0) emailPayload.attachments = attachments
@@ -2138,8 +2157,8 @@ serve(async (req: Request) => {
             primary_recipient_email: primaryContact.client_email || job.client_email || '',
             per_contact_pdfs: [],
             terms_valid_days: 30,
-            terms_payment_terms: '50% deposit + 50% on completion',
-            terms_deposit_pct: 50,
+            terms_payment_terms: getDepositTermsString(getDepositPct(job.type, job.pricing_json)),
+            terms_deposit_pct: getDepositPct(job.type, job.pricing_json),
             scoper_user_id: (job as any).created_by ?? null,
             scoper_user_name: null,
             scoped_at: null,
@@ -2277,7 +2296,7 @@ serve(async (req: Request) => {
         ? `${BASE_URL}/functions/v1/send-quote/payment-confirmed?token=${share_token}`
         : ''
 
-      const emailSubject = `Deposit Invoice ${invoice_number || ''} — SecureWorks Group`.trim()
+      const emailSubject = `Deposit Invoice ${invoice_number || ''} - SecureWorks Group`.trim()
       const emailHtml = buildInvoiceEmail({
         firstName,
         jobType: typeName,
@@ -2304,6 +2323,7 @@ serve(async (req: Request) => {
             to: client_email,
             subject: emailSubject,
             html: emailHtml,
+            cc: [getDivisionInbox(invoiceJob?.type || job_type), 'finance@secureworkswa.com.au'],
           }),
         })
 
@@ -2663,7 +2683,7 @@ function buildQuoteEmail(opts: {
       ${opts.customMessage ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.customMessage}</p>` : ''}
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
         Thank you for giving us the opportunity to quote on your ${opts.projectType} project${opts.suburb ? ' in ' + opts.suburb : ''}.
-        Please find your detailed quote attached below.
+        You can view your detailed quote using the button below.
       </p>
 
       <!-- CTA Button -->
@@ -2691,8 +2711,8 @@ function buildQuoteEmail(opts: {
     <!-- Cross-sell footer -->
     <tr><td style="background:#293C46;padding:20px 32px;">
       <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
-        <strong>SecureWorks Group</strong> — Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
-        <span style="color:#F15A29;">Transform your entire outdoor space — ask us about a complete package</span>
+        <strong>SecureWorks Group</strong> - Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
+        <span style="color:#F15A29;">Transform your entire outdoor space - ask us about a complete package</span>
       </p>
     </td></tr>
 
@@ -2731,7 +2751,7 @@ function buildClientPage(doc: any, token: string): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Your Quote — SecureWorks Group</title>
+  <title>Your Quote - SecureWorks Group</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f5f7; color: #333; }
@@ -2769,7 +2789,7 @@ function buildClientPage(doc: any, token: string): string {
   <div class="container">
     <div class="card">
       <h1>Your ${projectType} quote</h1>
-      <p class="subtitle">For ${clientName}${suburb ? ' — ' + suburb : ''}</p>
+      <p class="subtitle">For ${clientName}${suburb ? ', ' + suburb : ''}</p>
 
       ${statusHtml}
 
@@ -2954,7 +2974,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
 
   let statusHtml = ''
   if (isAccepted) {
-    statusHtml = '<div style="background:#34C75920;color:#34C759;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Accepted &mdash; Thank you!</div>'
+    statusHtml = '<div style="background:#34C75920;color:#34C759;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Accepted - Thank you!</div>'
   } else if (isDeclined) {
     statusHtml = '<div style="background:#FF3B3020;color:#FF3B30;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Declined</div>'
   }
@@ -3035,12 +3055,12 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     <div style="margin-top:24px;font-size:11px;color:#4C6A7C;line-height:1.6;">
       <div style="font-weight:600;margin-bottom:8px;">Terms & Conditions</div>
       <ol style="padding-left:16px;">
-        <li style="margin-bottom:4px;"><strong>Boundary verification</strong> — The client is responsible for confirming the boundary location. SecureWorks is not liable for fencing installed in the wrong position.</li>
-        <li style="margin-bottom:4px;"><strong>Permits & approvals</strong> — Any required permits or council approvals are excluded unless specifically itemised above.</li>
-        <li style="margin-bottom:4px;"><strong>Site conditions</strong> — Pricing assumes standard sand/loam conditions. Rock excavation, if encountered, will be charged at $45 per hole.</li>
-        <li style="margin-bottom:4px;"><strong>Variations</strong> — Any changes to the scope of work will be quoted separately and require written approval before proceeding.</li>
-        <li style="margin-bottom:4px;"><strong>Underground services</strong> — The client is responsible for obtaining a Dial Before You Dig report and marking all underground services on-site prior to works commencing.</li>
-        <li style="margin-bottom:4px;"><strong>Payment</strong> — 50% deposit required on acceptance. Balance due on completion.</li>
+        <li style="margin-bottom:4px;"><strong>Boundary verification</strong> - The client is responsible for confirming the boundary location. SecureWorks Group is not liable for fencing installed in the wrong position.</li>
+        <li style="margin-bottom:4px;"><strong>Permits & approvals</strong> - Any required permits or council approvals are excluded unless specifically itemised above.</li>
+        <li style="margin-bottom:4px;"><strong>Site conditions</strong> - Pricing assumes standard sand/loam conditions. Rock excavation, if encountered, will be charged at $45 per hole.</li>
+        <li style="margin-bottom:4px;"><strong>Variations</strong> - Any changes to the scope of work will be quoted separately and require written approval before proceeding.</li>
+        <li style="margin-bottom:4px;"><strong>Underground services</strong> - The client is responsible for obtaining a Dial Before You Dig report and marking all underground services on-site prior to works commencing.</li>
+        <li style="margin-bottom:4px;"><strong>Payment</strong> - Deposit required on acceptance per the accepted quote. Balance due on completion.</li>
       </ol>
       <div style="margin-top:8px;">This quote is valid for 30 days from the date of issue.</div>
     </div>
@@ -3051,7 +3071,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${quoteRef} — ${runName} — SecureWorks Group</title>
+  <title>${quoteRef} - ${runName} - SecureWorks Group</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f5f7; color: #333; }
@@ -3177,15 +3197,15 @@ function buildRunAcceptedPage(job: any, run: any, acceptorName: string): string 
 
   return `<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Quote Accepted — SecureWorks Group</title>
+<title>Quote Accepted - SecureWorks Group</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;background:#f5f5f7;color:#333}.header{background:#293C46;padding:16px 24px}.header-brand{color:#fff;font-size:18px;font-weight:700}.container{max-width:600px;margin:0 auto;padding:24px 16px}.card{background:#fff;border-radius:12px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.08);text-align:center;margin-bottom:16px}.footer{text-align:center;color:#999;font-size:12px;padding:24px}</style>
 </head><body>
 <div class="header"><div class="header-brand">SecureWorks <span style="color:rgba(255,255,255,0.6);font-weight:400">Group</span></div></div>
 <div class="container">
   <div class="card">
     <div style="font-size:48px;margin-bottom:16px">✅</div>
-    <h1 style="color:#293C46;font-size:22px;margin-bottom:8px">${runName} — Accepted</h1>
-    <p style="color:#4C6A7C;font-size:15px;margin-bottom:24px">${jobNumber}${suburb ? ' — ' + suburb : ''}</p>
+    <h1 style="color:#293C46;font-size:22px;margin-bottom:8px">${runName} - Accepted</h1>
+    <p style="color:#4C6A7C;font-size:15px;margin-bottom:24px">${jobNumber}${suburb ? ', ' + suburb : ''}</p>
     <div style="background:#34C75915;border:1px solid #34C75930;border-radius:8px;padding:16px;margin-bottom:24px;">
       <p style="color:#34C759;font-weight:600;font-size:15px;">Both parties have confirmed this run.</p>
       <p style="color:#4C6A7C;font-size:13px;margin-top:8px;">Deposit invoices are being created now. You'll receive yours by email shortly with a payment link.</p>
@@ -3217,7 +3237,7 @@ function buildWaitingPage(job: any, run: any, acceptorName: string, runLabel: st
 
   return `<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Quote Accepted — SecureWorks Group</title>
+<title>Quote Accepted - SecureWorks Group</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;background:#f5f5f7;color:#333}.header{background:#293C46;padding:16px 24px}.header-brand{color:#fff;font-size:18px;font-weight:700}.container{max-width:600px;margin:0 auto;padding:24px 16px}.card{background:#fff;border-radius:12px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:16px}.footer{text-align:center;color:#999;font-size:12px;padding:24px}</style>
 </head><body>
 <div class="header"><div class="header-brand">SecureWorks <span style="color:rgba(255,255,255,0.6);font-weight:400">Group</span></div></div>
@@ -3310,7 +3330,7 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
   }).join('')
 
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Your Quotes — SecureWorks Group</title>
+<title>Your Quotes - SecureWorks Group</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;background:#f5f5f7;color:#333}
@@ -3325,7 +3345,7 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
 <div class="container">
   <div class="card">
     <h1 style="color:#293C46;font-size:22px;margin-bottom:4px;">Your ${projectType} quotes</h1>
-    <p style="color:#4C6A7C;font-size:14px;">For ${clientName}${suburb ? ' — ' + suburb : ''}</p>
+    <p style="color:#4C6A7C;font-size:14px;">For ${clientName}${suburb ? ', ' + suburb : ''}</p>
     <p style="color:#4C6A7C;font-size:13px;margin-top:8px;">We've prepared ${docs.length} options for you. Review each quote PDF and accept the one you'd like to go with.</p>
   </div>
   ${optionCards}
@@ -3358,7 +3378,7 @@ function buildVariationPage(variation: any, token: string): string {
   const isDeclined = !!variation.declined_at
 
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Variation — ${jobNum}</title>
+<title>Variation - ${jobNum}</title>
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:0;background:#F8F6F3;color:#1A2332}
   .header{background:#293C46;padding:24px;text-align:center}
@@ -3375,7 +3395,7 @@ function buildVariationPage(variation: any, token: string): string {
   .status{text-align:center;padding:16px;font-size:15px;font-weight:600}
   .status.accepted{color:#27AE60} .status.declined{color:#E74C3C}
 </style></head><body>
-<div class="header"><h1>Variation Request</h1><p>${jobNum} — ${clientName}</p></div>
+<div class="header"><h1>Variation Request</h1><p>${jobNum} - ${clientName}</p></div>
 <div class="card">
   <div style="font-size:13px;color:#7C8898;margin-bottom:4px">Variation #${variation.variation_number || 1}</div>
   <div style="font-size:12px;color:#7C8898">${variation.reason ? `Reason: ${variation.reason.replace(/_/g, ' ')}` : ''}</div>
@@ -3580,12 +3600,12 @@ function buildNextStepsPage(opts: {
     : ''
 
   const payButton = opts.paymentUrl
-    ? `<a href="${opts.paymentUrl}" class="btn btn-pay" target="_blank">Pay Now — Card or Bank Transfer</a>`
+    ? `<a href="${opts.paymentUrl}" class="btn btn-pay" target="_blank">Pay Now - Card or Bank Transfer</a>`
     : '<p style="color:#4C6A7C;font-size:14px;">Your deposit invoice has been emailed to you. You can pay by card or bank transfer.</p>'
 
   // "I've paid" secondary button — links to payment-confirmed handler
   const paidButton = opts.shareToken
-    ? `<a href="${BASE_URL}/functions/v1/send-quote/payment-confirmed?token=${opts.shareToken}" class="btn btn-paid">I've made my payment &mdash; let SecureWorks know</a>`
+    ? `<a href="${BASE_URL}/functions/v1/send-quote/payment-confirmed?token=${opts.shareToken}" class="btn btn-paid">I've made my payment - let SecureWorks Group know</a>`
     : ''
 
   // Bank details section — only shown if configured
@@ -3603,7 +3623,7 @@ function buildNextStepsPage(opts: {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Quote Accepted — SecureWorks Group</title>
+  <title>Quote Accepted - SecureWorks Group</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f5f7; color: #333; }
@@ -3671,14 +3691,14 @@ function buildNextStepsPage(opts: {
     <div class="card">
       <h3 style="color:#293C46;font-size:16px;margin-bottom:16px;">What happens next?</h3>
       <ol class="timeline">
-        <li><strong>Deposit received</strong> — we confirm your booking</li>
+        <li><strong>Deposit received</strong> - we confirm your booking</li>
         ${opts.isPatio ? `
-        <li><strong>Send us your house plans</strong> — so we can start engineering</li>
-        <li><strong>Engineering drawings</strong> — our engineer prepares structural plans</li>
-        <li><strong>Council approval</strong> — we handle the entire process (typically 6–8 weeks)</li>
+        <li><strong>Send us your house plans</strong> - so we can start engineering</li>
+        <li><strong>Engineering drawings</strong> - our engineer prepares structural plans</li>
+        <li><strong>Council approval</strong> - we handle the entire process (typically 6 to 8 weeks)</li>
         ` : ''}
-        <li><strong>Materials ordered</strong> — lead time is around 2 weeks</li>
-        <li><strong>Build day!</strong> — our crew arrives and gets to work</li>
+        <li><strong>Materials ordered</strong> - lead time is around 2 weeks</li>
+        <li><strong>Build day!</strong> - our crew arrives and gets to work</li>
       </ol>
     </div>
 
@@ -3686,7 +3706,7 @@ function buildNextStepsPage(opts: {
     <div class="card" style="border-left:4px solid #293C46;">
       <div style="text-align:center;margin-bottom:12px;">
         <span style="font-size:28px;">📋</span>
-        <h3 style="color:#293C46;font-size:16px;margin-top:8px;">Speed things up — send us your house plans now</h3>
+        <h3 style="color:#293C46;font-size:16px;margin-top:8px;">Speed things up - send us your house plans now</h3>
         <p style="color:#4C6A7C;font-size:13px;margin-top:4px;">We need your original house plans (showing the house footprint) to start the engineering and council process.</p>
       </div>
       <div id="planUploadArea" style="border:2px dashed #D4DEE4;border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:border-color 0.2s" onclick="document.getElementById('planFileInput').click()" ondragover="event.preventDefault();this.style.borderColor='#F15A29'" ondragleave="this.style.borderColor='#D4DEE4'" ondrop="event.preventDefault();this.style.borderColor='#D4DEE4';handlePlanDrop(event)">
@@ -3701,7 +3721,7 @@ function buildNextStepsPage(opts: {
         <div style="font-size:13px;color:#4C6A7C;">We'll start the engineering process and keep you updated.</div>
       </div>
       <div style="text-align:center;margin-top:12px;">
-        <p style="font-size:12px;color:#999;">Or email them to: <a href="mailto:approvals@secureworksgroup.app" style="color:#F15A29;">approvals@secureworksgroup.app</a></p>
+        <p style="font-size:12px;color:#999;">Or email them to: <a href="mailto:plans@secureworkswa.com.au" style="color:#F15A29;">plans@secureworkswa.com.au</a></p>
         <p style="font-size:11px;color:#999;margin-top:4px;">Not sure where to find them? Check your original build pack, or request a copy from your local council.</p>
       </div>
     </div>
@@ -3740,7 +3760,7 @@ function buildNextStepsPage(opts: {
           area.style.display = 'none';
           status.style.display = '';
         } catch (e) {
-          area.innerHTML = '<div style="color:#E74C3C;">Upload failed: ' + e.message + '. Try emailing to approvals@secureworksgroup.app instead.</div>';
+          area.innerHTML = '<div style="color:#E74C3C;">Upload failed: ' + e.message + '. Try emailing to plans@secureworkswa.com.au instead.</div>';
         }
       }
       function handlePlanDrop(e) {
@@ -3863,8 +3883,8 @@ function buildInvoiceEmail(opts: {
     <!-- Cross-sell footer -->
     <tr><td style="background:#293C46;padding:20px 32px;">
       <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
-        <strong>SecureWorks Group</strong> — Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
-        <span style="color:#F15A29;">Transform your entire outdoor space — ask us about a complete package</span>
+        <strong>SecureWorks Group</strong> - Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
+        <span style="color:#F15A29;">Transform your entire outdoor space - ask us about a complete package</span>
       </p>
     </td></tr>
 
@@ -3889,7 +3909,7 @@ function buildPaymentConfirmedPage(firstName: string): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Payment Noted — SecureWorks Group</title>
+  <title>Payment Noted - SecureWorks Group</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f5f7; color: #333; }
@@ -3921,7 +3941,7 @@ function buildPaymentConfirmedPage(firstName: string): string {
 
 function buildUploadPlansPage(token: string, jobId: string, address: string): string {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Upload House Plans — SecureWorks Group</title>
+<title>Upload House Plans - SecureWorks Group</title>
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:0;background:#F8F6F3;color:#293C46}
   .header{background:#293C46;padding:16px 24px;color:#fff;font-size:18px;font-weight:700}
@@ -3938,11 +3958,11 @@ function buildUploadPlansPage(token: string, jobId: string, address: string): st
 <div class="container">
   <div class="card">
     <h2 style="margin:0 0 8px">Upload Your House Plans</h2>
-    <p style="color:#4C6A7C;font-size:14px;margin-bottom:20px">${address ? address + ' — ' : ''}We need your original house plans to start engineering.</p>
+    <p style="color:#4C6A7C;font-size:14px;margin-bottom:20px">${address ? address + ': ' : ''}We need your original house plans to start engineering.</p>
     <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()" ondragover="event.preventDefault();this.style.borderColor='#F15A29'" ondragleave="this.style.borderColor='#D4DEE4'" ondrop="event.preventDefault();this.style.borderColor='#D4DEE4';doUpload(event.dataTransfer.files)">
       <div style="font-size:24px;margin-bottom:8px">📎</div>
       <div style="font-weight:600">Drag files here or tap to upload</div>
-      <div style="font-size:12px;color:#999;margin-top:4px">PDF, JPG, PNG — max 20MB</div>
+      <div style="font-size:12px;color:#999;margin-top:4px">PDF, JPG, PNG - max 20MB</div>
       <input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png" multiple style="display:none" onchange="doUpload(this.files)">
     </div>
     <div class="success" id="success">
@@ -3950,7 +3970,7 @@ function buildUploadPlansPage(token: string, jobId: string, address: string): st
       <div style="font-size:18px;font-weight:700;color:#34C759">Plans received!</div>
       <div style="font-size:14px;color:#4C6A7C;margin-top:4px">We'll start the engineering process and keep you updated.</div>
     </div>
-    <p style="font-size:12px;color:#999;margin-top:16px">Or email to: <a href="mailto:approvals@secureworksgroup.app" style="color:#F15A29">approvals@secureworksgroup.app</a></p>
+    <p style="font-size:12px;color:#999;margin-top:16px">Or email to: <a href="mailto:plans@secureworkswa.com.au" style="color:#F15A29">plans@secureworkswa.com.au</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
 </div>
@@ -3990,7 +4010,7 @@ function buildCouncilKickoffEmail(clientFirst: string, address: string, suburb: 
   </td></tr>
   <tr><td style="padding:32px;background:#fff;">
     <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi ${clientFirst},</p>
-    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Thanks for choosing SecureWorks for your patio project${address ? ' at ' + address : ''}!</p>
+    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Thanks for choosing SecureWorks Group for your patio project${address ? ' at ' + address : ''}!</p>
     <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Your deposit invoice has been sent separately. While we wait for that to come through, there's one thing we need from you to get started:</p>
 
     <div style="background:#293C46;border-radius:8px;padding:20px;margin:20px 0;text-align:center;">
@@ -4010,15 +4030,15 @@ function buildCouncilKickoffEmail(clientFirst: string, address: string, suburb: 
         <li>Council reviews and issues a building permit (typically 6–8 weeks)</li>
         <li>We order materials and schedule your build</li>
       </ol>
-      <p style="color:#4C6A7C;font-size:13px;margin-top:12px;">We handle the entire council process for you — no need for you to contact council directly.</p>
+      <p style="color:#4C6A7C;font-size:13px;margin-top:12px;">We handle the entire council process for you - no need for you to contact council directly.</p>
     </div>
 
     <p style="color:#4C6A7C;font-size:14px;margin-top:20px;">Questions? Call <a href="tel:+61489267771" style="color:#F15A29;text-decoration:none;font-weight:600;">0489 267 771</a> or reply to this email.</p>
   </td></tr>
   <tr><td style="background:#293C46;padding:20px 32px;">
     <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
-      <strong>SecureWorks Group</strong> — Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
-      <span style="color:#F15A29;">Transform your entire outdoor space — ask us about a complete package</span>
+      <strong>SecureWorks Group</strong> - Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
+      <span style="color:#F15A29;">Transform your entire outdoor space - ask us about a complete package</span>
     </p>
   </td></tr>
   <tr><td style="background:#f5f5f7;padding:16px 32px;">
@@ -4034,7 +4054,7 @@ function buildPaymentConfirmPromptPage(token: string): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Confirm Payment — SecureWorks Group</title>
+  <title>Confirm Payment - SecureWorks Group</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f5f7; color: #333; }
@@ -4058,7 +4078,7 @@ function buildPaymentConfirmPromptPage(token: string): string {
       <h1>Made your payment?</h1>
       <p>Tap the button below to let our team know. This helps us process your project faster.</p>
       <button class="btn" onclick="confirmPayment()" id="confirmBtn">Yes, I've Made My Payment</button>
-      <p class="note">This does not process a payment — it simply notifies our team.</p>
+      <p class="note">This does not process a payment - it simply notifies our team.</p>
     </div>
     <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
   </div>
