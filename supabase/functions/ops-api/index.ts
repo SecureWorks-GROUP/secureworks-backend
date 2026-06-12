@@ -2773,17 +2773,49 @@ if (import.meta.main) serve(async (req: Request) => {
               .eq('user_id', tradeUser.id)
               .single()
             if (invErr || !inv) throw new ApiError('Invoice not found', 404)
+            // Change 5: attach external_ref (builder ref) to each returned line so the
+            // saved-invoice detail view (trade.html renderInvoiceDetail reads l.external_ref)
+            // can show the builder ref. Resolution mirrors the write path (Change 4):
+            // makesafe_job_details.external_ref first, fallback jobs.metadata->>'external_ref'.
+            // Batched by distinct job_id to avoid N+1. Null-guarded (left undefined when no ref).
+            const detailLines = Array.isArray(inv.lines) ? inv.lines : []
+            const detailJobIds = [...new Set(detailLines.map((l: any) => l?.job_id).filter(Boolean))]
+            if (detailJobIds.length > 0) {
+              const refByJob: Record<string, string> = {}
+              const { data: msRefs } = await client.from('makesafe_job_details')
+                .select('job_id, external_ref')
+                .in('job_id', detailJobIds)
+              for (const r of (msRefs || [])) {
+                if (r.job_id && r.external_ref) refByJob[r.job_id] = r.external_ref
+              }
+              // Fallback to jobs.metadata->>'external_ref' for any job_id not covered above
+              const missingJobIds = detailJobIds.filter((id: string) => !refByJob[id])
+              if (missingJobIds.length > 0) {
+                const { data: jobRows } = await client.from('jobs')
+                  .select('id, metadata')
+                  .in('id', missingJobIds)
+                for (const j of (jobRows || [])) {
+                  const mref = j?.metadata?.external_ref
+                  if (j.id && mref) refByJob[j.id] = mref
+                }
+              }
+              for (const l of detailLines) {
+                if (l?.job_id && refByJob[l.job_id]) l.external_ref = refByJob[l.job_id]
+              }
+            }
             return json({ invoice: inv })
           }
           case 'search_all_jobs': {
             const q = (url.searchParams.get('q') || '').toLowerCase().trim()
-            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+            // Change 1 + Change 2: removed complete/completed/invoiced from exclusion list so
+            // completed make-safes are searchable. Trades must find EVERY job by any field.
+            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
             const { data: assignedRows } = await client.from('job_assignments')
               .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
               .eq('user_id', tradeUser.id)
             const assignedJobs = (assignedRows || [])
               .map((r: any) => r.jobs)
-              .filter((j: any) => j && !['lost','cancelled','archived','deleted','complete','completed','invoiced','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+              .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
 
             let jobQuery = client.from('jobs')
               .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
@@ -2791,7 +2823,8 @@ if (import.meta.main) serve(async (req: Request) => {
               .order('created_at', { ascending: false })
               .limit(200)
             if (q) {
-              jobQuery = jobQuery.or(`job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%`)
+              // Change 1: search covers job_number + client_name + site_suburb + site_address (full field coverage)
+              jobQuery = jobQuery.or(`job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`)
             }
             const { data: allJobs, error: allJobsErr } = await jobQuery
             if (allJobsErr) throw allJobsErr
@@ -3401,13 +3434,23 @@ if (import.meta.main) serve(async (req: Request) => {
               jobGroups[a.job_id].push(a)
             }
 
-            // Get job details
+            // Get job details — Change 4: add metadata so external_ref (builder ref) is available for Xero descriptions
             const jobIds = Object.keys(jobGroups)
             const { data: jobs } = await client.from('jobs')
-              .select('id, job_number, client_name, type, site_address, site_suburb')
+              .select('id, job_number, client_name, type, site_address, site_suburb, metadata')
               .in('id', jobIds)
             const jobMap: Record<string, any> = {}
             for (const j of (jobs || [])) jobMap[j.id] = j
+            // Enrich makesafe jobs with external_ref from makesafe_job_details (100% population vs 91% in metadata)
+            const msJobIds = jobIds.filter((id: string) => jobMap[id]?.type === 'makesafe')
+            if (msJobIds.length > 0) {
+              const { data: msDetails } = await client.from('makesafe_job_details')
+                .select('job_id, external_ref')
+                .in('job_id', msJobIds)
+              for (const d of (msDetails || [])) {
+                if (d.job_id && jobMap[d.job_id]) jobMap[d.job_id]._external_ref = d.external_ref
+              }
+            }
 
             // Build line items
             let totalHours = 0
@@ -3462,7 +3505,9 @@ if (import.meta.main) serve(async (req: Request) => {
               const requestedJobIds = [...new Set((extra_items || []).map((i: any) => i?.job_id).filter(Boolean))]
               const requestedJobNumbers = [...new Set((extra_items || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
               const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
-              const activeJobStatusExclude = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+              // Change 3: removed complete/completed/invoiced so WO/commission extra-item rows on completed
+              // make-safes still resolve job_id (fixes null job_id on audit log for finished jobs)
+              const activeJobStatusExclude = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
               const extraJobReads: PromiseLike<any>[] = []
               if (requestedJobIds.length > 0) {
                 extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('id', requestedJobIds))
@@ -3634,23 +3679,25 @@ if (import.meta.main) serve(async (req: Request) => {
               } catch (e) { /* non-blocking */ }
             }
 
-            // ── Ops review gate (Option A) ───────────────────────────────────
-            // Clock-off used to be the implicit "work happened" proof. With manual
-            // hours that proof is gone, so any invoice carrying manual (typed)
-            // hours, or flagged hours_excess, lands in pending_ops_review. Shaun
-            // verifies against the schedule and approves before the Xero draft is
-            // pushed (push_trade_invoice_to_xero gates on acknowledged/approved).
-            // Fully-clocked / extras-only invoices keep prior auto-push behaviour.
-            //   [F6 / Q4 Option A]  (Marnin can switch to Option B by removing this)
-            const needsOpsReview = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess'
-            if (needsOpsReview) {
+            // ── Change 6 (Q18): straight-to-Xero-draft, no in-app approval hold ──
+            // PREVIOUS behaviour (Option A): manual hours / client-priced extras /
+            // hours_excess set status='pending_ops_review' and SKIPPED the auto-push;
+            // the Xero draft only fired after Shaun approved in-app. NEW behaviour:
+            // the hard guards above (non-Monday 422, dup-week 409, rate==0 422, the
+            // active-assignment/dup-assignment 409/422 checks) already blocked the
+            // dangerous cases with NO Xero bill created. The remaining flags here are
+            // SOFT — they no longer hold the invoice. The Xero DRAFT bill IS the
+            // manual check now: the bookkeeper reviews/approves it in Xero (drafts
+            // pay no one until approved there). So soft flags ANNOTATE the invoice
+            // (query_note) and PROCEED to draft.  [Q18 — supersedes F6/Q4 Option A]
+            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess'
+            if (softReviewFlag) {
               await client.from('trade_invoices').update({
-                status: 'pending_ops_review',
                 query_note: reviewFlag === 'hours_excess'
-                  ? 'Auto-flagged: an assignment exceeds 16h — verify hours.'
+                  ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
                   : clientPricedExtraCount > 0
-                    ? 'Manual hours/rates entered by trade — verify job, description, hours and rate before approval.'
-                  : 'Manual hours entered — verify against schedule before approval.',
+                    ? 'Manual hours/rates entered by trade — verify job, description, hours and rate in Xero before approving the draft.'
+                  : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
               }).eq('id', invoice.id)
             }
 
@@ -3684,15 +3731,14 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
-            // Skipped when the invoice is in pending_ops_review (Option A): the
-            // push fires later, after Shaun approves, via push_trade_invoice_to_xero
-            // (which gates on acknowledged/approved). This is the replacement for
-            // the deleted clock-off "work happened" gate.                      [F6]
+            // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
+            // invoice that passed the hard guards goes straight to a Xero DRAFT bill.
+            // The Xero draft is the manual review surface (bookkeeper approves there).
             let xeroBillId = null
             let xeroBillNumber = null
             // Declared outside the try so the catch block can record which phase failed.
             let xeroContactId: string | null = null
-            if (!needsOpsReview) try {
+            try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
@@ -3713,8 +3759,11 @@ if (import.meta.main) serve(async (req: Request) => {
               })
               if (!xeroContactId) {
                 console.error('[ops-api] Could not resolve Xero contact for trade', tradeUser.id)
-                // Mark invoice as needing manual Xero push
-                await client.from('trade_invoices').update({ status: 'draft' }).eq('id', invoice.id)
+                // Change 6 (Q18): contact resolution failed — the invoice + lines are
+                // already persisted. Land it in 'approved' (a clearly-recoverable state
+                // that push_trade_invoice_to_xero accepts) so admin can re-push once the
+                // contact is fixed. Do NOT silently drop it or treat it as success.
+                await client.from('trade_invoices').update({ status: 'approved' }).eq('id', invoice.id)
               }
 
               if (xeroContactId) {
@@ -3737,9 +3786,13 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
 
                 // Build Xero line items with tracking + correct tax type + rich descriptions
-                const allLines = [...lineItems.map((l: any) => ({
+                const allLines = [...lineItems.map((l: any) => {
+                  // Change 4: include builder ref in Xero description when present (makesafe jobs)
+                  const builderRef = jobMap[l.job_id]?._external_ref || jobMap[l.job_id]?.metadata?.external_ref
+                  return {
                   Description: [
                     (l.job_number || 'Labour') + ' | ' + (trackingCategoryForJob(l.job_number || '') || 'Construction'),
+                    builderRef ? 'Builder Ref: ' + builderRef : null,
                     'Labour — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr' + (l.days_worked > 1 ? ' (' + l.days_worked + ' days)' : ''),
                     [l.client_name, jobMap[l.job_id]?.site_address, jobMap[l.job_id]?.site_suburb].filter(Boolean).join(', '),
                   ].filter(Boolean).join('\n'),
@@ -3748,7 +3801,8 @@ if (import.meta.main) serve(async (req: Request) => {
                   AccountCode: accountCodeForJob(jobMap[l.job_id]?.type || '', '301'),
                   TaxType: taxType,
                   Tracking: xeroTracking(l.job_number || ''),
-                })), ...extraLineItems.map((e: any) => ({
+                  }
+                }), ...extraLineItems.map((e: any) => ({
                   Description: [
                     e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
                     (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
@@ -3803,6 +3857,14 @@ if (import.meta.main) serve(async (req: Request) => {
             } catch (e) {
               const errMsg = (e as Error).message
               console.log('[ops-api] Xero auto-push failed (non-blocking):', errMsg)
+              // Change 6 (Q18): a Xero failure must NOT be swallowed as success and the
+              // invoice must NOT be lost. The invoice + lines are already persisted; land
+              // it in 'approved' — a clearly-recoverable state that push_trade_invoice_to_xero
+              // accepts — so admin can re-push once the Xero issue (token/API) is resolved.
+              // (idempotencyKey 'trade-inv-<id>' means the re-push cannot create a duplicate.)
+              try {
+                await client.from('trade_invoices').update({ status: 'approved' }).eq('id', invoice.id)
+              } catch (stErr) { console.log('[ops-api] Failed to mark invoice recoverable:', (stErr as Error).message) }
               // Persist the failure so admin has an audit trail (the user-visible
               // "Saved locally — admin will sync manually" message used to be the
               // ONLY signal that the push failed). Non-blocking — invoice insert is
@@ -3818,6 +3880,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     user_id: tradeUser.id,
                     error_message: errMsg,
                     error_phase: xeroContactId ? 'bill_creation' : 'contact_resolution',
+                    recoverable_status: 'approved',
                   },
                   schema_version: '1.0',
                 })
@@ -3833,12 +3896,14 @@ if (import.meta.main) serve(async (req: Request) => {
               line_count: lineItems.length + extraLineItems.length,
               xero_bill_id: xeroBillId,
               xero_bill_number: xeroBillNumber,
-              // pending_ops_review = held for Shaun (not a Xero failure). Lets the
-              // UI show "sent for review" instead of the manual-sync warning.   [F6]
-              pending_ops_review: needsOpsReview,
+              // Change 6 (Q18): no in-app hold anymore — every passing invoice goes
+              // straight to a Xero draft. pending_ops_review is retained as a field for
+              // backward-compat with any UI reading it, but is always false now.
+              pending_ops_review: false,
+              soft_review_flag: softReviewFlag,
               review_flag: reviewFlag,
-              xero_warning: (!xeroBillId && !needsOpsReview)
-                ? 'Invoice saved but could not push to Xero — admin will push manually'
+              xero_warning: !xeroBillId
+                ? 'Invoice saved (recoverable) but could not push to Xero — admin will push manually'
                 : undefined,
             })
           }
@@ -13750,7 +13815,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     .select(`
       id, scheduled_date, started_at, completed_at, role, assignment_type,
       jobs:job_id (
-        id, type, job_number, client_name, site_address, site_suburb
+        id, type, job_number, client_name, site_address, site_suburb, metadata
       )
     `)
     .eq('user_id', userId)
@@ -13816,8 +13881,11 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       subtotal += amount
 
       const job = jobMap[item.job_id] || {}
+      // Change 4: include builder ref in Xero description when present
+      const pmBuilderRef = job?.metadata?.external_ref
       const desc = [
         (job.job_number || '') + ' | ' + (trackingCategoryForJob(job.job_number || '') || 'Construction'),
+        pmBuilderRef ? 'Builder Ref: ' + pmBuilderRef : null,
         [job.client_name, job.site_address, job.site_suburb].filter(Boolean).join(', '),
         `Fencing installation — ${metres}m @ $${pmRate}/m`,
       ].filter(Boolean).join('\n')
@@ -13859,9 +13927,12 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       const dayLabel = `${dayNames[d.getUTCDay()]} ${d.getUTCDate()} ${monthNames[d.getUTCMonth()]}`
       const division = trackingCategoryForJob(job?.job_number || '')
       const roleLabel = a.role ? ` (${a.role})` : ''
+      // Change 4: include builder ref in Xero description when present
+      const hrBuilderRef = job?.metadata?.external_ref
 
       const desc = [
         (job?.job_number || '') + ' | ' + (division || 'Construction'),
+        hrBuilderRef ? 'Builder Ref: ' + hrBuilderRef : null,
         `Install${roleLabel} — ${dayLabel} — ${hours}hrs @ $${rate}/hr`,
         [job?.client_name, job?.site_address, job?.site_suburb].filter(Boolean).join(', '),
       ].filter(Boolean).join('\n')
