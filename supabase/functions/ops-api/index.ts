@@ -2773,6 +2773,36 @@ if (import.meta.main) serve(async (req: Request) => {
               .eq('user_id', tradeUser.id)
               .single()
             if (invErr || !inv) throw new ApiError('Invoice not found', 404)
+            // Change 5: attach external_ref (builder ref) to each returned line so the
+            // saved-invoice detail view (trade.html renderInvoiceDetail reads l.external_ref)
+            // can show the builder ref. Resolution mirrors the write path (Change 4):
+            // makesafe_job_details.external_ref first, fallback jobs.metadata->>'external_ref'.
+            // Batched by distinct job_id to avoid N+1. Null-guarded (left undefined when no ref).
+            const detailLines = Array.isArray(inv.lines) ? inv.lines : []
+            const detailJobIds = [...new Set(detailLines.map((l: any) => l?.job_id).filter(Boolean))]
+            if (detailJobIds.length > 0) {
+              const refByJob: Record<string, string> = {}
+              const { data: msRefs } = await client.from('makesafe_job_details')
+                .select('job_id, external_ref')
+                .in('job_id', detailJobIds)
+              for (const r of (msRefs || [])) {
+                if (r.job_id && r.external_ref) refByJob[r.job_id] = r.external_ref
+              }
+              // Fallback to jobs.metadata->>'external_ref' for any job_id not covered above
+              const missingJobIds = detailJobIds.filter((id: string) => !refByJob[id])
+              if (missingJobIds.length > 0) {
+                const { data: jobRows } = await client.from('jobs')
+                  .select('id, metadata')
+                  .in('id', missingJobIds)
+                for (const j of (jobRows || [])) {
+                  const mref = j?.metadata?.external_ref
+                  if (j.id && mref) refByJob[j.id] = mref
+                }
+              }
+              for (const l of detailLines) {
+                if (l?.job_id && refByJob[l.job_id]) l.external_ref = refByJob[l.job_id]
+              }
+            }
             return json({ invoice: inv })
           }
           case 'search_all_jobs': {
