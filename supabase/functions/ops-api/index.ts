@@ -9472,14 +9472,14 @@ async function preflightInvoiceCreation(client: any, body: any): Promise<{
     ? JSON.parse(job.pricing_json || '{}')
     : (job.pricing_json || {})) as Record<string, any>
   const PAYMENT_TERMS_DEFAULTS: Record<string, string> = {
-    patio:      'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
-    fencing:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
-    decking:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
-    roofing:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
-    insurance:  'Payable on completion of works per insurance scope. Bank transfer or credit card (1.75% surcharge).',
-    renovation: 'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
-    combo:      'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
-    general:    'Net 14 days from invoice date. Bank transfer (no surcharge) or credit card (1.75% surcharge applies).',
+    patio:      'Net 14 days from invoice date. Bank transfer.',
+    fencing:    'Net 14 days from invoice date. Bank transfer.',
+    decking:    'Net 14 days from invoice date. Bank transfer.',
+    roofing:    'Net 14 days from invoice date. Bank transfer.',
+    insurance:  'Payable on completion of works per insurance scope. Bank transfer.',
+    renovation: 'Net 14 days from invoice date. Bank transfer.',
+    combo:      'Net 14 days from invoice date. Bank transfer.',
+    general:    'Net 14 days from invoice date. Bank transfer.',
   }
   let paymentTermsText = ''
   let paymentTermsSource: 'body_override' | 'jobs.payment_terms' | 'pricing_json.payment_terms' | 'division_default' = 'division_default'
@@ -9594,21 +9594,35 @@ async function createInvoice(client: any, body: any) {
   let resolvedContactId = xero_contact_id
   if (!resolvedContactId && contact) {
     try {
-      // Fetch job data for email/phone (needed for search + contact creation)
       const jId = job_id || jobId
-      const { data: jobData } = jId ? await client.from('jobs')
-        .select('client_email, client_phone')
-        .eq('id', jId)
-        .maybeSingle() : { data: null }
+
+      // When billing a neighbour, use their email/phone, not the job's primary client.
+      let contactEmail: string | undefined
+      let contactPhone: string | undefined
+      if (job_contact_id) {
+        const { data: jcData } = await client.from('job_contacts')
+          .select('client_email, client_phone')
+          .eq('id', job_contact_id)
+          .maybeSingle()
+        contactEmail = jcData?.client_email || undefined
+        contactPhone = jcData?.client_phone || undefined
+      } else {
+        const { data: jobData } = jId ? await client.from('jobs')
+          .select('client_email, client_phone')
+          .eq('id', jId)
+          .maybeSingle() : { data: null }
+        contactEmail = jobData?.client_email || undefined
+        contactPhone = jobData?.client_phone || undefined
+      }
 
       // 1. Search by EMAIL first (most reliable dedup — avoids name variation duplicates)
       let existing: any = null
-      if (jobData?.client_email) {
+      if (contactEmail) {
         const emailResult = await xeroGet('/Contacts', accessToken, tenantId, {
-          where: `EmailAddress=="${jobData.client_email.replace(/"/g, '')}"`,
+          where: `EmailAddress=="${contactEmail.replace(/"/g, '')}"`,
         })
         existing = emailResult?.Contacts?.[0]
-        if (existing) console.log(`[ops-api] Xero contact matched by email: ${jobData.client_email} → ${existing.ContactID}`)
+        if (existing) console.log(`[ops-api] Xero contact matched by email: ${contactEmail} → ${existing.ContactID}`)
       }
 
       // 2. Fall back to NAME search if email didn't match
@@ -9624,7 +9638,7 @@ async function createInvoice(client: any, body: any) {
       } else {
         // 3. Create new contact in Xero
         const newContact = await xeroPost('/Contacts', accessToken, tenantId, {
-          Contacts: [{ Name: contact, EmailAddress: jobData?.client_email || undefined, Phones: jobData?.client_phone ? [{ PhoneType: 'DEFAULT', PhoneNumber: jobData.client_phone }] : undefined }],
+          Contacts: [{ Name: contact, EmailAddress: contactEmail || undefined, Phones: contactPhone ? [{ PhoneType: 'DEFAULT', PhoneNumber: contactPhone }] : undefined }],
         }, 'PUT', `contact-${contact.replace(/\s/g, '-')}`)
         resolvedContactId = newContact?.Contacts?.[0]?.ContactID
       }
@@ -9633,25 +9647,14 @@ async function createInvoice(client: any, body: any) {
         if (job_contact_id) {
           // Neighbour: write to job_contacts, not jobs
           await client.from('job_contacts').update({ xero_contact_id: resolvedContactId }).eq('id', job_contact_id)
-        } else if (job_id || jobId) {
-          await client.from('jobs').update({ xero_contact_id: resolvedContactId }).eq('id', job_id || jobId)
+        } else if (jId) {
+          await client.from('jobs').update({ xero_contact_id: resolvedContactId }).eq('id', jId)
         }
       }
     } catch (e) {
       console.log('[ops-api] Xero contact lookup/create failed, falling back to Name:', (e as Error).message)
       // Fall through — will use Name-based contact below
     }
-  }
-
-  // If job_contact_id provided (neighbour split), override contact with that neighbour's details
-  if (job_contact_id) {
-    try {
-      const { data: jc } = await client.from('job_contacts')
-        .select('client_name, client_email, xero_contact_id, ghl_contact_id')
-        .eq('id', job_contact_id)
-        .single()
-      if (jc?.xero_contact_id) resolvedContactId = jc.xero_contact_id
-    } catch { /* job_contacts table may not exist yet */ }
   }
 
   const ref = reference || ''
@@ -11127,7 +11130,8 @@ async function createDepositInvoice(client: any, body: any) {
 
   // Resolve neighbour contact details if job_contact_id provided
   const job_contact_id = body.job_contact_id || null
-  let invoiceContactId = job.xero_contact_id || undefined
+  // Do not default to the job's Xero contact when billing a neighbour.
+  let invoiceContactId = job_contact_id ? undefined : (job.xero_contact_id || undefined)
   let invoiceContactName = job.client_name
   let contactLabel = '' // A, B, C, D — used for reference suffix
   if (job_contact_id) {
@@ -11211,19 +11215,6 @@ async function createDepositInvoice(client: any, body: any) {
     account_code: accountCodeForJob(job.type),
   }]
 
-  // Credit card surcharge — always applied. Bank transfer clients can ignore.
-  const CARD_SURCHARGE_RATE = 0.0175    // 1.75%
-  const CARD_SURCHARGE_FIXED = 0.30     // $0.30
-  const surchargeIncGst = Math.round((depositAmountIncGst * CARD_SURCHARGE_RATE + CARD_SURCHARGE_FIXED) * 100) / 100
-  const surchargeExGst = Math.round((surchargeIncGst / 1.1) * 100) / 100
-  lineItems.push({
-    description: 'Credit card processing fee (1.75% — waived for bank transfer payments)',
-    quantity: 1,
-    unit_price: surchargeExGst,
-    account_code: accountCodeForJob(job.type),
-  })
-  console.log(`[createDepositInvoice] Card surcharge added: $${surchargeIncGst} inc GST on deposit $${depositAmountIncGst}`)
-
   // Extra line items (council fees, etc.) — each has amount_inc_gst
   const extras = body.extra_line_items || []
   for (const extra of extras) {
@@ -11237,14 +11228,14 @@ async function createDepositInvoice(client: any, body: any) {
     }
   }
 
-  // Create Xero invoice — AUTHORISED so Shaun can send immediately
+  // Create Xero invoice as a draft by default so Shaun can review before sending.
   const invoiceResult = await createInvoice(client, {
     job_id: jId,
     xero_contact_id: invoiceContactId,
     contact_name: invoiceContactName,
     line_items: lineItems,
     reference,
-    xero_status: 'AUTHORISED',
+    xero_status: body.xero_status || 'DRAFT',
     send_email: body.send_email !== false, // default: send
     job_contact_id: job_contact_id,
     run_label: runLabel,
