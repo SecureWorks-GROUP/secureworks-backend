@@ -3048,6 +3048,17 @@ if (import.meta.main) serve(async (req: Request) => {
             const gst = Math.round(subtotal * 0.1 * 100) / 100
             const total = subtotal + gst
 
+            // ── M0 WO GUARD (2026-06-12) ──
+            // WO path: job attribution is already guaranteed (wo.job_id is required
+            // to load the WO). Guard checks scope items are non-empty and non-zero.
+            if (scopeItems.length === 0) {
+              throw new ApiError('Invoice rejected: work order has no scope items to invoice.', 422)
+            }
+            if (Math.abs(subtotal) < 0.01) {
+              throw new ApiError('Invoice rejected: work order scope items sum to zero. Check unit prices.', 422)
+            }
+            // ── END M0 WO GUARD ──
+
             // Push directly to Xero as DRAFT ACCPAY bill
             const tradeName = tradeXeroUser?.name || 'Trade'
             const dueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
@@ -3574,6 +3585,52 @@ if (import.meta.main) serve(async (req: Request) => {
             const subtotal = labourSubtotal + extraSubtotal
             const gst = gstRegistered ? Math.round(subtotal * 0.1 * 100) / 100 : 0
             const totalInc = Math.round((subtotal + gst) * 100) / 100
+
+            // ── M0 CAPTURE ENFORCEMENT (2026-06-12) ──────────────────────────
+            // Reject zero-line submissions, unattributed lines, and missing
+            // hours on labour lines BEFORE any Xero push or DB write.
+            // UX: normal job-centric cards pass untouched — the guard only
+            // kills the lump-sum/zero-line class of submission.
+            {
+              const HOURLY_TYPES = new Set(['labour', 'fencing', 'patio', 'make safe', 'general labour'])
+              const NON_JOB_TYPES = new Set(['adjustment']) // narrow allowlist — no job attribution required
+              const allLines = [...lineItems, ...extraLineItems]
+
+              // 1. Zero-line check: sum of per-line totals must match invoice subtotal
+              const lineSum = allLines.reduce((s: number, l: any) => s + (Number(l.line_total_ex) || 0), 0)
+              if (allLines.length === 0) {
+                throw new ApiError('Invoice rejected: no line items. Add at least one job card with hours or items.', 422)
+              }
+              if (Math.abs(lineSum - subtotal) > 0.01) {
+                throw new ApiError(`Invoice rejected: line items sum ($${lineSum.toFixed(2)}) does not match invoice subtotal ($${subtotal.toFixed(2)}). Re-open and resubmit.`, 422)
+              }
+
+              // 2. Per-line job attribution + hours check
+              for (const line of allLines) {
+                const lt = (line.line_type || '').toLowerCase()
+                if (!NON_JOB_TYPES.has(lt)) {
+                  // Every non-adjustment line needs job attribution
+                  if (!line.job_id && !line.job_number) {
+                    throw new ApiError(`Invoice rejected: line "${line.description || lt || 'unknown'}" is missing job attribution. Assign a job number to every line.`, 422)
+                  }
+                  // Make-safe lines must reference a SWMS- job
+                  if (lt === 'make safe') {
+                    const jn = String(line.job_number || '').toUpperCase()
+                    if (!jn.match(/^SWMS-\d+$/)) {
+                      throw new ApiError(`Invoice rejected: make-safe line "${line.description || 'unknown'}" must reference a valid SWMS- job number (got: "${line.job_number || 'none'}").`, 422)
+                    }
+                  }
+                }
+                // Hours > 0 on hourly-type lines
+                if (HOURLY_TYPES.has(lt)) {
+                  const hrs = Number(line.total_hours || 0)
+                  if (hrs <= 0) {
+                    throw new ApiError(`Invoice rejected: labour line "${line.description || lt}" has zero or missing hours. Enter hours greater than 0.`, 422)
+                  }
+                }
+              }
+            }
+            // ── END M0 GUARD ─────────────────────────────────────────────────
 
             // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq} (global sequence, never reused)
             const initials = (userProfile?.name || 'XX').split(' ').map((n: string) => n.charAt(0).toUpperCase()).join('').slice(0, 3)
@@ -13948,6 +14005,14 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     }
   }
 
+  // ── M0 LEGACY GUARD (2026-06-12) ──
+  if (lineItems.length === 0) {
+    throw new Error('Invoice rejected: no valid line items to submit.')
+  }
+  if (subtotal <= 0) {
+    throw new Error('Invoice rejected: invoice subtotal is zero or negative. Check hours and rates.')
+  }
+  // ── END M0 LEGACY GUARD ──
   const gst = Math.round(subtotal * 0.1 * 100) / 100
   const total = Math.round((subtotal + gst) * 100) / 100
 
