@@ -483,7 +483,7 @@ async function syncInvoices(sb: any) {
           // Auto-link invoice to job via SW reference number in Reference field.
           // Matches patterns like SWP-25001, SWF-25002, SW1615, etc.
           const ref = inv.Reference || ''
-          const swMatch = ref.match(/SW[A-Z]?-?(\d{3,5})/i)
+          const swMatch = ref.match(/SWMS-\d{4,5}|SW[A-Z]?-?\d{3,5}/i)
           if (swMatch) {
             const swNumber = swMatch[0].toUpperCase()
             const { data: job } = await sb.from('jobs')
@@ -2003,7 +2003,7 @@ async function matchInvoicesByReference(sb: any) {
   }
 
   // Filter to only those with SW-like references
-  const swPattern = /SW[A-Z]?-?(\d{3,5})/i
+  const swPattern = /SWMS-\d{4,5}|SW[A-Z]?-?\d{3,5}/i
   const candidates = invoices.filter((inv: any) => swPattern.test(inv.reference || ''))
 
   if (candidates.length === 0) {
