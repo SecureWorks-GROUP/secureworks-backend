@@ -7581,12 +7581,9 @@ async function submitMakesafeReport(client: any, body: any) {
       .eq('type', 'photo')
       .limit(200)
     if (mediaErr) throw mediaErr
-    const count = (phaseNames: string[]) => (mediaRows || []).filter((m: any) => phaseNames.includes(String(m.phase || ''))).length
-    const frontCount = count(['front_elevation', 'front'])
-    const beforeCount = count(['scope'])
-    const afterCount = count(['completion'])
-    if (frontCount < 1 || beforeCount < 3 || afterCount < 3) {
-      throw new ApiError(`MakeSafe report needs 1 front, 3 before, and 3 after photos (found ${frontCount}/${beforeCount}/${afterCount})`, 400)
+    const photoCount = (mediaRows || []).length
+    if (photoCount < 5) {
+      throw new ApiError(`MakeSafe report needs at least 5 photos (found ${photoCount})`, 400)
     }
   }
 
