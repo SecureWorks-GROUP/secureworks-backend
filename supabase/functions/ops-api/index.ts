@@ -3679,23 +3679,25 @@ if (import.meta.main) serve(async (req: Request) => {
               } catch (e) { /* non-blocking */ }
             }
 
-            // ── Ops review gate (Option A) ───────────────────────────────────
-            // Clock-off used to be the implicit "work happened" proof. With manual
-            // hours that proof is gone, so any invoice carrying manual (typed)
-            // hours, or flagged hours_excess, lands in pending_ops_review. Shaun
-            // verifies against the schedule and approves before the Xero draft is
-            // pushed (push_trade_invoice_to_xero gates on acknowledged/approved).
-            // Fully-clocked / extras-only invoices keep prior auto-push behaviour.
-            //   [F6 / Q4 Option A]  (Marnin can switch to Option B by removing this)
-            const needsOpsReview = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess'
-            if (needsOpsReview) {
+            // ── Change 6 (Q18): straight-to-Xero-draft, no in-app approval hold ──
+            // PREVIOUS behaviour (Option A): manual hours / client-priced extras /
+            // hours_excess set status='pending_ops_review' and SKIPPED the auto-push;
+            // the Xero draft only fired after Shaun approved in-app. NEW behaviour:
+            // the hard guards above (non-Monday 422, dup-week 409, rate==0 422, the
+            // active-assignment/dup-assignment 409/422 checks) already blocked the
+            // dangerous cases with NO Xero bill created. The remaining flags here are
+            // SOFT — they no longer hold the invoice. The Xero DRAFT bill IS the
+            // manual check now: the bookkeeper reviews/approves it in Xero (drafts
+            // pay no one until approved there). So soft flags ANNOTATE the invoice
+            // (query_note) and PROCEED to draft.  [Q18 — supersedes F6/Q4 Option A]
+            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess'
+            if (softReviewFlag) {
               await client.from('trade_invoices').update({
-                status: 'pending_ops_review',
                 query_note: reviewFlag === 'hours_excess'
-                  ? 'Auto-flagged: an assignment exceeds 16h — verify hours.'
+                  ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
                   : clientPricedExtraCount > 0
-                    ? 'Manual hours/rates entered by trade — verify job, description, hours and rate before approval.'
-                  : 'Manual hours entered — verify against schedule before approval.',
+                    ? 'Manual hours/rates entered by trade — verify job, description, hours and rate in Xero before approving the draft.'
+                  : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
               }).eq('id', invoice.id)
             }
 
@@ -3729,15 +3731,14 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
-            // Skipped when the invoice is in pending_ops_review (Option A): the
-            // push fires later, after Shaun approves, via push_trade_invoice_to_xero
-            // (which gates on acknowledged/approved). This is the replacement for
-            // the deleted clock-off "work happened" gate.                      [F6]
+            // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
+            // invoice that passed the hard guards goes straight to a Xero DRAFT bill.
+            // The Xero draft is the manual review surface (bookkeeper approves there).
             let xeroBillId = null
             let xeroBillNumber = null
             // Declared outside the try so the catch block can record which phase failed.
             let xeroContactId: string | null = null
-            if (!needsOpsReview) try {
+            try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
@@ -3758,8 +3759,11 @@ if (import.meta.main) serve(async (req: Request) => {
               })
               if (!xeroContactId) {
                 console.error('[ops-api] Could not resolve Xero contact for trade', tradeUser.id)
-                // Mark invoice as needing manual Xero push
-                await client.from('trade_invoices').update({ status: 'draft' }).eq('id', invoice.id)
+                // Change 6 (Q18): contact resolution failed — the invoice + lines are
+                // already persisted. Land it in 'approved' (a clearly-recoverable state
+                // that push_trade_invoice_to_xero accepts) so admin can re-push once the
+                // contact is fixed. Do NOT silently drop it or treat it as success.
+                await client.from('trade_invoices').update({ status: 'approved' }).eq('id', invoice.id)
               }
 
               if (xeroContactId) {
@@ -3853,6 +3857,14 @@ if (import.meta.main) serve(async (req: Request) => {
             } catch (e) {
               const errMsg = (e as Error).message
               console.log('[ops-api] Xero auto-push failed (non-blocking):', errMsg)
+              // Change 6 (Q18): a Xero failure must NOT be swallowed as success and the
+              // invoice must NOT be lost. The invoice + lines are already persisted; land
+              // it in 'approved' — a clearly-recoverable state that push_trade_invoice_to_xero
+              // accepts — so admin can re-push once the Xero issue (token/API) is resolved.
+              // (idempotencyKey 'trade-inv-<id>' means the re-push cannot create a duplicate.)
+              try {
+                await client.from('trade_invoices').update({ status: 'approved' }).eq('id', invoice.id)
+              } catch (stErr) { console.log('[ops-api] Failed to mark invoice recoverable:', (stErr as Error).message) }
               // Persist the failure so admin has an audit trail (the user-visible
               // "Saved locally — admin will sync manually" message used to be the
               // ONLY signal that the push failed). Non-blocking — invoice insert is
@@ -3868,6 +3880,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     user_id: tradeUser.id,
                     error_message: errMsg,
                     error_phase: xeroContactId ? 'bill_creation' : 'contact_resolution',
+                    recoverable_status: 'approved',
                   },
                   schema_version: '1.0',
                 })
@@ -3883,12 +3896,14 @@ if (import.meta.main) serve(async (req: Request) => {
               line_count: lineItems.length + extraLineItems.length,
               xero_bill_id: xeroBillId,
               xero_bill_number: xeroBillNumber,
-              // pending_ops_review = held for Shaun (not a Xero failure). Lets the
-              // UI show "sent for review" instead of the manual-sync warning.   [F6]
-              pending_ops_review: needsOpsReview,
+              // Change 6 (Q18): no in-app hold anymore — every passing invoice goes
+              // straight to a Xero draft. pending_ops_review is retained as a field for
+              // backward-compat with any UI reading it, but is always false now.
+              pending_ops_review: false,
+              soft_review_flag: softReviewFlag,
               review_flag: reviewFlag,
-              xero_warning: (!xeroBillId && !needsOpsReview)
-                ? 'Invoice saved but could not push to Xero — admin will push manually'
+              xero_warning: !xeroBillId
+                ? 'Invoice saved (recoverable) but could not push to Xero — admin will push manually'
                 : undefined,
             })
           }
