@@ -64,6 +64,15 @@ function getDivisionInbox(jobType: string | null | undefined): string {
   return jobType === 'fencing' ? 'fencing@secureworkswa.com.au' : 'patios@secureworkswa.com.au'
 }
 
+// ── Division phone (Marnin ruling 2026-06-12): fencing client-facing → 0489 267 772.
+// 0489 267 771 is the admin line — patio + general templates keep 771 as the default. ──
+function getDivisionPhone(jobType: string | null | undefined): string {
+  return jobType === 'fencing' ? '0489 267 772' : '0489 267 771'
+}
+function getDivisionPhoneHref(jobType: string | null | undefined): string {
+  return 'tel:+61' + getDivisionPhone(jobType).replace(/\s+/g, '').slice(1)
+}
+
 // ── Default deposit % by job type (mirrors ops-api:14211-14213) ──
 // pricing_json.deposit.percent is the authoritative source when present.
 // Falls back to type-based default: fencing 50%, patio/decking 20%.
@@ -2703,7 +2712,7 @@ function buildQuoteEmail(opts: {
       <p style="color:#293C46;font-size:14px;font-weight:600;margin:0;">
         ${opts.scoperName}<br>
         <span style="font-weight:400;color:#4C6A7C;">SecureWorks Group</span><br>
-        <a href="tel:+61489267771" style="color:#F15A29;text-decoration:none;">Call us</a> &nbsp;|&nbsp;
+        <a href="${getDivisionPhoneHref(opts.projectType)}" style="color:#F15A29;text-decoration:none;">Call us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;text-decoration:none;">Email</a>
       </p>
     </td></tr>
@@ -2846,7 +2855,7 @@ function buildClientPage(doc: any, token: string): string {
     <div class="card" style="text-align:center;">
       <p style="color:#4C6A7C;font-size:14px;">Questions about your quote?</p>
       <p style="margin-top:8px;">
-        <a href="tel:+61489267771" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
+        <a href="${getDivisionPhoneHref(doc.jobs?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
       </p>
     </div>
@@ -3141,7 +3150,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     <div class="card no-print" style="text-align:center;">
       <p style="color:#4C6A7C;font-size:14px;">Questions about your quote?</p>
       <p style="margin-top:8px;">
-        <a href="tel:+61489267771" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
+        <a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
       </p>
     </div>
@@ -3221,7 +3230,7 @@ function buildRunAcceptedPage(job: any, run: any, acceptorName: string): string 
   </div>
   <div class="card" style="text-align:center;">
     <p style="color:#4C6A7C;font-size:14px;">Questions?</p>
-    <p style="margin-top:8px;"><a href="tel:+61489267771" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
+    <p style="margin-top:8px;"><a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
 </div></body></html>`
@@ -3283,7 +3292,7 @@ function buildWaitingPage(job: any, run: any, acceptorName: string, runLabel: st
   <div class="card" style="text-align:center;">
     <p style="color:#4C6A7C;font-size:14px;">Questions about your fencing project?</p>
     <p style="margin-top:8px;">
-      <a href="tel:+61489267771" style="color:#F15A29;font-weight:600;text-decoration:none;">Call +61 489 267 771</a> &nbsp;|&nbsp;
+      <a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call ${getDivisionPhone(job?.type)}</a> &nbsp;|&nbsp;
       <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email Us</a>
     </p>
   </div>
@@ -3351,7 +3360,7 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
   ${optionCards}
   <div class="card" style="text-align:center;">
     <p style="color:#4C6A7C;font-size:14px;">Questions? We're here to help.</p>
-    <p style="margin-top:8px;"><a href="tel:+61489267771" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
+    <p style="margin-top:8px;"><a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
 </div>
@@ -3772,7 +3781,7 @@ function buildNextStepsPage(opts: {
     <div class="card contact-card">
       <p style="color:#4C6A7C;font-size:14px;">Questions? We're here to help.</p>
       <p style="margin-top:8px;">
-        <a href="tel:+61489267778" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
+        <a href="${getDivisionPhoneHref(opts.projectType)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
       </p>
     </div>
@@ -3876,7 +3885,7 @@ function buildInvoiceEmail(opts: {
       <hr style="border:none;border-top:1px solid #eee;margin:0 0 24px;">
 
       <p style="color:#4C6A7C;font-size:14px;line-height:1.6;margin:0 0 8px;">
-        Questions? Call <a href="tel:+61489267778" style="color:#F15A29;text-decoration:none;font-weight:600;">0489 267 778</a> or reply to this email.
+        Questions? Call <a href="${getDivisionPhoneHref(opts.jobType)}" style="color:#F15A29;text-decoration:none;font-weight:600;">${getDivisionPhone(opts.jobType)}</a> or reply to this email.
       </p>
     </td></tr>
 
