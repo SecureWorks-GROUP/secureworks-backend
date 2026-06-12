@@ -2777,13 +2777,15 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'search_all_jobs': {
             const q = (url.searchParams.get('q') || '').toLowerCase().trim()
-            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+            // Change 1 + Change 2: removed complete/completed/invoiced from exclusion list so
+            // completed make-safes are searchable. Trades must find EVERY job by any field.
+            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
             const { data: assignedRows } = await client.from('job_assignments')
               .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
               .eq('user_id', tradeUser.id)
             const assignedJobs = (assignedRows || [])
               .map((r: any) => r.jobs)
-              .filter((j: any) => j && !['lost','cancelled','archived','deleted','complete','completed','invoiced','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+              .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
 
             let jobQuery = client.from('jobs')
               .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
@@ -2791,7 +2793,8 @@ if (import.meta.main) serve(async (req: Request) => {
               .order('created_at', { ascending: false })
               .limit(200)
             if (q) {
-              jobQuery = jobQuery.or(`job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%`)
+              // Change 1: search covers job_number + client_name + site_suburb + site_address (full field coverage)
+              jobQuery = jobQuery.or(`job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`)
             }
             const { data: allJobs, error: allJobsErr } = await jobQuery
             if (allJobsErr) throw allJobsErr
@@ -3401,13 +3404,23 @@ if (import.meta.main) serve(async (req: Request) => {
               jobGroups[a.job_id].push(a)
             }
 
-            // Get job details
+            // Get job details — Change 4: add metadata so external_ref (builder ref) is available for Xero descriptions
             const jobIds = Object.keys(jobGroups)
             const { data: jobs } = await client.from('jobs')
-              .select('id, job_number, client_name, type, site_address, site_suburb')
+              .select('id, job_number, client_name, type, site_address, site_suburb, metadata')
               .in('id', jobIds)
             const jobMap: Record<string, any> = {}
             for (const j of (jobs || [])) jobMap[j.id] = j
+            // Enrich makesafe jobs with external_ref from makesafe_job_details (100% population vs 91% in metadata)
+            const msJobIds = jobIds.filter((id: string) => jobMap[id]?.type === 'makesafe')
+            if (msJobIds.length > 0) {
+              const { data: msDetails } = await client.from('makesafe_job_details')
+                .select('job_id, external_ref')
+                .in('job_id', msJobIds)
+              for (const d of (msDetails || [])) {
+                if (d.job_id && jobMap[d.job_id]) jobMap[d.job_id]._external_ref = d.external_ref
+              }
+            }
 
             // Build line items
             let totalHours = 0
@@ -3462,7 +3475,9 @@ if (import.meta.main) serve(async (req: Request) => {
               const requestedJobIds = [...new Set((extra_items || []).map((i: any) => i?.job_id).filter(Boolean))]
               const requestedJobNumbers = [...new Set((extra_items || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
               const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
-              const activeJobStatusExclude = '("lost","cancelled","archived","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")'
+              // Change 3: removed complete/completed/invoiced so WO/commission extra-item rows on completed
+              // make-safes still resolve job_id (fixes null job_id on audit log for finished jobs)
+              const activeJobStatusExclude = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
               const extraJobReads: PromiseLike<any>[] = []
               if (requestedJobIds.length > 0) {
                 extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('id', requestedJobIds))
@@ -3737,9 +3752,13 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
 
                 // Build Xero line items with tracking + correct tax type + rich descriptions
-                const allLines = [...lineItems.map((l: any) => ({
+                const allLines = [...lineItems.map((l: any) => {
+                  // Change 4: include builder ref in Xero description when present (makesafe jobs)
+                  const builderRef = jobMap[l.job_id]?._external_ref || jobMap[l.job_id]?.metadata?.external_ref
+                  return {
                   Description: [
                     (l.job_number || 'Labour') + ' | ' + (trackingCategoryForJob(l.job_number || '') || 'Construction'),
+                    builderRef ? 'Builder Ref: ' + builderRef : null,
                     'Labour — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr' + (l.days_worked > 1 ? ' (' + l.days_worked + ' days)' : ''),
                     [l.client_name, jobMap[l.job_id]?.site_address, jobMap[l.job_id]?.site_suburb].filter(Boolean).join(', '),
                   ].filter(Boolean).join('\n'),
@@ -3748,7 +3767,8 @@ if (import.meta.main) serve(async (req: Request) => {
                   AccountCode: accountCodeForJob(jobMap[l.job_id]?.type || '', '301'),
                   TaxType: taxType,
                   Tracking: xeroTracking(l.job_number || ''),
-                })), ...extraLineItems.map((e: any) => ({
+                  }
+                }), ...extraLineItems.map((e: any) => ({
                   Description: [
                     e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
                     (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
@@ -13750,7 +13770,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     .select(`
       id, scheduled_date, started_at, completed_at, role, assignment_type,
       jobs:job_id (
-        id, type, job_number, client_name, site_address, site_suburb
+        id, type, job_number, client_name, site_address, site_suburb, metadata
       )
     `)
     .eq('user_id', userId)
@@ -13816,8 +13836,11 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       subtotal += amount
 
       const job = jobMap[item.job_id] || {}
+      // Change 4: include builder ref in Xero description when present
+      const pmBuilderRef = job?.metadata?.external_ref
       const desc = [
         (job.job_number || '') + ' | ' + (trackingCategoryForJob(job.job_number || '') || 'Construction'),
+        pmBuilderRef ? 'Builder Ref: ' + pmBuilderRef : null,
         [job.client_name, job.site_address, job.site_suburb].filter(Boolean).join(', '),
         `Fencing installation — ${metres}m @ $${pmRate}/m`,
       ].filter(Boolean).join('\n')
@@ -13859,9 +13882,12 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       const dayLabel = `${dayNames[d.getUTCDay()]} ${d.getUTCDate()} ${monthNames[d.getUTCMonth()]}`
       const division = trackingCategoryForJob(job?.job_number || '')
       const roleLabel = a.role ? ` (${a.role})` : ''
+      // Change 4: include builder ref in Xero description when present
+      const hrBuilderRef = job?.metadata?.external_ref
 
       const desc = [
         (job?.job_number || '') + ' | ' + (division || 'Construction'),
+        hrBuilderRef ? 'Builder Ref: ' + hrBuilderRef : null,
         `Install${roleLabel} — ${dayLabel} — ${hours}hrs @ $${rate}/hr`,
         [job?.client_name, job?.site_address, job?.site_suburb].filter(Boolean).join(', '),
       ].filter(Boolean).join('\n')
