@@ -2708,13 +2708,17 @@ if (import.meta.main) serve(async (req: Request) => {
         const { data: userRec } = await client.from('users').select('role').eq('id', tradeUser.id).maybeSingle()
         const tradeRole = userRec?.role || 'trade'
         const isAdmin = tradeRole === 'admin'
+        // Dispatcher = the ops manager / admin who runs the board. They get a
+        // see-all view of every job and are the only non-assigned users who can
+        // see the full open MakeSafe pool (other trades see only their own).
+        const isDispatcher = isAdmin || tradeRole === 'ops_manager'
         switch (action) {
           case 'my_jobs': {
-            const mode = url.searchParams.get('mode') // 'all' for admin view, 'mine' for personal
-            const showAll = isAdmin && mode !== 'mine'
-            return json(await myJobs(client, tradeUser.id, showAll))
+            const mode = url.searchParams.get('mode') // 'all' for dispatcher view, 'mine' for personal
+            const showAll = isDispatcher && mode !== 'mine'
+            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher))
           }
-          case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isAdmin))
+          case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
           case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin))
           case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin))
@@ -11825,7 +11829,7 @@ export function _groupTradeAssignmentsForTest(assignments: any[], today: string,
   return grouped
 }
 
-async function myJobs(client: any, userId: string, showAll = false) {
+async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false) {
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -11873,11 +11877,12 @@ async function myJobs(client: any, userId: string, showAll = false) {
 
   if (error) throw error
 
-  // MakeSafe dispatch flow: active MakeSafes are visible to any logged-in
-  // trade as open field-report cards, even before a named assignment exists.
-  // Keep this specific to MakeSafe and expose only the same slim job fields
-  // the mobile job list already uses.
-  if (!showAll) {
+  // MakeSafe dispatch flow: the full open MakeSafe pool is visible only to the
+  // dispatcher (ops manager / admin) as open field-report cards, even before a
+  // named assignment exists. Other trades see a MakeSafe only once it is
+  // allocated to them (their named assignment). Keep this specific to MakeSafe
+  // and expose only the same slim job fields the mobile job list already uses.
+  if (isDispatcher) {
     const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
