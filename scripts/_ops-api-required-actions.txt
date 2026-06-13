@@ -82,3 +82,7 @@ job_detail
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event
+
+# ── Job P&L (M3) — read-only; pairs with ops.html #119 + M1 migration ──
+job_financials
+job_financials_detail

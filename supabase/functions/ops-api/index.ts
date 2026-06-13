@@ -20,6 +20,8 @@
 //   pipeline            — Jobs by status for kanban view
 //   job_detail          — Full job + assignments + POs + WOs + invoices
 //   list_invoices       — Xero invoices with filters
+//   job_financials      — Job P&L list (makesafe-scoped view; M3 panel)
+//   job_financials_detail — Single job P&L + trade charge lines (get_job_financials rpc)
 //   list_quotes         — Jobs in quote stage (draft/quoted) with search
 //   list_pos            — Purchase orders with filters
 //   list_work_orders    — Work orders with filters
@@ -160,7 +162,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 226
+const OPS_API_EXPECTED_ACTION_COUNT = 228
 
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
@@ -1479,6 +1481,13 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'scan_ses_makesafes': return json(await scanSesMakesafes(client))
       case 'submit_makesafe_report': return json(await submitMakesafeReport(client, body))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
+      // ── Job P&L (M3) — pairs with ops.html #119 + M1 migration ──
+      case 'job_financials': return json(await listJobFinancials(client))
+      case 'job_financials_detail': {
+        const jobId = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
+        if (!jobId) return json({ error: 'jobId required' }, 400)
+        return json(await getJobFinancialsDetail(client, jobId))
+      }
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))
@@ -22026,4 +22035,30 @@ async function scopeAvailability(client: any, params: URLSearchParams) {
   })
 
   return { slots, scopers: allScopers.map((s: any) => ({ id: s.id, name: s.name })) }
+}
+
+// ── Job P&L (M3) — read-only, pairs with ops.html #119 + M1 migration ──
+// job_financials: list all makesafe jobs from the job_financials view.
+// No params; view already gates on type='makesafe' and org_id.
+async function listJobFinancials(client: any) {
+  const { data, error } = await client
+    .from('job_financials')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(500)
+  if (error) throw error
+  return { jobs: data || [] }
+}
+
+// job_financials_detail: single job P&L + trade charge lines via get_job_financials(uuid).
+// Panel sends { jobId } (UUID). Returns { job: { ...columns, lines: [...] } }.
+async function getJobFinancialsDetail(client: any, jobId: string) {
+  if (!jobId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+    throw new ApiError('jobId must be a valid UUID', 400)
+  }
+  const { data, error } = await client.rpc('get_job_financials', { p_job_id: jobId })
+  if (error) throw error
+  const row = data && data[0] ? data[0] : null
+  if (!row) throw new ApiError(`No job_financials row for job ${jobId}`, 404)
+  return { job: row }
 }
