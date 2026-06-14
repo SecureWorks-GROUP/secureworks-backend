@@ -20,6 +20,8 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   checkCanary,
@@ -33,6 +35,7 @@ import {
   type PipelineRef,
   reconcileD1,
   reconcileD2Inventory,
+  seedCanaryExpectation,
   summarizeDrift,
 } from "./makesafe_reconcile.ts";
 
@@ -304,17 +307,31 @@ function makeSink() {
 //   .from(t).select(...)...maybeSingle()                    -> { data }
 //   .from(t).upsert(row, {onConflict})                      -> records, { error:null }
 //   .from(t).insert(row)                                    -> records, { error:null }
+//
+// Error injection (for the fail-closed sweep):
+//   countErrors[t]  -> the COUNT query on table t returns { count:null, error }
+//   readErrors[t]   -> a non-count SELECT on table t returns { data:null, error }
+//                      (covers list reads, .maybeSingle(), and .single())
+//   writeErrors[t]  -> an upsert/insert/update on table t returns { error } (so we
+//                      can prove an unchecked write that fails leaves the action
+//                      FAILING CLOSED, not silently succeeding)
 function makeReconClient(
   seed: Record<string, any[]>,
   counts: Record<string, number> = {},
   // FINDING 3 — tables listed here return an ERROR on their COUNT query (so we can
   // prove the attachment-count error is NOT coerced to 0). Maps table -> message.
   countErrors: Record<string, string> = {},
+  // SWEEP — tables listed here return an ERROR on a non-count SELECT.
+  readErrors: Record<string, string> = {},
+  // BLOCKER 1/3 — tables listed here return an ERROR on upsert/insert/update.
+  writeErrors: Record<string, string> = {},
 ) {
   const writes: Array<{ table: string; op: string; row: any }> = [];
   function builder(table: string) {
     const rows = seed[table] || [];
     let isCount = false;
+    const readErr = readErrors[table] ? { message: readErrors[table] } : null;
+    const writeErr = writeErrors[table] ? { message: writeErrors[table] } : null;
     const b: any = {
       select: (_c?: any, opts?: any) => { if (opts?.count) isCount = true; return b; },
       eq: () => b,
@@ -326,14 +343,14 @@ function makeReconClient(
       or: () => b,
       order: () => b,
       limit: () => b,
-      maybeSingle: async () => ({ data: rows[0] ?? null, error: null }),
-      single: async () => ({ data: rows[0] ?? null, error: null }),
-      upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: null }; },
-      insert: async (row: any) => { writes.push({ table, op: "insert", row }); return { error: null }; },
+      maybeSingle: async () => readErr ? ({ data: null, error: readErr }) : ({ data: rows[0] ?? null, error: null }),
+      single: async () => readErr ? ({ data: null, error: readErr }) : ({ data: rows[0] ?? null, error: null }),
+      upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: writeErr }; },
+      insert: async (row: any) => { writes.push({ table, op: "insert", row }); return { error: writeErr }; },
       // N1 — .update(row).eq(...) chain (used to mark a passed canary resolved).
       update: (row: any) => {
         writes.push({ table, op: "update", row });
-        return { eq: async () => ({ error: null }) };
+        return { eq: async () => ({ error: writeErr }) };
       },
       then: (resolve: (v: any) => any) => {
         if (isCount) {
@@ -343,6 +360,7 @@ function makeReconClient(
           }
           return resolve({ count: counts[table] ?? 0, error: null });
         }
+        if (readErr) return resolve({ data: null, error: readErr });
         return resolve({ data: rows, error: null });
       },
     };
@@ -909,4 +927,373 @@ Deno.test("FINDING 3 control: a clean count (0, no error) on the D2 action verif
   };
   const r = await makesafeEmailReconcileFullInventory(client, sink, deps);
   assertEquals(r.gate.recon_verified, true);
+});
+
+// ════════════════════════════════════════════════════════════
+// BLOCKER 1 — every sync_state UPSERT is checked + FAILS CLOSED on write error.
+// A failed verdict-persist must throw (the caller returns 500) so a prior row with
+// recon_verified=true is NEVER left silently in place after a run that should have
+// re-evaluated (and possibly blocked) it. We also prove a stale prior verdict is
+// NOT confirmed: the action throws instead of returning success.
+// ════════════════════════════════════════════════════════════
+
+// Standard clean-D1 seed where, absent any injected error, the action would persist
+// recon_verified=true. We then inject a write error and assert it fails closed.
+function cleanD1Seed() {
+  return {
+    pipeline_items: [{ ref: "AJBR-67200", target_job: "job-uuid", source_event_ids: ["ev-1"] }],
+    emails: [{ post_id: "post-1", from_email: "dispatch@mlb.com.au", received_at: "2026-06-13T00:00:00Z" }],
+    email_events_raw: [{ id: "ev-1", post_id: "post-1" }],
+    makesafe_companies: [{ sender_patterns: ["mlb.com.au"] }],
+    sync_state: [{
+      recon_d2_verified: true,
+      recon_d2_missing_posts: 0,
+      recon_inventory_floor: "1970-01-01T00:00:00Z",
+      recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+    }],
+  };
+}
+const CLEAN_D1_AUDIT = async () => ({
+  known_refs: [{ external_ref: "AJBR-67200", source_email_id: null, job_number: "SWMS-67200", substatus: "complete" }],
+});
+
+Deno.test("BLOCKER 1 (D1): a failed sync_state upsert FAILS CLOSED (throws, does not silently succeed)", async () => {
+  const { client } = makeReconClient(
+    cleanD1Seed(),
+    { email_attachments: 0 },
+    {},
+    {},
+    { sync_state: "simulated upsert write failure" }, // the verdict-persist write fails
+  );
+  const { sink } = makeSink();
+  // The action would otherwise return verified=true; a failed persist must throw
+  // so the prior recon_verified is NEVER left stale and success is NEVER reported.
+  const err = await assertRejects(
+    () => makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: CLEAN_D1_AUDIT, nowIso: "2026-06-14T00:00:00Z" }),
+    Error,
+  );
+  assertStringIncludes(err.message, "sync_state upsert (D1 verdict persist) failed");
+  assertStringIncludes(err.message, "failing closed");
+});
+
+Deno.test("BLOCKER 1 (D2): a failed sync_state upsert FAILS CLOSED (throws, does not silently succeed)", async () => {
+  const { client } = makeReconClient(
+    {
+      emails: [{ post_id: "post-A" }],
+      sync_state: [{
+        recon_d1_verified: true,
+        recon_inventory_floor: "1970-01-01T00:00:00Z",
+        recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+      }],
+    },
+    { email_attachments: 0 },
+    {},
+    {},
+    { sync_state: "simulated upsert write failure" },
+  );
+  const { sink } = makeSink();
+  const deps = {
+    getGraphToken: async () => "tok",
+    resolveGroupId: async (_t: string) => "group-1",
+    collectPosts: async (_t: string, _g: string, _s: string) => ({
+      posts: [{ id: "post-A" }],
+      pageCounts: { conversations: 1, threads: 1, posts: 1 },
+    }),
+    historical: true,
+    nowIso: NOW,
+  };
+  const err = await assertRejects(
+    () => makesafeEmailReconcileFullInventory(client, sink, deps),
+    Error,
+  );
+  assertStringIncludes(err.message, "sync_state upsert (D2 verdict persist) failed");
+  assertStringIncludes(err.message, "failing closed");
+});
+
+// ════════════════════════════════════════════════════════════
+// BLOCKER 3 — the D2 inventory scan-log insert is checked + FAILS CLOSED. D2 must
+// NOT persist a verified state without its scan evidence. We inject an insert error
+// on email_events_raw and assert the action throws BEFORE the sync_state upsert.
+// ════════════════════════════════════════════════════════════
+Deno.test("BLOCKER 3 (D2): a failed scan-log insert FAILS CLOSED (no verified state without scan evidence)", async () => {
+  const { client, writes } = makeReconClient(
+    {
+      emails: [{ post_id: "post-A" }],
+      sync_state: [{
+        recon_d1_verified: true,
+        recon_inventory_floor: "1970-01-01T00:00:00Z",
+        recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+      }],
+    },
+    { email_attachments: 0 },
+    {},
+    {},
+    { email_events_raw: "simulated scan-log insert failure" },
+  );
+  const { sink } = makeSink();
+  const deps = {
+    getGraphToken: async () => "tok",
+    resolveGroupId: async (_t: string) => "group-1",
+    collectPosts: async (_t: string, _g: string, _s: string) => ({
+      posts: [{ id: "post-A" }],
+      pageCounts: { conversations: 1, threads: 1, posts: 1 },
+    }),
+    historical: true,
+    nowIso: NOW,
+  };
+  const err = await assertRejects(
+    () => makesafeEmailReconcileFullInventory(client, sink, deps),
+    Error,
+  );
+  assertStringIncludes(err.message, "D2 scan-log insert failed");
+  // And critically: the sync_state verdict was NEVER written (we failed BEFORE it).
+  const ss = writes.find((w) => w.table === "sync_state" && w.op === "upsert");
+  assertEquals(ss, undefined);
+});
+
+// ════════════════════════════════════════════════════════════
+// FINDING 2 — future-ceiling rejection + clamped skew.
+// A ceiling AHEAD of now (clock skew / corrupt timestamp) must NOT verify; an
+// absurd skew must be clamped so it cannot re-open the stale-ceiling hole.
+// ════════════════════════════════════════════════════════════
+Deno.test("FINDING 2 (future ceiling): a ceiling AHEAD of now -> NOT verified", () => {
+  const NOW3 = "2026-06-15T00:00:00Z";
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: "2026-06-16T00:00:00Z", // 1 day in the FUTURE
+    nowIso: NOW3,
+  });
+  assertEquals(gate.recon_verified, false);
+  assertEquals(gate.recon_mode, "DEGRADED");
+  assertStringIncludes(gate.recon_reason, "inventory_ceiling_in_future_clock_skew");
+});
+
+Deno.test("FINDING 2 (clamp): an absurd skew is clamped and does NOT re-open the stale-ceiling hole", () => {
+  const NOW3 = "2026-06-15T00:00:00Z";
+  // Ceiling is 10 days stale. A malicious/corrupt 100-day skew would, if honoured,
+  // make minFreshMs = now - 100d and wrongly verify. Clamped to <= 1h, it still
+  // rejects the 10-day-stale ceiling.
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: "2026-06-05T00:00:00Z", // 10 days stale
+    nowIso: NOW3,
+    ceilingSkewSeconds: 100 * 86_400, // absurd 100-day skew
+  });
+  assertEquals(gate.recon_verified, false);
+  assertEquals(gate.recon_mode, "DEGRADED");
+  assertStringIncludes(gate.recon_reason, "inventory_ceiling_stale_does_not_cover_window");
+});
+
+Deno.test("FINDING 2 (clamp): a tiny ceiling skew within the clamp still verifies a just-finished sweep", () => {
+  const NOW3 = "2026-06-15T00:00:00Z";
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: "2026-06-14T23:45:00Z", // 15 min stale (within 1h clamp)
+    nowIso: NOW3,
+    ceilingSkewSeconds: 1800, // 30 min, under the clamp
+  });
+  assertEquals(gate.recon_verified, true);
+  assertEquals(gate.recon_mode, "OK");
+});
+
+// ════════════════════════════════════════════════════════════
+// SWEEP — every gate-feeding READ fails closed (throws) on a DB error, so a
+// transient read failure can NEVER be coerced into a passing/clean value that lets
+// recon_verified pass or suppresses an alert. One test per gate-feeding read site.
+// ════════════════════════════════════════════════════════════
+
+// D1: pipeline_items read (already threw pre-mission) — regression guard.
+Deno.test("SWEEP (D1): pipeline_items read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD1Seed(), { email_attachments: 0 }, {}, { pipeline_items: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: CLEAN_D1_AUDIT, nowIso: "2026-06-14T00:00:00Z" }),
+    Error,
+    "pipeline_items read failed",
+  );
+});
+
+// D1: emails (corroboration) read — error must not become an empty evidence set.
+Deno.test("SWEEP (D1): emails (corroboration) read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD1Seed(), { email_attachments: 0 }, {}, { emails: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: CLEAN_D1_AUDIT, nowIso: "2026-06-14T00:00:00Z" }),
+    Error,
+    "emails (D1 corroboration) read failed",
+  );
+});
+
+// D1: email_events_raw (event->post) read — error must not strip source_email_id links.
+Deno.test("SWEEP (D1): email_events_raw (event->post) read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD1Seed(), { email_attachments: 0 }, {}, { email_events_raw: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: CLEAN_D1_AUDIT, nowIso: "2026-06-14T00:00:00Z" }),
+    Error,
+    "email_events_raw (event->post) read failed",
+  );
+});
+
+// D1: makesafe_companies (trusted domains) read — error must not change the match surface.
+Deno.test("SWEEP (D1): makesafe_companies (trusted domains) read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD1Seed(), { email_attachments: 0 }, {}, { makesafe_companies: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: CLEAN_D1_AUDIT, nowIso: "2026-06-14T00:00:00Z" }),
+    Error,
+  );
+});
+
+// D1: prior sync_state (D2 signal) read — error must not drop a persisted D2 drop to null.
+Deno.test("SWEEP (D1): prior sync_state (D2 signal) read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD1Seed(), { email_attachments: 0 }, {}, { sync_state: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: CLEAN_D1_AUDIT, nowIso: "2026-06-14T00:00:00Z" }),
+    Error,
+    "sync_state (prior D2 signal) read failed",
+  );
+});
+
+// D2: emails (inventory) read (already threw pre-mission) — regression guard.
+function cleanD2Seed() {
+  return {
+    emails: [{ post_id: "post-A" }],
+    sync_state: [{
+      recon_d1_verified: true,
+      recon_inventory_floor: "1970-01-01T00:00:00Z",
+      recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+    }],
+  };
+}
+function cleanD2Deps(extra: Record<string, unknown> = {}) {
+  return {
+    getGraphToken: async () => "tok",
+    resolveGroupId: async (_t: string) => "group-1",
+    collectPosts: async (_t: string, _g: string, _s: string) => ({
+      posts: [{ id: "post-A" }],
+      pageCounts: { conversations: 1, threads: 1, posts: 1 },
+    }),
+    historical: true,
+    nowIso: NOW,
+    ...extra,
+  };
+}
+
+Deno.test("SWEEP (D2): emails (inventory) read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD2Seed(), { email_attachments: 0 }, {}, { emails: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcileFullInventory(client, sink, cleanD2Deps()),
+    Error,
+    "emails inventory read failed",
+  );
+});
+
+// D2: email_classifier_exclusions read — error must not corrupt the accounted set.
+Deno.test("SWEEP (D2): email_classifier_exclusions read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD2Seed(), { email_attachments: 0 }, {}, { email_classifier_exclusions: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcileFullInventory(client, sink, cleanD2Deps()),
+    Error,
+    "email_classifier_exclusions read failed",
+  );
+});
+
+// D2: email_events_raw (excluded events) read — error must not corrupt the accounted set.
+// (emails read is fine here; only email_events_raw errors — but email_events_raw is
+//  used for BOTH the excluded-events read AND the scan-log insert. The read fires
+//  first, so it is the throw we expect.)
+Deno.test("SWEEP (D2): email_events_raw (excluded events) read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD2Seed(), { email_attachments: 0 }, {}, { email_events_raw: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcileFullInventory(client, sink, cleanD2Deps()),
+    Error,
+    "email_events_raw (excluded events) read failed",
+  );
+});
+
+// D2: prior sync_state (D1 signal) read — error must not drop the persisted D1 signal/bounds.
+Deno.test("SWEEP (D2): prior sync_state (D1 signal) read error fails closed", async () => {
+  const { client } = makeReconClient(cleanD2Seed(), { email_attachments: 0 }, {}, { sync_state: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailReconcileFullInventory(client, sink, cleanD2Deps()),
+    Error,
+    "sync_state (prior D1 signal) read failed",
+  );
+});
+
+// ════════════════════════════════════════════════════════════
+// SWEEP (D4) — the canary alert path fails closed: an expectations-read error must
+// not be coerced into "no canary in flight" (which would suppress canary_missing).
+// ════════════════════════════════════════════════════════════
+Deno.test("SWEEP (D4): makesafe_canary_expectations read error fails closed", async () => {
+  const { client } = makeReconClient({ emails: [] }, {}, {}, { makesafe_canary_expectations: "boom" });
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailCanary(client, sink, { nowIso: "2026-06-14T02:00:00Z" }),
+    Error,
+    "makesafe_canary_expectations read failed",
+  );
+});
+
+Deno.test("SWEEP (D4): canary emails-hit read error fails closed", async () => {
+  const { client } = makeReconClient(
+    {
+      makesafe_canary_expectations: [
+        { marker: "CANARY-X", seeded_at: "2026-06-14T00:00:00Z", sla_minutes: 30, require_pdf: true, require_threaded_reply: true, resolved: false },
+      ],
+    },
+    {},
+    {},
+    { emails: "boom" },
+  );
+  const { sink } = makeSink();
+  await assertRejects(
+    () => makesafeEmailCanary(client, sink, { nowIso: "2026-06-14T02:00:00Z" }),
+    Error,
+    "emails (canary hit) read failed",
+  );
+});
+
+Deno.test("SWEEP (D4): seedCanaryExpectation upsert error fails closed", async () => {
+  const { client } = makeReconClient({}, {}, {}, {}, { makesafe_canary_expectations: "boom" });
+  await assertRejects(
+    () => seedCanaryExpectation(client, { marker: "CANARY-SEED" }),
+    Error,
+    "makesafe_canary_expectations seed upsert failed",
+  );
+});
+
+// ════════════════════════════════════════════════════════════
+// CONTROL — with NO injected errors, the same clean seeds DO verify + persist, so
+// the fail-closed throws above are caused by the injected error, not a regression.
+// ════════════════════════════════════════════════════════════
+Deno.test("CONTROL: clean D1 with no injected errors persists recon_verified=true", async () => {
+  const { client, writes } = makeReconClient(cleanD1Seed(), { email_attachments: 0 });
+  const { sink } = makeSink();
+  const res = await makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: CLEAN_D1_AUDIT, nowIso: "2026-06-14T00:00:00Z" });
+  assertEquals(res.gate.recon_verified, true);
+  const ss = writes.find((w) => w.table === "sync_state" && w.op === "upsert")!;
+  assertEquals(ss.row.recon_verified, true);
+});
+
+Deno.test("CONTROL: clean D2 with no injected errors persists a scan log + verdict", async () => {
+  const { client, writes } = makeReconClient(cleanD2Seed(), { email_attachments: 0 });
+  const { sink } = makeSink();
+  const r = await makesafeEmailReconcileFullInventory(client, sink, cleanD2Deps());
+  assertEquals(r.gate.recon_verified, true);
+  // scan log + sync_state verdict both written.
+  assert(writes.find((w) => w.table === "email_events_raw" && w.row?.change_type === "inventory_scan"));
+  assert(writes.find((w) => w.table === "sync_state" && w.op === "upsert"));
 });
