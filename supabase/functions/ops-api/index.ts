@@ -3747,6 +3747,10 @@ if (import.meta.main) serve(async (req: Request) => {
                   line_type: item.type ? item.type.toLowerCase() : 'other',
                   description: item.description || item.type || 'Extra item',
                   quantity: Number(item.quantity || 1),
+                  // M0 guard reads total_hours for HOURLY_TYPES lines; extras carry their
+                  // hours in `quantity` (searched-in make-safe/labour route here), so mirror
+                  // it to total_hours or the guard rejects every searched-in line as "zero hours".
+                  total_hours: Number(item.quantity ?? item.qty ?? item.hours ?? 0),
                   unit: item.unit || 'ea',
                   unit_rate: Number(item.rate || 0),
                   line_total_ex: amt,
