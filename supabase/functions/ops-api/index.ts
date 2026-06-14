@@ -2819,12 +2819,20 @@ if (import.meta.main) serve(async (req: Request) => {
             // Change 1 + Change 2: removed complete/completed/invoiced from exclusion list so
             // completed make-safes are searchable. Trades must find EVERY job by any field.
             const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
-            const { data: assignedRows } = await client.from('job_assignments')
-              .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
-              .eq('user_id', tradeUser.id)
-            const assignedJobs = (assignedRows || [])
-              .map((r: any) => r.jobs)
-              .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+
+            // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
+            // set — it polluted results (a gibberish q returned ~6 rows from the trade's
+            // assigned list with no text filter). When q is empty, keep assigned-jobs as the
+            // browse list (behaviour unchanged for the empty-query case).
+            let seedJobs: any[] = []
+            if (!q) {
+              const { data: assignedRows } = await client.from('job_assignments')
+                .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
+                .eq('user_id', tradeUser.id)
+              seedJobs = (assignedRows || [])
+                .map((r: any) => r.jobs)
+                .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+            }
 
             let jobQuery = client.from('jobs')
               .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
@@ -2837,11 +2845,40 @@ if (import.meta.main) serve(async (req: Request) => {
             }
             const { data: allJobs, error: allJobsErr } = await jobQuery
             if (allJobsErr) throw allJobsErr
+
+            // Merge: assigned-jobs-first when browsing (q empty), text-results only when searching (q present)
             const byId: Record<string, any> = {}
-            for (const j of [...assignedJobs, ...(allJobs || [])]) {
+            for (const j of [...seedJobs, ...(allJobs || [])]) {
               if (j?.id) byId[j.id] = j
             }
-            const jobs = await enrichTradeMakesafeJobs(client, Object.values(byId))
+
+            // M9 FIX A (ordering): when searching, sort by exact/prefix job_number match first,
+            // then by created_at desc so results are deterministic rather than insertion-order random.
+            let merged = Object.values(byId)
+            if (q) {
+              merged = merged.sort((a: any, b: any) => {
+                const aNum = String(a.job_number || '').toLowerCase()
+                const bNum = String(b.job_number || '').toLowerCase()
+                const aExact = aNum === q || aNum.startsWith(q) ? 0 : 1
+                const bExact = bNum === q || bNum.startsWith(q) ? 0 : 1
+                if (aExact !== bExact) return aExact - bExact
+                // Fallback: newest first
+                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+              })
+            }
+
+            // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
+            // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
+            const jobs = await enrichTradeMakesafeJobs(client, merged)
+            // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
+            for (const job of jobs) {
+              if (!job.external_ref && job.makesafe_details?.external_ref) {
+                job.external_ref = job.makesafe_details.external_ref
+              }
+              if (!job.external_ref) {
+                job.external_ref = job.metadata?.external_ref || null
+              }
+            }
             return json({ jobs })
           }
           case 'crew_charges_on_my_jobs': {
@@ -3881,11 +3918,20 @@ if (import.meta.main) serve(async (req: Request) => {
                   Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                 }))]
 
+                // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
+                // so the insurer/builder ref appears in the bill header, not just the line descriptions.
+                // _external_ref is already on jobMap entries (enriched above at Change 4 / L3464-3472).
+                const xeroExternalRefs = [...new Set(lineItems.map((l: any) => jobMap[l.job_id]?._external_ref).filter(Boolean))].join(', ')
+                const xeroInternalJobNums = [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', ')
+                const xeroReference = invoiceNumber
+                  + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
+                  + (xeroExternalRefs ? ' | ' + xeroExternalRefs : '')
+
                 const xeroPayload = {
                   Invoices: [{
                     Type: 'ACCPAY',
                     Contact: { ContactID: xeroContactId },
-                    Reference: invoiceNumber + ' | ' + [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', '),
+                    Reference: xeroReference,
                     Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
@@ -13768,6 +13814,38 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   const { data: rawAssignments, error } = await asnQuery.order('scheduled_date', { ascending: true })
 
   if (error) throw error
+
+  // M9 FIX A2: attach external_ref to each assignment's jobs object so the trade
+  // weekly job cards can display the insurer/builder ref. Batch-resolved: prefer
+  // makesafe_job_details.external_ref, fallback to jobs.metadata->>'external_ref'.
+  const asnJobIds: string[] = Array.from(new Set<string>((rawAssignments || []).map((a: any) => String(a.jobs?.id || '')).filter(Boolean)))
+  if (asnJobIds.length > 0) {
+    try {
+      const extRefByJobId: Record<string, string> = {}
+      const { data: msExtRefs } = await client.from('makesafe_job_details')
+        .select('job_id, external_ref')
+        .in('job_id', asnJobIds)
+      for (const r of (msExtRefs || [])) {
+        if (r.job_id && r.external_ref) extRefByJobId[r.job_id] = r.external_ref
+      }
+      // Fallback: jobs.metadata->>'external_ref' for jobs not in makesafe_job_details
+      const missingExtRefIds = asnJobIds.filter((id: string) => !extRefByJobId[id])
+      if (missingExtRefIds.length > 0) {
+        const { data: jobMeta } = await client.from('jobs').select('id, metadata').in('id', missingExtRefIds)
+        for (const jm of (jobMeta || [])) {
+          const mref = jm?.metadata?.external_ref
+          if (jm.id && mref) extRefByJobId[jm.id] = mref
+        }
+      }
+      for (const a of (rawAssignments || [])) {
+        if (a.jobs?.id && extRefByJobId[a.jobs.id]) {
+          a.jobs.external_ref = extRefByJobId[a.jobs.id]
+        }
+      }
+    } catch (extRefErr: any) {
+      console.log('[ops-api] my_hours external_ref enrichment skipped:', extRefErr?.message)
+    }
+  }
 
   // Layer B double-invoice guard: hide assignments already on a LIVE invoice.
   // An assignment whose referencing invoice is terminal (failed/ops-reject) or a
