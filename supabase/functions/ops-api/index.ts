@@ -178,27 +178,31 @@ function digitCore(s: string): string | null {
 }
 
 // Shared external_ref resolver: given a supabase client, a set of ref strings,
-// and an activeJobStatusExclude clause, returns a map of job_id → job row for
-// every job whose external_ref (in makesafe_job_details) normalises to any of the refs.
+// and an activeJobStatusExclude clause, returns:
+//   byId:  { [job.id]: job }  — every active job that matched any input ref
+//   byRef: { [normRef]: Job[] } — per normalised input ref, the list of distinct active
+//                                 jobs that matched (length > 1 means the ref is ambiguous)
 // Only queries makesafe_job_details filtered by the digit core — never full-table-scan.
 async function resolveJobsByExternalRef(
   client: any,
   refs: string[],
   activeJobStatusExclude: string,
   jobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
-): Promise<Record<string, any>> {
-  if (refs.length === 0) return {}
+): Promise<{ byId: Record<string, any>; byRef: Record<string, any[]> }> {
+  if (refs.length === 0) return { byId: {}, byRef: {} }
   // Build a list of digit cores to filter makesafe_job_details efficiently.
   const cores = [...new Set(refs.map(digitCore).filter(Boolean))] as string[]
-  if (cores.length === 0) return {}
+  if (cores.length === 0) return { byId: {}, byRef: {} }
 
   // Query makesafe_job_details with ilike on each digit core (OR-joined).
   // We do one query per core to stay within PostgREST .or() constraints, then deduplicate.
+  // limit(200): table is ~125 rows; 200 ensures no real match is truncated when many refs
+  // share the same digit core.
   const detailFetches = cores.map(core =>
     client.from('makesafe_job_details')
       .select('job_id, external_ref')
       .ilike('external_ref', `%${core}%`)
-      .limit(50)
+      .limit(200)
   )
   const detailResults = await Promise.all(detailFetches)
   const allDetails: { job_id: string; external_ref: string }[] = detailResults.flatMap((r: any) => r.data || [])
@@ -214,7 +218,7 @@ async function resolveJobsByExternalRef(
       .map(d => d.job_id)
       .filter(Boolean)
   )]
-  if (matchedJobIds.length === 0) return {}
+  if (matchedJobIds.length === 0) return { byId: {}, byRef: {} }
 
   // Fetch the actual job rows (filtered to active statuses).
   const { data: jobRows, error: jobErr } = await client.from('jobs')
@@ -223,15 +227,26 @@ async function resolveJobsByExternalRef(
     .in('id', matchedJobIds)
   if (jobErr) throw jobErr
 
-  // Return a map of job_id → job, also keyed by the matched external_ref for convenience.
-  const result: Record<string, any> = {}
+  // Build byId (all matched jobs) and byRef (jobs per normalised input ref).
+  const byId: Record<string, any> = {}
+  const byRef: Record<string, any[]> = {}
   for (const job of (jobRows || [])) {
-    result[job.id] = job
-    // Also index by each external_ref that maps to this job
+    byId[job.id] = job
+    // Find which input normRef(s) this job satisfies.
     const detail = allDetails.find(d => d.job_id === job.id)
-    if (detail?.external_ref) result[normRef(detail.external_ref)] = job
+    if (detail?.external_ref) {
+      const detailNorm = normRef(detail.external_ref)
+      // Map back to every input ref whose normRef matches or overlaps.
+      for (const ref of refs) {
+        const refNorm = normRef(ref)
+        if (detailNorm === refNorm || detailNorm.includes(refNorm) || refNorm.includes(detailNorm)) {
+          if (!byRef[refNorm]) byRef[refNorm] = []
+          if (!byRef[refNorm].some((j: any) => j.id === job.id)) byRef[refNorm].push(job)
+        }
+      }
+    }
   }
-  return result
+  return { byId, byRef }
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2936,8 +2951,8 @@ if (import.meta.main) serve(async (req: Request) => {
                 ACTIVE_JOB_STATUS_EXCLUDE,
                 'id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at'
               )
-              for (const [jobId, job] of Object.entries(extRefMatches)) {
-                // resolveJobsByExternalRef also keys by normRef(external_ref) — skip non-UUID keys
+              // Merge all matched jobs by UUID — search returns multiple matches correctly.
+              for (const [jobId, job] of Object.entries(extRefMatches.byId)) {
                 if (/^[0-9a-f-]{36}$/i.test(jobId)) byId[jobId] = job
               }
             }
@@ -3677,10 +3692,11 @@ if (import.meta.main) serve(async (req: Request) => {
               // were not resolved via exact job_id or job_number lookup above.
               // Trades submit "MLB25248" (no hyphen); canonical store is "MLB-25248".
               // We only attempt refs that: are not a UUID, not SWMS-prefixed, and are not
-              // already in jobByNumber. resolveJobsByExternalRef returns jobs keyed by
-              // both job.id AND normRef(external_ref), so we look up each input ref by
-              // normRef(ref) and key jobByNumber under the original input string so the
-              // existing resolvedJob lookup at the item loop below finds the job.
+              // already in jobByNumber.
+              // SAFETY: if a ref normalises to the same normRef as 2+ distinct active jobs
+              // (ambiguous), we leave it unresolved so the existing "Manual invoice job is
+              // not active or does not exist" error fires — never silently bill the wrong job.
+              // Exactly one match → resolves normally (MLB25248 happy path).
               {
                 const unresolvedExternalRefs = requestedJobNumbers.filter(ref => {
                   if (/^[0-9a-f-]{36}$/i.test(ref)) return false   // UUID — handled by jobById path
@@ -3688,7 +3704,6 @@ if (import.meta.main) serve(async (req: Request) => {
                   return !jobByNumber[ref]                           // not already resolved
                 })
                 if (unresolvedExternalRefs.length > 0) {
-                  // resolveJobsByExternalRef returns { [job.id]: job, [normRef(external_ref)]: job }
                   const extRefMap = await resolveJobsByExternalRef(
                     client,
                     unresolvedExternalRefs,
@@ -3696,13 +3711,17 @@ if (import.meta.main) serve(async (req: Request) => {
                     activeJobSelect
                   )
                   for (const ref of unresolvedExternalRefs) {
-                    // Look up by normRef(ref) — the helper keys by normRef(external_ref)
-                    const job = extRefMap[normRef(ref)]
-                    if (job) {
+                    // byRef[normRef(ref)] is the list of distinct active jobs that matched.
+                    // Only resolve when EXACTLY ONE match — 0 or 2+ stays unresolved (fail-safe).
+                    const matches = extRefMap.byRef[normRef(ref)] || []
+                    if (matches.length === 1) {
+                      const job = matches[0]
                       jobById[job.id] = job
                       // Key under the original input ref so resolvedJob lookup below finds it
                       jobByNumber[ref] = job
                     }
+                    // 0 matches → not found (error fires downstream)
+                    // 2+ matches → ambiguous ref, refuse silently (error fires downstream)
                   }
                 }
               }
