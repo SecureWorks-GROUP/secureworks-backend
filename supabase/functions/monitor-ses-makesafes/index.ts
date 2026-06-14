@@ -969,6 +969,243 @@ async function refreshSyncState(
 }
 
 // ════════════════════════════════════════════════════════════
+// FULL HISTORICAL BACKFILL — one-shot, gated, manual (mode=backfill_full)
+// ════════════════════════════════════════════════════════════
+// Mission: makesafe-live-truth-2026-06-14 (the gated Phase-2 step the M7 first-run
+// TODO promised). This is NOT the regular */5 poll. It is invoked explicitly with
+// {mode:"backfill_full"} (POST body) or ?backfill=full, runs ONCE, and:
+//
+//   1. Traverses the ENTIRE ses@ group history (epoch -> backfill start time) with
+//      @odata.nextLink exhaustion at EVERY level — reusing collectPosts, which
+//      already drains every page. The recent-only lookback of the poll is REPLACED
+//      here by an epoch lower bound so nothing old is filtered out.
+//   2. Idempotently ingests through the SAME persistPost + processAttachments path,
+//      so every fail-closed + durable-attachment-record invariant holds, and a
+//      re-run never double-inserts (ON CONFLICT(post_id) / (email_id,graph_attach_id)
+//      / (mailbox,ref)). Excluded posts ALWAYS write an audit row (auditExclusion).
+//   3. Establishes the true coverage FLOOR (recon_inventory_floor = earliest
+//      ingested receivedDateTime) and CEILING (recon_inventory_ceiling = now), so
+//      the verified gate (combineVerifiedGate) can reflect true full-history
+//      coverage. ONLY this full pass is allowed to set the historical floor.
+//   4. Commits the live cursor (mail_sync_cursors.last_completed_max) at the END so
+//      the */5 poll takes over with NO GAP — set to the backfill START time, so the
+//      poll's overlapping (>= start - overlap) window re-scans EVERYTHING that could
+//      have arrived during the (long) backfill run. Backfill covered <= start..now
+//      already, and the poll re-covers >= start, so the two windows OVERLAP — never
+//      a gap.
+//
+// FAIL CLOSED + RESUMABLE: the floor, the ceiling, and the live cursor are written
+// ONLY after the full pass completes WITHOUT throwing. A partial/failed backfill
+// (any persist/attachment/traversal throw) leaves NO floor and NO live cursor — so
+// recon_verified can NEVER read true over un-ingested history. A re-run after a
+// partial failure re-traverses from epoch and idempotently re-ingests; already-
+// ingested posts upsert as no-ops, un-ingested ones are filled in, and only THEN is
+// the floor/cursor committed. The advisory lock prevents it running concurrently
+// with the poll (which would race the same cursor/rows).
+//
+// COST: it is a long run. Progress is logged (pages, posts, attachments). Posts are
+// processed in bounded batches with per-batch progress; floor/cursor are NOT
+// advanced until the WHOLE intended scope (epoch..start) is covered, so a batched
+// run can never leave a misleading floor mid-way.
+const BACKFILL_BATCH_SIZE = 200;
+
+async function runBackfillFull(
+  // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+  sb: any,
+  // Injected so tests can stub the network/traversal layer without import.meta.main
+  // binding a port. Production passes the real implementations.
+  deps: {
+    getGraphToken: () => Promise<string>;
+    resolveGroupId: (token: string) => Promise<string>;
+    loadCompanyPatterns: (
+      // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+      sb: any,
+    ) => Promise<LoadedCompanies>;
+    collectPosts: (
+      token: string,
+      groupId: string,
+      sinceIso: string,
+    ) => Promise<{
+      posts: GraphPost[];
+      pageCounts: { conversations: number; threads: number; posts: number };
+    }>;
+    persistPost: (
+      // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+      sb: any,
+      token: string,
+      groupId: string,
+      post: GraphPost,
+      cls: ReturnType<typeof classifyPost>,
+    ) => Promise<number>;
+    auditExclusion: (
+      // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+      sb: any,
+      post: GraphPost,
+      reason: string,
+    ) => Promise<void>;
+    // Wall clock, injectable for deterministic tests.
+    nowIso?: string;
+  },
+): Promise<{
+  success: boolean;
+  group_id: string;
+  posts_seen: number;
+  included: number;
+  excluded: number;
+  unresolved_attachments: number;
+  page_counts: { conversations: number; threads: number; posts: number };
+  inventory_floor: string | null;
+  inventory_ceiling: string;
+  committed_cursor: string;
+  timestamp: string;
+}> {
+  // Capture the backfill START instant up front. The live cursor is committed to
+  // this value at the end, so the */5 poll re-scans (start - overlap)..now and
+  // cannot skip anything that arrived DURING the backfill run.
+  const backfillStartIso = deps.nowIso || new Date().toISOString();
+
+  const token = await deps.getGraphToken();
+  const groupId = await deps.resolveGroupId(token);
+  // Same data-driven classifier inputs as the poll (sender patterns + ref prefixes),
+  // so historical posts are classified identically to live ones.
+  const { patterns: companies, refPrefixes } = await deps.loadCompanyPatterns(sb);
+
+  // Epoch lower bound — the WHOLE history. collectPosts drains every conversation/
+  // thread/post page via @odata.nextLink; the >= epoch filter keeps everything.
+  const sinceIso = new Date(0).toISOString();
+  console.log(
+    `[monitor-ses][backfill] FULL historical backfill start group=${groupId} ` +
+      `since>=${sinceIso} (epoch) start=${backfillStartIso}`,
+  );
+
+  const { posts, pageCounts } = await deps.collectPosts(token, groupId, sinceIso);
+  console.log(
+    `[monitor-ses][backfill] traversal drained pages conv=${pageCounts.conversations} ` +
+      `thread=${pageCounts.threads} post=${pageCounts.posts}; ${posts.length} posts total`,
+  );
+
+  let included = 0;
+  let excluded = 0;
+  let totalUnresolved = 0;
+  // The earliest receivedDateTime actually INGESTED (included posts) — this becomes
+  // the true coverage floor. Excluded posts are accounted by an audit row but do not
+  // lower the ingested floor (D2 treats exclusions as terminal/accounted).
+  let earliestReceived: string | null = null;
+
+  // Bounded batches: process in chunks with per-batch progress logging. Any throw
+  // in persistPost / auditExclusion propagates (fail closed) BEFORE the floor/cursor
+  // are written below, so a partial pass never advances coverage.
+  for (let i = 0; i < posts.length; i += BACKFILL_BATCH_SIZE) {
+    const batch = posts.slice(i, i + BACKFILL_BATCH_SIZE);
+    for (const post of batch) {
+      const cls = classifyPost(post, companies, refPrefixes);
+      if (!cls.include) {
+        await deps.auditExclusion(sb, post, cls.reason);
+        excluded++;
+        continue;
+      }
+      const unresolved = await deps.persistPost(sb, token, groupId, post, cls);
+      totalUnresolved += unresolved;
+      included++;
+      const ts = post.receivedDateTime || post.createdDateTime || null;
+      if (ts && (!earliestReceived || ts < earliestReceived)) earliestReceived = ts;
+    }
+    console.log(
+      `[monitor-ses][backfill] progress ${Math.min(i + batch.length, posts.length)}/${posts.length} ` +
+        `posts (included=${included} excluded=${excluded} unresolved_att=${totalUnresolved})`,
+    );
+  }
+
+  // ── FULL PASS COMPLETED WITHOUT THROWING. Only now do we commit coverage. ──
+  // The ceiling is the backfill start instant (everything up to here is covered);
+  // the floor is the earliest ingested receivedDateTime (true all-history floor).
+  const ceilingIso = backfillStartIso;
+  const floorIso = earliestReceived ?? backfillStartIso; // empty group -> floor=ceiling
+
+  // 1) Establish/extend the coverage FLOOR + CEILING on sync_state. Only the full
+  //    historical backfill writes the historical floor (the recurring D2 sweep only
+  //    moves the ceiling). We do NOT lower an already-earlier floor: if a prior
+  //    backfill set an earlier floor, keep it (MIN), so re-running on a now-larger
+  //    history never regresses coverage.
+  const { data: prior, error: priorErr } = await sb.from("sync_state")
+    .select("recon_inventory_floor, recon_inventory_ceiling")
+    .eq("mailbox", MAILBOX)
+    .maybeSingle();
+  if (priorErr) {
+    throw new Error(`backfill sync_state prior read failed: ${priorErr.message}`);
+  }
+  const priorFloor = (prior as { recon_inventory_floor?: string } | null)?.recon_inventory_floor ?? null;
+  const priorCeiling = (prior as { recon_inventory_ceiling?: string } | null)?.recon_inventory_ceiling ?? null;
+  // Floor: the EARLIEST of (prior floor, this run's floor) — coverage only widens.
+  const newFloor = priorFloor && priorFloor < floorIso ? priorFloor : floorIso;
+  // Ceiling: the LATEST of (prior ceiling, this run's ceiling) — never regress.
+  const newCeiling = priorCeiling && priorCeiling > ceilingIso ? priorCeiling : ceilingIso;
+
+  const nowStamp = new Date().toISOString();
+  const { error: ssErr } = await sb.from("sync_state").upsert({
+    mailbox: MAILBOX,
+    recon_inventory_floor: newFloor,
+    recon_inventory_ceiling: newCeiling,
+    last_full_resync_at: nowStamp,
+    updated_at: nowStamp,
+  }, { onConflict: "mailbox" });
+  if (ssErr) {
+    // FAIL CLOSED: if the floor/ceiling cannot be persisted we must NOT proceed to
+    // commit the live cursor — otherwise the poll would take over while coverage was
+    // never recorded, and recon_verified could later read true over a floor that was
+    // never written. Throw so the run fails and is re-run.
+    throw new Error(`backfill floor/ceiling persist failed: ${ssErr.message}`);
+  }
+
+  // 2) Commit the live cursor LAST, at the backfill START instant. The poll's
+  //    overlapping (>= last_completed_max - overlap) window then re-scans from
+  //    (start - overlap) forward, covering anything that arrived during the run with
+  //    NO gap between backfill end and first poll. Done last so a floor/ceiling
+  //    write failure above never leaves a live cursor past un-ingested history.
+  const overlapSeconds = await (async () => {
+    const { data: cur } = await sb.from("mail_sync_cursors")
+      .select("overlap_seconds")
+      .eq("mailbox", MAILBOX)
+      .maybeSingle();
+    return (cur as { overlap_seconds?: number } | null)?.overlap_seconds ?? 900;
+  })();
+  const { error: curErr } = await sb.from("mail_sync_cursors").upsert({
+    mailbox: MAILBOX,
+    last_completed_max: backfillStartIso,
+    overlap_seconds: overlapSeconds,
+    last_full_resync_at: nowStamp,
+    updated_at: nowStamp,
+  }, { onConflict: "mailbox" });
+  if (curErr) {
+    throw new Error(`backfill live-cursor commit failed: ${curErr.message}`);
+  }
+
+  // 3) Refresh sync_state mode (DEGRADED while any attachment is unresolved). Done
+  //    after coverage is committed; surfaces the attachment backlog for the gate.
+  await refreshSyncState(sb, true, null);
+
+  console.log(
+    `[monitor-ses][backfill] DONE included=${included} excluded=${excluded} ` +
+      `unresolved_att=${totalUnresolved} floor=${newFloor} ceiling=${newCeiling} ` +
+      `cursor=${backfillStartIso}`,
+  );
+
+  return {
+    success: true,
+    group_id: groupId,
+    posts_seen: posts.length,
+    included,
+    excluded,
+    unresolved_attachments: totalUnresolved,
+    page_counts: pageCounts,
+    inventory_floor: newFloor,
+    inventory_ceiling: newCeiling,
+    committed_cursor: backfillStartIso,
+    timestamp: nowStamp,
+  };
+}
+
+// ════════════════════════════════════════════════════════════
 // Main handler
 // ════════════════════════════════════════════════════════════
 // Exported as a named handler and only bound to Deno.serve when this module is
@@ -1002,6 +1239,26 @@ async function handler(req: Request): Promise<Response> {
       status: 401,
       headers: { ...CORS, "Content-Type": "application/json" },
     });
+  }
+
+  // ── Mode detection: regular poll (default) vs the gated FULL HISTORICAL backfill.
+  // The backfill is EXPLICIT and manual: {mode:"backfill_full"} in the POST body OR
+  // ?backfill=full in the query string. The */5 cron trigger posts {} (no mode), so
+  // it always runs the regular poll — the backfill is NEVER the scheduled path. Both
+  // modes are behind the SAME auth gate above and the SAME advisory lock below.
+  let backfillFull = false;
+  try {
+    const u = new URL(req.url);
+    if ((u.searchParams.get("backfill") || "").toLowerCase() === "full") backfillFull = true;
+  } catch (_) { /* non-URL request line; ignore */ }
+  if (!backfillFull && req.method === "POST") {
+    try {
+      const raw = await req.text();
+      if (raw) {
+        const body = JSON.parse(raw);
+        if (body && typeof body === "object" && body.mode === "backfill_full") backfillFull = true;
+      }
+    } catch (_) { /* empty / non-JSON body (cron posts {}); treat as regular poll */ }
   }
 
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -1038,6 +1295,26 @@ async function handler(req: Request): Promise<Response> {
   }
 
   try {
+    // ── GATED FULL HISTORICAL BACKFILL branch (mode=backfill_full). Runs UNDER the
+    // same advisory lock as the poll (so it never races the */5 cron), traverses ALL
+    // history, ingests idempotently, then sets the coverage floor/ceiling + commits
+    // the live cursor LAST (fail-closed: see runBackfillFull). On any throw the
+    // catch below leaves NO floor and NO cursor, so a partial backfill cannot let
+    // recon_verified read true over un-ingested history.
+    if (backfillFull) {
+      const result = await runBackfillFull(sb, {
+        getGraphToken,
+        resolveGroupId,
+        loadCompanyPatterns,
+        collectPosts,
+        persistPost,
+        auditExclusion,
+      });
+      return new Response(JSON.stringify({ ...result, mode: "backfill_full" }), {
+        headers: { ...CORS, "Content-Type": "application/json" },
+      });
+    }
+
     const token = await getGraphToken();
     const groupId = await resolveGroupId(token);
     // B1 — patterns drive sender matching; refPrefixes (data-driven, union of the
@@ -1067,15 +1344,15 @@ async function handler(req: Request): Promise<Response> {
     // but we must NOT commit a live watermark off that partial window — doing so
     // would permanently skip anything older than the lookback. So the first run is
     // an explicit INITIAL BACKFILL: it ingests the recent window (idempotently) and
-    // does NOT advance the cursor. The full historical backfill is its own gated
-    // Phase-2 step (TODO below) that ingests the entire group history, after which
-    // the live cursor is established.
-    //
-    // TODO(Phase 2): run the full historical backfill as a separate gated step
-    //   (traverse the whole group via D2-style exhaustion, ingest all posts), THEN
-    //   write the first live cursor. Until that step runs, every poll re-scans the
-    //   recent lookback window (idempotent upserts make this safe but not complete
-    //   for old mail). Do not rely on this function alone for historical completeness.
+    // does NOT advance the cursor. The FULL historical backfill is now implemented
+    // as the gated, one-shot {mode:"backfill_full"} path above (runBackfillFull):
+    // it traverses the entire group history from epoch, ingests via this SAME
+    // persistPost path, sets recon_inventory_floor to all-history, and ESTABLISHES
+    // the first live cursor (at the backfill start instant) so this poll then takes
+    // over with no gap. Until that gated backfill has been run once, this poll keeps
+    // re-scanning the recent lookback window (idempotent upserts make that safe but
+    // NOT complete for old mail) and never advances a live cursor — so a poll-only
+    // deployment can never make the verified gate read true over un-ingested history.
     const initialBackfill = !lastMax;
     const baseMs = lastMax
       ? Date.parse(lastMax)
@@ -1206,6 +1483,7 @@ export {
   persistPost as _persistPost,
   processAttachments as _processAttachments,
   resolveGroupId as _resolveGroupId,
+  runBackfillFull as _runBackfillFull,
   senderMatchesPattern as _senderMatchesPattern,
   sha256Hex as _sha256Hex,
 };
