@@ -2819,12 +2819,20 @@ if (import.meta.main) serve(async (req: Request) => {
             // Change 1 + Change 2: removed complete/completed/invoiced from exclusion list so
             // completed make-safes are searchable. Trades must find EVERY job by any field.
             const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
-            const { data: assignedRows } = await client.from('job_assignments')
-              .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
-              .eq('user_id', tradeUser.id)
-            const assignedJobs = (assignedRows || [])
-              .map((r: any) => r.jobs)
-              .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+
+            // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
+            // set — it polluted results (a gibberish q returned ~6 rows from the trade's
+            // assigned list with no text filter). When q is empty, keep assigned-jobs as the
+            // browse list (behaviour unchanged for the empty-query case).
+            let seedJobs: any[] = []
+            if (!q) {
+              const { data: assignedRows } = await client.from('job_assignments')
+                .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
+                .eq('user_id', tradeUser.id)
+              seedJobs = (assignedRows || [])
+                .map((r: any) => r.jobs)
+                .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
+            }
 
             let jobQuery = client.from('jobs')
               .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
@@ -2837,11 +2845,40 @@ if (import.meta.main) serve(async (req: Request) => {
             }
             const { data: allJobs, error: allJobsErr } = await jobQuery
             if (allJobsErr) throw allJobsErr
+
+            // Merge: assigned-jobs-first when browsing (q empty), text-results only when searching (q present)
             const byId: Record<string, any> = {}
-            for (const j of [...assignedJobs, ...(allJobs || [])]) {
+            for (const j of [...seedJobs, ...(allJobs || [])]) {
               if (j?.id) byId[j.id] = j
             }
-            const jobs = await enrichTradeMakesafeJobs(client, Object.values(byId))
+
+            // M9 FIX A (ordering): when searching, sort by exact/prefix job_number match first,
+            // then by created_at desc so results are deterministic rather than insertion-order random.
+            let merged = Object.values(byId)
+            if (q) {
+              merged = merged.sort((a: any, b: any) => {
+                const aNum = String(a.job_number || '').toLowerCase()
+                const bNum = String(b.job_number || '').toLowerCase()
+                const aExact = aNum === q || aNum.startsWith(q) ? 0 : 1
+                const bExact = bNum === q || bNum.startsWith(q) ? 0 : 1
+                if (aExact !== bExact) return aExact - bExact
+                // Fallback: newest first
+                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+              })
+            }
+
+            // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
+            // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
+            const jobs = await enrichTradeMakesafeJobs(client, merged)
+            // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
+            for (const job of jobs) {
+              if (!job.external_ref && job.makesafe_details?.external_ref) {
+                job.external_ref = job.makesafe_details.external_ref
+              }
+              if (!job.external_ref) {
+                job.external_ref = job.metadata?.external_ref || null
+              }
+            }
             return json({ jobs })
           }
           case 'crew_charges_on_my_jobs': {
