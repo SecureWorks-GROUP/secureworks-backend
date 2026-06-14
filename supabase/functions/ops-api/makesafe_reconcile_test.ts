@@ -493,6 +493,153 @@ Deno.test("B2+B3: both checks clean AND floor established AND no D2 drop -> veri
   assertEquals(gate.recon_mode, "OK");
 });
 
+// ════════════════════════════════════════════════════════════
+// B3 (STILL-OPEN fix) — recon_inventory_ceiling is now ENFORCED
+// Pre-fix: combineVerifiedGate checked only the FLOOR; recon_verified could be set
+// with a null OR stale ceiling, so a recent un-inventoried tail evaded detection.
+// These pin nowIso so they are deterministic (not wall-clock dependent).
+// ════════════════════════════════════════════════════════════
+const NOW = "2026-06-15T00:00:00Z";
+
+Deno.test("B3: a NULL ceiling -> NOT verified (ceiling now enforced, not just floor)", () => {
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: null,           // computed-but-never-set; previously slipped through
+    nowIso: NOW,
+    coverageWindowDays: 7,
+  });
+  assertEquals(gate.recon_verified, false);
+  assertEquals(gate.recon_mode, "DEGRADED");
+  assert(gate.recon_reason.includes("inventory_ceiling_unestablished"));
+});
+
+Deno.test("B3: a STALE ceiling (older than the window) -> NOT verified", () => {
+  // Ceiling is 60 days before NOW but the window only covers 7 days -> the recent
+  // 53-day tail is un-inventoried, so verified must be blocked.
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: "2026-04-16T00:00:00Z", // ~60 days before NOW
+    nowIso: NOW,
+    coverageWindowDays: 7,
+  });
+  assertEquals(gate.recon_verified, false);
+  assertEquals(gate.recon_mode, "DEGRADED");
+  assert(gate.recon_reason.includes("inventory_ceiling_stale_does_not_cover_window"));
+});
+
+Deno.test("B3: a NULL floor -> NOT verified (floor still required alongside ceiling)", () => {
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: null,
+    inventoryCeiling: NOW,            // fresh ceiling, but no floor
+    nowIso: NOW,
+    coverageWindowDays: 7,
+  });
+  assertEquals(gate.recon_verified, false);
+  assert(gate.recon_reason.includes("inventory_floor_unestablished"));
+});
+
+Deno.test("B3: floor + FRESH ceiling + both checks clean + no attachment backlog -> verified", () => {
+  // The only path to verified: floor established, ceiling present AND covering the
+  // window, the other check clean, no D2 drop, and zero attachment backlog.
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: "2026-06-14T12:00:00Z", // < 7 days before NOW
+    nowIso: NOW,
+    coverageWindowDays: 7,
+    unresolvedAttachments: 0,
+  });
+  assertEquals(gate.recon_verified, true);
+  assertEquals(gate.recon_mode, "OK");
+});
+
+// ════════════════════════════════════════════════════════════
+// ATTACHMENT-GATE (NEW MAJOR) — a non-zero attachment backlog blocks recon_verified
+// on EITHER run, even when D1+D2 drift is otherwise clean. Pre-fix the D2 path
+// passed 0 to summarizeDrift, so D2 could verify with attachments pending/failed.
+// ════════════════════════════════════════════════════════════
+Deno.test("attachment-gate: backlog > 0 blocks verified even with clean D1+D2 drift", () => {
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: "2026-06-14T12:00:00Z",
+    nowIso: NOW,
+    coverageWindowDays: 7,
+    unresolvedAttachments: 3,          // pending/failed/needs_review backlog
+  });
+  assertEquals(gate.recon_verified, false);
+  assertEquals(gate.recon_mode, "DEGRADED");
+  assert(gate.recon_reason.includes("unresolved_attachments=3"));
+});
+
+Deno.test("attachment-gate: the D2 ACTION blocks verified when a backlog exists (was passing 0)", async () => {
+  // D2 sees full coverage (no missing posts) AND D1 last ran clean within bounds,
+  // so the ONLY thing that can block verified is the live attachment backlog. This
+  // proves the D2 path now folds the real backlog in (instead of the hard-coded 0).
+  const { client, writes } = makeReconClient({
+    emails: [{ post_id: "post-A" }],
+    sync_state: [{
+      recon_d1_verified: true,
+      recon_inventory_floor: "1970-01-01T00:00:00Z",
+      recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+    }],
+  }, { email_attachments: 2 }); // 2 unresolved attachments for this mailbox
+  const { sink } = makeSink();
+  const deps = {
+    getGraphToken: async () => "tok",
+    resolveGroupId: async (_t: string) => "group-1",
+    // Live traversal == store -> zero missing posts (D2 drift clean).
+    collectPosts: async (_t: string, _g: string, _s: string) => ({
+      posts: [{ id: "post-A" }],
+      pageCounts: { conversations: 1, threads: 1, posts: 1 },
+    }),
+    historical: true,            // establishes the floor so only the backlog blocks
+    nowIso: NOW,
+  };
+  const r = await makesafeEmailReconcileFullInventory(client, sink, deps);
+  assertEquals(r.missing_post_ids.length, 0);       // D2 drift is clean
+  assertEquals(r.gate.recon_verified, false);       // but verified is BLOCKED
+  assert(r.gate.recon_reason.includes("unresolved_attachments=2"));
+  // sync_state persisted the blocked gate.
+  const ss = writes.find((w) => w.table === "sync_state" && w.op === "upsert")!;
+  assertEquals(ss.row.recon_verified, false);
+});
+
+Deno.test("attachment-gate: the D2 ACTION verifies when the backlog is zero (control)", async () => {
+  // Same as above but with zero backlog -> verified can be claimed (proves the
+  // backlog is the ONLY blocker, not an unrelated regression).
+  const { client } = makeReconClient({
+    emails: [{ post_id: "post-A" }],
+    sync_state: [{
+      recon_d1_verified: true,
+      recon_inventory_floor: "1970-01-01T00:00:00Z",
+      recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+    }],
+  }, { email_attachments: 0 });
+  const { sink } = makeSink();
+  const deps = {
+    getGraphToken: async () => "tok",
+    resolveGroupId: async (_t: string) => "group-1",
+    collectPosts: async (_t: string, _g: string, _s: string) => ({
+      posts: [{ id: "post-A" }],
+      pageCounts: { conversations: 1, threads: 1, posts: 1 },
+    }),
+    historical: true,
+    nowIso: NOW,
+  };
+  const r = await makesafeEmailReconcileFullInventory(client, sink, deps);
+  assertEquals(r.missing_post_ids.length, 0);
+  assertEquals(r.gate.recon_verified, true);
+});
+
 Deno.test("B2: a D1 run persists recon_d1_* + combined gate but NEVER writes recon_d2_*", async () => {
   const { client, writes } = makeReconClient({
     pipeline_items: [],

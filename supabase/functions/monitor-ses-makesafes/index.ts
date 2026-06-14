@@ -81,6 +81,15 @@ interface CompanyPattern {
   pattern: string;
 }
 
+// B1 — the loaded company set, plus the data-driven ref-prefix set derived from
+// every active company's parsing_rules.ref_prefixes (unioned with the static
+// floor). The handler threads `refPrefixes` into classifyPost so a company-defined
+// ref family is recognised without a code change.
+interface LoadedCompanies {
+  patterns: CompanyPattern[];
+  refPrefixes: string[];
+}
+
 // ════════════════════════════════════════════════════════════
 // Exhaustive paginated GET — follow @odata.nextLink until drained.
 // Returns all collected values + the page count (for logging / page_meta).
@@ -199,11 +208,47 @@ async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
 // Returns {include, reason, ref, company}. Never silently drops — caller writes
 // an exclusion audit row when include=false.
 // ════════════════════════════════════════════════════════════
-// B1 — SUBJECT_REF now allows a SPACE (not just an optional dash) between the
-// prefix and the digits, so "AJBR 67134" is captured as a ref at classify time
-// instead of falling through to ref=null (which previously meant no
-// pipeline_items row -> D1 blind -> a real dropped intake evading BOTH checks).
-const SUBJECT_REF = /\b(MLB[\s-]?\d+|AJBR[\s-]?\d+)\b/i;
+// B1 — the make-safe ref-prefix set is DATA-DRIVEN from makesafe_companies (the
+// same source the classifier uses for sender patterns), so a new builder ref
+// format added to a company's parsing_rules.ref_prefixes cannot silently
+// reintroduce the dropped-ref bug. The static set below is only the floor — the
+// known historical families that MUST always be recognised even if a company row
+// is missing/misconfigured.
+//
+// DEFAULT_REF_PREFIXES is the static floor. It covers the known make-safe ref
+// families:
+//   MLB   — MLB-#####
+//   AJBR  — AJBR-##### / AJBR #####
+//   MS    — MS191190 (compact, no separator: a REAL historically-dropped WO; the
+//           bare-numeric fallback cannot catch it because the digits are glued to
+//           the "S", giving no \b before the digit run).
+// TODO(B1): this floor MUST track the make-safe families in makesafe_companies.
+// The live set is the UNION of this floor and every company's
+// parsing_rules.ref_prefixes (see loadCompanyPatterns / extractRefPrefixes). Add
+// new families to makesafe_companies.parsing_rules.ref_prefixes, NOT here.
+const DEFAULT_REF_PREFIXES = ["MLB", "AJBR", "MS"] as const;
+
+// Escape a prefix for safe inclusion in a RegExp (prefixes are short ALPHA tokens
+// today, but escaping keeps this robust if a data-driven prefix carries metachars).
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// B1 — build the subject/body ref matcher from a prefix set. Each prefix matches
+// "<PREFIX>[\s-]?<digits>" so dashed ("AJBR-67134"), spaced ("AJBR 67134"), and
+// COMPACT ("MS191190") forms are all captured. Longest prefix first so e.g. a
+// prefix that is a substring of another never short-circuits the wrong family.
+function buildSubjectRef(prefixes: readonly string[]): RegExp {
+  const sorted = [...new Set(prefixes.map((p) => p.toUpperCase()))]
+    .filter((p) => p.length > 0)
+    .sort((a, b) => b.length - a.length);
+  const alt = sorted.map((p) => `${escapeRegExp(p)}[\\s-]?\\d+`).join("|");
+  return new RegExp(`\\b(${alt})\\b`, "i");
+}
+
+// The default (floor) matcher — used wherever a data-driven prefix set is not
+// threaded through (pure helpers, tests). It already covers MLB/AJBR/MS.
+const SUBJECT_REF = buildSubjectRef(DEFAULT_REF_PREFIXES);
 const SUBJECT_KEYWORD = /make\s*safe|work\s*order/i;
 // B1 — bare-numeric fallback. A make-safe subject like "Make Safe 67005" carries
 // no prefix; the >=5-digit core IS the ref (consistent with normaliseRef + the
@@ -211,34 +256,50 @@ const SUBJECT_KEYWORD = /make\s*safe|work\s*order/i;
 // ingested make-safe post gets a non-null ref.
 const BARE_NUMERIC_REF = /\b(\d{5,})\b/;
 
-function normaliseRef(raw: string | null): string | null {
+// B1 — normalise a raw matched ref to canonical "<PREFIX>-<digits>" upper form,
+// or a bare numeric core, against the active prefix set. The prefix branch is
+// data-driven so MS191190 -> "MS-191190" (compact form gains a canonical dash).
+function normaliseRef(
+  raw: string | null,
+  prefixes: readonly string[] = DEFAULT_REF_PREFIXES,
+): string | null {
   if (!raw) return null;
-  // Normalise "AJBR 67200" / "AJBR-67200" / "67200" -> "AJBR-67200" style upper.
-  const m = raw.match(/\b(MLB|AJBR)\s*-?\s*(\d+)\b/i);
+  const sorted = [...new Set(prefixes.map((p) => p.toUpperCase()))]
+    .filter((p) => p.length > 0)
+    .sort((a, b) => b.length - a.length);
+  const alt = sorted.map(escapeRegExp).join("|");
+  // Normalise "AJBR 67200" / "AJBR-67200" / "MS191190" -> "<PREFIX>-<digits>".
+  const m = raw.match(new RegExp(`\\b(${alt})\\s*-?\\s*(\\d+)\\b`, "i"));
   if (m) return `${m[1].toUpperCase()}-${m[2]}`;
   const bare = raw.match(/\b(\d{5,})\b/);
   return bare ? bare[1] : raw.trim().toUpperCase() || null;
 }
 
 // B1 — extract a make-safe ref from the FULL subject, then the body as a
-// fallback, handling prefixed (AJBR-67200 / AJBR 67200 / AJBR67200), bare-numeric
-// ("Make Safe 67005"), and space-separated-prefix forms. Returns a normalised ref
+// fallback, handling prefixed (AJBR-67200 / AJBR 67200 / AJBR67200 / MS191190),
+// bare-numeric ("Make Safe 67005"), and space-separated-prefix forms. The prefix
+// set is data-driven (defaulting to the static floor). Returns a normalised ref
 // or null. This runs at classify time so persistPost always sees a ref for a
 // make-safe post and writes a pipeline_items row (closing the B1 drop path).
-function extractRef(subject: string, body: string | null): string | null {
-  // 1) Prefixed ref anywhere in the subject (space- or dash-separated).
-  const subjPrefixed = subject.match(SUBJECT_REF);
-  if (subjPrefixed) return normaliseRef(subjPrefixed[0]);
+function extractRef(
+  subject: string,
+  body: string | null,
+  prefixes: readonly string[] = DEFAULT_REF_PREFIXES,
+): string | null {
+  const subjectRef = buildSubjectRef(prefixes);
+  // 1) Prefixed ref anywhere in the subject (compact / space- / dash-separated).
+  const subjPrefixed = subject.match(subjectRef);
+  if (subjPrefixed) return normaliseRef(subjPrefixed[0], prefixes);
   // 2) Bare numeric core in the subject (>=5 digits).
   const subjBare = subject.match(BARE_NUMERIC_REF);
-  if (subjBare) return normaliseRef(subjBare[1]);
+  if (subjBare) return normaliseRef(subjBare[1], prefixes);
   // 3) Body fallback (strip tags first), prefixed then bare-numeric.
   if (body) {
     const text = body.replace(/<[^>]+>/g, " ");
-    const bodyPrefixed = text.match(SUBJECT_REF);
-    if (bodyPrefixed) return normaliseRef(bodyPrefixed[0]);
+    const bodyPrefixed = text.match(subjectRef);
+    if (bodyPrefixed) return normaliseRef(bodyPrefixed[0], prefixes);
     const bodyBare = text.match(BARE_NUMERIC_REF);
-    if (bodyBare) return normaliseRef(bodyBare[1]);
+    if (bodyBare) return normaliseRef(bodyBare[1], prefixes);
   }
   return null;
 }
@@ -270,6 +331,10 @@ function senderMatchesPattern(fromEmail: string, pattern: string): boolean {
 function classifyPost(
   post: GraphPost,
   companies: CompanyPattern[],
+  // B1 — the data-driven ref-prefix set (union of the static floor and every
+  // company's parsing_rules.ref_prefixes). Defaults to the floor so pure callers
+  // / tests still recognise MLB/AJBR/MS without wiring the company set.
+  prefixes: readonly string[] = DEFAULT_REF_PREFIXES,
 ): { include: boolean; reason: string; ref: string | null; company: CompanyPattern | null } {
   const fromEmail =
     (post.from?.emailAddress?.address || post.sender?.emailAddress?.address || "")
@@ -284,16 +349,16 @@ function classifyPost(
       break;
     }
   }
-  const subjectRefMatch = subject.match(SUBJECT_REF);
+  const subjectRefMatch = subject.match(buildSubjectRef(prefixes));
   const subjectKeyword = SUBJECT_KEYWORD.test(subject);
 
   // B1 — extract the ref from the FULL subject (prefixed OR bare-numeric) with a
   // body fallback, so a make-safe post is NEVER persisted with ref=null. A null
   // ref previously skipped the pipeline_items projection, leaving the post
   // invisible to D1 while D2 saw the email present -> a real dropped intake
-  // evaded BOTH checks. Now bare/spaced refs get a non-null ref + a row.
+  // evaded BOTH checks. Now bare/spaced/compact refs get a non-null ref + a row.
   const body = post.body?.content || null;
-  const ref = extractRef(subject, body);
+  const ref = extractRef(subject, body, prefixes);
 
   if (matchedCompany) {
     return { include: true, reason: `sender:${matchedCompany.slug}`, ref, company: matchedCompany };
@@ -789,15 +854,31 @@ async function auditExclusion(
   }
 }
 
+// B1 — pull ref prefixes out of a company's parsing_rules.ref_prefixes (an array
+// of short prefix tokens like ["MLB"] or ["AJBR"]). Tolerant of shape: accepts an
+// array, a single string, or absence. Each token is upper-cased + trimmed.
+// deno-lint-ignore no-explicit-any
+function extractRefPrefixes(parsingRules: any): string[] {
+  const raw = parsingRules?.ref_prefixes;
+  const arr = Array.isArray(raw) ? raw : (typeof raw === "string" ? [raw] : []);
+  return arr
+    .map((p: unknown) => String(p ?? "").trim().toUpperCase())
+    .filter((p: string) => p.length > 0);
+}
+
 // ════════════════════════════════════════════════════════════
-// Load active company sender patterns (reuse scanSesMakesafes approach).
+// Load active company sender patterns + data-driven ref prefixes.
+// Reuse scanSesMakesafes approach for sender patterns; additionally derive the
+// ref-prefix set (B1) from each company's parsing_rules.ref_prefixes, unioned
+// with the static floor, so a new builder ref format added in makesafe_companies
+// is recognised without a code change.
 // ════════════════════════════════════════════════════════════
 async function loadCompanyPatterns(
   // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
   sb: any,
-): Promise<CompanyPattern[]> {
+): Promise<LoadedCompanies> {
   const { data: companies, error } = await sb.from("makesafe_companies")
-    .select("slug, name, sender_patterns")
+    .select("slug, name, sender_patterns, parsing_rules")
     .eq("active", true);
   // M6 — a failed company query previously fell through to an empty pattern set,
   // which silently degrades the classifier to subject-only matching (over- and
@@ -806,13 +887,21 @@ async function loadCompanyPatterns(
   if (error) {
     throw new Error(`makesafe_companies query failed: ${error.message}`);
   }
-  const out: CompanyPattern[] = [];
-  for (const co of (companies || []) as Array<{ slug: string; name: string; sender_patterns: string[] }>) {
+  const patterns: CompanyPattern[] = [];
+  // B1 — seed with the static floor so the known families (MLB/AJBR/MS) are ALWAYS
+  // recognised even if a company row is missing/misconfigured. The DB adds to this.
+  const prefixSet = new Set<string>(DEFAULT_REF_PREFIXES.map((p) => p.toUpperCase()));
+  for (
+    const co of (companies || []) as Array<
+      { slug: string; name: string; sender_patterns: string[]; parsing_rules?: unknown }
+    >
+  ) {
     for (const p of (co.sender_patterns || [])) {
-      out.push({ slug: co.slug, name: co.name, pattern: p.toLowerCase() });
+      patterns.push({ slug: co.slug, name: co.name, pattern: p.toLowerCase() });
     }
+    for (const pre of extractRefPrefixes(co.parsing_rules)) prefixSet.add(pre);
   }
-  return out;
+  return { patterns, refPrefixes: [...prefixSet] };
 }
 
 // ════════════════════════════════════════════════════════════
@@ -984,7 +1073,10 @@ async function handler(req: Request): Promise<Response> {
   try {
     const token = await getGraphToken();
     const groupId = await resolveGroupId(token);
-    const companies = await loadCompanyPatterns(sb);
+    // B1 — patterns drive sender matching; refPrefixes (data-driven, union of the
+    // static floor + every company's parsing_rules.ref_prefixes) drives subject
+    // ref extraction so a company-defined ref family is recognised code-free.
+    const { patterns: companies, refPrefixes } = await loadCompanyPatterns(sb);
 
     // ── Overlapping watermark: read cursor, compute lower bound (>=, not >). ──
     const { data: cursor, error: cursorReadErr } = await sb.from("mail_sync_cursors")
@@ -1044,7 +1136,7 @@ async function handler(req: Request): Promise<Response> {
       const ts = post.receivedDateTime || post.createdDateTime || null;
       if (ts && (!maxReceived || ts > maxReceived)) maxReceived = ts;
 
-      const cls = classifyPost(post, companies);
+      const cls = classifyPost(post, companies, refPrefixes);
       if (!cls.include) {
         await auditExclusion(sb, post, cls.reason);
         excluded++;
@@ -1132,9 +1224,12 @@ if (import.meta.main) {
 // inventory reconcile (see makesafe_reconcile.ts).
 export {
   auditExclusion as _auditExclusion,
+  buildSubjectRef as _buildSubjectRef,
   classifyPost as _classifyPost,
   collectPosts as _collectPosts,
+  DEFAULT_REF_PREFIXES as _DEFAULT_REF_PREFIXES,
   extractRef as _extractRef,
+  extractRefPrefixes as _extractRefPrefixes,
   graphGetAll as _graphGetAll,
   handler as _handler,
   isPdfMagic as _isPdfMagic,

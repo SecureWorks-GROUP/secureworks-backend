@@ -463,6 +463,24 @@ export interface PersistedReconSignals {
   // B3 coverage bounds (null = not yet inventoried at that edge).
   inventoryFloor: string | null;
   inventoryCeiling: string | null;
+  // B3 — current attachment backlog for this mailbox (pending/failed/needs_review).
+  // A non-zero backlog forces DEGRADED on EITHER run (D1 or D2), so a clean D1+D2
+  // drift can NEVER read verified while attachments are unresolved. This is folded
+  // in here (not only in summarizeDrift) because the D2 path historically passed 0
+  // to summarizeDrift and would otherwise verify despite a real backlog.
+  unresolvedAttachments?: number | null;
+  // B3 — coverage freshness inputs. recon_verified may only be claimed when the
+  // inventoried CEILING actually covers the window being verified: the ceiling must
+  // be no older than (now - coverageWindowDays). Without these, a stale ceiling
+  // (e.g. D2 stopped running) could leave recon_verified=true over an un-inventoried
+  // recent window. Both default safely (now / a generous window) if omitted.
+  nowIso?: string | null;
+  coverageWindowDays?: number | null;
+  // B3 — the earliest claim this run asserts verified for (the window FLOOR being
+  // verified). The inventory floor must be <= this, else the claimed window reaches
+  // before inventoried history. Optional; when omitted the floor-non-null check
+  // alone applies (back-compat).
+  earliestClaimedIso?: string | null;
 }
 
 export interface CombinedGate {
@@ -500,12 +518,56 @@ export function combineVerifiedGate(
     reasons.push("other_check_unresolved");
   }
 
-  // B3: coverage bound. recon_verified may only claim coverage WITHIN the
+  // B3: coverage bound (FLOOR). recon_verified may only claim coverage WITHIN the
   // inventoried bounds. If the floor was never established (no full historical
   // backfill), coverage is incomplete -> not verified.
   if (!persisted.inventoryFloor) {
     if (mode === "OK") mode = "DEGRADED";
     reasons.push("inventory_floor_unestablished_coverage_incomplete");
+  }
+
+  // B3: coverage bound (CEILING present). recon_inventory_ceiling is COMPUTED by
+  // the D2 sweep but was never ENFORCED before — recon_verified could be set with a
+  // null ceiling. A null ceiling means no inventory sweep has ever recorded an
+  // upper coverage edge, so the recent window is un-inventoried -> not verified.
+  if (!persisted.inventoryCeiling) {
+    if (mode === "OK") mode = "DEGRADED";
+    reasons.push("inventory_ceiling_unestablished_coverage_incomplete");
+  } else {
+    // B3: coverage bound (CEILING fresh enough). The ceiling must actually COVER
+    // the window being verified: it must be no older than (now - coverageWindowDays).
+    // A stale ceiling (D2 stopped running) leaves a recent un-inventoried tail that
+    // recon_verified would otherwise wrongly claim. Default window is generous (35d)
+    // and now defaults to wall-clock; both are overridable by the caller.
+    const nowMs = persisted.nowIso ? Date.parse(persisted.nowIso) : Date.now();
+    const windowDays = persisted.coverageWindowDays ?? 35;
+    const ceilMs = Date.parse(persisted.inventoryCeiling);
+    const minFreshMs = nowMs - windowDays * 86_400_000;
+    if (Number.isNaN(ceilMs) || ceilMs < minFreshMs) {
+      if (mode === "OK") mode = "DEGRADED";
+      reasons.push("inventory_ceiling_stale_does_not_cover_window");
+    }
+  }
+
+  // B3: coverage bound (FLOOR covers earliest claim). If this run asserts verified
+  // for a window reaching back to earliestClaimedIso, the inventory floor must be
+  // at or before it; otherwise the claimed window reaches before inventoried history.
+  if (persisted.inventoryFloor && persisted.earliestClaimedIso) {
+    const floorMs = Date.parse(persisted.inventoryFloor);
+    const earliestMs = Date.parse(persisted.earliestClaimedIso);
+    if (Number.isNaN(floorMs) || (!Number.isNaN(earliestMs) && floorMs > earliestMs)) {
+      if (mode === "OK") mode = "DEGRADED";
+      reasons.push("inventory_floor_after_earliest_claimed_window");
+    }
+  }
+
+  // B3 / attachment-gate: a non-zero attachment backlog forces DEGRADED on EITHER
+  // run, so a clean D1+D2 drift can never read verified while attachments are
+  // pending/failed/needs_review. (Folded in here, not only in summarizeDrift, so
+  // the D2 path — which passed 0 to summarizeDrift — is also blocked.)
+  if ((persisted.unresolvedAttachments ?? 0) > 0) {
+    if (mode === "OK") mode = "DEGRADED";
+    reasons.push(`unresolved_attachments=${persisted.unresolvedAttachments}`);
   }
 
   return {
@@ -755,6 +817,15 @@ export async function makesafeEmailReconcile(
     d2MissingPosts: (prior as any)?.recon_d2_missing_posts ?? null,
     inventoryFloor: (prior as any)?.recon_inventory_floor ?? null,
     inventoryCeiling: (prior as any)?.recon_inventory_ceiling ?? null,
+    // ATTACHMENT-GATE — fold the live backlog into the combined gate (not only into
+    // summarizeDrift) so the gate is consistent across D1 and D2 runs. A non-zero
+    // backlog forces DEGRADED and blocks recon_verified.
+    unresolvedAttachments: unresolved || 0,
+    // B3 — coverage freshness: the persisted ceiling must still cover this D1/D3
+    // window, and the floor must reach back to this window's start, else not verified.
+    nowIso: opts.nowIso ?? new Date().toISOString(),
+    coverageWindowDays: windowDays,
+    earliestClaimedIso: sinceIso,
   });
 
   // Persist the verified-gate signal onto sync_state so the board/skills can read
@@ -876,10 +947,21 @@ export async function makesafeEmailReconcileFullInventory(
 
   await emitAlerts(client, sink, "D2", d2.alerts);
 
+  // ATTACHMENT-GATE — the CURRENT unresolved-attachment backlog for this mailbox
+  // (pending/failed/needs_review), mailbox-scoped, same query the D1 path uses.
+  // Previously the D2 path passed 0 to summarizeDrift, so D2 could report verified
+  // while attachments were pending/failed. Now the backlog is folded into BOTH the
+  // drift summary AND the combined gate, so any non-zero backlog forces DEGRADED
+  // and blocks recon_verified on the D2 run too.
+  const { count: unresolvedAttachments } = await client.from("email_attachments")
+    .select("id, emails!inner(mailbox)", { count: "exact", head: true })
+    .eq("emails.mailbox", SES_MAILBOX)
+    .in("status", ["pending", "failed", "needs_review"]);
+
   // B2/B3 — persist the D2-specific verified signal + coverage bounds, then write
   // the combined gate folding in the LAST persisted D1 signal. D2 must NOT clobber
   // D1's signal (recon_d1_*).
-  const d2Drift = summarizeDrift(null, d2, 0);
+  const d2Drift = summarizeDrift(null, d2, unresolvedAttachments || 0);
   const { data: prior } = await client.from("sync_state")
     .select("recon_d1_verified, recon_inventory_floor, recon_inventory_ceiling")
     .eq("mailbox", SES_MAILBOX)
@@ -901,6 +983,12 @@ export async function makesafeEmailReconcileFullInventory(
     d2MissingPosts: d2.missing_post_ids.length, // this run's own count
     inventoryFloor: newFloor,
     inventoryCeiling: newCeiling,
+    // B3/attachment-gate: fold the live backlog + coverage freshness in here too so
+    // a stale ceiling or a pending backlog blocks verified on the D2 run.
+    unresolvedAttachments: unresolvedAttachments || 0,
+    nowIso: new Date(nowMs).toISOString(),
+    coverageWindowDays: historical ? undefined : windowDays,
+    earliestClaimedIso: sinceIso,
   });
 
   const nowIso = new Date().toISOString();
