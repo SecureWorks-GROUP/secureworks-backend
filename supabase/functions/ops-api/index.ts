@@ -14167,7 +14167,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         Description: desc,
         Quantity: metres,
         UnitAmount: pmRate,
-        AccountCode: accountCodeForJob(job.type || '', '301'),
+        AccountCode: '620', // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
         TaxType: stTaxType,
         Tracking: xeroTracking(job.job_number || ''),
       })
@@ -14214,7 +14214,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         Description: desc,
         Quantity: hours,
         UnitAmount: rate,
-        AccountCode: accountCodeForJob(job?.type || '', '301'),
+        AccountCode: '620', // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
         TaxType: stTaxType,
         Tracking: xeroTracking(job?.job_number || ''),
       })
