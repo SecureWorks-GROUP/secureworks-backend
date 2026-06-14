@@ -164,6 +164,92 @@ const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
 const OPS_API_EXPECTED_ACTION_COUNT = 228
 
+// ── M9 r2: external_ref normalisation helper ──────────────────────────────────
+// Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
+const normRef = (s: unknown): string => String(s || '').toUpperCase().replace(/[-\s]/g, '')
+
+// Extract the longest contiguous run of digits from a string (e.g. "MLB25248" → "25248").
+// Returns null if fewer than 3 digits found.
+function digitCore(s: string): string | null {
+  const m = s.match(/\d+/g)
+  if (!m) return null
+  const longest = m.reduce((a, b) => (a.length >= b.length ? a : b), '')
+  return longest.length >= 3 ? longest : null
+}
+
+// Shared external_ref resolver: given a supabase client, a set of ref strings,
+// and an activeJobStatusExclude clause, returns:
+//   byId:  { [job.id]: job }  — every active job that matched any input ref
+//   byRef: { [normRef]: Job[] } — per normalised input ref, the list of distinct active
+//                                 jobs that matched (length > 1 means the ref is ambiguous)
+// Only queries makesafe_job_details filtered by the digit core — never full-table-scan.
+async function resolveJobsByExternalRef(
+  client: any,
+  refs: string[],
+  activeJobStatusExclude: string,
+  jobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
+): Promise<{ byId: Record<string, any>; byRef: Record<string, any[]> }> {
+  if (refs.length === 0) return { byId: {}, byRef: {} }
+  // Build a list of digit cores to filter makesafe_job_details efficiently.
+  const cores = [...new Set(refs.map(digitCore).filter(Boolean))] as string[]
+  if (cores.length === 0) return { byId: {}, byRef: {} }
+
+  // Query makesafe_job_details with ilike on each digit core (OR-joined).
+  // We do one query per core to stay within PostgREST .or() constraints, then deduplicate.
+  // limit(200): table is ~125 rows; 200 ensures no real match is truncated when many refs
+  // share the same digit core.
+  const detailFetches = cores.map(core =>
+    client.from('makesafe_job_details')
+      .select('job_id, external_ref')
+      .ilike('external_ref', `%${core}%`)
+      .limit(200)
+  )
+  const detailResults = await Promise.all(detailFetches)
+  const allDetails: { job_id: string; external_ref: string }[] = detailResults.flatMap((r: any) => r.data || [])
+
+  // Keep only rows where normRef(external_ref) matches any normRef(ref) in our set.
+  const normRefs = new Set(refs.map(normRef))
+  const matchedJobIds = [...new Set(
+    allDetails
+      .filter(d => {
+        const nr = normRef(d.external_ref)
+        return normRefs.has(nr) || refs.some(r => nr.includes(normRef(r)) || normRef(r).includes(nr))
+      })
+      .map(d => d.job_id)
+      .filter(Boolean)
+  )]
+  if (matchedJobIds.length === 0) return { byId: {}, byRef: {} }
+
+  // Fetch the actual job rows (filtered to active statuses).
+  const { data: jobRows, error: jobErr } = await client.from('jobs')
+    .select(jobSelect)
+    .not('status', 'in', activeJobStatusExclude)
+    .in('id', matchedJobIds)
+  if (jobErr) throw jobErr
+
+  // Build byId (all matched jobs) and byRef (jobs per normalised input ref).
+  const byId: Record<string, any> = {}
+  const byRef: Record<string, any[]> = {}
+  for (const job of (jobRows || [])) {
+    byId[job.id] = job
+    // Find which input normRef(s) this job satisfies.
+    const detail = allDetails.find(d => d.job_id === job.id)
+    if (detail?.external_ref) {
+      const detailNorm = normRef(detail.external_ref)
+      // Map back to every input ref whose normRef matches or overlaps.
+      for (const ref of refs) {
+        const refNorm = normRef(ref)
+        if (detailNorm === refNorm || detailNorm.includes(refNorm) || refNorm.includes(detailNorm)) {
+          if (!byRef[refNorm]) byRef[refNorm] = []
+          if (!byRef[refNorm].some((j: any) => j.id === job.id)) byRef[refNorm].push(job)
+        }
+      }
+    }
+  }
+  return { byId, byRef }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Test data filter — exclude test records from production outputs
 const isTestRecord = (name: string | null | undefined): boolean =>
   !name ? false : /\btest\b/i.test(name) || /^marnin test/i.test(name)
@@ -2852,6 +2938,25 @@ if (import.meta.main) serve(async (req: Request) => {
               if (j?.id) byId[j.id] = j
             }
 
+            // M9 r2 FIX 1: when q is present, also resolve via external_ref (MLB builder ref).
+            // Trades type "MLB25248" (no hyphen); canonical store is "MLB-25248".
+            // We do NOT add metadata->>external_ref to the PostgREST .or() above (JSON-path in
+            // .or() is unreliable). Instead resolveJobsByExternalRef does a digit-core ilike on
+            // makesafe_job_details.external_ref and merges matches into byId so they flow through
+            // enrichTradeMakesafeJobs and the external_ref surface block below.
+            if (q) {
+              const extRefMatches = await resolveJobsByExternalRef(
+                client,
+                [q],
+                ACTIVE_JOB_STATUS_EXCLUDE,
+                'id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at'
+              )
+              // Merge all matched jobs by UUID — search returns multiple matches correctly.
+              for (const [jobId, job] of Object.entries(extRefMatches.byId)) {
+                if (/^[0-9a-f-]{36}$/i.test(jobId)) byId[jobId] = job
+              }
+            }
+
             // M9 FIX A (ordering): when searching, sort by exact/prefix job_number match first,
             // then by created_at desc so results are deterministic rather than insertion-order random.
             let merged = Object.values(byId)
@@ -3581,6 +3686,44 @@ if (import.meta.main) serve(async (req: Request) => {
               for (const j of (extraJobs || [])) {
                 if (j.id) jobById[j.id] = j
                 if (j.job_number) jobByNumber[String(j.job_number)] = j
+              }
+
+              // M9 r2 FIX 2: resolve external_ref (MLB builder ref) for extra items that
+              // were not resolved via exact job_id or job_number lookup above.
+              // Trades submit "MLB25248" (no hyphen); canonical store is "MLB-25248".
+              // We only attempt refs that: are not a UUID, not SWMS-prefixed, and are not
+              // already in jobByNumber.
+              // SAFETY: if a ref normalises to the same normRef as 2+ distinct active jobs
+              // (ambiguous), we leave it unresolved so the existing "Manual invoice job is
+              // not active or does not exist" error fires — never silently bill the wrong job.
+              // Exactly one match → resolves normally (MLB25248 happy path).
+              {
+                const unresolvedExternalRefs = requestedJobNumbers.filter(ref => {
+                  if (/^[0-9a-f-]{36}$/i.test(ref)) return false   // UUID — handled by jobById path
+                  if (/^SWMS-/i.test(ref)) return false              // SWMS ref — not a builder ref
+                  return !jobByNumber[ref]                           // not already resolved
+                })
+                if (unresolvedExternalRefs.length > 0) {
+                  const extRefMap = await resolveJobsByExternalRef(
+                    client,
+                    unresolvedExternalRefs,
+                    activeJobStatusExclude,
+                    activeJobSelect
+                  )
+                  for (const ref of unresolvedExternalRefs) {
+                    // byRef[normRef(ref)] is the list of distinct active jobs that matched.
+                    // Only resolve when EXACTLY ONE match — 0 or 2+ stays unresolved (fail-safe).
+                    const matches = extRefMap.byRef[normRef(ref)] || []
+                    if (matches.length === 1) {
+                      const job = matches[0]
+                      jobById[job.id] = job
+                      // Key under the original input ref so resolvedJob lookup below finds it
+                      jobByNumber[ref] = job
+                    }
+                    // 0 matches → not found (error fires downstream)
+                    // 2+ matches → ambiguous ref, refuse silently (error fires downstream)
+                  }
+                }
               }
 
               for (const item of extra_items) {
