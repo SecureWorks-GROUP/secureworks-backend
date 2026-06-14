@@ -3673,6 +3673,40 @@ if (import.meta.main) serve(async (req: Request) => {
                 if (j.job_number) jobByNumber[String(j.job_number)] = j
               }
 
+              // M9 r2 FIX 2: resolve external_ref (MLB builder ref) for extra items that
+              // were not resolved via exact job_id or job_number lookup above.
+              // Trades submit "MLB25248" (no hyphen); canonical store is "MLB-25248".
+              // We only attempt refs that: are not a UUID, not SWMS-prefixed, and are not
+              // already in jobByNumber. resolveJobsByExternalRef returns jobs keyed by
+              // both job.id AND normRef(external_ref), so we look up each input ref by
+              // normRef(ref) and key jobByNumber under the original input string so the
+              // existing resolvedJob lookup at the item loop below finds the job.
+              {
+                const unresolvedExternalRefs = requestedJobNumbers.filter(ref => {
+                  if (/^[0-9a-f-]{36}$/i.test(ref)) return false   // UUID — handled by jobById path
+                  if (/^SWMS-/i.test(ref)) return false              // SWMS ref — not a builder ref
+                  return !jobByNumber[ref]                           // not already resolved
+                })
+                if (unresolvedExternalRefs.length > 0) {
+                  // resolveJobsByExternalRef returns { [job.id]: job, [normRef(external_ref)]: job }
+                  const extRefMap = await resolveJobsByExternalRef(
+                    client,
+                    unresolvedExternalRefs,
+                    activeJobStatusExclude,
+                    activeJobSelect
+                  )
+                  for (const ref of unresolvedExternalRefs) {
+                    // Look up by normRef(ref) — the helper keys by normRef(external_ref)
+                    const job = extRefMap[normRef(ref)]
+                    if (job) {
+                      jobById[job.id] = job
+                      // Key under the original input ref so resolvedJob lookup below finds it
+                      jobByNumber[ref] = job
+                    }
+                  }
+                }
+              }
+
               for (const item of extra_items) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
