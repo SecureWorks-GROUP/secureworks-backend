@@ -13806,6 +13806,38 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
 
   if (error) throw error
 
+  // M9 FIX A2: attach external_ref to each assignment's jobs object so the trade
+  // weekly job cards can display the insurer/builder ref. Batch-resolved: prefer
+  // makesafe_job_details.external_ref, fallback to jobs.metadata->>'external_ref'.
+  const asnJobIds: string[] = Array.from(new Set<string>((rawAssignments || []).map((a: any) => String(a.jobs?.id || '')).filter(Boolean)))
+  if (asnJobIds.length > 0) {
+    try {
+      const extRefByJobId: Record<string, string> = {}
+      const { data: msExtRefs } = await client.from('makesafe_job_details')
+        .select('job_id, external_ref')
+        .in('job_id', asnJobIds)
+      for (const r of (msExtRefs || [])) {
+        if (r.job_id && r.external_ref) extRefByJobId[r.job_id] = r.external_ref
+      }
+      // Fallback: jobs.metadata->>'external_ref' for jobs not in makesafe_job_details
+      const missingExtRefIds = asnJobIds.filter((id: string) => !extRefByJobId[id])
+      if (missingExtRefIds.length > 0) {
+        const { data: jobMeta } = await client.from('jobs').select('id, metadata').in('id', missingExtRefIds)
+        for (const jm of (jobMeta || [])) {
+          const mref = jm?.metadata?.external_ref
+          if (jm.id && mref) extRefByJobId[jm.id] = mref
+        }
+      }
+      for (const a of (rawAssignments || [])) {
+        if (a.jobs?.id && extRefByJobId[a.jobs.id]) {
+          a.jobs.external_ref = extRefByJobId[a.jobs.id]
+        }
+      }
+    } catch (extRefErr: any) {
+      console.log('[ops-api] my_hours external_ref enrichment skipped:', extRefErr?.message)
+    }
+  }
+
   // Layer B double-invoice guard: hide assignments already on a LIVE invoice.
   // An assignment whose referencing invoice is terminal (failed/ops-reject) or a
   // draft is released and may be re-invoiced. We resolve the referenced invoice
