@@ -19,7 +19,7 @@
 //   - ref normalisation
 //   - the four pinned regression refs classify as make-safe
 
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _classifyPost,
   _DEFAULT_REF_PREFIXES,
@@ -27,13 +27,21 @@ import {
   _extractRefPrefixes,
   _graphGetAll,
   _isPdfMagic,
+  _loadCompanyPatterns,
   _normaliseRef,
   _parseSenderDomain,
   _persistPost,
   _processAttachments,
   _senderMatchesPattern,
 } from "../monitor-ses-makesafes/index.ts";
-import { normaliseReconRef as _normaliseReconRef } from "./makesafe_reconcile.ts";
+import {
+  normaliseReconRef as _normaliseReconRef,
+  reconcileD1,
+} from "./makesafe_reconcile.ts";
+import {
+  loadRefPrefixes as _loadRefPrefixes,
+  validateRefPrefix as _validateRefPrefix,
+} from "../_shared/makesafe_refs.ts";
 import {
   FX_FAKE_PDF_ATTACHMENT,
   FX_INLINE_ATTACHMENT,
@@ -520,4 +528,155 @@ Deno.test("persistPost: an MS ref in the BODY (generic subject) still writes a p
   const pi = writes.find((w) => w.table === "pipeline_items" && w.op === "upsert");
   assertEquals(!!pi, true, "expected a pipeline_items upsert from a body-only MS ref");
   assertEquals(pi!.row.ref, "MS-191190");
+});
+
+// ════════════════════════════════════════════════════════════
+// FINDING 1 (parity, end-to-end) — a COMPANY-SUPPLIED prefix ("KBA"), configured
+// only via makesafe_companies.parsing_rules.ref_prefixes, flows through BOTH:
+//   (a) monitor ingestion: loadCompanyPatterns derives the prefix set from the DB,
+//       classify yields a NON-NULL ref, persist writes a pipeline_items row; AND
+//   (b) recon D1: an email "KBA-88123" matches a board job ref "KBA88123".
+// This proves the shared module (the SINGLE source of truth used by both sides)
+// fixes the parity gap: pre-fix the recon side hard-coded MLB|AJBR|MS so "KBA"
+// could never match on the board side. NON-TAUTOLOGICAL: KBA is NOT in the floor,
+// and "KBA88123" has glued digits (no \b before the run) so the bare-numeric
+// fallback cannot recover it — only the data-driven prefix set can.
+// ════════════════════════════════════════════════════════════
+
+// A stub sb whose makesafe_companies query returns the seeded rows. Covers the
+// .select(...).eq("active", true) await shape used by loadCompanyPatterns AND
+// loadRefPrefixes.
+function makeCompaniesSb(companyRows: any[]) {
+  const writes: Array<{ table: string; op: string; row: any }> = [];
+  function builder(table: string): any {
+    const b: any = {
+      select: () => b,
+      eq: (_col?: string, _val?: unknown) => {
+        // loadCompanyPatterns / loadRefPrefixes await the .eq(...) result directly.
+        if (table === "makesafe_companies") {
+          return Promise.resolve({ data: companyRows, error: null });
+        }
+        return b;
+      },
+      ilike: () => b,
+      in: () => b,
+      limit: async () => ({ data: [], error: null }),
+      maybeSingle: async () => ({ data: null, error: null }),
+      single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }),
+      upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: null }; },
+      insert: (row: any) => {
+        writes.push({ table, op: "insert", row });
+        return {
+          select: () => ({ single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }) }),
+          then: (resolve: (v: any) => any) => resolve({ error: null }),
+        };
+      },
+    };
+    return b;
+  }
+  return { sb: { from: (t: string) => builder(t) }, writes };
+}
+
+Deno.test("FINDING 1 parity: a company-supplied prefix 'KBA' flows through monitor ingestion AND recon D1", async () => {
+  const companyRows = [{
+    slug: "kba",
+    name: "KBA Builders",
+    sender_patterns: ["kba.com.au"],
+    parsing_rules: { ref_prefixes: ["KBA"] },
+  }];
+
+  // ── (a) MONITOR SIDE ── load the data-driven prefix set + sender patterns.
+  const { sb, writes } = makeCompaniesSb(companyRows);
+  const { patterns, refPrefixes } = await _loadCompanyPatterns(sb as any);
+  // The data-driven set includes the company prefix on TOP of the static floor.
+  assert(refPrefixes.includes("KBA"), "loadCompanyPatterns must include the company prefix KBA");
+  assert(refPrefixes.includes("MLB"), "floor prefix MLB must still be present");
+
+  // Classify a KBA post (compact glued-digit ref). With the floor-only set this
+  // would drop to ref=null (the parity bug); with the data-driven set it is a
+  // non-null canonical ref.
+  const post = { ...FX_NON_MAKESAFE_POST, subject: "KBA88123 make safe Joondalup" };
+  // Floor-only: dropped.
+  assertEquals(_classifyPost(post as any, patterns).ref, null);
+  // Data-driven set: recognised.
+  const cls = _classifyPost(post as any, patterns, refPrefixes);
+  assertEquals(cls.include, true);
+  assertEquals(cls.ref, "KBA-88123");
+
+  // Persist -> a pipeline_items row with the non-null KBA ref exists.
+  await _persistPost(sb as any, "tok", "group-1", post as any, cls);
+  const pi = writes.find((w) => w.table === "pipeline_items" && w.op === "upsert");
+  assert(!!pi, "expected a pipeline_items upsert for the KBA ref");
+  assertEquals(pi!.row.ref, "KBA-88123");
+
+  // ── (b) RECON D1 SIDE ── the SAME data-driven prefix set normalises BOTH the
+  // email side (pipeline ref "KBA-88123") and the board side (job ref "KBA88123"),
+  // so they match. Without the shared prefix set, "KBA88123" board-side would
+  // normalise to "KBA88123" (untouched) while the email side is "KBA-88123" -> no
+  // match -> a real dropped intake.
+  const r = reconcileD1(
+    [{ ref: "KBA-88123", source_email_id: "post-kba" }],
+    [{ external_ref: "KBA88123", source_email_id: null, job_number: "SWMS-KBA", substatus: null }],
+    { refPrefixes },
+  );
+  assertEquals(r.counts.matched, 1);
+  assertEquals(r.matched[0].method, "exact_ref");
+  assertEquals(r.counts.email_no_job, 0);
+
+  // CONTROL: with the FLOOR-ONLY prefix set, the board side does NOT recognise the
+  // KBA prefix, so "KBA88123" can never be a CLEAN exact match to the email side's
+  // "KBA-88123". It is NOT auto-linked (matched=0) -- it falls to an uncorroborated
+  // numeric-core ambiguity (needs_review), which still BLOCKS the clean match. This
+  // is the pre-fix failure mode, proving the test is non-tautological: only the
+  // shared data-driven prefix set produces the clean exact match above.
+  const rFloorOnly = reconcileD1(
+    [{ ref: "KBA-88123", source_email_id: "post-kba" }],
+    [{ external_ref: "KBA88123", source_email_id: null, job_number: "SWMS-KBA", substatus: null }],
+    { refPrefixes: [..._DEFAULT_REF_PREFIXES] },
+  );
+  assertEquals(rFloorOnly.counts.matched, 0); // NOT cleanly matched without KBA
+  // The clean exact match only happens WITH the data-driven prefix set (asserted above).
+  assert(rFloorOnly.matched.every((m) => m.method !== "exact_ref"));
+});
+
+// ════════════════════════════════════════════════════════════
+// FINDING 4 — invalid company prefixes ("X", "*", "") are REJECTED (no over-match
+// / no regex risk); floor prefixes still work.
+// ════════════════════════════════════════════════════════════
+Deno.test("FINDING 4: invalid company prefixes are rejected; floor still works", async () => {
+  // validateRefPrefix unit shape.
+  assertEquals(_validateRefPrefix("X"), false);   // single char
+  assertEquals(_validateRefPrefix("*"), false);   // regex metachar
+  assertEquals(_validateRefPrefix(""), false);    // empty
+  assertEquals(_validateRefPrefix("A.B"), false); // punctuation/metachar
+  assertEquals(_validateRefPrefix("A|B"), false);
+  assertEquals(_validateRefPrefix("KBA"), true);  // valid
+  assertEquals(_validateRefPrefix("kba"), true);  // case-insensitive
+
+  // extractRefPrefixes drops the invalid tokens, keeps the valid one.
+  assertEquals(_extractRefPrefixes({ ref_prefixes: ["X", "*", "", "KBA"] }), ["KBA"]);
+
+  // loadRefPrefixes (the shared loader) drops invalids and unions floor + valid.
+  const { sb } = makeCompaniesSb([{
+    slug: "bad", name: "Bad Co", sender_patterns: [],
+    parsing_rules: { ref_prefixes: ["X", "*", "", "KBA"] },
+  }]);
+  const prefixes = await _loadRefPrefixes(sb as any);
+  assert(prefixes.includes("KBA"), "valid company prefix KBA kept");
+  assert(prefixes.includes("MLB"), "floor prefix retained");
+  assert(!prefixes.includes("X"), "single-char prefix dropped");
+  assert(!prefixes.includes("*"), "metachar prefix dropped");
+
+  // No over-match: a generic post that merely CONTAINS an "X" must not be classified
+  // make-safe by an invalid "X" prefix. With the cleaned set there is no KBA/etc in
+  // the subject, no sender match, no keyword -> excluded.
+  const post = { ...FX_NON_MAKESAFE_POST, subject: "Xtra savings this June (X marks it)" };
+  assertEquals(_classifyPost(post as any, [], prefixes).include, false);
+
+  // A floor-prefix ref still classifies make-safe even when an invalid company
+  // prefix was supplied (floor always applies).
+  const mlbPost = { ...FX_NON_MAKESAFE_POST, subject: "MLB-67166 Bassendean" };
+  const r = _classifyPost(mlbPost as any, [], prefixes);
+  assertEquals(r.include, true);
+  assertEquals(r.ref, "MLB-67166");
 });

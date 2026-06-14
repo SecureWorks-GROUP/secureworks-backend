@@ -42,6 +42,19 @@
 // summarizeDrift) are exported for the Deno test suite; nothing here calls the
 // network at module load.
 
+// SINGLE SOURCE OF TRUTH for ref prefixes + normalisation, shared with the monitor
+// (monitor-ses-makesafes/index.ts). The recon side used to hard-code MLB|AJBR|MS
+// in normaliseReconRef, so a company-supplied prefix (e.g. "KBA") ingested fine
+// but D1 could NEVER match it on the board side (silent reconciliation failure).
+// D1 now LOADS the same prefix set the monitor uses (loadRefPrefixes) and
+// normalises BOTH the email side and the board side with it via the shared
+// normaliseRef. No local prefix copy survives in this file.
+import {
+  loadRefPrefixes,
+  normaliseRef as sharedNormaliseRef,
+  REF_PREFIX_FLOOR,
+} from "../_shared/makesafe_refs.ts";
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 // A board-side ref record (from makesafe_audit known_refs[]).
@@ -118,22 +131,19 @@ export interface ReconD2Result {
 
 // ── D1/D3 ref normalisation ───────────────────────────────────────────────────
 // Per MISSION.md: "AJBR 67200" == "AJBR-67200" == "67200" for refs >= 5 chars.
-// Returns the canonical form used as the candidate match key. Mirrors the sync
-// engine's normaliseRef + the ops-api _makesafeNormRef whitespace discipline, but
-// is the RECON-side normaliser (kept here so the test suite can target it pure).
-export function normaliseReconRef(raw: string | null | undefined): string | null {
-  if (raw == null) return null;
-  const s = String(raw).trim();
-  if (!s) return null;
-  // Prefixed ref: <PREFIX>-<digits>, whitespace/dash insensitive.
-  const m = s.match(/\b(MLB|AJBR|MS)\s*-?\s*(\d+)\b/i);
-  if (m) return `${m[1].toUpperCase()}-${m[2]}`;
-  // Bare numeric ref (>= 5 digits so short tokens can't false-match).
-  const bare = s.match(/\b(\d{5,})\b/);
-  if (bare) return bare[1];
-  // Fall back to an upper, whitespace-collapsed token.
-  const collapsed = s.replace(/\s+/g, "").toUpperCase();
-  return collapsed || null;
+// Returns the canonical form used as the candidate match key.
+//
+// PARITY FIX (finding 1): this DELEGATES to the SHARED normaliseRef — the exact
+// same implementation the monitor uses on the email side — so the email side and
+// the board side can never recognise a different set of prefixes. The optional
+// `prefixes` argument is the data-driven set loaded once per run (floor UNION
+// validated company prefixes); when omitted it falls back to the static floor, so
+// the pure unit tests still see MLB/AJBR/MS without wiring a company set.
+export function normaliseReconRef(
+  raw: string | null | undefined,
+  prefixes: readonly string[] = REF_PREFIX_FLOOR,
+): string | null {
+  return sharedNormaliseRef(raw, prefixes);
 }
 
 // The "bare numeric core" of a normalised ref, used so that "AJBR-67200" and a
@@ -160,6 +170,11 @@ export interface CorroborationCtx {
   // proximity as corroboration. Default 14 days.
   maxDayGap?: number;
   nowIso?: string;
+  // PARITY FIX (finding 1): the data-driven ref-prefix set (floor UNION validated
+  // company prefixes), loaded once per run by the D1 action and threaded in so
+  // BOTH the email side and the board side normalise with the SAME prefixes. When
+  // omitted, the static floor (MLB/AJBR/MS) is used (pure-unit-test default).
+  refPrefixes?: readonly string[];
 }
 
 function dateProximityOk(receivedAt: string | null | undefined, ctx: CorroborationCtx): boolean {
@@ -203,13 +218,18 @@ export function reconcileD1(
   const matched: ReconD1Result["matched"] = [];
   const needsReview: ReconD1Result["needs_review"] = [];
 
+  // PARITY FIX (finding 1): normalise with the data-driven prefix set threaded
+  // through ctx. The SAME set normalises the board side AND the email side below.
+  const prefixes = ctx.refPrefixes ?? REF_PREFIX_FLOOR;
+  const normRef = (r: string | null | undefined) => normaliseReconRef(r, prefixes);
+
   // Index the board side.
   const boardByEmailId = new Map<string, KnownRef>();
   const boardByExactRef = new Map<string, KnownRef[]>();
   const boardByNumericCore = new Map<string, KnownRef[]>();
   for (const k of knownRefs) {
     if (k.source_email_id) boardByEmailId.set(k.source_email_id, k);
-    const norm = normaliseReconRef(k.external_ref);
+    const norm = normRef(k.external_ref);
     if (norm) {
       (boardByExactRef.get(norm) ?? boardByExactRef.set(norm, []).get(norm)!).push(k);
       const core = refNumericCore(norm);
@@ -224,7 +244,7 @@ export function reconcileD1(
 
   // ── Direction A: every synced pipeline ref must map to a board job. ──
   for (const p of pipelineRefs) {
-    const norm = normaliseReconRef(p.ref);
+    const norm = normRef(p.ref);
 
     // 1) source_email_id identity.
     if (p.source_email_id && boardByEmailId.has(p.source_email_id)) {
@@ -276,7 +296,7 @@ export function reconcileD1(
       const corroborated =
         senderCorroborated(p.sender_domain, ctx) || dateProximityOk(p.received_at, ctx);
       // Ambiguity: more than one distinct board ref shares the numeric core.
-      const distinct = new Set(candidates.map((c) => normaliseReconRef(c.external_ref)));
+      const distinct = new Set(candidates.map((c) => normRef(c.external_ref)));
       if (corroborated && distinct.size === 1) {
         const job = candidates.find((c) => c.job_number) ?? candidates[0];
         matchedBoardKeys.add(job);
@@ -315,7 +335,7 @@ export function reconcileD1(
   const syncNumericCores = new Set<string>();
   for (const p of pipelineRefs) {
     if (p.source_email_id) syncEmailIds.add(p.source_email_id);
-    const norm = normaliseReconRef(p.ref);
+    const norm = normRef(p.ref);
     if (norm) {
       syncExactRefs.add(norm);
       const core = refNumericCore(norm);
@@ -325,7 +345,7 @@ export function reconcileD1(
   for (const k of knownRefs) {
     if (matchedBoardKeys.has(k)) continue;
     // A draft (no job_number) with no ref is not actionable as a "job_no_email".
-    const norm = normaliseReconRef(k.external_ref);
+    const norm = normRef(k.external_ref);
     const hasSyncSide =
       (k.source_email_id && syncEmailIds.has(k.source_email_id)) ||
       (norm && syncExactRefs.has(norm)) ||
@@ -469,13 +489,27 @@ export interface PersistedReconSignals {
   // in here (not only in summarizeDrift) because the D2 path historically passed 0
   // to summarizeDrift and would otherwise verify despite a real backlog.
   unresolvedAttachments?: number | null;
+  // FINDING 3 — the attachment-count query FAILED, so the backlog is UNKNOWN. An
+  // unknown backlog must NOT be treated as 0 (that silently clears the backlog and
+  // lets verified pass). When true, the gate is forced DEGRADED and blocked with a
+  // distinct reason. Applies to BOTH the D1 and D2 paths.
+  attachmentsUnknown?: boolean | null;
   // B3 — coverage freshness inputs. recon_verified may only be claimed when the
-  // inventoried CEILING actually covers the window being verified: the ceiling must
-  // be no older than (now - coverageWindowDays). Without these, a stale ceiling
+  // inventoried CEILING actually covers UP TO NOW. Without these, a stale ceiling
   // (e.g. D2 stopped running) could leave recon_verified=true over an un-inventoried
-  // recent window. Both default safely (now / a generous window) if omitted.
+  // recent window. Defaults to wall-clock now if omitted.
   nowIso?: string | null;
+  // RETAINED for back-compat (callers still pass it) but NO LONGER the staleness
+  // bound — see ceilingSkewSeconds. coverageWindowDays describes the lookback the
+  // sweep covered; it does NOT relax the freshness requirement (finding 2).
   coverageWindowDays?: number | null;
+  // FINDING 2 — full-coverage freshness bound. recon_inventory_ceiling must reach
+  // UP TO NOW (now - ceilingSkewSeconds), NOT merely within the lookback window. A
+  // days-old ceiling must NOT verify. The skew is a small bounded allowance for the
+  // gap between the sweep finishing and this gate running (e.g. the sweep interval).
+  // Defaults to a single bounded sweep interval (1 hour) so a routine sweep just
+  // finished still verifies, but a ceiling hours/days stale does not.
+  ceilingSkewSeconds?: number | null;
   // B3 — the earliest claim this run asserts verified for (the window FLOOR being
   // verified). The inventory floor must be <= this, else the claimed window reaches
   // before inventoried history. Optional; when omitted the floor-non-null check
@@ -534,15 +568,16 @@ export function combineVerifiedGate(
     if (mode === "OK") mode = "DEGRADED";
     reasons.push("inventory_ceiling_unestablished_coverage_incomplete");
   } else {
-    // B3: coverage bound (CEILING fresh enough). The ceiling must actually COVER
-    // the window being verified: it must be no older than (now - coverageWindowDays).
-    // A stale ceiling (D2 stopped running) leaves a recent un-inventoried tail that
-    // recon_verified would otherwise wrongly claim. Default window is generous (35d)
-    // and now defaults to wall-clock; both are overridable by the caller.
+    // FINDING 2 — CEILING must cover UP TO NOW, not merely within the lookback
+    // window. The ceiling must be no older than (now - ceilingSkewSeconds), where
+    // the skew is a small bounded allowance (default one sweep interval = 1h). A
+    // days-old ceiling (D2 stopped running) leaves a recent un-inventoried tail and
+    // must NOT verify. (Previously the bound was (now - coverageWindowDays), so a
+    // ceiling up to ~window days stale wrongly passed.)
     const nowMs = persisted.nowIso ? Date.parse(persisted.nowIso) : Date.now();
-    const windowDays = persisted.coverageWindowDays ?? 35;
+    const skewSeconds = persisted.ceilingSkewSeconds ?? 3600; // 1h default
     const ceilMs = Date.parse(persisted.inventoryCeiling);
-    const minFreshMs = nowMs - windowDays * 86_400_000;
+    const minFreshMs = nowMs - skewSeconds * 1000;
     if (Number.isNaN(ceilMs) || ceilMs < minFreshMs) {
       if (mode === "OK") mode = "DEGRADED";
       reasons.push("inventory_ceiling_stale_does_not_cover_window");
@@ -559,6 +594,13 @@ export function combineVerifiedGate(
       if (mode === "OK") mode = "DEGRADED";
       reasons.push("inventory_floor_after_earliest_claimed_window");
     }
+  }
+
+  // FINDING 3: the attachment-count query FAILED -> backlog UNKNOWN. Block verified
+  // with a distinct reason; never let an unknown backlog read as clean.
+  if (persisted.attachmentsUnknown) {
+    if (mode === "OK") mode = "DEGRADED";
+    reasons.push("attachment_backlog_unknown_count_query_failed");
   }
 
   // B3 / attachment-gate: a non-zero attachment backlog forces DEGRADED on EITHER
@@ -789,19 +831,34 @@ export async function makesafeEmailReconcile(
   const knownRefs: KnownRef[] = (audit?.known_refs || []) as KnownRef[];
 
   const trustedSenderDomains = await loadTrustedSenderDomains(client);
+  // PARITY FIX (finding 1): load the SAME data-driven prefix set the monitor uses
+  // (floor UNION validated company prefixes), ONCE per run, and thread it into D1
+  // so the board side and the email side normalise with identical prefixes. A
+  // company-supplied prefix recognised on ingest is now matchable here.
+  const refPrefixes = await loadRefPrefixes(client);
   const d1 = reconcileD1(pipelineRefs, knownRefs, {
     trustedSenderDomains,
     nowIso: opts.nowIso,
+    refPrefixes,
   });
 
   // Attachment completeness (counts unresolved attachments for this mailbox) —
   // part of the D-series reconcile per MISSION.md.
-  const { count: unresolved } = await client.from("email_attachments")
+  // FINDING 3 — a count-query ERROR must NOT be coerced to 0 (that would silently
+  // clear the backlog and let recon_verified pass). On error the backlog is
+  // UNKNOWN: force DEGRADED and block verified via the sentinel below.
+  const { count: unresolvedCount, error: attErr } = await client.from("email_attachments")
     .select("id, emails!inner(mailbox)", { count: "exact", head: true })
     .eq("emails.mailbox", SES_MAILBOX)
     .in("status", ["pending", "failed", "needs_review"]);
+  const attachmentsUnknown = !!attErr;
+  // Treat UNKNOWN as a non-zero backlog so it blocks verified (it cannot be 0).
+  const unresolved = attachmentsUnknown ? (unresolvedCount ?? 1) : (unresolvedCount ?? 0);
+  if (attachmentsUnknown) {
+    console.error(`[recon ${source}] attachment-count query failed: ${attErr!.message}`);
+  }
 
-  const drift = summarizeDrift(d1, null, unresolved || 0);
+  const drift = summarizeDrift(d1, null, unresolved);
   await emitAlerts(client, sink, source, d1.alerts);
 
   // B2/B3 — read the LAST persisted D2 signal + coverage bounds so this D1 run
@@ -821,6 +878,9 @@ export async function makesafeEmailReconcile(
     // summarizeDrift) so the gate is consistent across D1 and D2 runs. A non-zero
     // backlog forces DEGRADED and blocks recon_verified.
     unresolvedAttachments: unresolved || 0,
+    // FINDING 3 — propagate the count-query failure so an UNKNOWN backlog blocks
+    // verified (rather than silently reading as 0).
+    attachmentsUnknown,
     // B3 — coverage freshness: the persisted ceiling must still cover this D1/D3
     // window, and the floor must reach back to this window's start, else not verified.
     nowIso: opts.nowIso ?? new Date().toISOString(),
@@ -953,15 +1013,22 @@ export async function makesafeEmailReconcileFullInventory(
   // while attachments were pending/failed. Now the backlog is folded into BOTH the
   // drift summary AND the combined gate, so any non-zero backlog forces DEGRADED
   // and blocks recon_verified on the D2 run too.
-  const { count: unresolvedAttachments } = await client.from("email_attachments")
+  // FINDING 3 — a count-query ERROR must NOT be coerced to 0 (silent backlog
+  // clear). On error the backlog is UNKNOWN: block verified via the sentinel.
+  const { count: attCount, error: d2AttErr } = await client.from("email_attachments")
     .select("id, emails!inner(mailbox)", { count: "exact", head: true })
     .eq("emails.mailbox", SES_MAILBOX)
     .in("status", ["pending", "failed", "needs_review"]);
+  const d2AttachmentsUnknown = !!d2AttErr;
+  const unresolvedAttachments = d2AttachmentsUnknown ? (attCount ?? 1) : (attCount ?? 0);
+  if (d2AttachmentsUnknown) {
+    console.error(`[recon D2] attachment-count query failed: ${d2AttErr!.message}`);
+  }
 
   // B2/B3 — persist the D2-specific verified signal + coverage bounds, then write
   // the combined gate folding in the LAST persisted D1 signal. D2 must NOT clobber
   // D1's signal (recon_d1_*).
-  const d2Drift = summarizeDrift(null, d2, unresolvedAttachments || 0);
+  const d2Drift = summarizeDrift(null, d2, unresolvedAttachments);
   const { data: prior } = await client.from("sync_state")
     .select("recon_d1_verified, recon_inventory_floor, recon_inventory_ceiling")
     .eq("mailbox", SES_MAILBOX)
@@ -985,7 +1052,10 @@ export async function makesafeEmailReconcileFullInventory(
     inventoryCeiling: newCeiling,
     // B3/attachment-gate: fold the live backlog + coverage freshness in here too so
     // a stale ceiling or a pending backlog blocks verified on the D2 run.
-    unresolvedAttachments: unresolvedAttachments || 0,
+    unresolvedAttachments,
+    // FINDING 3 — propagate the count-query failure so an UNKNOWN backlog blocks
+    // verified on the D2 run too.
+    attachmentsUnknown: d2AttachmentsUnknown,
     nowIso: new Date(nowMs).toISOString(),
     coverageWindowDays: historical ? undefined : windowDays,
     earliestClaimedIso: sinceIso,
