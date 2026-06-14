@@ -523,6 +523,14 @@ export interface CombinedGate {
   recon_reason: string;
 }
 
+// FINDING 2 — ceiling-freshness skew bounds. The skew is a small allowance for the
+// gap between the D2 sweep finishing and this gate running; it is NOT a tunable that
+// can be widened to relax the freshness requirement. DEFAULT = one sweep interval
+// (1h); MAX = the same 1h hard ceiling, so a caller/corrupt-value cannot pass a
+// days-long skew and resurrect a stale-ceiling verify.
+export const DEFAULT_CEILING_SKEW_SECONDS = 3600; // 1h
+export const MAX_CEILING_SKEW_SECONDS = 3600; // 1h hard cap
+
 export function combineVerifiedGate(
   thisSide: DriftSummary,
   persisted: PersistedReconSignals,
@@ -575,10 +583,30 @@ export function combineVerifiedGate(
     // must NOT verify. (Previously the bound was (now - coverageWindowDays), so a
     // ceiling up to ~window days stale wrongly passed.)
     const nowMs = persisted.nowIso ? Date.parse(persisted.nowIso) : Date.now();
-    const skewSeconds = persisted.ceilingSkewSeconds ?? 3600; // 1h default
+    // FINDING 2 (skew clamp) — the skew is a SMALL bounded allowance only. A caller
+    // (or a corrupt/poisoned persisted value) supplying an absurd skew (e.g. days)
+    // would widen the freshness window so far that a days-stale ceiling would verify
+    // again — the exact failure this check exists to prevent. Clamp the skew to a
+    // sane maximum (<= 1h = MAX_CEILING_SKEW_SECONDS) and floor it at 0 (a negative
+    // skew must not push minFreshMs into the future and reject a fresh ceiling).
+    const rawSkew = persisted.ceilingSkewSeconds ?? DEFAULT_CEILING_SKEW_SECONDS;
+    const skewSeconds = Number.isFinite(rawSkew)
+      ? Math.min(Math.max(rawSkew as number, 0), MAX_CEILING_SKEW_SECONDS)
+      : DEFAULT_CEILING_SKEW_SECONDS;
     const ceilMs = Date.parse(persisted.inventoryCeiling);
     const minFreshMs = nowMs - skewSeconds * 1000;
-    if (Number.isNaN(ceilMs) || ceilMs < minFreshMs) {
+    // FINDING 2 (future ceiling) — a ceiling AHEAD of now (clock skew on the writer,
+    // a corrupt timestamp, or a manually-poisoned row) is not real coverage and must
+    // NOT verify. Allow only the same small skew forward as backward; anything beyond
+    // now + clampedSkew is rejected as a future/clock-skewed ceiling -> DEGRADED.
+    const maxFutureMs = nowMs + skewSeconds * 1000;
+    if (Number.isNaN(ceilMs)) {
+      if (mode === "OK") mode = "DEGRADED";
+      reasons.push("inventory_ceiling_unparseable");
+    } else if (ceilMs > maxFutureMs) {
+      if (mode === "OK") mode = "DEGRADED";
+      reasons.push("inventory_ceiling_in_future_clock_skew");
+    } else if (ceilMs < minFreshMs) {
       if (mode === "OK") mode = "DEGRADED";
       reasons.push("inventory_ceiling_stale_does_not_cover_window");
     }
@@ -749,10 +777,18 @@ async function emitAlerts(
 }
 
 // Load the trusted make-safe sender domains for D1 corroboration.
+// FAIL CLOSED (sweep): this read FEEDS the gate — trusted domains can promote an
+// otherwise-ambiguous numeric-core candidate to a clean match (suppressing an
+// alert). A failed read silently yielding an EMPTY set would not suppress alerts
+// (fewer corroborations = MORE needs_review = more DEGRADED), so the empty-set
+// direction is safe; but the call must still THROW on error rather than swallow it,
+// so a transient DB failure can never quietly change the matching surface. The
+// caller turns the throw into a fail-closed 500.
 async function loadTrustedSenderDomains(client: SB): Promise<Set<string>> {
   const domains = new Set<string>();
-  const { data } = await client.from("makesafe_companies")
+  const { data, error } = await client.from("makesafe_companies")
     .select("sender_patterns").eq("active", true);
+  if (error) throw new Error(`makesafe_companies read failed: ${error.message}`);
   for (const co of (data || []) as Array<{ sender_patterns?: string[] }>) {
     for (const p of (co.sender_patterns || [])) {
       const v = String(p).toLowerCase().trim();
@@ -792,10 +828,18 @@ export async function makesafeEmailReconcile(
 
   // Map ref -> originating email evidence via email_events_raw + emails. We read
   // emails within the window for sender_domain + received_at corroboration.
-  const { data: emails } = await client.from("emails")
+  // FAIL CLOSED (sweep): this read feeds D1 corroboration AND the source_email_id
+  // linkage. A swallowed error coerced to an empty list would silently drop every
+  // pipeline item's email evidence — turning source_email_id matches into
+  // email_no_job ERRORs (over-alert) OR, worse, dropping corroboration so a real
+  // match is lost. Either way the gate must NOT run on partial evidence; THROW so
+  // the caller fails closed (500) rather than persist a verdict computed on a
+  // truncated/empty evidence set.
+  const { data: emails, error: emailsErr } = await client.from("emails")
     .select("post_id, from_email, received_at, has_attachments")
     .eq("mailbox", SES_MAILBOX)
     .gte("received_at", sinceIso);
+  if (emailsErr) throw new Error(`emails (D1 corroboration) read failed: ${emailsErr.message}`);
   const emailById = new Map<string, { from_email: string | null; received_at: string | null }>();
   for (const e of (emails || []) as Array<any>) {
     emailById.set(e.post_id, { from_email: e.from_email ?? null, received_at: e.received_at ?? null });
@@ -806,8 +850,13 @@ export async function makesafeEmailReconcile(
   );
   const eventToPost = new Map<string, string>();
   if (eventIds.length) {
-    const { data: evs } = await client.from("email_events_raw")
+    // FAIL CLOSED (sweep): this read resolves pipeline-item -> source email identity,
+    // the HIGHEST-trust D1 match tier. A swallowed error -> empty map would strip
+    // every source_email_id link, mis-classifying matched emails as dropped intake.
+    // THROW on error so the gate never runs on a broken linkage.
+    const { data: evs, error: evsErr } = await client.from("email_events_raw")
       .select("id, post_id").in("id", eventIds);
+    if (evsErr) throw new Error(`email_events_raw (event->post) read failed: ${evsErr.message}`);
     for (const ev of (evs || []) as Array<any>) eventToPost.set(ev.id, ev.post_id);
   }
 
@@ -865,10 +914,17 @@ export async function makesafeEmailReconcile(
   // does NOT overwrite/clear an unresolved D2 drop and only claims verified
   // within inventoried bounds. The combined gate requires BOTH d1 clean AND d2
   // clean AND coverage established.
-  const { data: prior } = await client.from("sync_state")
+  // FAIL CLOSED (sweep): this read feeds the gate the persisted D2 missing-post
+  // count and coverage bounds. A swallowed error coerced to null would DROP a
+  // real, unresolved persisted D2 drop (d2MissingPosts=null reads as "no drop"),
+  // i.e. an error coerced into a passing value on the very signal that is supposed
+  // to keep a D1 run from clearing a D2 failure. THROW so the caller fails closed
+  // (500) rather than recompute + persist a gate on an unknown prior D2 state.
+  const { data: prior, error: priorErr } = await client.from("sync_state")
     .select("recon_d2_verified, recon_d2_missing_posts, recon_inventory_floor, recon_inventory_ceiling")
     .eq("mailbox", SES_MAILBOX)
     .maybeSingle();
+  if (priorErr) throw new Error(`sync_state (prior D2 signal) read failed: ${priorErr.message}`);
   const gate = combineVerifiedGate(drift, {
     otherVerified: (prior as any)?.recon_d2_verified ?? null,
     d2MissingPosts: (prior as any)?.recon_d2_missing_posts ?? null,
@@ -892,8 +948,15 @@ export async function makesafeEmailReconcile(
   // it without re-running reconcile. We write BOTH this run's D1-specific signal
   // AND the combined gate — but we DO NOT touch any recon_d2_* column (B2: D1
   // never clears D2's unresolved drift).
+  // BLOCKER 1 (FAIL CLOSED) — this upsert PERSISTS the (possibly blocking) verdict
+  // the board/skills read. If it is unchecked and silently fails, a PRIOR row with
+  // recon_verified=true survives even though this run computed a DIFFERENT (possibly
+  // blocking) verdict — leaving a misleading verified flag. We MUST surface a write
+  // failure and fail the action closed: throw so the caller returns an error/500 and
+  // NEVER reports success. A run that cannot persist its verdict must not look as if
+  // it confirmed the prior one.
   const nowIso = new Date().toISOString();
-  await client.from("sync_state").upsert({
+  const { error: upsertErr } = await client.from("sync_state").upsert({
     mailbox: SES_MAILBOX,
     recon_d1_verified: drift.verified,
     recon_d1_checked_at: nowIso,
@@ -903,6 +966,12 @@ export async function makesafeEmailReconcile(
     recon_reason: gate.recon_reason,
     recon_checked_at: nowIso,
   }, { onConflict: "mailbox" });
+  if (upsertErr) {
+    throw new Error(
+      `sync_state upsert (D1 verdict persist) failed: ${upsertErr.message} ` +
+        `— failing closed; verdict NOT persisted (recon_verified would be left stale).`,
+    );
+  }
 
   return { d1, drift, gate, source };
 }
@@ -966,18 +1035,27 @@ export async function makesafeEmailReconcileFullInventory(
   // in `emails`, so comparing live posts against `emails` ALONE false-alarms them
   // as missing. Fold the terminal exclusion set into the "accounted for" set so an
   // excluded post PASSES instead of raising a missing_post ERROR.
-  const { data: excl } = await client.from("email_classifier_exclusions")
+  // FAIL CLOSED (sweep): the exclusion set feeds D2's "accounted for" set, i.e. it
+  // directly decides which live posts are MISSING. A swallowed error -> empty set
+  // would corrupt that accounting (firing false missing_post ERRORs on legitimately
+  // excluded posts). D2's missing count drives the gate, so it must run on the FULL
+  // exclusion set or not at all — THROW so the caller fails closed rather than
+  // computing/persisting a verdict from an incomplete accounting.
+  const { data: excl, error: exclErr } = await client.from("email_classifier_exclusions")
     .select("post_id")
     .eq("mailbox", SES_MAILBOX);
+  if (exclErr) throw new Error(`email_classifier_exclusions read failed: ${exclErr.message}`);
   const excludedIds = (excl || []).map((e: any) => e.post_id);
 
   // Belt-and-braces: also treat any change_type='excluded' event as terminal, in
   // case the dedicated exclusions table is pruned/rebuilt but the append-only
   // email_events_raw audit log still holds the exclusion record.
-  const { data: exclEvents } = await client.from("email_events_raw")
+  // FAIL CLOSED (sweep): same reasoning — feeds the "accounted for" set; THROW on error.
+  const { data: exclEvents, error: exclEventsErr } = await client.from("email_events_raw")
     .select("post_id")
     .eq("mailbox", SES_MAILBOX)
     .eq("change_type", "excluded");
+  if (exclEventsErr) throw new Error(`email_events_raw (excluded events) read failed: ${exclEventsErr.message}`);
   const exclusionEventIds = (exclEvents || []).map((e: any) => e.post_id);
 
   const accountedIds = [...storedIds, ...excludedIds, ...exclusionEventIds];
@@ -988,7 +1066,13 @@ export async function makesafeEmailReconcileFullInventory(
 
   // Persist the D2 scan log (post ids seen, page counts) to email_events_raw as a
   // non-PII inventory record, per MISSION.md ("persist a scan log").
-  await client.from("email_events_raw").insert({
+  // BLOCKER 3 (FAIL CLOSED) — the scan log is the EVIDENCE that this D2 inventory
+  // actually ran (post ids seen, page counts, covered window). D2 must NOT proceed
+  // to persist a verified state without its scan evidence. If the insert fails and
+  // is swallowed, sync_state could be updated to recon_verified=true with NO audit
+  // record that the sweep happened — an unprovable verdict. Check the error and
+  // THROW so the action fails closed BEFORE any sync_state verdict is written.
+  const { error: scanLogErr } = await client.from("email_events_raw").insert({
     mailbox: SES_MAILBOX,
     post_id: "_D2_INVENTORY_SCAN",
     change_type: "inventory_scan",
@@ -1004,6 +1088,12 @@ export async function makesafeEmailReconcileFullInventory(
       covered_until: coveredCeiling,
     },
   });
+  if (scanLogErr) {
+    throw new Error(
+      `email_events_raw D2 scan-log insert failed: ${scanLogErr.message} ` +
+        `— failing closed; D2 will NOT persist a verified state without scan evidence.`,
+    );
+  }
 
   await emitAlerts(client, sink, "D2", d2.alerts);
 
@@ -1029,10 +1119,17 @@ export async function makesafeEmailReconcileFullInventory(
   // the combined gate folding in the LAST persisted D1 signal. D2 must NOT clobber
   // D1's signal (recon_d1_*).
   const d2Drift = summarizeDrift(null, d2, unresolvedAttachments);
-  const { data: prior } = await client.from("sync_state")
+  // FAIL CLOSED (sweep): this read feeds the gate the persisted D1 verified signal
+  // and the prior coverage bounds (floor/ceiling). A swallowed error coerced to null
+  // would (a) drop the persisted D1 signal (otherVerified=null) and (b) lose the
+  // prior ceiling/floor — so the persisted upsert below could REGRESS the coverage
+  // bounds or recompute the combined gate against unknown prior D1 state. THROW so
+  // the caller fails closed rather than persist a verdict built on partial state.
+  const { data: prior, error: priorErr } = await client.from("sync_state")
     .select("recon_d1_verified, recon_inventory_floor, recon_inventory_ceiling")
     .eq("mailbox", SES_MAILBOX)
     .maybeSingle();
+  if (priorErr) throw new Error(`sync_state (prior D1 signal) read failed: ${priorErr.message}`);
 
   // The recurring bounded sweep updates only the CEILING it covered; ONLY the
   // historical backfill establishes/extends the true coverage FLOOR (B3).
@@ -1061,8 +1158,15 @@ export async function makesafeEmailReconcileFullInventory(
     earliestClaimedIso: sinceIso,
   });
 
+  // BLOCKER 1 (FAIL CLOSED) — this upsert PERSISTS the D2 verdict (including the
+  // D2 missing-post count that BLOCKS the gate). An unchecked, silently-failed write
+  // leaves a stale prior row that could still read recon_verified=true even though
+  // this D2 run found missing posts that should have blocked it. Check the error and
+  // THROW so the action fails closed: the caller returns an error/500 and does NOT
+  // report success, so a run that cannot persist its (possibly blocking) verdict
+  // never leaves a misleading verified flag behind.
   const nowIso = new Date().toISOString();
-  await client.from("sync_state").upsert({
+  const { error: upsertErr } = await client.from("sync_state").upsert({
     mailbox: SES_MAILBOX,
     recon_d2_verified: d2Drift.verified,
     recon_d2_checked_at: nowIso,
@@ -1074,6 +1178,12 @@ export async function makesafeEmailReconcileFullInventory(
     recon_reason: gate.recon_reason,
     recon_checked_at: nowIso,
   }, { onConflict: "mailbox" });
+  if (upsertErr) {
+    throw new Error(
+      `sync_state upsert (D2 verdict persist) failed: ${upsertErr.message} ` +
+        `— failing closed; verdict NOT persisted (recon_verified would be left stale).`,
+    );
+  }
 
   return { ...d2, gate };
 }
@@ -1090,34 +1200,51 @@ export async function makesafeEmailCanary(
   // Active canary expectations live in a small table (one row per outstanding
   // canary). If the table/rows are absent, this is a clean no-op (no canary in
   // flight).
-  const { data: exps } = await client.from("makesafe_canary_expectations")
+  // FAIL CLOSED (sweep): D4 is an ALERT path. A swallowed error here coerced to an
+  // empty list would silently report "0 canaries in flight" while a real canary is
+  // outstanding — suppressing the canary_missing alert this check exists to raise.
+  // THROW so the caller surfaces the failure rather than reporting a false all-clear.
+  const { data: exps, error: expsErr } = await client.from("makesafe_canary_expectations")
     .select("marker, seeded_at, sla_minutes, require_pdf, require_threaded_reply, resolved")
     .eq("resolved", false);
+  if (expsErr) throw new Error(`makesafe_canary_expectations read failed: ${expsErr.message}`);
 
   const alerts: ReconAlert[] = [];
   let ok = 0;
   for (const e of (exps || []) as Array<any>) {
     // Observation: is a stored email carrying this marker present, and complete?
-    const { data: hit } = await client.from("emails")
+    // FAIL CLOSED (sweep): a swallowed error -> hit null would mis-read a LANDED
+    // canary as absent and (after SLA) fire a false canary_missing — but more to the
+    // point, a transient read failure must not silently decide canary presence.
+    // THROW so the operator sees the DB failure rather than a fabricated verdict.
+    const { data: hit, error: hitErr } = await client.from("emails")
       .select("post_id, received_at, has_attachments, subject, body_preview")
       .eq("mailbox", SES_MAILBOX)
       .or(`subject.ilike.%${e.marker}%,body_preview.ilike.%${e.marker}%`)
       .order("received_at", { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (hitErr) throw new Error(`emails (canary hit) read failed: ${hitErr.message}`);
 
     let obs: CanaryObservation | null = null;
     if (hit?.post_id) {
       // PDF attachment present + uploaded?
-      const { count: pdfCount } = await client.from("email_attachments")
+      // FAIL CLOSED (sweep): an error coerced to 0 would mark the PDF as ABSENT and
+      // mis-classify a complete canary as incomplete (WARN). Surface the error so a
+      // count failure is not silently read as "no PDF".
+      const { count: pdfCount, error: pdfErr } = await client.from("email_attachments")
         .select("id", { count: "exact", head: true })
         .eq("email_id", hit.post_id)
         .eq("status", "uploaded");
+      if (pdfErr) throw new Error(`email_attachments (canary pdf count) failed: ${pdfErr.message}`);
       // Threaded reply: more than one stored post sharing the canary's thread.
-      const { count: threadCount } = await client.from("emails")
+      // FAIL CLOSED (sweep): same — an error coerced to 0 would mark the canary as
+      // un-threaded. Surface the error rather than fabricate a completeness verdict.
+      const { count: threadCount, error: threadErr } = await client.from("emails")
         .select("post_id", { count: "exact", head: true })
         .eq("mailbox", SES_MAILBOX)
         .or(`subject.ilike.%${e.marker}%,body_preview.ilike.%${e.marker}%`);
+      if (threadErr) throw new Error(`emails (canary thread count) failed: ${threadErr.message}`);
       obs = {
         marker: e.marker,
         observed_at: hit.received_at,
@@ -1142,10 +1269,16 @@ export async function makesafeEmailCanary(
       // N1 — a passing canary is DONE: mark it resolved so the scheduled D4 check
       // stops re-checking it forever. Without this, every passed canary is
       // re-evaluated on every */15 run indefinitely.
-      await client.from("makesafe_canary_expectations").update({
+      // SURFACE (sweep): a failed resolve is not a verified-gate signal, but a
+      // swallowed failure would leave the canary re-firing every run with no trace.
+      // Surface it so the operator can fix the write rather than chase phantom
+      // re-checks. (Throwing AFTER ok++ is acceptable: the caller fails the action
+      // and re-runs; the canary is idempotently re-resolved next pass.)
+      const { error: resolveErr } = await client.from("makesafe_canary_expectations").update({
         resolved: true,
         resolved_at: new Date().toISOString(),
       }).eq("marker", e.marker);
+      if (resolveErr) throw new Error(`makesafe_canary_expectations resolve update failed: ${resolveErr.message}`);
     }
     if (alert) alerts.push(alert);
   }
@@ -1171,7 +1304,11 @@ export async function seedCanaryExpectation(
   client: SB,
   exp: { marker: string; sla_minutes?: number; require_pdf?: boolean; require_threaded_reply?: boolean },
 ): Promise<void> {
-  await client.from("makesafe_canary_expectations").upsert({
+  // FAIL CLOSED (sweep): this records the expectation row D4 watches. A swallowed
+  // failure means the operator believes a canary is being watched while NO row
+  // exists — so a genuinely-missing canary would never raise canary_missing (a
+  // silent hole in the alert path). THROW so a failed seed is visible and retried.
+  const { error } = await client.from("makesafe_canary_expectations").upsert({
     marker: exp.marker,
     seeded_at: new Date().toISOString(),
     sla_minutes: exp.sla_minutes ?? 30,
@@ -1179,4 +1316,5 @@ export async function seedCanaryExpectation(
     require_threaded_reply: exp.require_threaded_reply ?? true,
     resolved: false,
   }, { onConflict: "marker" });
+  if (error) throw new Error(`makesafe_canary_expectations seed upsert failed: ${error.message}`);
 }
