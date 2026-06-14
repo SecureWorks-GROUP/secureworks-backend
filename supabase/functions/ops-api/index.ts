@@ -3188,7 +3188,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 ].filter(Boolean).join('\n'),
                 Quantity: qty,
                 UnitAmount: price,
-                AccountCode: accountCodeForJob(wo.jobs?.type || '', '200'),
+                AccountCode: '620', // expense account for trade ACCPAY bills (matches submitTradeInvoice/generate_trade_invoice/push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax on ACCPAY)
                 TaxType: woTaxType,
                 Tracking: xeroTracking(woJobNum),
               }
