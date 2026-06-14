@@ -397,7 +397,45 @@ async function processAttachments(
       updated_at: new Date().toISOString(),
     });
     if (error) {
-      console.error(`[monitor-ses] failed-placeholder upsert failed for ${post.id}: ${error.message}`);
+      // HIGH (silent-drop window): the list fetch already failed AND we could not
+      // even record the failed placeholder. If we logged-and-returned here, the run
+      // would report success and the watermark would advance past a post whose
+      // attachment failure left NO durable record — a silent drop. FAIL CLOSED:
+      // throw so the run returns non-success and does NOT advance the watermark
+      // (the same window is retried next cycle). Never a no-record continue.
+      throw new Error(
+        `attachment list fetch failed AND failed-placeholder upsert failed for ${post.id}: ` +
+        `list_error=${(e as Error).message}; upsert_error=${error.message}`,
+      );
+    }
+    return 1;
+  }
+
+  // HIGH (silent-drop window): hasAttachments=true but Graph returned a SUCCESSFUL
+  // EMPTY list. Pre-fix the for-loop below simply did not run and we returned 0 ->
+  // no durable row, watermark advances, attachment silently lost. Write a synthetic
+  // needs_review row (non-null graph_attachment_id) and count it as unresolved so it
+  // is seen by the refreshSyncState backlog count -> DEGRADED -> blocks verified ->
+  // the retry worker re-checks. Never a no-record return.
+  if (attachments.length === 0) {
+    const synthetic = "_hasattachments_true_empty_list";
+    const attempts = (await priorAttempts(sb, post.id, synthetic)) + 1;
+    const { error } = await upsertAttachmentRow(sb, {
+      email_id: post.id,
+      graph_attachment_id: synthetic,
+      name: null,
+      status: "needs_review",
+      attachment_kind: "unknown",
+      last_error: "hasAttachments_true_but_empty_list",
+      attempts,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) {
+      // Same fail-closed contract as the list-fetch placeholder: if even the
+      // synthetic row cannot be recorded, throw rather than silently drop.
+      throw new Error(
+        `hasAttachments=true empty-list synthetic upsert failed for ${post.id}: ${error.message}`,
+      );
     }
     return 1;
   }

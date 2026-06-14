@@ -435,6 +435,233 @@ Deno.test("attachments: a post with hasAttachments=false does no work", async ()
   assertEquals(unresolved, 0);
 });
 
+// ── Silent-drop failure cases (attachment INVARIANT) ──────────────────────────
+// Every attachment failure branch must leave a DURABLE email_attachments row OR
+// fail closed (throw, so the run does not advance the watermark). These cases
+// drive the REAL _processAttachments with stubs and assert a durable row OR a
+// throw — never a path that returns/continues leaving no record.
+
+// Configurable stub: inject an upsert error (always, or only for rows matching a
+// predicate) and/or a storage upload error. Records every upsert + upload + remove.
+function makeConfigurableAttachmentSb(opts: {
+  // Return an error for an email_attachments upsert when this predicate matches the
+  // row being written (default: never error).
+  upsertError?: (row: any) => string | null;
+  // Return an error string for a storage upload (default: no error).
+  uploadError?: string | null;
+} = {}) {
+  const upserts: any[] = [];
+  const uploads: Array<{ path: string }> = [];
+  const removes: string[][] = [];
+  const sb: any = {
+    from(table: string) {
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                eq() {
+                  return { maybeSingle: async () => ({ data: null, error: null }) };
+                },
+                maybeSingle: async () => ({ data: null, error: null }),
+              };
+            },
+          };
+        },
+        upsert: async (row: any, _o?: any) => {
+          if (table === "email_attachments") {
+            upserts.push(row);
+            const msg = opts.upsertError ? opts.upsertError(row) : null;
+            if (msg) return { error: { message: msg } };
+          }
+          return { error: null };
+        },
+      };
+    },
+    storage: {
+      from() {
+        return {
+          upload: async (path: string, _bytes: Uint8Array, _o?: any) => {
+            uploads.push({ path });
+            if (opts.uploadError) return { error: { message: opts.uploadError } };
+            return { error: null };
+          },
+          remove: async (paths: string[]) => {
+            removes.push(paths);
+            return { error: null };
+          },
+        };
+      },
+    },
+  };
+  return { sb, upserts, uploads, removes };
+}
+
+// Drive _processAttachments with a configurable sb + an attachment-list fetch that
+// either returns the given attachments OR fails (status 500 / network throw).
+async function runWith(
+  atts: any[],
+  sbBundle: ReturnType<typeof makeConfigurableAttachmentSb>,
+  listMode: "ok" | "http500" | "throw" = "ok",
+) {
+  const realFetch = globalThis.fetch;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).fetch = (_url: string) => {
+    if (listMode === "throw") return Promise.reject(new Error("network down"));
+    if (listMode === "http500") {
+      return Promise.resolve(new Response("graph boom", { status: 500 }));
+    }
+    return Promise.resolve(attListResponse(atts));
+  };
+  try {
+    const post = { ...FX_MLB_POST, hasAttachments: true };
+    const unresolved = await _processAttachments(sbBundle.sb, "tok", "group-1", post as any);
+    return { unresolved };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// FINDING 1 — list fetch fails AND the failed-placeholder upsert ALSO fails -> the
+// run must FAIL CLOSED (throw), so the watermark is not advanced past an unrecorded
+// attachment failure. (Pre-fix this logged and returned 1, silently dropping it.)
+Deno.test("attachments [FINDING 1]: list-fetch failure + placeholder upsert failure -> THROWS (fail closed)", async () => {
+  const sbBundle = makeConfigurableAttachmentSb({
+    // The placeholder row uses the synthetic list-fetch id; error it too.
+    upsertError: (row) =>
+      row.graph_attachment_id === "_list_fetch_failed" ? "db down on placeholder" : null,
+  });
+  let threw = false;
+  try {
+    await runWith([], sbBundle, "http500");
+  } catch (e) {
+    threw = true;
+    assert(
+      (e as Error).message.includes("failed-placeholder upsert failed"),
+      `expected fail-closed throw, got: ${(e as Error).message}`,
+    );
+  }
+  assertEquals(threw, true, "must throw when both the list fetch AND the placeholder write fail");
+  // It DID attempt to record the placeholder (durable-record-first), then threw.
+  assertEquals(sbBundle.upserts.length, 1);
+  assertEquals(sbBundle.upserts[0].graph_attachment_id, "_list_fetch_failed");
+});
+
+// FINDING 1 (positive control) — list fetch fails but the placeholder upsert
+// SUCCEEDS -> a durable failed row, return 1 (DEGRADED), NO throw.
+Deno.test("attachments [FINDING 1]: list-fetch failure with a successful placeholder -> durable failed row, no throw", async () => {
+  const sbBundle = makeConfigurableAttachmentSb();
+  const { unresolved } = await runWith([], sbBundle, "throw");
+  assertEquals(unresolved, 1);
+  assertEquals(sbBundle.upserts.length, 1);
+  assertEquals(sbBundle.upserts[0].graph_attachment_id, "_list_fetch_failed");
+  assertEquals(sbBundle.upserts[0].status, "failed");
+  assertEquals(sbBundle.upserts[0].last_error, "attachment_list_fetch_failed");
+});
+
+// FINDING 2 — hasAttachments=true but Graph returns a SUCCESSFUL EMPTY list. Pre-fix
+// the loop did not run and we returned 0 -> silent drop. Now a synthetic
+// needs_review row (non-null id) is written and counted as unresolved (DEGRADED).
+Deno.test("attachments [FINDING 2]: hasAttachments=true + empty list -> synthetic needs_review row, unresolved=1", async () => {
+  const sbBundle = makeConfigurableAttachmentSb();
+  const { unresolved } = await runWith([], sbBundle, "ok");
+  assertEquals(unresolved, 1, "an empty list under hasAttachments=true must be unresolved (DEGRADED)");
+  assertEquals(sbBundle.upserts.length, 1);
+  const row = sbBundle.upserts[0];
+  assertEquals(row.graph_attachment_id, "_hasattachments_true_empty_list");
+  assert(row.graph_attachment_id !== null, "synthetic id must be non-null");
+  assertEquals(row.status, "needs_review");
+  assertEquals(row.last_error, "hasAttachments_true_but_empty_list");
+});
+
+// FINDING 2 (fail-closed) — empty list AND the synthetic upsert fails -> THROW.
+Deno.test("attachments [FINDING 2]: empty list + synthetic upsert failure -> THROWS (fail closed)", async () => {
+  const sbBundle = makeConfigurableAttachmentSb({
+    upsertError: (row) =>
+      row.graph_attachment_id === "_hasattachments_true_empty_list" ? "db down" : null,
+  });
+  let threw = false;
+  try {
+    await runWith([], sbBundle, "ok");
+  } catch (e) {
+    threw = true;
+    assert((e as Error).message.includes("empty-list synthetic upsert failed"));
+  }
+  assertEquals(threw, true, "must fail closed when the synthetic empty-list row cannot be written");
+});
+
+// FINDING 3 (sweep) — Storage upload failure -> a durable FAILED row is recorded
+// (the bytes never landed, the row tracks the failure for the retry worker).
+Deno.test("attachments [FINDING 3]: storage upload failure -> durable failed row, unresolved=1", async () => {
+  const sbBundle = makeConfigurableAttachmentSb({ uploadError: "bucket 503" });
+  const { unresolved } = await runWith([FX_PDF_ATTACHMENT], sbBundle, "ok");
+  assertEquals(unresolved, 1);
+  const failed = sbBundle.upserts.find((r) => r.status === "failed");
+  assert(!!failed, "expected a durable failed row after a storage upload failure");
+  assert(
+    String(failed.last_error).startsWith("storage_upload_failed:"),
+    `last_error should record the storage failure, got: ${failed.last_error}`,
+  );
+});
+
+// FINDING 3 (sweep) — DB row upsert failure AFTER a successful upload -> the
+// orphaned object is removed AND a durable failed row is recorded (no silent skip).
+Deno.test("attachments [FINDING 3]: row upsert failure after upload -> orphan cleanup + failed row", async () => {
+  const sbBundle = makeConfigurableAttachmentSb({
+    // Error ONLY the success ("uploaded") row write; the subsequent markAttachmentFailed
+    // ("failed") write must succeed so a durable failed row is left.
+    upsertError: (row) => (row.status === "uploaded" ? "row write conflict" : null),
+  });
+  const { unresolved } = await runWith([FX_PDF_ATTACHMENT], sbBundle, "ok");
+  assertEquals(unresolved, 1);
+  // The object we wrote was cleaned up (M4 orphan delete).
+  assertEquals(sbBundle.removes.length, 1);
+  assertEquals(sbBundle.uploads.length, 1);
+  assertEquals(sbBundle.removes[0][0], sbBundle.uploads[0].path);
+  // A durable failed row remains for the retry worker.
+  const failed = sbBundle.upserts.find((r) => r.status === "failed");
+  assert(!!failed, "expected a durable failed row after the orphaned upload");
+  assert(String(failed.last_error).startsWith("row_upsert_failed:"));
+});
+
+// FINDING 3 (sweep) — DB row upsert failure after upload where the FAILED write
+// ALSO fails -> fail closed (throw), never a silent skip.
+Deno.test("attachments [FINDING 3]: upload ok but BOTH row writes fail -> THROWS (fail closed)", async () => {
+  const sbBundle = makeConfigurableAttachmentSb({
+    upsertError: () => "db totally down", // both the uploaded row and the failed row error
+  });
+  let threw = false;
+  try {
+    await runWith([FX_PDF_ATTACHMENT], sbBundle, "ok");
+  } catch (e) {
+    threw = true;
+    assert((e as Error).message.includes("markAttachmentFailed upsert failed"));
+  }
+  assertEquals(threw, true, "must fail closed when neither the uploaded nor the failed row can be written");
+  // The orphan was still cleaned up before the throw.
+  assertEquals(sbBundle.removes.length, 1);
+});
+
+// FINDING 4 — invalid base64 contentBytes -> a durable failed row is recorded.
+Deno.test("attachments [FINDING 4]: invalid base64 -> durable failed row (base64_decode_failed)", async () => {
+  const badB64Pdf = {
+    id: "att-badb64-1",
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    name: "Work Order.pdf",
+    contentType: "application/pdf",
+    size: 10,
+    isInline: false,
+    contentBytes: "%%%not-valid-base64%%%", // atob throws on these chars
+  };
+  const sbBundle = makeConfigurableAttachmentSb();
+  const { unresolved } = await runWith([badB64Pdf], sbBundle, "ok");
+  assertEquals(unresolved, 1);
+  assertEquals(sbBundle.uploads.length, 0, "must not upload anything for undecodable bytes");
+  const failed = sbBundle.upserts.find((r) => r.status === "failed");
+  assert(!!failed, "expected a durable failed row for invalid base64");
+  assertEquals(failed.last_error, "base64_decode_failed");
+});
+
 // ── M5 — ingestion-level persistPost: spaced/bare refs DO create a pipeline_items
 // row with a non-null ref (validates B1 end-to-end at the real persist path, not
 // just the downstream recon recovery). This is the test Codex flagged as missing:
