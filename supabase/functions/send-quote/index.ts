@@ -2801,17 +2801,11 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     statusHtml = '<div style="background:#FF3B3020;color:#FF3B30;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Declined</div>'
   }
 
-  // Hero banner HTML (desktop + mobile)
+  // Hero banner HTML (shows on both desktop and mobile, single instance at top of card)
   const heroBannerHtml = heroUrl ? `
       <div class="hero-banner">
         <img src="${heroUrl}" alt="${projectType} render for ${suburb || clientName}" class="hero-img" onerror="this.parentElement.style.display='none'">
       </div>` : ''
-
-  // Mobile hero (shown inside pdf-mobile card on mobile)
-  const mobileHeroHtml = heroUrl ? `
-        <div class="mobile-hero">
-          <img src="${heroUrl}" alt="Your ${projectType} project" class="mobile-hero-img" onerror="this.parentElement.style.display='none'">
-        </div>` : ''
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -2839,8 +2833,6 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     .confirm-overlay.active { display:flex; }
     .confirm-box { background:#fff;border-radius:14px;padding:32px;max-width:400px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.2); }
     .pdf-mobile { display: none; text-align: center; padding: 0; background: #F9FAFB; border-radius: 10px; border: 1px solid #E5E7EB; overflow: hidden; }
-    .mobile-hero { overflow: hidden; max-height: 220px; background: #e8ecef; }
-    .mobile-hero-img { width: 100%; height: 220px; object-fit: cover; display: block; }
     .pdf-mobile-body { padding: 24px 20px; }
     .pdf-mobile-icon { font-size: 36px; margin-bottom: 10px; }
     .pdf-mobile p { color: #4C6A7C; font-size: 14px; margin-bottom: 16px; }
@@ -2878,7 +2870,6 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
       ${doc.pdf_url ? `
       <iframe src="${doc.pdf_url}#view=FitH" class="pdf-frame" title="Quote PDF"></iframe>
       <div class="pdf-mobile">
-        ${mobileHeroHtml}
         <div class="pdf-mobile-body">
           <div class="pdf-mobile-icon">📄</div>
           <p>Your detailed quote is ready to view</p>
