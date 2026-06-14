@@ -2288,9 +2288,8 @@ if (import.meta.main) serve(async (req: Request) => {
         const tradeEmail = inv.user?.email || ''
         const cachedContactId: string | null = inv.user?.xero_contact_id || null
 
-        const weekNum = Math.ceil((new Date(inv.week_start).getTime() - new Date(new Date(inv.week_start).getFullYear(), 0, 1).getTime()) / (7 * 86400000))
-        const year = new Date(inv.week_start).getFullYear()
-        const reference = 'TRADE-' + tradeName.split(' ')[0] + '-WK' + weekNum + '-' + year
+        const distinctJobNums = [...new Set((lines || []).map((l: any) => l.job_number).filter(Boolean))].join(', ')
+        const reference = `${inv.invoice_number || 'TRADE'} | ${distinctJobNums}`
 
         const paymentDays = inv.user?.payment_terms_days || 7
         const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
@@ -4044,7 +4043,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   ].filter(Boolean).join('\n'),
                   Quantity: l.total_hours,
                   UnitAmount: l.hourly_rate,
-                  AccountCode: accountCodeForJob(jobMap[l.job_id]?.type || '', '301'),
+                  AccountCode: '620', // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
                   TaxType: taxType,
                   Tracking: xeroTracking(l.job_number || ''),
                   }
@@ -4056,7 +4055,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   ].filter(Boolean).join('\n'),
                   Quantity: e.quantity || 1,
                   UnitAmount: e.unit_rate || 0,
-                  AccountCode: e.job_id ? accountCodeForJob(jobMap[e.job_id]?.type || '', '301') : '301',
+                  AccountCode: '620', // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
                   TaxType: taxType,
                   Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                 }))]
