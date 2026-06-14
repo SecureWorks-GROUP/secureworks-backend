@@ -3466,20 +3466,10 @@ if (import.meta.main) serve(async (req: Request) => {
               const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
               weekEnd = weekEndDate.toISOString().slice(0, 10)
 
-              // ── Duplicate-week guard (Layer A, app side) ──────────────────
-              // The DB partial unique index is the hard guarantee; this app-side
-              // check returns a friendly 409 before we do any work. A draft for
-              // this week is fine (submit promotes it below); any non-failed,
-              // non-draft invoice for the same (user, week) is a duplicate.  [F3]
-              const { data: dupWeek } = await client.from('trade_invoices')
-                .select('id, status')
-                .eq('user_id', tradeUser.id)
-                .eq('week_start', week_start)
-                .not('status', 'in', '("draft","failed","ops-reject")')
-                .maybeSingle()
-              if (dupWeek && dupWeek.id !== draft_id) {
-                throw new ApiError('An invoice has already been submitted for this week', 409)
-              }
+              // ── Duplicate-week guard (Layer A) REMOVED ────────────────────
+              // Multiple invoices per week are now allowed (e.g. correction/
+              // supplemental submissions). The DB unique index was also dropped.
+              // Per-assignment duplicate protection remains via invoiced_in. [F3]
             }
 
             // Resolve the server-side hourly rate for this trade for this week.
@@ -3835,7 +3825,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
 
             // Create or promote invoice + line items. If the user saved a weekly draft, submit must
-            // update that same row; inserting a second row conflicts with the weekly unique index.
+            // update that same row; otherwise a plain INSERT creates a new invoice row.
             let invoice: any = null
             if (draft_id) {
               const { data: draftToSubmit } = await client.from('trade_invoices')
@@ -3884,13 +3874,6 @@ if (import.meta.main) serve(async (req: Request) => {
             } else {
               const { data: newInvoice, error: invErr } = await client.from('trade_invoices').insert(invoicePayload).select('id').single()
               if (invErr) {
-                // Map the partial-unique-index race (two submits for the same week
-                // land between the app-side dup check and the insert) to a friendly
-                // 409 rather than a raw 500.                                    [D6]
-                const m = (invErr.message || '').toLowerCase()
-                if (invErr.code === '23505' || m.includes('duplicate key') || m.includes('unique')) {
-                  throw new ApiError('An invoice has already been submitted for this week', 409)
-                }
                 throw new Error('Failed to create invoice: ' + invErr.message)
               }
               invoice = newInvoice
