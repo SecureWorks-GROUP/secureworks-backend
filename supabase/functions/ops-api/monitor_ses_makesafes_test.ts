@@ -22,7 +22,9 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _classifyPost,
+  _DEFAULT_REF_PREFIXES,
   _extractRef,
+  _extractRefPrefixes,
   _graphGetAll,
   _isPdfMagic,
   _normaliseRef,
@@ -137,6 +139,69 @@ Deno.test("extractRef: spaced/bare/body forms all yield a non-null ref (B1)", ()
   assertEquals(_extractRef("make safe please", "job number 67500 confirmed"), "67500");
   // Truly no ref anywhere -> null.
   assertEquals(_extractRef("make safe please", "no number here"), null);
+});
+
+// ── B1 (STILL-OPEN fix) — MS-prefixed COMPACT refs ────────────────────────────
+// "MS191190" is a real historically-dropped WO. Pre-fix the recognised prefix set
+// was MLB|AJBR only and the bare-numeric fallback could NOT catch it (the digits
+// are glued to the "S", so there is no \b before the digit run). It therefore fell
+// to ref=null -> no pipeline_items row -> D1-blind drop. These prove the MS family
+// is now recognised in compact, spaced, and dashed forms.
+Deno.test("extractRef: MS-prefixed COMPACT ref 'MS191190' yields a non-null ref (B1 still-open)", () => {
+  assertEquals(_extractRef("MS191190", null), "MS-191190");
+  assertEquals(_extractRef("RE: MS191190 emergency make safe", null), "MS-191190");
+  // Spaced + dashed MS variants too.
+  assertEquals(_extractRef("MS 191190 attend tonight", null), "MS-191190");
+  assertEquals(_extractRef("Work Order MS-191190", null), "MS-191190");
+  // Body fallback for a compact MS ref.
+  assertEquals(_extractRef("make safe please", "<p>job MS191190 attached</p>"), "MS-191190");
+});
+
+Deno.test("normaliseRef: compact MS ref collapses to MS-191190 (default prefix floor)", () => {
+  assertEquals(_normaliseRef("MS191190"), "MS-191190");
+  assertEquals(_normaliseRef("ms-191190"), "MS-191190");
+  assertEquals(_normaliseRef("MS 191190"), "MS-191190");
+});
+
+Deno.test("classifyPost: an MS-prefixed subject classifies make-safe with a non-null ref (B1 still-open)", () => {
+  // No sender match (random domain), subject carries only the compact MS ref. It
+  // must still INCLUDE (subject_ref) with a NON-NULL ref so persistPost writes a
+  // pipeline_items row instead of silently dropping it.
+  const post = { ...FX_NON_MAKESAFE_POST, subject: "MS191190 emergency make safe" };
+  const r = _classifyPost(post, COMPANIES);
+  assertEquals(r.include, true);
+  assertEquals(r.reason, "subject_ref");
+  assertEquals(r.ref, "MS-191190");
+  assertEquals(r.ref !== null, true);
+});
+
+// ── B1 — the prefix set is DATA-DRIVEN from makesafe_companies ─────────────────
+// A company-defined ref prefix (parsing_rules.ref_prefixes) must be recognised
+// WITHOUT a code change. extractRefPrefixes parses the company shape; passing the
+// derived set to classifyPost/extractRef recognises a brand-new family ("KBA").
+Deno.test("extractRefPrefixes: pulls ref_prefixes from a company parsing_rules shape", () => {
+  assertEquals(
+    _extractRefPrefixes({ ref_prefixes: ["KBA", "kbz"] }),
+    ["KBA", "KBZ"],
+  );
+  // Tolerant of a single-string shape + absence.
+  assertEquals(_extractRefPrefixes({ ref_prefixes: "qbcc" }), ["QBCC"]);
+  assertEquals(_extractRefPrefixes({}), []);
+  assertEquals(_extractRefPrefixes(null), []);
+});
+
+Deno.test("classifyPost: a DATA-DRIVEN company prefix ('KBA') is recognised code-free (B1)", () => {
+  // COMPACT "KBA88123": the static floor does NOT include KBA, AND the bare-numeric
+  // fallback cannot catch it (digits glued to the "A" -> no \b before the run), so
+  // with the floor-only set it drops to ref=null -- exactly the MS191190 class of
+  // bug. The DATA-DRIVEN prefix set is the only thing that recovers it.
+  const post = { ...FX_NON_MAKESAFE_POST, subject: "KBA88123 make safe Joondalup" };
+  // Default (floor-only) set: no KBA prefix + glued digits -> null (the drop).
+  assertEquals(_classifyPost(post, COMPANIES).ref, null);
+  // Data-driven set (floor UNION company prefixes) -> prefixed canonical form.
+  const driven = _classifyPost(post, COMPANIES, [..._DEFAULT_REF_PREFIXES, "KBA"]);
+  assertEquals(driven.include, true);
+  assertEquals(driven.ref, "KBA-88123");
 });
 
 // ── Ref normalisation ─────────────────────────────────────────────────────────
@@ -418,4 +483,41 @@ Deno.test("persistPost: a BARE-numeric ref ('Make Safe 67005') writes a pipeline
   assertEquals(!!pi, true, "expected a pipeline_items upsert");
   assertEquals(pi!.row.ref, "67005");
   assertEquals(pi!.row.ref !== null, true);
+});
+
+// B1 STILL-OPEN, proven END-TO-END: the previously-dropped compact MS ref must
+// now drive the REAL persist path to a pipeline_items row (not just classify).
+// This is the trace that closes the MS drop: classify -> non-null ref -> a
+// pipeline_items row exists -> D1 can see it.
+Deno.test("persistPost: a COMPACT MS ref ('MS191190') writes a pipeline_items row with a non-null ref (B1 still-open)", async () => {
+  const { pi, cls } = await persistAndGetPipelineItem("MS191190 emergency make safe Marangaroo");
+  assertEquals(cls.include, true);
+  assertEquals(cls.ref, "MS-191190");
+  assertEquals(!!pi, true, "expected a pipeline_items upsert for the MS ref");
+  assertEquals(pi!.row.ref, "MS-191190");
+  assertEquals(pi!.row.ref !== null, true);
+  // The append-only replay log also records the extracted ref (rebuildability).
+  const { writes } = await persistAndGetPipelineItem("MS191190 emergency make safe Marangaroo");
+  const ev = writes.find((w) => w.table === "email_events_raw" && w.op === "insert");
+  assertEquals(!!ev, true, "expected an email_events_raw audit row");
+  assertEquals(ev!.row.extracted_ref, "MS-191190");
+});
+
+// One more real-world variant: an MS ref carried only in the email BODY (subject
+// is a generic "make safe" line) must still reach a pipeline_items row.
+Deno.test("persistPost: an MS ref in the BODY (generic subject) still writes a pipeline_items row (B1)", async () => {
+  const { sb, writes } = makePersistSb();
+  const post = {
+    ...FX_MLB_POST,
+    subject: "Emergency make safe tonight",
+    body: { contentType: "html", content: "<p>Please attend, ref MS191190 attached.</p>" },
+    hasAttachments: false,
+  };
+  const cls = _classifyPost(post as any, COMPANIES);
+  assertEquals(cls.include, true);
+  assertEquals(cls.ref, "MS-191190");
+  await _persistPost(sb as any, "tok", "group-1", post as any, cls);
+  const pi = writes.find((w) => w.table === "pipeline_items" && w.op === "upsert");
+  assertEquals(!!pi, true, "expected a pipeline_items upsert from a body-only MS ref");
+  assertEquals(pi!.row.ref, "MS-191190");
 });
