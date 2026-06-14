@@ -3918,11 +3918,20 @@ if (import.meta.main) serve(async (req: Request) => {
                   Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                 }))]
 
+                // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
+                // so the insurer/builder ref appears in the bill header, not just the line descriptions.
+                // _external_ref is already on jobMap entries (enriched above at Change 4 / L3464-3472).
+                const xeroExternalRefs = [...new Set(lineItems.map((l: any) => jobMap[l.job_id]?._external_ref).filter(Boolean))].join(', ')
+                const xeroInternalJobNums = [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', ')
+                const xeroReference = invoiceNumber
+                  + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
+                  + (xeroExternalRefs ? ' | ' + xeroExternalRefs : '')
+
                 const xeroPayload = {
                   Invoices: [{
                     Type: 'ACCPAY',
                     Contact: { ContactID: xeroContactId },
-                    Reference: invoiceNumber + ' | ' + [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', '),
+                    Reference: xeroReference,
                     Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
