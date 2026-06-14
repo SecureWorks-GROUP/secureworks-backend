@@ -1090,7 +1090,53 @@ serve(async (req: Request) => {
         }
       }
 
-      return await htmlResponse(buildClientPage(doc, token))
+      // ── HERO RENDER LOOKUP (B1 brochure viewer) ──
+      // Look up the latest scope_revision for this job and pick the best render artifact.
+      let heroUrl: string | null = null
+      if (doc.job_id) {
+        try {
+          const { data: latestRevision } = await sb
+            .from('scope_revisions')
+            .select('id')
+            .eq('job_id', doc.job_id)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single()
+
+          if (latestRevision?.id) {
+            const jobType = doc.jobs?.type || ''
+            // Prefer render_hero for patio; for fencing prefer render_profile/render_site_plan
+            const preferredTypes = jobType === 'fencing'
+              ? ['render_profile', 'render_site_plan', 'render_hero', 'render_front', 'render_side']
+              : ['render_hero', 'render_front', 'render_side', 'render_profile', 'render_site_plan']
+
+            const { data: artifacts } = await sb
+              .from('scope_artifacts')
+              .select('id, artifact_type, storage_path')
+              .eq('scope_revision_id', latestRevision.id)
+
+            if (artifacts && artifacts.length > 0) {
+              let best: { storage_path: string } | null = null
+              for (const preferred of preferredTypes) {
+                const found = artifacts.find((a: any) => a.artifact_type === preferred)
+                if (found) { best = found; break }
+              }
+              if (!best) best = artifacts[0]
+
+              if (best?.storage_path) {
+                const { data: signed } = await sb.storage
+                  .from('scope-artifacts')
+                  .createSignedUrl(best.storage_path, 3600)
+                if (signed?.signedUrl) heroUrl = signed.signedUrl
+              }
+            }
+          }
+        } catch {
+          // Non-blocking: hero is optional, fall through with null
+        }
+      }
+
+      return await htmlResponse(buildClientPage(doc, token, heroUrl))
     }
 
     // ── VARIATION ACCEPT/DECLINE ──
@@ -2741,7 +2787,7 @@ function buildQuoteEmail(opts: {
 // CLIENT-FACING QUOTE PAGE
 // ════════════════════════════════════════════════════════════
 
-function buildClientPage(doc: any, token: string): string {
+function buildClientPage(doc: any, token: string, heroUrl: string | null = null): string {
   const clientName = doc.jobs?.client_name || 'Customer'
   const projectType = doc.jobs?.type || 'project'
   const suburb = doc.jobs?.site_suburb || ''
@@ -2750,10 +2796,16 @@ function buildClientPage(doc: any, token: string): string {
 
   let statusHtml = ''
   if (isAccepted) {
-    statusHtml = '<div style="background:#34C75920;color:#34C759;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Accepted &mdash; Thank you! We\'ll be in touch shortly.</div>'
+    statusHtml = '<div style="background:#34C75920;color:#34C759;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
   } else if (isDeclined) {
     statusHtml = '<div style="background:#FF3B3020;color:#FF3B30;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Declined</div>'
   }
+
+  // Hero banner HTML (shows on both desktop and mobile, single instance at top of card)
+  const heroBannerHtml = heroUrl ? `
+      <div class="hero-banner">
+        <img src="${heroUrl}" alt="${projectType} render for ${suburb || clientName}" class="hero-img" onerror="this.parentElement.style.display='none'">
+      </div>` : ''
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -2763,20 +2815,26 @@ function buildClientPage(doc: any, token: string): string {
   <title>Your Quote - SecureWorks Group</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f5f7; color: #333; }
-    .header { background: #293C46; padding: 16px 24px; }
-    .header-brand { color: #fff; font-size: 18px; font-weight: 700; }
-    .header-brand span { color: rgba(255,255,255,0.6); font-weight: 400; }
-    .container { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
-    .card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 16px; }
-    h1 { color: #293C46; font-size: 22px; margin-bottom: 8px; }
-    .subtitle { color: #4C6A7C; font-size: 14px; margin-bottom: 24px; }
-    .pdf-frame { width: 100%; height: 80vh; min-height: 600px; border: none; border-radius: 8px; background: #f0f0f0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f0f2f5; color: #333; }
+    .header { background: #293C46; padding: 18px 28px; display: flex; align-items: center; justify-content: space-between; }
+    .header-brand { color: #fff; font-size: 19px; font-weight: 700; letter-spacing: 0.3px; }
+    .header-brand span { color: rgba(255,255,255,0.55); font-weight: 400; }
+    .header-accent { width: 100%; height: 3px; background: #F15A29; }
+    .container { max-width: 800px; margin: 0 auto; padding: 28px 16px; }
+    .card { background: #fff; border-radius: 14px; padding: 28px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 16px; overflow: hidden; }
+    .card-header { margin-bottom: 6px; }
+    h1 { color: #293C46; font-size: 23px; font-weight: 700; margin-bottom: 4px; }
+    .subtitle { color: #4C6A7C; font-size: 14px; margin-bottom: 20px; }
+    .prepared-for { font-size: 12px; color: #8FA5B2; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; margin-bottom: 4px; }
+    .hero-banner { margin: -28px -28px 24px -28px; overflow: hidden; max-height: 320px; background: #e8ecef; }
+    .hero-img { width: 100%; height: 320px; object-fit: cover; display: block; }
+    .pdf-frame { width: 100%; height: 82vh; min-height: 640px; border: none; border-radius: 10px; background: #f0f0f0; }
     .confirm-overlay { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center; }
     .confirm-overlay.active { display:flex; }
-    .confirm-box { background:#fff;border-radius:12px;padding:28px;max-width:400px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.2); }
-    .pdf-mobile { display: none; text-align: center; padding: 32px 16px; background: #F9FAFB; border-radius: 8px; border: 1px solid #E5E7EB; }
-    .pdf-mobile-icon { font-size: 48px; margin-bottom: 12px; }
+    .confirm-box { background:#fff;border-radius:14px;padding:32px;max-width:400px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.2); }
+    .pdf-mobile { display: none; text-align: center; padding: 0; background: #F9FAFB; border-radius: 10px; border: 1px solid #E5E7EB; overflow: hidden; }
+    .pdf-mobile-body { padding: 24px 20px; }
+    .pdf-mobile-icon { font-size: 36px; margin-bottom: 10px; }
     .pdf-mobile p { color: #4C6A7C; font-size: 14px; margin-bottom: 16px; }
     .btn { display: inline-block; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; }
     .btn-accept { background: #34C759; color: #fff; }
@@ -2784,36 +2842,45 @@ function buildClientPage(doc: any, token: string): string {
     .btn-download { background: #293C46; color: #fff; }
     .btn-view-pdf { background: #F15A29; color: #fff; display: inline-block; width: auto; padding: 14px 40px; }
     .btn:hover { opacity: 0.9; }
-    .footer { text-align: center; color: #999; font-size: 12px; padding: 24px; }
+    .footer { text-align: center; color: #aaa; font-size: 12px; padding: 24px; }
     @media (max-width: 768px) {
+      .container { padding: 16px 12px; }
       .pdf-frame { display: none !important; }
       .pdf-mobile { display: block !important; }
+      .hero-banner { max-height: 200px; margin: -28px -28px 20px -28px; }
+      .hero-img { height: 200px; }
     }
   </style>
 </head>
 <body>
+  <div class="header-accent"></div>
   <div class="header">
     <div class="header-brand">SecureWorks <span>Group</span></div>
   </div>
   <div class="container">
     <div class="card">
-      <h1>Your ${projectType} quote</h1>
-      <p class="subtitle">For ${clientName}${suburb ? ', ' + suburb : ''}</p>
+      ${heroBannerHtml}
+      <div class="card-header">
+        <div class="prepared-for">Prepared for ${clientName}${suburb ? ', ' + suburb : ''}</div>
+        <h1>Your ${projectType} quote</h1>
+      </div>
 
       ${statusHtml}
 
       ${doc.pdf_url ? `
-      <iframe src="${doc.pdf_url}" class="pdf-frame" title="Quote PDF"></iframe>
+      <iframe src="${doc.pdf_url}#view=FitH" class="pdf-frame" title="Quote PDF"></iframe>
       <div class="pdf-mobile">
-        <div class="pdf-mobile-icon">📄</div>
-        <p>Your detailed quote is ready to view</p>
-        <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn btn-view-pdf">View Quote PDF</a>
-        <a href="${doc.pdf_url}" download style="display:block;margin-top:8px;color:#4C6A7C;font-size:13px;text-decoration:underline;">Download PDF</a>
+        <div class="pdf-mobile-body">
+          <div class="pdf-mobile-icon">📄</div>
+          <p>Your detailed quote is ready to view</p>
+          <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn btn-view-pdf">View Full Quote PDF</a>
+          <a href="${doc.pdf_url}" download style="display:block;margin-top:10px;color:#4C6A7C;font-size:13px;text-decoration:underline;">Download PDF</a>
+        </div>
       </div>
       ` : '<p style="color:#4C6A7C;text-align:center;padding:20px;">PDF not available</p>'}
 
       ${!isAccepted && !isDeclined ? `
-      <div style="margin-top:24px;padding-top:24px;border-top:1px solid #eee;">
+      <div style="margin-top:28px;padding-top:24px;border-top:1px solid #eee;">
         <p style="color:#4C6A7C;font-size:14px;margin-bottom:16px;">Happy with the quote? Accept below to confirm and we'll be in touch to schedule your project.</p>
         <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
         <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
@@ -3117,7 +3184,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     <div class="card">
       <div class="run-badge">${runLabel}</div>
       <h1>${runName}</h1>
-      <p class="subtitle">${quoteRef} &mdash; ${suburb}</p>
+      <p class="subtitle">${quoteRef}${suburb ? ' - ' + suburb : ''}</p>
 
       ${statusHtml}
       ${partiesHtml}
@@ -3267,7 +3334,7 @@ function buildWaitingPage(job: any, run: any, acceptorName: string, runLabel: st
         The other party has received the same quote with the agreed cost split.
       </p>
       <p style="color:#4C6A7C;font-size:14px;line-height:1.6;">
-        We'll follow up with them if we haven't heard back within a few days. You don't need to do anything &mdash; we'll email you as soon as both parties are confirmed.
+        We'll follow up with them if we haven't heard back within a few days. You don't need to do anything. We'll email you as soon as both parties are confirmed.
       </p>
     </div>
 
@@ -3297,7 +3364,7 @@ function buildWaitingPage(job: any, run: any, acceptorName: string, runLabel: st
     </p>
   </div>
 
-  <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416<br>${jobNumber}${suburb ? ' &mdash; ' + suburb : ''}</div>
+  <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416<br>${jobNumber}${suburb ? ' - ' + suburb : ''}</div>
 </div></body></html>`
 }
 
