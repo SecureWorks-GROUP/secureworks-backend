@@ -304,7 +304,13 @@ function makeSink() {
 //   .from(t).select(...)...maybeSingle()                    -> { data }
 //   .from(t).upsert(row, {onConflict})                      -> records, { error:null }
 //   .from(t).insert(row)                                    -> records, { error:null }
-function makeReconClient(seed: Record<string, any[]>, counts: Record<string, number> = {}) {
+function makeReconClient(
+  seed: Record<string, any[]>,
+  counts: Record<string, number> = {},
+  // FINDING 3 — tables listed here return an ERROR on their COUNT query (so we can
+  // prove the attachment-count error is NOT coerced to 0). Maps table -> message.
+  countErrors: Record<string, string> = {},
+) {
   const writes: Array<{ table: string; op: string; row: any }> = [];
   function builder(table: string) {
     const rows = seed[table] || [];
@@ -329,8 +335,16 @@ function makeReconClient(seed: Record<string, any[]>, counts: Record<string, num
         writes.push({ table, op: "update", row });
         return { eq: async () => ({ error: null }) };
       },
-      then: (resolve: (v: any) => any) =>
-        resolve(isCount ? { count: counts[table] ?? 0, error: null } : { data: rows, error: null }),
+      then: (resolve: (v: any) => any) => {
+        if (isCount) {
+          if (countErrors[table]) {
+            // The count query errored: count is null + an error is returned.
+            return resolve({ count: null, error: { message: countErrors[table] } });
+          }
+          return resolve({ count: counts[table] ?? 0, error: null });
+        }
+        return resolve({ data: rows, error: null });
+      },
     };
     return b;
   }
@@ -483,11 +497,16 @@ Deno.test("B3: verified requires the historical inventory floor to be establishe
 });
 
 Deno.test("B2+B3: both checks clean AND floor established AND no D2 drop -> verified", () => {
+  // FINDING 2 — the ceiling must reach UP TO NOW (within the bounded skew), not
+  // merely within a lookback window. Pin nowIso == ceiling so the freshness bound
+  // is deterministically satisfied.
+  const NOW = "2026-06-15T00:00:00Z";
   const gate = combineVerifiedGate(CLEAN_DRIFT, {
     otherVerified: true,
     d2MissingPosts: 0,
     inventoryFloor: "1970-01-01T00:00:00Z",
-    inventoryCeiling: "2026-06-14T00:00:00Z",
+    inventoryCeiling: NOW,
+    nowIso: NOW,
   });
   assertEquals(gate.recon_verified, true);
   assertEquals(gate.recon_mode, "OK");
@@ -545,13 +564,14 @@ Deno.test("B3: a NULL floor -> NOT verified (floor still required alongside ceil
 });
 
 Deno.test("B3: floor + FRESH ceiling + both checks clean + no attachment backlog -> verified", () => {
-  // The only path to verified: floor established, ceiling present AND covering the
-  // window, the other check clean, no D2 drop, and zero attachment backlog.
+  // The only path to verified: floor established, ceiling present AND reaching UP
+  // TO NOW (within the bounded skew, finding 2), the other check clean, no D2 drop,
+  // and zero attachment backlog. The ceiling is 30 min before NOW (< 1h skew).
   const gate = combineVerifiedGate(CLEAN_DRIFT, {
     otherVerified: true,
     d2MissingPosts: 0,
     inventoryFloor: "1970-01-01T00:00:00Z",
-    inventoryCeiling: "2026-06-14T12:00:00Z", // < 7 days before NOW
+    inventoryCeiling: "2026-06-14T23:30:00Z", // 30 min before NOW (within 1h skew)
     nowIso: NOW,
     coverageWindowDays: 7,
     unresolvedAttachments: 0,
@@ -753,4 +773,140 @@ Deno.test("N1: a canary that PASSES is marked resolved + resolved_at", async () 
   assert(upd, "expected a resolve update on the passed canary");
   assertEquals(upd!.row.resolved, true);
   assertEquals(typeof upd!.row.resolved_at, "string");
+});
+
+// ════════════════════════════════════════════════════════════
+// FINDING 2 — ceiling coverage must reach UP TO NOW, not merely within a lookback
+// window. Ceiling exactly now -> verified; ceiling now-2days (stale) -> NOT
+// verified. (Pre-fix the bound was (now - coverageWindowDays), so a days-old
+// ceiling over a generous window wrongly verified.)
+// ════════════════════════════════════════════════════════════
+Deno.test("FINDING 2: a ceiling EXACTLY now -> verified", () => {
+  const NOW2 = "2026-06-15T00:00:00Z";
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: NOW2,        // ceiling == now
+    nowIso: NOW2,
+    coverageWindowDays: 30,        // a generous window must NOT relax freshness
+    unresolvedAttachments: 0,
+  });
+  assertEquals(gate.recon_verified, true);
+  assertEquals(gate.recon_mode, "OK");
+});
+
+Deno.test("FINDING 2: a ceiling now-2days (stale) -> NOT verified (window does not relax it)", () => {
+  const NOW2 = "2026-06-15T00:00:00Z";
+  const gate = combineVerifiedGate(CLEAN_DRIFT, {
+    otherVerified: true,
+    d2MissingPosts: 0,
+    inventoryFloor: "1970-01-01T00:00:00Z",
+    inventoryCeiling: "2026-06-13T00:00:00Z", // 2 days before NOW
+    nowIso: NOW2,
+    coverageWindowDays: 30,        // even a 30-day window must NOT verify a 2-day-stale ceiling
+    unresolvedAttachments: 0,
+  });
+  assertEquals(gate.recon_verified, false);
+  assertEquals(gate.recon_mode, "DEGRADED");
+  assert(gate.recon_reason.includes("inventory_ceiling_stale_does_not_cover_window"));
+});
+
+// ════════════════════════════════════════════════════════════
+// FINDING 3 — the attachment-count query ERROR must NOT be coerced to 0. A failed
+// count is an UNKNOWN backlog that BLOCKS recon_verified (not a silent pass).
+// Applies to BOTH the D1 and D2 paths.
+// ════════════════════════════════════════════════════════════
+Deno.test("FINDING 3: attachment-count query ERROR blocks verified on the D1 action (not silent 0)", async () => {
+  const { client, writes } = makeReconClient(
+    {
+      // Clean D1 (no pipeline refs, no board jobs) + D2 last ran clean within bounds.
+      pipeline_items: [],
+      emails: [],
+      makesafe_companies: [{ sender_patterns: ["mlb.com.au"], parsing_rules: {} }],
+      sync_state: [{
+        recon_d2_verified: true,
+        recon_d2_missing_posts: 0,
+        recon_inventory_floor: "1970-01-01T00:00:00Z",
+        recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+      }],
+    },
+    {}, // no counts
+    { email_attachments: "simulated count-query failure" }, // FINDING 3: count errors
+  );
+  const { sink } = makeSink();
+  const fakeAudit = async () => ({ known_refs: [] });
+  const res = await makesafeEmailReconcile(client, sink, {
+    mode: "D1",
+    makesafeAudit: fakeAudit,
+    nowIso: "2026-06-14T00:00:00Z",
+  });
+  // The backlog is UNKNOWN -> verified is blocked (NOT silently zero/clean).
+  assertEquals(res.gate.recon_verified, false);
+  assert(res.gate.recon_reason.includes("attachment_backlog_unknown_count_query_failed"));
+  const ss = writes.find((w) => w.table === "sync_state" && w.op === "upsert")!;
+  assertEquals(ss.row.recon_verified, false);
+});
+
+Deno.test("FINDING 3: attachment-count query ERROR blocks verified on the D2 action (not silent 0)", async () => {
+  const { client, writes } = makeReconClient(
+    {
+      emails: [{ post_id: "post-A" }],
+      sync_state: [{
+        recon_d1_verified: true,
+        recon_inventory_floor: "1970-01-01T00:00:00Z",
+        recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+      }],
+    },
+    {},
+    { email_attachments: "simulated count-query failure" }, // FINDING 3
+  );
+  const { sink } = makeSink();
+  const deps = {
+    getGraphToken: async () => "tok",
+    resolveGroupId: async (_t: string) => "group-1",
+    // Live traversal == store -> zero missing posts (D2 drift clean), so the ONLY
+    // possible blocker is the UNKNOWN attachment backlog.
+    collectPosts: async (_t: string, _g: string, _s: string) => ({
+      posts: [{ id: "post-A" }],
+      pageCounts: { conversations: 1, threads: 1, posts: 1 },
+    }),
+    historical: true, // establish the floor so only the backlog can block
+    nowIso: NOW,
+  };
+  const r = await makesafeEmailReconcileFullInventory(client, sink, deps);
+  assertEquals(r.missing_post_ids.length, 0);          // D2 drift is clean
+  assertEquals(r.gate.recon_verified, false);          // but verified is BLOCKED
+  assert(r.gate.recon_reason.includes("attachment_backlog_unknown_count_query_failed"));
+  const ss = writes.find((w) => w.table === "sync_state" && w.op === "upsert")!;
+  assertEquals(ss.row.recon_verified, false);
+});
+
+// CONTROL — a SUCCESSFUL zero count on the same clean state DOES verify (proves the
+// blocker above is the count ERROR, not an unrelated regression).
+Deno.test("FINDING 3 control: a clean count (0, no error) on the D2 action verifies", async () => {
+  const { client } = makeReconClient(
+    {
+      emails: [{ post_id: "post-A" }],
+      sync_state: [{
+        recon_d1_verified: true,
+        recon_inventory_floor: "1970-01-01T00:00:00Z",
+        recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+      }],
+    },
+    { email_attachments: 0 }, // clean zero, no error
+  );
+  const { sink } = makeSink();
+  const deps = {
+    getGraphToken: async () => "tok",
+    resolveGroupId: async (_t: string) => "group-1",
+    collectPosts: async (_t: string, _g: string, _s: string) => ({
+      posts: [{ id: "post-A" }],
+      pageCounts: { conversations: 1, threads: 1, posts: 1 },
+    }),
+    historical: true,
+    nowIso: NOW,
+  };
+  const r = await makesafeEmailReconcileFullInventory(client, sink, deps);
+  assertEquals(r.gate.recon_verified, true);
 });
