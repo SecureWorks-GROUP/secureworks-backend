@@ -455,6 +455,8 @@ Deno.test("action D1: clean state emits no alerts and reports verified=OK", asyn
       recon_d2_missing_posts: 0,
       recon_inventory_floor: "1970-01-01T00:00:00Z",
       recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+      // BLOCKER (atomic backfill) — a completed full backfill is now required to verify.
+      backfill_complete: true,
     }],
   }, { email_attachments: 0 });
   const { sink, events } = makeSink();
@@ -525,6 +527,7 @@ Deno.test("B2+B3: both checks clean AND floor established AND no D2 drop -> veri
     inventoryFloor: "1970-01-01T00:00:00Z",
     inventoryCeiling: NOW,
     nowIso: NOW,
+    backfillComplete: true,
   });
   assertEquals(gate.recon_verified, true);
   assertEquals(gate.recon_mode, "OK");
@@ -593,6 +596,7 @@ Deno.test("B3: floor + FRESH ceiling + both checks clean + no attachment backlog
     nowIso: NOW,
     coverageWindowDays: 7,
     unresolvedAttachments: 0,
+    backfillComplete: true,
   });
   assertEquals(gate.recon_verified, true);
   assertEquals(gate.recon_mode, "OK");
@@ -809,6 +813,7 @@ Deno.test("FINDING 2: a ceiling EXACTLY now -> verified", () => {
     nowIso: NOW2,
     coverageWindowDays: 30,        // a generous window must NOT relax freshness
     unresolvedAttachments: 0,
+    backfillComplete: true,
   });
   assertEquals(gate.recon_verified, true);
   assertEquals(gate.recon_mode, "OK");
@@ -950,6 +955,8 @@ function cleanD1Seed() {
       recon_d2_missing_posts: 0,
       recon_inventory_floor: "1970-01-01T00:00:00Z",
       recon_inventory_ceiling: "2026-06-14T00:00:00Z",
+      // BLOCKER (atomic backfill) — a completed full backfill is required to verify.
+      backfill_complete: true,
     }],
   };
 }
@@ -1097,6 +1104,7 @@ Deno.test("FINDING 2 (clamp): a tiny ceiling skew within the clamp still verifie
     inventoryCeiling: "2026-06-14T23:45:00Z", // 15 min stale (within 1h clamp)
     nowIso: NOW3,
     ceilingSkewSeconds: 1800, // 30 min, under the clamp
+    backfillComplete: true,
   });
   assertEquals(gate.recon_verified, true);
   assertEquals(gate.recon_mode, "OK");

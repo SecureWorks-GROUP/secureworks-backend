@@ -43,6 +43,16 @@ const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ||
   Deno.env.get("SUPABASE_SERVICE_KEY")!;
 const SW_API_KEY = Deno.env.get("SW_API_KEY") || "";
 
+// Test-only seam: the handler builds its Supabase client via this indirection so a
+// Deno test can inject a stub client (createClient is an esm.sh import that cannot be
+// stubbed otherwise). Production leaves it null and the real createClient is used.
+// deno-lint-ignore no-explicit-any
+let _testClientFactory: ((url: string, key: string) => any) | null = null;
+// deno-lint-ignore no-explicit-any
+function _setTestClientFactory(f: ((url: string, key: string) => any) | null): void {
+  _testClientFactory = f;
+}
+
 const SES_GROUP_MAIL = "ses@secureworkswa.com.au";
 const MAILBOX = SES_GROUP_MAIL; // mailbox key in mail_sync_cursors / sync_state
 const STORAGE_BUCKET = "makesafe-emails";
@@ -700,21 +710,40 @@ async function persistPost(
   // that pipeline_items is rebuilt from; if this insert fails but the cursor still
   // advanced, the row would vanish from the replay set forever. Throw so the caller
   // aborts BEFORE the watermark commit (retry the same window next cycle).
-  const { data: eventRow, error: evErr } = await sb.from("email_events_raw").insert({
-    mailbox: MAILBOX,
-    post_id: post.id,
-    change_type: "created",
-    received_at: receivedAt,
-    content_sha256: contentSha,
-    extracted_ref: cls.ref,
-    conversation_id: post.conversationId || null,
-    thread_id: post.conversationThreadId || null,
-    page_meta: {},
-  }).select("id").single();
-  if (evErr) {
-    throw new Error(`email_events_raw insert failed for ${post.id}: ${evErr.message}`);
+  //
+  // MEDIUM (idempotency) — a backfill re-run (or an overlapping-window re-poll) hits
+  // the SAME post again. A plain insert would APPEND a duplicate 'created' audit row
+  // for that post on every re-run, polluting the replay log (and pipeline_items'
+  // source_event_ids provenance). Dedupe on the stable (post_id, change_type='created')
+  // key: if an equivalent row already exists, REUSE its id instead of inserting a new
+  // one. (The append-only contract is preserved for genuinely distinct events — the
+  // D2 'inventory_scan' rows are a different change_type and are never deduped here.)
+  const { data: existingEvent, error: existingEvErr } = await sb.from("email_events_raw")
+    .select("id")
+    .eq("post_id", post.id)
+    .eq("change_type", "created")
+    .maybeSingle();
+  if (existingEvErr) {
+    throw new Error(`email_events_raw dedupe read failed for ${post.id}: ${existingEvErr.message}`);
   }
-  const eventId = (eventRow as { id?: string } | null)?.id || null;
+  let eventId = (existingEvent as { id?: string } | null)?.id || null;
+  if (!eventId) {
+    const { data: eventRow, error: evErr } = await sb.from("email_events_raw").insert({
+      mailbox: MAILBOX,
+      post_id: post.id,
+      change_type: "created",
+      received_at: receivedAt,
+      content_sha256: contentSha,
+      extracted_ref: cls.ref,
+      conversation_id: post.conversationId || null,
+      thread_id: post.conversationThreadId || null,
+      page_meta: {},
+    }).select("id").single();
+    if (evErr) {
+      throw new Error(`email_events_raw insert failed for ${post.id}: ${evErr.message}`);
+    }
+    eventId = (eventRow as { id?: string } | null)?.id || null;
+  }
 
   // 3) Attachments (decoupled DEGRADED contract).
   const unresolved = await processAttachments(sb, token, groupId, post);
@@ -796,18 +825,35 @@ async function auditExclusion(
   // B3 — the exclusion audit write is REQUIRED. If it fails, throw so the caller
   // aborts BEFORE the watermark is committed (otherwise an excluded post would
   // silently vanish while the cursor advanced past it). Nothing is dropped.
-  const { error: evErr } = await sb.from("email_events_raw").insert({
-    mailbox: MAILBOX,
-    post_id: post.id,
-    change_type: "excluded",
-    received_at: post.receivedDateTime || post.createdDateTime || null,
-    exclusion_reason: reason,
-    conversation_id: post.conversationId || null,
-    thread_id: post.conversationThreadId || null,
-    page_meta: {},
-  });
-  if (evErr) {
-    throw new Error(`exclusion event insert failed for ${post.id}: ${evErr.message}`);
+  //
+  // MEDIUM (idempotency) — a backfill re-run / overlapping re-poll re-classifies the
+  // SAME excluded post. A plain insert would append a duplicate 'excluded' audit row
+  // each run. Dedupe on the stable (post_id, change_type='excluded') key: skip the
+  // insert if an equivalent row already exists. (The classifier-exclusions row below
+  // already upserts ON CONFLICT(post_id), so it was idempotent; this closes the gap
+  // on the event-log side.)
+  const { data: existingExcl, error: existingExclErr } = await sb.from("email_events_raw")
+    .select("id")
+    .eq("post_id", post.id)
+    .eq("change_type", "excluded")
+    .maybeSingle();
+  if (existingExclErr) {
+    throw new Error(`exclusion event dedupe read failed for ${post.id}: ${existingExclErr.message}`);
+  }
+  if (!existingExcl) {
+    const { error: evErr } = await sb.from("email_events_raw").insert({
+      mailbox: MAILBOX,
+      post_id: post.id,
+      change_type: "excluded",
+      received_at: post.receivedDateTime || post.createdDateTime || null,
+      exclusion_reason: reason,
+      conversation_id: post.conversationId || null,
+      thread_id: post.conversationThreadId || null,
+      page_meta: {},
+    });
+    if (evErr) {
+      throw new Error(`exclusion event insert failed for ${post.id}: ${evErr.message}`);
+    }
   }
   const { error: exErr } = await sb.from("email_classifier_exclusions").upsert({
     post_id: post.id,
@@ -987,21 +1033,26 @@ async function refreshSyncState(
 //      ingested receivedDateTime) and CEILING (recon_inventory_ceiling = now), so
 //      the verified gate (combineVerifiedGate) can reflect true full-history
 //      coverage. ONLY this full pass is allowed to set the historical floor.
-//   4. Commits the live cursor (mail_sync_cursors.last_completed_max) at the END so
-//      the */5 poll takes over with NO GAP — set to the backfill START time, so the
+//   4. ATOMICALLY commits the coverage FLOOR + CEILING, the backfill_complete
+//      marker, AND the live cursor (mail_sync_cursors.last_completed_max) in ONE
+//      transaction via the commit_makesafe_backfill RPC — the FINAL step. The cursor
+//      is set to the backfill START time so the */5 poll takes over with NO GAP: the
 //      poll's overlapping (>= start - overlap) window re-scans EVERYTHING that could
 //      have arrived during the (long) backfill run. Backfill covered <= start..now
 //      already, and the poll re-covers >= start, so the two windows OVERLAP — never
 //      a gap.
 //
-// FAIL CLOSED + RESUMABLE: the floor, the ceiling, and the live cursor are written
-// ONLY after the full pass completes WITHOUT throwing. A partial/failed backfill
-// (any persist/attachment/traversal throw) leaves NO floor and NO live cursor — so
-// recon_verified can NEVER read true over un-ingested history. A re-run after a
-// partial failure re-traverses from epoch and idempotently re-ingests; already-
-// ingested posts upsert as no-ops, un-ingested ones are filled in, and only THEN is
-// the floor/cursor committed. The advisory lock prevents it running concurrently
-// with the poll (which would race the same cursor/rows).
+// FAIL CLOSED + RESUMABLE: the floor, the ceiling, the backfill_complete marker, and
+// the live cursor are committed in ONE all-or-nothing RPC transaction, ONLY after the
+// full pass completes WITHOUT throwing. A partial/failed backfill (any persist/
+// attachment/traversal throw, OR a failure inside the atomic commit) leaves NO floor,
+// NO ceiling, NO completion marker, and NO live cursor — so recon_verified can NEVER
+// read true over un-ingested history. (The verified gate also requires
+// backfill_complete = true, so even a partially-written prior state cannot verify.)
+// A re-run after a partial failure re-traverses from epoch and idempotently
+// re-ingests; already-ingested posts upsert as no-ops, un-ingested ones are filled
+// in, and only THEN is the atomic commit attempted. The advisory lock prevents it
+// running concurrently with the poll (which would race the same cursor/rows).
 //
 // COST: it is a long run. Progress is logged (pages, posts, attachments). Posts are
 // processed in bounded batches with per-batch progress; floor/cursor are NOT
@@ -1122,72 +1173,52 @@ async function runBackfillFull(
   const ceilingIso = backfillStartIso;
   const floorIso = earliestReceived ?? backfillStartIso; // empty group -> floor=ceiling
 
-  // 1) Establish/extend the coverage FLOOR + CEILING on sync_state. Only the full
-  //    historical backfill writes the historical floor (the recurring D2 sweep only
-  //    moves the ceiling). We do NOT lower an already-earlier floor: if a prior
-  //    backfill set an earlier floor, keep it (MIN), so re-running on a now-larger
-  //    history never regresses coverage.
-  const { data: prior, error: priorErr } = await sb.from("sync_state")
-    .select("recon_inventory_floor, recon_inventory_ceiling")
-    .eq("mailbox", MAILBOX)
-    .maybeSingle();
-  if (priorErr) {
-    throw new Error(`backfill sync_state prior read failed: ${priorErr.message}`);
-  }
-  const priorFloor = (prior as { recon_inventory_floor?: string } | null)?.recon_inventory_floor ?? null;
-  const priorCeiling = (prior as { recon_inventory_ceiling?: string } | null)?.recon_inventory_ceiling ?? null;
-  // Floor: the EARLIEST of (prior floor, this run's floor) — coverage only widens.
-  const newFloor = priorFloor && priorFloor < floorIso ? priorFloor : floorIso;
-  // Ceiling: the LATEST of (prior ceiling, this run's ceiling) — never regress.
-  const newCeiling = priorCeiling && priorCeiling > ceilingIso ? priorCeiling : ceilingIso;
-
+  // BLOCKER FIX (atomic commit) — commit the coverage FLOOR + CEILING, the
+  // backfill_complete marker, AND the live cursor in ONE transaction via the
+  // commit_makesafe_backfill RPC. Previously these were two SEPARATE writes
+  // (sync_state floor/ceiling, then mail_sync_cursors cursor); if the cursor write
+  // failed AFTER the floor write, the system had coverage bounds set (claiming
+  // ingestion coverage) but the wrong/absent live cursor — a sync gap the verified
+  // gate could falsely pass. The RPC is the LAST step and is all-or-nothing: on ANY
+  // failure NOTHING is set, so a partial/failed backfill can never leave coverage
+  // bounds (or the backfill_complete marker) recorded without the matching cursor,
+  // and recon_verified can never read true over un-ingested history.
+  //
+  // The RPC also applies the MIN(floor)/MAX(ceiling) widen-only rule server-side
+  // (against the existing row), so re-running on a now-larger history never regresses
+  // coverage — the same invariant the old separate read+compute path enforced.
   const nowStamp = new Date().toISOString();
-  const { error: ssErr } = await sb.from("sync_state").upsert({
-    mailbox: MAILBOX,
-    recon_inventory_floor: newFloor,
-    recon_inventory_ceiling: newCeiling,
-    last_full_resync_at: nowStamp,
-    updated_at: nowStamp,
-  }, { onConflict: "mailbox" });
-  if (ssErr) {
-    // FAIL CLOSED: if the floor/ceiling cannot be persisted we must NOT proceed to
-    // commit the live cursor — otherwise the poll would take over while coverage was
-    // never recorded, and recon_verified could later read true over a floor that was
-    // never written. Throw so the run fails and is re-run.
-    throw new Error(`backfill floor/ceiling persist failed: ${ssErr.message}`);
+  const { data: committed, error: commitErr } = await sb.rpc("commit_makesafe_backfill", {
+    p_mailbox: MAILBOX,
+    p_floor: floorIso,
+    p_ceiling: ceilingIso,
+    p_cursor: backfillStartIso,
+  });
+  if (commitErr) {
+    // FAIL CLOSED: the atomic commit failed -> NEITHER coverage bounds NOR the live
+    // cursor NOR the backfill_complete marker were written (the RPC body is one
+    // transaction). Throw so the run fails and is re-run; recon_verified stays
+    // blocked (backfill_incomplete) until a commit succeeds.
+    throw new Error(`backfill atomic commit failed: ${commitErr.message}`);
   }
 
-  // 2) Commit the live cursor LAST, at the backfill START instant. The poll's
-  //    overlapping (>= last_completed_max - overlap) window then re-scans from
-  //    (start - overlap) forward, covering anything that arrived during the run with
-  //    NO gap between backfill end and first poll. Done last so a floor/ceiling
-  //    write failure above never leaves a live cursor past un-ingested history.
-  const overlapSeconds = await (async () => {
-    const { data: cur } = await sb.from("mail_sync_cursors")
-      .select("overlap_seconds")
-      .eq("mailbox", MAILBOX)
-      .maybeSingle();
-    return (cur as { overlap_seconds?: number } | null)?.overlap_seconds ?? 900;
-  })();
-  const { error: curErr } = await sb.from("mail_sync_cursors").upsert({
-    mailbox: MAILBOX,
-    last_completed_max: backfillStartIso,
-    overlap_seconds: overlapSeconds,
-    last_full_resync_at: nowStamp,
-    updated_at: nowStamp,
-  }, { onConflict: "mailbox" });
-  if (curErr) {
-    throw new Error(`backfill live-cursor commit failed: ${curErr.message}`);
-  }
+  // The RPC returns the post-widen floor/ceiling it actually persisted.
+  const result = (committed || {}) as {
+    recon_inventory_floor?: string;
+    recon_inventory_ceiling?: string;
+  };
+  const newFloor = result.recon_inventory_floor ?? floorIso;
+  const newCeiling = result.recon_inventory_ceiling ?? ceilingIso;
 
-  // 3) Refresh sync_state mode (DEGRADED while any attachment is unresolved). Done
-  //    after coverage is committed; surfaces the attachment backlog for the gate.
+  // Refresh sync_state mode (DEGRADED while any attachment is unresolved). Done
+  // after coverage is committed; surfaces the attachment backlog for the gate. (A
+  // best-effort mode write — it never un-sets backfill_complete or the cursor.)
   await refreshSyncState(sb, true, null);
 
   console.log(
     `[monitor-ses][backfill] DONE included=${included} excluded=${excluded} ` +
       `unresolved_att=${totalUnresolved} floor=${newFloor} ceiling=${newCeiling} ` +
-      `cursor=${backfillStartIso}`,
+      `cursor=${backfillStartIso} (atomic commit ok)`,
   );
 
   return {
@@ -1261,7 +1292,9 @@ async function handler(req: Request): Promise<Response> {
     } catch (_) { /* empty / non-JSON body (cron posts {}); treat as regular poll */ }
   }
 
-  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+  const sb = _testClientFactory
+    ? _testClientFactory(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    : createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
   // B2 — per-mailbox concurrency lock. Overlapping */5 runs would race on the
   // cursor read/drain/write and corrupt the watermark. Acquire a pg advisory lock
@@ -1485,5 +1518,6 @@ export {
   resolveGroupId as _resolveGroupId,
   runBackfillFull as _runBackfillFull,
   senderMatchesPattern as _senderMatchesPattern,
+  _setTestClientFactory,
   sha256Hex as _sha256Hex,
 };

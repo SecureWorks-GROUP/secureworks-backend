@@ -483,6 +483,16 @@ export interface PersistedReconSignals {
   // B3 coverage bounds (null = not yet inventoried at that edge).
   inventoryFloor: string | null;
   inventoryCeiling: string | null;
+  // BLOCKER (atomic backfill) — TRUE only once a FULL historical backfill has run to
+  // completion AND atomically committed (commit_makesafe_backfill set this + the
+  // cursor + the floor/ceiling in one transaction). A coverage floor can be present
+  // WITHOUT a completed backfill (e.g. a partially-applied prior state, or a recurring
+  // sweep that moved the ceiling), so the floor alone is NOT proof of full-history
+  // coverage. recon_verified now REQUIRES this true: a floor without a completed
+  // backfill must NOT verify. null/false (never completed) -> blocked
+  // (backfill_incomplete). This is read from sync_state.backfill_complete and passed
+  // in by the D1/D2 actions.
+  backfillComplete?: boolean | null;
   // B3 — current attachment backlog for this mailbox (pending/failed/needs_review).
   // A non-zero backlog forces DEGRADED on EITHER run (D1 or D2), so a clean D1+D2
   // drift can NEVER read verified while attachments are unresolved. This is folded
@@ -566,6 +576,19 @@ export function combineVerifiedGate(
   if (!persisted.inventoryFloor) {
     if (mode === "OK") mode = "DEGRADED";
     reasons.push("inventory_floor_unestablished_coverage_incomplete");
+  }
+
+  // BLOCKER (atomic backfill) — a FLOOR alone is NOT proof of full-history coverage:
+  // it can be present from a partially-applied prior state, or moved by something
+  // other than a completed backfill. recon_verified additionally REQUIRES that a full
+  // historical backfill ran to completion AND committed atomically (backfill_complete
+  // = true). A floor WITHOUT a completed backfill must NOT verify — otherwise a
+  // partial/failed backfill that somehow left a floor (or a coverage bound set without
+  // the matching live cursor) could let recon_verified read true over un-ingested
+  // history, the exact gap the atomic commit + this gate close together.
+  if (persisted.backfillComplete !== true) {
+    if (mode === "OK") mode = "DEGRADED";
+    reasons.push("backfill_incomplete");
   }
 
   // B3: coverage bound (CEILING present). recon_inventory_ceiling is COMPUTED by
@@ -921,7 +944,7 @@ export async function makesafeEmailReconcile(
   // to keep a D1 run from clearing a D2 failure. THROW so the caller fails closed
   // (500) rather than recompute + persist a gate on an unknown prior D2 state.
   const { data: prior, error: priorErr } = await client.from("sync_state")
-    .select("recon_d2_verified, recon_d2_missing_posts, recon_inventory_floor, recon_inventory_ceiling")
+    .select("recon_d2_verified, recon_d2_missing_posts, recon_inventory_floor, recon_inventory_ceiling, backfill_complete")
     .eq("mailbox", SES_MAILBOX)
     .maybeSingle();
   if (priorErr) throw new Error(`sync_state (prior D2 signal) read failed: ${priorErr.message}`);
@@ -930,6 +953,8 @@ export async function makesafeEmailReconcile(
     d2MissingPosts: (prior as any)?.recon_d2_missing_posts ?? null,
     inventoryFloor: (prior as any)?.recon_inventory_floor ?? null,
     inventoryCeiling: (prior as any)?.recon_inventory_ceiling ?? null,
+    // BLOCKER (atomic backfill) — require a COMPLETED full backfill, not just a floor.
+    backfillComplete: (prior as any)?.backfill_complete ?? null,
     // ATTACHMENT-GATE — fold the live backlog into the combined gate (not only into
     // summarizeDrift) so the gate is consistent across D1 and D2 runs. A non-zero
     // backlog forces DEGRADED and blocks recon_verified.
@@ -1126,7 +1151,7 @@ export async function makesafeEmailReconcileFullInventory(
   // bounds or recompute the combined gate against unknown prior D1 state. THROW so
   // the caller fails closed rather than persist a verdict built on partial state.
   const { data: prior, error: priorErr } = await client.from("sync_state")
-    .select("recon_d1_verified, recon_inventory_floor, recon_inventory_ceiling")
+    .select("recon_d1_verified, recon_inventory_floor, recon_inventory_ceiling, backfill_complete")
     .eq("mailbox", SES_MAILBOX)
     .maybeSingle();
   if (priorErr) throw new Error(`sync_state (prior D1 signal) read failed: ${priorErr.message}`);
@@ -1135,6 +1160,11 @@ export async function makesafeEmailReconcileFullInventory(
   // historical backfill establishes/extends the true coverage FLOOR (B3).
   const priorFloor = (prior as any)?.recon_inventory_floor ?? null;
   const priorCeiling = (prior as any)?.recon_inventory_ceiling ?? null;
+  // BLOCKER (atomic backfill) — the recurring D2 sweep does NOT run the full
+  // historical backfill, so it cannot set backfill_complete. It reads (and preserves)
+  // whatever the gated backfill committed. The recurring sweep moving the ceiling must
+  // NOT, on its own, make the gate verify if no completed backfill exists.
+  const priorBackfillComplete = (prior as any)?.backfill_complete ?? null;
   const newFloor = historical
     ? sinceIso // epoch — coverage now reaches all history
     : priorFloor; // recurring sweep does NOT lower the historical floor
@@ -1147,6 +1177,10 @@ export async function makesafeEmailReconcileFullInventory(
     d2MissingPosts: d2.missing_post_ids.length, // this run's own count
     inventoryFloor: newFloor,
     inventoryCeiling: newCeiling,
+    // BLOCKER (atomic backfill) — a historical D2 backfill (historical=true) implies a
+    // completed full-history pass; the recurring sweep relies on the prior marker. A
+    // floor without a completed backfill must NOT verify.
+    backfillComplete: historical ? true : priorBackfillComplete,
     // B3/attachment-gate: fold the live backlog + coverage freshness in here too so
     // a stale ceiling or a pending backlog blocks verified on the D2 run.
     unresolvedAttachments,
@@ -1173,6 +1207,11 @@ export async function makesafeEmailReconcileFullInventory(
     recon_d2_missing_posts: d2.missing_post_ids.length,
     recon_inventory_floor: newFloor,
     recon_inventory_ceiling: newCeiling,
+    // BLOCKER (atomic backfill) — a historical D2 inventory IS a full-history pass, so
+    // it marks the backfill complete. A recurring sweep must NOT touch the marker
+    // (it preserves whatever the gated backfill / commit RPC set): only spread it when
+    // historical, so a recurring sweep upsert never clears or wrongly sets it.
+    ...(historical ? { backfill_complete: true, backfill_completed_at: nowIso } : {}),
     recon_verified: gate.recon_verified,
     recon_mode: gate.recon_mode,
     recon_reason: gate.recon_reason,
