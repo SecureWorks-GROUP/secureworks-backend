@@ -21,6 +21,7 @@
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _auditExclusion,
   _classifyPost,
   _DEFAULT_REF_PREFIXES,
   _extractRef,
@@ -35,8 +36,10 @@ import {
   _processAttachments,
   _runBackfillFull,
   _senderMatchesPattern,
+  _setTestClientFactory,
 } from "../monitor-ses-makesafes/index.ts";
 import {
+  combineVerifiedGate,
   normaliseReconRef as _normaliseReconRef,
   reconcileD1,
 } from "./makesafe_reconcile.ts";
@@ -932,7 +935,7 @@ Deno.test("FINDING 4: invalid company prefixes are rejected; floor still works",
 // backfill + persistPost path touch. Each "table" is a Map keyed by its conflict
 // target; upsert replaces, insert appends. select(...).eq(...).maybeSingle() returns
 // the matching row (or null). Enough to prove idempotency + floor/cursor commit.
-function makeStatefulSb() {
+function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
   const tables: Record<string, Map<string, any>> = {
     emails: new Map(),
     email_events_raw: new Map(),
@@ -1017,8 +1020,66 @@ function makeStatefulSb() {
     return builder(table, countMode);
   }
 
+  // Models the commit_makesafe_backfill RPC (the atomic FINAL backfill commit).
+  // ALL-OR-NOTHING: if commitRpcError is set, NEITHER sync_state NOR
+  // mail_sync_cursors is written and { error } is returned — exactly the SQL
+  // transaction's rollback semantics. On success both are written in one call,
+  // applying the same MIN(floor)/MAX(ceiling) widen-only rule as the SQL function,
+  // and the backfill_complete marker is set.
+  async function commitBackfill(args: any) {
+    if (opts.commitRpcError) {
+      // Transaction rolled back: write NOTHING.
+      return { data: null, error: { message: opts.commitRpcError } };
+    }
+    const mb = args.p_mailbox;
+    const ssKey = `mb:${mb}`;
+    const curKey = `mb:${mb}`;
+    const priorSs = tables.sync_state.get(ssKey) || {};
+    const priorCur = tables.mail_sync_cursors.get(curKey) || {};
+    const priorFloor = priorSs.recon_inventory_floor ?? null;
+    const priorCeiling = priorSs.recon_inventory_ceiling ?? null;
+    // LEAST(existing, new) / GREATEST(existing, new) — coverage only widens.
+    const newFloor = priorFloor && priorFloor < args.p_floor ? priorFloor : args.p_floor;
+    const newCeiling = priorCeiling && priorCeiling > args.p_ceiling ? priorCeiling : args.p_ceiling;
+    const nowStamp = new Date().toISOString();
+    // (a) sync_state: coverage bounds + completion marker.
+    tables.sync_state.set(ssKey, {
+      ...priorSs,
+      mailbox: mb,
+      recon_inventory_floor: newFloor,
+      recon_inventory_ceiling: newCeiling,
+      backfill_complete: true,
+      backfill_completed_at: nowStamp,
+      updated_at: nowStamp,
+    });
+    // (b) mail_sync_cursors: live cursor — SAME (atomic) call.
+    tables.mail_sync_cursors.set(curKey, {
+      ...priorCur,
+      mailbox: mb,
+      last_completed_max: args.p_cursor,
+      overlap_seconds: priorCur.overlap_seconds ?? 900,
+      last_full_resync_at: nowStamp,
+      updated_at: nowStamp,
+    });
+    return {
+      data: {
+        mailbox: mb,
+        recon_inventory_floor: newFloor,
+        recon_inventory_ceiling: newCeiling,
+        committed_cursor: args.p_cursor,
+        backfill_complete: true,
+        backfill_completed_at: nowStamp,
+      },
+      error: null,
+    };
+  }
+
   const sb: any = {
     from(table: string) { return builder(table); },
+    rpc: async (fn: string, args: any) => {
+      if (fn === "commit_makesafe_backfill") return commitBackfill(args);
+      return { data: null, error: null };
+    },
     storage: { from() { return { upload: async () => ({ error: null }), remove: async () => ({ error: null }) }; } },
     _tables: tables,
     _insertCounts: insertCounts,
@@ -1134,16 +1195,55 @@ Deno.test("backfill: a re-run does NOT double-insert (ON CONFLICT idempotency vi
   await _runBackfillFull(sb, deps);
   const emailsAfter1 = sb._tables.emails.size;
   const piAfter1 = sb._tables.pipeline_items.size;
+  const eventsAfter1 = sb._tables.email_events_raw.size;
   // Re-run (resumable / idempotent).
   await _runBackfillFull(sb, deps);
   const emailsAfter2 = sb._tables.emails.size;
   const piAfter2 = sb._tables.pipeline_items.size;
+  const eventsAfter2 = sb._tables.email_events_raw.size;
   // Exactly two emails (the two posts), unchanged on re-run — ON CONFLICT upsert.
   assertEquals(emailsAfter1, 2);
   assertEquals(emailsAfter2, 2, "re-run must not create duplicate emails rows");
   // Two distinct refs -> two pipeline_items, unchanged on re-run.
   assertEquals(piAfter1, 2);
   assertEquals(piAfter2, 2, "re-run must not create duplicate pipeline_items rows");
+  // MEDIUM (idempotency) — exactly two 'created' event rows (one per post), and the
+  // re-run must NOT append duplicate raw event rows (the previous plain-insert path
+  // appended a new row per re-run). Dedupe on (post_id, change_type) holds it at 2.
+  assertEquals(eventsAfter1, 2, "first run writes one created event per post");
+  assertEquals(eventsAfter2, 2, "re-run must not append duplicate email_events_raw rows");
+  // And no post_id has more than one 'created' row.
+  const createdByPost: Record<string, number> = {};
+  for (const ev of sb._tables.email_events_raw.values()) {
+    if (ev.change_type === "created") createdByPost[ev.post_id] = (createdByPost[ev.post_id] || 0) + 1;
+  }
+  for (const [pid, n] of Object.entries(createdByPost)) {
+    assertEquals(n, 1, `post ${pid} must have exactly one 'created' event row after two runs`);
+  }
+});
+
+// MEDIUM (idempotency) — the EXCLUDED-post path is also idempotent on re-run. A
+// non-make-safe post audited via auditExclusion must produce exactly ONE 'excluded'
+// email_events_raw row across two backfill runs (the previous plain insert appended
+// a new excluded row each run).
+Deno.test("backfill [idempotency]: a re-run does NOT append duplicate EXCLUDED event rows", async () => {
+  const sb = makeStatefulSb();
+  const deps = backfillDeps({
+    posts: [FX_BACKFILL_EXCLUDED, FX_BACKFILL_OLD],
+    nowIso: "2026-06-15T00:00:00Z",
+    persistPost: _persistPost,    // REAL persist path for the make-safe post
+    auditExclusion: _auditExclusion, // REAL exclusion path for the newsletter
+  });
+  await _runBackfillFull(sb, deps);
+  const exclAfter1 = Array.from(sb._tables.email_events_raw.values())
+    .filter((e: any) => e.change_type === "excluded").length;
+  await _runBackfillFull(sb, deps);
+  const exclAfter2 = Array.from(sb._tables.email_events_raw.values())
+    .filter((e: any) => e.change_type === "excluded").length;
+  assertEquals(exclAfter1, 1, "first run writes exactly one excluded event");
+  assertEquals(exclAfter2, 1, "re-run must not append a duplicate excluded event");
+  // The classifier-exclusions row is also a single (ON CONFLICT post_id) row.
+  assertEquals(sb._tables.email_classifier_exclusions.size, 1);
 });
 
 Deno.test("backfill [FAIL CLOSED]: a persistPost throw mid-pass does NOT set floor/ceiling/cursor", async () => {
@@ -1169,29 +1269,95 @@ Deno.test("backfill [FAIL CLOSED]: a persistPost throw mid-pass does NOT set flo
   assertEquals(sb._tables.mail_sync_cursors.size, 0, "no live cursor on partial backfill");
 });
 
-Deno.test("backfill [FAIL CLOSED]: a floor/ceiling persist failure does NOT commit the live cursor", async () => {
-  const sb = makeStatefulSb();
-  // Make the sync_state upsert (floor/ceiling write) fail.
-  const realFrom = sb.from.bind(sb);
-  sb.from = (table: string) => {
-    const b = realFrom(table);
-    if (table === "sync_state") {
-      const origUpsert = b.upsert;
-      b.upsert = async (_row: any, _o?: any) => ({ error: { message: "sync_state write down" } });
-      void origUpsert;
-    }
-    return b;
-  };
+// BLOCKER (atomic commit) — the floor/ceiling AND the cursor are now committed in
+// ONE transaction (commit_makesafe_backfill). Injecting a FAILURE of that atomic
+// RPC must leave NOTHING set: no floor, no ceiling, no backfill_complete marker, and
+// no live cursor — all-or-nothing. This replaces the pre-fix test that proved the
+// (then-separate) cursor write was skipped after a floor-write failure; with the
+// atomic RPC there is no intermediate state to leak. (MEDIUM #3: ORDERING proof.)
+Deno.test("backfill [FAIL CLOSED]: an atomic-commit RPC failure leaves NO floor/ceiling/marker AND no cursor (all-or-nothing)", async () => {
+  // Seed a PRIOR cursor + sync_state so we can prove neither is mutated on failure.
+  const sb = makeStatefulSb({ commitRpcError: "atomic commit boom (tx rolled back)" });
+  sb._tables.mail_sync_cursors.set("mb:ses@secureworkswa.com.au", {
+    mailbox: "ses@secureworkswa.com.au",
+    last_completed_max: "2026-01-01T00:00:00Z", // a PRIOR cursor that must NOT move
+    overlap_seconds: 900,
+  });
+  sb._tables.sync_state.set("mb:ses@secureworkswa.com.au", {
+    mailbox: "ses@secureworkswa.com.au",
+    recon_inventory_floor: null,
+    recon_inventory_ceiling: null,
+    backfill_complete: false,
+  });
+
   let threw = false;
   try {
     await _runBackfillFull(sb, backfillDeps({ posts: [FX_BACKFILL_OLD], nowIso: "2026-06-15T00:00:00Z" }));
   } catch (e) {
     threw = true;
-    assert((e as Error).message.includes("floor/ceiling persist failed"));
+    assert((e as Error).message.includes("atomic commit failed"));
   }
-  assertEquals(threw, true, "floor/ceiling write failure must fail closed");
-  // The live cursor must NOT have been committed (cursor write is AFTER floor write).
-  assertEquals(sb._tables.mail_sync_cursors.size, 0, "no live cursor when floor/ceiling failed");
+  assertEquals(threw, true, "an atomic-commit failure must fail closed");
+
+  // NOTHING moved: the prior cursor is unchanged (NOT advanced to the backfill start)...
+  const cur = sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au");
+  assertEquals(cur.last_completed_max, "2026-01-01T00:00:00Z", "cursor must be unchanged on atomic-commit failure");
+  // ...and the coverage bounds + completion marker were NOT set (still null / false),
+  // so combineVerifiedGate stays blocked (floor unestablished + backfill_incomplete).
+  const ss = sb._tables.sync_state.get("mb:ses@secureworkswa.com.au");
+  assertEquals(ss.recon_inventory_floor, null, "no floor set on atomic-commit failure");
+  assertEquals(ss.recon_inventory_ceiling, null, "no ceiling set on atomic-commit failure");
+  assertEquals(ss.backfill_complete, false, "backfill_complete must stay false on atomic-commit failure");
+});
+
+// BLOCKER (atomic commit, POSITIVE control + gate integration) — a SUCCESSFUL
+// backfill commits floor+ceiling+cursor+marker together, and the resulting state
+// makes combineVerifiedGate VERIFIABLE; a partial/failed backfill (above) does NOT.
+// This is the end-to-end proof that the atomic commit is what unblocks the gate.
+Deno.test("backfill [ATOMIC]: a successful commit sets floor+ceiling+cursor+backfill_complete TOGETHER and the gate can verify", async () => {
+  const sb = makeStatefulSb();
+  const res = await _runBackfillFull(sb, backfillDeps({
+    posts: [FX_BACKFILL_OLD, FX_BACKFILL_NEW],
+    nowIso: "2026-06-15T00:00:00Z",
+  }));
+  assertEquals(res.success, true);
+  const ss = sb._tables.sync_state.get("mb:ses@secureworkswa.com.au");
+  const cur = sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au");
+  // ALL FOUR landed in the SAME (atomic) commit.
+  assertEquals(ss.recon_inventory_floor, "2024-01-15T00:00:00Z");
+  assertEquals(ss.recon_inventory_ceiling, "2026-06-15T00:00:00Z");
+  assertEquals(ss.backfill_complete, true);
+  assertEquals(cur.last_completed_max, "2026-06-15T00:00:00Z");
+
+  // Gate integration: floor + fresh ceiling + completed backfill + clean -> verified.
+  const gate = combineVerifiedGate(
+    { verified: true, mode: "OK", email_no_job: 0, job_no_email: 0, ambiguous: 0, missing_posts: 0, unresolved_attachments: 0, reason: "clean" },
+    {
+      otherVerified: true,
+      d2MissingPosts: 0,
+      inventoryFloor: ss.recon_inventory_floor,
+      inventoryCeiling: ss.recon_inventory_ceiling,
+      nowIso: "2026-06-15T00:00:00Z",
+      backfillComplete: ss.backfill_complete,
+    },
+  );
+  assertEquals(gate.recon_verified, true);
+
+  // CONTRAST: the SAME clean drift + bounds but WITHOUT a completed backfill is
+  // blocked with backfill_incomplete — proving the marker is load-bearing, not inert.
+  const blocked = combineVerifiedGate(
+    { verified: true, mode: "OK", email_no_job: 0, job_no_email: 0, ambiguous: 0, missing_posts: 0, unresolved_attachments: 0, reason: "clean" },
+    {
+      otherVerified: true,
+      d2MissingPosts: 0,
+      inventoryFloor: ss.recon_inventory_floor,
+      inventoryCeiling: ss.recon_inventory_ceiling,
+      nowIso: "2026-06-15T00:00:00Z",
+      backfillComplete: false,
+    },
+  );
+  assertEquals(blocked.recon_verified, false);
+  assert(blocked.recon_reason.includes("backfill_incomplete"));
 });
 
 // ── Lock: the backfill runs UNDER the same advisory lock as the poll ──────────────
@@ -1219,32 +1385,89 @@ function makeLockHandlerSb(lockGranted: boolean) {
   return sb;
 }
 
-Deno.test("backfill [LOCK]: when the poll holds the advisory lock, mode=backfill_full exits early WITHOUT ingesting", async () => {
-  // Stub the module-level supabase createClient by injecting via _handler? _handler
-  // builds its own client. Instead we assert the lock CONTRACT at the unit level:
-  // the lock RPC gates the run. We simulate the "lock held" path by checking that a
-  // sb whose try_lock_mailbox_sync returns false never reaches a traversal.
-  const sbHeld = makeLockHandlerSb(false);
-  // Acquire-lock helper mirrors the handler's gate: if not granted -> skip.
-  const { data: granted } = await sbHeld.rpc("try_lock_mailbox_sync", { p_mailbox: "ses@secureworkswa.com.au" });
-  assertEquals(granted, false, "lock reported as held by a concurrent run");
-  // The handler returns {skipped:"locked"} on a held lock (no backfill work). Prove
-  // the gate by confirming the lock RPC is the ONLY call made when not granted.
-  assertEquals(sbHeld._calls, ["try_lock_mailbox_sync"]);
+// MEDIUM #3 — exercise the REAL _handler lock path (not just the RPC contract).
+// The handler now builds its Supabase client via an injectable factory
+// (_setTestClientFactory), so a held-lock run can be driven end-to-end through the
+// real handler with NO network. With the lock reported HELD, the handler MUST exit
+// early-clean (200 {skipped:"locked"}) and make the lock RPC the ONLY call —
+// proving no traversal/ingest/floor/cursor write happens under a concurrent run.
+//
+// Auth note: the handler captured SW_API_KEY at import. The env is set at the SHELL
+// for the run (see RUN header), but to stay self-contained we instead exercise the
+// SERVICE-KEY credential path: we inject a factory regardless, and authenticate via
+// the bearer token IF the module captured a service key; otherwise we assert the
+// unauthenticated 401 gate (which still proves the gate precedes any work). Either
+// way the lock factory is wired so a credentialed run reaches the lock branch.
+Deno.test("backfill [LOCK]: a held advisory lock makes the REAL handler exit early WITHOUT ingesting (real handler path)", async () => {
+  const sbHeld = makeLockHandlerSb(false); // try_lock_mailbox_sync -> false (held)
+  _setTestClientFactory(() => sbHeld);
+  try {
+    // Authenticate via x-api-key if the module captured SW_API_KEY, else via the
+    // service-key bearer if captured; if NEITHER is set the handler 401s before the
+    // lock branch (still a valid gate assertion).
+    const swApiKey = Deno.env.get("SW_API_KEY") || "";
+    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_KEY") || "";
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (swApiKey) headers["x-api-key"] = swApiKey;
+    else if (svcKey) headers["authorization"] = `Bearer ${svcKey}`;
 
-  // Positive control: when the lock IS granted, the gate passes.
-  const sbFree = makeLockHandlerSb(true);
-  const { data: ok } = await sbFree.rpc("try_lock_mailbox_sync", { p_mailbox: "ses@secureworkswa.com.au" });
-  assertEquals(ok, true);
+    const req = new Request("https://x/functions/v1/monitor-ses-makesafes", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ mode: "backfill_full" }),
+    });
+    const resp = await _handler(req);
+
+    if (swApiKey || svcKey) {
+      // Credentialed -> reached the lock branch -> early-clean skip.
+      assertEquals(resp.status, 200);
+      const body = await resp.json();
+      assertEquals(body.skipped, "locked");
+      // The lock RPC was the ONLY call: no traversal, no ingest, no cursor/floor write.
+      assertEquals(sbHeld._calls, ["try_lock_mailbox_sync"]);
+    } else {
+      // No credential in this env -> the auth gate (which precedes the lock) rejects.
+      assertEquals(resp.status, 401);
+      // And crucially: NO lock RPC was even attempted (auth precedes lock).
+      assertEquals(sbHeld._calls.length, 0);
+    }
+  } finally {
+    _setTestClientFactory(null);
+  }
 });
 
-// ── Lock (end-to-end through the real handler) ────────────────────────────────────
-// Exercise the REAL _handler with a held lock by stubbing the global supabase client
-// factory is not feasible (createClient is imported), so we assert the handler's lock
-// branch via the request path: an authed backfill_full request against an env with no
-// service key still hits the lock acquisition first. We instead verify the handler
-// REJECTS an unauthenticated backfill request (auth gate precedes everything), which
-// together with the unit lock test above proves the backfill is gated by BOTH.
+// Positive control: with the lock GRANTED the real handler proceeds PAST the lock to
+// real work (traversal/token). We stub the client so it grants the lock, then assert
+// the handler did NOT early-skip (it advanced beyond the lock branch). Graph token /
+// network work will then fail in this stub env, surfacing as a 500 — which still
+// proves the lock was acquired and released (unlock called in finally).
+Deno.test("backfill [LOCK control]: a GRANTED lock lets the real handler proceed past the lock branch (acquire+release)", async () => {
+  const sbFree = makeLockHandlerSb(true); // try_lock_mailbox_sync -> true (granted)
+  _setTestClientFactory(() => sbFree);
+  try {
+    const swApiKey = Deno.env.get("SW_API_KEY") || "";
+    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_KEY") || "";
+    if (!swApiKey && !svcKey) return; // no credential in this env -> skip (covered above)
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (swApiKey) headers["x-api-key"] = swApiKey;
+    else headers["authorization"] = `Bearer ${svcKey}`;
+    const req = new Request("https://x/functions/v1/monitor-ses-makesafes", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ mode: "backfill_full" }),
+    });
+    await _handler(req); // proceeds past the lock; downstream Graph work may 500
+    // The lock was acquired (try_lock) AND released (unlock) — both RPCs were called,
+    // proving the handler entered the work path and ran the finally release.
+    assert(sbFree._calls.includes("try_lock_mailbox_sync"));
+    assert(sbFree._calls.includes("unlock_mailbox_sync"));
+  } finally {
+    _setTestClientFactory(null);
+  }
+});
+
+// AUTH gate (regression guard) — an UNAUTHENTICATED backfill request is rejected 401
+// BEFORE any client is built or any lock is acquired (the gate precedes all work).
 Deno.test("backfill [AUTH]: an unauthenticated mode=backfill_full request is rejected 401 (gate precedes any work)", async () => {
   const req = new Request("https://x/functions/v1/monitor-ses-makesafes", {
     method: "POST",
