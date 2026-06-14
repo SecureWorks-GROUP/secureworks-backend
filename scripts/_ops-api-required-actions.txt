@@ -90,3 +90,11 @@ job_financials_detail
 # ── Make-safe audit — read-only; the compact pipeline reader the intake-audit
 #    and close-out-audit skills depend on (retires the per-job sw_job_detail loop) ──
 makesafe_audit
+
+# ── Make-safe email reconciliation (Mission makesafe-live-truth-2026-06-14) ──
+#    D1/D3 reconcile diff, D2 mandatory full-post inventory, D4 canary check.
+#    Reconciliation is the completeness guarantee; unresolved D1/D2 drift is the
+#    "verified" gate signal persisted on sync_state.recon_*.
+makesafe_email_reconcile
+makesafe_email_reconcile_inventory
+makesafe_email_canary
