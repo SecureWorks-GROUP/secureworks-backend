@@ -86,3 +86,7 @@ log_business_event
 # ── Job P&L (M3) — read-only; pairs with ops.html #119 + M1 migration ──
 job_financials
 job_financials_detail
+
+# ── Make-safe audit — read-only; the compact pipeline reader the intake-audit
+#    and close-out-audit skills depend on (retires the per-job sw_job_detail loop) ──
+makesafe_audit

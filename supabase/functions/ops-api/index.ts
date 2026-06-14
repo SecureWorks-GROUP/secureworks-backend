@@ -1471,6 +1471,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
       case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
+      case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
       case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
       case 'geocode_job': return json(await geocodeJob(client, body))
       case 'geocode_missing_makesafes': return json(await geocodeMissingMakesafes(client))
@@ -7382,6 +7383,7 @@ export function _deriveMakesafeBoardStage(
   invoice?: any,
   nowIso?: string,
   docs?: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null,
+  packSent?: boolean,
 ): string {
   const normalizedSub = normalizeMakesafeSubstatus(detail?.substatus)
   const jobStatus = String(job?.status || '').toLowerCase()
@@ -7389,18 +7391,34 @@ export function _deriveMakesafeBoardStage(
   const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
   const invoiceDone = hasActiveMakesafeInvoice(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
 
+  // A job is "verified sent" when the reporting skill has written the
+  // MAKESAFE_PACK_SENT | main marker note AND the invoice is actually
+  // authorised (not just draft). This is the only signal that softens the
+  // hard doc-gate below — and it is a TRIAGE input here, never the sole
+  // driver: it only relaxes the gate when the invoice is authorised and the
+  // substatus is complete (the pack genuinely went out the door).
+  const invoiceAuthorised = hasActiveMakesafeInvoice(invoice) &&
+    ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(String(invoice?.status || '').toUpperCase())
+  const verifiedSent = packSent === true && invoiceAuthorised && normalizedSub === 'complete'
+
   // Canonical MakeSafe command flow:
   // Intake drafts live outside this board until approved.
   // New -> Allocated -> Report Ready -> Completed (<=7 days) -> Archive (>7 days).
   // `ready_to_invoice` is a legacy/admin substatus and now stays actionable in
   // Report Ready unless an invoice/complete signal proves the MakeSafe is done.
   if (invoiceDone) {
-    // Hard close-out gate: only resolve to completed/archive once the invoice +
-    // report PDFs (and SWMS for MLB) are attached. When a docs map is supplied
-    // and the gate is unmet, hold the job in report_ready rather than silently
-    // marking it complete. When no docs map is supplied (callers that do not
-    // load job_documents), preserve the prior behaviour and skip the gate.
-    if (docs !== undefined && docs !== null) {
+    // Close-out doc gate. Two regimes:
+    //  - VERIFIED-SENT job (pack_sent marker + authorised invoice + substatus
+    //    complete): the pack demonstrably went to the builder, so any still-
+    //    missing docs are a SOFT docs_warning (surfaced by enrichMakesafeBoardJob),
+    //    NOT a hard hold. The job derives to completed/archive. This clears the
+    //    Tapping/Bassendean/Stirling/Marangaroo class where the pack was sent but
+    //    the PDF was never re-attached to the job.
+    //  - NOT-verified-sent job: the HARD doc-gate stays. An un-sent job is never
+    //    completed without its invoice + report (+ SWMS for MLB) attached — hold
+    //    it in report_ready. (When no docs map is supplied, preserve the prior
+    //    ungated behaviour for callers that don't load job_documents.)
+    if (!verifiedSent && docs !== undefined && docs !== null) {
       const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job))
       if (missing.length > 0) return 'report_ready'
     }
@@ -7418,8 +7436,9 @@ function deriveMakesafeBoardStage(
   report?: any,
   invoice?: any,
   docs?: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null,
+  packSent?: boolean,
 ): string {
-  return _deriveMakesafeBoardStage(job, detail, assignments, report, invoice, undefined, docs)
+  return _deriveMakesafeBoardStage(job, detail, assignments, report, invoice, undefined, docs, packSent)
 }
 
 function makesafeAge(createdAt: string | null | undefined, boardStage: string) {
@@ -7488,11 +7507,45 @@ function makesafeDocBooleans(docRows: any[] | null | undefined) {
   }
 }
 
-function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], report?: any, invoice?: any, docRows?: any[] | null) {
+// The marker note the reporting skill writes on a successful make-safe pack send
+// (send_makesafe_email.py). It rides the job_events note stream as
+// `MAKESAFE_PACK_SENT | <kind: main|photo> | ...`. The board only treats the
+// `main` pack as a verified send; the `photo` follow-up does not count.
+const MAKESAFE_PACK_SENT_MAIN_PREFIX = 'MAKESAFE_PACK_SENT | main'
+
+// True if a job_events note row carries the MAKESAFE_PACK_SENT | main marker.
+function isPackSentMainEvent(ev: any): boolean {
+  if (!ev || String(ev.event_type) !== 'note') return false
+  let dj = ev.detail_json
+  if (typeof dj === 'string') {
+    try { dj = JSON.parse(dj) } catch (_) { dj = { text: dj } }
+  }
+  const text = dj && typeof dj === 'object' ? dj.text : null
+  return typeof text === 'string' && text.trim().startsWith(MAKESAFE_PACK_SENT_MAIN_PREFIX)
+}
+
+// Build a job_id -> boolean map of which jobs carry a verified MAKESAFE_PACK_SENT
+// | main marker note. One query over job_events for the candidate job set; the
+// EXISTS-style reduction happens in JS over the returned note rows. Triage flag
+// only — see the guardrail in _deriveMakesafeBoardStage / enrichMakesafeBoardJob.
+async function buildPackSentMap(client: any, jobIds: string[]): Promise<Record<string, boolean>> {
+  const map: Record<string, boolean> = {}
+  if (!jobIds.length) return map
+  const { data: events } = await client.from('job_events')
+    .select('job_id, event_type, detail_json')
+    .in('job_id', jobIds)
+    .eq('event_type', 'note')
+  for (const ev of (events || [])) {
+    if (ev?.job_id && isPackSentMainEvent(ev)) map[ev.job_id] = true
+  }
+  return map
+}
+
+function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], report?: any, invoice?: any, docRows?: any[] | null, packSent?: boolean) {
   // Only engage the close-out doc gate when the caller actually loaded
   // job_documents. Callers that pass nothing keep the prior (ungated) behaviour.
   const docFlags = docRows !== undefined ? makesafeDocBooleans(docRows) : null
-  const boardStage = deriveMakesafeBoardStage(j, detail, assignments, report, invoice, docFlags)
+  const boardStage = deriveMakesafeBoardStage(j, detail, assignments, report, invoice, docFlags, packSent)
   const age = makesafeAge(j.created_at, boardStage)
   const crew = makesafeCrew(assignments)
   const requestingCompany = detail?.requesting_company_name || detail?.makesafe_companies?.name || j.metadata?.requesting_company?.name || null
@@ -7500,16 +7553,33 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   // Surface which docs are still missing for the close-out gate. Only meaningful
   // once a job is otherwise ready to complete (an active invoice / complete
   // signal); we compute it whenever a docs map was supplied so the board can
-  // explain why an invoiced job is still sitting in Report Ready.
-  let docsMissing: string[] | null = null
+  // explain why an invoiced job is still sitting in Report Ready (hard hold) or
+  // has gone to completed with a soft docs_warning (verified-sent).
+  let missingDocs: string[] = []
+  let invoiceDone = false
   if (docFlags) {
-    const invoiceDone = hasActiveMakesafeInvoice(invoice) ||
+    invoiceDone = hasActiveMakesafeInvoice(invoice) ||
       String(j?.status || '').toLowerCase() === 'invoiced' ||
       normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
     if (invoiceDone) {
-      docsMissing = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j))
+      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j))
     }
   }
+  // Verified-sent reconciles the same way the board stage derives it: the
+  // MAKESAFE_PACK_SENT marker is TRIAGE only and never softens the gate on its
+  // own — it must coincide with an authorised invoice + substatus complete.
+  const invoiceAuthorised = hasActiveMakesafeInvoice(invoice) &&
+    ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(String(invoice?.status || '').toUpperCase())
+  const verifiedSent = packSent === true && invoiceAuthorised &&
+    normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
+
+  // Split the missing-docs signal:
+  //  - HARD docs_missing: the un-sent job is held in report_ready by the gate.
+  //  - SOFT docs_warning: the verified-sent job completed, but a doc is still not
+  //    attached — surfaced for the audit/board, NOT a hold. pack_sent is shown
+  //    next to both so the model reconciles it against has_*_doc itself.
+  const hardMissing = missingDocs.length > 0 && !verifiedSent
+  const softWarning = missingDocs.length > 0 && verifiedSent
   return {
     ...j,
     makesafe_details: detail,
@@ -7533,8 +7603,12 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     report_status: makesafeReportStatus(boardStage, detail, report),
     invoice_status: makesafeInvoiceStatus(boardStage, invoice),
     ...(docFlags || {}),
-    docs_missing: docsMissing != null && docsMissing.length > 0,
-    missing_docs: docsMissing != null && docsMissing.length > 0 ? docsMissing : undefined,
+    // pack_sent is only meaningful (defined) when the caller loaded the marker.
+    ...(packSent !== undefined ? { pack_sent: packSent === true } : {}),
+    docs_missing: hardMissing,
+    missing_docs: hardMissing ? missingDocs : undefined,
+    docs_warning: softWarning,
+    warning_docs: softWarning ? missingDocs : undefined,
   }
 }
 
@@ -7630,6 +7704,8 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
 
   // Fetch assignments for these jobs
   let assignMap: Record<string, any[]> = {}
+  // packSentMap: which jobs carry a verified MAKESAFE_PACK_SENT | main marker.
+  let packSentMap: Record<string, boolean> = {}
   if (jobIds.length > 0) {
     const { data: assigns } = await client.from('job_assignments')
       .select('job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
@@ -7640,6 +7716,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
       if (!assignMap[a.job_id]) assignMap[a.job_id] = []
       assignMap[a.job_id].push(a)
     }
+    packSentMap = await buildPackSentMap(client, jobIds)
   }
 
   const columns: Record<string, any[]> = {
@@ -7651,7 +7728,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   }
 
   for (const j of (jobs || [])) {
-    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [])
+    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true)
     columns[enriched.board_stage].push(enriched)
   }
 
@@ -7661,6 +7738,200 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
 // Test-only export alias (mirrors the `_`-prefixed export convention used for
 // the other make-safe helpers). Production routes still call makesafePipeline.
 export const _makesafePipelineForTest = makesafePipeline
+
+// ── sw_makesafe_audit: compact pipeline reader (jobs[] + known_refs[]) ──
+// Retires the per-job sw_job_detail loop in the intake-audit + close-out-audit
+// skills. One server-side aggregate; the skills drill sw_job_detail only into a
+// single already-flagged job. See harness/.../sw-makesafe-audit-tool-spec.md.
+
+// Reference normaliser — mirrors the Python invoice_utils._norm (strip, lower,
+// drop all whitespace) so the server-side resolver matches the client guard.
+function _makesafeNormRef(s: any): string {
+  return String(s ?? '').trim().toLowerCase().replace(/\s+/g, '')
+}
+
+// AUDIT-MODE invoice resolution (item 2.4). Returns the FULL mapped invoice list
+// for a job INCLUDING VOIDED/DELETED, each row tagged with status + match_tier,
+// so the audit's duplicate + void-history checks can fire (Erskine / Sorrento).
+// This is the OPPOSITE of the create-invoice dup-guard, which deliberately
+// collapses to a single live winner (fail-safe). Tiers, highest-trust first:
+//   job_id           — invoice.job_id === job.id
+//   reference        — norm(invoice.reference) === norm(external_ref)
+//   reference_substr — norm(external_ref) is a substring of norm(reference)
+//                      (>=5 chars so short tokens can't false-match)
+// A given invoice is tagged with the FIRST (highest) tier it matches; an invoice
+// matching no tier for this job is not returned for this job.
+function _resolveMakesafeJobInvoices(
+  invoiceRows: any[],
+  jobId: string | null | undefined,
+  externalRef: string | null | undefined,
+): Array<{ status: string | null; invoice_number: string | null; reference: string | null; match_tier: string; voided: boolean }> {
+  const nref = _makesafeNormRef(externalRef)
+  const out: Array<any> = []
+  for (const inv of (invoiceRows || [])) {
+    let tier: string | null = null
+    if (jobId && inv?.job_id === jobId) {
+      tier = 'job_id'
+    } else if (nref) {
+      const invRef = _makesafeNormRef(inv?.reference)
+      if (invRef && invRef === nref) tier = 'reference'
+      else if (nref.length >= 5 && invRef && invRef.includes(nref)) tier = 'reference_substring'
+    }
+    if (!tier) continue
+    const status = inv?.status != null ? String(inv.status) : null
+    out.push({
+      status,
+      invoice_number: inv?.invoice_number ?? null,
+      reference: inv?.reference ?? null,
+      match_tier: tier,
+      voided: ['VOIDED', 'DELETED'].includes(String(status || '').toUpperCase()),
+    })
+  }
+  return out
+}
+// Test-only exports.
+export const _resolveMakesafeJobInvoicesForTest = _resolveMakesafeJobInvoices
+
+async function makesafeAudit(client: any, params: URLSearchParams) {
+  const since = params.get('since')
+  const statusFilter = params.get('status')
+  const companyFilter = params.get('company')
+
+  // ── jobs[] ── one compact row per make-safe job ──
+  let jobQuery = client.from('jobs')
+    .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
+    .eq('type', 'makesafe')
+    .order('created_at', { ascending: false })
+    .limit(500)
+  if (since) jobQuery = jobQuery.gte('created_at', since)
+  if (statusFilter) jobQuery = jobQuery.eq('status', statusFilter)
+  const { data: jobs, error } = await jobQuery
+  if (error) throw error
+
+  const jobIds = (jobs || []).map((j: any) => j.id)
+  let detailsMap: Record<string, any> = {}
+  let docsMap: Record<string, any[]> = {}
+  let reportSet: Set<string> = new Set()
+  let invoiceRows: any[] = []
+  if (jobIds.length > 0) {
+    const [detailsRes, docsRes, reportsRes, invoicesRes] = await Promise.all([
+      client.from('makesafe_job_details')
+        .select('job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)')
+        .in('job_id', jobIds),
+      client.from('job_documents')
+        .select('job_id, type, file_name')
+        .in('job_id', jobIds),
+      client.from('job_service_reports')
+        .select('job_id, status')
+        .in('job_id', jobIds)
+        .neq('status', 'draft'),
+      // AUDIT path: pull ALL ACCREC invoices for these jobs INCLUDING
+      // VOIDED/DELETED (item 2.4) so duplicate + void-history checks can fire.
+      client.from('xero_invoices')
+        .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
+        .eq('invoice_type', 'ACCREC')
+        .order('invoice_date', { ascending: false }),
+    ])
+    for (const d of (detailsRes.data || [])) detailsMap[d.job_id] = d
+    for (const doc of (docsRes.data || [])) {
+      if (!doc?.job_id) continue
+      if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
+      docsMap[doc.job_id].push(doc)
+    }
+    for (const r of (reportsRes.data || [])) if (r?.job_id) reportSet.add(r.job_id)
+    invoiceRows = invoicesRes.data || []
+  }
+
+  let jobRows = (jobs || []).map((j: any) => {
+    const detail = detailsMap[j.id] || null
+    const docFlags = makesafeDocBooleans(docsMap[j.id] || [])
+    const company = detail?.requesting_company_name || detail?.makesafe_companies?.name ||
+      j.metadata?.requesting_company?.name || null
+    const externalRef = detail?.external_ref || j.metadata?.external_ref || null
+    const rawSub = detail?.substatus ?? null
+    // Resolve the FULL mapped invoice list (incl. voided/deleted) for this job.
+    const invoices = _resolveMakesafeJobInvoices(invoiceRows, j.id, externalRef)
+    // invoice_status / invoice_no = comma-joined DISTINCT (duplicates SHOW —
+    // a second invoice with the same status still surfaces via the list; a
+    // distinct status set keeps the summary compact while the list keeps detail).
+    const distinctStatuses = Array.from(new Set(invoices.map((i) => i.status).filter(Boolean)))
+    const distinctNumbers = Array.from(new Set(invoices.map((i) => i.invoice_number).filter(Boolean)))
+    return {
+      job_id: j.id,
+      job_number: j.job_number,
+      external_ref: externalRef,
+      company,
+      job_status: j.status,
+      substatus: rawSub, // RAW, not normalised — board-truth check needs to SEE the stale alias
+      substatus_legacy: rawSub === 'pending_allocation',
+      geocoded: j.site_lat != null && j.site_lng != null,
+      has_wo: docFlags.has_wo,
+      has_report_doc: docFlags.has_report_doc,
+      has_invoice_doc: docFlags.has_invoice_doc,
+      has_swms_doc: docFlags.has_swms_doc,
+      has_report_record: reportSet.has(j.id),
+      invoice_status: distinctStatuses.length ? distinctStatuses.join(',') : null,
+      invoice_no: distinctNumbers.length ? distinctNumbers.join(',') : null,
+      // Full per-row mapped invoice list incl. voided/deleted (item 2.4).
+      invoices,
+    }
+  })
+
+  // Optional company filter (slug or name substring on the make-safe company).
+  if (companyFilter) {
+    const cf = companyFilter.toLowerCase()
+    const matchById: Record<string, boolean> = {}
+    for (const j of (jobs || [])) {
+      const d = detailsMap[j.id] || null
+      const slug = String(d?.requesting_company_slug || d?.makesafe_companies?.slug || '').toLowerCase()
+      const name = String(d?.requesting_company_name || d?.makesafe_companies?.name || '').toLowerCase()
+      matchById[j.id] = slug.includes(cf) || name.includes(cf)
+    }
+    jobRows = jobRows.filter((r: any) => matchById[r.job_id])
+  }
+
+  // ── known_refs[] ── tiny ref index for the intake audit ──
+  // Union of (a) make-safe jobs and (b) intake drafts. The job's source_email_id
+  // comes from the originating intake draft (joined on approved_job_id) — jobs do
+  // not currently carry the email id themselves (see PR notes). Drafts contribute
+  // {ref, email, job_number: null, substatus: null}.
+  const knownRefs: Array<{ external_ref: string | null; source_email_id: string | null; job_number: string | null; substatus: string | null }> = []
+  // Drafts: needs_review or draft (not yet a job).
+  const { data: drafts } = await client.from('makesafe_intake_drafts')
+    .select('external_ref, graph_message_id, internet_message_id, status, approved_job_id')
+    .in('status', ['needs_review', 'draft'])
+  const draftEmailByJob: Record<string, string | null> = {}
+  // Also map approved drafts -> their job, to recover each job's source_email_id.
+  const { data: approvedDrafts } = await client.from('makesafe_intake_drafts')
+    .select('graph_message_id, internet_message_id, approved_job_id')
+    .eq('status', 'approved')
+  for (const d of (approvedDrafts || [])) {
+    if (d?.approved_job_id) draftEmailByJob[d.approved_job_id] = d.graph_message_id || d.internet_message_id || null
+  }
+  for (const r of jobRows) {
+    knownRefs.push({
+      external_ref: r.external_ref,
+      source_email_id: draftEmailByJob[r.job_id] ?? null,
+      job_number: r.job_number,
+      substatus: r.substatus,
+    })
+  }
+  for (const d of (drafts || [])) {
+    knownRefs.push({
+      external_ref: d.external_ref ?? null,
+      source_email_id: d.graph_message_id || d.internet_message_id || null,
+      job_number: null,
+      substatus: null,
+    })
+  }
+
+  return {
+    generated_at: new Date().toISOString(),
+    jobs: jobRows,
+    known_refs: knownRefs,
+  }
+}
+export const _makesafeAuditForTest = makesafeAudit
 
 // ── Slice 5: make-safe completion report ──
 async function submitMakesafeReport(client: any, body: any) {
