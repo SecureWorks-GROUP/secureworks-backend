@@ -2870,7 +2870,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
   <!-- PDF presenter (desktop) -->
   ${doc.pdf_url ? `
   <div class="pdf-wrap">
-    <iframe src="${doc.pdf_url}#view=FitH" class="pdf-frame" title="Quote PDF"></iframe>
+    <iframe src="${doc.pdf_url}#view=Fit&toolbar=0" class="pdf-frame" title="Quote PDF"></iframe>
   </div>` : '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">PDF not available</div>'}
 
   <!-- Mobile fallback -->
@@ -3384,16 +3384,16 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
     if (isAccepted) statusBadge = '<span style="color:#34C759;font-weight:600;">Accepted ✓</span>'
     else if (isDeclined) statusBadge = '<span style="color:#FF3B30;">Declined</span>'
 
-    return `<div style="border:${isActive ? '2px solid #F15A29' : '1px solid #ddd'};border-radius:10px;padding:16px;margin-bottom:12px;background:#fff;">
+    return `<div style="border:${isActive ? '2px solid #F15A29' : '1px solid rgba(255,255,255,0.12)'};border-radius:10px;padding:16px;margin-bottom:12px;background:#293C46;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div>
-          <div style="font-weight:700;font-size:16px;color:#293C46;">${qn || 'Quote'}</div>
-          ${priceStr ? `<div style="font-size:22px;font-weight:800;color:#F15A29;margin-top:4px;">${priceStr} <span style="font-size:12px;color:#4C6A7C;font-weight:400;">inc GST</span></div>` : ''}
+          <div style="font-weight:700;font-size:16px;color:#fff;">${qn || 'Quote'}</div>
+          ${priceStr ? `<div style="font-size:22px;font-weight:800;color:#F15A29;margin-top:4px;">${priceStr} <span style="font-size:12px;color:rgba(255,255,255,0.55);font-weight:400;">inc GST</span></div>` : ''}
         </div>
         ${statusBadge}
       </div>
       <div style="display:flex;gap:8px;margin-top:12px;">
-        <a href="${d.pdf_url || '#'}" target="_blank" style="flex:1;padding:10px;text-align:center;background:#293C46;color:#fff;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">View PDF</a>
+        <a href="${d.pdf_url ? d.pdf_url + '#view=Fit&toolbar=0' : '#'}" target="_blank" style="flex:1;padding:10px;text-align:center;background:#F15A29;color:#fff;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">View PDF</a>
         ${!isAccepted && !isDeclined ? `<button onclick="respondToQuote('accept','${d.share_token}')" style="flex:1;padding:10px;background:#34C759;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;">Accept This Option</button>` : ''}
       </div>
     </div>`
@@ -3403,24 +3403,26 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
 <title>Your Quotes - SecureWorks Group</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;background:#f5f5f7;color:#333}
-  .header{background:#293C46;padding:16px 24px}
-  .header-brand{color:#fff;font-size:18px;font-weight:700}
-  .header-brand span{color:rgba(255,255,255,0.6);font-weight:400}
-  .container{max-width:720px;margin:0 auto;padding:24px 16px}
-  .card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:16px}
-  .footer{text-align:center;color:#999;font-size:12px;padding:24px}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;background:#1E2A30;color:#fff;min-height:100vh}
+  .accent{height:3px;background:#F15A29}
+  .header{background:#293C46;padding:16px 28px}
+  .header-brand{color:#fff;font-size:18px;font-weight:700;letter-spacing:0.3px}
+  .header-brand span{color:rgba(255,255,255,0.5);font-weight:400}
+  .container{max-width:720px;margin:0 auto;padding:24px 16px 40px}
+  .card{background:#293C46;border-radius:12px;padding:24px;margin-bottom:16px}
+  .footer{text-align:center;color:rgba(255,255,255,0.3);font-size:12px;padding:24px}
 </style></head><body>
+<div class="accent"></div>
 <div class="header"><div class="header-brand">SecureWorks <span>Group</span></div></div>
 <div class="container">
   <div class="card">
-    <h1 style="color:#293C46;font-size:22px;margin-bottom:4px;">Your ${projectType} quotes</h1>
-    <p style="color:#4C6A7C;font-size:14px;">For ${clientName}${suburb ? ', ' + suburb : ''}</p>
-    <p style="color:#4C6A7C;font-size:13px;margin-top:8px;">We've prepared ${docs.length} options for you. Review each quote PDF and accept the one you'd like to go with.</p>
+    <h1 style="color:#fff;font-size:22px;margin-bottom:4px;">Your ${projectType} quotes</h1>
+    <p style="color:rgba(255,255,255,0.6);font-size:14px;">For ${clientName}${suburb ? ', ' + suburb : ''}</p>
+    <p style="color:rgba(255,255,255,0.6);font-size:13px;margin-top:8px;">We've prepared ${docs.length} options for you. Review each quote PDF and accept the one you'd like to go with.</p>
   </div>
   ${optionCards}
   <div class="card" style="text-align:center;">
-    <p style="color:#4C6A7C;font-size:14px;">Questions? We're here to help.</p>
+    <p style="color:rgba(255,255,255,0.6);font-size:14px;">Questions? We're here to help.</p>
     <p style="margin-top:8px;"><a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
