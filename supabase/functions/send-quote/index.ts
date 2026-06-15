@@ -2788,24 +2788,16 @@ function buildQuoteEmail(opts: {
 // ════════════════════════════════════════════════════════════
 
 function buildClientPage(doc: any, token: string, heroUrl: string | null = null): string {
-  const clientName = doc.jobs?.client_name || 'Customer'
-  const projectType = doc.jobs?.type || 'project'
-  const suburb = doc.jobs?.site_suburb || ''
+  // heroUrl retained in signature for backwards compat but not rendered — PDF has its own cover
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
 
   let statusHtml = ''
   if (isAccepted) {
-    statusHtml = '<div style="background:#34C75920;color:#34C759;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
+    statusHtml = '<div style="background:rgba(52,199,89,0.15);color:#34C759;padding:14px 20px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
   } else if (isDeclined) {
-    statusHtml = '<div style="background:#FF3B3020;color:#FF3B30;padding:16px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:24px;">Quote Declined</div>'
+    statusHtml = '<div style="background:rgba(255,59,48,0.15);color:#FF6B60;padding:14px 20px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Declined</div>'
   }
-
-  // Hero banner HTML (shows on both desktop and mobile, single instance at top of card)
-  const heroBannerHtml = heroUrl ? `
-      <div class="hero-banner">
-        <img src="${heroUrl}" alt="${projectType} render for ${suburb || clientName}" class="hero-img" onerror="this.parentElement.style.display='none'">
-      </div>` : ''
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -2815,116 +2807,118 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
   <title>Your Quote - SecureWorks Group</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f0f2f5; color: #333; }
-    .header { background: #293C46; padding: 18px 28px; display: flex; align-items: center; justify-content: space-between; }
-    .header-brand { color: #fff; font-size: 19px; font-weight: 700; letter-spacing: 0.3px; }
-    .header-brand span { color: rgba(255,255,255,0.55); font-weight: 400; }
-    .header-accent { width: 100%; height: 3px; background: #F15A29; }
-    .container { max-width: 800px; margin: 0 auto; padding: 28px 16px; }
-    .card { background: #fff; border-radius: 14px; padding: 28px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 16px; overflow: hidden; }
-    .card-header { margin-bottom: 6px; }
-    h1 { color: #293C46; font-size: 23px; font-weight: 700; margin-bottom: 4px; }
-    .subtitle { color: #4C6A7C; font-size: 14px; margin-bottom: 20px; }
-    .prepared-for { font-size: 12px; color: #8FA5B2; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; margin-bottom: 4px; }
-    .hero-banner { margin: -28px -28px 24px -28px; overflow: hidden; max-height: 320px; background: #e8ecef; }
-    .hero-img { width: 100%; height: 320px; object-fit: cover; display: block; }
-    .pdf-frame { width: 100%; height: 82vh; min-height: 640px; border: none; border-radius: 10px; background: #f0f0f0; }
-    .confirm-overlay { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center; }
-    .confirm-overlay.active { display:flex; }
-    .confirm-box { background:#fff;border-radius:14px;padding:32px;max-width:400px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.2); }
-    .pdf-mobile { display: none; text-align: center; padding: 0; background: #F9FAFB; border-radius: 10px; border: 1px solid #E5E7EB; overflow: hidden; }
-    .pdf-mobile-body { padding: 24px 20px; }
-    .pdf-mobile-icon { font-size: 36px; margin-bottom: 10px; }
-    .pdf-mobile p { color: #4C6A7C; font-size: 14px; margin-bottom: 16px; }
-    .btn { display: inline-block; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #1E2A30; color: #fff; min-height: 100vh; }
+    /* ── Top bar ── */
+    .topbar { background: #293C46; padding: 14px 28px; display: flex; align-items: center; border-bottom: 3px solid #F15A29; }
+    .topbar-brand { color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
+    .topbar-brand span { color: rgba(255,255,255,0.5); font-weight: 400; }
+    /* ── PDF presenter ── */
+    .pdf-wrap { display: flex; justify-content: center; padding: 28px 20px 0; }
+    .pdf-frame { width: 100%; max-width: 960px; height: 88vh; min-height: 700px; border: none; border-radius: 10px; box-shadow: 0 8px 48px rgba(0,0,0,0.55); background: #2a3840; display: block; }
+    /* ── Actions / chrome below PDF ── */
+    .container { max-width: 960px; margin: 0 auto; padding: 20px 20px 40px; }
+    /* Status banner */
+    /* ── Accept / Decline ── */
+    .actions-card { background: #293C46; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; }
+    .btn { display: inline-block; padding: 13px 32px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; font-family: inherit; }
     .btn-accept { background: #34C759; color: #fff; }
-    .btn-decline { background: #f5f5f7; color: #FF3B30; border: 1px solid #FF3B30; }
-    .btn-download { background: #293C46; color: #fff; }
-    .btn-view-pdf { background: #F15A29; color: #fff; display: inline-block; width: auto; padding: 14px 40px; }
-    .btn:hover { opacity: 0.9; }
-    .footer { text-align: center; color: #aaa; font-size: 12px; padding: 24px; }
+    .btn-decline { background: transparent; color: #FF6B60; border: 1px solid #FF6B60; }
+    .btn-view-pdf { background: #F15A29; color: #fff; display: inline-block; width: auto; padding: 13px 40px; }
+    .btn:hover { opacity: 0.88; }
+    /* Decline form */
+    .decline-form { margin-top: 16px; padding: 20px; background: rgba(255,59,48,0.08); border: 1px solid rgba(255,59,48,0.25); border-radius: 8px; }
+    .decline-form p { color: rgba(255,255,255,0.85); }
+    .decline-label { display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:6px;cursor:pointer;font-size:14px;color:rgba(255,255,255,0.9); }
+    .decline-textarea { width:100%;padding:10px;border:1px solid rgba(255,255,255,0.15);border-radius:6px;font-size:14px;font-family:inherit;resize:vertical;min-height:60px;margin-bottom:12px;background:rgba(255,255,255,0.07);color:#fff; }
+    .decline-textarea::placeholder { color:rgba(255,255,255,0.35); }
+    /* Supporting docs */
+    .card { background: #293C46; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; }
+    .card h3 { color: #fff; font-size: 15px; margin-bottom: 14px; }
+    .doc-row { padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 12px; }
+    .doc-row:last-child { border-bottom: none; padding-bottom: 0; }
+    .doc-icon { width: 36px; height: 36px; background: rgba(255,255,255,0.1); border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 16px; }
+    .doc-title { font-weight: 600; color: #fff; font-size: 14px; }
+    .doc-desc { color: rgba(255,255,255,0.5); font-size: 12px; }
+    /* Contact + footer */
+    .contact-card { background: #293C46; border-radius: 12px; padding: 20px 28px; margin-bottom: 16px; text-align: center; }
+    .contact-card p { color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 8px; }
+    .contact-card a { color: #F15A29; font-weight: 600; text-decoration: none; }
+    .footer { text-align: center; color: rgba(255,255,255,0.3); font-size: 12px; padding: 20px 0 32px; }
+    /* Confirm overlay */
+    .confirm-overlay { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center; }
+    .confirm-overlay.active { display:flex; }
+    .confirm-box { background:#293C46;border-radius:14px;padding:32px;max-width:400px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:#fff; }
+    .confirm-box h3 { color:#fff;font-size:18px;margin-bottom:8px; }
+    .confirm-box p { color:rgba(255,255,255,0.65);font-size:14px;margin-bottom:20px; }
+    /* Mobile fallback */
+    .pdf-mobile { display: none; }
+    .pdf-mobile-card { background: #293C46; border-radius: 12px; padding: 32px 24px; margin: 24px 20px 0; text-align: center; }
+    .pdf-mobile-card p { color: rgba(255,255,255,0.65); font-size: 14px; margin-bottom: 18px; }
     @media (max-width: 768px) {
-      .container { padding: 16px 12px; }
-      .pdf-frame { display: none !important; }
+      .pdf-wrap { display: none !important; }
       .pdf-mobile { display: block !important; }
-      .hero-banner { max-height: 200px; margin: -28px -28px 20px -28px; }
-      .hero-img { height: 200px; }
+      .topbar { padding: 12px 20px; }
     }
   </style>
 </head>
 <body>
-  <div class="header-accent"></div>
-  <div class="header">
-    <div class="header-brand">SecureWorks <span>Group</span></div>
+  <!-- Slim top bar: wordmark only -->
+  <div class="topbar">
+    <div class="topbar-brand">SecureWorks <span>Group</span></div>
   </div>
-  <div class="container">
-    <div class="card">
-      ${heroBannerHtml}
-      <div class="card-header">
-        <div class="prepared-for">Prepared for ${clientName}${suburb ? ', ' + suburb : ''}</div>
-        <h1>Your ${projectType} quote</h1>
-      </div>
 
-      ${statusHtml}
+  <!-- PDF presenter (desktop) -->
+  ${doc.pdf_url ? `
+  <div class="pdf-wrap">
+    <iframe src="${doc.pdf_url}#view=FitH" class="pdf-frame" title="Quote PDF"></iframe>
+  </div>` : '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">PDF not available</div>'}
 
-      ${doc.pdf_url ? `
-      <iframe src="${doc.pdf_url}#view=FitH" class="pdf-frame" title="Quote PDF"></iframe>
-      <div class="pdf-mobile">
-        <div class="pdf-mobile-body">
-          <div class="pdf-mobile-icon">📄</div>
-          <p>Your detailed quote is ready to view</p>
-          <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn btn-view-pdf">View Full Quote PDF</a>
-          <a href="${doc.pdf_url}" download style="display:block;margin-top:10px;color:#4C6A7C;font-size:13px;text-decoration:underline;">Download PDF</a>
-        </div>
-      </div>
-      ` : '<p style="color:#4C6A7C;text-align:center;padding:20px;">PDF not available</p>'}
-
-      ${!isAccepted && !isDeclined ? `
-      <div style="margin-top:28px;padding-top:24px;border-top:1px solid #eee;">
-        <p style="color:#4C6A7C;font-size:14px;margin-bottom:16px;">Happy with the quote? Accept below to confirm and we'll be in touch to schedule your project.</p>
-        <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
-        <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
-      </div>
-      <div id="declineForm" style="display:none;margin-top:16px;padding:20px;background:#FFF5F5;border:1px solid #FF3B3040;border-radius:8px;">
-        <p style="color:#293C46;font-size:15px;font-weight:600;margin-bottom:12px;">We'd appreciate your feedback</p>
-        <p style="color:#4C6A7C;font-size:13px;margin-bottom:16px;">This helps us improve our service. Select the main reason:</p>
-        <div id="declineReasons" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;">
-          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;color:#333;">
-            <input type="radio" name="declineReason" value="price" style="accent-color:#F15A29;"> Price too high
-          </label>
-          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;color:#333;">
-            <input type="radio" name="declineReason" value="timeline" style="accent-color:#F15A29;"> Timeline doesn't work
-          </label>
-          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;color:#333;">
-            <input type="radio" name="declineReason" value="competitor" style="accent-color:#F15A29;"> Going with another company
-          </label>
-          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;color:#333;">
-            <input type="radio" name="declineReason" value="scope_changed" style="accent-color:#F15A29;"> Project scope changed
-          </label>
-          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;color:#333;">
-            <input type="radio" name="declineReason" value="not_proceeding" style="accent-color:#F15A29;"> Not proceeding at all
-          </label>
-          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;color:#333;">
-            <input type="radio" name="declineReason" value="other" style="accent-color:#F15A29;"> Other
-          </label>
-        </div>
-        <textarea id="declineComment" placeholder="Any additional feedback? (optional)" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px;font-family:inherit;resize:vertical;min-height:60px;margin-bottom:12px;"></textarea>
-        <div style="display:flex;gap:8px;">
-          <button class="btn" style="background:#FF3B30;color:#fff;flex:1;" onclick="submitDecline()">Confirm Decline</button>
-          <button class="btn" style="background:#f5f5f7;color:#4C6A7C;flex:1;" onclick="hideDeclineForm()">Cancel</button>
-        </div>
-      </div>
-      ` : ''}
+  <!-- Mobile fallback -->
+  ${doc.pdf_url ? `
+  <div class="pdf-mobile">
+    <div class="pdf-mobile-card">
+      <div style="font-size:36px;margin-bottom:12px;">📄</div>
+      <p>Your detailed quote is ready to view</p>
+      <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn btn-view-pdf">View Quote PDF</a>
+      <a href="${doc.pdf_url}" download style="display:block;margin-top:10px;color:rgba(255,255,255,0.4);font-size:13px;text-decoration:underline;">Download PDF</a>
     </div>
+  </div>` : ''}
 
-    ${buildSupportingDocsHtml(doc)}
+  <!-- Actions + chrome -->
+  <div class="container">
+    ${statusHtml}
 
-    <div class="card" style="text-align:center;">
-      <p style="color:#4C6A7C;font-size:14px;">Questions about your quote?</p>
-      <p style="margin-top:8px;">
-        <a href="${getDivisionPhoneHref(doc.jobs?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
-        <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
-      </p>
+    ${!isAccepted && !isDeclined ? `
+    <div class="actions-card">
+      <p style="color:rgba(255,255,255,0.7);font-size:14px;margin-bottom:16px;">Happy with the quote? Accept below to confirm and we'll be in touch to schedule your project.</p>
+      <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
+      <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
+    </div>
+    <div id="declineForm" class="decline-form" style="display:none;margin-bottom:16px;">
+      <p style="font-size:15px;font-weight:600;margin-bottom:8px;">We'd appreciate your feedback</p>
+      <p style="font-size:13px;opacity:0.7;margin-bottom:14px;">This helps us improve our service. Select the main reason:</p>
+      <div id="declineReasons" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;">
+        <label class="decline-label"><input type="radio" name="declineReason" value="price" style="accent-color:#F15A29;"> Price too high</label>
+        <label class="decline-label"><input type="radio" name="declineReason" value="timeline" style="accent-color:#F15A29;"> Timeline doesn't work</label>
+        <label class="decline-label"><input type="radio" name="declineReason" value="competitor" style="accent-color:#F15A29;"> Going with another company</label>
+        <label class="decline-label"><input type="radio" name="declineReason" value="scope_changed" style="accent-color:#F15A29;"> Project scope changed</label>
+        <label class="decline-label"><input type="radio" name="declineReason" value="not_proceeding" style="accent-color:#F15A29;"> Not proceeding at all</label>
+        <label class="decline-label"><input type="radio" name="declineReason" value="other" style="accent-color:#F15A29;"> Other</label>
+      </div>
+      <textarea id="declineComment" class="decline-textarea" placeholder="Any additional feedback? (optional)"></textarea>
+      <div style="display:flex;gap:8px;">
+        <button class="btn" style="background:#FF3B30;color:#fff;flex:1;" onclick="submitDecline()">Confirm Decline</button>
+        <button class="btn" style="background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.7);flex:1;border:1px solid rgba(255,255,255,0.15);" onclick="hideDeclineForm()">Cancel</button>
+      </div>
+    </div>
+    ` : ''}
+
+    ${buildSupportingDocsHtml(doc, 'dark')}
+
+    <div class="contact-card">
+      <p>Questions about your quote?</p>
+      <a href="${getDivisionPhoneHref(doc.jobs?.type)}">Call Us</a> &nbsp;|&nbsp;
+      <a href="mailto:admin@secureworkswa.com.au">Email</a>
     </div>
 
     <div class="footer">
@@ -3505,28 +3499,35 @@ const SUPPORTING_DOC_META: Record<string, { title: string; description: string }
   colour_chart: { title: 'Colorbond Colour Chart', description: 'Available roof, ceiling, and post colours' },
 }
 
-function buildSupportingDocsHtml(doc: any): string {
+function buildSupportingDocsHtml(doc: any, theme: 'light' | 'dark' = 'light'): string {
   const snapshot = doc.data_snapshot_json
   const docs = snapshot?.supporting_docs
   if (!docs || !Array.isArray(docs) || docs.length === 0) return ''
+
+  const isDark = theme === 'dark'
+  const rowBorder = isDark ? 'rgba(255,255,255,0.08)' : '#f0f0f0'
+  const iconBg = isDark ? 'rgba(255,255,255,0.1)' : '#EDF1F4'
+  const titleColor = isDark ? '#fff' : '#293C46'
+  const descColor = isDark ? 'rgba(255,255,255,0.5)' : '#4C6A7C'
+  const headingColor = isDark ? '#fff' : '#293C46'
 
   const items = docs.map((key: string) => {
     const meta = SUPPORTING_DOC_META[key] || { title: key, description: '' }
     // Static URLs — these PDFs are uploaded once to Supabase Storage
     // For now, show info-only until the PDFs are actually uploaded
-    return `<div style="padding:12px 0;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;gap:12px;">
-      <div style="width:36px;height:36px;background:#EDF1F4;border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+    return `<div style="padding:12px 0;border-bottom:1px solid ${rowBorder};display:flex;align-items:center;gap:12px;">
+      <div style="width:36px;height:36px;background:${iconBg};border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
         <span style="font-size:18px;">📄</span>
       </div>
       <div>
-        <div style="font-weight:600;color:#293C46;font-size:14px;">${meta.title}</div>
-        <div style="color:#4C6A7C;font-size:12px;">${meta.description}</div>
+        <div style="font-weight:600;color:${titleColor};font-size:14px;">${meta.title}</div>
+        <div style="color:${descColor};font-size:12px;">${meta.description}</div>
       </div>
     </div>`
   }).join('')
 
   return `<div class="card">
-    <h3 style="color:#293C46;font-size:16px;margin-bottom:12px;">Supporting Documents</h3>
+    <h3 style="color:${headingColor};font-size:16px;margin-bottom:12px;">Supporting Documents</h3>
     ${items}
   </div>`
 }
