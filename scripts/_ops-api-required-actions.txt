@@ -90,3 +90,15 @@ job_financials_detail
 # ── Make-safe audit — read-only; the compact pipeline reader the intake-audit
 #    and close-out-audit skills depend on (retires the per-job sw_job_detail loop) ──
 makesafe_audit
+
+# ── Make-safe compact READ endpoints (Mission makesafe-live-truth-2026-06-14, M2)
+#    GAP-1..6: let the make-safe skills read the email-sync Supabase projection
+#    (emails / email_attachments / pipeline_items) instead of scanning the live
+#    ses@ mailbox via Graph. All read-only; get_makesafe_attachment_url mints a
+#    60s signed URL (a read). GAP-4 (pack_sent + pipeline_item_sent_status) and
+#    GAP-5 (attachment_status_summary) are additive FIELDS on makesafe_audit /
+#    makesafe_new_emails / makesafe_pipeline_items, not separate action names. ──
+makesafe_new_emails
+makesafe_pipeline_items
+get_makesafe_attachment_url
+get_makesafe_email
