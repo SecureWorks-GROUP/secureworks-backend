@@ -39,6 +39,68 @@ const DAY_MS = 86_400_000;
 
 type SB = any;
 
+// ── Pagination + chunking (PostgREST 1000-row cap) ─────────────────────────────
+// PostgREST caps every response at 1000 ROWS regardless of how narrow the filter
+// is (project-wide gotcha). A multi-row read with no .range() therefore SILENTLY
+// truncates at 1000 — for GAP-1's drafts read that means already-drafted emails
+// fall out of the dedup set and resurface as "new" -> duplicate intake. Every
+// multi-row read in this module must paginate.
+//
+// PAGE_SIZE matches index.ts fetchAll (1000 = the cap). We loop .range(offset,
+// offset+PAGE-1) until a short page. The factory returns a FRESH builder each
+// call so .range() is re-applied cleanly per page (Supabase builders are not
+// reusable once awaited). Works with the injected test client provided its
+// builder exposes a .range(from,to) terminal (see the test stub).
+const PAGE_SIZE = 1000;
+
+async function fetchAllRows<T = any>(
+  buildQuery: () => any,
+  label: string,
+): Promise<T[]> {
+  const all: T[] = [];
+  let offset = 0;
+  // Hard ceiling so a misbehaving range terminal can't loop forever.
+  for (let guard = 0; guard < 100_000; guard++) {
+    const { data, error } = await buildQuery().range(offset, offset + PAGE_SIZE - 1);
+    if (error) throw new Error(`${label} failed: ${error.message ?? error}`);
+    const page: T[] = data || [];
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+  return all;
+}
+
+// PostgREST also pushes an `.in(col, list)` into the request URL, so a very large
+// id list can blow the URL length AND (because the response is still capped at
+// 1000 result rows) silently truncate. Chunk the id list into IN_CHUNK-sized
+// batches, paginate each batch, and merge. IN_CHUNK is conservative (URL safety)
+// well under the row cap.
+const IN_CHUNK = 500;
+
+function chunk<T>(list: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+// Run a paginated read for each IN-chunk of `ids` and merge all rows. The
+// factory receives one chunk and must return a fresh query builder whose
+// terminal is .range() (i.e. it includes the .in(col, chunk) filter).
+async function fetchAllRowsInChunks<T = any>(
+  ids: string[],
+  buildQueryForChunk: (chunkIds: string[]) => any,
+  label: string,
+): Promise<T[]> {
+  if (!ids.length) return [];
+  const all: T[] = [];
+  for (const ch of chunk(ids, IN_CHUNK)) {
+    const rows = await fetchAllRows<T>(() => buildQueryForChunk(ch), label);
+    all.push(...rows);
+  }
+  return all;
+}
+
 // ── Shared pure helpers ───────────────────────────────────────────────────────
 
 // Derive the sender domain from a full email address. emails carries no
@@ -151,21 +213,29 @@ export async function makesafeNewEmails(
   const since = params.since || sinceFromDays(30, params.nowIso);
 
   // All ses@ emails in the window (exclude tombstoned — no PII to intake).
-  const { data: emails, error: emailsErr } = await client.from("emails")
-    .select("post_id, received_at, from_email, has_attachments")
-    .eq("mailbox", mailbox)
-    .is("pii_purged_at", null)
-    .gte("received_at", since)
-    .order("received_at", { ascending: false });
-  if (emailsErr) throw new Error(`emails read failed: ${emailsErr.message}`);
+  // Paginated: the window can hold >1000 emails (PostgREST 1000-row cap).
+  const emails = await fetchAllRows<any>(
+    () => client.from("emails")
+      .select("post_id, received_at, from_email, has_attachments")
+      .eq("mailbox", mailbox)
+      .is("pii_purged_at", null)
+      .gte("received_at", since)
+      .order("received_at", { ascending: false }),
+    "emails read",
+  );
 
   // Already-known Graph post ids: any intake draft (draft/needs_review/approved/
   // superseded). An approved draft maps to a live job, so its email is not "new".
   // A rejected draft IS eligible to resurface, so rejected ids are NOT excluded.
-  const { data: drafts, error: draftsErr } = await client.from("makesafe_intake_drafts")
-    .select("graph_message_id, status")
-    .neq("status", "rejected");
-  if (draftsErr) throw new Error(`makesafe_intake_drafts read failed: ${draftsErr.message}`);
+  // PAGINATED — this read has no time window, so it is the FIRST to hit the
+  // 1000-row cap; truncation here drops known ids -> already-drafted emails
+  // resurface as "new" -> duplicate intake. Must read every draft.
+  const drafts = await fetchAllRows<any>(
+    () => client.from("makesafe_intake_drafts")
+      .select("graph_message_id, status")
+      .neq("status", "rejected"),
+    "makesafe_intake_drafts read",
+  );
   const knownIds = new Set<string>();
   for (const d of (drafts || [])) if (d?.graph_message_id) knownIds.add(d.graph_message_id);
 
@@ -221,47 +291,62 @@ export async function makesafePipelineItems(
   const mailbox = params.mailbox || SES_MAILBOX;
   const since = params.since || sinceFromDays(60, params.nowIso);
 
-  let piQuery = client.from("pipeline_items")
-    .select("ref, target_job, sent_status, attachment_refs, match_score, match_method, source_event_ids")
-    .eq("mailbox", mailbox);
-  if (params.sent_status) piQuery = piQuery.eq("sent_status", params.sent_status);
-  const { data: pi, error: piErr } = await piQuery;
-  if (piErr) throw new Error(`pipeline_items read failed: ${piErr.message}`);
+  // Paginated: the full pipeline_items projection for a mailbox can exceed 1000.
+  const pi = await fetchAllRows<any>(
+    () => {
+      let q = client.from("pipeline_items")
+        .select("ref, target_job, sent_status, attachment_refs, match_score, match_method, source_event_ids")
+        .eq("mailbox", mailbox);
+      if (params.sent_status) q = q.eq("sent_status", params.sent_status);
+      return q;
+    },
+    "pipeline_items read",
+  );
 
   // Resolve each pipeline item's originating email post_id via source_event_ids
   // -> email_events_raw.post_id (the highest-trust linkage, same as reconcile D1).
+  // The eventIds list can be large -> chunk the .in() (URL safety) AND paginate
+  // each chunk (1000-row result cap).
   const eventIds = Array.from(
     new Set((pi || []).flatMap((p: any) => (p.source_event_ids || [])).filter(Boolean)),
-  );
+  ) as string[];
   const eventToPost = new Map<string, string>();
-  if (eventIds.length) {
-    const { data: evs, error: evsErr } = await client.from("email_events_raw")
-      .select("id, post_id").in("id", eventIds);
-    if (evsErr) throw new Error(`email_events_raw (event->post) read failed: ${evsErr.message}`);
-    for (const ev of (evs || [])) if (ev?.id) eventToPost.set(ev.id, ev.post_id);
-  }
+  const evs = await fetchAllRowsInChunks<any>(
+    eventIds,
+    (ch) => client.from("email_events_raw").select("id, post_id").in("id", ch),
+    "email_events_raw (event->post) read",
+  );
+  for (const ev of evs) if (ev?.id) eventToPost.set(ev.id, ev.post_id);
 
   // Resolve the post ids -> emails (sender_domain + received_at), windowed.
-  const postIds = Array.from(new Set(Array.from(eventToPost.values())));
+  // postIds can be large -> chunk the .in() AND paginate each chunk.
+  const postIds = Array.from(new Set(Array.from(eventToPost.values()))) as string[];
   const emailById = new Map<string, { from_email: string | null; received_at: string | null }>();
-  if (postIds.length) {
-    const { data: emails, error: emailsErr } = await client.from("emails")
+  const joinedEmails = await fetchAllRowsInChunks<any>(
+    postIds,
+    (ch) => client.from("emails")
       .select("post_id, from_email, received_at")
       .eq("mailbox", mailbox)
-      .in("post_id", postIds);
-    if (emailsErr) throw new Error(`emails (pipeline join) read failed: ${emailsErr.message}`);
-    for (const e of (emails || [])) {
-      emailById.set(e.post_id, { from_email: e.from_email ?? null, received_at: e.received_at ?? null });
-    }
+      .in("post_id", ch),
+    "emails (pipeline join) read",
+  );
+  for (const e of joinedEmails) {
+    emailById.set(e.post_id, { from_email: e.from_email ?? null, received_at: e.received_at ?? null });
   }
 
   // GAP-5 — attachment status summary per originating email.
   const summaries = await loadAttachmentSummaries(client, postIds);
 
-  let rows = (pi || []).map((p: any) => {
-    const firstEventId = (p.source_event_ids || []).find((id: string) => eventToPost.has(id));
+  const mapped = (pi || []).map((p: any) => {
+    const firstEventId = (p.source_event_ids || []).find(
+      (id: string) => eventToPost.has(id) && emailById.has(eventToPost.get(id) as string),
+    );
     const postId = firstEventId ? (eventToPost.get(firstEventId) ?? null) : null;
     const email = postId ? emailById.get(postId) : null;
+    // A usable link requires BOTH event->post resolution AND the email row itself
+    // (sender_domain/received_at live on the email). If either is missing the
+    // item is unresolved and must NOT silently vanish (no-silent-drops).
+    const resolved = !!email;
     const summary = postId ? (summaries[postId] ?? emptyAttachmentSummary()) : emptyAttachmentSummary();
     // attachment_count: prefer the live store summary; fall back to the
     // pipeline_items.attachment_refs length when the email join is missing.
@@ -269,22 +354,34 @@ export async function makesafePipelineItems(
     const attachment_count = liveAttachmentCount(summary) || refsCount;
     return {
       ref: p.ref ?? null,
-      source_email_id: postId,
-      sender_domain: deriveFromDomain(email?.from_email ?? null),
-      received_at: email?.received_at ?? null,
+      source_email_id: resolved ? postId : null,
+      sender_domain: resolved ? deriveFromDomain(email?.from_email ?? null) : null,
+      received_at: resolved ? (email?.received_at ?? null) : null,
       sent_status: p.sent_status ?? null,
       attachment_count,
       has_target_job: !!p.target_job,
       match_score: p.match_score ?? null,
       attachment_status_summary: summary,
+      // no-silent-drops flag for intake-audit (see windowing rule below).
+      email_link: resolved ? "resolved" : "unresolved",
+      _resolved: resolved, // internal; stripped before return
     };
   });
 
-  // `since` filters on the originating email's received_at. A pipeline item whose
-  // email is older than the window (or whose email could not be resolved) is
-  // excluded so the result honours the lookback. (sent_status, if supplied, was
-  // already applied server-side above.)
-  rows = rows.filter((r: any) => r.received_at != null && r.received_at >= since);
+  // WINDOWING RULE (`since` filters on the originating email's received_at):
+  //   • resolved AND received_at >= since -> include (normal, inside window).
+  //   • resolved AND received_at <  since -> exclude (correctly outside window).
+  //   • NOT resolved (no usable email link) -> INCLUDE, flagged
+  //     email_link:"unresolved" (source_email_id/received_at null) so intake-audit
+  //     sees the anomaly. An unresolvable item must never be dropped just because
+  //     its received_at is null.
+  // (sent_status, if supplied, was already applied server-side above.)
+  const rows = mapped
+    .filter((r: any) => !r._resolved || (r.received_at != null && r.received_at >= since))
+    .map((r: any) => {
+      const { _resolved: _omit, ...rest } = r;
+      return rest;
+    });
 
   return {
     generated_at: new Date().toISOString(),
@@ -293,6 +390,11 @@ export async function makesafePipelineItems(
     sent_status: params.sent_status || null,
     count: rows.length,
     items: rows,
+    notes:
+      "email_link is 'resolved' (received_at within the `since` window) or 'unresolved' " +
+      "(no usable email link via source_event_ids -> email_events_raw -> emails). " +
+      "Unresolved items are INCLUDED with source_email_id/received_at null so intake-audit " +
+      "sees the anomaly; resolved items older than `since` are excluded.",
   };
 }
 
@@ -427,10 +529,12 @@ export async function buildPipelineSentStatusMap(
 ): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   if (!jobIds.length) return map;
-  const { data, error } = await client.from("pipeline_items")
-    .select("target_job, sent_status")
-    .in("target_job", jobIds);
-  if (error) throw new Error(`pipeline_items (sent_status by job) read failed: ${error.message}`);
+  // Chunk the job-id .in() list AND paginate each chunk (1000-row cap).
+  const data = await fetchAllRowsInChunks<any>(
+    jobIds,
+    (ch) => client.from("pipeline_items").select("target_job, sent_status").in("target_job", ch),
+    "pipeline_items (sent_status by job) read",
+  );
   for (const p of (data || [])) {
     if (p?.target_job && p.sent_status) map[p.target_job] = p.sent_status;
   }
@@ -438,16 +542,20 @@ export async function buildPipelineSentStatusMap(
 }
 
 // ── internal: batched attachment summary load (GAP-5) ──
+// One email can have MANY attachments, so the 1000-row RESULT cap can truncate
+// even for far fewer than 1000 emails. Chunk the email_id .in() list AND paginate
+// each chunk so every attachment row is counted.
 async function loadAttachmentSummaries(
   client: SB,
   postIds: string[],
 ): Promise<Record<string, AttachmentStatusSummary>> {
   if (!postIds.length) return {};
-  const { data, error } = await client.from("email_attachments")
-    .select("email_id, status")
-    .in("email_id", postIds);
-  if (error) throw new Error(`email_attachments (status summary) read failed: ${error.message}`);
-  return buildAttachmentSummaries((data || []) as Array<{ email_id?: string | null; status?: string | null }>);
+  const rows = await fetchAllRowsInChunks<{ email_id?: string | null; status?: string | null }>(
+    postIds,
+    (ch) => client.from("email_attachments").select("email_id, status").in("email_id", ch),
+    "email_attachments (status summary) read",
+  );
+  return buildAttachmentSummaries(rows);
 }
 
 // A 400-class error the ops-api dispatcher maps to a 400 response. index.ts has

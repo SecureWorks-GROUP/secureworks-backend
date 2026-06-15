@@ -48,6 +48,12 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
       },
       order: () => b,
       limit: () => b,
+      // Paginated read terminal (fetchAllRows): applies the recorded predicates
+      // then returns rows in [from, to] inclusive (real PostgREST .range()).
+      range: async (from: number, to: number) => {
+        const data = rows.filter((r) => preds.every((p) => p(r))).slice(from, to + 1);
+        return { data, error: null };
+      },
       then: (resolve: (v: any) => any) => {
         const data = rows.filter((r) => preds.every((p) => p(r)));
         return resolve({ data, error: null });

@@ -86,6 +86,11 @@ function makeClient(
       or: () => b,
       order: () => b,
       limit: () => b,
+      // Paginated read terminal (fetchAllRows / fetchAllRowsInChunks): applies the
+      // recorded filters then returns the rows in [from, to] inclusive. Mirrors
+      // PostgREST .range(): a page shorter than the window ends pagination.
+      range: async (from: number, to: number) =>
+        readErr ? ({ data: null, error: readErr }) : ({ data: apply().slice(from, to + 1), error: null }),
       maybeSingle: async () => readErr ? ({ data: null, error: readErr }) : ({ data: apply()[0] ?? null, error: null }),
       single: async () => readErr ? ({ data: null, error: readErr }) : ({ data: apply()[0] ?? null, error: null }),
       then: (resolve: (v: any) => any) => {
@@ -446,4 +451,123 @@ Deno.test("GAP-6: an unknown post_id returns found:false", async () => {
   const res = await _getMakesafeEmail(client, { post_id: "ghost" });
   assertEquals(res.found, false);
   assertEquals(res.post_id, "ghost");
+});
+
+// ════════════════════════════════════════════════════════════
+// PostgREST 1000-row cap — pagination (.range()) must return ALL rows
+// ════════════════════════════════════════════════════════════
+Deno.test("Pagination: GAP-1 returns ALL emails across >1000-row pages (not capped at 1000)", async () => {
+  // 2500 ses@ emails in window, none drafted. The stub's .range() returns
+  // [from,to] slices, so a non-paginating read would stop at 1000.
+  const N = 2500;
+  const emails = Array.from({ length: N }, (_, i) => ({
+    post_id: `post-${i}`,
+    mailbox: "ses@secureworkswa.com.au",
+    received_at: "2026-06-14T00:00:00Z",
+    from_email: "x@mlb.com.au",
+    has_attachments: false,
+    pii_purged_at: null,
+  }));
+  const { client } = makeClient({ emails, makesafe_intake_drafts: [], email_attachments: [] });
+  const res = await _makesafeNewEmails(client, { nowIso: "2026-06-15T00:00:00Z" });
+  assertEquals(res.count, N); // ALL 2500, not 1000
+  assertEquals(res.emails.length, N);
+});
+
+Deno.test("Pagination GAP-1 drafts: an already-drafted email beyond row 1000 is STILL excluded (no resurfacing)", async () => {
+  // The drafts read has NO window -> it is the soonest to truncate. Put a known
+  // already-drafted id at draft index 1500 (page 2). If the drafts read stopped
+  // at 1000 it would be missing from knownIds and the email would resurface as
+  // "new" -> duplicate intake. Paginated, it must stay excluded.
+  const NEW = "post-NEW";
+  const DRAFTED = "post-DRAFTED-1500";
+  const emails = [
+    { post_id: NEW, mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "x@mlb.com.au", has_attachments: false, pii_purged_at: null },
+    { post_id: DRAFTED, mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "x@mlb.com.au", has_attachments: false, pii_purged_at: null },
+  ];
+  // 2000 drafts; the one matching DRAFTED sits at index 1500 (second page).
+  const drafts = Array.from({ length: 2000 }, (_, i) => ({
+    graph_message_id: i === 1500 ? DRAFTED : `draft-filler-${i}`,
+    status: "approved",
+  }));
+  const { client } = makeClient({ emails, makesafe_intake_drafts: drafts, email_attachments: [] });
+  const res = await _makesafeNewEmails(client, { nowIso: "2026-06-15T00:00:00Z" });
+  assertEquals(res.count, 1);
+  assertEquals(res.emails[0].post_id, NEW);
+  assert(
+    !res.emails.some((e: any) => e.post_id === DRAFTED),
+    "already-drafted email beyond row 1000 must NOT resurface",
+  );
+});
+
+Deno.test("Pagination: GAP-3 returns ALL pipeline_items across >1000-row pages", async () => {
+  const N = 2300;
+  const pipeline_items = Array.from({ length: N }, (_, i) => ({
+    ref: `R-${i}`,
+    mailbox: "ses@secureworkswa.com.au",
+    target_job: null,
+    sent_status: "not_sent",
+    attachment_refs: [],
+    match_score: null,
+    source_event_ids: [`ev-${i}`],
+  }));
+  const email_events_raw = Array.from({ length: N }, (_, i) => ({ id: `ev-${i}`, post_id: `post-${i}` }));
+  const emails = Array.from({ length: N }, (_, i) => ({
+    post_id: `post-${i}`,
+    mailbox: "ses@secureworkswa.com.au",
+    from_email: "x@mlb.com.au",
+    received_at: "2026-06-14T00:00:00Z",
+  }));
+  const { client } = makeClient({ pipeline_items, email_events_raw, emails, email_attachments: [] });
+  const res = await _makesafePipelineItems(client, { nowIso: "2026-06-15T00:00:00Z" });
+  assertEquals(res.count, N); // ALL 2300, not 1000
+});
+
+// ════════════════════════════════════════════════════════════
+// GAP-3 no-silent-drops — unresolvable items must NOT vanish
+// ════════════════════════════════════════════════════════════
+Deno.test("GAP-3 no-silent-drops: an unresolvable item is INCLUDED flagged unresolved; resolved-but-old is excluded", async () => {
+  const { client } = makeClient({
+    pipeline_items: [
+      // Resolved + in window -> included, email_link:"resolved".
+      { ref: "R-OK", mailbox: "ses@secureworkswa.com.au", target_job: "j1", sent_status: "not_sent", attachment_refs: [], match_score: null, source_event_ids: ["ev-ok"] },
+      // Resolved but email older than `since` -> excluded.
+      { ref: "R-OLD", mailbox: "ses@secureworkswa.com.au", target_job: null, sent_status: "not_sent", attachment_refs: [], match_score: null, source_event_ids: ["ev-old"] },
+      // Unresolvable: source_event_ids points at an event with no email row.
+      { ref: "R-UNRESOLVED", mailbox: "ses@secureworkswa.com.au", target_job: null, sent_status: "needs_review", attachment_refs: ["a-1"], match_score: null, source_event_ids: ["ev-orphan"] },
+    ],
+    email_events_raw: [
+      { id: "ev-ok", post_id: "post-ok" },
+      { id: "ev-old", post_id: "post-old" },
+      { id: "ev-orphan", post_id: "post-missing" }, // points to an email that does not exist
+    ],
+    emails: [
+      { post_id: "post-ok", mailbox: "ses@secureworkswa.com.au", from_email: "x@mlb.com.au", received_at: "2026-06-14T00:00:00Z" },
+      { post_id: "post-old", mailbox: "ses@secureworkswa.com.au", from_email: "x@mlb.com.au", received_at: "2026-01-01T00:00:00Z" },
+      // post-missing intentionally absent -> R-UNRESOLVED has no usable email link.
+    ],
+    email_attachments: [],
+  });
+  const res = await _makesafePipelineItems(client, { nowIso: "2026-06-15T00:00:00Z" });
+  const byRef: Record<string, any> = {};
+  for (const it of res.items) byRef[it.ref] = it;
+
+  // Resolved + in window: present, flagged resolved.
+  assert(byRef["R-OK"], "resolved in-window item must be present");
+  assertEquals(byRef["R-OK"].email_link, "resolved");
+  assertEquals(byRef["R-OK"].source_email_id, "post-ok");
+
+  // Resolved but old: correctly excluded.
+  assertEquals("R-OLD" in byRef, false, "resolved-but-old item must be excluded by the window");
+
+  // Unresolvable: INCLUDED, flagged, with null source_email_id + received_at.
+  assert(byRef["R-UNRESOLVED"], "unresolvable item must NOT be dropped (no-silent-drops)");
+  assertEquals(byRef["R-UNRESOLVED"].email_link, "unresolved");
+  assertEquals(byRef["R-UNRESOLVED"].source_email_id, null);
+  assertEquals(byRef["R-UNRESOLVED"].received_at, null);
+  // attachment_count falls back to attachment_refs length when the email is unresolved.
+  assertEquals(byRef["R-UNRESOLVED"].attachment_count, 1);
+
+  // notes documents the rule.
+  assert(res.notes.includes("unresolved"), "GAP-3 response must carry a notes field documenting the rule");
 });
