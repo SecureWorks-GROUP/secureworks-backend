@@ -23,7 +23,11 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pinned to a concrete recent-stable release. `version: latest` made
+          # setup-cli resolve the newest release at deploy time, which started
+          # failing with "resolve latest release: Gateway Time-out". Pinning
+          # removes that network dependency and keeps deploys deterministic.
+          version: 2.105.0
 
       - name: Identify changed function directories
         id: changed

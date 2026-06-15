@@ -117,9 +117,12 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 const EXTRACTOR_VERSION = "v1";
 const MATCHER_VERSION = "v1";
 
-// Graph inline contentBytes cap (~4MB). Above this, the bytes are not inlined and
-// the large-attachment $value path is required. Phase 1 marks those needs_review.
-const INLINE_BYTES_LIMIT = 4 * 1024 * 1024;
+// HARD decode safety cap (memory guard) for inline PDF bytes. This is NOT the
+// business size cap: a PDF that carries inline contentBytes is uploaded regardless
+// of ordinary size. This only stops the edge isolate from decoding a pathological
+// blob. Graph's own ~4MB inline cap means PDFs above it arrive WITHOUT contentBytes
+// (handled separately as needs_review), so this rarely if ever triggers.
+const INLINE_BYTES_LIMIT = 25 * 1024 * 1024;
 
 // ════════════════════════════════════════════════════════════
 // Types (minimal Graph shapes we read)
@@ -396,11 +399,14 @@ function classifyPost(
 }
 
 // ════════════════════════════════════════════════════════════
-// Attachment handling. Validates PDF magic bytes, sha256-dedups, uploads to the
-// PRIVATE bucket, inserts an email_attachments row. Non-file / oversize / inline
-// attachments -> status=needs_review (never silently skipped). Returns the count
-// of still-unresolved (pending/failed/needs_review) attachment rows for this
-// email, which drives the DEGRADED mode.
+// Attachment handling. Validates PDF magic bytes, sha256-dedups, uploads PDFs to the
+// PRIVATE bucket, inserts an email_attachments row. Classification by TYPE (never
+// inline-ness): reference/item -> needs_review (BLOCKING); non-PDF files incl inline
+// images -> skipped (benign, NON-blocking, audit-only); PDF without inline bytes or
+// over the decode cap -> needs_review (BLOCKING); valid PDF (even inline) -> uploaded;
+// any genuine failure -> failed. Nothing is silently dropped. Returns the count of
+// still-unresolved (pending/failed/needs_review) rows — `skipped` and `uploaded` are
+// resolved — which drives the DEGRADED mode.
 // ════════════════════════════════════════════════════════════
 function isPdfMagic(bytes: Uint8Array): boolean {
   // "%PDF" = 0x25 0x50 0x44 0x46
@@ -455,45 +461,69 @@ async function processAttachments(
 ): Promise<number> {
   if (!post.hasAttachments) return 0;
 
-  // Attachment-list pagination: Graph returns at most 200 per call; drain all.
-  const attUrl =
-    `${GRAPH}/groups/${groupId}/threads/${post.conversationThreadId}/posts/${post.id}/attachments`;
+  // Fetch the post's attachments via $expand=attachments on the post itself.
+  // IMPORTANT (root cause of the 75/75 live failure): the direct sub-resource list
+  // `GET /groups/{id}/threads/{tid}/posts/{pid}/attachments` is DELEGATED-ONLY in
+  // Graph v1.0 — it is NOT supported for Application (client_credentials) tokens,
+  // which is what _shared/graph_client.ts mints, so it 4xxs for every group post.
+  // `GET .../posts/{pid}?$expand=attachments` IS app-only supported and returns the
+  // SAME fileAttachment objects with inline contentBytes, so the per-attachment
+  // loop below is unchanged. On failure we record the REAL Graph status/body — the
+  // old opaque "attachment_list_fetch_failed" label hid it and made this
+  // undiagnosable. (Make-safe WO emails carry a handful of PDFs; $expand returns
+  // them all for a single post — no pagination needed at this volume.)
+  const expandUrl =
+    `${GRAPH}/groups/${groupId}/threads/${post.conversationThreadId}/posts/${post.id}?$expand=attachments`;
   let attachments: GraphAttachment[] = [];
+  let listOk = false;
+  let fetchError = "";
   try {
-    const drained = await graphGetAll<GraphAttachment>(attUrl, token);
-    attachments = drained.values;
+    const resp = await fetch(expandUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`Graph GET failed ${resp.status} for ${expandUrl}: ${body.slice(0, 300)}`);
+    }
+    const data = await resp.json() as { attachments?: GraphAttachment[] };
+    attachments = data.attachments || [];
+    listOk = true;
     console.log(
-      `[monitor-ses] post ${post.id}: ${attachments.length} attachments over ${drained.pages} page(s)`,
+      `[monitor-ses] post ${post.id}: ${attachments.length} attachments (expand)`,
     );
   } catch (e) {
-    // List fetch failed — leave the email DEGRADED. Record a placeholder using a
-    // synthetic graph_attachment_id (the non-null key) so the retry worker re-tries
-    // and the row is idempotent across polls. B5: error checked.
+    fetchError = (e as Error).message;
     console.error(
-      `[monitor-ses] attachment list fetch failed for ${post.id}: ${(e as Error).message}`,
+      `[monitor-ses] attachment expand fetch failed for ${post.id}: ${fetchError}`,
     );
+  }
+
+  if (!listOk) {
+    // The $expand fetch failed — leave the email DEGRADED. Record a placeholder
+    // using a synthetic graph_attachment_id (the non-null key) so the retry worker
+    // re-tries and the row is idempotent across polls. last_error now carries the
+    // REAL Graph status/body for diagnosis.
     const synthetic = "_list_fetch_failed";
     const attempts = (await priorAttempts(sb, post.id, synthetic)) + 1;
+    const realErr = `attachment_list_fetch_failed: ${fetchError}`.slice(0, 1000);
     const { error } = await upsertAttachmentRow(sb, {
       email_id: post.id,
       graph_attachment_id: synthetic,
       name: null,
       status: "failed",
       attachment_kind: "unknown",
-      last_error: "attachment_list_fetch_failed",
+      last_error: realErr,
       attempts,
       updated_at: new Date().toISOString(),
     });
     if (error) {
-      // HIGH (silent-drop window): the list fetch already failed AND we could not
-      // even record the failed placeholder. If we logged-and-returned here, the run
+      // HIGH (silent-drop window): the fetch already failed AND we could not even
+      // record the failed placeholder. If we logged-and-returned here, the run
       // would report success and the watermark would advance past a post whose
       // attachment failure left NO durable record — a silent drop. FAIL CLOSED:
       // throw so the run returns non-success and does NOT advance the watermark
       // (the same window is retried next cycle). Never a no-record continue.
       throw new Error(
-        `attachment list fetch failed AND failed-placeholder upsert failed for ${post.id}: ` +
-        `list_error=${(e as Error).message}; upsert_error=${error.message}`,
+        `attachment expand fetch failed AND failed-placeholder upsert failed for ${post.id}: ` +
+        `fetch_error=${fetchError}; upsert_error=${error.message}`,
       );
     }
     return 1;
@@ -542,8 +572,25 @@ async function processAttachments(
     const gaid = att.id || `_noid_${kind}_${(att.name || "unnamed")}`;
     const attempts = (await priorAttempts(sb, post.id, gaid)) + 1;
 
-    // referenceAttachment / itemAttachment / inline -> needs_review + alert.
-    if (!isFileAttachment || isInline) {
+    // STATUS SEMANTICS (2026-06-15): `skipped` is a TERMINAL, NON-BLOCKING record —
+    // an attachment we deliberately do NOT capture (benign), kept only for audit.
+    // `needs_review` is TERMINAL but BLOCKING — a human must look (it may hide a real
+    // work order). Both monitor.refreshSyncState and ops-api reconcile count
+    // (pending|failed|needs_review) as the unresolved backlog and EXCLUDE `skipped`,
+    // so benign attachments never keep the board DEGRADED while a genuinely-missing
+    // PDF still blocks the verified gate. `skipped` rows do NOT increment `unresolved`.
+
+    // ORDER MATTERS. Classify by TYPE first, never by inline-ness: an inline check
+    // must NOT pre-empt these branches, or an inline PDF work order (a real WO) would
+    // be silently skipped, and an inline reference/item that could hide a WO would be
+    // dropped. So: (1) non-file -> block; (2) non-PDF file -> skip (this is where
+    // inline IMAGES land, benign); (3) PDF (even inline) -> capture below.
+
+    // referenceAttachment / itemAttachment (a OneDrive link or an attached Outlook
+    // item) -> needs_review (BLOCKING), regardless of inline-ness. These can hide a
+    // real work order (a WO shared by link, or a forwarded email carrying the PDF),
+    // so a human must check.
+    if (!isFileAttachment) {
       const { error } = await upsertAttachmentRow(sb, {
         email_id: post.id,
         graph_attachment_id: gaid,
@@ -551,8 +598,8 @@ async function processAttachments(
         content_type: att.contentType || null,
         size_bytes: att.size || null,
         status: "needs_review",
-        attachment_kind: isInline ? "inline" : kind,
-        last_error: `unsupported_attachment_kind:${isInline ? "inline" : kind}`,
+        attachment_kind: kind,
+        last_error: `unsupported_attachment_kind:${kind}`,
         attempts,
         updated_at: new Date().toISOString(),
       });
@@ -564,31 +611,13 @@ async function processAttachments(
       continue;
     }
 
-    // fileAttachment with no inline contentBytes (too large for inline) -> the
-    // large-attachment $value path is required. Phase 1 marks needs_review.
-    if (!att.contentBytes || (att.size || 0) > INLINE_BYTES_LIMIT) {
-      const { error } = await upsertAttachmentRow(sb, {
-        email_id: post.id,
-        graph_attachment_id: gaid,
-        name: att.name || null,
-        content_type: att.contentType || null,
-        size_bytes: att.size || null,
-        status: "needs_review",
-        attachment_kind: "fileAttachment",
-        last_error: "large_attachment_value_path_required",
-        attempts,
-        updated_at: new Date().toISOString(),
-      });
-      if (error) {
-        throw new Error(`large-attachment upsert failed for ${post.id}/${gaid}: ${error.message}`);
-      }
-      unresolved++;
-      // TODO(Phase 2): fetch via /attachments/{id}/$value for large PDFs.
-      continue;
-    }
-
-    // We only store PDFs in this private bucket. Non-PDF file attachments are
-    // recorded as needs_review (auditable) rather than silently skipped.
+    // PDF-ONLY policy (Marnin 2026-06-15): only PDFs are stored in this private
+    // bucket. Non-PDF FILE attachments -> skipped (benign, auditable, NOT downloaded,
+    // NOT blocking). This is where inline IMAGES (logos/signatures, contentType
+    // image/*) land — they are non-PDF file attachments. An inline PDF does NOT land
+    // here; it falls through to the PDF capture below. This check is BEFORE the
+    // size/bytes branches so a large NON-PDF (e.g. a 5 MB JPG) classifies as non-PDF,
+    // not mislabelled as a "large attachment" needing the value path.
     if (!isPdfByType) {
       const { error } = await upsertAttachmentRow(sb, {
         email_id: post.id,
@@ -596,14 +625,65 @@ async function processAttachments(
         name: att.name || null,
         content_type: att.contentType || null,
         size_bytes: att.size || null,
-        status: "needs_review",
-        attachment_kind: "fileAttachment",
-        last_error: "non_pdf_file_attachment",
+        status: "skipped",
+        attachment_kind: isInline ? "inline" : "fileAttachment",
+        last_error: isInline ? "inline_attachment_skipped" : "non_pdf_file_attachment_skipped",
         attempts,
         updated_at: new Date().toISOString(),
       });
       if (error) {
-        throw new Error(`non-pdf attachment upsert failed for ${post.id}/${gaid}: ${error.message}`);
+        throw new Error(`skipped(non-pdf) upsert failed for ${post.id}/${gaid}: ${error.message}`);
+      }
+      continue; // resolved-as-skipped: NOT unresolved
+    }
+
+    // PDF without inline contentBytes — Graph omits contentBytes for fileAttachments
+    // above its inline cap (~4 MB). Fetching those bytes needs the /attachments/{id}
+    // /$value path, which is the SAME /attachments sub-resource that is
+    // DELEGATED-ONLY (app-only unsupported) — so it cannot be retrieved with this
+    // function's app-only token. Record needs_review (visible, NOT lost) and defer.
+    // No such case in the live 7-day sample; revisit the auth model if large inbound
+    // WO PDFs ever appear.
+    if (!att.contentBytes) {
+      const { error } = await upsertAttachmentRow(sb, {
+        email_id: post.id,
+        graph_attachment_id: gaid,
+        name: att.name || null,
+        content_type: att.contentType || null,
+        size_bytes: att.size || null,
+        status: "needs_review",
+        attachment_kind: "fileAttachment",
+        last_error: "pdf_no_inline_bytes_value_path_required",
+        attempts,
+        updated_at: new Date().toISOString(),
+      });
+      if (error) {
+        throw new Error(`pdf-no-bytes upsert failed for ${post.id}/${gaid}: ${error.message}`);
+      }
+      unresolved++;
+      continue;
+    }
+
+    // Memory guard: contentBytes IS present but the file is absurdly large — do not
+    // decode it in the edge isolate. INLINE_BYTES_LIMIT is a HARD decode safety cap
+    // (a memory guard, NOT the business size cap: a PDF with inline bytes uploads
+    // regardless of ordinary size). In practice Graph's own inline cap keeps this
+    // from triggering; it exists only to protect the isolate from a pathological blob.
+    if ((att.size || 0) > INLINE_BYTES_LIMIT) {
+      const { error } = await upsertAttachmentRow(sb, {
+        email_id: post.id,
+        graph_attachment_id: gaid,
+        name: att.name || null,
+        content_type: att.contentType || null,
+        size_bytes: att.size || null,
+        status: "needs_review",
+        attachment_kind: "fileAttachment",
+        last_error: "pdf_exceeds_inline_decode_cap",
+        attempts,
+        updated_at: new Date().toISOString(),
+      });
+      if (error) {
+        throw new Error(`pdf-oversize upsert failed for ${post.id}/${gaid}: ${error.message}`);
       }
       unresolved++;
       continue;
@@ -679,6 +759,23 @@ async function processAttachments(
     }
     console.log(`[monitor-ses] stored attachment for post ${post.id} (sha ${sha.slice(0, 12)}…)`);
   }
+
+  // Supersede stale synthetic placeholders. We reached here only when the list
+  // fetch SUCCEEDED and returned real attachments (attachments.length > 0), so any
+  // failure/empty placeholder from a PRIOR run is now stale. Without this, a single
+  // transient list-fetch failure would leave a post permanently DEGRADED even after
+  // a later successful poll. Idempotent: no-op when none exist. Cleanup failure is
+  // logged but does NOT throw — it never drops real data, only fails to tidy.
+  const { error: supersedeErr } = await sb.from("email_attachments")
+    .delete()
+    .eq("email_id", post.id)
+    .in("graph_attachment_id", ["_list_fetch_failed", "_hasattachments_true_empty_list"]);
+  if (supersedeErr) {
+    console.error(
+      `[monitor-ses] stale-placeholder supersede failed for ${post.id}: ${supersedeErr.message}`,
+    );
+  }
+
   return unresolved;
 }
 
@@ -882,6 +979,20 @@ async function persistPost(
     }
   }
 
+  // 5) DONE MARKER (resumable backfill) — set LAST, only after the email row, events,
+  // ALL attachments, and the pipeline projection were durably written without throwing.
+  // The chunked backfill's done-detection keys off this flag (NOT mere email-row or
+  // attachment-row existence — the FK forces the email row first, and a kill mid
+  // attachment-loop leaves some rows but not all). A partially-written post stays
+  // attachments_settled=false and is REPROCESSED next invoke — never skipped with PDFs
+  // silently missing. The */5 poll sets it too (harmless; idempotent).
+  const { error: settledErr } = await sb.from("emails")
+    .update({ attachments_settled: true, updated_at: new Date().toISOString() })
+    .eq("post_id", post.id);
+  if (settledErr) {
+    throw new Error(`attachments_settled marker write failed for ${post.id}: ${settledErr.message}`);
+  }
+
   return unresolved;
 }
 
@@ -1078,6 +1189,14 @@ async function refreshSyncState(
   // no mailbox column, so we join through emails (email_id -> emails.post_id) and
   // filter emails.mailbox = MAILBOX. Counting across all mailboxes (the old
   // behaviour) would falsely DEGRADE this mailbox on another mailbox's backlog.
+  //
+  // BACKLOG SEMANTICS: count pending|failed|needs_review as unresolved. `skipped`
+  // (benign: inline images + non-PDF files under the PDF-only policy) is TERMINAL
+  // and EXCLUDED — without it, every email's logo/photo kept the board permanently
+  // DEGRADED so verified could never go true. needs_review STILL blocks (a real
+  // problem a human must resolve: a missing PDF, a reference/item link that could
+  // hide a WO, an empty list despite hasAttachments). This MUST match the ops-api
+  // reconcile backlog query (makesafe_reconcile.ts) so monitor + gate agree.
   const { count, error: countErr } = await sb.from("email_attachments")
     .select("id, emails!inner(mailbox)", { count: "exact", head: true })
     .eq("emails.mailbox", MAILBOX)
@@ -1149,11 +1268,80 @@ async function refreshSyncState(
 // in, and only THEN is the atomic commit attempted. The advisory lock prevents it
 // running concurrently with the poll (which would race the same cursor/rows).
 //
-// COST: it is a long run. Progress is logged (pages, posts, attachments). Posts are
-// processed in bounded batches with per-batch progress; floor/cursor are NOT
-// advanced until the WHOLE intended scope (epoch..start) is covered, so a batched
-// run can never leave a misleading floor mid-way.
-const BACKFILL_BATCH_SIZE = 200;
+// COST: it is a long run, and the full history can exceed ONE invoke's compute
+// (photo-heavy emails return tens of MB of contentBytes via $expand -> the edge
+// isolate OOMs with WORKER_RESOURCE_LIMIT). So the backfill is RESUMABLE ACROSS
+// INVOKES: each invoke processes at most BACKFILL_MAX_POSTS_PER_INVOKE not-yet-done
+// posts (persisting each idempotently), then returns {partial:true} if more remain.
+// floor/ceiling/cursor are committed ONLY on the invoke that drains the LAST post, so
+// a partial run never leaves a misleading floor. The driver re-invokes until
+// partial=false. Conservative cap keeps each invoke well under the resource limit.
+const BACKFILL_MAX_POSTS_PER_INVOKE = 40;
+
+// PostgREST returns at most ~1000 rows per request. The chunked backfill's
+// done-detection MUST see EVERY settled/excluded row each invoke — a truncated read
+// makes already-done posts look not-done, re-burning the per-invoke budget so the
+// backfill never converges (never commits). So all backfill-state reads paginate via
+// .range() until a short page. eqFilters are applied to every page.
+async function fetchAllRows(
+  // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+  sb: any,
+  table: string,
+  columns: string,
+  eqFilters: Array<[string, unknown]> = [],
+): Promise<Record<string, unknown>[]> {
+  const PAGE = 1000;
+  const out: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += PAGE) {
+    let q = sb.from(table).select(columns);
+    for (const [c, v] of eqFilters) q = q.eq(c, v);
+    const { data, error } = await q.range(from, from + PAGE - 1);
+    if (error) throw new Error(`fetchAll ${table} failed: ${error.message}`);
+    const rows = (data || []) as Record<string, unknown>[];
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+  }
+  return out;
+}
+
+// A post is "already done" (handled by a prior invoke) when it has an exclusion row,
+// OR an emails row with attachments_settled=true (the all-or-nothing done marker that
+// persistPost sets LAST). Keying off the settled marker — NOT email-row existence (the
+// FK forces it first) nor mere attachment-row existence (a kill mid-attachment-loop
+// leaves some rows but not all) — is what makes the chunked backfill crash-safe: a
+// partially-written post stays settled=false and is reprocessed, never silently skipped.
+// Returns the two id sets the caller unions. BOTH reads are PAGINATED (see fetchAllRows)
+// so the done-set is always complete — the loop's termination depends on it.
+async function loadBackfillState(
+  // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+  sb: any,
+): Promise<{ settledIds: Set<string>; excludedIds: Set<string> }> {
+  const settledIds = new Set<string>();
+  const excludedIds = new Set<string>();
+  const em = await fetchAllRows(sb, "emails", "post_id", [["mailbox", MAILBOX], ["attachments_settled", true]]);
+  for (const r of em) settledIds.add(r.post_id as string);
+  const ex = await fetchAllRows(sb, "email_classifier_exclusions", "post_id", []);
+  for (const r of ex) excludedIds.add(r.post_id as string);
+  return { settledIds, excludedIds };
+}
+
+// The coverage FLOOR for the atomic commit = earliest received_at across ALL ingested
+// make-safe emails. Computed from the DB (not in-memory), because a chunked invoke
+// never holds the whole history at once. Reads received_at for the mailbox and takes
+// the MIN in code (the set is bounded — one-time backfill); the commit RPC then
+// applies the widen-only rule server-side.
+async function loadIngestedFloor(
+  // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+  sb: any,
+): Promise<string | null> {
+  const rows = await fetchAllRows(sb, "emails", "received_at", [["mailbox", MAILBOX]]);
+  let min: string | null = null;
+  for (const r of rows) {
+    const ts = r.received_at as string | null | undefined;
+    if (ts && (!min || ts < min)) min = ts;
+  }
+  return min;
+}
 
 async function runBackfillFull(
   // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
@@ -1195,6 +1383,8 @@ async function runBackfillFull(
 ): Promise<{
   success: boolean;
   group_id: string;
+  partial: boolean;
+  remaining: number;
   posts_seen: number;
   included: number;
   excluded: number;
@@ -1230,43 +1420,66 @@ async function runBackfillFull(
       `thread=${pageCounts.threads} post=${pageCounts.posts}; ${posts.length} posts total`,
   );
 
+  // ── RESUMABLE CHUNKED PROCESSING. Skip posts a prior invoke already handled, then
+  // process at most BACKFILL_MAX_POSTS_PER_INVOKE not-done posts. Each persistPost /
+  // auditExclusion throw propagates (fail closed). If any not-done posts remain after
+  // the cap, return {partial:true} WITHOUT committing coverage — the driver re-invokes.
+  const { settledIds, excludedIds } = await loadBackfillState(sb);
+  const isDone = (post: GraphPost): boolean =>
+    excludedIds.has(post.id) || settledIds.has(post.id);
+
   let included = 0;
   let excluded = 0;
   let totalUnresolved = 0;
-  // The earliest receivedDateTime actually INGESTED (included posts) — this becomes
-  // the true coverage floor. Excluded posts are accounted by an audit row but do not
-  // lower the ingested floor (D2 treats exclusions as terminal/accounted).
-  let earliestReceived: string | null = null;
+  let processedThisInvoke = 0;
+  let remaining = 0;
 
-  // Bounded batches: process in chunks with per-batch progress logging. Any throw
-  // in persistPost / auditExclusion propagates (fail closed) BEFORE the floor/cursor
-  // are written below, so a partial pass never advances coverage.
-  for (let i = 0; i < posts.length; i += BACKFILL_BATCH_SIZE) {
-    const batch = posts.slice(i, i + BACKFILL_BATCH_SIZE);
-    for (const post of batch) {
-      const cls = classifyPost(post, companies, refPrefixes);
-      if (!cls.include) {
-        await deps.auditExclusion(sb, post, cls.reason);
-        excluded++;
-        continue;
-      }
+  for (const post of posts) {
+    if (isDone(post)) continue; // handled by a prior invoke
+    if (processedThisInvoke >= BACKFILL_MAX_POSTS_PER_INVOKE) { remaining++; continue; }
+    const cls = classifyPost(post, companies, refPrefixes);
+    if (!cls.include) {
+      await deps.auditExclusion(sb, post, cls.reason);
+      excluded++;
+    } else {
       const unresolved = await deps.persistPost(sb, token, groupId, post, cls);
       totalUnresolved += unresolved;
       included++;
-      const ts = post.receivedDateTime || post.createdDateTime || null;
-      if (ts && (!earliestReceived || ts < earliestReceived)) earliestReceived = ts;
     }
-    console.log(
-      `[monitor-ses][backfill] progress ${Math.min(i + batch.length, posts.length)}/${posts.length} ` +
-        `posts (included=${included} excluded=${excluded} unresolved_att=${totalUnresolved})`,
-    );
+    processedThisInvoke++;
+  }
+  console.log(
+    `[monitor-ses][backfill] chunk processed=${processedThisInvoke} ` +
+      `(included=${included} excluded=${excluded} unresolved_att=${totalUnresolved}) remaining=${remaining}`,
+  );
+
+  // ── NOT FINISHED: more not-done posts remain. Return PARTIAL without committing
+  // coverage (FAIL CLOSED — no floor/ceiling/cursor/marker until the WHOLE history is
+  // drained). The driver re-invokes until partial=false. ──
+  if (remaining > 0) {
+    await refreshSyncState(sb, true, null); // best-effort mode; never writes the cursor
+    return {
+      success: true,
+      partial: true,
+      remaining,
+      group_id: groupId,
+      posts_seen: posts.length,
+      included,
+      excluded,
+      unresolved_attachments: totalUnresolved,
+      page_counts: pageCounts,
+      inventory_floor: null,
+      inventory_ceiling: backfillStartIso,
+      committed_cursor: "",
+      timestamp: new Date().toISOString(),
+    };
   }
 
-  // ── FULL PASS COMPLETED WITHOUT THROWING. Only now do we commit coverage. ──
-  // The ceiling is the backfill start instant (everything up to here is covered);
-  // the floor is the earliest ingested receivedDateTime (true all-history floor).
+  // ── ALL POSTS DRAINED WITHOUT THROWING. Only now commit coverage. The ceiling is
+  // the backfill start instant; the floor is the earliest ingested received_at across
+  // ALL history, read from the DB (chunked invokes never hold the whole set). ──
   const ceilingIso = backfillStartIso;
-  const floorIso = earliestReceived ?? backfillStartIso; // empty group -> floor=ceiling
+  const floorIso = (await loadIngestedFloor(sb)) ?? backfillStartIso; // empty group -> floor=ceiling
 
   // BLOCKER FIX (atomic commit) — commit the coverage FLOOR + CEILING, the
   // backfill_complete marker, AND the live cursor in ONE transaction via the
@@ -1318,6 +1531,8 @@ async function runBackfillFull(
 
   return {
     success: true,
+    partial: false,
+    remaining: 0,
     group_id: groupId,
     posts_seen: posts.length,
     included,
