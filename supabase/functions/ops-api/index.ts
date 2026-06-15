@@ -12591,14 +12591,30 @@ async function getTradeJobTypeForAccess(client: any, jobId: string): Promise<str
   return String(job.type || '').toLowerCase()
 }
 
+// Dispatcher = the ops manager / admin / owner who runs the board. Mirrors the role
+// gate used at the my_jobs routing layer (tradeRole === 'ops_manager') and the elevated
+// check used elsewhere (admin | owner | ops_manager).
+async function isDispatcherUser(client: any, userId: string): Promise<boolean> {
+  if (!userId) return false
+  const { data } = await client.from('users').select('role').eq('id', userId).maybeSingle()
+  const role = String(data?.role || '').toLowerCase()
+  return role === 'admin' || role === 'owner' || role === 'ops_manager'
+}
+
 async function assertAssignedOrMakesafeAccess(client: any, jobId: string, userId: string, isAdmin = false) {
   try {
     await assertAssigned(client, jobId, userId, isAdmin)
     return
   } catch (err) {
     if (isAdmin) return
-    const job = await getTradeJobForAccess(client, jobId)
-    if (await isMakesafeAccessJobForClient(client, job)) return
+    // Strictly allocation-based: only the dispatcher (ops manager / admin / owner) may
+    // reach an UNassigned make-safe. Regular trades must have a named assignment.
+    // Previously ANY logged-in trade could open any open make-safe (the pool-era
+    // bypass) — removed so visibility and access both follow allocation.
+    if (await isDispatcherUser(client, userId)) {
+      const job = await getTradeJobForAccess(client, jobId)
+      if (await isMakesafeAccessJobForClient(client, job)) return
+    }
     throw err
   }
 }
