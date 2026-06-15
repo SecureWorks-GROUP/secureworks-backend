@@ -3203,7 +3203,7 @@ if (import.meta.main) serve(async (req: Request) => {
 
           case 'submit_work_order_invoice': {
             const { work_order_id } = body
-            if (!work_order_id) throw new ApiError('work_order_id required', 400)
+            if (!work_order_id) throw new ApiError('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.', 400)
 
             // Get the work order (include address fields for rich descriptions)
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
@@ -3536,7 +3536,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const manualAssignmentsIn: any[] = Array.isArray(manual_assignments) ? manual_assignments : []
             for (const ma of manualAssignmentsIn) {
               if (!ma || !ma.assignment_id) {
-                throw new ApiError('Each manual assignment requires an assignment_id', 422)
+                throw new ApiError('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.', 422)
               }
             }
             const hasManualAssignments = manualAssignmentsIn.length > 0
@@ -3549,10 +3549,10 @@ if (import.meta.main) serve(async (req: Request) => {
               // and the legacy Sunday-keyed prod row proves it can happen.   [D2]
               const weekStartDate = new Date(week_start + 'T00:00:00Z')
               if (Number.isNaN(weekStartDate.getTime())) {
-                throw new ApiError('Invalid week_start date', 422)
+                throw new ApiError('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.', 422)
               }
               if (weekStartDate.getUTCDay() !== 1) {
-                throw new ApiError('week_start must be a Monday (week_start is Monday-keyed)', 422)
+                throw new ApiError('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.', 422)
               }
               const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
               weekEnd = weekEndDate.toISOString().slice(0, 10)
@@ -3638,7 +3638,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 })
               }
               if ((asn || []).length !== wantedIds.length) {
-                throw new ApiError('One or more assignments do not belong to you or do not exist', 422)
+                throw new ApiError('One of your job cards could not be found. It may have been removed or reassigned. Reload and try again, and tell the office if it keeps happening.', 422)
               }
             } else if (week_start && weekEnd) {
               // Legacy clocked path: re-query completed assignments server-side.
@@ -3658,7 +3658,7 @@ if (import.meta.main) serve(async (req: Request) => {
 
             // Must have either hours or extra items
             const hasExtras = Array.isArray(extra_items) && extra_items.length > 0
-            if (assignments.length === 0 && !hasExtras) throw new ApiError('No completed assignments or line items to invoice', 400)
+            if (assignments.length === 0 && !hasExtras) throw new ApiError('Nothing to invoice yet. Tick at least one job card, or add a line with hours, before submitting.', 400)
 
             // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below).
             // GST registration is a server-side profile fact; do not trust a frontend boolean.
@@ -3813,10 +3813,10 @@ if (import.meta.main) serve(async (req: Request) => {
                 const qty = Number(item.quantity || 0)
                 const rate = Number(item.rate || 0)
                 if (week_start) {
-                  if (!item.job_id && !item.job_number) throw new ApiError('Manual invoice rows require a job number', 422)
-                  if (!item.description) throw new ApiError('Manual invoice rows require a description', 422)
-                  if (qty <= 0) throw new ApiError('Manual invoice rows require hours greater than zero', 422)
-                  if (rate <= 0) throw new ApiError('Manual invoice rows require a rate greater than zero', 422)
+                  if (!item.job_id && !item.job_number) throw new ApiError('Add a job number to the extra line before submitting.', 422)
+                  if (!item.description) throw new ApiError(`Add a description of works for the ${item.job_number || item.job_id || 'extra'} line before submitting.`, 422)
+                  if (qty <= 0) throw new ApiError(`Enter the hours on the ${item.job_number || item.job_id || 'extra'} line (more than 0).`, 422)
+                  if (rate <= 0) throw new ApiError(`Enter a rate on the ${item.job_number || item.job_id || 'extra'} line (more than 0).`, 422)
                 }
                 const resolvedJob = item.job_id ? jobById[item.job_id] : jobByNumber[String(item.job_number || '')]
                 if (week_start && !resolvedJob) throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
@@ -3851,7 +3851,7 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
-              throw new ApiError('No billable invoice lines after filtering clocked review rows', 400)
+              throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)
             }
 
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
@@ -14429,7 +14429,7 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
 // ── submit_trade_invoice: build + push ACCPAY bill to Xero ──
 async function submitTradeInvoice(client: any, userId: string, body: any) {
   const { week_ending, notes, invoice_type, rate_per_metre, items } = body
-  if (!week_ending) throw new Error('week_ending required')
+  if (!week_ending) throw new Error('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.')
 
   const weekStart = weekStartFromEnd(week_ending)
   const isPerMetre = invoice_type === 'per_metre'
@@ -14441,7 +14441,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     .eq('user_id', userId)
     .eq('week_ending', week_ending)
     .maybeSingle()
-  if (existing) throw new Error('Invoice already submitted for this week')
+  if (existing) throw new Error(`You already submitted an invoice for week ending ${week_ending}. Contact the office if it needs changing.`)
 
   // Re-query assignments server-side (prevents tampering)
   const { data: assignments, error } = await client
@@ -14498,7 +14498,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
 
   if (isPerMetre) {
     // ── Per-metre invoice: use client-sent items with per-metre rate ──
-    if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Per-metre invoice requires items array')
+    if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Enter the metres installed on at least one job before submitting.')
     const pmRate = Number(rate_per_metre) || 35
 
     // Build a job lookup from server-side assignments for descriptions
@@ -14534,7 +14534,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       })
     }
 
-    if (lineItems.length === 0) throw new Error('No valid per-metre line items')
+    if (lineItems.length === 0) throw new Error('All metre amounts are zero. Enter the metres you installed on each job.')
 
   } else {
     // ── Hourly invoice: existing path ──
