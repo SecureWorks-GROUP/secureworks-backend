@@ -92,9 +92,13 @@ async function fetchAllRowsInChunks<T = any>(
   buildQueryForChunk: (chunkIds: string[]) => any,
   label: string,
 ): Promise<T[]> {
-  if (!ids.length) return [];
+  // Dedup ids FIRST. A duplicate id that straddles the IN_CHUNK boundary would
+  // otherwise land in two different `.in(col, chunk)` reads and return the same
+  // DB row twice (double-counting downstream). Dedup also shrinks the request.
+  const uniqueIds = Array.from(new Set(ids));
+  if (!uniqueIds.length) return [];
   const all: T[] = [];
-  for (const ch of chunk(ids, IN_CHUNK)) {
+  for (const ch of chunk(uniqueIds, IN_CHUNK)) {
     const rows = await fetchAllRows<T>(() => buildQueryForChunk(ch), label);
     all.push(...rows);
   }
@@ -419,10 +423,15 @@ export async function getMakesafeEmail(
   if (emailErr) throw new Error(`emails read failed: ${emailErr.message}`);
   if (!email) return { found: false, post_id: postId };
 
-  const { data: atts, error: attErr } = await client.from("email_attachments")
-    .select("id, graph_attachment_id, name, content_type, size_bytes, status, attachment_kind")
-    .eq("email_id", postId);
-  if (attErr) throw new Error(`email_attachments read failed: ${attErr.message}`);
+  // PAGINATED: a single email can carry >1000 attachments (PostgREST 1000-row
+  // cap), so an unpaginated read would silently truncate the attachment list and
+  // undercount the status summary. fetchAllRows loops .range() to the last page.
+  const atts = await fetchAllRows<any>(
+    () => client.from("email_attachments")
+      .select("id, graph_attachment_id, name, content_type, size_bytes, status, attachment_kind")
+      .eq("email_id", postId),
+    "email_attachments read",
+  );
 
   const summary = (buildAttachmentSummaries(
     (atts || []).map((a: any) => ({ email_id: postId, status: a.status })),
@@ -576,3 +585,4 @@ export const _makesafePipelineItems = makesafePipelineItems;
 export const _getMakesafeEmail = getMakesafeEmail;
 export const _getMakesafeAttachmentUrl = getMakesafeAttachmentUrl;
 export const _buildPipelineSentStatusMap = buildPipelineSentStatusMap;
+export const _fetchAllRowsInChunks = fetchAllRowsInChunks;

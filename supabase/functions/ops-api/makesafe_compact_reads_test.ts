@@ -26,6 +26,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _buildPipelineSentStatusMap,
+  _fetchAllRowsInChunks,
   _getMakesafeAttachmentUrl,
   _getMakesafeEmail,
   _makesafeNewEmails,
@@ -570,4 +571,72 @@ Deno.test("GAP-3 no-silent-drops: an unresolvable item is INCLUDED flagged unres
 
   // notes documents the rule.
   assert(res.notes.includes("unresolved"), "GAP-3 response must carry a notes field documenting the rule");
+});
+
+// ════════════════════════════════════════════════════════════
+// Fix A — fetchAllRowsInChunks dedups ids before chunking
+// ════════════════════════════════════════════════════════════
+Deno.test("fetchAllRowsInChunks: a duplicate id straddling the 500 chunk boundary returns its DB row exactly once", async () => {
+  // IN_CHUNK is 500. Build 501 ids where the duplicate sits at index 0 AND index
+  // 500 — i.e. it lands in BOTH chunk 1 (0..499) and chunk 2 (500). Without the
+  // dedup, the .in() read for each chunk would match the same DB row, returning
+  // it twice. One DB row per distinct id.
+  const DUP = "dup-id";
+  const ids = [DUP];
+  for (let i = 1; i < 500; i++) ids.push(`id-${i}`); // fills indices 1..499
+  ids.push(DUP); // index 500 -> would be chunk 2 without dedup
+  assertEquals(ids.length, 501);
+
+  // Seed one DB row per distinct id (500 distinct ids -> 500 rows).
+  const distinct = Array.from(new Set(ids));
+  assertEquals(distinct.length, 500);
+  const { client } = makeClient({
+    widgets: distinct.map((id) => ({ widget_id: id, payload: `row-for-${id}` })),
+  });
+
+  const rows = await _fetchAllRowsInChunks<{ widget_id: string }>(
+    ids,
+    (chunkIds) => client.from("widgets").select("widget_id, payload").in("widget_id", chunkIds),
+    "widgets read",
+  );
+
+  // Total rows == distinct ids (no double-count from the straddling duplicate).
+  assertEquals(rows.length, 500);
+  // The duplicate id's row appears exactly once.
+  const dupRows = rows.filter((r) => r.widget_id === DUP);
+  assertEquals(dupRows.length, 1, "duplicate id must return its DB row exactly once");
+  // Every distinct id appears exactly once.
+  const seen = new Set(rows.map((r) => r.widget_id));
+  assertEquals(seen.size, 500);
+});
+
+// ════════════════════════════════════════════════════════════
+// Fix B — GAP-6 attachment read is paginated (no 1000-row truncation)
+// ════════════════════════════════════════════════════════════
+Deno.test("GAP-6: an email with >1000 attachments returns ALL of them across 2 .range() pages (status summary counts all)", async () => {
+  // 1500 uploaded attachments on one email forces a second .range() page (the
+  // stub slices [from,to], so an unpaginated read would stop at 1000). All 1500
+  // must come back and the GAP-5 summary must count every one.
+  const N = 1500;
+  const email_attachments = Array.from({ length: N }, (_, i) => ({
+    id: `att-${i}`,
+    email_id: "post-big",
+    graph_attachment_id: `g-${i}`,
+    name: `file-${i}.pdf`,
+    content_type: "application/pdf",
+    size_bytes: 100,
+    status: "uploaded",
+    attachment_kind: "fileAttachment",
+  }));
+  const { client } = makeClient({
+    emails: [
+      { post_id: "post-big", mailbox: "ses@secureworkswa.com.au", subject: "many attachments", body_preview: "p", from_email: "x@mlb.com.au", received_at: "2026-06-14T00:00:00Z", has_attachments: true, pii_purged_at: null },
+    ],
+    email_attachments,
+  });
+
+  const res = await _getMakesafeEmail(client, { post_id: "post-big" });
+  assertEquals(res.found, true);
+  assertEquals(res.attachments!.length, N); // ALL 1500, not capped at 1000
+  assertEquals(res.attachment_status_summary!.uploaded, N); // summary counts them all
 });
