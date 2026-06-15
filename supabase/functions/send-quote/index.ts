@@ -2870,7 +2870,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
   <!-- PDF presenter (desktop) -->
   ${doc.pdf_url ? `
   <div class="pdf-wrap">
-    <iframe src="${doc.pdf_url}#view=FitH" class="pdf-frame" title="Quote PDF"></iframe>
+    <iframe src="${doc.pdf_url}#view=Fit&toolbar=0" class="pdf-frame" title="Quote PDF"></iframe>
   </div>` : '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">PDF not available</div>'}
 
   <!-- Mobile fallback -->
