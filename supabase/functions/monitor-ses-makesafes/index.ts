@@ -127,20 +127,43 @@ const INLINE_BYTES_LIMIT = 4 * 1024 * 1024;
 interface GraphFrom {
   emailAddress?: { address?: string; name?: string };
 }
+// GROUP CONVERSATION POST (microsoft.graph.post). RESOLVED: group posts do NOT
+// carry `subject` or `internetMessageId` — requesting `subject` in $select 400s
+// ("Could not find a property named 'subject' on type
+// 'Microsoft.OutlookServices.Post'"). The SUBJECT lives on the parent THREAD as
+// `topic`; collectPosts threads that topic into `subject` below so the classifier /
+// persistence contract (which reads post.subject) is unchanged. internetMessageId
+// is not available on group posts at all, so dedup is on post.id only.
 interface GraphPost {
   id: string;
-  // internetMessageId presence on group posts is UNCONFIRMED — read defensively.
-  internetMessageId?: string;
   conversationId?: string;
   conversationThreadId?: string;
   createdDateTime?: string;
   receivedDateTime?: string;
   from?: GraphFrom;
   sender?: GraphFrom;
+  // NOT requested from Graph (not a valid Post property). Populated by collectPosts
+  // from the parent thread's `topic`. Read by classifyPost / persistPost.
   subject?: string;
   hasAttachments?: boolean;
   body?: { contentType?: string; content?: string };
   newParticipants?: unknown;
+  // Thread-sourced recipient signals, threaded down from conversationThread
+  // (toRecipients/ccRecipients live on the THREAD, not the post).
+  toRecipients?: GraphFrom[];
+  ccRecipients?: GraphFrom[];
+}
+
+// GROUP CONVERSATION THREAD (microsoft.graph.conversationThread). These ARE valid
+// thread properties: id, topic (the subject), lastDeliveredDateTime, hasAttachments,
+// toRecipients, ccRecipients. `topic` is the subject source for every post under it.
+interface GraphThread {
+  id: string;
+  topic?: string;
+  lastDeliveredDateTime?: string;
+  hasAttachments?: boolean;
+  toRecipients?: GraphFrom[];
+  ccRecipients?: GraphFrom[];
 }
 interface GraphAttachment {
   id?: string;
@@ -741,7 +764,10 @@ async function persistPost(
   const { error: emailErr } = await sb.from("emails").upsert({
     post_id: post.id,
     mailbox: MAILBOX,
-    internet_message_id: post.internetMessageId || null,
+    // Group posts (microsoft.graph.post) do NOT expose internetMessageId — it is not
+    // a valid Post property. Dedup is on post.id (post_id is the ON CONFLICT key); the
+    // emails.internet_message_id partial-unique index is disabled and tolerates null.
+    internet_message_id: null,
     conversation_id: post.conversationId || null,
     thread_id: post.conversationThreadId || null,
     from_email: fromEmail,
@@ -1000,22 +1026,36 @@ async function collectPosts(
   convPages += conversations.pages;
 
   for (const conv of conversations.values) {
-    // Threads under each conversation.
-    const threadUrl = `${GRAPH}/groups/${groupId}/conversations/${conv.id}/threads?$select=id`;
-    const threads = await graphGetAll<{ id: string }>(threadUrl, token, budget);
+    // Threads under each conversation. The SUBJECT lives on the thread as `topic`
+    // (it is NOT a Post property), so request topic + the other valid thread fields
+    // (lastDeliveredDateTime, hasAttachments, toRecipients, ccRecipients on
+    // microsoft.graph.conversationThread) and thread them down to each post.
+    const threadUrl = `${GRAPH}/groups/${groupId}/conversations/${conv.id}/threads` +
+      `?$select=id,topic,lastDeliveredDateTime,hasAttachments,toRecipients,ccRecipients`;
+    const threads = await graphGetAll<GraphThread>(threadUrl, token, budget);
     threadPages += threads.pages;
 
     for (const thread of threads.values) {
-      // Posts under each thread. Request the fields we project.
+      // Posts under each thread. Request ONLY valid microsoft.graph.post fields.
+      // `subject` and `internetMessageId` are NOT Post properties (requesting
+      // `subject` 400s); the subject comes from thread.topic, set on each post below.
       const postUrl =
         `${GRAPH}/groups/${groupId}/threads/${thread.id}/posts` +
-        `?$select=id,createdDateTime,receivedDateTime,from,sender,subject,hasAttachments,body,conversationId,conversationThreadId,internetMessageId`;
+        `?$select=id,createdDateTime,receivedDateTime,from,sender,hasAttachments,body,conversationId,conversationThreadId`;
       const threadPosts = await graphGetAll<GraphPost>(postUrl, token, budget);
       postPages += threadPosts.pages;
 
       for (const post of threadPosts.values) {
         // Ensure the thread id is available for the attachment endpoint.
         if (!post.conversationThreadId) post.conversationThreadId = thread.id;
+        // SUBJECT = the thread topic. classifyPost / persistPost read post.subject;
+        // ref extraction (MLB-/AJBR-/MS… refs) runs against this topic, with the post
+        // body as a secondary ref source. emails.subject is stored as this topic.
+        post.subject = thread.topic ?? "";
+        // Recipient signals live on the thread, not the post — thread them down so
+        // any To/Cc-based classification has them.
+        if (thread.toRecipients) post.toRecipients = thread.toRecipients;
+        if (thread.ccRecipients) post.ccRecipients = thread.ccRecipients;
         const ts = post.receivedDateTime || post.createdDateTime;
         // Overlapping window filter: include anything at/after the lower bound.
         if (!ts || ts >= sinceIso) posts.push(post);
