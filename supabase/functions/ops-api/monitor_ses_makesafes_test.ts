@@ -470,6 +470,7 @@ Deno.test("persistPost: emails row stores internet_message_id=null and subject=t
         insert: (row: any) => ({
           select: () => ({ single: () => Promise.resolve({ data: { id: "ev-1" }, error: null }) }),
         }),
+        update: () => ({ eq: () => Promise.resolve({ error: null }) }), // attachments_settled marker
         select: () => chain,
         eq: () => chain,
         ilike: () => chain,
@@ -518,6 +519,11 @@ function makeAttachmentSb() {
           if (table === "email_attachments") upserts.push(row);
           return { error: null };
         },
+        // Supersede step: processAttachments deletes stale synthetic placeholders
+        // after a successful fetch with real attachments. .delete().eq().in().
+        delete() {
+          return { eq() { return { in: async () => ({ error: null }) }; } };
+        },
       };
     },
     storage: {
@@ -536,7 +542,9 @@ function makeAttachmentSb() {
 }
 
 function attListResponse(atts: any[]): Response {
-  return new Response(JSON.stringify({ value: atts }), { status: 200 });
+  // Attachments are now fetched via GET post?$expand=attachments (app-only), whose
+  // body shape is { attachments: [...] } (NOT the old /attachments list { value: [...] }).
+  return new Response(JSON.stringify({ attachments: atts }), { status: 200 });
 }
 
 async function runProcessAttachments(atts: any[]) {
@@ -575,27 +583,27 @@ Deno.test("attachments: itemAttachment routes to needs_review", async () => {
   assertEquals(upserts[0].status, "needs_review");
 });
 
-Deno.test("attachments: inline attachment routes to needs_review", async () => {
+Deno.test("attachments: inline attachment is skipped (benign, non-blocking)", async () => {
   const { unresolved, upserts } = await runProcessAttachments([FX_INLINE_ATTACHMENT]);
-  assertEquals(unresolved, 1);
-  assertEquals(upserts[0].status, "needs_review");
+  assertEquals(unresolved, 0); // skipped is resolved-as-skipped, NOT unresolved
+  assertEquals(upserts[0].status, "skipped");
   assertEquals(upserts[0].attachment_kind, "inline");
 });
 
-Deno.test("attachments: oversize PDF (>4MB, no contentBytes) routes to needs_review (large path)", async () => {
+Deno.test("attachments: PDF with no inline contentBytes routes to needs_review (value-path required, app-only can't fetch)", async () => {
   const { unresolved, upserts, uploads } = await runProcessAttachments([FX_OVERSIZE_ATTACHMENT]);
   assertEquals(unresolved, 1);
   assertEquals(uploads.length, 0);
   assertEquals(upserts[0].status, "needs_review");
-  assertEquals(upserts[0].last_error, "large_attachment_value_path_required");
+  assertEquals(upserts[0].last_error, "pdf_no_inline_bytes_value_path_required");
 });
 
-Deno.test("attachments: non-PDF file attachment routes to needs_review (not stored)", async () => {
+Deno.test("attachments: non-PDF file attachment is skipped (PDF-only policy, non-blocking)", async () => {
   const { unresolved, upserts, uploads } = await runProcessAttachments([FX_NON_PDF_FILE_ATTACHMENT]);
-  assertEquals(unresolved, 1);
+  assertEquals(unresolved, 0); // skipped is resolved-as-skipped, NOT unresolved
   assertEquals(uploads.length, 0);
-  assertEquals(upserts[0].status, "needs_review");
-  assertEquals(upserts[0].last_error, "non_pdf_file_attachment");
+  assertEquals(upserts[0].status, "skipped");
+  assertEquals(upserts[0].last_error, "non_pdf_file_attachment_skipped");
 });
 
 Deno.test("attachments: a fake-PDF (claims pdf, bad magic bytes) is marked failed", async () => {
@@ -654,6 +662,10 @@ function makeConfigurableAttachmentSb(opts: {
             if (msg) return { error: { message: msg } };
           }
           return { error: null };
+        },
+        // Supersede step: .delete().eq().in() of stale synthetic placeholders.
+        delete() {
+          return { eq() { return { in: async () => ({ error: null }) }; } };
         },
       };
     },
@@ -735,7 +747,11 @@ Deno.test("attachments [FINDING 1]: list-fetch failure with a successful placeho
   assertEquals(sbBundle.upserts.length, 1);
   assertEquals(sbBundle.upserts[0].graph_attachment_id, "_list_fetch_failed");
   assertEquals(sbBundle.upserts[0].status, "failed");
-  assertEquals(sbBundle.upserts[0].last_error, "attachment_list_fetch_failed");
+  // last_error now carries the REAL Graph/fetch error, prefixed with the label.
+  assert(
+    String(sbBundle.upserts[0].last_error).startsWith("attachment_list_fetch_failed"),
+    `last_error should start with the label, got: ${sbBundle.upserts[0].last_error}`,
+  );
 });
 
 // FINDING 2 — hasAttachments=true but Graph returns a SUCCESSFUL EMPTY list. Pre-fix
@@ -858,6 +874,10 @@ function makePersistSb() {
       maybeSingle: async () => ({ data: null, error: null }),
       single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }),
       upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: null }; },
+      // persistPost's final attachments_settled marker: .update(...).eq("post_id", id).
+      update: (row: any) => ({
+        eq: async (_c: string, _v: unknown) => { writes.push({ table, op: "update", row }); return { error: null }; },
+      }),
       insert: (row: any) => {
         writes.push({ table, op: "insert", row });
         // email_events_raw.insert(...).select("id").single() chain.
@@ -970,6 +990,9 @@ function makeCompaniesSb(companyRows: any[]) {
       maybeSingle: async () => ({ data: null, error: null }),
       single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }),
       upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: null }; },
+      update: (row: any) => ({ // attachments_settled marker
+        eq: async (_c?: string, _v?: unknown) => { writes.push({ table, op: "update", row }); return { error: null }; },
+      }),
       insert: (row: any) => {
         writes.push({ table, op: "insert", row });
         return {
@@ -1162,6 +1185,11 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
         return b;
       },
       limit: async (_n: number) => ({ data: matchingRows(table, filters), error: null }),
+      // Paginated read terminal (fetchAllRows): returns the filtered rows in [from,to].
+      range: async (from: number, to: number) => ({
+        data: matchingRows(table, filters).slice(from, to + 1),
+        error: null,
+      }),
       maybeSingle: async () => {
         const rows = matchingRows(table, filters);
         return { data: rows[0] ?? null, error: null };
@@ -1187,6 +1215,20 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
           then: (resolve: (v: any) => any) => resolve({ error: null }),
         };
       },
+      // persistPost's final attachments_settled marker: .update(...).eq(col, val).
+      // Mutates matching in-memory rows so the chunked backfill's done-detection
+      // (settled rows) reflects it across invokes.
+      update: (changes: any) => ({
+        eq: (col: string, val: unknown) => {
+          const map = tables[table];
+          if (map) {
+            for (const [k, row] of map.entries()) {
+              if (row[col] === val) map.set(k, { ...row, ...changes });
+            }
+          }
+          return Promise.resolve({ error: null });
+        },
+      }),
     };
     return b;
   }
@@ -1298,12 +1340,23 @@ function backfillDeps(opts: {
       if (opts.capture) opts.capture.since = since;
       return { posts: opts.posts, pageCounts: { conversations: 1, threads: 1, posts: 1 } };
     }),
-    persistPost: opts.persistPost ?? (async (_sb: any, _t: string, _g: string, post: any, _cls: any) => {
+    persistPost: opts.persistPost ?? (async (sb: any, _t: string, _g: string, post: any, _cls: any) => {
       if (opts.capture) opts.capture.persisted.push(post.id);
+      // Mirror the real persistPost's emails write so the chunked backfill's DB-based
+      // floor (loadIngestedFloor) and done-detection (loadBackfillState) are testable.
+      await sb.from("emails").upsert({
+        post_id: post.id,
+        mailbox: "ses@secureworkswa.com.au",
+        received_at: post.receivedDateTime ?? post.createdDateTime ?? null,
+        has_attachments: post.hasAttachments ?? false,
+        attachments_settled: true, // stub stands in for the whole persistPost incl the done marker
+      });
       return 0;
     }),
-    auditExclusion: opts.auditExclusion ?? (async (_sb: any, post: any, _r: string) => {
+    auditExclusion: opts.auditExclusion ?? (async (sb: any, post: any, _r: string) => {
       if (opts.capture) opts.capture.excluded.push(post.id);
+      // Mirror the real auditExclusion so done-detection skips excluded posts on re-run.
+      await sb.from("email_classifier_exclusions").upsert({ post_id: post.id });
     }),
     nowIso: opts.nowIso,
   };
@@ -1345,6 +1398,41 @@ Deno.test("backfill: sets recon_inventory_floor to the EARLIEST ingested receive
   assertEquals(ss.recon_inventory_ceiling, "2026-06-15T00:00:00Z");
   const cur = sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au");
   assertEquals(cur.last_completed_max, "2026-06-15T00:00:00Z");
+});
+
+Deno.test("backfill [CHUNKED]: > cap posts -> first invoke is PARTIAL (no commit), re-invoke resumes (skips done) and commits", async () => {
+  // 45 make-safe posts > the 40-per-invoke cap, so the first invoke must return
+  // partial:true and NOT commit coverage; a second invoke processes the remainder
+  // (skipping the 40 already done) and commits. Proves resumability + fail-closed.
+  const sb = makeStatefulSb();
+  const posts = Array.from({ length: 45 }, (_, i) => ({
+    ...FX_MLB_POST,
+    id: `post-chunk-${i}`,
+    subject: `Work Order AJBR-7${String(i).padStart(4, "0")} job`,
+    receivedDateTime: `2026-05-${String((i % 27) + 1).padStart(2, "0")}T00:00:00Z`,
+    hasAttachments: false,
+  }));
+
+  // Invoke 1 — processes the first 40, 5 remain -> PARTIAL, nothing committed.
+  const r1 = await _runBackfillFull(sb, backfillDeps({ posts, nowIso: "2026-06-15T00:00:00Z" }));
+  assertEquals(r1.partial, true);
+  assertEquals(r1.remaining, 5);
+  assertEquals(r1.included, 40);
+  assertEquals(r1.committed_cursor, ""); // not committed
+  assertEquals(sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au"), undefined);
+  const ssAfter1 = sb._tables.sync_state.get("mb:ses@secureworkswa.com.au");
+  assertEquals(ssAfter1?.backfill_complete ?? false, false); // FAIL CLOSED: no marker yet
+
+  // Invoke 2 — the 40 done posts are skipped; the last 5 processed -> commit.
+  const r2 = await _runBackfillFull(sb, backfillDeps({ posts, nowIso: "2026-06-15T00:05:00Z" }));
+  assertEquals(r2.partial, false);
+  assertEquals(r2.remaining, 0);
+  assertEquals(r2.included, 5); // only the previously-unprocessed remainder
+  const cur = sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au");
+  assertEquals(cur.last_completed_max, "2026-06-15T00:05:00Z"); // cursor = committing invoke's start
+  const ss = sb._tables.sync_state.get("mb:ses@secureworkswa.com.au");
+  assertEquals(ss.backfill_complete, true);
+  assertEquals(ss.recon_inventory_floor, "2026-05-01T00:00:00Z"); // earliest across ALL ingested
 });
 
 Deno.test("backfill: empty group -> floor == ceiling == start (no false historical floor)", async () => {
