@@ -163,6 +163,17 @@ import {
 } from '../monitor-ses-makesafes/index.ts'
 import { getGraphToken as _getGraphToken } from '../_shared/graph_client.ts'
 
+// Mission makesafe-live-truth-2026-06-14 (M2) — compact READ endpoints GAP-1..6.
+// These let the make-safe skills read the email-sync Supabase projection instead
+// of scanning the live ses@ mailbox. All read-only; GAP-2 mints a 60s signed URL.
+import {
+  makesafeNewEmails as _makesafeNewEmails,
+  makesafePipelineItems as _makesafePipelineItems,
+  getMakesafeAttachmentUrl as _getMakesafeAttachmentUrl,
+  getMakesafeEmail as _getMakesafeEmail,
+  buildPipelineSentStatusMap as _buildPipelineSentStatusMap,
+} from './makesafe_compact_reads.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -1607,6 +1618,46 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
+      // ── Mission makesafe-live-truth (M2): compact READ endpoints GAP-1..6 ──
+      // All read-only against business data. They serve the email-sync Supabase
+      // projection (emails / email_attachments / pipeline_items) so the make-safe
+      // skills stop scanning the live ses@ mailbox. GAP-2 mints a 60s signed URL
+      // (a read) to a stored attachment; the bytes never reach model context.
+      case 'makesafe_new_emails': {
+        // GAP-1 (+GAP-5) — new candidate ses@ emails not already drafted/approved.
+        return json(await _makesafeNewEmails(client, {
+          since: url.searchParams.get('since'),
+          mailbox: url.searchParams.get('mailbox'),
+        }))
+      }
+      case 'makesafe_pipeline_items': {
+        // GAP-3 (+GAP-5) — pipeline_items joined to emails (sender_domain/date).
+        return json(await _makesafePipelineItems(client, {
+          since: url.searchParams.get('since'),
+          mailbox: url.searchParams.get('mailbox'),
+          sent_status: url.searchParams.get('sent_status'),
+        }))
+      }
+      case 'get_makesafe_attachment_url': {
+        // GAP-2 — short-TTL (60s) signed URL to an `uploaded` attachment.
+        const attId = url.searchParams.get('attachment_id') || body?.attachment_id
+        const aPostId = url.searchParams.get('post_id') || body?.post_id
+        const gAttId = url.searchParams.get('graph_attachment_id') || body?.graph_attachment_id
+        if (!attId && !(aPostId && gAttId)) {
+          throw new ApiError('attachment_id, or (post_id and graph_attachment_id), required', 400)
+        }
+        return json(await _getMakesafeAttachmentUrl(client, {
+          attachment_id: attId,
+          post_id: aPostId,
+          graph_attachment_id: gAttId,
+        }))
+      }
+      case 'get_makesafe_email': {
+        // GAP-6 (+GAP-5) — one email by post_id + attachments; tombstoned-aware.
+        const emPostId = url.searchParams.get('post_id') || body?.post_id
+        if (!emPostId) throw new ApiError('post_id required', 400)
+        return json(await _getMakesafeEmail(client, { post_id: emPostId }))
+      }
       // ── Mission makesafe-live-truth: reconciliation D1-D4 ──
       // M1 — these three actions WRITE business_events + sync_state and can trigger
       // a live Graph traversal (D2). They must NOT be invocable by any valid
@@ -8078,8 +8129,13 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   let docsMap: Record<string, any[]> = {}
   let reportSet: Set<string> = new Set()
   let invoiceRows: any[] = []
+  // GAP-4 — pack_sent (notes-based MAKESAFE_PACK_SENT marker, via buildPackSentMap)
+  // and pipeline_item_sent_status (the sync-system verdict from pipeline_items,
+  // joined on the target job) surfaced on each audit jobs[] row.
+  let packSentMap: Record<string, boolean> = {}
+  let pipelineSentStatusMap: Record<string, string> = {}
   if (jobIds.length > 0) {
-    const [detailsRes, docsRes, reportsRes, invoicesRes] = await Promise.all([
+    const [detailsRes, docsRes, reportsRes, invoicesRes, psMap, pisMap] = await Promise.all([
       client.from('makesafe_job_details')
         .select('job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)')
         .in('job_id', jobIds),
@@ -8096,6 +8152,10 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
         .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
         .eq('invoice_type', 'ACCREC')
         .order('invoice_date', { ascending: false }),
+      // GAP-4 — reuse the existing buildPackSentMap (batch job_events query).
+      buildPackSentMap(client, jobIds),
+      // GAP-4 — sync-system sent verdict per job (pipeline_items.sent_status).
+      _buildPipelineSentStatusMap(client, jobIds),
     ])
     for (const d of (detailsRes.data || [])) detailsMap[d.job_id] = d
     for (const doc of (docsRes.data || [])) {
@@ -8105,6 +8165,8 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     }
     for (const r of (reportsRes.data || [])) if (r?.job_id) reportSet.add(r.job_id)
     invoiceRows = invoicesRes.data || []
+    packSentMap = psMap
+    pipelineSentStatusMap = pisMap
   }
 
   let jobRows = (jobs || []).map((j: any) => {
@@ -8137,6 +8199,9 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       has_report_record: reportSet.has(j.id),
       invoice_status: distinctStatuses.length ? distinctStatuses.join(',') : null,
       invoice_no: distinctNumbers.length ? distinctNumbers.join(',') : null,
+      // GAP-4 — notes-based pack-sent marker (triage) + the sync-system verdict.
+      pack_sent: packSentMap[j.id] === true,
+      pipeline_item_sent_status: pipelineSentStatusMap[j.id] ?? null,
       // Full per-row mapped invoice list incl. voided/deleted (item 2.4).
       invoices,
     }
