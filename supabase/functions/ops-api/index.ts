@@ -149,6 +149,20 @@ import {
   getScopeRevisionForViewer as _getScopeRevisionForViewer,
 } from '../_shared/scope_freeze/get_scope_revision_for_viewer.ts'
 
+// Mission makesafe-live-truth-2026-06-14 (Phase 2) — reconciliation D1-D4.
+// Pure diff/inventory/canary logic + DB-bound action wrappers. The D2 inventory
+// reuses the Phase-1 group traversal exported from monitor-ses-makesafes.
+import {
+  makesafeEmailReconcile as _makesafeEmailReconcile,
+  makesafeEmailReconcileFullInventory as _makesafeEmailReconcileFullInventory,
+  makesafeEmailCanary as _makesafeEmailCanary,
+} from './makesafe_reconcile.ts'
+import {
+  _collectPosts as _monitorCollectPosts,
+  _resolveGroupId as _monitorResolveGroupId,
+} from '../monitor-ses-makesafes/index.ts'
+import { getGraphToken as _getGraphToken } from '../_shared/graph_client.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -162,7 +176,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 228
+const OPS_API_EXPECTED_ACTION_COUNT = 231
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -399,6 +413,41 @@ async function logBusinessEvent(client: any, event: {
   } catch (e) {
     // Non-blocking — log but don't fail the main operation
     console.log('[ops-api] business_events write failed (table may not exist yet):', (e as Error).message)
+  }
+}
+
+// Broadcast a one-line alert to the business-events Telegram channel. Reuses the
+// existing TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID broadcast pattern (resend-webhook).
+// Non-blocking: a Telegram outage never breaks reconciliation. Used by the
+// make-safe reconcile/canary actions (Mission makesafe-live-truth-2026-06-14).
+async function notifyBusinessEventsTelegram(text: string): Promise<void> {
+  const token = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
+  const chatId = Deno.env.get('TELEGRAM_CHAT_ID') || ''
+  if (!token || !chatId) return
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    })
+    // N2 — a non-2xx (bad token, wrong chat_id, rate limit) previously passed
+    // silently, so an alert-delivery failure went unnoticed. Check resp.ok and log
+    // the Telegram error body so a broken alert channel is at least visible in logs.
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '<unreadable>')
+      console.error(`[ops-api] reconcile Telegram notify non-OK ${resp.status}: ${errBody}`)
+    }
+  } catch (e) {
+    console.error('[ops-api] reconcile Telegram notify failed:', (e as Error).message)
+  }
+}
+
+// Build the AlertSink the make-safe reconciliation actions consume — wires their
+// alerts into the EXISTING business_events + Telegram channels (no new system).
+function makeReconAlertSink() {
+  return {
+    logBusinessEvent,
+    notifyTelegram: notifyBusinessEventsTelegram,
   }
 }
 
@@ -1558,6 +1607,47 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
+      // ── Mission makesafe-live-truth: reconciliation D1-D4 ──
+      // M1 — these three actions WRITE business_events + sync_state and can trigger
+      // a live Graph traversal (D2). They must NOT be invocable by any valid
+      // Supabase JWT. Gate them to a service/API-key caller (the pg_cron trigger
+      // calls with the service-role key; manual ops uses x-api-key) OR an explicit
+      // admin/owner JWT — mirroring the heal_scope_revisions admin gate above.
+      case 'makesafe_email_reconcile':
+      case 'makesafe_email_reconcile_inventory':
+      case 'makesafe_email_canary': {
+        const reconIsAdmin = authMode === 'api_key' ||
+          authUser?.role === 'admin' || authUser?.role === 'owner'
+        if (!reconIsAdmin) {
+          return json({ error: `forbidden: ${action} requires service/API key or admin/owner role` }, 403)
+        }
+        // D1 (default) / D3 (?mode=D3, wider window) reconcile diff: pipeline_items
+        // refs vs board known_refs, both-direction alerts, ambiguous -> needs_review.
+        if (action === 'makesafe_email_reconcile') {
+          const mode = (url.searchParams.get('mode') === 'D3') ? 'D3' as const : 'D1' as const
+          const windowDays = Number(url.searchParams.get('window_days') || '') || undefined
+          return json(await _makesafeEmailReconcile(client, makeReconAlertSink(), {
+            mode, windowDays, makesafeAudit,
+          }))
+        }
+        // D2 MANDATORY bounded full-post inventory — live group traversal; alerts on
+        // any post id absent from the emails store (the gap D1 alone cannot catch).
+        if (action === 'makesafe_email_reconcile_inventory') {
+          const windowDays = Number(url.searchParams.get('window_days') || '') || undefined
+          const historical = url.searchParams.get('historical') === 'true' ||
+            url.searchParams.get('historical') === '1'
+          return json(await _makesafeEmailReconcileFullInventory(client, makeReconAlertSink(), {
+            getGraphToken: _getGraphToken,
+            resolveGroupId: _monitorResolveGroupId,
+            collectPosts: _monitorCollectPosts,
+            windowDays,
+            historical,
+          }))
+        }
+        // D4 canary — verify the seeded synthetic make-safe marker is in store with
+        // a PDF attachment + threaded reply within SLA; alert if absent/incomplete.
+        return json(await _makesafeEmailCanary(client, makeReconAlertSink()))
+      }
       case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
       case 'geocode_job': return json(await geocodeJob(client, body))
       case 'geocode_missing_makesafes': return json(await geocodeMissingMakesafes(client))
