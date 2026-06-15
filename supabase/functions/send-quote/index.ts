@@ -2792,6 +2792,13 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
 
+  // Mobile card display fields — omit gracefully if absent
+  const mobQuoteRef = doc.quote_number || ''
+  const mobClientName = doc.job_contacts?.client_name || doc.jobs?.client_name || ''
+  const mobSnapshot = doc.data_snapshot_json || {}
+  const mobPriceRaw = mobSnapshot.totalIncGST || mobSnapshot.total || null
+  const mobPriceStr = mobPriceRaw ? '$' + Number(mobPriceRaw).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : ''
+
   let statusHtml = ''
   if (isAccepted) {
     statusHtml = '<div style="background:rgba(52,199,89,0.15);color:#34C759;padding:14px 20px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
@@ -2813,8 +2820,16 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     .topbar-brand { color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
     .topbar-brand span { color: rgba(255,255,255,0.5); font-weight: 400; }
     /* ── PDF presenter ── */
-    .pdf-wrap { display: flex; justify-content: center; padding: 28px 20px 0; }
-    .pdf-frame { width: 100%; max-width: 960px; height: 88vh; min-height: 700px; border: none; border-radius: 10px; box-shadow: 0 8px 48px rgba(0,0,0,0.55); background: #2a3840; display: block; }
+    .pdf-wrap { display: flex; justify-content: center; padding: 28px 24px 0; }
+    .pdf-frame { width: 100%; max-width: 880px; height: 86vh; min-height: 640px; border: none; border-radius: 10px; box-shadow: 0 8px 48px rgba(0,0,0,0.55); background: #2a3840; display: block; }
+    @media (min-width: 1440px) {
+      .pdf-wrap { padding: 36px 60px 0; }
+      .pdf-frame { max-width: 1040px; height: 84vh; }
+    }
+    @media (max-width: 1024px) and (min-width: 769px) {
+      .pdf-wrap { padding: 20px 16px 0; }
+      .pdf-frame { max-width: 100%; height: 82vh; min-height: 560px; }
+    }
     /* ── Actions / chrome below PDF ── */
     .container { max-width: 960px; margin: 0 auto; padding: 20px 20px 40px; }
     /* Status banner */
@@ -2852,12 +2867,21 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     .confirm-box p { color:rgba(255,255,255,0.65);font-size:14px;margin-bottom:20px; }
     /* Mobile fallback */
     .pdf-mobile { display: none; }
-    .pdf-mobile-card { background: #293C46; border-radius: 12px; padding: 32px 24px; margin: 24px 20px 0; text-align: center; }
-    .pdf-mobile-card p { color: rgba(255,255,255,0.65); font-size: 14px; margin-bottom: 18px; }
+    .pdf-mobile-card { background: #293C46; border-radius: 14px; padding: 32px 20px; margin: 20px 16px 0; }
+    .pdf-mobile-card .mob-brand { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #F15A29; margin-bottom: 18px; }
+    .pdf-mobile-card .mob-ref { font-size: 13px; color: rgba(255,255,255,0.5); margin-bottom: 4px; }
+    .pdf-mobile-card .mob-client { font-size: 20px; font-weight: 700; color: #fff; margin-bottom: 6px; line-height: 1.25; }
+    .pdf-mobile-card .mob-price { font-size: 28px; font-weight: 800; color: #F15A29; margin-bottom: 2px; }
+    .pdf-mobile-card .mob-price-label { font-size: 12px; color: rgba(255,255,255,0.45); margin-bottom: 24px; }
+    .pdf-mobile-card .mob-divider { height: 1px; background: rgba(255,255,255,0.1); margin: 0 0 24px; }
+    .pdf-mobile-card .btn-mob-primary { display: block; width: 100%; padding: 15px; background: #F15A29; color: #fff; border: none; border-radius: 9px; font-size: 16px; font-weight: 700; text-align: center; text-decoration: none; cursor: pointer; font-family: inherit; }
+    .pdf-mobile-card .btn-mob-secondary { display: block; width: 100%; padding: 12px; background: transparent; color: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.18); border-radius: 9px; font-size: 14px; font-weight: 500; text-align: center; text-decoration: none; margin-top: 10px; }
+    .pdf-mobile-card .mob-actions-sep { margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
     @media (max-width: 768px) {
       .pdf-wrap { display: none !important; }
       .pdf-mobile { display: block !important; }
-      .topbar { padding: 12px 20px; }
+      .topbar { padding: 12px 16px; }
+      .container { padding: 16px 16px 40px; }
     }
   </style>
 </head>
@@ -2873,14 +2897,22 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     <iframe src="${doc.pdf_url}#view=Fit&toolbar=0" class="pdf-frame" title="Quote PDF"></iframe>
   </div>` : '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">PDF not available</div>'}
 
-  <!-- Mobile fallback -->
+  <!-- Mobile fallback: premium branded card -->
   ${doc.pdf_url ? `
   <div class="pdf-mobile">
     <div class="pdf-mobile-card">
-      <div style="font-size:36px;margin-bottom:12px;">📄</div>
-      <p>Your detailed quote is ready to view</p>
-      <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn btn-view-pdf">View Quote PDF</a>
-      <a href="${doc.pdf_url}" download style="display:block;margin-top:10px;color:rgba(255,255,255,0.4);font-size:13px;text-decoration:underline;">Download PDF</a>
+      <div class="mob-brand">SecureWorks Group</div>
+      ${mobQuoteRef ? `<div class="mob-ref">Quote ${mobQuoteRef}</div>` : ''}
+      ${mobClientName ? `<div class="mob-client">${mobClientName}</div>` : ''}
+      ${mobPriceStr ? `<div class="mob-price">${mobPriceStr}</div><div class="mob-price-label">inc GST</div>` : '<div style="margin-bottom:8px;"></div>'}
+      <div class="mob-divider"></div>
+      <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
+      <a href="${doc.pdf_url}" download class="btn-mob-secondary">Download PDF</a>
+      ${!isAccepted && !isDeclined ? `
+      <div class="mob-actions-sep">
+        <button class="btn btn-accept" onclick="respondToQuote('accept')" style="margin-bottom:8px;">Accept Quote</button>
+        <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
+      </div>` : statusHtml ? `<div class="mob-actions-sep">${statusHtml}</div>` : ''}
     </div>
   </div>` : ''}
 
@@ -3384,17 +3416,21 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
     if (isAccepted) statusBadge = '<span style="color:#34C759;font-weight:600;">Accepted ✓</span>'
     else if (isDeclined) statusBadge = '<span style="color:#FF3B30;">Declined</span>'
 
-    return `<div style="border:${isActive ? '2px solid #F15A29' : '1px solid rgba(255,255,255,0.12)'};border-radius:10px;padding:16px;margin-bottom:12px;background:#293C46;">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+    const optionLabel = `Option ${docs.indexOf(d) + 1}`
+    const activePill = isActive ? `<span style="display:inline-block;background:rgba(241,90,41,0.15);color:#F15A29;font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;padding:3px 9px;border-radius:20px;margin-left:8px;vertical-align:middle;">Linked</span>` : ''
+
+    return `<div style="border:${isActive ? '2px solid #F15A29' : '1px solid rgba(255,255,255,0.12)'};border-radius:12px;padding:20px;margin-bottom:14px;background:#293C46;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">
         <div>
-          <div style="font-weight:700;font-size:16px;color:#fff;">${qn || 'Quote'}</div>
-          ${priceStr ? `<div style="font-size:22px;font-weight:800;color:#F15A29;margin-top:4px;">${priceStr} <span style="font-size:12px;color:rgba(255,255,255,0.55);font-weight:400;">inc GST</span></div>` : ''}
+          <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:4px;">${optionLabel}${activePill}</div>
+          <div style="font-weight:700;font-size:17px;color:#fff;line-height:1.2;">${qn || 'Quote'}</div>
+          ${priceStr ? `<div style="font-size:26px;font-weight:800;color:#F15A29;margin-top:6px;line-height:1;">${priceStr} <span style="font-size:12px;color:rgba(255,255,255,0.5);font-weight:400;">inc GST</span></div>` : ''}
         </div>
         ${statusBadge}
       </div>
-      <div style="display:flex;gap:8px;margin-top:12px;">
-        <a href="${d.pdf_url ? d.pdf_url + '#view=Fit&toolbar=0' : '#'}" target="_blank" style="flex:1;padding:10px;text-align:center;background:#F15A29;color:#fff;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">View PDF</a>
-        ${!isAccepted && !isDeclined ? `<button onclick="respondToQuote('accept','${d.share_token}')" style="flex:1;padding:10px;background:#34C759;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;">Accept This Option</button>` : ''}
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <a href="${d.pdf_url ? d.pdf_url + '#view=Fit&toolbar=0' : '#'}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View PDF</a>
+        ${!isAccepted && !isDeclined ? `<button onclick="respondToQuote('accept','${d.share_token}')" style="display:block;width:100%;padding:12px;background:#34C759;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;">Accept This Option</button>` : ''}
       </div>
     </div>`
   }).join('')
@@ -3405,20 +3441,25 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
   *{margin:0;padding:0;box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;background:#1E2A30;color:#fff;min-height:100vh}
   .accent{height:3px;background:#F15A29}
-  .header{background:#293C46;padding:16px 28px}
+  .header{background:#293C46;padding:16px 28px;border-bottom:3px solid #F15A29}
   .header-brand{color:#fff;font-size:18px;font-weight:700;letter-spacing:0.3px}
   .header-brand span{color:rgba(255,255,255,0.5);font-weight:400}
-  .container{max-width:720px;margin:0 auto;padding:24px 16px 40px}
+  .container{max-width:680px;margin:0 auto;padding:28px 16px 48px}
   .card{background:#293C46;border-radius:12px;padding:24px;margin-bottom:16px}
   .footer{text-align:center;color:rgba(255,255,255,0.3);font-size:12px;padding:24px}
+  @media(max-width:480px){
+    .header{padding:14px 16px}
+    .container{padding:20px 12px 40px}
+    .card{padding:20px 16px}
+  }
 </style></head><body>
-<div class="accent"></div>
 <div class="header"><div class="header-brand">SecureWorks <span>Group</span></div></div>
 <div class="container">
   <div class="card">
-    <h1 style="color:#fff;font-size:22px;margin-bottom:4px;">Your ${projectType} quotes</h1>
-    <p style="color:rgba(255,255,255,0.6);font-size:14px;">For ${clientName}${suburb ? ', ' + suburb : ''}</p>
-    <p style="color:rgba(255,255,255,0.6);font-size:13px;margin-top:8px;">We've prepared ${docs.length} options for you. Review each quote PDF and accept the one you'd like to go with.</p>
+    <div style="font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#F15A29;margin-bottom:10px;">SecureWorks Group</div>
+    <h1 style="color:#fff;font-size:22px;font-weight:800;margin-bottom:4px;line-height:1.2;">We've prepared ${docs.length} quote option${docs.length !== 1 ? 's' : ''} for you</h1>
+    <p style="color:rgba(255,255,255,0.55);font-size:14px;margin-top:4px;">${clientName}${suburb ? ', ' + suburb : ''}</p>
+    <p style="color:rgba(255,255,255,0.6);font-size:13px;margin-top:12px;line-height:1.6;">Review each option below and tap <strong style="color:#fff;">View PDF</strong> to see the full details. When you're ready, tap <strong style="color:#fff;">Accept This Option</strong> to confirm your choice.</p>
   </div>
   ${optionCards}
   <div class="card" style="text-align:center;">
