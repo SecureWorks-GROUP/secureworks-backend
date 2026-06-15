@@ -53,6 +53,61 @@ function _setTestClientFactory(f: ((url: string, key: string) => any) | null): v
   _testClientFactory = f;
 }
 
+// ── AUTH HELPERS ────────────────────────────────────────────────────────────
+// This function is deployed with verify_jwt ON: the Supabase gateway
+// cryptographically verifies the JWT signature BEFORE our handler runs. So when a
+// Bearer token reaches our code at all, its signature is already proven valid — we
+// only need to authorize on the *claims*, not re-verify the signature ourselves.
+//
+// Why this matters: the pg_cron trigger (trigger_monitor_ses_makesafes ->
+// _sw_service_key()) calls us with `Authorization: Bearer <a valid service-role
+// JWT>`. That JWT is signature-valid but does NOT byte-equal the function's injected
+// SUPABASE_SERVICE_ROLE_KEY (the keys can be rotated/differ), so an exact-string
+// match silently 401s the CRON and the sync never runs. Authorizing on the decoded
+// `role` claim (== "service_role") lets the cron bearer through while still rejecting
+// an anon JWT (role == "anon").
+
+// Decode (NOT verify) a JWT's payload and return its `role` claim, or null on any
+// failure. Signature verification is the gateway's job (verify_jwt on); we just read
+// the middle segment. Any malformed/garbage token returns null -> not authorized.
+function decodeJwtRole(token: string): string | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    // base64url -> base64, pad, decode, JSON.parse.
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4 !== 0) b64 += "=";
+    const json = atob(b64);
+    const payload = JSON.parse(json);
+    return typeof payload?.role === "string" ? payload.role : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Authorize a request. Accept if ANY of:
+//   (a) x-api-key === expectedApiKey (manual ops invoke), OR
+//   (b) Bearer === expectedServiceKey (fast path: exact injected service key), OR
+//   (c) Bearer is a JWT whose decoded `role` claim === "service_role" (the pg_cron
+//       _sw_service_key() path — signature already verified by the gateway).
+// Everything else (anon JWT, garbage bearer, no creds) is rejected.
+function isAuthorized(
+  req: Request,
+  expectedServiceKey: string,
+  expectedApiKey: string,
+): boolean {
+  const apiKey = req.headers.get("x-api-key") || "";
+  if (!!expectedApiKey && apiKey === expectedApiKey) return true; // (a)
+
+  const authHeader = req.headers.get("authorization") || "";
+  const bearer = authHeader.toLowerCase().startsWith("bearer ")
+    ? authHeader.slice(7).trim()
+    : "";
+  if (!bearer) return false;
+  if (!!expectedServiceKey && bearer === expectedServiceKey) return true; // (b)
+  return decodeJwtRole(bearer) === "service_role"; // (c)
+}
+
 const SES_GROUP_MAIL = "ses@secureworkswa.com.au";
 const MAILBOX = SES_GROUP_MAIL; // mailbox key in mail_sync_cursors / sync_state
 const STORAGE_BUCKET = "makesafe-emails";
@@ -1251,21 +1306,17 @@ async function handler(req: Request): Promise<Response> {
   };
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
-  // B1 — AUTH GUARD. Deployed --no-verify-jwt, so this function MUST authenticate
-  // every non-OPTIONS request itself. The pg_cron trigger calls with
-  // `Authorization: Bearer <service key>` (trigger_monitor_ses_makesafes ->
-  // _sw_service_key(), which is the service-role JWT == SUPABASE_SERVICE_KEY).
-  // Manual ops invokes carry x-api-key: SW_API_KEY. Accept EITHER valid
-  // credential; reject everything else 401. (monitor-inbox accepted unauthenticated
-  // requests — the gap Codex flagged. We close it here.)
-  const apiKey = req.headers.get("x-api-key") || "";
-  const authHeader = req.headers.get("authorization") || "";
-  const bearer = authHeader.toLowerCase().startsWith("bearer ")
-    ? authHeader.slice(7).trim()
-    : "";
-  const serviceKeyOk = !!SUPABASE_SERVICE_KEY && bearer === SUPABASE_SERVICE_KEY;
-  const apiKeyOk = !!SW_API_KEY && apiKey === SW_API_KEY;
-  if (!serviceKeyOk && !apiKeyOk) {
+  // B1 — AUTH GUARD. This function authenticates every non-OPTIONS request itself.
+  // verify_jwt is ON for this deploy, so the Supabase gateway has ALREADY
+  // cryptographically verified any Bearer JWT's signature before we run — which means
+  // we authorize on the decoded `role` claim, NOT a brittle exact-string match.
+  // Accept if ANY of: x-api-key == SW_API_KEY (manual ops), Bearer == the injected
+  // service key (fast path), OR Bearer is a JWT with role == "service_role". That last
+  // clause is what lets the pg_cron _sw_service_key() bearer through: it is a
+  // signature-valid service-role JWT that does NOT byte-equal SUPABASE_SERVICE_ROLE_KEY
+  // (rotated/different value), so the old exact-match silently 401'd the cron and the
+  // sync never ran. An anon JWT (role == "anon") is still rejected. See isAuthorized().
+  if (!isAuthorized(req, SUPABASE_SERVICE_KEY, SW_API_KEY)) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: { ...CORS, "Content-Type": "application/json" },
@@ -1504,11 +1555,13 @@ export {
   buildSubjectRef as _buildSubjectRef,
   classifyPost as _classifyPost,
   collectPosts as _collectPosts,
+  decodeJwtRole as _decodeJwtRole,
   DEFAULT_REF_PREFIXES as _DEFAULT_REF_PREFIXES,
   extractRef as _extractRef,
   extractRefPrefixes as _extractRefPrefixes,
   graphGetAll as _graphGetAll,
   handler as _handler,
+  isAuthorized as _isAuthorized,
   isPdfMagic as _isPdfMagic,
   loadCompanyPatterns as _loadCompanyPatterns,
   normaliseRef as _normaliseRef,
