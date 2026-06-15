@@ -6,52 +6,81 @@
 // the documented Graph Groups conversations/threads/posts shape — NOT real
 // captured ses@ payloads. MISSION.md requires real captured group-post payloads
 // to be committed here before deploy approval (the integration-validation step),
-// to resolve the open unknown of whether `internetMessageId` is present on group
-// posts and the real attachment shape. Replace these with the captured payloads
+// to resolve the real attachment shape. Replace these with the captured payloads
 // at that step; the parser/matcher tests below should then re-run unchanged.
+//
+// GRAPH SCHEMA TRUTH (live-verified): a group conversation POST
+// (microsoft.graph.post) does NOT carry `subject` or `internetMessageId`
+// (requesting `subject` in $select 400s). The SUBJECT lives on the parent THREAD as
+// `topic`. So the raw POST fixtures below have NO `subject` / `internetMessageId`;
+// the matching THREAD fixtures carry `topic`. collectPosts threads the thread topic
+// into each post's `subject`, which is the value the classifier reads.
 //
 // The four pinned regression refs (Erskine 67200, Alexander Heights 67005,
 // Tapping 67134, Bassendean 67166) are represented so the classifier + recon can
 // be exercised against them.
 
 // A minimal Graph group "post" shape (mirrors GraphPost in monitor-ses-makesafes).
+// NOTE: no `subject` and no `internetMessageId` — neither is a valid Post property.
+// `subject` is OPTIONAL here ONLY because collectPosts populates it from the thread
+// topic; the raw fixtures never set it.
 export interface FxPost {
   id: string;
-  internetMessageId?: string; // presence UNCONFIRMED on group posts — read defensively
   conversationId?: string;
   conversationThreadId?: string;
   createdDateTime?: string;
   receivedDateTime?: string;
   from?: { emailAddress?: { address?: string; name?: string } };
+  // Populated by collectPosts from the parent thread topic — never set on a raw
+  // Graph post. Present in the type so the classifier (which reads post.subject)
+  // and post-collection tests can set/assert it.
   subject?: string;
   hasAttachments?: boolean;
   body?: { contentType?: string; content?: string };
 }
 
-// A representative make-safe builder email (MLB sender, ref in subject, PDF WO).
+// A minimal Graph conversationThread shape (mirrors GraphThread). `topic` is the
+// SUBJECT source for every post under the thread.
+export interface FxThread {
+  id: string;
+  topic?: string;
+  lastDeliveredDateTime?: string;
+  hasAttachments?: boolean;
+  toRecipients?: { emailAddress?: { address?: string; name?: string } }[];
+  ccRecipients?: { emailAddress?: { address?: string; name?: string } }[];
+}
+
+// A representative make-safe builder email (MLB sender, ref in the THREAD TOPIC,
+// PDF WO). Raw post: NO subject, NO internetMessageId.
 export const FX_MLB_POST: FxPost = {
   id: "AAMkAG-post-mlb-67200",
-  internetMessageId: "<msg-67200@mlb.com.au>",
   conversationId: "conv-67200",
   conversationThreadId: "thread-67200",
   createdDateTime: "2026-06-13T01:00:00Z",
   receivedDateTime: "2026-06-13T01:00:00Z",
   from: { emailAddress: { address: "dispatch@mlb.com.au", name: "MLB Dispatch" } },
-  subject: "Work Order AJBR-67200 — Erskine make safe",
   hasAttachments: true,
   body: { contentType: "html", content: "<p>Please attend the Erskine make safe. WO attached.</p>" },
 };
 
+// The parent THREAD for FX_MLB_POST — the subject lives here as `topic`.
+export const FX_MLB_THREAD: FxThread = {
+  id: "thread-67200",
+  topic: "Work Order AJBR-67200 — Erskine make safe",
+  lastDeliveredDateTime: "2026-06-13T01:00:00Z",
+  hasAttachments: true,
+  toRecipients: [{ emailAddress: { address: "ses@secureworkswa.com.au", name: "SES" } }],
+};
+
 // Same conversation, a THREADED REPLY post added later (re-poll coverage case).
+// Raw post: NO subject, NO internetMessageId.
 export const FX_MLB_THREAD_REPLY: FxPost = {
   id: "AAMkAG-post-mlb-67200-reply",
-  internetMessageId: "<reply-67200@mlb.com.au>",
   conversationId: "conv-67200",
   conversationThreadId: "thread-67200",
   createdDateTime: "2026-06-13T02:30:00Z",
   receivedDateTime: "2026-06-13T02:30:00Z",
   from: { emailAddress: { address: "dispatch@mlb.com.au", name: "MLB Dispatch" } },
-  subject: "RE: Work Order AJBR-67200 — Erskine make safe",
   hasAttachments: false,
   body: { contentType: "text", content: "Confirming attendance window." },
 };
@@ -63,9 +92,15 @@ export const FX_NON_MAKESAFE_POST: FxPost = {
   conversationThreadId: "thread-news",
   receivedDateTime: "2026-06-13T03:00:00Z",
   from: { emailAddress: { address: "news@somesupplier.com", name: "Supplier News" } },
-  subject: "June product catalogue is here",
   hasAttachments: false,
   body: { contentType: "html", content: "<p>Check out our new range.</p>" },
+};
+
+// The parent THREAD for FX_NON_MAKESAFE_POST — topic carries no make-safe ref.
+export const FX_NON_MAKESAFE_THREAD: FxThread = {
+  id: "thread-news",
+  topic: "June product catalogue is here",
+  lastDeliveredDateTime: "2026-06-13T03:00:00Z",
 };
 
 // An over-match probe: a lookalike domain that must NOT match pattern "mlb.com.au".
@@ -75,12 +110,17 @@ export const FX_LOOKALIKE_SENDER_POST: FxPost = {
   conversationThreadId: "thread-evil",
   receivedDateTime: "2026-06-13T03:30:00Z",
   from: { emailAddress: { address: "spam@evilmlb.com.au", name: "Evil MLB" } },
-  // No make-safe keyword/ref in the subject — so the ONLY thing that could
-  // include this is a sender-domain match, which must be rejected (evilmlb.com.au
-  // is not a dot-anchored suffix of mlb.com.au).
-  subject: "totally legit promotion inside",
   hasAttachments: false,
   body: { contentType: "text", content: "nope" },
+};
+
+// Parent THREAD for the lookalike probe. Topic has NO make-safe keyword/ref — so the
+// ONLY thing that could include the post is a sender-domain match, which must be
+// rejected (evilmlb.com.au is not a dot-anchored suffix of mlb.com.au).
+export const FX_LOOKALIKE_SENDER_THREAD: FxThread = {
+  id: "thread-evil",
+  topic: "totally legit promotion inside",
+  lastDeliveredDateTime: "2026-06-13T03:30:00Z",
 };
 
 // ── Graph attachment fixtures ────────────────────────────────────────────────

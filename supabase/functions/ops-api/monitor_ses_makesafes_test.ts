@@ -23,6 +23,7 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import {
   _auditExclusion,
   _classifyPost,
+  _collectPosts,
   _decodeJwtRole,
   _DEFAULT_REF_PREFIXES,
   _extractRef,
@@ -54,8 +55,12 @@ import {
   FX_INLINE_ATTACHMENT,
   FX_ITEM_ATTACHMENT,
   FX_LOOKALIKE_SENDER_POST,
+  FX_LOOKALIKE_SENDER_THREAD,
   FX_MLB_POST,
+  FX_MLB_THREAD,
+  FX_MLB_THREAD_REPLY,
   FX_NON_MAKESAFE_POST,
+  FX_NON_MAKESAFE_THREAD,
   FX_NON_PDF_FILE_ATTACHMENT,
   FX_OVERSIZE_ATTACHMENT,
   FX_PDF_ATTACHMENT,
@@ -68,8 +73,16 @@ const COMPANIES = [
 ];
 
 // ── Classifier: domain-boundary matching ──────────────────────────────────────
+// SCHEMA NOTE: a raw group post has NO `subject`; collectPosts sets post.subject
+// from the parent thread `topic`. `withTopic` mirrors that so classifier tests run
+// against the same shape the classifier sees in production.
+function withTopic(post: typeof FX_MLB_POST, topic: string): typeof FX_MLB_POST {
+  return { ...post, subject: topic };
+}
+
 Deno.test("classifier: exact sender domain matches the company pattern", () => {
-  const r = _classifyPost(FX_MLB_POST, COMPANIES);
+  // Subject comes from the THREAD topic (threaded onto the post by collectPosts).
+  const r = _classifyPost(withTopic(FX_MLB_POST, FX_MLB_THREAD.topic!), COMPANIES);
   assertEquals(r.include, true);
   assertEquals(r.reason, "sender:mlb");
   assertEquals(r.ref, "AJBR-67200");
@@ -87,8 +100,11 @@ Deno.test("classifier: subdomain of the pattern matches (dot-anchored suffix)", 
 });
 
 Deno.test("classifier: lookalike domain does NOT match (over-match rejection)", () => {
-  // evilmlb.com.au must NOT match pattern mlb.com.au, and the subject has no ref.
-  const r = _classifyPost(FX_LOOKALIKE_SENDER_POST, COMPANIES);
+  // evilmlb.com.au must NOT match pattern mlb.com.au, and the thread topic has no ref.
+  const r = _classifyPost(
+    withTopic(FX_LOOKALIKE_SENDER_POST, FX_LOOKALIKE_SENDER_THREAD.topic!),
+    COMPANIES,
+  );
   assertEquals(r.include, false);
 });
 
@@ -100,7 +116,10 @@ Deno.test("classifier: substring-but-not-suffix domain rejected", () => {
 });
 
 Deno.test("classifier: non-make-safe post is excluded (audit-row caller path)", () => {
-  const r = _classifyPost(FX_NON_MAKESAFE_POST, COMPANIES);
+  const r = _classifyPost(
+    withTopic(FX_NON_MAKESAFE_POST, FX_NON_MAKESAFE_THREAD.topic!),
+    COMPANIES,
+  );
   assertEquals(r.include, false);
 });
 
@@ -320,6 +339,159 @@ Deno.test("graphGetAll: 429 Retry-After is respected then the page succeeds", as
 function url0() {
   return "throttled-url";
 }
+
+// ── collectPosts: Graph schema fix (subject from THREAD topic, not the post) ───
+// Regression for the live 400: "Could not find a property named 'subject' on type
+// 'Microsoft.OutlookServices.Post'". A group POST carries NO `subject` /
+// `internetMessageId`; the subject lives on the THREAD as `topic`. collectPosts must
+// (a) request ONLY valid Post props (no subject / internetMessageId) in the post
+// $select, (b) request `topic` (+ the other valid thread props) in the thread
+// $select, and (c) thread the thread topic into each post's `subject` so the
+// classifier can extract the ref (e.g. AJBR-67200) from it.
+Deno.test("collectPosts: subject comes from the THREAD topic; post $select omits subject/internetMessageId", async () => {
+  const realFetch = globalThis.fetch;
+  const calls: string[] = [];
+  const GROUP = "group-1";
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).fetch = (url: string) => {
+    calls.push(url);
+    // conversations
+    if (url.includes("/conversations?")) {
+      return Promise.resolve(pageResponse([{ id: "conv-67200", lastDeliveredDateTime: "2026-06-13T01:00:00Z" }]));
+    }
+    // threads under the conversation — MUST carry `topic` (the subject lives here)
+    if (url.includes("/conversations/conv-67200/threads")) {
+      return Promise.resolve(pageResponse([{
+        id: FX_MLB_THREAD.id,
+        topic: FX_MLB_THREAD.topic,
+        lastDeliveredDateTime: FX_MLB_THREAD.lastDeliveredDateTime,
+        hasAttachments: FX_MLB_THREAD.hasAttachments,
+        toRecipients: FX_MLB_THREAD.toRecipients,
+      }]));
+    }
+    // posts under the thread — RAW posts: NO subject, NO internetMessageId.
+    if (url.includes(`/threads/${FX_MLB_THREAD.id}/posts`)) {
+      return Promise.resolve(pageResponse([{
+        id: FX_MLB_POST.id,
+        conversationId: FX_MLB_POST.conversationId,
+        conversationThreadId: FX_MLB_POST.conversationThreadId,
+        createdDateTime: FX_MLB_POST.createdDateTime,
+        receivedDateTime: FX_MLB_POST.receivedDateTime,
+        from: FX_MLB_POST.from,
+        hasAttachments: FX_MLB_POST.hasAttachments,
+        body: FX_MLB_POST.body,
+      }]));
+    }
+    throw new Error("unexpected url " + url);
+  };
+  try {
+    const { posts } = await _collectPosts("tok", GROUP, new Date(0).toISOString());
+
+    // The post $select MUST NOT request subject or internetMessageId (the 400 cause).
+    const postSelectCall = calls.find((c) => c.includes(`/threads/${FX_MLB_THREAD.id}/posts`))!;
+    assert(postSelectCall, "expected a posts $select call");
+    assert(!/[?&]\$select=[^&]*\bsubject\b/.test(postSelectCall), "post $select must NOT request subject");
+    assert(
+      !/[?&]\$select=[^&]*internetMessageId/.test(postSelectCall),
+      "post $select must NOT request internetMessageId",
+    );
+
+    // The thread $select MUST request topic (so we can source the subject).
+    const threadSelectCall = calls.find((c) => c.includes("/threads") && c.includes("conv-67200"))!;
+    assert(/\$select=[^&]*\btopic\b/.test(threadSelectCall), "thread $select must request topic");
+    assert(
+      /\$select=[^&]*lastDeliveredDateTime/.test(threadSelectCall),
+      "thread $select must request lastDeliveredDateTime",
+    );
+    assert(/\$select=[^&]*toRecipients/.test(threadSelectCall), "thread $select must request toRecipients");
+
+    // The collected post's subject is the THREAD topic, and recipients are threaded.
+    assertEquals(posts.length, 1);
+    assertEquals(posts[0].subject, FX_MLB_THREAD.topic);
+    assertEquals(posts[0].toRecipients, FX_MLB_THREAD.toRecipients);
+
+    // The classifier extracts the ref from the topic-sourced subject (AJBR-67200).
+    const cls = _classifyPost(posts[0], COMPANIES);
+    assertEquals(cls.include, true);
+    assertEquals(cls.ref, "AJBR-67200");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// A reply post (no subject of its own) STILL inherits the thread topic as subject,
+// so a threaded reply classifies against the same ref as the parent.
+Deno.test("collectPosts: a threaded reply inherits the thread topic as its subject", async () => {
+  const realFetch = globalThis.fetch;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).fetch = (url: string) => {
+    if (url.includes("/conversations?")) {
+      return Promise.resolve(pageResponse([{ id: "conv-67200", lastDeliveredDateTime: "2026-06-13T02:30:00Z" }]));
+    }
+    if (url.includes("/conversations/conv-67200/threads")) {
+      return Promise.resolve(pageResponse([{ id: FX_MLB_THREAD.id, topic: FX_MLB_THREAD.topic }]));
+    }
+    if (url.includes(`/threads/${FX_MLB_THREAD.id}/posts`)) {
+      // Raw reply post: NO subject of its own.
+      return Promise.resolve(pageResponse([{
+        id: FX_MLB_THREAD_REPLY.id,
+        conversationThreadId: FX_MLB_THREAD_REPLY.conversationThreadId,
+        receivedDateTime: FX_MLB_THREAD_REPLY.receivedDateTime,
+        from: FX_MLB_THREAD_REPLY.from,
+        body: FX_MLB_THREAD_REPLY.body,
+      }]));
+    }
+    throw new Error("unexpected url " + url);
+  };
+  try {
+    const { posts } = await _collectPosts("tok", "g", new Date(0).toISOString());
+    assertEquals(posts.length, 1);
+    assertEquals(posts[0].subject, FX_MLB_THREAD.topic);
+    const cls = _classifyPost(posts[0], COMPANIES);
+    assertEquals(cls.ref, "AJBR-67200");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// ── persistPost: internet_message_id is ALWAYS null (not a Post property) ──────
+// Group posts have no internetMessageId. Dedup is on post.id (the emails ON
+// CONFLICT(post_id) key); emails.internet_message_id is written null.
+Deno.test("persistPost: emails row stores internet_message_id=null and subject=thread topic; dedup is post_id", async () => {
+  const upserts: Record<string, any[]> = {};
+  // deno-lint-ignore no-explicit-any
+  const sb: any = {
+    from(table: string) {
+      const chain: any = {
+        upsert: (row: any, opts?: any) => {
+          (upserts[table] ||= []).push({ row, opts });
+          return Promise.resolve({ error: null, data: null });
+        },
+        insert: (row: any) => ({
+          select: () => ({ single: () => Promise.resolve({ data: { id: "ev-1" }, error: null }) }),
+        }),
+        select: () => chain,
+        eq: () => chain,
+        ilike: () => chain,
+        in: () => chain,
+        limit: () => Promise.resolve({ data: [], error: null }),
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+      };
+      return chain;
+    },
+  };
+  // The post as collectPosts produces it: subject = thread topic, no internetMessageId.
+  const post = { ...FX_MLB_POST, subject: FX_MLB_THREAD.topic!, hasAttachments: false };
+  const cls = _classifyPost(post, COMPANIES);
+  await _persistPost(sb, "tok", "group-1", post, cls);
+
+  const emailUpsert = upserts["emails"]?.[0];
+  assert(emailUpsert, "expected an emails upsert");
+  assertEquals(emailUpsert.row.internet_message_id, null);
+  assertEquals(emailUpsert.row.subject, FX_MLB_THREAD.topic);
+  assertEquals(emailUpsert.row.post_id, FX_MLB_POST.id);
+  assertEquals(emailUpsert.opts?.onConflict, "post_id"); // dedup is on post id
+});
 
 // ── Attachment routing (processAttachments) ───────────────────────────────────
 // Stub sb: records every email_attachments upsert + storage upload; returns no
