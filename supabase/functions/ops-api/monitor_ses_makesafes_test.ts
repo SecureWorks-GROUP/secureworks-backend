@@ -23,11 +23,13 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import {
   _auditExclusion,
   _classifyPost,
+  _decodeJwtRole,
   _DEFAULT_REF_PREFIXES,
   _extractRef,
   _extractRefPrefixes,
   _graphGetAll,
   _handler,
+  _isAuthorized,
   _isPdfMagic,
   _loadCompanyPatterns,
   _normaliseRef,
@@ -1476,4 +1478,81 @@ Deno.test("backfill [AUTH]: an unauthenticated mode=backfill_full request is rej
   });
   const resp = await _handler(req);
   assertEquals(resp.status, 401);
+});
+
+// ════════════════════════════════════════════════════════════
+// AUTH FIX — authorize on the JWT `role` claim, not exact-string match
+// ════════════════════════════════════════════════════════════
+// Regression for the live 401: the pg_cron trigger calls with
+// `Authorization: Bearer <_sw_service_key()>`, a signature-valid service-role JWT
+// that does NOT byte-equal the function's injected SUPABASE_SERVICE_ROLE_KEY. The
+// old gate did `bearer === SUPABASE_SERVICE_KEY`, so it 401'd the cron and the sync
+// never ran. The fix authorizes on the decoded role claim (verify_jwt is ON, so the
+// gateway already verified the signature). These tests use a FAKE service key and api
+// key passed directly into the pure helper, so they are deterministic regardless of
+// the shell env, and build a JWT as header.payloadBase64url.sig.
+
+// Build a fake unsigned JWT: base64url(header).base64url(payload).fakesig
+function fakeJwt(payload: Record<string, unknown>): string {
+  const b64url = (obj: Record<string, unknown>) =>
+    btoa(JSON.stringify(obj))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  const header = b64url({ alg: "HS256", typ: "JWT" });
+  const body = b64url(payload);
+  return `${header}.${body}.fakesignature`;
+}
+
+function reqWithBearer(token: string): Request {
+  return new Request("https://x/functions/v1/monitor-ses-makesafes", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+}
+function reqWithApiKey(key: string): Request {
+  return new Request("https://x/functions/v1/monitor-ses-makesafes", {
+    method: "POST",
+    headers: { "x-api-key": key },
+  });
+}
+
+const FAKE_SERVICE_KEY = "injected-service-key-value-aaa"; // the env-injected one
+const FAKE_API_KEY = "sw-api-key-bbb";
+
+Deno.test("auth [FIX]: a Bearer JWT with role=service_role is ACCEPTED (the pg_cron _sw_service_key() path)", () => {
+  // A cron-style service-role JWT whose raw value differs from the injected key.
+  const cronJwt = fakeJwt({ role: "service_role", iss: "supabase", ref: "proj" });
+  assert(cronJwt !== FAKE_SERVICE_KEY, "fixture must NOT byte-equal the injected key");
+  assertEquals(_decodeJwtRole(cronJwt), "service_role");
+  assert(_isAuthorized(reqWithBearer(cronJwt), FAKE_SERVICE_KEY, FAKE_API_KEY));
+});
+
+Deno.test("auth [FIX]: a Bearer JWT with role=anon is REJECTED", () => {
+  const anonJwt = fakeJwt({ role: "anon", iss: "supabase", ref: "proj" });
+  assertEquals(_decodeJwtRole(anonJwt), "anon");
+  assertEquals(_isAuthorized(reqWithBearer(anonJwt), FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+});
+
+Deno.test("auth [FIX]: x-api-key === SW_API_KEY is ACCEPTED", () => {
+  assert(_isAuthorized(reqWithApiKey(FAKE_API_KEY), FAKE_SERVICE_KEY, FAKE_API_KEY));
+});
+
+Deno.test("auth [FIX]: a wrong x-api-key is REJECTED", () => {
+  assertEquals(_isAuthorized(reqWithApiKey("not-the-key"), FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+});
+
+Deno.test("auth [FIX]: a garbage (non-JWT) Bearer is REJECTED and decode returns null (no throw)", () => {
+  assertEquals(_decodeJwtRole("not.a.jwt"), null); // 3 parts but middle is not base64 JSON
+  assertEquals(_decodeJwtRole("totally-garbage"), null); // not even 3 parts
+  assertEquals(_isAuthorized(reqWithBearer("totally-garbage"), FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+});
+
+Deno.test("auth [FIX]: the exact injected service key as Bearer is still ACCEPTED (fast path kept)", () => {
+  assert(_isAuthorized(reqWithBearer(FAKE_SERVICE_KEY), FAKE_SERVICE_KEY, FAKE_API_KEY));
+});
+
+Deno.test("auth [FIX]: no credentials at all is REJECTED", () => {
+  const bare = new Request("https://x/functions/v1/monitor-ses-makesafes", { method: "POST" });
+  assertEquals(_isAuthorized(bare, FAKE_SERVICE_KEY, FAKE_API_KEY), false);
 });
