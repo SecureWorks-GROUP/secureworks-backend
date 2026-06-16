@@ -3069,9 +3069,12 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'search_all_jobs': {
             const q = (url.searchParams.get('q') || '').toLowerCase().trim()
-            // Change 1 + Change 2: removed complete/completed/invoiced from exclusion list so
-            // completed make-safes are searchable. Trades must find EVERY job by any field.
-            const ACTIVE_JOB_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
+            // All-tab trade search is the historical/global lookup. When a trade types a
+            // query it should find old/completed/archived jobs across the board, not only
+            // jobs currently allocated to them. Keep only records that are operationally
+            // unsafe/noisy to surface (deleted/void/duplicates) out of typed search results.
+            const GLOBAL_SEARCH_STATUS_EXCLUDE = '("deleted","duplicate","duplicated","void","voided")'
+            const ASSIGNED_BROWSE_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
 
             // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
             // set — it polluted results (a gibberish q returned ~6 rows from the trade's
@@ -3088,8 +3091,8 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             let jobQuery = client.from('jobs')
-              .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at')
-              .not('status', 'in', ACTIVE_JOB_STATUS_EXCLUDE)
+              .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at')
+              .not('status', 'in', q ? GLOBAL_SEARCH_STATUS_EXCLUDE : ASSIGNED_BROWSE_STATUS_EXCLUDE)
               .order('created_at', { ascending: false })
               .limit(200)
             if (q) {
@@ -3115,8 +3118,8 @@ if (import.meta.main) serve(async (req: Request) => {
               const extRefMatches = await resolveJobsByExternalRef(
                 client,
                 [q],
-                ACTIVE_JOB_STATUS_EXCLUDE,
-                'id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at'
+                GLOBAL_SEARCH_STATUS_EXCLUDE,
+                'id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at'
               )
               // Merge all matched jobs by UUID — search returns multiple matches correctly.
               for (const [jobId, job] of Object.entries(extRefMatches.byId)) {
@@ -12702,38 +12705,22 @@ async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   return data
 }
 
-async function getTradeJobTypeForAccess(client: any, jobId: string): Promise<string> {
-  const job = await getTradeJobForAccess(client, jobId)
-  return String(job.type || '').toLowerCase()
-}
-
-// Dispatcher = the ops manager / admin / owner who runs the board. Mirrors the role
-// gate used at the my_jobs routing layer (tradeRole === 'ops_manager') and the elevated
-// check used elsewhere (admin | owner | ops_manager).
-async function isDispatcherUser(client: any, userId: string): Promise<boolean> {
-  if (!userId) return false
-  const { data } = await client.from('users').select('role').eq('id', userId).maybeSingle()
-  const role = String(data?.role || '').toLowerCase()
-  return role === 'admin' || role === 'owner' || role === 'ops_manager'
-}
-
 async function assertAssignedOrMakesafeAccess(client: any, jobId: string, userId: string, isAdmin = false) {
   try {
     await assertAssigned(client, jobId, userId, isAdmin)
     return
   } catch (err) {
     if (isAdmin) return
-    // Strictly allocation-based: only the dispatcher (ops manager / admin / owner) may
-    // reach an UNassigned make-safe. Regular trades must have a named assignment.
-    // Previously ANY logged-in trade could open any open make-safe (the pool-era
-    // bypass) — removed so visibility and access both follow allocation.
-    if (await isDispatcherUser(client, userId)) {
-      const job = await getTradeJobForAccess(client, jobId)
-      if (await isMakesafeAccessJobForClient(client, job)) return
-    }
+    // MakeSafe report fallback: any logged-in trade may open/report an open
+    // MakeSafe even before ops has created a named assignment. This keeps the
+    // field-report flow moving when the board/admin upload step is behind, while
+    // ordinary patio/fencing/decking jobs remain allocation-gated below.
+    const job = await getTradeJobForAccess(client, jobId)
+    if (await isMakesafeAccessJobForClient(client, job)) return
     throw err
   }
 }
+export const _assertAssignedOrMakesafeAccessForTest = assertAssignedOrMakesafeAccess
 
 async function assertMakesafeJob(client: any, jobId: string) {
   const job = await getTradeJobForAccess(client, jobId)
