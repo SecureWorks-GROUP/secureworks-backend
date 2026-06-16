@@ -1,49 +1,56 @@
 // Wave 0 (Make-Safe Autopilot) hardening proof tests.
 //
-// PROVES the two red-team gate fixes in ops-api/index.ts:
-//   C2 — approve_intake_draft is human-only: the automation api-key is REJECTED,
-//        only an authenticated admin/owner JWT may approve. (route gate ~1796-1809)
-//   C3 — approveIntakeDraft claims the draft ATOMICALLY so two concurrent
-//        approvals cannot both create a live job. (claim ~8744-8755)
+// PROVES the Wave 0 gate fixes in ops-api/index.ts, including the scoped-routine-key
+// model (decision scoped-routine-key-2026-06-17):
+//   C2  — approve_intake_draft is PRIVILEGED: allowed for the master SW_API_KEY (the
+//         ops dashboard, authMode='api_key') OR a jwt admin/owner; the scoped routine
+//         key (authMode='routine') is REJECTED. (route gate)
+//   C3  — approveIntakeDraft claims the draft ATOMICALLY so two concurrent approvals
+//         cannot both create a live job, with an orphan-safe post-claim catch.
+//   SCOPED KEY — the routine key cannot approve, cannot create a LIVE job (redirected
+//         to a needs_review draft), cannot authorise; the privileged SW_API_KEY (the
+//         dashboard) CAN approve + create live (the C2 dashboard regression is fixed).
 //
 // Why these are reimplemented-pure tests (not direct imports): importing index.ts
 // here boots the production HTTP server via serve(...) at module load, and both the
 // route gate and approveIntakeDraft are module-internal (not exported). This file
 // follows the SAME convention the existing index_test.ts Quick-Quote section uses:
 // reimplement the exact pattern under test as a small pure function and exercise it
-// with mocked deps, cross-referenced to the deployed code by line. The pattern here
-// mirrors index.ts VERBATIM (predicate + conditional UPDATE), so a future change to
-// the real gate that breaks the contract will also break this test if kept in sync.
+// with mocked deps, cross-referenced to the deployed code by line. The patterns here
+// mirror index.ts VERBATIM, so a future change to a real gate that breaks the contract
+// will also break this test if kept in sync.
 //
 // No network. No live Supabase. No live Xero.
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts"
 
 // ── C2: the exact gate predicate from index.ts route case 'approve_intake_draft' ──
-//   const approveIsHuman = authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner')
-//   if (!approveIsHuman) return json({ error: '...' }, 403)
-type AuthMode = "api_key" | "jwt"
+//   const approveIsPrivileged = authMode === 'api_key' ||
+//     (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+//   if (!approveIsPrivileged) return json({ error: '...' }, 403)
+type AuthMode = "api_key" | "jwt" | "routine"
 type AuthUser = { id: string; email: string; role: string } | null
 
 function approveGate(authMode: AuthMode, authUser: AuthUser): { allowed: boolean; status: number } {
-  const approveIsHuman = authMode === "jwt" && (authUser?.role === "admin" || authUser?.role === "owner")
-  return approveIsHuman ? { allowed: true, status: 200 } : { allowed: false, status: 403 }
+  const approveIsPrivileged = authMode === "api_key" ||
+    (authMode === "jwt" && (authUser?.role === "admin" || authUser?.role === "owner"))
+  return approveIsPrivileged ? { allowed: true, status: 200 } : { allowed: false, status: 403 }
 }
 
-Deno.test("C2: routine api-key is REJECTED on approve_intake_draft (403)", () => {
-  // The routine authenticates as api_key (a VALID SW_API_KEY, but not a human).
-  const r = approveGate("api_key", null)
-  assertEquals(r.allowed, false, "the automation api-key must never be allowed to approve a draft")
+Deno.test("C2: routine key is REJECTED on approve_intake_draft (403)", () => {
+  // The scoped automation routine presents MAKESAFE_ROUTINE_KEY -> authMode='routine'.
+  const r = approveGate("routine", null)
+  assertEquals(r.allowed, false, "the make-safe automation routine must never approve a draft")
   assertEquals(r.status, 403)
 })
 
-Deno.test("C2: api-key is rejected even if some authUser context were present", () => {
-  // Defence-in-depth: api_key mode is rejected regardless of any role value.
-  for (const role of ["admin", "owner", "ops", "unknown", "viewer"]) {
-    const r = approveGate("api_key", { id: "x", email: "x@x", role })
-    assertEquals(r.allowed, false, `api_key + role=${role} must still be rejected`)
-    assertEquals(r.status, 403)
-  }
+Deno.test("C2 regression FIX: the ops dashboard (privileged SW_API_KEY = api_key) CAN approve", () => {
+  // The dashboard authenticates with SW_API_KEY + anon bearer -> authMode='api_key',
+  // NEVER a user JWT. The earlier jwt-only gate 403'd it; the privileged-key allowance
+  // restores the live approve button.
+  const r = approveGate("api_key", null)
+  assertEquals(r.allowed, true, "the ops dashboard approve button (SW_API_KEY) must work")
+  assertEquals(r.status, 200)
 })
 
 Deno.test("C2: a logged-in admin/owner JWT IS allowed (the human tick)", () => {
@@ -59,6 +66,93 @@ Deno.test("C2: a non-admin/owner JWT is rejected (403)", () => {
   }
   // A jwt with no user object (shouldn't happen, but must fail closed).
   assertEquals(approveGate("jwt", null).allowed, false)
+})
+
+// ── SCOPED ROUTINE KEY (decision scoped-routine-key-2026-06-17) ──
+// 1) The central routine deny-list from index.ts (privileged money/approve/send actions
+//    the routine may never reach). Mirrors ROUTINE_FORBIDDEN_ACTIONS + the guard.
+const ROUTINE_FORBIDDEN_ACTIONS = new Set([
+  "approve_intake_draft",
+  "approve_invoice",
+  "approve_and_send_invoice",
+  "void_invoice",
+  "update_invoice",
+  "send_invoice_email",
+  "mark_invoice_paid",
+  "makesafe_send_pack",
+])
+function routineDenied(authMode: AuthMode, action: string): boolean {
+  return authMode === "routine" && ROUTINE_FORBIDDEN_ACTIONS.has(action)
+}
+
+Deno.test("ScopedKey: routine key is denied on every privileged money/authorise/send action", () => {
+  for (const action of ROUTINE_FORBIDDEN_ACTIONS) {
+    assert(routineDenied("routine", action), `routine must be denied on ${action}`)
+  }
+  // The authorise path the H1 script uses (approve_invoice) is covered above.
+  assert(routineDenied("routine", "approve_invoice"), "routine cannot authorise an invoice")
+})
+
+Deno.test("ScopedKey: privileged + jwt callers are NOT blocked by the deny-list", () => {
+  for (const action of ROUTINE_FORBIDDEN_ACTIONS) {
+    assert(!routineDenied("api_key", action), `api_key must pass the deny-list for ${action}`)
+    assert(!routineDenied("jwt", action), `jwt must pass the deny-list for ${action}`)
+  }
+})
+
+Deno.test("ScopedKey: the routine may still reach draft create/read actions (not denied)", () => {
+  for (const action of ["create_intake_draft", "list_intake_drafts", "create_makesafe_job", "scan_ses_makesafes"]) {
+    assert(!routineDenied("routine", action), `routine must be allowed to reach ${action}`)
+  }
+})
+
+// 2) create_makesafe_job dispatch from index.ts route case: routine -> draft, else live.
+type CreateOutcome = "live_job" | "needs_review_draft"
+function createMakesafeDispatch(authMode: AuthMode): CreateOutcome {
+  // case 'create_makesafe_job': if (authMode === 'routine') -> createMakesafeDraftFromProposal
+  //                             else -> createMakesafeJob (live)
+  return authMode === "routine" ? "needs_review_draft" : "live_job"
+}
+
+Deno.test("ScopedKey: routine create_makesafe_job is REDIRECTED to a draft, never a live job", () => {
+  assertEquals(createMakesafeDispatch("routine"), "needs_review_draft",
+    "the routine must not put a live make-safe job on the board")
+})
+
+Deno.test("ScopedKey: privileged SW_API_KEY (dashboard) and jwt create a LIVE job, as today", () => {
+  assertEquals(createMakesafeDispatch("api_key"), "live_job",
+    "the ops dashboard manual create button stays live")
+  assertEquals(createMakesafeDispatch("jwt"), "live_job")
+})
+
+// 3) Defensive: an UNSET MAKESAFE_ROUTINE_KEY env must never classify a caller as
+//    routine (the morning-provisioning reality). Mirrors index.ts:
+//      const routineKey = env && env.length > 0 ? env : null
+//      if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) 'routine'
+function classifyAuthMode(opts: {
+  routineKeyEnv: string | null; swApiKey: string; xApiKey: string | null; bearer: string | null
+}): AuthMode | "unauthorized" {
+  const routineKey = opts.routineKeyEnv && opts.routineKeyEnv.length > 0 ? opts.routineKeyEnv : null
+  if (routineKey && (opts.xApiKey === routineKey || opts.bearer === routineKey)) return "routine"
+  if (opts.xApiKey && opts.xApiKey === opts.swApiKey) return "api_key"
+  if (opts.bearer && opts.bearer === opts.swApiKey) return "api_key"
+  if (opts.bearer) return "jwt" // (would then be validated as a real JWT)
+  return "unauthorized"
+}
+
+Deno.test("ScopedKey: an UNSET routine key env never classifies anyone as routine", () => {
+  // Routine key not provisioned yet (env unset). A caller sending an empty/no key must
+  // not become 'routine'; a caller with SW_API_KEY is still 'api_key' as before.
+  assertEquals(classifyAuthMode({ routineKeyEnv: null, swApiKey: "MASTER", xApiKey: null, bearer: null }), "unauthorized")
+  assertEquals(classifyAuthMode({ routineKeyEnv: "", swApiKey: "MASTER", xApiKey: "", bearer: null }), "unauthorized")
+  assertEquals(classifyAuthMode({ routineKeyEnv: null, swApiKey: "MASTER", xApiKey: "MASTER", bearer: null }), "api_key")
+})
+
+Deno.test("ScopedKey: when provisioned, the routine key classifies as routine and SW_API_KEY stays api_key", () => {
+  assertEquals(classifyAuthMode({ routineKeyEnv: "ROUTINE", swApiKey: "MASTER", xApiKey: "ROUTINE", bearer: null }), "routine")
+  assertEquals(classifyAuthMode({ routineKeyEnv: "ROUTINE", swApiKey: "MASTER", xApiKey: "MASTER", bearer: null }), "api_key")
+  // The routine key and master key are distinct; presenting the master is never routine.
+  assert(classifyAuthMode({ routineKeyEnv: "ROUTINE", swApiKey: "MASTER", xApiKey: "MASTER", bearer: null }) !== "routine")
 })
 
 // ── C3: the exact atomic-claim from approveIntakeDraft in index.ts ──
@@ -89,6 +183,11 @@ function makeDraftStore(initialStatus: string) {
     },
     current(): string {
       return status
+    },
+    // Unconditional set, modelling the catch-path .update({status:...}).eq('id',id)
+    // (no pre-image guard; the catch already owns the row via the prior claim).
+    forceStatus(s: string) {
+      status = s
     },
   }
 }
@@ -141,4 +240,74 @@ Deno.test("C3: a 'draft' status (incomplete intake) is still claimable from the 
   const r = attemptApprove(store, jobsCreated)
   assertEquals(r.created, true)
   assertEquals(jobsCreated.n, 1)
+})
+
+// ── Concern 2 (auditor): C3 post-claim catch must not orphan-double-create ──
+// Models the new approveIntakeDraft catch branch in index.ts:
+//   let createdJobId = null
+//   try { jobResult = createMakesafeJob(...); createdJobId = jobResult.job.id; <later steps> }
+//   catch { if (!createdJobId) status -> needs_review (re-queue)
+//           else status stays 'approved' + approved_job_id = createdJobId (no re-queue) }
+// The hazard: if the job was created but a LATER step throws, the OLD code reset the
+// draft to needs_review -> it could be approved again -> SECOND live job for one draft.
+
+type FailPoint = "before_job" | "after_job" | "none"
+
+function approveWithFailure(failAt: FailPoint, store: ReturnType<typeof makeDraftStore>, jobsCreated: { n: number }):
+  { finalStatus: string; approvedJobId: string | null; threw: boolean } {
+  // Claim first (the C3 atomic claim).
+  const { rows } = store.atomicClaim("draft-1", ["needs_review", "draft"])
+  if (rows.length === 0) return { finalStatus: store.current(), approvedJobId: null, threw: false }
+  let createdJobId: string | null = null
+  let approvedJobId: string | null = null
+  try {
+    if (failAt === "before_job") throw new Error("createMakesafeJob failed")
+    // job created
+    jobsCreated.n += 1
+    createdJobId = "job-" + jobsCreated.n
+    approvedJobId = createdJobId
+    if (failAt === "after_job") throw new Error("audit update failed AFTER job insert")
+    return { finalStatus: store.current(), approvedJobId, threw: false }
+  } catch (_e) {
+    if (!createdJobId) {
+      // safe to re-queue
+      store.forceStatus("needs_review")
+      return { finalStatus: store.current(), approvedJobId: null, threw: true }
+    }
+    // job exists: do NOT re-queue; keep approved + point at the orphan job
+    store.forceStatus("approved")
+    return { finalStatus: store.current(), approvedJobId: createdJobId, threw: true }
+  }
+}
+
+Deno.test("Concern2: pre-insert failure re-queues the draft (needs_review), no job", () => {
+  const store = makeDraftStore("needs_review")
+  const jobsCreated = { n: 0 }
+  const r = approveWithFailure("before_job", store, jobsCreated)
+  assertEquals(r.threw, true)
+  assertEquals(jobsCreated.n, 0, "no job created when the failure is before the insert")
+  assertEquals(r.finalStatus, "needs_review", "a pre-insert failure must release the claim")
+})
+
+Deno.test("Concern2: post-insert failure does NOT re-queue (no orphan double-create)", () => {
+  const store = makeDraftStore("needs_review")
+  const jobsCreated = { n: 0 }
+  const r = approveWithFailure("after_job", store, jobsCreated)
+  assertEquals(r.threw, true)
+  assertEquals(jobsCreated.n, 1, "exactly one job was created")
+  assertEquals(r.finalStatus, "approved", "a post-insert failure must leave the draft approved, NOT re-queued")
+  assertEquals(r.approvedJobId, "job-1", "the draft must point at the orphan job for reconciliation")
+})
+
+Deno.test("Concern2: a post-insert failure cannot be re-approved into a second job", () => {
+  // Replays the real attack: job created, later step throws, then someone clicks
+  // approve again. Because status stayed 'approved', the re-approval claim gets 0 rows.
+  const store = makeDraftStore("needs_review")
+  const jobsCreated = { n: 0 }
+  approveWithFailure("after_job", store, jobsCreated) // first attempt: job-1, then audit fails
+  assertEquals(store.current(), "approved")
+  // second click:
+  const second = attemptApprove(store, jobsCreated)
+  assertEquals(second.created, false, "re-approving an approved-but-failed draft must NOT create a second job")
+  assertEquals(jobsCreated.n, 1, "still exactly one job total")
 })
