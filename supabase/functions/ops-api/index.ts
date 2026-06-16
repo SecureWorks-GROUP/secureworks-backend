@@ -15587,17 +15587,24 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   const depositPercent = body.deposit_percent ?? depositConfig.percent ?? defaultPercent
   const councilFees = body.council_fees ?? depositConfig.council_fees ?? 0
 
-  // Build extra line items for council fees
+  // Use deposit config total if available, otherwise calculate.
+  // IMPORTANT (ruling D1): the patio tool bakes council fees into total_deposit_inc_gst
+  // (depTotal = depBase + depCouncilFees). When that pre-baked total is used as depositAmount,
+  // council fees are already included — do NOT add them again as extra_line_items.
+  // Only add the council extra line when the deposit amount is being calculated from scratch
+  // (i.e., no pre-baked total_deposit_inc_gst exists, or the caller explicitly overrides
+  // deposit_amount without a pre-baked total to rely on).
+  const depositAmount = body.deposit_amount ?? depositConfig.total_deposit_inc_gst ?? undefined
+  const totalIsBaked = body.deposit_amount == null && depositConfig.total_deposit_inc_gst != null
+
+  // Build extra line items for council fees — only when they are NOT already inside depositAmount
   const extraLineItems: any[] = []
-  if (councilFees > 0) {
+  if (councilFees > 0 && !totalIsBaked) {
     extraLineItems.push({
       description: 'Council / planning application fee',
       amount_inc_gst: councilFees,
     })
   }
-
-  // Use deposit config total if available, otherwise calculate
-  const depositAmount = body.deposit_amount ?? depositConfig.total_deposit_inc_gst ?? undefined
 
   // Create the deposit invoice — Xero email DISABLED, we send branded email ourselves
   const invoiceResult = await createDepositInvoice(client, {
