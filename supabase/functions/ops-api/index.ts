@@ -1681,26 +1681,55 @@ if (import.meta.main) serve(async (req: Request) => {
     const action = url.searchParams.get('action')
     console.log(`[ops-api] action=${action} method=${req.method}`)
 
-    // ── Scoped routine deny-list (decision scoped-routine-key-2026-06-17) ──
-    // The make-safe automation routine (authMode='routine') may create/read DRAFTS
-    // only. These actions are PRIVILEGED money / authorise / send / approve operations
-    // it must NEVER reach with its key, even if it learns the action name. Rejected
-    // centrally here so a routine key is denied regardless of the per-case logic below.
-    // (create_makesafe_job is NOT in this list: a routine caller is REDIRECTED to a
-    // draft, not rejected, in its own case. approve_intake_draft keeps its dedicated
-    // allow-gate but is listed here too as belt-and-braces.)
-    const ROUTINE_FORBIDDEN_ACTIONS = new Set([
-      'approve_intake_draft',
-      'approve_invoice',
-      'approve_and_send_invoice',
-      'void_invoice',
-      'update_invoice',
-      'send_invoice_email',
-      'mark_invoice_paid',
-      'makesafe_send_pack',
+    // ── Scoped routine ALLOW-LIST (decision scoped-routine-key-2026-06-17) ──
+    // DEFAULT-DENY (fail-safe): the make-safe automation routine (authMode='routine')
+    // may call ONLY the actions in this allow-list; every other action is rejected by
+    // default. This is the campaign's #1 rule made structural ("the AI never sends"):
+    // a send/authorise/approve action, or any NEW dangerous action added later, is
+    // routine-callable ONLY if someone explicitly adds it here. If we omit a
+    // legitimately-needed SAFE action, the routine gets a harmless 403 and we add it,
+    // rather than a dangerous action silently slipping through (the deny-list failure
+    // mode). It contains DRAFT / READ / RENDER / ATTACH actions ONLY.
+    //
+    // EXTEND ONLY with draft / read / render / attach actions; NEVER a send (send_*),
+    // authorise/void/update/mark-paid invoice action, approve_* action, makesafe_send_pack,
+    // or any crew / PO / assignment / status-mutation action. (create_makesafe_job is a
+    // deliberate exception: allow-listed so the routine reaches its case, which then
+    // redirects the routine to a draft. It can never create a live job.)
+    const ROUTINE_ALLOWED_ACTIONS = new Set([
+      // Reads / context (decide what is report-ready, read intake + evidence)
+      'ops_api_version',
+      'ops_summary',
+      'makesafe_pipeline',
+      'makesafe_pipeline_items',
+      'makesafe_audit',
+      'makesafe_new_emails',
+      'get_makesafe_email',
+      'get_makesafe_attachment_url',
+      'job_detail',
+      'list_intake_drafts',
+      'list_makesafe_companies',
+      // Make-safe DRAFT creation (intake). scan/create_intake_draft produce drafts only.
+      'scan_ses_makesafes',
+      'create_intake_draft',
+      // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
+      // own case, where a routine caller is REDIRECTED to a needs_review draft (it can
+      // never create a live job). It is the single exception to "no job creation"; the
+      // redirect (not the allow-list) is what keeps the routine off the live board.
+      'create_makesafe_job',
+      // Wave 2 report DRAFT artifacts that EXIST today (Scribe extends this block):
+      'attach_makesafe_document', // typed doc attach (report / invoice-pdf / swms)
+      'submit_makesafe_report', // writes the report record (a draft artifact, no send)
+      'update_makesafe_substatus', // BOARD-state only; the SEND/close transition lives
+      // in makesafe_send_pack (denied). Scribe: ensure the routine only sets draft-stage
+      // substatuses (e.g. admin_to_send_report), never a sent/closed substatus.
+      // ── Wave 2 extension point (Scribe) — ADD the report draft-invoice + render
+      // actions here by their real names once built, e.g.:
+      //   'create_makesafe_draft_invoice', 'render_makesafe_report'
+      // Draft/render only; the AUTHORISE + SEND stays in makesafe_send_pack (denied).
     ])
-    if (authMode === 'routine' && action && ROUTINE_FORBIDDEN_ACTIONS.has(action)) {
-      return json({ error: `forbidden: '${action}' is a privileged action; the make-safe automation routine may create and read drafts only` }, 403)
+    if (authMode === 'routine' && action && !ROUTINE_ALLOWED_ACTIONS.has(action)) {
+      return json({ error: `forbidden: '${action}' is not permitted for the make-safe automation routine; the routine key may only create/read drafts and render/attach report artifacts (default-deny). A human tick (privileged ops key or admin/owner) performs every send, authorise, and approve.` }, 403)
     }
 
     // Parse POST body for write actions

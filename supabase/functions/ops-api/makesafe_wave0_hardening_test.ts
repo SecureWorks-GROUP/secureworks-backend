@@ -69,40 +69,81 @@ Deno.test("C2: a non-admin/owner JWT is rejected (403)", () => {
 })
 
 // ── SCOPED ROUTINE KEY (decision scoped-routine-key-2026-06-17) ──
-// 1) The central routine deny-list from index.ts (privileged money/approve/send actions
-//    the routine may never reach). Mirrors ROUTINE_FORBIDDEN_ACTIONS + the guard.
-const ROUTINE_FORBIDDEN_ACTIONS = new Set([
-  "approve_intake_draft",
-  "approve_invoice",
-  "approve_and_send_invoice",
-  "void_invoice",
-  "update_invoice",
-  "send_invoice_email",
-  "mark_invoice_paid",
-  "makesafe_send_pack",
+// 1) The central routine ALLOW-LIST from index.ts. DEFAULT-DENY: the routine may call
+//    ONLY these actions; everything else is rejected. Mirrors ROUTINE_ALLOWED_ACTIONS +
+//    the guard `if (authMode==='routine' && action && !ALLOWED.has(action)) -> 403`.
+//    Kept in sync with index.ts; drift in either breaks these tests.
+const ROUTINE_ALLOWED_ACTIONS = new Set([
+  "ops_api_version",
+  "ops_summary",
+  "makesafe_pipeline",
+  "makesafe_pipeline_items",
+  "makesafe_audit",
+  "makesafe_new_emails",
+  "get_makesafe_email",
+  "get_makesafe_attachment_url",
+  "job_detail",
+  "list_intake_drafts",
+  "list_makesafe_companies",
+  "scan_ses_makesafes",
+  "create_intake_draft",
+  "create_makesafe_job", // reaches its case -> redirected to a draft (never a live job)
+  "attach_makesafe_document",
+  "submit_makesafe_report",
+  "update_makesafe_substatus",
 ])
+// Default-deny: a routine caller is allowed ONLY if the action is in the allow-list.
 function routineDenied(authMode: AuthMode, action: string): boolean {
-  return authMode === "routine" && ROUTINE_FORBIDDEN_ACTIONS.has(action)
+  return authMode === "routine" && !ROUTINE_ALLOWED_ACTIONS.has(action)
 }
 
-Deno.test("ScopedKey: routine key is denied on every privileged money/authorise/send action", () => {
-  for (const action of ROUTINE_FORBIDDEN_ACTIONS) {
-    assert(routineDenied("routine", action), `routine must be denied on ${action}`)
+// The General's required deny cases plus the campaign's whole comms surface. NONE of
+// these is in the allow-list, so default-deny must reject the routine on every one.
+const ROUTINE_MUST_DENY = [
+  // comms (the campaign #1 rule: the AI never sends)
+  "send_email", "send_sms", "send_po_email", "send_client_update", "send_quote",
+  "send_chase_sms", "send_review_request", "send_invoice_email", "send_telegram_message",
+  "send_acceptance_invoice", "send_payment_link", "send_variation", "send_work_order",
+  "send_comms_message", "send_council_email", "send_quick_quote_email",
+  // money / authorise
+  "approve_invoice", "approve_and_send_invoice", "void_invoice", "update_invoice",
+  "mark_invoice_paid", "create_invoice", "create_deposit_invoice", "push_po_to_xero",
+  // approve / send-pack
+  "approve_intake_draft", "makesafe_send_pack", "approve_variation", "approve_expense",
+  // crew / PO / assignment / status-mutation (the broader default-deny the General extended)
+  "create_po", "update_job_status", "create_assignment", "update_job_field",
+  "complete_job", "complete_and_invoice", "create_work_order",
+  // a NEW dangerous action nobody has added to the allow-list yet (fail-safe proof)
+  "some_future_dangerous_action",
+]
+
+Deno.test("ScopedKey (default-deny): routine is DENIED on all comms, money, approve, crew/PO/status, and any unknown action", () => {
+  for (const action of ROUTINE_MUST_DENY) {
+    assert(routineDenied("routine", action), `default-deny must reject the routine on ${action}`)
   }
-  // The authorise path the H1 script uses (approve_invoice) is covered above.
-  assert(routineDenied("routine", "approve_invoice"), "routine cannot authorise an invoice")
 })
 
-Deno.test("ScopedKey: privileged + jwt callers are NOT blocked by the deny-list", () => {
-  for (const action of ROUTINE_FORBIDDEN_ACTIONS) {
-    assert(!routineDenied("api_key", action), `api_key must pass the deny-list for ${action}`)
-    assert(!routineDenied("jwt", action), `jwt must pass the deny-list for ${action}`)
+Deno.test("ScopedKey (default-deny): a brand-new unenumerated action is denied by DEFAULT (fail-safe)", () => {
+  // This is the whole point of flipping to an allow-list: a future send/authorise
+  // action added elsewhere is NOT routine-callable unless explicitly allow-listed.
+  assert(routineDenied("routine", "send_some_new_channel"), "unknown action must fail safe (denied)")
+  assert(routineDenied("routine", "authorise_anything_new"), "unknown action must fail safe (denied)")
+})
+
+Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach few", () => {
+  for (const action of ["job_detail", "create_intake_draft", "scan_ses_makesafes",
+    "list_intake_drafts", "attach_makesafe_document", "submit_makesafe_report",
+    "ops_summary", "makesafe_pipeline"]) {
+    assert(!routineDenied("routine", action), `routine must be allowed on the safe action ${action}`)
   }
 })
 
-Deno.test("ScopedKey: the routine may still reach draft create/read actions (not denied)", () => {
-  for (const action of ["create_intake_draft", "list_intake_drafts", "create_makesafe_job", "scan_ses_makesafes"]) {
-    assert(!routineDenied("routine", action), `routine must be allowed to reach ${action}`)
+Deno.test("ScopedKey: privileged + jwt callers are NEVER blocked by the routine allow-list", () => {
+  // The allow-list gate only fires for authMode==='routine'. Every action the routine
+  // is denied must still be reachable by the dashboard (api_key) and a jwt caller.
+  for (const action of [...ROUTINE_MUST_DENY, ...ROUTINE_ALLOWED_ACTIONS]) {
+    assert(!routineDenied("api_key", action), `api_key must never be blocked by the routine gate (${action})`)
+    assert(!routineDenied("jwt", action), `jwt must never be blocked by the routine gate (${action})`)
   }
 })
 
