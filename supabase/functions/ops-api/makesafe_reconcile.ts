@@ -54,6 +54,17 @@ import {
   normaliseRef as sharedNormaliseRef,
   REF_PREFIX_FLOOR,
 } from "../_shared/makesafe_refs.ts";
+// SINGLE SOURCE OF TRUTH for the URL-length-budget chunking TUNING — the exact
+// constants makesafe_compact_reads.ts uses (IN_URL_BUDGET / IN_MAX_COUNT). The
+// runtime helpers there (fetchAllRows / fetchAllRowsInChunks / chunkByUrlBudget)
+// are MODULE-PRIVATE in compact_reads (only `_`-prefixed TEST aliases are
+// exported), so they cannot be imported into production code cleanly. Per the
+// task contract we therefore IMPORT the cleanly-exported constants (so the budget
+// can never drift between the two files) and REPLICATE the small pure helpers
+// below with identical logic. See makesafe_compact_reads.ts §"Pagination +
+// chunking" for the rationale (live-found 500: an over-long `.in()` URL is
+// dropped by the Supabase gateway BEFORE the request is sent).
+import { IN_MAX_COUNT, IN_URL_BUDGET } from "./makesafe_compact_reads.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -747,6 +758,88 @@ export function checkCanary(
 
 type SB = any;
 
+// ── Pagination + URL-budget chunking (REPLICATED from makesafe_compact_reads) ──
+// PostgREST caps EVERY response at 1000 rows and pushes an `.in(col, list)` into
+// the request URL, so a large id list both (a) silently truncates at 1000 result
+// rows and (b) can blow the URL length. The Supabase gateway rejects an over-long
+// URL BEFORE the request is sent — surfacing in Deno as "error sending request
+// for ..." rather than an HTTP status. The D1 reconcile resolves a pipeline item's
+// source email via `email_events_raw.id IN (eventIds)` where eventIds come from
+// pipeline_items.source_event_ids[] — Graph/Exchange event ids (~100-150 chars
+// each, with URL-special chars). A few dozen of those build a multi-KB `.in()`
+// list the gateway drops, which is exactly what broke the */30 reconcile.
+//
+// The constants (IN_URL_BUDGET / IN_MAX_COUNT) are IMPORTED from
+// makesafe_compact_reads.ts so the budget is single-sourced; the small pure
+// helpers below mirror that file's implementation byte-for-byte (the runtime
+// helpers there are module-private). Keep the two in sync.
+
+const PAGE_SIZE = 1000;
+
+// Paginate a single read with .range() until a short page (PostgREST 1000-row cap).
+async function reconFetchAllRows<T = any>(
+  buildQuery: () => any,
+  label: string,
+): Promise<T[]> {
+  const all: T[] = [];
+  let offset = 0;
+  for (let guard = 0; guard < 100_000; guard++) {
+    const { data, error } = await buildQuery().range(offset, offset + PAGE_SIZE - 1);
+    if (error) throw new Error(`${label} failed: ${error.message ?? error}`);
+    const page: T[] = data || [];
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+  return all;
+}
+
+// Encoded cost of adding one id to the comma-joined `.in()` list: the id's
+// URL-encoded length plus 1 for the separating comma. Mirrors the wire format.
+function reconEncodedIdCost(id: string): number {
+  return encodeURIComponent(id).length + 1;
+}
+
+// Split ids into chunks by URL-length budget (IN_URL_BUDGET) with a secondary hard
+// count cap (IN_MAX_COUNT). A single id whose encoded cost alone exceeds the budget
+// still gets its own 1-element chunk (never an empty/infinite chunk).
+function reconChunkByUrlBudget(ids: string[]): string[][] {
+  const out: string[][] = [];
+  let cur: string[] = [];
+  let curBytes = 0;
+  for (const id of ids) {
+    const cost = reconEncodedIdCost(id);
+    if (cur.length > 0 && (curBytes + cost > IN_URL_BUDGET || cur.length >= IN_MAX_COUNT)) {
+      out.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+    cur.push(id);
+    curBytes += cost;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+// Run a paginated read for each budgeted chunk of `ids` and merge all rows. The
+// factory receives one chunk and must return a fresh query builder whose terminal
+// is .range() (i.e. it includes the .in(col, chunk) filter). Dedups ids first so a
+// duplicate straddling a chunk boundary cannot return the same DB row twice.
+async function reconFetchAllRowsInChunks<T = any>(
+  ids: string[],
+  buildQueryForChunk: (chunkIds: string[]) => any,
+  label: string,
+): Promise<T[]> {
+  const uniqueIds = Array.from(new Set(ids));
+  if (!uniqueIds.length) return [];
+  const all: T[] = [];
+  for (const ch of reconChunkByUrlBudget(uniqueIds)) {
+    const rows = await reconFetchAllRows<T>(() => buildQueryForChunk(ch), label);
+    all.push(...rows);
+  }
+  return all;
+}
+
 export interface AlertSink {
   // Reuse ops-api logBusinessEvent (business_events) + Telegram path. Injected so
   // tests can capture without writing.
@@ -844,10 +937,15 @@ export async function makesafeEmailReconcile(
   ).toISOString();
 
   // Sync side: pipeline_items joined to their originating emails (sender + date).
-  const { data: pi, error: piErr } = await client.from("pipeline_items")
-    .select("ref, target_job, source_event_ids")
-    .eq("mailbox", SES_MAILBOX);
-  if (piErr) throw new Error(`pipeline_items read failed: ${piErr.message}`);
+  // PAGINATED: pipeline_items has NO time window here, so the full projection for a
+  // busy mailbox can exceed the PostgREST 1000-row cap; an unpaginated read would
+  // silently truncate the sync side and mis-fire job_no_email / email_no_job gaps.
+  const pi = await reconFetchAllRows<any>(
+    () => client.from("pipeline_items")
+      .select("ref, target_job, source_event_ids")
+      .eq("mailbox", SES_MAILBOX),
+    "pipeline_items read",
+  );
 
   // Map ref -> originating email evidence via email_events_raw + emails. We read
   // emails within the window for sender_domain + received_at corroboration.
@@ -858,11 +956,16 @@ export async function makesafeEmailReconcile(
   // match is lost. Either way the gate must NOT run on partial evidence; THROW so
   // the caller fails closed (500) rather than persist a verdict computed on a
   // truncated/empty evidence set.
-  const { data: emails, error: emailsErr } = await client.from("emails")
-    .select("post_id, from_email, received_at, has_attachments")
-    .eq("mailbox", SES_MAILBOX)
-    .gte("received_at", sinceIso);
-  if (emailsErr) throw new Error(`emails (D1 corroboration) read failed: ${emailsErr.message}`);
+  // PAGINATED: a wide D3 window (30d) can hold >1000 ses@ emails; truncation here
+  // would drop corroboration/source-email evidence for the tail and mis-classify
+  // matched emails as dropped intake.
+  const emails = await reconFetchAllRows<any>(
+    () => client.from("emails")
+      .select("post_id, from_email, received_at, has_attachments")
+      .eq("mailbox", SES_MAILBOX)
+      .gte("received_at", sinceIso),
+    "emails (D1 corroboration) read",
+  );
   const emailById = new Map<string, { from_email: string | null; received_at: string | null }>();
   for (const e of (emails || []) as Array<any>) {
     emailById.set(e.post_id, { from_email: e.from_email ?? null, received_at: e.received_at ?? null });
@@ -877,10 +980,20 @@ export async function makesafeEmailReconcile(
     // the HIGHEST-trust D1 match tier. A swallowed error -> empty map would strip
     // every source_email_id link, mis-classifying matched emails as dropped intake.
     // THROW on error so the gate never runs on a broken linkage.
-    const { data: evs, error: evsErr } = await client.from("email_events_raw")
-      .select("id, post_id").in("id", eventIds);
-    if (evsErr) throw new Error(`email_events_raw (event->post) read failed: ${evsErr.message}`);
-    for (const ev of (evs || []) as Array<any>) eventToPost.set(ev.id, ev.post_id);
+    //
+    // D1 RECONCILE .in() URL BUG (this fix): eventIds come from
+    // pipeline_items.source_event_ids[] — Graph/Exchange event ids (~100-150 chars,
+    // URL-special chars). The previous SINGLE unbounded `.in("id", eventIds)` built
+    // an over-long request URL the Supabase gateway DROPS before sending ("error
+    // sending request for ..."), AND was subject to the 1000-row result cap. This is
+    // the SAME class as the compact-reads fix (GAP-3 resolves THIS EXACT query via
+    // chunkByUrlBudget). Chunk the id list by URL budget AND paginate each chunk.
+    const evs = await reconFetchAllRowsInChunks<any>(
+      eventIds as string[],
+      (ch) => client.from("email_events_raw").select("id, post_id").in("id", ch),
+      "email_events_raw (event->post) read",
+    );
+    for (const ev of evs as Array<any>) eventToPost.set(ev.id, ev.post_id);
   }
 
   const pipelineRefs: PipelineRef[] = (pi || []).map((p: any) => {
@@ -1047,11 +1160,17 @@ export async function makesafeEmailReconcileFullInventory(
   const livePostIds = posts.map((p) => p.id);
 
   // Stored post ids within the same window (the comparison set).
-  const { data: stored, error } = await client.from("emails")
-    .select("post_id")
-    .eq("mailbox", SES_MAILBOX)
-    .gte("received_at", sinceIso);
-  if (error) throw new Error(`emails inventory read failed: ${error.message}`);
+  // PAGINATED: this is the SET that decides which live posts are "missing". For a
+  // historical backfill (since=epoch) the whole group history easily exceeds the
+  // PostgREST 1000-row cap; a truncated stored set would mark legitimately-ingested
+  // posts as missing_post ERRORs (false D2 drops that wrongly block the gate).
+  const stored = await reconFetchAllRows<any>(
+    () => client.from("emails")
+      .select("post_id")
+      .eq("mailbox", SES_MAILBOX)
+      .gte("received_at", sinceIso),
+    "emails inventory read",
+  );
   const storedIds = (stored || []).map((e: any) => e.post_id);
 
   // M2 — a post can be legitimately TERMINAL via exclusion: it was classified as
@@ -1066,21 +1185,31 @@ export async function makesafeEmailReconcileFullInventory(
   // excluded posts). D2's missing count drives the gate, so it must run on the FULL
   // exclusion set or not at all — THROW so the caller fails closed rather than
   // computing/persisting a verdict from an incomplete accounting.
-  const { data: excl, error: exclErr } = await client.from("email_classifier_exclusions")
-    .select("post_id")
-    .eq("mailbox", SES_MAILBOX);
-  if (exclErr) throw new Error(`email_classifier_exclusions read failed: ${exclErr.message}`);
+  // PAGINATED: also a comparison set that decides "missing" — over a long history
+  // the exclusion list can exceed the 1000-row cap; truncation would re-surface
+  // legitimately-excluded posts as false missing_post ERRORs.
+  const excl = await reconFetchAllRows<any>(
+    () => client.from("email_classifier_exclusions")
+      .select("post_id")
+      .eq("mailbox", SES_MAILBOX),
+    "email_classifier_exclusions read",
+  );
   const excludedIds = (excl || []).map((e: any) => e.post_id);
 
   // Belt-and-braces: also treat any change_type='excluded' event as terminal, in
   // case the dedicated exclusions table is pruned/rebuilt but the append-only
   // email_events_raw audit log still holds the exclusion record.
   // FAIL CLOSED (sweep): same reasoning — feeds the "accounted for" set; THROW on error.
-  const { data: exclEvents, error: exclEventsErr } = await client.from("email_events_raw")
-    .select("post_id")
-    .eq("mailbox", SES_MAILBOX)
-    .eq("change_type", "excluded");
-  if (exclEventsErr) throw new Error(`email_events_raw (excluded events) read failed: ${exclEventsErr.message}`);
+  // PAGINATED: append-only audit log — the change_type='excluded' set grows
+  // unbounded over time and is another "accounted for" comparison set; truncation
+  // would re-surface excluded posts as false missing_post ERRORs.
+  const exclEvents = await reconFetchAllRows<any>(
+    () => client.from("email_events_raw")
+      .select("post_id")
+      .eq("mailbox", SES_MAILBOX)
+      .eq("change_type", "excluded"),
+    "email_events_raw (excluded events) read",
+  );
   const exclusionEventIds = (exclEvents || []).map((e: any) => e.post_id);
 
   const accountedIds = [...storedIds, ...excludedIds, ...exclusionEventIds];
