@@ -202,6 +202,35 @@ function digitCore(s: string): string | null {
   return longest.length >= 3 ? longest : null
 }
 
+function refPrefix(s: unknown): string {
+  const m = normRef(s).match(/^[A-Z]+/)
+  return m ? m[0] : ''
+}
+
+function compatibleRefPrefix(inputPrefix: string, externalPrefix: string): boolean {
+  if (!inputPrefix || !externalPrefix) return true
+  if (inputPrefix === externalPrefix) return true
+  // AJ Building & Restoration refs are stored as AJBR, while trades/admin often type AJ.
+  // Keep this alias explicit so AJ does not accidentally match AJS/other future prefixes.
+  const ajAliases = new Set(['AJ', 'AJBR'])
+  return ajAliases.has(inputPrefix) && ajAliases.has(externalPrefix)
+}
+
+function refMatchesExternalRef(inputRef: string, externalRef: string): boolean {
+  const inputNorm = normRef(inputRef)
+  const externalNorm = normRef(externalRef)
+  if (!inputNorm || !externalNorm) return false
+  if (inputNorm === externalNorm || externalNorm.includes(inputNorm) || inputNorm.includes(externalNorm)) {
+    return true
+  }
+  const inputCore = digitCore(inputRef)
+  const externalCore = digitCore(externalRef)
+  if (!inputCore || !externalCore || inputCore !== externalCore) return false
+  return compatibleRefPrefix(refPrefix(inputRef), refPrefix(externalRef))
+}
+
+export const _refMatchesExternalRefForTest = refMatchesExternalRef
+
 // Shared external_ref resolver: given a supabase client, a set of ref strings,
 // and an activeJobStatusExclude clause, returns:
 //   byId:  { [job.id]: job }  — every active job that matched any input ref
@@ -232,14 +261,10 @@ async function resolveJobsByExternalRef(
   const detailResults = await Promise.all(detailFetches)
   const allDetails: { job_id: string; external_ref: string }[] = detailResults.flatMap((r: any) => r.data || [])
 
-  // Keep only rows where normRef(external_ref) matches any normRef(ref) in our set.
-  const normRefs = new Set(refs.map(normRef))
+  // Keep only rows where stored external_ref matches an input ref, including safe AJ/AJBR aliases.
   const matchedJobIds = [...new Set(
     allDetails
-      .filter(d => {
-        const nr = normRef(d.external_ref)
-        return normRefs.has(nr) || refs.some(r => nr.includes(normRef(r)) || normRef(r).includes(nr))
-      })
+      .filter(d => refs.some(r => refMatchesExternalRef(r, d.external_ref)))
       .map(d => d.job_id)
       .filter(Boolean)
   )]
@@ -260,11 +285,10 @@ async function resolveJobsByExternalRef(
     // Find which input normRef(s) this job satisfies.
     const detail = allDetails.find(d => d.job_id === job.id)
     if (detail?.external_ref) {
-      const detailNorm = normRef(detail.external_ref)
-      // Map back to every input ref whose normRef matches or overlaps.
+      // Map back to every input ref whose normalised/external-safe form matches.
       for (const ref of refs) {
         const refNorm = normRef(ref)
-        if (detailNorm === refNorm || detailNorm.includes(refNorm) || refNorm.includes(detailNorm)) {
+        if (refMatchesExternalRef(ref, detail.external_ref)) {
           if (!byRef[refNorm]) byRef[refNorm] = []
           if (!byRef[refNorm].some((j: any) => j.id === job.id)) byRef[refNorm].push(job)
         }
@@ -273,6 +297,8 @@ async function resolveJobsByExternalRef(
   }
   return { byId, byRef }
 }
+
+export const _resolveJobsByExternalRefForTest = resolveJobsByExternalRef
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Test data filter — exclude test records from production outputs
