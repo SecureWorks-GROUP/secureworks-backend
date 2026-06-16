@@ -8302,6 +8302,16 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   let jobRows = (jobs || []).map((j: any) => {
     const detail = detailsMap[j.id] || null
     const docFlags = makesafeDocBooleans(docsMap[j.id] || [])
+    // A filed close-out report can show up two ways: (a) a job_service_reports
+    // row (legacy / submit_makesafe_report path), or (b) a typed
+    // job_documents row of type 'makesafe_report' (the M3 attach path used by
+    // the reporting/close-out skill via attach_makesafe_document). The skill
+    // files the report as a typed doc and never writes a job_service_reports
+    // row, so the audit must count the typed doc too — otherwise every report
+    // the skill produces reads as missing. See sw-makesafe-audit-tool-spec.md.
+    const hasReportDocTyped = (docsMap[j.id] || []).some(
+      (d: any) => String(d?.type || '').toLowerCase() === 'makesafe_report',
+    )
     const company = detail?.requesting_company_name || detail?.makesafe_companies?.name ||
       j.metadata?.requesting_company?.name || null
     const externalRef = detail?.external_ref || j.metadata?.external_ref || null
@@ -8332,7 +8342,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       has_report_doc: docFlags.has_report_doc,
       has_invoice_doc: docFlags.has_invoice_doc,
       has_swms_doc: docFlags.has_swms_doc,
-      has_report_record: reportSet.has(j.id),
+      has_report_record: reportSet.has(j.id) || hasReportDocTyped,
       invoice_status: distinctStatuses.length ? distinctStatuses.join(',') : null,
       invoice_no: distinctNumbers.length ? distinctNumbers.join(',') : null,
       // M3 — current LIVE (non-voided) invoice resolved by job link, AUTHORISED-first.
