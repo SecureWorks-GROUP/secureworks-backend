@@ -1753,6 +1753,28 @@ async function handler(req: Request): Promise<Response> {
     // with an uncommitted state row.
     await refreshSyncState(sb, true, null);
 
+    // Wave 1 (intake autopilot): after a successful group-sync poll, trigger the
+    // ops-api intake scan so a work-order email becomes a draft within ~5 min.
+    // Best-effort: a scan failure must NOT fail the sync poll (the watermark is
+    // already committed). The scan is idempotent (dedups by post_id + external_ref),
+    // so re-triggering on every poll is safe. The scan creates DRAFTS only; it can
+    // never approve (Wave 0 C2 gate: approve_intake_draft is human-JWT-only).
+    try {
+      const opsApiUrl = `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
+      const scanResp = await fetch(opsApiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": SW_API_KEY,
+          "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+        },
+        body: JSON.stringify({}),
+      });
+      console.log(`[monitor-ses] intake scan tail-call status=${scanResp.status}`);
+    } catch (scanErr) {
+      console.error("[monitor-ses] intake scan tail-call failed (non-fatal):", (scanErr as Error).message);
+    }
+
     const result = {
       success: true,
       group_id: groupId,
