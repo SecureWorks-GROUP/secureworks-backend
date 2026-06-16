@@ -1821,24 +1821,29 @@ serve(async (req: Request) => {
     // ── Register an uploaded media item in the database ──
     if (action === 'register_media' && req.method === 'POST') {
       const body = await req.json()
-      const { jobId, storageUrl, type, label } = body
+      const { jobId, storageUrl, type, label, thumbnailUrl } = body
       if (!jobId || !storageUrl) return json({ error: 'jobId and storageUrl required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const { data, error } = await sb.from('job_media').insert({
+      const insertRow: Record<string, unknown> = {
         job_id: jobId,
         type: type || 'photo',
         storage_url: storageUrl,
         label: label || '',
         phase: 'scope',
-      }).select().single()
+      }
+      // Persist the thumbnail when the caller supplies one. When omitted the
+      // column stays null and the UI falls back to storage_url (existing behaviour).
+      if (thumbnailUrl) insertRow.thumbnail_url = thumbnailUrl
+
+      const { data, error } = await sb.from('job_media').insert(insertRow).select().single()
 
       if (error) {
         console.log('[ghl-proxy] register_media error:', error)
         return json({ error: error.message }, 500)
       }
 
-      return json({ id: data.id, url: storageUrl })
+      return json({ id: data.id, url: storageUrl, thumbnail_url: data.thumbnail_url || null })
     }
 
     // ── Upload a photo to Supabase Storage ──
