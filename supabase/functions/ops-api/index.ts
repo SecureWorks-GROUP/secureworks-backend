@@ -183,6 +183,11 @@ import {
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
 } from './makesafe_intake_gate.ts'
 
+// Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
+// the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
+// == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
+import { loadRefPrefixes, normaliseRef } from '../_shared/makesafe_refs.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -1788,7 +1793,17 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'geocode_job': return json(await geocodeJob(client, body))
       case 'geocode_missing_makesafes': return json(await geocodeMissingMakesafes(client))
       case 'list_intake_drafts': return json(await listIntakeDrafts(client, url.searchParams))
-      case 'approve_intake_draft': return json(await approveIntakeDraft(client, body))
+      // Wave 0 C2 gate (red-team): approving a draft creates a LIVE make-safe job.
+      // This is a human-only action. The automation api-key (the routine SW_API_KEY)
+      // is allowed to CREATE and READ drafts but must NEVER approve them, so we
+      // reject api_key entirely here and require a logged-in admin/owner JWT.
+      case 'approve_intake_draft': {
+        const approveIsHuman = authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner')
+        if (!approveIsHuman) {
+          return json({ error: 'forbidden: approve_intake_draft requires an authenticated admin/owner (human) session; the automation api-key cannot approve drafts' }, 403)
+        }
+        return json(await approveIntakeDraft(client, body))
+      }
       case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
       case 'create_intake_draft': return json(await createIntakeDraft(client, body))
       case 'scan_ses_makesafes': return json(await scanSesMakesafes(client))
@@ -8673,11 +8688,10 @@ async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
 
-  // Load the draft
+  // Load the draft for its field data (extraction/reviewed values below need draft.*).
   const { data: draft, error: dErr } = await client.from('makesafe_intake_drafts')
     .select('*').eq('id', draft_id).single()
   if (dErr || !draft) throw new Error('Draft not found')
-  if (draft.status === 'approved') throw new Error('Draft already approved')
 
   const extraction = parseJsonObject(draft.extraction_json)
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
@@ -8707,74 +8721,116 @@ async function approveIntakeDraft(client: any, body: any) {
   if (attachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
-  // Duplicate guard: warn/block same external ref already live before creating another job.
+  // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
+  // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
+  // so "AJBR 67200", "AJBR-67200" and "AJBR67200" all collapse to one canonical key
+  // rather than relying on near-exact ilike. When there is genuinely no match, this
+  // is a no-op and distinct refs still pass.
   if (approvedFields.external_ref) {
-    const { data: existingDetail } = await client.from('makesafe_job_details')
-      .select('job_id, external_ref, jobs(job_number, client_name, site_address, status)')
-      .ilike('external_ref', approvedFields.external_ref)
-      .limit(1)
-      .maybeSingle()
-    if (existingDetail?.job_id) {
-      const existingJob = Array.isArray(existingDetail.jobs) ? existingDetail.jobs[0] : existingDetail.jobs
-      throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || existingDetail.job_id))
+    const prefixes = await loadRefPrefixes(client)
+    const normTarget = normaliseRef(approvedFields.external_ref, prefixes)
+    if (normTarget) {
+      // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
+      // the refs already on live jobs is cheap and lets us match on normalised form.
+      const { data: candidates } = await client.from('makesafe_job_details')
+        .select('job_id, external_ref, jobs(job_number, client_name, site_address, status)')
+        .not('external_ref', 'is', null)
+      const dup = (candidates || []).find((row: any) => normaliseRef(row.external_ref, prefixes) === normTarget)
+      if (dup?.job_id) {
+        const existingJob = Array.isArray(dup.jobs) ? dup.jobs[0] : dup.jobs
+        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id))
+      }
     }
   }
 
-  // Create the make-safe job using reviewed/edited fields, not stale extraction data.
-  const jobResult = await createMakesafeJob(client, {
-    client_name: approvedFields.client_name,
-    site_address: approvedFields.site_address,
-    suburb: approvedFields.site_suburb,
-    phone: approvedFields.client_phone,
-    email: approvedFields.client_email,
-    requesting_company_slug: approvedFields.requesting_company_slug,
-    requesting_company_name: approvedFields.requesting_company_name,
-    external_ref: approvedFields.external_ref,
-    description: approvedFields.description,
-    makesafe_type: approvedFields.makesafe_type,
-    safety_requirements: approvedFields.safety_requirements,
-    special_instructions: approvedFields.special_instructions,
-    suppress_notifications: true,
-  })
-
-  // Link draft to created job and preserve the reviewed values on the draft audit row.
-  await client.from('makesafe_intake_drafts').update({
-    status: 'approved',
-    approved_job_id: jobResult.job.id,
-    approved_at: new Date().toISOString(),
-    approved_by: approved_by || null,
-    review_notes: body.review_notes || body.reviewNotes || 'Approved in Ops intake review gate after PDF/source comparison.',
-    requesting_company_slug: approvedFields.requesting_company_slug,
-    requesting_company_name: approvedFields.requesting_company_name,
-    external_ref: approvedFields.external_ref,
-    client_name: approvedFields.client_name,
-    client_phone: approvedFields.client_phone,
-    client_email: approvedFields.client_email,
-    site_address: approvedFields.site_address,
-    site_suburb: approvedFields.site_suburb,
-    description: approvedFields.description,
-    safety_requirements: approvedFields.safety_requirements,
-    special_instructions: approvedFields.special_instructions,
-    updated_at: new Date().toISOString(),
-  }).eq('id', draft_id)
-
-  // Attach any PDF attachments from the original email as visible work orders.
-  for (const att of attachments) {
-    if (att.storage_url || att.pdf_url) {
-      try {
-        await client.from('job_documents').insert({
-          job_id: jobResult.job.id,
-          type: 'work_order',
-          file_name: att.file_name || att.name || 'work-order.pdf',
-          storage_url: att.storage_url || att.pdf_url,
-          pdf_url: att.pdf_url || att.storage_url,
-          visible_to_trades: true,
-        })
-      } catch (_) { /* non-blocking */ }
-    }
+  // Atomic claim (Wave 0 C3, TOCTOU): claim the draft BEFORE creating the job so two
+  // concurrent approvals cannot both create a live job. The status CHECK constraint
+  // (migration 20260602000001) only permits draft/needs_review/approved/rejected/
+  // superseded -- there is NO 'approving' value -- so we claim DIRECTLY to 'approved'
+  // gated on the current reviewable status, and drop the separate final status write
+  // (the audit fields are still written below). A draft may legitimately be approved
+  // from either 'needs_review' or 'draft', so the claim allows both (the narrowest
+  // set that does not break the happy path); any other current status (approved,
+  // approving-n/a, rejected, superseded) yields zero rows -> concurrent/invalid block.
+  const { data: claimed, error: claimErr } = await client.from('makesafe_intake_drafts')
+    .update({ status: 'approved', updated_at: new Date().toISOString() })
+    .eq('id', draft_id)
+    .in('status', ['needs_review', 'draft'])
+    .select()
+  if (claimErr) throw claimErr
+  if (!claimed || claimed.length === 0) {
+    throw new Error('Draft is not in needs_review state (already approved, approving, or rejected) - concurrent approval blocked')
   }
 
-  return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields }
+  // Failure-safety: everything from job creation through the audit-field write runs
+  // inside this try. If any step throws, reset the draft back to 'needs_review' so a
+  // failed approve does not permanently strand the claimed draft, then rethrow.
+  try {
+    // Create the make-safe job using reviewed/edited fields, not stale extraction data.
+    const jobResult = await createMakesafeJob(client, {
+      client_name: approvedFields.client_name,
+      site_address: approvedFields.site_address,
+      suburb: approvedFields.site_suburb,
+      phone: approvedFields.client_phone,
+      email: approvedFields.client_email,
+      requesting_company_slug: approvedFields.requesting_company_slug,
+      requesting_company_name: approvedFields.requesting_company_name,
+      external_ref: approvedFields.external_ref,
+      description: approvedFields.description,
+      makesafe_type: approvedFields.makesafe_type,
+      safety_requirements: approvedFields.safety_requirements,
+      special_instructions: approvedFields.special_instructions,
+      suppress_notifications: true,
+    })
+
+    // Link draft to created job and preserve the reviewed values on the draft audit
+    // row. Status was already set to 'approved' by the atomic claim above, so this
+    // update writes only the audit/linkage fields (no redundant status write).
+    await client.from('makesafe_intake_drafts').update({
+      approved_job_id: jobResult.job.id,
+      approved_at: new Date().toISOString(),
+      approved_by: approved_by || null,
+      review_notes: body.review_notes || body.reviewNotes || 'Approved in Ops intake review gate after PDF/source comparison.',
+      requesting_company_slug: approvedFields.requesting_company_slug,
+      requesting_company_name: approvedFields.requesting_company_name,
+      external_ref: approvedFields.external_ref,
+      client_name: approvedFields.client_name,
+      client_phone: approvedFields.client_phone,
+      client_email: approvedFields.client_email,
+      site_address: approvedFields.site_address,
+      site_suburb: approvedFields.site_suburb,
+      description: approvedFields.description,
+      safety_requirements: approvedFields.safety_requirements,
+      special_instructions: approvedFields.special_instructions,
+      updated_at: new Date().toISOString(),
+    }).eq('id', draft_id)
+
+    // Attach any PDF attachments from the original email as visible work orders.
+    for (const att of attachments) {
+      if (att.storage_url || att.pdf_url) {
+        try {
+          await client.from('job_documents').insert({
+            job_id: jobResult.job.id,
+            type: 'work_order',
+            file_name: att.file_name || att.name || 'work-order.pdf',
+            storage_url: att.storage_url || att.pdf_url,
+            pdf_url: att.pdf_url || att.storage_url,
+            visible_to_trades: true,
+          })
+        } catch (_) { /* non-blocking */ }
+      }
+    }
+
+    return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields }
+  } catch (postClaimErr) {
+    // Best-effort release of the claim so the draft returns to the review queue.
+    try {
+      await client.from('makesafe_intake_drafts')
+        .update({ status: 'needs_review', updated_at: new Date().toISOString() })
+        .eq('id', draft_id)
+    } catch (_) { /* best-effort; do not mask the original error */ }
+    throw postClaimErr
+  }
 }
 
 // ── Slice 7: reject intake draft ──
@@ -9059,6 +9115,21 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     const extractedRef = extraction.external_ref || null
     if (extractedRef && existingRefs.has(extractedRef.toUpperCase())) continue
 
+    // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
+    // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
+    // same required-field logic approveIntakeDraft uses (requesting_company, external_
+    // ref, client_name, site_address, and a work-order PDF via attachments.length): a
+    // draft missing any required field stays 'draft', a complete one goes to
+    // 'needs_review'. Both values are valid per the status CHECK constraint
+    // (migration 20260602000001).
+    const missingRequired = (
+      (!matchedCompany?.slug && !matchedCompany?.name) ||
+      !extractedRef ||
+      !extraction.client_name ||
+      !extraction.site_address ||
+      attachments.length === 0
+    )
+
     // Create draft
     const draft = {
       org_id: DEFAULT_ORG_ID,
@@ -9086,6 +9157,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       missing_fields: missingFields,
       extraction_json: extraction,
       attachments_json: attachments,
+      status: missingRequired ? 'draft' : 'needs_review',
     }
 
     const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')
