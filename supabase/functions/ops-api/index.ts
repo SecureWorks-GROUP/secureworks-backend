@@ -185,7 +185,7 @@ import {
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
 import {
-  sendPackIsHuman,
+  sendPackAllowed,
   resolveExistingInvoice,
   checkClientSendGate,
   buildPackSentMarkerText,
@@ -2791,16 +2791,22 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── MakeSafe Reporting Autopilot (Wave 2) ──
       // create_makesafe_draft_invoice + makesafe_render_report are routine-safe
       // (no send, no authorise). makesafe_send_pack authorises + emails and is
-      // HUMAN-ONLY: the api-key is rejected at the case, admin/owner JWT only.
+      // PRIVILEGED: reachable by the dashboard (master SW_API_KEY) or an
+      // admin/owner JWT only; the make-safe automation routine is rejected.
       case 'create_makesafe_draft_invoice':
         return json(await createMakesafeDraftInvoice(client, body))
       case 'makesafe_render_report':
         return json(await makesafeRenderReport(client, body))
       case 'makesafe_send_pack': {
-        // HUMAN-ONLY money/comms gate. Copies the approve_intake_draft pattern:
-        // the routine api-key can never authorise an invoice or email a builder.
-        if (!sendPackIsHuman(authMode, authUser)) {
-          return json({ error: 'forbidden: makesafe_send_pack requires an admin or owner user session (JWT)' }, 403)
+        // auth per decision scoped-routine-key-2026-06-17: privileged SW_API_KEY
+        // (dashboard) OR jwt admin/owner; the scoped routine key (authMode='routine',
+        // Sentinel Wave 0 PR #179) is rejected here and centrally via
+        // ROUTINE_FORBIDDEN_ACTIONS. The ops dashboard (secureworks-ux/ops.html)
+        // authenticates with the master SW_API_KEY (no per-user login), so its own
+        // approve/send button is authMode='api_key' and must be allowed.
+        const sendPackAllowed_ = sendPackAllowed(authMode, authUser)
+        if (!sendPackAllowed_) {
+          return json({ error: 'forbidden: makesafe_send_pack requires the privileged dashboard key or an admin/owner session; the make-safe automation routine cannot send' }, 403)
         }
         return json(await makesafeSendPack(client, body, {
           approverId: authUser?.id || null,
@@ -14295,9 +14301,11 @@ async function _patchPack(client: any, jobId: string, packKind: string, patch: R
   }
 }
 
-// (3c) makesafe_send_pack — the RESUMABLE STATE MACHINE. HUMAN-ONLY (gated at the
-// route case). Authorises the Xero invoice + emails the builder, fail-closed at
-// every irreversible step so a partial failure is recoverable.
+// (3c) makesafe_send_pack — the RESUMABLE STATE MACHINE. PRIVILEGED-CALLER ONLY
+// (gated at the route case: dashboard SW_API_KEY or admin/owner JWT; the make-safe
+// routine key is rejected — decision scoped-routine-key-2026-06-17). Authorises
+// the Xero invoice + emails the builder, fail-closed at every irreversible step so
+// a partial failure is recoverable.
 async function makesafeSendPack(
   client: any,
   body: any,
