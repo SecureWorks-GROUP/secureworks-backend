@@ -194,6 +194,17 @@ import {
   MAKESAFE_ADMIN_FROM,
   MAKESAFE_CC,
 } from './makesafe_send_pack.ts'
+// Wave 2 -- READ-ONLY report-draft cockpit feed (the informed-approve content
+// gate). Pure composers + normalisers; the orchestration below supplies the
+// live client + storage signing.
+import {
+  REPORT_DRAFT_READY_SUBSTATUS,
+  composeDefaultSubject,
+  composeDefaultHtmlBody,
+  normaliseLineItems,
+  computeInvoiceTotals,
+  resolveRecipientEmail,
+} from './makesafe_report_drafts.ts'
 
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
@@ -213,7 +224,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 231
+const OPS_API_EXPECTED_ACTION_COUNT = 232
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -1808,6 +1819,15 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
+      // Wave 2 — READ-ONLY feed for the report-draft cockpit (informed-approve
+      // content gate). Returns report-draft-ready jobs (substatus =
+      // admin_to_send_report) with invoice line items + totals, signed PDF urls
+      // (report + invoice), evidence photos, recipient builder email, and a
+      // gate-passing default subject + html body the human can review/edit
+      // before the approve button calls makesafe_send_pack. No writes. Callable
+      // by the dashboard api_key / a jwt (same posture as every read action).
+      case 'makesafe_report_drafts':
+        return json(await makesafeReportDrafts(client, url.searchParams))
       // ── Mission makesafe-live-truth (M2): compact READ endpoints GAP-1..6 ──
       // All read-only against business data. They serve the email-sync Supabase
       // projection (emails / email_attachments / pipeline_items) so the make-safe
@@ -14396,6 +14416,195 @@ async function attachMakesafeDocument(client: any, body: any) {
 // ════════════════════════════════════════════════════════════════════════════
 // MakeSafe Reporting Autopilot (Wave 2) — draft invoice, render report, send pack
 // ════════════════════════════════════════════════════════════════════════════
+
+// (3d) makesafe_report_drafts — READ-ONLY feed for the report-draft cockpit.
+// Returns every report-draft-ready job (makesafe_job_details.substatus =
+// 'admin_to_send_report') with the full informed-approve content set: invoice
+// line items + totals, signed/public PDF urls (report + invoice), evidence
+// photos, the builder recipient email, a gate-passing default subject + html
+// body, and the send-pack status if a pack row exists. No writes, no Xero, no
+// send. The cockpit shows all of this so a human can make an informed decision
+// before the approve button fires makesafe_send_pack.
+//
+// NOTE on invoice line items: createInvoice does NOT write line_items into the
+// local xero_invoices row — only the 2-hourly xero-sync does. So a freshly
+// drafted make-safe invoice can have NULL/[] lines locally. When that happens we
+// return lines:[] + lines_unavailable:true + a note; the inline invoice PDF in
+// the cockpit still satisfies the informed-approve gate (the amount + the PDF
+// are enough to decide).
+async function makesafeReportDrafts(client: any, params: URLSearchParams) {
+  const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 200)
+  const SIGNED_TTL = 600 // 10 min, short-lived signed urls for any private docs
+
+  // 1) The report-draft-ready make-safe details.
+  const { data: details, error: detErr } = await client
+    .from('makesafe_job_details')
+    .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, invoice_notes, makesafe_companies(slug, name, invoice_email)')
+    .eq('substatus', REPORT_DRAFT_READY_SUBSTATUS)
+    .limit(limit)
+  if (detErr) throw new ApiError('makesafe_report_drafts: details read failed: ' + detErr.message, 500)
+  const detailRows = details || []
+  if (detailRows.length === 0) return { drafts: [], count: 0 }
+
+  const jobIds: string[] = detailRows.map((d: any) => d.job_id).filter(Boolean)
+
+  // 2) Bulk-load the related rows for those jobs (each a single .in() read).
+  const [jobsRes, invoicesRes, docsRes, mediaRes, packsRes] = await Promise.all([
+    client.from('jobs')
+      .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, status, type')
+      .in('id', jobIds),
+    client.from('xero_invoices')
+      .select('xero_invoice_id, invoice_number, status, reference, sub_total, total, total_tax, line_items, job_id, invoice_date')
+      .in('job_id', jobIds)
+      .order('invoice_date', { ascending: false }),
+    client.from('job_documents')
+      .select('id, job_id, type, file_name, storage_url, pdf_url, version')
+      .in('job_id', jobIds),
+    client.from('job_media')
+      .select('id, job_id, phase, type, storage_url, thumbnail_url, label')
+      .in('job_id', jobIds)
+      .eq('phase', 'completion'),
+    client.from('makesafe_report_packs')
+      .select('job_id, pack_kind, status, xero_invoice_id, invoice_status, sent_at, failed_step, error_detail')
+      .in('job_id', jobIds),
+  ])
+
+  const jobsById: Record<string, any> = {}
+  for (const j of (jobsRes.data || [])) jobsById[j.id] = j
+
+  const invoicesByJob: Record<string, any[]> = {}
+  for (const inv of (invoicesRes.data || [])) {
+    (invoicesByJob[inv.job_id] ||= []).push(inv)
+  }
+  const docsByJob: Record<string, any[]> = {}
+  for (const d of (docsRes.data || [])) (docsByJob[d.job_id] ||= []).push(d)
+  const mediaByJob: Record<string, any[]> = {}
+  for (const m of (mediaRes.data || [])) (mediaByJob[m.job_id] ||= []).push(m)
+  const packByJob: Record<string, any> = {}
+  for (const p of (packsRes.data || [])) {
+    if ((p.pack_kind || 'main') === 'main') packByJob[p.job_id] = p
+  }
+
+  // Mint a short-lived signed url for a job_documents storage path. The
+  // job-documents bucket is public so pdf_url/storage_url is usually a full
+  // public url already; we sign only when the stored value looks like a bare
+  // storage path (no scheme). Falls back to the stored value on any failure.
+  const signDocUrl = async (stored: string | null | undefined): Promise<string | null> => {
+    const raw = stored || null
+    if (!raw) return null
+    if (/^https?:\/\//i.test(raw)) return raw // already a full (public) url
+    try {
+      const { data: signed } = await client.storage
+        .from('job-documents')
+        .createSignedUrl(raw, SIGNED_TTL)
+      return signed?.signedUrl || signed?.signedURL || raw
+    } catch (_) {
+      return raw
+    }
+  }
+
+  // 3) Assemble one cockpit row per report-draft-ready job.
+  const drafts = await Promise.all(detailRows.map(async (d: any) => {
+    const job = jobsById[d.job_id] || {}
+    const company = d.makesafe_companies || {}
+    const jobInvoices = invoicesByJob[d.job_id] || []
+    // The live (non-void) invoice — same posture as makesafe_send_pack preflight.
+    const liveInvoice = jobInvoices.find((inv: any) =>
+      !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase())) || jobInvoices[0] || null
+
+    const lines = normaliseLineItems(liveInvoice?.line_items)
+    const linesUnavailable = !!liveInvoice && lines.length === 0
+    const totals = computeInvoiceTotals({
+      subTotal: liveInvoice?.sub_total ?? null,
+      total: liveInvoice?.total ?? null,
+      lines,
+    })
+
+    const docs = docsByJob[d.job_id] || []
+    const pickLatest = (type: string) => {
+      const cands = docs.filter((x: any) => x.type === type)
+      cands.sort((a: any, b: any) => (b.version || 1) - (a.version || 1))
+      return cands[0] || null
+    }
+    const reportDoc = pickLatest('makesafe_report')
+    const invoiceDoc = pickLatest('invoice')
+    const [reportPdfUrl, invoicePdfUrl] = await Promise.all([
+      signDocUrl(reportDoc?.pdf_url || reportDoc?.storage_url),
+      signDocUrl(invoiceDoc?.pdf_url || invoiceDoc?.storage_url),
+    ])
+
+    const photos = (mediaByJob[d.job_id] || []).map((m: any) => ({
+      url: m.storage_url || null,
+      thumbnail_url: m.thumbnail_url || m.storage_url || null,
+      label: m.label || null,
+    })).filter((p: any) => p.url)
+
+    const recipientEmail = resolveRecipientEmail({
+      companyInvoiceEmail: company.invoice_email,
+      detailInvoiceEmail: null, // no per-job recipient column on makesafe_job_details
+    })
+
+    const builderName = d.requesting_company_name || company.name || ''
+    const siteAddress = job.site_address || null
+    const subject = composeDefaultSubject({
+      externalRef: d.external_ref,
+      siteAddress,
+      siteSuburb: job.site_suburb,
+    })
+    const htmlBody = composeDefaultHtmlBody({
+      builderName,
+      externalRef: d.external_ref,
+      clientName: job.client_name,
+      siteAddress,
+      invoiceNumber: liveInvoice?.invoice_number || null,
+      totalIncGst: totals.total_inc_gst,
+    })
+
+    const pack = packByJob[d.job_id] || null
+
+    return {
+      job_id: d.job_id,
+      job_number: job.job_number || null,
+      builder: builderName,
+      requesting_company_name: builderName,
+      external_ref: d.external_ref || null,
+      client_name: job.client_name || null,
+      client_email: job.client_email || null,
+      client_phone: job.client_phone || null,
+      site_address: siteAddress,
+      site_suburb: job.site_suburb || null,
+      recipient_email: recipientEmail, // null -> cockpit shows a warning
+      invoice: liveInvoice ? {
+        invoice_number: liveInvoice.invoice_number || null,
+        status: liveInvoice.status || null,
+        reference: liveInvoice.reference || null,
+        total_ex_gst: totals.total_ex_gst,
+        total_inc_gst: totals.total_inc_gst,
+        totals_source: totals.source,
+        lines,
+        lines_unavailable: linesUnavailable,
+        lines_note: linesUnavailable
+          ? 'line detail not yet synced locally; see the invoice PDF below for the full breakdown'
+          : null,
+      } : null,
+      report_pdf_url: reportPdfUrl,
+      invoice_pdf_url: invoicePdfUrl,
+      photos,
+      // Defaults the human sees + can edit. Composed to pass the client-send gate.
+      default_subject: subject,
+      default_html_body: htmlBody,
+      pack_status: pack ? {
+        status: pack.status || null,
+        invoice_status: pack.invoice_status || null,
+        sent_at: pack.sent_at || null,
+        failed_step: pack.failed_step || null,
+        error_detail: pack.error_detail || null,
+      } : null,
+    }
+  }))
+
+  return { drafts, count: drafts.length }
+}
 
 // Fetch the FULL live ACCREC invoice set, paginating list_invoices' source so the
 // dup-guard scans every invoice (not a recent window). Mirrors the python
