@@ -802,9 +802,48 @@ const DEFAULT_RULES: ReadinessRule[] = [
 // Job types that run on van stock — no POs or material deliveries needed
 const VAN_STOCK_JOB_TYPES = ['makesafe', 'inspection', 'report']
 
+// M4 allocation truth — derive crew_assigned from the LIVE assignments[] rather
+// than the job_intelligence.assignment_count materialized-view column, which is
+// stale for freshly-allocated jobs (most acutely make-safe, where the MV refresh
+// lags or never fires). A job counts as crew-assigned when it has at least one
+// assignment that is:
+//   • not cancelled                            (status != 'cancelled')
+//   • not a pure observer / ghost placeholder  (role/assignment_type not observer)
+//   • scheduled for today or the future        (no past-only stale allocations)
+// This is intentionally STRICTER than assignment_count > 0: a job whose only
+// assignment is a past-dated stale row (e.g. the proof's SWMS-26604) does NOT
+// flip to ready — readiness must reflect a live, actionable allocation.
+const OBSERVER_ROLES = new Set(['observer', 'ghost'])
+function isLiveCrewAssignment(a: any, todayStr: string): boolean {
+  if (!a) return false
+  const status = String(a.status ?? a.assignment_status ?? '').toLowerCase()
+  if (status === 'cancelled' || status === 'declined') return false
+  const role = String(a.role ?? '').toLowerCase()
+  const aType = String(a.assignment_type ?? '').toLowerCase()
+  if (OBSERVER_ROLES.has(role) || OBSERVER_ROLES.has(aType)) return false
+  // Make-safe open-pool synthetic cards are not a real named allocation.
+  if (role === 'makesafe_open' || aType === 'makesafe_open') return false
+  const date = a.scheduled_date ?? null
+  // No date = treat as live (can't disprove); with a date it must be today/future.
+  if (date && String(date) < todayStr) return false
+  return true
+}
+function liveCrewAssigned(assignments: any[] | null | undefined): boolean {
+  if (!Array.isArray(assignments) || assignments.length === 0) return false
+  const todayStr = getAWSTDate()
+  return assignments.some((a) => isLiveCrewAssignment(a, todayStr))
+}
+export const _liveCrewAssignedForTest = liveCrewAssigned
+
 function evaluateCheck(check: string, data: Record<string, any>): boolean {
   // Simple expression evaluator for readiness checks
   // Supports: 'field > N', 'field', 'has_doc_TYPE'
+  // M4: crew_assigned derives from live assignments[] when supplied (overrides
+  // the stale assignment_count column). Falls back to assignment_count when no
+  // assignments array was threaded in, so non-allocation callers are unchanged.
+  if (check === 'assignment_count > 0' && data._has_live_assignments) {
+    return !!data._live_crew_assigned
+  }
   const gtMatch = check.match(/^(\w+)\s*>\s*(\d+)$/)
   if (gtMatch) {
     const val = Number(data[gtMatch[1]] || 0)
@@ -855,11 +894,20 @@ function computeReadiness(
   intelligence: Record<string, any>,
   scopeJson: any,
   pricingJson?: any,
+  assignments?: any[] | null,
 ): JobReadiness {
   const rules = READINESS_RULES[jobType] || DEFAULT_RULES
 
   // Inject pricing_json into data so evaluateCondition can access it
-  const data = { ...intelligence, _pricing_json: pricingJson || {} }
+  const data: Record<string, any> = { ...intelligence, _pricing_json: pricingJson || {} }
+
+  // M4 allocation truth — when the caller threads the live assignments[] in,
+  // crew_assigned is derived from that real data (see evaluateCheck/liveCrewAssigned)
+  // instead of the stale job_intelligence.assignment_count materialized-view column.
+  if (assignments !== undefined && assignments !== null) {
+    data._has_live_assignments = true
+    data._live_crew_assigned = liveCrewAssigned(assignments)
+  }
 
   const blockers: ReadinessItem[] = []
   const warnings: ReadinessItem[] = []
@@ -901,6 +949,8 @@ function computeReadiness(
 
   return { score, status, blockers, warnings, completeness }
 }
+// M4 — test-only export so the crew_assigned-from-live-assignments path is unit-testable.
+export const _computeReadinessForTest = computeReadiness
 
 // AWST = UTC+8 — Perth has no daylight saving
 const AWST_OFFSET_MS = 8 * 60 * 60 * 1000
@@ -5324,7 +5374,7 @@ async function calendarEvents(client: any, params: URLSearchParams) {
 
   // Run PO delivery queries in parallel for performance
   const events = data || []
-  const uniqueJobIds = [...new Set(events.map((e: any) => e.job_id).filter(Boolean))]
+  const uniqueJobIds: string[] = [...new Set(events.map((e: any) => e.job_id).filter(Boolean))] as string[]
 
   const poSelect = 'id, po_number, supplier_name, delivery_date, confirmed_delivery_date, job_id, status, total'
   const [
@@ -5362,6 +5412,14 @@ async function calendarEvents(client: any, params: URLSearchParams) {
       intelMap[row.job_id] = row
     }
 
+    // M4: group calendar_events (one row per assignment) by job so crew_assigned
+    // derives from the live assignment rows, not the stale assignment_count column.
+    const eventsByJob: Record<string, any[]> = {}
+    for (const e of events) {
+      if (!e?.job_id) continue
+      ;(eventsByJob[e.job_id] ||= []).push(e)
+    }
+
     // Get scope_json for conditional rules (from events data — already have it)
     for (const jobId of uniqueJobIds) {
       const intel = intelMap[jobId] || {}
@@ -5370,7 +5428,7 @@ async function calendarEvents(client: any, params: URLSearchParams) {
       const scopeJson = ev?.scope_json || null
       const pricingJson = typeof ev?.pricing_json === 'string' ? JSON.parse(ev.pricing_json || '{}') : (ev?.pricing_json || {})
       const jobType = intel.job_type || ev?.job_type || 'patio'
-      readiness[jobId] = computeReadiness(jobType, intel, scopeJson, pricingJson)
+      readiness[jobId] = computeReadiness(jobType, intel, scopeJson, pricingJson, eventsByJob[jobId] || [])
     }
   }
 
@@ -5686,6 +5744,9 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
         intelRow,
         job?.scope_json || null,
         pJson,
+        // M4: pass the LIVE assignments[] (already fetched above) so crew_assigned
+        // reflects real allocation, not the stale assignment_count MV column.
+        assignRes.data || [],
       )
     }
   } catch (e) {
@@ -9025,7 +9086,23 @@ async function createAssignment(client: any, body: any) {
   const validConfStatuses = ['placeholder', 'tentative', 'confirmed']
   const finalConfStatus = validConfStatuses.includes(confStatus) ? confStatus : 'tentative'
 
-  const { data, error } = await client.from('job_assignments').insert({
+  // Fetch the job up-front: needed for the make-safe trade-visibility trigger AND
+  // the legacy accepted->processing auto-advance below (one read instead of two).
+  const { data: currentJob } = await client.from('jobs')
+    .select('id, type, job_number, status').eq('id', jId).single()
+
+  // M4 allocation truth — defect #2: when a MAKE-SAFE assignment is created
+  // (the dispatcher allocates the job to a named crew), expose it to the trade
+  // app by setting visible_to_trades=true on this row. Without this, allocated
+  // make-safes stay invisible (the column defaults to false in prod) and the
+  // crew never sees the job. Scoped to make-safe ONLY — ordinary patio/fencing/
+  // decking assignments keep their existing visibility behaviour (we only set the
+  // flag for make-safe, never clear it for others). This fires at allocation, not
+  // earlier: an open-pool make-safe with no named assignment is unaffected.
+  const isMakesafe = isMakesafeAccessJob(currentJob) ||
+    (currentJob?.id ? await hasMakesafeDetailForAccess(client, currentJob.id) : false)
+
+  const insertRow: Record<string, any> = {
     job_id: jId,
     user_id: userId || user_id || null,
     scheduled_date: sDate,
@@ -9038,14 +9115,16 @@ async function createAssignment(client: any, body: any) {
     crew_name: crewName || crew_name || null,
     status: 'scheduled',
     confirmation_status: finalConfStatus,
-  }).select().single()
+  }
+  if (isMakesafe) insertRow.visible_to_trades = true
+
+  const { data, error } = await client.from('job_assignments').insert(insertRow).select().single()
 
   if (error) throw error
 
   // Auto-update job status when crew is assigned
   // processing jobs with crew assigned can auto-advance (kept for backwards compat)
   // Legacy 'accepted' jobs also auto-advance to 'processing'
-  const { data: currentJob } = await client.from('jobs').select('status').eq('id', jId).single()
   if (currentJob?.status === 'accepted') {
     await client.from('jobs').update({ status: 'processing', processing_at: new Date().toISOString() }).eq('id', jId)
   }
