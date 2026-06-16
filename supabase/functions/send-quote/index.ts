@@ -1622,6 +1622,9 @@ serve(async (req: Request) => {
             const invoiceBody: any = {
               job_id: job.id,
               notify_client: true,
+              // Bind the deposit basis to the accepted document so ops-api reads the
+              // frozen quote_revision for THIS document (not "latest for the job").
+              job_document_id: doc.id,
             }
 
             // If this is a per-neighbour document, pass the contact info for portion-based invoicing

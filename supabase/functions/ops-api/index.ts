@@ -15588,37 +15588,58 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   // pricing_snapshot_json.raw at send time (see build_minimal_manifest.ts), so we
   // prefer it. Fall back to live config only when no released revision exists.
   //
-  // "The accepted revision" = the most recently RELEASED revision for this job
-  // (sent_at IS NOT NULL, ordered sent_at DESC). Released rows are immutable
-  // (DB triggers), so this is a safe frozen source. Staged-but-unsent rows are
-  // excluded. NOTE: the deposit config in the snapshot is job-level (same shape
-  // as live); per-neighbour share amounts are computed by the send-quote caller
-  // and passed in explicitly via body.deposit_amount/body.deposit_percent, which
-  // continue to take precedence below — those paths are unaffected by this change.
+  // Binding to the ACCEPTED artifact: acceptance happens for a specific
+  // job_documents row (the share_token the client clicked). quote_revisions.
+  // job_document_id links a revision back to that document. So when the caller
+  // passes job_document_id (the accepted document — send-quote/accept does this),
+  // we select the revision for THAT document, not "latest for the job". This is
+  // correct under multi-contact (per-neighbour docs) and multi-revision re-sends.
+  // If a document has more than one released revision, take the most recent
+  // (sent_at DESC) — that is the terms last shown for that document.
+  //
+  // When no job_document_id is supplied (manual triggers via sale.html / MCP that
+  // do not know the document), fall back to the most recently RELEASED revision
+  // for the job (sent_at IS NOT NULL, sent_at DESC). Released rows are immutable
+  // (DB triggers), so the frozen source is safe. Staged-but-unsent rows excluded.
+  //
+  // NOTE: the deposit config in the snapshot is job-level (same shape as live);
+  // per-neighbour share AMOUNTS are computed by the send-quote caller and passed
+  // explicitly via body.deposit_amount/body.deposit_percent, which take precedence
+  // below — those paths' amounts are unaffected by this change.
+  const acceptedJobDocumentId = body.job_document_id || null
   let frozenDeposit: any = null
+  let frozenSource = ''
   try {
-    const { data: acceptedRev } = await client
+    let revQuery = client
       .from('quote_revisions')
-      .select('pricing_snapshot_json, sent_at')
+      .select('pricing_snapshot_json, sent_at, job_document_id')
       .eq('job_id', jId)
       .not('sent_at', 'is', null)
       .order('sent_at', { ascending: false })
       .limit(1)
-      .maybeSingle()
+    if (acceptedJobDocumentId) revQuery = revQuery.eq('job_document_id', acceptedJobDocumentId)
+    const { data: acceptedRev } = await revQuery.maybeSingle()
     if (acceptedRev?.pricing_snapshot_json) {
       const snap = typeof acceptedRev.pricing_snapshot_json === 'string'
         ? JSON.parse(acceptedRev.pricing_snapshot_json)
         : acceptedRev.pricing_snapshot_json
       const frozenRaw = snap?.raw || null
-      if (frozenRaw && typeof frozenRaw === 'object') frozenDeposit = frozenRaw.deposit || null
+      if (frozenRaw && typeof frozenRaw === 'object' && frozenRaw.deposit && typeof frozenRaw.deposit === 'object') {
+        frozenDeposit = frozenRaw.deposit
+        frozenSource = acceptedJobDocumentId ? 'accepted_document' : 'latest_released_for_job'
+      }
     }
   } catch (e) {
+    // Fail SAFE: on any lookup/parse error, fall back to live config. The common
+    // case (pricing unchanged since send) yields identical numbers either way.
     console.log('[send_acceptance_invoice] frozen revision lookup failed, using live config:', (e as Error).message)
   }
 
   const liveDepositConfig = livePricing.deposit || {}
-  // Prefer the frozen deposit config when a released revision exists; otherwise live.
-  // Resolved per-field so a partially-shaped frozen snapshot still falls through safely.
+  // Whole-object preference: use the frozen deposit config when a released
+  // revision was found; otherwise the live config. (Not per-field — we want a
+  // single coherent source so percent/council/total agree with each other and
+  // with the D1 baked-total guard below.)
   const depositConfig = frozenDeposit || liveDepositConfig
   const usingFrozenDeposit = frozenDeposit != null
 
@@ -15641,7 +15662,8 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 
   console.log('[send_acceptance_invoice] deposit basis:', JSON.stringify({
     job_id: jId,
-    source: usingFrozenDeposit ? 'frozen_quote_revision' : 'live_pricing_json',
+    job_document_id: acceptedJobDocumentId,
+    source: usingFrozenDeposit ? `frozen_quote_revision:${frozenSource}` : 'live_pricing_json',
     depositPercent, councilFees, depositAmount, totalIsBaked,
     body_overrides: { deposit_percent: body.deposit_percent ?? null, deposit_amount: body.deposit_amount ?? null },
   }))
