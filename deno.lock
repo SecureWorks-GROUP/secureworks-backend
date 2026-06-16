@@ -2,7 +2,16 @@
   "version": "5",
   "redirects": {
     "https://esm.sh/@supabase/supabase-js@2": "https://esm.sh/@supabase/supabase-js@2.99.3",
-    "https://esm.sh/iceberg-js@^0.8.1?target=denonext": "https://esm.sh/iceberg-js@0.8.1?target=denonext"
+    "https://esm.sh/canvg?target=denonext": "https://esm.sh/canvg@4.0.3?target=denonext",
+    "https://esm.sh/dompurify?target=denonext": "https://esm.sh/dompurify@3.4.10?target=denonext",
+    "https://esm.sh/fflate@^0.4.8?target=denonext": "https://esm.sh/fflate@0.4.8?target=denonext",
+    "https://esm.sh/html2canvas?target=denonext": "https://esm.sh/html2canvas@1.4.1?target=denonext",
+    "https://esm.sh/iceberg-js@^0.8.1?target=denonext": "https://esm.sh/iceberg-js@0.8.1?target=denonext",
+    "https://esm.sh/performance-now@^2.1.0?target=denonext": "https://esm.sh/performance-now@2.1.0?target=denonext",
+    "https://esm.sh/raf@^3.4.1?target=denonext": "https://esm.sh/raf@3.4.1?target=denonext",
+    "https://esm.sh/rgbcolor@^1.0.1?target=denonext": "https://esm.sh/rgbcolor@1.0.1?target=denonext",
+    "https://esm.sh/stackblur-canvas@^2.0.0?target=denonext": "https://esm.sh/stackblur-canvas@2.7.0?target=denonext",
+    "https://esm.sh/svg-pathdata@^6.0.3?target=denonext": "https://esm.sh/svg-pathdata@6.0.3?target=denonext"
   },
   "remote": {
     "https://deno.land/std@0.168.0/async/abortable.ts": "80b2ac399f142cc528f95a037a7d0e653296352d95c681e284533765961de409",
@@ -118,8 +127,28 @@
     "https://esm.sh/@supabase/storage-js@2.99.3/denonext/storage-js.mjs": "e96730599fbf773dc50de17ba61478c991c52fdff8f8c308abef428679a44ef3",
     "https://esm.sh/@supabase/supabase-js@2.99.3": "043625cad1798d7e165a9cfcea145ac7d309c34786e5558023fecbcf565abfc7",
     "https://esm.sh/@supabase/supabase-js@2.99.3/denonext/supabase-js.mjs": "af4d9b87a8acdeea13eed5905469ba5927d2286fade34fa785c5e8bdd67ff287",
+    "https://esm.sh/canvg@4.0.3/denonext/canvg.mjs": "963ae6646373caece9a5e1b0190aad76f3424a75c65f5705ffc840d8bc8fa478",
+    "https://esm.sh/canvg@4.0.3?target=denonext": "3d4cfa967ecff066d00121a53be6d4afcc2e1256279204c1a1707d6617b0711e",
+    "https://esm.sh/dompurify@3.4.10/denonext/dompurify.mjs": "588bff12e89f472d521509d274fc5ee38e4a035d08563949cbedd337d747a139",
+    "https://esm.sh/dompurify@3.4.10?target=denonext": "c3fbc736c805fa19cdd73d84050c6719b81f5c8800e48bf863411b7e869c7839",
+    "https://esm.sh/fflate@0.4.8/denonext/fflate.mjs": "a34e1f5ca2424aae577449ca15cce8f63c886e14af814a195e998d612cb06089",
+    "https://esm.sh/fflate@0.4.8?target=denonext": "feae0b604626905078f6dc7d16ec843bcb2434cbdb36d9c2d2fc44a2c65f30ac",
+    "https://esm.sh/html2canvas@1.4.1/denonext/html2canvas.mjs": "7d101f94117b8610969abc4533ceefb2ab886ed5d39d0eb5bfe9de7c73828e0a",
+    "https://esm.sh/html2canvas@1.4.1?target=denonext": "7c7506658947c798388a68425ade96cfca25110f0358cd1ad56a58972a7167f2",
     "https://esm.sh/iceberg-js@0.8.1/denonext/iceberg-js.mjs": "d839d81a2e3966500ca2cdd0c1cb458e9608bacfc91f7bb67a69b2e878dcdb4f",
     "https://esm.sh/iceberg-js@0.8.1?target=denonext": "58c849d7fe2bf4eca4a84eb501e83c161a7d8c34ca1bec15a962b3bec3062633",
+    "https://esm.sh/jspdf@2.5.1": "c07581dbd904c5f4347d0ae882a204e4b398d78fbd75b04e67ffa1c9269be362",
+    "https://esm.sh/jspdf@2.5.1/denonext/jspdf.mjs": "d576a68c5a19eb2f475d5be0e8017dc789be3960dee4d0fc9f0ee88e25e26244",
+    "https://esm.sh/performance-now@2.1.0/denonext/performance-now.mjs": "865e852a187e5ac0622bc803aa0e959f633a71f2b6c297cda8806961febe889b",
+    "https://esm.sh/performance-now@2.1.0?target=denonext": "19f5f27e3631f9a471d73e9bf3f3731cd099701a7656817ee92f922a9c0f3272",
+    "https://esm.sh/raf@3.4.1/denonext/raf.mjs": "89ea0c5c4b2f095fe7d39fd1e846660d7e2c15e4ccb1d24d81178b1770f23ab2",
+    "https://esm.sh/raf@3.4.1?target=denonext": "c23d7244deee17f4abdc9c44677d4a932937251b962a364a81a9db222dafd1de",
+    "https://esm.sh/rgbcolor@1.0.1/denonext/rgbcolor.mjs": "d13ec6ea5a7f7e20676b031dcad6c12ab429d2a5a85099f48b4e55c899619010",
+    "https://esm.sh/rgbcolor@1.0.1?target=denonext": "c13ff0d3264d1fb23d772400591f606440ee0c9a831e5c4534eebe1f324f0794",
+    "https://esm.sh/stackblur-canvas@2.7.0/denonext/stackblur-canvas.mjs": "015ed7547ae865dbb8359c8e590ccd3f92fcde395a43bb664c3c2bf4481442ff",
+    "https://esm.sh/stackblur-canvas@2.7.0?target=denonext": "10384fa4eba4071e7f139c74dbeae53504adf89ec023efde6b2e12d8384bd64a",
+    "https://esm.sh/svg-pathdata@6.0.3/denonext/svg-pathdata.mjs": "606a9a8fd87fe0d6f350d08eb6c82f8671cf608a4b43edf6af46761cb59279c7",
+    "https://esm.sh/svg-pathdata@6.0.3?target=denonext": "1494f13da34d93f557f58931a30bab74697ec0eabbdb6d1b4df0c00956ceed0a",
     "https://esm.sh/tslib@2.8.1/denonext/tslib.mjs": "c38da5dd6da6281964435002ce204cd586634fe3bdfb24a0ee116f48cf3292e9"
   }
 }

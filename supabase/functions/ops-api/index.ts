@@ -182,6 +182,18 @@ import {
   isGenuineNewWorkOrder as _isGenuineNewWorkOrder,
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
 } from './makesafe_intake_gate.ts'
+// Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
+import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
+import {
+  sendPackIsHuman,
+  resolveExistingInvoice,
+  checkClientSendGate,
+  buildPackSentMarkerText,
+  isPackSentMainEvent as _sendPackIsPackSentMainEvent,
+  LOCKABLE_STATUSES,
+  MAKESAFE_ADMIN_FROM,
+  MAKESAFE_CC,
+} from './makesafe_send_pack.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -2775,6 +2787,27 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'upload_document': return json(await uploadDocument(client, body))
       case 'confirm_document_upload': return json(await confirmDocumentUpload(client, body))
       case 'attach_makesafe_document': return json(await attachMakesafeDocument(client, body))
+
+      // ── MakeSafe Reporting Autopilot (Wave 2) ──
+      // create_makesafe_draft_invoice + makesafe_render_report are routine-safe
+      // (no send, no authorise). makesafe_send_pack authorises + emails and is
+      // HUMAN-ONLY: the api-key is rejected at the case, admin/owner JWT only.
+      case 'create_makesafe_draft_invoice':
+        return json(await createMakesafeDraftInvoice(client, body))
+      case 'makesafe_render_report':
+        return json(await makesafeRenderReport(client, body))
+      case 'makesafe_send_pack': {
+        // HUMAN-ONLY money/comms gate. Copies the approve_intake_draft pattern:
+        // the routine api-key can never authorise an invoice or email a builder.
+        if (!sendPackIsHuman(authMode, authUser)) {
+          return json({ error: 'forbidden: makesafe_send_pack requires an admin or owner user session (JWT)' }, 403)
+        }
+        return json(await makesafeSendPack(client, body, {
+          approverId: authUser?.id || null,
+          approverEmail: authUser?.email || null,
+        }))
+      }
+
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
       case 'delete_document': return json(await deleteDocument(client, body))
 
@@ -14096,6 +14129,449 @@ async function attachMakesafeDocument(client: any, body: any) {
   })
 
   return { success: true, document_id: docId, type: type, url: publicUrl }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MakeSafe Reporting Autopilot (Wave 2) — draft invoice, render report, send pack
+// ════════════════════════════════════════════════════════════════════════════
+
+// Fetch the FULL live ACCREC invoice set, paginating list_invoices' source so the
+// dup-guard scans every invoice (not a recent window). Mirrors the python
+// fetch_all_invoices but reads the xero_invoices projection directly (the same
+// table list_invoices serves) with PostgREST .range() chunking under the 1000 cap.
+async function _fetchAllAccrecInvoices(client: any): Promise<any[]> {
+  const rows: any[] = []
+  const page = 500
+  let offset = 0
+  // Bounded loop — never spin forever even if the table is huge.
+  for (let guard = 0; guard < 40; guard++) {
+    const { data, error } = await client.from('xero_invoices')
+      .select('xero_invoice_id, invoice_number, reference, status, job_id, invoice_type, invoice_date')
+      .eq('invoice_type', 'ACCREC')
+      .order('invoice_date', { ascending: false })
+      .range(offset, offset + page - 1)
+    if (error) throw new Error('dup-guard: xero_invoices scan failed: ' + error.message)
+    const batch = data || []
+    rows.push(...batch)
+    if (batch.length < page) break
+    offset += page
+  }
+  return rows
+}
+
+// (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
+// full-ACCREC-scan 3-tier dup guard FIRST; if a live invoice already maps to the
+// job, returns {skipped:true, existing_invoice} and creates nothing. Routine-safe
+// (drafts only) — NO human-only gate.
+async function createMakesafeDraftInvoice(client: any, body: any) {
+  const jobId = body.job_id || body.jobId || null
+  const reference = body.reference
+  const contact = body.contact_name || body.contactName
+  const lines = body.line_items || body.lineItems || body.lines
+  if (!reference) throw new ApiError('reference required', 400)
+  if (!contact) throw new ApiError('contact_name required', 400)
+  if (!Array.isArray(lines) || lines.length === 0) throw new ApiError('line_items required', 400)
+
+  // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
+  // to the make-safe reference. A VOIDED/DELETED invoice never blocks.
+  const externalRef = body.external_ref || reference
+  const allInvoices = await _fetchAllAccrecInvoices(client)
+  const existing = resolveExistingInvoice(allInvoices, jobId, externalRef)
+  if (existing) {
+    return {
+      skipped: true,
+      reference,
+      existing_invoice: existing,
+      scanned: allInvoices.length,
+      note: `live invoice ${existing.invoice_number} (${existing.status}) already maps to this job via ${existing.match_method}; no new invoice created`,
+    }
+  }
+
+  // Safe to create the single DRAFT. Hardcoded guardrails: DRAFT + no send.
+  // account_code default 210 (per the make-safe draft spec), not createInvoice's
+  // default of 200 — stamp it onto every line that did not specify one.
+  const draftLines = lines.map((li: any) => ({
+    description: li.description || '',
+    quantity: li.quantity ?? 1,
+    unit_price: li.unit_price ?? li.unitPrice ?? 0,
+    account_code: li.account_code || li.accountCode || '210',
+  }))
+  const created = await createInvoice(client, {
+    job_id: jobId || undefined,
+    contact_name: contact,
+    line_items: draftLines,
+    due_date: body.due_date || body.dueDate,
+    reference,
+    xero_status: 'DRAFT', // guardrail
+    send_email: false,    // guardrail
+    operator: body.operator || 'makesafe reporting autopilot (draft-only)',
+  })
+  return {
+    success: true,
+    skipped: false,
+    xero_invoice_id: created.xero_invoice_id,
+    invoice_number: created.invoice_number,
+    total: created.total,
+    reference,
+  }
+}
+
+// (3b) makesafe_render_report — render the report PDF (server jsPDF) and attach it
+// via attachMakesafeDocument as type 'makesafe_report'. Routine-safe (no send).
+async function makesafeRenderReport(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  if (!jobId) throw new ApiError('job_id required', 400)
+  const job = body.job || body.report_job
+  if (!job || typeof job !== 'object') throw new ApiError('job (render payload) required', 400)
+
+  const rendered = await renderMakesafeReportPdf(job)
+  // base64 the bytes for attachMakesafeDocument's pdf_base64 path.
+  let bin = ''
+  for (let i = 0; i < rendered.bytes.length; i++) bin += String.fromCharCode(rendered.bytes[i])
+  const pdfBase64 = btoa(bin)
+
+  const attached = await attachMakesafeDocument(client, {
+    job_id: jobId,
+    type: 'makesafe_report',
+    file_name: rendered.fileName,
+    pdf_base64: pdfBase64,
+    uploaded_by: body.operator || 'makesafe reporting autopilot',
+  })
+
+  // Record the render hash onto the pack row (upsert a 'drafted' row if absent).
+  try {
+    await client.from('makesafe_report_packs').upsert({
+      org_id: DEFAULT_ORG_ID,
+      job_id: jobId,
+      pack_kind: body.pack_kind || 'main',
+      report_doc_id: attached.document_id || null,
+      last_render_hash: rendered.renderHash,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'job_id,pack_kind' })
+  } catch (e) {
+    console.log('[makesafe_render_report] pack upsert non-blocking:', (e as Error).message)
+  }
+
+  return {
+    success: true,
+    document_id: attached.document_id,
+    file_name: rendered.fileName,
+    render_hash: rendered.renderHash,
+  }
+}
+
+// Convert a Xero PDF arrayBuffer to base64 (mirrors getInvoicePdf / send-invoice).
+function _bytesToBase64(bytes: Uint8Array): string {
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
+}
+
+// Fetch the AUTHORISED invoice PDF from Xero (Accept: application/pdf). Used to
+// attach the REAL authorised invoice, not the draft.
+async function _fetchXeroInvoicePdfBytes(
+  accessToken: string, tenantId: string, xeroInvoiceId: string,
+): Promise<Uint8Array> {
+  const resp = await fetch(`${XERO_API_BASE}/Invoices/${xeroInvoiceId}`, {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Xero-tenant-id': tenantId,
+      'Accept': 'application/pdf',
+    },
+  })
+  if (!resp.ok) throw new ApiError(`Failed to fetch authorised invoice PDF from Xero: ${resp.status}`, 502)
+  return new Uint8Array(await resp.arrayBuffer())
+}
+
+// Patch the pack row status + diagnostics. Best-effort but logged: state must
+// always reflect reality so a resume re-enters at the right step.
+async function _patchPack(client: any, jobId: string, packKind: string, patch: Record<string, any>) {
+  try {
+    await client.from('makesafe_report_packs')
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq('job_id', jobId).eq('pack_kind', packKind)
+  } catch (e) {
+    console.log('[makesafe_send_pack] pack status patch failed:', (e as Error).message)
+  }
+}
+
+// (3c) makesafe_send_pack — the RESUMABLE STATE MACHINE. HUMAN-ONLY (gated at the
+// route case). Authorises the Xero invoice + emails the builder, fail-closed at
+// every irreversible step so a partial failure is recoverable.
+async function makesafeSendPack(
+  client: any,
+  body: any,
+  ctx: { approverId: string | null; approverEmail: string | null },
+) {
+  const jobId = body.job_id || body.jobId
+  const packKind = body.pack_kind || 'main'
+  const recipientEmail = body.recipient_email || body.recipientEmail
+  const subject = body.subject
+  const htmlBody = body.html_body || body.htmlBody
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (!recipientEmail) throw new ApiError('recipient_email required', 400)
+  if (!subject) throw new ApiError('subject required', 400)
+  if (!htmlBody) throw new ApiError('html_body required', 400)
+  const nowIso = () => new Date().toISOString()
+
+  // ── PARTIAL-FAILURE / IDEMPOTENCY STOP (before anything irreversible) ──
+  // If the MAKESAFE_PACK_SENT | main marker already exists, UNCONDITIONAL STOP.
+  const { data: priorEvents } = await client.from('job_events')
+    .select('job_id, event_type, detail_json')
+    .eq('job_id', jobId).eq('event_type', 'note')
+  if ((priorEvents || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))) {
+    return { already_sent: true, reason: 'MAKESAFE_PACK_SENT marker present', job_id: jobId }
+  }
+
+  // ── Load job + makesafe detail (MLB detection, doc gate) ──
+  const { data: job } = await client.from('jobs')
+    .select('id, job_number, type, status, metadata, client_name')
+    .eq('id', jobId).maybeSingle()
+  if (!job) throw new ApiError('job not found', 404)
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('*, makesafe_companies(slug,name)')
+    .eq('job_id', jobId).maybeSingle()
+  const requiresSwms = _isMakesafeMlbCompany(detail, job)
+
+  // ── PREFLIGHT: typed close-out docs must exist (report + invoice + swms if MLB) ──
+  const { data: docRows } = await client.from('job_documents')
+    .select('id, type, file_name').eq('job_id', jobId)
+  const docFlags = makesafeDocBooleans(docRows || [])
+  const missing = _makesafeMissingCloseoutDocs(docFlags, requiresSwms)
+  if (missing.length > 0) {
+    await _ensurePackRow(client, jobId, packKind)
+    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_docs', error_detail: 'missing close-out docs: ' + missing.join(', ') })
+    throw new ApiError('preflight failed: missing close-out docs: ' + missing.join(', '), 412)
+  }
+
+  // ── PREFLIGHT: a Xero invoice (draft or authorised) must be linked to the job ──
+  const { data: jobInvoices } = await client.from('xero_invoices')
+    .select('xero_invoice_id, invoice_number, status, reference, job_id, invoice_date')
+    .eq('job_id', jobId)
+    .order('invoice_date', { ascending: false })
+  const liveInvoiceMapped = _resolveMakesafeJobInvoices(jobInvoices || [], jobId, detail?.external_ref)
+  const liveInvoiceRow = (jobInvoices || []).find((inv: any) =>
+    !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase()))
+  if (!liveInvoiceRow) {
+    await _ensurePackRow(client, jobId, packKind)
+    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_invoice', error_detail: 'no live Xero invoice linked to job' })
+    throw new ApiError('preflight failed: no live Xero invoice linked to this job', 412)
+  }
+  const xeroInvoiceId = liveInvoiceRow.xero_invoice_id
+  const invoiceNumber = liveInvoiceRow.invoice_number
+  const invoiceAlreadyAuthorised = ['AUTHORISED', 'SUBMITTED', 'PAID']
+    .includes(String(liveInvoiceRow.status || '').toUpperCase())
+
+  // ── ATOMIC SEND-LOCK ──
+  // Ensure a pack row exists in a lockable state, then take the lock with a
+  // single conditional UPDATE. 0 rows == concurrent send / wrong state -> 409.
+  await _ensurePackRow(client, jobId, packKind, {
+    xero_invoice_id: xeroInvoiceId,
+    invoice_status: liveInvoiceRow.status || null,
+    report_doc_id: (docRows || []).find((d: any) => d.type === 'makesafe_report')?.id || null,
+    invoice_doc_id: (docRows || []).find((d: any) => d.type === 'invoice')?.id || null,
+    swms_doc_id: (docRows || []).find((d: any) => d.type === 'swms')?.id || null,
+    approver_id: ctx.approverId,
+    approved_at: nowIso(),
+  })
+  const { data: locked, error: lockErr } = await client.from('makesafe_report_packs')
+    .update({ status: 'sending', send_started_at: nowIso(), updated_at: nowIso() })
+    .eq('job_id', jobId).eq('pack_kind', packKind)
+    .in('status', LOCKABLE_STATUSES)
+    .select()
+  if (lockErr) throw new ApiError('send-lock update failed: ' + lockErr.message, 500)
+  if (!locked || locked.length === 0) {
+    return { error: 'conflict: pack is already sending or not in a sendable state', job_id: jobId, status: 'sending_or_terminal' }
+  }
+
+  // The send is now in-flight (status='sending'). From here every failure must
+  // leave a recoverable status and must NOT re-authorise / re-email on resume.
+  try {
+    const { accessToken, tenantId } = await getToken(client)
+
+    // ── STEP 1: AUTHORISE (only if still a DRAFT) ──
+    // Resume safety: if the invoice is already AUTHORISED/SUBMITTED/PAID we skip
+    // the authorise entirely (no double-authorise).
+    if (!invoiceAlreadyAuthorised) {
+      await xeroPost(`/Invoices/${xeroInvoiceId}`, accessToken, tenantId,
+        { Invoices: [{ InvoiceID: xeroInvoiceId, Status: 'AUTHORISED' }] }, 'POST')
+      await client.from('xero_invoices')
+        .update({ status: 'AUTHORISED', updated_at: nowIso() })
+        .eq('xero_invoice_id', xeroInvoiceId)
+      try {
+        await client.from('business_events').insert({
+          event_type: 'invoice.authorised',
+          source: 'ops-api/makesafe_send_pack',
+          entity_type: 'invoice',
+          entity_id: xeroInvoiceId,
+          job_id: jobId,
+          correlation_id: jobId,
+          payload: { previous_status: liveInvoiceRow.status || 'UNKNOWN', new_status: 'AUTHORISED', invoice_number: invoiceNumber },
+          metadata: { operator: ctx.approverEmail || null },
+        })
+      } catch (e) {
+        console.log('[makesafe_send_pack] business_events invoice.authorised non-blocking:', (e as Error).message)
+      }
+    }
+    // From this point the invoice is AUTHORISED. A failure must NOT re-authorise.
+    await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', invoice_status: 'AUTHORISED', xero_invoice_id: xeroInvoiceId })
+
+    // ── STEP 2: refetch the AUTHORISED PDF from Xero, re-attach as type 'invoice' ──
+    const authorisedPdfBytes = await _fetchXeroInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
+    const authorisedPdfB64 = _bytesToBase64(authorisedPdfBytes)
+    // Filename MUST pass the client send gate's is_xero_invoice_pdf (contains
+    // 'xero' + 'invoice') AND makesafeDocBooleans invoice match ('invoice').
+    const invoicePdfName = `Xero Invoice - ${invoiceNumber || xeroInvoiceId}.pdf`
+    const reInvDoc = await attachMakesafeDocument(client, {
+      job_id: jobId,
+      type: 'invoice',
+      file_name: invoicePdfName,
+      pdf_base64: authorisedPdfB64,
+      uploaded_by: ctx.approverEmail || 'makesafe reporting autopilot',
+    })
+    await _patchPack(client, jobId, packKind, { invoice_doc_id: reInvDoc.document_id || null })
+
+    // ── STEP 3: load the report PDF bytes (from storage) for the attachment ──
+    const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+    let reportPdfB64: string | null = null
+    let reportFileName = reportDoc?.file_name || ''
+    if (reportDoc) {
+      const { data: freshReport } = await client.from('job_documents')
+        .select('file_name, storage_url, pdf_url').eq('id', reportDoc.id).maybeSingle()
+      reportFileName = freshReport?.file_name || reportFileName
+      const reportUrl = freshReport?.pdf_url || freshReport?.storage_url
+      if (reportUrl) {
+        const rResp = await fetch(reportUrl)
+        if (rResp.ok) reportPdfB64 = _bytesToBase64(new Uint8Array(await rResp.arrayBuffer()))
+      }
+    }
+    if (!reportPdfB64) {
+      // Cannot assemble the pack without the report PDF. FAIL CLOSED — no send.
+      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'load_report_pdf', error_detail: 'report PDF bytes unavailable' })
+      throw new ApiError('send failed: could not load the report PDF for attachment (invoice already authorised; safe to resume)', 502)
+    }
+
+    // ── STEP 4: assemble + CLIENT-SEND GATE (hard, fail-closed) ──
+    const attachments = [
+      { contentBytes: reportPdfB64, name: reportFileName, contentType: 'application/pdf' },
+      { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
+    ]
+    const gatePayload = {
+      from: MAKESAFE_ADMIN_FROM,
+      to: recipientEmail,
+      cc: MAKESAFE_CC,
+      subject,
+      htmlBody,
+      attachments: attachments.map((a) => ({ name: a.name })),
+    }
+    const gateFailures = checkClientSendGate(gatePayload)
+    if (gateFailures.length > 0) {
+      // Invoice authorised but the send is unsafe. Recoverable — resume after fix.
+      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'client_send_gate', error_detail: gateFailures.join(' | ') })
+      throw new ApiError('client send gate failed (no email sent; invoice already authorised, safe to resume): ' + gateFailures.join('; '), 412)
+    }
+
+    // ── STEP 5: SEND via send-outlook-email. NON-OK == HARD FAILURE (fail closed) ──
+    const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+      body: JSON.stringify({
+        from: MAKESAFE_ADMIN_FROM,
+        to: recipientEmail,
+        cc: MAKESAFE_CC,
+        subject,
+        htmlBody,
+        attachments,
+      }),
+    })
+    if (!emailResp.ok) {
+      const errText = await emailResp.text().catch(() => '')
+      // FAIL CLOSED: invoice authorised, NOT sent. No marker, no close.
+      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send', error_detail: `send-outlook-email ${emailResp.status}: ${errText}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
+      throw new ApiError(`email send failed (FAIL CLOSED — invoice authorised but NOT sent; status=authorised_not_sent, safe to resume): ${emailResp.status}`, 502)
+    }
+    let emailResult: any = {}
+    try { emailResult = await emailResp.json() } catch { emailResult = {} }
+    const messageId = emailResult?.message_id || emailResult?.id || null
+
+    // ── STEP 6: SEND CONFIRMED. Write the MAKESAFE_PACK_SENT | main marker ──
+    const markerText = buildPackSentMarkerText({ invoiceNumber, to: recipientEmail, nowIso: nowIso(), messageId })
+    try {
+      await client.from('job_events').insert({
+        job_id: jobId,
+        event_type: 'note',
+        detail_json: { text: markerText },
+      })
+      try {
+        await client.from('business_events').insert({
+          event_type: 'makesafe.pack_sent',
+          source: 'ops-api/makesafe_send_pack',
+          entity_type: 'job',
+          entity_id: jobId,
+          job_id: jobId,
+          correlation_id: jobId,
+          payload: { invoice_number: invoiceNumber, to: recipientEmail, message_id: messageId, pack_kind: packKind },
+          metadata: { operator: ctx.approverEmail || null },
+        })
+      } catch (_) { /* non-blocking */ }
+    } catch (markerErr) {
+      // Email genuinely sent but the marker write failed. Recoverable: a resume
+      // sees the AUTHORISED invoice, writes the marker, and stops (no re-email).
+      await _patchPack(client, jobId, packKind, { status: 'sent_marker_failed', failed_step: 'marker', sent_at: nowIso(), error_detail: (markerErr as Error).message })
+      throw new ApiError('email sent but marker write failed (status=sent_marker_failed; resume writes the marker, no re-email)', 500)
+    }
+
+    // ── STEP 7: CLOSE via make-safe semantics (substatus=complete + report_sent_at) ──
+    // NOT completeJob — its status allow-list excludes make-safe substatuses.
+    try {
+      await client.from('makesafe_job_details')
+        .update({ substatus: 'complete', report_sent_at: nowIso(), updated_at: nowIso() })
+        .eq('job_id', jobId)
+    } catch (closeErr) {
+      // Sent + marker written, but close failed. Recoverable: resume re-applies
+      // the close only (marker present -> no re-email, invoice authorised -> no
+      // re-authorise). Surfaced so the board can be reconciled.
+      await _patchPack(client, jobId, packKind, { status: 'sent_not_closed', failed_step: 'close', sent_at: nowIso(), error_detail: (closeErr as Error).message })
+      return { success: true, sent: true, closed: false, status: 'sent_not_closed', job_id: jobId, invoice_number: invoiceNumber, warning: 'pack sent but make-safe close failed; resume to reconcile substatus' }
+    }
+
+    // ── TERMINAL SUCCESS ──
+    await _patchPack(client, jobId, packKind, { status: 'sent', sent_at: nowIso(), failed_step: null, error_detail: null })
+    return { success: true, sent: true, closed: true, status: 'sent', job_id: jobId, invoice_number: invoiceNumber, to: recipientEmail, message_id: messageId }
+  } catch (err) {
+    // Any thrown ApiError already patched the pack to a recoverable state above.
+    // Re-throw so the handler returns the right status code; the pack row is the
+    // durable source of truth a resume reads.
+    if (err instanceof ApiError) throw err
+    // Unexpected throw before authorise (e.g. getToken): leave as failed/sending.
+    await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'unexpected', error_detail: (err as Error).message?.slice(0, 500) })
+    throw new ApiError('makesafe_send_pack failed (state preserved for resume): ' + (err as Error).message, 500)
+  }
+}
+
+// Upsert a pack row, leaving it in a lockable 'drafted' state if it does not yet
+// exist. Never downgrades a terminal/in-flight status: the lock UPDATE is the
+// real gate, this only guarantees a row is present to lock.
+async function _ensurePackRow(client: any, jobId: string, packKind: string, extra?: Record<string, any>) {
+  const { data: existing } = await client.from('makesafe_report_packs')
+    .select('id, status').eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
+  if (!existing) {
+    await client.from('makesafe_report_packs').insert({
+      org_id: DEFAULT_ORG_ID,
+      job_id: jobId,
+      pack_kind: packKind,
+      status: 'drafted',
+      ...(extra || {}),
+      updated_at: new Date().toISOString(),
+    })
+    return
+  }
+  // Row exists — only patch the supplied diagnostic fields; never touch status here.
+  if (extra && Object.keys(extra).length > 0) {
+    await client.from('makesafe_report_packs')
+      .update({ ...extra, updated_at: new Date().toISOString() })
+      .eq('id', existing.id)
+  }
 }
 
 async function toggleDocumentVisibility(client: any, body: any) {
