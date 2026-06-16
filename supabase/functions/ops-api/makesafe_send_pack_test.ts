@@ -30,6 +30,14 @@ import {
   hasReviewMarker,
   MAKESAFE_ADMIN_FROM,
   MAKESAFE_CC,
+  // C-1 / P-1 / N-1 last-round helpers (post-send recovery, 'sending' resolution,
+  // ambiguous-invoice fail-closed).
+  planPostSendResume,
+  planSendingResolution,
+  isSendingStale,
+  isInvoiceAmbiguous,
+  countLiveInvoices,
+  SENDING_STALE_SECONDS,
 } from "./makesafe_send_pack.ts";
 
 // ─────────────────────────────────────────────────────────────────
@@ -380,4 +388,276 @@ Deno.test("marker: buildPackSentMarkerText starts with the main prefix (round-tr
   const text = buildPackSentMarkerText({ invoiceNumber: "INV-0712", to: "builder@x.com", nowIso: "2026-06-17T00:00:00Z", messageId: "m1" });
   assert(text.startsWith("MAKESAFE_PACK_SENT | main"));
   assert(isPackSentMainEvent({ event_type: "note", detail_json: { text } }));
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 7. POST-SEND RESUME + 'sending' RESOLUTION + AMBIGUOUS-INVOICE (N-3 — proves
+//    C-1, P-1, N-1). reimplement-pure + mocked: NO network, NO Supabase, NO Xero.
+//
+//    A faithful model of index.ts:makesafeSendPack's RESUME RE-ENTRY block
+//    (just after the pack-row load, BEFORE the atomic lock) + the N-1 ambiguity
+//    preflight. It drives the SAME pure decision functions the orchestration
+//    imports (planPostSendResume / planSendingResolution / isInvoiceAmbiguous)
+//    and tracks every irreversible side effect, so the tests assert "no
+//    re-email / no re-authorise / no re-marker" as hard counters.
+//
+//    Cross-ref index.ts:
+//      ~14827  RESUME RE-ENTRY (C-1 + P-1): const postSendPlan = planPostSendResume(priorStatus)
+//      ~14874  'sending': const resolution = planSendingResolution(body.sending_resolution)
+//      ~14935  N-1 AMBIGUOUS INVOICE: if (isInvoiceAmbiguous(jobInvoices)) -> 412
+// ═════════════════════════════════════════════════════════════════
+
+interface SideEffects {
+  authorise: number; // Xero invoice AUTHORISE writes
+  email: number; // builder email sends
+  marker: number; // MAKESAFE_PACK_SENT | main marker writes
+  close: number; // make-safe close (substatus=complete + report_sent_at)
+}
+
+interface ResumeResult {
+  status: number; // HTTP-ish: 200 ok, 409 conflict, 412 fail-closed
+  resumed?: boolean;
+  action?: string;
+  packStatus?: string;
+  sent?: boolean;
+  closed?: boolean;
+  fx: SideEffects;
+  body?: Record<string, unknown>;
+}
+
+// Models the makesafeSendPack ENTRY -> resume -> (fall-through) send path with
+// explicit side-effect counters. emailOk lets us drive the confirmed_not_sent
+// re-entry to a successful send. Mirrors the index.ts ordering exactly.
+function simulateResume(opts: {
+  priorStatus: string; // pack.status at entry
+  markerPresent?: boolean; // the unconditional marker idempotency stop
+  sendingResolution?: unknown; // body.sending_resolution
+  liveInvoiceCount?: number; // count of NON-void mapped invoices (N-1)
+  invoiceAlreadyAuthorised?: boolean; // for the confirmed_not_sent send path
+  emailOk?: boolean; // does the re-entered send succeed
+}): ResumeResult {
+  const fx: SideEffects = { authorise: 0, email: 0, marker: 0, close: 0 };
+
+  // ENTRY: unconditional marker idempotency stop (index.ts ~14806).
+  if (opts.markerPresent) {
+    return { status: 200, resumed: false, action: "already_sent", fx };
+  }
+
+  // RESUME RE-ENTRY (C-1) — post-send recovery (index.ts ~14837).
+  const postSendPlan = planPostSendResume(opts.priorStatus);
+  if (postSendPlan) {
+    if (postSendPlan.writeMarker) fx.marker++; // marker_and_close only
+    if (postSendPlan.applyClose) fx.close++;
+    // NEVER re-email, NEVER re-authorise (the plan encodes both as false).
+    return { status: 200, resumed: true, action: postSendPlan.action, packStatus: "sent", sent: true, closed: true, fx };
+  }
+
+  // 'sending' hard-crash window (P-1) — requires explicit resolution (index.ts ~14872).
+  if (opts.priorStatus === "sending") {
+    const resolution = planSendingResolution(opts.sendingResolution);
+    if (!resolution) {
+      // No valid resolution -> 409, NO side effects.
+      return { status: 409, packStatus: "sending", fx, body: { requires: "sending_resolution" } };
+    }
+    if (resolution.writeMarkerAndClose) {
+      // confirmed_sent -> marker + close, status='sent', NO re-email/authorise.
+      fx.marker++;
+      fx.close++;
+      return { status: 200, resumed: true, action: "confirmed_sent_marker_and_close", packStatus: "sent", sent: true, closed: true, fx };
+    }
+    // confirmed_not_sent -> move to authorised_not_sent and FALL THROUGH to the
+    // normal send path below. The pack is now lockable; invoice already authorised.
+    // (We continue past this block with an effective priorStatus of authorised_not_sent.)
+  }
+
+  // ── N-1 preflight: AMBIGUOUS INVOICE = FAIL CLOSED (index.ts ~14935). Runs in
+  // the normal (non-recovery) path BEFORE the lock/authorise. We model the
+  // invoice set as a count of non-void rows; >1 -> 412, NO authorise, NO send.
+  const liveCount = opts.liveInvoiceCount ?? 1;
+  // Build a representative invoice-row set so we exercise the REAL isInvoiceAmbiguous.
+  const invoiceRows = [
+    ...Array.from({ length: liveCount }, (_, i) => ({ status: "DRAFT", invoice_number: `INV-${i}` })),
+    { status: "VOIDED", invoice_number: "INV-DEAD" }, // a void row never counts
+  ];
+  if (isInvoiceAmbiguous(invoiceRows)) {
+    return { status: 412, packStatus: "failed", fx, body: { failed_step: "preflight_invoice_ambiguous", count: countLiveInvoices(invoiceRows) } };
+  }
+  if (liveCount === 0) {
+    // No live invoice -> the OTHER 412 (preflight_invoice). Not the focus here.
+    return { status: 412, packStatus: "failed", fx, body: { failed_step: "preflight_invoice" } };
+  }
+
+  // ── Normal send path (or confirmed_not_sent re-entry). LOCK -> AUTHORISE (only
+  // if not already) -> SEND -> MARKER -> CLOSE.
+  // For the confirmed_not_sent re-entry, invoiceAlreadyAuthorised is true so we
+  // SKIP re-authorise (P-1 requirement).
+  if (!opts.invoiceAlreadyAuthorised) fx.authorise++;
+  // SEND
+  if (opts.emailOk === false) {
+    // FAIL CLOSED: invoice authorised but not sent. No marker, no close.
+    return { status: 502, packStatus: "authorised_not_sent", sent: false, fx };
+  }
+  fx.email++;
+  fx.marker++;
+  fx.close++;
+  return { status: 200, packStatus: "sent", sent: true, closed: true, fx };
+}
+
+// ── C-1: sent_marker_failed resume -> marker (idempotent) + close -> sent; NO re-email.
+Deno.test("C-1 resume: sent_marker_failed -> writes marker + closes, status sent, NO re-email", () => {
+  const r = simulateResume({ priorStatus: "sent_marker_failed" });
+  assertEquals(r.status, 200);
+  assertEquals(r.resumed, true);
+  assertEquals(r.action, "marker_and_close");
+  assertEquals(r.packStatus, "sent");
+  assertEquals(r.fx.email, 0, "MUST NOT re-email — the email already went out");
+  assertEquals(r.fx.authorise, 0, "MUST NOT re-authorise");
+  assertEquals(r.fx.marker, 1, "writes the missing marker once (idempotent)");
+  assertEquals(r.fx.close, 1, "applies the make-safe close");
+});
+
+// ── C-1: sent_not_closed resume -> close ONLY -> sent; NO re-email, NO re-marker.
+Deno.test("C-1 resume: sent_not_closed -> close only, status sent, NO re-email, NO re-marker", () => {
+  const r = simulateResume({ priorStatus: "sent_not_closed" });
+  assertEquals(r.status, 200);
+  assertEquals(r.action, "close");
+  assertEquals(r.packStatus, "sent");
+  assertEquals(r.fx.email, 0, "NO re-email");
+  assertEquals(r.fx.marker, 0, "NO re-marker (marker already written)");
+  assertEquals(r.fx.authorise, 0, "NO re-authorise");
+  assertEquals(r.fx.close, 1, "applies the close only");
+});
+
+// ── C-1: close_failed resume -> close ONLY -> sent; NO re-email.
+Deno.test("C-1 resume: close_failed -> close only, status sent, NO re-email", () => {
+  const r = simulateResume({ priorStatus: "close_failed" });
+  assertEquals(r.status, 200);
+  assertEquals(r.action, "close");
+  assertEquals(r.packStatus, "sent");
+  assertEquals(r.fx.email, 0);
+  assertEquals(r.fx.marker, 0);
+  assertEquals(r.fx.close, 1);
+});
+
+// planPostSendResume pure-contract: only the three post-send states recover.
+Deno.test("C-1 planPostSendResume: only post-send states recover; lockable/terminal/sending do NOT", () => {
+  assertEquals(planPostSendResume("sent_marker_failed")?.action, "marker_and_close");
+  assertEquals(planPostSendResume("sent_not_closed")?.action, "close");
+  assertEquals(planPostSendResume("close_failed")?.action, "close");
+  // Never recovers these (normal path / explicit-resolution path / terminal).
+  for (const s of ["admin_to_send_report", "drafted", "authorised_not_sent", "sending", "sent", "failed", "", undefined]) {
+    assertEquals(planPostSendResume(s as string), null, `${s} must not auto-recover`);
+  }
+  // The recovery plans hard-encode no-reemail / no-reauthorise.
+  const p = planPostSendResume("sent_marker_failed")!;
+  assertEquals(p.reEmail, false);
+  assertEquals(p.reAuthorise, false);
+});
+
+// ── P-1: 'sending' with NO resolution -> 409, no send.
+Deno.test("P-1 resume: 'sending' + NO resolution -> 409, NO send/authorise/marker/close", () => {
+  const r = simulateResume({ priorStatus: "sending" });
+  assertEquals(r.status, 409);
+  assertEquals(r.packStatus, "sending");
+  assertEquals(r.body?.requires, "sending_resolution");
+  assertEquals(r.fx.email, 0);
+  assertEquals(r.fx.authorise, 0);
+  assertEquals(r.fx.marker, 0);
+  assertEquals(r.fx.close, 0);
+});
+
+// ── P-1: 'sending' + confirmed_sent -> marker + close, NO re-email.
+Deno.test("P-1 resume: 'sending' + confirmed_sent -> marker+close, status sent, NO re-email", () => {
+  const r = simulateResume({ priorStatus: "sending", sendingResolution: "confirmed_sent" });
+  assertEquals(r.status, 200);
+  assertEquals(r.resumed, true);
+  assertEquals(r.action, "confirmed_sent_marker_and_close");
+  assertEquals(r.packStatus, "sent");
+  assertEquals(r.fx.email, 0, "operator confirmed it sent — never re-email");
+  assertEquals(r.fx.authorise, 0);
+  assertEquals(r.fx.marker, 1);
+  assertEquals(r.fx.close, 1);
+});
+
+// ── P-1: 'sending' + confirmed_not_sent -> re-enters the send path (email sent
+//    EXACTLY ONCE), invoice already authorised so NO re-authorise.
+Deno.test("P-1 resume: 'sending' + confirmed_not_sent -> re-enters send (email once), NO re-authorise", () => {
+  const r = simulateResume({
+    priorStatus: "sending",
+    sendingResolution: "confirmed_not_sent",
+    invoiceAlreadyAuthorised: true, // it was authorised before the crash
+    emailOk: true,
+  });
+  assertEquals(r.status, 200);
+  assertEquals(r.packStatus, "sent");
+  assertEquals(r.fx.email, 1, "the email is sent EXACTLY once on re-entry");
+  assertEquals(r.fx.authorise, 0, "invoice already authorised -> NO re-authorise");
+  assertEquals(r.fx.marker, 1);
+  assertEquals(r.fx.close, 1);
+});
+
+// planSendingResolution pure-contract: only the two literals plan; else null (-> 409).
+Deno.test("P-1 planSendingResolution: only confirmed_sent / confirmed_not_sent are valid", () => {
+  assertEquals(planSendingResolution("confirmed_sent")?.writeMarkerAndClose, true);
+  assertEquals(planSendingResolution("confirmed_sent")?.reEnterSend, false);
+  assertEquals(planSendingResolution("confirmed_not_sent")?.reEnterSend, true);
+  assertEquals(planSendingResolution("confirmed_not_sent")?.writeMarkerAndClose, false);
+  // Neither resolution ever re-authorises from 'sending'.
+  assertEquals(planSendingResolution("confirmed_sent")?.reAuthorise, false);
+  assertEquals(planSendingResolution("confirmed_not_sent")?.reAuthorise, false);
+  for (const bad of ["", "yes", "sent", "CONFIRMED_SENT", null, undefined, 1, {}]) {
+    assertEquals(planSendingResolution(bad as unknown), null, `${String(bad)} must be invalid -> 409`);
+  }
+});
+
+// P-1 read-endpoint flag: isSendingStale only fires for a 'sending' pack past the
+// threshold; absent/unparseable timestamps fail VISIBLE (treated stale).
+Deno.test("P-1 isSendingStale: only 'sending' past threshold; fail-visible on bad timestamp", () => {
+  const now = Date.parse("2026-06-17T00:10:00Z");
+  const old = "2026-06-17T00:00:00Z"; // 10 min ago > 2 min
+  const fresh = "2026-06-17T00:09:30Z"; // 30s ago < 2 min
+  assertEquals(isSendingStale("sending", old, now), true);
+  assertEquals(isSendingStale("sending", fresh, now), false);
+  // Non-'sending' packs are never in-flight stale.
+  assertEquals(isSendingStale("sent", old, now), false);
+  assertEquals(isSendingStale("authorised_not_sent", old, now), false);
+  // Fail-visible: missing / unparseable send_started_at on a 'sending' pack -> stale.
+  assertEquals(isSendingStale("sending", null, now), true);
+  assertEquals(isSendingStale("sending", "not-a-date", now), true);
+  // The boundary uses the configured threshold.
+  const exactlyAt = now - SENDING_STALE_SECONDS * 1000;
+  assertEquals(isSendingStale("sending", new Date(exactlyAt).toISOString(), now), true);
+});
+
+// ── N-1: TWO non-void mapped invoices -> 412 ambiguous, NO authorise, NO send.
+Deno.test("N-1: two live invoices map to the job -> 412 ambiguous, NO authorise/send", () => {
+  const r = simulateResume({ priorStatus: "admin_to_send_report", liveInvoiceCount: 2 });
+  assertEquals(r.status, 412);
+  assertEquals(r.packStatus, "failed");
+  assertEquals(r.body?.failed_step, "preflight_invoice_ambiguous");
+  assertEquals(r.body?.count, 2);
+  assertEquals(r.fx.authorise, 0, "FAIL CLOSED before any authorise");
+  assertEquals(r.fx.email, 0, "FAIL CLOSED before any send");
+});
+
+// N-1: EXACTLY ONE live invoice proceeds normally (authorise + send happen once).
+Deno.test("N-1: exactly one live invoice proceeds (authorise + send once)", () => {
+  const r = simulateResume({ priorStatus: "admin_to_send_report", liveInvoiceCount: 1, emailOk: true });
+  assertEquals(r.status, 200);
+  assertEquals(r.packStatus, "sent");
+  assertEquals(r.fx.authorise, 1);
+  assertEquals(r.fx.email, 1);
+});
+
+// N-1 pure-contract: isInvoiceAmbiguous / countLiveInvoices ignore VOIDED/DELETED.
+Deno.test("N-1 isInvoiceAmbiguous: >1 non-void is ambiguous; voided/deleted never count", () => {
+  assertEquals(isInvoiceAmbiguous([]), false);
+  assertEquals(isInvoiceAmbiguous([{ status: "DRAFT" }]), false);
+  assertEquals(isInvoiceAmbiguous([{ status: "AUTHORISED" }, { status: "DRAFT" }]), true);
+  // Voided/deleted rows are ignored: one live + two dead is NOT ambiguous.
+  assertEquals(
+    isInvoiceAmbiguous([{ status: "AUTHORISED" }, { status: "VOIDED" }, { status: "DELETED" }]),
+    false,
+  );
+  assertEquals(countLiveInvoices([{ status: "AUTHORISED" }, { status: "VOIDED" }, { status: "PAID" }]), 2);
 });

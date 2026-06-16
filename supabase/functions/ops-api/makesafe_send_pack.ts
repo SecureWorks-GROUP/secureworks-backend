@@ -284,3 +284,116 @@ export class SendLockCell {
     this.status = status
   }
 }
+
+// ── Post-send RESUME re-entry (C-1) — RECOVERY of a CONFIRMED send, never a
+// re-send. ──
+//
+// The post-send failure states below are NOT lockable (the email ALREADY went
+// out), so a normal retry would 409 forever and a confirmed-sent pack would be
+// silently stuck. makesafeSendPack reads the pack row up front and, BEFORE the
+// atomic lock, asks this pure function what recovery to apply. Each branch is
+// idempotent (re-running is safe) and NEVER re-emails and NEVER re-authorises.
+//
+//   sent_marker_failed -> the email went out but the marker write failed.
+//                         Recovery: write the marker (idempotent) + apply the
+//                         make-safe close + status='sent'.   action='marker_and_close'
+//   sent_not_closed     -> email out, marker written; only the close failed.
+//   close_failed        -> (alias) email out, marker written; only the close failed.
+//                         Recovery for both: apply the close ONLY + status='sent'.
+//                                                                action='close'
+// Anything else -> no recovery (null): the caller proceeds to the normal
+// lock/authorise/send path (or, for 'sending', the explicit-resolution path P-1).
+export type PostSendResumeAction = 'marker_and_close' | 'close'
+
+export interface PostSendResumePlan {
+  action: PostSendResumeAction
+  writeMarker: boolean // marker_and_close writes it (idempotent); close does not
+  applyClose: boolean // both apply the make-safe close
+  reEmail: false // NEVER — the email already went out
+  reAuthorise: false // NEVER — the invoice is already authorised
+  finalStatus: 'sent'
+}
+
+export const POST_SEND_RECOVERABLE_STATUSES = ['sent_marker_failed', 'sent_not_closed', 'close_failed']
+
+// Pure: given the current pack status, return the recovery plan for the post-send
+// failure states, or null when no post-send recovery applies. Cross-ref
+// index.ts:makesafeSendPack resume block (just after the pack-row load).
+export function planPostSendResume(currentStatus: string | null | undefined): PostSendResumePlan | null {
+  const s = String(currentStatus ?? '')
+  if (s === 'sent_marker_failed') {
+    return { action: 'marker_and_close', writeMarker: true, applyClose: true, reEmail: false, reAuthorise: false, finalStatus: 'sent' }
+  }
+  if (s === 'sent_not_closed' || s === 'close_failed') {
+    return { action: 'close', writeMarker: false, applyClose: true, reEmail: false, reAuthorise: false, finalStatus: 'sent' }
+  }
+  return null
+}
+
+// ── Hard-crash 'sending' window (P-1) — human-visible signal + GUARDED resume. ──
+//
+// The kill-after-email-before-marker crash correctly leaves status='sending'.
+// We do NOT auto-reclaim 'sending' (that would reintroduce double-send risk).
+// Instead the read endpoint surfaces it as stale for an attention card, and a
+// resume from 'sending' REQUIRES an explicit operator decision in the body.
+export const SENDING_STALE_SECONDS = 120 // ~2 minutes
+
+// Pure: is a 'sending' pack stale (send_started_at older than the threshold)?
+// Non-'sending' packs are never "in-flight stale". Unparseable/absent timestamps
+// are treated as stale so an in-flight pack with a lost timestamp still raises the
+// attention card rather than hiding (fail-visible).
+export function isSendingStale(
+  status: string | null | undefined,
+  sendStartedAt: string | null | undefined,
+  nowMs: number,
+  thresholdSeconds: number = SENDING_STALE_SECONDS,
+): boolean {
+  if (String(status ?? '') !== 'sending') return false
+  if (!sendStartedAt) return true
+  const started = Date.parse(String(sendStartedAt))
+  if (Number.isNaN(started)) return true
+  return (nowMs - started) >= thresholdSeconds * 1000
+}
+
+// The two operator resolutions for a 'sending' pack (P-1). The cockpit's two
+// buttons send body.sending_resolution = one of these. Any other value (or none)
+// -> 409, instructing the operator to verify Sent Items first.
+export type SendingResolution = 'confirmed_sent' | 'confirmed_not_sent'
+
+export interface SendingResolutionPlan {
+  resolution: SendingResolution
+  // confirmed_not_sent -> re-enter the send path (invoice already authorised, so
+  //   skip re-authorise; re-run the gate + send exactly once).
+  reEnterSend: boolean
+  // confirmed_sent -> write marker + close, status='sent', NO re-email.
+  writeMarkerAndClose: boolean
+  reAuthorise: false // NEVER from 'sending' (the invoice is already authorised)
+}
+
+// Pure: validate + plan a 'sending' resolution. Returns null for an absent/invalid
+// value so the caller returns a 409 (verify Sent Items, resubmit with a resolution).
+export function planSendingResolution(raw: unknown): SendingResolutionPlan | null {
+  if (raw === 'confirmed_not_sent') {
+    return { resolution: 'confirmed_not_sent', reEnterSend: true, writeMarkerAndClose: false, reAuthorise: false }
+  }
+  if (raw === 'confirmed_sent') {
+    return { resolution: 'confirmed_sent', reEnterSend: false, writeMarkerAndClose: true, reAuthorise: false }
+  }
+  return null
+}
+
+// ── Ambiguous-invoice guard (N-1) — money-safety, FAIL CLOSED. ──
+//
+// The live-invoice selection must resolve to EXACTLY ONE non-void (not
+// VOIDED/DELETED) ACCREC invoice mapped to the job. If MORE THAN ONE maps, we do
+// not guess: send_pack fails closed (412) and the read endpoint flags it so the
+// cockpit shows the ambiguity rather than a wrong amount.
+export function countLiveInvoices(invoiceRows: any[] | null | undefined): number {
+  return (invoiceRows || []).filter((inv) => !isVoidStatus(inv?.status)).length
+}
+
+// True when more than one non-void invoice maps to the job (ambiguous -> stop).
+export function isInvoiceAmbiguous(invoiceRows: any[] | null | undefined): boolean {
+  return countLiveInvoices(invoiceRows) > 1
+}
+

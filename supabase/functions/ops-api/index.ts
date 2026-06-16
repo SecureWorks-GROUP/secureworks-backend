@@ -193,6 +193,13 @@ import {
   LOCKABLE_STATUSES,
   MAKESAFE_ADMIN_FROM,
   MAKESAFE_CC,
+  // C-1 / P-1 / N-1 (Wave 2 last round): post-send recovery + 'sending' resolution
+  // + ambiguous-invoice fail-closed (pure helpers; orchestration supplies clients).
+  planPostSendResume,
+  isSendingStale,
+  planSendingResolution,
+  isInvoiceAmbiguous,
+  countLiveInvoices,
 } from './makesafe_send_pack.ts'
 // Wave 2 -- READ-ONLY report-draft cockpit feed (the informed-approve content
 // gate). Pure composers + normalisers; the orchestration below supplies the
@@ -1746,10 +1753,14 @@ if (import.meta.main) serve(async (req: Request) => {
       'update_makesafe_substatus', // BOARD-state only; the SEND/close transition lives
       // in makesafe_send_pack (denied). Scribe: ensure the routine only sets draft-stage
       // substatuses (e.g. admin_to_send_report), never a sent/closed substatus.
-      // ── Wave 2 extension point (Scribe) — ADD the report draft-invoice + render
-      // actions here by their real names once built, e.g.:
-      //   'create_makesafe_draft_invoice', 'render_makesafe_report'
-      // Draft/render only; the AUTHORISE + SEND stays in makesafe_send_pack (denied).
+      // ── Wave 2 extension point (Scribe) — report DRAFT-invoice + RENDER + READ.
+      // These are the REAL action names (Sentinel's comment above guessed
+      // 'render_makesafe_report'; the live action is 'makesafe_render_report').
+      // Draft / render / read ONLY; the AUTHORISE + SEND stays in makesafe_send_pack,
+      // which is DELIBERATELY NOT in this allow-list and so is denied by default-deny.
+      'create_makesafe_draft_invoice', // creates a Xero DRAFT invoice (reversible, no authorise)
+      'makesafe_render_report', // renders the report PDF artifact (no send)
+      'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
     ])
     if (authMode === 'routine' && action && !ROUTINE_ALLOWED_ACTIONS.has(action)) {
       return json({ error: `forbidden: '${action}' is not permitted for the make-safe automation routine; the routine key may only create/read drafts and render/attach report artifacts (default-deny). A human tick (privileged ops key or admin/owner) performs every send, authorise, and approve.` }, 403)
@@ -14465,7 +14476,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       .in('job_id', jobIds)
       .eq('phase', 'completion'),
     client.from('makesafe_report_packs')
-      .select('job_id, pack_kind, status, xero_invoice_id, invoice_status, sent_at, failed_step, error_detail')
+      .select('job_id, pack_kind, status, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail')
       .in('job_id', jobIds),
   ])
 
@@ -14511,6 +14522,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     // The live (non-void) invoice — same posture as makesafe_send_pack preflight.
     const liveInvoice = jobInvoices.find((inv: any) =>
       !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase())) || jobInvoices[0] || null
+    // N-1 (money-safety) — surface AMBIGUITY (>1 non-void invoice maps to the job)
+    // rather than display a wrong amount. The cockpit shows the ambiguity card;
+    // makesafe_send_pack fails closed (412) on the same condition.
+    const invoiceAmbiguous = isInvoiceAmbiguous(jobInvoices)
 
     const lines = normaliseLineItems(liveInvoice?.line_items)
     const linesUnavailable = !!liveInvoice && lines.length === 0
@@ -14574,6 +14589,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       site_address: siteAddress,
       site_suburb: job.site_suburb || null,
       recipient_email: recipientEmail, // null -> cockpit shows a warning
+      // N-1: when true, MORE THAN ONE non-void invoice maps to this job. The
+      // cockpit must show the ambiguity (not a single amount) and block sending;
+      // makesafe_send_pack returns 412 on the same condition.
+      invoice_ambiguous: invoiceAmbiguous,
       invoice: liveInvoice ? {
         invoice_number: liveInvoice.invoice_number || null,
         status: liveInvoice.status || null,
@@ -14586,6 +14605,9 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
         lines_note: linesUnavailable
           ? 'line detail not yet synced locally; see the invoice PDF below for the full breakdown'
           : null,
+        // N-1: echoed inside the invoice block too so a consumer reading only the
+        // invoice object still sees the ambiguity warning.
+        ambiguous: invoiceAmbiguous,
       } : null,
       report_pdf_url: reportPdfUrl,
       invoice_pdf_url: invoicePdfUrl,
@@ -14597,6 +14619,12 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
         status: pack.status || null,
         invoice_status: pack.invoice_status || null,
         sent_at: pack.sent_at || null,
+        // P-1: the hard-crash 'sending' window. in_flight_stale is true when the
+        // pack is 'sending' and send_started_at is older than ~2 minutes -> the
+        // cockpit renders an "IN-FLIGHT — VERIFY SENT ITEMS" attention card and
+        // the operator resubmits makesafe_send_pack with body.sending_resolution.
+        send_started_at: pack.send_started_at || null,
+        in_flight_stale: isSendingStale(pack.status, pack.send_started_at, Date.now()),
         failed_step: pack.failed_step || null,
         error_detail: pack.error_detail || null,
       } : null,
@@ -14796,6 +14824,87 @@ async function makesafeSendPack(
     return { already_sent: true, reason: 'MAKESAFE_PACK_SENT marker present', job_id: jobId }
   }
 
+  // ── RESUME RE-ENTRY (C-1 + P-1) — RECOVERY of a CONFIRMED send / hard-crash
+  // window. Runs AFTER loading the pack row's current status, BEFORE the atomic
+  // send-lock, so these recovery returns NEVER 409 and NEVER re-email /
+  // re-authorise. This is reconciliation of an email that ALREADY went out (or a
+  // human-confirmed not-sent), not a re-send. ──
+  const { data: priorPack } = await client.from('makesafe_report_packs')
+    .select('status, send_started_at, sent_at, xero_invoice_id, invoice_status')
+    .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
+  const priorStatus = priorPack?.status || null
+
+  // Helper: apply the make-safe close (idempotent). NOT completeJob — its status
+  // allow-list excludes make-safe substatuses. report_sent_at is set only if not
+  // already present so a re-run preserves the original send time.
+  const _applyMakesafeClose = async () => {
+    const patch: Record<string, any> = { substatus: 'complete', updated_at: nowIso() }
+    const { data: msd } = await client.from('makesafe_job_details')
+      .select('report_sent_at').eq('job_id', jobId).maybeSingle()
+    if (!msd?.report_sent_at) patch.report_sent_at = nowIso()
+    await client.from('makesafe_job_details').update(patch).eq('job_id', jobId)
+  }
+
+  const postSendPlan = planPostSendResume(priorStatus)
+  if (postSendPlan) {
+    // sent_marker_failed: the email went out but the marker write failed. Write
+    // the marker (idempotent — the unconditional marker stop above already
+    // returned if it now exists), apply the close, set status='sent'. The
+    // marker baked invoice number is a triage breadcrumb (M3 never trusts it).
+    if (postSendPlan.writeMarker) {
+      const xeroId = priorPack?.xero_invoice_id || null
+      let recoverInvNo: string | null = null
+      if (xeroId) {
+        const { data: inv } = await client.from('xero_invoices')
+          .select('invoice_number').eq('xero_invoice_id', xeroId).maybeSingle()
+        recoverInvNo = inv?.invoice_number || null
+      }
+      const markerText = buildPackSentMarkerText({ invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
+      await client.from('job_events').insert({ job_id: jobId, event_type: 'note', detail_json: { text: markerText } })
+    }
+    if (postSendPlan.applyClose) await _applyMakesafeClose()
+    await _patchPack(client, jobId, packKind, { status: 'sent', sent_at: priorPack?.sent_at || nowIso(), failed_step: null, error_detail: null })
+    return { resumed: true, action: postSendPlan.action, status: 'sent', sent: true, closed: true, job_id: jobId, note: 'recovery of a confirmed send (no re-email, no re-authorise)' }
+  }
+
+  // ── 'sending' hard-crash window (P-1) — NO auto-anything. The email may or may
+  // not have gone out (process killed after email 200, before the marker). A
+  // resume from 'sending' REQUIRES an explicit operator decision in the body.
+  if (priorStatus === 'sending') {
+    const resolution = planSendingResolution(body.sending_resolution)
+    if (!resolution) {
+      // No valid resolution -> 409. Operator must verify Sent Items and resubmit.
+      return {
+        error: 'in-flight: this pack is in the SENDING state (email may have gone out). Verify the Sent Items folder, then resubmit with body.sending_resolution = "confirmed_sent" (the email DID go) or "confirmed_not_sent" (it did NOT go).',
+        status: 'sending',
+        in_flight_stale: isSendingStale(priorStatus, priorPack?.send_started_at, Date.now()),
+        send_started_at: priorPack?.send_started_at || null,
+        requires: 'sending_resolution',
+        job_id: jobId,
+      }
+    }
+    if (resolution.writeMarkerAndClose) {
+      // confirmed_sent: the email DID go. Write marker + close, status='sent'.
+      // NO re-email, NO re-authorise.
+      const xeroId = priorPack?.xero_invoice_id || null
+      let recoverInvNo: string | null = null
+      if (xeroId) {
+        const { data: inv } = await client.from('xero_invoices')
+          .select('invoice_number').eq('xero_invoice_id', xeroId).maybeSingle()
+        recoverInvNo = inv?.invoice_number || null
+      }
+      const markerText = buildPackSentMarkerText({ invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
+      await client.from('job_events').insert({ job_id: jobId, event_type: 'note', detail_json: { text: markerText } })
+      await _applyMakesafeClose()
+      await _patchPack(client, jobId, packKind, { status: 'sent', sent_at: priorPack?.sent_at || nowIso(), failed_step: null, error_detail: null })
+      return { resumed: true, action: 'confirmed_sent_marker_and_close', status: 'sent', sent: true, closed: true, job_id: jobId, note: 'operator confirmed the email went out; reconciled (no re-email)' }
+    }
+    // confirmed_not_sent: the email did NOT go. The invoice is already AUTHORISED,
+    // so we move the pack to 'authorised_not_sent' (a lockable resume state) and
+    // fall through to the normal lock -> (skip re-authorise) -> gate -> send path.
+    await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: null, error_detail: 'operator confirmed not-sent from sending; re-entering send' })
+  }
+
   // ── Load job + makesafe detail (MLB detection, doc gate) ──
   const { data: job } = await client.from('jobs')
     .select('id, job_number, type, status, metadata, client_name')
@@ -14823,6 +14932,17 @@ async function makesafeSendPack(
     .eq('job_id', jobId)
     .order('invoice_date', { ascending: false })
   const liveInvoiceMapped = _resolveMakesafeJobInvoices(jobInvoices || [], jobId, detail?.external_ref)
+  // N-1 (money-safety) — AMBIGUOUS INVOICE = FAIL CLOSED. If MORE THAN ONE
+  // non-void (not VOIDED/DELETED) ACCREC invoice maps to the job, we do NOT
+  // auto-pick the first/newest one (silent wrong-amount risk). Stop with a 412
+  // and patch the pack so the cockpit shows the ambiguity. Only proceed when
+  // EXACTLY ONE non-void invoice maps. (jobInvoices is the job-linked set.)
+  const liveInvoiceCount = countLiveInvoices(jobInvoices || [])
+  if (isInvoiceAmbiguous(jobInvoices || [])) {
+    await _ensurePackRow(client, jobId, packKind)
+    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_invoice_ambiguous', error_detail: `ambiguous invoice: ${liveInvoiceCount} live invoices map to this job` })
+    throw new ApiError(`ambiguous invoice: ${liveInvoiceCount} live invoices map to this job; resolve to one before sending`, 412)
+  }
   const liveInvoiceRow = (jobInvoices || []).find((inv: any) =>
     !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase()))
   if (!liveInvoiceRow) {
