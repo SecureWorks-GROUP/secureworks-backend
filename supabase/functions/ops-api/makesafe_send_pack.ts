@@ -6,15 +6,28 @@
 // MONEY/COMMS critical. Every gate here FAILS CLOSED: an ambiguous or incomplete
 // input yields "do not send / do not authorise".
 
-// ── Human-only auth gate (copies the approve_intake_draft pattern) ──
+// ── Privileged-caller auth gate (decision: scoped-routine-key-2026-06-17) ──
 //
-// send_pack authorises a Xero invoice and emails a builder. It must NEVER be
-// callable by the routine api-key. Only an admin/owner Supabase JWT may call it.
-export function sendPackIsHuman(
-  authMode: 'api_key' | 'jwt',
+// send_pack authorises a Xero invoice and emails a builder. It is reachable by
+// the PRIVILEGED caller classes only:
+//   - authMode='api_key'  -> the master SW_API_KEY (the ops dashboard, which has
+//                            NO per-user login) or the service-role key. PRIVILEGED.
+//   - authMode='jwt'      -> a logged-in user; only role admin/owner is privileged.
+//   - authMode='routine'  -> the LESSER MAKESAFE_ROUTINE_KEY held by the make-safe
+//                            automation. Drafts-only. REJECTED here (and centrally,
+//                            via Sentinel Wave 0's ROUTINE_FORBIDDEN_ACTIONS,
+//                            branch origin/sentinel/makesafe-wave0-hardening PR #179).
+//
+// The 'routine' class falls through to false because it is neither 'api_key' nor
+// jwt admin/owner. Under main (where authMode is only 'api_key'|'jwt' and there is
+// no 'routine' class yet) this predicate is identical in behaviour: dashboard
+// api_key + admin/owner jwt are allowed. Belt-and-braces with the central deny-list.
+export function sendPackAllowed(
+  authMode: 'api_key' | 'jwt' | 'routine',
   authUser: { role?: string } | null | undefined,
 ): boolean {
-  return authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner')
+  return authMode === 'api_key' ||
+    (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
 }
 
 // ── Marker idempotency (mirrors index.ts isPackSentMainEvent) ──

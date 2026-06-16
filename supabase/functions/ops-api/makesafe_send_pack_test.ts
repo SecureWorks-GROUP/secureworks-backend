@@ -6,7 +6,9 @@
 // model of the atomic send-lock and the resume invariants.
 //
 // They cross-reference index.ts:makesafeSendPack (the orchestration) and the
-// route gate at the `makesafe_send_pack` case.
+// route gate at the `makesafe_send_pack` case (auth per decision
+// scoped-routine-key-2026-06-17: privileged dashboard api_key OR admin/owner jwt;
+// the lesser make-safe routine key is rejected).
 //
 // Run: deno test --no-check --allow-env --allow-net=127.0.0.1 \
 //        supabase/functions/ops-api/makesafe_send_pack_test.ts
@@ -15,7 +17,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  sendPackIsHuman,
+  sendPackAllowed,
   checkClientSendGate,
   resolveExistingInvoice,
   isPackSentMainEvent,
@@ -31,27 +33,70 @@ import {
 } from "./makesafe_send_pack.ts";
 
 // ─────────────────────────────────────────────────────────────────
-// 1. HUMAN-ONLY gate — api-key can NEVER call send_pack; only admin/owner JWT.
-//    (Mirrors index.ts route case: if (!sendPackIsHuman(...)) return 403.)
+// 1. PRIVILEGED-CALLER gate (decision: scoped-routine-key-2026-06-17).
+//    send_pack is reachable by the privileged dashboard key (authMode='api_key',
+//    the master SW_API_KEY — the ops dashboard has NO per-user login) OR an
+//    admin/owner JWT. The lesser make-safe routine key (authMode='routine',
+//    Sentinel Wave 0 PR #179) is REJECTED.
+//    (Mirrors index.ts route case: if (!sendPackAllowed(...)) return 403.)
 // ─────────────────────────────────────────────────────────────────
 
-Deno.test("gate: api-key is rejected for EVERY role (cannot authorise/email)", () => {
+Deno.test("gate: api_key (the dashboard / master key) is ALLOWED for any role", () => {
+  // The ops dashboard authenticates with the master SW_API_KEY, never a user
+  // JWT, so its own approve/send button arrives as authMode='api_key'. A
+  // "reject all api_key" gate would 403 the live dashboard — the bug this fixes.
   for (const role of ["admin", "owner", "ops", "viewer", "unknown", undefined]) {
     assertEquals(
-      sendPackIsHuman("api_key", role ? { role } : null),
-      false,
-      `api_key + role=${role} must be rejected`,
+      sendPackAllowed("api_key", role ? { role } : null),
+      true,
+      `api_key + role=${role} (dashboard / master key) must be allowed`,
     );
   }
 });
 
-Deno.test("gate: admin/owner JWT allowed; ops/viewer/unknown JWT rejected", () => {
-  assertEquals(sendPackIsHuman("jwt", { role: "admin" }), true);
-  assertEquals(sendPackIsHuman("jwt", { role: "owner" }), true);
-  assertEquals(sendPackIsHuman("jwt", { role: "ops" }), false);
-  assertEquals(sendPackIsHuman("jwt", { role: "viewer" }), false);
-  assertEquals(sendPackIsHuman("jwt", { role: "unknown" }), false);
-  assertEquals(sendPackIsHuman("jwt", null), false);
+Deno.test("gate: admin/owner JWT allowed; ops/viewer/unknown/'' JWT rejected", () => {
+  assertEquals(sendPackAllowed("jwt", { role: "admin" }), true);
+  assertEquals(sendPackAllowed("jwt", { role: "owner" }), true);
+  assertEquals(sendPackAllowed("jwt", { role: "ops" }), false);
+  assertEquals(sendPackAllowed("jwt", { role: "trade" }), false);
+  assertEquals(sendPackAllowed("jwt", { role: "viewer" }), false);
+  assertEquals(sendPackAllowed("jwt", { role: "unknown" }), false);
+  assertEquals(sendPackAllowed("jwt", { role: "" }), false);
+  assertEquals(sendPackAllowed("jwt", null), false);
+});
+
+Deno.test("gate: routine (the lesser MAKESAFE_ROUTINE_KEY) is REJECTED — drafts only", () => {
+  // The 3-class model: 'routine' is neither 'api_key' nor jwt admin/owner, so the
+  // standalone predicate returns false regardless of any role hint the caller
+  // sends. Sentinel Wave 0 PR #179 also pre-denies it centrally (next test).
+  for (const role of ["admin", "owner", "ops", "viewer", "unknown", undefined]) {
+    assertEquals(
+      sendPackAllowed("routine", role ? { role } : null),
+      false,
+      `routine + role=${role} must be rejected (the automation cannot send)`,
+    );
+  }
+});
+
+// Belt-and-braces: even before the route case runs, Sentinel Wave 0's central
+// deny-list (ROUTINE_FORBIDDEN_ACTIONS in index.ts global auth, branch
+// origin/sentinel/makesafe-wave0-hardening PR #179) 403s the routine for
+// 'makesafe_send_pack'. We model that Set here and assert the cross-check.
+Deno.test("central deny-list: routine + 'makesafe_send_pack' -> 403 (Sentinel Wave 0)", () => {
+  // Mirrors Sentinel's `const ROUTINE_FORBIDDEN_ACTIONS = new Set([... 'makesafe_send_pack' ...])`
+  const ROUTINE_FORBIDDEN_ACTIONS = new Set<string>(["makesafe_send_pack"]);
+  function centralAuthStatus(authMode: string, action: string): number {
+    // Mirrors `if (authMode === 'routine' && ROUTINE_FORBIDDEN_ACTIONS.has(action)) return 403`.
+    if (authMode === "routine" && ROUTINE_FORBIDDEN_ACTIONS.has(action)) return 403;
+    return 200; // falls through to the route case (which also gates via sendPackAllowed)
+  }
+  assertEquals(centralAuthStatus("routine", "makesafe_send_pack"), 403);
+  // The privileged classes are NOT centrally denied — they reach the route case.
+  assertEquals(centralAuthStatus("api_key", "makesafe_send_pack"), 200);
+  assertEquals(centralAuthStatus("jwt", "makesafe_send_pack"), 200);
+  // The routine CAN reach the draft-only verbs (not on the deny-list).
+  assertEquals(centralAuthStatus("routine", "create_makesafe_draft_invoice"), 200);
+  assertEquals(centralAuthStatus("routine", "makesafe_render_report"), 200);
 });
 
 // ─────────────────────────────────────────────────────────────────
