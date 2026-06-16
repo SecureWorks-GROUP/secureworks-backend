@@ -15643,6 +15643,20 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   const depositConfig = frozenDeposit || liveDepositConfig
   const usingFrozenDeposit = frozenDeposit != null
 
+  // Visibility for the H2 gap: an accepted document was supplied but has no frozen
+  // revision (legacy job predating quote_revisions, or recordReleasedQuoteRevision
+  // failed at send, or a re-send that did not re-freeze). We fall back to LIVE
+  // pricing here — which is exactly the pre-fix production behaviour, so this is
+  // NOT a regression — but the live figure is mutable. Log loudly so it is
+  // alertable. NOTE: a stricter fail-closed policy (reject acceptance when no
+  // frozen revision exists) is deliberately NOT applied here because it would
+  // block acceptance for every legacy job; that is a policy call for review.
+  if (acceptedJobDocumentId && !usingFrozenDeposit && body.deposit_amount == null) {
+    console.warn('[send_acceptance_invoice] WARN no frozen revision for accepted document — falling back to LIVE pricing (mutable):', JSON.stringify({
+      job_id: jId, job_document_id: acceptedJobDocumentId,
+    }))
+  }
+
   // Resolve deposit parameters: explicit body params → frozen/live deposit config → job-type defaults
   const defaultPercent = job.type === 'fencing' ? 50 : 20
   const depositPercent = body.deposit_percent ?? depositConfig.percent ?? defaultPercent
