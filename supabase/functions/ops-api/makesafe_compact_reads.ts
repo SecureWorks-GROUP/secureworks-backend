@@ -53,7 +53,11 @@ type SB = any;
 // builder exposes a .range(from,to) terminal (see the test stub).
 const PAGE_SIZE = 1000;
 
-async function fetchAllRows<T = any>(
+// Exported (Wave 1): scanSesMakesafes in index.ts reuses this SAME paginated
+// reader (PostgREST 1000-row cap) for its candidate window over the `emails`
+// projection, mirroring makesafeNewEmails' sourcing. Pure DB read; no module-load
+// side effects.
+export async function fetchAllRows<T = any>(
   buildQuery: () => any,
   label: string,
 ): Promise<T[]> {
