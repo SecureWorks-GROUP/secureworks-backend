@@ -38,8 +38,16 @@ jobs:
             echo "Initial push — listing all function directories"
             CHANGED=$(find supabase/functions -mindepth 1 -maxdepth 1 -type d ! -name '_shared' -exec basename {} \; | sort -u | tr '\n' ' ')
           else
-            # Diff against the previous commit on main
-            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/*/index.ts' | awk -F/ '{print $3}' | sort -u | tr '\n' ' ')
+            # Diff against the previous commit on main.
+            # Detect a change to ANY file inside a function directory, not just
+            # index.ts. PR #164 changed ops-api/makesafe_compact_reads.ts (NOT
+            # index.ts); the old `-- '.../*/index.ts'` glob produced an empty
+            # CHANGED, so "Deploy changed edge functions" was skipped and the
+            # fix silently never deployed. Diff the whole functions tree and take
+            # the function name (3rd path segment), excluding _shared (handled by
+            # its own warning below). NF>=4 drops top-level non-function files
+            # like supabase/functions/README.md.
+            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/' | awk -F/ 'NF>=4 && $3!="_shared" {print $3}' | sort -u | tr '\n' ' ')
           fi
 
           echo "functions=$CHANGED" >> "$GITHUB_OUTPUT"

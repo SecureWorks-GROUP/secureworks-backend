@@ -26,6 +26,8 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _buildPipelineSentStatusMap,
+  _chunkByUrlBudget,
+  _encodedIdCost,
   _fetchAllRowsInChunks,
   _getMakesafeAttachmentUrl,
   _getMakesafeEmail,
@@ -35,7 +37,8 @@ import {
   buildAttachmentSummaries,
   deriveFromDomain,
   emptyAttachmentSummary,
-  IN_CHUNK,
+  IN_MAX_COUNT,
+  IN_URL_BUDGET,
   liveAttachmentCount,
   sinceFromDays,
 } from "./makesafe_compact_reads.ts";
@@ -580,23 +583,25 @@ Deno.test("GAP-3 no-silent-drops: an unresolvable item is INCLUDED flagged unres
 
 // ════════════════════════════════════════════════════════════
 // Fix A — fetchAllRowsInChunks dedups ids before chunking
-// (boundary references the exported IN_CHUNK constant, not a hardcoded 500/100, so
-//  it stays correct if the URL-safe chunk size is ever re-tuned.)
+// (boundary is forced via the exported IN_MAX_COUNT count cap, not a hardcoded
+//  100/500, so it stays correct if the budget/cap is ever re-tuned.)
 // ════════════════════════════════════════════════════════════
-Deno.test("fetchAllRowsInChunks: a duplicate id straddling the IN_CHUNK boundary returns its DB row exactly once", async () => {
-  // Build (IN_CHUNK + 1) ids where the duplicate sits at index 0 AND index
-  // IN_CHUNK — i.e. it lands in BOTH chunk 1 (0..IN_CHUNK-1) and chunk 2
-  // (IN_CHUNK). Without the dedup, the .in() read for each chunk would match the
-  // same DB row, returning it twice. One DB row per distinct id.
+Deno.test("fetchAllRowsInChunks: a duplicate id straddling a chunk boundary returns its DB row exactly once", async () => {
+  // Build (IN_MAX_COUNT + 1) short ids where the duplicate sits at index 0 AND
+  // index IN_MAX_COUNT. Short ids stay well under IN_URL_BUDGET, so the count cap
+  // (IN_MAX_COUNT) is what forces the split: chunk 1 = indices 0..IN_MAX_COUNT-1,
+  // chunk 2 = index IN_MAX_COUNT. The dup therefore lands in BOTH chunks. Without
+  // the dedup the .in() read for each chunk would match the same DB row, returning
+  // it twice. One DB row per distinct id is the contract.
   const DUP = "dup-id";
   const ids = [DUP];
-  for (let i = 1; i < IN_CHUNK; i++) ids.push(`id-${i}`); // fills indices 1..IN_CHUNK-1
-  ids.push(DUP); // index IN_CHUNK -> would be chunk 2 without dedup
-  assertEquals(ids.length, IN_CHUNK + 1);
+  for (let i = 1; i < IN_MAX_COUNT; i++) ids.push(`id-${i}`); // fills indices 1..IN_MAX_COUNT-1
+  ids.push(DUP); // index IN_MAX_COUNT -> would be chunk 2 without dedup
+  assertEquals(ids.length, IN_MAX_COUNT + 1);
 
-  // Seed one DB row per distinct id (IN_CHUNK distinct ids -> IN_CHUNK rows).
+  // Seed one DB row per distinct id (IN_MAX_COUNT distinct ids -> IN_MAX_COUNT rows).
   const distinct = Array.from(new Set(ids));
-  assertEquals(distinct.length, IN_CHUNK);
+  assertEquals(distinct.length, IN_MAX_COUNT);
   const { client } = makeClient({
     widgets: distinct.map((id) => ({ widget_id: id, payload: `row-for-${id}` })),
   });
@@ -608,42 +613,134 @@ Deno.test("fetchAllRowsInChunks: a duplicate id straddling the IN_CHUNK boundary
   );
 
   // Total rows == distinct ids (no double-count from the straddling duplicate).
-  assertEquals(rows.length, IN_CHUNK);
+  assertEquals(rows.length, IN_MAX_COUNT);
   // The duplicate id's row appears exactly once.
   const dupRows = rows.filter((r) => r.widget_id === DUP);
   assertEquals(dupRows.length, 1, "duplicate id must return its DB row exactly once");
   // Every distinct id appears exactly once.
   const seen = new Set(rows.map((r) => r.widget_id));
-  assertEquals(seen.size, IN_CHUNK);
+  assertEquals(seen.size, IN_MAX_COUNT);
 });
 
 // ════════════════════════════════════════════════════════════
-// Fix C (2026-06-16 hotfix) — IN_CHUNK is URL-safe AND a list larger than it is
-// split across multiple `.in()` reads, with every row still returned.
-// This is the regression guard for the live-found GAP-1/GAP-3 500: a single
-// `.in()` of 500 UUIDs built a ~19KB URL the Supabase gateway dropped. Chunking
-// keeps each `.in()` URL small; the test proves >IN_CHUNK ids -> multiple chunks.
+// Fix C (2026-06-16) — URL-BUDGET chunking. A FIXED COUNT cannot be safe for both
+// 37-char UUIDs (email_events_raw.id, GAP-3) and ~150-char Graph post-ids
+// (email_attachments.email_id = emails.post_id, GAP-1): 100 long post-ids build a
+// ~15-20KB `.in()` URL the Supabase gateway drops ("Invalid URL" / "error sending
+// request"). chunkByUrlBudget sizes each chunk by encoded byte budget instead, so
+// EVERY chunk's `.in()` list stays under IN_URL_BUDGET regardless of id length.
+// These are the regression guards for the live GAP-1/GAP-3 500.
 // ════════════════════════════════════════════════════════════
-Deno.test("IN_CHUNK is small enough to keep an .in() URL well under the gateway limit", () => {
-  // A UUID is 36 chars; URL-encoding adds quotes/commas, ~37 chars per id in the
-  // PostgREST `in.(...)` list. Keep the resulting list well under ~6KB.
-  const APPROX_BYTES_PER_ID = 37;
-  const approxUrlListBytes = IN_CHUNK * APPROX_BYTES_PER_ID;
-  assert(
-    approxUrlListBytes < 6000,
-    `IN_CHUNK=${IN_CHUNK} -> ~${approxUrlListBytes}B .in() list; must stay under ~6KB to avoid the gateway URL-length rejection that 500'd GAP-1/GAP-3`,
+Deno.test("budget constants: IN_URL_BUDGET leaves gateway headroom; IN_MAX_COUNT under the row cap", () => {
+  // ~6000B list + the rest of the URL (table, columns, `id=in.(`, headers) stays
+  // well under the ~8KB gateway limit that 500'd GAP-1/GAP-3.
+  assert(IN_URL_BUDGET <= 6500, `IN_URL_BUDGET=${IN_URL_BUDGET} must leave headroom under the ~8KB gateway URL limit`);
+  assert(IN_URL_BUDGET >= 2000, `IN_URL_BUDGET=${IN_URL_BUDGET} too small — would over-chunk short UUIDs`);
+  // The secondary count cap keeps chunks under the PostgREST 1000-row response cap.
+  assert(IN_MAX_COUNT <= 1000, "IN_MAX_COUNT must not exceed the PostgREST 1000-row cap");
+});
+
+Deno.test("chunkByUrlBudget: short UUIDs pack many per chunk; every chunk stays within budget AND count cap", () => {
+  // 600 UUID-shaped ids. encodedIdCost(uuid) ~= 37, so ~162 fit under IN_URL_BUDGET,
+  // but IN_MAX_COUNT (the count cap) caps each chunk first.
+  const ids = Array.from({ length: 600 }, (_, i) => `${i}`.padStart(8, "0") + "-1234-5678-9abc-def012345678");
+  const chunks = _chunkByUrlBudget(ids);
+  // No id is lost or duplicated.
+  assertEquals(chunks.reduce((n, c) => n + c.length, 0), ids.length);
+  assertEquals(new Set(chunks.flat()).size, ids.length);
+  for (const c of chunks) {
+    const listBytes = c.reduce((n, id) => n + _encodedIdCost(id), 0);
+    assert(listBytes <= IN_URL_BUDGET, `chunk list ${listBytes}B exceeds IN_URL_BUDGET ${IN_URL_BUDGET}`);
+    assert(c.length <= IN_MAX_COUNT, `chunk count ${c.length} exceeds IN_MAX_COUNT ${IN_MAX_COUNT}`);
+  }
+  // Short ids should pack densely: far fewer chunks than one-per-id.
+  assert(chunks.length < ids.length, "short ids must pack multiple per chunk");
+});
+
+Deno.test("chunkByUrlBudget: LONG ~150-char Graph post-ids force few-per-chunk; every chunk's encoded list stays under budget", () => {
+  // The GAP-1 live bug: email_attachments.email_id = emails.post_id is a Graph
+  // post id ~100-150 chars with URL-special chars (/, +, =). A fixed count of 100
+  // of these blew the URL. Budget chunking must split them into many small chunks.
+  const LONG_LEN = 150;
+  const makeLongId = (i: number) =>
+    `AAMkAGI2/${i}+Tsz==` + "x".repeat(LONG_LEN - 18); // ~150 chars, with /, +, = (encoded longer)
+  const ids = Array.from({ length: 300 }, (_, i) => makeLongId(i));
+  // Sanity: a single encoded long id is large; 100 of them would blow the URL.
+  const oneCost = _encodedIdCost(ids[0]);
+  assert(oneCost > 100, `long id encoded cost ${oneCost} should be >100 chars`);
+  assert(oneCost * 100 > IN_URL_BUDGET, "100 long ids must exceed the URL budget (the live bug)");
+
+  const chunks = _chunkByUrlBudget(ids);
+  // No id lost or duplicated.
+  assertEquals(chunks.reduce((n, c) => n + c.length, 0), ids.length);
+  assertEquals(new Set(chunks.flat()).size, ids.length);
+  // EVERY chunk's encoded id-list stays under the budget (the core guarantee).
+  for (const c of chunks) {
+    const listBytes = c.reduce((n, id) => n + _encodedIdCost(id), 0);
+    assert(listBytes <= IN_URL_BUDGET, `long-id chunk list ${listBytes}B exceeds IN_URL_BUDGET ${IN_URL_BUDGET}`);
+  }
+  // Long ids -> many chunks (fewer ids each) vs short ids.
+  assert(chunks.length > 1, "long ids must split into multiple chunks");
+  // Each long-id chunk holds far fewer than IN_MAX_COUNT (budget binds first).
+  assert(chunks[0].length < IN_MAX_COUNT, "long-id chunk should be budget-bound, not count-bound");
+});
+
+Deno.test("chunkByUrlBudget: a single over-budget id still gets its own 1-element chunk (no drop, no infinite loop)", () => {
+  // One id whose encoded cost alone exceeds IN_URL_BUDGET must NOT be dropped and
+  // must NOT loop forever — it lands in its own chunk.
+  const huge = "z".repeat(IN_URL_BUDGET + 500);
+  const chunks = _chunkByUrlBudget([huge, "small-1", "small-2"]);
+  // The huge id is present in exactly one chunk, alone.
+  const hugeChunk = chunks.find((c) => c.includes(huge));
+  assert(hugeChunk, "over-budget id must not be dropped");
+  assertEquals(hugeChunk!.length, 1, "over-budget id must be alone in its chunk");
+  // No id is lost.
+  assertEquals(new Set(chunks.flat()).size, 3);
+});
+
+Deno.test("chunkByUrlBudget: empty input -> no chunks", () => {
+  assertEquals(_chunkByUrlBudget([]), []);
+});
+
+Deno.test("fetchAllRowsInChunks: LONG post-ids are split into multiple small .in() reads and ALL rows return exactly once", async () => {
+  // End-to-end: feed long Graph post-ids through fetchAllRowsInChunks (the path
+  // GAP-1's email_attachments.email_id .in() and GAP-3's joins take). Assert
+  // multiple chunks, every chunk under budget, and every row returned once.
+  const LONG_LEN = 150;
+  const ids = Array.from({ length: 250 }, (_, i) => `AAMkAGI2/${i}+Tsz==` + "x".repeat(LONG_LEN - 18));
+  const seenChunkBytes: number[] = [];
+
+  const { client, inCalls } = makeClient({
+    widgets: ids.map((id) => ({ widget_id: id })),
+  });
+
+  const rows = await _fetchAllRowsInChunks<{ widget_id: string }>(
+    ids,
+    (chunkIds) => {
+      // Record each chunk's encoded `.in()` list size as it is actually issued.
+      seenChunkBytes.push(chunkIds.reduce((n, id) => n + _encodedIdCost(id), 0));
+      return client.from("widgets").select("widget_id").in("widget_id", chunkIds);
+    },
+    "widgets read",
   );
-  // And keep it under the 1000-row response cap so each chunk's page round-trips
-  // are minimal.
-  assert(IN_CHUNK <= 1000, "IN_CHUNK must not exceed the PostgREST 1000-row cap");
+
+  // Multiple `.in()` reads were issued (multi-chunk for long ids).
+  assert(inCalls["widgets"] > 1, "long ids must split into multiple .in() reads");
+  assertEquals(inCalls["widgets"], seenChunkBytes.length);
+  // EVERY issued chunk's encoded id-list stayed under the URL budget.
+  for (const b of seenChunkBytes) {
+    assert(b <= IN_URL_BUDGET, `issued chunk ${b}B exceeded IN_URL_BUDGET ${IN_URL_BUDGET}`);
+  }
+  // All rows returned exactly once.
+  assertEquals(rows.length, ids.length);
+  assertEquals(new Set(rows.map((r) => r.widget_id)).size, ids.length);
 });
 
-Deno.test("fetchAllRowsInChunks: >IN_CHUNK ids are split into multiple .in() reads and ALL rows return", async () => {
-  // 2.5x IN_CHUNK distinct ids -> 3 chunks -> 3 separate `.in()` reads (each a
-  // separate, small request URL). Every row must come back exactly once.
-  const N = IN_CHUNK * 2 + Math.floor(IN_CHUNK / 2); // 2.5 chunks
+Deno.test("fetchAllRowsInChunks: many short ids split by the count cap into multiple .in() reads; ALL rows return", async () => {
+  // 2.5x IN_MAX_COUNT short ids -> 3 chunks via the count cap -> 3 `.in()` reads.
+  const N = IN_MAX_COUNT * 2 + Math.floor(IN_MAX_COUNT / 2); // 2.5 cap-sized chunks
   const ids = Array.from({ length: N }, (_, i) => `id-${i}`);
-  const expectedChunks = Math.ceil(N / IN_CHUNK);
+  const expectedChunks = Math.ceil(N / IN_MAX_COUNT);
   assertEquals(expectedChunks, 3);
 
   const { client, inCalls } = makeClient({
@@ -656,9 +753,8 @@ Deno.test("fetchAllRowsInChunks: >IN_CHUNK ids are split into multiple .in() rea
     "widgets read",
   );
 
-  // Multiple `.in()` calls were made (multi-chunk), one per chunk.
-  assertEquals(inCalls["widgets"], expectedChunks, "each chunk must be a separate .in() read");
-  // All rows returned, exactly once each.
+  // Count-cap split: one .in() per cap-sized chunk.
+  assertEquals(inCalls["widgets"], expectedChunks, "each cap-sized chunk must be a separate .in() read");
   assertEquals(rows.length, N);
   assertEquals(new Set(rows.map((r) => r.widget_id)).size, N);
 });

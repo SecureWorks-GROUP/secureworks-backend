@@ -73,26 +73,66 @@ async function fetchAllRows<T = any>(
 
 // PostgREST also pushes an `.in(col, list)` into the request URL, so a very large
 // id list can blow the URL length AND (because the response is still capped at
-// 1000 result rows) silently truncate. Chunk the id list into IN_CHUNK-sized
-// batches, paginate each batch, and merge.
+// 1000 result rows) silently truncate. Chunk the id list, paginate each chunk,
+// and merge.
 //
 // URL-LENGTH CONSTRAINT (live-found 500 bug, 2026-06-16): the Supabase gateway
 // rejects an over-long request URL BEFORE the request is sent — surfacing in Deno
-// as "error sending request for ..." rather than an HTTP status. Each UUID is ~37
-// chars once URL-encoded into the `in.(...)` list, so 500 ids built a ~19KB URL
-// that the gateway dropped (GAP-1 / GAP-3 both 500'd here). 100 ids keeps the
-// `.in()` URL at ~4KB — safely under the ~6KB practical limit — while staying far
-// below the 1000-row response cap, so round-trips stay low. Do NOT raise this back
-// toward 500 without re-checking the gateway URL limit.
-export const IN_CHUNK = 100;
+// as "error sending request for ..." rather than an HTTP status. GAP-1/GAP-3 both
+// 500'd here. A FIXED COUNT cannot be safe for both id shapes this module reads:
+//   • email_events_raw.id is a 36-char UUID (~37 chars encoded in the in.(...) list).
+//   • email_attachments.email_id = emails.post_id = a Graph/Exchange post id, which
+//     is ~100-150 chars and carries URL-special chars (/, +, =) that grow further
+//     under encoding. 100 of THOSE build a ~15-20KB list the gateway drops.
+//
+// So we chunk by a URL-LENGTH BUDGET, not a fixed count: accumulate ids until the
+// next id would push the URL-encoded, comma-joined id list past IN_URL_BUDGET.
+// This makes a chunk of long post-ids small (few per chunk) and a chunk of short
+// UUIDs large (many per chunk) — each producing an `.in()` URL safely under the
+// gateway's ~8KB limit, with headroom for the rest of the URL (table, columns,
+// the `id=in.(` wrapper, range headers). A secondary hard COUNT cap bounds the
+// worst case for very short ids and keeps each chunk under the 1000-row response
+// cap.
 
-function chunk<T>(list: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+// URL-encoded byte budget for the comma-joined id list inside one `.in()`. ~6000
+// leaves ~2KB headroom under the ~8KB gateway limit for the rest of the request URL.
+export const IN_URL_BUDGET = 6000;
+
+// Secondary hard cap on ids-per-chunk (independent of the byte budget). Keeps the
+// worst case (many very short ids) bounded and well under the 1000-row cap.
+export const IN_MAX_COUNT = 200;
+
+// Encoded cost of adding one id to the comma-joined list: the id's URL-encoded
+// length plus 1 for the separating comma. Mirrors what PostgREST puts on the wire.
+function encodedIdCost(id: string): number {
+  return encodeURIComponent(id).length + 1;
+}
+
+// Split ids into chunks by URL-length budget (IN_URL_BUDGET) with a secondary
+// hard count cap (IN_MAX_COUNT). A single id whose encoded cost alone exceeds the
+// budget still gets its own 1-element chunk (never an empty/infinite chunk).
+function chunkByUrlBudget(ids: string[]): string[][] {
+  const out: string[][] = [];
+  let cur: string[] = [];
+  let curBytes = 0;
+  for (const id of ids) {
+    const cost = encodedIdCost(id);
+    // Start a new chunk if adding this id would exceed the byte budget OR the hard
+    // count cap — but only if the current chunk already has at least one id (so a
+    // lone over-budget id is not dropped and we never loop forever).
+    if (cur.length > 0 && (curBytes + cost > IN_URL_BUDGET || cur.length >= IN_MAX_COUNT)) {
+      out.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+    cur.push(id);
+    curBytes += cost;
+  }
+  if (cur.length) out.push(cur);
   return out;
 }
 
-// Run a paginated read for each IN-chunk of `ids` and merge all rows. The
+// Run a paginated read for each budgeted chunk of `ids` and merge all rows. The
 // factory receives one chunk and must return a fresh query builder whose
 // terminal is .range() (i.e. it includes the .in(col, chunk) filter).
 async function fetchAllRowsInChunks<T = any>(
@@ -100,13 +140,13 @@ async function fetchAllRowsInChunks<T = any>(
   buildQueryForChunk: (chunkIds: string[]) => any,
   label: string,
 ): Promise<T[]> {
-  // Dedup ids FIRST. A duplicate id that straddles the IN_CHUNK boundary would
+  // Dedup ids FIRST. A duplicate id that straddles a chunk boundary would
   // otherwise land in two different `.in(col, chunk)` reads and return the same
   // DB row twice (double-counting downstream). Dedup also shrinks the request.
   const uniqueIds = Array.from(new Set(ids));
   if (!uniqueIds.length) return [];
   const all: T[] = [];
-  for (const ch of chunk(uniqueIds, IN_CHUNK)) {
+  for (const ch of chunkByUrlBudget(uniqueIds)) {
     const rows = await fetchAllRows<T>(() => buildQueryForChunk(ch), label);
     all.push(...rows);
   }
@@ -594,3 +634,5 @@ export const _getMakesafeEmail = getMakesafeEmail;
 export const _getMakesafeAttachmentUrl = getMakesafeAttachmentUrl;
 export const _buildPipelineSentStatusMap = buildPipelineSentStatusMap;
 export const _fetchAllRowsInChunks = fetchAllRowsInChunks;
+export const _chunkByUrlBudget = chunkByUrlBudget;
+export const _encodedIdCost = encodedIdCost;
