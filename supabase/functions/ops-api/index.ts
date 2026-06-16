@@ -174,6 +174,15 @@ import {
   buildPipelineSentStatusMap as _buildPipelineSentStatusMap,
 } from './makesafe_compact_reads.ts'
 
+// Mission makesafe-inbound-filter-2026-06-16 — intake-draft gate. scanSesMakesafes
+// is the ONLY layer that creates makesafe_intake_drafts; this gate keeps it from
+// drafting photo-evidence / report / invoice / outbound / reply emails that merely
+// carry a builder ref (the needs_review flood). See makesafe_intake_gate.ts.
+import {
+  isGenuineNewWorkOrder as _isGenuineNewWorkOrder,
+  subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
+} from './makesafe_intake_gate.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -8894,6 +8903,11 @@ async function scanSesMakesafes(client: any) {
   const makesafeEmails = messages.filter((msg: any) => {
     const fromEmail = (msg.from?.emailAddress?.address || '').toLowerCase()
     const subject = (msg.subject || '').toLowerCase()
+    // makesafe-inbound-filter — cheap SUBJECT pre-filter: drop the unambiguous
+    // non-WO subjects (Photo Evidence / Report / Invoice / Correction / Crew
+    // Report / RE:/FW:) BEFORE the expensive Graph attachment fetch + Haiku call.
+    // The hard isGenuineNewWorkOrder gate still runs before insert below.
+    if (_subjectIsExcludedNonWorkOrder(msg.subject || '')) return false
     // Match if sender matches a known pattern OR subject contains work order keywords
     const senderMatch = senderPatterns.some(sp => fromEmail.includes(sp.pattern))
     const subjectMatch = /work\s*order|make\s*safe|emergency|storm|urgent\s*(attend|repair)/i.test(subject)
@@ -9027,8 +9041,19 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       }
     }
 
-    // Skip if not actually a work order
+    // Skip if not actually a work order (Haiku hint)
     if (missingFields.includes('not_a_work_order')) continue
+
+    // makesafe-inbound-filter — HARD GATE: only a GENUINE new work order becomes a
+    // draft. `attachments` holds only successfully-uploaded PDF work orders, so its
+    // length is the work-order-PDF count. This drops photo-evidence / report /
+    // invoice / outbound / reply emails that carry a ref but no WO (the needs_review
+    // flood) while keeping any email with a WO PDF or a NEW-WO subject pattern.
+    const woGate = _isGenuineNewWorkOrder(subject, fromEmail, attachments.length)
+    if (!woGate.ok) {
+      console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
+      continue
+    }
 
     // Skip if we already have a job with this external ref
     const extractedRef = extraction.external_ref || null
