@@ -8134,6 +8134,39 @@ function _resolveMakesafeJobInvoices(
 // Test-only exports.
 export const _resolveMakesafeJobInvoicesForTest = _resolveMakesafeJobInvoices
 
+// M3 marker-integrity. From the full per-job mapped invoice list (which keeps
+// VOIDED/DELETED for the void-history checks), pick the SINGLE current LIVE
+// invoice resolved purely by job link / reference — never by parsing a baked
+// MAKESAFE_PACK_SENT marker. Voided/deleted rows are excluded; AUTHORISED wins
+// over SUBMITTED wins over any other non-void status (e.g. PAID/DRAFT). On a tie
+// the first (newest — the input list is invoice_date desc) is kept. This is what
+// downstream should read for "what invoice did we actually send", so a voided +
+// replaced job (Swanbourne MLB-25691: INV-0701 VOIDED → INV-0704 AUTHORISED)
+// resolves to the live INV-0704, not the dead marker number.
+const _MAKESAFE_LIVE_INVOICE_RANK: Record<string, number> = {
+  AUTHORISED: 3,
+  SUBMITTED: 2,
+  PAID: 1,
+}
+function _resolveLiveMakesafeInvoice(
+  invoices: Array<{ status: string | null; invoice_number: string | null; voided: boolean }>,
+): { invoice_number: string | null; status: string | null } | null {
+  let best: { invoice_number: string | null; status: string | null } | null = null
+  let bestRank = -1
+  for (const inv of (invoices || [])) {
+    if (inv?.voided) continue // never a live winner
+    const status = String(inv?.status || '').toUpperCase()
+    const rank = _MAKESAFE_LIVE_INVOICE_RANK[status] ?? 0
+    if (rank > bestRank) {
+      bestRank = rank
+      best = { invoice_number: inv?.invoice_number ?? null, status: inv?.status ?? null }
+    }
+  }
+  return best
+}
+// Test-only export.
+export const _resolveLiveMakesafeInvoiceForTest = _resolveLiveMakesafeInvoice
+
 async function makesafeAudit(client: any, params: URLSearchParams) {
   const since = params.get('since')
   const statusFilter = params.get('status')
@@ -8209,6 +8242,12 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // distinct status set keeps the summary compact while the list keeps detail).
     const distinctStatuses = Array.from(new Set(invoices.map((i) => i.status).filter(Boolean)))
     const distinctNumbers = Array.from(new Set(invoices.map((i) => i.invoice_number).filter(Boolean)))
+    // M3 marker-integrity: the SINGLE current LIVE invoice, resolved by job link /
+    // reference and preferring AUTHORISED over any non-void status. Voided/replaced
+    // numbers (and any baked sent-marker text) never win — invoice_no above keeps
+    // the full distinct blob for void-history, this is the one downstream should
+    // read as "the invoice we actually sent".
+    const liveInvoice = _resolveLiveMakesafeInvoice(invoices)
     return {
       job_id: j.id,
       job_number: j.job_number,
@@ -8225,6 +8264,9 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       has_report_record: reportSet.has(j.id),
       invoice_status: distinctStatuses.length ? distinctStatuses.join(',') : null,
       invoice_no: distinctNumbers.length ? distinctNumbers.join(',') : null,
+      // M3 — current LIVE (non-voided) invoice resolved by job link, AUTHORISED-first.
+      live_invoice_no: liveInvoice?.invoice_number ?? null,
+      live_invoice_status: liveInvoice?.status ?? null,
       // GAP-4 — notes-based pack-sent marker (triage) + the sync-system verdict.
       pack_sent: packSentMap[j.id] === true,
       pipeline_item_sent_status: pipelineSentStatusMap[j.id] ?? null,
