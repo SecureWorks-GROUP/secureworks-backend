@@ -166,6 +166,48 @@ export function deriveFromDomain(fromEmail: string | null | undefined): string |
   return d || null;
 }
 
+// ── Own / outbound domain classification (inbound contamination filter) ────────
+// The ses@ mailbox is a M365 GROUP that receives a COPY of every report/invoice
+// pack WE send out, so the email-sync projection is contaminated by our own
+// outbound mail: a live readiness check found makesafe_new_emails returned 460
+// rows, 366 (79%) from our own domains, leaving only ~90 genuine inbound builder
+// work-order candidates. GAP-1 is an INBOUND intake-candidate feed, so own/
+// outbound mail must be excluded; GAP-3 (the fuller pipeline view) keeps both but
+// tags each item's direction so the audit skill can filter cleanly.
+//
+// AUTHORITATIVE SOURCE: the codebase defines the INBOUND side (builders) as
+// makesafe_companies.sender_patterns (used by monitor-ses-makesafes' classifier).
+// There is NO existing self/own-domain list anywhere in the backend — own domains
+// are the COMPLEMENT of the builder set and were not previously enumerated. So we
+// define them here as the single source of truth for "our outbound mail".
+//
+// Matched by SUFFIX (equality OR dot-anchored suffix) so a subdomain like
+// notifications.primeeco.tech is covered by "primeeco.tech" while a look-alike
+// like "notsecureworksgroup.app" is NOT (the dot anchor prevents over-matching,
+// mirroring senderMatchesPattern in monitor-ses-makesafes).
+export const OWN_OUTBOUND_DOMAINS: readonly string[] = [
+  "secureworkswa.com.au", // legacy primary (ses@ lives here)
+  "secureworksgroup.app", // current outbound app domain (quotes@/invoices@/orders@/approvals@)
+  "secureworksgroup.com.au",
+  "primeeco.tech", // platform/notification sender (covers notifications.primeeco.tech)
+];
+
+// True when fromDomain is (or is a subdomain of) one of our own outbound domains.
+// Pure + exported for the test suite. Null/empty domain -> not own (treated as
+// inbound so an un-parseable sender is never silently dropped from intake).
+export function isOwnDomain(fromDomain: string | null | undefined): boolean {
+  if (!fromDomain) return false;
+  const d = String(fromDomain).trim().toLowerCase();
+  if (!d) return false;
+  return OWN_OUTBOUND_DOMAINS.some((own) => d === own || d.endsWith(`.${own}`));
+}
+
+// "outbound" when the sender is one of our own domains, else "inbound".
+export type EmailDirection = "inbound" | "outbound";
+export function directionForDomain(fromDomain: string | null | undefined): EmailDirection {
+  return isOwnDomain(fromDomain) ? "outbound" : "inbound";
+}
+
 // ISO timestamp `days` before `nowIso` (default wall-clock now). Used to build
 // the default `since` window for GAP-1/GAP-3.
 export function sinceFromDays(days: number, nowIso?: string | null): string {
@@ -291,7 +333,14 @@ export async function makesafeNewEmails(
   const knownIds = new Set<string>();
   for (const d of (drafts || [])) if (d?.graph_message_id) knownIds.add(d.graph_message_id);
 
-  const newEmails = (emails || []).filter((e: any) => !knownIds.has(e.post_id));
+  // INBOUND CONTAMINATION FILTER: ses@ is a group that receives a COPY of every
+  // pack WE send, so the window is ~79% our own outbound mail. This feed is an
+  // INBOUND intake-candidate list, so drop any email whose sender is one of our
+  // own/outbound domains BEFORE dedup/summary work (smaller batched reads too).
+  // Un-drafted AND inbound is the candidate set.
+  const undrafted = (emails || []).filter((e: any) => !knownIds.has(e.post_id));
+  const newEmails = undrafted.filter((e: any) => !isOwnDomain(deriveFromDomain(e.from_email)));
+  const excluded_outbound = undrafted.length - newEmails.length;
   const postIds = newEmails.map((e: any) => e.post_id);
 
   // GAP-5 — attachment status summary per email (one batched read).
@@ -300,10 +349,14 @@ export async function makesafeNewEmails(
   const rows = newEmails.map((e: any) => {
     const summary = summaries[e.post_id] ?? emptyAttachmentSummary();
     const attachment_count = liveAttachmentCount(summary);
+    const from_domain = deriveFromDomain(e.from_email);
     return {
       post_id: e.post_id,
       received_at: e.received_at ?? null,
-      from_domain: deriveFromDomain(e.from_email),
+      from_domain,
+      // After the filter every retained row is inbound; the field is surfaced for
+      // transparency (and so a future relaxation of the filter stays self-describing).
+      direction: directionForDomain(from_domain),
       extracted_ref: null as string | null, // see note below
       has_attachments: e.has_attachments === true || attachment_count > 0,
       attachment_count,
@@ -316,12 +369,19 @@ export async function makesafeNewEmails(
     mailbox,
     since,
     count: rows.length,
+    // Count of un-drafted emails dropped because their sender is one of our own
+    // outbound domains (the ses@-group self-copy contamination). Surfaced so the
+    // intake skill can see the filter is working without a separate count.
+    excluded_outbound,
     emails: rows,
     // extracted_ref is sourced from the pipeline_items projection (one ref per
     // ref per mailbox); a per-email ref is not stored on the emails row itself.
     // GAP-3 (makesafe_pipeline_items) is the ref-bearing read. GAP-1 stays a
     // pure "what is un-drafted" query; extracted_ref is null here by design.
-    notes: "extracted_ref is null on this endpoint by design; use makesafe_pipeline_items (GAP-3) for normalised refs.",
+    notes:
+      "INBOUND-ONLY: emails from our own outbound domains (ses@-group self-copies) are " +
+      "EXCLUDED; excluded_outbound counts them. Each retained row carries direction:'inbound'. " +
+      "extracted_ref is null on this endpoint by design; use makesafe_pipeline_items (GAP-3) for normalised refs.",
   };
 }
 
@@ -404,11 +464,17 @@ export async function makesafePipelineItems(
     // pipeline_items.attachment_refs length when the email join is missing.
     const refsCount = Array.isArray(p.attachment_refs) ? p.attachment_refs.length : 0;
     const attachment_count = liveAttachmentCount(summary) || refsCount;
+    const sender_domain = resolved ? deriveFromDomain(email?.from_email ?? null) : null;
     return {
       ref: p.ref ?? null,
       source_email_id: resolved ? postId : null,
-      sender_domain: resolved ? deriveFromDomain(email?.from_email ?? null) : null,
+      sender_domain,
       received_at: resolved ? (email?.received_at ?? null) : null,
+      // NOT excluded here (GAP-3 is the fuller pipeline view). direction is
+      // "inbound"/"outbound" by sender_domain so intake-audit can filter cleanly;
+      // when the email link is unresolved (sender_domain null) direction is null
+      // (unknown — never guessed) rather than defaulting to inbound.
+      direction: resolved ? directionForDomain(sender_domain) : null,
       sent_status: p.sent_status ?? null,
       attachment_count,
       has_target_job: !!p.target_job,
@@ -446,7 +512,9 @@ export async function makesafePipelineItems(
       "email_link is 'resolved' (received_at within the `since` window) or 'unresolved' " +
       "(no usable email link via source_event_ids -> email_events_raw -> emails). " +
       "Unresolved items are INCLUDED with source_email_id/received_at null so intake-audit " +
-      "sees the anomaly; resolved items older than `since` are excluded.",
+      "sees the anomaly; resolved items older than `since` are excluded. " +
+      "direction is 'inbound'/'outbound' by sender_domain (null when unresolved); items are " +
+      "NOT filtered by direction here (this is the fuller pipeline view) — filter client-side.",
   };
 }
 
@@ -636,3 +704,5 @@ export const _buildPipelineSentStatusMap = buildPipelineSentStatusMap;
 export const _fetchAllRowsInChunks = fetchAllRowsInChunks;
 export const _chunkByUrlBudget = chunkByUrlBudget;
 export const _encodedIdCost = encodedIdCost;
+export const _isOwnDomain = isOwnDomain;
+export const _directionForDomain = directionForDomain;
