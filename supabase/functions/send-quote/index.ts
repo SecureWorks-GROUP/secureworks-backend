@@ -87,6 +87,31 @@ function getDepositTermsString(depositPct: number): string {
   return `${depositPct}% deposit + ${remaining}% on completion`
 }
 
+// ── Server-side quote pricing gate ──
+// Returns an error string when a quote must NOT be sent, or null when it may.
+// Blocks: (1) explicit validation failure (pricing_validation_passed === false),
+// (2) a non-positive quote total. Accepts string-or-object pricing_json.
+// pricing_validation_passed is checked with strict === false so quotes that never
+// set the flag (fence-designer, legacy quotes) are NOT blocked — only an explicit
+// failed validation from the scoping tool blocks.
+function quotePricingGateError(pricingJsonRaw: any): string | null {
+  let pj: any = {}
+  try {
+    pj = typeof pricingJsonRaw === 'string' ? JSON.parse(pricingJsonRaw || '{}') : (pricingJsonRaw || {})
+  } catch {
+    // Unparseable pricing_json cannot be safely sent.
+    return 'Quote pricing is missing or invalid. Re-open the job in the scoping tool and re-save before sending.'
+  }
+  if (pj.pricing_validation_passed === false) {
+    return 'Quote failed pricing validation in the scoping tool and cannot be sent. Fix the flagged pricing issues, re-save, and try again.'
+  }
+  const total = Number(pj.totalIncGST ?? pj.total ?? pj.grandTotal ?? 0)
+  if (!(total > 0)) {
+    return 'Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.'
+  }
+  return null
+}
+
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
 function logEmailToGHL(contactId: string | null, subject: string, recipient: string) {
   if (!contactId) return
@@ -623,6 +648,19 @@ serve(async (req: Request) => {
       const client_email = providedEmail || doc.job_contacts?.client_email
       if (!client_email) {
         return jsonResponse({ error: 'No email address found for this contact' }, 400, corsHeaders)
+      }
+
+      // ── Server-side pricing gate ──
+      // The scoping tools embed pricing_validation_passed in pricing_json and the
+      // patio tool's own comment promises "pricing_validation_passed === false ⇒
+      // send-quote 400", but that was never enforced server-side. A quote with a
+      // failed validation, or a zero/negative total, could still be sent by hitting
+      // this endpoint directly or replaying a stale document. Enforce it here.
+      // Strict === false so fence/legacy quotes that never set the flag (undefined)
+      // are NOT blocked — only an explicit validation failure blocks.
+      {
+        const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
+        if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
       }
 
       // Resolve name: use provided, fall back to job_contact, then job-level
@@ -1924,6 +1962,12 @@ serve(async (req: Request) => {
       const pj = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job.pricing_json || {})
       const runs = pj.runs || []
       if (runs.length === 0) return jsonResponse({ error: 'No runs in pricing_json' }, 400, corsHeaders)
+
+      // ── Server-side pricing gate (same contract as the single-doc send path) ──
+      {
+        const gateErr = quotePricingGateError(pj)
+        if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
+      }
 
       const contacts = job.job_contacts || []
       const primaryContact = contacts.find((c: any) => c.is_primary) || { client_name: job.client_name, client_email: job.client_email }
