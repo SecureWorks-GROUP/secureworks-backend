@@ -401,6 +401,62 @@ Deno.test("2.1 makesafeAudit returns compact jobs[] with raw substatus, doc bool
   assert(j.invoices.some((i: any) => i.voided === true));
 });
 
+// has_report_record must count a typed job_documents row (type='makesafe_report')
+// as a filed report — the close-out skill files reports via attach_makesafe_document
+// (M3 typed-doc path) and never writes a job_service_reports row. Without this OR
+// every report the skill produces reads as missing. (SWMS-26582 MLB-20773
+// Mirrabooka, SWMS-26584 AJBR-67713 Ferndale are real jobs in this exact state.)
+Deno.test("2.1 has_report_record is TRUE for a typed makesafe_report doc with no job_service_reports row", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-rep", job_number: "SWMS-26582", status: "complete" })],
+    makesafe_job_details: [
+      {
+        job_id: "j-rep",
+        external_ref: "MLB-20773",
+        requesting_company_name: "Major Loss Builders",
+        requesting_company_slug: "mlb",
+        substatus: "complete",
+      },
+    ],
+    job_documents: [
+      // The skill-filed report: a typed makesafe_report doc whose file_name does
+      // NOT contain "make safe report" (so the heuristic has_report_doc may miss
+      // it, but the typed-OR must still mark the record present).
+      {
+        job_id: "j-rep",
+        type: "makesafe_report",
+        file_name: "SWMS-26582 completion.pdf",
+      },
+    ],
+    job_service_reports: [], // no record row at all — the bug case
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_record, true); // typed doc counts as a filed report
+});
+
+Deno.test("2.1 has_report_record stays FALSE with neither a report row nor a makesafe_report doc", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-none", job_number: "SWMS-27000", status: "complete" })],
+    makesafe_job_details: [
+      { job_id: "j-none", external_ref: "MLB-27000", substatus: "complete" },
+    ],
+    // Only a work-order doc and an unrelated invoice doc — neither is a report.
+    job_documents: [
+      { job_id: "j-none", type: "work_order", file_name: "Work Order SWMS-27000.pdf" },
+      { job_id: "j-none", type: "invoice", file_name: "INV-9999 invoice.pdf" },
+    ],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_record, false); // no signal → still false (no false positive)
+});
+
 Deno.test("2.1 known_refs[] unions jobs (with source_email_id from the approved draft) and pending drafts", async () => {
   const client = makeQueryClient({
     jobs: [jobRow({ id: "j-live", job_number: "SWMS-30001" })],
