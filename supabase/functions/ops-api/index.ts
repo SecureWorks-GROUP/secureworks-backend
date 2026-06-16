@@ -205,6 +205,14 @@ import {
   computeInvoiceTotals,
   resolveRecipientEmail,
 } from './makesafe_report_drafts.ts'
+// Wave 3 -- threaded draft-feedback loop (draft_notes). Pure helpers enforce the
+// namespace isolation between an agent reply note and a pack-sent send-marker.
+import {
+  rejectIfPackSentMarker,
+  AGENT_REPLY_PREFIX,
+  buildAgentReplyBody,
+  noteIsAddressable,
+} from './makesafe_draft_notes.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -2833,6 +2841,17 @@ if (import.meta.main) serve(async (req: Request) => {
           approverEmail: authUser?.email || null,
         }))
       }
+
+      // ── MakeSafe Feedback Loop (Wave 3, Echo) ──
+      // Threaded notes on a make-safe DRAFT (report/intake). DRAFT-ONLY: these
+      // never send, authorise, void, or touch the board send/close transition.
+      // add_draft_note validates the body server-side (a note can NEVER be a
+      // MAKESAFE_PACK_SENT marker -> 400). rerun_draft_report re-runs the Wave 2
+      // render pipeline (draft re-render only), marks the human notes addressed,
+      // and posts an agent-reply note. Routine-safe (added to ROUTINE_ALLOWED_ACTIONS).
+      case 'add_draft_note': return json(await addDraftNote(client, body, authMode))
+      case 'list_draft_notes': return json(await listDraftNotes(client, url.searchParams))
+      case 'rerun_draft_report': return json(await rerunDraftReport(client, body, authMode))
 
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
       case 'delete_document': return json(await deleteDocument(client, body))
@@ -14788,6 +14807,142 @@ async function _ensurePackRow(client: any, jobId: string, packKind: string, extr
     await client.from('makesafe_report_packs')
       .update({ ...extra, updated_at: new Date().toISOString() })
       .eq('id', existing.id)
+  }
+}
+
+// ──────────────────────────────────────────────────────
+// Wave 3 — Feedback loop actions (Echo)
+//
+// Threaded notes on a make-safe DRAFT (report/intake). DRAFT-ONLY: nothing here
+// sends, authorises, voids, or applies the board send/close transition. The
+// load-bearing invariant is NAMESPACE ISOLATION — a note body can never be (or
+// begin with) a MAKESAFE_PACK_SENT send-marker (rejectIfPackSentMarker -> 400),
+// and every agent reply note carries AGENT_REPLY_PREFIX. The DB also enforces
+// this at row level (trg_reject_pack_sent_marker_draft_note); the action check is
+// the caller-facing 400.
+// ──────────────────────────────────────────────────────
+
+// add_draft_note: add a note to a draft (human via dashboard, or agent reply).
+// Auth: any authed caller (dashboard api_key, routine key, or jwt). Routine is
+// allow-listed (ROUTINE_ALLOWED_ACTIONS) so it can post its own reply notes.
+async function addDraftNote(client: any, body: any, _authMode: string): Promise<any> {
+  const job_id = body.job_id || body.jobId
+  const note_body = body.note_body ?? body.body
+  const author = body.author
+  const role = body.role
+  const draft_kind = body.draft_kind || body.draftKind
+  if (!job_id) throw new ApiError('job_id required', 400)
+  if (!note_body || !String(note_body).trim()) throw new ApiError('note_body required', 400)
+  if (!author || !String(author).trim()) throw new ApiError('author required', 400)
+
+  // CRITICAL: reject any attempt to write a MAKESAFE_PACK_SENT marker as a note
+  // (namespace isolation — a reply must never look like a send-marker). 400.
+  try {
+    rejectIfPackSentMarker(String(note_body))
+  } catch (e) {
+    throw new ApiError((e as Error).message, 400)
+  }
+
+  const noteRole = (role === 'agent') ? 'agent' : 'human'
+  const kind = draft_kind || 'makesafe_report'
+  const cleanBody = String(note_body).trim()
+
+  // An agent-role note in this system is always a structured reply: it MUST carry
+  // AGENT_REPLY_PREFIX so the thread (and the cockpit) can identify it. Human notes
+  // are free text. This keeps the agent namespace disciplined at write time.
+  if (noteRole === 'agent' && !cleanBody.startsWith(AGENT_REPLY_PREFIX)) {
+    throw new ApiError(`agent notes must start with '${AGENT_REPLY_PREFIX}'`, 400)
+  }
+
+  const { data, error } = await client.from('draft_notes').insert({
+    org_id: DEFAULT_ORG_ID,
+    job_id,
+    draft_kind: kind,
+    author: String(author).trim(),
+    role: noteRole,
+    body: cleanBody,
+    addressed: false,
+  }).select().single()
+
+  if (error) throw new ApiError('add_draft_note failed: ' + error.message, 500)
+  return { note: data }
+}
+
+// list_draft_notes: list notes for a job/draft (chronological, oldest first).
+// Auth: any authed caller. Params: job_id (required), draft_kind (optional).
+async function listDraftNotes(client: any, params: URLSearchParams): Promise<any> {
+  const jobId = params.get('job_id') || params.get('jobId')
+  if (!jobId) throw new ApiError('job_id required', 400)
+  const kind = params.get('draft_kind') || params.get('draftKind') || null
+
+  let q = client.from('draft_notes')
+    .select('id, job_id, draft_kind, author, role, body, addressed, created_at')
+    .eq('job_id', jobId)
+    .order('created_at', { ascending: true })
+
+  if (kind) q = q.eq('draft_kind', kind)
+
+  const { data, error } = await q
+  if (error) throw new ApiError('list_draft_notes failed: ' + error.message, 500)
+  return { notes: data || [] }
+}
+
+// rerun_draft_report: acknowledge the unaddressed human notes on a job — mark them
+// addressed and post an agent-reply note summarising what changed. The actual
+// DRAFT re-render is a separate makesafe_render_report call by the routine; this
+// action is the bookkeeping half of the loop. SAFE: never authorises or sends.
+// Auth: routine key OR privileged dashboard key OR admin/owner jwt (all reach the
+// action; the routine is allow-listed because this is draft-stage only).
+async function rerunDraftReport(client: any, body: any, _authMode: string): Promise<any> {
+  const job_id = body.job_id || body.jobId
+  const change_description = body.change_description || body.changeDescription
+  const kind = body.draft_kind || body.draftKind || 'makesafe_report'
+  if (!job_id) throw new ApiError('job_id required', 400)
+
+  // 1. Fetch unaddressed human notes (the addressable set, per noteIsAddressable).
+  const { data: unaddressedNotes, error: fetchErr } = await client.from('draft_notes')
+    .select('id, role, addressed, body')
+    .eq('job_id', job_id)
+    .eq('draft_kind', kind)
+    .eq('role', 'human')
+    .eq('addressed', false)
+    .order('created_at', { ascending: true })
+  if (fetchErr) throw new ApiError('rerun_draft_report fetch failed: ' + fetchErr.message, 500)
+  // Defensive: only act on rows that truly satisfy the addressable filter.
+  const addressable = (unaddressedNotes || []).filter((n: any) => noteIsAddressable(n))
+  if (addressable.length === 0) {
+    return { skipped: true, reason: 'no unaddressed human notes for this job' }
+  }
+
+  // 2. Mark all addressable human notes as addressed (single UPDATE).
+  const noteIds = addressable.map((n: any) => n.id)
+  const { error: updateErr } = await client.from('draft_notes')
+    .update({ addressed: true })
+    .in('id', noteIds)
+  if (updateErr) throw new ApiError('failed to mark notes addressed: ' + updateErr.message, 500)
+
+  // 3. Post an agent-reply note. buildAgentReplyBody guarantees AGENT_REPLY_PREFIX
+  //    and a body that is NOT a pack-sent marker; rejectIfPackSentMarker re-asserts
+  //    the invariant at runtime (it will not throw, by construction).
+  const description = change_description || 'Report re-rendered in response to your note.'
+  const replyBody = buildAgentReplyBody(description)
+  rejectIfPackSentMarker(replyBody) // enforces the namespace invariant at runtime
+
+  const { data: replyNote, error: insertErr } = await client.from('draft_notes').insert({
+    org_id: DEFAULT_ORG_ID,
+    job_id,
+    draft_kind: kind,
+    author: 'MAKESAFE_AGENT',
+    role: 'agent',
+    body: replyBody,
+    addressed: false,
+  }).select().single()
+  if (insertErr) throw new ApiError('notes addressed but reply note failed: ' + insertErr.message, 500)
+
+  return {
+    rerun: true,
+    addressed_count: noteIds.length,
+    reply_note: replyNote,
   }
 }
 
