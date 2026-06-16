@@ -33,6 +33,8 @@ import {
   _getMakesafeEmail,
   _makesafeNewEmails,
   _makesafePipelineItems,
+  _directionForDomain,
+  _isOwnDomain,
   attachmentUrlGuard,
   buildAttachmentSummaries,
   deriveFromDomain,
@@ -40,6 +42,7 @@ import {
   IN_MAX_COUNT,
   IN_URL_BUDGET,
   liveAttachmentCount,
+  OWN_OUTBOUND_DOMAINS,
   sinceFromDays,
 } from "./makesafe_compact_reads.ts";
 
@@ -162,6 +165,37 @@ Deno.test("sinceFromDays: returns ISO `days` before nowIso", () => {
 });
 
 // ════════════════════════════════════════════════════════════
+// Own / outbound domain classification (inbound contamination filter)
+// ════════════════════════════════════════════════════════════
+Deno.test("isOwnDomain: our own domains (exact + subdomain) are own; builders + null are not", () => {
+  // Every enumerated own domain matches exactly.
+  for (const own of OWN_OUTBOUND_DOMAINS) {
+    assert(_isOwnDomain(own), `${own} should be own`);
+    assert(_isOwnDomain(own.toUpperCase()), `${own} (upper) should be own (case-insensitive)`);
+  }
+  // Subdomains match by dot-anchored suffix (the live contaminant).
+  assert(_isOwnDomain("notifications.primeeco.tech"), "notifications.primeeco.tech is a subdomain of an own domain");
+  assert(_isOwnDomain("mail.secureworksgroup.app"), "mail.secureworksgroup.app is own");
+  // Builders (genuine inbound senders) are NOT own.
+  assert(!_isOwnDomain("mlb.com.au"), "builder domain must not be own");
+  assert(!_isOwnDomain("dispatch.ajbuildingrepairs.com.au"), "builder subdomain must not be own");
+  // Look-alikes must NOT over-match (the dot anchor guards this).
+  assert(!_isOwnDomain("notsecureworksgroup.app"), "look-alike must not match (no dot boundary)");
+  assert(!_isOwnDomain("primeeco.tech.evil.test"), "suffix-style look-alike must not match");
+  // Null/empty -> not own (treated as inbound so it is never silently dropped).
+  assert(!_isOwnDomain(null));
+  assert(!_isOwnDomain(undefined));
+  assert(!_isOwnDomain(""));
+});
+
+Deno.test("directionForDomain: own -> outbound, builder/null -> inbound", () => {
+  assertEquals(_directionForDomain("secureworkswa.com.au"), "outbound");
+  assertEquals(_directionForDomain("notifications.primeeco.tech"), "outbound");
+  assertEquals(_directionForDomain("mlb.com.au"), "inbound");
+  assertEquals(_directionForDomain(null), "inbound");
+});
+
+// ════════════════════════════════════════════════════════════
 // GAP-2 status guard (pure)
 // ════════════════════════════════════════════════════════════
 Deno.test("GAP-2 guard: only 'uploaded' with a storage_path passes", () => {
@@ -259,6 +293,36 @@ Deno.test("GAP-1: tombstoned emails are excluded (pii_purged_at set)", async () 
   assertEquals(res.count, 0);
 });
 
+Deno.test("GAP-1 inbound filter: own/outbound (ses@-group self-copy) emails are EXCLUDED; inbound builder survives", async () => {
+  // Mirrors the live contamination: the ses@ group receives a copy of every pack
+  // we send (own outbound domains), so an INBOUND intake feed must drop them and
+  // keep only genuine builder mail. excluded_outbound must count the drops, and
+  // every surviving row must be flagged direction:"inbound".
+  const { client } = makeClient({
+    emails: [
+      // Genuine inbound builder work-order -> KEEP.
+      { post_id: "post-BUILDER", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "dispatch@mlb.com.au", has_attachments: true, pii_purged_at: null },
+      // Our own outbound mail, self-copied into the group -> DROP (each own domain).
+      { post_id: "post-OUT-WA", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "ses@secureworkswa.com.au", has_attachments: false, pii_purged_at: null },
+      { post_id: "post-OUT-APP", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "invoices@secureworksgroup.app", has_attachments: false, pii_purged_at: null },
+      // Subdomain of an own domain -> DROP (suffix match).
+      { post_id: "post-OUT-SUB", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "no-reply@notifications.primeeco.tech", has_attachments: false, pii_purged_at: null },
+    ],
+    makesafe_intake_drafts: [],
+    email_attachments: [{ email_id: "post-BUILDER", status: "uploaded" }],
+  });
+  const res = await _makesafeNewEmails(client, { nowIso: "2026-06-15T00:00:00Z" });
+  // Only the builder email survives the inbound filter.
+  assertEquals(res.count, 1);
+  assertEquals(res.emails[0].post_id, "post-BUILDER");
+  assertEquals(res.emails[0].from_domain, "mlb.com.au");
+  assertEquals(res.emails[0].direction, "inbound");
+  // The three own/outbound self-copies were counted, not silently vanished.
+  assertEquals(res.excluded_outbound, 3);
+  // No surviving row is ever flagged outbound (the feed is inbound-only).
+  assert(res.emails.every((e: any) => e.direction === "inbound"), "every retained GAP-1 row must be inbound");
+});
+
 // ════════════════════════════════════════════════════════════
 // GAP-3 — makesafe_pipeline_items
 // ════════════════════════════════════════════════════════════
@@ -326,6 +390,45 @@ Deno.test("GAP-3: sent_status filter is honoured", async () => {
   assertEquals(res.count, 1);
   assertEquals(res.items[0].ref, "R-SENT");
   assertEquals(res.sent_status, "verified_sent");
+});
+
+Deno.test("GAP-3 direction: tagged per sender_domain (inbound builder vs outbound self-copy), NOT excluded; null when unresolved", async () => {
+  // GAP-3 is the fuller pipeline view, so it must KEEP both inbound and outbound
+  // items but tag each so intake-audit can filter. An unresolved item (no email
+  // link) has no sender_domain, so its direction is null (unknown, never guessed).
+  const { client } = makeClient({
+    pipeline_items: [
+      { ref: "R-IN", mailbox: "ses@secureworkswa.com.au", target_job: "j1", sent_status: "needs_review", attachment_refs: [], match_score: null, source_event_ids: ["ev-in"] },
+      { ref: "R-OUT", mailbox: "ses@secureworkswa.com.au", target_job: null, sent_status: "needs_review", attachment_refs: [], match_score: null, source_event_ids: ["ev-out"] },
+      { ref: "R-UNRES", mailbox: "ses@secureworkswa.com.au", target_job: null, sent_status: "needs_review", attachment_refs: ["a-1"], match_score: null, source_event_ids: ["ev-orphan"] },
+    ],
+    email_events_raw: [
+      { id: "ev-in", post_id: "post-in" },
+      { id: "ev-out", post_id: "post-out" },
+      { id: "ev-orphan", post_id: "post-missing" }, // no email row -> unresolved
+    ],
+    emails: [
+      { post_id: "post-in", mailbox: "ses@secureworkswa.com.au", from_email: "dispatch@mlb.com.au", received_at: "2026-06-14T00:00:00Z" },
+      // Our own outbound pack self-copied into the group: kept here, tagged outbound.
+      { post_id: "post-out", mailbox: "ses@secureworkswa.com.au", from_email: "invoices@secureworksgroup.app", received_at: "2026-06-14T00:00:00Z" },
+    ],
+    email_attachments: [],
+  });
+  const res = await _makesafePipelineItems(client, { nowIso: "2026-06-15T00:00:00Z" });
+  const byRef: Record<string, any> = {};
+  for (const it of res.items) byRef[it.ref] = it;
+
+  // All three retained (no direction-based exclusion in GAP-3).
+  assertEquals(res.count, 3);
+  // Inbound builder.
+  assertEquals(byRef["R-IN"].direction, "inbound");
+  assertEquals(byRef["R-IN"].sender_domain, "mlb.com.au");
+  // Outbound self-copy KEPT but tagged.
+  assertEquals(byRef["R-OUT"].direction, "outbound");
+  assertEquals(byRef["R-OUT"].sender_domain, "secureworksgroup.app");
+  // Unresolved -> direction null (never guessed).
+  assertEquals(byRef["R-UNRES"].direction, null);
+  assertEquals(byRef["R-UNRES"].email_link, "unresolved");
 });
 
 // ════════════════════════════════════════════════════════════
