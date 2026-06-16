@@ -183,6 +183,11 @@ import {
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
 } from './makesafe_intake_gate.ts'
 
+// Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
+// the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
+// == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
+import { loadRefPrefixes, normaliseRef } from '../_shared/makesafe_refs.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -1613,17 +1618,33 @@ if (import.meta.main) serve(async (req: Request) => {
     })
   }
 
-  // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
+  // ── Authentication: API key (server-to-server) + JWT (browser) + scoped routine ──
+  // Three caller classes (decision: scoped-routine-key-2026-06-17):
+  //   api_key  — the master SW_API_KEY (the ops dashboard) or the service-role key.
+  //              PRIVILEGED: may approve / create live jobs / authorise.
+  //   jwt      — a logged-in Supabase user (role admin/owner = privileged).
+  //   routine  — the LESSER MAKESAFE_ROUTINE_KEY held by the make-safe automation.
+  //              May create/read DRAFTS only; rejected by approve/authorise and
+  //              forced-to-draft on live-job creation. NEVER privileged.
+  // The routine key is a DISTINCT secret from SW_API_KEY; the routine env carries the
+  // routine key ONLY, never SW_API_KEY (morning provisioning discipline). The env var
+  // may be UNSET until provisioned, so we only ever match it when it is non-empty;
+  // an unset routine key can never classify any caller as routine.
   const validKey = Deno.env.get('SW_API_KEY')
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
+  const routineKey = routineKeyEnv && routineKeyEnv.length > 0 ? routineKeyEnv : null
   const xApiKey = req.headers.get('x-api-key')
   const authHeader = req.headers.get('authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
-  let authMode: 'api_key' | 'jwt' = 'api_key'
+  let authMode: 'api_key' | 'jwt' | 'routine' = 'api_key'
   let authUser: { id: string; email: string; role: string } | null = null
 
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
+  if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) {
+    // Scoped automation caller (presents the routine key, NOT SW_API_KEY).
+    authMode = 'routine'
+  } else if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
     authMode = 'api_key' // Server-to-server call via x-api-key header
   } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) {
     authMode = 'api_key' // Server-to-server call via Authorization header
@@ -1660,6 +1681,57 @@ if (import.meta.main) serve(async (req: Request) => {
     const action = url.searchParams.get('action')
     console.log(`[ops-api] action=${action} method=${req.method}`)
 
+    // ── Scoped routine ALLOW-LIST (decision scoped-routine-key-2026-06-17) ──
+    // DEFAULT-DENY (fail-safe): the make-safe automation routine (authMode='routine')
+    // may call ONLY the actions in this allow-list; every other action is rejected by
+    // default. This is the campaign's #1 rule made structural ("the AI never sends"):
+    // a send/authorise/approve action, or any NEW dangerous action added later, is
+    // routine-callable ONLY if someone explicitly adds it here. If we omit a
+    // legitimately-needed SAFE action, the routine gets a harmless 403 and we add it,
+    // rather than a dangerous action silently slipping through (the deny-list failure
+    // mode). It contains DRAFT / READ / RENDER / ATTACH actions ONLY.
+    //
+    // EXTEND ONLY with draft / read / render / attach actions; NEVER a send (send_*),
+    // authorise/void/update/mark-paid invoice action, approve_* action, makesafe_send_pack,
+    // or any crew / PO / assignment / status-mutation action. (create_makesafe_job is a
+    // deliberate exception: allow-listed so the routine reaches its case, which then
+    // redirects the routine to a draft. It can never create a live job.)
+    const ROUTINE_ALLOWED_ACTIONS = new Set([
+      // Reads / context (decide what is report-ready, read intake + evidence)
+      'ops_api_version',
+      'ops_summary',
+      'makesafe_pipeline',
+      'makesafe_pipeline_items',
+      'makesafe_audit',
+      'makesafe_new_emails',
+      'get_makesafe_email',
+      'get_makesafe_attachment_url',
+      'job_detail',
+      'list_intake_drafts',
+      'list_makesafe_companies',
+      // Make-safe DRAFT creation (intake). scan/create_intake_draft produce drafts only.
+      'scan_ses_makesafes',
+      'create_intake_draft',
+      // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
+      // own case, where a routine caller is REDIRECTED to a needs_review draft (it can
+      // never create a live job). It is the single exception to "no job creation"; the
+      // redirect (not the allow-list) is what keeps the routine off the live board.
+      'create_makesafe_job',
+      // Wave 2 report DRAFT artifacts that EXIST today (Scribe extends this block):
+      'attach_makesafe_document', // typed doc attach (report / invoice-pdf / swms)
+      'submit_makesafe_report', // writes the report record (a draft artifact, no send)
+      'update_makesafe_substatus', // BOARD-state only; the SEND/close transition lives
+      // in makesafe_send_pack (denied). Scribe: ensure the routine only sets draft-stage
+      // substatuses (e.g. admin_to_send_report), never a sent/closed substatus.
+      // ── Wave 2 extension point (Scribe) — ADD the report draft-invoice + render
+      // actions here by their real names once built, e.g.:
+      //   'create_makesafe_draft_invoice', 'render_makesafe_report'
+      // Draft/render only; the AUTHORISE + SEND stays in makesafe_send_pack (denied).
+    ])
+    if (authMode === 'routine' && action && !ROUTINE_ALLOWED_ACTIONS.has(action)) {
+      return json({ error: `forbidden: '${action}' is not permitted for the make-safe automation routine; the routine key may only create/read drafts and render/attach report artifacts (default-deny). A human tick (privileged ops key or admin/owner) performs every send, authorise, and approve.` }, 403)
+    }
+
     // Parse POST body for write actions
     let body: any = {}
     if (req.method === 'POST') {
@@ -1667,6 +1739,14 @@ if (import.meta.main) serve(async (req: Request) => {
     }
 
     const client = sb()
+
+    // Legacy auth-mode alias for pre-existing handlers (expenses, booking proposals)
+    // whose signatures predate authMode='routine' and only know 'api_key' | 'jwt'. A
+    // routine caller is the least-privileged class, so for those non-make-safe handlers
+    // it maps to the non-jwt floor 'api_key' (they grant privilege only to jwt
+    // admin/owner; the routine is never that). No behaviour change for existing callers;
+    // the routine cannot reach anything privileged here regardless (deny-list + gates).
+    const authModeLegacy: 'api_key' | 'jwt' = authMode === 'routine' ? 'api_key' : authMode
 
     switch (action) {
       case 'ops_api_version': return json(opsApiVersion())
@@ -1697,7 +1777,20 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'generate_work_order_doc': return json(await generateWorkOrderDoc(client, body))
       case 'delete_media': return json(await deleteMedia(client, body))
       case 'jump_council_step': return json(await jumpCouncilStep(client, body))
-      case 'create_makesafe_job': return json(await createMakesafeJob(client, body))
+      // create_makesafe_job (decision scoped-routine-key-2026-06-17): privileged callers
+      // (the ops dashboard SW_API_KEY = api_key, or a jwt admin/owner) create a LIVE job
+      // directly, as today. The scoped automation routine is NOT allowed to put a live
+      // job on the board with its key; instead its call is REDIRECTED into a
+      // needs_review intake draft so the human approve gate still applies (the routine
+      // may propose, never promote). The internal service-role approve path calls
+      // createMakesafeJob() at the function level (not via this route), so approved
+      // drafts still become live jobs unchanged.
+      case 'create_makesafe_job': {
+        if (authMode === 'routine') {
+          return json(await createMakesafeDraftFromProposal(client, body))
+        }
+        return json(await createMakesafeJob(client, body))
+      }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
       case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
@@ -1788,7 +1881,21 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'geocode_job': return json(await geocodeJob(client, body))
       case 'geocode_missing_makesafes': return json(await geocodeMissingMakesafes(client))
       case 'list_intake_drafts': return json(await listIntakeDrafts(client, url.searchParams))
-      case 'approve_intake_draft': return json(await approveIntakeDraft(client, body))
+      // Wave 0 C2 gate (red-team + decision scoped-routine-key-2026-06-17): approving a
+      // draft creates a LIVE make-safe job, so it is a PRIVILEGED action. Allowed callers:
+      // the master SW_API_KEY (the ops dashboard, authMode='api_key') OR a logged-in
+      // admin/owner JWT. The scoped automation routine (authMode='routine') is REJECTED:
+      // it may create/read drafts but the human tick (this approve) is the gate it must
+      // never cross. (This also fixes the earlier C2 regression that 403'd the dashboard,
+      // which authenticates with SW_API_KEY + anon bearer, never a user JWT.)
+      case 'approve_intake_draft': {
+        const approveIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!approveIsPrivileged) {
+          return json({ error: 'forbidden: approve_intake_draft requires the privileged ops key or an admin/owner session; the make-safe automation routine cannot approve drafts' }, 403)
+        }
+        return json(await approveIntakeDraft(client, body))
+      }
       case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
       case 'create_intake_draft': return json(await createIntakeDraft(client, body))
       case 'scan_ses_makesafes': return json(await scanSesMakesafes(client))
@@ -2738,13 +2845,13 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'confirmed_prices': return json(await getConfirmedPrices(client))
 
       // ── Spine: Expenses ──
-      case 'submit_expense': return json(await submitExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
-      case 'approve_expense': return json(await approveExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
-      case 'push_expense_to_xero': return json(await pushExpenseToXero(client, body, { mode: authMode, user: authUser ?? undefined }))
+      case 'submit_expense': return json(await submitExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
+      case 'approve_expense': return json(await approveExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
+      case 'push_expense_to_xero': return json(await pushExpenseToXero(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
       case 'list_expenses': return json(await listExpenses(client, url.searchParams))
       case 'list_unreconciled_transactions': return json(await listUnreconciledTransactions(client, url.searchParams))
-      case 'suggest_job_for_expense': return json(await suggestJobForExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
-      case 'update_expense': return json(await updateExpense(client, body, { mode: authMode, user: authUser ?? undefined }))
+      case 'suggest_job_for_expense': return json(await suggestJobForExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
+      case 'update_expense': return json(await updateExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
 
       // ── Spine: Council/Engineering ──
       case 'create_council_submission': return json(await createCouncilSubmission(client, body))
@@ -2813,7 +2920,7 @@ if (import.meta.main) serve(async (req: Request) => {
       // Booking approval bridge — browser/ops-api calls Railway, Railway calls
       // the existing sw_approve_booking_proposal path. Keeps Graph/calendar
       // logic in one place instead of duplicating it in Deno.
-      case 'approve_booking_proposal':      return json(await approveBookingProposalViaAgent(body, { mode: authMode, user: authUser }))
+      case 'approve_booking_proposal':      return json(await approveBookingProposalViaAgent(body, { mode: authModeLegacy, user: authUser }))
       // Quote Follow-Up Loop send path (atomic-claim per parent card B4).
       // Only fires when sale.html dispatches a send_quote_followup_sms
       // proposal. Customer-facing send is gated by Marnin's cockpit click.
@@ -7465,6 +7572,72 @@ async function geocodeMissingMakesafes(client: any) {
   return { ok: true, geocoded, total: jobs.length }
 }
 
+// Scoped-routine redirect (decision scoped-routine-key-2026-06-17): when the make-safe
+// automation routine calls create_makesafe_job, it must NOT create a live job. Instead
+// we record its proposal as a make-safe intake DRAFT so the human approve gate still
+// applies. Takes the SAME body shape as createMakesafeJob and writes a
+// makesafe_intake_drafts row (never a jobs row). Status mirrors the P0-C completeness
+// logic: a complete proposal lands as 'needs_review' (ready for the human tick), an
+// incomplete one as 'draft'. A synthetic graph_message_id is minted because a routine
+// proposal has no source email; it is namespaced so it can never collide with a real
+// ingested email id and the create_intake_draft dedup still works.
+async function createMakesafeDraftFromProposal(client: any, body: any) {
+  const {
+    client_name, site_address, suburb, site_suburb, phone, mobile, email,
+    requesting_company_slug, requesting_company_name, external_ref, description,
+    makesafe_type, job_type_detail, makesafe_type_detail,
+    safety_requirements, special_instructions, attachments_json,
+  } = body
+
+  if (!client_name || !site_address) throw new Error('client_name and site_address required')
+
+  const attachments = parseJsonArray(attachments_json)
+  // Same required-field set the approve gate enforces (P0-C parity): a draft missing any
+  // of these is not yet tickable, so it lands as 'draft' rather than 'needs_review'.
+  const missingRequired = (
+    (!requesting_company_slug && !requesting_company_name) ||
+    !external_ref ||
+    !client_name ||
+    !site_address ||
+    attachments.length === 0
+  )
+
+  // Synthetic, collision-proof message id for a routine proposal (no source email).
+  const syntheticMessageId = `routine-proposal:${crypto.randomUUID()}`
+
+  // The drafts table has NO makesafe_type column and confidence is constrained to
+  // high/medium/low, so we stash the proposed make-safe type in extraction_json (which
+  // approveIntakeDraft's choose() reads via extraction[key]) and record confidence as
+  // 'low' (a routine proposal always needs the human review).
+  const resolvedMakesafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
+
+  const { data, error } = await client.from('makesafe_intake_drafts').insert({
+    org_id: DEFAULT_ORG_ID,
+    mailbox: 'routine@makesafe.internal',
+    graph_message_id: syntheticMessageId,
+    received_at: new Date().toISOString(),
+    requesting_company_slug: requesting_company_slug || null,
+    requesting_company_name: requesting_company_name || null,
+    external_ref: external_ref || null,
+    client_name: client_name || null,
+    client_phone: phone || mobile || null,
+    client_email: email || null,
+    site_address: site_address || null,
+    site_suburb: site_suburb || suburb || null,
+    description: description || null,
+    safety_requirements: safety_requirements || null,
+    special_instructions: special_instructions || null,
+    confidence: 'low',
+    missing_fields: [],
+    extraction_json: { makesafe_type: resolvedMakesafeType, source: 'routine_proposal' },
+    attachments_json: attachments,
+    status: missingRequired ? 'draft' : 'needs_review',
+  }).select().single()
+
+  if (error) throw error
+  return { ok: true, draft: data, redirected: true, note: 'routine proposal recorded as an intake draft for human approval; no live job created' }
+}
+
 async function createMakesafeJob(client: any, body: any) {
   const {
     client_name, site_address, suburb, phone, mobile, email,
@@ -8673,11 +8846,10 @@ async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
 
-  // Load the draft
+  // Load the draft for its field data (extraction/reviewed values below need draft.*).
   const { data: draft, error: dErr } = await client.from('makesafe_intake_drafts')
     .select('*').eq('id', draft_id).single()
   if (dErr || !draft) throw new Error('Draft not found')
-  if (draft.status === 'approved') throw new Error('Draft already approved')
 
   const extraction = parseJsonObject(draft.extraction_json)
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
@@ -8707,74 +8879,142 @@ async function approveIntakeDraft(client: any, body: any) {
   if (attachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
-  // Duplicate guard: warn/block same external ref already live before creating another job.
+  // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
+  // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
+  // so "AJBR 67200", "AJBR-67200" and "AJBR67200" all collapse to one canonical key
+  // rather than relying on near-exact ilike. When there is genuinely no match, this
+  // is a no-op and distinct refs still pass.
   if (approvedFields.external_ref) {
-    const { data: existingDetail } = await client.from('makesafe_job_details')
-      .select('job_id, external_ref, jobs(job_number, client_name, site_address, status)')
-      .ilike('external_ref', approvedFields.external_ref)
-      .limit(1)
-      .maybeSingle()
-    if (existingDetail?.job_id) {
-      const existingJob = Array.isArray(existingDetail.jobs) ? existingDetail.jobs[0] : existingDetail.jobs
-      throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || existingDetail.job_id))
+    const prefixes = await loadRefPrefixes(client)
+    const normTarget = normaliseRef(approvedFields.external_ref, prefixes)
+    if (normTarget) {
+      // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
+      // the refs already on live jobs is cheap and lets us match on normalised form.
+      const { data: candidates } = await client.from('makesafe_job_details')
+        .select('job_id, external_ref, jobs(job_number, client_name, site_address, status)')
+        .not('external_ref', 'is', null)
+      const dup = (candidates || []).find((row: any) => normaliseRef(row.external_ref, prefixes) === normTarget)
+      if (dup?.job_id) {
+        const existingJob = Array.isArray(dup.jobs) ? dup.jobs[0] : dup.jobs
+        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id))
+      }
     }
   }
 
-  // Create the make-safe job using reviewed/edited fields, not stale extraction data.
-  const jobResult = await createMakesafeJob(client, {
-    client_name: approvedFields.client_name,
-    site_address: approvedFields.site_address,
-    suburb: approvedFields.site_suburb,
-    phone: approvedFields.client_phone,
-    email: approvedFields.client_email,
-    requesting_company_slug: approvedFields.requesting_company_slug,
-    requesting_company_name: approvedFields.requesting_company_name,
-    external_ref: approvedFields.external_ref,
-    description: approvedFields.description,
-    makesafe_type: approvedFields.makesafe_type,
-    safety_requirements: approvedFields.safety_requirements,
-    special_instructions: approvedFields.special_instructions,
-    suppress_notifications: true,
-  })
+  // Atomic claim (Wave 0 C3, TOCTOU): claim the draft BEFORE creating the job so two
+  // concurrent approvals cannot both create a live job. The status CHECK constraint
+  // (migration 20260602000001) only permits draft/needs_review/approved/rejected/
+  // superseded -- there is NO 'approving' value -- so we claim DIRECTLY to 'approved'
+  // gated on the current reviewable status, and drop the separate final status write
+  // (the audit fields are still written below). A draft may legitimately be approved
+  // from either 'needs_review' or 'draft', so the claim allows both (the narrowest
+  // set that does not break the happy path); any other current status (approved,
+  // approving-n/a, rejected, superseded) yields zero rows -> concurrent/invalid block.
+  const { data: claimed, error: claimErr } = await client.from('makesafe_intake_drafts')
+    .update({ status: 'approved', updated_at: new Date().toISOString() })
+    .eq('id', draft_id)
+    .in('status', ['needs_review', 'draft'])
+    .select()
+  if (claimErr) throw claimErr
+  if (!claimed || claimed.length === 0) {
+    throw new Error('Draft is not in a reviewable state (needs_review/draft) - already approved, rejected, or superseded; concurrent approval blocked')
+  }
 
-  // Link draft to created job and preserve the reviewed values on the draft audit row.
-  await client.from('makesafe_intake_drafts').update({
-    status: 'approved',
-    approved_job_id: jobResult.job.id,
-    approved_at: new Date().toISOString(),
-    approved_by: approved_by || null,
-    review_notes: body.review_notes || body.reviewNotes || 'Approved in Ops intake review gate after PDF/source comparison.',
-    requesting_company_slug: approvedFields.requesting_company_slug,
-    requesting_company_name: approvedFields.requesting_company_name,
-    external_ref: approvedFields.external_ref,
-    client_name: approvedFields.client_name,
-    client_phone: approvedFields.client_phone,
-    client_email: approvedFields.client_email,
-    site_address: approvedFields.site_address,
-    site_suburb: approvedFields.site_suburb,
-    description: approvedFields.description,
-    safety_requirements: approvedFields.safety_requirements,
-    special_instructions: approvedFields.special_instructions,
-    updated_at: new Date().toISOString(),
-  }).eq('id', draft_id)
+  // Failure-safety (Wave 0 C3 + auditor concern 2): everything from job creation
+  // through the audit-field write runs inside this try. On failure we must avoid two
+  // hazards: (a) stranding the claimed draft forever, and (b) creating an ORPHAN
+  // double-create. The naive "always reset to needs_review on error" is unsafe: if
+  // createMakesafeJob already inserted a LIVE job but a LATER step throws, resetting
+  // the draft to needs_review would make it re-approvable and spawn a SECOND live job
+  // for the same draft. So we track whether the job was created and branch:
+  //   - job NOT yet created  -> safe to release the claim back to needs_review.
+  //   - job ALREADY created  -> leave status 'approved', best-effort stamp the orphan
+  //     job id (approved_job_id) so the row points at the real job for reconciliation,
+  //     and do NOT re-queue it. A later step failing (audit update / doc attach) is
+  //     non-fatal to the job itself; the job exists and the draft stays approved.
+  let createdJobId: string | null = null
+  try {
+    // Create the make-safe job using reviewed/edited fields, not stale extraction data.
+    const jobResult = await createMakesafeJob(client, {
+      client_name: approvedFields.client_name,
+      site_address: approvedFields.site_address,
+      suburb: approvedFields.site_suburb,
+      phone: approvedFields.client_phone,
+      email: approvedFields.client_email,
+      requesting_company_slug: approvedFields.requesting_company_slug,
+      requesting_company_name: approvedFields.requesting_company_name,
+      external_ref: approvedFields.external_ref,
+      description: approvedFields.description,
+      makesafe_type: approvedFields.makesafe_type,
+      safety_requirements: approvedFields.safety_requirements,
+      special_instructions: approvedFields.special_instructions,
+      suppress_notifications: true,
+    })
+    // Record the live job id the instant it exists so the catch path can tell a
+    // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
+    createdJobId = jobResult?.job?.id || null
 
-  // Attach any PDF attachments from the original email as visible work orders.
-  for (const att of attachments) {
-    if (att.storage_url || att.pdf_url) {
+    // Link draft to created job and preserve the reviewed values on the draft audit
+    // row. Status was already set to 'approved' by the atomic claim above, so this
+    // update writes only the audit/linkage fields (no redundant status write).
+    await client.from('makesafe_intake_drafts').update({
+      approved_job_id: jobResult.job.id,
+      approved_at: new Date().toISOString(),
+      approved_by: approved_by || null,
+      review_notes: body.review_notes || body.reviewNotes || 'Approved in Ops intake review gate after PDF/source comparison.',
+      requesting_company_slug: approvedFields.requesting_company_slug,
+      requesting_company_name: approvedFields.requesting_company_name,
+      external_ref: approvedFields.external_ref,
+      client_name: approvedFields.client_name,
+      client_phone: approvedFields.client_phone,
+      client_email: approvedFields.client_email,
+      site_address: approvedFields.site_address,
+      site_suburb: approvedFields.site_suburb,
+      description: approvedFields.description,
+      safety_requirements: approvedFields.safety_requirements,
+      special_instructions: approvedFields.special_instructions,
+      updated_at: new Date().toISOString(),
+    }).eq('id', draft_id)
+
+    // Attach any PDF attachments from the original email as visible work orders.
+    for (const att of attachments) {
+      if (att.storage_url || att.pdf_url) {
+        try {
+          await client.from('job_documents').insert({
+            job_id: jobResult.job.id,
+            type: 'work_order',
+            file_name: att.file_name || att.name || 'work-order.pdf',
+            storage_url: att.storage_url || att.pdf_url,
+            pdf_url: att.pdf_url || att.storage_url,
+            visible_to_trades: true,
+          })
+        } catch (_) { /* non-blocking */ }
+      }
+    }
+
+    return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields }
+  } catch (postClaimErr) {
+    if (!createdJobId) {
+      // Pre-insert failure: no live job exists, so release the claim back to the
+      // review queue. This is the only safe path to re-queue a draft.
       try {
-        await client.from('job_documents').insert({
-          job_id: jobResult.job.id,
-          type: 'work_order',
-          file_name: att.file_name || att.name || 'work-order.pdf',
-          storage_url: att.storage_url || att.pdf_url,
-          pdf_url: att.pdf_url || att.storage_url,
-          visible_to_trades: true,
-        })
-      } catch (_) { /* non-blocking */ }
+        await client.from('makesafe_intake_drafts')
+          .update({ status: 'needs_review', updated_at: new Date().toISOString() })
+          .eq('id', draft_id)
+      } catch (_) { /* best-effort; do not mask the original error */ }
+    } else {
+      // Post-insert failure: a LIVE job already exists. Do NOT re-queue (that would
+      // double-create). Leave status 'approved' and best-effort point the draft at the
+      // orphan job so reconciliation can find it. The job itself is fine; only a later
+      // audit/attach step failed.
+      try {
+        await client.from('makesafe_intake_drafts')
+          .update({ status: 'approved', approved_job_id: createdJobId, updated_at: new Date().toISOString() })
+          .eq('id', draft_id)
+      } catch (_) { /* best-effort; do not mask the original error */ }
     }
+    throw postClaimErr
   }
-
-  return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields }
 }
 
 // ── Slice 7: reject intake draft ──
@@ -9059,6 +9299,21 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     const extractedRef = extraction.external_ref || null
     if (extractedRef && existingRefs.has(extractedRef.toUpperCase())) continue
 
+    // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
+    // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
+    // same required-field logic approveIntakeDraft uses (requesting_company, external_
+    // ref, client_name, site_address, and a work-order PDF via attachments.length): a
+    // draft missing any required field stays 'draft', a complete one goes to
+    // 'needs_review'. Both values are valid per the status CHECK constraint
+    // (migration 20260602000001).
+    const missingRequired = (
+      (!matchedCompany?.slug && !matchedCompany?.name) ||
+      !extractedRef ||
+      !extraction.client_name ||
+      !extraction.site_address ||
+      attachments.length === 0
+    )
+
     // Create draft
     const draft = {
       org_id: DEFAULT_ORG_ID,
@@ -9086,6 +9341,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       missing_fields: missingFields,
       extraction_json: extraction,
       attachments_json: attachments,
+      status: missingRequired ? 'draft' : 'needs_review',
     }
 
     const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')
