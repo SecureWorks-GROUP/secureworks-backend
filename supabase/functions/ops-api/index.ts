@@ -2715,6 +2715,7 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── Document Upload Management ──
       case 'upload_document': return json(await uploadDocument(client, body))
       case 'confirm_document_upload': return json(await confirmDocumentUpload(client, body))
+      case 'attach_makesafe_document': return json(await attachMakesafeDocument(client, body))
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
       case 'delete_document': return json(await deleteDocument(client, body))
 
@@ -8080,6 +8081,9 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
 // Test-only export alias (mirrors the `_`-prefixed export convention used for
 // the other make-safe helpers). Production routes still call makesafePipeline.
 export const _makesafePipelineForTest = makesafePipeline
+
+// Test-only export for the close-out doc-attach path (typed + idempotent).
+export const _attachMakesafeDocumentForTest = attachMakesafeDocument
 
 // ── sw_makesafe_audit: compact pipeline reader (jobs[] + known_refs[]) ──
 // Retires the per-job sw_job_detail loop in the intake-audit + close-out-audit
@@ -13747,7 +13751,7 @@ async function uploadDocument(client: any, body: any) {
   const fName = fileName || file_name
   if (!jId || !fName) throw new Error('jobId and fileName required')
 
-  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
+  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'makesafe_report', 'invoice', 'swms', 'other']
   const docType = allowedTypes.includes(type) ? type : 'general'
 
   const bucket = 'job-documents'
@@ -13777,10 +13781,13 @@ async function confirmDocumentUpload(client: any, body: any) {
   if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
 
   // Default visibility: on for field/useful trade docs. Off for quote/client-only docs.
-  const defaultVisible = ['site_photo', 'council_plans', 'engineering', 'work_order', 'supplier_work_order', 'supplier_quote', 'approval'].includes(type)
+  // makesafe_report + swms are operational docs trades/ops view on site (close-out
+  // contract surfaces them on the Ops Dash MakeSafe card); invoice is client/admin
+  // only so it defaults trades-hidden.
+  const defaultVisible = ['site_photo', 'council_plans', 'engineering', 'work_order', 'supplier_work_order', 'supplier_quote', 'approval', 'makesafe_report', 'swms'].includes(type)
   const isVisible = visible_to_trades != null ? visible_to_trades : defaultVisible
 
-  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'other']
+  const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'makesafe_report', 'invoice', 'swms', 'other']
   const docType = allowedTypes.includes(type) ? type : 'general'
 
   const insertData: any = {
@@ -13821,6 +13828,128 @@ async function confirmDocumentUpload(client: any, body: any) {
   })
 
   return { success: true, document_id: doc?.id, url: publicUrl }
+}
+
+// ── Make-Safe close-out doc attach (typed + idempotent) ──
+// Closes the gap the close-out contract requires: the completion report,
+// authorised invoice and SWMS are emailed by the wiki Python skill but no
+// job_documents row is ever created, so the Ops Dash MakeSafe card only ever
+// shows the work order. This action writes the typed job_documents row so the
+// board/contract can verify the evidence. It does NOT change job status, send
+// anything or mutate live business state.
+//
+// Accepts: job_id, type (makesafe_report|invoice|swms|work_order), and EITHER a
+// public/storage `url` already in the bucket OR `pdf_base64` bytes to upload to
+// the `job-documents` bucket. Idempotent on (job_id, type, file_name): an
+// existing row of the same type+file_name is updated (version bumped) instead of
+// inserting a duplicate — mirrors the work-order attach pattern.
+async function attachMakesafeDocument(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  const type = body.type
+  const allowedTypes = ['work_order', 'makesafe_report', 'invoice', 'swms']
+  if (!jId) throw new Error('job_id required')
+  if (!allowedTypes.includes(type)) {
+    throw new Error('type must be one of ' + allowedTypes.join(', '))
+  }
+
+  const url: string | undefined = body.url || body.public_url || body.publicUrl || body.storage_url
+  const pdfBase64: string | undefined = body.pdf_base64 || body.pdfBase64
+  if (!url && !pdfBase64) throw new Error('url or pdf_base64 required')
+
+  // Resolve a stable file name. Caller may pass one; otherwise derive from the
+  // type so idempotency stays deterministic per job+type.
+  const rawName: string = body.file_name || body.fileName ||
+    (url ? decodeURIComponent(url.split('/').pop()?.split('?')[0] || '') : '') ||
+    `${type}-${jId}.pdf`
+  const fileName = rawName || `${type}-${jId}.pdf`
+
+  const bucket = 'job-documents'
+  let publicUrl: string
+  let storagePath: string
+
+  if (pdfBase64) {
+    // Upload bytes — mirrors the create_makesafe_job PDF upload path.
+    const pdfBuffer = Uint8Array.from(atob(pdfBase64), (c) => c.charCodeAt(0))
+    storagePath = `${jId}/${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+    const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    try { await adminClient.storage.createBucket(bucket, { public: true }) } catch { /* exists */ }
+    const { error: upErr } = await adminClient.storage
+      .from(bucket)
+      .upload(storagePath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
+    if (upErr) throw new Error('Storage upload failed: ' + upErr.message)
+    const { data: urlData } = adminClient.storage.from(bucket).getPublicUrl(storagePath)
+    publicUrl = urlData?.publicUrl || ''
+  } else {
+    // Already-in-storage URL path.
+    publicUrl = url as string
+    storagePath = body.path || body.storage_path || publicUrl
+  }
+
+  // Visibility: report + swms are operational docs trades/ops view on site;
+  // invoice is client/admin only; work_order stays trade-visible. Caller may
+  // override with visible_to_trades.
+  const defaultVisible = ['work_order', 'makesafe_report', 'swms'].includes(type)
+  const isVisible = body.visible_to_trades != null ? body.visible_to_trades : defaultVisible
+  const isPdf = /\.pdf$/i.test(fileName)
+
+  // Idempotency: same job + type + file_name → update (bump version), else insert.
+  const { data: existing } = await client.from('job_documents')
+    .select('id, version').eq('job_id', jId).eq('type', type).eq('file_name', fileName).limit(1)
+
+  let docId: string
+  if (existing && existing.length > 0) {
+    const nextVersion = (existing[0].version || 1) + 1
+    const updateData: any = {
+      storage_url: publicUrl,
+      visible_to_trades: isVisible,
+      version: nextVersion,
+    }
+    if (isPdf) updateData.pdf_url = publicUrl
+    const { error: updErr } = await client.from('job_documents')
+      .update(updateData).eq('id', existing[0].id)
+    if (updErr) throw updErr
+    docId = existing[0].id
+  } else {
+    const insertData: any = {
+      job_id: jId,
+      type: type,
+      file_name: fileName,
+      storage_url: publicUrl,
+      visible_to_trades: isVisible,
+      version: 1,
+      uploaded_by: body.uploaded_by || body.operator_email || null,
+    }
+    if (isPdf) insertData.pdf_url = publicUrl
+    const { data: newDoc, error: insErr } = await client.from('job_documents')
+      .insert(insertData).select('id').single()
+    if (insErr) throw insErr
+    docId = newDoc?.id
+  }
+
+  // Job event ledger row.
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'makesafe_document_attached',
+    detail_json: {
+      document_id: docId,
+      type: type,
+      file_name: fileName,
+      visible_to_trades: isVisible,
+      uploaded_by: body.uploaded_by || body.operator_email || null,
+    },
+  })
+
+  // Dual-write to business_events (best-effort, mirrors confirmDocumentUpload).
+  logBusinessEvent(client, {
+    event_type: 'document.uploaded',
+    entity_type: 'job_document',
+    entity_id: docId || '',
+    job_id: jId,
+    payload: { type: type, file_name: fileName, visible_to_trades: isVisible, source: 'makesafe_closeout' },
+    metadata: { operator: body.uploaded_by || body.operator_email || null },
+  })
+
+  return { success: true, document_id: docId, type: type, url: publicUrl }
 }
 
 async function toggleDocumentVisibility(client: any, body: any) {
