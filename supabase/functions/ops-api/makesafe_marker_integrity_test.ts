@@ -84,15 +84,44 @@ Deno.test("M3 live-resolver: voided+replaced job resolves to the AUTHORISED invo
   assertEquals(live!.status, "AUTHORISED");
 });
 
-Deno.test("M3 live-resolver: AUTHORISED beats SUBMITTED beats PAID; voided never wins", () => {
+Deno.test("M3 live-resolver: PAID beats AUTHORISED beats SUBMITTED beats DRAFT; voided never wins", () => {
   // Order intentionally not by rank to prove rank, not position, decides.
   const mapped = [
     { status: "VOIDED", invoice_number: "INV-V", voided: true },
-    { status: "PAID", invoice_number: "INV-P", voided: false },
-    { status: "SUBMITTED", invoice_number: "INV-S", voided: false },
+    { status: "DRAFT", invoice_number: "INV-D", voided: false },
     { status: "AUTHORISED", invoice_number: "INV-A", voided: false },
+    { status: "SUBMITTED", invoice_number: "INV-S", voided: false },
+    { status: "PAID", invoice_number: "INV-P", voided: false },
   ];
-  assertEquals(_resolveLiveMakesafeInvoiceForTest(mapped)!.invoice_number, "INV-A");
+  assertEquals(_resolveLiveMakesafeInvoiceForTest(mapped)!.invoice_number, "INV-P");
+});
+
+Deno.test("M3 live-resolver: PAID outranks AUTHORISED (the settled invoice is the live answer)", () => {
+  // The defect this guards: a job whose invoice was issued then PAID must
+  // resolve to the PAID row, not a stray AUTHORISED one. Newest-first input.
+  const mapped = [
+    { status: "AUTHORISED", invoice_number: "INV-0710", voided: false },
+    { status: "PAID", invoice_number: "INV-0704", voided: false },
+  ];
+  const live = _resolveLiveMakesafeInvoiceForTest(mapped);
+  assertEquals(live!.invoice_number, "INV-0704");
+  assertEquals(live!.status, "PAID");
+});
+
+Deno.test("M3 live-resolver: among same-rank invoices the newest (first in list) wins", () => {
+  // Input list is invoice_date desc; tie-break must keep the first-seen.
+  const mapped = [
+    { status: "AUTHORISED", invoice_number: "INV-NEW", voided: false },
+    { status: "AUTHORISED", invoice_number: "INV-OLD", voided: false },
+  ];
+  assertEquals(_resolveLiveMakesafeInvoiceForTest(mapped)!.invoice_number, "INV-NEW");
+});
+
+Deno.test("M3 live-resolver: unknown non-void status still resolves (lowest rank, never null when a live row exists)", () => {
+  const mapped = [
+    { status: "WEIRD_STATUS", invoice_number: "INV-X", voided: false },
+  ];
+  assertEquals(_resolveLiveMakesafeInvoiceForTest(mapped)!.invoice_number, "INV-X");
 });
 
 Deno.test("M3 live-resolver: all-voided job resolves to NO live invoice (null)", () => {

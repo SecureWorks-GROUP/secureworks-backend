@@ -8137,16 +8137,19 @@ export const _resolveMakesafeJobInvoicesForTest = _resolveMakesafeJobInvoices
 // M3 marker-integrity. From the full per-job mapped invoice list (which keeps
 // VOIDED/DELETED for the void-history checks), pick the SINGLE current LIVE
 // invoice resolved purely by job link / reference — never by parsing a baked
-// MAKESAFE_PACK_SENT marker. Voided/deleted rows are excluded; AUTHORISED wins
-// over SUBMITTED wins over any other non-void status (e.g. PAID/DRAFT). On a tie
-// the first (newest — the input list is invoice_date desc) is kept. This is what
-// downstream should read for "what invoice did we actually send", so a voided +
-// replaced job (Swanbourne MLB-25691: INV-0701 VOIDED → INV-0704 AUTHORISED)
-// resolves to the live INV-0704, not the dead marker number.
+// MAKESAFE_PACK_SENT marker. Voided/deleted rows are excluded. Ranking, highest
+// first: PAID (money received — the most-final live state) > AUTHORISED (issued)
+// > SUBMITTED > DRAFT > any other non-void status. On a tie the first (newest —
+// the input list is invoice_date desc) is kept. This is what downstream should
+// read for "what invoice did we actually send / settle", so a voided + replaced
+// job (Swanbourne MLB-25691: INV-0701 VOIDED → INV-0704 AUTHORISED) resolves to
+// the live INV-0704, not the dead marker number; and a job whose invoice has
+// since been PAID resolves to the PAID one over a stray AUTHORISED.
 const _MAKESAFE_LIVE_INVOICE_RANK: Record<string, number> = {
+  PAID: 4,
   AUTHORISED: 3,
   SUBMITTED: 2,
-  PAID: 1,
+  DRAFT: 1,
 }
 function _resolveLiveMakesafeInvoice(
   invoices: Array<{ status: string | null; invoice_number: string | null; voided: boolean }>,
