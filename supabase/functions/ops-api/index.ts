@@ -15579,10 +15579,50 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     .single()
   if (jobErr || !job) throw new Error('Job not found')
 
-  const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
-  const depositConfig = pricing.deposit || {}
+  const livePricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
 
-  // Resolve deposit parameters: explicit body params → pricing_json.deposit → job-type defaults
+  // ── Resolve the deposit basis from the FROZEN quote revision the client accepted ──
+  // The live jobs.pricing_json is mutable: a scoper editing pricing or the deposit
+  // config AFTER the quote was sent would otherwise change what the client gets
+  // invoiced. The accepted quote_revision freezes pricing_json verbatim under
+  // pricing_snapshot_json.raw at send time (see build_minimal_manifest.ts), so we
+  // prefer it. Fall back to live config only when no released revision exists.
+  //
+  // "The accepted revision" = the most recently RELEASED revision for this job
+  // (sent_at IS NOT NULL, ordered sent_at DESC). Released rows are immutable
+  // (DB triggers), so this is a safe frozen source. Staged-but-unsent rows are
+  // excluded. NOTE: the deposit config in the snapshot is job-level (same shape
+  // as live); per-neighbour share amounts are computed by the send-quote caller
+  // and passed in explicitly via body.deposit_amount/body.deposit_percent, which
+  // continue to take precedence below — those paths are unaffected by this change.
+  let frozenDeposit: any = null
+  try {
+    const { data: acceptedRev } = await client
+      .from('quote_revisions')
+      .select('pricing_snapshot_json, sent_at')
+      .eq('job_id', jId)
+      .not('sent_at', 'is', null)
+      .order('sent_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (acceptedRev?.pricing_snapshot_json) {
+      const snap = typeof acceptedRev.pricing_snapshot_json === 'string'
+        ? JSON.parse(acceptedRev.pricing_snapshot_json)
+        : acceptedRev.pricing_snapshot_json
+      const frozenRaw = snap?.raw || null
+      if (frozenRaw && typeof frozenRaw === 'object') frozenDeposit = frozenRaw.deposit || null
+    }
+  } catch (e) {
+    console.log('[send_acceptance_invoice] frozen revision lookup failed, using live config:', (e as Error).message)
+  }
+
+  const liveDepositConfig = livePricing.deposit || {}
+  // Prefer the frozen deposit config when a released revision exists; otherwise live.
+  // Resolved per-field so a partially-shaped frozen snapshot still falls through safely.
+  const depositConfig = frozenDeposit || liveDepositConfig
+  const usingFrozenDeposit = frozenDeposit != null
+
+  // Resolve deposit parameters: explicit body params → frozen/live deposit config → job-type defaults
   const defaultPercent = job.type === 'fencing' ? 50 : 20
   const depositPercent = body.deposit_percent ?? depositConfig.percent ?? defaultPercent
   const councilFees = body.council_fees ?? depositConfig.council_fees ?? 0
@@ -15594,8 +15634,17 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   // Only add the council extra line when the deposit amount is being calculated from scratch
   // (i.e., no pre-baked total_deposit_inc_gst exists, or the caller explicitly overrides
   // deposit_amount without a pre-baked total to rely on).
+  // percent, council, and total all come from the SAME source (frozen or live) so the
+  // D1 baked-total guard stays coherent with the resolved percent.
   const depositAmount = body.deposit_amount ?? depositConfig.total_deposit_inc_gst ?? undefined
   const totalIsBaked = body.deposit_amount == null && depositConfig.total_deposit_inc_gst != null
+
+  console.log('[send_acceptance_invoice] deposit basis:', JSON.stringify({
+    job_id: jId,
+    source: usingFrozenDeposit ? 'frozen_quote_revision' : 'live_pricing_json',
+    depositPercent, councilFees, depositAmount, totalIsBaked,
+    body_overrides: { deposit_percent: body.deposit_percent ?? null, deposit_amount: body.deposit_amount ?? null },
+  }))
 
   // Build extra line items for council fees — only when they are NOT already inside depositAmount
   const extraLineItems: any[] = []
