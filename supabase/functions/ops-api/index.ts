@@ -8334,32 +8334,57 @@ async function submitMakesafeReport(client: any, body: any) {
   }
 
   // Auto-update makesafe substatus + job status on report submission
+  let boardSync: any = null
+  let eventSync: any = null
+  const warnings: string[] = []
   if (submittingFinal) {
-    try {
-      await client.from('makesafe_job_details')
-        .update({
-          substatus: 'admin_to_send_report',
-          report_received_at: new Date().toISOString(),
-          invoice_notes: invoice_notes || null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('job_id', jId)
-    } catch (_) { /* non-blocking if overlay table not populated */ }
+    const syncAt = new Date().toISOString()
+    const { data: detailSync, error: detailSyncErr } = await client.from('makesafe_job_details')
+      .update({
+        substatus: 'admin_to_send_report',
+        report_received_at: syncAt,
+        invoice_notes: invoice_notes || null,
+        updated_at: syncAt,
+      })
+      .eq('job_id', jId)
+      .select('job_id, substatus, report_received_at')
+      .maybeSingle()
+    if (detailSyncErr) {
+      throw new ApiError(`MakeSafe report saved but board sync failed: ${detailSyncErr.message || detailSyncErr}`, 500)
+    }
+    if (!detailSync) {
+      throw new ApiError('MakeSafe report saved but board sync failed: makesafe detail row missing', 500)
+    }
+    boardSync = {
+      ok: true,
+      substatus: detailSync.substatus || 'admin_to_send_report',
+      report_received_at: detailSync.report_received_at || syncAt,
+    }
 
     // Do not mark the job final complete/invoiced here. The MakeSafe ops board
     // derives its report_ready stage from substatus=admin_to_send_report above.
     try {
-      await client.from('job_events').insert({
+      const { error: eventErr } = await client.from('job_events').insert({
         job_id: jId,
         user_id: uId,
         event_type: 'makesafe_report_submitted',
         detail_json: { report_id: report.id, labour_hours, trade_count, materials_used },
       })
-    } catch (_) { /* non-blocking */ }
+      if (eventErr) {
+        eventSync = { ok: false, error: eventErr.message || String(eventErr) }
+        warnings.push('event_sync_failed')
+      } else {
+        eventSync = { ok: true }
+      }
+    } catch (err) {
+      eventSync = { ok: false, error: err instanceof Error ? err.message : String(err) }
+      warnings.push('event_sync_failed')
+    }
   }
 
-  return { ok: true, report }
+  return { ok: true, report, board_sync: boardSync, event_sync: eventSync, warnings }
 }
+export const _submitMakesafeReportForTest = submitMakesafeReport
 
 // ── Slice 6: make-safe map data ──
 async function makesafeMap(client: any, params: URLSearchParams) {
