@@ -35,6 +35,7 @@ import {
   buildAttachmentSummaries,
   deriveFromDomain,
   emptyAttachmentSummary,
+  IN_CHUNK,
   liveAttachmentCount,
   sinceFromDays,
 } from "./makesafe_compact_reads.ts";
@@ -54,6 +55,10 @@ function makeClient(
   } = {},
 ) {
   const readErrors = opts.readErrors || {};
+  // Per-table count of how many `.in(col, list)` filters were applied across all
+  // builders for that table. Used to assert multi-chunk behaviour (each chunk is a
+  // fresh builder, so one .in() == one chunk == one would-be `.in()` request URL).
+  const inCalls: Record<string, number> = {};
   function builder(table: string) {
     const rows = (seed[table] || []).slice();
     const eqs: Array<[string, any]> = [];
@@ -79,7 +84,7 @@ function makeClient(
       select: () => b,
       eq: (c: string, v: any) => { eqs.push([c, v]); return b; },
       neq: (c: string, v: any) => { neqs.push([c, v]); return b; },
-      in: (c: string, vs: any[]) => { ins.push([c, vs]); return b; },
+      in: (c: string, vs: any[]) => { ins.push([c, vs]); inCalls[table] = (inCalls[table] ?? 0) + 1; return b; },
       gte: (c: string, v: any) => { gtes.push([c, v]); return b; },
       lte: () => b,
       is: (c: string, v: any) => { if (v === null) isNull.push(c); else isNotNull.push(c); return b; },
@@ -113,7 +118,7 @@ function makeClient(
     }),
   };
 
-  return { client: { from: (t: string) => builder(t), storage }, signCalls };
+  return { client: { from: (t: string) => builder(t), storage }, signCalls, inCalls };
 }
 
 // ════════════════════════════════════════════════════════════
@@ -575,21 +580,23 @@ Deno.test("GAP-3 no-silent-drops: an unresolvable item is INCLUDED flagged unres
 
 // ════════════════════════════════════════════════════════════
 // Fix A — fetchAllRowsInChunks dedups ids before chunking
+// (boundary references the exported IN_CHUNK constant, not a hardcoded 500/100, so
+//  it stays correct if the URL-safe chunk size is ever re-tuned.)
 // ════════════════════════════════════════════════════════════
-Deno.test("fetchAllRowsInChunks: a duplicate id straddling the 500 chunk boundary returns its DB row exactly once", async () => {
-  // IN_CHUNK is 500. Build 501 ids where the duplicate sits at index 0 AND index
-  // 500 — i.e. it lands in BOTH chunk 1 (0..499) and chunk 2 (500). Without the
-  // dedup, the .in() read for each chunk would match the same DB row, returning
-  // it twice. One DB row per distinct id.
+Deno.test("fetchAllRowsInChunks: a duplicate id straddling the IN_CHUNK boundary returns its DB row exactly once", async () => {
+  // Build (IN_CHUNK + 1) ids where the duplicate sits at index 0 AND index
+  // IN_CHUNK — i.e. it lands in BOTH chunk 1 (0..IN_CHUNK-1) and chunk 2
+  // (IN_CHUNK). Without the dedup, the .in() read for each chunk would match the
+  // same DB row, returning it twice. One DB row per distinct id.
   const DUP = "dup-id";
   const ids = [DUP];
-  for (let i = 1; i < 500; i++) ids.push(`id-${i}`); // fills indices 1..499
-  ids.push(DUP); // index 500 -> would be chunk 2 without dedup
-  assertEquals(ids.length, 501);
+  for (let i = 1; i < IN_CHUNK; i++) ids.push(`id-${i}`); // fills indices 1..IN_CHUNK-1
+  ids.push(DUP); // index IN_CHUNK -> would be chunk 2 without dedup
+  assertEquals(ids.length, IN_CHUNK + 1);
 
-  // Seed one DB row per distinct id (500 distinct ids -> 500 rows).
+  // Seed one DB row per distinct id (IN_CHUNK distinct ids -> IN_CHUNK rows).
   const distinct = Array.from(new Set(ids));
-  assertEquals(distinct.length, 500);
+  assertEquals(distinct.length, IN_CHUNK);
   const { client } = makeClient({
     widgets: distinct.map((id) => ({ widget_id: id, payload: `row-for-${id}` })),
   });
@@ -601,13 +608,59 @@ Deno.test("fetchAllRowsInChunks: a duplicate id straddling the 500 chunk boundar
   );
 
   // Total rows == distinct ids (no double-count from the straddling duplicate).
-  assertEquals(rows.length, 500);
+  assertEquals(rows.length, IN_CHUNK);
   // The duplicate id's row appears exactly once.
   const dupRows = rows.filter((r) => r.widget_id === DUP);
   assertEquals(dupRows.length, 1, "duplicate id must return its DB row exactly once");
   // Every distinct id appears exactly once.
   const seen = new Set(rows.map((r) => r.widget_id));
-  assertEquals(seen.size, 500);
+  assertEquals(seen.size, IN_CHUNK);
+});
+
+// ════════════════════════════════════════════════════════════
+// Fix C (2026-06-16 hotfix) — IN_CHUNK is URL-safe AND a list larger than it is
+// split across multiple `.in()` reads, with every row still returned.
+// This is the regression guard for the live-found GAP-1/GAP-3 500: a single
+// `.in()` of 500 UUIDs built a ~19KB URL the Supabase gateway dropped. Chunking
+// keeps each `.in()` URL small; the test proves >IN_CHUNK ids -> multiple chunks.
+// ════════════════════════════════════════════════════════════
+Deno.test("IN_CHUNK is small enough to keep an .in() URL well under the gateway limit", () => {
+  // A UUID is 36 chars; URL-encoding adds quotes/commas, ~37 chars per id in the
+  // PostgREST `in.(...)` list. Keep the resulting list well under ~6KB.
+  const APPROX_BYTES_PER_ID = 37;
+  const approxUrlListBytes = IN_CHUNK * APPROX_BYTES_PER_ID;
+  assert(
+    approxUrlListBytes < 6000,
+    `IN_CHUNK=${IN_CHUNK} -> ~${approxUrlListBytes}B .in() list; must stay under ~6KB to avoid the gateway URL-length rejection that 500'd GAP-1/GAP-3`,
+  );
+  // And keep it under the 1000-row response cap so each chunk's page round-trips
+  // are minimal.
+  assert(IN_CHUNK <= 1000, "IN_CHUNK must not exceed the PostgREST 1000-row cap");
+});
+
+Deno.test("fetchAllRowsInChunks: >IN_CHUNK ids are split into multiple .in() reads and ALL rows return", async () => {
+  // 2.5x IN_CHUNK distinct ids -> 3 chunks -> 3 separate `.in()` reads (each a
+  // separate, small request URL). Every row must come back exactly once.
+  const N = IN_CHUNK * 2 + Math.floor(IN_CHUNK / 2); // 2.5 chunks
+  const ids = Array.from({ length: N }, (_, i) => `id-${i}`);
+  const expectedChunks = Math.ceil(N / IN_CHUNK);
+  assertEquals(expectedChunks, 3);
+
+  const { client, inCalls } = makeClient({
+    widgets: ids.map((id) => ({ widget_id: id })),
+  });
+
+  const rows = await _fetchAllRowsInChunks<{ widget_id: string }>(
+    ids,
+    (chunkIds) => client.from("widgets").select("widget_id").in("widget_id", chunkIds),
+    "widgets read",
+  );
+
+  // Multiple `.in()` calls were made (multi-chunk), one per chunk.
+  assertEquals(inCalls["widgets"], expectedChunks, "each chunk must be a separate .in() read");
+  // All rows returned, exactly once each.
+  assertEquals(rows.length, N);
+  assertEquals(new Set(rows.map((r) => r.widget_id)).size, N);
 });
 
 // ════════════════════════════════════════════════════════════

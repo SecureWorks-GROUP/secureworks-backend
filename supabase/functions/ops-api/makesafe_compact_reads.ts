@@ -74,9 +74,17 @@ async function fetchAllRows<T = any>(
 // PostgREST also pushes an `.in(col, list)` into the request URL, so a very large
 // id list can blow the URL length AND (because the response is still capped at
 // 1000 result rows) silently truncate. Chunk the id list into IN_CHUNK-sized
-// batches, paginate each batch, and merge. IN_CHUNK is conservative (URL safety)
-// well under the row cap.
-const IN_CHUNK = 500;
+// batches, paginate each batch, and merge.
+//
+// URL-LENGTH CONSTRAINT (live-found 500 bug, 2026-06-16): the Supabase gateway
+// rejects an over-long request URL BEFORE the request is sent — surfacing in Deno
+// as "error sending request for ..." rather than an HTTP status. Each UUID is ~37
+// chars once URL-encoded into the `in.(...)` list, so 500 ids built a ~19KB URL
+// that the gateway dropped (GAP-1 / GAP-3 both 500'd here). 100 ids keeps the
+// `.in()` URL at ~4KB — safely under the ~6KB practical limit — while staying far
+// below the 1000-row response cap, so round-trips stay low. Do NOT raise this back
+// toward 500 without re-checking the gateway URL limit.
+export const IN_CHUNK = 100;
 
 function chunk<T>(list: T[], size: number): T[][] {
   const out: T[][] = [];
