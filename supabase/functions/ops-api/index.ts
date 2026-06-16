@@ -172,6 +172,14 @@ import {
   getMakesafeAttachmentUrl as _getMakesafeAttachmentUrl,
   getMakesafeEmail as _getMakesafeEmail,
   buildPipelineSentStatusMap as _buildPipelineSentStatusMap,
+  // Wave 1 (intake autopilot): scanSesMakesafes now sources candidate emails
+  // from the live GROUP-sync projection (emails + email_attachments) instead of
+  // the Graph USER mailbox. It reuses the SAME mailbox identity, paginated read,
+  // and inbound-contamination filter as makesafeNewEmails (GAP-1).
+  SES_MAILBOX as _SES_MAILBOX,
+  fetchAllRows as _fetchAllRows,
+  deriveFromDomain as _deriveFromDomain,
+  isOwnDomain as _isOwnDomain,
 } from './makesafe_compact_reads.ts'
 
 // Mission makesafe-inbound-filter-2026-06-16 — intake-draft gate. scanSesMakesafes
@@ -8898,32 +8906,44 @@ async function createIntakeDraft(client: any, body: any) {
   return { ok: true, draft: data }
 }
 
-// ── Slice 7: scan SES mailbox for make-safe work orders ──
-async function scanSesMakesafes(client: any) {
-  // ses@ is a distribution group tied to admin@ in M365
-  const SES_MAILBOX = 'admin@secureworkswa.com.au'
-
-  // Get Graph token
-  const tenantId = Deno.env.get('MICROSOFT_TENANT_ID')
-  const clientId = Deno.env.get('MICROSOFT_CLIENT_ID')
-  const clientSecret = Deno.env.get('MICROSOFT_CLIENT_SECRET')
-  if (!tenantId || !clientId || !clientSecret) {
-    throw new Error('Microsoft Graph credentials not configured')
+// Wave 1: encode raw bytes -> base64 in 8192-byte chunks. A naive
+// btoa(String.fromCharCode(...bytes)) blows the call stack on large PDFs because
+// the whole array is spread into one fromCharCode call; chunking keeps each spread
+// bounded. Mirrors the chunked-btoa pattern already used for quote-PDF email
+// attachments elsewhere in this file.
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 8192
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
   }
+  return btoa(binary)
+}
 
-  const tokenResp = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: clientId,
-      client_secret: clientSecret,
-      scope: 'https://graph.microsoft.com/.default',
-    }),
-  })
-  if (!tokenResp.ok) throw new Error('Graph token request failed: ' + tokenResp.status)
-  const tokenData = await tokenResp.json()
-  const token = tokenData.access_token
+// ── Slice 7: scan SES make-safes for make-safe work orders ──
+// Wave 1 (intake autopilot): SOURCE CHANGED. This no longer scans the Graph USER
+// mailbox (users/admin@.../inbox). It now sources candidate work-order emails from
+// the live GROUP-sync projection (the `emails` + `email_attachments` tables that
+// monitor-ses-makesafes populates from the ses@ M365 group), reusing the SAME
+// mailbox identity (ses@secureworkswa.com.au), paginated read, and inbound-
+// contamination filter as makesafe_new_emails (GAP-1). Everything DOWNSTREAM is
+// unchanged: company-pattern sender match, the subject pre-filter, dedup vs drafts
+// (by graph_message_id == emails.post_id) + jobs (by external_ref), Haiku
+// extraction, the isGenuineNewWorkOrder hard gate, the job-documents public
+// re-upload, the draft status logic, and the insert + return shape — so the
+// ops-dash cockpit keeps working with NO change. PDF bytes now come from the
+// PRIVATE makesafe-emails bucket (where the group sync stored them) instead of a
+// live Graph attachment download. The api-key-callable wiring is deliberately
+// unchanged so the 5-min monitor cron can tail-call this to create DRAFTS (it can
+// never approve — approve_intake_draft is human-JWT-only, Wave 0 C2 gate).
+async function scanSesMakesafes(client: any) {
+  // The group-sync projection keys ses@ mail under this mailbox (the canonical
+  // value used by monitor-ses-makesafes + reconcile + the GAP reads).
+  const SES_MAILBOX = _SES_MAILBOX
+
+  // One admin/service client for both the private-bucket download and the public
+  // re-upload below (hoisted out of the loop — was re-created per attachment).
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   // Load known make-safe company sender patterns
   const { data: companies } = await client.from('makesafe_companies')
@@ -8936,32 +8956,55 @@ async function scanSesMakesafes(client: any) {
     }
   }
 
-  // Fetch recent emails from SES inbox (last 7 days, up to 50)
+  // Candidate window: last 7 days from the GROUP-sync projection (parity with the
+  // old 7-day Graph window). Read the `emails` table for ses@, excluding PII-
+  // tombstoned rows, paginated (PostgREST 1000-row cap) so a busy week isn't
+  // silently truncated. Mirrors makesafe_new_emails (GAP-1) sourcing.
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-  const graphUrl = `https://graph.microsoft.com/v1.0/users/${SES_MAILBOX}/mailFolders/inbox/messages` +
-    `?$filter=receivedDateTime ge ${sevenDaysAgo}` +
-    `&$top=50` +
-    `&$select=id,internetMessageId,conversationId,from,subject,bodyPreview,body,receivedDateTime,hasAttachments` +
-    `&$orderby=receivedDateTime desc`
+  const emailRows = await _fetchAllRows<any>(
+    () => client.from('emails')
+      .select('post_id, mailbox, subject, body_preview, body_content, body_content_type, from_email, from_name, has_attachments, received_at, pii_purged_at')
+      .eq('mailbox', SES_MAILBOX)
+      .is('pii_purged_at', null)
+      .gte('received_at', sevenDaysAgo)
+      .order('received_at', { ascending: false }),
+    'emails (intake scan) read',
+  )
 
-  const mailResp = await fetch(graphUrl, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  })
-  if (!mailResp.ok) {
-    const err = await mailResp.text()
-    throw new Error('Graph inbox fetch failed: ' + mailResp.status + ' ' + err)
-  }
+  // Map each emails row into the SAME shape the rest of the loop expects (it was
+  // written against the Graph message shape: msg.id, msg.from.emailAddress.*,
+  // msg.subject, msg.bodyPreview, msg.body.content, msg.hasAttachments).
+  const mappedMessages = (emailRows || []).map((row: any) => ({
+    id: row.post_id,
+    internetMessageId: null,
+    conversationId: null,
+    from: { emailAddress: { address: row.from_email, name: row.from_name } },
+    subject: row.subject,
+    bodyPreview: row.body_preview,
+    // Full body_content (HTML stripped below) gives better extraction than the
+    // 500-char preview; fall back to preview then empty string.
+    body: { content: row.body_content || row.body_preview || '' },
+    receivedDateTime: row.received_at,
+    hasAttachments: row.has_attachments,
+    _post_id: row.post_id, // internal — used for the private-bucket attachment lookup
+  }))
 
-  const mailData = await mailResp.json()
-  const messages = mailData.value || []
+  // INBOUND-ONLY contamination filter (BEFORE sender/subject match): ses@ is a
+  // GROUP that receives a COPY of every pack WE send, so the projection is ~79%
+  // our own outbound mail. Drop any email whose sender is one of our own outbound
+  // domains so the candidate set is the inbound, known-sender set (same approach
+  // as makesafe_new_emails / GAP-1).
+  const inboundMessages = mappedMessages.filter(
+    (msg: any) => !_isOwnDomain(_deriveFromDomain(msg.from?.emailAddress?.address || null)),
+  )
 
-  // Filter to known make-safe senders
-  const makesafeEmails = messages.filter((msg: any) => {
+  // Filter to known make-safe senders (UNCHANGED logic, now over the inbound set)
+  const matchedMessages = inboundMessages.filter((msg: any) => {
     const fromEmail = (msg.from?.emailAddress?.address || '').toLowerCase()
     const subject = (msg.subject || '').toLowerCase()
     // makesafe-inbound-filter — cheap SUBJECT pre-filter: drop the unambiguous
     // non-WO subjects (Photo Evidence / Report / Invoice / Correction / Crew
-    // Report / RE:/FW:) BEFORE the expensive Graph attachment fetch + Haiku call.
+    // Report / RE:/FW:) BEFORE the expensive attachment read + Haiku call.
     // The hard isGenuineNewWorkOrder gate still runs before insert below.
     if (_subjectIsExcludedNonWorkOrder(msg.subject || '')) return false
     // Match if sender matches a known pattern OR subject contains work order keywords
@@ -8969,6 +9012,10 @@ async function scanSesMakesafes(client: any) {
     const subjectMatch = /work\s*order|make\s*safe|emergency|storm|urgent\s*(attend|repair)/i.test(subject)
     return senderMatch || (subjectMatch && (fromEmail.includes('.build') || fromEmail.includes('primeeco.tech')))
   })
+
+  // Cap the candidate set at the first 50 (matched are already received_at desc)
+  // to keep Haiku cost bounded — parity with the old $top=50 Graph window.
+  const makesafeEmails = matchedMessages.slice(0, 50)
 
   // Dedup against existing drafts
   const graphIds = makesafeEmails.map((m: any) => m.id)
@@ -9007,50 +9054,68 @@ async function scanSesMakesafes(client: any) {
       }
     }
 
-    // Download PDF attachments FIRST so we can feed them to Haiku
+    // Read PDF attachments FIRST so we can feed them to Haiku.
+    // Wave 1: bytes come from the PRIVATE makesafe-emails bucket (where the group
+    // sync stored them) instead of a live Graph attachment download. Only rows
+    // with status='uploaded' have servable bytes (the GAP-2 invariant). We then
+    // RE-UPLOAD to the PUBLIC job-documents bucket at the SAME path pattern and
+    // produce the IDENTICAL attachments_json shape, so the cockpit (which reads
+    // attachments_json[].pdf_url) keeps working with no UI change.
     const attachments: any[] = []
     const pdfBase64List: Array<{ name: string; base64: string }> = []
     if (msg.hasAttachments) {
       try {
-        const attResp = await fetch(
-          `https://graph.microsoft.com/v1.0/users/${SES_MAILBOX}/messages/${msg.id}/attachments`,
-          { headers: { 'Authorization': `Bearer ${token}` } }
-        )
-        if (attResp.ok) {
-          const attData = await attResp.json()
-          for (const att of (attData.value || [])) {
-            const isPdf = (att.contentType || '').includes('pdf') || (att.name || '').endsWith('.pdf')
-            if (!isPdf || !att.contentBytes || att.size > 15000000) continue
+        const { data: attRows, error: attErr } = await client.from('email_attachments')
+          .select('id, graph_attachment_id, name, content_type, storage_path, size_bytes')
+          .eq('email_id', msg._post_id)
+          .eq('status', 'uploaded')
+        if (attErr) {
+          console.log('[ops-api] intake attachment lookup failed:', attErr.message)
+        }
+        for (const att of (attRows || [])) {
+          const isPdf = (att.content_type || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+          if (!isPdf || !att.storage_path) continue
 
-            // Keep base64 for Haiku extraction (limit to first 2 PDFs, under 5MB each)
-            if (pdfBase64List.length < 2 && att.size < 5000000) {
-              pdfBase64List.push({ name: att.name, base64: att.contentBytes })
+          try {
+            // Download the bytes from the PRIVATE makesafe-emails bucket.
+            const { data: blob, error: dlErr } = await adminClient.storage
+              .from('makesafe-emails')
+              .download(att.storage_path)
+            if (dlErr || !blob) {
+              console.log('[ops-api] PDF download failed for intake:', dlErr?.message || 'no blob', att.storage_path)
+              continue
+            }
+            const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+
+            // Keep base64 for Haiku extraction (limit to first 2 PDFs, under 5MB
+            // each). Encode the raw bytes -> base64 with a CHUNKED btoa (8192-byte
+            // chunks) to avoid the call-stack-overflow that
+            // String.fromCharCode(...bigArray) hits on large PDFs. (Old code got
+            // base64 directly from Graph; the private bucket gives raw bytes.)
+            if (pdfBase64List.length < 2 && fileBuffer.length < 5000000) {
+              pdfBase64List.push({ name: att.name, base64: bytesToBase64(fileBuffer) })
             }
 
-            // Upload PDF to Supabase storage
+            // Re-upload PDF to the PUBLIC job-documents bucket (same path pattern).
             const storagePath = `makesafe-intake/${msg.id}/${(att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_')}`
-            try {
-              const fileBuffer = Uint8Array.from(atob(att.contentBytes), (c: string) => c.charCodeAt(0))
-              const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-              await adminClient.storage
-                .from('job-documents')
-                .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
-              const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(storagePath)
+            await adminClient.storage
+              .from('job-documents')
+              .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
+            const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(storagePath)
 
-              attachments.push({
-                name: att.name,
-                file_name: att.name,
-                storage_url: storagePath,
-                pdf_url: urlData?.publicUrl || null,
-                size: att.size,
-              })
-            } catch (e) {
-              console.log('[ops-api] PDF upload failed for intake:', (e as Error).message)
-            }
+            attachments.push({
+              name: att.name,
+              file_name: att.name,
+              storage_url: storagePath,
+              pdf_url: urlData?.publicUrl || null,
+              size: att.size_bytes,
+            })
+          } catch (e) {
+            console.log('[ops-api] PDF re-upload failed for intake:', (e as Error).message)
           }
         }
       } catch (e) {
-        console.log('[ops-api] Attachment fetch failed:', (e as Error).message)
+        console.log('[ops-api] Attachment read failed:', (e as Error).message)
       }
     }
 
@@ -9172,11 +9237,16 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
 
   return {
     ok: true,
-    scanned: messages.length,
+    // Wave 1: emails READ from the group-sync projection (the candidate window),
+    // not a live Graph message count.
+    scanned: (emailRows || []).length,
     makesafe_candidates: makesafeEmails.length,
     already_processed: makesafeEmails.length - newDrafts.length - makesafeEmails.filter((m: any) => existingSet.has(m.id)).length,
     new_drafts: newDrafts,
     new_count: newDrafts.length,
+    // Observability: confirms the redirected source is live (not the old Graph
+    // USER-mailbox scan).
+    source: 'group_sync_projection',
   }
 }
 
