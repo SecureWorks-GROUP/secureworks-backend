@@ -11619,8 +11619,10 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   if (pricing.pricing_validation_passed === false) {
     throw new Error('Quote failed pricing validation in the scoping tool and cannot be sent. Fix the flagged pricing issues, re-save, and try again.')
   }
-  const totalIncGST = pricing.totalIncGST || 0
-  if (!(Number(totalIncGST) > 0)) {
+  // Same total fallback chain as send-quote so legacy quotes carrying only
+  // `total`/`grandTotal` (not `totalIncGST`) are not falsely blocked.
+  const totalIncGST = Number(pricing.totalIncGST ?? pricing.total ?? pricing.grandTotal ?? 0)
+  if (!(totalIncGST > 0)) {
     throw new Error('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.')
   }
   const paymentTerms = pricing.payment_terms || '50/50 split'
