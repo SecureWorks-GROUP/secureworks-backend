@@ -38,6 +38,10 @@ import {
   seedCanaryExpectation,
   summarizeDrift,
 } from "./makesafe_reconcile.ts";
+// The chunking budget constants are single-sourced in makesafe_compact_reads and
+// imported by makesafe_reconcile; the chunking test asserts each `.in()` chunk
+// stays within them.
+import { IN_MAX_COUNT, IN_URL_BUDGET } from "./makesafe_compact_reads.ts";
 
 // ── normaliseReconRef ─────────────────────────────────────────────────────────
 Deno.test("normaliseReconRef: AJBR 67200 == AJBR-67200 == 67200 (>=5 chars)", () => {
@@ -327,11 +331,33 @@ function makeReconClient(
   writeErrors: Record<string, string> = {},
 ) {
   const writes: Array<{ table: string; op: string; row: any }> = [];
+  // CHUNK INSTRUMENTATION — every `.in(col, list)` call across every builder, so a
+  // chunking test can assert the long-id list was split into multiple `.in()` reads
+  // (each safely under the URL budget) AND that all matching rows came back.
+  const inCalls: Array<{ table: string; column: string; list: any[] }> = [];
   function builder(table: string) {
     const rows = seed[table] || [];
     let isCount = false;
+    // Captured `.in(col, list)` filters for THIS builder instance. A paginated/
+    // chunked read makes ONE fresh builder per chunk (the factory returns a new
+    // builder each call), so each builder sees exactly one chunk's id list.
+    const inFilters: Array<{ column: string; list: any[] }> = [];
     const readErr = readErrors[table] ? { message: readErrors[table] } : null;
     const writeErr = writeErrors[table] ? { message: writeErrors[table] } : null;
+    // Apply the captured `.in()` filters to the seeded rows so a chunked read
+    // returns ONLY the rows whose id is in this chunk (mirrors PostgREST). With no
+    // `.in()` filter, all seeded rows pass (existing tests rely on this).
+    const filteredRows = () => {
+      let out = rows;
+      for (const f of inFilters) {
+        const set = new Set(f.list);
+        out = out.filter((r: any) => set.has(r?.[f.column]));
+      }
+      return out;
+    };
+    // .range(offset, to) is the pagination terminal. Page 0 returns the (filtered)
+    // rows; subsequent offsets return an empty page so reconFetchAllRows stops.
+    let ranged = false;
     const b: any = {
       select: (_c?: any, opts?: any) => { if (opts?.count) isCount = true; return b; },
       eq: () => b,
@@ -339,12 +365,22 @@ function makeReconClient(
       not: () => b,
       gte: () => b,
       lte: () => b,
-      in: () => b,
+      in: (column: string, list: any[]) => {
+        inFilters.push({ column, list });
+        inCalls.push({ table, column, list });
+        return b;
+      },
       or: () => b,
       order: () => b,
       limit: () => b,
-      maybeSingle: async () => readErr ? ({ data: null, error: readErr }) : ({ data: rows[0] ?? null, error: null }),
-      single: async () => readErr ? ({ data: null, error: readErr }) : ({ data: rows[0] ?? null, error: null }),
+      range: async (offset: number, _to: number) => {
+        if (readErr) return { data: null, error: readErr };
+        if (offset > 0 || ranged) return { data: [], error: null };
+        ranged = true;
+        return { data: filteredRows(), error: null };
+      },
+      maybeSingle: async () => readErr ? ({ data: null, error: readErr }) : ({ data: filteredRows()[0] ?? null, error: null }),
+      single: async () => readErr ? ({ data: null, error: readErr }) : ({ data: filteredRows()[0] ?? null, error: null }),
       upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: writeErr }; },
       insert: async (row: any) => { writes.push({ table, op: "insert", row }); return { error: writeErr }; },
       // N1 — .update(row).eq(...) chain (used to mark a passed canary resolved).
@@ -361,12 +397,12 @@ function makeReconClient(
           return resolve({ count: counts[table] ?? 0, error: null });
         }
         if (readErr) return resolve({ data: null, error: readErr });
-        return resolve({ data: rows, error: null });
+        return resolve({ data: filteredRows(), error: null });
       },
     };
     return b;
   }
-  return { client: { from: (t: string) => builder(t) }, writes };
+  return { client: { from: (t: string) => builder(t) }, writes, inCalls };
 }
 
 Deno.test("action D1: email_no_job + job_no_email both fire business_events alerts", async () => {
@@ -1304,4 +1340,143 @@ Deno.test("CONTROL: clean D2 with no injected errors persists a scan log + verdi
   // scan log + sync_state verdict both written.
   assert(writes.find((w) => w.table === "email_events_raw" && w.row?.change_type === "inventory_scan"));
   assert(writes.find((w) => w.table === "sync_state" && w.op === "upsert"));
+});
+
+// ════════════════════════════════════════════════════════════
+// D1 RECONCILE .in() CHUNKING — the */30 reconcile 500 bug
+// ════════════════════════════════════════════════════════════
+//
+// The D1 reconcile resolves each pipeline item's source email via
+// email_events_raw.id IN (eventIds), where eventIds come from
+// pipeline_items.source_event_ids[]. Those are Graph/Exchange event ids
+// (~100-150 chars, URL-special chars). The PREVIOUS single unbounded `.in()` built
+// an over-long request URL the Supabase gateway DROPS before sending — the same
+// class as the compact-reads fix. These tests prove the reconcile path now chunks
+// the id list by URL budget AND paginates each chunk, returning EVERY row.
+
+// Build a realistic long Graph post/event id (~150 chars, with URL-special chars).
+function longGraphId(n: number): string {
+  // Mirrors the shape of a real Graph post id: base-prefix + a long opaque token
+  // carrying '/', '+', '=' which all GROW under URL encoding. ~150 chars total.
+  const pad = "AAMkAGI2TG93AAA=/Conversation+Thread/Post=".repeat(2);
+  return `AQMkAD${pad}${String(n).padStart(6, "0")}_evt`;
+}
+
+Deno.test("D1 chunking: a long source_event_id list is split into MULTIPLE budgeted .in() reads, all events resolved", async () => {
+  // 400 pipeline items, each with a UNIQUE ~150-char Graph event id -> ~60KB of
+  // ids. A single .in() URL would be dropped by the gateway; the fix must chunk it.
+  const N = 400;
+  const pipeline_items: any[] = [];
+  const email_events_raw: any[] = [];
+  const emails: any[] = [];
+  const known_refs: any[] = [];
+  for (let i = 0; i < N; i++) {
+    const evId = longGraphId(i);
+    const postId = `post-${i}`;
+    const ref = `AJBR-${70000 + i}`;
+    pipeline_items.push({ ref, target_job: `job-${i}`, source_event_ids: [evId] });
+    email_events_raw.push({ id: evId, post_id: postId });
+    emails.push({ post_id: postId, from_email: "dispatch@mlb.com.au", received_at: "2026-06-13T00:00:00Z", has_attachments: false });
+    // Board side has the SAME ref -> a clean exact match IFF the event->post link
+    // resolved (which only happens if every chunk was read). source_email_id is
+    // null so the match MUST come through the resolved email evidence path.
+    known_refs.push({ external_ref: ref, source_email_id: null, job_number: `SWMS-${70000 + i}`, substatus: "complete" });
+  }
+
+  const { client, inCalls } = makeReconClient({
+    pipeline_items,
+    emails,
+    email_events_raw,
+    makesafe_companies: [{ sender_patterns: ["mlb.com.au"] }],
+  }, { email_attachments: 0 });
+
+  const { sink } = makeSink();
+  const fakeAudit = async () => ({ known_refs });
+
+  const res = await makesafeEmailReconcile(client, sink, {
+    mode: "D1",
+    makesafeAudit: fakeAudit,
+    nowIso: "2026-06-14T00:00:00Z",
+  });
+
+  // 1) The event->post read was CHUNKED: more than one `.in()` on email_events_raw.
+  const eventReads = inCalls.filter((c) => c.table === "email_events_raw" && c.column === "id");
+  assert(
+    eventReads.length > 1,
+    `expected the long event-id list to be split into >1 .in() reads, got ${eventReads.length}`,
+  );
+
+  // 2) EVERY budgeted chunk's encoded, comma-joined id list is under IN_URL_BUDGET
+  //    (with headroom) and within the secondary count cap — i.e. each chunk is a URL
+  //    the gateway would accept.
+  for (const c of eventReads) {
+    const encodedBytes = c.list.map((id: string) => encodeURIComponent(id).length + 1)
+      .reduce((a: number, b: number) => a + b, 0);
+    assert(
+      encodedBytes <= IN_URL_BUDGET,
+      `a chunk exceeded IN_URL_BUDGET (${encodedBytes} > ${IN_URL_BUDGET})`,
+    );
+    assert(c.list.length <= IN_MAX_COUNT, `a chunk exceeded IN_MAX_COUNT (${c.list.length})`);
+    assert(c.list.length >= 1, "a chunk was empty");
+  }
+
+  // 3) The union of all chunks covers EVERY event id exactly once (dedup + complete).
+  const allChunked = new Set<string>();
+  for (const c of eventReads) for (const id of c.list) allChunked.add(id);
+  assertEquals(allChunked.size, N, "every event id must appear across the chunks");
+
+  // 4) COMPLETENESS: because every chunk was read, every pipeline ref resolved its
+  //    source email and matched the board exact ref. NO email_no_job ERRORs, NO
+  //    job_no_email gaps, NO ambiguity — the verified gate is clean on the D1 side.
+  assertEquals(res.d1.counts.matched, N);
+  assertEquals(res.d1.counts.email_no_job, 0);
+  assertEquals(res.d1.counts.job_no_email, 0);
+  assertEquals(res.d1.counts.ambiguous, 0);
+  assertEquals(res.drift.email_no_job, 0);
+});
+
+Deno.test("D1 chunking: a SHORT event-id list still works as a single .in() read (no regression)", async () => {
+  const { client, inCalls } = makeReconClient({
+    pipeline_items: [{ ref: "AJBR-67200", target_job: "job-1", source_event_ids: ["ev-1"] }],
+    emails: [{ post_id: "post-1", from_email: "dispatch@mlb.com.au", received_at: "2026-06-13T00:00:00Z" }],
+    email_events_raw: [{ id: "ev-1", post_id: "post-1" }],
+    makesafe_companies: [{ sender_patterns: ["mlb.com.au"] }],
+  }, { email_attachments: 0 });
+  const { sink } = makeSink();
+  const fakeAudit = async () => ({
+    known_refs: [{ external_ref: "AJBR-67200", source_email_id: null, job_number: "SWMS-67200", substatus: "complete" }],
+  });
+  const res = await makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: fakeAudit, nowIso: "2026-06-14T00:00:00Z" });
+  // One short id -> exactly one .in() read, the ref resolved + matched cleanly.
+  const eventReads = inCalls.filter((c) => c.table === "email_events_raw" && c.column === "id");
+  assertEquals(eventReads.length, 1);
+  assertEquals(res.d1.counts.matched, 1);
+  assertEquals(res.d1.counts.email_no_job, 0);
+});
+
+Deno.test("D1 chunking: duplicate event ids across pipeline items are DEDUPED before chunking", async () => {
+  // Two pipeline items share the SAME long event id. The chunked read must dedup so
+  // the shared id is fetched ONCE (a straddling duplicate would otherwise double-read).
+  const evId = longGraphId(1);
+  const { client, inCalls } = makeReconClient({
+    pipeline_items: [
+      { ref: "AJBR-67200", target_job: "job-1", source_event_ids: [evId] },
+      { ref: "AJBR-67201", target_job: "job-2", source_event_ids: [evId] },
+    ],
+    emails: [{ post_id: "post-1", from_email: "dispatch@mlb.com.au", received_at: "2026-06-13T00:00:00Z" }],
+    email_events_raw: [{ id: evId, post_id: "post-1" }],
+    makesafe_companies: [{ sender_patterns: ["mlb.com.au"] }],
+  }, { email_attachments: 0 });
+  const { sink } = makeSink();
+  const fakeAudit = async () => ({
+    known_refs: [
+      { external_ref: "AJBR-67200", source_email_id: null, job_number: "SWMS-1", substatus: "complete" },
+      { external_ref: "AJBR-67201", source_email_id: null, job_number: "SWMS-2", substatus: "complete" },
+    ],
+  });
+  await makesafeEmailReconcile(client, sink, { mode: "D1", makesafeAudit: fakeAudit, nowIso: "2026-06-14T00:00:00Z" });
+  const eventReads = inCalls.filter((c) => c.table === "email_events_raw" && c.column === "id");
+  // The shared id appears in the chunked reads exactly ONCE (deduped).
+  const occurrences = eventReads.flatMap((c) => c.list).filter((id) => id === evId).length;
+  assertEquals(occurrences, 1, "a duplicate event id must be deduped before chunking");
 });
