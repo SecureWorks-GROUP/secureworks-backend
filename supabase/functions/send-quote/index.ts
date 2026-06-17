@@ -1174,15 +1174,6 @@ serve(async (req: Request) => {
         }
       }
 
-      // ── HTML REDIRECT (Slice 3) ──
-      // Single-option docs with an html_url → redirect the client directly to the
-      // interactive HTML quote. Docs with html_url NULL fall through to buildClientPage
-      // (zero regression). Multi-option and per-run fencing paths have already returned
-      // above, so this only fires for the single-doc case.
-      if (doc.html_url) {
-        return Response.redirect(doc.html_url, 302)
-      }
-
       return await htmlResponse(buildClientPage(doc, token, heroUrl))
     }
 

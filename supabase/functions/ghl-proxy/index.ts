@@ -2035,19 +2035,6 @@ serve(async (req: Request) => {
       // Get the public URL
       const { data: urlData } = sb.storage.from('job-pdfs').getPublicUrl(path)
 
-      // Mirror: create a signed upload URL + public URL for the interactive HTML version
-      const htmlPath = `${orgId}/${jobId}/quote_v${version}_web.html`
-      const { data: htmlUploadData, error: htmlUploadErr } = await sb.storage
-        .from('job-pdfs')
-        .createSignedUploadUrl(htmlPath)
-
-      if (htmlUploadErr) {
-        console.log('[ghl-proxy] HTML signed URL error:', htmlUploadErr)
-        return json({ error: htmlUploadErr.message }, 500)
-      }
-
-      const { data: htmlUrlData } = sb.storage.from('job-pdfs').getPublicUrl(htmlPath)
-
       // Generate share token
       const shareToken = crypto.randomUUID()
 
@@ -2061,7 +2048,6 @@ serve(async (req: Request) => {
         type: 'quote',
         version,
         pdf_url: urlData.publicUrl,
-        html_url: htmlUrlData.publicUrl,
         share_token: shareToken,
         quote_number: quoteNumber,
       }
@@ -2093,9 +2079,6 @@ serve(async (req: Request) => {
         uploadUrl: uploadData.signedUrl,
         publicUrl: urlData.publicUrl,
         path,
-        htmlUploadUrl: htmlUploadData.signedUrl,
-        htmlPublicUrl: htmlUrlData.publicUrl,
-        htmlPath,
       })
     }
 
