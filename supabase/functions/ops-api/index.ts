@@ -4055,6 +4055,9 @@ if (import.meta.main) serve(async (req: Request) => {
                   id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: appliedRate,
                   rate_source: clientRateProvided ? 'client_entered' : 'server_resolved',
                   description: manualRow.description || null,
+                  // Hours-flag: carry the trade's justification from the submit payload so the
+                  // lineItems loop can persist it when a make-safe line exceeds the 2hr minimum.
+                  justification: manualRow.justification || null,
                   break_minutes: 0, manual_override_flag: false,
                   scheduled_date: a.scheduled_date, status: a.status,
                 })
@@ -4145,19 +4148,47 @@ if (import.meta.main) serve(async (req: Request) => {
               const lineTotal = Math.round(jobHours * rate * 100) / 100
               totalHours += jobHours
 
+              // ── Hours-flag (Lane B — make-safe cost control) ─────────────────
+              // Scope: make-safe lines only (division or line_type). For each line
+              // where total_hours > 2, collect any justification the trade submitted
+              // and set a review flag. No justification = accepted but flagged
+              // "unjustified over-hours". Rate/amounts are NEVER altered here.  [Q18]
+              const isMakeSafeLine = job.type === 'makesafe' || (job.job_number || '').toUpperCase().startsWith('SWMS-')
+              const roundedJobHours = Math.round(jobHours * 100) / 100
+              const justifications = [...new Set(assigns.map((a: any) => a.justification).filter(Boolean))]
+              const justificationText = justifications.join('; ')
+              let hoursQueryNote: string
+              let lineHoursFlag: string | null = null
+              if (isMakeSafeLine && roundedJobHours > 2) {
+                if (justificationText) {
+                  lineHoursFlag = 'hours_flag_justified'
+                  hoursQueryNote = 'HOURS-FLAG: ' + roundedJobHours + 'h (>2hr minimum) — reason: ' + justificationText + '. Ops must verify before approving.'
+                } else {
+                  lineHoursFlag = 'hours_flag_unjustified'
+                  hoursQueryNote = 'HOURS-FLAG: ' + roundedJobHours + 'h (>2hr minimum) — no justification provided. Ops must verify before approving.'
+                }
+              } else {
+                hoursQueryNote = rateSource === 'client_entered'
+                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                  : 'Server-resolved rate from trade_rates.'
+              }
+              // ── END hours-flag ─────────────────────────────────────────────
+
               lineItems.push({
                 job_id: jobId,
                 job_number: job.job_number || '',
                 client_name: job.client_name || '',
-                total_hours: Math.round(jobHours * 100) / 100,
+                total_hours: roundedJobHours,
                 hourly_rate: rate,
                 line_total_ex: lineTotal,
                 days_worked: assigns.length,
                 assignment_ids: assignmentIds,
                 description: descriptions.length > 0 ? descriptions.join('; ') : null,
-                query_note: rateSource === 'client_entered'
-                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                  : 'Server-resolved rate from trade_rates.',
+                query_note: hoursQueryNote,
+                // Internal metadata — consumed by the Xero description builder below.
+                // Not written to DB; stripped before the insert.
+                _hours_flag: lineHoursFlag,
+                _hours_justification: justificationText || null,
               })
             }
 
@@ -4392,12 +4423,16 @@ if (import.meta.main) serve(async (req: Request) => {
               invoice = newInvoice
             }
 
-            // Insert labour line items
+            // Insert labour line items.
+            // Strip _hours_flag/_hours_justification — internal metadata used by the
+            // Xero description builder below; not DB columns.
             for (const line of lineItems) {
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { _hours_flag: _hf, _hours_justification: _hj, ...lineForDb } = line
               await client.from('trade_invoice_lines').insert({
                 trade_invoice_id: invoice.id,
                 line_type: 'labour',
-                ...line,
+                ...lineForDb,
               })
             }
 
@@ -4435,15 +4470,29 @@ if (import.meta.main) serve(async (req: Request) => {
             // manual check now: the bookkeeper reviews/approves it in Xero (drafts
             // pay no one until approved there). So soft flags ANNOTATE the invoice
             // (query_note) and PROCEED to draft.  [Q18 — supersedes F6/Q4 Option A]
-            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess'
+            // Detect any make-safe lines that triggered the hours flag (either justified
+            // or unjustified). Used to annotate the invoice-level query_note and the Xero
+            // bill Reference so finance can spot flagged bills at a glance.
+            const hasMakesafeHoursFlag = lineItems.some(
+              (l: any) => l._hours_flag === 'hours_flag_justified' || l._hours_flag === 'hours_flag_unjustified'
+            )
+            const hasUnjustifiedHoursFlag = lineItems.some((l: any) => l._hours_flag === 'hours_flag_unjustified')
+
+            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess' || hasMakesafeHoursFlag
             if (softReviewFlag) {
-              await client.from('trade_invoices').update({
-                query_note: reviewFlag === 'hours_excess'
-                  ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
-                  : clientPricedExtraCount > 0
-                    ? 'Manual hours/rates entered by trade — verify job, description, hours and rate in Xero before approving the draft.'
-                  : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
-              }).eq('id', invoice.id)
+              let invoiceQueryNote: string
+              if (reviewFlag === 'hours_excess') {
+                invoiceQueryNote = 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
+              } else if (hasMakesafeHoursFlag) {
+                invoiceQueryNote = hasUnjustifiedHoursFlag
+                  ? 'HOURS-FLAG: one or more make-safe lines bill over 2hrs with no justification — verify before paying.'
+                  : 'HOURS-FLAG: one or more make-safe lines bill over 2hrs — justification provided, verify before paying.'
+              } else if (clientPricedExtraCount > 0) {
+                invoiceQueryNote = 'Manual hours/rates entered by trade — verify job, description, hours and rate in Xero before approving the draft.'
+              } else {
+                invoiceQueryNote = 'Manual hours entered — verify against schedule in Xero before approving the draft.'
+              }
+              await client.from('trade_invoices').update({ query_note: invoiceQueryNote }).eq('id', invoice.id)
             }
 
             // Log business event
@@ -4534,11 +4583,21 @@ if (import.meta.main) serve(async (req: Request) => {
                 const allLines = [...lineItems.map((l: any) => {
                   // Change 4: include builder ref in Xero description when present (makesafe jobs)
                   const builderRef = jobMap[l.job_id]?._external_ref || jobMap[l.job_id]?.metadata?.external_ref
+                  // Hours-flag: for make-safe lines over 2hrs, append the justification (or a
+                  // "no justification" notice) to the Xero line description so finance can review
+                  // it inline when approving the draft bill. Quantity/UnitAmount unchanged.
+                  const hoursLine = 'Labour — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr' + (l.days_worked > 1 ? ' (' + l.days_worked + ' days)' : '')
+                  const hoursFlagLine = l._hours_flag
+                    ? (l._hours_flag === 'hours_flag_justified'
+                        ? 'HOURS-FLAG (>2hr): ' + (l._hours_justification || '')
+                        : 'HOURS-FLAG (>2hr): no justification provided')
+                    : null
                   return {
                   Description: [
                     (l.job_number || 'Labour') + ' | ' + (trackingCategoryForJob(l.job_number || '') || 'Construction'),
                     builderRef ? 'Builder Ref: ' + builderRef : null,
-                    'Labour — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr' + (l.days_worked > 1 ? ' (' + l.days_worked + ' days)' : ''),
+                    hoursLine,
+                    hoursFlagLine,
                     [l.client_name, jobMap[l.job_id]?.site_address, jobMap[l.job_id]?.site_suburb].filter(Boolean).join(', '),
                   ].filter(Boolean).join('\n'),
                   Quantity: l.total_hours,
@@ -4565,9 +4624,12 @@ if (import.meta.main) serve(async (req: Request) => {
                 // _external_ref is already on jobMap entries (enriched above at Change 4 / L3464-3472).
                 const xeroExternalRefs = [...new Set(lineItems.map((l: any) => jobMap[l.job_id]?._external_ref).filter(Boolean))].join(', ')
                 const xeroInternalJobNums = [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', ')
+                // Hours-flag marker in the bill Reference — visible in the Xero invoice list view
+                // so finance can filter/spot flagged bills without opening each one.
                 const xeroReference = invoiceNumber
                   + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
                   + (xeroExternalRefs ? ' | ' + xeroExternalRefs : '')
+                  + (hasMakesafeHoursFlag ? ' | HOURS-FLAG' : '')
 
                 const xeroPayload = {
                   Invoices: [{
