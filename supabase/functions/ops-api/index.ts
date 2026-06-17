@@ -15634,7 +15634,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       .in('job_id', jobIds)
       .eq('phase', 'completion'),
     client.from('makesafe_report_packs')
-      .select('job_id, pack_kind, status, report_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail')
+      // B1 (Wave 0): last_render_hash feeds the versioned report doc URL (?v={hash})
+      // below — without it pack?.last_render_hash is always undefined and the
+      // cache-bust never appends, leaving the stale-doc fix inert.
+      .select('job_id, pack_kind, status, report_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail, last_render_hash')
       .in('job_id', jobIds),
   ])
 

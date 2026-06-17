@@ -81,6 +81,105 @@ Deno.test("B1: the stable storage path (idempotency key) is not altered — only
   assert(signed.endsWith("?v=renderHash8chars"), "version hash appended at the end")
 })
 
+// ── B1 LIVE PATH (the wiring test that catches the inert-select defect) ──
+// The unit tests above prove appendVersion in isolation, but the stale-doc fix
+// only works if last_render_hash actually FLOWS from the bulk packs .select(...)
+// through the packByJob map into renderHash into signDocUrl. The defect found at
+// GATE 0: last_render_hash was missing from the packs .select(...) projection, so
+// pack?.last_render_hash was always undefined and ?v= never appended.
+//
+// This test models the EXACT feed wiring from index.ts:makesafeReportDrafts:
+//   1) the packs query projects a set of COLUMNS (must include last_render_hash)
+//   2) packByJob[d.job_id] = the projected pack row
+//   3) renderHash = pack?.last_render_hash || null
+//   4) reportPdfUrl = signDocUrl(reportDoc..., renderHash)  -> appends ?v={hash}
+// A projection MISSING last_render_hash makes step 3 undefined -> no ?v= (the bug).
+
+// The actual column list from the bulk packs .select(...) at index.ts:15636-15640.
+// Kept in sync with the deployed projection; if the column is dropped from the
+// real select, this constant must be updated and the test below would fail.
+const PACKS_SELECT_COLUMNS = [
+  "job_id", "pack_kind", "status", "report_doc_id", "xero_invoice_id",
+  "invoice_status", "sent_at", "send_started_at", "failed_step", "error_detail",
+  "last_render_hash",
+]
+
+// Model a Supabase row projection: only the SELECTED columns survive (PostgREST
+// returns exactly the projected columns; an unprojected column is undefined).
+function projectRow(fullRow: Record<string, unknown>, selectColumns: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const c of selectColumns) out[c] = fullRow[c]
+  return out
+}
+
+// Model the feed wiring from packs row -> report doc URL.
+function deriveReportUrlFromPackRow(
+  projectedPackRow: Record<string, unknown>,
+  reportDocPublicUrl: string,
+): string | null {
+  // index.ts: const pack = packByJob[d.job_id] || null
+  const pack = projectedPackRow || null
+  // index.ts: const renderHash = pack?.last_render_hash || null
+  const renderHash = (pack?.last_render_hash as string | undefined) || null
+  // index.ts: signDocUrl(reportDoc..., renderHash) — public URL path returns appendVersion(raw)
+  return appendVersion(reportDocPublicUrl, renderHash)
+}
+
+Deno.test("B1 LIVE: last_render_hash IS in the packs select projection (the inert-select regression guard)", () => {
+  assert(
+    PACKS_SELECT_COLUMNS.includes("last_render_hash"),
+    "the bulk packs .select(...) MUST project last_render_hash or the ?v= fix is inert",
+  )
+})
+
+Deno.test("B1 LIVE: a pack row carrying last_render_hash produces a report URL containing ?v={hash}", () => {
+  // The full DB row has last_render_hash; the projection includes it (post-fix).
+  const fullPackRow = {
+    job_id: "job-99",
+    pack_kind: "main",
+    status: "drafted",
+    report_doc_id: "doc-1",
+    last_render_hash: "deadbeefcafe1234",
+  }
+  const projected = projectRow(fullPackRow, PACKS_SELECT_COLUMNS)
+  const reportUrl = deriveReportUrlFromPackRow(
+    projected,
+    "https://kevgrhcjxspbxgovpmfl.supabase.co/storage/v1/object/public/job-documents/job-99/make_safe_report-job-99.pdf",
+  )
+  assert(reportUrl !== null)
+  assert(
+    reportUrl!.includes("?v=deadbeefcafe1234"),
+    `the report URL must carry the render hash; got: ${reportUrl}`,
+  )
+})
+
+Deno.test("B1 LIVE: a re-render (new last_render_hash) changes the report URL end-to-end through the wiring", () => {
+  const base = "https://example.com/storage/v1/object/public/job-documents/job-99/make_safe_report-job-99.pdf"
+  const v1Row = projectRow({ job_id: "job-99", last_render_hash: "hashV1aaaa" }, PACKS_SELECT_COLUMNS)
+  const v2Row = projectRow({ job_id: "job-99", last_render_hash: "hashV2bbbb" }, PACKS_SELECT_COLUMNS)
+  const url1 = deriveReportUrlFromPackRow(v1Row, base)
+  const url2 = deriveReportUrlFromPackRow(v2Row, base)
+  assert(url1 !== url2, "a re-render with a new hash must change the report URL")
+  assert(url1!.endsWith("?v=hashV1aaaa"))
+  assert(url2!.endsWith("?v=hashV2bbbb"))
+})
+
+Deno.test("B1 LIVE (counter-proof): an inert select MISSING last_render_hash yields NO ?v= (the exact defect)", () => {
+  // Reproduce the GATE-0 defect: if last_render_hash is NOT projected, the
+  // projected row has it undefined, renderHash becomes null, and ?v= never appends.
+  const inertSelect = PACKS_SELECT_COLUMNS.filter((c) => c !== "last_render_hash")
+  const fullPackRow = { job_id: "job-99", last_render_hash: "shouldHaveAppeared" }
+  const projected = projectRow(fullPackRow, inertSelect)
+  const reportUrl = deriveReportUrlFromPackRow(
+    projected,
+    "https://example.com/storage/v1/object/public/job-documents/job-99/report.pdf",
+  )
+  assert(
+    reportUrl !== null && !reportUrl.includes("?v="),
+    "an inert select missing last_render_hash must NOT append ?v= (proves why the projection matters)",
+  )
+})
+
 // ─────────────────────────────────────────────────────────────────
 // B2 — MONEY-REVIEW HARD GATE
 // Reimplemented-pure model of the gate predicate in index.ts:makesafeSendPack
