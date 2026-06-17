@@ -44,6 +44,15 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
 
 const NOW = "2026-06-10T03:00:00Z";
 
+// Tests that route through _makesafePipelineForTest exercise the LIVE pipeline,
+// which derives completed-vs-archive against the real wall clock (Date.now()) —
+// the test NOW constant is NOT threaded into the pipeline path. Fixtures meant to
+// represent "invoiced today" must therefore be anchored to the real now so the
+// <7-day completed window holds regardless of the calendar date the suite runs on
+// (a hard-coded 2026-06-10 silently flips to 'archive' once real-now drifts >7d).
+const RECENT_ISO = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // ~1 day ago
+const RECENT_DATE = RECENT_ISO.slice(0, 10); // YYYY-MM-DD for invoice_date
+
 function jobRow(over: Record<string, any> = {}) {
   return {
     id: "job-1",
@@ -128,10 +137,10 @@ Deno.test("makesafePipeline holds an invoiced job with missing docs in report_re
 
 Deno.test("makesafePipeline lets an invoiced job with both docs reach completed", async () => {
   const client = makeQueryClient({
-    jobs: [jobRow({ id: "job-3", completed_at: NOW })],
+    jobs: [jobRow({ id: "job-3", completed_at: RECENT_ISO })],
     makesafe_job_details: [{ job_id: "job-3", substatus: "complete", requesting_company_name: "Acme Restorations" }],
-    job_service_reports: [{ job_id: "job-3", status: "submitted", submitted_at: NOW }],
-    xero_invoices: [{ job_id: "job-3", status: "AUTHORISED", invoice_type: "ACCREC", invoice_date: "2026-06-10" }],
+    job_service_reports: [{ job_id: "job-3", status: "submitted", submitted_at: RECENT_ISO }],
+    xero_invoices: [{ job_id: "job-3", status: "AUTHORISED", invoice_type: "ACCREC", invoice_date: RECENT_DATE }],
     job_documents: [
       { job_id: "job-3", type: "general", file_name: "Make Safe Report SWMS-26003.pdf" },
       { job_id: "job-3", type: "general", file_name: "Tax Invoice INV-3.pdf" },

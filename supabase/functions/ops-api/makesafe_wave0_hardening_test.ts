@@ -91,6 +91,11 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   "attach_makesafe_document",
   "submit_makesafe_report",
   "update_makesafe_substatus",
+  // Wave 2 (Scribe) — report DRAFT-invoice + RENDER + READ. Draft/render/read only;
+  // the AUTHORISE + SEND stays in makesafe_send_pack (NOT allow-listed -> denied).
+  "create_makesafe_draft_invoice",
+  "makesafe_render_report",
+  "makesafe_report_drafts",
 ])
 // Default-deny: a routine caller is allowed ONLY if the action is in the allow-list.
 function routineDenied(authMode: AuthMode, action: string): boolean {
@@ -133,9 +138,21 @@ Deno.test("ScopedKey (default-deny): a brand-new unenumerated action is denied b
 Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach few", () => {
   for (const action of ["job_detail", "create_intake_draft", "scan_ses_makesafes",
     "list_intake_drafts", "attach_makesafe_document", "submit_makesafe_report",
-    "ops_summary", "makesafe_pipeline"]) {
+    "ops_summary", "makesafe_pipeline",
+    // Wave 2 (Scribe) draft/render/read actions — routine-safe (no send/authorise).
+    "create_makesafe_draft_invoice", "makesafe_render_report", "makesafe_report_drafts"]) {
     assert(!routineDenied("routine", action), `routine must be allowed on the safe action ${action}`)
   }
+})
+
+Deno.test("ScopedKey (Wave 2): the draft/render/read trio is allow-listed but makesafe_send_pack stays DENIED", () => {
+  // Scribe's extension adds exactly the draft/render/read trio. The SEND verb is
+  // deliberately NOT allow-listed, so the routine still hits the central 403 BEFORE
+  // its per-case sendPackAllowed() gate (belt-and-braces).
+  assert(!routineDenied("routine", "create_makesafe_draft_invoice"))
+  assert(!routineDenied("routine", "makesafe_render_report"))
+  assert(!routineDenied("routine", "makesafe_report_drafts"))
+  assert(routineDenied("routine", "makesafe_send_pack"), "send_pack must remain denied by default-deny")
 })
 
 Deno.test("ScopedKey: privileged + jwt callers are NEVER blocked by the routine allow-list", () => {
