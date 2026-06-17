@@ -61,6 +61,8 @@ export interface IntakeDedupRow {
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
   status?: string | null;
+  /** ISO timestamp of when the email was received — used by suppressed_rejected date check. */
+  received_at?: string | null;
 }
 
 /** A candidate email being considered for a new draft. */
@@ -70,6 +72,20 @@ export interface IntakeDedupCandidate {
   external_ref?: string | null;
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
+  /**
+   * When true, bypasses the suppressed_rejected check so a targeted recapture
+   * action can create a fresh draft for a previously-rejected email. It does NOT
+   * bypass live-state checks (graph_message_id / refCompany / internet_message_id)
+   * — a force_recapture must still not duplicate a LIVE draft.
+   */
+  force_recapture?: boolean;
+  /**
+   * ISO timestamp of the candidate email's received date. Used by suppressed_rejected:
+   * a candidate NEWER than the latest rejected draft for the same ref+company is a
+   * corrected resend and must NOT be suppressed. Candidates with no received_at are
+   * fail-open (not suppressed) — a real WO is safer than a missed resend.
+   */
+  received_at?: string | null;
 }
 
 export interface DedupIndex {
@@ -79,6 +95,16 @@ export interface DedupIndex {
   refCompany: Set<string>;
   /** normalised ref for existing JOBS (a live job already covers this ref) */
   jobRefs: Set<string>;
+  /**
+   * normalised `${ref}|${company}` -> latest rejected received_at (ISO string).
+   * Maps each rejected/superseded ref+company key to the MAX received_at among
+   * all rejected/superseded drafts for that key. A normal scan candidate matching
+   * this map is returned as 'suppressed_rejected' ONLY when the candidate's
+   * received_at is present AND <= the stored timestamp (same or older email).
+   * A candidate with a NEWER received_at (corrected resend) or no received_at
+   * (fail-open) is NOT suppressed.
+   */
+  rejectedRefCompany: Map<string, string>;
 }
 
 // Draft states that mean "a draft already exists, do not make another". rejected /
@@ -87,6 +113,18 @@ export const LIVE_DRAFT_STATES: readonly string[] = [
   "draft",
   "needs_review",
   "approved",
+] as const;
+
+/**
+ * Suppressed draft states: the normal scan will NOT re-create a draft for an
+ * email that was previously rejected or superseded. A targeted recapture
+ * (force_recapture=true) bypasses this suppression.
+ * F1 (re-spam guard): without this, 6+ in-window rejected MLB WOs would be
+ * resurrected every 5-min cron run into Marnin's review queue.
+ */
+export const SUPPRESSED_DRAFT_STATES: readonly string[] = [
+  "rejected",
+  "superseded",
 ] as const;
 
 /**
@@ -136,20 +174,24 @@ export function refCompanyKey(
 
 /**
  * Build a dedup index from the existing drafts (in any LIVE state) and, optionally,
- * existing jobs' external refs. Call ONCE per scan, then test each candidate with
- * isDuplicateIntake.
+ * existing jobs' external refs, and previously-rejected/superseded drafts.
  *
- * @param existingDrafts rows from makesafe_intake_drafts in LIVE_DRAFT_STATES
+ * @param existingDrafts  rows from makesafe_intake_drafts in LIVE_DRAFT_STATES
  * @param existingJobRefs external_ref values from already-created make-safe jobs
+ * @param rejectedDrafts  rows from makesafe_intake_drafts in SUPPRESSED_DRAFT_STATES
+ *                        (rejected / superseded). A candidate matching this set
+ *                        yields 'suppressed_rejected' unless force_recapture=true.
  */
 export function buildIntakeDedupIndex(
   existingDrafts: IntakeDedupRow[],
   existingJobRefs: Array<string | null | undefined> = [],
+  rejectedDrafts: IntakeDedupRow[] = [],
 ): DedupIndex {
   const graphIds = new Set<string>();
   const internetIds = new Set<string>();
   const refCompany = new Set<string>();
   const jobRefs = new Set<string>();
+  const rejectedRefCompany = new Map<string, string>();
 
   for (const d of existingDrafts || []) {
     if (d.graph_message_id) graphIds.add(d.graph_message_id);
@@ -161,8 +203,22 @@ export function buildIntakeDedupIndex(
     const nr = normaliseRef(r);
     if (nr) jobRefs.add(nr);
   }
+  for (const d of rejectedDrafts || []) {
+    const rc = refCompanyKey(d.external_ref, d.requesting_company_slug, d.requesting_company_name);
+    // Only add when BOTH ref AND company are known — same safety invariant as the
+    // live-state check (no false suppression of unknown-company candidates).
+    if (!rc) continue;
+    // Keep the LATEST received_at per key (max). This timestamp is the boundary:
+    // candidates with the same or older received_at are the already-rejected email;
+    // candidates with a NEWER received_at are corrected resends (must NOT suppress).
+    const existing = rejectedRefCompany.get(rc);
+    const ts = d.received_at || '';
+    if (!existing || ts > existing) {
+      rejectedRefCompany.set(rc, ts);
+    }
+  }
 
-  return { graphIds, internetIds, refCompany, jobRefs };
+  return { graphIds, internetIds, refCompany, jobRefs, rejectedRefCompany };
 }
 
 /**
@@ -170,12 +226,18 @@ export function buildIntakeDedupIndex(
  * existing draft (any live state) or an existing job — i.e. DO NOT create a new
  * draft. Returns null when the candidate is genuinely new.
  *
- * Priority: graph_message_id -> internet_message_id -> (ref + company) -> job ref.
+ * Priority: graph_message_id -> internet_message_id -> (ref + company) -> job ref ->
+ *           suppressed_rejected (only when !force_recapture).
+ *
+ * suppressed_rejected fires AFTER all live-state checks so a force_recapture still
+ * cannot duplicate a LIVE draft. It only allows bypassing the rejected/superseded
+ * suppression for a targeted recapture.
  */
 export function isDuplicateIntake(
   candidate: IntakeDedupCandidate,
   index: DedupIndex,
 ): string | null {
+  // Live-state checks — these fire even for force_recapture (cannot duplicate LIVE).
   if (candidate.graph_message_id && index.graphIds.has(candidate.graph_message_id)) {
     return "graph_message_id";
   }
@@ -194,6 +256,29 @@ export function isDuplicateIntake(
   if (nr && index.jobRefs.has(nr)) {
     return "job_external_ref";
   }
+
+  // Suppressed-rejected guard (F1 + Codex F3): if the candidate's ref+company matches a
+  // previously-rejected/superseded draft AND this is NOT a targeted recapture,
+  // return 'suppressed_rejected' ONLY when the candidate is the SAME or OLDER email
+  // (received_at <= stored latest-rejected received_at). A candidate with a NEWER
+  // received_at is a corrected resend and must NOT be suppressed. A candidate with no
+  // received_at is fail-open (let it through — prefer a possible duplicate review draft
+  // over silently missing a real corrected work order).
+  if (!candidate.force_recapture && rc) {
+    const rejectedLatestTs = index.rejectedRefCompany.get(rc);
+    if (rejectedLatestTs !== undefined) {
+      // Only suppress when:
+      //   (a) candidate has a received_at present, AND
+      //   (b) it is <= the latest rejected received_at (same or older email)
+      // If candidate has no received_at -> fail-open (do NOT suppress).
+      if (candidate.received_at && candidate.received_at <= rejectedLatestTs) {
+        return "suppressed_rejected";
+      }
+      // candidate.received_at is absent OR newer than the rejected row -> fall through
+      // (will create a fresh draft for the corrected resend)
+    }
+  }
+
   return null;
 }
 
