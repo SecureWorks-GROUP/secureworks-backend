@@ -8826,6 +8826,7 @@ async function submitMakesafeReport(client: any, body: any) {
   return { ok: true, report, board_sync: boardSync, event_sync: eventSync, warnings }
 }
 export const _submitMakesafeReportForTest = submitMakesafeReport
+export const _recaptureIntakeDraftForTest = recaptureIntakeDraft
 
 // ── Slice 6: make-safe map data ──
 async function makesafeMap(client: any, params: URLSearchParams) {
@@ -9367,6 +9368,29 @@ async function recaptureIntakeDraft(client: any, body: any) {
       recaptured: false,
       reason: 'live_draft_exists',
       existing_draft_id: existingLive.id,
+    }
+  }
+
+  // 3b. Refuse to create a duplicate draft when a live make-safe JOB already covers
+  //     this ref (e.g. a human created the job directly via sw_create_makesafe_job,
+  //     bypassing intake entirely). Attaching to the job is a human/General GATE-2
+  //     recovery action — recapture must NOT auto-attach or create a redundant draft.
+  if (draft.external_ref) {
+    const normDraftRef = _normaliseDedupRef(draft.external_ref)
+    if (normDraftRef) {
+      const { data: jobRows } = await client.from('makesafe_job_details')
+        .select('job_id, external_ref')
+        .not('external_ref', 'is', null)
+      for (const jobRow of (jobRows || [])) {
+        if (jobRow.external_ref && _normaliseDedupRef(jobRow.external_ref) === normDraftRef) {
+          return {
+            ok: true,
+            recaptured: false,
+            reason: 'live_job_exists',
+            existing_job_id: jobRow.job_id,
+          }
+        }
+      }
     }
   }
 

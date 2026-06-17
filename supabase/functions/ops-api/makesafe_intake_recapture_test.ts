@@ -42,6 +42,7 @@ import {
   subjectLooksLikeNewWorkOrder,
   subjectIsExcludedNonWorkOrder,
 } from "./makesafe_intake_gate.ts";
+import { _recaptureIntakeDraftForTest } from "./index.ts";
 
 // ── B1 detect-and-flag eligibility logic (GAP-B, AC4) ───────────────────────────
 //
@@ -346,4 +347,207 @@ Deno.test("AC7 (documented): test count and CI gates confirmed via external run"
   //   deno cache --no-check index.ts: no output (clean)
   //   deno check makesafe_wo_selection.ts makesafe_intake_dedup.ts: 0 errors
   assert(true, "AC7 gates documented and verified externally");
+});
+
+// ── live_job_exists guard (mission makesafe-wo-capture-recovery-2026-06-17 hardening) ──
+//
+// When a live make-safe JOB already covers the draft's external_ref, recapture MUST
+// refuse to create a new draft and return recaptured:false, reason:'live_job_exists'.
+// MLB-25096 (Balcatta) is the motivating example: job SWMS-26655 was created directly
+// via sw_create_makesafe_job, so the draft intake would have duplicated it without this guard.
+
+// Minimal chainable query stub that handles the 4 DB calls before the guard fires:
+//   1. makesafe_intake_drafts.select('*').eq('id', draft_id).single()       → draft
+//   2. emails.select('post_id').eq('post_id', groupPostId).maybeSingle()    → email row (ses@ path)
+//   3. makesafe_intake_drafts.select('id,status').eq.eq.in.maybeSingle()    → null (no live draft)
+//   4. makesafe_job_details.select('job_id,external_ref').not(...)           → [job row]
+//
+// The adminClient is constructed at the top of recaptureIntakeDraft but never called
+// before the guard fires (Storage calls are step 4 "Capture PDFs", after the guard).
+function makeRecaptureStub(opts: {
+  draft: Record<string, any>;
+  groupEmailPostId: string;
+  jobRows: Array<{ job_id: string; external_ref: string }>;
+}): { client: any; inserts: Array<{ table: string; row: any }> } {
+  const inserts: Array<{ table: string; row: any }> = [];
+
+  function builder(table: string) {
+    const b: any = {
+      select: (_cols: string) => b,
+      eq: (_col: string, _val: any) => b,
+      neq: (_col: string, _val: any) => b,
+      not: (_col: string, _op: string, _val: any) => b,
+      in: (_col: string, _vals: any[]) => b,
+      is: (_col: string, _val: any) => b,
+      gte: (_col: string, _val: any) => b,
+      lte: (_col: string, _val: any) => b,
+      order: (_col: string, _opts?: any) => b,
+      limit: (_n: number) => b,
+      range: async (_from: number, _to: number) => ({ data: [], error: null }),
+      single: async () => {
+        if (table === "makesafe_intake_drafts") {
+          return { data: opts.draft, error: null };
+        }
+        return { data: null, error: { message: "not found" } };
+      },
+      maybeSingle: async () => {
+        if (table === "emails") {
+          // Step 2: verify group email exists (ses@ path)
+          return { data: { post_id: opts.groupEmailPostId }, error: null };
+        }
+        if (table === "makesafe_intake_drafts") {
+          // Step 3: no live draft exists for this group post_id
+          return { data: null, error: null };
+        }
+        return { data: null, error: null };
+      },
+      // Terminal: awaiting the builder resolves for bulk reads (step 4 job query)
+      then: (resolve: (v: any) => any) => {
+        if (table === "makesafe_job_details") {
+          return resolve({ data: opts.jobRows, error: null });
+        }
+        return resolve({ data: [], error: null });
+      },
+      insert: (row: any) => {
+        inserts.push({ table, row });
+        return { select: () => ({ single: async () => ({ data: { id: "flag-draft-id" }, error: null }) }) };
+      },
+    };
+    return b;
+  }
+
+  return {
+    client: { from: (table: string) => builder(table) },
+    inserts,
+  };
+}
+
+Deno.test({
+  name: "live_job_exists guard: recapture refuses to create a draft when a live job already covers the ref",
+  // supabase-js createClient starts auth auto-refresh timers; disable leak detection.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+  // recaptureIntakeDraft calls createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) at the
+  // top. Provide stub values so the constructor does not throw; adminClient is never called
+  // before the guard fires (storage calls are in step 4, after the guard returns).
+  Deno.env.set("SUPABASE_URL", "https://stub-supabase.invalid");
+  Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
+
+  const DRAFT_ID = "draft-uuid-mlb-25096";
+  const GROUP_POST_ID = "AAQkADA3_ses_group_balcatta==";
+  const LIVE_JOB_ID = "5520cb13-b1cc-4d07-b923-69eae05462a8"; // SWMS-26655
+
+  // _SES_MAILBOX = "ses@secureworkswa.com.au" (from makesafe_compact_reads.ts)
+  const draft = {
+    id: DRAFT_ID,
+    mailbox: "ses@secureworkswa.com.au",
+    graph_message_id: GROUP_POST_ID,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    received_at: "2026-06-16T12:48:00.000Z",
+    status: "rejected",
+    from_email: "admin@primeeco.tech",
+    from_name: "ML Builders",
+    subject: "NEW WORK ORDER - MLB-25096 7 Broughton St, Balcatta, WA 6021",
+    body_preview: "New make safe work order",
+    client_name: "Test Client",
+    client_phone: null,
+    site_address: "7 Broughton St",
+    site_suburb: "Balcatta",
+    description: "Make safe required",
+    confidence: "high",
+    extraction_json: {},
+  };
+
+  // Live job that already covers MLB-25096 (normalises to same ref)
+  const { client, inserts } = makeRecaptureStub({
+    draft,
+    groupEmailPostId: GROUP_POST_ID,
+    jobRows: [
+      { job_id: LIVE_JOB_ID, external_ref: "MLB-25096" },
+    ],
+  });
+
+  const result = await _recaptureIntakeDraftForTest(client, { draft_id: DRAFT_ID });
+
+  // Must refuse to create a new draft
+  assertEquals(result.ok, true, "ok must be true");
+  assertEquals(result.recaptured, false, "recaptured must be false when a live job covers the ref");
+  assertEquals(result.reason, "live_job_exists", "reason must be live_job_exists");
+  assertEquals(result.existing_job_id, LIVE_JOB_ID, "must surface the existing job_id");
+
+  // CRITICAL: no new draft row must be inserted
+  assertEquals(inserts.length, 0, "must NOT insert a new makesafe_intake_drafts row");
+  },
+});
+
+Deno.test({
+  name: "live_job_exists guard: recapture proceeds when no live job matches the ref",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+  // When the job table has rows but NONE match the draft's ref, the guard must NOT fire.
+  // The function will try to proceed to step 4 (storage download) and fail because the
+  // stub returns no attachments — but the guard itself must not trigger.
+  Deno.env.set("SUPABASE_URL", "https://stub-supabase.invalid");
+  Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
+
+  const DRAFT_ID = "draft-uuid-ajs-67251";
+  const GROUP_POST_ID = "AAQkADA3_ses_group_doubleview==";
+
+  const draft = {
+    id: DRAFT_ID,
+    mailbox: "ses@secureworkswa.com.au",
+    graph_message_id: GROUP_POST_ID,
+    external_ref: "AJBR-67251",
+    requesting_company_slug: "ajs",
+    requesting_company_name: "AJS Building",
+    received_at: "2026-06-16T10:00:00.000Z",
+    status: "rejected",
+    from_email: "admin@ajsbuilding.com.au",
+    from_name: "AJS Building",
+    subject: "NEW WORK ORDER - AJBR-67251 Doubleview",
+    body_preview: "New work order",
+    client_name: null,
+    client_phone: null,
+    site_address: "1 Test St",
+    site_suburb: "Doubleview",
+    description: null,
+    confidence: "medium",
+    extraction_json: {},
+  };
+
+  // Job table only has MLB jobs — no AJBR match
+  const { client, inserts } = makeRecaptureStub({
+    draft,
+    groupEmailPostId: GROUP_POST_ID,
+    jobRows: [
+      { job_id: "some-other-job-id", external_ref: "MLB-25096" },
+    ],
+  });
+
+  // The function will proceed past the guard and into step 4 (attachment fetch).
+  // It should NOT return live_job_exists.
+  let result: any;
+  try {
+    result = await _recaptureIntakeDraftForTest(client, { draft_id: DRAFT_ID });
+  } catch (_e) {
+    // A downstream error (e.g. adminClient storage call with empty URL) is acceptable here —
+    // what matters is that the guard did NOT fire live_job_exists.
+    result = null;
+  }
+
+  if (result !== null) {
+    assert(
+      result.reason !== "live_job_exists",
+      `guard must not fire for unmatched ref; got reason=${result.reason}`,
+    );
+  }
+  // The guard was bypassed — function proceeds to step 4+5+6 (insert fresh draft).
+  // We do NOT assert inserts.length here because the function legitimately inserts a
+  // new draft when no live job covers the ref. The key contract is that live_job_exists
+  // was NOT returned (asserted above).
+  },
 });
