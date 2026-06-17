@@ -9263,36 +9263,48 @@ async function recaptureIntakeDraft(client: any, body: any) {
       .is('pii_purged_at', null)
       .gte('received_at', windowStart)
       .lte('received_at', windowEnd)
+      .order('post_id', { ascending: true })  // deterministic DB order; JS sort finalises
 
-    // Find the best match: group post whose subject/body implies the same ref+company.
-    // Heuristic: the external_ref appears in the subject OR the company slug/name pattern matches.
+    // Bridge scoring: the external_ref match is MANDATORY (min score threshold = REF_SCORE).
+    // A company-only match (no ref in subject) does NOT qualify — we must not bridge on
+    // company + has_attachments alone (could pick any in-window email from the same sender).
+    const REF_SCORE = 10  // score awarded when the ref appears in the subject
+    const MIN_THRESHOLD = REF_SCORE  // bridge requires at minimum a ref match
+
     type GroupMatch = { email: any; score: number; deltaMs: number }
     const matches: GroupMatch[] = []
     for (const email of (candidates || [])) {
       let score = 0
       const subjectLower = (email.subject || '').toLowerCase()
       const normRefLower = normRef.toLowerCase()
-      // Check if any version of the ref appears in the subject.
+      // Ref match is MANDATORY: the normalised ref OR the raw external_ref must appear in the subject.
       if (subjectLower.includes(normRefLower) ||
           (draft.external_ref && subjectLower.includes(draft.external_ref.toLowerCase()))) {
-        score += 10
+        score += REF_SCORE
       }
-      // Check if company name/slug appears in the from_email (e.g. mlb.mailer@primeeco.tech).
+      // Ref match is required — do not score company/attachment-only candidates.
+      if (score < MIN_THRESHOLD) continue
+      // Bonus: company name/slug appears in the from_email (corroborating signal).
       if (normCompany && (email.from_email || '').toLowerCase().includes(normCompany)) {
         score += 5
       }
       // The email must have attachments to be a WO candidate.
       if (email.has_attachments) score += 2
-      if (score > 0) {
-        const delta = Math.abs(new Date(email.received_at).getTime() - receivedAt.getTime())
-        matches.push({ email, score, deltaMs: delta })
-      }
+      const delta = Math.abs(new Date(email.received_at).getTime() - receivedAt.getTime())
+      matches.push({ email, score, deltaMs: delta })
     }
 
     if (matches.length > 0) {
-      // Best: highest score, then closest received_at.
-      matches.sort((a, b) => b.score - a.score || a.deltaMs - b.deltaMs)
+      // Sort: (score desc, received_at proximity asc, post_id asc) — fully deterministic.
+      matches.sort((a, b) =>
+        b.score - a.score ||
+        a.deltaMs - b.deltaMs ||
+        (a.email.post_id < b.email.post_id ? -1 : a.email.post_id > b.email.post_id ? 1 : 0)
+      )
       groupPostId = matches[0].email.post_id
+    } else {
+      // No candidate cleared the ref-match threshold — return B1-flag path.
+      // Falls through to the !groupPostId block below.
     }
   }
 
@@ -9374,18 +9386,19 @@ async function recaptureIntakeDraft(client: any, body: any) {
     const { selected: designatedWo, ordered: orderedPdfs } = _selectWorkOrderPdf(uploadedPdfRows)
     const keyHash = await _shortStorageKey(groupPostId)
 
-    for (const att of orderedPdfs) {
+    for (let attIdx = 0; attIdx < orderedPdfs.length; attIdx++) {
+      const att = orderedPdfs[attIdx]
       try {
         const { data: blob, error: dlErr } = await adminClient.storage
           .from('makesafe-emails')
-          .download(att.storage_path)
+          .download(att.storage_path!)
         if (dlErr || !blob) {
           console.log('[ops-api] recapture PDF download failed:', dlErr?.message || 'no blob', att.storage_path)
           continue
         }
         const fileBuffer = new Uint8Array(await blob.arrayBuffer())
         const safeName = (att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)
-        const keyComponent = _attachmentKeyComponent(att)
+        const keyComponent = _attachmentKeyComponent(att, attIdx)
         const storagePath = `makesafe-intake/${keyHash}-${keyComponent}/${safeName}`
         const { error: upErr } = await adminClient.storage
           .from('job-documents')
@@ -9634,7 +9647,7 @@ async function scanSesMakesafes(client: any) {
   // recapture (force_recapture=true) can bypass this guard.
   const rejectedDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
-      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, received_at')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _SUPPRESSED_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (rejected dedup index) read',
@@ -9729,12 +9742,13 @@ async function scanSesMakesafes(client: any) {
         // Pre-compute the per-message hash (used for all keys in this message).
         const keyHash = await _shortStorageKey(msg.id)
 
-        for (const att of orderedPdfs) {
+        for (let attIdx = 0; attIdx < orderedPdfs.length; attIdx++) {
+          const att = orderedPdfs[attIdx]
           try {
             // Download the bytes from the PRIVATE makesafe-emails bucket.
             const { data: blob, error: dlErr } = await adminClient.storage
               .from('makesafe-emails')
-              .download(att.storage_path)
+              .download(att.storage_path!)
             if (dlErr || !blob) {
               console.log('[ops-api] PDF download failed for intake:', dlErr?.message || 'no blob', att.storage_path)
               continue
@@ -9745,7 +9759,7 @@ async function scanSesMakesafes(client: any) {
             // Because orderedPdfs has the WO first, the WO naturally enters pdfBase64List
             // first (if it is small enough). Other PDFs follow in original stable order.
             if (pdfBase64List.length < 2 && fileBuffer.length < 5000000) {
-              pdfBase64List.push({ name: att.name, base64: bytesToBase64(fileBuffer) })
+              pdfBase64List.push({ name: att.name ?? 'work-order.pdf', base64: bytesToBase64(fileBuffer) })
             }
 
             // GAP-A: UNIQUE storage key per attachment.
@@ -9754,7 +9768,7 @@ async function scanSesMakesafes(client: any) {
             // New key: makesafe-intake/<hash(msg.id)>-<keyComponent(att)>/<safeName>
             //   → every attachment in an email gets its own prefix segment.
             const safeName = (att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)
-            const keyComponent = _attachmentKeyComponent(att)
+            const keyComponent = _attachmentKeyComponent(att, attIdx)
             const storagePath = `makesafe-intake/${keyHash}-${keyComponent}/${safeName}`
             const { error: upErr } = await adminClient.storage
               .from('job-documents')
@@ -9873,10 +9887,14 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           .select('id, graph_attachment_id, name, content_type, size_bytes, status, attachment_kind, last_error')
           .eq('email_id', msg._post_id)
           .eq('status', 'needs_review')
+        // WO_BYTES_ERRORS: reasons monitor-ses writes when it SAW a PDF but could NOT get
+        // bytes (over-cap / portal link). These land as status='needs_review'.
+        // NOTE: 'pdf_magic_byte_validation_failed' is written with status='failed'
+        // (markAttachmentFailed), NOT 'needs_review', so the B1 query (status='needs_review')
+        // can never match it. Remove it from this set to eliminate the dead branch (Codex F6).
         const WO_BYTES_ERRORS = new Set([
           'pdf_no_inline_bytes_value_path_required',
           'pdf_exceeds_inline_decode_cap',
-          'pdf_magic_byte_validation_failed',
         ])
         const qualifyingNr = (nrRows || []).find((nr: any) => {
           // A WO-bytes error: the sync saw a PDF but couldn't get bytes (over-cap / portal / magic fail)
@@ -9930,6 +9948,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         external_ref: extractedRef,
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
+        received_at: msg.receivedDateTime || null,
       },
       dedupIndex,
     )

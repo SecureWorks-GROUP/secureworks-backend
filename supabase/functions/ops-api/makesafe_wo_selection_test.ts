@@ -33,18 +33,23 @@ Deno.test("scoreWorkOrder: 'works order' strong signal (100)", () => {
   assertEquals(scoreWorkOrder("works order report.pdf"), 100);
 });
 
-Deno.test("scoreWorkOrder: standalone \\bWO\\b strong signal (100)", () => {
+Deno.test("scoreWorkOrder: standalone WO strong signal — WO_123 and WO-123 (100)", () => {
   assertEquals(scoreWorkOrder("WO-12345.pdf"), 100);
   assertEquals(scoreWorkOrder("site WO attachment.pdf"), 100);
+  // Codex F3: WO followed by underscore must match (underscore is word char, old \bWO\b missed it)
+  assertEquals(scoreWorkOrder("WO_123.pdf"), 100);
+  assertEquals(scoreWorkOrder("WO_MLB-25096.pdf"), 100);
 });
 
-Deno.test("scoreWorkOrder: \\bWO\\b must be whole-word — WOrksheet is not strong", () => {
-  // "WOrksheet" should NOT match \bWO\b (b is a word boundary)
-  // But "WO" at the END of a word boundary: SWOMETHING - actually let's check the real regex
-  // \bWO\b requires both word boundaries; "WOrksheet" does NOT qualify.
-  const score = scoreWorkOrder("WOrksheet.pdf");
-  // "WOrksheet" contains "WO" but NOT as \bWO\b (because 'r' follows and is \w)
-  assertEquals(score, 0);
+Deno.test("scoreWorkOrder: WO prefix pattern must NOT match WORD, SWORD, TWOFOLD", () => {
+  // 'WO' preceded by a letter (like 'S' in SWORD) must NOT score strong.
+  assertEquals(scoreWorkOrder("SWORD.pdf"), 0);
+  assertEquals(scoreWorkOrder("TWOFOLD.pdf"), 0);
+  // 'WO' followed by a letter (like 'r' in WOrksheet) must NOT score strong.
+  assertEquals(scoreWorkOrder("WOrksheet.pdf"), 0);
+  // 'WO' in the middle of a word: WORKFLOW -> should NOT score strong WO alone
+  // (but let's verify: 'WORKFLOW' has WO followed by 'R' = letter -> no match)
+  assertEquals(scoreWorkOrder("workflow.pdf"), 0);
 });
 
 Deno.test("scoreWorkOrder: 'PO' weak signal (10)", () => {
@@ -230,4 +235,35 @@ Deno.test("attachmentKeyComponent: two atts with same name but different ids pro
     attachmentKeyComponent(att2),
     "same filename, different ids => different storage key components",
   );
+});
+
+// ── Codex F5: fallback index-based disambiguation ────────────────────────────────
+
+Deno.test("Codex F5: fallback — two atts with both ids null AND same name+size but different index -> DIFFERENT keys", () => {
+  // Edge case: id and graph_attachment_id are both null/empty, same name, same size.
+  // Without the index, name:size hash would collide. The index param disambiguates.
+  const att: WoAttachmentInput = {
+    id: null,
+    graph_attachment_id: null,
+    name: "work_order.pdf",
+    size_bytes: 150000,
+  };
+  const key0 = attachmentKeyComponent(att, 0);
+  const key1 = attachmentKeyComponent(att, 1);
+  assertNotEquals(key0, key1, "same name+size but different index must produce different fallback keys");
+  assert(key0.length > 0, "key0 must be non-empty");
+  assert(key1.length > 0, "key1 must be non-empty");
+});
+
+Deno.test("Codex F5: fallback index — index=0 and absent index produce same key (backward compat when only one att)", () => {
+  // A single att with no index (omitted = 0) must match explicit index=0.
+  const att: WoAttachmentInput = {
+    id: null,
+    graph_attachment_id: null,
+    name: "report.pdf",
+    size_bytes: 200000,
+  };
+  const keyAbsent = attachmentKeyComponent(att);
+  const keyZero = attachmentKeyComponent(att, 0);
+  assertEquals(keyAbsent, keyZero, "absent index and explicit 0 must produce the same key");
 });

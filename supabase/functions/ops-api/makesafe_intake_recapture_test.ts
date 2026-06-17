@@ -203,8 +203,11 @@ Deno.test("2-PDF email: second scan with same email is deduped as live_draft_exi
 });
 
 // ── AC5: suppressed_rejected (already tested in dedup_test.ts, key case here) ────
+// Note: Codex F3 refinement — suppressed_rejected now requires received_at to be PRESENT
+// on the candidate AND <= the rejected draft's received_at. A candidate with no received_at
+// is fail-open (NOT suppressed). The real cron always passes msg.receivedDateTime.
 
-Deno.test("AC5: scan guard — rejected Balcatta (MLB-25096) is NOT re-created by normal scan", () => {
+Deno.test("AC5: scan guard — rejected Balcatta (MLB-25096) is NOT re-created by normal scan (with received_at)", () => {
   const rejectedBalcatta = {
     graph_message_id: "AAMkADA3_old_user_mailbox_balcatta==",
     internet_message_id: "<primeecoemail...mlb.mailer@primeeco.tech>",
@@ -212,6 +215,7 @@ Deno.test("AC5: scan guard — rejected Balcatta (MLB-25096) is NOT re-created b
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
     status: "rejected",
+    received_at: "2026-06-16T12:48:00.000Z",  // real Balcatta received_at
   };
   const index = buildIntakeDedupIndex([], [], [rejectedBalcatta]);
   const newScanCandidate = {
@@ -220,10 +224,34 @@ Deno.test("AC5: scan guard — rejected Balcatta (MLB-25096) is NOT re-created b
     external_ref: "MLB-25096",
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
+    received_at: "2026-06-16T12:48:00.000Z",  // same email -> suppressed
     // No force_recapture = normal scan
   };
   assertEquals(isDuplicateIntake(newScanCandidate, index), "suppressed_rejected",
     "Balcatta MLB-25096 must be suppressed on normal scan after rejection");
+});
+
+Deno.test("AC5: corrected Balcatta resend (newer email) is NOT suppressed", () => {
+  // If MLB re-sends a corrected Balcatta WO, the newer email must NOT be suppressed.
+  const rejectedBalcatta = {
+    graph_message_id: "AAMkADA3_old_user_mailbox_balcatta==",
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    status: "rejected",
+    received_at: "2026-06-16T12:48:00.000Z",
+  };
+  const index = buildIntakeDedupIndex([], [], [rejectedBalcatta]);
+  const correctedResend = {
+    graph_message_id: "AAQkADA3_corrected_resend==",
+    internet_message_id: null,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    received_at: "2026-06-17T09:30:00.000Z",  // NEWER -> not suppressed
+  };
+  assertEquals(isDuplicateIntake(correctedResend, index), null,
+    "Corrected resend (newer received_at) must NOT be suppressed");
 });
 
 Deno.test("AC5: force_recapture bypasses suppressed Balcatta and allows recapture", () => {
@@ -233,6 +261,7 @@ Deno.test("AC5: force_recapture bypasses suppressed Balcatta and allows recaptur
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
     status: "rejected",
+    received_at: "2026-06-16T12:48:00.000Z",
   };
   const index = buildIntakeDedupIndex([], [], [rejectedBalcatta]);
   const recaptureCandidate = {
@@ -241,6 +270,7 @@ Deno.test("AC5: force_recapture bypasses suppressed Balcatta and allows recaptur
     external_ref: "MLB-25096",
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
+    received_at: "2026-06-16T12:48:00.000Z",  // same date but force_recapture overrides
     force_recapture: true, // targeted recapture
   };
   assertEquals(isDuplicateIntake(recaptureCandidate, index), null,

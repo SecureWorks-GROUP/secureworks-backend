@@ -41,7 +41,14 @@ export interface WoAttachmentInput {
 // ── scoreWorkOrder ────────────────────────────────────────────────────────────────
 
 // Strong WO filename signals — case-insensitive (filenames vary in case).
-const STRONG_WO_RE = /work[\s_-]*order|works[\s_-]*order|\bWO\b/i;
+// \bWO\b matches WO flanked by word boundaries — but \b treats underscore as a word char,
+// so "WO_123.pdf" does NOT match \bWO\b (the underscore makes it a word char on both sides).
+// Fix: broaden the standalone-WO pattern to (?<![A-Za-z])WO(?![A-Za-z]) which matches
+// "WO" not preceded or followed by a letter. This catches:
+//   WO_123.pdf  WO-123.pdf  "WO 123"  WO-only filenames
+// and correctly EXCLUDES:
+//   WOrksheet.pdf  SWORD.pdf  TWOFOLD.pdf  (letter follows/precedes WO)
+const STRONG_WO_RE = /work[\s_-]*order|works[\s_-]*order|(?<![A-Za-z])WO(?![A-Za-z])/i;
 
 // Weak PO filename signals (less relevant than WO but still useful as tiebreaker
 // when there is NO strong WO signal at all). We intentionally score PO weakly: the
@@ -131,24 +138,31 @@ export function selectWorkOrderPdf(atts: WoAttachmentInput[]): WoSelectionResult
  * Priority:
  *   1. att.id (UUID PK — strongest, always unique)
  *   2. att.graph_attachment_id (non-null on all group-sync rows)
- *   3. Fallback: base on name+size (for hypothetical completely-missing-ids cases)
+ *   3. Fallback: base on name+size+index (index disambiguates two atts with same name+size)
  *
  * The token is derived by taking the raw value, stripping non-[a-zA-Z0-9] chars,
  * and slicing the LAST 16 characters. UUIDs end in a highly-entropic hex segment so
  * slicing the last 16 gives excellent collision resistance while keeping the key
  * short. Graph attachment ids also end in high-entropy segments.
  *
+ * @param att   The attachment row.
+ * @param index Optional array-position index used only in the fallback path to
+ *              disambiguate two attachments that have both ids null AND the same
+ *              name+size. Callers should pass the attachment's index in the
+ *              surrounding array.
+ *
  * The result is appended to the hash(msg.id) prefix in the caller, producing:
  *   makesafe-intake/<hash(msg.id)>-<component>/<safeName>
  * Two different attachments in the same email always get different components.
  */
-export function attachmentKeyComponent(att: WoAttachmentInput): string {
+export function attachmentKeyComponent(att: WoAttachmentInput, index?: number): string {
   const raw = att.id || att.graph_attachment_id;
   if (raw) {
     return raw.replace(/[^a-zA-Z0-9]/g, "").slice(-16);
   }
-  // Fallback: combine name + size into a simple hash-like token.
-  const fallbackRaw = `${att.name || ""}:${att.size_bytes ?? 0}`;
+  // Fallback: combine name + size + index into a simple hash-like token.
+  // The index disambiguates two atts that share both a name and a size (Codex F5).
+  const fallbackRaw = `${att.name || ""}:${att.size_bytes ?? 0}:${index ?? 0}`;
   let h = 0;
   for (let i = 0; i < fallbackRaw.length; i++) {
     h = (Math.imul(31, h) + fallbackRaw.charCodeAt(i)) | 0;
