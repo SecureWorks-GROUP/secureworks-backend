@@ -190,6 +190,15 @@ import {
   isGenuineNewWorkOrder as _isGenuineNewWorkOrder,
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
 } from './makesafe_intake_gate.ts'
+// BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
+// drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
+// scan. See makesafe_intake_dedup.ts.
+import {
+  buildIntakeDedupIndex as _buildIntakeDedupIndex,
+  isDuplicateIntake as _isDuplicateIntake,
+  registerIntakeDraft as _registerIntakeDraft,
+  LIVE_DRAFT_STATES as _LIVE_DRAFT_STATES,
+} from './makesafe_intake_dedup.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
 import {
@@ -8949,12 +8958,21 @@ async function approveIntakeDraft(client: any, body: any) {
   }
 
   const attachments = parseJsonArray(draft.attachments_json)
+  // BUG 2 (CAPTURE): require a SERVABLE work-order PDF, not merely an attachments_json
+  // entry. The intake scan now records a flagged entry (pdf_unavailable=true, null
+  // URLs) when the re-upload to job-documents fails; that entry must NOT satisfy the
+  // work_order_pdf requirement, or a make-safe job could be approved with no openable
+  // WO document (the attach step below skips entries with no URL). Count only entries
+  // with a usable pdf_url/storage_url and not flagged unavailable.
+  const availableAttachments = (attachments || []).filter(
+    (a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url),
+  )
   const missing: string[] = []
   if (!approvedFields.requesting_company_slug && !approvedFields.requesting_company_name) missing.push('requesting_company')
   if (!approvedFields.external_ref) missing.push('external_ref')
   if (!approvedFields.client_name) missing.push('client_name')
   if (!approvedFields.site_address) missing.push('site_address')
-  if (attachments.length === 0) missing.push('work_order_pdf')
+  if (availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
@@ -9174,6 +9192,18 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
+// BUG 2 (CAPTURE): the intake re-upload key used the raw graph_message_id, which is
+// ~150 chars and contains '=', '+', '_' — pushing some keys past Storage's object-key
+// constraints and silently failing the upload. Derive a SHORT, deterministic,
+// Storage-safe key from the message id (first 24 hex of its SHA-256) so the same
+// email always maps to the same object path and the key is always valid.
+async function _shortStorageKey(input: string): Promise<string> {
+  const buf = new TextEncoder().encode(String(input || ''))
+  const digest = await crypto.subtle.digest('SHA-256', buf)
+  const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+  return hex.slice(0, 24)
+}
+
 // ── Slice 7: scan SES make-safes for make-safe work orders ──
 // Wave 1 (intake autopilot): SOURCE CHANGED. This no longer scans the Graph USER
 // mailbox (users/admin@.../inbox). It now sources candidate work-order emails from
@@ -9271,23 +9301,45 @@ async function scanSesMakesafes(client: any) {
   // to keep Haiku cost bounded — parity with the old $top=50 Graph window.
   const makesafeEmails = matchedMessages.slice(0, 50)
 
-  // Dedup against existing drafts
-  const graphIds = makesafeEmails.map((m: any) => m.id)
-  const { data: existing } = await client.from('makesafe_intake_drafts')
-    .select('graph_message_id')
-    .in('graph_message_id', graphIds.length > 0 ? graphIds : ['__none__'])
-  const existingSet = new Set((existing || []).map((e: any) => e.graph_message_id))
-  // Also dedup against already-created jobs with matching external ref
+  // BUG 1 — CROSS-PATH DEDUP. The OLD user-mailbox path and the NEW group-sync path
+  // assign DIFFERENT graph_message_id values to the SAME work-order email, so a
+  // graph_message_id-only check (the previous behaviour) re-drafts an email that was
+  // already drafted by the other path. Build a single index over EVERY existing draft
+  // in a live state (draft|needs_review|approved) — not just the candidate
+  // graph_message_ids — plus existing make-safe jobs' external refs. A candidate is
+  // skipped if it matches on graph_message_id OR internet_message_id OR
+  // (normalised external_ref + requesting_company) OR an existing job's external_ref.
+  // internet_message_id is null on the group-sync path (group posts don't expose it),
+  // so (ref + company) is the workhorse cross-path key. See makesafe_intake_dedup.ts.
+  const existingDrafts = await _fetchAllRows<any>(
+    () => client.from('makesafe_intake_drafts')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .in('status', _LIVE_DRAFT_STATES as unknown as string[]),
+    'makesafe_intake_drafts (dedup index) read',
+  )
+  // Already-created jobs with a matching external ref (a live job already covers it).
   const { data: existingJobs } = await client.from('makesafe_job_details')
     .select('external_ref')
     .not('external_ref', 'is', null)
-  const existingRefs = new Set((existingJobs || []).map((j: any) => j.external_ref?.toUpperCase()))
+  const dedupIndex = _buildIntakeDedupIndex(
+    existingDrafts || [],
+    (existingJobs || []).map((j: any) => j.external_ref),
+  )
 
   const newDrafts: any[] = []
+  let skippedDuplicates = 0
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
 
   for (const msg of makesafeEmails) {
-    if (existingSet.has(msg.id)) continue
+    // Cheap pre-extraction dedup on the message ids we already have (graph /
+    // internet). The (ref + company) check runs again AFTER Haiku extraction, once
+    // we know the ref + matched company.
+    const earlyDup = _isDuplicateIntake(
+      { graph_message_id: msg.id, internet_message_id: msg.internetMessageId || null },
+      dedupIndex,
+    )
+    if (earlyDup) { skippedDuplicates++; continue }
 
     const fromEmail = msg.from?.emailAddress?.address || ''
     const fromName = msg.from?.emailAddress?.name || ''
@@ -9350,13 +9402,45 @@ async function scanSesMakesafes(client: any) {
               pdfBase64List.push({ name: att.name, base64: bytesToBase64(fileBuffer) })
             }
 
-            // Re-upload PDF to the PUBLIC job-documents bucket (same path pattern).
-            const storagePath = `makesafe-intake/${msg.id}/${(att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_')}`
-            await adminClient.storage
+            // Re-upload PDF to the PUBLIC job-documents bucket.
+            // BUG 2 (CAPTURE): the previous code ignored the upload() error AND
+            // recorded getPublicUrl() unconditionally. getPublicUrl is pure string
+            // concatenation — it returns a URL even when no object exists — so a
+            // FAILED upload still wrote a pdf_url that 404s in the cockpit iframe
+            // (the raw {"statusCode":"404","Object not found"} symptom). MLB Balcatta
+            // hit this: object 400/JSON in job-documents while a pdf_url was recorded.
+            // Two contributing causes: (1) the storage key embedded the raw
+            // graph_message_id (contains '=' '+' '_' and is ~150 chars) plus a long
+            // filename, pushing the key past Storage's key constraints for some
+            // emails; (2) any transient/validation upload failure was swallowed.
+            // FIX: use a short, deterministic, Storage-safe key (a hash of the
+            // message id) and CHECK the upload result. Only record pdf_url when the
+            // object is confirmed present; otherwise record the attachment with
+            // pdf_unavailable=true + a reason so the cockpit shows a graceful
+            // fallback instead of raw JSON.
+            const safeName = (att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)
+            const keyHash = await _shortStorageKey(msg.id)
+            const storagePath = `makesafe-intake/${keyHash}/${safeName}`
+            const { error: upErr } = await adminClient.storage
               .from('job-documents')
               .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
+            if (upErr) {
+              // Upload failed — DO NOT record a pdf_url that would 404. Keep the
+              // attachment in the list (it IS a real WO PDF we have private bytes
+              // for) but flag it unavailable so the cockpit renders the fallback.
+              console.log('[ops-api] intake job-documents upload failed:', upErr.message, storagePath)
+              attachments.push({
+                name: att.name,
+                file_name: att.name,
+                storage_url: null,
+                pdf_url: null,
+                pdf_unavailable: true,
+                pdf_error: `upload_failed:${upErr.message}`.slice(0, 200),
+                size: att.size_bytes,
+              })
+              continue
+            }
             const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(storagePath)
-
             attachments.push({
               name: att.name,
               file_name: att.name,
@@ -9419,20 +9503,49 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // Skip if not actually a work order (Haiku hint)
     if (missingFields.includes('not_a_work_order')) continue
 
+    // BUG 2 (CAPTURE): `attachments` may now include an entry whose re-upload FAILED
+    // (pdf_unavailable=true, null URLs). Such an entry is NOT a servable work-order
+    // PDF. Count only AVAILABLE WO PDFs (a real pdf_url, not flagged unavailable) for
+    // the gate + required-field logic, so an upload-failure can't (a) let an email
+    // pass the WO gate on a non-existent PDF, or (b) mark a draft needs_review/approve-
+    // ready when no WO PDF can actually be opened. The unavailable entry is still kept
+    // in attachments_json (with its error) so the cockpit shows the graceful fallback.
+    const availableWoCount = attachments.filter(
+      (a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url),
+    ).length
+
     // makesafe-inbound-filter — HARD GATE: only a GENUINE new work order becomes a
-    // draft. `attachments` holds only successfully-uploaded PDF work orders, so its
-    // length is the work-order-PDF count. This drops photo-evidence / report /
-    // invoice / outbound / reply emails that carry a ref but no WO (the needs_review
-    // flood) while keeping any email with a WO PDF or a NEW-WO subject pattern.
-    const woGate = _isGenuineNewWorkOrder(subject, fromEmail, attachments.length)
+    // draft. availableWoCount is the count of SERVABLE work-order PDFs. This drops
+    // photo-evidence / report / invoice / outbound / reply emails that carry a ref but
+    // no WO (the needs_review flood) while keeping any email with a WO PDF or a NEW-WO
+    // subject pattern.
+    const woGate = _isGenuineNewWorkOrder(subject, fromEmail, availableWoCount)
     if (!woGate.ok) {
       console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
       continue
     }
 
-    // Skip if we already have a job with this external ref
+    // BUG 1 — POST-EXTRACTION CROSS-PATH DEDUP. Now that Haiku has given us the
+    // external_ref and we've matched the requesting company, re-run the dedup with
+    // those keys. This is what catches the OLD-path draft of the SAME work order
+    // whose graph_message_id differs from this group-sync candidate (the BICTON
+    // 67998 case): same (normalised ref + company), or a live job already on the ref.
     const extractedRef = extraction.external_ref || null
-    if (extractedRef && existingRefs.has(extractedRef.toUpperCase())) continue
+    const refDup = _isDuplicateIntake(
+      {
+        graph_message_id: msg.id,
+        internet_message_id: msg.internetMessageId || null,
+        external_ref: extractedRef,
+        requesting_company_slug: matchedCompany?.slug || null,
+        requesting_company_name: matchedCompany?.name || null,
+      },
+      dedupIndex,
+    )
+    if (refDup) {
+      console.log('[ops-api] intake skip (duplicate across paths):', refDup, '|', extractedRef, '|', subject)
+      skippedDuplicates++
+      continue
+    }
 
     // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
     // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
@@ -9446,7 +9559,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       !extractedRef ||
       !extraction.client_name ||
       !extraction.site_address ||
-      attachments.length === 0
+      availableWoCount === 0
     )
 
     // Create draft
@@ -9486,6 +9599,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       continue
     }
 
+    // BUG 1 — register the new draft in the in-memory index so a SECOND copy of the
+    // same email later in THIS batch (same ref+company) is also skipped.
+    _registerIntakeDraft(
+      {
+        graph_message_id: msg.id,
+        internet_message_id: msg.internetMessageId || null,
+        external_ref: extractedRef,
+        requesting_company_slug: matchedCompany?.slug || null,
+        requesting_company_name: matchedCompany?.name || null,
+      },
+      dedupIndex,
+    )
     newDrafts.push(inserted)
   }
 
@@ -9495,7 +9620,9 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // not a live Graph message count.
     scanned: (emailRows || []).length,
     makesafe_candidates: makesafeEmails.length,
-    already_processed: makesafeEmails.length - newDrafts.length - makesafeEmails.filter((m: any) => existingSet.has(m.id)).length,
+    // BUG 1: count of candidates skipped because a draft/job already exists for them
+    // (across BOTH the old user-mailbox path and the new group-sync path).
+    already_processed: skippedDuplicates,
     new_drafts: newDrafts,
     new_count: newDrafts.length,
     // Observability: confirms the redirected source is live (not the old Graph
