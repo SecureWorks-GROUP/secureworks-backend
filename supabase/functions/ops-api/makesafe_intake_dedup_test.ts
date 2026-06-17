@@ -19,6 +19,7 @@ import {
   normaliseRef,
   refCompanyKey,
   registerIntakeDraft,
+  SUPPRESSED_DRAFT_STATES,
 } from "./makesafe_intake_dedup.ts";
 
 // ── Real-shaped rows from the live BICTON 67998 duplicate (2026-06-16) ────────────
@@ -193,4 +194,126 @@ Deno.test("two copies of the same email WITHIN one batch: first creates, second 
     index,
   );
   assertEquals(dup, "external_ref+company");
+});
+
+// ── F1: suppressed_rejected scan-guard (mission makesafe-wo-capture-recovery-2026-06-17) ──
+// These tests prove:
+//   1. A rejected, in-window WO email is NOT re-created by a normal scan.
+//   2. A force_recapture=true candidate DOES bypass the suppression.
+//   3. force_recapture still CANNOT duplicate a LIVE draft.
+//   4. A genuinely-new WO (no rejected match) is NOT affected.
+//   5. SUPPRESSED_DRAFT_STATES exports the correct values.
+
+const BALCATTA_REJECTED = {
+  graph_message_id: "AAMkADA3_old_user_mailbox_id==",
+  internet_message_id: "<primeecoemail...mlb.mailer@primeeco.tech>",
+  external_ref: "MLB-25096",
+  requesting_company_slug: "mlb",
+  requesting_company_name: "ML Builders",
+  status: "rejected",
+};
+
+Deno.test("SUPPRESSED_DRAFT_STATES includes rejected and superseded", () => {
+  assert(SUPPRESSED_DRAFT_STATES.includes("rejected"), "rejected must be in SUPPRESSED_DRAFT_STATES");
+  assert(SUPPRESSED_DRAFT_STATES.includes("superseded"), "superseded must be in SUPPRESSED_DRAFT_STATES");
+});
+
+Deno.test("F1: rejected in-window WO is NOT re-created by a normal scan (suppressed_rejected)", () => {
+  // Normal scan: live drafts empty, rejected draft in 3rd arg.
+  const index = buildIntakeDedupIndex(
+    [],        // no live drafts
+    [],        // no jobs
+    [BALCATTA_REJECTED],  // rejected draft
+  );
+  const candidate = {
+    graph_message_id: "AAMkADA3_new_group_sync_id==",  // different (group path)
+    internet_message_id: null,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    // force_recapture: false (omitted = normal scan)
+  };
+  const reason = isDuplicateIntake(candidate, index);
+  assertEquals(reason, "suppressed_rejected", "rejected in-window WO must be suppressed on normal scan");
+});
+
+Deno.test("F1: force_recapture=true bypasses suppressed_rejected", () => {
+  const index = buildIntakeDedupIndex([], [], [BALCATTA_REJECTED]);
+  const candidate = {
+    graph_message_id: "AAMkADA3_new_group_sync_id==",
+    internet_message_id: null,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    force_recapture: true,  // targeted recapture bypasses suppressed_rejected
+  };
+  const reason = isDuplicateIntake(candidate, index);
+  assertEquals(reason, null, "force_recapture must bypass suppressed_rejected and allow creation");
+});
+
+Deno.test("F1: force_recapture still blocked by a LIVE refCompany match (cannot duplicate LIVE)", () => {
+  const liveDraft = {
+    graph_message_id: "AAMkADA3_live_group_sync_id==",
+    internet_message_id: null,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    status: "needs_review",
+  };
+  const index = buildIntakeDedupIndex(
+    [liveDraft],   // a LIVE draft already exists
+    [],
+    [BALCATTA_REJECTED],  // also a rejected one
+  );
+  const candidate = {
+    graph_message_id: "AAMkADA3_different_group_sync==",
+    internet_message_id: null,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    force_recapture: true,  // tries to force, but LIVE draft blocks
+  };
+  const reason = isDuplicateIntake(candidate, index);
+  assertEquals(reason, "external_ref+company", "force_recapture must NOT bypass a LIVE draft match");
+});
+
+Deno.test("F1: a genuinely-new WO (no rejected match) is NOT affected by suppressed_rejected guard", () => {
+  const index = buildIntakeDedupIndex([], [], [BALCATTA_REJECTED]);
+  const candidate = {
+    graph_message_id: "brand-new-id-for-different-job",
+    internet_message_id: null,
+    external_ref: "MLB-25900",   // different ref — genuinely new
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+  };
+  const reason = isDuplicateIntake(candidate, index);
+  assertEquals(reason, null, "genuinely-new WO must pass through regardless of rejected guard");
+});
+
+Deno.test("F1: unknown-company rejected draft does NOT build a suppression key (no false positives)", () => {
+  // A rejected draft with NO company must not suppress a future unrelated candidate.
+  const rejectedNoCompany = {
+    graph_message_id: "some-old-id==",
+    external_ref: "MLB-99999",
+    requesting_company_slug: null,
+    requesting_company_name: null,
+    status: "rejected",
+  };
+  const index = buildIntakeDedupIndex([], [], [rejectedNoCompany]);
+  const candidate = {
+    graph_message_id: "new-id-==",
+    external_ref: "MLB-99999",
+    requesting_company_slug: null,
+    requesting_company_name: null,
+  };
+  // No company -> refCompanyKey returns "" -> no suppression key built -> not suppressed
+  const reason = isDuplicateIntake(candidate, index);
+  assertEquals(reason, null, "unknown-company rejected draft must NOT build a suppression key");
+});
+
+Deno.test("F1: live-state behaviour unchanged — existing tests still hold with rejectedDrafts arg", () => {
+  // Passing an empty rejectedDrafts must not change any existing dedup behaviour.
+  const index = buildIntakeDedupIndex([BICTON_OLD], [], []);
+  const reason = isDuplicateIntake(BICTON_NEW_CANDIDATE, index);
+  assertEquals(reason, "external_ref+company", "cross-path dup must still be caught with empty rejectedDrafts");
 });

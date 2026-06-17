@@ -189,6 +189,7 @@ import {
 import {
   isGenuineNewWorkOrder as _isGenuineNewWorkOrder,
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
+  subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
 } from './makesafe_intake_gate.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
@@ -198,7 +199,16 @@ import {
   isDuplicateIntake as _isDuplicateIntake,
   registerIntakeDraft as _registerIntakeDraft,
   LIVE_DRAFT_STATES as _LIVE_DRAFT_STATES,
+  SUPPRESSED_DRAFT_STATES as _SUPPRESSED_DRAFT_STATES,
+  normaliseRef as _normaliseDedupRef,
+  normaliseCompany as _normaliseDedupCompany,
 } from './makesafe_intake_dedup.ts'
+// GAP-A (WO selection + unique per-attachment key).
+// Mission: makesafe-wo-capture-recovery-2026-06-17.
+import {
+  selectWorkOrderPdf as _selectWorkOrderPdf,
+  attachmentKeyComponent as _attachmentKeyComponent,
+} from './makesafe_wo_selection.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
 import {
@@ -1955,6 +1965,19 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: approve_intake_draft requires the privileged ops key or an admin/owner session; the make-safe automation routine cannot approve drafts' }, 403)
         }
         return json(await approveIntakeDraft(client, body))
+      }
+      // recapture_intake_draft (GAP-C, mission makesafe-wo-capture-recovery-2026-06-17).
+      // Resolves an old-path (user-mailbox) draft to the group-sync projection by
+      // normalised ref+company+received_at window, re-captures the WO PDF with the
+      // new unique key, and inserts a fresh draft. Privileged gate identical to
+      // approve_intake_draft — NOT routine-callable (default-deny keeps it out).
+      case 'recapture_intake_draft': {
+        const recaptureIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!recaptureIsPrivileged) {
+          return json({ error: 'forbidden: recapture_intake_draft requires the privileged ops key or an admin/owner session; the make-safe automation routine cannot recapture drafts' }, 403)
+        }
+        return json(await recaptureIntakeDraft(client, body))
       }
       case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
       case 'create_intake_draft': return json(await createIntakeDraft(client, body))
@@ -9178,6 +9201,293 @@ async function createIntakeDraft(client: any, body: any) {
   return { ok: true, draft: data }
 }
 
+// ── GAP-C: recapture_intake_draft ─────────────────────────────────────────────
+// Mission: makesafe-wo-capture-recovery-2026-06-17
+//
+// Resolves a stale/rejected intake draft (usually created by the OLD user-mailbox
+// path, which had a raw ~150-char graph_message_id that blew the storage key limit)
+// to the GROUP-SYNC projection email, re-captures the WO PDF with the new unique
+// key, and inserts a fresh reviewable draft.
+//
+// DRAFTS ONLY. Never calls approve / createMakesafeJob / invoice / send.
+// NOT routine-callable (omitted from ROUTINE_ALLOWED_ACTIONS, default-deny fires).
+// Privilege gate is identical to approve_intake_draft: api_key OR admin/owner JWT.
+async function recaptureIntakeDraft(client: any, body: any) {
+  const { draft_id } = body
+  if (!draft_id) throw new Error('draft_id required')
+
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const SES_MAILBOX = _SES_MAILBOX
+
+  // 1. Load the existing draft.
+  const { data: draft, error: draftErr } = await client.from('makesafe_intake_drafts')
+    .select('*').eq('id', draft_id).single()
+  if (draftErr || !draft) throw new Error('Draft not found')
+
+  // 2. Resolve the group email row.
+  // If the draft was already created by the group-sync path (mailbox == ses@),
+  // use its graph_message_id directly as the group post_id.
+  // Otherwise (old user-mailbox path) resolve via normalised ref+company+received_at window.
+  let groupPostId: string | null = null
+
+  if (draft.mailbox === SES_MAILBOX && draft.graph_message_id) {
+    // Already a group-sync draft. Verify the group post still exists in emails.
+    const { data: emailRow } = await client.from('emails')
+      .select('post_id').eq('post_id', draft.graph_message_id).maybeSingle()
+    if (emailRow) groupPostId = emailRow.post_id
+  }
+
+  if (!groupPostId) {
+    // OLD-path draft (user-mailbox graph_message_id) OR the direct lookup failed.
+    // Bridge: find the group projection row by (normalised ref + company + received_at window +/- 2 days).
+    const normRef = _normaliseDedupRef(draft.external_ref)
+    const normCompany = _normaliseDedupCompany(draft.requesting_company_slug, draft.requesting_company_name)
+
+    if (!normRef) {
+      return {
+        ok: true,
+        recaptured: false,
+        reason: 'no_ref_to_bridge',
+        detail: 'The draft has no external_ref to search by. Cannot resolve group email row.',
+      }
+    }
+
+    // Fetch group-sync candidates in a +/- 2-day window around the draft's received_at.
+    const receivedAt = draft.received_at ? new Date(draft.received_at) : new Date()
+    const windowStart = new Date(receivedAt.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString()
+    const windowEnd = new Date(receivedAt.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString()
+
+    const { data: candidates } = await client.from('emails')
+      .select('post_id, from_email, subject, received_at, has_attachments')
+      .eq('mailbox', SES_MAILBOX)
+      .is('pii_purged_at', null)
+      .gte('received_at', windowStart)
+      .lte('received_at', windowEnd)
+
+    // Find the best match: group post whose subject/body implies the same ref+company.
+    // Heuristic: the external_ref appears in the subject OR the company slug/name pattern matches.
+    type GroupMatch = { email: any; score: number; deltaMs: number }
+    const matches: GroupMatch[] = []
+    for (const email of (candidates || [])) {
+      let score = 0
+      const subjectLower = (email.subject || '').toLowerCase()
+      const normRefLower = normRef.toLowerCase()
+      // Check if any version of the ref appears in the subject.
+      if (subjectLower.includes(normRefLower) ||
+          (draft.external_ref && subjectLower.includes(draft.external_ref.toLowerCase()))) {
+        score += 10
+      }
+      // Check if company name/slug appears in the from_email (e.g. mlb.mailer@primeeco.tech).
+      if (normCompany && (email.from_email || '').toLowerCase().includes(normCompany)) {
+        score += 5
+      }
+      // The email must have attachments to be a WO candidate.
+      if (email.has_attachments) score += 2
+      if (score > 0) {
+        const delta = Math.abs(new Date(email.received_at).getTime() - receivedAt.getTime())
+        matches.push({ email, score, deltaMs: delta })
+      }
+    }
+
+    if (matches.length > 0) {
+      // Best: highest score, then closest received_at.
+      matches.sort((a, b) => b.score - a.score || a.deltaMs - b.deltaMs)
+      groupPostId = matches[0].email.post_id
+    }
+  }
+
+  if (!groupPostId) {
+    // No group email row found. Produce a B1-flag draft (visible, not silent no-op).
+    const flagDraft = {
+      org_id: DEFAULT_ORG_ID,
+      mailbox: SES_MAILBOX,
+      graph_message_id: `recapture:no_group_email:${draft_id}`,
+      received_at: draft.received_at,
+      from_email: draft.from_email,
+      from_name: draft.from_name,
+      subject: draft.subject,
+      body_preview: draft.body_preview,
+      requesting_company_slug: draft.requesting_company_slug,
+      requesting_company_name: draft.requesting_company_name,
+      external_ref: draft.external_ref,
+      client_name: draft.client_name,
+      client_phone: draft.client_phone,
+      site_address: draft.site_address,
+      site_suburb: draft.site_suburb,
+      description: draft.description,
+      confidence: draft.confidence || 'low',
+      missing_fields: ['work_order_pdf', 'group_email_not_found'],
+      extraction_json: draft.extraction_json || {},
+      attachments_json: [{
+        name: 'work-order',
+        file_name: null,
+        storage_url: null,
+        pdf_url: null,
+        pdf_unavailable: true,
+        pdf_error: 'portal_link_or_oversize_needs_review',
+        size: null,
+      }],
+      status: 'draft',
+    }
+    const { data: flagInserted, error: flagErr } = await client.from('makesafe_intake_drafts')
+      .insert(flagDraft).select().single()
+    if (flagErr) {
+      console.log('[ops-api] recapture flag-draft insert failed:', flagErr.message)
+    }
+    return {
+      ok: true,
+      recaptured: false,
+      reason: 'no_group_email_found',
+      flag_draft_id: flagInserted?.id || null,
+    }
+  }
+
+  // 3. Check if a LIVE draft already exists for this group post_id (idempotency).
+  const { data: existingLive } = await client.from('makesafe_intake_drafts')
+    .select('id, status')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('graph_message_id', groupPostId)
+    .in('status', _LIVE_DRAFT_STATES as unknown as string[])
+    .maybeSingle()
+  if (existingLive) {
+    return {
+      ok: true,
+      recaptured: false,
+      reason: 'live_draft_exists',
+      existing_draft_id: existingLive.id,
+    }
+  }
+
+  // 4. Capture PDFs from the group post's uploaded attachments (same logic as scanSesMakesafes).
+  const recaptureAttachments: any[] = []
+  try {
+    const { data: attRows } = await client.from('email_attachments')
+      .select('id, graph_attachment_id, name, content_type, storage_path, size_bytes')
+      .eq('email_id', groupPostId)
+      .eq('status', 'uploaded')
+
+    const uploadedPdfRows = (attRows || []).filter((att: any) => {
+      const isPdf = (att.content_type || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+      return isPdf && att.storage_path
+    })
+
+    const { selected: designatedWo, ordered: orderedPdfs } = _selectWorkOrderPdf(uploadedPdfRows)
+    const keyHash = await _shortStorageKey(groupPostId)
+
+    for (const att of orderedPdfs) {
+      try {
+        const { data: blob, error: dlErr } = await adminClient.storage
+          .from('makesafe-emails')
+          .download(att.storage_path)
+        if (dlErr || !blob) {
+          console.log('[ops-api] recapture PDF download failed:', dlErr?.message || 'no blob', att.storage_path)
+          continue
+        }
+        const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+        const safeName = (att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)
+        const keyComponent = _attachmentKeyComponent(att)
+        const storagePath = `makesafe-intake/${keyHash}-${keyComponent}/${safeName}`
+        const { error: upErr } = await adminClient.storage
+          .from('job-documents')
+          .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
+        if (upErr) {
+          console.log('[ops-api] recapture upload failed:', upErr.message, storagePath)
+          recaptureAttachments.push({
+            name: att.name,
+            file_name: att.name,
+            storage_url: null,
+            pdf_url: null,
+            pdf_unavailable: true,
+            pdf_error: `upload_failed:${upErr.message}`.slice(0, 200),
+            size: att.size_bytes,
+            is_work_order: (att === designatedWo),
+          })
+          continue
+        }
+        const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(storagePath)
+        recaptureAttachments.push({
+          name: att.name,
+          file_name: att.name,
+          storage_url: storagePath,
+          pdf_url: urlData?.publicUrl || null,
+          size: att.size_bytes,
+          is_work_order: (att === designatedWo),
+        })
+      } catch (e) {
+        console.log('[ops-api] recapture PDF re-upload failed:', (e as Error).message)
+      }
+    }
+  } catch (e) {
+    console.log('[ops-api] recapture attachment read failed:', (e as Error).message)
+  }
+
+  // 5. Determine status for the fresh draft.
+  const recaptureAvailableCount = recaptureAttachments.filter(
+    (a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url),
+  ).length
+  const freshStatus = recaptureAvailableCount > 0 ? 'needs_review' : 'draft'
+
+  // 6. Insert the fresh draft. Use graph_message_id = groupPostId so the
+  //    UNIQUE(org_id, graph_message_id) constraint acts as the idempotency backstop.
+  const freshDraft = {
+    org_id: DEFAULT_ORG_ID,
+    mailbox: SES_MAILBOX,
+    graph_message_id: groupPostId,
+    received_at: draft.received_at,
+    from_email: draft.from_email,
+    from_name: draft.from_name,
+    subject: draft.subject,
+    body_preview: draft.body_preview,
+    requesting_company_slug: draft.requesting_company_slug,
+    requesting_company_name: draft.requesting_company_name,
+    external_ref: draft.external_ref,
+    client_name: draft.client_name,
+    client_phone: draft.client_phone,
+    client_email: draft.client_email || null,
+    site_address: draft.site_address,
+    site_suburb: draft.site_suburb,
+    description: draft.description,
+    safety_requirements: draft.safety_requirements || null,
+    special_instructions: null,
+    confidence: draft.confidence || 'medium',
+    missing_fields: recaptureAvailableCount > 0 ? [] : ['work_order_pdf'],
+    extraction_json: draft.extraction_json || {},
+    attachments_json: recaptureAttachments,
+    status: freshStatus,
+  }
+
+  const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')
+    .insert(freshDraft).select().single()
+
+  if (insErr) {
+    // If it's a unique violation, a draft for this group post_id already exists (concurrent call).
+    // Treat as idempotent success (no-op).
+    if (insErr.code === '23505' || (insErr.message || '').includes('unique')) {
+      return {
+        ok: true,
+        recaptured: false,
+        reason: 'unique_constraint_live_draft_exists',
+        group_post_id: groupPostId,
+      }
+    }
+    throw new Error('recapture draft insert failed: ' + insErr.message)
+  }
+
+  // 7. Optionally mark the old draft as superseded (auditable but not required).
+  // Keep it simple: the original rejected draft stays as-is (already rejected).
+  // The new draft is the authoritative one going forward.
+
+  return {
+    ok: true,
+    recaptured: true,
+    new_draft_id: inserted?.id,
+    group_post_id: groupPostId,
+    attachments_count: recaptureAttachments.length,
+    available_pdf_count: recaptureAvailableCount,
+    status: freshStatus,
+  }
+}
+
 // Wave 1: encode raw bytes -> base64 in 8192-byte chunks. A naive
 // btoa(String.fromCharCode(...bytes)) blows the call stack on large PDFs because
 // the whole array is spread into one fromCharCode call; chunking keeps each spread
@@ -9318,6 +9628,17 @@ async function scanSesMakesafes(client: any) {
       .in('status', _LIVE_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (dedup index) read',
   )
+  // F1 (re-spam guard): also fetch rejected/superseded drafts so the cron does not
+  // endlessly resurrect them. A normal scan candidate matching a rejected/superseded
+  // ref+company is suppressed (reason='suppressed_rejected'). Only a targeted
+  // recapture (force_recapture=true) can bypass this guard.
+  const rejectedDrafts = await _fetchAllRows<any>(
+    () => client.from('makesafe_intake_drafts')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .in('status', _SUPPRESSED_DRAFT_STATES as unknown as string[]),
+    'makesafe_intake_drafts (rejected dedup index) read',
+  )
   // Already-created jobs with a matching external ref (a live job already covers it).
   const { data: existingJobs } = await client.from('makesafe_job_details')
     .select('external_ref')
@@ -9325,6 +9646,7 @@ async function scanSesMakesafes(client: any) {
   const dedupIndex = _buildIntakeDedupIndex(
     existingDrafts || [],
     (existingJobs || []).map((j: any) => j.external_ref),
+    rejectedDrafts || [],
   )
 
   const newDrafts: any[] = []
@@ -9367,10 +9689,26 @@ async function scanSesMakesafes(client: any) {
     // RE-UPLOAD to the PUBLIC job-documents bucket at the SAME path pattern and
     // produce the IDENTICAL attachments_json shape, so the cockpit (which reads
     // attachments_json[].pdf_url) keeps working with no UI change.
+    //
+    // GAP-A (WO selection + unique key) — mission makesafe-wo-capture-recovery-2026-06-17.
+    // We collect ALL uploaded PDF rows first, run selectWorkOrderPdf to designate
+    // the WO and reorder (WO first), then iterate the ORDERED list. Each attachment
+    // gets a UNIQUE storage key: makesafe-intake/<hash(msg.id)>-<keyComponent>/<safeName>
+    // so two PDFs with the same/similar filename never overwrite each other.
+    // The designated WO is fed to Haiku first (pdfBase64List ordering) and marked
+    // is_work_order:true in attachments_json.
+    //
+    // GAP-B (B1 detect-and-flag) — same mission. After the uploaded-PDF capture,
+    // if no servable PDF was produced AND the email passes a NEW-WO-subject check,
+    // query email_attachments for needs_review rows with a qualifying WO-bytes reason
+    // (pdf_no_inline_bytes_value_path_required / pdf_exceeds_inline_decode_cap /
+    // pdf_magic_byte_validation_failed) OR a PDF-ish referenceAttachment/itemAttachment.
+    // Push ONE flag entry so the draft is visible with an explicit reason, never silent.
     const attachments: any[] = []
     const pdfBase64List: Array<{ name: string; base64: string }> = []
     if (msg.hasAttachments) {
       try {
+        // Read all uploaded PDF rows for this email.
         const { data: attRows, error: attErr } = await client.from('email_attachments')
           .select('id, graph_attachment_id, name, content_type, storage_path, size_bytes')
           .eq('email_id', msg._post_id)
@@ -9378,10 +9716,20 @@ async function scanSesMakesafes(client: any) {
         if (attErr) {
           console.log('[ops-api] intake attachment lookup failed:', attErr.message)
         }
-        for (const att of (attRows || [])) {
-          const isPdf = (att.content_type || '').includes('pdf') || (att.name || '').endsWith('.pdf')
-          if (!isPdf || !att.storage_path) continue
 
+        // Filter to PDFs only (mirrors the original isPdf check).
+        const uploadedPdfRows = (attRows || []).filter((att: any) => {
+          const isPdf = (att.content_type || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+          return isPdf && att.storage_path
+        })
+
+        // GAP-A: designate the WO PDF and reorder (WO first, rest stable order).
+        const { selected: designatedWo, ordered: orderedPdfs } = _selectWorkOrderPdf(uploadedPdfRows)
+
+        // Pre-compute the per-message hash (used for all keys in this message).
+        const keyHash = await _shortStorageKey(msg.id)
+
+        for (const att of orderedPdfs) {
           try {
             // Download the bytes from the PRIVATE makesafe-emails bucket.
             const { data: blob, error: dlErr } = await adminClient.storage
@@ -9393,34 +9741,21 @@ async function scanSesMakesafes(client: any) {
             }
             const fileBuffer = new Uint8Array(await blob.arrayBuffer())
 
-            // Keep base64 for Haiku extraction (limit to first 2 PDFs, under 5MB
-            // each). Encode the raw bytes -> base64 with a CHUNKED btoa (8192-byte
-            // chunks) to avoid the call-stack-overflow that
-            // String.fromCharCode(...bigArray) hits on large PDFs. (Old code got
-            // base64 directly from Graph; the private bucket gives raw bytes.)
+            // GAP-A: feed the designated WO to Haiku FIRST; keep the <2 + <5MB cap.
+            // Because orderedPdfs has the WO first, the WO naturally enters pdfBase64List
+            // first (if it is small enough). Other PDFs follow in original stable order.
             if (pdfBase64List.length < 2 && fileBuffer.length < 5000000) {
               pdfBase64List.push({ name: att.name, base64: bytesToBase64(fileBuffer) })
             }
 
-            // Re-upload PDF to the PUBLIC job-documents bucket.
-            // BUG 2 (CAPTURE): the previous code ignored the upload() error AND
-            // recorded getPublicUrl() unconditionally. getPublicUrl is pure string
-            // concatenation — it returns a URL even when no object exists — so a
-            // FAILED upload still wrote a pdf_url that 404s in the cockpit iframe
-            // (the raw {"statusCode":"404","Object not found"} symptom). MLB Balcatta
-            // hit this: object 400/JSON in job-documents while a pdf_url was recorded.
-            // Two contributing causes: (1) the storage key embedded the raw
-            // graph_message_id (contains '=' '+' '_' and is ~150 chars) plus a long
-            // filename, pushing the key past Storage's key constraints for some
-            // emails; (2) any transient/validation upload failure was swallowed.
-            // FIX: use a short, deterministic, Storage-safe key (a hash of the
-            // message id) and CHECK the upload result. Only record pdf_url when the
-            // object is confirmed present; otherwise record the attachment with
-            // pdf_unavailable=true + a reason so the cockpit shows a graceful
-            // fallback instead of raw JSON.
+            // GAP-A: UNIQUE storage key per attachment.
+            // Old key: makesafe-intake/<hash(msg.id)>/<safeName.slice(-80)>
+            //   → two PDFs with the same/similar trailing filename overwrite each other.
+            // New key: makesafe-intake/<hash(msg.id)>-<keyComponent(att)>/<safeName>
+            //   → every attachment in an email gets its own prefix segment.
             const safeName = (att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)
-            const keyHash = await _shortStorageKey(msg.id)
-            const storagePath = `makesafe-intake/${keyHash}/${safeName}`
+            const keyComponent = _attachmentKeyComponent(att)
+            const storagePath = `makesafe-intake/${keyHash}-${keyComponent}/${safeName}`
             const { error: upErr } = await adminClient.storage
               .from('job-documents')
               .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
@@ -9437,6 +9772,8 @@ async function scanSesMakesafes(client: any) {
                 pdf_unavailable: true,
                 pdf_error: `upload_failed:${upErr.message}`.slice(0, 200),
                 size: att.size_bytes,
+                // GAP-A: mark which PDF is the designated work order.
+                is_work_order: (att === designatedWo),
               })
               continue
             }
@@ -9447,6 +9784,10 @@ async function scanSesMakesafes(client: any) {
               storage_url: storagePath,
               pdf_url: urlData?.publicUrl || null,
               size: att.size_bytes,
+              // GAP-A: mark the designated WO so the cockpit and approveIntakeDraft
+              // can surface the right PDF first. Backward-compatible (existing
+              // cockpit ignores unknown keys).
+              is_work_order: (att === designatedWo),
             })
           } catch (e) {
             console.log('[ops-api] PDF re-upload failed for intake:', (e as Error).message)
@@ -9513,6 +9854,57 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     const availableWoCount = attachments.filter(
       (a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url),
     ).length
+
+    // GAP-B (B1 detect-and-flag) — mission makesafe-wo-capture-recovery-2026-06-17.
+    // If no servable PDF was captured AND the email passes a NEW-WO SUBJECT check,
+    // look for qualifying needs_review attachments (portal link / over-cap / magic-
+    // byte fail). If found, push ONE flag entry so the draft is visible with an
+    // explicit reason, rather than silently missing the WO.
+    //
+    // False-positive bound (F4): ONLY flag when:
+    //   1. availableWoCount === 0 (no servable PDF already captured)
+    //   2. subject passes subjectLooksLikeNewWorkOrder (stronger than a bare keyword)
+    //   3. a qualifying needs_review row exists (WO-bytes last_error or PDF-ish
+    //      referenceAttachment/itemAttachment) — NOT every needs_review row
+    //      (avoids SharePoint-signature false positives)
+    if (availableWoCount === 0 && _subjectLooksLikeNewWorkOrder(subject)) {
+      try {
+        const { data: nrRows } = await client.from('email_attachments')
+          .select('id, graph_attachment_id, name, content_type, size_bytes, status, attachment_kind, last_error')
+          .eq('email_id', msg._post_id)
+          .eq('status', 'needs_review')
+        const WO_BYTES_ERRORS = new Set([
+          'pdf_no_inline_bytes_value_path_required',
+          'pdf_exceeds_inline_decode_cap',
+          'pdf_magic_byte_validation_failed',
+        ])
+        const qualifyingNr = (nrRows || []).find((nr: any) => {
+          // A WO-bytes error: the sync saw a PDF but couldn't get bytes (over-cap / portal / magic fail)
+          if (nr.last_error && WO_BYTES_ERRORS.has(nr.last_error)) return true
+          // A referenceAttachment / itemAttachment with a PDF-ish name or content_type
+          // (a WO delivered via a SharePoint/OneDrive link or Outlook forwarded item)
+          const kind = nr.attachment_kind || ''
+          const isPdfRef = (nr.name || '').toLowerCase().endsWith('.pdf') ||
+            (nr.content_type || '').includes('pdf')
+          if ((kind === 'referenceAttachment' || kind === 'itemAttachment') && isPdfRef) return true
+          return false
+        })
+        if (qualifyingNr) {
+          attachments.push({
+            name: qualifyingNr.name || 'work-order',
+            file_name: qualifyingNr.name || null,
+            storage_url: null,
+            pdf_url: null,
+            pdf_unavailable: true,
+            pdf_error: 'portal_link_or_oversize_needs_review',
+            size: qualifyingNr.size_bytes || null,
+          })
+          console.log('[ops-api] intake B1 flag: qualifying needs_review attachment for WO-subject email', subject, qualifyingNr.last_error || qualifyingNr.attachment_kind)
+        }
+      } catch (e) {
+        console.log('[ops-api] intake B1 flag lookup failed:', (e as Error).message)
+      }
+    }
 
     // makesafe-inbound-filter — HARD GATE: only a GENUINE new work order becomes a
     // draft. availableWoCount is the count of SERVABLE work-order PDFs. This drops
