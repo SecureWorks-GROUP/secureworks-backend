@@ -26,7 +26,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import { canonicalJsonAndHash, jsonHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -276,6 +276,54 @@ async function safeBusinessEventInsert(
   }
 }
 
+// ── Idempotency content-hash (freeze-on-resend spine, 2026-06-17) ───────────
+//
+// The stored manifest_hash CANNOT be used as an idempotency key: the manifest
+// embeds a per-call `captured_at` timestamp (build_minimal_manifest.ts:69) and
+// the internal_cost envelope embeds `captured_at` + a random `release_id`
+// (internal_cost_types.ts:64,70). canonicalize() hashes every key, so two
+// byte-identical re-sends always produce DIFFERENT manifest_hash values. (The
+// builder's own test pins this: build_minimal_manifest_test.ts:103-113 strips
+// captured_at before comparing.)
+//
+// releaseContentHash() hashes ONLY the billing-determining content — the public
+// scope/pricing/totals snapshots plus the internal-cost content sub-fields —
+// with all volatile identity/timestamp fields stripped. This is the
+// timestamp-independent key used to decide "same content → idempotent" vs
+// "different content → reallocate". It hashes the same shape whether the inputs
+// come from the freshly-built manifest or from the stored quote_revisions row,
+// so the comparison is apples-to-apples.
+//
+// Stripped from internal_cost: schema_version, release_id, job_id, version,
+// captured_at. Kept: line_costs, cost_estimates, margin, commission.
+function internalCostContent(ic: unknown): unknown {
+  if (!ic || typeof ic !== 'object') return null
+  const o = ic as Record<string, unknown>
+  return {
+    line_costs: o.line_costs ?? null,
+    cost_estimates: o.cost_estimates ?? null,
+    margin: o.margin ?? null,
+    commission: o.commission ?? null,
+  }
+}
+
+async function releaseContentHash(parts: {
+  scope_snapshot: unknown
+  pricing_snapshot: unknown
+  totals_snapshot: unknown
+  internal_cost_snapshot: unknown
+}): Promise<string> {
+  // jsonHash() canonicalizes (recursive deep key-sort) then SHA-256s. Volatile
+  // top-level manifest fields (captured_at, sent_at, release_id) are NOT part of
+  // this object, so the hash is stable across re-sends of identical content.
+  return await jsonHash({
+    scope: parts.scope_snapshot ?? null,
+    pricing: parts.pricing_snapshot ?? null,
+    totals: parts.totals_snapshot ?? null,
+    internal_cost: internalCostContent(parts.internal_cost_snapshot),
+  })
+}
+
 // ── CAP0-QUOTE-REVISION-MINIMAL — Job Release Packet V1 helper ──────────────
 //
 // recordReleasedQuoteRevision: builds the minimal manifest, computes the hash,
@@ -498,6 +546,17 @@ async function recordReleasedQuoteRevision(
       }
     }
 
+    // Timestamp-independent idempotency key for this release. Computed over the
+    // billing-determining content only (no captured_at / release_id), so two
+    // identical re-sends produce the SAME contentHash even though their stored
+    // manifest_hash differs. Used in the conflict branch below.
+    const incomingContentHash = await releaseContentHash({
+      scope_snapshot: manifest.scope_snapshot,
+      pricing_snapshot: manifest.pricing_snapshot,
+      totals_snapshot: totals,
+      internal_cost_snapshot: (v2Cols.internal_cost_snapshot_json ?? null),
+    })
+
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({
         id: releaseId,
@@ -547,100 +606,138 @@ async function recordReleasedQuoteRevision(
 
     // INSERT failed — (job_id, version) unique conflict.
     //
-    // New idempotency contract (freeze-on-resend spine, 2026-06-17):
+    // Idempotency contract (freeze-on-resend spine, 2026-06-17):
     //
-    // Fetch the existing row with its hash columns to decide:
-    //   (a) Identical re-send: manifest_hash AND internal_cost_hash both match
-    //       → genuine unchanged re-send; return existing id, write NO new row.
-    //   (b) Revised document collided on version (e.g. fencing re-sends that all
-    //       arrive at version=1, or a rare race): hashes differ → re-allocate
-    //       version = max(quote_revisions.version for this job)+1, INSERT a fresh
-    //       immutable row, log [quote-revision-reallocated].
+    // Fetch the existing row's stored snapshots and compute its TIMESTAMP-
+    // INDEPENDENT content hash (releaseContentHash — strips captured_at /
+    // release_id), then compare to the incoming content hash:
+    //   (a) Same content → genuine unchanged re-send; return existing id, write
+    //       NO new row. log [quote-revision-unchanged-resend].
+    //   (b) Different content → revised release collided on version (e.g. an
+    //       UNCHANGED-vs-EDITED race, or send-runs where every re-send arrives at
+    //       version=1): re-allocate version = max(version)+1, INSERT a fresh
+    //       immutable row with a bounded retry that re-reads max on each
+    //       unique-violation. log [quote-revision-reallocated].
     //   (c) sent_at IS NULL — legacy staged row (should not exist post this fix).
     //       Log [quote-revision-stale-staged] and return null; DB admin must clean.
+    //
+    // NOTE: patio EDITED re-sends do NOT reach this branch — prepare_quote
+    // (ghl-proxy) inserts a new job_documents row at version=max+1, so the edited
+    // release arrives at a fresh version and INSERTs cleanly above. This branch is
+    // exercised by (1) UNCHANGED patio re-sends / duplicate Send clicks at the
+    // same version, and (2) send-runs re-sends (docs all arrive version=1).
     const { data: existing } = await sb.from('quote_revisions')
-      .select('id, sent_at, manifest_hash, internal_cost_hash')
+      .select('id, sent_at, scope_snapshot_json, pricing_snapshot_json, totals_snapshot_json, internal_cost_snapshot_json')
       .eq('job_id', input.job_id)
       .eq('version', input.version)
       .maybeSingle()
 
     if (existing && existing.sent_at !== null) {
-      const hashesMatch =
-        existing.manifest_hash === hash &&
-        // internal_cost_hash may be null on V1-only rows; treat null==null as match
-        (existing.internal_cost_hash ?? null) === (v2EmitInputs?.internal_cost_hash ?? null)
+      const existingContentHash = await releaseContentHash({
+        scope_snapshot: existing.scope_snapshot_json,
+        pricing_snapshot: existing.pricing_snapshot_json,
+        totals_snapshot: existing.totals_snapshot_json,
+        internal_cost_snapshot: existing.internal_cost_snapshot_json ?? null,
+      })
 
-      if (hashesMatch) {
-        // Genuine identical re-send: same doc content at same version.
-        // Return existing id — no new row needed.
+      if (existingContentHash === incomingContentHash) {
+        // Genuine identical re-send: same billing content at same version.
+        // Return existing id — write NO new row (idempotent).
         console.log('[quote-revision-unchanged-resend]', JSON.stringify({
           job_id: input.job_id, version: input.version,
           handler: ctx.handler, revision_id: existing.id,
-          note: 'hashes match — unchanged re-send, returning existing revision id',
+          content_hash: incomingContentHash,
+          note: 'content hash matches — unchanged re-send, returning existing revision id',
         }))
         return existing.id
       }
 
-      // Hashes differ: revised document arrived at a version that already has a
-      // released row. Re-allocate to max(version)+1 and INSERT a fresh row.
-      const { data: maxRow } = await sb.from('quote_revisions')
-        .select('version')
-        .eq('job_id', input.job_id)
-        .order('version', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      const newVersion = ((maxRow?.version ?? 0) as number) + 1
-      const newReleaseId = crypto.randomUUID()
-      const { data: reinserted, error: reinsErr } = await sb.from('quote_revisions')
-        .insert({
-          id: newReleaseId,
-          job_id: input.job_id,
-          job_document_id: input.job_document_id,
-          version: newVersion,
-          recipient_email: input.recipient_email,
-          recipient_label: input.recipient_label,
-          scope_snapshot_json: manifest.scope_snapshot,
-          pricing_snapshot_json: manifest.pricing_snapshot,
-          totals_snapshot_json: totals,
-          manifest_url: manifestUrl,
-          manifest_hash: hash,
-          manifest_canonical_text: canonical,
-          pdf_url: input.pdf_url,
-          council_status: input.council_status ?? 'unknown',
-          build_kind: input.build_kind,
-          neighbours_required: input.neighbours_required ?? null,
-          released_via: input.released_via,
-          sent_at: sentAtIso,
-          schema_version: '1.0',
-          ...v2Cols,
-        })
-        .select('id')
-        .single()
-      if (!reinsErr && reinserted) {
-        console.log('[quote-revision-reallocated]', JSON.stringify({
-          job_id: input.job_id,
-          original_version: input.version,
-          reallocated_version: newVersion,
-          handler: ctx.handler,
-          revision_id: reinserted.id,
-          note: 'hash mismatch at (job_id,version) — reallocated to max+1 for revised document',
-        }))
-        if (v2EmitInputs) {
-          await emitV2SealedEvent(sb, {
+      // Content differs: revised release collided on this version. Re-allocate to
+      // max(version)+1 and INSERT a fresh immutable row. Bounded retry handles the
+      // concurrent-resend race where two callers compute the same max+1 and one
+      // loses the unique constraint — the loser re-reads max and retries.
+      const MAX_REALLOC_ATTEMPTS = 5
+      for (let attempt = 1; attempt <= MAX_REALLOC_ATTEMPTS; attempt++) {
+        const { data: maxRow } = await sb.from('quote_revisions')
+          .select('version')
+          .eq('job_id', input.job_id)
+          .order('version', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        const newVersion = ((maxRow?.version ?? 0) as number) + 1
+        const newReleaseId = crypto.randomUUID()
+        const { data: reinserted, error: reinsErr } = await sb.from('quote_revisions')
+          .insert({
+            id: newReleaseId,
             job_id: input.job_id,
-            quote_revision_id: reinserted.id,
-            release_id: newReleaseId,
+            job_document_id: input.job_document_id,
             version: newVersion,
-            manifest_hash: v2EmitInputs.manifest_hash,
-            internal_cost_hash: v2EmitInputs.internal_cost_hash,
+            recipient_email: input.recipient_email,
+            recipient_label: input.recipient_label,
+            scope_snapshot_json: manifest.scope_snapshot,
+            pricing_snapshot_json: manifest.pricing_snapshot,
+            totals_snapshot_json: totals,
+            manifest_url: manifestUrl,
+            manifest_hash: hash,
+            manifest_canonical_text: canonical,
+            pdf_url: input.pdf_url,
+            council_status: input.council_status ?? 'unknown',
+            build_kind: input.build_kind,
+            neighbours_required: input.neighbours_required ?? null,
             released_via: input.released_via,
+            sent_at: sentAtIso,
+            schema_version: '1.0',
+            ...v2Cols,
           })
+          .select('id')
+          .single()
+        if (!reinsErr && reinserted) {
+          console.log('[quote-revision-reallocated]', JSON.stringify({
+            job_id: input.job_id,
+            original_version: input.version,
+            reallocated_version: newVersion,
+            attempt,
+            handler: ctx.handler,
+            revision_id: reinserted.id,
+            note: 'content mismatch at (job_id,version) — reallocated to max+1 for revised release',
+          }))
+          if (v2EmitInputs) {
+            await emitV2SealedEvent(sb, {
+              job_id: input.job_id,
+              quote_revision_id: reinserted.id,
+              release_id: newReleaseId,
+              version: newVersion,
+              manifest_hash: v2EmitInputs.manifest_hash,
+              internal_cost_hash: v2EmitInputs.internal_cost_hash,
+              released_via: input.released_via,
+            })
+          }
+          return reinserted.id
         }
-        return reinserted.id
+        // Distinguish a unique-violation (concurrent reallocation — retry) from a
+        // hard failure (don't retry). PostgREST surfaces 23505 in error.code.
+        const isUniqueViolation =
+          (reinsErr as any)?.code === '23505' ||
+          /duplicate key|unique constraint/i.test(reinsErr?.message ?? '')
+        if (isUniqueViolation && attempt < MAX_REALLOC_ATTEMPTS) {
+          console.log('[quote-revision-reallocate-retry]', JSON.stringify({
+            job_id: input.job_id, attempted_version: newVersion, attempt,
+            handler: ctx.handler,
+            note: 'unique violation on reallocated version — concurrent re-send; re-reading max and retrying',
+          }))
+          continue
+        }
+        console.error('[quote-revision-reallocate-fail]', JSON.stringify({
+          job_id: input.job_id, original_version: input.version, new_version: newVersion,
+          attempt, handler: ctx.handler, error: reinsErr?.message ?? String(reinsErr),
+        }))
+        return null
       }
-      console.error('[quote-revision-reallocate-fail]', JSON.stringify({
-        job_id: input.job_id, original_version: input.version, new_version: newVersion,
-        handler: ctx.handler, error: reinsErr?.message ?? String(reinsErr),
+      // Exhausted all attempts (every attempt lost the race).
+      console.error('[quote-revision-reallocate-exhausted]', JSON.stringify({
+        job_id: input.job_id, original_version: input.version,
+        attempts: MAX_REALLOC_ATTEMPTS, handler: ctx.handler,
+        note: 'all reallocation attempts lost the unique-constraint race; no frozen row written',
       }))
       return null
     }
@@ -1032,15 +1129,18 @@ serve(async (req: Request) => {
             schema_version: '1.0',
           }, { handler: 'send-quote/send', job_id: doc.job_id })
         } else {
-          // Re-send path: emit a non-blocking quote.resent event so the
-          // evidence spine records each deliberate re-send with its revision id.
-          sb.from('business_events').insert({
+          // Re-send path: emit a quote.resent event so the evidence spine records
+          // each deliberate re-send with its revision id. Awaited via
+          // safeBusinessEventInsert for consistency with quote.sent — transient
+          // failures are logged as [canonical-event-fail], not silently dropped.
+          await safeBusinessEventInsert(sb, {
             event_type: 'quote.resent',
             source: 'send-quote',
             occurred_at: nowIso,
             recorded_at: nowIso,
             entity_type: 'job',
             entity_id: doc.job_id,
+            correlation_id: doc.job_id,
             job_id: doc.job_id,
             payload: {
               document_id,
@@ -1050,7 +1150,7 @@ serve(async (req: Request) => {
             },
             metadata: { handler: 'send-quote/send' },
             schema_version: '1.0',
-          }).then(() => {}, () => {})
+          }, { handler: 'send-quote/send', job_id: doc.job_id })
         }
 
         // Get full job data for GHL + Xero sync
@@ -2476,14 +2576,17 @@ serve(async (req: Request) => {
           schema_version: '1.0',
         }, { handler: 'send-quote/send-runs', job_id: job.id })
       } else if (primarySent) {
-        // Re-send path: emit a non-blocking quote.resent event.
-        sb.from('business_events').insert({
+        // Re-send path: emit a quote.resent event. Awaited via
+        // safeBusinessEventInsert for consistency with quote.sent — transient
+        // failures are logged as [canonical-event-fail], not silently dropped.
+        await safeBusinessEventInsert(sb, {
           event_type: 'quote.resent',
           source: 'send-quote',
           occurred_at: nowIsoRuns,
           recorded_at: nowIsoRuns,
           entity_type: 'job',
           entity_id: job.id,
+          correlation_id: job.id,
           job_id: job.id,
           payload: {
             document_id: firstClientDoc?.id || null,
@@ -2493,7 +2596,7 @@ serve(async (req: Request) => {
           },
           metadata: { handler: 'send-quote/send-runs' },
           schema_version: '1.0',
-        }).then(() => {}, () => {})
+        }, { handler: 'send-quote/send-runs', job_id: job.id })
       }
 
       return jsonResponse({
