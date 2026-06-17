@@ -55,14 +55,15 @@
 -- [A7] org_id constant '00000000-0000-0000-0000-000000000001' is correct for
 --      this single-org deployment. Carried from the parked view.
 --
--- [A8] job_financials is widened to all job types by removing the
---      j.type = 'makesafe' filter. This means patio/fence/reno jobs with no
---      trade_invoice_lines will appear with cost = 0 (COALESCE). That is
---      correct behaviour: they are visible but show "no_labour_linked" cost_flag.
---      The margin suppression rule (net_margin_ex NULL when cost_flag != 'ok')
---      prevents any misleading P&L number showing for those jobs.
---      VERIFY: confirm with Marnin that all-job-type visibility is desired
---      NOW at M1, or whether to keep the makesafe scope until a later gate.
+-- [A8] SCOPE IS MAKE-SAFE ONLY at M1. Widening to all job types is GATED on materials/PO
+--      cost capture being live (M7), not a calendar date.
+--      Reason: patio/fence are materials-dominant; v_trade_charge_resolved includes their
+--      labour costs but cost_materials_ex is reserved/unpopulated until M7. A widened view
+--      would compute margin = revenue minus labour-only = badly inflated for those jobs.
+--      The margin suppression rule does NOT catch this: cost.job_id is non-null (labour
+--      lines exist), so suppression doesn't fire, and there is no materials-missing flag yet.
+--      Make-safe is labour-dominant so it is safe to include now.
+--      Widen job_financials when M7 materials/PO cost capture is live.
 -- ============================================================
 
 
@@ -125,20 +126,17 @@ GROUP BY j.id, j.job_number, j.type;
 
 
 -- ============================================================
--- 2. job_financials — widened to all job types
+-- 2. job_financials — MAKE-SAFE SCOPED (same scope as parked version)
 --
 --    CHANGES FROM PARKED VERSION (20260613000001):
---      - Removed: AND j.type = 'makesafe' filter on the outer WHERE
---        (was "V1 SCOPE: remove at M6" — we move that date forward to M1
---         per CONTRACT §Skeleton co-priority ruling)
---      - Added: job_type column already present; no other column changes
---      - Added: comment noting M6 removal was the original plan; now done at M1
+--      - No scope change: j.type = 'makesafe' filter is KEPT on the outer WHERE.
+--        Widening to all job types is gated on M7 materials/PO cost capture [A8].
 --      - Revenue side: unchanged (already reads all ACCREC xero_invoices by job_id)
 --      - Cost side: unchanged (v_trade_charge_resolved is already job-type-agnostic)
 --      - All rulings from the parked version (§2a, §2c, §2b, §2e, D-B1, D-M1,
 --        D-M3, D-M4, D-M5) carry forward unchanged.
---
---    ASSUMPTION: [A8] — confirm all-job visibility is wanted at M1.
+--      - This file is a CREATE OR REPLACE so it is safe to apply after the parked
+--        version; it will not create a duplicate, it will replace in place.
 --
 --    NOTE: This CREATE OR REPLACE will fail if 20260613000001 is not applied first
 --    because it references v_trade_charge_resolved and v_invoice_line_completeness.
@@ -254,8 +252,5 @@ LEFT JOIN rev  ON rev.job_id  = j.id
 LEFT JOIN cost ON cost.job_id = j.id
 WHERE j.org_id  = '00000000-0000-0000-0000-000000000001'  -- [A7]
   AND j.legacy  = false
-  AND j.status != 'cancelled';
-  -- NOTE: j.type = 'makesafe' filter REMOVED here vs the parked version.
-  -- Original plan was to remove at M6; CONTRACT §Skeleton co-priority moves it to M1.
-  -- [A8] Verify with Marnin that all-job visibility is wanted now.
-  -- To revert to makesafe-only scope: add AND j.type = 'makesafe' here.
+  AND j.status != 'cancelled'
+  AND j.type    = 'makesafe';  -- [A8] make-safe scoped at M1; widen when M7 materials cost is live
