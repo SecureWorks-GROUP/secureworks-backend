@@ -545,28 +545,106 @@ async function recordReleasedQuoteRevision(
       return inserted.id
     }
 
-    // INSERT failed — almost certainly a (job_id, version) unique conflict.
-    // In the new lifecycle, a row can only exist at sent_at IS NOT NULL (we
-    // never stage). So a conflict means either (a) a previous release fired
-    // this row — defensive log [quote-revision-duplicate-release], return the
-    // existing released id so canonical events stay coherent — or (b) a stale
-    // staged row from a pre-fix deploy (should not exist in this codebase's
-    // history; defensive only) — log [quote-revision-stale-staged] and return
-    // null so canonical events emit with quote_revision_id=null and the
-    // operator notices.
+    // INSERT failed — (job_id, version) unique conflict.
+    //
+    // New idempotency contract (freeze-on-resend spine, 2026-06-17):
+    //
+    // Fetch the existing row with its hash columns to decide:
+    //   (a) Identical re-send: manifest_hash AND internal_cost_hash both match
+    //       → genuine unchanged re-send; return existing id, write NO new row.
+    //   (b) Revised document collided on version (e.g. fencing re-sends that all
+    //       arrive at version=1, or a rare race): hashes differ → re-allocate
+    //       version = max(quote_revisions.version for this job)+1, INSERT a fresh
+    //       immutable row, log [quote-revision-reallocated].
+    //   (c) sent_at IS NULL — legacy staged row (should not exist post this fix).
+    //       Log [quote-revision-stale-staged] and return null; DB admin must clean.
     const { data: existing } = await sb.from('quote_revisions')
-      .select('id, sent_at')
+      .select('id, sent_at, manifest_hash, internal_cost_hash')
       .eq('job_id', input.job_id)
       .eq('version', input.version)
       .maybeSingle()
+
     if (existing && existing.sent_at !== null) {
-      console.log('[quote-revision-duplicate-release]', JSON.stringify({
-        job_id: input.job_id, version: input.version,
-        handler: ctx.handler, revision_id: existing.id,
-        note: 'release path fired but row already at sent_at NOT NULL — duplicate release attempt',
+      const hashesMatch =
+        existing.manifest_hash === hash &&
+        // internal_cost_hash may be null on V1-only rows; treat null==null as match
+        (existing.internal_cost_hash ?? null) === (v2EmitInputs?.internal_cost_hash ?? null)
+
+      if (hashesMatch) {
+        // Genuine identical re-send: same doc content at same version.
+        // Return existing id — no new row needed.
+        console.log('[quote-revision-unchanged-resend]', JSON.stringify({
+          job_id: input.job_id, version: input.version,
+          handler: ctx.handler, revision_id: existing.id,
+          note: 'hashes match — unchanged re-send, returning existing revision id',
+        }))
+        return existing.id
+      }
+
+      // Hashes differ: revised document arrived at a version that already has a
+      // released row. Re-allocate to max(version)+1 and INSERT a fresh row.
+      const { data: maxRow } = await sb.from('quote_revisions')
+        .select('version')
+        .eq('job_id', input.job_id)
+        .order('version', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      const newVersion = ((maxRow?.version ?? 0) as number) + 1
+      const newReleaseId = crypto.randomUUID()
+      const { data: reinserted, error: reinsErr } = await sb.from('quote_revisions')
+        .insert({
+          id: newReleaseId,
+          job_id: input.job_id,
+          job_document_id: input.job_document_id,
+          version: newVersion,
+          recipient_email: input.recipient_email,
+          recipient_label: input.recipient_label,
+          scope_snapshot_json: manifest.scope_snapshot,
+          pricing_snapshot_json: manifest.pricing_snapshot,
+          totals_snapshot_json: totals,
+          manifest_url: manifestUrl,
+          manifest_hash: hash,
+          manifest_canonical_text: canonical,
+          pdf_url: input.pdf_url,
+          council_status: input.council_status ?? 'unknown',
+          build_kind: input.build_kind,
+          neighbours_required: input.neighbours_required ?? null,
+          released_via: input.released_via,
+          sent_at: sentAtIso,
+          schema_version: '1.0',
+          ...v2Cols,
+        })
+        .select('id')
+        .single()
+      if (!reinsErr && reinserted) {
+        console.log('[quote-revision-reallocated]', JSON.stringify({
+          job_id: input.job_id,
+          original_version: input.version,
+          reallocated_version: newVersion,
+          handler: ctx.handler,
+          revision_id: reinserted.id,
+          note: 'hash mismatch at (job_id,version) — reallocated to max+1 for revised document',
+        }))
+        if (v2EmitInputs) {
+          await emitV2SealedEvent(sb, {
+            job_id: input.job_id,
+            quote_revision_id: reinserted.id,
+            release_id: newReleaseId,
+            version: newVersion,
+            manifest_hash: v2EmitInputs.manifest_hash,
+            internal_cost_hash: v2EmitInputs.internal_cost_hash,
+            released_via: input.released_via,
+          })
+        }
+        return reinserted.id
+      }
+      console.error('[quote-revision-reallocate-fail]', JSON.stringify({
+        job_id: input.job_id, original_version: input.version, new_version: newVersion,
+        handler: ctx.handler, error: reinsErr?.message ?? String(reinsErr),
       }))
-      return existing.id
+      return null
     }
+
     if (existing) {
       // sent_at IS NULL — should not happen post-this-fix. The
       // controlled-immutability trigger refuses any UPDATE; the no_delete
@@ -801,96 +879,102 @@ serve(async (req: Request) => {
           detail_json: { document_id, sent_to: client_email },
         })
 
-        // Canonical release events — only when this UPDATE actually flipped the row.
-        // Awaited via safeBusinessEventInsert so transient Supabase failures are logged as
-        // [canonical-event-fail] rather than silently dropped.
-        if (transitioned) {
-          const nowIso = new Date().toISOString()
-          const totalIncGST = jobBefore?.pricing_json?.totalIncGST ?? jobBefore?.pricing_json?.total ?? jobBefore?.pricing_json?.grandTotal ?? 0
+        const nowIso = new Date().toISOString()
+        const totalIncGST = jobBefore?.pricing_json?.totalIncGST ?? jobBefore?.pricing_json?.total ?? jobBefore?.pricing_json?.grandTotal ?? 0
 
-          // ── Loop 3 / P2 V2 augmentation prep ──
-          // Fetch the supplemental data the V2 adapter needs (full jobs row,
-          // job_contacts, job_media). Best-effort — failure to fetch leaves
-          // V2 columns NULL and the V1 release-truth path proceeds untouched.
-          let v2Inputs: Omit<V2AugmentationInput, 'release_id'> | null = null
-          try {
-            const [{ data: fullJobRow }, { data: contactRows }, { data: mediaRows }] = await Promise.all([
-              sb.from('jobs')
-                .select('id, type, org_id, client_name, client_email, client_phone, site_address, site_suburb, site_lat, site_lng, job_number, ghl_contact_id, xero_contact_id, scope_json, pricing_json, notes, created_by')
-                .eq('id', doc.job_id).maybeSingle(),
-              sb.from('job_contacts')
-                .select('id, contact_type, is_primary, contact_label, client_name, client_email, client_phone, assigned_runs, share_percentage')
-                .eq('job_id', doc.job_id),
-              sb.from('job_media')
-                .select('id, type, phase, storage_url, label, taken_at, lat, lng')
-                .eq('job_id', doc.job_id),
-            ])
-            if (fullJobRow) {
-              v2Inputs = {
-                job_id: doc.job_id,
-                version: doc.version || 1,
-                released_via: 'send-quote/send',
-                released_at: nowIso,
-                released_by_user_id: fullJobRow.created_by ?? null,
-                job_row: fullJobRow,
-                contacts: contactRows ?? [],
-                media: mediaRows ?? [],
-                quote_pdf_url: doc.pdf_url || '',
-                quote_pdf_size_bytes: null,
-                email_subject: customSubject || `Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`,
-                email_custom_message: message || '',
-                email_template_version: 'v1',
-                scoper_name: scoper_name || 'The SecureWorks Team',
-                resend_message_id: null, // Resend id is in emailRes.id but not in scope here
-                primary_recipient_email: client_email,
-                per_contact_pdfs: [],
-                terms_valid_days: 30,
-                terms_payment_terms: getDepositTermsString(getDepositPct(doc.jobs?.type, doc.jobs?.pricing_json)),
-                terms_deposit_pct: getDepositPct(doc.jobs?.type, doc.jobs?.pricing_json),
-                scoper_user_id: fullJobRow.created_by ?? null,
-                scoper_user_name: scoper_name || null,
-                scoped_at: null,
-                override_operator_allowlist: [],
-                pdf_sha256: '',
-                email_html_sha256: '',
-              }
-            }
-          } catch (e: any) {
-            console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({
+        // ── Freeze-on-every-send (spine fix 2026-06-17) ──
+        // Record the immutable quote_revisions row for THIS document on EVERY
+        // successful email send — not only on the first-send draft→quoted flip.
+        // Decoupled from the status transition so re-sends always produce a
+        // frozen snapshot bound to the document the client actually received.
+        // Version = doc.version (already incremented to vN+1 by prepare_quote).
+        // Idempotency: on (job_id,version) conflict, helper compares hashes —
+        // match → unchanged re-send (returns existing id); differ → reallocates
+        // max+1 and INSERTs a fresh row. See recordReleasedQuoteRevision.
+        //
+        // ── Loop 3 / P2 V2 augmentation prep ──
+        // Fetch the supplemental data the V2 adapter needs (full jobs row,
+        // job_contacts, job_media). Best-effort — failure to fetch leaves
+        // V2 columns NULL and the V1 release-truth path proceeds untouched.
+        let v2Inputs: Omit<V2AugmentationInput, 'release_id'> | null = null
+        try {
+          const [{ data: fullJobRow }, { data: contactRows }, { data: mediaRows }] = await Promise.all([
+            sb.from('jobs')
+              .select('id, type, org_id, client_name, client_email, client_phone, site_address, site_suburb, site_lat, site_lng, job_number, ghl_contact_id, xero_contact_id, scope_json, pricing_json, notes, created_by')
+              .eq('id', doc.job_id).maybeSingle(),
+            sb.from('job_contacts')
+              .select('id, contact_type, is_primary, contact_label, client_name, client_email, client_phone, assigned_runs, share_percentage')
+              .eq('job_id', doc.job_id),
+            sb.from('job_media')
+              .select('id, type, phase, storage_url, label, taken_at, lat, lng')
+              .eq('job_id', doc.job_id),
+          ])
+          if (fullJobRow) {
+            v2Inputs = {
               job_id: doc.job_id,
-              handler: 'send-quote/send',
-              error: e?.message ?? String(e),
-              note: 'V2 columns left NULL; V1 release-truth path proceeds',
-            }))
+              version: doc.version || 1,
+              released_via: 'send-quote/send',
+              released_at: nowIso,
+              released_by_user_id: fullJobRow.created_by ?? null,
+              job_row: fullJobRow,
+              contacts: contactRows ?? [],
+              media: mediaRows ?? [],
+              quote_pdf_url: doc.pdf_url || '',
+              quote_pdf_size_bytes: null,
+              email_subject: customSubject || `Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`,
+              email_custom_message: message || '',
+              email_template_version: 'v1',
+              scoper_name: scoper_name || 'The SecureWorks Team',
+              resend_message_id: null, // Resend id is in emailRes.id but not in scope here
+              primary_recipient_email: client_email,
+              per_contact_pdfs: [],
+              terms_valid_days: 30,
+              terms_payment_terms: getDepositTermsString(getDepositPct(doc.jobs?.type, doc.jobs?.pricing_json)),
+              terms_deposit_pct: getDepositPct(doc.jobs?.type, doc.jobs?.pricing_json),
+              scoper_user_id: fullJobRow.created_by ?? null,
+              scoper_user_name: scoper_name || null,
+              scoped_at: null,
+              override_operator_allowlist: [],
+              pdf_sha256: '',
+              email_html_sha256: '',
+            }
           }
-
-          // Cap 0 quote_revisions: record the released row HERE, atomic with
-          // the release moment. Builds manifest + uploads + INSERTs sent_at=now()
-          // in one helper call. Returns the new revision id, or null if the
-          // helper failed (release moment is irreversible — email sent and
-          // jobs.status flipped, so canonical events still emit, just with
-          // quote_revision_id=null).
-          const releasedRevisionId = await recordReleasedQuoteRevision(sb, {
+        } catch (e: any) {
+          console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({
             job_id: doc.job_id,
-            job_document_id: doc.id,
-            version: doc.version || 1,
-            recipient_email: client_email,
-            recipient_label: doc.job_contacts?.client_name || null,
-            build_kind: buildKindForSend,
-            scope: {
-              client_name: doc.jobs?.client_name || null,
-              site_address: doc.jobs?.site_address || null,
-              site_suburb: doc.jobs?.site_suburb || null,
-              job_type: doc.jobs?.type || null,
-              job_number: doc.jobs?.job_number || null,
-            },
-            pricing_json: doc.jobs?.pricing_json || null,
-            pdf_url: doc.pdf_url || '',
-            released_via: 'send-quote/send',
-            org_id: DEFAULT_ORG_ID,
-            v2_inputs: v2Inputs,
-          }, { handler: 'send-quote/send', job_id: doc.job_id })
+            handler: 'send-quote/send',
+            error: e?.message ?? String(e),
+            note: 'V2 columns left NULL; V1 release-truth path proceeds',
+          }))
+        }
 
+        // Freeze write — runs every successful send (first send and re-sends).
+        const releasedRevisionId = await recordReleasedQuoteRevision(sb, {
+          job_id: doc.job_id,
+          job_document_id: doc.id,
+          version: doc.version || 1,
+          recipient_email: client_email,
+          recipient_label: doc.job_contacts?.client_name || null,
+          build_kind: buildKindForSend,
+          scope: {
+            client_name: doc.jobs?.client_name || null,
+            site_address: doc.jobs?.site_address || null,
+            site_suburb: doc.jobs?.site_suburb || null,
+            job_type: doc.jobs?.type || null,
+            job_number: doc.jobs?.job_number || null,
+          },
+          pricing_json: doc.jobs?.pricing_json || null,
+          pdf_url: doc.pdf_url || '',
+          released_via: 'send-quote/send',
+          org_id: DEFAULT_ORG_ID,
+          v2_inputs: v2Inputs,
+        }, { handler: 'send-quote/send', job_id: doc.job_id })
+
+        // Canonical release events — only when this UPDATE actually flipped the row
+        // (first send: draft→quoted). Re-sends no-op the UPDATE and skip this block.
+        // Awaited via safeBusinessEventInsert so transient Supabase failures are
+        // logged as [canonical-event-fail] rather than silently dropped.
+        if (transitioned) {
           // N2 — body_preview carries a one-line structured summary so the
           // extractor pre-filter has substance to chew on. Loop-1 S1 audit
           // on the sibling card observed 20/20 quote.sent rows skipped at
@@ -947,6 +1031,26 @@ serve(async (req: Request) => {
             metadata: { reason: 'quote_sent', handler: 'send-quote/send' },
             schema_version: '1.0',
           }, { handler: 'send-quote/send', job_id: doc.job_id })
+        } else {
+          // Re-send path: emit a non-blocking quote.resent event so the
+          // evidence spine records each deliberate re-send with its revision id.
+          sb.from('business_events').insert({
+            event_type: 'quote.resent',
+            source: 'send-quote',
+            occurred_at: nowIso,
+            recorded_at: nowIso,
+            entity_type: 'job',
+            entity_id: doc.job_id,
+            job_id: doc.job_id,
+            payload: {
+              document_id,
+              quote_revision_id: releasedRevisionId,
+              version: doc.version || 1,
+              sent_to: client_email,
+            },
+            metadata: { handler: 'send-quote/send' },
+            schema_version: '1.0',
+          }).then(() => {}, () => {})
         }
 
         // Get full job data for GHL + Xero sync
@@ -2205,108 +2309,118 @@ serve(async (req: Request) => {
         metadata: {},
       }).then(() => {}, () => {})
 
+      const nowIsoRuns = new Date().toISOString()
+      const totalIncGST = pj?.totalIncGST ?? pj?.total ?? pj?.grandTotal ?? 0
+      const firstClientDoc = createdDocs[0]
+
+      // ── Freeze-on-every-send for send-runs (spine fix 2026-06-17) ──
+      // Record the immutable quote_revisions row for the primary client's
+      // document on EVERY successful primary send — not only on the first-send
+      // draft→quoted flip. Fencing re-sends always produce a fresh frozen
+      // snapshot bound to the newly-created documents.
+      //
+      // Version note: send-runs docs are created inline (not via prepare_quote)
+      // so job_documents.version is NULL on those rows. We pass version=1 as
+      // the initial value; if this job already has a v1 revision with different
+      // hashes the helper will reallocate to max+1 automatically.
+      //
+      // ── Loop 3 / P2 V2 augmentation prep (send-runs) ──
+      let v2InputsRuns: Omit<V2AugmentationInput, 'release_id'> | null = null
+      try {
+        const [{ data: contactRows }, { data: mediaRows }] = await Promise.all([
+          sb.from('job_contacts')
+            .select('id, contact_type, is_primary, contact_label, client_name, client_email, client_phone, assigned_runs, share_percentage')
+            .eq('job_id', job.id),
+          sb.from('job_media')
+            .select('id, type, phase, storage_url, label, taken_at, lat, lng')
+            .eq('job_id', job.id),
+        ])
+        v2InputsRuns = {
+          job_id: job.id,
+          version: 1,
+          released_via: 'send-quote/send-runs',
+          released_at: nowIsoRuns,
+          released_by_user_id: (job as any).created_by ?? null,
+          job_row: {
+            id: job.id,
+            type: job.type ?? 'fencing',
+            org_id: (job as any).org_id ?? DEFAULT_ORG_ID,
+            client_name: job.client_name ?? null,
+            client_email: job.client_email ?? null,
+            client_phone: (job as any).client_phone ?? null,
+            site_address: job.site_address ?? null,
+            site_suburb: job.site_suburb ?? null,
+            site_lat: (job as any).site_lat ?? null,
+            site_lng: (job as any).site_lng ?? null,
+            job_number: job.job_number ?? null,
+            ghl_contact_id: (job as any).ghl_contact_id ?? null,
+            xero_contact_id: (job as any).xero_contact_id ?? null,
+            scope_json: (job as any).scope_json ?? null,
+            pricing_json: pj ?? null,
+            notes: (job as any).notes ?? null,
+          },
+          contacts: contactRows ?? [],
+          media: mediaRows ?? [],
+          quote_pdf_url: anyRunPdfUrl,
+          quote_pdf_size_bytes: null,
+          email_subject: 'Your fencing quote from SecureWorks Group',
+          email_custom_message: '',
+          email_template_version: 'v1',
+          scoper_name: 'The SecureWorks Team',
+          resend_message_id: null,
+          primary_recipient_email: primaryContact.client_email || job.client_email || '',
+          per_contact_pdfs: [],
+          terms_valid_days: 30,
+          terms_payment_terms: getDepositTermsString(getDepositPct(job.type, job.pricing_json)),
+          terms_deposit_pct: getDepositPct(job.type, job.pricing_json),
+          scoper_user_id: (job as any).created_by ?? null,
+          scoper_user_name: null,
+          scoped_at: null,
+          override_operator_allowlist: [],
+          pdf_sha256: '',
+          email_html_sha256: '',
+        }
+      } catch (e: any) {
+        console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({
+          job_id: job.id,
+          handler: 'send-quote/send-runs',
+          error: e?.message ?? String(e),
+          note: 'V2 columns left NULL; V1 release-truth path proceeds',
+        }))
+      }
+
+      // Freeze write — runs every successful primary send (first send and re-sends).
+      // Guard: only freeze when primary was actually sent (neighbourOnly=false).
+      let releasedRevisionIdRuns: string | null = null
+      if (primarySent && firstClientDocForRev?.id) {
+        releasedRevisionIdRuns = await recordReleasedQuoteRevision(sb, {
+          job_id: job.id,
+          job_document_id: firstClientDocForRev.id,
+          version: 1,
+          recipient_email: primaryContact.client_email || job.client_email || '',
+          recipient_label: primaryContact.client_name || null,
+          build_kind: 'fence',
+          neighbours_required: anyNeighbourBound,
+          scope: {
+            client_name: job.client_name || null,
+            site_address: job.site_address || null,
+            site_suburb: job.site_suburb || null,
+            job_type: job.type || 'fencing',
+            job_number: job.job_number || null,
+            runs: runsScopeSummary,
+          },
+          pricing_json: pj,
+          pdf_url: anyRunPdfUrl,
+          released_via: 'send-quote/send-runs',
+          org_id: DEFAULT_ORG_ID,
+          v2_inputs: v2InputsRuns,
+        }, { handler: 'send-quote/send-runs', job_id: job.id })
+      }
+
       // Canonical release events — only when this call's UPDATE actually flipped
-      // the job from 'draft' to 'quoted'. Resends on an already-quoted/accepted/etc.
-      // job no-op the UPDATE (zero affected rows) and emit nothing here.
+      // the job from 'draft' to 'quoted'. Re-sends no-op the UPDATE and skip
+      // these blocks. Freeze write above already ran unconditionally.
       if (transitioned) {
-        const nowIso = new Date().toISOString()
-        const totalIncGST = pj?.totalIncGST ?? pj?.total ?? pj?.grandTotal ?? 0
-        const firstClientDoc = createdDocs[0]
-
-        // ── Loop 3 / P2 V2 augmentation prep (send-runs) ──
-        let v2InputsRuns: Omit<V2AugmentationInput, 'release_id'> | null = null
-        try {
-          const [{ data: contactRows }, { data: mediaRows }] = await Promise.all([
-            sb.from('job_contacts')
-              .select('id, contact_type, is_primary, contact_label, client_name, client_email, client_phone, assigned_runs, share_percentage')
-              .eq('job_id', job.id),
-            sb.from('job_media')
-              .select('id, type, phase, storage_url, label, taken_at, lat, lng')
-              .eq('job_id', job.id),
-          ])
-          v2InputsRuns = {
-            job_id: job.id,
-            version: 1,
-            released_via: 'send-quote/send-runs',
-            released_at: nowIso,
-            released_by_user_id: (job as any).created_by ?? null,
-            job_row: {
-              id: job.id,
-              type: job.type ?? 'fencing',
-              org_id: (job as any).org_id ?? DEFAULT_ORG_ID,
-              client_name: job.client_name ?? null,
-              client_email: job.client_email ?? null,
-              client_phone: (job as any).client_phone ?? null,
-              site_address: job.site_address ?? null,
-              site_suburb: job.site_suburb ?? null,
-              site_lat: (job as any).site_lat ?? null,
-              site_lng: (job as any).site_lng ?? null,
-              job_number: job.job_number ?? null,
-              ghl_contact_id: (job as any).ghl_contact_id ?? null,
-              xero_contact_id: (job as any).xero_contact_id ?? null,
-              scope_json: (job as any).scope_json ?? null,
-              pricing_json: pj ?? null,
-              notes: (job as any).notes ?? null,
-            },
-            contacts: contactRows ?? [],
-            media: mediaRows ?? [],
-            quote_pdf_url: anyRunPdfUrl,
-            quote_pdf_size_bytes: null,
-            email_subject: 'Your fencing quote from SecureWorks Group',
-            email_custom_message: '',
-            email_template_version: 'v1',
-            scoper_name: 'The SecureWorks Team',
-            resend_message_id: null,
-            primary_recipient_email: primaryContact.client_email || job.client_email || '',
-            per_contact_pdfs: [],
-            terms_valid_days: 30,
-            terms_payment_terms: getDepositTermsString(getDepositPct(job.type, job.pricing_json)),
-            terms_deposit_pct: getDepositPct(job.type, job.pricing_json),
-            scoper_user_id: (job as any).created_by ?? null,
-            scoper_user_name: null,
-            scoped_at: null,
-            override_operator_allowlist: [],
-            pdf_sha256: '',
-            email_html_sha256: '',
-          }
-        } catch (e: any) {
-          console.error('[v2-augmentation-prefetch-fail]', JSON.stringify({
-            job_id: job.id,
-            handler: 'send-quote/send-runs',
-            error: e?.message ?? String(e),
-            note: 'V2 columns left NULL; V1 release-truth path proceeds',
-          }))
-        }
-
-        // Cap 0 quote_revisions: record the released row HERE for /send-runs.
-        // Atomic with the release moment. One revision per call regardless of
-        // run count; manifest captures all runs in scope_snapshot.runs[].
-        let releasedRevisionIdRuns: string | null = null
-        if (firstClientDocForRev?.id) {
-          releasedRevisionIdRuns = await recordReleasedQuoteRevision(sb, {
-            job_id: job.id,
-            job_document_id: firstClientDocForRev.id,
-            version: 1,
-            recipient_email: primaryContact.client_email || job.client_email || '',
-            recipient_label: primaryContact.client_name || null,
-            build_kind: 'fence',
-            neighbours_required: anyNeighbourBound,
-            scope: {
-              client_name: job.client_name || null,
-              site_address: job.site_address || null,
-              site_suburb: job.site_suburb || null,
-              job_type: job.type || 'fencing',
-              job_number: job.job_number || null,
-              runs: runsScopeSummary,
-            },
-            pricing_json: pj,
-            pdf_url: anyRunPdfUrl,
-            released_via: 'send-quote/send-runs',
-            org_id: DEFAULT_ORG_ID,
-            v2_inputs: v2InputsRuns,
-          }, { handler: 'send-quote/send-runs', job_id: job.id })
-        }
-
         // N2 — see send-quote/send above. Structured body_preview so the
         // extractor pre-filter doesn't skip with "quote quote.sent <UUID>".
         const qsBodyPreviewRuns = [
@@ -2319,8 +2433,8 @@ serve(async (req: Request) => {
         await safeBusinessEventInsert(sb, {
           event_type: 'quote.sent',
           source: 'send-quote',
-          occurred_at: nowIso,
-          recorded_at: nowIso,
+          occurred_at: nowIsoRuns,
+          recorded_at: nowIsoRuns,
           entity_type: 'job',
           entity_id: job.id,
           correlation_id: job.id,
@@ -2343,8 +2457,8 @@ serve(async (req: Request) => {
         await safeBusinessEventInsert(sb, {
           event_type: 'job.status_changed',
           source: 'send-quote',
-          occurred_at: nowIso,
-          recorded_at: nowIso,
+          occurred_at: nowIsoRuns,
+          recorded_at: nowIsoRuns,
           entity_type: 'job',
           entity_id: job.id,
           correlation_id: job.id,
@@ -2361,6 +2475,25 @@ serve(async (req: Request) => {
           metadata: { reason: 'quote_sent_runs', handler: 'send-quote/send-runs' },
           schema_version: '1.0',
         }, { handler: 'send-quote/send-runs', job_id: job.id })
+      } else if (primarySent) {
+        // Re-send path: emit a non-blocking quote.resent event.
+        sb.from('business_events').insert({
+          event_type: 'quote.resent',
+          source: 'send-quote',
+          occurred_at: nowIsoRuns,
+          recorded_at: nowIsoRuns,
+          entity_type: 'job',
+          entity_id: job.id,
+          job_id: job.id,
+          payload: {
+            document_id: firstClientDoc?.id || null,
+            quote_revision_id: releasedRevisionIdRuns,
+            sent_to: primaryContact.client_email || job.client_email,
+            run_count: runs.length,
+          },
+          metadata: { handler: 'send-quote/send-runs' },
+          schema_version: '1.0',
+        }).then(() => {}, () => {})
       }
 
       return jsonResponse({
