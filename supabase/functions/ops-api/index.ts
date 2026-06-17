@@ -14056,20 +14056,36 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
   // fetches make-safe jobs (by jobs.type or job_number prefix) that were allocated
   // to this trade but fall outside the standard 30-day window. Results are
   // de-duplicated by assignment ID so there is no double-counting.
+  //
+  // PostgREST semantics (supabase-js v2): to make an embedded-table filter actually
+  // CONSTRAIN the parent job_assignments rows (not just shape the embedded payload),
+  // the embed MUST be an INNER join (`jobs:job_id!inner(...)`) AND the filter must be
+  // applied with `{ referencedTable: 'jobs' }` using column names relative to jobs.
+  // A plain embed + top-level `jobs.type` filter does NOT constrain the parent and
+  // would either error or return ALL of the trade's old assignments — both wrong.
+  const ASSIGNMENT_SELECT_USER_MAKESAFE = `
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        jobs:job_id!inner (
+          id, type, status, client_name, client_phone, client_email,
+          site_address, site_suburb, notes, job_number
+        )
+      `
   if (!showAll) {
     try {
       const existing30DayIds = new Set((assignments || []).map((a: any) => a.id))
       const resMakesafe = await client
         .from('job_assignments')
-        .select(ASSIGNMENT_SELECT_USER)
+        .select(ASSIGNMENT_SELECT_USER_MAKESAFE)
         .eq('user_id', userId)
         .neq('status', 'cancelled')
         .gte('scheduled_date', makesafeSixMonthsAgo.toISOString().slice(0, 10))
         .lt('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
-        // Only fetch assignments linked to makesafe jobs (join filter via inner select)
-        // PostgREST: filter on the related jobs.type or jobs.job_number
-        .or('jobs.type.eq.makesafe,jobs.job_number.ilike.SWMS-%')
+        // Filter on the EMBEDDED jobs relation (inner join) so only assignments whose
+        // job is a make-safe come back. Column names are relative to `jobs`.
+        .or('type.eq.makesafe,job_number.ilike.SWMS-%', { referencedTable: 'jobs' })
         .order('scheduled_date', { ascending: true })
+      if (resMakesafe.error) throw resMakesafe.error
       const msAssignments: any[] = resMakesafe.data || []
       for (const a of msAssignments) {
         if (a?.id && !existing30DayIds.has(a.id)) {
