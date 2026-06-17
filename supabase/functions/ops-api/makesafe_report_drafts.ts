@@ -63,8 +63,14 @@ export function composeDefaultSubject(args: {
 
 // ── Default html body composer ──
 //
-// A short, branded-ish completion note. Plain, professional, no review markers,
-// no em dashes. The recipient sees + can edit it in the cockpit before sending.
+// A professional, branded completion email. Inline styles only (email-client-safe:
+// no <style> blocks, no external CSS). Orange accent bar at top, bold lead line,
+// styled detail table, clean sign-off. No em dashes. No review markers.
+// The recipient sees + can edit it in the cockpit before sending.
+//
+// NOTE: send-outlook-email appends getSignature(from) AFTER this body. Do NOT
+// add a contact-block/phone/email footer here - that would duplicate the signature.
+// End with a simple text sign-off only.
 export function composeDefaultHtmlBody(args: {
   builderName?: string | null
   externalRef?: string | null
@@ -87,23 +93,32 @@ export function composeDefaultHtmlBody(args: {
   if (inv) detailRows.push(row('Invoice', inv))
   if (total) detailRows.push(row('Invoice total (inc GST)', total))
 
+  const detailTable = detailRows.length
+    ? '<table style="border-collapse:collapse;margin:16px 0;width:100%;max-width:480px;">' +
+      detailRows.join('') +
+      '</table>'
+    : ''
+
   return [
-    '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#293C46;line-height:1.6;">',
-    `<p>Hi ${builder},</p>`,
-    '<p>Please find attached our make safe completion report and tax invoice for the works below.</p>',
-    detailRows.length
-      ? '<table style="border-collapse:collapse;margin:14px 0;">' + detailRows.join('') + '</table>'
-      : '',
-    '<p>The completion report sets out the work carried out and the site condition on completion. The attached tax invoice covers these works.</p>',
-    '<p>Please let us know if you need anything further.</p>',
-    '<p style="margin-top:18px;">Kind regards,<br>SecureWorks Group</p>',
+    '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#293C46;line-height:1.6;max-width:600px;">',
+    // Orange accent bar - brand colour #F15A29, used sparingly as a top rule only.
+    '<div style="height:4px;background:#F15A29;border-radius:2px;margin-bottom:24px;"></div>',
+    `<p style="margin:0 0 16px;">Hi ${builder},</p>`,
+    // Bold lead line - the key sentence the recipient reads first.
+    '<p style="margin:0 0 16px;"><strong>Please find attached our make safe completion report and tax invoice for the works below.</strong></p>',
+    detailTable,
+    '<p style="margin:0 0 16px;">The completion report sets out the work carried out and the site condition on completion. The attached tax invoice covers these works.</p>',
+    '<p style="margin:0 0 24px;">Please do not hesitate to contact us if you need anything further.</p>',
+    '<p style="margin:0;">Kind regards,<br><strong>SecureWorks Group</strong></p>',
     '</div>',
   ].filter(Boolean).join('')
 }
 
 function row(label: string, value: string): string {
-  return `<tr><td style="padding:3px 16px 3px 0;color:#4C6A7C;font-weight:700;">${label}</td>` +
-    `<td style="padding:3px 0;">${value}</td></tr>`
+  return `<tr>` +
+    `<td style="padding:6px 20px 6px 0;color:#4C6A7C;font-weight:700;white-space:nowrap;border-bottom:1px solid #e8ecef;">${label}</td>` +
+    `<td style="padding:6px 0;color:#293C46;border-bottom:1px solid #e8ecef;">${value}</td>` +
+    `</tr>`
 }
 
 // Minimal HTML-text escape for values we interpolate into the body. Not a full

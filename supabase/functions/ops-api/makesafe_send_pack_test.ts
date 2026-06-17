@@ -279,6 +279,37 @@ Deno.test("client-gate: wrong sender / missing cc / single PDF all FAIL closed",
   assert(checkClientSendGate(basePayload({ attachments: [cleanAttachments[0]] })).some((x) => x.includes("at least two")));
 });
 
+// S1 explicit pin: admin@ is the ONLY allowed sender for make-safe pack sends.
+// Positive: MAKESAFE_ADMIN_FROM (admin@secureworkswa.com.au) passes the from-check.
+// Negative: marnin@ (the send-outlook-email graph default) FAILS the from-check.
+// This pins that the from= passed by makesafeSendPack is the only acceptable value,
+// and that the send-outlook-email default (marnin@) would be caught by the gate
+// if makesafeSendPack ever failed to pass `from` explicitly.
+Deno.test("S1 sender pin: admin@secureworkswa.com.au PASSES; marnin@ FAILS the from-check", () => {
+  // Positive: MAKESAFE_ADMIN_FROM is exactly admin@secureworkswa.com.au and must pass.
+  assertEquals(
+    MAKESAFE_ADMIN_FROM,
+    "admin@secureworkswa.com.au",
+    "MAKESAFE_ADMIN_FROM must be admin@secureworkswa.com.au",
+  );
+  const passResult = checkClientSendGate(basePayload({ from: MAKESAFE_ADMIN_FROM }));
+  assertEquals(passResult, [], `admin@ must pass the gate; got: ${JSON.stringify(passResult)}`);
+
+  // Negative: the send-outlook-email default (marnin@) must fail the from-check.
+  const failMarnin = checkClientSendGate(basePayload({ from: "marnin@secureworkswa.com.au" }));
+  assert(
+    failMarnin.some((x) => x.includes("sender must be") && x.includes("admin@secureworkswa.com.au")),
+    `marnin@ must fail the sender check; got: ${JSON.stringify(failMarnin)}`,
+  );
+
+  // Negative: missing from (empty string) also fails.
+  const failEmpty = checkClientSendGate(basePayload({ from: "" }));
+  assert(
+    failEmpty.some((x) => x.includes("sender must be")),
+    `empty from must fail the sender check; got: ${JSON.stringify(failEmpty)}`,
+  );
+});
+
 Deno.test("client-gate: exactly one report + one Xero invoice required", () => {
   // Two reports, no invoice.
   const f = checkClientSendGate(basePayload({

@@ -145,6 +145,79 @@ Deno.test("default html body escapes interpolated job data", () => {
   assert(html.includes("A&amp;B"), "ampersand should be escaped");
 });
 
+// S2 professional template assertions.
+Deno.test("S2 html body: bold lead sentence present", () => {
+  const html = composeDefaultHtmlBody({
+    builderName: "MLB Constructions",
+    externalRef: "MLB-25248",
+    siteAddress: "12 Smith Street, Joondalup",
+    invoiceNumber: "INV-1234",
+    totalIncGst: 1234.5,
+  });
+  // The lead line must be wrapped in a bold/strong tag.
+  assert(
+    html.includes("<strong>Please find attached our make safe completion report"),
+    "bold lead sentence must be present",
+  );
+});
+
+Deno.test("S2 html body: orange accent element present (brand colour #F15A29)", () => {
+  const html = composeDefaultHtmlBody({ builderName: "Test Builder" });
+  assert(html.includes("#F15A29"), "orange accent colour must appear in the html body");
+});
+
+Deno.test("S2 html body: detail table contains reference and address when provided", () => {
+  const html = composeDefaultHtmlBody({
+    externalRef: "MLB-25248",
+    siteAddress: "12 Smith Street, Joondalup",
+    invoiceNumber: "INV-5678",
+    totalIncGst: 990,
+  });
+  assert(html.includes("MLB-25248"), "reference must be present in detail table");
+  assert(html.includes("12 Smith Street, Joondalup"), "site address must be present in detail table");
+  assert(html.includes("INV-5678"), "invoice number must be present in detail table");
+  assert(html.includes("$990.00"), "total must be present in detail table");
+});
+
+Deno.test("S2 html body: no em dash anywhere in generated output", () => {
+  const html = composeDefaultHtmlBody({
+    builderName: "AJS Constructions",
+    externalRef: "AJS-10001",
+    clientName: "Bob Owner",
+    siteAddress: "7 Builder Lane, Balga",
+    invoiceNumber: "INV-9999",
+    totalIncGst: 2500,
+  });
+  // U+2014 is the em dash character. Must not appear in any outbound email content.
+  assert(!html.includes("\u2014"), "html body must contain no em dash (Rule 1)");
+});
+
+Deno.test("S2 html body: passes checkClientSendGate body constraint (non-empty, no review marker)", () => {
+  const html = composeDefaultHtmlBody({
+    builderName: "MLB Constructions",
+    externalRef: "MLB-25248",
+    siteAddress: "12 Smith Street, Joondalup",
+    invoiceNumber: "INV-1234",
+    totalIncGst: 1234.5,
+  });
+  // The gate checks: html body is non-empty and has no standalone review marker.
+  assert(html.trim().length > 0, "html body must be non-empty for gate");
+  assertEquals(hasReviewMarker(html), null, "html body must carry no review marker for gate");
+  // Verify the full gate also passes when wired up with a valid surrounding payload.
+  const gateResult = checkClientSendGate({
+    from: MAKESAFE_ADMIN_FROM,
+    to: "builder@example.com",
+    cc: MAKESAFE_CC,
+    subject: "Make Safe Completion - MLB-25248 - 12 Smith Street, Joondalup",
+    htmlBody: html,
+    attachments: [
+      { name: "Make Safe Report - MLB-25248.pdf" },
+      { name: "Xero Invoice - INV-1234.pdf" },
+    ],
+  });
+  assertEquals(gateResult, [], `gate must pass with the S2 html body; got: ${JSON.stringify(gateResult)}`);
+});
+
 // ─────────────────────────────────────────────────────────────────
 // 3. Line item normalisation - Xero native shape + snake_case + derived totals.
 // ─────────────────────────────────────────────────────────────────
