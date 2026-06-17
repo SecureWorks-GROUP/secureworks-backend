@@ -3733,11 +3733,26 @@ if (import.meta.main) serve(async (req: Request) => {
               },
             })
 
+            // B3: XERO_PUSH_FAILED — work order invoice saved locally but Xero push failed.
+            // Surface clearly so FE can show a warning rather than a silent success/failure.
+            if (!xeroSuccess) {
+              return json({
+                ok: false,
+                code: 'XERO_PUSH_FAILED',
+                userMessage: 'Your invoice was saved and the office has been notified, but it could not be sent to Xero automatically. The office will push it manually — no action needed from you.',
+                // Backward-compat fields
+                success: true,
+                xero_bill_number: null,
+                total: Math.round(total * 100) / 100,
+                error: 'Xero push failed — contact admin',
+              })
+            }
+
             return json({
-              success: xeroSuccess,
+              ok: true,
+              success: true,
               xero_bill_number: xeroBillNumber,
               total: Math.round(total * 100) / 100,
-              error: xeroSuccess ? undefined : 'Xero push failed — contact admin',
             })
           }
 
@@ -3948,7 +3963,12 @@ if (import.meta.main) serve(async (req: Request) => {
               // If the trade enters their own rate, allow it — it flags pending_ops_review below.
               const anyClientRate = manualAssignmentsIn.some((m: any) => Number(m.rate) > 0)
               if (resolvedRate <= 0 && !anyClientRate) {
-                throw new ApiError('Rate not configured for trade — contact office', 422)
+                // B3: RATE_NOT_CONFIGURED — structured error the FE can surface as a toast
+                return json({
+                  ok: false,
+                  code: 'RATE_NOT_CONFIGURED',
+                  userMessage: 'No pay rate is set for you this week. Enter a rate on the job card, or contact the office to have one configured.',
+                }, 422)
               }
               const wantedIds = manualAssignmentsIn.map((m: any) => m.assignment_id)
               const { data: asn } = await client.from('job_assignments')
@@ -3974,11 +3994,21 @@ if (import.meta.main) serve(async (req: Request) => {
               }
               for (const a of (asn || [])) {
                 if (!HOURLY_STATUS_WHITELIST.includes(a.status)) {
-                  throw new ApiError('Assignment ' + a.id + ' has status "' + a.status + '" and cannot be invoiced', 422)
+                  // B3: ASSIGNMENT_NOT_INVOICEABLE — structured error with plain-English message
+                  return json({
+                    ok: false,
+                    code: 'ASSIGNMENT_NOT_INVOICEABLE',
+                    userMessage: `One of your job cards (status: "${a.status}") cannot be invoiced yet. It must be scheduled, confirmed, in progress, or complete. Contact the office if this looks wrong.`,
+                  }, 422)
                 }
                 // Layer B: reject an assignment already on a live invoice.      [F3]
                 if (a.invoiced_in && liveRefIds.has(a.invoiced_in)) {
-                  throw new ApiError('Assignment ' + a.id + ' has already been invoiced', 409)
+                  // B3: ALREADY_INVOICED — structured error with plain-English message
+                  return json({
+                    ok: false,
+                    code: 'ALREADY_INVOICED',
+                    userMessage: 'One of the job cards you selected has already been included in a previous invoice. Remove it from this submission or contact the office.',
+                  }, 409)
                 }
                 const h = hoursById[a.id] || 0
                 // hours>16/day is implausible — flag for ops review, do not reject. [F2]
@@ -4576,7 +4606,32 @@ if (import.meta.main) serve(async (req: Request) => {
               } catch (logErr) { console.log('[ops-api] Failed to record xero_push_failed event:', (logErr as Error).message) }
             }
 
+            // B3: XERO_PUSH_FAILED — invoice is saved locally in 'approved' state (recoverable)
+            // but the Xero push did not complete. Surface this clearly so the FE can show a
+            // warning toast rather than a silent success. The invoice is NOT lost.
+            if (!xeroBillId) {
+              return json({
+                ok: false,
+                code: 'XERO_PUSH_FAILED',
+                userMessage: 'Your invoice was saved and the office has been notified, but it could not be sent to Xero automatically. The office will push it manually — no action needed from you.',
+                // Backward-compat fields so existing FE invoice-confirmation logic still reads them
+                success: true,
+                invoice_id: invoice.id,
+                invoice_number: invoiceNumber,
+                total_hours: totalHours,
+                total_inc: totalInc,
+                line_count: lineItems.length + extraLineItems.length,
+                xero_bill_id: null,
+                xero_bill_number: null,
+                pending_ops_review: false,
+                soft_review_flag: softReviewFlag,
+                review_flag: reviewFlag,
+                xero_warning: 'Invoice saved (recoverable) but could not push to Xero — admin will push manually',
+              })
+            }
+
             return json({
+              ok: true,
               success: true,
               invoice_id: invoice.id,
               invoice_number: invoiceNumber,
@@ -4591,9 +4646,6 @@ if (import.meta.main) serve(async (req: Request) => {
               pending_ops_review: false,
               soft_review_flag: softReviewFlag,
               review_flag: reviewFlag,
-              xero_warning: !xeroBillId
-                ? 'Invoice saved (recoverable) but could not push to Xero — admin will push manually'
-                : undefined,
             })
           }
 
@@ -13947,6 +13999,30 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+  // B2: make-safe assignments can be allocated weeks before the scheduled date or
+  // span insurance processing windows longer than 30 days. Use a 180-day backstop
+  // so allocated make-safe jobs never drop off the trade's list silently.
+  // Non-make-safe assignments keep the original 30-day window.
+  const makesafeSixMonthsAgo = new Date(Date.now() + AWST_OFFSET_MS)
+  makesafeSixMonthsAgo.setDate(makesafeSixMonthsAgo.getDate() - 180)
+
+  const ASSIGNMENT_SELECT_ADMIN = `
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        user:user_id ( id, name ),
+        jobs:job_id (
+          id, type, status, client_name, client_phone, client_email,
+          site_address, site_suburb, notes, job_number
+        )
+      `
+  const ASSIGNMENT_SELECT_USER = `
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        jobs:job_id (
+          id, type, status, client_name, client_phone, client_email,
+          site_address, site_suburb, notes, job_number
+        )
+      `
 
   let assignments: any[]
   let error: any
@@ -13955,15 +14031,7 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
     // ── Admin mode: show ALL assignments across all users ──
     const res = await client
       .from('job_assignments')
-      .select(`
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
-        user:user_id ( id, name ),
-        jobs:job_id (
-          id, type, status, client_name, client_phone, client_email,
-          site_address, site_suburb, notes, job_number
-        )
-      `)
+      .select(ASSIGNMENT_SELECT_ADMIN)
       .neq('status', 'cancelled')
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
       .order('scheduled_date', { ascending: true })
@@ -13973,14 +14041,7 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
     // ── Normal mode: only this user's assignments ──
     const res = await client
       .from('job_assignments')
-      .select(`
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
-        jobs:job_id (
-          id, type, status, client_name, client_phone, client_email,
-          site_address, site_suburb, notes, job_number
-        )
-      `)
+      .select(ASSIGNMENT_SELECT_USER)
       .eq('user_id', userId)
       .neq('status', 'cancelled')
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
@@ -13990,6 +14051,52 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
   }
 
   if (error) throw error
+
+  // B2: Backstop for make-safe assignments older than 30 days. A second query
+  // fetches make-safe jobs (by jobs.type or job_number prefix) that were allocated
+  // to this trade but fall outside the standard 30-day window. Results are
+  // de-duplicated by assignment ID so there is no double-counting.
+  //
+  // PostgREST semantics (supabase-js v2): to make an embedded-table filter actually
+  // CONSTRAIN the parent job_assignments rows (not just shape the embedded payload),
+  // the embed MUST be an INNER join (`jobs:job_id!inner(...)`) AND the filter must be
+  // applied with `{ referencedTable: 'jobs' }` using column names relative to jobs.
+  // A plain embed + top-level `jobs.type` filter does NOT constrain the parent and
+  // would either error or return ALL of the trade's old assignments — both wrong.
+  const ASSIGNMENT_SELECT_USER_MAKESAFE = `
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        jobs:job_id!inner (
+          id, type, status, client_name, client_phone, client_email,
+          site_address, site_suburb, notes, job_number
+        )
+      `
+  if (!showAll) {
+    try {
+      const existing30DayIds = new Set((assignments || []).map((a: any) => a.id))
+      const resMakesafe = await client
+        .from('job_assignments')
+        .select(ASSIGNMENT_SELECT_USER_MAKESAFE)
+        .eq('user_id', userId)
+        .neq('status', 'cancelled')
+        .gte('scheduled_date', makesafeSixMonthsAgo.toISOString().slice(0, 10))
+        .lt('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+        // Filter on the EMBEDDED jobs relation (inner join) so only assignments whose
+        // job is a make-safe come back. Column names are relative to `jobs`.
+        .or('type.eq.makesafe,job_number.ilike.SWMS-%', { referencedTable: 'jobs' })
+        .order('scheduled_date', { ascending: true })
+      if (resMakesafe.error) throw resMakesafe.error
+      const msAssignments: any[] = resMakesafe.data || []
+      for (const a of msAssignments) {
+        if (a?.id && !existing30DayIds.has(a.id)) {
+          assignments = [...(assignments || []), a]
+        }
+      }
+    } catch (msErr: any) {
+      // Non-blocking: if the backstop query fails, the primary 30-day list still shows.
+      console.log('[ops-api] myJobs makesafe backstop query failed (non-blocking):', msErr?.message)
+    }
+  }
 
   // MakeSafe dispatch flow: the full open MakeSafe pool is visible only to the
   // dispatcher (ops manager / admin) as open field-report cards, even before a
