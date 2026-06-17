@@ -17,6 +17,15 @@ import {
 
 const NOW = "2026-06-10T03:00:00Z";
 
+// _makesafePipelineForTest runs the LIVE pipeline, which derives completed-vs-archive
+// against the real wall clock (Date.now()), not the NOW constant. Fixtures meant to
+// represent "invoiced today / completed today" are anchored to the real now so the
+// <7-day completed window holds whatever calendar date the suite runs on. A hard-coded
+// 2026-06-10 invoice_date silently flips a verified-sent job to 'archive' once real-now
+// drifts more than 7 days past it (the suite was authored when now was within that window).
+const RECENT_ISO = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // ~1 day ago
+const RECENT_DATE = RECENT_ISO.slice(0, 10); // YYYY-MM-DD for invoice_date
+
 // ── Chainable query stub (extends the makesafe_lifecycle pattern) ──
 // Every builder method returns the same builder; awaiting it resolves to
 // { data: rows, error: null }. Unlike the lifecycle stub, this one APPLIES the
@@ -165,7 +174,7 @@ Deno.test("2.3 pack_sent alone (DRAFT invoice, not authorised) does NOT soften t
 
 Deno.test("2.2 makesafePipeline surfaces pack_sent and a verified-sent job completes with docs_warning", async () => {
   const client = makeQueryClient({
-    jobs: [jobRow({ id: "job-sent", completed_at: NOW })],
+    jobs: [jobRow({ id: "job-sent", completed_at: RECENT_ISO })],
     makesafe_job_details: [{
       job_id: "job-sent",
       substatus: "complete",
@@ -174,13 +183,13 @@ Deno.test("2.2 makesafePipeline surfaces pack_sent and a verified-sent job compl
     job_service_reports: [{
       job_id: "job-sent",
       status: "submitted",
-      submitted_at: NOW,
+      submitted_at: RECENT_ISO,
     }],
     xero_invoices: [{
       job_id: "job-sent",
       status: "AUTHORISED",
       invoice_type: "ACCREC",
-      invoice_date: "2026-06-10",
+      invoice_date: RECENT_DATE,
     }],
     // invoice attached, but report PDF missing → soft warning on a sent job.
     job_documents: [{
