@@ -1501,11 +1501,7 @@ serve(async (req: Request) => {
         site_address: siteAddress || '',
         site_suburb: siteSuburb || '',
         created_by: salespersonFor(resolvedType),
-        // Lean stored columns — explicit defaults on creation (columns default correctly
-        // but being explicit avoids silent NULL reads if the migration hasn't backfilled).
-        has_scope: false,
-        quoted_amount: null,
-        neighbour_count: 0,
+        // has_scope / quoted_amount / neighbour_count are set by the DB trigger on insert.
       }
       // GHL link is optional — walk-up scopes may not have an opportunity
       if (opportunityId) insertData.ghl_opportunity_id = opportunityId
@@ -1755,32 +1751,10 @@ serve(async (req: Request) => {
         if (meta.notes) update.notes = meta.notes
       }
 
-      // ── Lean stored columns (perf/lean-columns-2026-06-17) ──
-      // Populate denormalised scalars so list/dashboard queries never touch fat TOAST.
-      // has_scope: true when scope_json is non-null and non-empty.
-      const incomingScope = scopeJson || {}
-      update.has_scope = Object.keys(incomingScope).length > 0
-
-      // quoted_amount: canonical INC-GST total. totalIncGST is the only field written
-      // by both patio-tool (buildPricingJson:29534) and fence-designer (buildPricingJson:12741).
-      // Do NOT fall back to .total or .grandTotal — those are absent in current saves.
-      const incomingPricing = meta?.pricing_json ?? null
-      if (incomingPricing !== null) {
-        const pj = typeof incomingPricing === 'string' ? JSON.parse(incomingPricing) : incomingPricing
-        update.quoted_amount = pj?.totalIncGST != null ? Number(pj.totalIncGST) : null
-      }
-
-      // neighbour_count: length of fencing neighbour array, 0 for non-fencing or absent.
-      // Reads neighbour_splits.neighbours (fence save path) with job.neighbours fallback.
-      if (incomingPricing !== null) {
-        const pj = typeof incomingPricing === 'string' ? JSON.parse(incomingPricing) : incomingPricing
-        const jobType = meta?.toolType || meta?.type || null
-        const ns: any[] = pj?.neighbour_splits?.neighbours || pj?.job?.neighbours || []
-        update.neighbour_count = Array.isArray(ns) ? ns.length : 0
-        // Non-fencing jobs should always be 0; guard against stale data from a
-        // job that changed type (rare but possible in draft flow).
-        if (jobType && jobType !== 'fencing') update.neighbour_count = 0
-      }
+      // Note: has_scope, quoted_amount, neighbour_count are maintained by a
+      // BEFORE INSERT OR UPDATE trigger (jobs_lean_columns_trigger, migration
+      // 20260617000003). No app-level population needed — the trigger fires on
+      // every write that touches scope_json or pricing_json.
 
       const { data, error } = await sb.from('jobs')
         .update(update)
