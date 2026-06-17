@@ -1420,7 +1420,63 @@ serve(async (req: Request) => {
         return json({ error: error.message }, 500)
       }
 
-      return json({ jobs: data || [] })
+      // Trim fat JSONB columns — the picker card only needs a tiny slice of each blob.
+      // DB SELECT stays unchanged (removing columns requires lean stored columns, deferred).
+      // Trimming here collapses the ~3 MB browser payload to <50 KB without touching renderers.
+      // scope_json keys kept: config (patio _scopeDesc), job.runs (fence _scopeDesc), and the
+      //   presence check (hasScope = Object.keys(scope_json).length > 0).
+      // pricing_json keys kept: totalIncGST (price badge).
+      // Null/empty-object scope_json returns null so hasScope stays false (Object.keys semantics preserved).
+      type JobRow = Record<string, unknown>
+      const trimmed = (data || []).map((row: JobRow) => {
+        // ── pricing_json → keep only totalIncGST ──
+        let pricingTrimmed: { totalIncGST: unknown } | null = null
+        if (row.pricing_json && typeof row.pricing_json === 'object') {
+          const p = row.pricing_json as Record<string, unknown>
+          pricingTrimmed = { totalIncGST: p.totalIncGST ?? null }
+        }
+
+        // ── scope_json → keep only config (patio) and job.runs (fence) ──
+        // Return null when original is null or {} so hasScope (Object.keys().length > 0) stays false.
+        let scopeTrimmed: Record<string, unknown> | null = null
+        if (row.scope_json && typeof row.scope_json === 'object') {
+          const s = row.scope_json as Record<string, unknown>
+          if (Object.keys(s).length > 0) {
+            scopeTrimmed = {}
+            // Patio: config sub-object (length, projection, roofStyle, roofing)
+            if (s.config && typeof s.config === 'object') {
+              const c = s.config as Record<string, unknown>
+              scopeTrimmed.config = {
+                length: c.length ?? null,
+                projection: c.projection ?? null,
+                roofStyle: c.roofStyle ?? null,
+                roofing: c.roofing ?? null,
+              }
+            }
+            // Fence: job.runs array (each run needs totalLength and lengthM)
+            if (s.job && typeof s.job === 'object') {
+              const j = s.job as Record<string, unknown>
+              if (Array.isArray(j.runs)) {
+                scopeTrimmed.job = {
+                  runs: (j.runs as Array<Record<string, unknown>>).map((r) => ({
+                    totalLength: r.totalLength ?? null,
+                    lengthM: r.lengthM ?? null,
+                  })),
+                }
+              }
+            }
+            // If neither patio nor fence sub-keys were present but scope_json was non-empty,
+            // preserve a sentinel so hasScope stays true (unknown scope type).
+            if (Object.keys(scopeTrimmed).length === 0) {
+              scopeTrimmed = { _type: 'unknown' }
+            }
+          }
+        }
+
+        return { ...row, scope_json: scopeTrimmed, pricing_json: pricingTrimmed }
+      })
+
+      return json({ jobs: trimmed })
     }
 
     // ── Create a Supabase job linked to a GHL opportunity ──
