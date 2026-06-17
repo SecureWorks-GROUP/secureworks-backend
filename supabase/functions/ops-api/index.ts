@@ -228,6 +228,17 @@ import {
   planSendingResolution,
   isInvoiceAmbiguous,
   countLiveInvoices,
+  // Phase 1b — resume-aware feed mapping + close-only / failed-reset gates
+  // (TASK A/B/D). Pure money-safety predicates; the orchestration supplies the
+  // live client. deriveResumeAction is the single source of truth for the
+  // cockpit's per-state resume_action; checkResumeCloseGate / checkResetFailedGate
+  // are the fail-closed asserts for the two new privileged actions.
+  deriveResumeAction,
+  RESUMABLE_PACK_STATUSES,
+  checkResumeCloseGate,
+  RESUME_CLOSE_ALLOWED_STATUSES,
+  checkResetFailedGate,
+  emailFailureIsProvablyPreDispatch,
 } from './makesafe_send_pack.ts'
 // Wave 2 -- READ-ONLY report-draft cockpit feed (the informed-approve content
 // gate). Pure composers + normalisers; the orchestration below supplies the
@@ -2991,6 +3002,29 @@ if (import.meta.main) serve(async (req: Request) => {
           approverId: authUser?.id || null,
           approverEmail: authUser?.email || null,
         }))
+      }
+      // makesafe_resume_close (TASK B) — CLOSE-ONLY resume for sent_not_closed /
+      // close_failed. PRIVILEGED-CALLER ONLY, gated EXACTLY like makesafe_send_pack
+      // (dashboard SW_API_KEY or admin/owner jwt; the routine key is rejected here
+      // and is NOT in ROUTINE_ALLOWED_ACTIONS, so default-deny also 403s it — it
+      // belongs on ROUTINE_FORBIDDEN_ACTIONS once Sentinel Wave 0 PR #179 lands).
+      // It is structurally incapable of emailing/authorising (no email client, no
+      // Xero authorise call): it only applies the make-safe close.
+      case 'makesafe_resume_close': {
+        if (!sendPackAllowed(authMode, authUser)) {
+          return json({ error: 'forbidden: makesafe_resume_close requires the privileged dashboard key or an admin/owner session; the make-safe automation routine cannot close packs' }, 403)
+        }
+        return json(await makesafeResumeClose(client, body))
+      }
+      // makesafe_reset_failed_pack (TASK D) — privileged reset of a 'failed' pack
+      // back to a lockable state (no permanent dead-ends). Same privileged gate;
+      // NOT routine-callable. Fail-closed: only resets a PRE-SEND failure with NO
+      // MAKESAFE_PACK_SENT marker. NO email, NO authorise in this path.
+      case 'makesafe_reset_failed_pack': {
+        if (!sendPackAllowed(authMode, authUser)) {
+          return json({ error: 'forbidden: makesafe_reset_failed_pack requires the privileged dashboard key or an admin/owner session; the make-safe automation routine cannot reset packs' }, 403)
+        }
+        return json(await makesafeResetFailedPack(client, body))
       }
 
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
@@ -15497,16 +15531,52 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 200)
   const SIGNED_TTL = 600 // 10 min, short-lived signed urls for any private docs
 
+  const DETAIL_SELECT = 'job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, makesafe_companies(slug, name, invoice_email, report_recipient)'
+
   // 1) The report-draft-ready make-safe details. report_sent_at is loaded so the
   // shared surfacing predicate can exclude an already-sent-but-stale job (the
-  // substatus alone is NOT enough — see T3).
+  // substatus alone is NOT enough — see T3). The outer substatus filter is KEPT
+  // intact (it is the primary feed source).
   const { data: details, error: detErr } = await client
     .from('makesafe_job_details')
-    .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, makesafe_companies(slug, name, invoice_email, report_recipient)')
+    .select(DETAIL_SELECT)
     .eq('substatus', REPORT_DRAFT_READY_SUBSTATUS)
     .limit(limit)
   if (detErr) throw new ApiError('makesafe_report_drafts: details read failed: ' + detErr.message, 500)
-  const detailRows = details || []
+  const detailRows: any[] = (details || []).slice()
+  const detailJobIdSet = new Set<string>(detailRows.map((d: any) => d.job_id).filter(Boolean))
+
+  // 1b) RESUME-AWARE UNION (TASK A — the Ferndale bug). A resume can move the
+  // substatus OFF admin_to_send_report (e.g. an authorised_not_sent pack whose
+  // job advanced), so the substatus filter alone EXCLUDES those resumable packs.
+  // Also query makesafe_report_packs for the in-progress statuses and union any
+  // job_ids NOT already in the detail set into the feed's detail fetch, so a
+  // half-sent pack still surfaces for the operator to finish.
+  const { data: resumablePacks, error: rpErr } = await client
+    .from('makesafe_report_packs')
+    .select('job_id, pack_kind, status')
+    .in('status', RESUMABLE_PACK_STATUSES)
+    .limit(limit)
+  if (rpErr) throw new ApiError('makesafe_report_drafts: resumable packs read failed: ' + rpErr.message, 500)
+  const extraJobIds = Array.from(new Set(
+    (resumablePacks || [])
+      .filter((p: any) => (p.pack_kind || 'main') === 'main' && p.job_id && !detailJobIdSet.has(p.job_id))
+      .map((p: any) => p.job_id),
+  )) as string[]
+  if (extraJobIds.length > 0) {
+    const { data: extraDetails, error: edErr } = await client
+      .from('makesafe_job_details')
+      .select(DETAIL_SELECT)
+      .in('job_id', extraJobIds)
+    if (edErr) throw new ApiError('makesafe_report_drafts: resumable details read failed: ' + edErr.message, 500)
+    for (const d of (extraDetails || [])) {
+      if (d?.job_id && !detailJobIdSet.has(d.job_id)) {
+        detailRows.push(d)
+        detailJobIdSet.add(d.job_id)
+      }
+    }
+  }
+
   if (detailRows.length === 0) return { drafts: [], count: 0 }
 
   const jobIds: string[] = detailRows.map((d: any) => d.job_id).filter(Boolean)
@@ -15630,8 +15700,22 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       has_report_doc: !!reportDoc,
       has_swms_doc: !!swmsDoc,
     }
-    const surf = _deriveMakesafeSurfacing(d, d, true /* report received via substatus */, liveInvoice, feedDocFlags, packSentMap[d.job_id] === true, pack)
-    if (!surf.readyForReview) return null
+    const markerPresent = packSentMap[d.job_id] === true
+    const surf = _deriveMakesafeSurfacing(d, d, true /* report received via substatus */, liveInvoice, feedDocFlags, markerPresent, pack)
+
+    // RESUME-AWARE action mapping (TASK A). Reuse the deployed surfacing predicates
+    // (NEVER relax sentClosed) and the marker map (#193). deriveResumeAction is the
+    // SINGLE source of truth: it returns the one safe operation for this state, or
+    // null to EXCLUDE a genuinely terminal / unrecoverable job (as before). This
+    // widens the feed past the old `if (!surf.readyForReview) return null`, which
+    // dropped authorised_not_sent packs (the Ferndale bug).
+    const resumeAction = deriveResumeAction({
+      readyForReview: surf.readyForReview,
+      invoiceAuthorisedLive: surf.invoiceAuthorisedLive,
+      packStatus: pack?.status,
+      markerPresent,
+    })
+    if (resumeAction === null) return null
 
     const photos = (mediaByJob[d.job_id] || []).map((m: any) => ({
       url: m.storage_url || null,
@@ -15694,6 +15778,14 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       site_address: siteAddress,
       site_suburb: job.site_suburb || null,
       recipient_email: recipientEmail, // null -> cockpit shows a warning
+      // TASK A — the EXPLICIT per-state resume_action the cockpit drives off:
+      //   'send'             -> a fresh ready-to-review draft (authorise + send)
+      //   'finish_send'      -> authorised, not sent, NO marker (re-email ONCE)
+      //   'finish_close_out' -> marker present, only the close remains (NO email)
+      //   'resolve_send_state' -> 'sending', NO marker (operator must confirm)
+      // deriveResumeAction is the single source of truth; a terminal job is
+      // excluded above (resumeAction === null), never surfaced as sendable.
+      resume_action: resumeAction,
       // BLOCKER C — the EXACT (and only) cc set for a make-safe report send. The
       // cockpit/send carries this so the To = work-orders inbox + CC = ses@ only
       // (vanessa@ajs.build is never a recipient or cc). send_pack re-derives +
@@ -15938,11 +16030,45 @@ async function _patchPack(client: any, jobId: string, packKind: string, patch: R
 // routine key is rejected — decision scoped-routine-key-2026-06-17). Authorises
 // the Xero invoice + emails the builder, fail-closed at every irreversible step so
 // a partial failure is recoverable.
+// Injectable network seams (TASK E — orchestration testability, mirrors the
+// _verifyAndSendInvoiceEmail deps pattern). Production passes NO deps, so the live
+// implementations are used and behaviour is unchanged. Tests inject stubs to prove
+// the money-safety invariants (re-email ONCE, no re-authorise, D-d unknown-outcome)
+// while asserting the side-effect counters.
+export interface MakesafeSendPackDeps {
+  getToken: (client: any) => Promise<{ accessToken: string; tenantId: string }>
+  xeroPost: (path: string, accessToken: string, tenantId: string, body: any, method?: string, idempotencyKey?: string) => Promise<any>
+  fetchInvoicePdfBytes: (accessToken: string, tenantId: string, xeroInvoiceId: string) => Promise<Uint8Array>
+  attachDoc: (client: any, body: any) => Promise<{ document_id?: string | null }>
+  fetchReportPdfBytes: (url: string) => Promise<Uint8Array | null>
+  sendEmail: (payload: any) => Promise<{ ok: boolean; status: number; bodyText: () => Promise<string>; json: () => Promise<any> }>
+}
+
 async function makesafeSendPack(
   client: any,
   body: any,
   ctx: { approverId: string | null; approverEmail: string | null },
+  deps?: Partial<MakesafeSendPackDeps>,
 ) {
+  // Live defaults: the production network implementations. Tests override these.
+  const _getToken = deps?.getToken || getToken
+  const _xeroPost = deps?.xeroPost || xeroPost
+  const _fetchInvoicePdfBytes = deps?.fetchInvoicePdfBytes || _fetchXeroInvoicePdfBytes
+  const _attachDoc = deps?.attachDoc || attachMakesafeDocument
+  const _fetchReportPdfBytes = deps?.fetchReportPdfBytes || (async (url: string) => {
+    const rResp = await fetch(url)
+    if (!rResp.ok) return null
+    return new Uint8Array(await rResp.arrayBuffer())
+  })
+  const _sendEmail = deps?.sendEmail || (async (payload: any) => {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+      body: JSON.stringify(payload),
+    })
+    return { ok: r.ok, status: r.status, bodyText: () => r.text(), json: () => r.json() }
+  })
+
   const jobId = body.job_id || body.jobId
   const packKind = body.pack_kind || 'main'
   const recipientEmail = body.recipient_email || body.recipientEmail
@@ -16137,14 +16263,19 @@ async function makesafeSendPack(
 
   // The send is now in-flight (status='sending'). From here every failure must
   // leave a recoverable status and must NOT re-authorise / re-email on resume.
+  // sendAttempted flips true the instant the email DISPATCH is initiated (STEP 5).
+  // It makes the unknown-outcome firewall STRUCTURAL (not just code-path-reasoned):
+  // the outer catch consults it so ANY raw post-dispatch throw lands in 'sending',
+  // never 'authorised_not_sent' (which would re-offer a send => double-email).
+  let sendAttempted = false
   try {
-    const { accessToken, tenantId } = await getToken(client)
+    const { accessToken, tenantId } = await _getToken(client)
 
     // ── STEP 1: AUTHORISE (only if still a DRAFT) ──
     // Resume safety: if the invoice is already AUTHORISED/SUBMITTED/PAID we skip
     // the authorise entirely (no double-authorise).
     if (!invoiceAlreadyAuthorised) {
-      await xeroPost(`/Invoices/${xeroInvoiceId}`, accessToken, tenantId,
+      await _xeroPost(`/Invoices/${xeroInvoiceId}`, accessToken, tenantId,
         { Invoices: [{ InvoiceID: xeroInvoiceId, Status: 'AUTHORISED' }] }, 'POST')
       await client.from('xero_invoices')
         .update({ status: 'AUTHORISED', updated_at: nowIso() })
@@ -16168,12 +16299,12 @@ async function makesafeSendPack(
     await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', invoice_status: 'AUTHORISED', xero_invoice_id: xeroInvoiceId })
 
     // ── STEP 2: refetch the AUTHORISED PDF from Xero, re-attach as type 'invoice' ──
-    const authorisedPdfBytes = await _fetchXeroInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
+    const authorisedPdfBytes = await _fetchInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
     const authorisedPdfB64 = _bytesToBase64(authorisedPdfBytes)
     // Filename MUST pass the client send gate's is_xero_invoice_pdf (contains
     // 'xero' + 'invoice') AND makesafeDocBooleans invoice match ('invoice').
     const invoicePdfName = `Xero Invoice - ${invoiceNumber || xeroInvoiceId}.pdf`
-    const reInvDoc = await attachMakesafeDocument(client, {
+    const reInvDoc = await _attachDoc(client, {
       job_id: jobId,
       type: 'invoice',
       file_name: invoicePdfName,
@@ -16192,8 +16323,8 @@ async function makesafeSendPack(
       reportFileName = freshReport?.file_name || reportFileName
       const reportUrl = freshReport?.pdf_url || freshReport?.storage_url
       if (reportUrl) {
-        const rResp = await fetch(reportUrl)
-        if (rResp.ok) reportPdfB64 = _bytesToBase64(new Uint8Array(await rResp.arrayBuffer()))
+        const bytes = await _fetchReportPdfBytes(reportUrl)
+        if (bytes) reportPdfB64 = _bytesToBase64(bytes)
       }
     }
     if (!reportPdfB64) {
@@ -16222,24 +16353,60 @@ async function makesafeSendPack(
       throw new ApiError('client send gate failed (no email sent; invoice already authorised, safe to resume): ' + gateFailures.join('; '), 412)
     }
 
-    // ── STEP 5: SEND via send-outlook-email. NON-OK == HARD FAILURE (fail closed) ──
-    const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
-      body: JSON.stringify({
+    // ── STEP 5: SEND via send-outlook-email. ──────────────────────────────────
+    // D-d (TASK C) — UNKNOWN-OUTCOME = 'sending', NOT 'authorised_not_sent'. The
+    // double-email firewall. The catch around this step MUST distinguish:
+    //   * "send PROVABLY did NOT start" — a 4xx clean rejection from the email fn
+    //     (request rejected BEFORE dispatch: bad payload, validation, auth). Safe
+    //     to mark authorised_not_sent — a resume can re-email exactly once.
+    //   * "AMBIGUOUS / UNKNOWN outcome" — the request was DISPATCHED and the
+    //     failure is a post-dispatch throw (the fetch itself threw: network error
+    //     / timeout / abort AFTER the call began) OR a 5xx from the email fn
+    //     (which may have already handed the message to Outlook then errored). We
+    //     do NOT know whether the builder received the email, so we set
+    //     status='sending' (requires an explicit operator resolution — verify
+    //     Sent Items) and we NEVER let the resume UI offer another 'finish_send'.
+    // Any thrown exception / timeout / ambiguous result around the actual send
+    // call => 'sending'. Only a clean pre-dispatch {ok:false} => authorised_not_sent.
+    let emailResp: { ok: boolean; status: number; bodyText: () => Promise<string>; json: () => Promise<any> }
+    // The dispatch is about to begin. From HERE the outcome is potentially
+    // ambiguous: a throw / timeout / 5xx may occur AFTER the message was handed
+    // off. sendAttempted=true routes ALL such failures to 'sending' (never
+    // authorised_not_sent) — the structural double-email firewall.
+    sendAttempted = true
+    try {
+      emailResp = await _sendEmail({
         from: MAKESAFE_ADMIN_FROM,
         to: recipientEmail,
         cc: MAKESAFE_CC,
         subject,
         htmlBody,
         attachments,
-      }),
-    })
+      })
+    } catch (dispatchErr) {
+      // The send THREW: the request began but we got no response (network error /
+      // timeout / abort). Post-dispatch ambiguity => 'sending'. NEVER
+      // authorised_not_sent here — re-sending could double-email. The operator
+      // resolves via body.sending_resolution after verifying Sent Items.
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `send dispatch threw (outcome unknown, may have sent): ${(dispatchErr as Error).message}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
+      throw new ApiError('email send outcome UNKNOWN (the request was dispatched but no response came back; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.', 502)
+    }
     if (!emailResp.ok) {
-      const errText = await emailResp.text().catch(() => '')
-      // FAIL CLOSED: invoice authorised, NOT sent. No marker, no close.
-      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send', error_detail: `send-outlook-email ${emailResp.status}: ${errText}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
-      throw new ApiError(`email send failed (FAIL CLOSED — invoice authorised but NOT sent; status=authorised_not_sent, safe to resume): ${emailResp.status}`, 502)
+      const errText = await emailResp.bodyText().catch(() => '')
+      // Classify the failure. Only a NARROW set of 4xx codes (400/401/403/404/422)
+      // PROVE a pre-dispatch rejection (malformed/unauthorised/unprocessable, the
+      // email fn refused without contacting the provider) => authorised_not_sent,
+      // re-send OK. A timeout/rate-limit/conflict 4xx (408/409/425/429/...) and ALL
+      // 5xx are AMBIGUOUS — the fn may have dispatched to Outlook then errored — so
+      // they are unknown-outcome => 'sending'. FAIL CLOSED: not-proven => ambiguous.
+      const provablyNotDispatched = emailFailureIsProvablyPreDispatch(emailResp.status)
+      if (provablyNotDispatched) {
+        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send', error_detail: `send-outlook-email ${emailResp.status} (clean pre-dispatch reject): ${errText}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
+        throw new ApiError(`email send rejected before dispatch (FAIL CLOSED — invoice authorised but provably NOT sent; status=authorised_not_sent, safe to re-send): ${emailResp.status}`, 502)
+      }
+      // 5xx / unknown: do NOT offer a re-send; the email may have gone out.
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `send-outlook-email ${emailResp.status} (ambiguous; may have dispatched): ${errText}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
+      throw new ApiError(`email send outcome UNKNOWN (email fn returned ${emailResp.status}; it may have dispatched; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.`, 502)
     }
     let emailResult: any = {}
     try { emailResult = await emailResp.json() } catch { emailResult = {} }
@@ -16294,11 +16461,26 @@ async function makesafeSendPack(
     // Re-throw so the handler returns the right status code; the pack row is the
     // durable source of truth a resume reads.
     if (err instanceof ApiError) throw err
-    // Unexpected throw before authorise (e.g. getToken): leave as failed/sending.
+    // D-d STRUCTURAL FIREWALL — consult sendAttempted, do NOT rely on each
+    // post-dispatch step having its own catch. If the email dispatch had ALREADY
+    // begun when an unexpected (non-ApiError) throw bubbled here, the outcome is
+    // ambiguous (the message may have gone out) => status='sending' (operator
+    // resolves via sending_resolution). We NEVER write authorised_not_sent once a
+    // send was attempted, because that would re-offer a send => double-email.
+    if (sendAttempted) {
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: ('post-dispatch unexpected throw (outcome unknown): ' + (err as Error).message).slice(0, 500) })
+      throw new ApiError('makesafe_send_pack failed AFTER the send was attempted (outcome UNKNOWN; status=sending, verify Sent Items then resume with sending_resolution): ' + (err as Error).message, 502)
+    }
+    // PRE-DISPATCH throw (getToken, the AUTHORISED-PDF fetch/attach, etc.) — the
+    // email provably never began, so authorised_not_sent is safe (re-send later).
     await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'unexpected', error_detail: (err as Error).message?.slice(0, 500) })
     throw new ApiError('makesafe_send_pack failed (state preserved for resume): ' + (err as Error).message, 500)
   }
 }
+// Test-only export so the orchestration money-safety invariants (re-email ONCE,
+// no re-authorise, D-d unknown-outcome) can be exercised with a fake client +
+// injected network seams (TASK E).
+export const _makesafeSendPackForTest = makesafeSendPack
 
 // Upsert a pack row, leaving it in a lockable 'drafted' state if it does not yet
 // exist. Never downgrades a terminal/in-flight status: the lock UPDATE is the
@@ -16324,6 +16506,111 @@ async function _ensurePackRow(client: any, jobId: string, packKind: string, extr
       .eq('id', existing.id)
   }
 }
+
+// (3d) makesafe_resume_close — TASK B / B1: CLOSE-ONLY resume for the
+// sent_not_closed / close_failed states. PRIVILEGED-CALLER ONLY (route-gated by
+// sendPackAllowed, exactly like makesafe_send_pack; NOT routine-callable).
+//
+// MONEY/COMMS SAFETY: this handler is STRUCTURALLY INCAPABLE of emailing or
+// authorising — it has NO email client (no fetch to send-outlook-email), NO Xero
+// authorise call, and never loads/builds a send payload. It applies the make-safe
+// CLOSE only. It fails closed unless BOTH asserts pass:
+//   1. pack.status IN {sent_not_closed, close_failed}; and
+//   2. the MAKESAFE_PACK_SENT | main marker IS PRESENT (proof the email went out).
+// No marker => no proof of send => refuse (route the operator through send).
+async function makesafeResumeClose(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  const packKind = body.pack_kind || 'main'
+  if (!jobId) throw new ApiError('job_id required', 400)
+  const nowIso = () => new Date().toISOString()
+
+  // ASSERT 1 — load the pack row + check status is close-recoverable.
+  const { data: pack } = await client.from('makesafe_report_packs')
+    .select('id, status, sent_at, send_started_at, failed_step')
+    .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
+  if (!pack) throw new ApiError('makesafe_resume_close: no pack row for this job', 404)
+
+  // ASSERT 2 — the marker MUST be present (reuse _sendPackIsPackSentMainEvent over
+  // job_events). No marker == no proof of send == refuse to close fail-closed.
+  const { data: events } = await client.from('job_events')
+    .select('job_id, event_type, detail_json')
+    .eq('job_id', jobId).eq('event_type', 'note')
+  const markerPresent = (events || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))
+
+  const gate = checkResumeCloseGate({ packStatus: pack.status, markerPresent })
+  if (!gate.ok) {
+    return { error: gate.reason, status: pack.status || null, marker_present: markerPresent, job_id: jobId, requires: 'sent_not_closed_or_close_failed_with_marker' }
+  }
+
+  // CLOSE ONLY. Apply the make-safe close (substatus=complete + report_sent_at if
+  // absent). NO email, NO authorise anywhere in this path.
+  const closePatch: Record<string, any> = { substatus: 'complete', updated_at: nowIso() }
+  const { data: msd } = await client.from('makesafe_job_details')
+    .select('report_sent_at').eq('job_id', jobId).maybeSingle()
+  if (!msd?.report_sent_at) closePatch.report_sent_at = nowIso()
+  const { error: closeErr, data: closedRows } = await client.from('makesafe_job_details')
+    .update(closePatch).eq('job_id', jobId).select()
+  // Verify the close actually landed BEFORE flipping the pack to 'sent'. Do NOT
+  // silently mark a pack sent on a failed/no-op update.
+  if (closeErr) {
+    await _patchPack(client, jobId, packKind, { failed_step: 'resume_close', error_detail: ('resume_close update failed: ' + closeErr.message).slice(0, 500) })
+    throw new ApiError('makesafe_resume_close: close update failed (pack NOT marked sent; safe to retry): ' + closeErr.message, 500)
+  }
+  if (!closedRows || closedRows.length === 0) {
+    await _patchPack(client, jobId, packKind, { failed_step: 'resume_close', error_detail: 'resume_close affected 0 rows (no makesafe_job_details row updated)' })
+    throw new ApiError('makesafe_resume_close: close affected 0 rows (pack NOT marked sent); verify the job detail row exists', 409)
+  }
+
+  // Close confirmed -> flip the pack to terminal 'sent', clear diagnostics.
+  await _patchPack(client, jobId, packKind, { status: 'sent', sent_at: pack.sent_at || nowIso(), failed_step: null, error_detail: null })
+  return { resumed: true, action: 'close_only', status: 'sent', closed: true, emailed: false, authorised: false, job_id: jobId, note: 'close-only resume (no email, no authorise; marker verified present)' }
+}
+export const _makesafeResumeCloseForTest = makesafeResumeClose
+
+// (3e) makesafe_reset_failed_pack — TASK D / D-c: privileged reset of a 'failed'
+// pack back to a lockable state so the normal send flow can re-run, with NO
+// permanent dead-ends. PRIVILEGED-CALLER ONLY (route-gated by sendPackAllowed;
+// NOT routine-callable). NO email, NO authorise in this path.
+//
+// FAIL CLOSED: only resets when pack.status='failed' AND failed_step is a
+// recognised PRE-SEND step AND NO MAKESAFE_PACK_SENT marker is present (a marker
+// or a post-email failed_step means the email may have gone out — never reset).
+async function makesafeResetFailedPack(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  const packKind = body.pack_kind || 'main'
+  if (!jobId) throw new ApiError('job_id required', 400)
+  const nowIso = () => new Date().toISOString()
+
+  const { data: pack } = await client.from('makesafe_report_packs')
+    .select('id, status, failed_step')
+    .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
+  if (!pack) throw new ApiError('makesafe_reset_failed_pack: no pack row for this job', 404)
+
+  // Fail-closed on a marker: a marker means the email went out -> never reset.
+  const { data: events } = await client.from('job_events')
+    .select('job_id, event_type, detail_json')
+    .eq('job_id', jobId).eq('event_type', 'note')
+  const markerPresent = (events || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))
+
+  const gate = checkResetFailedGate({ packStatus: pack.status, failedStep: pack.failed_step, markerPresent })
+  if (!gate.ok) {
+    return { error: gate.reason, status: pack.status || null, failed_step: pack.failed_step || null, marker_present: markerPresent, job_id: jobId }
+  }
+
+  // Reset to a lockable state ('drafted'); the normal send flow re-runs from
+  // scratch (re-runs preflight + the atomic lock). Clear the failure diagnostics.
+  const targetStatus = body.target_status === 'admin_to_send_report' ? 'admin_to_send_report' : 'drafted'
+  const { error: resetErr, data: resetRows } = await client.from('makesafe_report_packs')
+    .update({ status: targetStatus, failed_step: null, error_detail: null, send_started_at: null, updated_at: nowIso() })
+    .eq('id', pack.id).eq('status', 'failed') // conditional: only reset a still-failed row
+    .select()
+  if (resetErr) throw new ApiError('makesafe_reset_failed_pack: reset update failed: ' + resetErr.message, 500)
+  if (!resetRows || resetRows.length === 0) {
+    return { error: 'reset affected 0 rows (the pack was no longer in failed state); re-read and retry', job_id: jobId }
+  }
+  return { reset: true, status: targetStatus, job_id: jobId, note: `failed pack reset to '${targetStatus}'; normal send flow can re-run` }
+}
+export const _makesafeResetFailedPackForTest = makesafeResetFailedPack
 
 async function toggleDocumentVisibility(client: any, body: any) {
   const { documentId, document_id, visible_to_trades } = body

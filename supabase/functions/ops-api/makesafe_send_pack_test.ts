@@ -40,6 +40,13 @@ import {
   isInvoiceAmbiguous,
   countLiveInvoices,
   SENDING_STALE_SECONDS,
+  // Phase 1b — resume-aware feed mapping + close-only / failed-reset gates.
+  deriveResumeAction,
+  RESUMABLE_PACK_STATUSES,
+  checkResumeCloseGate,
+  RESUME_CLOSE_ALLOWED_STATUSES,
+  checkResetFailedGate,
+  emailFailureIsProvablyPreDispatch,
 } from "./makesafe_send_pack.ts";
 
 // ─────────────────────────────────────────────────────────────────
@@ -775,4 +782,204 @@ Deno.test("dup-guard: a SPACED external_ref matches a HYPHENATED stored referenc
   assert(hit, "spaced ref must match the hyphenated stored reference");
   assertEquals(hit!.match_method, "reference");
   assertEquals(hit!.invoice_number, "INV-H");
+});
+
+// ═════════════════════════════════════════════════════════════════
+// PHASE 1b — RESUME-AWARE FEED ACTION MAPPING (TASK A, deriveResumeAction).
+// The 6 contract mapping rows, each returning the right resume_action, plus the
+// double-email firewall (marker present => never 'finish_send') and EXCLUSION of
+// a sent/terminal job.
+// ═════════════════════════════════════════════════════════════════
+
+Deno.test("resume-map row 1: readyForReview -> 'send'", () => {
+  assertEquals(
+    deriveResumeAction({ readyForReview: true, invoiceAuthorisedLive: false, packStatus: "drafted", markerPresent: false }),
+    "send",
+  );
+  // readyForReview wins even if a pack status string is present (DRAFT invoice).
+  assertEquals(
+    deriveResumeAction({ readyForReview: true, invoiceAuthorisedLive: false, packStatus: null, markerPresent: false }),
+    "send",
+  );
+});
+
+Deno.test("resume-map row 2: authorised_not_sent + authorised invoice + NO marker -> 'finish_send'", () => {
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "authorised_not_sent", markerPresent: false }),
+    "finish_send",
+  );
+});
+
+Deno.test("resume-map row 2 (firewall): authorised_not_sent WITH marker -> NOT 'finish_send' (excluded, no double-email)", () => {
+  // The double-email firewall: a marker means the email already went out, so we
+  // must NEVER offer another send for an authorised_not_sent pack.
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "authorised_not_sent", markerPresent: true }),
+    null,
+  );
+});
+
+Deno.test("resume-map row 2 (guard): authorised_not_sent but invoice NOT authorised-live -> excluded", () => {
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: false, packStatus: "authorised_not_sent", markerPresent: false }),
+    null,
+  );
+});
+
+Deno.test("resume-map row 3: sent_marker_failed + NO marker -> 'finish_send' (marker_and_close on backend)", () => {
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "sent_marker_failed", markerPresent: false }),
+    "finish_send",
+  );
+  // If the marker is now present, it is a bare terminal -> excluded.
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "sent_marker_failed", markerPresent: true }),
+    null,
+  );
+});
+
+Deno.test("resume-map row 4: (sent_not_closed | close_failed) + marker PRESENT -> 'finish_close_out'", () => {
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "sent_not_closed", markerPresent: true }),
+    "finish_close_out",
+  );
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "close_failed", markerPresent: true }),
+    "finish_close_out",
+  );
+});
+
+Deno.test("resume-map row 5: sending + NO marker -> 'resolve_send_state'", () => {
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "sending", markerPresent: false }),
+    "resolve_send_state",
+  );
+});
+
+Deno.test("resume-map row 6: sending + marker PRESENT -> 'finish_close_out'", () => {
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "sending", markerPresent: true }),
+    "finish_close_out",
+  );
+});
+
+Deno.test("resume-map row 7: a sent / terminal job is EXCLUDED (null)", () => {
+  for (const status of ["sent", "drafted", "failed", "complete", "", null, undefined]) {
+    assertEquals(
+      deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: status as any, markerPresent: false }),
+      null,
+      `status=${status} must be excluded when not readyForReview`,
+    );
+  }
+  // A bare marker-only terminal (marker present, no recoverable in-progress state).
+  assertEquals(
+    deriveResumeAction({ readyForReview: false, invoiceAuthorisedLive: true, packStatus: "sent", markerPresent: true }),
+    null,
+  );
+});
+
+Deno.test("RESUMABLE_PACK_STATUSES: the in-progress set the feed unions in", () => {
+  // These are the statuses whose substatus may have moved off admin_to_send_report
+  // but which must still surface for resume.
+  for (const s of ["authorised_not_sent", "sent_marker_failed", "sent_not_closed", "close_failed", "sending"]) {
+    assert(RESUMABLE_PACK_STATUSES.includes(s), `${s} must be a resumable status`);
+  }
+  // A terminal 'sent' / fresh 'drafted' must NOT be in the union set.
+  assert(!RESUMABLE_PACK_STATUSES.includes("sent"));
+  assert(!RESUMABLE_PACK_STATUSES.includes("drafted"));
+});
+
+// ═════════════════════════════════════════════════════════════════
+// PHASE 1b — makesafe_resume_close GATE (TASK B). Both asserts: status in
+// {sent_not_closed, close_failed} AND marker present, else fail-closed.
+// ═════════════════════════════════════════════════════════════════
+
+Deno.test("resume_close gate: sent_not_closed + marker -> ok", () => {
+  const g = checkResumeCloseGate({ packStatus: "sent_not_closed", markerPresent: true });
+  assertEquals(g.ok, true);
+});
+
+Deno.test("resume_close gate: close_failed + marker -> ok", () => {
+  assertEquals(checkResumeCloseGate({ packStatus: "close_failed", markerPresent: true }).ok, true);
+});
+
+Deno.test("resume_close gate: wrong status -> rejected (409), even WITH a marker", () => {
+  for (const s of ["sent", "authorised_not_sent", "sending", "drafted", "failed", "", null]) {
+    const g = checkResumeCloseGate({ packStatus: s as any, markerPresent: true });
+    assertEquals(g.ok, false, `status ${s} must be rejected`);
+    assertEquals(g.httpStatus, 409);
+  }
+});
+
+Deno.test("resume_close gate: marker ABSENT -> rejected (no proof of send)", () => {
+  const g = checkResumeCloseGate({ packStatus: "sent_not_closed", markerPresent: false });
+  assertEquals(g.ok, false);
+  assertEquals(g.httpStatus, 409);
+  assert(g.reason!.includes("marker absent"));
+});
+
+Deno.test("resume_close gate: RESUME_CLOSE_ALLOWED_STATUSES is exactly the close-recoverable set", () => {
+  assertEquals(RESUME_CLOSE_ALLOWED_STATUSES.slice().sort(), ["close_failed", "sent_not_closed"]);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// PHASE 1b — makesafe_reset_failed_pack GATE (TASK D). Resets a PRE-SEND failed
+// pack with NO marker; refuses a marker or a post-email failed_step.
+// ═════════════════════════════════════════════════════════════════
+
+Deno.test("reset gate: failed + pre-send step + NO marker -> ok", () => {
+  for (const step of ["recipient_gate", "preflight_docs", "preflight_invoice", "preflight_invoice_ambiguous", "load_report_pdf", "client_send_gate", "unexpected"]) {
+    const g = checkResetFailedGate({ packStatus: "failed", failedStep: step, markerPresent: false });
+    assertEquals(g.ok, true, `pre-send step ${step} must be resettable`);
+  }
+});
+
+Deno.test("reset gate: a marker present -> REFUSED (the email may have gone out)", () => {
+  const g = checkResetFailedGate({ packStatus: "failed", failedStep: "preflight_docs", markerPresent: true });
+  assertEquals(g.ok, false);
+  assert(g.reason!.includes("marker present"));
+});
+
+Deno.test("reset gate: a POST-email failed_step -> REFUSED (send/marker/close)", () => {
+  for (const step of ["send", "marker", "close", "send_unknown_outcome"]) {
+    const g = checkResetFailedGate({ packStatus: "failed", failedStep: step, markerPresent: false });
+    assertEquals(g.ok, false, `post-email step ${step} must NOT be resettable`);
+  }
+});
+
+Deno.test("reset gate: status not 'failed' -> REFUSED", () => {
+  for (const s of ["sent", "sending", "authorised_not_sent", "drafted", "sent_not_closed"]) {
+    assertEquals(checkResetFailedGate({ packStatus: s, failedStep: "preflight_docs", markerPresent: false }).ok, false);
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════
+// PHASE 1b (TASK C, D-d) — email-outcome classifier. Only a narrow set of 4xx
+// codes PROVE a pre-dispatch rejection; timeout/rate-limit 4xx + ALL 5xx are
+// AMBIGUOUS (=> 'sending', never authorised_not_sent). FAIL CLOSED.
+// ═════════════════════════════════════════════════════════════════
+Deno.test("email classifier: 400/401/403/404/422 are provably pre-dispatch (authorised_not_sent OK)", () => {
+  for (const s of [400, 401, 403, 404, 422]) {
+    assertEquals(emailFailureIsProvablyPreDispatch(s), true, `${s} should be provably pre-dispatch`);
+  }
+});
+
+Deno.test("email classifier: AMBIGUOUS 4xx (408/409/425/429) are NOT pre-dispatch -> 'sending'", () => {
+  // The codex-review hardening: a timeout / conflict / too-early / rate-limit is
+  // NOT proof the email was rejected before dispatch.
+  for (const s of [408, 409, 425, 429, 451, 499]) {
+    assertEquals(emailFailureIsProvablyPreDispatch(s), false, `${s} is ambiguous, must NOT be pre-dispatch`);
+  }
+});
+
+Deno.test("email classifier: ALL 5xx are ambiguous (NOT pre-dispatch)", () => {
+  for (const s of [500, 502, 503, 504, 599]) {
+    assertEquals(emailFailureIsProvablyPreDispatch(s), false, `${s} (5xx) is ambiguous`);
+  }
+});
+
+Deno.test("email classifier: 0/NaN/negative (thrown-fetch sentinel) are ambiguous -> fail closed", () => {
+  assertEquals(emailFailureIsProvablyPreDispatch(0), false);
+  assertEquals(emailFailureIsProvablyPreDispatch(NaN), false);
+  assertEquals(emailFailureIsProvablyPreDispatch(-1), false);
 });

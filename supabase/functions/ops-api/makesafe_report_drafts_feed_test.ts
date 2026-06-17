@@ -238,3 +238,121 @@ Deno.test("T3 feed: invoice_ambiguous is still returned (UX gates on it)", async
     assert(true);
   }
 });
+
+// ═════════════════════════════════════════════════════════════════
+// PHASE 1b (TASK A) — RESUME-AWARE FEED action mapping. Each of the resume
+// states surfaces with the correct resume_action; a sent/terminal job is
+// EXCLUDED. Also proves the union: a pack whose substatus moved off
+// admin_to_send_report still surfaces via the makesafe_report_packs query.
+// ═════════════════════════════════════════════════════════════════
+
+// A marker note for a job (used to drive markerPresent via buildPackSentMap).
+function markerNote(jobId: string) {
+  return { id: `ev-${jobId}`, job_id: jobId, event_type: "note", detail_json: { text: `MAKESAFE_PACK_SENT | main | INV | to=x@y.com | 2026-06-17T00:00:00Z` } };
+}
+
+Deno.test("A feed row 1: a ready draft -> resume_action 'send'", async () => {
+  const client = makeFeedClient(ferndaleSeed());
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "send");
+});
+
+Deno.test("A feed row 2: authorised_not_sent + authorised invoice + NO marker -> 'finish_send'", async () => {
+  const seed = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "authorised_not_sent", report_doc_id: "d-rep", sent_at: null }];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "finish_send");
+});
+
+Deno.test("A feed firewall: authorised_not_sent WITH a marker -> EXCLUDED (no double-email)", async () => {
+  const seed: any = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "authorised_not_sent", report_doc_id: "d-rep", sent_at: null }];
+  seed.job_events = [markerNote("job-ferndale")];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 0, "a marker means it was sent -> never re-offer a send");
+});
+
+Deno.test("A feed row 3: sent_marker_failed + NO marker -> 'finish_send'", async () => {
+  const seed = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sent_marker_failed", report_doc_id: "d-rep", sent_at: null }];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "finish_send");
+});
+
+Deno.test("A feed row 4: sent_not_closed + marker -> 'finish_close_out'", async () => {
+  const seed: any = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sent_not_closed", report_doc_id: "d-rep", sent_at: "2026-06-17T01:00:00Z" }];
+  seed.job_events = [markerNote("job-ferndale")];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "finish_close_out");
+});
+
+Deno.test("A feed row 4b: close_failed + marker -> 'finish_close_out'", async () => {
+  const seed: any = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "close_failed", report_doc_id: "d-rep", sent_at: "2026-06-17T01:00:00Z" }];
+  seed.job_events = [markerNote("job-ferndale")];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "finish_close_out");
+});
+
+Deno.test("A feed row 5: sending + NO marker -> 'resolve_send_state' (with send_started_at + in_flight_stale)", async () => {
+  const seed = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  const started = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sending", report_doc_id: "d-rep", sent_at: null, send_started_at: started }];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "resolve_send_state");
+  assertEquals(res.drafts[0].pack_status.send_started_at, started);
+  assertEquals(res.drafts[0].pack_status.in_flight_stale, true);
+});
+
+Deno.test("A feed row 6: sending + marker -> 'finish_close_out'", async () => {
+  const seed: any = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sending", report_doc_id: "d-rep", sent_at: null, send_started_at: new Date().toISOString() }];
+  seed.job_events = [markerNote("job-ferndale")];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "finish_close_out");
+});
+
+Deno.test("A feed row 7: a sent/terminal job is EXCLUDED (resume_action null -> dropped)", async () => {
+  const seed = ferndaleSeed();
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sent", report_doc_id: "d-rep", sent_at: "2026-06-17T05:00:00Z" }];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 0, "a terminal sent job must be excluded");
+});
+
+Deno.test("A feed UNION: an authorised_not_sent pack whose substatus MOVED OFF admin_to_send_report still surfaces", async () => {
+  // The Ferndale union: the detail substatus is NOT admin_to_send_report (a resume
+  // advanced it), so the outer substatus filter excludes it. The resumable-packs
+  // query must union it back in via job_id.
+  const seed = ferndaleSeed();
+  seed.makesafe_job_details[0].substatus = "ready_to_invoice"; // moved off admin_to_send_report
+  seed.xero_invoices[0].status = "AUTHORISED";
+  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "authorised_not_sent", report_doc_id: "d-rep", sent_at: null }];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1, "the resumable pack is unioned in despite the moved substatus");
+  assertEquals(res.drafts[0].job_id, "job-ferndale");
+  assertEquals(res.drafts[0].resume_action, "finish_send");
+});

@@ -449,3 +449,215 @@ export function isInvoiceAmbiguous(invoiceRows: any[] | null | undefined): boole
   return countLiveInvoices(invoiceRows) > 1
 }
 
+// ── Resume-aware feed action mapping (TASK A — the Ferndale fix) ──────────────
+//
+// The cockpit feed (makesafeReportDrafts) must surface not just a fresh
+// ready-to-send draft, but every RESUMABLE pack state, with an EXPLICIT
+// per-state action so the UI offers the one safe operation. This is the SINGLE
+// source of truth for that mapping. It is PURE: it reads the pack status, the
+// derived surfacing flags and whether the MAKESAFE_PACK_SENT | main marker is
+// present, and returns the resume_action — or null for a genuinely terminal /
+// unrecoverable job (which the feed EXCLUDES, exactly as today).
+//
+// MONEY/COMMS-safety invariants baked into the mapping:
+//   - A job that is sentClosed AND has no recoverable in-progress pack state is
+//     EXCLUDED (null) — never re-surfaced as sendable. We NEVER relax sentClosed.
+//   - 'finish_send' (re-email ONCE, no re-authorise) is offered ONLY when the
+//     invoice is provably AUTHORISED and NO marker is present (no proof of a
+//     prior send). The moment a marker exists, the only forward action is
+//     close-out ('finish_close_out'), never another email.
+//   - 'sent_not_closed' / 'close_failed' ALWAYS carry the marker (the send wrote
+//     it), so the marker-stop in makesafeSendPack blocks the normal close path;
+//     they are routed to the dedicated close-only resume ('finish_close_out').
+//   - 'sending' is NEVER auto-resolved: with no marker the operator must decide
+//     ('resolve_send_state'); once a marker exists the email demonstrably went
+//     out and the only remaining step is the close ('finish_close_out').
+export type ResumeAction =
+  | 'send' // a fresh ready-to-review draft: authorise + send (the normal flow)
+  | 'finish_send' // authorised, NOT sent, NO marker: re-email ONCE (no re-authorise)
+  | 'finish_close_out' // marker present, only the close remains: close-only, NO email
+  | 'resolve_send_state' // 'sending' + NO marker: operator must confirm sent / not-sent
+
+// The pack statuses the feed must ALSO surface beyond the
+// substatus=admin_to_send_report outer filter, because a resume can move the
+// substatus off admin_to_send_report (e.g. authorised_not_sent). The feed unions
+// the job_ids of packs in these statuses into its detail fetch.
+export const RESUMABLE_PACK_STATUSES = [
+  'authorised_not_sent',
+  'sent_marker_failed',
+  'sent_not_closed',
+  'close_failed',
+  'sending',
+]
+
+export interface DeriveResumeActionArgs {
+  // From _deriveMakesafeSurfacing (reused, never relaxed).
+  readyForReview: boolean
+  invoiceAuthorisedLive: boolean
+  // The durable pack row status (makesafe_report_packs.status).
+  packStatus: string | null | undefined
+  // Whether the MAKESAFE_PACK_SENT | main marker note is present for the job.
+  markerPresent: boolean
+}
+
+// Pure: map a candidate job to its resume_action, or null to EXCLUDE it.
+// Implements the contract mapping EXACTLY (cross-ref TASK A):
+//   readyForReview                                              -> 'send'
+//   authorised_not_sent && invoiceAuthorisedLive && NO marker   -> 'finish_send'
+//   sent_marker_failed && NO marker                             -> 'finish_send'
+//   (sent_not_closed || close_failed) && marker PRESENT         -> 'finish_close_out'
+//   sending && NO marker                                        -> 'resolve_send_state'
+//   sending && marker PRESENT                                   -> 'finish_close_out'
+//   anything else (sent / terminal / marker-only)               -> null (EXCLUDE)
+export function deriveResumeAction(args: DeriveResumeActionArgs): ResumeAction | null {
+  const s = String(args.packStatus ?? '')
+  const marker = args.markerPresent === true
+
+  // A genuinely fresh drafted-not-sent pack — the normal authorise+send flow.
+  // readyForReview already requires !sentClosed and a DRAFT invoice, so it can
+  // never collide with a post-send state.
+  if (args.readyForReview) return 'send'
+
+  // Authorised but not sent, with NO proof of a prior send -> re-email ONCE.
+  // The marker guard is the double-email firewall: if a marker is present the
+  // email already went out and we must NOT offer another send.
+  if (s === 'authorised_not_sent' && args.invoiceAuthorisedLive && !marker) return 'finish_send'
+
+  // Email went out but the marker write failed AND the marker is still absent ->
+  // 'finish_send' is the cockpit BUTTON, but it does NOT re-email for this state:
+  // when the operator triggers it, makesafeSendPack's planPostSendResume sees
+  // 'sent_marker_failed' and runs the 'marker_and_close' recovery (writes the
+  // missing marker + applies the close, NO email, NO authorise) BEFORE any send
+  // path is reached. So no double-email is possible. If the marker is now present
+  // this instead falls through to exclude (a bare marker-only terminal) — the
+  // marker-stop short-circuits any send regardless. (See planPostSendResume.)
+  if (s === 'sent_marker_failed' && !marker) return 'finish_send'
+
+  // Email out + marker written; only the close failed -> close-only, NO email.
+  if ((s === 'sent_not_closed' || s === 'close_failed') && marker) return 'finish_close_out'
+
+  // Hard-crash 'sending' window. No marker -> the operator must verify Sent
+  // Items and decide. Marker present -> the email demonstrably went out, so the
+  // only remaining step is the close.
+  if (s === 'sending') return marker ? 'finish_close_out' : 'resolve_send_state'
+
+  // sent / marker-only terminal / genuine closed -> EXCLUDE (null), as today.
+  return null
+}
+
+// ── Email-outcome classifier (D-d, TASK C — double-email firewall) ───────────
+//
+// MONEY/COMMS-safety. When send-outlook-email returns a NON-OK status, decide
+// whether the failure PROVES the email was rejected BEFORE dispatch (safe to set
+// authorised_not_sent and re-send later) or is AMBIGUOUS (it may have dispatched
+// then errored -> must land in 'sending', NEVER re-offered as a send).
+//
+// Only a NARROW set of 4xx codes prove a pre-dispatch rejection: a malformed /
+// unauthorised / unprocessable request the email fn rejects WITHOUT contacting
+// the mail provider. A timeout / rate-limit / conflict / generic-or-unknown 4xx
+// and ALL 5xx are AMBIGUOUS (the fn may have handed the message to Outlook then
+// errored), so they are treated as unknown-outcome => 'sending'. FAIL CLOSED:
+// anything not explicitly proven pre-dispatch is ambiguous.
+const PROVABLY_PRE_DISPATCH_STATUSES = new Set([400, 401, 403, 404, 422])
+
+export function emailFailureIsProvablyPreDispatch(status: number): boolean {
+  // Defensive: a 0/NaN/negative (e.g. a thrown fetch surfaced as status 0) is
+  // NOT provably pre-dispatch -> ambiguous.
+  if (!Number.isFinite(status) || status <= 0) return false
+  return PROVABLY_PRE_DISPATCH_STATUSES.has(status)
+}
+
+// ── makesafe_resume_close assertions (TASK B — close-only, fail-closed) ──────
+//
+// The close-only resume path is structurally incapable of emailing or
+// authorising. Before it applies the close it MUST pass BOTH asserts:
+//   1. the pack status is one of the close-recoverable states; and
+//   2. the MAKESAFE_PACK_SENT | main marker is PRESENT (proof the email went
+//      out). No marker == no proof of send == refuse (never close a pack that
+//      may not have emailed; the operator routes it through send instead).
+export const RESUME_CLOSE_ALLOWED_STATUSES = ['sent_not_closed', 'close_failed']
+
+export interface ResumeCloseGate {
+  ok: boolean
+  // HTTP status for the failure (409 for a wrong-state pack, 409 for no marker —
+  // both are conflict/precondition failures the operator must resolve first).
+  httpStatus: number
+  reason: string | null
+}
+
+// Pure: gate a makesafe_resume_close call. ok only when BOTH asserts pass.
+export function checkResumeCloseGate(args: {
+  packStatus: string | null | undefined
+  markerPresent: boolean
+}): ResumeCloseGate {
+  const s = String(args.packStatus ?? '')
+  if (!RESUME_CLOSE_ALLOWED_STATUSES.includes(s)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      reason: `makesafe_resume_close requires pack status in {${RESUME_CLOSE_ALLOWED_STATUSES.join(', ')}}; got '${s || '<none>'}'`,
+    }
+  }
+  if (args.markerPresent !== true) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      reason: 'makesafe_resume_close refused: MAKESAFE_PACK_SENT marker absent (no proof the email was sent); resolve via send, not close',
+    }
+  }
+  return { ok: true, httpStatus: 200, reason: null }
+}
+
+// ── makesafe_reset_failed_pack guards (TASK D — no permanent dead-ends) ──────
+//
+// A 'failed' pack is not lockable, so it 409s forever even after the underlying
+// problem is fixed. This privileged reset puts it back into a lockable state so
+// the normal send flow can re-run. It is FAIL-CLOSED: it only resets a pack that
+// failed at a PRE-SEND step AND has NO MAKESAFE_PACK_SENT marker. A pack that may
+// have emailed (post-email failed_step OR any marker present) is NEVER reset.
+//
+// PRE-SEND failed_steps are the steps that run BEFORE the email is dispatched:
+//   recipient_gate, preflight_docs, preflight_invoice, preflight_invoice_ambiguous,
+//   load_report_pdf, client_send_gate, unexpected (pre-authorise getToken etc.)
+// POST-SEND/ambiguous failed_steps that must NEVER be reset by this path:
+//   send (the email dispatch step — outcome may be unknown), marker, close.
+export const RESET_FAILED_PRESEND_STEPS = [
+  'recipient_gate',
+  'preflight_docs',
+  'preflight_invoice',
+  'preflight_invoice_ambiguous',
+  'load_report_pdf',
+  'client_send_gate',
+  'unexpected',
+]
+// Steps at/after the actual email dispatch — a reset here could mask a real send.
+export const RESET_FAILED_FORBIDDEN_STEPS = ['send', 'marker', 'close']
+
+export interface ResetFailedGate {
+  ok: boolean
+  httpStatus: number
+  reason: string | null
+}
+
+// Pure: gate a makesafe_reset_failed_pack call. ok only when the pack is 'failed',
+// the failed_step is a recognised PRE-SEND step, and NO marker is present.
+export function checkResetFailedGate(args: {
+  packStatus: string | null | undefined
+  failedStep: string | null | undefined
+  markerPresent: boolean
+}): ResetFailedGate {
+  const s = String(args.packStatus ?? '')
+  const step = String(args.failedStep ?? '')
+  if (s !== 'failed') {
+    return { ok: false, httpStatus: 409, reason: `makesafe_reset_failed_pack requires pack status 'failed'; got '${s || '<none>'}'` }
+  }
+  // FAIL CLOSED on a marker: a marker means the email went out — never reset.
+  if (args.markerPresent === true) {
+    return { ok: false, httpStatus: 409, reason: 'reset refused: MAKESAFE_PACK_SENT marker present (the email may have gone out); this pack cannot be reset' }
+  }
+  if (RESET_FAILED_FORBIDDEN_STEPS.includes(step) || !RESET_FAILED_PRESEND_STEPS.includes(step)) {
+    return { ok: false, httpStatus: 409, reason: `reset refused: failed_step '${step || '<none>'}' is not a recognised PRE-SEND step; only ${RESET_FAILED_PRESEND_STEPS.join(', ')} are resettable` }
+  }
+  return { ok: true, httpStatus: 200, reason: null }
+}
+
