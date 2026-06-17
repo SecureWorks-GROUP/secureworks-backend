@@ -1,6 +1,8 @@
 // send-quote test suite covering:
 //   - safeBusinessEventInsert (Phase 2 hardening — 5 cases, originally CAP0-QA-CANONICAL-EVENTS-HARDENING)
 //   - stageQuoteRevision / releaseQuoteRevision (CAP0-QUOTE-REVISION-MINIMAL)
+//   - freeze-on-resend spine (2026-06-17, PR #189): content-hash idempotency
+//     (IC1–IC6, timestamp-independent) + reallocate self-verifiability (SV1–SV2)
 //
 // LOCAL-ONLY. The helpers under test are non-exported top-level async functions
 // in `index.ts`; importing index.ts directly would start the production HTTP
@@ -631,4 +633,141 @@ Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canon
   // And the uploaded body equals manifest_canonical_text exactly (hash-only
   // equality is necessary but not sufficient; verify byte equality too).
   assertEquals(uploadedBytes, sb._state.inserted[0].manifest_canonical_text)
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// FREEZE-ON-RESEND SPINE (2026-06-17) — content-hash idempotency + self-verify
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Regression coverage for PR #189. Two distinct guarantees:
+//
+//   IC1–IC6: releaseContentHash() is TIMESTAMP-INDEPENDENT. The stored
+//   manifest_hash embeds a per-call captured_at (build_minimal_manifest.ts:69)
+//   and the internal_cost envelope embeds captured_at + a random release_id, so
+//   it CANNOT be the idempotency key. releaseContentHash hashes only the
+//   billing-determining content (scope/pricing/totals + internal-cost
+//   line_costs/cost_estimates/margin/commission) so identical content → equal
+//   hash regardless of timestamps/ids. This is the round-1 CRITICAL fix.
+//
+//   SV1–SV2: a reallocated revision (round-2 HIGH) must REBUILD its manifest at
+//   the NEW version so that rebuilding the manifest from the row's own version
+//   reproduces its stored manifest_hash (self-verifiability + T7 invariant). A
+//   row carrying a v1-built manifest_hash but row.version=2 fails this.
+//
+// EXACT COPY of releaseContentHash / internalCostContent from index.ts. Any
+// drift is caught at PR review via grep diff (same convention as the helpers
+// copied above).
+
+function internalCostContent(ic: unknown): unknown {
+  if (!ic || typeof ic !== 'object') return null
+  const o = ic as Record<string, unknown>
+  return {
+    line_costs: o.line_costs ?? null,
+    cost_estimates: o.cost_estimates ?? null,
+    margin: o.margin ?? null,
+    commission: o.commission ?? null,
+  }
+}
+
+async function releaseContentHash(parts: {
+  scope_snapshot: unknown
+  pricing_snapshot: unknown
+  totals_snapshot: unknown
+  internal_cost_snapshot: unknown
+}): Promise<string> {
+  // jsonHash via canonicalJsonAndHash (same recursive deep-sort + SHA-256).
+  const { hash } = await canonicalJsonAndHash({
+    scope: parts.scope_snapshot ?? null,
+    pricing: parts.pricing_snapshot ?? null,
+    totals: parts.totals_snapshot ?? null,
+    internal_cost: internalCostContent(parts.internal_cost_snapshot),
+  })
+  return hash
+}
+
+const icBase = {
+  schema_version: '2.0', release_id: 'uuid-AAA', job_id: 'j1', version: 1,
+  captured_at: '2026-06-17T01:00:00Z',
+  line_costs: [{ x: 1 }], cost_estimates: { e: 2 }, margin: { m: 3 }, commission: { c: 4 },
+}
+const scope = { client_name: 'Jo', site_address: '1 St', site_suburb: 'Perth', job_type: 'patio', job_number: 'SW1' }
+const pricing = { raw: { totalIncGST: 1100, totalExGST: 1000, gst: 100, lines: [{ d: 'a', qty: 2 }] } }
+const totals = { total_ex_gst: 1000, gst: 100, total_inc_gst: 1100 }
+
+Deno.test("IC1 — identical content with DIFFERENT captured_at + release_id produces the SAME content hash (the round-1 CRITICAL — was dead code with manifest_hash)", async () => {
+  const ic1 = { ...icBase, release_id: 'uuid-AAA', captured_at: '2026-06-17T01:00:00Z' }
+  const ic2 = { ...icBase, release_id: 'uuid-BBB', captured_at: '2026-06-17T23:59:59Z' }
+  const h1 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: ic1 })
+  const h2 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: ic2 })
+  assertEquals(h1, h2, 'identical billing content must hash equal despite different captured_at/release_id')
+})
+
+Deno.test("IC2 — key-reordering (simulating jsonb read-back) still matches (canonicalize deep-sorts)", async () => {
+  const scopeReordered = { job_number: 'SW1', job_type: 'patio', site_suburb: 'Perth', site_address: '1 St', client_name: 'Jo' }
+  const pricingReordered = { raw: { lines: [{ qty: 2, d: 'a' }], gst: 100, totalExGST: 1000, totalIncGST: 1100 } }
+  const h1 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: icBase })
+  const h2 = await releaseContentHash({ scope_snapshot: scopeReordered, pricing_snapshot: pricingReordered, totals_snapshot: totals, internal_cost_snapshot: icBase })
+  assertEquals(h1, h2, 'jsonb key-reorder on read-back must not change the content hash')
+})
+
+Deno.test("IC3 — changed public pricing produces a DIFFERENT hash (reallocate path)", async () => {
+  const pricingChanged = { raw: { totalIncGST: 2200, totalExGST: 2000, gst: 200, lines: [{ d: 'a', qty: 2 }] } }
+  const totalsChanged = { total_ex_gst: 2000, gst: 200, total_inc_gst: 2200 }
+  const h1 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: icBase })
+  const h2 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricingChanged, totals_snapshot: totalsChanged, internal_cost_snapshot: icBase })
+  assert(h1 !== h2, 'changed pricing must change the content hash')
+})
+
+Deno.test("IC4 — changed internal margin/commission produces a DIFFERENT hash (under-billing protection)", async () => {
+  const icChanged = { ...icBase, margin: { m: 99 } }
+  const h1 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: icBase })
+  const h2 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: icChanged })
+  assert(h1 !== h2, 'changed internal margin must change the content hash')
+})
+
+Deno.test("IC5 — V1-only rows: null vs undefined internal_cost are equal (both normalize to null content)", async () => {
+  const h1 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: null })
+  const h2 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: undefined })
+  assertEquals(h1, h2, 'V1-only null/undefined internal_cost must hash equal')
+})
+
+Deno.test("IC6 — V1-only vs V2 of same public content differ (richer envelope is genuinely different content → reallocate, safe)", async () => {
+  const hV1 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: null })
+  const hV2 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: icBase })
+  assert(hV1 !== hV2, 'V1-only and V2 of the same public content must differ')
+})
+
+Deno.test("SV1 — self-verifiability: a manifest rebuilt at version=2 reproduces a version=2 manifest_hash, NOT the version=1 hash (round-2 HIGH — reallocate must rebuild)", async () => {
+  // The bug: reallocate reused the v1-built manifest_hash for a row at version=2.
+  // Rebuilding the manifest from the row's OWN version=2 must reproduce the
+  // STORED hash. This proves version is load-bearing in the hash, so reusing the
+  // v1 artifact at v2 is detectably wrong, and rebuilding at v2 is correct.
+  const baseArgs = {
+    job_id: 'j1', job_document_id: 'd1', recipient_email: 'a@b.com', recipient_label: null,
+    build_kind: 'fence' as const, scope: { client_name: 'Jo', site_address: '1 St', site_suburb: 'Perth', job_type: 'fencing', job_number: 'SWF1' },
+    pricing_json: { totalIncGST: 1100, totalExGST: 1000, gst: 100 }, pdf_url: 'https://x/p.pdf',
+    released_via: 'send-quote/send-runs' as const,
+  }
+  const mV1 = buildMinimalReleaseManifest({ ...baseArgs, version: 1 })
+  const mV2 = buildMinimalReleaseManifest({ ...baseArgs, version: 2 })
+  // Freeze captured_at on both so only `version` differs (captured_at is now()).
+  const frozenV1 = { ...mV1, captured_at: '2026-06-17T00:00:00Z' }
+  const frozenV2 = { ...mV2, captured_at: '2026-06-17T00:00:00Z' }
+  const { hash: hV1 } = await canonicalJsonAndHash(frozenV1)
+  const { hash: hV2 } = await canonicalJsonAndHash(frozenV2)
+  assert(hV1 !== hV2, 'version is part of the manifest bytes → v1 and v2 hashes must differ')
+  // The stored row at version=2 carries hV2; rebuilding from version=2
+  // reproduces hV2 (self-verifies). Reusing hV1 on a v2 row would fail this.
+  const { hash: rebuiltV2 } = await canonicalJsonAndHash({ ...buildMinimalReleaseManifest({ ...baseArgs, version: 2 }), captured_at: '2026-06-17T00:00:00Z' })
+  assertEquals(rebuiltV2, hV2, 'rebuilding the manifest at the row\'s own version reproduces its manifest_hash')
+})
+
+Deno.test("SV2 — content hash is INDEPENDENT of version (so an unchanged re-send at v1 still matches the stored v1 row even after a reallocation bumped max version)", async () => {
+  // releaseContentHash excludes version (it's not a billing field). Two builds
+  // of the same content at different versions must produce the same CONTENT hash
+  // — this is what lets the unchanged-resend idempotency match survive
+  // regardless of how the version counter has advanced.
+  const hAtV1 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: { ...icBase, version: 1 } })
+  const hAtV2 = await releaseContentHash({ scope_snapshot: scope, pricing_snapshot: pricing, totals_snapshot: totals, internal_cost_snapshot: { ...icBase, version: 2 } })
+  assertEquals(hAtV1, hAtV2, 'content hash must ignore version (stripped from internal_cost content)')
 })

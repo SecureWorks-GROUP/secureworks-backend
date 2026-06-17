@@ -395,209 +395,228 @@ async function recordReleasedQuoteRevision(
   ctx: { handler: string; job_id: string },
 ): Promise<string | null> {
   try {
-    // 1. Build minimal manifest snapshot at release time.
-    const manifest = buildMinimalReleaseManifest({
-      job_id: input.job_id,
-      job_document_id: input.job_document_id,
-      version: input.version,
-      recipient_email: input.recipient_email,
-      recipient_label: input.recipient_label,
-      build_kind: input.build_kind,
-      council_status: input.council_status,
-      neighbours_required: input.neighbours_required,
-      scope: input.scope,
-      pricing_json: input.pricing_json,
-      pdf_url: input.pdf_url,
-      released_via: input.released_via,
-    })
-
-    // 2. Canonicalize + hash (recursive deep-sort + SHA-256).
-    const { canonical, hash } = await canonicalJsonAndHash(manifest)
-
-    // 3. Manifest URL — CAP0-QUOTE-REVISION-MANIFEST-STORAGE (2026-05-01).
+    // ── Build all version/release_id-dependent artifacts together ──
     //
-    // The dedicated PRIVATE `release-manifests` bucket (migration
-    // 20260501140000) holds canonical JSON keyed by sha256 hash. Service role
-    // is the only writer; service role + future release-packet read API are
-    // the only readers. The object URL returns 401 to anon/authenticated.
-    //
-    // The earlier failure mode (job-pdfs RLS expecting auth_org_id()) does not
-    // apply: the new bucket has NO RLS policies, so the storage default
-    // (deny-all to non-service roles, service-role bypass) is the entire
-    // access model.
-    //
-    // Failure-mode policy: if upload fails (network, transient outage, etc),
-    // the helper falls back to writing manifest_url = stub and logs
-    // [quote-revision-upload-fail]. The row is still INSERTed because
-    // manifest_canonical_text is the inline verification source — the hash is
-    // verifiable without Storage. A 409 "duplicate" upload error is treated
-    // as success (same hash means same content; the existing object IS our
-    // content), so retries with identical input don't fall back to stub.
-    const objectPath = `${hash}.json`
-    const realManifestUrl = `${SUPABASE_URL}/storage/v1/object/release-manifests/${objectPath}`
-    const stubManifestUrl = `supabase-internal://manifest/${hash}`
-    let manifestUrl = stubManifestUrl
-    try {
-      const bytes = new TextEncoder().encode(canonical)
-      const { error: upErr } = await sb.storage
-        .from('release-manifests')
-        .upload(objectPath, bytes, {
-          contentType: 'application/json',
-          upsert: false,
-        })
-      if (!upErr) {
-        manifestUrl = realManifestUrl
-      } else {
-        const dup = (upErr as any)?.statusCode === '409'
-          || /duplicate|already exists/i.test(upErr.message ?? '')
-        if (dup) {
-          // Same hash = same content, by sha256. The existing object IS our
-          // content. Use the real URL anyway.
-          manifestUrl = realManifestUrl
-        } else {
-          console.error('[quote-revision-upload-fail]', JSON.stringify({
-            job_id: input.job_id, version: input.version, handler: ctx.handler,
-            error: upErr.message ?? String(upErr),
-            note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
-          }))
-        }
-      }
-    } catch (e: any) {
-      console.error('[quote-revision-upload-fail]', JSON.stringify({
-        job_id: input.job_id, version: input.version, handler: ctx.handler,
-        error: e?.message ?? String(e),
-        note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
-      }))
-    }
-
-    // 4. INSERT the released row directly with sent_at = now(). Atomic; no staging.
-    const totals = manifest.totals_snapshot
+    // The minimal manifest bakes `version` into its bytes; the V2 envelope bakes
+    // BOTH `version` and `release_id` into internal_cost_snapshot_json + the
+    // sealed-event payload + the hashes. So the manifest_hash and
+    // internal_cost_hash are functions of (version, releaseId). To keep every
+    // INSERTed row self-verifiable (rebuilding the manifest from the row's OWN
+    // version reproduces its manifest_hash; T7 invariant: release_id in
+    // canonical_text == quote_revisions.id), we build these artifacts fresh for
+    // whatever (version, releaseId) the row will actually carry — the primary
+    // version below, OR the reallocated version in the conflict branch.
     const sentAtIso = new Date().toISOString()
 
-    // ── Loop 3 / P2 V2 augmentation ──
-    //
-    // When v2_inputs are provided, build the V2 envelope alongside the
-    // V1 minimal manifest. Validator runs in mode='warn'; this NEVER
-    // refuses the release. V2 column values land in the same INSERT so
-    // the row is atomic. If V2 build fails (unknown adapter, exception),
-    // we log [v2-augmentation-fail] and write V1 columns only — V1
-    // release-truth contract is preserved unconditionally.
-    //
-    // The V1 row id is generated by `gen_random_uuid()` default at INSERT
-    // time. We pre-allocate a UUID here so the V2 envelope's release_id
-    // matches the row id (T7 evidence-spine compatibility: release_id
-    // in canonical_text == quote_revisions.id).
-    const releaseId = crypto.randomUUID()
+    type ReleaseArtifacts = {
+      manifest: ReturnType<typeof buildMinimalReleaseManifest>
+      canonical: string
+      hash: string
+      manifestUrl: string
+      totals: unknown
+      v2Cols: Record<string, unknown>
+      v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null
+    }
 
-    let v2Cols: Record<string, unknown> = {}
-    let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null = null
-    if (input.v2_inputs) {
+    const buildReleaseArtifacts = async (
+      version: number,
+      releaseId: string,
+    ): Promise<ReleaseArtifacts> => {
+      // 1. Build minimal manifest snapshot at release time (version-bound).
+      const manifest = buildMinimalReleaseManifest({
+        job_id: input.job_id,
+        job_document_id: input.job_document_id,
+        version,
+        recipient_email: input.recipient_email,
+        recipient_label: input.recipient_label,
+        build_kind: input.build_kind,
+        council_status: input.council_status,
+        neighbours_required: input.neighbours_required,
+        scope: input.scope,
+        pricing_json: input.pricing_json,
+        pdf_url: input.pdf_url,
+        released_via: input.released_via,
+      })
+
+      // 2. Canonicalize + hash (recursive deep-sort + SHA-256).
+      const { canonical, hash } = await canonicalJsonAndHash(manifest)
+
+      // 3. Manifest URL — CAP0-QUOTE-REVISION-MANIFEST-STORAGE (2026-05-01).
+      // PRIVATE `release-manifests` bucket keyed by sha256 hash; service role is
+      // the only writer/reader. If upload fails we fall back to a stub URL and
+      // log [quote-revision-upload-fail]; manifest_canonical_text is the inline
+      // verification source so the hash is verifiable without Storage. A 409
+      // "duplicate" upload is treated as success (same hash = same content).
+      const objectPath = `${hash}.json`
+      const realManifestUrl = `${SUPABASE_URL}/storage/v1/object/release-manifests/${objectPath}`
+      const stubManifestUrl = `supabase-internal://manifest/${hash}`
+      let manifestUrl = stubManifestUrl
       try {
-        const v2 = await buildV2Augmentation(sb, {
-          ...input.v2_inputs,
-          release_id: releaseId,
-        })
-        if (v2.ok) {
-          v2Cols = {
-            contacts_snapshot_json: v2.contacts_snapshot_json,
-            documents_snapshot_json: v2.documents_snapshot_json,
-            media_snapshot_json: v2.media_snapshot_json,
-            qa_snapshot_json: v2.qa_snapshot_json,
-            send_snapshot_json: v2.send_snapshot_json,
-            terms_snapshot_json: v2.terms_snapshot_json,
-            provenance_snapshot_json: v2.provenance_snapshot_json,
-            option_label: v2.option_label,
-            internal_cost_snapshot_json: v2.internal_cost_snapshot_json,
-            internal_cost_canonical_text: v2.internal_cost_canonical_text,
-            internal_cost_hash: v2.internal_cost_hash,
-          }
-          v2EmitInputs = {
-            manifest_hash: v2.manifest_hash,
-            internal_cost_hash: v2.internal_cost_hash,
-          }
-          if (v2.soft_warnings.length > 0) {
-            console.log('[v2-soft-warnings]', JSON.stringify({
-              job_id: input.job_id,
-              version: input.version,
-              handler: ctx.handler,
-              warnings: v2.soft_warnings,
-              hard_blockers_passed_count: v2.hard_blockers_passed.length,
-              note: 'Loop 3 / P2 soft-warn mode — release proceeds; warnings logged for capture-work prioritization',
+        const bytes = new TextEncoder().encode(canonical)
+        const { error: upErr } = await sb.storage
+          .from('release-manifests')
+          .upload(objectPath, bytes, {
+            contentType: 'application/json',
+            upsert: false,
+          })
+        if (!upErr) {
+          manifestUrl = realManifestUrl
+        } else {
+          const dup = (upErr as any)?.statusCode === '409'
+            || /duplicate|already exists/i.test(upErr.message ?? '')
+          if (dup) {
+            manifestUrl = realManifestUrl
+          } else {
+            console.error('[quote-revision-upload-fail]', JSON.stringify({
+              job_id: input.job_id, version, handler: ctx.handler,
+              error: upErr.message ?? String(upErr),
+              note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
             }))
           }
-        } else {
+        }
+      } catch (e: any) {
+        console.error('[quote-revision-upload-fail]', JSON.stringify({
+          job_id: input.job_id, version, handler: ctx.handler,
+          error: e?.message ?? String(e),
+          note: 'falling back to internal stub URL; manifest_canonical_text is the verification source',
+        }))
+      }
+
+      // 4. V2 augmentation envelope (version + release_id-bound). When v2_inputs
+      // are provided, build the V2 envelope. Validator runs in mode='warn'; this
+      // NEVER refuses the release. If the V2 build fails, log
+      // [v2-augmentation-fail] and write V1 columns only.
+      //
+      // release_id == the row id this artifact set will be INSERTed with, so the
+      // T7 invariant (release_id in canonical_text == quote_revisions.id) holds.
+      // version == the row's actual version, so internal_cost_snapshot_json
+      // self-verifies.
+      let v2Cols: Record<string, unknown> = {}
+      let v2EmitInputs: { manifest_hash: string; internal_cost_hash: string } | null = null
+      if (input.v2_inputs) {
+        try {
+          const v2 = await buildV2Augmentation(sb, {
+            ...input.v2_inputs,
+            version,
+            release_id: releaseId,
+          })
+          if (v2.ok) {
+            v2Cols = {
+              contacts_snapshot_json: v2.contacts_snapshot_json,
+              documents_snapshot_json: v2.documents_snapshot_json,
+              media_snapshot_json: v2.media_snapshot_json,
+              qa_snapshot_json: v2.qa_snapshot_json,
+              send_snapshot_json: v2.send_snapshot_json,
+              terms_snapshot_json: v2.terms_snapshot_json,
+              provenance_snapshot_json: v2.provenance_snapshot_json,
+              option_label: v2.option_label,
+              internal_cost_snapshot_json: v2.internal_cost_snapshot_json,
+              internal_cost_canonical_text: v2.internal_cost_canonical_text,
+              internal_cost_hash: v2.internal_cost_hash,
+            }
+            v2EmitInputs = {
+              manifest_hash: v2.manifest_hash,
+              internal_cost_hash: v2.internal_cost_hash,
+            }
+            if (v2.soft_warnings.length > 0) {
+              console.log('[v2-soft-warnings]', JSON.stringify({
+                job_id: input.job_id,
+                version,
+                handler: ctx.handler,
+                warnings: v2.soft_warnings,
+                hard_blockers_passed_count: v2.hard_blockers_passed.length,
+                note: 'Loop 3 / P2 soft-warn mode — release proceeds; warnings logged for capture-work prioritization',
+              }))
+            }
+          } else {
+            console.error('[v2-augmentation-fail]', JSON.stringify({
+              job_id: input.job_id,
+              version,
+              handler: ctx.handler,
+              reason: v2.reason,
+              note: 'V1 release-truth path proceeds; V2 columns left NULL on this row',
+            }))
+          }
+        } catch (e: any) {
           console.error('[v2-augmentation-fail]', JSON.stringify({
             job_id: input.job_id,
-            version: input.version,
+            version,
             handler: ctx.handler,
-            reason: v2.reason,
+            stage: 'helper_threw',
+            error: e?.message ?? String(e),
             note: 'V1 release-truth path proceeds; V2 columns left NULL on this row',
           }))
         }
-      } catch (e: any) {
-        console.error('[v2-augmentation-fail]', JSON.stringify({
-          job_id: input.job_id,
-          version: input.version,
-          handler: ctx.handler,
-          stage: 'helper_threw',
-          error: e?.message ?? String(e),
-          note: 'V1 release-truth path proceeds; V2 columns left NULL on this row',
-        }))
+      }
+
+      return {
+        manifest,
+        canonical,
+        hash,
+        manifestUrl,
+        totals: manifest.totals_snapshot,
+        v2Cols,
+        v2EmitInputs,
       }
     }
 
-    // Timestamp-independent idempotency key for this release. Computed over the
-    // billing-determining content only (no captured_at / release_id), so two
-    // identical re-sends produce the SAME contentHash even though their stored
-    // manifest_hash differs. Used in the conflict branch below.
+    // Assemble the row INSERT payload from a built artifact set.
+    const rowFromArtifacts = (version: number, releaseId: string, art: ReleaseArtifacts) => ({
+      id: releaseId,
+      job_id: input.job_id,
+      job_document_id: input.job_document_id,
+      version,
+      recipient_email: input.recipient_email,
+      recipient_label: input.recipient_label,
+      scope_snapshot_json: art.manifest.scope_snapshot,
+      pricing_snapshot_json: art.manifest.pricing_snapshot,
+      totals_snapshot_json: art.totals,
+      manifest_url: art.manifestUrl,
+      manifest_hash: art.hash,
+      // Codex stop-gate fix: capture canonical bytes inline so the hash is
+      // verifiable without external Storage. sha256(manifest_canonical_text)
+      // = manifest_hash by construction.
+      manifest_canonical_text: art.canonical,
+      pdf_url: input.pdf_url,
+      council_status: input.council_status ?? 'unknown',
+      build_kind: input.build_kind,
+      neighbours_required: input.neighbours_required ?? null,
+      released_via: input.released_via,
+      sent_at: sentAtIso,
+      schema_version: '1.0',
+      ...art.v2Cols,
+    })
+
+    // ── Primary attempt at the input version ──
+    // We pre-allocate a UUID so the V2 envelope's release_id == the row id.
+    const releaseId = crypto.randomUUID()
+    const art = await buildReleaseArtifacts(input.version, releaseId)
+
+    // Timestamp-independent idempotency key — billing content only (no
+    // captured_at / release_id), so two identical re-sends produce the SAME
+    // contentHash even though their stored manifest_hash differs.
     const incomingContentHash = await releaseContentHash({
-      scope_snapshot: manifest.scope_snapshot,
-      pricing_snapshot: manifest.pricing_snapshot,
-      totals_snapshot: totals,
-      internal_cost_snapshot: (v2Cols.internal_cost_snapshot_json ?? null),
+      scope_snapshot: art.manifest.scope_snapshot,
+      pricing_snapshot: art.manifest.pricing_snapshot,
+      totals_snapshot: art.totals,
+      internal_cost_snapshot: (art.v2Cols.internal_cost_snapshot_json ?? null),
     })
 
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
-      .insert({
-        id: releaseId,
-        job_id: input.job_id,
-        job_document_id: input.job_document_id,
-        version: input.version,
-        recipient_email: input.recipient_email,
-        recipient_label: input.recipient_label,
-        scope_snapshot_json: manifest.scope_snapshot,
-        pricing_snapshot_json: manifest.pricing_snapshot,
-        totals_snapshot_json: totals,
-        manifest_url: manifestUrl,
-        manifest_hash: hash,
-        // Codex stop-gate fix: capture canonical bytes inline so the hash is
-        // verifiable without external Storage. sha256(manifest_canonical_text)
-        // = manifest_hash by construction. Cap 0 schema-version 1.0; column
-        // is nullable for backward compat with rows written before
-        // 20260430170000 migration landed.
-        manifest_canonical_text: canonical,
-        pdf_url: input.pdf_url,
-        council_status: input.council_status ?? 'unknown',
-        build_kind: input.build_kind,
-        neighbours_required: input.neighbours_required ?? null,
-        released_via: input.released_via,
-        sent_at: sentAtIso,
-        schema_version: '1.0',
-        ...v2Cols,
-      })
+      .insert(rowFromArtifacts(input.version, releaseId, art))
       .select('id')
       .single()
 
     if (!insErr && inserted) {
       // V2 sealed event — append-only, T7 evidence spine consumable.
-      if (v2EmitInputs) {
+      if (art.v2EmitInputs) {
         await emitV2SealedEvent(sb, {
           job_id: input.job_id,
           quote_revision_id: inserted.id,
           release_id: releaseId,
           version: input.version,
-          manifest_hash: v2EmitInputs.manifest_hash,
-          internal_cost_hash: v2EmitInputs.internal_cost_hash,
+          manifest_hash: art.v2EmitInputs.manifest_hash,
+          internal_cost_hash: art.v2EmitInputs.internal_cost_hash,
           released_via: input.released_via,
         })
       }
@@ -666,29 +685,19 @@ async function recordReleasedQuoteRevision(
           .maybeSingle()
         const newVersion = ((maxRow?.version ?? 0) as number) + 1
         const newReleaseId = crypto.randomUUID()
+
+        // CRITICAL (round-2 review): rebuild the manifest + V2 envelope at the
+        // NEW version/release_id. Reusing the v1-built artifacts would store a
+        // manifest_hash that encodes the OLD version and an
+        // internal_cost_snapshot_json whose release_id/version disagree with the
+        // row — breaking self-verifiability (rebuilding from the row's own
+        // version would not reproduce manifest_hash) and the T7 invariant. The
+        // upload writes a second manifest object keyed by the new hash; cheap and
+        // correct.
+        const reArt = await buildReleaseArtifacts(newVersion, newReleaseId)
+
         const { data: reinserted, error: reinsErr } = await sb.from('quote_revisions')
-          .insert({
-            id: newReleaseId,
-            job_id: input.job_id,
-            job_document_id: input.job_document_id,
-            version: newVersion,
-            recipient_email: input.recipient_email,
-            recipient_label: input.recipient_label,
-            scope_snapshot_json: manifest.scope_snapshot,
-            pricing_snapshot_json: manifest.pricing_snapshot,
-            totals_snapshot_json: totals,
-            manifest_url: manifestUrl,
-            manifest_hash: hash,
-            manifest_canonical_text: canonical,
-            pdf_url: input.pdf_url,
-            council_status: input.council_status ?? 'unknown',
-            build_kind: input.build_kind,
-            neighbours_required: input.neighbours_required ?? null,
-            released_via: input.released_via,
-            sent_at: sentAtIso,
-            schema_version: '1.0',
-            ...v2Cols,
-          })
+          .insert(rowFromArtifacts(newVersion, newReleaseId, reArt))
           .select('id')
           .single()
         if (!reinsErr && reinserted) {
@@ -699,16 +708,16 @@ async function recordReleasedQuoteRevision(
             attempt,
             handler: ctx.handler,
             revision_id: reinserted.id,
-            note: 'content mismatch at (job_id,version) — reallocated to max+1 for revised release',
+            note: 'content mismatch at (job_id,version) — reallocated to max+1 for revised release; manifest + V2 envelope rebuilt at new version/id',
           }))
-          if (v2EmitInputs) {
+          if (reArt.v2EmitInputs) {
             await emitV2SealedEvent(sb, {
               job_id: input.job_id,
               quote_revision_id: reinserted.id,
               release_id: newReleaseId,
               version: newVersion,
-              manifest_hash: v2EmitInputs.manifest_hash,
-              internal_cost_hash: v2EmitInputs.internal_cost_hash,
+              manifest_hash: reArt.v2EmitInputs.manifest_hash,
+              internal_cost_hash: reArt.v2EmitInputs.internal_cost_hash,
               released_via: input.released_via,
             })
           }
@@ -719,21 +728,25 @@ async function recordReleasedQuoteRevision(
         const isUniqueViolation =
           (reinsErr as any)?.code === '23505' ||
           /duplicate key|unique constraint/i.test(reinsErr?.message ?? '')
-        if (isUniqueViolation && attempt < MAX_REALLOC_ATTEMPTS) {
-          console.log('[quote-revision-reallocate-retry]', JSON.stringify({
-            job_id: input.job_id, attempted_version: newVersion, attempt,
-            handler: ctx.handler,
-            note: 'unique violation on reallocated version — concurrent re-send; re-reading max and retrying',
+        if (!isUniqueViolation) {
+          // Hard failure (not a version collision) — do not retry.
+          console.error('[quote-revision-reallocate-fail]', JSON.stringify({
+            job_id: input.job_id, original_version: input.version, new_version: newVersion,
+            attempt, handler: ctx.handler, error: reinsErr?.message ?? String(reinsErr),
           }))
-          continue
+          return null
         }
-        console.error('[quote-revision-reallocate-fail]', JSON.stringify({
-          job_id: input.job_id, original_version: input.version, new_version: newVersion,
-          attempt, handler: ctx.handler, error: reinsErr?.message ?? String(reinsErr),
+        // Unique-violation: a concurrent re-send took this version. Re-read max
+        // and retry on the next loop iteration (if any remain).
+        console.log('[quote-revision-reallocate-retry]', JSON.stringify({
+          job_id: input.job_id, attempted_version: newVersion, attempt,
+          handler: ctx.handler,
+          note: 'unique violation on reallocated version — concurrent re-send; re-reading max and retrying',
         }))
-        return null
       }
-      // Exhausted all attempts (every attempt lost the race).
+      // Exhausted all attempts (every attempt lost the unique-constraint race).
+      // Reachable now that the loop only `continue`s on retryable violations and
+      // never returns null on the final attempt's violation path.
       console.error('[quote-revision-reallocate-exhausted]', JSON.stringify({
         job_id: input.job_id, original_version: input.version,
         attempts: MAX_REALLOC_ATTEMPTS, handler: ctx.handler,
