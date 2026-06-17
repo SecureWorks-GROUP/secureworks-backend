@@ -19,6 +19,7 @@ import {
   _createMakesafeDraftInvoiceForTest,
   _fetchAllByJobIdChunkedForTest,
   _makesafeDraftIdempotencyKey,
+  _makesafeNormRefForTest,
   _makesafePipelineForTest,
 } from "./index.ts";
 
@@ -201,6 +202,28 @@ Deno.test("T5: make-safe draft idempotency key is STABLE per (job, reference) re
   assertEquals(_makesafeDraftIdempotencyKey("job-9", " MLB-25248 "), _makesafeDraftIdempotencyKey("job-9", "mlb-25248"));
   // No time component: stays identical across a simulated time gap.
   assert(!k1.includes(":"), "key has no ISO time component");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// BLOCKER B pt2 — hyphen-robust _makesafeNormRef. 'AJBR 67713' == 'AJBR-67713'
+// == 'AJBR67713' all collapse to 'ajbr67713', so the DRAFT idempotency key + the
+// dup-scan match hyphen/space variants of the same external_ref. Mirrors
+// makesafe_send_pack.ts:normRef (both sites changed together).
+// ════════════════════════════════════════════════════════════════════════════
+Deno.test("B2: _makesafeNormRef collapses space/hyphen/compact variants to one key", () => {
+  assertEquals(_makesafeNormRefForTest("AJBR 67713"), "ajbr67713");
+  assertEquals(_makesafeNormRefForTest("AJBR-67713"), "ajbr67713");
+  assertEquals(_makesafeNormRefForTest("AJBR67713"), "ajbr67713");
+  assertEquals(_makesafeNormRefForTest("AJBR 67713"), _makesafeNormRefForTest("AJBR-67713"));
+  assertEquals(_makesafeNormRefForTest("AJBR-67713"), _makesafeNormRefForTest("AJBR67713"));
+});
+
+Deno.test("B2: draft idempotency key is identical for spaced vs hyphenated vs compact refs", () => {
+  const spaced = _makesafeDraftIdempotencyKey("job-x", "AJBR 67713");
+  const hyphen = _makesafeDraftIdempotencyKey("job-x", "AJBR-67713");
+  const compact = _makesafeDraftIdempotencyKey("job-x", "AJBR67713");
+  assertEquals(spaced, hyphen, "spaced and hyphenated refs must yield the same idempotency key");
+  assertEquals(hyphen, compact, "hyphenated and compact refs must yield the same idempotency key");
 });
 
 Deno.test("T5: a second createMakesafeDraftInvoice with the same job/reference returns skipped (no duplicate)", async () => {

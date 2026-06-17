@@ -205,6 +205,7 @@ import {
   sendPackAllowed,
   resolveExistingInvoice,
   checkClientSendGate,
+  checkExactRecipientGate,
   buildPackSentMarkerText,
   isPackSentMainEvent as _sendPackIsPackSentMainEvent,
   LOCKABLE_STATUSES,
@@ -8697,9 +8698,13 @@ export const _attachMakesafeDocumentForTest = attachMakesafeDocument
 // single already-flagged job. See harness/.../sw-makesafe-audit-tool-spec.md.
 
 // Reference normaliser — mirrors the Python invoice_utils._norm (strip, lower,
-// drop all whitespace) so the server-side resolver matches the client guard.
+// drop all whitespace) AND drops hyphens so spaced/dashed/compact variants of the
+// SAME ref collapse to one key: 'AJBR 67713' == 'AJBR-67713' == 'AJBR67713' ->
+// 'ajbr67713' (BLOCKER B pt2). This keeps the DRAFT idempotency key + the dup-scan
+// robust to hyphen/space variants of the same external_ref. The >=5-char substring
+// tier still works on this normalised (hyphen/space-free) form.
 function _makesafeNormRef(s: any): string {
-  return String(s ?? '').trim().toLowerCase().replace(/\s+/g, '')
+  return String(s ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')
 }
 
 // AUDIT-MODE invoice resolution (item 2.4). Returns the FULL mapped invoice list
@@ -8743,6 +8748,7 @@ function _resolveMakesafeJobInvoices(
 }
 // Test-only exports.
 export const _resolveMakesafeJobInvoicesForTest = _resolveMakesafeJobInvoices
+export const _makesafeNormRefForTest = _makesafeNormRef
 
 // M3 marker-integrity. From the full per-job mapped invoice list (which keeps
 // VOIDED/DELETED for the void-history checks), pick the SINGLE current LIVE
@@ -14948,7 +14954,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   // substatus alone is NOT enough — see T3).
   const { data: details, error: detErr } = await client
     .from('makesafe_job_details')
-    .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, makesafe_companies(slug, name, invoice_email)')
+    .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, makesafe_companies(slug, name, invoice_email, report_recipient)')
     .eq('substatus', REPORT_DRAFT_READY_SUBSTATUS)
     .limit(limit)
   if (detErr) throw new ApiError('makesafe_report_drafts: details read failed: ' + detErr.message, 500)
@@ -15102,8 +15108,13 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       if (p.url) sourceDocs.push({ label: p.label || 'Site Photo', url: p.url, kind: 'image' })
     }
 
+    // BLOCKER C — the To is the builder's WORK-ORDERS inbox (report_recipient),
+    // NEVER the billing contact (invoice_email = vanessa@ajs.build for AJS). When
+    // report_recipient is unset the recipient is null and the cockpit shows the
+    // "no work-order recipient configured" warning (no fallback to invoice_email).
     const recipientEmail = resolveRecipientEmail({
-      companyInvoiceEmail: company.invoice_email,
+      companyReportRecipient: company.report_recipient,
+      companyInvoiceEmail: company.invoice_email, // accepted for back-compat; never used as To
       detailInvoiceEmail: null, // no per-job recipient column on makesafe_job_details
     })
 
@@ -15135,6 +15146,11 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       site_address: siteAddress,
       site_suburb: job.site_suburb || null,
       recipient_email: recipientEmail, // null -> cockpit shows a warning
+      // BLOCKER C — the EXACT (and only) cc set for a make-safe report send. The
+      // cockpit/send carries this so the To = work-orders inbox + CC = ses@ only
+      // (vanessa@ajs.build is never a recipient or cc). send_pack re-derives +
+      // enforces this server-side too (checkExactRecipientGate).
+      cc: [MAKESAFE_CC],
       // N-1: when true, MORE THAN ONE non-void invoice maps to this job. The
       // cockpit must show the ambiguity (not a single amount) and block sending;
       // makesafe_send_pack returns 412 on the same condition.
@@ -15486,9 +15502,28 @@ async function makesafeSendPack(
     .eq('id', jobId).maybeSingle()
   if (!job) throw new ApiError('job not found', 404)
   const { data: detail } = await client.from('makesafe_job_details')
-    .select('*, makesafe_companies(slug,name)')
+    .select('*, makesafe_companies(slug,name,report_recipient)')
     .eq('job_id', jobId).maybeSingle()
   const requiresSwms = _isMakesafeMlbCompany(detail, job)
+
+  // ── BLOCKER C — EXACT-RECIPIENT GATE (money/comms, FAIL CLOSED) ──
+  // Re-derive the builder's WORK-ORDERS inbox SERVER-SIDE from
+  // makesafe_companies.report_recipient (the job's requesting company) — never
+  // trust body.recipient_email alone. The send To MUST equal that inbox and the
+  // CC MUST be EXACTLY ses@secureworkswa.com.au. This blocks vanessa@ajs.build
+  // (the billing contact) ever being the To, and blocks any extra/legacy CC
+  // (e.g. a 'CC vanessa@ajs.build' special_instructions value).
+  const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
+  const recipientFailures = checkExactRecipientGate({
+    configuredReportRecipient,
+    to: recipientEmail,
+    cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
+  })
+  if (recipientFailures.length > 0) {
+    await _ensurePackRow(client, jobId, packKind)
+    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'recipient_gate', error_detail: recipientFailures.join(' | ').slice(0, 500) })
+    throw new ApiError('recipient gate failed (no send; fix the work-orders recipient): ' + recipientFailures.join('; '), 403)
+  }
 
   // ── PREFLIGHT: typed close-out docs must exist (report + invoice + swms if MLB) ──
   const { data: docRows } = await client.from('job_documents')

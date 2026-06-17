@@ -78,8 +78,12 @@ export function buildPackSentMarkerText(args: {
 //                        external_ref >= 5 chars (short tokens cannot false-match)
 const VOID_STATUSES = ['VOIDED', 'DELETED']
 
+// Strips case + ALL whitespace AND hyphens so spaced/dashed/compact variants of
+// the same ref collapse to one key ('AJBR 67713' == 'AJBR-67713' == 'AJBR67713'
+// -> 'ajbr67713'), making the dup-resolver robust to hyphen/space variants
+// (BLOCKER B pt2). The >=5-char substring tier still works on this normalised form.
 export function normRef(s: unknown): string {
-  return String(s ?? '').trim().toLowerCase().replace(/\s+/g, '')
+  return String(s ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')
 }
 
 export function isVoidStatus(status: unknown): boolean {
@@ -197,6 +201,54 @@ export interface ClientSendPayload {
   htmlBody?: string
   html_body?: string
   attachments?: unknown
+}
+
+// ── Exact-recipient gate (BLOCKER C — money/comms, FAIL CLOSED) ──
+//
+// The previous gate only required CC to INCLUDE ses@; it did not enforce the To
+// and did not reject EXTRA CCs (e.g. vanessa@ajs.build via special_instructions).
+// This gate enforces the EXACT recipient set, SERVER-DERIVED (never trusting the
+// UI body alone):
+//   - To MUST equal the configured work-orders inbox (report_recipient) for the
+//     job's builder. If no report_recipient is configured -> REJECT (cannot send
+//     to the right place). If the body's To != the configured inbox -> REJECT.
+//   - CC MUST equal EXACTLY [ses@secureworkswa.com.au]. Any extra address
+//     (vanessa, anyone) or a missing ses@ -> REJECT.
+//
+// Returns [] when the recipient set is exactly correct; otherwise a list of hard
+// failures. The caller MUST treat any non-empty result as a do-not-send stop.
+export function checkExactRecipientGate(args: {
+  configuredReportRecipient: string | null | undefined
+  to: unknown
+  cc: unknown
+}): string[] {
+  const failures: string[] = []
+
+  const configured = String(args.configuredReportRecipient ?? '').trim().toLowerCase()
+  if (!configured) {
+    failures.push('no work-order recipient (report_recipient) configured for this builder; cannot send')
+  }
+
+  const toList = splitEmails(args.to)
+  if (toList.length === 0) {
+    failures.push('to recipient is missing')
+  } else if (toList.length > 1) {
+    failures.push(`to must be exactly the configured work-orders inbox; got ${toList.length} recipients: ${toList.join(', ')}`)
+  } else if (configured && toList[0] !== configured) {
+    failures.push(`to must equal the configured work-orders inbox '${configured}'; got '${toList[0]}'`)
+  }
+
+  // CC MUST equal exactly [ses@]. Reject any extra (vanessa, etc.) or a miss.
+  const ccList = splitEmails(args.cc)
+  const extras = ccList.filter((c) => c !== MAKESAFE_CC)
+  if (!ccList.includes(MAKESAFE_CC)) {
+    failures.push(`cc must be exactly ${MAKESAFE_CC}; got ${ccList.length ? ccList.join(', ') : '<missing>'}`)
+  }
+  if (extras.length > 0) {
+    failures.push(`cc must be EXACTLY ${MAKESAFE_CC} only; rejected extra cc(s): ${extras.join(', ')}`)
+  }
+
+  return failures
 }
 
 // Returns [] when the payload is safe to send; otherwise a list of failure

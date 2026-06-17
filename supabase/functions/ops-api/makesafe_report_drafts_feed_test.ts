@@ -12,6 +12,7 @@
 //        supabase/functions/ops-api/makesafe_report_drafts_feed_test.ts
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _makesafeReportDraftsForTest } from "./index.ts";
+import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
 // Fake client: table reads with .eq/.in/.limit/.order (predicate-applying) plus a
 // .storage stub. The feed signs only bare storage paths; full https urls pass
@@ -180,6 +181,43 @@ Deno.test("D3 feed: an attached SWMS is surfaced in draft_docs", async () => {
   const res: any = await _makesafeReportDraftsForTest(client, params());
   const draftLabels = res.drafts[0].draft_docs.map((d: any) => d.label);
   assert(draftLabels.includes("SWMS"), "attached SWMS is surfaced");
+});
+
+// ─────────────────────────────────────────────────────────────────
+// BLOCKER C — feed recipient resolution. The To is the builder's WORK-ORDERS
+// inbox (makesafe_companies.report_recipient) ONLY, and the cc is EXACTLY [ses@].
+// invoice_email (the billing contact, vanessa@ajs.build for AJS) is NEVER the To.
+// ─────────────────────────────────────────────────────────────────
+Deno.test("C feed: report_recipient set -> recipient_email = work-orders inbox, cc = [ses@]", async () => {
+  const seed = ferndaleSeed();
+  // AJS-shaped: a billing contact (invoice_email = vanessa) PLUS the work-orders
+  // inbox (report_recipient). The To must be the work-orders inbox, never vanessa.
+  seed.makesafe_job_details[0].makesafe_companies = {
+    slug: "aj", name: "AJS", invoice_email: "vanessa@ajs.build", report_recipient: "workorders@ajs.build",
+  } as any;
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  const row = res.drafts[0];
+  assertEquals(row.recipient_email, "workorders@ajs.build");
+  assert(row.recipient_email !== "vanessa@ajs.build", "vanessa (billing) must NEVER be the To");
+  assertEquals(row.cc, [MAKESAFE_CC]);
+});
+
+Deno.test("C feed: report_recipient null -> recipient_email null (warning), NOT invoice_email", async () => {
+  const seed = ferndaleSeed();
+  // Only a billing contact configured, no work-orders inbox.
+  seed.makesafe_job_details[0].makesafe_companies = {
+    slug: "aj", name: "AJS", invoice_email: "vanessa@ajs.build", report_recipient: null,
+  } as any;
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  const row = res.drafts[0];
+  assertEquals(row.recipient_email, null, "no work-orders inbox -> null (cockpit warns)");
+  assert(row.recipient_email !== "vanessa@ajs.build", "must NOT fall back to the billing contact");
+  // cc is still exactly ses@ (the send hard-enforces this server-side too).
+  assertEquals(row.cc, [MAKESAFE_CC]);
 });
 
 Deno.test("T3 feed: invoice_ambiguous is still returned (UX gates on it)", async () => {

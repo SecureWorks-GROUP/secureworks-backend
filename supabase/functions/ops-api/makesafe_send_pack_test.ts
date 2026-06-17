@@ -19,6 +19,8 @@ import {
 import {
   sendPackAllowed,
   checkClientSendGate,
+  checkExactRecipientGate,
+  normRef,
   resolveExistingInvoice,
   isPackSentMainEvent,
   hasPackSentMainMarker,
@@ -312,8 +314,8 @@ Deno.test("dup-guard: exact normalised reference match (case + whitespace folded
   const rows = [
     { job_id: "other", status: "DRAFT", invoice_number: "INV-2", reference: " MLB-24981 ", xero_invoice_id: "x2" },
   ];
-  // normRef folds case + strips surrounding/inner whitespace (NOT hyphens),
-  // matching the python _norm. " MLB-24981 " -> "mlb-24981" == "mlb-24981".
+  // normRef folds case + strips surrounding/inner whitespace AND hyphens, so
+  // " MLB-24981 " -> "mlb24981" == "mlb24981" (BLOCKER B pt2 hyphen-robust).
   const hit = resolveExistingInvoice(rows, "job-x", "mlb-24981");
   assert(hit);
   assertEquals(hit!.match_method, "reference");
@@ -660,4 +662,117 @@ Deno.test("N-1 isInvoiceAmbiguous: >1 non-void is ambiguous; voided/deleted neve
     false,
   );
   assertEquals(countLiveInvoices([{ status: "AUTHORISED" }, { status: "VOIDED" }, { status: "PAID" }]), 2);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 8. EXACT-RECIPIENT GATE (BLOCKER C — money/comms, FAIL CLOSED).
+//    The To MUST equal the SERVER-CONFIGURED work-orders inbox (report_recipient)
+//    and the CC MUST be EXACTLY [ses@secureworkswa.com.au]. vanessa@ajs.build (the
+//    billing contact) must NEVER be a To or a CC. Cross-ref index.ts:makesafeSendPack
+//    recipient-gate block (server-derives report_recipient from makesafe_companies).
+// ═════════════════════════════════════════════════════════════════
+
+const AJS_WORKORDERS = "workorders@ajs.build";
+const VANESSA = "vanessa@ajs.build";
+
+Deno.test("recipient-gate: To=work-orders inbox + CC=[ses@] PASSES", () => {
+  assertEquals(
+    checkExactRecipientGate({
+      configuredReportRecipient: AJS_WORKORDERS,
+      to: AJS_WORKORDERS,
+      cc: [MAKESAFE_CC],
+    }),
+    [],
+  );
+  // A comma-joined string To/CC is tolerated as long as the set is exact.
+  assertEquals(
+    checkExactRecipientGate({
+      configuredReportRecipient: AJS_WORKORDERS,
+      to: AJS_WORKORDERS,
+      cc: MAKESAFE_CC,
+    }),
+    [],
+  );
+});
+
+Deno.test("recipient-gate: CC containing vanessa is REJECTED (vanessa never on CC)", () => {
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: AJS_WORKORDERS,
+    to: AJS_WORKORDERS,
+    cc: [MAKESAFE_CC, VANESSA],
+  });
+  assert(f.length > 0);
+  assert(f.some((x) => x.includes("EXACTLY") && x.includes(VANESSA)), `expected a vanessa cc rejection, got: ${f.join(" | ")}`);
+});
+
+Deno.test("recipient-gate: CC with an extra (non-ses) address is REJECTED", () => {
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: AJS_WORKORDERS,
+    to: AJS_WORKORDERS,
+    cc: [MAKESAFE_CC, "someone-else@example.com"],
+  });
+  assert(f.some((x) => x.includes("someone-else@example.com")), `expected an extra-cc rejection, got: ${f.join(" | ")}`);
+});
+
+Deno.test("recipient-gate: missing ses@ on CC is REJECTED", () => {
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: AJS_WORKORDERS,
+    to: AJS_WORKORDERS,
+    cc: [],
+  });
+  assert(f.some((x) => x.includes("cc must be exactly")), `expected a missing-ses cc rejection, got: ${f.join(" | ")}`);
+});
+
+Deno.test("recipient-gate: To != configured report_recipient is REJECTED (vanessa as To blocked)", () => {
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: AJS_WORKORDERS,
+    to: VANESSA, // the billing contact must never be the To
+    cc: [MAKESAFE_CC],
+  });
+  assert(f.some((x) => x.includes("to must equal the configured work-orders inbox") && x.includes(VANESSA)),
+    `expected a wrong-To rejection naming vanessa, got: ${f.join(" | ")}`);
+});
+
+Deno.test("recipient-gate: no report_recipient configured is REJECTED (cannot send)", () => {
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: null,
+    to: VANESSA,
+    cc: [MAKESAFE_CC],
+  });
+  assert(f.some((x) => x.includes("no work-order recipient")), `expected a no-recipient rejection, got: ${f.join(" | ")}`);
+});
+
+Deno.test("recipient-gate: a second To address is REJECTED (exactly one recipient)", () => {
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: AJS_WORKORDERS,
+    to: [AJS_WORKORDERS, VANESSA],
+    cc: [MAKESAFE_CC],
+  });
+  assert(f.some((x) => x.includes("to must be exactly the configured work-orders inbox")),
+    `expected a too-many-To rejection, got: ${f.join(" | ")}`);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 9. HYPHEN-ROBUST normRef (BLOCKER B pt2). 'AJBR 67713' == 'AJBR-67713' ==
+//    'AJBR67713' all normalise to 'ajbr67713'. The dup-resolver therefore matches
+//    hyphen/space variants of the same external_ref. (Mirrors index.ts
+//    _makesafeNormRef; both sites changed together.)
+// ═════════════════════════════════════════════════════════════════
+Deno.test("normRef: space, hyphen, and compact ref variants collapse to one key", () => {
+  assertEquals(normRef("AJBR 67713"), "ajbr67713");
+  assertEquals(normRef("AJBR-67713"), "ajbr67713");
+  assertEquals(normRef("AJBR67713"), "ajbr67713");
+  assertEquals(normRef(" ajbr - 67713 "), "ajbr67713");
+  assertEquals(normRef("AJBR 67713"), normRef("AJBR-67713"));
+});
+
+Deno.test("dup-guard: a SPACED external_ref matches a HYPHENATED stored reference (BLOCKER B pt2)", () => {
+  const rows = [
+    { job_id: "other", status: "AUTHORISED", invoice_number: "INV-H", reference: "AJBR-67713", xero_invoice_id: "xh" },
+  ];
+  // Typed 'AJBR 67713' (space) must resolve the same invoice stored as 'AJBR-67713'.
+  const hit = resolveExistingInvoice(rows, "job-x", "AJBR 67713");
+  assert(hit, "spaced ref must match the hyphenated stored reference");
+  assertEquals(hit!.match_method, "reference");
+  assertEquals(hit!.invoice_number, "INV-H");
 });
