@@ -1866,7 +1866,23 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
-      case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
+      case 'update_makesafe_substatus': {
+        // B3 (Wave 0): AUTH-MODE TRANSITION GUARD. The automation routine key
+        // (authMode='routine') MUST NOT set ready_to_invoice or complete — those are
+        // sent/closed states. The master plan: "automation cannot close a job."
+        // Only the gated send path (makesafe_send_pack, privileged-only) closes jobs.
+        //
+        // NOTE: the direct makesafe_job_details.update({substatus:...}) patches
+        // INSIDE makesafe_send_pack (at advanceMakesafeSubstatusOnInvoice and the
+        // resume close path) intentionally BYPASS this guard. Those patches are only
+        // reachable from makesafe_send_pack which is already privileged-only (the
+        // route case above). This dispatch block is the routine's entry point.
+        const ROUTINE_FORBIDDEN_SUBSTATUSES = ['ready_to_invoice', 'complete']
+        if (authMode === 'routine' && ROUTINE_FORBIDDEN_SUBSTATUSES.includes(String(body?.substatus || ''))) {
+          return json({ error: `routine key is not permitted to set substatus='${body.substatus}'. Only a privileged caller (api_key or admin/owner jwt) may advance to sent/closed states.` }, 403)
+        }
+        return json(await updateMakesafeSubstatus(client, body))
+      }
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
       // Wave 2 — READ-ONLY feed for the report-draft cockpit (informed-approve
@@ -8150,6 +8166,24 @@ export function _isMakesafeMlbCompany(detail: any, job: any): boolean {
   return false
 }
 
+// B4 (Wave 0): Western Building / Builderwest identity. Mirrors _isMakesafeMlbCompany.
+// Western Building and Builderwest are the same operator group for make-safe purposes —
+// they use the MLB-style hire card and require a SWMS like MLB.
+// Slug slugs: 'builderwest', 'western-building'. Ref prefixes: 'BWCWA', 'WB'.
+export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
+  const slug = String(
+    detail?.requesting_company_slug || detail?.makesafe_companies?.slug || job?.metadata?.requesting_company?.slug || ''
+  ).toLowerCase()
+  const name = String(
+    detail?.requesting_company_name || detail?.makesafe_companies?.name || job?.metadata?.requesting_company?.name || ''
+  ).toLowerCase()
+  const ref = String(detail?.external_ref || job?.metadata?.external_ref || '').toUpperCase()
+  if (slug.includes('builderwest') || slug.includes('western-building')) return true
+  if (name.includes('builderwest') || name.includes('western building')) return true
+  if (ref.startsWith('BWCWA') || /\bWB[-\s]?\d/.test(ref)) return true
+  return false
+}
+
 // Close-out doc gate. A make-safe may only resolve to completed/archive once its
 // invoice + report PDFs are attached. SWMS is additionally required for MLB jobs.
 // Returns the set of docs that are still missing (empty => gate satisfied).
@@ -8369,7 +8403,8 @@ export function _deriveMakesafeBoardStage(
     //    it in report_ready. (When no docs map is supplied, preserve the prior
     //    ungated behaviour for callers that don't load job_documents.)
     if (!verifiedSent && docs !== undefined && docs !== null) {
-      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job))
+      // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
+      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job))
       if (missing.length > 0) return 'report_ready'
     }
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
@@ -8568,7 +8603,8 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       String(j?.status || '').toLowerCase() === 'invoiced' ||
       normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
     if (invoiceDone) {
-      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j))
+      // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
+      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j) || _isMakesafeWesternCompany(detail, j))
     }
   }
   // Verified-sent reconciles the same way the board stage derives it: the
@@ -15630,17 +15666,30 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   // job-documents bucket is public so pdf_url/storage_url is usually a full
   // public url already; we sign only when the stored value looks like a bare
   // storage path (no scheme). Falls back to the stored value on any failure.
-  const signDocUrl = async (stored: string | null | undefined): Promise<string | null> => {
+  //
+  // B1 (Wave 0 versioned URLs): an optional `versionHash` (the doc/render hash
+  // from `makesafe_report_packs.last_render_hash`) is appended as `?v=<hash>` so
+  // that a re-rendered document always produces a NEW URL the browser/CDN cannot
+  // serve from cache. The stable filename + (job_id,type,file_name) idempotency key
+  // are UNCHANGED — the cache-bust lives only in the returned URL, not in storage.
+  // A re-render writes a new hash -> the next feed call returns a changed URL.
+  const signDocUrl = async (stored: string | null | undefined, versionHash?: string | null): Promise<string | null> => {
     const raw = stored || null
     if (!raw) return null
-    if (/^https?:\/\//i.test(raw)) return raw // already a full (public) url
+    const appendVersion = (url: string): string => {
+      if (!versionHash) return url
+      const sep = url.includes('?') ? '&' : '?'
+      return `${url}${sep}v=${versionHash}`
+    }
+    if (/^https?:\/\//i.test(raw)) return appendVersion(raw) // already a full (public) url
     try {
       const { data: signed } = await client.storage
         .from('job-documents')
         .createSignedUrl(raw, SIGNED_TTL)
-      return signed?.signedUrl || signed?.signedURL || raw
+      const signedUrl = signed?.signedUrl || signed?.signedURL || raw
+      return appendVersion(signedUrl)
     } catch (_) {
-      return raw
+      return appendVersion(raw)
     }
   }
 
@@ -15678,15 +15727,19 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     // The original trade/service report doc (the source the close-out report is
     // built from), distinct from the rendered makesafe_report draft above.
     const serviceReportDoc = pickLatest('service_report') || pickLatest('client_reference')
+    // B1 (Wave 0): read the pack row early so last_render_hash is available for
+    // versioned URL minting below. The pack row is also used downstream for surface
+    // derivation and pack_status — the value is the same object reference.
+    const pack = packByJob[d.job_id] || null
+    const renderHash = pack?.last_render_hash || null
     const [reportPdfUrl, invoicePdfUrl, swmsPdfUrl, workOrderPdfUrl, serviceReportPdfUrl] = await Promise.all([
-      signDocUrl(reportDoc?.pdf_url || reportDoc?.storage_url),
+      // B1: the report URL carries the render hash so a re-render always yields a new URL.
+      signDocUrl(reportDoc?.pdf_url || reportDoc?.storage_url, renderHash),
       signDocUrl(invoiceDoc?.pdf_url || invoiceDoc?.storage_url),
       signDocUrl(swmsDoc?.pdf_url || swmsDoc?.storage_url),
       signDocUrl(workOrderDoc?.pdf_url || workOrderDoc?.storage_url),
       signDocUrl(serviceReportDoc?.pdf_url || serviceReportDoc?.storage_url),
     ])
-
-    const pack = packByJob[d.job_id] || null
 
     // T3 — SHARED surfacing predicate. The feed must only return genuinely
     // drafted-not-sent jobs. The substatus filter alone (admin_to_send_report)
@@ -15834,6 +15887,22 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
         failed_step: pack.failed_step || null,
         error_detail: pack.error_detail || null,
       } : null,
+      // B2 (Wave 0 money-review schema): the money_review block surfaces when the
+      // invoice needs human sign-off before sending. W0 builds the schema + the
+      // send-block only; the flag EMISSION (deciding when to flag) is Wave 2 (pricing
+      // engine). Default is unset (null) — no flag, no block. When Wave 2 populates
+      // it, the cockpit shows a CHECK PRICING amber banner and the send button is
+      // disabled until money_review_confirmed=true is passed in the send body.
+      //
+      // Schema:
+      //   needs_money_review: boolean
+      //   reason: string           — human-readable explanation
+      //   flagged_lines: Array<{ description, amount, flag }> — per-line flags
+      money_review: null as (null | {
+        needs_money_review: boolean
+        reason: string
+        flagged_lines: Array<{ description: string; amount: number; flag: string }>
+      }),
     }
   }))
 
@@ -16178,7 +16247,8 @@ async function makesafeSendPack(
   const { data: detail } = await client.from('makesafe_job_details')
     .select('*, makesafe_companies(slug,name,report_recipient)')
     .eq('job_id', jobId).maybeSingle()
-  const requiresSwms = _isMakesafeMlbCompany(detail, job)
+  // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
+  const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
 
   // ── BLOCKER C — EXACT-RECIPIENT GATE (money/comms, FAIL CLOSED) ──
   // Re-derive the builder's WORK-ORDERS inbox SERVER-SIDE from
@@ -16239,6 +16309,30 @@ async function makesafeSendPack(
   const invoiceAlreadyAuthorised = ['AUTHORISED', 'SUBMITTED', 'PAID']
     .includes(String(liveInvoiceRow.status || '').toUpperCase())
 
+  // ── B2 (Wave 0): MONEY-REVIEW HARD GATE ──
+  // If the pack is flagged needs_money_review, BLOCK the send unless the caller
+  // has explicitly passed body.money_review_confirmed === true (the human tick in
+  // the approve UI). This block is AFTER liveInvoiceRow is resolved (so line items
+  // are available for re-derivation in Wave 2) and BEFORE the atomic send-lock so
+  // the pack row is never set to 'sending' on a flagged invoice.
+  //
+  // Wave 0 builds the SCHEMA + the BLOCK only. The flag EMISSION (when to set
+  // needs_money_review and which lines to flag) is Wave 2 (pricing engine). Default
+  // is unset / false — no block occurs until Wave 2 populates the flag.
+  //
+  // The flag is re-derived server-side here (NOT trusted from body) because the
+  // cockpit body is caller-supplied and could be spoofed. Wave 2 will populate the
+  // flag from pack or re-derive from invoice lines; for now we read from the pack
+  // row if present (where Wave 2 will write it), defaulting to false.
+  const packForMoneyCheck = (await client.from('makesafe_report_packs')
+    .select('needs_money_review').eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle())?.data || null
+  const isMoneyFlagged: boolean = packForMoneyCheck?.needs_money_review === true
+  if (isMoneyFlagged && body.money_review_confirmed !== true) {
+    await _ensurePackRow(client, jobId, packKind)
+    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'money_review_gate', error_detail: 'invoice flagged needs_money_review; pass money_review_confirmed=true to proceed' })
+    throw new ApiError('send blocked: invoice is flagged for money review. Review the flagged lines in the cockpit, then approve with money_review_confirmed=true in the send body.', 412)
+  }
+
   // ── ATOMIC SEND-LOCK ──
   // Ensure a pack row exists in a lockable state, then take the lock with a
   // single conditional UPDATE. 0 rows == concurrent send / wrong state -> 409.
@@ -16251,8 +16345,23 @@ async function makesafeSendPack(
     approver_id: ctx.approverId,
     approved_at: nowIso(),
   })
+  // B5 (Wave 0): Write approver_id + approved_at at the SEND-LOCK ACQUIRE
+  // (the guaranteed-single-execution point — 0 rows = no send, so no approval).
+  // _ensurePackRow above writes them on INSERT (new row), but if the row already
+  // existed the INSERT path is skipped. Writing them here in the conditional UPDATE
+  // covers both paths: the approver is durably recorded on the exact row that was
+  // locked for sending, always, in a single atomic operation.
   const { data: locked, error: lockErr } = await client.from('makesafe_report_packs')
-    .update({ status: 'sending', send_started_at: nowIso(), updated_at: nowIso() })
+    .update({
+      status: 'sending',
+      send_started_at: nowIso(),
+      updated_at: nowIso(),
+      // B5: approver identity written at lock-acquire (the single point we know
+      // this exact row will proceed to send). Written here even if _ensurePackRow
+      // already wrote them — the conditional UPDATE guarantees the correct row.
+      approver_id: ctx.approverId,
+      approved_at: nowIso(),
+    })
     .eq('job_id', jobId).eq('pack_kind', packKind)
     .in('status', LOCKABLE_STATUSES)
     .select()
