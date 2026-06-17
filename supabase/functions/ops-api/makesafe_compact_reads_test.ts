@@ -173,12 +173,16 @@ Deno.test("isOwnDomain: our own domains (exact + subdomain) are own; builders + 
     assert(_isOwnDomain(own), `${own} should be own`);
     assert(_isOwnDomain(own.toUpperCase()), `${own} (upper) should be own (case-insensitive)`);
   }
-  // Subdomains match by dot-anchored suffix (the live contaminant).
-  assert(_isOwnDomain("notifications.primeeco.tech"), "notifications.primeeco.tech is a subdomain of an own domain");
+  // Subdomains match by dot-anchored suffix.
   assert(_isOwnDomain("mail.secureworksgroup.app"), "mail.secureworksgroup.app is own");
   // Builders (genuine inbound senders) are NOT own.
   assert(!_isOwnDomain("mlb.com.au"), "builder domain must not be own");
   assert(!_isOwnDomain("dispatch.ajbuildingrepairs.com.au"), "builder subdomain must not be own");
+  // primeeco.tech is the builders' inbound platform, NOT ours — it must NOT be own,
+  // or genuine MLB/Prime work orders get dropped from intake as "outbound".
+  assert(!_isOwnDomain("primeeco.tech"), "primeeco.tech is a builder platform, not own");
+  assert(!_isOwnDomain("notifications.primeeco.tech"), "notifications.primeeco.tech is inbound, not own");
+  assert(!_isOwnDomain("mlb.mailer@primeeco.tech".split("@")[1]), "mlb.mailer@primeeco.tech sender domain is not own");
   // Look-alikes must NOT over-match (the dot anchor guards this).
   assert(!_isOwnDomain("notsecureworksgroup.app"), "look-alike must not match (no dot boundary)");
   assert(!_isOwnDomain("primeeco.tech.evil.test"), "suffix-style look-alike must not match");
@@ -190,7 +194,7 @@ Deno.test("isOwnDomain: our own domains (exact + subdomain) are own; builders + 
 
 Deno.test("directionForDomain: own -> outbound, builder/null -> inbound", () => {
   assertEquals(_directionForDomain("secureworkswa.com.au"), "outbound");
-  assertEquals(_directionForDomain("notifications.primeeco.tech"), "outbound");
+  assertEquals(_directionForDomain("notifications.primeeco.tech"), "inbound");
   assertEquals(_directionForDomain("mlb.com.au"), "inbound");
   assertEquals(_directionForDomain(null), "inbound");
 });

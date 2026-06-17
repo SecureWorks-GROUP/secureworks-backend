@@ -186,14 +186,21 @@ export function deriveFromDomain(fromEmail: string | null | undefined): string |
 // define them here as the single source of truth for "our outbound mail".
 //
 // Matched by SUFFIX (equality OR dot-anchored suffix) so a subdomain like
-// notifications.primeeco.tech is covered by "primeeco.tech" while a look-alike
+// mail.secureworksgroup.app is covered by "secureworksgroup.app" while a look-alike
 // like "notsecureworksgroup.app" is NOT (the dot anchor prevents over-matching,
 // mirroring senderMatchesPattern in monitor-ses-makesafes).
+//
+// NOTE: primeeco.tech is deliberately NOT here. It is the builders' platform that
+// delivers inbound work orders to us (mlb.mailer@primeeco.tech,
+// noreply@notifications.primeeco.tech, etc.), NOT a domain WE send from. Listing it
+// classified genuine inbound MLB/Prime work orders as "our own outbound" and silently
+// dropped them from intake. The notification noise Prime also emits is handled by the
+// subject-exclusion + work-order-PDF gate (see makesafe_intake_gate.ts), not by a
+// blanket domain block.
 export const OWN_OUTBOUND_DOMAINS: readonly string[] = [
   "secureworkswa.com.au", // legacy primary (ses@ lives here)
   "secureworksgroup.app", // current outbound app domain (quotes@/invoices@/orders@/approvals@)
   "secureworksgroup.com.au",
-  "primeeco.tech", // platform/notification sender (covers notifications.primeeco.tech)
 ];
 
 // True when fromDomain is (or is a subdomain of) one of our own outbound domains.
