@@ -44,7 +44,7 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS neighbour_count smallint NOT NULL DEFA
 -- No app-level population is needed or present in the edge functions.
 --
 -- Logic mirrors the backfill SQL exactly (single source of truth):
---   quoted_amount  = (pricing_json->>'totalIncGST')::numeric
+--   quoted_amount  = safe_cast(pricing_json->>'totalIncGST') — NULL on malformed input
 --   has_scope      = scope_json IS NOT NULL AND scope_json != '{}'
 --   neighbour_count = fencing ? coalesce(array_length(neighbour_splits.neighbours),
 --                                        array_length(job.neighbours), 0) : 0
@@ -69,7 +69,13 @@ BEGIN
   -- quoted_amount: totalIncGST is the canonical INC-GST field written by both
   -- patio-tool (buildPricingJson:29534) and fence-designer (buildPricingJson:12741).
   -- Absent on unpriced / draft jobs -> NULL.
-  NEW.quoted_amount := (NEW.pricing_json->>'totalIncGST')::numeric;
+  -- Safe cast: regex guards against malformed values (empty string, "$1,234", etc.)
+  -- that would otherwise throw and abort the INSERT/UPDATE in the field.
+  NEW.quoted_amount := CASE
+    WHEN (NEW.pricing_json->>'totalIncGST') ~ '^-?\d+(\.\d+)?$'
+    THEN (NEW.pricing_json->>'totalIncGST')::numeric
+    ELSE NULL
+  END;
 
   -- neighbour_count: fencing jobs only; 0 for all other types.
   IF NEW.type = 'fencing' THEN
@@ -106,7 +112,11 @@ CREATE TRIGGER jobs_lean_columns_trigger
 /*
 UPDATE jobs
 SET
-  quoted_amount   = (pricing_json->>'totalIncGST')::numeric,
+  quoted_amount   = CASE
+    WHEN (pricing_json->>'totalIncGST') ~ '^-?\d+(\.\d+)?$'
+    THEN (pricing_json->>'totalIncGST')::numeric
+    ELSE NULL
+  END,
   has_scope       = (scope_json IS NOT NULL AND scope_json != '{}'::jsonb),
   neighbour_count = CASE
     WHEN type = 'fencing' THEN
@@ -133,7 +143,14 @@ SELECT
   COUNT(*) FILTER (
     WHERE ABS(
       COALESCE(quoted_amount, 0) -
-      COALESCE((pricing_json->>'totalIncGST')::numeric, 0)
+      COALESCE(
+        CASE
+          WHEN (pricing_json->>'totalIncGST') ~ '^-?\d+(\.\d+)?$'
+          THEN (pricing_json->>'totalIncGST')::numeric
+          ELSE NULL
+        END,
+        0
+      )
     ) > 0.01
   ) AS mismatch_count
 FROM jobs
