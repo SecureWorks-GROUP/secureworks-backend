@@ -7930,6 +7930,10 @@ async function updateMakesafeDetails(client: any, body: any) {
 const MAKESAFE_BOARD_STAGE_LABELS: Record<string, string> = {
   new: 'New',
   allocated: 'Allocated',
+  // Trade report received but the close-out pack has NOT yet been drafted
+  // (no rendered report doc / no draft invoice). Sits between Allocated and
+  // Report Ready so admin can see what is waiting to be drafted.
+  trade_report_in: 'Trade Report In',
   report_ready: 'Report Ready',
   completed: 'Completed This Week',
   archive: 'Archive',
@@ -8051,6 +8055,134 @@ export function _makesafeMissingCloseoutDocs(
   return missing
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// SHARED surfacing predicate — single source of truth for the board derivation
+// (_deriveMakesafeBoardStage / enrichMakesafeBoardJob) AND the report-drafts
+// cockpit feed (makesafeReportDrafts). Both must agree on:
+//   - sentClosed: the pack genuinely went out the door (never re-surface it).
+//   - readyForReview: a draft is rendered + draft invoice exists, awaiting send.
+//   - resumeNotSent: an authorised-but-not-sent pack to RESUME (never a fresh send).
+//   - tradeReportIn: report received but NOT yet drafted.
+// This is the SAFE predicate from the adversarial review. It only ever reads /
+// derives — it authorises nothing, sends nothing, charges nothing.
+//
+// `pack` is the makesafe_report_packs row for the job (status + report_doc_id).
+// A non-null report_doc_id (written by makesafeRenderReport) means a report
+// draft was rendered. The pack `status` column distinguishes sent vs not.
+export interface MakesafeReportPackLike {
+  status?: string | null
+  report_doc_id?: string | null
+  sent_at?: string | null
+}
+export interface MakesafeSurfacing {
+  normalizedSub: string | null
+  hasSubmittedReport: boolean
+  hasReportDoc: boolean
+  invoiceIsDraft: boolean
+  invoiceAuthorisedLive: boolean
+  sentClosed: boolean
+  // gateSoftenSent: the TRUSTWORTHY sent signal that may soften the hard
+  // close-out doc-gate. NARROWER than sentClosed: it excludes a bare
+  // MAKESAFE_PACK_SENT marker (packSent) on its own, because that marker alone
+  // (with a DRAFT/unauthorised invoice) is TRIAGE-only and must NOT relax the
+  // gate (preserves the existing 2.3 guardrail). It is true for a durable pack
+  // sent-status or detail.report_sent_at — both proof the close-out actually went
+  // out. sentClosed (which DOES include bare packSent) still governs SURFACING
+  // (never re-show a packSent job as a fresh ready-to-send draft).
+  gateSoftenSent: boolean
+  readyForReview: boolean
+  resumeNotSent: boolean
+  tradeReportIn: boolean
+}
+
+// pack statuses that mean the pack was actually sent / closed (never re-surface).
+const MAKESAFE_PACK_SENT_STATUSES = ['sent', 'sent_marker_failed', 'sent_not_closed', 'close_failed']
+
+export function _deriveMakesafeSurfacing(
+  job: any,
+  detail: any,
+  report: any,
+  invoice: any,
+  docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
+  packSent: boolean | undefined,
+  pack: MakesafeReportPackLike | null | undefined,
+): MakesafeSurfacing {
+  const normalizedSub = normalizeMakesafeSubstatus(detail?.substatus)
+  const hasSubmittedReport = !!report || !!detail?.report_received_at ||
+    normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
+  const packStatus = String(pack?.status || '').toLowerCase()
+
+  // A rendered report draft artifact exists: either makesafeRenderReport wrote a
+  // report_doc_id onto the pack, or job_documents already carry a report PDF.
+  const hasReportDoc = !!(pack && pack.report_doc_id) || docs?.has_report_doc === true
+
+  const invoiceStatusUpper = String(invoice?.status || '').toUpperCase()
+  const invoiceIsLive = hasActiveMakesafeInvoice(invoice)
+  const invoiceIsDraft = invoiceIsLive && invoiceStatusUpper === 'DRAFT'
+  const invoiceAuthorisedLive = invoiceIsLive &&
+    ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(invoiceStatusUpper)
+
+  // gateSoftenSent — the signal trustworthy enough to SOFTEN the hard close-out
+  // doc-gate (let a job complete despite a missing doc). This is the UNSAFE
+  // direction, so it is the NARROWEST: a durable pack sent-status ONLY. It
+  // deliberately EXCLUDES detail.report_sent_at, because updateMakesafeSubstatus
+  // stamps report_sent_at on the move to ready_to_invoice (admin marking the
+  // report ready to invoice) — NOT necessarily when the pack was actually
+  // emailed. Trusting it here could let an un-sent invoiced job with a missing
+  // close-out doc bypass the gate. A durable pack status (sent / sent_not_closed
+  // / sent_marker_failed / close_failed) only exists after the irreversible send
+  // step, so it is safe gate-softening evidence. (Adversarial review finding 3.)
+  const gateSoftenSent = MAKESAFE_PACK_SENT_STATUSES.includes(packStatus)
+
+  // sentClosed — the pack demonstrably went to the builder. ANY of:
+  //   - the MAKESAFE_PACK_SENT | main marker note (packSent)
+  //   - detail.report_sent_at stamped (the close-out send timestamp)
+  //   - the durable pack row is in a sent/closed status
+  // Governs SURFACING only (never re-surface a packSent job as ready-to-send) —
+  // this is the SAFE direction (excluding a job from the send queue can't cause
+  // a double-send), so it can trust report_sent_at where gateSoftenSent cannot.
+  const sentClosed = packSent === true ||
+    !!detail?.report_sent_at ||
+    MAKESAFE_PACK_SENT_STATUSES.includes(packStatus)
+
+  // readyForReview — a genuine drafted-not-sent pack awaiting the human send:
+  // not sent, in the admin_to_send_report substatus, with a submitted report, a
+  // rendered report artifact AND a DRAFT invoice (the two close-out artifacts).
+  const readyForReview = !sentClosed &&
+    normalizedSub === 'admin_to_send_report' &&
+    hasSubmittedReport &&
+    hasReportDoc &&
+    invoiceIsDraft
+
+  // resumeNotSent — the irreversible authorise happened but the send did not.
+  // Resume re-sends; it must NEVER re-authorise and must NEVER read as a fresh
+  // ready-for-review draft. Surfaces in report_ready as a resume.
+  const resumeNotSent = !sentClosed &&
+    packStatus === 'authorised_not_sent' &&
+    invoiceAuthorisedLive
+
+  // tradeReportIn — the trade report has come in (substatus admin_to_send_report)
+  // but the close-out pack is NOT yet drafted (no rendered report doc / no draft
+  // invoice) and it is not already sent. Scoped to the admin_to_send_report
+  // substatus so it can NEVER hijack a job already in the invoiced/complete
+  // close-out regime (those keep the existing invoiceDone + hard doc-gate path).
+  const tradeReportIn = normalizedSub === 'admin_to_send_report' &&
+    hasSubmittedReport && !readyForReview && !resumeNotSent && !sentClosed
+
+  return {
+    normalizedSub,
+    hasSubmittedReport,
+    hasReportDoc,
+    invoiceIsDraft,
+    invoiceAuthorisedLive,
+    sentClosed,
+    gateSoftenSent,
+    readyForReview,
+    resumeNotSent,
+    tradeReportIn,
+  }
+}
+
 export function _deriveMakesafeBoardStage(
   job: any,
   detail: any,
@@ -8060,12 +8192,15 @@ export function _deriveMakesafeBoardStage(
   nowIso?: string,
   docs?: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null,
   packSent?: boolean,
+  pack?: MakesafeReportPackLike | null,
 ): string {
   const normalizedSub = normalizeMakesafeSubstatus(detail?.substatus)
   const jobStatus = String(job?.status || '').toLowerCase()
   const hasAssignments = assignments.length > 0
   const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
   const invoiceDone = hasActiveMakesafeInvoice(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
+
+  const surf = _deriveMakesafeSurfacing(job, detail, report, invoice, docs, packSent, pack)
 
   // A job is "verified sent" when the reporting skill has written the
   // MAKESAFE_PACK_SENT | main marker note AND the invoice is actually
@@ -8075,13 +8210,42 @@ export function _deriveMakesafeBoardStage(
   // substatus is complete (the pack genuinely went out the door).
   const invoiceAuthorised = hasActiveMakesafeInvoice(invoice) &&
     ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(String(invoice?.status || '').toUpperCase())
-  const verifiedSent = packSent === true && invoiceAuthorised && normalizedSub === 'complete'
+  // verifiedSent softens the hard close-out doc-gate. Original signal: pack_sent
+  // marker + authorised invoice + substatus complete. Now ALSO satisfied by the
+  // TRUSTWORTHY gateSoftenSent signal (a DURABLE pack status sent/sent_not_closed/
+  // sent_marker_failed/close_failed ONLY) so a sent-but-not-fully-closed pack
+  // (e.g. sent_not_closed) does NOT get re-held in report_ready by a missing doc —
+  // it already went out the door and must resolve to completed/archive.
+  // gateSoftenSent deliberately EXCLUDES a bare packSent marker AND
+  // detail.report_sent_at (the latter is stamped at the ready_to_invoice move, not
+  // at send time, so it is not safe gate-softening evidence — adversarial #3).
+  const verifiedSent = (packSent === true && invoiceAuthorised && normalizedSub === 'complete') ||
+    surf.gateSoftenSent
 
   // Canonical MakeSafe command flow:
   // Intake drafts live outside this board until approved.
-  // New -> Allocated -> Report Ready -> Completed (<=7 days) -> Archive (>7 days).
+  // New -> Allocated -> Trade Report In -> Report Ready -> Completed (<=7 days)
+  //   -> Archive (>7 days).
   // `ready_to_invoice` is a legacy/admin substatus and now stays actionable in
   // Report Ready unless an invoice/complete signal proves the MakeSafe is done.
+  //
+  // DRAFTED-NOT-SENT / RESUME WIN over the invoiceDone short-circuit, but ONLY
+  // when the pack has NOT been sent+closed. This fixes Ferndale: an invoiced
+  // job (status=invoiced, sub=admin_to_send_report) carrying a DRAFT invoice +
+  // rendered report previously short-circuited to completed/archive (because a
+  // DRAFT invoice counts as an active invoice) and vanished. It must instead
+  // surface in report_ready for the human to send. A genuinely sent+closed job
+  // (surf.sentClosed) falls through to the close-out doc gate below exactly as
+  // before — we never re-surface a sent pack.
+  if (!surf.sentClosed) {
+    // resume an authorised-but-not-sent pack — surfaces as report_ready (a
+    // resume), never re-sends, never re-authorises.
+    if (surf.resumeNotSent) return 'report_ready'
+    // a drafted-not-sent pack (rendered report + DRAFT invoice) awaiting send.
+    if (surf.readyForReview) return 'report_ready'
+    // report received but NOT yet drafted -> the new Trade Report In column.
+    if (surf.tradeReportIn) return 'trade_report_in'
+  }
   if (invoiceDone) {
     // Close-out doc gate. Two regimes:
     //  - VERIFIED-SENT job (pack_sent marker + authorised invoice + substatus
@@ -8113,8 +8277,9 @@ function deriveMakesafeBoardStage(
   invoice?: any,
   docs?: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null,
   packSent?: boolean,
+  pack?: MakesafeReportPackLike | null,
 ): string {
-  return _deriveMakesafeBoardStage(job, detail, assignments, report, invoice, undefined, docs, packSent)
+  return _deriveMakesafeBoardStage(job, detail, assignments, report, invoice, undefined, docs, packSent, pack)
 }
 
 function makesafeAge(createdAt: string | null | undefined, boardStage: string) {
@@ -8200,28 +8365,83 @@ function isPackSentMainEvent(ev: any): boolean {
   return typeof text === 'string' && text.trim().startsWith(MAKESAFE_PACK_SENT_MAIN_PREFIX)
 }
 
+// ── Paginated, id-chunked .in() reader (money-safety) ────────────────────────
+// PostgREST caps a single response at 1000 rows. A make-safe job set can carry
+// FAR more than 1000 job_events notes or job_documents rows across its history,
+// so a single unpaginated .in() read SILENTLY TRUNCATES — dropping (e.g.) a
+// MAKESAFE_PACK_SENT marker that happens to sort beyond row 1000. A dropped
+// marker makes a SENT job look unsent and re-surface as ready-to-send. This
+// helper paginates by ROWS via .range() AND chunks the id list (<=200 ids per
+// call) so neither dimension can exceed the cap. It returns EVERY matching row.
+//
+// `applyFilters(query)` lets the caller add column predicates (e.g.
+// .eq('event_type','note')); the helper owns the .in() chunking + .range()
+// pagination so callers never re-implement the cap-safe loop.
+const MAKESAFE_IN_ID_CHUNK = 200
+const MAKESAFE_PAGE_SIZE = 1000
+async function _fetchAllByJobIdChunked(
+  client: any,
+  table: string,
+  select: string,
+  jobIds: string[],
+  applyFilters?: (q: any) => any,
+  idColumn = 'job_id',
+): Promise<any[]> {
+  const out: any[] = []
+  if (!jobIds.length) return out
+  for (let i = 0; i < jobIds.length; i += MAKESAFE_IN_ID_CHUNK) {
+    const idBatch = jobIds.slice(i, i + MAKESAFE_IN_ID_CHUNK)
+    let offset = 0
+    // Bounded loop — never spin forever even if a job set is pathologically large.
+    for (let guard = 0; guard < 1000; guard++) {
+      let query = client.from(table).select(select).in(idColumn, idBatch)
+      if (applyFilters) query = applyFilters(query)
+      query = query.range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+      const { data, error } = await query
+      if (error) throw error
+      const batch = data || []
+      out.push(...batch)
+      if (batch.length < MAKESAFE_PAGE_SIZE) break
+      offset += MAKESAFE_PAGE_SIZE
+    }
+  }
+  return out
+}
+// Test-only export for the cap-safe chunked reader (proves >1000-row pagination).
+export const _fetchAllByJobIdChunkedForTest = _fetchAllByJobIdChunked
+
 // Build a job_id -> boolean map of which jobs carry a verified MAKESAFE_PACK_SENT
-// | main marker note. One query over job_events for the candidate job set; the
-// EXISTS-style reduction happens in JS over the returned note rows. Triage flag
+// | main marker note. PAGINATED + id-chunked read over job_events for the
+// candidate job set (was a single unpaginated .in() that truncated at 1000 rows
+// and could drop a sent-marker beyond the cap, re-surfacing a SENT job). The
+// EXISTS-style reduction happens in JS over EVERY returned note row. Triage flag
 // only — see the guardrail in _deriveMakesafeBoardStage / enrichMakesafeBoardJob.
 async function buildPackSentMap(client: any, jobIds: string[]): Promise<Record<string, boolean>> {
   const map: Record<string, boolean> = {}
   if (!jobIds.length) return map
-  const { data: events } = await client.from('job_events')
-    .select('job_id, event_type, detail_json')
-    .in('job_id', jobIds)
-    .eq('event_type', 'note')
+  const events = await _fetchAllByJobIdChunked(
+    client,
+    'job_events',
+    'job_id, event_type, detail_json',
+    jobIds,
+    // STABLE order so .range() pagination cannot skip/duplicate a row under
+    // concurrent inserts — a skipped row could drop a MAKESAFE_PACK_SENT marker
+    // and re-surface a sent job. id is the monotonic PK. (Adversarial review #5.)
+    (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
+  )
   for (const ev of (events || [])) {
     if (ev?.job_id && isPackSentMainEvent(ev)) map[ev.job_id] = true
   }
   return map
 }
+// Test-only export for the cap-safe pack-sent map builder.
+export const _buildPackSentMapForTest = buildPackSentMap
 
-function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], report?: any, invoice?: any, docRows?: any[] | null, packSent?: boolean) {
+function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], report?: any, invoice?: any, docRows?: any[] | null, packSent?: boolean, pack?: MakesafeReportPackLike | null) {
   // Only engage the close-out doc gate when the caller actually loaded
   // job_documents. Callers that pass nothing keep the prior (ungated) behaviour.
   const docFlags = docRows !== undefined ? makesafeDocBooleans(docRows) : null
-  const boardStage = deriveMakesafeBoardStage(j, detail, assignments, report, invoice, docFlags, packSent)
+  const boardStage = deriveMakesafeBoardStage(j, detail, assignments, report, invoice, docFlags, packSent, pack)
   const age = makesafeAge(j.created_at, boardStage)
   const crew = makesafeCrew(assignments)
   const requestingCompany = detail?.requesting_company_name || detail?.makesafe_companies?.name || j.metadata?.requesting_company?.name || null
@@ -8243,11 +8463,13 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   }
   // Verified-sent reconciles the same way the board stage derives it: the
   // MAKESAFE_PACK_SENT marker is TRIAGE only and never softens the gate on its
-  // own — it must coincide with an authorised invoice + substatus complete.
+  // own — it must coincide with an authorised invoice + substatus complete OR
+  // the trustworthy gateSoftenSent signal (durable pack status / report_sent_at).
+  const surf = _deriveMakesafeSurfacing(j, detail, report, invoice, docFlags, packSent, pack)
   const invoiceAuthorised = hasActiveMakesafeInvoice(invoice) &&
     ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(String(invoice?.status || '').toUpperCase())
-  const verifiedSent = packSent === true && invoiceAuthorised &&
-    normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
+  const verifiedSent = (packSent === true && invoiceAuthorised &&
+    normalizeMakesafeSubstatus(detail?.substatus) === 'complete') || surf.gateSoftenSent
 
   // Split the missing-docs signal:
   //  - HARD docs_missing: the un-sent job is held in report_ready by the gate.
@@ -8330,13 +8552,28 @@ export const _updateMakesafeSubstatus = updateMakesafeSubstatus
 
 // ── Slice 3: dedicated make-safe pipeline ──
 async function makesafePipeline(client: any, params: URLSearchParams) {
-  const { data: jobs, error } = await client.from('jobs')
-    .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
-    .eq('type', 'makesafe')
-    .not('status', 'in', '("cancelled","archived","lost")')
-    .order('created_at', { ascending: false })
-    .limit(200)
-  if (error) throw error
+  // T4 — full-history load. The old `.limit(200)` hid older completed/archived
+  // make-safes from the archive column. Paginate the jobs query so the board
+  // shows the COMPLETE history; T1's row-paginated dependent reads keep this
+  // money-safe even as the job set (and its events/docs) grows past the cap.
+  const jobsRaw: any[] = []
+  {
+    let offset = 0
+    for (let guard = 0; guard < 1000; guard++) {
+      const { data, error } = await client.from('jobs')
+        .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+        .eq('type', 'makesafe')
+        .not('status', 'in', '("cancelled","archived","lost")')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+      if (error) throw error
+      const batch = data || []
+      jobsRaw.push(...batch)
+      if (batch.length < MAKESAFE_PAGE_SIZE) break
+      offset += MAKESAFE_PAGE_SIZE
+    }
+  }
+  const jobs = jobsRaw
 
   // Fetch all makesafe_job_details for these jobs
   const jobIds = (jobs || []).map((j: any) => j.id)
@@ -8345,36 +8582,68 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   let invoiceMap: Record<string, any> = {}
   // docsMap: per-job array of job_documents rows, used for the close-out gate.
   let docsMap: Record<string, any[]> = {}
+  // packMap: the durable makesafe_report_packs row (status + report_doc_id) used
+  // by the shared surfacing predicate (drafted-not-sent / resume / sent-closed).
+  let packMap: Record<string, MakesafeReportPackLike> = {}
   if (jobIds.length > 0) {
-    const { data: details } = await client.from('makesafe_job_details')
-      .select('*, makesafe_companies:requesting_company_id(slug, name)')
-      .in('job_id', jobIds)
+    // T1 — id-chunked (details list is one-per-job so row count ~= job count,
+    // but chunk the .in() anyway so a multi-thousand-job set can't exceed the
+    // PostgREST id-list/row caps).
+    const details = await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_job_details',
+      '*, makesafe_companies:requesting_company_id(slug, name)',
+      jobIds,
+    )
     for (const d of (details || [])) {
       detailsMap[d.job_id] = d
     }
 
-    const [reportsRes, invoicesRes, docsRes] = await Promise.all([
-      client.from('job_service_reports')
-        .select('job_id, status, submitted_at, created_at')
-        .in('job_id', jobIds)
-        .neq('status', 'draft')
-        .order('submitted_at', { ascending: false }),
-      client.from('xero_invoices')
-        .select('job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at')
-        .in('job_id', jobIds)
-        .eq('invoice_type', 'ACCREC')
-        .not('status', 'in', '("VOIDED","DELETED")')
-        .order('invoice_date', { ascending: false }),
-      client.from('job_documents')
-        .select('job_id, type, file_name')
-        .in('job_id', jobIds),
+    // T1 — job_service_reports + xero_invoices + job_documents + report_packs.
+    // job_documents ROW count can exceed 1000 across full history, so it MUST be
+    // row-paginated (not just id-chunked). The chunked helper does both. We keep
+    // the original predicate/order via applyFilters.
+    const [reports, invoices, docs, packs] = await Promise.all([
+      _fetchAllByJobIdChunked(
+        client,
+        'job_service_reports',
+        'job_id, status, submitted_at, created_at',
+        jobIds,
+        (q) => q.neq('status', 'draft').order('submitted_at', { ascending: false }),
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'xero_invoices',
+        'job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at',
+        jobIds,
+        (q) => q.eq('invoice_type', 'ACCREC')
+          .not('status', 'in', '("VOIDED","DELETED")')
+          .order('invoice_date', { ascending: false }),
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_documents',
+        'job_id, type, file_name',
+        jobIds,
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_report_packs',
+        'job_id, pack_kind, status, report_doc_id, sent_at',
+        jobIds,
+      ),
     ])
-    reportMap = firstByJobId(reportsRes.data || [])
-    invoiceMap = firstByJobId(invoicesRes.data || [])
-    for (const doc of (docsRes.data || [])) {
+    reportMap = firstByJobId(reports || [])
+    invoiceMap = firstByJobId(invoices || [])
+    for (const doc of (docs || [])) {
       if (!doc?.job_id) continue
       if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
       docsMap[doc.job_id].push(doc)
+    }
+    for (const p of (packs || [])) {
+      if (!p?.job_id) continue
+      // 'main' is the close-out pack; only the main pack drives board surfacing.
+      if ((p.pack_kind || 'main') === 'main') packMap[p.job_id] = p
     }
   }
 
@@ -8383,11 +8652,14 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   // packSentMap: which jobs carry a verified MAKESAFE_PACK_SENT | main marker.
   let packSentMap: Record<string, boolean> = {}
   if (jobIds.length > 0) {
-    const { data: assigns } = await client.from('job_assignments')
-      .select('job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
-      .in('job_id', jobIds)
-      .neq('status', 'cancelled')
-      .order('scheduled_date', { ascending: true })
+    // T1 — assignments can be multiple per job; id-chunk + row-paginate.
+    const assigns = await _fetchAllByJobIdChunked(
+      client,
+      'job_assignments',
+      'job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)',
+      jobIds,
+      (q) => q.neq('status', 'cancelled').order('scheduled_date', { ascending: true }),
+    )
     for (const a of (assigns || [])) {
       if (!assignMap[a.job_id]) assignMap[a.job_id] = []
       assignMap[a.job_id].push(a)
@@ -8398,13 +8670,14 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   const columns: Record<string, any[]> = {
     new: [],
     allocated: [],
+    trade_report_in: [],
     report_ready: [],
     completed: [],
     archive: [],
   }
 
   for (const j of (jobs || [])) {
-    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true)
+    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packMap[j.id] || null)
     columns[enriched.board_stage].push(enriched)
   }
 
@@ -8875,7 +9148,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
   if (MAKESAFE_BOARD_STAGES.includes(filter)) filtered = enriched.filter((j: any) => j.board_stage === filter)
   if (filter === 'today') filtered = enriched.filter((j: any) => j.assignments.some((a: any) => a.scheduled_date === today))
   if (filter === 'unassigned') filtered = enriched.filter((j: any) => j.assignments.length === 0)
-  if (filter === 'waiting_report') filtered = enriched.filter((j: any) => j.substatus === 'waiting_on_trade_report' || j.board_stage === 'allocated' || j.board_stage === 'report_ready')
+  if (filter === 'waiting_report') filtered = enriched.filter((j: any) => j.substatus === 'waiting_on_trade_report' || j.board_stage === 'allocated' || j.board_stage === 'trade_report_in' || j.board_stage === 'report_ready')
   if (filter === 'on_road') filtered = enriched.filter((j: any) => j.on_road)
   if (tradeId) filtered = filtered.filter((j: any) => j.assignments.some((a: any) => a.user_id === tradeId))
 
@@ -11178,9 +11451,21 @@ async function createInvoice(client: any, body: any) {
     }],
   }
 
-  // Idempotency key: job_id + reference + minute — prevents duplicate invoice on retry/double-click
+  // Idempotency key. Default: job_id + reference + minute (prevents duplicate on
+  // retry/double-click within a minute). The make-safe DRAFT path (and ONLY that
+  // internal path) threads an explicit stable key via the INTERNAL-ONLY property
+  // `makesafe_idempotency_key`, so the key is STABLE across calls regardless of
+  // time (Xero collapses identical keys to one invoice for 12h). We deliberately
+  // do NOT read a generic `body.idempotency_key`: the public `create_invoice`
+  // route forwards the request body verbatim, so honouring an arbitrary
+  // caller-supplied key would let an external caller force key collisions and get
+  // back the WRONG existing invoice. `makesafe_idempotency_key` is set only by
+  // createMakesafeDraftInvoice (server-side), never by the public route's body.
+  // (Adversarial review finding 4.)
   const jIdForKey = job_id || jobId || 'nojob'
-  const invIdempotencyKey = `inv-${jIdForKey}-${reference || 'noref'}-${new Date().toISOString().slice(0, 16)}`
+  const invIdempotencyKey = body.makesafe_idempotency_key
+    ? String(body.makesafe_idempotency_key)
+    : `inv-${jIdForKey}-${reference || 'noref'}-${new Date().toISOString().slice(0, 16)}`
   const result = await xeroPost('/Invoices', accessToken, tenantId, invoice, 'PUT', invIdempotencyKey)
   const xeroInv = result?.Invoices?.[0]
   const xeroInvId = xeroInv?.InvoiceID
@@ -14658,10 +14943,12 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 200)
   const SIGNED_TTL = 600 // 10 min, short-lived signed urls for any private docs
 
-  // 1) The report-draft-ready make-safe details.
+  // 1) The report-draft-ready make-safe details. report_sent_at is loaded so the
+  // shared surfacing predicate can exclude an already-sent-but-stale job (the
+  // substatus alone is NOT enough — see T3).
   const { data: details, error: detErr } = await client
     .from('makesafe_job_details')
-    .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, invoice_notes, makesafe_companies(slug, name, invoice_email)')
+    .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, makesafe_companies(slug, name, invoice_email)')
     .eq('substatus', REPORT_DRAFT_READY_SUBSTATUS)
     .limit(limit)
   if (detErr) throw new ApiError('makesafe_report_drafts: details read failed: ' + detErr.message, 500)
@@ -14687,9 +14974,17 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       .in('job_id', jobIds)
       .eq('phase', 'completion'),
     client.from('makesafe_report_packs')
-      .select('job_id, pack_kind, status, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail')
+      .select('job_id, pack_kind, status, report_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail')
       .in('job_id', jobIds),
   ])
+
+  // T3 (adversarial review #1) — load the MAKESAFE_PACK_SENT | main marker map so
+  // the feed excludes a LEGACY marker-only sent job (sent via the pre-pack-table
+  // path: a marker note exists but there is no durable pack row and no
+  // report_sent_at). Without this, such a job with a lingering DRAFT invoice +
+  // admin_to_send_report substatus could slip into the cockpit and be re-sent.
+  // The board already loads this map; the feed must too (single source of truth).
+  const packSentMap = await buildPackSentMap(client, jobIds)
 
   const jobsById: Record<string, any> = {}
   for (const j of (jobsRes.data || [])) jobsById[j.id] = j
@@ -14754,16 +15049,58 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     }
     const reportDoc = pickLatest('makesafe_report')
     const invoiceDoc = pickLatest('invoice')
-    const [reportPdfUrl, invoicePdfUrl] = await Promise.all([
+    const swmsDoc = pickLatest('swms')
+    const workOrderDoc = pickLatest('work_order')
+    // The original trade/service report doc (the source the close-out report is
+    // built from), distinct from the rendered makesafe_report draft above.
+    const serviceReportDoc = pickLatest('service_report') || pickLatest('client_reference')
+    const [reportPdfUrl, invoicePdfUrl, swmsPdfUrl, workOrderPdfUrl, serviceReportPdfUrl] = await Promise.all([
       signDocUrl(reportDoc?.pdf_url || reportDoc?.storage_url),
       signDocUrl(invoiceDoc?.pdf_url || invoiceDoc?.storage_url),
+      signDocUrl(swmsDoc?.pdf_url || swmsDoc?.storage_url),
+      signDocUrl(workOrderDoc?.pdf_url || workOrderDoc?.storage_url),
+      signDocUrl(serviceReportDoc?.pdf_url || serviceReportDoc?.storage_url),
     ])
+
+    const pack = packByJob[d.job_id] || null
+
+    // T3 — SHARED surfacing predicate. The feed must only return genuinely
+    // drafted-not-sent jobs. The substatus filter alone (admin_to_send_report)
+    // would still include a job whose pack was already sent (e.g. the close
+    // failed and the substatus never advanced). Exclude anything sentClosed and
+    // require a real readyForReview draft (report artifact + DRAFT invoice).
+    // docFlags is built from the TYPED doc picks (not filename matching) so the
+    // report-doc presence signal agrees with what the carousel actually shows.
+    const feedDocFlags = {
+      has_invoice_doc: !!invoiceDoc,
+      has_report_doc: !!reportDoc,
+      has_swms_doc: !!swmsDoc,
+    }
+    const surf = _deriveMakesafeSurfacing(d, d, true /* report received via substatus */, liveInvoice, feedDocFlags, packSentMap[d.job_id] === true, pack)
+    if (!surf.readyForReview) return null
 
     const photos = (mediaByJob[d.job_id] || []).map((m: any) => ({
       url: m.storage_url || null,
       thumbnail_url: m.thumbnail_url || m.storage_url || null,
       label: m.label || null,
     })).filter((p: any) => p.url)
+
+    // D3 — carousel doc arrays. draft_docs: the artifacts WE produced for this
+    // close-out (rendered report PDF, draft invoice PDF, attached SWMS if any).
+    // source_docs: the inputs (original trade/service report, work order, photos).
+    // Each {label, url, kind}. SWMS is surfaced ONLY when one is attached (we do
+    // NOT generate one). Reuses the same signed-url mechanism as report/invoice.
+    const draftDocs: Array<{ label: string; url: string; kind: 'pdf' | 'image' }> = []
+    if (reportPdfUrl) draftDocs.push({ label: 'Make Safe Report', url: reportPdfUrl, kind: 'pdf' })
+    if (invoicePdfUrl) draftDocs.push({ label: 'Draft Invoice', url: invoicePdfUrl, kind: 'pdf' })
+    if (swmsPdfUrl) draftDocs.push({ label: 'SWMS', url: swmsPdfUrl, kind: 'pdf' })
+
+    const sourceDocs: Array<{ label: string; url: string; kind: 'pdf' | 'image' }> = []
+    if (serviceReportPdfUrl) sourceDocs.push({ label: 'Trade Report', url: serviceReportPdfUrl, kind: 'pdf' })
+    if (workOrderPdfUrl) sourceDocs.push({ label: 'Work Order', url: workOrderPdfUrl, kind: 'pdf' })
+    for (const p of photos) {
+      if (p.url) sourceDocs.push({ label: p.label || 'Site Photo', url: p.url, kind: 'image' })
+    }
 
     const recipientEmail = resolveRecipientEmail({
       companyInvoiceEmail: company.invoice_email,
@@ -14785,8 +15122,6 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       invoiceNumber: liveInvoice?.invoice_number || null,
       totalIncGst: totals.total_inc_gst,
     })
-
-    const pack = packByJob[d.job_id] || null
 
     return {
       job_id: d.job_id,
@@ -14823,6 +15158,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       report_pdf_url: reportPdfUrl,
       invoice_pdf_url: invoicePdfUrl,
       photos,
+      // D3 — carousel arrays for the cockpit (existing fields above unchanged for
+      // backward compat). draft_docs = artifacts we produced; source_docs = inputs.
+      draft_docs: draftDocs,
+      source_docs: sourceDocs,
       // Defaults the human sees + can edit. Composed to pass the client-send gate.
       default_subject: subject,
       default_html_body: htmlBody,
@@ -14842,8 +15181,14 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     }
   }))
 
-  return { drafts, count: drafts.length }
+  // T3 — drop the rows the shared predicate rejected (sent-but-stale / not yet a
+  // real draft). Only genuinely drafted-not-sent jobs reach the cockpit.
+  const filtered = drafts.filter((row: any) => row !== null)
+  return { drafts: filtered, count: filtered.length }
 }
+// Test-only export alias (mirrors the `_`-prefixed convention) so the T3 feed
+// gating + D3 doc-array shape can be exercised with a fake client.
+export const _makesafeReportDraftsForTest = makesafeReportDrafts
 
 // Fetch the FULL live ACCREC invoice set, paginating list_invoices' source so the
 // dup-guard scans every invoice (not a recent window). Mirrors the python
@@ -14867,6 +15212,13 @@ async function _fetchAllAccrecInvoices(client: any): Promise<any[]> {
     offset += page
   }
   return rows
+}
+
+// D2 — deterministic make-safe DRAFT idempotency key. STABLE per (job, reference)
+// with NO time component, so two sequential create calls collapse to one invoice
+// at the Xero layer (12h idempotency window). Pure + exported for testing.
+export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, reference: any): string {
+  return `msafe-draft-${jobId || 'nojob'}-${_makesafeNormRef(reference)}`.slice(0, 120)
 }
 
 // (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
@@ -14906,6 +15258,13 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
     unit_price: li.unit_price ?? li.unitPrice ?? 0,
     account_code: li.account_code || li.accountCode || '210',
   }))
+  // D2 — STABLE Xero idempotency key per (job, reference), NO time component.
+  // The old key baked the current minute, so a retry a minute later created a
+  // second DRAFT. A stable key makes Xero collapse identical create calls to one
+  // invoice (12h window), so this path is idempotent even when the non-atomic
+  // pre-read dup-guard above races. Kept short (Xero caps the header) and
+  // namespaced to the make-safe draft path.
+  const stableIdempotencyKey = _makesafeDraftIdempotencyKey(jobId, reference)
   const created = await createInvoice(client, {
     job_id: jobId || undefined,
     contact_name: contact,
@@ -14914,6 +15273,9 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
     reference,
     xero_status: 'DRAFT', // guardrail
     send_email: false,    // guardrail
+    // D2 — deterministic per (job, reference). INTERNAL-ONLY property name so the
+    // public create_invoice route can never inject it (adversarial review #4).
+    makesafe_idempotency_key: stableIdempotencyKey,
     operator: body.operator || 'makesafe reporting autopilot (draft-only)',
   })
   return {
@@ -14925,6 +15287,8 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
     reference,
   }
 }
+// Test-only export alias for the DRAFT-invoice dup-guard skip path.
+export const _createMakesafeDraftInvoiceForTest = createMakesafeDraftInvoice
 
 // (3b) makesafe_render_report — render the report PDF (server jsPDF) and attach it
 // via attachMakesafeDocument as type 'makesafe_report'. Routine-safe (no send).

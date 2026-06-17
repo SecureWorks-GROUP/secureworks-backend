@@ -75,6 +75,13 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
         maxRows = n;
         return b;
       },
+      // .range() supports the paginated readers. Seeded sets are small (<1000):
+      // return the matched rows in [from,to] inclusive (real PostgREST .range()),
+      // which yields [] once `from` is past the end so the loop terminates.
+      range: async (from: number, to: number) => ({
+        data: matchingRows().slice(from, to + 1),
+        error: null,
+      }),
       insert: (row: any) => {
         insertRow = row;
         return b;
@@ -161,7 +168,7 @@ Deno.test("submit_makesafe_report rejects final submit with fewer than 5 photos"
   assertEquals(rows.job_service_reports.length, 0);
 });
 
-Deno.test("submit_makesafe_report saves report, flips board state, records event, and pipeline returns Report Ready", async () => {
+Deno.test("submit_makesafe_report saves report, flips board state, records event, and pipeline returns Trade Report In", async () => {
   const { client, rows } = makeSubmitClient(baseRows());
 
   const res: any = await _submitMakesafeReportForTest(client, validBody());
@@ -188,11 +195,20 @@ Deno.test("submit_makesafe_report saves report, flips board state, records event
     client,
     new URLSearchParams(),
   );
-  const ready = pipeline.columns.report_ready.find((j: any) =>
+  // Board V2: a freshly submitted trade report (sub=admin_to_send_report) with no
+  // drafted close-out pack (no rendered report doc, no draft invoice) lands in the
+  // new Trade Report In column, not Report Ready. Report Ready is now reserved for
+  // drafted-not-sent packs awaiting the human send.
+  const inTradeReportIn = pipeline.columns.trade_report_in.find((j: any) =>
     j.id === "job-1"
   );
-  assert(ready, "submitted MakeSafe should be in Report Ready");
-  assertEquals(ready.report_status, "ready_for_reporting_skill");
+  assert(inTradeReportIn, "submitted MakeSafe should be in Trade Report In");
+  assertEquals(inTradeReportIn.report_status, "ready_for_reporting_skill");
+  // And it must NOT be in report_ready (no draft pack yet).
+  assert(
+    !pipeline.columns.report_ready.find((j: any) => j.id === "job-1"),
+    "un-drafted report must not sit in Report Ready",
+  );
 });
 
 Deno.test("submit_makesafe_report blocks duplicate submitted reports", async () => {

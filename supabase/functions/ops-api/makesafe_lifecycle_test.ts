@@ -34,6 +34,11 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
       in: () => b,
       order: () => b,
       limit: () => b,
+      // .range() supports the paginated readers (buildPackSentMap /
+      // _fetchAllByJobIdChunked / the paginated jobs query). The seeded set is
+      // small (<1000) so we return it all on the first page and [] thereafter so
+      // the bounded pagination loop terminates.
+      range: async (from: number, _to: number) => ({ data: from === 0 ? rows : [], error: null }),
       // Thenable so `await client.from(t)...` resolves to { data, error }.
       then: (resolve: (v: any) => any) => resolve(result),
     };
