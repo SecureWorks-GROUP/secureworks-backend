@@ -194,16 +194,35 @@ Deno.test("computeInvoiceTotals falls back to lines when header absent", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// 5. Recipient email - comes from the company invoice_email; null when unknown.
+// 5. Recipient email (BLOCKER C) - the To is the work-orders inbox
+//    (report_recipient) ONLY. It is NEVER the billing contact (invoice_email =
+//    vanessa@ajs.build for AJS). Null when no report_recipient is configured ->
+//    the cockpit warns. NO fallback to invoice_email.
 // ─────────────────────────────────────────────────────────────────
-Deno.test("resolveRecipientEmail uses the company invoice_email", () => {
+Deno.test("resolveRecipientEmail uses the company report_recipient (work-orders inbox)", () => {
   assertEquals(
-    resolveRecipientEmail({ companyInvoiceEmail: "accounts@mlb.com.au", detailInvoiceEmail: null }),
-    "accounts@mlb.com.au",
+    resolveRecipientEmail({
+      companyReportRecipient: "workorders@ajs.build",
+      companyInvoiceEmail: "vanessa@ajs.build",
+      detailInvoiceEmail: null,
+    }),
+    "workorders@ajs.build",
   );
 });
 
-Deno.test("resolveRecipientEmail returns null when no email is known (UI warns)", () => {
-  assertEquals(resolveRecipientEmail({ companyInvoiceEmail: null, detailInvoiceEmail: null }), null);
-  assertEquals(resolveRecipientEmail({ companyInvoiceEmail: "   ", detailInvoiceEmail: "" }), null);
+Deno.test("resolveRecipientEmail NEVER falls back to invoice_email (vanessa must not be the To)", () => {
+  // report_recipient absent + invoice_email present -> still null (no fallback).
+  assertEquals(
+    resolveRecipientEmail({
+      companyReportRecipient: null,
+      companyInvoiceEmail: "vanessa@ajs.build",
+      detailInvoiceEmail: "vanessa@ajs.build",
+    }),
+    null,
+  );
+});
+
+Deno.test("resolveRecipientEmail returns null when no work-orders inbox is configured (UI warns)", () => {
+  assertEquals(resolveRecipientEmail({ companyReportRecipient: null, companyInvoiceEmail: null, detailInvoiceEmail: null }), null);
+  assertEquals(resolveRecipientEmail({ companyReportRecipient: "   ", companyInvoiceEmail: "x@y.com", detailInvoiceEmail: "" }), null);
 });

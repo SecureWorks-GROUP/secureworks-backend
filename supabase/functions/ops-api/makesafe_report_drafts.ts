@@ -180,20 +180,26 @@ function round2(n: number): number {
   return Math.round((Number(n) || 0) * 100) / 100
 }
 
-// ── Builder recipient email resolution ──
+// ── Builder recipient email resolution (BLOCKER C — fail-closed) ──
 //
-// makesafe_job_details has NO direct recipient column. The builder send-to
-// address comes from the linked makesafe_companies.invoice_email (joined via
-// requesting_company_id / slug). When absent we return null and the cockpit
-// shows a warning (the human cannot approve a send with no recipient).
+// MONEY/COMMS-sensitive. The make-safe report pack To MUST be the builder's
+// WORK-ORDERS inbox (makesafe_companies.report_recipient), NOT the per-builder
+// BILLING contact (invoice_email). For AJS the billing contact is
+// vanessa@ajs.build, who must NEVER be the To of a report send.
+//
+// Resolution is report_recipient ONLY. When it is absent we return null and the
+// cockpit shows a "no work-order recipient configured" warning (the human cannot
+// approve a send with no recipient). We do NOT silently fall back to
+// invoice_email — that would put vanessa on the To. invoice_email is accepted as
+// an arg purely for back-compat of the signature but is never used as the To.
 export function resolveRecipientEmail(args: {
+  companyReportRecipient?: string | null
   companyInvoiceEmail?: string | null
   detailInvoiceEmail?: string | null
 }): string | null {
-  const fromDetail = clean(args.detailInvoiceEmail)
-  if (fromDetail) return fromDetail
-  const fromCompany = clean(args.companyInvoiceEmail)
-  if (fromCompany) return fromCompany
+  // The work-orders inbox is the ONLY acceptable To. No fallback to billing.
+  const fromReportRecipient = clean(args.companyReportRecipient)
+  if (fromReportRecipient) return fromReportRecipient
   return null
 }
 
