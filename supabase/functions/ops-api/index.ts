@@ -15433,7 +15433,13 @@ async function attachMakesafeDocument(client: any, body: any) {
       storage_url: publicUrl,
       visible_to_trades: isVisible,
       version: 1,
-      uploaded_by: body.uploaded_by || body.operator_email || null,
+      // uploaded_by is a UUID column (FK to users). Callers sometimes pass an
+      // operator label or email (the dashboard api_key path has no user UUID,
+      // only a fallback label like "makesafe reporting autopilot"). Coerce any
+      // non-UUID value to NULL so the insert never throws "invalid input syntax
+      // for type uuid". The human-readable operator label is still preserved in
+      // the job_events / business_events JSON below for the audit trail.
+      uploaded_by: ((v: any) => (typeof v === 'string' && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v) ? v : null))(body.uploaded_by || body.operator_email),
     }
     if (isPdf) insertData.pdf_url = publicUrl
     const { data: newDoc, error: insErr } = await client.from('job_documents')
