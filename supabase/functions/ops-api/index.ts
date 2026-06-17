@@ -1855,6 +1855,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
       case 'update_makesafe_substatus': return json(await updateMakesafeSubstatus(client, body))
+      // ── Temp Fence Pickup (mission temp-fence-pickup-2026-06-16) ──
+      // Pickup lifecycle on the ORIGINAL make-safe job. NO invoice action: hire +
+      // retrieval are billed UPFRONT, so v1 stays entirely out of the money path.
+      case 'mark_fence_out': return json(await markFenceOut(client, body))
+      case 'set_fence_hire_status': return json(await setFenceHireStatus(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
       // Wave 2 — READ-ONLY feed for the report-draft cockpit (informed-approve
@@ -7934,6 +7939,11 @@ async function updateMakesafeDetails(client: any, body: any) {
     'external_ref', 'substatus', 'safety_requirements', 'special_instructions',
     'external_links', 'billing_rules', 'invoice_notes',
     'company_contacted_at', 'report_received_at', 'report_sent_at', 'invoice_ready_at',
+    // Temp-fence pickup (mission temp-fence-pickup-2026-06-16): editable hire-end
+    // date. fence_hire_status transitions go through set_fence_hire_status (which
+    // validates the 3-value set + stamps timestamps); hire_end_date is a plain
+    // editable field. No billing implication.
+    'hire_end_date',
   ]
   const updates: Record<string, any> = { updated_at: new Date().toISOString() }
   for (const key of allowed) {
@@ -8308,6 +8318,11 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     missing_docs: hardMissing ? missingDocs : undefined,
     docs_warning: softWarning,
     warning_docs: softWarning ? missingDocs : undefined,
+    // Temp-fence pickup fields (mission temp-fence-pickup-2026-06-16). Derived
+    // fence_hire_state incl. the hire-end timer; absent (null) for the vast
+    // majority of make-safes that never hired out our fencing. Board VISUAL is
+    // gated to preview + sign-off; this only wires the DATA the card needs.
+    ...fenceHireFields(detail),
   }
 }
 
@@ -8350,6 +8365,148 @@ async function updateMakesafeSubstatus(client: any, body: any) {
 }
 // Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
 export const _updateMakesafeSubstatus = updateMakesafeSubstatus
+
+// ══════════════════════════════════════════════════════════════
+// Temp Fence Pickup (mission temp-fence-pickup-2026-06-16)
+//
+// SecureWorks hires out its OWN temp fencing on some make-safe jobs and must
+// later collect it. The hire fee AND the retrieval fee are billed UPFRONT in
+// the first invoice — there is NO recurring billing and NO re-invoice on pickup.
+// Therefore every function below stays ENTIRELY out of the money path: it writes
+// only to makesafe_job_details (+ a job_events audit row) and NEVER touches an
+// invoice, Xero, a send, or an allocation.
+//
+// The pickup lifecycle is a SEPARATE axis from substatus (which drives the
+// report/invoice lifecycle + the derived board stage). It lives in its own
+// columns: fence_hire_status (out -> needs_pickup -> picked_up) + hire_end_date.
+// ══════════════════════════════════════════════════════════════
+
+export const FENCE_HIRE_STATUSES = ['out', 'needs_pickup', 'picked_up'] as const
+export type FenceHireStatus = (typeof FENCE_HIRE_STATUSES)[number]
+
+// Default hire window when none is supplied: install/first-invoice date + 3 months.
+function defaultHireEndDate(fromIso?: string | null): string {
+  const base = fromIso ? new Date(fromIso) : new Date()
+  const d = Number.isNaN(base.getTime()) ? new Date() : base
+  const end = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 3, d.getUTCDate()))
+  return end.toISOString().slice(0, 10) // YYYY-MM-DD (date column)
+}
+
+// Pure, read-only derivation of the pickup state INCLUDING the timer.
+// This is the single source of truth for "needs pickup" surfacing; the gated
+// cron only mirrors it onto the stored column for column-only consumers.
+//
+// Rule: needs_pickup iff (status='out' AND hire_end_date <= today_Perth)
+//                     OR (status already === 'needs_pickup').
+// Boundary is INCLUSIVE (the end-date day itself surfaces as needs_pickup).
+// A null/unparseable hire_end_date with status 'out' stays 'out' (open-ended
+// hire never auto-flips — no false dispatch). Terminal 'picked_up' never reverts.
+export function _deriveFenceHireState(
+  fenceHireStatus: string | null | undefined,
+  hireEndDate: string | null | undefined,
+  nowIso?: string,
+): { fence_hire_state: FenceHireStatus | null; needs_pickup: boolean; hire_overdue: boolean } {
+  const status = fenceHireStatus ? String(fenceHireStatus).trim() : null
+  if (!status) return { fence_hire_state: null, needs_pickup: false, hire_overdue: false }
+  if (status === 'picked_up') return { fence_hire_state: 'picked_up', needs_pickup: false, hire_overdue: false }
+  if (status === 'needs_pickup') return { fence_hire_state: 'needs_pickup', needs_pickup: true, hire_overdue: false }
+  // status === 'out' (or any unknown value treated conservatively as not-due)
+  if (status !== 'out') return { fence_hire_state: null, needs_pickup: false, hire_overdue: false }
+
+  if (!hireEndDate) return { fence_hire_state: 'out', needs_pickup: false, hire_overdue: false }
+  // Compare on Perth calendar dates using the same helpers as the board logic.
+  const endParts = perthYmd(new Date(`${String(hireEndDate).slice(0, 10)}T00:00:00Z`))
+  const nowParts = perthYmd(nowIso ? new Date(nowIso) : new Date())
+  if (!endParts || !nowParts) return { fence_hire_state: 'out', needs_pickup: false, hire_overdue: false }
+  const overdue = utcMidnight(endParts) <= utcMidnight(nowParts) // inclusive boundary
+  return overdue
+    ? { fence_hire_state: 'needs_pickup', needs_pickup: true, hire_overdue: true }
+    : { fence_hire_state: 'out', needs_pickup: false, hire_overdue: false }
+}
+
+// Build the pickup fields exposed on a board/audit row from an overlay detail.
+function fenceHireFields(detail: any, nowIso?: string) {
+  const stored = detail?.fence_hire_status ?? null
+  const hireEnd = detail?.hire_end_date ?? null
+  const derived = _deriveFenceHireState(stored, hireEnd, nowIso)
+  return {
+    fence_hire_status: stored,        // raw stored value (may lag the timer)
+    fence_hire_state: derived.fence_hire_state, // derived incl. timer (truth)
+    hire_end_date: hireEnd,
+    needs_pickup: derived.needs_pickup,
+    hire_overdue: derived.hire_overdue,
+  }
+}
+
+// Mark a make-safe job's fencing as "out" (we hired out our fencing on this job).
+// Sets a hire_end_date (default = now + 3 months, editable via body.hire_end_date).
+// NO invoice action.
+async function markFenceOut(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new Error('job_id required')
+  await assertMakesafeJob(client, jId)
+
+  const hireEnd = body.hire_end_date
+    ? String(body.hire_end_date).slice(0, 10)
+    : defaultHireEndDate(body.fence_out_at || body.from_date || null)
+  const nowIso = new Date().toISOString()
+
+  const { data, error } = await client.from('makesafe_job_details')
+    .update({
+      fence_hire_status: 'out',
+      hire_end_date: hireEnd,
+      fence_out_at: body.fence_out_at || nowIso,
+      updated_at: nowIso,
+    })
+    .eq('job_id', jId)
+    .select()
+    .single()
+  if (error) throw error
+
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'fence_hire_marked_out',
+    detail_json: { hire_end_date: hireEnd, marked_at: nowIso, operator: body.operator_email || null },
+  }).then(() => {}).catch(() => {})
+
+  return { ok: true, details: data, ...fenceHireFields(data, nowIso) }
+}
+export const _markFenceOut = markFenceOut
+
+// Transition the pickup lifecycle: out -> needs_pickup -> picked_up.
+// Covers builder-told (b) and manual-mark (c); the timer (a) is derived on read
+// (and optionally promoted by the gated cron). NO invoice action.
+async function setFenceHireStatus(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  const next = body.fence_hire_status ? String(body.fence_hire_status).trim() : ''
+  if (!jId) throw new Error('job_id required')
+  if (!FENCE_HIRE_STATUSES.includes(next as FenceHireStatus)) {
+    throw new Error('Invalid fence_hire_status: ' + (next || '(empty)') + '. Allowed: ' + FENCE_HIRE_STATUSES.join(', '))
+  }
+  await assertMakesafeJob(client, jId)
+
+  const nowIso = new Date().toISOString()
+  const updates: Record<string, any> = { fence_hire_status: next, updated_at: nowIso }
+  if (next === 'out' && body.hire_end_date) updates.hire_end_date = String(body.hire_end_date).slice(0, 10)
+  if (next === 'needs_pickup') updates.pickup_due_logged_at = nowIso
+  if (next === 'picked_up') updates.picked_up_at = nowIso
+
+  const { data, error } = await client.from('makesafe_job_details')
+    .update(updates)
+    .eq('job_id', jId)
+    .select()
+    .single()
+  if (error) throw error
+
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'fence_hire_status_changed',
+    detail_json: { fence_hire_status: next, source: body.source || null, changed_at: nowIso, operator: body.operator_email || null },
+  }).then(() => {}).catch(() => {})
+
+  return { ok: true, details: data, ...fenceHireFields(data, nowIso) }
+}
+export const _setFenceHireStatus = setFenceHireStatus
 
 // ── Slice 3: dedicated make-safe pipeline ──
 async function makesafePipeline(client: any, params: URLSearchParams) {
@@ -8559,7 +8716,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   if (jobIds.length > 0) {
     const [detailsRes, docsRes, reportsRes, invoicesRes, psMap, pisMap] = await Promise.all([
       client.from('makesafe_job_details')
-        .select('job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)')
+        .select('job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, fence_hire_status, hire_end_date, makesafe_companies:requesting_company_id(slug, name)')
         .in('job_id', jobIds),
       client.from('job_documents')
         .select('job_id, type, file_name')
@@ -8643,6 +8800,9 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       // GAP-4 — notes-based pack-sent marker (triage) + the sync-system verdict.
       pack_sent: packSentMap[j.id] === true,
       pipeline_item_sent_status: pipelineSentStatusMap[j.id] ?? null,
+      // Temp-fence pickup (mission temp-fence-pickup-2026-06-16): derived state
+      // incl. the hire-end timer. Null for non-hire jobs. No billing implication.
+      ...fenceHireFields(detail),
       // Full per-row mapped invoice list incl. voided/deleted (item 2.4).
       invoices,
     }
