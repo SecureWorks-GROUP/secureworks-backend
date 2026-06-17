@@ -2,6 +2,8 @@
   "version": "5",
   "redirects": {
     "https://esm.sh/@supabase/supabase-js@2": "https://esm.sh/@supabase/supabase-js@2.99.3",
+    "https://esm.sh/@types/raf@~3.4.3/index.d.ts": "https://esm.sh/@types/raf@3.4.3/index.d.ts",
+    "https://esm.sh/@types/trusted-types@~2.0.7/lib/index.d.ts": "https://esm.sh/@types/trusted-types@2.0.7/lib/index.d.ts",
     "https://esm.sh/canvg?target=denonext": "https://esm.sh/canvg@4.0.3?target=denonext",
     "https://esm.sh/dompurify?target=denonext": "https://esm.sh/dompurify@3.4.10?target=denonext",
     "https://esm.sh/fflate@^0.4.8?target=denonext": "https://esm.sh/fflate@0.4.8?target=denonext",
