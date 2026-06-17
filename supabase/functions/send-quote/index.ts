@@ -2142,6 +2142,7 @@ serve(async (req: Request) => {
 
           const emailPayload: any = {
             from: `${FROM_NAME} <${FROM_EMAIL}>`,
+            reply_to: getClientReplyTo(job?.type, job?.job_number),
             to: [email],
             cc: [getDivisionInbox(job.type), 'admin@secureworkswa.com.au'],
             subject: `Your Fencing Quote - ${job.job_number || ''} - SecureWorks Group`,

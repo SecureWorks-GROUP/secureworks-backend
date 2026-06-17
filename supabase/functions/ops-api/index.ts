@@ -12051,6 +12051,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   // Build Resend payload
   const emailPayload: any = {
     from: 'SecureWorks Group <orders@secureworksgroup.app>',
+    reply_to: getClientReplyTo(job.type, job.job_number),
     to: [job.client_email],
     subject: `Your Quote — ${job.job_number || 'SecureWorks Group'}`,
     html: emailHtml,

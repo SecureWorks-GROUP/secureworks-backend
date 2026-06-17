@@ -2466,7 +2466,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
               const { data: doc } = await sb.from('job_documents').select('share_token').eq('job_id', cs.job_id).eq('type', 'quote').limit(1).maybeSingle()
               const uploadUrl = doc?.share_token
                 ? `${SUPABASE_URL}/functions/v1/send-quote/upload-plans?token=${doc.share_token}&job=${cs.job_id}`
-                : 'approvals@secureworksgroup.app'
+                : 'plans@secureworkswa.com.au'
 
               await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_client_update`, {
                 method: 'POST',
@@ -2475,7 +2475,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
                   job_id: cs.job_id,
                   comms_trigger: 'plans_reminder_day7',
                   channel: 'email',
-                  custom_message: `Hi ${firstName}, just a reminder — we still need your house plans to start the engineering and council approval for your patio at ${address}. Upload here: ${uploadUrl} or email them to approvals@secureworksgroup.app`,
+                  custom_message: `Hi ${firstName}, just a reminder — we still need your house plans to start the engineering and council approval for your patio at ${address}. Upload here: ${uploadUrl} or email them to plans@secureworkswa.com.au`,
                 }),
               }).catch(() => {})
               plansFollowups++
@@ -2493,7 +2493,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
                   job_id: cs.job_id,
                   comms_trigger: 'plans_reminder_day3',
                   channel: 'sms',
-                  custom_message: `Hi ${firstName}, just a quick reminder — we need your house plans to get started on engineering for your patio at ${address}. You can email them to approvals@secureworksgroup.app. Happy to help if you're not sure where to find them!`,
+                  custom_message: `Hi ${firstName}, just a quick reminder — we need your house plans to get started on engineering for your patio at ${address}. You can email them to plans@secureworkswa.com.au. Happy to help if you're not sure where to find them!`,
                 }),
               }).catch(() => {})
               plansFollowups++
