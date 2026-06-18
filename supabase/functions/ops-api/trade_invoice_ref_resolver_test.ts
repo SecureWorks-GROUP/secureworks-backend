@@ -1,4 +1,7 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _refMatchesExternalRefForTest,
   _resolveJobsByExternalRefForTest,
@@ -132,4 +135,123 @@ Deno.test("trade invoice resolver leaves bare numeric duplicate cores ambiguous"
     "job-aj",
     "job-mlb",
   ]);
+});
+
+Deno.test("trade invoice submit saves local lines before Xero and checks insert errors", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const stripMemoryOnlyField = source.indexOf(
+    "const { site_address: _siteAddress, ...dbLine } = { ...defaults, ...line }",
+  );
+  const normalizedShape = source.indexOf(
+    "const toTradeInvoiceLineRow = (line: any, defaults: any = {})",
+  );
+  const checkedLineInsert = source.indexOf(
+    "const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)",
+  );
+  const checkedAssignmentStamp = source.indexOf(
+    "Failed to lock invoiced job cards before Xero push:",
+  );
+  const duplicateExtraReview = source.indexOf(
+    "Possible duplicate searched-in job line(s):",
+  );
+  const duplicateXeroWarning = source.indexOf(
+    "POSSIBLE DUPLICATE - verify prior trade invoice before approving",
+  );
+  const conditionalStamp = source.indexOf(
+    "stampQuery.or('invoiced_in.is.null,invoiced_in.in.(' + releasedStampInvoiceIds.join(',') + ')')",
+  );
+  const stampOwnership = source.indexOf(
+    ".eq('user_id', tradeUser.id)",
+    checkedAssignmentStamp,
+  );
+  const failureMessage = source.indexOf("Failed to save invoice line items:");
+  const xeroPush = source.indexOf(
+    "// ── Auto-push to Xero as DRAFT ACCPAY bill ──",
+  );
+
+  assert(
+    stripMemoryOnlyField > -1,
+    "extra line insert strips site_address before PostgREST insert",
+  );
+  assert(
+    normalizedShape > -1,
+    "trade invoice lines use one normalized PostgREST insert shape",
+  );
+  assert(
+    checkedLineInsert > -1,
+    "trade_invoice_lines insert error is captured",
+  );
+  assert(failureMessage > checkedLineInsert, "line insert failure is surfaced");
+  assert(
+    checkedLineInsert < xeroPush,
+    "local invoice lines are saved before any Xero push",
+  );
+  assert(
+    checkedAssignmentStamp > checkedLineInsert,
+    "assigned-card invoice lock is checked after local line save",
+  );
+  assert(
+    checkedAssignmentStamp < xeroPush,
+    "assigned-card invoice lock is checked before any Xero push",
+  );
+  assert(
+    conditionalStamp > checkedAssignmentStamp,
+    "assigned-card invoice lock conditionally claims only unlocked/released assignments",
+  );
+  assert(
+    stampOwnership > checkedAssignmentStamp,
+    "assigned-card invoice lock remains scoped to the authenticated trade",
+  );
+  assert(
+    duplicateExtraReview > -1,
+    "searched-in duplicate risk is flagged on the local invoice for review",
+  );
+  assert(
+    duplicateXeroWarning > duplicateExtraReview,
+    "searched-in duplicate risk is visible in the Xero draft line description",
+  );
+});
+
+Deno.test("trade invoice PDF attach validates the Xero bill belongs to the authenticated trade", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const attachStart = source.lastIndexOf("case 'attach_invoice_pdf':");
+  const attachCase = source.slice(
+    attachStart,
+    source.indexOf("case 'delete_trade_invoice':", attachStart),
+  );
+
+  assert(
+    attachCase.includes(".eq('user_id', tradeUser.id)"),
+    "PDF attach is scoped to the authenticated trade",
+  );
+  assert(
+    attachCase.includes(".eq('xero_bill_id', attachBillId)"),
+    "PDF attach looks up the returned Xero bill id",
+  );
+  assert(
+    attachCase.includes("Invoice not found for this Xero bill"),
+    "PDF attach rejects unowned/unknown Xero bill ids",
+  );
+  assert(
+    attachCase.includes("const maxPdfBytes = 5 * 1024 * 1024"),
+    "PDF attach enforces a bounded payload size",
+  );
+  assert(
+    attachCase.includes("PDF payload must be a PDF document"),
+    "PDF attach validates the decoded payload is a PDF",
+  );
+  assert(
+    attachCase.includes("const attachFilename = ((attachInv.invoice_number"),
+    "PDF attach derives the attachment filename from the server invoice row",
+  );
+  assert(
+    attachCase.indexOf(
+      "const { accessToken, tenantId } = await getToken(client)",
+    ) > attachCase.indexOf("PDF payload must be a PDF document"),
+    "PDF attach validates payload before requesting a Xero token",
+  );
 });
