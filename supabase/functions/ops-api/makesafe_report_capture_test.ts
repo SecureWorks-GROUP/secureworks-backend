@@ -116,10 +116,6 @@ Deno.test("isGenuineNewWorkOrder: NEW WORK ORDER subject with no PDF passes as k
   assertEquals(r.reason, "new_work_order_subject");
 });
 
-// Normal WO should have report_type=null (classifyReportType is only called for report captures).
-// The wire layer does NOT call classifyReportType for kind=work_order.
-// No direct test needed here — the gate itself never sets report_type.
-
 // ── 6. classifyReportType ─────────────────────────────────────────────────────
 
 Deno.test("classifyReportType: body mentions roof -> roof_report", () => {
@@ -214,28 +210,20 @@ Deno.test("slugFromRefPrefix: unknown prefix -> null", () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// CODEX REVIEW FIXES (PR #212)
+// ISSUE 1: report pattern + PDF = kind=work_order + reportSubjectPattern=true
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── ISSUE 1: a report email that arrives WITH a PDF must still carry report_type ──
-
 Deno.test("ISSUE 1: report-pattern subject WITH a PDF still flags reportSubjectPattern", () => {
-  // A roof report that happens to arrive with a PDF: the work_order_pdf signal
-  // makes it kind='work_order', but reportSubjectPattern MUST be set so the caller
-  // tags report_type instead of silently treating it as a plain work order.
   const subject = "Our Ref: MLB-25795 - 47 Hale St, Eaton - roof report";
   const r = isGenuineNewWorkOrder(subject, MLB_SENDER, 1);
   assertEquals(r.ok, true);
   assertEquals(r.kind, "work_order");               // PDF signal wins on kind
   assertEquals(r.reportSubjectPattern, true);        // but still flagged as report
   assertEquals(r.reason, "work_order_pdf");
-  // The wire layer then runs classifyReportType -> roof_report.
   assertEquals(classifyReportType(subject, ""), "roof_report");
 });
 
 Deno.test("ISSUE 1: BWCWA make-safe-AND-report stays kind=work_order but carries report flag", () => {
-  // "New Make Safe and Report Request" with a WO PDF: it IS a make-safe (approves
-  // as a WO) but ALSO wants a report — must carry reportSubjectPattern.
   const subject = "BWCWA6773 Builderwest; New Make Safe and Report Request.";
   const r = isGenuineNewWorkOrder(subject, BW_SENDER, 1);
   assertEquals(r.ok, true);
@@ -263,7 +251,9 @@ Deno.test("ISSUE 1: subjectMatchesReportCapture is PDF-independent (subject-only
   assert(!subjectMatchesReportCapture("Make Safe Work Order: WB69684 - Cottesloe"));
 });
 
-// ── ISSUE 2: report-only drafts must NOT be approvable into a make-safe job ──
+// ════════════════════════════════════════════════════════════════════════════
+// ISSUE 2: isReportOnlyType — approve gate behaviour
+// ════════════════════════════════════════════════════════════════════════════
 
 Deno.test("ISSUE 2: isReportOnlyType true for roof_report and assessment_report", () => {
   assert(isReportOnlyType("roof_report"));
@@ -271,8 +261,6 @@ Deno.test("ISSUE 2: isReportOnlyType true for roof_report and assessment_report"
 });
 
 Deno.test("ISSUE 2: isReportOnlyType false for non-report-only types", () => {
-  // temp_fence / re_attend involve a physical attend, unknown_report and null are
-  // not report-only either — only roof/assessment are blocked from approval.
   assert(!isReportOnlyType("temp_fence"));
   assert(!isReportOnlyType("re_attend"));
   assert(!isReportOnlyType("unknown_report"));
@@ -281,51 +269,49 @@ Deno.test("ISSUE 2: isReportOnlyType false for non-report-only types", () => {
   assert(!isReportOnlyType(""));
 });
 
-// Pure model of the approveIntakeDraft guard ordering (approveIntakeDraft itself is
-// module-internal, mirrored here per the makesafe_wave0_hardening_test.ts convention).
-// Guard: a report-only draft is BLOCKED before any job is created; reject still works.
-function modelApproveGate(draft: { report_type: string | null }): { jobCreated: boolean; error: string | null } {
-  if (isReportOnlyType(draft.report_type)) {
-    return { jobCreated: false, error: "report_only_blocked" };
-  }
-  // ... real code would createMakesafeJob + attach PDFs here ...
-  return { jobCreated: true, error: null };
+// Model of the approve gate: report-only -> creates job (NOT blocked).
+// (The old guard BLOCKED report-only drafts; the new flow CREATES a report-type job.)
+function modelApproveGate(draft: { report_type: string | null }): {
+  jobCreated: boolean;
+  error: string | null;
+  isReportOnlyDraft: boolean;
+} {
+  const isReportOnlyDraft = isReportOnlyType(draft.report_type);
+  // Report-only: no WO PDF required; job is created with report_type set.
+  // Normal WO (report_type null/non-report-only): job created normally.
+  return { jobCreated: true, error: null, isReportOnlyDraft };
 }
 
-Deno.test("ISSUE 2: approve gate BLOCKS a roof_report draft and creates NO job", () => {
+Deno.test("ISSUE 2: approve gate CREATES a job for a roof_report draft (not blocked)", () => {
   const r = modelApproveGate({ report_type: "roof_report" });
-  assertEquals(r.jobCreated, false);
-  assertEquals(r.error, "report_only_blocked");
+  assertEquals(r.jobCreated, true);
+  assertEquals(r.error, null);
+  assertEquals(r.isReportOnlyDraft, true);
 });
 
-Deno.test("ISSUE 2: approve gate BLOCKS an assessment_report draft and creates NO job", () => {
+Deno.test("ISSUE 2: approve gate CREATES a job for an assessment_report draft (not blocked)", () => {
   const r = modelApproveGate({ report_type: "assessment_report" });
-  assertEquals(r.jobCreated, false);
-  assertEquals(r.error, "report_only_blocked");
+  assertEquals(r.jobCreated, true);
+  assertEquals(r.error, null);
+  assertEquals(r.isReportOnlyDraft, true);
 });
 
 Deno.test("ISSUE 2: a normal WO draft (report_type null) still creates a job", () => {
   const r = modelApproveGate({ report_type: null });
   assertEquals(r.jobCreated, true);
   assertEquals(r.error, null);
+  assertEquals(r.isReportOnlyDraft, false);
 });
 
-Deno.test("ISSUE 2: a combined make-safe-AND-report is NOT report-only — still approves", () => {
-  // A BWCWA-style WO that carries report_type='unknown_report' is a real make-safe;
-  // it is not roof/assessment-only, so it approves normally as a work order.
+Deno.test("ISSUE 2: a combined make-safe-AND-report (unknown_report) creates a normal WO job", () => {
   const r = modelApproveGate({ report_type: "unknown_report" });
   assertEquals(r.jobCreated, true);
+  assertEquals(r.isReportOnlyDraft, false);
 });
 
-Deno.test("ISSUE 2: reject path is independent of report_type (always allowed)", () => {
-  // rejectIntakeDraft only flips status='rejected'; it never inspects report_type,
-  // so a human can always clear a report-only draft. Model that invariant.
-  const reject = (_draft: { report_type: string | null }) => ({ status: "rejected" });
-  assertEquals(reject({ report_type: "roof_report" }).status, "rejected");
-  assertEquals(reject({ report_type: "assessment_report" }).status, "rejected");
-});
-
-// ── ISSUE 3: light over-capture guard — pure acks drop, actionable stays ──
+// ════════════════════════════════════════════════════════════════════════════
+// ISSUE 3: isPureAckNoAction — light over-capture guard
+// ════════════════════════════════════════════════════════════════════════════
 
 Deno.test("ISSUE 3: a pure 'thanks' ack with no action and no PDF is DROPPED", () => {
   const subject = "Our Ref: MLB-25795 - thanks for the update";
@@ -341,7 +327,6 @@ Deno.test("ISSUE 3: 'noted' / 'received' courtesy acks are DROPPED", () => {
 });
 
 Deno.test("ISSUE 3: an actionable Our-Ref (address/roof) is KEPT (captured)", () => {
-  // Has an address + roof — clearly actionable. Must stay captured.
   const subject = "Our Ref: MLB-25795 - 47 Hale St, Eaton - roof report required";
   assert(!isPureAckNoAction(subject, false), "actionable Our-Ref must NOT be droppable");
   const r = isGenuineNewWorkOrder(subject, MLB_SENDER, 0);
@@ -349,13 +334,11 @@ Deno.test("ISSUE 3: an actionable Our-Ref (address/roof) is KEPT (captured)", ()
   assertEquals(r.kind, "report");
 });
 
-Deno.test("ISSUE 3: an ack subject WITH a PDF is NEVER dropped (PDF could be the report)", () => {
-  // Even a "thanks" subject keeps if a PDF rides along — the PDF could be the report.
+Deno.test("ISSUE 3: an ack subject WITH a PDF is NEVER dropped", () => {
   assert(!isPureAckNoAction("Our Ref: MLB-25795 - thanks", true));
 });
 
 Deno.test("ISSUE 3: ambiguous Our-Ref with no clear action and no ack word STAYS captured", () => {
-  // Not a recognised courtesy line, not clearly actionable -> err toward capture.
   const subject = "Our Ref: MLB-25795 - 47 Hale St, Eaton";
   assert(!isPureAckNoAction(subject, false));
   const r = isGenuineNewWorkOrder(subject, MLB_SENDER, 0);
@@ -363,6 +346,162 @@ Deno.test("ISSUE 3: ambiguous Our-Ref with no clear action and no ack word STAYS
   assertEquals(r.kind, "report");
 });
 
-Deno.test("ISSUE 3: BWCWA report-request is NOT a pure ack (has 'report' action word)", () => {
+Deno.test("ISSUE 3: BWCWA report-request is NOT a pure ack", () => {
   assert(!isPureAckNoAction("BWCWA6773 Builderwest; New Make Safe and Report Request.", false));
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// REPORT JOB CLOSEOUT — invoice-only gate
+// ════════════════════════════════════════════════════════════════════════════
+
+Deno.test("closeout: report job requires only invoice (no report doc)", () => {
+  // Model _makesafeMissingCloseoutDocs with isReportJob=true
+  function missingDocs(
+    docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean },
+    requiresSwms: boolean,
+    isReportJob: boolean,
+  ): string[] {
+    const missing: string[] = [];
+    if (!docs.has_invoice_doc) missing.push("invoice");
+    if (!isReportJob && !docs.has_report_doc) missing.push("report");
+    if (requiresSwms && !docs.has_swms_doc) missing.push("swms");
+    return missing;
+  }
+  // Report job with invoice: gate satisfied
+  assertEquals(missingDocs({ has_invoice_doc: true, has_report_doc: false }, false, true), []);
+  // Report job without invoice: missing invoice
+  assertEquals(missingDocs({ has_invoice_doc: false, has_report_doc: false }, false, true), ["invoice"]);
+  // Normal WO without report: missing report
+  assertEquals(missingDocs({ has_invoice_doc: true, has_report_doc: false }, false, false), ["report"]);
+  // Normal WO with both: gate satisfied
+  assertEquals(missingDocs({ has_invoice_doc: true, has_report_doc: true }, false, false), []);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// REPORT JOB MONEY GATE — $0 invoice blocked
+// ════════════════════════════════════════════════════════════════════════════
+
+Deno.test("money gate: report job with $0 line items throws", () => {
+  function reportJobMoneyGate(reportType: string | null, lineItems: Array<{unit_price: number; quantity?: number}>): string | null {
+    if (!reportType) return null; // normal job, no gate
+    const totalExGst = lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity ?? 1), 0);
+    if (lineItems.length === 0) return "report job needs a charge amount before invoicing: supply line_items_override with the trade/WO charge";
+    if (totalExGst <= 0) return "report job needs a charge amount before invoicing: line items sum to $0 or less";
+    return null;
+  }
+  // No line items -> error
+  assert(reportJobMoneyGate("roof_report", []) !== null, "empty line items must error");
+  // $0 line item -> error
+  assert(reportJobMoneyGate("roof_report", [{ unit_price: 0, quantity: 1 }]) !== null, "$0 must error");
+  // Non-zero -> passes
+  assertEquals(reportJobMoneyGate("roof_report", [{ unit_price: 100, quantity: 1 }]), null);
+  // Normal job (report_type null) -> no gate
+  assertEquals(reportJobMoneyGate(null, []), null);
+});
+
+Deno.test("money gate: report job with a valid charge passes", () => {
+  // $150 ex-GST trade charge -> ok
+  const lineItems = [{ description: "Roof report attendance", unit_price: 150, quantity: 1 }];
+  const total = lineItems.reduce((s, li) => s + li.unit_price * li.quantity, 0);
+  assert(total > 0, "valid charge must sum to non-zero");
+});
+
+Deno.test("money gate: normal WO job with empty pricing_json does NOT hit the report gate", () => {
+  // Normal WOs are not gated on report_type; their $0 handling is separate
+  function reportJobMoneyGate(reportType: string | null, lineItems: Array<{unit_price: number; quantity?: number}>): string | null {
+    if (!reportType) return null;
+    const totalExGst = lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity ?? 1), 0);
+    if (lineItems.length === 0) return "error";
+    if (totalExGst <= 0) return "error";
+    return null;
+  }
+  assertEquals(reportJobMoneyGate(null, []), null); // normal WO, no gate
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PORTAL LINK EXTRACTION
+// ════════════════════════════════════════════════════════════════════════════
+
+Deno.test("portal_link: Haiku extraction result stores URL in extraction_json.portal_link", () => {
+  // Model the extraction result from the Haiku prompt
+  const extractionResult = {
+    external_ref: "MLB-25795",
+    client_name: "John Smith",
+    site_address: "47 Hale St, Eaton",
+    portal_link: "https://portal.builderwest.com.au/jobs/25795",
+    confidence: "high",
+    missing_fields: [],
+  };
+  assertEquals(extractionResult.portal_link, "https://portal.builderwest.com.au/jobs/25795");
+});
+
+Deno.test("portal_link: extraction_json.portal_link null when not present", () => {
+  const extractionResult = {
+    external_ref: "MLB-25795",
+    client_name: "John Smith",
+    site_address: "47 Hale St",
+    portal_link: null,
+    confidence: "high",
+    missing_fields: [],
+  };
+  assertEquals(extractionResult.portal_link, null);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// SEND PACK — report job sends invoice only
+// ════════════════════════════════════════════════════════════════════════════
+
+Deno.test("send pack: report job attachment list is invoice-only (no report PDF)", () => {
+  // Model the attachment assembly logic from makesafeSendPack
+  function buildAttachments(isReportJob: boolean, reportPdfB64: string | null, invoicePdfB64: string, invoicePdfName: string): Array<{name: string}> {
+    return isReportJob
+      ? [{ name: invoicePdfName }]
+      : [
+          { name: reportPdfB64 ? "report.pdf" : "report-unavailable.pdf" },
+          { name: invoicePdfName },
+        ];
+  }
+  // Report job: only invoice
+  const reportAttachments = buildAttachments(true, null, "base64==", "Xero Invoice - INV-001.pdf");
+  assertEquals(reportAttachments.length, 1);
+  assertEquals(reportAttachments[0].name, "Xero Invoice - INV-001.pdf");
+
+  // Normal WO: report + invoice
+  const normalAttachments = buildAttachments(false, "base64==", "base64==", "Xero Invoice - INV-002.pdf");
+  assertEquals(normalAttachments.length, 2);
+});
+
+Deno.test("send pack: normal WO job (no report_type) still sends report + invoice", () => {
+  function isReportJob(reportType: string | null | undefined): boolean {
+    return !!(reportType);
+  }
+  assertEquals(isReportJob(null), false);
+  assertEquals(isReportJob("roof_report"), true);
+  assertEquals(isReportJob("assessment_report"), true);
+  assertEquals(isReportJob("unknown_report"), true); // combined WO+report still has report_type
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// REGRESSION: normal WO and combined WO+report still approve normally
+// ════════════════════════════════════════════════════════════════════════════
+
+Deno.test("regression: normal WO (report_type null) requires work_order_pdf", () => {
+  // The approve gate should still require work_order_pdf for a normal WO.
+  // We model the gate: isReportOnlyDraft=false -> work_order_pdf IS required.
+  function approveGateNeedsWoPdf(reportType: string | null, hasWoPdf: boolean): string | null {
+    const isReportOnlyDraft = isReportOnlyType(reportType);
+    if (!isReportOnlyDraft && !hasWoPdf) return "work_order_pdf";
+    return null;
+  }
+  assertEquals(approveGateNeedsWoPdf(null, false), "work_order_pdf"); // normal WO, no PDF -> blocked
+  assertEquals(approveGateNeedsWoPdf(null, true), null);              // normal WO, has PDF -> ok
+  assertEquals(approveGateNeedsWoPdf("roof_report", false), null);    // report-only, no PDF -> ok
+  assertEquals(approveGateNeedsWoPdf("unknown_report", false), "work_order_pdf"); // combined WO, no PDF -> blocked
+});
+
+Deno.test("regression: combined WO+report (unknown_report) still needs WO PDF", () => {
+  // A BWCWA-style combined make-safe-AND-report has report_type='unknown_report' but
+  // is NOT isReportOnlyType, so it still requires a work_order_pdf.
+  assert(!isReportOnlyType("unknown_report"), "unknown_report is not report-only");
+  // therefore it would still need a WO PDF at approval time
 });

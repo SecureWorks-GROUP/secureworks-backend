@@ -8193,11 +8193,13 @@ export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
 export function _makesafeMissingCloseoutDocs(
   docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
   requiresSwms: boolean,
+  isReportJob?: boolean,
 ): string[] {
   const d = docs || {}
   const missing: string[] = []
   if (!d.has_invoice_doc) missing.push('invoice')
-  if (!d.has_report_doc) missing.push('report')
+  // Report jobs require ONLY the invoice — no SecureWorks report PDF is produced.
+  if (!isReportJob && !d.has_report_doc) missing.push('report')
   if (requiresSwms && !d.has_swms_doc) missing.push('swms')
   return missing
 }
@@ -8407,7 +8409,7 @@ export function _deriveMakesafeBoardStage(
     //    ungated behaviour for callers that don't load job_documents.)
     if (!verifiedSent && docs !== undefined && docs !== null) {
       // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
-      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job))
+      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job), !!(detail?.report_type))
       if (missing.length > 0) return 'report_ready'
     }
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
@@ -8607,7 +8609,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
     if (invoiceDone) {
       // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
-      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j) || _isMakesafeWesternCompany(detail, j))
+      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j) || _isMakesafeWesternCompany(detail, j), !!(detail?.report_type))
     }
   }
   // Verified-sent reconciles the same way the board stage derives it: the
@@ -9366,19 +9368,12 @@ async function approveIntakeDraft(client: any, body: any) {
     .select('*').eq('id', draft_id).single()
   if (dErr || !draft) throw new Error('Draft not found')
 
-  // Codex issue 2 (money/safety): a report-ONLY draft (roof_report / assessment_
-  // report — no physical make-safe) must NOT be approvable into a standard make-safe
-  // job yet. createMakesafeJob below would attach the report PDF mislabeled as
-  // type:'work_order'. Report handling is a later mission. Block approval here; the
-  // human can still REJECT it (separate path) or handle it manually. A combined
-  // make-safe-AND-report draft (a normal WO that also carries report_type, e.g.
-  // BWCWA) is NOT report-only and still approves normally as a work order.
-  if (_isReportOnlyType(draft.report_type)) {
-    throw new Error(
-      'This draft is a ' + draft.report_type + '; report handling is not built yet — ' +
-      'reject it or handle it manually. It cannot be approved into a make-safe job.',
-    )
-  }
+  // Codex issue 2: report-ONLY drafts (roof_report / assessment_report) are now
+  // approvable — they create a report-type make-safe job (no WO PDF required, no
+  // report PDF produced, substatus advances to ready_to_invoice immediately).
+  // Combined make-safe-AND-report drafts (report_type='unknown_report' etc.) are
+  // NOT report-only and approve normally as work orders.
+  const isReportOnlyDraft = _isReportOnlyType(draft.report_type)
 
   const extraction = parseJsonObject(draft.extraction_json)
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
@@ -9414,7 +9409,7 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!approvedFields.external_ref) missing.push('external_ref')
   if (!approvedFields.client_name) missing.push('client_name')
   if (!approvedFields.site_address) missing.push('site_address')
-  if (availableAttachments.length === 0) missing.push('work_order_pdf')
+  if (!isReportOnlyDraft && availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
@@ -9473,6 +9468,12 @@ async function approveIntakeDraft(client: any, body: any) {
   let createdJobId: string | null = null
   try {
     // Create the make-safe job using reviewed/edited fields, not stale extraction data.
+    // For report-only drafts: pass the builder portal link as external_links and
+    // set substatus=ready_to_invoice immediately (skips the report-production stage).
+    const portalLink = extraction?.portal_link || null
+    const reportJobExternalLinks = isReportOnlyDraft && portalLink
+      ? [{ label: 'Builder Portal', url: portalLink }]
+      : null
     const jobResult = await createMakesafeJob(client, {
       client_name: approvedFields.client_name,
       site_address: approvedFields.site_address,
@@ -9487,10 +9488,25 @@ async function approveIntakeDraft(client: any, body: any) {
       safety_requirements: approvedFields.safety_requirements,
       special_instructions: approvedFields.special_instructions,
       suppress_notifications: true,
+      ...(reportJobExternalLinks ? { external_links: reportJobExternalLinks } : {}),
     })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
+
+    // For report-only jobs: set report_type on makesafe_job_details and advance
+    // substatus to ready_to_invoice (bypasses the report-production stage).
+    if (isReportOnlyDraft && createdJobId) {
+      try {
+        await client.from('makesafe_job_details').update({
+          report_type: draft.report_type,
+          substatus: 'ready_to_invoice',
+          updated_at: new Date().toISOString(),
+        }).eq('job_id', createdJobId)
+      } catch (e: any) {
+        console.log('[ops-api] approveIntakeDraft: report_type/substatus update non-blocking:', e?.message)
+      }
+    }
 
     // Link draft to created job and preserve the reviewed values on the draft audit
     // row. Status was already set to 'approved' by the atomic claim above, so this
@@ -9515,18 +9531,21 @@ async function approveIntakeDraft(client: any, body: any) {
     }).eq('id', draft_id)
 
     // Attach any PDF attachments from the original email as visible work orders.
-    for (const att of attachments) {
-      if (att.storage_url || att.pdf_url) {
-        try {
-          await client.from('job_documents').insert({
-            job_id: jobResult.job.id,
-            type: 'work_order',
-            file_name: att.file_name || att.name || 'work-order.pdf',
-            storage_url: att.storage_url || att.pdf_url,
-            pdf_url: att.pdf_url || att.storage_url,
-            visible_to_trades: true,
-          })
-        } catch (_) { /* non-blocking */ }
+    // Report-only jobs have no WO PDF — skip the attach loop for them.
+    if (!isReportOnlyDraft) {
+      for (const att of attachments) {
+        if (att.storage_url || att.pdf_url) {
+          try {
+            await client.from('job_documents').insert({
+              job_id: jobResult.job.id,
+              type: 'work_order',
+              file_name: att.file_name || att.name || 'work-order.pdf',
+              storage_url: att.storage_url || att.pdf_url,
+              pdf_url: att.pdf_url || att.storage_url,
+              visible_to_trades: true,
+            })
+          } catch (_) { /* non-blocking */ }
+        }
       }
     }
 
@@ -10279,9 +10298,10 @@ async function scanSesMakesafes(client: any) {
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 500,
           system: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
-Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "portal_link": "https://..." or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
 Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
 Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
+For portal_link: extract any https builder-portal URL in the email body (the report / photos / quote share link the builder wants SecureWorks to access).
 If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
           messages: [{ role: 'user', content: userContent }],
         })
@@ -12605,6 +12625,25 @@ async function completeAndInvoice(client: any, body: any) {
       `Already invoiced: $${alreadyInvoiced.toFixed(2)}. ` +
       `No balance remaining. Check existing invoices: ${(existingInvoices || []).map((i: any) => i.invoice_number).join(', ')}`
     )
+  }
+
+  // ── REPORT JOB MONEY GATE ──
+  // A report-type job has no scope_json/pricing_json. If no line_items_override
+  // was supplied, lineItems is empty -> would silently create a $0 Xero draft.
+  // Block this hard: the caller must supply explicit line_items_override sourced
+  // from the trade's submitted charge / WO billing amount.
+  if (job.type === 'makesafe') {
+    const { data: msDetail } = await client.from('makesafe_job_details')
+      .select('report_type').eq('job_id', jId).maybeSingle()
+    if (msDetail?.report_type) {
+      if (lineItems.length === 0) {
+        throw new Error('report job needs a charge amount before invoicing: supply line_items_override with the trade/WO charge')
+      }
+      const totalExGst = lineItems.reduce((sum: number, li: any) => sum + (li.unit_price ?? 0) * (li.quantity ?? 1), 0)
+      if (totalExGst <= 0) {
+        throw new Error('report job needs a charge amount before invoicing: line items sum to $0 or less')
+      }
+    }
   }
 
   // If deposits exist, adjust line items to invoice only the balance
@@ -16008,6 +16047,18 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
   if (!Array.isArray(lines) || lines.length === 0) throw new ApiError('line_items required', 400)
+  // Report job $0 gate: if a job_id is supplied and the job is a report type,
+  // block $0 or empty-amount invoices (the trade's charge must be present).
+  if (jobId) {
+    const { data: msDetail } = await client.from('makesafe_job_details')
+      .select('report_type').eq('job_id', jobId).maybeSingle()
+    if (msDetail?.report_type) {
+      const totalExGst = lines.reduce((sum: number, li: any) => sum + (Number(li.unit_price ?? li.unitPrice ?? 0)) * (Number(li.quantity ?? 1)), 0)
+      if (totalExGst <= 0) {
+        throw new ApiError('report job needs a charge amount before invoicing: line items sum to $0 or less', 400)
+      }
+    }
+  }
 
   // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
   // to the make-safe reference. A VOIDED/DELETED invoice never blocks.
@@ -16323,7 +16374,8 @@ async function makesafeSendPack(
   const { data: docRows } = await client.from('job_documents')
     .select('id, type, file_name').eq('job_id', jobId)
   const docFlags = makesafeDocBooleans(docRows || [])
-  const missing = _makesafeMissingCloseoutDocs(docFlags, requiresSwms)
+  const isReportJob = !!(detail?.report_type)
+  const missing = _makesafeMissingCloseoutDocs(docFlags, requiresSwms, isReportJob)
   if (missing.length > 0) {
     await _ensurePackRow(client, jobId, packKind)
     await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_docs', error_detail: 'missing close-out docs: ' + missing.join(', ') })
@@ -16473,30 +16525,38 @@ async function makesafeSendPack(
     await _patchPack(client, jobId, packKind, { invoice_doc_id: reInvDoc.document_id || null })
 
     // ── STEP 3: load the report PDF bytes (from storage) for the attachment ──
-    const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+    // Report jobs (report_type IS NOT NULL) send the INVOICE ONLY — no SecureWorks
+    // report PDF is produced. Normal WO jobs require the report PDF.
     let reportPdfB64: string | null = null
-    let reportFileName = reportDoc?.file_name || ''
-    if (reportDoc) {
-      const { data: freshReport } = await client.from('job_documents')
-        .select('file_name, storage_url, pdf_url').eq('id', reportDoc.id).maybeSingle()
-      reportFileName = freshReport?.file_name || reportFileName
-      const reportUrl = freshReport?.pdf_url || freshReport?.storage_url
-      if (reportUrl) {
-        const bytes = await _fetchReportPdfBytes(reportUrl)
-        if (bytes) reportPdfB64 = _bytesToBase64(bytes)
+    let reportFileName = ''
+    if (!isReportJob) {
+      const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+      reportFileName = reportDoc?.file_name || ''
+      if (reportDoc) {
+        const { data: freshReport } = await client.from('job_documents')
+          .select('file_name, storage_url, pdf_url').eq('id', reportDoc.id).maybeSingle()
+        reportFileName = freshReport?.file_name || reportFileName
+        const reportUrl = freshReport?.pdf_url || freshReport?.storage_url
+        if (reportUrl) {
+          const bytes = await _fetchReportPdfBytes(reportUrl)
+          if (bytes) reportPdfB64 = _bytesToBase64(bytes)
+        }
       }
-    }
-    if (!reportPdfB64) {
-      // Cannot assemble the pack without the report PDF. FAIL CLOSED — no send.
-      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'load_report_pdf', error_detail: 'report PDF bytes unavailable' })
-      throw new ApiError('send failed: could not load the report PDF for attachment (invoice already authorised; safe to resume)', 502)
+      if (!reportPdfB64) {
+        // Cannot assemble the pack without the report PDF. FAIL CLOSED — no send.
+        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'load_report_pdf', error_detail: 'report PDF bytes unavailable' })
+        throw new ApiError('send failed: could not load the report PDF for attachment (invoice already authorised; safe to resume)', 502)
+      }
     }
 
     // ── STEP 4: assemble + CLIENT-SEND GATE (hard, fail-closed) ──
-    const attachments = [
-      { contentBytes: reportPdfB64, name: reportFileName, contentType: 'application/pdf' },
-      { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
-    ]
+    // Report jobs send invoice-only; normal WO jobs send report + invoice.
+    const attachments = isReportJob
+      ? [{ contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' }]
+      : [
+          { contentBytes: reportPdfB64!, name: reportFileName, contentType: 'application/pdf' },
+          { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
+        ]
     const gatePayload = {
       from: MAKESAFE_ADMIN_FROM,
       to: recipientEmail,

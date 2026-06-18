@@ -268,7 +268,7 @@ export function isGenuineNewWorkOrder(
   subject: string | null | undefined,
   fromEmail: string | null | undefined,
   workOrderPdfCount: number,
-): { ok: boolean; reason: string; kind?: "work_order" | "report"; reportSubjectPattern?: boolean } {
+): { ok: boolean; reason: string; kind: "work_order" | "report"; reportSubjectPattern: boolean } {
   const s = (subject || "").trim();
 
   // 1) Our own outbound mail must never become an inbound intake draft. The ses@
@@ -276,7 +276,7 @@ export function isGenuineNewWorkOrder(
   const at = (fromEmail || "").lastIndexOf("@");
   const fromDomain = at >= 0 ? (fromEmail as string).slice(at + 1).trim().toLowerCase() : null;
   if (isOwnDomain(fromDomain)) {
-    return { ok: false, reason: `outbound:${fromDomain}` };
+    return { ok: false, reason: `outbound:${fromDomain}`, kind: "work_order", reportSubjectPattern: false };
   }
 
   // 2) Unambiguous non-WO subjects (photo evidence / report / invoice /
@@ -284,7 +284,7 @@ export function isGenuineNewWorkOrder(
   //    OR a report-capture candidate, regardless of any PDF.
   //    This is what keeps blocking our outbound acks ("Make Safe Report and Invoice").
   if (subjectIsExcludedNonWorkOrder(s)) {
-    return { ok: false, reason: "excluded_non_work_order_subject" };
+    return { ok: false, reason: "excluded_non_work_order_subject", kind: "work_order", reportSubjectPattern: false };
   }
 
   // Codex issue 1: whether the SUBJECT matches a report-capture pattern is
@@ -314,12 +314,12 @@ export function isGenuineNewWorkOrder(
     // acknowledgement (just thanks/noted, no address/job detail/action, no PDF).
     // Anything ambiguous or possibly-real STAYS captured (never-miss > tidy).
     if (isPureAckNoAction(s, hasWorkOrderPdf)) {
-      return { ok: false, reason: "pure_ack_no_action" };
+      return { ok: false, reason: "pure_ack_no_action", kind: "work_order", reportSubjectPattern: true };
     }
     return { ok: true, reason: "report_capture_pattern", kind: "report", reportSubjectPattern: true };
   }
 
   // 5) No positive signal and no PDF — not enough to call it a new work order
   //    or a report. Drop to avoid flooding the review queue.
-  return { ok: false, reason: "no_work_order_signal" };
+  return { ok: false, reason: "no_work_order_signal", kind: "work_order", reportSubjectPattern: false };
 }
