@@ -156,6 +156,7 @@ import {
   makesafeEmailReconcile as _makesafeEmailReconcile,
   makesafeEmailReconcileFullInventory as _makesafeEmailReconcileFullInventory,
   makesafeEmailCanary as _makesafeEmailCanary,
+  makesafeDraftHeartbeat as _makesafeDraftHeartbeat,
 } from './makesafe_reconcile.ts'
 import {
   _collectPosts as _monitorCollectPosts,
@@ -1976,7 +1977,23 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         // D4 canary — verify the seeded synthetic make-safe marker is in store with
         // a PDF attachment + threaded reply within SLA; alert if absent/incomplete.
-        return json(await _makesafeEmailCanary(client, makeReconAlertSink()))
+        // Also runs D5 draft-creation heartbeat on every canary invocation (same
+        // every-15-min cadence, no extra cron needed).
+        const canaryResult = await _makesafeEmailCanary(client, makeReconAlertSink())
+        const heartbeatResult = await _makesafeDraftHeartbeat(client, makeReconAlertSink())
+        return json({ ...canaryResult, heartbeat: heartbeatResult })
+      }
+      // D5 draft-creation heartbeat — standalone action for manual invocation and
+      // future dedicated scheduling. Detects "builder emails arriving but 0 new
+      // intake drafts in last 2 hours" — the silent-stall shape of the 2026-06-16
+      // 2-day outage. Requires same API key / admin role as the other recon actions.
+      case 'makesafe_draft_heartbeat': {
+        const hbIsAdmin = authMode === 'api_key' ||
+          authUser?.role === 'admin' || authUser?.role === 'owner'
+        if (!hbIsAdmin) {
+          return json({ error: 'forbidden: makesafe_draft_heartbeat requires service/API key or admin/owner role' }, 403)
+        }
+        return json(await _makesafeDraftHeartbeat(client, makeReconAlertSink()))
       }
       case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
       case 'geocode_job': return json(await geocodeJob(client, body))
