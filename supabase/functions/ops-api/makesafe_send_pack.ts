@@ -661,3 +661,112 @@ export function checkResetFailedGate(args: {
   return { ok: true, httpStatus: 200, reason: null }
 }
 
+// ── Stage 1-2a: Photo follow-up idempotency marker ──────────────────────────
+//
+// Email 2 for AJS/MLB: the approved site photos sent as individual attachments
+// AFTER the main pack (email 1). Idempotent via the MAKESAFE_PACK_SENT | photo
+// prefix in job_events. Independent of the main pack marker.
+export const MAKESAFE_PACK_PHOTO_SENT_PREFIX = 'MAKESAFE_PACK_SENT | photo'
+
+export function isPackPhotoSentEvent(ev: any): boolean {
+  if (!ev || String(ev.event_type) !== 'note') return false
+  let dj = ev.detail_json
+  if (typeof dj === 'string') { try { dj = JSON.parse(dj) } catch (_) { dj = { text: dj } } }
+  const text = dj && typeof dj === 'object' ? dj.text : null
+  return typeof text === 'string' && text.trim().startsWith(MAKESAFE_PACK_PHOTO_SENT_PREFIX)
+}
+
+export function hasPackPhotoSentMarker(events: any[] | null | undefined): boolean {
+  return (events || []).some((ev) => isPackPhotoSentEvent(ev))
+}
+
+export function buildPhotoFollowUpMarkerText(args: {
+  photoCount: number
+  to: string
+  nowIso: string
+  messageId?: string | null
+}): string {
+  return [
+    MAKESAFE_PACK_PHOTO_SENT_PREFIX,
+    `photos=${args.photoCount}`,
+    `to=${args.to}`,
+    args.nowIso,
+    `msgid=${args.messageId || ''}`,
+  ].join(' | ')
+}
+
+// ── Stage 1-2a: Portal-prep idempotency marker ───────────────────────────────
+//
+// Western Building / Builderwest are portal-only builders: NO email is sent.
+// We prep the doc list for manual portal submission and write this marker so
+// the cockpit shows 'portal_ready' and a second prep call returns early.
+export const MAKESAFE_PACK_PORTAL_READY_PREFIX = 'MAKESAFE_PACK_PORTAL_READY'
+
+export function isPackPortalReadyEvent(ev: any): boolean {
+  if (!ev || String(ev.event_type) !== 'note') return false
+  let dj = ev.detail_json
+  if (typeof dj === 'string') { try { dj = JSON.parse(dj) } catch (_) { dj = { text: dj } } }
+  const text = dj && typeof dj === 'object' ? dj.text : null
+  return typeof text === 'string' && text.trim().startsWith(MAKESAFE_PACK_PORTAL_READY_PREFIX)
+}
+
+export function hasPackPortalReadyMarker(events: any[] | null | undefined): boolean {
+  return (events || []).some((ev) => isPackPortalReadyEvent(ev))
+}
+
+export function buildPortalReadyMarkerText(args: { nowIso: string }): string {
+  return [MAKESAFE_PACK_PORTAL_READY_PREFIX, args.nowIso].join(' | ')
+}
+
+// ── Stage 1-2a: isSwmsPdf — detect SWMS attachment filenames ─────────────────
+//
+// Used by checkClientSendGateWithSwms to identify the SWMS PDF among attachments.
+export function isSwmsPdf(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.endsWith('.pdf') && lower.includes('swms')
+}
+
+// ── Stage 1-2a: checkClientSendGateWithSwms — 3-attachment gate for MLB ──────
+//
+// MLB email 1 requires THREE PDFs: report + Xero invoice + SWMS. This gate
+// extends checkClientSendGate's logic with the additional SWMS requirement.
+// Returns [] when the payload is safe to send; otherwise a list of failure
+// strings. The caller MUST treat any non-empty result as a hard stop.
+export function checkClientSendGateWithSwms(payload: ClientSendPayload): string[] {
+  const failures: string[] = []
+  const fromEmail = String(payload.from || payload.from_email || '').trim().toLowerCase()
+  if (fromEmail !== MAKESAFE_ADMIN_FROM) {
+    failures.push(`sender must be ${MAKESAFE_ADMIN_FROM}; got ${fromEmail || '<missing>'}`)
+  }
+  if (splitEmails(payload.to).length === 0) failures.push('to recipient is missing')
+  const cc = splitEmails(payload.cc)
+  if (!cc.includes(MAKESAFE_CC)) failures.push(`cc must include ${MAKESAFE_CC}`)
+  const subject = String(payload.subject || '').trim()
+  if (!subject) {
+    failures.push('subject is missing')
+  } else {
+    const marker = hasReviewMarker(subject)
+    if (marker) failures.push(`client subject contains review/test marker '${marker}': ${subject}`)
+  }
+  const html = String(payload.htmlBody || payload.html_body || '')
+  if (!html.trim()) failures.push('html body is missing')
+  const names = attachmentNames(payload.attachments)
+  if (names.length < 3) {
+    failures.push('MLB client send requires at least three separate PDF attachments: report, Xero invoice, and SWMS')
+  }
+  const reportNames = names.filter((n) => isReportPdf(n))
+  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n))
+  const swmsNames = names.filter((n) => isSwmsPdf(n))
+  if (reportNames.length !== 1) failures.push(`expected exactly one final make-safe report PDF; got ${reportNames.length}`)
+  if (invoiceNames.length !== 1) failures.push(`expected exactly one actual Xero invoice PDF; got ${invoiceNames.length}`)
+  if (swmsNames.length !== 1) failures.push(`expected exactly one SWMS PDF; got ${swmsNames.length}`)
+  for (const name of names) {
+    if (!name.toLowerCase().endsWith('.pdf')) {
+      failures.push(`attachment must be a PDF for formal client send: ${name}`)
+    }
+    const marker = hasReviewMarker(name)
+    if (marker) failures.push(`client attachment filename contains review/test marker '${marker}': ${name}`)
+  }
+  return failures
+}
+
