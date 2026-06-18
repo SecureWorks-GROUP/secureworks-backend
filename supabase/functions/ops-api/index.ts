@@ -192,6 +192,7 @@ import {
   subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
   classifyReportType as _classifyReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
+  isReportOnlyType as _isReportOnlyType,
 } from './makesafe_intake_gate.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
@@ -9365,6 +9366,20 @@ async function approveIntakeDraft(client: any, body: any) {
     .select('*').eq('id', draft_id).single()
   if (dErr || !draft) throw new Error('Draft not found')
 
+  // Codex issue 2 (money/safety): a report-ONLY draft (roof_report / assessment_
+  // report — no physical make-safe) must NOT be approvable into a standard make-safe
+  // job yet. createMakesafeJob below would attach the report PDF mislabeled as
+  // type:'work_order'. Report handling is a later mission. Block approval here; the
+  // human can still REJECT it (separate path) or handle it manually. A combined
+  // make-safe-AND-report draft (a normal WO that also carries report_type, e.g.
+  // BWCWA) is NOT report-only and still approves normally as a work order.
+  if (_isReportOnlyType(draft.report_type)) {
+    throw new Error(
+      'This draft is a ' + draft.report_type + '; report handling is not built yet — ' +
+      'reject it or handle it manually. It cannot be approved into a make-safe job.',
+    )
+  }
+
   const extraction = parseJsonObject(draft.extraction_json)
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
@@ -10365,7 +10380,11 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // whose sender is new / not yet seeded but whose subject carries "Our Ref:
     // MLB-25795" can still be attributed to mlb.
     const isReportCapture = woGate.kind === 'report'
-    if (isReportCapture && !matchedCompany?.slug) {
+    // Codex issue 1: tag report_type whenever the SUBJECT matched a report-capture
+    // pattern — even for a kind='work_order' email that rode in with a PDF (e.g. a
+    // BWCWA make-safe-AND-report, or a roof report that happened to attach a PDF).
+    const tagReportType = isReportCapture || woGate.reportSubjectPattern === true
+    if ((isReportCapture || tagReportType) && !matchedCompany?.slug) {
       const refPrefixMatch = subject.match(/\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
       const derivedSlug = _slugFromRefPrefix(refPrefixMatch?.[1] ?? null)
       if (derivedSlug) {
@@ -10398,11 +10417,15 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
 
     // Report-capture drafts always go to needs_review (they are human-review items,
     // never auto-approved). Normal WO drafts use the existing completeness logic.
+    // Codex issue 1: report_type is set whenever the subject matched a report
+    // pattern (tagReportType), even for a kind='work_order' make-safe-and-report.
     let draftStatus: string
     let draftReportType: string | null = null
+    if (tagReportType) {
+      draftReportType = _classifyReportType(subject, bodyPreview)
+    }
     if (isReportCapture) {
       draftStatus = 'needs_review'
-      draftReportType = _classifyReportType(subject, bodyPreview)
     } else {
       // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
       // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the

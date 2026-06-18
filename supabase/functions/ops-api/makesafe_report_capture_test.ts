@@ -16,6 +16,9 @@ import {
   isGenuineNewWorkOrder,
   classifyReportType,
   slugFromRefPrefix,
+  isReportOnlyType,
+  isPureAckNoAction,
+  subjectMatchesReportCapture,
 } from "./makesafe_intake_gate.ts";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -208,4 +211,158 @@ Deno.test("slugFromRefPrefix: unknown prefix -> null", () => {
   assertEquals(slugFromRefPrefix("XYZ"), null);
   assertEquals(slugFromRefPrefix(null), null);
   assertEquals(slugFromRefPrefix(""), null);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// CODEX REVIEW FIXES (PR #212)
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── ISSUE 1: a report email that arrives WITH a PDF must still carry report_type ──
+
+Deno.test("ISSUE 1: report-pattern subject WITH a PDF still flags reportSubjectPattern", () => {
+  // A roof report that happens to arrive with a PDF: the work_order_pdf signal
+  // makes it kind='work_order', but reportSubjectPattern MUST be set so the caller
+  // tags report_type instead of silently treating it as a plain work order.
+  const subject = "Our Ref: MLB-25795 - 47 Hale St, Eaton - roof report";
+  const r = isGenuineNewWorkOrder(subject, MLB_SENDER, 1);
+  assertEquals(r.ok, true);
+  assertEquals(r.kind, "work_order");               // PDF signal wins on kind
+  assertEquals(r.reportSubjectPattern, true);        // but still flagged as report
+  assertEquals(r.reason, "work_order_pdf");
+  // The wire layer then runs classifyReportType -> roof_report.
+  assertEquals(classifyReportType(subject, ""), "roof_report");
+});
+
+Deno.test("ISSUE 1: BWCWA make-safe-AND-report stays kind=work_order but carries report flag", () => {
+  // "New Make Safe and Report Request" with a WO PDF: it IS a make-safe (approves
+  // as a WO) but ALSO wants a report — must carry reportSubjectPattern.
+  const subject = "BWCWA6773 Builderwest; New Make Safe and Report Request.";
+  const r = isGenuineNewWorkOrder(subject, BW_SENDER, 1);
+  assertEquals(r.ok, true);
+  assertEquals(r.kind, "work_order");
+  assertEquals(r.reportSubjectPattern, true);
+});
+
+Deno.test("ISSUE 1: a NORMAL WO (no report pattern) has reportSubjectPattern false", () => {
+  const r = isGenuineNewWorkOrder("Make Safe Work Order: WB69684 - Cottesloe", BW_SENDER, 1);
+  assertEquals(r.ok, true);
+  assertEquals(r.kind, "work_order");
+  assertEquals(r.reportSubjectPattern, false);
+});
+
+Deno.test("ISSUE 1: report-pattern with NO PDF is kind=report and reportSubjectPattern true", () => {
+  const r = isGenuineNewWorkOrder("Our Ref: MLB-25795 - 47 Hale St, Eaton - roof report", MLB_SENDER, 0);
+  assertEquals(r.ok, true);
+  assertEquals(r.kind, "report");
+  assertEquals(r.reportSubjectPattern, true);
+});
+
+Deno.test("ISSUE 1: subjectMatchesReportCapture is PDF-independent (subject-only)", () => {
+  assert(subjectMatchesReportCapture("Our Ref: MLB-25795 - 47 Hale St"));
+  assert(subjectMatchesReportCapture("BWCWA6773 Builderwest; New Make Safe and Report Request."));
+  assert(!subjectMatchesReportCapture("Make Safe Work Order: WB69684 - Cottesloe"));
+});
+
+// ── ISSUE 2: report-only drafts must NOT be approvable into a make-safe job ──
+
+Deno.test("ISSUE 2: isReportOnlyType true for roof_report and assessment_report", () => {
+  assert(isReportOnlyType("roof_report"));
+  assert(isReportOnlyType("assessment_report"));
+});
+
+Deno.test("ISSUE 2: isReportOnlyType false for non-report-only types", () => {
+  // temp_fence / re_attend involve a physical attend, unknown_report and null are
+  // not report-only either — only roof/assessment are blocked from approval.
+  assert(!isReportOnlyType("temp_fence"));
+  assert(!isReportOnlyType("re_attend"));
+  assert(!isReportOnlyType("unknown_report"));
+  assert(!isReportOnlyType(null));
+  assert(!isReportOnlyType(undefined));
+  assert(!isReportOnlyType(""));
+});
+
+// Pure model of the approveIntakeDraft guard ordering (approveIntakeDraft itself is
+// module-internal, mirrored here per the makesafe_wave0_hardening_test.ts convention).
+// Guard: a report-only draft is BLOCKED before any job is created; reject still works.
+function modelApproveGate(draft: { report_type: string | null }): { jobCreated: boolean; error: string | null } {
+  if (isReportOnlyType(draft.report_type)) {
+    return { jobCreated: false, error: "report_only_blocked" };
+  }
+  // ... real code would createMakesafeJob + attach PDFs here ...
+  return { jobCreated: true, error: null };
+}
+
+Deno.test("ISSUE 2: approve gate BLOCKS a roof_report draft and creates NO job", () => {
+  const r = modelApproveGate({ report_type: "roof_report" });
+  assertEquals(r.jobCreated, false);
+  assertEquals(r.error, "report_only_blocked");
+});
+
+Deno.test("ISSUE 2: approve gate BLOCKS an assessment_report draft and creates NO job", () => {
+  const r = modelApproveGate({ report_type: "assessment_report" });
+  assertEquals(r.jobCreated, false);
+  assertEquals(r.error, "report_only_blocked");
+});
+
+Deno.test("ISSUE 2: a normal WO draft (report_type null) still creates a job", () => {
+  const r = modelApproveGate({ report_type: null });
+  assertEquals(r.jobCreated, true);
+  assertEquals(r.error, null);
+});
+
+Deno.test("ISSUE 2: a combined make-safe-AND-report is NOT report-only — still approves", () => {
+  // A BWCWA-style WO that carries report_type='unknown_report' is a real make-safe;
+  // it is not roof/assessment-only, so it approves normally as a work order.
+  const r = modelApproveGate({ report_type: "unknown_report" });
+  assertEquals(r.jobCreated, true);
+});
+
+Deno.test("ISSUE 2: reject path is independent of report_type (always allowed)", () => {
+  // rejectIntakeDraft only flips status='rejected'; it never inspects report_type,
+  // so a human can always clear a report-only draft. Model that invariant.
+  const reject = (_draft: { report_type: string | null }) => ({ status: "rejected" });
+  assertEquals(reject({ report_type: "roof_report" }).status, "rejected");
+  assertEquals(reject({ report_type: "assessment_report" }).status, "rejected");
+});
+
+// ── ISSUE 3: light over-capture guard — pure acks drop, actionable stays ──
+
+Deno.test("ISSUE 3: a pure 'thanks' ack with no action and no PDF is DROPPED", () => {
+  const subject = "Our Ref: MLB-25795 - thanks for the update";
+  assert(isPureAckNoAction(subject, false), "pure thanks ack should be droppable");
+  const r = isGenuineNewWorkOrder(subject, MLB_SENDER, 0);
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "pure_ack_no_action");
+});
+
+Deno.test("ISSUE 3: 'noted' / 'received' courtesy acks are DROPPED", () => {
+  assert(isPureAckNoAction("Our Ref: MLB-25795 - noted", false));
+  assert(isPureAckNoAction("Our Ref: MLB-25795 - received with thanks", false));
+});
+
+Deno.test("ISSUE 3: an actionable Our-Ref (address/roof) is KEPT (captured)", () => {
+  // Has an address + roof — clearly actionable. Must stay captured.
+  const subject = "Our Ref: MLB-25795 - 47 Hale St, Eaton - roof report required";
+  assert(!isPureAckNoAction(subject, false), "actionable Our-Ref must NOT be droppable");
+  const r = isGenuineNewWorkOrder(subject, MLB_SENDER, 0);
+  assertEquals(r.ok, true);
+  assertEquals(r.kind, "report");
+});
+
+Deno.test("ISSUE 3: an ack subject WITH a PDF is NEVER dropped (PDF could be the report)", () => {
+  // Even a "thanks" subject keeps if a PDF rides along — the PDF could be the report.
+  assert(!isPureAckNoAction("Our Ref: MLB-25795 - thanks", true));
+});
+
+Deno.test("ISSUE 3: ambiguous Our-Ref with no clear action and no ack word STAYS captured", () => {
+  // Not a recognised courtesy line, not clearly actionable -> err toward capture.
+  const subject = "Our Ref: MLB-25795 - 47 Hale St, Eaton";
+  assert(!isPureAckNoAction(subject, false));
+  const r = isGenuineNewWorkOrder(subject, MLB_SENDER, 0);
+  assertEquals(r.ok, true);
+  assertEquals(r.kind, "report");
+});
+
+Deno.test("ISSUE 3: BWCWA report-request is NOT a pure ack (has 'report' action word)", () => {
+  assert(!isPureAckNoAction("BWCWA6773 Builderwest; New Make Safe and Report Request.", false));
 });
