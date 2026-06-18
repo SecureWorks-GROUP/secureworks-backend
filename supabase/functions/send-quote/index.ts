@@ -1074,7 +1074,7 @@ serve(async (req: Request) => {
       // Check for multi-option siblings (same job, different options)
       if (doc.job_id) {
         const { data: siblings } = await sb.from('job_documents')
-          .select('id, quote_number, pdf_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id')
+          .select('id, quote_number, pdf_url, html_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id, run_label')
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
@@ -1242,10 +1242,69 @@ serve(async (req: Request) => {
       if (doc.accepted_at) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
       if (doc.declined_at) return jsonResponse({ error: 'Already declined' }, 400, corsHeaders)
 
+      // ── FAIL-CLOSED MULTI-ACCEPT GUARD (money-path) ──
+      // Multi-option jobs send one quote doc per option for the SAME recipient
+      // (same job_id + job_contact_id). Without this guard a client could accept
+      // more than one option and trigger more than one deposit invoice. Runs
+      // BEFORE we mark accepted_at / create any invoice, so it is truly fail-closed.
+      // Scoped to whole-quote options only (run_label IS NULL): per-run fencing
+      // acceptances have their own state machine below and must not be blocked.
+      if (doc.superseded_at) {
+        return new Response(
+          errorPage('This option is no longer available — another option was already accepted.'),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+        )
+      }
+      if (doc.job_id && !doc.run_label) {
+        // Sibling options for the SAME recipient: match job_contact_id null-to-null
+        // so we never read another contact's / neighbour's options.
+        let siblingQuery = sb.from('job_documents')
+          .select('id, accepted_at')
+          .eq('job_id', doc.job_id)
+          .eq('type', 'quote')
+          .is('run_label', null)
+          .neq('id', doc.id)
+          .not('accepted_at', 'is', null)
+        siblingQuery = doc.job_contact_id
+          ? siblingQuery.eq('job_contact_id', doc.job_contact_id)
+          : siblingQuery.is('job_contact_id', null)
+        const { data: acceptedSiblings } = await siblingQuery.limit(1)
+        if (acceptedSiblings && acceptedSiblings.length > 0) {
+          return new Response(
+            errorPage('This option is no longer available — another option was already accepted.'),
+            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+          )
+        }
+      }
+
       await sb
         .from('job_documents')
         .update({ accepted_at: new Date().toISOString() })
         .eq('id', doc.id)
+
+      // ── SUPERSEDE SIBLING OPTIONS ON ACCEPT (money-path, awaited) ──
+      // Right after the accepted_at write: mark the OTHER whole-quote options for
+      // THIS recipient as superseded so they can't be accepted (and so the picker
+      // copy's promise is true). CRITICAL: scoped by job_contact_id (null-to-null)
+      // so a primary client's accept does NOT supersede a NEIGHBOUR's quote
+      // (different job_contact_id). run_label docs (per-run fencing) are never
+      // touched — their lifecycle is the run state machine below.
+      if (doc.job_id && !doc.run_label) {
+        let supersedeQuery = sb.from('job_documents')
+          .update({ superseded_at: new Date().toISOString() })
+          .eq('job_id', doc.job_id)
+          .eq('type', 'quote')
+          .is('run_label', null)
+          .is('superseded_at', null)
+          .neq('id', doc.id)
+        supersedeQuery = doc.job_contact_id
+          ? supersedeQuery.eq('job_contact_id', doc.job_contact_id)
+          : supersedeQuery.is('job_contact_id', null)
+        const { error: supersedeErr } = await supersedeQuery
+        if (supersedeErr) {
+          console.error('[accept] sibling supersession failed:', supersedeErr.message)
+        }
+      }
 
       // ── T7 Loop 5 — closes G3 (quote.accepted missing from spine) ──
       // Iter-2 audit: quote.accepted lives only in job_events; the canonical
@@ -3486,7 +3545,9 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
         ${statusBadge}
       </div>
       <div style="display:flex;flex-direction:column;gap:8px;">
-        <a href="${d.pdf_url ? d.pdf_url + '#view=Fit&toolbar=0' : '#'}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View PDF</a>
+        ${d.html_url
+          ? `<a href="${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(d.html_url)}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View Quote</a>`
+          : `<a href="${d.pdf_url ? d.pdf_url + '#view=Fit&toolbar=0' : '#'}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View PDF</a>`}
         ${!isAccepted && !isDeclined ? `<button onclick="respondToQuote('accept','${d.share_token}')" style="display:block;width:100%;padding:12px;background:#34C759;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;">Accept This Option</button>` : ''}
       </div>
     </div>`
@@ -3516,7 +3577,7 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
     <div style="font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#F15A29;margin-bottom:10px;">SecureWorks Group</div>
     <h1 style="color:#fff;font-size:22px;font-weight:800;margin-bottom:4px;line-height:1.2;">We've prepared ${docs.length} quote option${docs.length !== 1 ? 's' : ''} for you</h1>
     <p style="color:rgba(255,255,255,0.55);font-size:14px;margin-top:4px;">${clientName}${suburb ? ', ' + suburb : ''}</p>
-    <p style="color:rgba(255,255,255,0.6);font-size:13px;margin-top:12px;line-height:1.6;">Review each option below and tap <strong style="color:#fff;">View PDF</strong> to see the full details. When you're ready, tap <strong style="color:#fff;">Accept This Option</strong> to confirm your choice.</p>
+    <p style="color:rgba(255,255,255,0.6);font-size:13px;margin-top:12px;line-height:1.6;">Review each option below and tap <strong style="color:#fff;">View</strong> to see the full details. When you're ready, tap <strong style="color:#fff;">Accept This Option</strong> to confirm your choice.</p>
   </div>
   ${optionCards}
   <div class="card" style="text-align:center;">
@@ -3532,7 +3593,10 @@ async function respondToQuote(action, token) {
     var res = await fetch('https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/send-quote/accept?token=' + token, {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
     });
-    if (res.ok) { location.reload(); } else { alert('Failed. Please try again.'); }
+    if (res.ok) {
+      var html = await res.text();
+      document.open(); document.write(html); document.close();
+    } else { alert('Failed. Please try again.'); }
   } catch(e) { alert('Network error. Please try again.'); }
 }
 </script></body></html>`
