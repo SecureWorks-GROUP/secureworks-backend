@@ -4187,7 +4187,19 @@ if (import.meta.main) serve(async (req: Request) => {
               const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
               // Change 3: removed complete/completed/invoiced so WO/commission extra-item rows on completed
               // make-safes still resolve job_id (fixes null job_id on audit log for finished jobs)
-              const activeJobStatusExclude = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
+              //
+              // 2026-06-18 FIX (archived make-safe block): a searched-in extra item is the trade
+              // billing for work already DONE. Make-safe jobs get ARCHIVED by the normal lifecycle to
+              // clear the ops board (and may sit at complete/closed/paid/processing/invoiced status),
+              // so excluding those statuses made every finished make-safe un-invoiceable — the trade
+              // could ADD the job card but SUBMIT threw "Manual invoice job is not active or does not
+              // exist" (and, because submit is atomic, one archived line killed the whole batch incl.
+              // good lines). We now exclude ONLY genuinely-dead jobs (lost/cancelled/deleted/void/
+              // duplicate) so done-and-filed make-safes resolve. Double-pay is guarded separately by
+              // the per-line existing-invoice-line check below — NOT by hiding finished jobs here.
+              // NOTE: this is the extra-items (searched-in) lane only. The assigned-card lane keeps its
+              // own HOURLY_STATUS_WHITELIST above and is unaffected.
+              const activeJobStatusExclude = '("lost","cancelled","deleted","duplicate","duplicated","void","voided")'
               const extraJobReads: PromiseLike<any>[] = []
               if (requestedJobIds.length > 0) {
                 extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('id', requestedJobIds))
@@ -4244,6 +4256,32 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
               }
 
+              // 2026-06-18 double-pay guard (extra-items lane): now that we admit finished/archived
+              // make-safe jobs (see status-exclude note above), a trade could re-submit a job that is
+              // already on a LIVE invoice. The assigned-card lane guards this via assignment.invoiced_in
+              // (Layer B above); searched-in extra items have no assignment, so we guard at the job level.
+              // Pre-fetch every job_id in this submit that already has a trade_invoice_line on a
+              // non-released invoice (released = draft/failed/ops-reject, mirroring the RELEASED set used
+              // by the assigned-card guard). Block any extra item whose resolved job is in that set.
+              const alreadyInvoicedJobIds = new Set<string>()
+              {
+                const resolvedExtraJobIds = [...new Set(
+                  Object.values(jobById).map((j: any) => j?.id).filter(Boolean)
+                )] as string[]
+                if (resolvedExtraJobIds.length > 0) {
+                  const RELEASED_INVOICE_STATUSES = ['draft', 'failed', 'ops-reject']
+                  const { data: priorLines } = await client.from('trade_invoice_lines')
+                    .select('job_id, trade_invoices!inner(status)')
+                    .in('job_id', resolvedExtraJobIds)
+                  for (const l of (priorLines || [])) {
+                    const st = String((l as any)?.trade_invoices?.status || '')
+                    if (l?.job_id && !RELEASED_INVOICE_STATUSES.includes(st)) {
+                      alreadyInvoicedJobIds.add(String(l.job_id))
+                    }
+                  }
+                }
+              }
+
               for (const item of extra_items) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
@@ -4258,6 +4296,17 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
                 const resolvedJob = item.job_id ? jobById[item.job_id] : jobByNumber[String(item.job_number || '')]
                 if (week_start && !resolvedJob) throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
+                // 2026-06-18 double-pay guard: reject an extra item whose resolved job is already on a
+                // live (non-released) invoice. Prevents paying a trade twice for the same finished job
+                // now that finished/archived jobs are invoiceable. Ops can still re-bill after voiding
+                // or rejecting the prior invoice (those statuses are in RELEASED and clear the block).
+                if (week_start && resolvedJob && alreadyInvoicedJobIds.has(String(resolvedJob.id))) {
+                  throw new ApiError(
+                    'This job has already been invoiced: ' + (resolvedJob.job_number || item.job_number || item.job_id) +
+                    '. Remove it from this submission or contact the office.',
+                    409,
+                  )
+                }
                 const rateSource = item.rate_source || (item.client_rate_entered ? 'client_entered' : 'client_entered')
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100

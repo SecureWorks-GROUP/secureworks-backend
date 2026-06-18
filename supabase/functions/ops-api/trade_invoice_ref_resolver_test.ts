@@ -78,6 +78,37 @@ Deno.test("trade invoice resolver maps AJ typed refs to active AJBR jobs", async
   assertEquals(res.byRef.AJ66934.map((j: any) => j.id), ["job-aj"]);
 });
 
+Deno.test("trade invoice resolver resolves ARCHIVED make-safe with narrowed exclude (2026-06-18 fix)", async () => {
+  // Regression: make-safe jobs get archived off the ops board but the trade still
+  // must be paid. With the narrowed extra-items exclude (dead states only — no
+  // 'archived'/'complete'), an archived job by builder ref must resolve.
+  const client = makeResolverClient(
+    [
+      { job_id: "job-archived", external_ref: "AJBR 66933" },
+      { job_id: "job-dead", external_ref: "AJBR 66999" },
+    ],
+    [
+      { id: "job-archived", job_number: "AJBR 66933", status: "archived" },
+      { id: "job-dead", job_number: "AJBR 66999", status: "cancelled" },
+    ],
+  );
+
+  // The new exclude list used by the extra-items lane: dead states only.
+  const NARROWED_EXCLUDE =
+    "('lost','cancelled','deleted','duplicate','duplicated','void','voided')";
+
+  const res = await _resolveJobsByExternalRefForTest(
+    client,
+    ["AJBR 66933", "AJBR 66999"],
+    NARROWED_EXCLUDE,
+  );
+
+  // archived resolves; cancelled (genuinely dead) stays excluded.
+  assertEquals(Object.keys(res.byId).sort(), ["job-archived"]);
+  assertEquals(res.byRef["AJBR66933"].map((j: any) => j.id), ["job-archived"]);
+  assertEquals(res.byRef["AJBR66999"], undefined);
+});
+
 Deno.test("trade invoice resolver leaves bare numeric duplicate cores ambiguous", async () => {
   const client = makeResolverClient(
     [
