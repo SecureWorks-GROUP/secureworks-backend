@@ -10160,20 +10160,26 @@ async function scanSesMakesafes(client: any) {
     'makesafe_intake_drafts (rejected dedup index) read',
   )
   // Already-created jobs with a matching external ref (a live job already covers it).
-  // Fetch job_id + jobs.status too so a job_external_ref hit can be surfaced as a
-  // reopen_candidate ONLY when the matched job is reopen-eligible (complete/invoiced/
-  // archived). Active jobs (scheduled, accepted, etc.) stay as silent skips — the email
-  // is just a re-scan or a duplicate WO for a job in flight.
+  // Fetch job_id + jobs.status + requesting_company_slug so a job_external_ref hit:
+  //   (a) is only surfaced as a reopen_candidate when the matched job is reopen-eligible
+  //   (b) is keyed by normalised-ref + company slug to prevent cross-builder ref
+  //       collisions (two builders can share a ref number like "67998"; without the
+  //       company scope the map would overwrite one builder's job with the other's).
   const { data: existingJobs } = await client.from('makesafe_job_details')
-    .select('job_id, external_ref, jobs(status)')
+    .select('job_id, external_ref, requesting_company_slug, jobs(status)')
     .not('external_ref', 'is', null)
-  // Build a normalised-ref -> { jobId, status } lookup for the reopen-candidate path.
+  // Build a (normalised-ref|company-slug) -> { jobId, status } lookup.
   const refToJobId = new Map<string, { jobId: string; status: string | null }>()
-  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; jobs: { status: string } | { status: string }[] | null }>) {
+  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; requesting_company_slug: string | null; jobs: { status: string } | { status: string }[] | null }>) {
     const nr = _normaliseDedupRef(j.external_ref)
     if (nr && j.job_id) {
       const jobsData = Array.isArray(j.jobs) ? j.jobs[0] : j.jobs
-      refToJobId.set(nr, { jobId: j.job_id, status: jobsData?.status ?? null })
+      const companyKey = (j.requesting_company_slug || '').toLowerCase()
+      // Primary key: ref|company so two builders' jobs with the same ref never collide.
+      refToJobId.set(`${nr}|${companyKey}`, { jobId: j.job_id, status: jobsData?.status ?? null })
+      // Fallback key: ref alone, so a match still occurs when company slug is missing.
+      // The company-scoped key always wins if present (map is set in order above).
+      if (!refToJobId.has(nr)) refToJobId.set(nr, { jobId: j.job_id, status: jobsData?.status ?? null })
     }
   }
   const dedupIndex = _buildIntakeDedupIndex(
@@ -10496,7 +10502,12 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       // or the email is a re-scan of the same post).
       if (refDup === 'job_external_ref' && extractedRef) {
         const normRef = _normaliseDedupRef(extractedRef)
-        const matchedEntry = normRef ? refToJobId.get(normRef) || null : null
+        // Prefer the company-scoped key (ref|slug) to avoid cross-builder collisions.
+        // Fall back to the ref-only key when the company slug is absent.
+        const companyKey = (matchedCompany?.slug || '').toLowerCase()
+        const matchedEntry = normRef
+          ? (refToJobId.get(`${normRef}|${companyKey}`) || refToJobId.get(normRef) || null)
+          : null
         const matchedJobId = matchedEntry?.jobId ?? null
         const matchedJobStatus = matchedEntry?.status ?? null
         // Only surface a reopen_candidate when the matched job is actually eligible
@@ -12071,7 +12082,7 @@ async function createInvoice(client: any, body: any) {
         (sum: number, li: any) => sum + (li.unit_price ?? 0) * (li.quantity ?? 1),
         0,
       )
-      if (items.length === 0 || gateTotal <= 0) {
+      if (gateTotal <= 0) {
         throw new Error('report job needs a charge amount before invoicing: supply line_items with the trade/WO charge')
       }
     }
@@ -17039,6 +17050,22 @@ async function reopenMakesafe(client: any, body: any) {
       `must be one of: ${REOPEN_ELIGIBLE_STATUSES.join(', ')}`,
       409,
     )
+  }
+
+  // ── DRAFT MISMATCH GUARD ──
+  // When a draft_id is supplied, verify the draft's reopen_job_id equals the
+  // job_id being reopened. A mismatched pair (e.g. copy-paste error, race) would
+  // reopen the wrong job while clearing the wrong draft — hard fail fast.
+  if (draftId) {
+    const { data: draftRow } = await client.from('makesafe_intake_drafts')
+      .select('reopen_job_id').eq('id', draftId).maybeSingle()
+    if (draftRow && draftRow.reopen_job_id && draftRow.reopen_job_id !== jobId) {
+      throw new ApiError(
+        `reopenMakesafe: draft ${draftId} is linked to job ${draftRow.reopen_job_id}, not ${jobId}; ` +
+        'pass the correct job_id or omit draft_id',
+        400,
+      )
+    }
   }
 
   // Read current cycle_number (defaults to 1 in the DB; may be null pre-migration).
@@ -26117,3 +26144,7 @@ async function getJobFinancialsDetail(client: any, jobId: string) {
   if (!row) throw new ApiError(`No job_financials row for job ${jobId}`, 404)
   return { job: row }
 }
+
+// Test-only exports for Issue A + B + C safety guards.
+export const _createInvoiceForTest = createInvoice
+export const _makesafeRenderReportForTest = makesafeRenderReport
