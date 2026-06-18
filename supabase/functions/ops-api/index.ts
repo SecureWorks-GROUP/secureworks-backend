@@ -3046,6 +3046,19 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await makesafeResetFailedPack(client, body))
       }
 
+      // reopen_makesafe — human-triggered reactivation of a completed/archived job
+      // that has a new inbound email (reopen_candidate intake draft). PRIVILEGED-ONLY:
+      // the dashboard (SW_API_KEY, authMode='api_key') or an admin/owner JWT. The
+      // automation routine is NEVER allowed to reopen a job.
+      case 'reopen_makesafe': {
+        const reopenIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!reopenIsPrivileged) {
+          return json({ error: 'forbidden: reopen_makesafe requires the privileged ops key or an admin/owner session; the automation routine cannot reopen jobs' }, 403)
+        }
+        return json(await reopenMakesafe(client, body))
+      }
+
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
       case 'delete_document': return json(await deleteDocument(client, body))
 
@@ -9317,7 +9330,9 @@ async function makesafeMap(client: any, params: URLSearchParams) {
 
 // ── Slice 7: list intake drafts ──
 async function listIntakeDrafts(client: any, params: URLSearchParams) {
-  const status = params.get('status') || 'draft,needs_review'
+  // reopen_candidate is included by default so the board INTAKE column surfaces
+  // "matches job X — reopen it?" items alongside normal new-WO drafts.
+  const status = params.get('status') || 'draft,needs_review,reopen_candidate'
   const statuses = status.split(',').map((s: string) => s.trim())
 
   const { data, error } = await client.from('makesafe_intake_drafts')
@@ -10114,9 +10129,17 @@ async function scanSesMakesafes(client: any) {
     'makesafe_intake_drafts (rejected dedup index) read',
   )
   // Already-created jobs with a matching external ref (a live job already covers it).
+  // Fetch job_id too so a job_external_ref hit can be surfaced as a reopen_candidate
+  // (the human sees "matches job X — reopen it?") instead of silently dropping it.
   const { data: existingJobs } = await client.from('makesafe_job_details')
-    .select('external_ref')
+    .select('job_id, external_ref')
     .not('external_ref', 'is', null)
+  // Build a normalised-ref -> job_id lookup for the reopen-candidate path.
+  const refToJobId = new Map<string, string>()
+  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string }>) {
+    const nr = _normaliseDedupRef(j.external_ref)
+    if (nr && j.job_id) refToJobId.set(nr, j.job_id)
+  }
   const dedupIndex = _buildIntakeDedupIndex(
     existingDrafts || [],
     (existingJobs || []).map((j: any) => j.external_ref),
@@ -10430,8 +10453,67 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       dedupIndex,
     )
     if (refDup) {
-      console.log('[ops-api] intake skip (duplicate across paths):', refDup, '|', extractedRef, '|', subject)
-      skippedDuplicates++
+      // REOPEN-CANDIDATE path: an email matching an existing job's external_ref is
+      // NOT silently dropped — it surfaces as a reopen_candidate draft so the human
+      // sees "this matches job X — reopen it?". Other dup reasons (same draft already
+      // exists, same message id) remain silent drops (the human already has the draft
+      // or the email is a re-scan of the same post).
+      if (refDup === 'job_external_ref' && extractedRef) {
+        const normRef = _normaliseDedupRef(extractedRef)
+        const matchedJobId = normRef ? refToJobId.get(normRef) || null : null
+        const reopenDraft = {
+          org_id: DEFAULT_ORG_ID,
+          mailbox: SES_MAILBOX,
+          graph_message_id: msg.id,
+          internet_message_id: msg.internetMessageId || null,
+          conversation_id: msg.conversationId || null,
+          received_at: msg.receivedDateTime || null,
+          from_email: fromEmail,
+          from_name: fromName,
+          subject,
+          body_preview: bodyPreview,
+          requesting_company_slug: matchedCompany?.slug || null,
+          requesting_company_name: matchedCompany?.name || null,
+          external_ref: extractedRef,
+          client_name: extraction.client_name || null,
+          client_phone: extraction.client_phone || null,
+          client_email: null,
+          site_address: extraction.site_address || null,
+          site_suburb: extraction.site_suburb || null,
+          description: extraction.description || null,
+          safety_requirements: null,
+          special_instructions: null,
+          confidence,
+          missing_fields: missingFields,
+          extraction_json: extraction,
+          attachments_json: attachments,
+          report_type: null,
+          status: 'reopen_candidate',
+          reopen_job_id: matchedJobId,
+        }
+        const { error: rcErr } = await client.from('makesafe_intake_drafts').insert(reopenDraft)
+        if (rcErr) {
+          console.log('[ops-api] intake reopen_candidate insert failed:', rcErr.message)
+        } else {
+          console.log('[ops-api] intake reopen_candidate created for ref', extractedRef, 'job', matchedJobId)
+          // Register in the in-memory index so a second copy of the same email in
+          // this batch is also caught (same idempotency contract as normal drafts).
+          _registerIntakeDraft(
+            {
+              graph_message_id: msg.id,
+              internet_message_id: msg.internetMessageId || null,
+              external_ref: extractedRef,
+              requesting_company_slug: matchedCompany?.slug || null,
+              requesting_company_name: matchedCompany?.name || null,
+            },
+            dedupIndex,
+          )
+          newDrafts.push({ ...reopenDraft, _is_reopen_candidate: true })
+        }
+      } else {
+        console.log('[ops-api] intake skip (duplicate across paths):', refDup, '|', extractedRef, '|', subject)
+        skippedDuplicates++
+      }
       continue
     }
 
@@ -16830,6 +16912,94 @@ async function makesafeResetFailedPack(client: any, body: any) {
   return { reset: true, status: targetStatus, job_id: jobId, note: `failed pack reset to '${targetStatus}'; normal send flow can re-run` }
 }
 export const _makesafeResetFailedPackForTest = makesafeResetFailedPack
+
+// ════════════════════════════════════════════════════════════
+// REOPEN-MAKESAFE — simple human-triggered job reactivation
+// Stage 4 (2026-06-18): no automated charge machinery, no pack-kind variants.
+// Charge/no-charge stays the human's call via the normal invoice flow.
+// PRIVILEGED: api_key (ops dashboard) OR admin/owner JWT. ROUTINE-FORBIDDEN.
+// ════════════════════════════════════════════════════════════
+//
+// Contract:
+//   - job_id + reason required. reason is a short free-text string (no strict enum;
+//     the human types it). Validated non-empty.
+//   - The job must be in a completed/archived state (complete, invoiced, archived).
+//     A still-active job is rejected with 409 (not eligible for reopen).
+//   - On success: jobs.status -> 'accepted' (re-enters the active pipeline),
+//     makesafe_job_details: reopen_reason updated, cycle_number incremented.
+//   - If a reopen_candidate draft_id is supplied, that draft is marked 'approved'
+//     (approved_job_id = job_id) so it disappears from the intake queue.
+//   - Does NOT void or alter any existing invoice. Does NOT auto-send or auto-charge.
+//   - Returns { reopened: true, job_id, cycle_number, previous_status }.
+//
+const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived']
+
+async function reopenMakesafe(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  const reason = (body.reason || '').trim()
+  const draftId = body.draft_id || body.draftId || null
+
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (!reason) throw new ApiError('reason required (e.g. reattendance, rectification, pickup)', 400)
+
+  // Load the job to check eligibility.
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, status, type').eq('id', jobId).maybeSingle()
+  if (jobErr) throw new ApiError('reopenMakesafe: job read failed: ' + jobErr.message, 500)
+  if (!job) throw new ApiError('reopenMakesafe: job not found: ' + jobId, 404)
+  if (job.type !== 'makesafe') throw new ApiError('reopenMakesafe: job is not a make-safe job', 400)
+  if (!REOPEN_ELIGIBLE_STATUSES.includes(job.status)) {
+    throw new ApiError(
+      `reopenMakesafe: job status '${job.status}' is not eligible for reopen; ` +
+      `must be one of: ${REOPEN_ELIGIBLE_STATUSES.join(', ')}`,
+      409,
+    )
+  }
+
+  // Read current cycle_number (defaults to 1 in the DB; may be null pre-migration).
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('cycle_number').eq('job_id', jobId).maybeSingle()
+  const currentCycle = (detail as { cycle_number?: number } | null)?.cycle_number ?? 1
+  const nextCycle = currentCycle + 1
+  const nowIso = new Date().toISOString()
+
+  // 1) Reactivate the job: status -> 'accepted', clear closed timestamps.
+  const { error: jobUpdateErr } = await client.from('jobs')
+    .update({ status: 'accepted', completed_at: null, archived_at: null, updated_at: nowIso })
+    .eq('id', jobId)
+  if (jobUpdateErr) throw new ApiError('reopenMakesafe: jobs update failed: ' + jobUpdateErr.message, 500)
+
+  // 2) Update make-safe details: reopen_reason + increment cycle_number.
+  const { error: detailErr } = await client.from('makesafe_job_details')
+    .update({ reopen_reason: reason, cycle_number: nextCycle, updated_at: nowIso })
+    .eq('job_id', jobId)
+  if (detailErr) {
+    // Non-fatal: detail row may not exist for very old jobs. Log but do not roll back.
+    console.log('[ops-api] reopenMakesafe: detail update failed (non-fatal):', detailErr.message)
+  }
+
+  // 3) Mark the reopen_candidate draft as approved (clears it from the intake queue).
+  if (draftId) {
+    const { error: draftErr } = await client.from('makesafe_intake_drafts')
+      .update({ status: 'approved', approved_job_id: jobId, approved_at: nowIso, approved_by: body.reopened_by || 'ops_dashboard' })
+      .eq('id', draftId)
+    if (draftErr) {
+      // Non-fatal: if the draft can't be updated it stays in the queue with a stale
+      // status, but the job reopen still happened. Log clearly.
+      console.log('[ops-api] reopenMakesafe: draft status update failed (non-fatal):', draftErr.message)
+    }
+  }
+
+  // 4) Log event.
+  await client.from('job_events').insert({
+    job_id: jobId,
+    event_type: 'note',
+    detail_json: { note: `Job reopened: ${reason}`, cycle: nextCycle, reopened_by: body.reopened_by || 'ops_dashboard', draft_id: draftId || null },
+  })
+
+  return { reopened: true, job_id: jobId, cycle_number: nextCycle, previous_status: job.status, reason }
+}
+export const _reopenMakesafeForTest = reopenMakesafe
 
 async function toggleDocumentVisibility(client: any, body: any) {
   const { documentId, document_id, visible_to_trades } = body

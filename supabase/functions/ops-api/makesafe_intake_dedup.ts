@@ -109,10 +109,13 @@ export interface DedupIndex {
 
 // Draft states that mean "a draft already exists, do not make another". rejected /
 // superseded are NOT included: a rejected email may legitimately be re-drafted.
+// reopen_candidate IS included: an email that already has a reopen-candidate draft
+// must NOT be re-surfaced as a second candidate on the next cron cycle.
 export const LIVE_DRAFT_STATES: readonly string[] = [
   "draft",
   "needs_review",
   "approved",
+  "reopen_candidate",
 ] as const;
 
 /**
