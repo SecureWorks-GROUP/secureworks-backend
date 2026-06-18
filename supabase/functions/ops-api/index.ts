@@ -16778,6 +16778,27 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     throw new ApiError('photo follow-up blocked: no work-orders recipient (report_recipient) configured for this builder', 412)
   }
 
+  // ── MONEY/COMMS SAFETY (FAIL CLOSED): every approved photo URL MUST belong to
+  // this job's own media. The body is caller-supplied; we never trust it to point
+  // the builder at an arbitrary file. Build the allow-set from job_media for this
+  // job (by URL base, ignoring the ?v= cache-bust + any signing query), and reject
+  // any approved_photos URL not in it. ──
+  const { data: jobMedia } = await client.from('job_media')
+    .select('storage_url, thumbnail_url').eq('job_id', jobId)
+  const _urlBase = (u: unknown) => String(u ?? '').split('?')[0].split('#')[0].trim().toLowerCase()
+  const allowedPhotoUrls = new Set<string>()
+  for (const m of (jobMedia || [])) {
+    if (m?.storage_url) allowedPhotoUrls.add(_urlBase(m.storage_url))
+    if (m?.thumbnail_url) allowedPhotoUrls.add(_urlBase(m.thumbnail_url))
+  }
+  const foreignPhotos = approvedPhotos.filter((p) => !allowedPhotoUrls.has(_urlBase(p?.url)))
+  if (foreignPhotos.length > 0) {
+    throw new ApiError(
+      `photo follow-up blocked (FAIL CLOSED): ${foreignPhotos.length} approved photo URL(s) do not belong to this job's media; only the job's own submitted photos can be sent`,
+      403,
+    )
+  }
+
   const builderName = detail?.makesafe_companies?.name || detail?.requesting_company_name || 'team'
   const address = job?.metadata?.address || job?.client_name || jobId
   const ref = detail?.external_ref || job?.job_number || ''
@@ -16829,7 +16850,13 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
   try { emailResult = await emailResp.json() } catch { emailResult = {} }
   const messageId = emailResult?.message_id || emailResult?.id || null
 
-  // ── Write the photo follow-up marker (idempotent) ──
+  // ── Write the photo follow-up marker (idempotency record) ──
+  // The email has ALREADY gone out at this point. If the marker insert fails we
+  // must NOT let a blind retry re-send the same photos: return a LOUD distinct
+  // signal so the operator knows the photos went out and does not re-click. (A
+  // retry without the marker would re-send — the same post-send/marker-fail risk
+  // the main pack handles via sent_marker_failed; for this lighter photo step we
+  // surface it explicitly rather than running the full pack state machine.)
   const nowIso = new Date().toISOString()
   const markerText = buildPhotoFollowUpMarkerText({
     photoCount: attachments.length,
@@ -16837,11 +16864,25 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     nowIso,
     messageId,
   })
-  await client.from('job_events').insert({
-    job_id: jobId,
-    event_type: 'note',
-    detail_json: { text: markerText },
-  })
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'note',
+      detail_json: { text: markerText },
+    })
+  } catch (markerErr) {
+    // Photos genuinely sent but the idempotency marker write failed. Tell the
+    // operator clearly: the email WENT OUT. Do NOT retry (it would double-send).
+    return {
+      sent: true,
+      photo_count: attachments.length,
+      to: recipientEmail,
+      message_id: messageId,
+      job_id: jobId,
+      marker_failed: true,
+      warning: 'PHOTOS WERE SENT but the idempotency marker write failed. Do NOT re-send (it would double-email the builder). Detail: ' + (markerErr as Error).message,
+    }
+  }
 
   return {
     sent: true,
