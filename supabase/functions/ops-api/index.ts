@@ -239,6 +239,15 @@ import {
   RESUME_CLOSE_ALLOWED_STATUSES,
   checkResetFailedGate,
   emailFailureIsProvablyPreDispatch,
+  // Stage 1-2a — per-builder send parity
+  isPackPhotoSentEvent as _isPackPhotoSentEvent,
+  hasPackPhotoSentMarker,
+  buildPhotoFollowUpMarkerText,
+  isPackPortalReadyEvent,
+  hasPackPortalReadyMarker,
+  buildPortalReadyMarkerText,
+  isSwmsPdf as _isSwmsPdf,
+  checkClientSendGateWithSwms,
 } from './makesafe_send_pack.ts'
 // Wave 2 -- READ-ONLY report-draft cockpit feed (the informed-approve content
 // gate). Pure composers + normalisers; the orchestration below supplies the
@@ -270,7 +279,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 232
+const OPS_API_EXPECTED_ACTION_COUNT = 233
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -3018,6 +3027,17 @@ if (import.meta.main) serve(async (req: Request) => {
           approverId: authUser?.id || null,
           approverEmail: authUser?.email || null,
         }))
+      }
+      // makesafe_send_photo_followup (Stage 1-2a) — EMAIL 2 for AJS/MLB.
+      // Sends the approved site photos as individual attachments after the main
+      // pack (email 1) has already been sent. Idempotent via the
+      // MAKESAFE_PACK_SENT | photo marker. PRIVILEGED-CALLER ONLY (same gate as
+      // makesafe_send_pack). NOT routine-callable. No Xero authorise in this path.
+      case 'makesafe_send_photo_followup': {
+        if (!sendPackAllowed(authMode, authUser)) {
+          return json({ error: 'forbidden: makesafe_send_photo_followup requires the privileged dashboard key or an admin/owner session' }, 403)
+        }
+        return json(await makesafeSendPhotoFollowup(client, body))
       }
       // makesafe_resume_close (TASK B) — CLOSE-ONLY resume for sent_not_closed /
       // close_failed. PRIVILEGED-CALLER ONLY, gated EXACTLY like makesafe_send_pack
@@ -16147,9 +16167,11 @@ async function makesafeSendPack(
   const subject = body.subject
   const htmlBody = body.html_body || body.htmlBody
   if (!jobId) throw new ApiError('job_id required', 400)
-  if (!recipientEmail) throw new ApiError('recipient_email required', 400)
-  if (!subject) throw new ApiError('subject required', 400)
-  if (!htmlBody) throw new ApiError('html_body required', 400)
+  // Stage 1 (D3): recipient_email / subject / html_body are required ONLY for the
+  // EMAIL send path (AJS / MLB). Portal builders (Western / Builderwest) submit a
+  // pack manually and carry none of these. We therefore DEFER these checks until
+  // after the portal-builder branch (which returns early), enforcing them right
+  // before the atomic send-lock — see the email-required check below.
   const nowIso = () => new Date().toISOString()
 
   // ── PARTIAL-FAILURE / IDEMPOTENCY STOP (before anything irreversible) ──
@@ -16252,6 +16274,14 @@ async function makesafeSendPack(
     .eq('job_id', jobId).maybeSingle()
   // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
   const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
+  // Stage 1 (D3): Western Building / Builderwest are PORTAL builders — they do NOT
+  // receive email and have NO report_recipient inbox (Wave 0 resolution). The
+  // EXACT-RECIPIENT GATE below is an EMAIL-send gate, so it MUST be skipped for
+  // portal builders (otherwise the null report_recipient fails it closed and the
+  // portal-prep branch further down is never reached). The portal-prep branch
+  // still runs AFTER both preflights (docs incl. SWMS via requiresSwms, + invoice),
+  // so the same compliance is enforced; only the email-recipient check is bypassed.
+  const isPortalBuilder = _isMakesafeWesternCompany(detail, job)
 
   // ── BLOCKER C — EXACT-RECIPIENT GATE (money/comms, FAIL CLOSED) ──
   // Re-derive the builder's WORK-ORDERS inbox SERVER-SIDE from
@@ -16260,16 +16290,19 @@ async function makesafeSendPack(
   // CC MUST be EXACTLY ses@secureworkswa.com.au. This blocks vanessa@ajs.build
   // (the billing contact) ever being the To, and blocks any extra/legacy CC
   // (e.g. a 'CC vanessa@ajs.build' special_instructions value).
-  const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
-  const recipientFailures = checkExactRecipientGate({
-    configuredReportRecipient,
-    to: recipientEmail,
-    cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
-  })
-  if (recipientFailures.length > 0) {
-    await _ensurePackRow(client, jobId, packKind)
-    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'recipient_gate', error_detail: recipientFailures.join(' | ').slice(0, 500) })
-    throw new ApiError('recipient gate failed (no send; fix the work-orders recipient): ' + recipientFailures.join('; '), 403)
+  // Skipped for portal builders (no email -> no recipient to gate).
+  if (!isPortalBuilder) {
+    const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
+    const recipientFailures = checkExactRecipientGate({
+      configuredReportRecipient,
+      to: recipientEmail,
+      cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
+    })
+    if (recipientFailures.length > 0) {
+      await _ensurePackRow(client, jobId, packKind)
+      await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'recipient_gate', error_detail: recipientFailures.join(' | ').slice(0, 500) })
+      throw new ApiError('recipient gate failed (no send; fix the work-orders recipient): ' + recipientFailures.join('; '), 403)
+    }
   }
 
   // ── PREFLIGHT: typed close-out docs must exist (report + invoice + swms if MLB) ──
@@ -16335,6 +16368,59 @@ async function makesafeSendPack(
     await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'money_review_gate', error_detail: 'invoice flagged needs_money_review; pass money_review_confirmed=true to proceed' })
     throw new ApiError('send blocked: invoice is flagged for money review. Review the flagged lines in the cockpit, then approve with money_review_confirmed=true in the send body.', 412)
   }
+
+  // ── PORTAL-BUILDER BRANCH (Western Building / Builderwest) ─────────────────
+  // These builders do NOT receive email. We produce the pack docs list for
+  // manual submission on their Prime-system portal. No email, no Xero authorise.
+  // isPortalBuilder is computed above (before the recipient gate, which is skipped
+  // for these builders). Reaching here means BOTH preflights have passed (docs incl.
+  // the required SWMS, + a single live invoice + money-review gate), so the portal
+  // pack is fully compliant; we just don't email it.
+  if (isPortalBuilder) {
+    // Idempotency: if already portal-prepped, return early.
+    const { data: portalEvents } = await client.from('job_events')
+      .select('job_id, event_type, detail_json')
+      .eq('job_id', jobId).eq('event_type', 'note')
+    if ((portalEvents || []).some((ev: any) => isPackPortalReadyEvent(ev))) {
+      return { portal_ready: true, already_prepped: true, job_id: jobId }
+    }
+    // Collect the docs for portal submission
+    const portalDocs: Array<{ type: string; file_name: string; doc_id: string }> = []
+    const rDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+    if (rDoc) portalDocs.push({ type: 'report', file_name: rDoc.file_name, doc_id: rDoc.id })
+    const iDoc = (docRows || []).find((d: any) => d.type === 'invoice')
+    if (iDoc) portalDocs.push({ type: 'invoice', file_name: iDoc.file_name, doc_id: iDoc.id })
+    const sDoc = (docRows || []).find((d: any) => d.type === 'swms')
+    if (sDoc) portalDocs.push({ type: 'swms', file_name: sDoc.file_name, doc_id: sDoc.id })
+    // Write the portal-ready pack row + marker
+    await _ensurePackRow(client, jobId, packKind, {
+      status: 'portal_ready',
+      approver_id: ctx.approverId,
+      approved_at: new Date().toISOString(),
+    })
+    await _patchPack(client, jobId, packKind, { status: 'portal_ready' })
+    const portalMarkerText = buildPortalReadyMarkerText({ nowIso: new Date().toISOString() })
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'note',
+      detail_json: { text: portalMarkerText },
+    })
+    return {
+      portal_ready: true,
+      docs: portalDocs,
+      job_id: jobId,
+      builder: detail?.makesafe_companies?.name || detail?.requesting_company_name || null,
+    }
+  }
+
+  // ── EMAIL-PATH REQUIRED FIELDS (deferred from the top — see note above) ──
+  // From here the flow is the email send path (AJS / MLB only; portal builders
+  // returned above). recipient_email / subject / html_body are mandatory and the
+  // send is structurally impossible without them. The recipient gate above has
+  // already confirmed recipientEmail equals the configured work-orders inbox.
+  if (!recipientEmail) throw new ApiError('recipient_email required', 400)
+  if (!subject) throw new ApiError('subject required', 400)
+  if (!htmlBody) throw new ApiError('html_body required', 400)
 
   // ── ATOMIC SEND-LOCK ──
   // Ensure a pack row exists in a lockable state, then take the lock with a
@@ -16445,10 +16531,35 @@ async function makesafeSendPack(
       throw new ApiError('send failed: could not load the report PDF for attachment (invoice already authorised; safe to resume)', 502)
     }
 
+    // ── STEP 3b: For MLB, also load the SWMS PDF ─────────────────────────────
+    // MLB email 1 attaches 3 PDFs: report + Xero invoice + SWMS. Western Building
+    // is a portal-builder (no email), so SWMS is only loaded here for MLB.
+    const isMlbBuilder = _isMakesafeMlbCompany(detail, job)
+    let swmsPdfB64: string | null = null
+    let swmsFileName: string | null = null
+    if (isMlbBuilder) {
+      const swmsDoc = (docRows || []).find((d: any) => d.type === 'swms')
+      if (swmsDoc) {
+        const { data: freshSwms } = await client.from('job_documents')
+          .select('file_name, storage_url, pdf_url').eq('id', swmsDoc.id).maybeSingle()
+        swmsFileName = freshSwms?.file_name || swmsDoc.file_name || 'SWMS.pdf'
+        const swmsUrl = freshSwms?.pdf_url || freshSwms?.storage_url
+        if (swmsUrl) {
+          const bytes = await _fetchReportPdfBytes(swmsUrl)
+          if (bytes) swmsPdfB64 = _bytesToBase64(bytes)
+        }
+      }
+      if (!swmsPdfB64) {
+        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'load_swms_pdf', error_detail: 'SWMS PDF bytes unavailable for MLB send' })
+        throw new ApiError('send failed: could not load SWMS PDF for MLB attachment (invoice already authorised; safe to resume)', 502)
+      }
+    }
+
     // ── STEP 4: assemble + CLIENT-SEND GATE (hard, fail-closed) ──
     const attachments = [
       { contentBytes: reportPdfB64, name: reportFileName, contentType: 'application/pdf' },
       { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
+      ...(swmsPdfB64 ? [{ contentBytes: swmsPdfB64, name: swmsFileName!, contentType: 'application/pdf' }] : []),
     ]
     const gatePayload = {
       from: MAKESAFE_ADMIN_FROM,
@@ -16458,7 +16569,10 @@ async function makesafeSendPack(
       htmlBody,
       attachments: attachments.map((a) => ({ name: a.name })),
     }
-    const gateFailures = checkClientSendGate(gatePayload)
+    // MLB requires the SWMS PDF as a 3rd attachment — use the stricter gate.
+    const gateFailures = isMlbBuilder
+      ? checkClientSendGateWithSwms(gatePayload)
+      : checkClientSendGate(gatePayload)
     if (gateFailures.length > 0) {
       // Invoice authorised but the send is unsafe. Recoverable — resume after fix.
       await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'client_send_gate', error_detail: gateFailures.join(' | ') })
@@ -16616,6 +16730,166 @@ async function _ensurePackRow(client: any, jobId: string, packKind: string, extr
     await client.from('makesafe_report_packs')
       .update({ ...extra, updated_at: new Date().toISOString() })
       .eq('id', existing.id)
+  }
+}
+
+// (3c-ii) makesafe_send_photo_followup — Stage 1-2a EMAIL 2 for AJS/MLB.
+// Sends the approved site photos as individual email attachments after the main
+// pack (email 1) is confirmed sent. The main MAKESAFE_PACK_SENT | main marker
+// MUST already be present (proof email 1 went out). Idempotent via the
+// MAKESAFE_PACK_SENT | photo marker.
+//
+// MONEY/COMMS SAFETY: NO Xero authorise, NO invoice PDF, NO pack state machine.
+// This is purely the photo delivery step. It uses the SAME recipient as the main
+// pack (report_recipient from makesafe_companies). Fails closed if the main pack
+// marker is absent (email 1 not yet confirmed sent).
+async function makesafeSendPhotoFollowup(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  if (!jobId) throw new ApiError('job_id required', 400)
+
+  const approvedPhotos: Array<{ url: string; name: string; contentType?: string }> =
+    Array.isArray(body.approved_photos) ? body.approved_photos : []
+  if (approvedPhotos.length === 0) throw new ApiError('approved_photos array is required and must be non-empty', 400)
+
+  // ── PRECONDITION: main pack MUST already be sent ──
+  const { data: events } = await client.from('job_events')
+    .select('job_id, event_type, detail_json')
+    .eq('job_id', jobId).eq('event_type', 'note')
+  if (!(events || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))) {
+    throw new ApiError('photo follow-up blocked: main pack (MAKESAFE_PACK_SENT | main marker) must be sent first', 409)
+  }
+
+  // ── IDEMPOTENCY: if photo follow-up already sent, return early ──
+  if (hasPackPhotoSentMarker(events || [])) {
+    return { already_sent: true, reason: 'MAKESAFE_PACK_SENT | photo marker present', job_id: jobId }
+  }
+
+  // ── Load job + builder detail for recipient + address ──
+  const { data: job } = await client.from('jobs')
+    .select('id, job_number, type, metadata, client_name')
+    .eq('id', jobId).maybeSingle()
+  if (!job) throw new ApiError('job not found', 404)
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('*, makesafe_companies(slug,name,report_recipient)')
+    .eq('job_id', jobId).maybeSingle()
+
+  const recipientEmail = detail?.makesafe_companies?.report_recipient || null
+  if (!recipientEmail) {
+    throw new ApiError('photo follow-up blocked: no work-orders recipient (report_recipient) configured for this builder', 412)
+  }
+
+  // ── MONEY/COMMS SAFETY (FAIL CLOSED): every approved photo URL MUST belong to
+  // this job's own media. The body is caller-supplied; we never trust it to point
+  // the builder at an arbitrary file. Build the allow-set from job_media for this
+  // job (by URL base, ignoring the ?v= cache-bust + any signing query), and reject
+  // any approved_photos URL not in it. ──
+  const { data: jobMedia } = await client.from('job_media')
+    .select('storage_url, thumbnail_url').eq('job_id', jobId)
+  const _urlBase = (u: unknown) => String(u ?? '').split('?')[0].split('#')[0].trim().toLowerCase()
+  const allowedPhotoUrls = new Set<string>()
+  for (const m of (jobMedia || [])) {
+    if (m?.storage_url) allowedPhotoUrls.add(_urlBase(m.storage_url))
+    if (m?.thumbnail_url) allowedPhotoUrls.add(_urlBase(m.thumbnail_url))
+  }
+  const foreignPhotos = approvedPhotos.filter((p) => !allowedPhotoUrls.has(_urlBase(p?.url)))
+  if (foreignPhotos.length > 0) {
+    throw new ApiError(
+      `photo follow-up blocked (FAIL CLOSED): ${foreignPhotos.length} approved photo URL(s) do not belong to this job's media; only the job's own submitted photos can be sent`,
+      403,
+    )
+  }
+
+  const builderName = detail?.makesafe_companies?.name || detail?.requesting_company_name || 'team'
+  const address = job?.metadata?.address || job?.client_name || jobId
+  const ref = detail?.external_ref || job?.job_number || ''
+  const subject = `Make Safe - Site Photos - ${ref ? ref + ' - ' : ''}${address}`
+  const htmlBody = `<p>Hi ${builderName},</p><p>Please find attached site photos from the make safe works at ${address}.</p><p>These photos are provided for your records.</p>`
+
+  // ── Fetch photo bytes and build attachments ──
+  const attachments: Array<{ contentBytes: string; name: string; contentType: string }> = []
+  for (const photo of approvedPhotos) {
+    try {
+      const resp = await fetch(photo.url)
+      if (!resp.ok) {
+        console.log(`[makesafe_send_photo_followup] photo fetch failed (${resp.status}): ${photo.url}`)
+        continue
+      }
+      const bytes = new Uint8Array(await resp.arrayBuffer())
+      const b64 = _bytesToBase64(bytes)
+      attachments.push({
+        contentBytes: b64,
+        name: photo.name || `photo-${attachments.length + 1}.jpg`,
+        contentType: photo.contentType || 'image/jpeg',
+      })
+    } catch (e) {
+      console.log(`[makesafe_send_photo_followup] photo fetch threw: ${(e as Error).message}`)
+    }
+  }
+  if (attachments.length === 0) {
+    throw new ApiError('photo follow-up failed: could not fetch any approved photo bytes', 502)
+  }
+
+  // ── Send email ──
+  const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+    body: JSON.stringify({
+      from: MAKESAFE_ADMIN_FROM,
+      to: recipientEmail,
+      cc: MAKESAFE_CC,
+      subject,
+      htmlBody,
+      attachments,
+    }),
+  })
+  if (!emailResp.ok) {
+    const errText = await emailResp.text().catch(() => '')
+    throw new ApiError(`photo follow-up email failed (${emailResp.status}): ${errText}`.slice(0, 400), 502)
+  }
+  let emailResult: any = {}
+  try { emailResult = await emailResp.json() } catch { emailResult = {} }
+  const messageId = emailResult?.message_id || emailResult?.id || null
+
+  // ── Write the photo follow-up marker (idempotency record) ──
+  // The email has ALREADY gone out at this point. If the marker insert fails we
+  // must NOT let a blind retry re-send the same photos: return a LOUD distinct
+  // signal so the operator knows the photos went out and does not re-click. (A
+  // retry without the marker would re-send — the same post-send/marker-fail risk
+  // the main pack handles via sent_marker_failed; for this lighter photo step we
+  // surface it explicitly rather than running the full pack state machine.)
+  const nowIso = new Date().toISOString()
+  const markerText = buildPhotoFollowUpMarkerText({
+    photoCount: attachments.length,
+    to: recipientEmail,
+    nowIso,
+    messageId,
+  })
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'note',
+      detail_json: { text: markerText },
+    })
+  } catch (markerErr) {
+    // Photos genuinely sent but the idempotency marker write failed. Tell the
+    // operator clearly: the email WENT OUT. Do NOT retry (it would double-send).
+    return {
+      sent: true,
+      photo_count: attachments.length,
+      to: recipientEmail,
+      message_id: messageId,
+      job_id: jobId,
+      marker_failed: true,
+      warning: 'PHOTOS WERE SENT but the idempotency marker write failed. Do NOT re-send (it would double-email the builder). Detail: ' + (markerErr as Error).message,
+    }
+  }
+
+  return {
+    sent: true,
+    photo_count: attachments.length,
+    to: recipientEmail,
+    message_id: messageId,
+    job_id: jobId,
   }
 }
 
