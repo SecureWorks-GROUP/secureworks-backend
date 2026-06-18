@@ -21,9 +21,10 @@ import { _attachMakesafeDocumentForTest } from "./index.ts";
 //   .from('job_documents').update(patch).eq('id', id)           → patches the row
 //   .from('job_events').insert(row)                             → records the event
 //   .from('business_events').insert(row)                        → swallowed by logBusinessEvent
+//   .from('makesafe_job_details').select().eq().maybeSingle()   → null (normal job, no report_type)
 type DB = { job_documents: any[]; job_events: any[]; business_events: any[] };
 
-function makeDocClient(db: DB) {
+function makeDocClient(db: DB, opts?: { reportType?: string | null }) {
   let idSeq = 1;
   function builder(table: string) {
     const preds: Array<(r: any) => boolean> = [];
@@ -43,6 +44,15 @@ function makeDocClient(db: DB) {
       limit: (_n: number) => {
         const data = rowsFor().filter((r) => preds.every((p) => p(r)));
         return Promise.resolve({ data, error: null });
+      },
+      // maybeSingle: used by the FIX-4 report-type gate on makesafe_job_details.
+      // Returns a row with report_type set (when opts.reportType is non-null) or null.
+      maybeSingle: () => {
+        if (table === "makesafe_job_details") {
+          const rt = opts?.reportType ?? null;
+          return Promise.resolve({ data: rt != null ? { report_type: rt } : null, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
       },
       insert: (row: any) => {
         if (table === "job_documents") {
@@ -187,4 +197,88 @@ Deno.test("writes a makesafe_document_attached job_event", async () => {
   assertEquals(db.job_events.length, 1);
   assertEquals(db.job_events[0].event_type, "makesafe_document_attached");
   assertEquals(db.job_events[0].detail_json.type, "swms");
+});
+
+// ── FIX 4: makesafe_report blocked on report-type jobs ──────────────────────
+//
+// A report-type job (report_type IS NOT NULL) must never receive a type='makesafe_report'
+// document — the completion report lives on the builder portal, not the job folder.
+// Other types (invoice, work_order, swms) on report jobs are unaffected.
+
+Deno.test("FIX 4 — attaching makesafe_report to a report-type job is REFUSED", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  // Pass reportType so the stub returns a non-null report_type for makesafe_job_details.
+  const client = makeDocClient(db, { reportType: "ajs_builder_report" });
+  let threw = false;
+  let errMsg = "";
+  try {
+    await _attachMakesafeDocumentForTest(client, {
+      job_id: "job-report-1",
+      type: "makesafe_report",
+      url: STORED_URL,
+      file_name: "report.pdf",
+    });
+  } catch (e: any) {
+    threw = true;
+    errMsg = e?.message || "";
+  }
+  assert(threw, "expected attach to refuse makesafe_report on a report-type job");
+  assert(errMsg.includes("builder portal"), "error must mention the builder portal");
+  // No doc row must have been inserted.
+  assertEquals(db.job_documents.length, 0);
+});
+
+Deno.test("FIX 4 — attaching makesafe_report to a NORMAL job (no report_type) is ALLOWED", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  // No reportType → stub returns null → normal job path.
+  const client = makeDocClient(db);
+  const res = await _attachMakesafeDocumentForTest(client, {
+    job_id: "job-normal-1",
+    type: "makesafe_report",
+    url: STORED_URL,
+    file_name: "report.pdf",
+  });
+  assertEquals(res.success, true);
+  assertEquals(db.job_documents.length, 1);
+  assertEquals(db.job_documents[0].type, "makesafe_report");
+});
+
+Deno.test("FIX 4 — attaching 'invoice' to a report-type job is still ALLOWED (other types unaffected)", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  const client = makeDocClient(db, { reportType: "ajs_builder_report" });
+  const res = await _attachMakesafeDocumentForTest(client, {
+    job_id: "job-report-1",
+    type: "invoice",
+    url: STORED_URL,
+    file_name: "inv.pdf",
+  });
+  assertEquals(res.success, true);
+  assertEquals(db.job_documents.length, 1);
+  assertEquals(db.job_documents[0].type, "invoice");
+});
+
+Deno.test("FIX 4 — attaching 'swms' to a report-type job is still ALLOWED", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  const client = makeDocClient(db, { reportType: "mlb_report" });
+  const res = await _attachMakesafeDocumentForTest(client, {
+    job_id: "job-report-1",
+    type: "swms",
+    url: STORED_URL,
+    file_name: "swms.pdf",
+  });
+  assertEquals(res.success, true);
+  assertEquals(db.job_documents.length, 1);
+});
+
+Deno.test("FIX 4 — attaching 'work_order' to a report-type job is still ALLOWED", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  const client = makeDocClient(db, { reportType: "ajs_builder_report" });
+  const res = await _attachMakesafeDocumentForTest(client, {
+    job_id: "job-report-1",
+    type: "work_order",
+    url: STORED_URL,
+    file_name: "wo.pdf",
+  });
+  assertEquals(res.success, true);
+  assertEquals(db.job_documents.length, 1);
 });

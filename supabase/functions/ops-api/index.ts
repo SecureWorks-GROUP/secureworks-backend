@@ -10507,17 +10507,26 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         // Prefer the company-scoped key (ref|slug) to avoid cross-builder collisions.
         // Fall back to the ref-only key when the company slug is absent.
         const companyKey = (matchedCompany?.slug || '').toLowerCase()
-        const matchedEntry = normRef
-          ? (refToJobId.get(`${normRef}|${companyKey}`) || refToJobId.get(normRef) || null)
+        // Only use a company-scoped key for the reopen_candidate lookup. A ref-only
+        // (ambiguous) fallback match means two different builders share the same
+        // ref number — creating a reopen_candidate against whichever job won the
+        // fallback slot would point at the wrong job. Fall through to skippedDuplicates
+        // instead (safer: treat it like any other duplicate).
+        const companyScopedEntry = normRef && companyKey
+          ? refToJobId.get(`${normRef}|${companyKey}`) ?? null
           : null
+        const matchedEntry = companyScopedEntry
         const matchedJobId = matchedEntry?.jobId ?? null
         const matchedJobStatus = matchedEntry?.status ?? null
         // Only surface a reopen_candidate when the matched job is actually eligible
         // for reopen (complete/invoiced/archived). Active jobs (scheduled, accepted,
         // processing, in_progress, etc.) stay as silent skips — the email is a re-scan
         // of an original WO or a duplicate for an in-flight job.
+        // A null matchedEntry means no company-scoped match was found (ambiguous ref,
+        // no company slug) — treated as a safe skip, never points at the wrong job.
         if (!REOPEN_ELIGIBLE_STATUSES.includes(matchedJobStatus ?? '')) {
-          console.log('[ops-api] intake skip (active job, not reopen-eligible):', matchedJobStatus, '|', extractedRef, '|', matchedJobId)
+          const skipReason = matchedEntry == null ? 'no company-scoped match (ambiguous ref)' : 'active job, not reopen-eligible'
+          console.log('[ops-api] intake skip (' + skipReason + '):', matchedJobStatus, '|', extractedRef, '|', matchedJobId)
           skippedDuplicates++
           continue
         }
@@ -12458,6 +12467,30 @@ async function updateInvoice(client: any, body: any) {
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
   if (!line_items || !Array.isArray(line_items) || line_items.length === 0) {
     throw new ApiError('line_items required (array of {description, quantity, unit_price})', 400)
+  }
+
+  // ── REPORT-JOB $0 GATE ──
+  // Mirror the create_invoice / complete_and_invoice guards: a report-type make-safe
+  // job must always carry a non-zero charge. An edit that zeroes out the total is
+  // rejected here before it reaches Xero. Normal (non-report) jobs are unaffected.
+  {
+    const { data: invForGate } = await client.from('xero_invoices')
+      .select('job_id').eq('xero_invoice_id', xero_invoice_id).maybeSingle()
+    const jIdForGate = invForGate?.job_id
+    if (jIdForGate) {
+      const { data: msGateDetail } = await client.from('makesafe_job_details')
+        .select('report_type').eq('job_id', jIdForGate).maybeSingle()
+      if (msGateDetail?.report_type) {
+        const lineTotal = (line_items as Array<{ quantity?: number; unit_price?: number }>)
+          .reduce((sum, li) => sum + ((li.quantity ?? 1) * (li.unit_price ?? 0)), 0)
+        if (lineTotal <= 0) {
+          throw new ApiError(
+            'report job needs a charge amount before invoicing: line items sum to $0 or less',
+            400,
+          )
+        }
+      }
+    }
   }
 
   const { accessToken, tenantId } = await getToken(client)
@@ -15686,6 +15719,24 @@ async function attachMakesafeDocument(client: any, body: any) {
     throw new Error('type must be one of ' + allowedTypes.join(', '))
   }
 
+  // ── REPORT-JOB REPORT-DOC GATE ──
+  // A report-type job (report_type IS NOT NULL in makesafe_job_details) never gets a
+  // SecureWorks-authored makesafe_report document — the completion report is owned by
+  // the builder and lives on the builder portal, not in the job folder. Allowing it
+  // would create a confusing duplicate of the builder-side PDF in the ops doc list.
+  // Other doc types (invoice, work_order, swms) on report jobs are unaffected.
+  if (type === 'makesafe_report') {
+    const { data: reportJobDetail } = await client.from('makesafe_job_details')
+      .select('report_type').eq('job_id', jId).maybeSingle()
+    if (reportJobDetail?.report_type != null) {
+      throw new ApiError(
+        `attachMakesafeDocument: type 'makesafe_report' is not allowed on a report-type job (report_type='${reportJobDetail.report_type}'); ` +
+        'the completion report lives on the builder portal, not in the job folder',
+        400,
+      )
+    }
+  }
+
   const url: string | undefined = body.url || body.public_url || body.publicUrl || body.storage_url
   const pdfBase64: string | undefined = body.pdf_base64 || body.pdfBase64
   if (!url && !pdfBase64) throw new Error('url or pdf_base64 required')
@@ -17055,13 +17106,24 @@ async function reopenMakesafe(client: any, body: any) {
   }
 
   // ── DRAFT MISMATCH GUARD ──
-  // When a draft_id is supplied, verify the draft's reopen_job_id equals the
-  // job_id being reopened. A mismatched pair (e.g. copy-paste error, race) would
-  // reopen the wrong job while clearing the wrong draft — hard fail fast.
+  // When a draft_id is supplied, REQUIRE the draft's reopen_job_id to be non-null
+  // AND equal to the job_id being reopened. A null reopen_job_id means the draft
+  // was not created for this job (or is a stale generic draft) — that path must
+  // not be allowed to bypass to an arbitrary job. A mismatched pair (e.g.
+  // copy-paste error, race) would reopen the wrong job while clearing the wrong
+  // draft — hard fail fast in both cases.
+  // Omitting draft_id entirely remains allowed (direct privileged admin reopen
+  // with no candidate draft — that path is unchanged).
   if (draftId) {
     const { data: draftRow } = await client.from('makesafe_intake_drafts')
       .select('reopen_job_id').eq('id', draftId).maybeSingle()
-    if (draftRow && draftRow.reopen_job_id && draftRow.reopen_job_id !== jobId) {
+    if (!draftRow || draftRow.reopen_job_id == null) {
+      throw new ApiError(
+        `reopenMakesafe: draft ${draftId} has no reopen_job_id; it is not a valid reopen candidate for job ${jobId}`,
+        400,
+      )
+    }
+    if (draftRow.reopen_job_id !== jobId) {
       throw new ApiError(
         `reopenMakesafe: draft ${draftId} is linked to job ${draftRow.reopen_job_id}, not ${jobId}; ` +
         'pass the correct job_id or omit draft_id',
@@ -26150,3 +26212,4 @@ async function getJobFinancialsDetail(client: any, jobId: string) {
 // Test-only exports for Issue A + B + C safety guards.
 export const _createInvoiceForTest = createInvoice
 export const _makesafeRenderReportForTest = makesafeRenderReport
+export const _updateInvoiceForTest = updateInvoice
