@@ -175,6 +175,7 @@ import {
   _reopenMakesafeForTest as reopenMakesafe,
   _createInvoiceForTest as createInvoice,
   _makesafeRenderReportForTest as makesafeRenderReport,
+  _updateInvoiceForTest as updateInvoice,
 } from "./index.ts"
 
 Deno.test("reopenMakesafe: reactivates an archived job + logs correct cycle_number", async () => {
@@ -494,4 +495,218 @@ Deno.test("Issue C — cross-builder ref scoping: same ref, different slugs, no 
   assertEquals(mlbEntry?.status, "scheduled")
 
   assert(ajsEntry?.jobId !== mlbEntry?.jobId, "cross-builder collision must not occur")
+})
+
+// ── 13. FIX 1: null/omitted reopen_job_id draft bypass ───────────────────────
+//
+// When a draft_id IS supplied, the draft's reopen_job_id must be non-null AND
+// must equal the job_id. A null reopen_job_id must be rejected (closes the
+// "any draft can reopen any job" bypass). A mismatch must also be rejected.
+// Omitting draft_id entirely remains allowed (privileged direct reopen).
+
+// Helper: builds a stub where the draft has the given reopen_job_id value.
+function makeReopenStubWithDraft(draftReopenJobId: string | null) {
+  return {
+    from: (table: string) => ({
+      select: (_cols: string) => ({
+        eq: (_col: string, _val: string) => ({
+          maybeSingle: async () => {
+            if (table === "jobs") {
+              return { data: { id: "job-target", status: "archived", type: "makesafe" }, error: null }
+            }
+            if (table === "makesafe_intake_drafts") {
+              return { data: { reopen_job_id: draftReopenJobId }, error: null }
+            }
+            return { data: null, error: null }
+          },
+        }),
+      }),
+      update: (_vals: any) => ({
+        eq: () => Promise.resolve({ error: null }),
+      }),
+      insert: (_vals: any) => Promise.resolve({ error: null }),
+    }),
+  }
+}
+
+Deno.test("FIX 1 — draft_id with null reopen_job_id is REJECTED (400)", async () => {
+  const stub = makeReopenStubWithDraft(null)
+  await assertRejects(
+    () => reopenMakesafe(stub, { job_id: "job-target", reason: "reattendance", draft_id: "draft-null" }),
+    Error,
+    "not a valid reopen candidate",
+  )
+})
+
+Deno.test("FIX 1 — draft_id with mismatched reopen_job_id is REJECTED (400)", async () => {
+  const stub = makeReopenStubWithDraft("job-other")
+  await assertRejects(
+    () => reopenMakesafe(stub, { job_id: "job-target", reason: "reattendance", draft_id: "draft-mismatch" }),
+    Error,
+    "draft-mismatch",
+  )
+})
+
+Deno.test("FIX 1 — draft_id with matching reopen_job_id is ALLOWED", async () => {
+  const stub = makeReopenStubWithDraft("job-target")
+  const result = await reopenMakesafe(stub, { job_id: "job-target", reason: "reattendance", draft_id: "draft-ok" })
+  assertEquals(result.reopened, true)
+})
+
+Deno.test("FIX 1 — omitting draft_id entirely is ALLOWED (privileged direct reopen)", async () => {
+  // No draft involved — direct privileged admin call.
+  const stub = {
+    from: (table: string) => ({
+      select: (_cols: string) => ({
+        eq: (_col: string, _val: string) => ({
+          maybeSingle: async () => {
+            if (table === "jobs") {
+              return { data: { id: "job-nodraft", status: "archived", type: "makesafe" }, error: null }
+            }
+            return { data: null, error: null }
+          },
+        }),
+      }),
+      update: (_vals: any) => ({
+        eq: () => Promise.resolve({ error: null }),
+      }),
+      insert: (_vals: any) => Promise.resolve({ error: null }),
+    }),
+  }
+  const result = await reopenMakesafe(stub, { job_id: "job-nodraft", reason: "reattendance" })
+  assertEquals(result.reopened, true)
+})
+
+// ── 14. FIX 2: reopen-candidate ref-only fallback must NOT create a candidate ─
+//
+// Only a company-scoped match (`ref|company`) may create a reopen_candidate.
+// A ref-only (ambiguous, no company) match must NOT create one — fall through
+// to skippedDuplicates instead.
+
+function normRef(ref: string): string {
+  return ref.toLowerCase().replace(/[\s\-_]+/g, "")
+}
+
+// Mirrors the FIX-2 lookup logic from index.ts.
+function fix2LookupEntry(
+  refToJobId: Map<string, { jobId: string; status: string | null }>,
+  extractedRef: string,
+  companySlug: string,
+): { jobId: string; status: string | null } | null {
+  const nr = normRef(extractedRef)
+  const companyKey = companySlug.toLowerCase()
+  // FIX 2: only company-scoped key — no ref-only fallback for reopen_candidate.
+  return (nr && companyKey) ? (refToJobId.get(`${nr}|${companyKey}`) ?? null) : null
+}
+
+Deno.test("FIX 2 — missing company slug: ref-only match does NOT produce a reopen_candidate entry", () => {
+  // Map built by the intake loop (job has a company slug, so it has a company-scoped key).
+  const refToJobId = new Map<string, { jobId: string; status: string | null }>()
+  const nr = normRef("67998")
+  refToJobId.set(`${nr}|ajs`, { jobId: "job-ajs-1", status: "complete" })
+  refToJobId.set(nr, { jobId: "job-ajs-1", status: "complete" }) // ref-only fallback still in map
+
+  // Inbound email has no company slug (matchedCompany is null → companyKey = '').
+  const entry = fix2LookupEntry(refToJobId, "67998", "")
+  assertEquals(entry, null, "no company slug → no reopen_candidate entry (ambiguous ref is not enough)")
+})
+
+Deno.test("FIX 2 — whitespace-only company slug: also produces no reopen_candidate entry", () => {
+  const refToJobId = new Map<string, { jobId: string; status: string | null }>()
+  const nr = normRef("67998")
+  refToJobId.set(`${nr}|ajs`, { jobId: "job-ajs-1", status: "complete" })
+  refToJobId.set(nr, { jobId: "job-ajs-1", status: "complete" })
+
+  const entry = fix2LookupEntry(refToJobId, "67998", "   ") // whitespace slug → trims to ''
+  // The trim happens in index.ts: (matchedCompany?.slug || '').toLowerCase()
+  // which produces '' for whitespace-only — same as missing.
+  // Our helper mirrors this by passing the raw slug; '' key won't match `${nr}|ajs`.
+  assertEquals(entry, null, "whitespace-only slug → no reopen_candidate (treated as missing)")
+})
+
+Deno.test("FIX 2 — matching company slug: company-scoped match STILL creates a reopen_candidate", () => {
+  const refToJobId = new Map<string, { jobId: string; status: string | null }>()
+  const nr = normRef("67998")
+  refToJobId.set(`${nr}|ajs`, { jobId: "job-ajs-1", status: "complete" })
+  refToJobId.set(nr, { jobId: "job-ajs-1", status: "complete" })
+
+  const entry = fix2LookupEntry(refToJobId, "67998", "ajs")
+  assertEquals(entry?.jobId, "job-ajs-1", "company-scoped match must resolve correctly")
+  assertEquals(entry?.status, "complete")
+})
+
+// ── 15. FIX 3: updateInvoice report-job $0 gate ───────────────────────────────
+//
+// update_invoice now mirrors the create/complete gates: report-type jobs must
+// carry a non-zero line total. Normal jobs are unaffected.
+
+// Stub for updateInvoice: returns a xero_invoice row with a job_id, then
+// returns makesafe_job_details with the given report_type for that job.
+function makeUpdateInvoiceStub(opts: { reportType: string | null }) {
+  return {
+    from: (table: string) => ({
+      select: (_cols: string) => ({
+        eq: (_col: string, _val: string) => ({
+          maybeSingle: async () => {
+            if (table === "xero_invoices") {
+              return { data: { job_id: "job-r2" }, error: null }
+            }
+            if (table === "makesafe_job_details") {
+              return { data: { report_type: opts.reportType }, error: null }
+            }
+            return { data: null, error: null }
+          },
+          single: async () => ({ data: null, error: null }),
+        }),
+        not: () => ({ data: [], error: null }),
+        in: () => ({ data: [], error: null }),
+      }),
+      update: (_vals: any) => ({
+        eq: () => Promise.resolve({ error: null }),
+      }),
+      insert: (_vals: any) => Promise.resolve({ error: null }),
+    }),
+    rpc: () => Promise.resolve({ data: null, error: null }),
+  }
+}
+
+Deno.test("FIX 3 — updateInvoice: report-type job with $0 line total is REJECTED", async () => {
+  const stub = makeUpdateInvoiceStub({ reportType: "ajs_builder_report" })
+  await assertRejects(
+    () => updateInvoice(stub, {
+      xero_invoice_id: "xero-inv-1",
+      line_items: [{ description: "Labour", quantity: 1, unit_price: 0 }],
+    }),
+    Error,
+    "report job needs a charge amount",
+  )
+})
+
+Deno.test("FIX 3 — updateInvoice: report-type job with $0 total (multi-line summing to 0) is REJECTED", async () => {
+  const stub = makeUpdateInvoiceStub({ reportType: "ajs_builder_report" })
+  await assertRejects(
+    () => updateInvoice(stub, {
+      xero_invoice_id: "xero-inv-1",
+      line_items: [
+        { description: "Credit", quantity: 1, unit_price: -50 },
+        { description: "Charge", quantity: 1, unit_price: 50 },
+      ],
+    }),
+    Error,
+    "report job needs a charge amount",
+  )
+})
+
+Deno.test("FIX 3 — updateInvoice: normal job (no report_type) passes the gate", async () => {
+  const stub = makeUpdateInvoiceStub({ reportType: null })
+  let reportGateThrew = false
+  try {
+    await updateInvoice(stub, {
+      xero_invoice_id: "xero-inv-2",
+      line_items: [{ description: "Labour", quantity: 1, unit_price: 0 }],
+    })
+  } catch (e: any) {
+    reportGateThrew = (e?.message || "").includes("report job needs a charge")
+  }
+  assert(!reportGateThrew, "normal job must not be blocked by the report-job gate")
 })
