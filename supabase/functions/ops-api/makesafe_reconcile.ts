@@ -1486,3 +1486,228 @@ export async function seedCanaryExpectation(
   }, { onConflict: "marker" });
   if (error) throw new Error(`makesafe_canary_expectations seed upsert failed: ${error.message}`);
 }
+
+// ── D5 — Draft-creation heartbeat (stall detector) ────────────────────────────
+//
+// PROBLEM: the make-safe intake pipeline is:
+//   pg_cron (*/5 min) -> monitor-ses-makesafes (sync emails)
+//                     -> tail-call ops-api?action=scan_ses_makesafes
+//                     -> scanSesMakesafes -> inserts makesafe_intake_drafts
+//
+// Because scan_ses_makesafes is a BEST-EFFORT, non-fatal tail-call, if the scan
+// starts failing (deploy regression, edge function crash, Deno runtime issue),
+// the cron still reports "succeeded", sync_state stays OK, and drafts SILENTLY
+// STOP with no alert. This is the exact shape of the 2-day outage on 2026-06-16.
+//
+// This heartbeat detects: "builder emails are arriving at ses@ BUT no new drafts
+// are being created in the same window."
+//
+// STALL WINDOW: 2 hours. Given the every-5-min cadence a 2-hour silence means
+// ≥24 consecutive scan failures — a clear pipeline break rather than normal
+// after-hours quiet. Weeknight (18:00-07:00 AWST) and weekends are NOT excluded
+// because builders can email at any time; false-positive rate at 2 h is low.
+//
+// NON-SPAMMY: the alert is only raised on TRANSITION into stalled, not every run.
+// A lightweight `makesafe_heartbeat_state` table tracks the last time we sent a
+// draft-stall alert; we skip sending if the last alert was < RESEND_HOURS ago.
+// This means Telegram fires once per stall episode, not once per 15-min canary run.
+//
+// ALERT PATH: identical to D1-D4 — emitAlerts -> logBusinessEvent + Telegram.
+// No new system invented.
+//
+// RESEND THRESHOLD: 4 hours. If a stall persists beyond 4 hours a fresh alert
+// fires so the on-call team gets a reminder rather than relying solely on the first
+// notification.
+//
+// CRON: no new cron needed. This check is appended to the existing
+// makesafe_email_canary (D4) action which already runs every 15 minutes via the
+// `makesafe-canary-d4` cron job. A standalone `makesafe_draft_heartbeat` action
+// is also registered (see index.ts) for manual invocation and future re-scheduling.
+//
+// If the `makesafe_heartbeat_state` table does not exist yet, the heartbeat
+// degrades gracefully (no last-alerted read = alert fires normally; no state write
+// = will re-alert next run). This keeps deploy ordering flexible.
+//
+// CRON SQL (to be run by the operator once on prod — NOT applied here):
+//   -- Dedicated cron (optional if D4 already runs every 15 min and is extended):
+//   SELECT cron.schedule(
+//     'makesafe-draft-heartbeat',
+//     '*/15 * * * *',
+//     $$SELECT net.http_post(
+//       url := 'https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api?action=makesafe_draft_heartbeat',
+//       headers := '{"Authorization":"Bearer <SW_API_KEY>","Content-Type":"application/json"}'::jsonb,
+//       body := '{}'::jsonb
+//     )$$
+//   );
+//
+// MIGRATION SQL (create the heartbeat state table — also NOT applied here):
+//   CREATE TABLE IF NOT EXISTS public.makesafe_heartbeat_state (
+//     key text PRIMARY KEY,
+//     last_alert_at timestamptz,
+//     last_ok_at timestamptz,
+//     updated_at timestamptz NOT NULL DEFAULT now()
+//   );
+//   ALTER TABLE public.makesafe_heartbeat_state ENABLE ROW LEVEL SECURITY;
+//   CREATE POLICY "service_role_all_makesafe_heartbeat_state"
+//     ON public.makesafe_heartbeat_state FOR ALL TO service_role
+//     USING (true) WITH CHECK (true);
+//   COMMENT ON TABLE public.makesafe_heartbeat_state IS
+//     'Tracks last-alert-sent times for make-safe pipeline heartbeat checks to prevent alert spam.';
+
+// Stall detection window: if builder emails exist in this window but no drafts
+// were created, the pipeline is stalled.
+export const HEARTBEAT_STALL_HOURS = 2;
+
+// Resend threshold: even if stalled, don't fire again until this many hours after
+// the last alert. Keeps Telegram quiet for a single prolonged stall.
+export const HEARTBEAT_RESEND_HOURS = 4;
+
+export interface HeartbeatInput {
+  // Recent inbound builder emails in the stall window (ses@ mailbox, non-own-domain).
+  recentEmailCount: number;
+  // New draft rows created in the stall window.
+  recentDraftCount: number;
+  // ISO timestamp of the last draft-stall alert (null = never alerted).
+  lastAlertAt: string | null;
+  // ISO timestamp used as "now" (injectable for testing).
+  nowIso?: string;
+}
+
+export interface HeartbeatResult {
+  // Whether the pipeline appears stalled.
+  stalled: boolean;
+  // Whether we should emit an alert this run (stalled AND not rate-limited).
+  shouldAlert: boolean;
+  detail: string;
+}
+
+// Pure logic — no DB, injectable for unit tests.
+export function checkDraftCreationHeartbeat(input: HeartbeatInput): HeartbeatResult {
+  const { recentEmailCount, recentDraftCount, lastAlertAt, nowIso } = input;
+  const now = nowIso ? Date.parse(nowIso) : Date.now();
+
+  const stalled = recentEmailCount > 0 && recentDraftCount === 0;
+
+  if (!stalled) {
+    return {
+      stalled: false,
+      shouldAlert: false,
+      detail: recentEmailCount === 0
+        ? `no builder emails in window (${HEARTBEAT_STALL_HOURS}h); pipeline quiet`
+        : `pipeline healthy: ${recentEmailCount} email(s), ${recentDraftCount} draft(s) in last ${HEARTBEAT_STALL_HOURS}h`,
+    };
+  }
+
+  // Stalled — check rate limit.
+  let shouldAlert = true;
+  if (lastAlertAt) {
+    const lastMs = Date.parse(lastAlertAt);
+    if (!Number.isNaN(lastMs)) {
+      const hoursSinceAlert = (now - lastMs) / 3_600_000;
+      if (hoursSinceAlert < HEARTBEAT_RESEND_HOURS) {
+        shouldAlert = false;
+      }
+    }
+  }
+
+  return {
+    stalled: true,
+    shouldAlert,
+    detail: `make-safe drafting may be stalled: ${recentEmailCount} builder email(s) arrived at ses@ in the last ${HEARTBEAT_STALL_HOURS}h but 0 new intake drafts were created`,
+  };
+}
+
+// DB-bound D5 action. Reads email + draft counts from the window, checks
+// heartbeat_state for rate-limiting, emits alert if needed, then updates state.
+export async function makesafeDraftHeartbeat(
+  client: SB,
+  sink: AlertSink,
+  opts: { nowIso?: string } = {},
+): Promise<{ stalled: boolean; shouldAlert: boolean; alerted: boolean; detail: string }> {
+  const now = opts.nowIso ? new Date(Date.parse(opts.nowIso)) : new Date();
+  const windowStart = new Date(now.getTime() - HEARTBEAT_STALL_HOURS * 3_600_000).toISOString();
+
+  // Count recent inbound builder emails in the stall window.
+  // We use `pii_purged_at IS NULL` (same as scanSesMakesafes) to stay parity with
+  // what the scanner can actually see. We do NOT filter to known builder senders
+  // here — if ANY non-purged email arrived at ses@ and no drafts appeared, the
+  // pipeline may be stalled. A stricter sender filter could mask the symptom.
+  // FAIL CLOSED: a DB error here should not silently suppress the check — THROW.
+  const { count: emailCount, error: emailErr } = await client
+    .from("emails")
+    .select("post_id", { count: "exact", head: true })
+    .eq("mailbox", SES_MAILBOX)
+    .is("pii_purged_at", null)
+    .gte("received_at", windowStart);
+  if (emailErr) throw new Error(`heartbeat emails count failed: ${emailErr.message}`);
+
+  // Count new intake drafts in the same window. `received_at` on the draft is the
+  // email's received timestamp (set at parse time) so it tracks when the email
+  // arrived, not when the row was inserted. Use `created_at` instead — that is
+  // when scanSesMakesafes actually inserted the row, which is what we want to
+  // measure (did the scan run?).
+  // FAIL CLOSED: THROW so a partial read never silently hides a 0-draft condition.
+  const { count: draftCount, error: draftErr } = await client
+    .from("makesafe_intake_drafts")
+    .select("id", { count: "exact", head: true })
+    .eq("mailbox", "ses@secureworkswa.com.au")
+    .gte("created_at", windowStart);
+  if (draftErr) throw new Error(`heartbeat drafts count failed: ${draftErr.message}`);
+
+  // Read last-alert-at from state table (gracefully absent — table may not exist yet).
+  let lastAlertAt: string | null = null;
+  try {
+    const { data: stateRow } = await client
+      .from("makesafe_heartbeat_state")
+      .select("last_alert_at")
+      .eq("key", "draft_stall")
+      .maybeSingle();
+    lastAlertAt = stateRow?.last_alert_at ?? null;
+  } catch {
+    // Table absent or RLS issue — treat as never alerted (safe: may over-alert once).
+  }
+
+  const { stalled, shouldAlert, detail } = checkDraftCreationHeartbeat({
+    recentEmailCount: emailCount ?? 0,
+    recentDraftCount: draftCount ?? 0,
+    lastAlertAt,
+    nowIso: now.toISOString(),
+  });
+
+  if (shouldAlert) {
+    // Emit via the standard alert path (business_events + Telegram).
+    const alert: ReconAlert = {
+      direction: "email_no_job",
+      severity: "ERROR",
+      ref: null,
+      detail,
+    };
+    await emitAlerts(client, sink, "D5-heartbeat", [alert]);
+
+    // Update state to suppress repeat alerts within HEARTBEAT_RESEND_HOURS.
+    // Non-fatal: a failed state write means the next run will re-alert (acceptable
+    // — over-alerting is less bad than silent stalls).
+    try {
+      await client.from("makesafe_heartbeat_state").upsert({
+        key: "draft_stall",
+        last_alert_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      }, { onConflict: "key" });
+    } catch {
+      // Non-fatal.
+    }
+  } else if (!stalled) {
+    // Pipeline is healthy — record last-ok-at for observability.
+    try {
+      await client.from("makesafe_heartbeat_state").upsert({
+        key: "draft_stall",
+        last_ok_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      }, { onConflict: "key" });
+    } catch {
+      // Non-fatal.
+    }
+  }
+
+  return { stalled, shouldAlert, alerted: shouldAlert, detail };
+}
