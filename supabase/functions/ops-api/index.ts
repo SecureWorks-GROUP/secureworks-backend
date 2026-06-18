@@ -257,6 +257,22 @@ import {
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { loadRefPrefixes, normaliseRef } from '../_shared/makesafe_refs.ts'
 
+// Stage 4 Phase A — re-open / re-cycle mechanism pure building blocks.
+// Privileged action `re_open_makesafe` (api_key / jwt admin|owner; ROUTINE-FORBIDDEN).
+import {
+  validateReopenInput,
+  buildReopenDetailPatch,
+  buildNewPackRow,
+  checkNoChargeInvoiceGate,
+  checkNoChargeSendGate,
+  filterInvoicesToCurrentCycle,
+  buildCyclePackSentMarkerText,
+  hasCyclePackSentMarker,
+  noChargeFromReason,
+  isValidReopenReason,
+  type ReopenReason,
+} from './makesafe_reopen.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
@@ -1800,6 +1816,10 @@ if (import.meta.main) serve(async (req: Request) => {
       'create_makesafe_draft_invoice', // creates a Xero DRAFT invoice (reversible, no authorise)
       'makesafe_render_report', // renders the report PDF artifact (no send)
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
+      // NOTE: 're_open_makesafe' is DELIBERATELY NOT listed here — it is a
+      // privileged mutation (reactivates a completed job) and must NEVER be
+      // reachable by the routine.  It is blocked by the default-deny below.
+      // Belt-and-braces: the route case also asserts !routine before executing.
     ])
     if (authMode === 'routine' && action && !ROUTINE_ALLOWED_ACTIONS.has(action)) {
       return json({ error: `forbidden: '${action}' is not permitted for the make-safe automation routine; the routine key may only create/read drafts and render/attach report artifacts (default-deny). A human tick (privileged ops key or admin/owner) performs every send, authorise, and approve.` }, 403)
@@ -3041,6 +3061,19 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: makesafe_reset_failed_pack requires the privileged dashboard key or an admin/owner session; the make-safe automation routine cannot reset packs' }, 403)
         }
         return json(await makesafeResetFailedPack(client, body))
+      }
+
+      // ── Stage 4 Phase A — re-open / re-cycle ──
+      // re_open_makesafe is PRIVILEGED: api_key (dashboard) or jwt admin/owner.
+      // The make-safe routine key is REJECTED here AND by the default-deny
+      // ROUTINE_ALLOWED_ACTIONS gate above (belt-and-braces, Sentinel Wave 0).
+      case 're_open_makesafe': {
+        const reopenAllowed = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!reopenAllowed) {
+          return json({ error: 'forbidden: re_open_makesafe requires the privileged dashboard key or an admin/owner session; the make-safe automation routine cannot re-open jobs' }, 403)
+        }
+        return json(await reopenMakesafe(client, body))
       }
 
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
@@ -15953,11 +15986,39 @@ export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, r
 // full-ACCREC-scan 3-tier dup guard FIRST; if a live invoice already maps to the
 // job, returns {skipped:true, existing_invoice} and creates nothing. Routine-safe
 // (drafts only) — NO human-only gate.
+//
+// Stage 4 Phase A: honours no_charge flag.  When body.no_charge=true (set by a
+// re-open cycle of type rectification/pickup), skips the Xero call entirely and
+// returns {skipped:true, reason:'no_charge'} + writes a job note.
 async function createMakesafeDraftInvoice(client: any, body: any) {
   const jobId = body.job_id || body.jobId || null
   const reference = body.reference
   const contact = body.contact_name || body.contactName
   const lines = body.line_items || body.lineItems || body.lines
+
+  // Stage 4 Phase A — no_charge gate: skip invoice creation for
+  // rectification/pickup re-open cycles.  The caller sets body.no_charge=true
+  // (derived from makesafe_job_details.no_charge at re-open time).
+  const noChargeSignal = checkNoChargeInvoiceGate(body.no_charge === true)
+  if (noChargeSignal) {
+    // Write a job note so the audit trail shows the skip.
+    if (jobId) {
+      try {
+        await client.from('job_events').insert({
+          job_id: jobId,
+          event_type: 'note',
+          detail_json: { text: `[no_charge] invoice creation skipped for ${reference || 'job'}: ${noChargeSignal.note}` },
+        })
+      } catch (_) { /* non-blocking */ }
+    }
+    return {
+      skipped: true,
+      reason: noChargeSignal.reason,
+      reference,
+      note: noChargeSignal.note,
+    }
+  }
+
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
   if (!Array.isArray(lines) || lines.length === 0) throw new ApiError('line_items required', 400)
@@ -16017,6 +16078,84 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
 }
 // Test-only export alias for the DRAFT-invoice dup-guard skip path.
 export const _createMakesafeDraftInvoiceForTest = createMakesafeDraftInvoice
+
+// ── Stage 4 Phase A — re_open_makesafe (PRIVILEGED: api_key / jwt admin|owner) ──
+//
+// Re-activates a completed/archived make-safe job (status -> scheduled) with a
+// reason + charge flag.  Creates a NEW makesafe_report_packs row for the new cycle
+// (pack_kind = reason).  Leaves the prior 'main' pack + its invoice + its docs
+// INTACT.  Does NOT delete or void any prior invoice.
+async function reopenMakesafe(client: any, body: any) {
+  const jobId = body.job_id || body.jobId || null
+  const reason = body.reason
+
+  // Load the job to check eligibility.
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, status, type').eq('id', jobId).maybeSingle()
+  if (jobErr || !job) throw new ApiError('job not found', 404)
+
+  const validation = validateReopenInput({ jobId, reason, jobStatus: job.status })
+  if (!validation.ok) throw new ApiError(validation.reason || 're_open validation failed', validation.httpStatus)
+
+  // Load current detail to get the current cycle_number.
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('cycle_number, no_charge, substatus').eq('job_id', jobId).maybeSingle()
+  if (!detail) throw new ApiError('makesafe_job_details not found for job', 404)
+
+  const nowIso = new Date().toISOString()
+  const patch = buildReopenDetailPatch({
+    reason: reason as ReopenReason,
+    priorCycleNumber: detail.cycle_number || 1,
+    nowIso,
+  })
+
+  // 1. Re-activate the job: set status back to 'scheduled' so it enters the pipeline.
+  const { error: jobUpdateErr } = await client.from('jobs')
+    .update({ status: 'scheduled', updated_at: nowIso })
+    .eq('id', jobId)
+  if (jobUpdateErr) throw new ApiError('failed to reactivate job: ' + jobUpdateErr.message, 500)
+
+  // 2. Patch makesafe_job_details with the re-open state.
+  const { error: detailUpdateErr } = await client.from('makesafe_job_details')
+    .update(patch).eq('job_id', jobId)
+  if (detailUpdateErr) throw new ApiError('failed to patch makesafe_job_details: ' + detailUpdateErr.message, 500)
+
+  // 3. Create a new makesafe_report_packs row for this cycle.
+  //    UNIQUE(job_id, pack_kind) ensures one pack per reason per job.
+  const newPack = buildNewPackRow({ jobId, reason: reason as ReopenReason, nowIso })
+  const { error: packInsertErr } = await client.from('makesafe_report_packs')
+    .insert(newPack)
+  if (packInsertErr) {
+    // A 23505 (unique violation) means this reason's pack already exists: idempotent.
+    if (!String(packInsertErr.code || '').includes('23505')) {
+      throw new ApiError('failed to create new report pack: ' + packInsertErr.message, 500)
+    }
+  }
+
+  // 4. Write a job note for the audit trail.
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'note',
+      detail_json: {
+        text: `[re_open_makesafe] job re-opened: reason=${reason}, no_charge=${patch.no_charge}, cycle_number=${patch.cycle_number}`,
+      },
+    })
+  } catch (_) { /* non-blocking */ }
+
+  return {
+    ok: true,
+    job_id: jobId,
+    reason,
+    no_charge: patch.no_charge,
+    cycle_number: patch.cycle_number,
+    pack_kind: reason,
+    note: `job re-opened as cycle ${patch.cycle_number} (${reason}); new pack row created; prior invoice/docs preserved`,
+  }
+}
+
+// Test-only exports for re-open mechanism.
+export const _reopenMakesafeForTest = reopenMakesafe
 
 // (3b) makesafe_render_report — render the report PDF (server jsPDF) and attach it
 // via attachMakesafeDocument as type 'makesafe_report'. Routine-safe (no send).
@@ -16253,6 +16392,14 @@ async function makesafeSendPack(
   // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
   const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
 
+  // ── Stage 4 Phase A — no_charge path (rectification / pickup) ──
+  // When the current cycle is no_charge (set at re-open time), skip:
+  //   (a) the invoice preflight (no invoice exists/required for this cycle)
+  //   (b) the Xero AUTHORISE step
+  // Do still: send the email with 1 report PDF + 0 invoice PDFs (report-only send).
+  // checkNoChargeSendGate validates the attachment list for this path.
+  const isNoChargeCycle = detail?.no_charge === true && packKind !== 'main'
+
   // ── BLOCKER C — EXACT-RECIPIENT GATE (money/comms, FAIL CLOSED) ──
   // Re-derive the builder's WORK-ORDERS inbox SERVER-SIDE from
   // makesafe_companies.report_recipient (the job's requesting company) — never
@@ -16284,33 +16431,49 @@ async function makesafeSendPack(
   }
 
   // ── PREFLIGHT: a Xero invoice (draft or authorised) must be linked to the job ──
-  const { data: jobInvoices } = await client.from('xero_invoices')
-    .select('xero_invoice_id, invoice_number, status, reference, job_id, invoice_date')
-    .eq('job_id', jobId)
-    .order('invoice_date', { ascending: false })
-  const liveInvoiceMapped = _resolveMakesafeJobInvoices(jobInvoices || [], jobId, detail?.external_ref)
-  // N-1 (money-safety) — AMBIGUOUS INVOICE = FAIL CLOSED. If MORE THAN ONE
-  // non-void (not VOIDED/DELETED) ACCREC invoice maps to the job, we do NOT
-  // auto-pick the first/newest one (silent wrong-amount risk). Stop with a 412
-  // and patch the pack so the cockpit shows the ambiguity. Only proceed when
-  // EXACTLY ONE non-void invoice maps. (jobInvoices is the job-linked set.)
-  const liveInvoiceCount = countLiveInvoices(jobInvoices || [])
-  if (isInvoiceAmbiguous(jobInvoices || [])) {
-    await _ensurePackRow(client, jobId, packKind)
-    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_invoice_ambiguous', error_detail: `ambiguous invoice: ${liveInvoiceCount} live invoices map to this job` })
-    throw new ApiError(`ambiguous invoice: ${liveInvoiceCount} live invoices map to this job; resolve to one before sending`, 412)
+  // Stage 4 Phase A — CYCLE-SCOPED invoice gate:
+  //   For a re-open cycle (packKind != 'main'), scope the ambiguity check to ONLY
+  //   the current cycle's invoice (identified by the pack's xero_invoice_id) so
+  //   the original paid invoice from the main cycle does NOT trip the fail-closed
+  //   2+-live-invoice gate.  Prior invoices are preserved (never voided).
+  //   For no_charge cycles: skip the entire invoice preflight (no invoice raised).
+  let liveInvoiceRow: any = null
+  let xeroInvoiceId: string | null = null
+  let invoiceNumber: string | null = null
+  let invoiceAlreadyAuthorised = false
+  if (!isNoChargeCycle) {
+    const { data: allJobInvoices } = await client.from('xero_invoices')
+      .select('xero_invoice_id, invoice_number, status, reference, job_id, invoice_date')
+      .eq('job_id', jobId)
+      .order('invoice_date', { ascending: false })
+    // Cycle-scope: for non-main packs, narrow to only this cycle's xero_invoice_id.
+    // priorPack is loaded earlier; if its xero_invoice_id is set that is the
+    // current cycle's invoice.  For a brand-new non-main pack (no priorPack /
+    // no xeroId yet) the scoped set is empty — the preflight will correctly fail
+    // (no invoice linked yet for this cycle) rather than picking up the old one.
+    const invoiceScopeRows = packKind === 'main'
+      ? (allJobInvoices || [])
+      : filterInvoicesToCurrentCycle({ allInvoices: allJobInvoices, currentPackXeroInvoiceId: priorPack?.xero_invoice_id || null })
+    const _resolveMapped = _resolveMakesafeJobInvoices(invoiceScopeRows, jobId, detail?.external_ref)
+    // N-1 (money-safety) — AMBIGUOUS INVOICE = FAIL CLOSED (cycle-scoped).
+    const liveInvoiceCount = countLiveInvoices(invoiceScopeRows)
+    if (isInvoiceAmbiguous(invoiceScopeRows)) {
+      await _ensurePackRow(client, jobId, packKind)
+      await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_invoice_ambiguous', error_detail: `ambiguous invoice: ${liveInvoiceCount} live invoices map to this cycle` })
+      throw new ApiError(`ambiguous invoice: ${liveInvoiceCount} live invoices map to this cycle; resolve to one before sending`, 412)
+    }
+    liveInvoiceRow = invoiceScopeRows.find((inv: any) =>
+      !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase())) || null
+    if (!liveInvoiceRow) {
+      await _ensurePackRow(client, jobId, packKind)
+      await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_invoice', error_detail: 'no live Xero invoice linked to this cycle' })
+      throw new ApiError('preflight failed: no live Xero invoice linked to this cycle', 412)
+    }
+    xeroInvoiceId = liveInvoiceRow.xero_invoice_id
+    invoiceNumber = liveInvoiceRow.invoice_number
+    invoiceAlreadyAuthorised = ['AUTHORISED', 'SUBMITTED', 'PAID']
+      .includes(String(liveInvoiceRow.status || '').toUpperCase())
   }
-  const liveInvoiceRow = (jobInvoices || []).find((inv: any) =>
-    !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase()))
-  if (!liveInvoiceRow) {
-    await _ensurePackRow(client, jobId, packKind)
-    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_invoice', error_detail: 'no live Xero invoice linked to job' })
-    throw new ApiError('preflight failed: no live Xero invoice linked to this job', 412)
-  }
-  const xeroInvoiceId = liveInvoiceRow.xero_invoice_id
-  const invoiceNumber = liveInvoiceRow.invoice_number
-  const invoiceAlreadyAuthorised = ['AUTHORISED', 'SUBMITTED', 'PAID']
-    .includes(String(liveInvoiceRow.status || '').toUpperCase())
 
   // ── B2 (Wave 0): MONEY-REVIEW HARD GATE ──
   // If the pack is flagged needs_money_review, BLOCK the send unless the caller
@@ -16383,10 +16546,11 @@ async function makesafeSendPack(
   try {
     const { accessToken, tenantId } = await _getToken(client)
 
-    // ── STEP 1: AUTHORISE (only if still a DRAFT) ──
+    // ── STEP 1: AUTHORISE (only if still a DRAFT; skipped for no_charge cycles) ──
     // Resume safety: if the invoice is already AUTHORISED/SUBMITTED/PAID we skip
     // the authorise entirely (no double-authorise).
-    if (!invoiceAlreadyAuthorised) {
+    // Stage 4 Phase A: no_charge cycles have no invoice — skip entirely.
+    if (!isNoChargeCycle && !invoiceAlreadyAuthorised) {
       await _xeroPost(`/Invoices/${xeroInvoiceId}`, accessToken, tenantId,
         { Invoices: [{ InvoiceID: xeroInvoiceId, Status: 'AUTHORISED' }] }, 'POST')
       await client.from('xero_invoices')
@@ -16407,23 +16571,33 @@ async function makesafeSendPack(
         console.log('[makesafe_send_pack] business_events invoice.authorised non-blocking:', (e as Error).message)
       }
     }
-    // From this point the invoice is AUTHORISED. A failure must NOT re-authorise.
-    await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', invoice_status: 'AUTHORISED', xero_invoice_id: xeroInvoiceId })
-
-    // ── STEP 2: refetch the AUTHORISED PDF from Xero, re-attach as type 'invoice' ──
-    const authorisedPdfBytes = await _fetchInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
-    const authorisedPdfB64 = _bytesToBase64(authorisedPdfBytes)
-    // Filename MUST pass the client send gate's is_xero_invoice_pdf (contains
-    // 'xero' + 'invoice') AND makesafeDocBooleans invoice match ('invoice').
-    const invoicePdfName = `Xero Invoice - ${invoiceNumber || xeroInvoiceId}.pdf`
-    const reInvDoc = await _attachDoc(client, {
-      job_id: jobId,
-      type: 'invoice',
-      file_name: invoicePdfName,
-      pdf_base64: authorisedPdfB64,
-      uploaded_by: ctx.approverEmail || 'makesafe reporting autopilot',
+    // From this point the invoice is AUTHORISED (or no_charge: no invoice).
+    // A failure must NOT re-authorise.
+    await _patchPack(client, jobId, packKind, {
+      status: 'authorised_not_sent',
+      invoice_status: isNoChargeCycle ? 'no_charge' : 'AUTHORISED',
+      xero_invoice_id: xeroInvoiceId,
     })
-    await _patchPack(client, jobId, packKind, { invoice_doc_id: reInvDoc.document_id || null })
+
+    // ── STEP 2: refetch the AUTHORISED PDF from Xero (skipped for no_charge) ──
+    // For no_charge cycles there is no invoice to fetch — report-only send.
+    let authorisedPdfB64: string | null = null
+    let invoicePdfName: string | null = null
+    if (!isNoChargeCycle) {
+      const authorisedPdfBytes = await _fetchInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId!)
+      authorisedPdfB64 = _bytesToBase64(authorisedPdfBytes)
+      // Filename MUST pass the client send gate's is_xero_invoice_pdf (contains
+      // 'xero' + 'invoice') AND makesafeDocBooleans invoice match ('invoice').
+      invoicePdfName = `Xero Invoice - ${invoiceNumber || xeroInvoiceId}.pdf`
+      const reInvDoc = await _attachDoc(client, {
+        job_id: jobId,
+        type: 'invoice',
+        file_name: invoicePdfName,
+        pdf_base64: authorisedPdfB64,
+        uploaded_by: ctx.approverEmail || 'makesafe reporting autopilot',
+      })
+      await _patchPack(client, jobId, packKind, { invoice_doc_id: reInvDoc.document_id || null })
+    }
 
     // ── STEP 3: load the report PDF bytes (from storage) for the attachment ──
     const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
@@ -16446,10 +16620,14 @@ async function makesafeSendPack(
     }
 
     // ── STEP 4: assemble + CLIENT-SEND GATE (hard, fail-closed) ──
-    const attachments = [
+    // Stage 4 Phase A — no_charge path: report-only (1 PDF, no invoice).
+    // The gate variant for no_charge checks: 1 report PDF, 0 invoice PDFs.
+    const attachments: { contentBytes: string; name: string; contentType: string }[] = [
       { contentBytes: reportPdfB64, name: reportFileName, contentType: 'application/pdf' },
-      { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
     ]
+    if (!isNoChargeCycle && authorisedPdfB64 && invoicePdfName) {
+      attachments.push({ contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' })
+    }
     const gatePayload = {
       from: MAKESAFE_ADMIN_FROM,
       to: recipientEmail,
@@ -16458,11 +16636,16 @@ async function makesafeSendPack(
       htmlBody,
       attachments: attachments.map((a) => ({ name: a.name })),
     }
-    const gateFailures = checkClientSendGate(gatePayload)
+    // For no_charge cycles use the report-only variant of the send gate; for
+    // charge cycles use the standard gate (1 report + 1 invoice required).
+    const noChargeGateResult = checkNoChargeSendGate({ noCharge: isNoChargeCycle, attachments: attachments.map((a) => ({ name: a.name })) })
+    const gateFailures = noChargeGateResult
+      ? noChargeGateResult.failures
+      : checkClientSendGate(gatePayload)
     if (gateFailures.length > 0) {
-      // Invoice authorised but the send is unsafe. Recoverable — resume after fix.
+      // Invoice authorised (or no_charge) but the send is unsafe. Recoverable — resume after fix.
       await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'client_send_gate', error_detail: gateFailures.join(' | ') })
-      throw new ApiError('client send gate failed (no email sent; invoice already authorised, safe to resume): ' + gateFailures.join('; '), 412)
+      throw new ApiError('client send gate failed (no email sent; safe to resume): ' + gateFailures.join('; '), 412)
     }
 
     // ── STEP 5: SEND via send-outlook-email. ──────────────────────────────────
