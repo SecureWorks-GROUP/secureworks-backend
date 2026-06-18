@@ -4289,31 +4289,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
               }
 
-              // 2026-06-18 double-pay guard (extra-items lane): now that we admit finished/archived
-              // make-safe jobs (see status-exclude note above), a trade could re-submit a job that is
-              // already on a LIVE invoice. The assigned-card lane guards this via assignment.invoiced_in
-              // (Layer B above); searched-in extra items have no assignment, so we guard at the job level.
-              // Pre-fetch every job_id in this submit that already has a trade_invoice_line on a
-              // non-released invoice (released = draft/failed/ops-reject, mirroring the RELEASED set used
-              // by the assigned-card guard). Block any extra item whose resolved job is in that set.
-              const alreadyInvoicedJobIds = new Set<string>()
-              {
-                const resolvedExtraJobIds = [...new Set(
-                  Object.values(jobById).map((j: any) => j?.id).filter(Boolean)
-                )] as string[]
-                if (resolvedExtraJobIds.length > 0) {
-                  const RELEASED_INVOICE_STATUSES = ['draft', 'failed', 'ops-reject']
-                  const { data: priorLines } = await client.from('trade_invoice_lines')
-                    .select('job_id, trade_invoices!inner(status)')
-                    .in('job_id', resolvedExtraJobIds)
-                  for (const l of (priorLines || [])) {
-                    const st = String((l as any)?.trade_invoices?.status || '')
-                    if (l?.job_id && !RELEASED_INVOICE_STATUSES.includes(st)) {
-                      alreadyInvoicedJobIds.add(String(l.job_id))
-                    }
-                  }
-                }
-              }
+              // double-pay guard removed per Marnin 2026-06-18 (office verifies before payment)
 
               for (const item of extra_items) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
@@ -4329,17 +4305,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
                 const resolvedJob = item.job_id ? jobById[item.job_id] : jobByNumber[String(item.job_number || '')]
                 if (week_start && !resolvedJob) throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
-                // 2026-06-18 double-pay guard: reject an extra item whose resolved job is already on a
-                // live (non-released) invoice. Prevents paying a trade twice for the same finished job
-                // now that finished/archived jobs are invoiceable. Ops can still re-bill after voiding
-                // or rejecting the prior invoice (those statuses are in RELEASED and clear the block).
-                if (week_start && resolvedJob && alreadyInvoicedJobIds.has(String(resolvedJob.id))) {
-                  throw new ApiError(
-                    'This job has already been invoiced: ' + (resolvedJob.job_number || item.job_number || item.job_id) +
-                    '. Remove it from this submission or contact the office.',
-                    409,
-                  )
-                }
                 const rateSource = item.rate_source || (item.client_rate_entered ? 'client_entered' : 'client_entered')
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
@@ -10195,16 +10160,21 @@ async function scanSesMakesafes(client: any) {
     'makesafe_intake_drafts (rejected dedup index) read',
   )
   // Already-created jobs with a matching external ref (a live job already covers it).
-  // Fetch job_id too so a job_external_ref hit can be surfaced as a reopen_candidate
-  // (the human sees "matches job X — reopen it?") instead of silently dropping it.
+  // Fetch job_id + jobs.status too so a job_external_ref hit can be surfaced as a
+  // reopen_candidate ONLY when the matched job is reopen-eligible (complete/invoiced/
+  // archived). Active jobs (scheduled, accepted, etc.) stay as silent skips — the email
+  // is just a re-scan or a duplicate WO for a job in flight.
   const { data: existingJobs } = await client.from('makesafe_job_details')
-    .select('job_id, external_ref')
+    .select('job_id, external_ref, jobs(status)')
     .not('external_ref', 'is', null)
-  // Build a normalised-ref -> job_id lookup for the reopen-candidate path.
-  const refToJobId = new Map<string, string>()
-  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string }>) {
+  // Build a normalised-ref -> { jobId, status } lookup for the reopen-candidate path.
+  const refToJobId = new Map<string, { jobId: string; status: string | null }>()
+  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; jobs: { status: string } | { status: string }[] | null }>) {
     const nr = _normaliseDedupRef(j.external_ref)
-    if (nr && j.job_id) refToJobId.set(nr, j.job_id)
+    if (nr && j.job_id) {
+      const jobsData = Array.isArray(j.jobs) ? j.jobs[0] : j.jobs
+      refToJobId.set(nr, { jobId: j.job_id, status: jobsData?.status ?? null })
+    }
   }
   const dedupIndex = _buildIntakeDedupIndex(
     existingDrafts || [],
@@ -10526,7 +10496,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       // or the email is a re-scan of the same post).
       if (refDup === 'job_external_ref' && extractedRef) {
         const normRef = _normaliseDedupRef(extractedRef)
-        const matchedJobId = normRef ? refToJobId.get(normRef) || null : null
+        const matchedEntry = normRef ? refToJobId.get(normRef) || null : null
+        const matchedJobId = matchedEntry?.jobId ?? null
+        const matchedJobStatus = matchedEntry?.status ?? null
+        // Only surface a reopen_candidate when the matched job is actually eligible
+        // for reopen (complete/invoiced/archived). Active jobs (scheduled, accepted,
+        // processing, in_progress, etc.) stay as silent skips — the email is a re-scan
+        // of an original WO or a duplicate for an in-flight job.
+        if (!REOPEN_ELIGIBLE_STATUSES.includes(matchedJobStatus ?? '')) {
+          console.log('[ops-api] intake skip (active job, not reopen-eligible):', matchedJobStatus, '|', extractedRef, '|', matchedJobId)
+          skippedDuplicates++
+          continue
+        }
         const reopenDraft = {
           org_id: DEFAULT_ORG_ID,
           mailbox: SES_MAILBOX,
@@ -12075,6 +12056,26 @@ async function createInvoice(client: any, body: any) {
   if (!items || items.length === 0) throw new Error('line_items required')
   const contact = contact_name || contactName
   if (!contact && !xero_contact_id) throw new Error('contact_name or xero_contact_id required')
+
+  // ── REPORT JOB $0 GATE (generic createInvoice path) ──
+  // A report-type makesafe job has no scope_json pricing — a $0 or empty invoice
+  // would be silently sent to the builder. Block it here so the generic create_invoice
+  // action has the same safety guard as completeAndInvoice + createMakesafeDraftInvoice.
+  // Normal (non-makesafe) manual invoicing is unaffected.
+  const jIdForGate = job_id || jobId
+  if (jIdForGate) {
+    const { data: msGateDetail } = await client.from('makesafe_job_details')
+      .select('report_type').eq('job_id', jIdForGate).maybeSingle()
+    if (msGateDetail?.report_type) {
+      const gateTotal = (items as any[]).reduce(
+        (sum: number, li: any) => sum + (li.unit_price ?? 0) * (li.quantity ?? 1),
+        0,
+      )
+      if (items.length === 0 || gateTotal <= 0) {
+        throw new Error('report job needs a charge amount before invoicing: supply line_items with the trade/WO charge')
+      }
+    }
+  }
 
   // Loop 1B-a-apply preflight gate. Block creation when required dimensions are
   // missing unless the caller passes bypass_preflight: true. Soft warnings do
@@ -16269,6 +16270,24 @@ export const _createMakesafeDraftInvoiceForTest = createMakesafeDraftInvoice
 async function makesafeRenderReport(client: any, body: any) {
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
+
+  // ── REPORT-TYPE GUARD ──
+  // A report-type job (report_type IS NOT NULL in makesafe_job_details) is a
+  // builder-portal report: the report lives on the builder side, not in our PDF.
+  // Producing and attaching a SecureWorks makesafe_report PDF is a mistake —
+  // refuse here rather than silently creating the wrong document.
+  const { data: renderDetail } = await client.from('makesafe_job_details')
+    .select('report_type').eq('job_id', jobId).maybeSingle()
+  if (renderDetail?.report_type) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'report-type job: no SecureWorks report is generated; report lives on the builder portal',
+      document_id: null,
+      file_name: null,
+    }
+  }
+
   const job = body.job || body.report_job
   if (!job || typeof job !== 'object') throw new ApiError('job (render payload) required', 400)
 
