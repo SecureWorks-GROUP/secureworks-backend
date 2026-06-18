@@ -190,6 +190,9 @@ import {
   isGenuineNewWorkOrder as _isGenuineNewWorkOrder,
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
   subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
+  classifyReportType as _classifyReportType,
+  slugFromRefPrefix as _slugFromRefPrefix,
+  isReportOnlyType as _isReportOnlyType,
 } from './makesafe_intake_gate.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
@@ -3041,6 +3044,19 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: makesafe_reset_failed_pack requires the privileged dashboard key or an admin/owner session; the make-safe automation routine cannot reset packs' }, 403)
         }
         return json(await makesafeResetFailedPack(client, body))
+      }
+
+      // reopen_makesafe — human-triggered reactivation of a completed/archived job
+      // that has a new inbound email (reopen_candidate intake draft). PRIVILEGED-ONLY:
+      // the dashboard (SW_API_KEY, authMode='api_key') or an admin/owner JWT. The
+      // automation routine is NEVER allowed to reopen a job.
+      case 'reopen_makesafe': {
+        const reopenIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!reopenIsPrivileged) {
+          return json({ error: 'forbidden: reopen_makesafe requires the privileged ops key or an admin/owner session; the automation routine cannot reopen jobs' }, 403)
+        }
+        return json(await reopenMakesafe(client, body))
       }
 
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
@@ -8239,11 +8255,13 @@ export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
 export function _makesafeMissingCloseoutDocs(
   docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
   requiresSwms: boolean,
+  isReportJob?: boolean,
 ): string[] {
   const d = docs || {}
   const missing: string[] = []
   if (!d.has_invoice_doc) missing.push('invoice')
-  if (!d.has_report_doc) missing.push('report')
+  // Report jobs require ONLY the invoice — no SecureWorks report PDF is produced.
+  if (!isReportJob && !d.has_report_doc) missing.push('report')
   if (requiresSwms && !d.has_swms_doc) missing.push('swms')
   return missing
 }
@@ -8453,7 +8471,7 @@ export function _deriveMakesafeBoardStage(
     //    ungated behaviour for callers that don't load job_documents.)
     if (!verifiedSent && docs !== undefined && docs !== null) {
       // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
-      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job))
+      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job), !!(detail?.report_type))
       if (missing.length > 0) return 'report_ready'
     }
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
@@ -8653,7 +8671,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
     if (invoiceDone) {
       // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
-      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j) || _isMakesafeWesternCompany(detail, j))
+      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j) || _isMakesafeWesternCompany(detail, j), !!(detail?.report_type))
     }
   }
   // Verified-sent reconciles the same way the board stage derives it: the
@@ -9361,7 +9379,9 @@ async function makesafeMap(client: any, params: URLSearchParams) {
 
 // ── Slice 7: list intake drafts ──
 async function listIntakeDrafts(client: any, params: URLSearchParams) {
-  const status = params.get('status') || 'draft,needs_review'
+  // reopen_candidate is included by default so the board INTAKE column surfaces
+  // "matches job X — reopen it?" items alongside normal new-WO drafts.
+  const status = params.get('status') || 'draft,needs_review,reopen_candidate'
   const statuses = status.split(',').map((s: string) => s.trim())
 
   const { data, error } = await client.from('makesafe_intake_drafts')
@@ -9412,6 +9432,13 @@ async function approveIntakeDraft(client: any, body: any) {
     .select('*').eq('id', draft_id).single()
   if (dErr || !draft) throw new Error('Draft not found')
 
+  // Codex issue 2: report-ONLY drafts (roof_report / assessment_report) are now
+  // approvable — they create a report-type make-safe job (no WO PDF required, no
+  // report PDF produced, substatus advances to ready_to_invoice immediately).
+  // Combined make-safe-AND-report drafts (report_type='unknown_report' etc.) are
+  // NOT report-only and approve normally as work orders.
+  const isReportOnlyDraft = _isReportOnlyType(draft.report_type)
+
   const extraction = parseJsonObject(draft.extraction_json)
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
@@ -9446,7 +9473,7 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!approvedFields.external_ref) missing.push('external_ref')
   if (!approvedFields.client_name) missing.push('client_name')
   if (!approvedFields.site_address) missing.push('site_address')
-  if (availableAttachments.length === 0) missing.push('work_order_pdf')
+  if (!isReportOnlyDraft && availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
@@ -9505,6 +9532,12 @@ async function approveIntakeDraft(client: any, body: any) {
   let createdJobId: string | null = null
   try {
     // Create the make-safe job using reviewed/edited fields, not stale extraction data.
+    // For report-only drafts: pass the builder portal link as external_links and
+    // set substatus=ready_to_invoice immediately (skips the report-production stage).
+    const portalLink = extraction?.portal_link || null
+    const reportJobExternalLinks = isReportOnlyDraft && portalLink
+      ? [{ label: 'Builder Portal', url: portalLink }]
+      : null
     const jobResult = await createMakesafeJob(client, {
       client_name: approvedFields.client_name,
       site_address: approvedFields.site_address,
@@ -9519,10 +9552,25 @@ async function approveIntakeDraft(client: any, body: any) {
       safety_requirements: approvedFields.safety_requirements,
       special_instructions: approvedFields.special_instructions,
       suppress_notifications: true,
+      ...(reportJobExternalLinks ? { external_links: reportJobExternalLinks } : {}),
     })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
+
+    // For report-only jobs: set report_type on makesafe_job_details and advance
+    // substatus to ready_to_invoice (bypasses the report-production stage).
+    if (isReportOnlyDraft && createdJobId) {
+      try {
+        await client.from('makesafe_job_details').update({
+          report_type: draft.report_type,
+          substatus: 'ready_to_invoice',
+          updated_at: new Date().toISOString(),
+        }).eq('job_id', createdJobId)
+      } catch (e: any) {
+        console.log('[ops-api] approveIntakeDraft: report_type/substatus update non-blocking:', e?.message)
+      }
+    }
 
     // Link draft to created job and preserve the reviewed values on the draft audit
     // row. Status was already set to 'approved' by the atomic claim above, so this
@@ -9547,18 +9595,21 @@ async function approveIntakeDraft(client: any, body: any) {
     }).eq('id', draft_id)
 
     // Attach any PDF attachments from the original email as visible work orders.
-    for (const att of attachments) {
-      if (att.storage_url || att.pdf_url) {
-        try {
-          await client.from('job_documents').insert({
-            job_id: jobResult.job.id,
-            type: 'work_order',
-            file_name: att.file_name || att.name || 'work-order.pdf',
-            storage_url: att.storage_url || att.pdf_url,
-            pdf_url: att.pdf_url || att.storage_url,
-            visible_to_trades: true,
-          })
-        } catch (_) { /* non-blocking */ }
+    // Report-only jobs have no WO PDF — skip the attach loop for them.
+    if (!isReportOnlyDraft) {
+      for (const att of attachments) {
+        if (att.storage_url || att.pdf_url) {
+          try {
+            await client.from('job_documents').insert({
+              job_id: jobResult.job.id,
+              type: 'work_order',
+              file_name: att.file_name || att.name || 'work-order.pdf',
+              storage_url: att.storage_url || att.pdf_url,
+              pdf_url: att.pdf_url || att.storage_url,
+              visible_to_trades: true,
+            })
+          } catch (_) { /* non-blocking */ }
+        }
       }
     }
 
@@ -10127,9 +10178,17 @@ async function scanSesMakesafes(client: any) {
     'makesafe_intake_drafts (rejected dedup index) read',
   )
   // Already-created jobs with a matching external ref (a live job already covers it).
+  // Fetch job_id too so a job_external_ref hit can be surfaced as a reopen_candidate
+  // (the human sees "matches job X — reopen it?") instead of silently dropping it.
   const { data: existingJobs } = await client.from('makesafe_job_details')
-    .select('external_ref')
+    .select('job_id, external_ref')
     .not('external_ref', 'is', null)
+  // Build a normalised-ref -> job_id lookup for the reopen-candidate path.
+  const refToJobId = new Map<string, string>()
+  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string }>) {
+    const nr = _normaliseDedupRef(j.external_ref)
+    if (nr && j.job_id) refToJobId.set(nr, j.job_id)
+  }
   const dedupIndex = _buildIntakeDedupIndex(
     existingDrafts || [],
     (existingJobs || []).map((j: any) => j.external_ref),
@@ -10311,9 +10370,10 @@ async function scanSesMakesafes(client: any) {
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 500,
           system: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
-Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "portal_link": "https://..." or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
 Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
 Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
+For portal_link: extract any https builder-portal URL in the email body (the report / photos / quote share link the builder wants SecureWorks to access).
 If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
           messages: [{ role: 'user', content: userContent }],
         })
@@ -10398,15 +10458,30 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       }
     }
 
-    // makesafe-inbound-filter — HARD GATE: only a GENUINE new work order becomes a
-    // draft. availableWoCount is the count of SERVABLE work-order PDFs. This drops
-    // photo-evidence / report / invoice / outbound / reply emails that carry a ref but
-    // no WO (the needs_review flood) while keeping any email with a WO PDF or a NEW-WO
-    // subject pattern.
+    // makesafe-inbound-filter — HARD GATE: a GENUINE new work order OR a captured
+    // report/re-attend email becomes a draft. Drops photo-evidence / report /
+    // invoice / outbound / reply emails. Report-capture emails get kind='report'.
     const woGate = _isGenuineNewWorkOrder(subject, fromEmail, availableWoCount)
     if (!woGate.ok) {
       console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
       continue
+    }
+
+    // For report-capture drafts: derive the company slug from the ref prefix if
+    // the normal sender-pattern match didn't resolve a company. E.g. an email
+    // whose sender is new / not yet seeded but whose subject carries "Our Ref:
+    // MLB-25795" can still be attributed to mlb.
+    const isReportCapture = woGate.kind === 'report'
+    // Codex issue 1: tag report_type whenever the SUBJECT matched a report-capture
+    // pattern — even for a kind='work_order' email that rode in with a PDF (e.g. a
+    // BWCWA make-safe-AND-report, or a roof report that happened to attach a PDF).
+    const tagReportType = isReportCapture || woGate.reportSubjectPattern === true
+    if ((isReportCapture || tagReportType) && !matchedCompany?.slug) {
+      const refPrefixMatch = subject.match(/\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
+      const derivedSlug = _slugFromRefPrefix(refPrefixMatch?.[1] ?? null)
+      if (derivedSlug) {
+        matchedCompany = { slug: derivedSlug, name: derivedSlug }
+      }
     }
 
     // BUG 1 — POST-EXTRACTION CROSS-PATH DEDUP. Now that Haiku has given us the
@@ -10427,25 +10502,98 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       dedupIndex,
     )
     if (refDup) {
-      console.log('[ops-api] intake skip (duplicate across paths):', refDup, '|', extractedRef, '|', subject)
-      skippedDuplicates++
+      // REOPEN-CANDIDATE path: an email matching an existing job's external_ref is
+      // NOT silently dropped — it surfaces as a reopen_candidate draft so the human
+      // sees "this matches job X — reopen it?". Other dup reasons (same draft already
+      // exists, same message id) remain silent drops (the human already has the draft
+      // or the email is a re-scan of the same post).
+      if (refDup === 'job_external_ref' && extractedRef) {
+        const normRef = _normaliseDedupRef(extractedRef)
+        const matchedJobId = normRef ? refToJobId.get(normRef) || null : null
+        const reopenDraft = {
+          org_id: DEFAULT_ORG_ID,
+          mailbox: SES_MAILBOX,
+          graph_message_id: msg.id,
+          internet_message_id: msg.internetMessageId || null,
+          conversation_id: msg.conversationId || null,
+          received_at: msg.receivedDateTime || null,
+          from_email: fromEmail,
+          from_name: fromName,
+          subject,
+          body_preview: bodyPreview,
+          requesting_company_slug: matchedCompany?.slug || null,
+          requesting_company_name: matchedCompany?.name || null,
+          external_ref: extractedRef,
+          client_name: extraction.client_name || null,
+          client_phone: extraction.client_phone || null,
+          client_email: null,
+          site_address: extraction.site_address || null,
+          site_suburb: extraction.site_suburb || null,
+          description: extraction.description || null,
+          safety_requirements: null,
+          special_instructions: null,
+          confidence,
+          missing_fields: missingFields,
+          extraction_json: extraction,
+          attachments_json: attachments,
+          report_type: null,
+          status: 'reopen_candidate',
+          reopen_job_id: matchedJobId,
+        }
+        const { error: rcErr } = await client.from('makesafe_intake_drafts').insert(reopenDraft)
+        if (rcErr) {
+          console.log('[ops-api] intake reopen_candidate insert failed:', rcErr.message)
+        } else {
+          console.log('[ops-api] intake reopen_candidate created for ref', extractedRef, 'job', matchedJobId)
+          // Register in the in-memory index so a second copy of the same email in
+          // this batch is also caught (same idempotency contract as normal drafts).
+          _registerIntakeDraft(
+            {
+              graph_message_id: msg.id,
+              internet_message_id: msg.internetMessageId || null,
+              external_ref: extractedRef,
+              requesting_company_slug: matchedCompany?.slug || null,
+              requesting_company_name: matchedCompany?.name || null,
+            },
+            dedupIndex,
+          )
+          newDrafts.push({ ...reopenDraft, _is_reopen_candidate: true })
+        }
+      } else {
+        console.log('[ops-api] intake skip (duplicate across paths):', refDup, '|', extractedRef, '|', subject)
+        skippedDuplicates++
+      }
       continue
     }
 
-    // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
-    // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
-    // same required-field logic approveIntakeDraft uses (requesting_company, external_
-    // ref, client_name, site_address, and a work-order PDF via attachments.length): a
-    // draft missing any required field stays 'draft', a complete one goes to
-    // 'needs_review'. Both values are valid per the status CHECK constraint
-    // (migration 20260602000001).
-    const missingRequired = (
-      (!matchedCompany?.slug && !matchedCompany?.name) ||
-      !extractedRef ||
-      !extraction.client_name ||
-      !extraction.site_address ||
-      availableWoCount === 0
-    )
+    // Report-capture drafts always go to needs_review (they are human-review items,
+    // never auto-approved). Normal WO drafts use the existing completeness logic.
+    // Codex issue 1: report_type is set whenever the subject matched a report
+    // pattern (tagReportType), even for a kind='work_order' make-safe-and-report.
+    let draftStatus: string
+    let draftReportType: string | null = null
+    if (tagReportType) {
+      draftReportType = _classifyReportType(subject, bodyPreview)
+    }
+    if (isReportCapture) {
+      draftStatus = 'needs_review'
+    } else {
+      // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
+      // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
+      // same required-field logic approveIntakeDraft uses (requesting_company, external_
+      // ref, client_name, site_address, and a work-order PDF via attachments.length): a
+      // draft missing any required field stays 'draft', a complete one goes to
+      // 'needs_review'. Both values are valid per the status CHECK constraint
+      // (migration 20260602000001).
+      const missingRequired = (
+        (!matchedCompany?.slug && !matchedCompany?.name) ||
+        !extractedRef ||
+        !extraction.client_name ||
+        !extraction.site_address ||
+        availableWoCount === 0
+      )
+      draftStatus = missingRequired ? 'draft' : 'needs_review'
+    }
 
     // Create draft
     const draft = {
@@ -10474,7 +10622,8 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       missing_fields: missingFields,
       extraction_json: extraction,
       attachments_json: attachments,
-      status: missingRequired ? 'draft' : 'needs_review',
+      report_type: draftReportType,
+      status: draftStatus,
     }
 
     const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')
@@ -12607,6 +12756,25 @@ async function completeAndInvoice(client: any, body: any) {
       `Already invoiced: $${alreadyInvoiced.toFixed(2)}. ` +
       `No balance remaining. Check existing invoices: ${(existingInvoices || []).map((i: any) => i.invoice_number).join(', ')}`
     )
+  }
+
+  // ── REPORT JOB MONEY GATE ──
+  // A report-type job has no scope_json/pricing_json. If no line_items_override
+  // was supplied, lineItems is empty -> would silently create a $0 Xero draft.
+  // Block this hard: the caller must supply explicit line_items_override sourced
+  // from the trade's submitted charge / WO billing amount.
+  if (job.type === 'makesafe') {
+    const { data: msDetail } = await client.from('makesafe_job_details')
+      .select('report_type').eq('job_id', jId).maybeSingle()
+    if (msDetail?.report_type) {
+      if (lineItems.length === 0) {
+        throw new Error('report job needs a charge amount before invoicing: supply line_items_override with the trade/WO charge')
+      }
+      const totalExGst = lineItems.reduce((sum: number, li: any) => sum + (li.unit_price ?? 0) * (li.quantity ?? 1), 0)
+      if (totalExGst <= 0) {
+        throw new Error('report job needs a charge amount before invoicing: line items sum to $0 or less')
+      }
+    }
   }
 
   // If deposits exist, adjust line items to invoice only the balance
@@ -16010,6 +16178,18 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
   if (!Array.isArray(lines) || lines.length === 0) throw new ApiError('line_items required', 400)
+  // Report job $0 gate: if a job_id is supplied and the job is a report type,
+  // block $0 or empty-amount invoices (the trade's charge must be present).
+  if (jobId) {
+    const { data: msDetail } = await client.from('makesafe_job_details')
+      .select('report_type').eq('job_id', jobId).maybeSingle()
+    if (msDetail?.report_type) {
+      const totalExGst = lines.reduce((sum: number, li: any) => sum + (Number(li.unit_price ?? li.unitPrice ?? 0)) * (Number(li.quantity ?? 1)), 0)
+      if (totalExGst <= 0) {
+        throw new ApiError('report job needs a charge amount before invoicing: line items sum to $0 or less', 400)
+      }
+    }
+  }
 
   // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
   // to the make-safe reference. A VOIDED/DELETED invoice never blocks.
@@ -16325,7 +16505,8 @@ async function makesafeSendPack(
   const { data: docRows } = await client.from('job_documents')
     .select('id, type, file_name').eq('job_id', jobId)
   const docFlags = makesafeDocBooleans(docRows || [])
-  const missing = _makesafeMissingCloseoutDocs(docFlags, requiresSwms)
+  const isReportJob = !!(detail?.report_type)
+  const missing = _makesafeMissingCloseoutDocs(docFlags, requiresSwms, isReportJob)
   if (missing.length > 0) {
     await _ensurePackRow(client, jobId, packKind)
     await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_docs', error_detail: 'missing close-out docs: ' + missing.join(', ') })
@@ -16475,30 +16656,38 @@ async function makesafeSendPack(
     await _patchPack(client, jobId, packKind, { invoice_doc_id: reInvDoc.document_id || null })
 
     // ── STEP 3: load the report PDF bytes (from storage) for the attachment ──
-    const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+    // Report jobs (report_type IS NOT NULL) send the INVOICE ONLY — no SecureWorks
+    // report PDF is produced. Normal WO jobs require the report PDF.
     let reportPdfB64: string | null = null
-    let reportFileName = reportDoc?.file_name || ''
-    if (reportDoc) {
-      const { data: freshReport } = await client.from('job_documents')
-        .select('file_name, storage_url, pdf_url').eq('id', reportDoc.id).maybeSingle()
-      reportFileName = freshReport?.file_name || reportFileName
-      const reportUrl = freshReport?.pdf_url || freshReport?.storage_url
-      if (reportUrl) {
-        const bytes = await _fetchReportPdfBytes(reportUrl)
-        if (bytes) reportPdfB64 = _bytesToBase64(bytes)
+    let reportFileName = ''
+    if (!isReportJob) {
+      const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+      reportFileName = reportDoc?.file_name || ''
+      if (reportDoc) {
+        const { data: freshReport } = await client.from('job_documents')
+          .select('file_name, storage_url, pdf_url').eq('id', reportDoc.id).maybeSingle()
+        reportFileName = freshReport?.file_name || reportFileName
+        const reportUrl = freshReport?.pdf_url || freshReport?.storage_url
+        if (reportUrl) {
+          const bytes = await _fetchReportPdfBytes(reportUrl)
+          if (bytes) reportPdfB64 = _bytesToBase64(bytes)
+        }
       }
-    }
-    if (!reportPdfB64) {
-      // Cannot assemble the pack without the report PDF. FAIL CLOSED — no send.
-      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'load_report_pdf', error_detail: 'report PDF bytes unavailable' })
-      throw new ApiError('send failed: could not load the report PDF for attachment (invoice already authorised; safe to resume)', 502)
+      if (!reportPdfB64) {
+        // Cannot assemble the pack without the report PDF. FAIL CLOSED — no send.
+        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'load_report_pdf', error_detail: 'report PDF bytes unavailable' })
+        throw new ApiError('send failed: could not load the report PDF for attachment (invoice already authorised; safe to resume)', 502)
+      }
     }
 
     // ── STEP 4: assemble + CLIENT-SEND GATE (hard, fail-closed) ──
-    const attachments = [
-      { contentBytes: reportPdfB64, name: reportFileName, contentType: 'application/pdf' },
-      { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
-    ]
+    // Report jobs send invoice-only; normal WO jobs send report + invoice.
+    const attachments = isReportJob
+      ? [{ contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' }]
+      : [
+          { contentBytes: reportPdfB64!, name: reportFileName, contentType: 'application/pdf' },
+          { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
+        ]
     const gatePayload = {
       from: MAKESAFE_ADMIN_FROM,
       to: recipientEmail,
@@ -16772,6 +16961,94 @@ async function makesafeResetFailedPack(client: any, body: any) {
   return { reset: true, status: targetStatus, job_id: jobId, note: `failed pack reset to '${targetStatus}'; normal send flow can re-run` }
 }
 export const _makesafeResetFailedPackForTest = makesafeResetFailedPack
+
+// ════════════════════════════════════════════════════════════
+// REOPEN-MAKESAFE — simple human-triggered job reactivation
+// Stage 4 (2026-06-18): no automated charge machinery, no pack-kind variants.
+// Charge/no-charge stays the human's call via the normal invoice flow.
+// PRIVILEGED: api_key (ops dashboard) OR admin/owner JWT. ROUTINE-FORBIDDEN.
+// ════════════════════════════════════════════════════════════
+//
+// Contract:
+//   - job_id + reason required. reason is a short free-text string (no strict enum;
+//     the human types it). Validated non-empty.
+//   - The job must be in a completed/archived state (complete, invoiced, archived).
+//     A still-active job is rejected with 409 (not eligible for reopen).
+//   - On success: jobs.status -> 'accepted' (re-enters the active pipeline),
+//     makesafe_job_details: reopen_reason updated, cycle_number incremented.
+//   - If a reopen_candidate draft_id is supplied, that draft is marked 'approved'
+//     (approved_job_id = job_id) so it disappears from the intake queue.
+//   - Does NOT void or alter any existing invoice. Does NOT auto-send or auto-charge.
+//   - Returns { reopened: true, job_id, cycle_number, previous_status }.
+//
+const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived']
+
+async function reopenMakesafe(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  const reason = (body.reason || '').trim()
+  const draftId = body.draft_id || body.draftId || null
+
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (!reason) throw new ApiError('reason required (e.g. reattendance, rectification, pickup)', 400)
+
+  // Load the job to check eligibility.
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, status, type').eq('id', jobId).maybeSingle()
+  if (jobErr) throw new ApiError('reopenMakesafe: job read failed: ' + jobErr.message, 500)
+  if (!job) throw new ApiError('reopenMakesafe: job not found: ' + jobId, 404)
+  if (job.type !== 'makesafe') throw new ApiError('reopenMakesafe: job is not a make-safe job', 400)
+  if (!REOPEN_ELIGIBLE_STATUSES.includes(job.status)) {
+    throw new ApiError(
+      `reopenMakesafe: job status '${job.status}' is not eligible for reopen; ` +
+      `must be one of: ${REOPEN_ELIGIBLE_STATUSES.join(', ')}`,
+      409,
+    )
+  }
+
+  // Read current cycle_number (defaults to 1 in the DB; may be null pre-migration).
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('cycle_number').eq('job_id', jobId).maybeSingle()
+  const currentCycle = (detail as { cycle_number?: number } | null)?.cycle_number ?? 1
+  const nextCycle = currentCycle + 1
+  const nowIso = new Date().toISOString()
+
+  // 1) Reactivate the job: status -> 'accepted', clear closed timestamps.
+  const { error: jobUpdateErr } = await client.from('jobs')
+    .update({ status: 'accepted', completed_at: null, archived_at: null, updated_at: nowIso })
+    .eq('id', jobId)
+  if (jobUpdateErr) throw new ApiError('reopenMakesafe: jobs update failed: ' + jobUpdateErr.message, 500)
+
+  // 2) Update make-safe details: reopen_reason + increment cycle_number.
+  const { error: detailErr } = await client.from('makesafe_job_details')
+    .update({ reopen_reason: reason, cycle_number: nextCycle, updated_at: nowIso })
+    .eq('job_id', jobId)
+  if (detailErr) {
+    // Non-fatal: detail row may not exist for very old jobs. Log but do not roll back.
+    console.log('[ops-api] reopenMakesafe: detail update failed (non-fatal):', detailErr.message)
+  }
+
+  // 3) Mark the reopen_candidate draft as approved (clears it from the intake queue).
+  if (draftId) {
+    const { error: draftErr } = await client.from('makesafe_intake_drafts')
+      .update({ status: 'approved', approved_job_id: jobId, approved_at: nowIso, approved_by: body.reopened_by || 'ops_dashboard' })
+      .eq('id', draftId)
+    if (draftErr) {
+      // Non-fatal: if the draft can't be updated it stays in the queue with a stale
+      // status, but the job reopen still happened. Log clearly.
+      console.log('[ops-api] reopenMakesafe: draft status update failed (non-fatal):', draftErr.message)
+    }
+  }
+
+  // 4) Log event.
+  await client.from('job_events').insert({
+    job_id: jobId,
+    event_type: 'note',
+    detail_json: { note: `Job reopened: ${reason}`, cycle: nextCycle, reopened_by: body.reopened_by || 'ops_dashboard', draft_id: draftId || null },
+  })
+
+  return { reopened: true, job_id: jobId, cycle_number: nextCycle, previous_status: job.status, reason }
+}
+export const _reopenMakesafeForTest = reopenMakesafe
 
 async function toggleDocumentVisibility(client: any, body: any) {
   const { documentId, document_id, visible_to_trades } = body

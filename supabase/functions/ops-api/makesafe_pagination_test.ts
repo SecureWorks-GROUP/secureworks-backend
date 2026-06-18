@@ -133,6 +133,16 @@ function makePipelineClient(rowsByTable: Record<string, any[]>) {
         const data = rows.filter((r) => preds.every((p) => p(r))).slice(from, to + 1);
         return { data, error: null };
       },
+      // Single-row terminals (e.g. the report_type lookup in the createMakesafeDraftInvoice
+      // $0 gate). Return the first matching row or null, mirroring real Supabase.
+      maybeSingle: async () => {
+        const data = rows.filter((r) => preds.every((p) => p(r)))[0] ?? null;
+        return { data, error: null };
+      },
+      single: async () => {
+        const data = rows.filter((r) => preds.every((p) => p(r)))[0] ?? null;
+        return { data, error: null };
+      },
       then: (resolve: (v: any) => any) =>
         resolve({ data: rows.filter((r) => preds.every((p) => p(r))), error: null }),
     };
