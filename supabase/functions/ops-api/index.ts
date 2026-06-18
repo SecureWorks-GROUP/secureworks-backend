@@ -190,6 +190,8 @@ import {
   isGenuineNewWorkOrder as _isGenuineNewWorkOrder,
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
   subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
+  classifyReportType as _classifyReportType,
+  slugFromRefPrefix as _slugFromRefPrefix,
 } from './makesafe_intake_gate.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
@@ -10349,15 +10351,26 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       }
     }
 
-    // makesafe-inbound-filter — HARD GATE: only a GENUINE new work order becomes a
-    // draft. availableWoCount is the count of SERVABLE work-order PDFs. This drops
-    // photo-evidence / report / invoice / outbound / reply emails that carry a ref but
-    // no WO (the needs_review flood) while keeping any email with a WO PDF or a NEW-WO
-    // subject pattern.
+    // makesafe-inbound-filter — HARD GATE: a GENUINE new work order OR a captured
+    // report/re-attend email becomes a draft. Drops photo-evidence / report /
+    // invoice / outbound / reply emails. Report-capture emails get kind='report'.
     const woGate = _isGenuineNewWorkOrder(subject, fromEmail, availableWoCount)
     if (!woGate.ok) {
       console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
       continue
+    }
+
+    // For report-capture drafts: derive the company slug from the ref prefix if
+    // the normal sender-pattern match didn't resolve a company. E.g. an email
+    // whose sender is new / not yet seeded but whose subject carries "Our Ref:
+    // MLB-25795" can still be attributed to mlb.
+    const isReportCapture = woGate.kind === 'report'
+    if (isReportCapture && !matchedCompany?.slug) {
+      const refPrefixMatch = subject.match(/\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
+      const derivedSlug = _slugFromRefPrefix(refPrefixMatch?.[1] ?? null)
+      if (derivedSlug) {
+        matchedCompany = { slug: derivedSlug, name: derivedSlug }
+      }
     }
 
     // BUG 1 — POST-EXTRACTION CROSS-PATH DEDUP. Now that Haiku has given us the
@@ -10383,20 +10396,30 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       continue
     }
 
-    // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
-    // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
-    // same required-field logic approveIntakeDraft uses (requesting_company, external_
-    // ref, client_name, site_address, and a work-order PDF via attachments.length): a
-    // draft missing any required field stays 'draft', a complete one goes to
-    // 'needs_review'. Both values are valid per the status CHECK constraint
-    // (migration 20260602000001).
-    const missingRequired = (
-      (!matchedCompany?.slug && !matchedCompany?.name) ||
-      !extractedRef ||
-      !extraction.client_name ||
-      !extraction.site_address ||
-      availableWoCount === 0
-    )
+    // Report-capture drafts always go to needs_review (they are human-review items,
+    // never auto-approved). Normal WO drafts use the existing completeness logic.
+    let draftStatus: string
+    let draftReportType: string | null = null
+    if (isReportCapture) {
+      draftStatus = 'needs_review'
+      draftReportType = _classifyReportType(subject, bodyPreview)
+    } else {
+      // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
+      // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
+      // same required-field logic approveIntakeDraft uses (requesting_company, external_
+      // ref, client_name, site_address, and a work-order PDF via attachments.length): a
+      // draft missing any required field stays 'draft', a complete one goes to
+      // 'needs_review'. Both values are valid per the status CHECK constraint
+      // (migration 20260602000001).
+      const missingRequired = (
+        (!matchedCompany?.slug && !matchedCompany?.name) ||
+        !extractedRef ||
+        !extraction.client_name ||
+        !extraction.site_address ||
+        availableWoCount === 0
+      )
+      draftStatus = missingRequired ? 'draft' : 'needs_review'
+    }
 
     // Create draft
     const draft = {
@@ -10425,7 +10448,8 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       missing_fields: missingFields,
       extraction_json: extraction,
       attachments_json: attachments,
-      status: missingRequired ? 'draft' : 'needs_review',
+      report_type: draftReportType,
+      status: draftStatus,
     }
 
     const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')

@@ -56,6 +56,77 @@ import { isOwnDomain } from "./makesafe_compact_reads.ts";
 // space/colon variants Outlook/Graph emit.
 const REPLY_FORWARD_RE = /^\s*(re|fw|fwd)\s*:/i;
 
+// ── REPORT-CAPTURE: recognised existing-ref / report-request patterns ─────────
+// These match genuine builder follow-up emails (re-attend / roof instructions /
+// assessment / new-report-request) that carry a known builder ref but no
+// work-order PDF and no standard "NEW WORK ORDER" subject keyword.
+// The MLB "Our Ref: MLB-XXXXX" format and the BWCWA "New Make Safe and Report
+// Request" format are the two live archetypes (8+ drops in 60 days confirmed).
+const REPORT_CAPTURE_PATTERNS: readonly RegExp[] = [
+  /\bour\s*ref\b.*\b(mlb|wb|bw|bwc|kba)-?\s*\d+/i,   // "Our Ref: MLB-25795 ..."
+  /###\s*urgent\s*###.*our\s*ref/i,                    // "### URGENT ### Our Ref"
+  /\burgent\b.*\bour\s*ref\b/i,                        // "URGENT ... Our Ref"
+  /new\s*make\s*safe\s*and\s*report\s*request/i,       // BWCWA format
+] as const;
+
+// ── REPORT-TYPE classifier ─────────────────────────────────────────────────────
+/** Classifies what KIND of report/request an already-captured builder email is. */
+export type ReportType =
+  | "roof_report"
+  | "assessment_report"
+  | "temp_fence"
+  | "re_attend"
+  | "unknown_report";
+
+/**
+ * Classify the report type from subject + body text.
+ * Subject is checked first; body is used as a tie-breaker for generic subjects
+ * like "Our Ref: MLB-25795 - 47 Hale St, Eaton".
+ */
+export function classifyReportType(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+): ReportType {
+  const s = (subject || "").toLowerCase();
+  const b = (body || "").toLowerCase();
+
+  // Subject-level signals (most reliable). roof checked before assess/inspect
+  // because "roof inspection" is a roof report, not a generic assessment.
+  if (/temp\s*fenc|collect|pick\s*up|pickup|retriev/i.test(s)) return "temp_fence";
+  if (/re.?attend|reattend/i.test(s)) return "re_attend";
+  if (/roof/i.test(s)) return "roof_report";
+  if (/assessment|inspect/i.test(s)) return "assessment_report";
+
+  // Body-level signals — used when subject is generic ("Our Ref: ...")
+  if (/temp\s*fenc|collect|pick\s*up|pickup|retriev/i.test(b)) return "temp_fence";
+  if (/re.?attend|reattend/i.test(b)) return "re_attend";
+  if (/roof/i.test(b)) return "roof_report";
+  if (/assessment|inspect/i.test(b)) return "assessment_report";
+
+  return "unknown_report";
+}
+
+// ── REPORT-CAPTURE: map ref prefix -> canonical company slug ──────────────────
+// Slugs must match exactly what is in the makesafe_companies table (confirmed
+// from migrations and test fixtures):
+//   mlb          -> ML Builders / primeeco.tech senders
+//   builderwest  -> Builderwest (BWCWA / BWC prefix)
+//   western-building -> Western Building (WB prefix)
+//   kba          -> KBA Insurance Repairs (KBA prefix)
+// If a prefix cannot be resolved, returns null so the normal company-match
+// fallback (sender pattern) takes over.
+export function slugFromRefPrefix(prefix: string | null | undefined): string | null {
+  switch ((prefix || "").toUpperCase()) {
+    case "MLB": return "mlb";
+    case "BWC":
+    case "BW":
+    case "BWCWA": return "builderwest";
+    case "WB": return "western-building";
+    case "KBA": return "kba";
+    default: return null;
+  }
+}
+
 // Unambiguous NON-work-order subject phrases. Each is matched case-insensitively
 // anywhere in the subject. These categorically describe crew evidence, our own
 // outbound sends, billing, or corrections — never a NEW work order, regardless of
@@ -105,20 +176,35 @@ export function subjectLooksLikeNewWorkOrder(subject: string | null | undefined)
 }
 
 /**
- * The hard gate: create an intake draft ONLY for a genuine new work order.
+ * The hard gate: create an intake draft ONLY for a genuine new work order OR a
+ * captured report/re-attend email.
  *
  * @param subject            the email subject
  * @param fromEmail          the sender address (used to drop our own outbound)
  * @param workOrderPdfCount  number of work-order PDF attachments resolved for the
  *                           email (0 when none / only inline images / no pdf)
  *
- * Returns { ok, reason }. ok=false means DO NOT create a draft.
+ * Returns { ok, reason, kind }.
+ *   ok=false  → DO NOT create a draft.
+ *   ok=true, kind='work_order'  → create a normal WO intake draft.
+ *   ok=true, kind='report'      → create a report-capture draft (status needs_review,
+ *                                  report_type should be set by the caller).
+ *
+ * CRITICAL ORDERING:
+ *   own-domain drop   ← runs first (step 1)
+ *   exclusion list    ← runs second (step 2) — blocks acks and chatter
+ *   positive WO check ← runs third (step 3) — normal work orders
+ *   report-capture    ← runs fourth (step 4) — alternative to no_work_order_signal
+ *   no signal drop    ← final fallback (step 5)
+ *
+ * The report-capture pass is ONLY an alternative to the no_work_order_signal
+ * drop. It never overrides an exclusion.
  */
 export function isGenuineNewWorkOrder(
   subject: string | null | undefined,
   fromEmail: string | null | undefined,
   workOrderPdfCount: number,
-): { ok: boolean; reason: string } {
+): { ok: boolean; reason: string; kind?: "work_order" | "report" } {
   const s = (subject || "").trim();
 
   // 1) Our own outbound mail must never become an inbound intake draft. The ses@
@@ -130,23 +216,33 @@ export function isGenuineNewWorkOrder(
   }
 
   // 2) Unambiguous non-WO subjects (photo evidence / report / invoice /
-  //    correction / crew chatter / reply-forward) are NEVER a new work order,
-  //    regardless of any PDF — a "Report and Invoice" PDF is not a work order.
+  //    correction / crew chatter / reply-forward) are NEVER a new work order
+  //    OR a report-capture candidate, regardless of any PDF.
+  //    This is what keeps blocking our outbound acks ("Make Safe Report and Invoice").
   if (subjectIsExcludedNonWorkOrder(s)) {
     return { ok: false, reason: "excluded_non_work_order_subject" };
   }
 
-  // 3) Positive signal required: a work-order PDF OR a new-WO subject pattern.
+  // 3) Positive WO signal: a work-order PDF OR a new-WO subject pattern.
   const hasWorkOrderPdf = (workOrderPdfCount ?? 0) > 0;
   if (hasWorkOrderPdf) {
-    return { ok: true, reason: "work_order_pdf" };
+    return { ok: true, reason: "work_order_pdf", kind: "work_order" };
   }
   if (subjectLooksLikeNewWorkOrder(s)) {
-    return { ok: true, reason: "new_work_order_subject" };
+    return { ok: true, reason: "new_work_order_subject", kind: "work_order" };
   }
 
-  // 4) No positive signal and no PDF — not enough to call it a new work order.
-  //    (A make-safe email with no WO PDF and a report/photo/invoice-shaped or
-  //    generic subject must NOT flood the review queue.)
+  // 4) REPORT-CAPTURE: genuine builder follow-up emails that carry a recognised
+  //    existing-ref / report-request pattern but no WO PDF and no WO keyword.
+  //    These were previously silently dropped with no_work_order_signal.
+  //    Only non-own-domain, non-excluded emails can reach here.
+  for (const re of REPORT_CAPTURE_PATTERNS) {
+    if (re.test(s)) {
+      return { ok: true, reason: "report_capture_pattern", kind: "report" };
+    }
+  }
+
+  // 5) No positive signal and no PDF — not enough to call it a new work order
+  //    or a report. Drop to avoid flooding the review queue.
   return { ok: false, reason: "no_work_order_signal" };
 }
