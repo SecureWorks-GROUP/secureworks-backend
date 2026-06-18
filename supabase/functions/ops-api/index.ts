@@ -16167,9 +16167,11 @@ async function makesafeSendPack(
   const subject = body.subject
   const htmlBody = body.html_body || body.htmlBody
   if (!jobId) throw new ApiError('job_id required', 400)
-  if (!recipientEmail) throw new ApiError('recipient_email required', 400)
-  if (!subject) throw new ApiError('subject required', 400)
-  if (!htmlBody) throw new ApiError('html_body required', 400)
+  // Stage 1 (D3): recipient_email / subject / html_body are required ONLY for the
+  // EMAIL send path (AJS / MLB). Portal builders (Western / Builderwest) submit a
+  // pack manually and carry none of these. We therefore DEFER these checks until
+  // after the portal-builder branch (which returns early), enforcing them right
+  // before the atomic send-lock — see the email-required check below.
   const nowIso = () => new Date().toISOString()
 
   // ── PARTIAL-FAILURE / IDEMPOTENCY STOP (before anything irreversible) ──
@@ -16272,6 +16274,14 @@ async function makesafeSendPack(
     .eq('job_id', jobId).maybeSingle()
   // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
   const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
+  // Stage 1 (D3): Western Building / Builderwest are PORTAL builders — they do NOT
+  // receive email and have NO report_recipient inbox (Wave 0 resolution). The
+  // EXACT-RECIPIENT GATE below is an EMAIL-send gate, so it MUST be skipped for
+  // portal builders (otherwise the null report_recipient fails it closed and the
+  // portal-prep branch further down is never reached). The portal-prep branch
+  // still runs AFTER both preflights (docs incl. SWMS via requiresSwms, + invoice),
+  // so the same compliance is enforced; only the email-recipient check is bypassed.
+  const isPortalBuilder = _isMakesafeWesternCompany(detail, job)
 
   // ── BLOCKER C — EXACT-RECIPIENT GATE (money/comms, FAIL CLOSED) ──
   // Re-derive the builder's WORK-ORDERS inbox SERVER-SIDE from
@@ -16280,16 +16290,19 @@ async function makesafeSendPack(
   // CC MUST be EXACTLY ses@secureworkswa.com.au. This blocks vanessa@ajs.build
   // (the billing contact) ever being the To, and blocks any extra/legacy CC
   // (e.g. a 'CC vanessa@ajs.build' special_instructions value).
-  const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
-  const recipientFailures = checkExactRecipientGate({
-    configuredReportRecipient,
-    to: recipientEmail,
-    cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
-  })
-  if (recipientFailures.length > 0) {
-    await _ensurePackRow(client, jobId, packKind)
-    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'recipient_gate', error_detail: recipientFailures.join(' | ').slice(0, 500) })
-    throw new ApiError('recipient gate failed (no send; fix the work-orders recipient): ' + recipientFailures.join('; '), 403)
+  // Skipped for portal builders (no email -> no recipient to gate).
+  if (!isPortalBuilder) {
+    const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
+    const recipientFailures = checkExactRecipientGate({
+      configuredReportRecipient,
+      to: recipientEmail,
+      cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
+    })
+    if (recipientFailures.length > 0) {
+      await _ensurePackRow(client, jobId, packKind)
+      await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'recipient_gate', error_detail: recipientFailures.join(' | ').slice(0, 500) })
+      throw new ApiError('recipient gate failed (no send; fix the work-orders recipient): ' + recipientFailures.join('; '), 403)
+    }
   }
 
   // ── PREFLIGHT: typed close-out docs must exist (report + invoice + swms if MLB) ──
@@ -16359,7 +16372,10 @@ async function makesafeSendPack(
   // ── PORTAL-BUILDER BRANCH (Western Building / Builderwest) ─────────────────
   // These builders do NOT receive email. We produce the pack docs list for
   // manual submission on their Prime-system portal. No email, no Xero authorise.
-  const isPortalBuilder = _isMakesafeWesternCompany(detail, job)
+  // isPortalBuilder is computed above (before the recipient gate, which is skipped
+  // for these builders). Reaching here means BOTH preflights have passed (docs incl.
+  // the required SWMS, + a single live invoice + money-review gate), so the portal
+  // pack is fully compliant; we just don't email it.
   if (isPortalBuilder) {
     // Idempotency: if already portal-prepped, return early.
     const { data: portalEvents } = await client.from('job_events')
@@ -16396,6 +16412,15 @@ async function makesafeSendPack(
       builder: detail?.makesafe_companies?.name || detail?.requesting_company_name || null,
     }
   }
+
+  // ── EMAIL-PATH REQUIRED FIELDS (deferred from the top — see note above) ──
+  // From here the flow is the email send path (AJS / MLB only; portal builders
+  // returned above). recipient_email / subject / html_body are mandatory and the
+  // send is structurally impossible without them. The recipient gate above has
+  // already confirmed recipientEmail equals the configured work-orders inbox.
+  if (!recipientEmail) throw new ApiError('recipient_email required', 400)
+  if (!subject) throw new ApiError('subject required', 400)
+  if (!htmlBody) throw new ApiError('html_body required', 400)
 
   // ── ATOMIC SEND-LOCK ──
   // Ensure a pack row exists in a lockable state, then take the lock with a
