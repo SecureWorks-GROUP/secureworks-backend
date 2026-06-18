@@ -3932,13 +3932,31 @@ if (import.meta.main) serve(async (req: Request) => {
             return json({ success: true })
           }
           case 'attach_invoice_pdf': {
-            const { xero_bill_id: attachBillId, pdf_base64, filename } = body
+            const { xero_bill_id: attachBillId, pdf_base64 } = body
             if (!attachBillId || !pdf_base64) throw new ApiError('xero_bill_id and pdf_base64 required', 400)
+            const { data: attachInv, error: attachLookupErr } = await client.from('trade_invoices')
+              .select('id, invoice_number, xero_bill_id')
+              .eq('user_id', tradeUser.id)
+              .eq('xero_bill_id', attachBillId)
+              .maybeSingle()
+            if (attachLookupErr) throw attachLookupErr
+            if (!attachInv) throw new ApiError('Invoice not found for this Xero bill', 404)
+            const pdfBase64 = String(pdf_base64 || '').replace(/^data:application\/pdf;base64,/i, '').replace(/\s/g, '')
+            const maxPdfBytes = 5 * 1024 * 1024
+            if (pdfBase64.length > Math.ceil(maxPdfBytes * 4 / 3) + 16) throw new ApiError('PDF payload size is invalid', 413)
+            let pdfBytes: Uint8Array
+            try {
+              pdfBytes = Uint8Array.from(atob(pdfBase64), (c: string) => c.charCodeAt(0))
+            } catch {
+              throw new ApiError('Invalid PDF payload', 400)
+            }
+            if (pdfBytes.length === 0 || pdfBytes.length > maxPdfBytes) throw new ApiError('PDF payload size is invalid', 413)
+            if (String.fromCharCode(...pdfBytes.slice(0, 5)) !== '%PDF-') throw new ApiError('PDF payload must be a PDF document', 400)
+            const attachFilename = ((attachInv.invoice_number || 'trade-invoice').replace(/[^A-Za-z0-9._-]/g, '_') || 'trade-invoice') + '.pdf'
             try {
               const { accessToken, tenantId } = await getToken(client)
-              const pdfBytes = Uint8Array.from(atob(pdf_base64), (c: string) => c.charCodeAt(0))
               const attachRes = await fetch(
-                `https://api.xero.com/api.xro/2.0/Invoices/${attachBillId}/Attachments/${encodeURIComponent(filename || 'invoice.pdf')}`,
+                `https://api.xero.com/api.xro/2.0/Invoices/${attachBillId}/Attachments/${encodeURIComponent(attachFilename)}`,
                 {
                   method: 'PUT',
                   headers: {
@@ -4228,8 +4246,8 @@ if (import.meta.main) serve(async (req: Request) => {
               // could ADD the job card but SUBMIT threw "Manual invoice job is not active or does not
               // exist" (and, because submit is atomic, one archived line killed the whole batch incl.
               // good lines). We now exclude ONLY genuinely-dead jobs (lost/cancelled/deleted/void/
-              // duplicate) so done-and-filed make-safes resolve. Double-pay is guarded separately by
-              // the per-line existing-invoice-line check below — NOT by hiding finished jobs here.
+              // duplicate) so done-and-filed make-safes resolve. Double-pay is handled by office
+              // verification/Xero draft review for searched-in rows — NOT by hiding finished jobs here.
               // NOTE: this is the extra-items (searched-in) lane only. The assigned-card lane keeps its
               // own HOURLY_STATUS_WHITELIST above and is unaffected.
               const activeJobStatusExclude = '("lost","cancelled","deleted","duplicate","duplicated","void","voided")'
@@ -4392,6 +4410,46 @@ if (import.meta.main) serve(async (req: Request) => {
             }
             // ── END M0 GUARD ─────────────────────────────────────────────────
 
+            let duplicateExtraMatches: any[] = []
+            if (extraLineItems.length > 0) {
+              const extraJobIds = [...new Set(extraLineItems.map((e: any) => e.job_id).filter(Boolean))]
+              const extraJobNumbers = [...new Set(extraLineItems.map((e: any) => String(e.job_number || '').trim()).filter(Boolean))]
+              const duplicateLineReads: PromiseLike<any>[] = []
+              if (extraJobIds.length > 0) {
+                duplicateLineReads.push(client.from('trade_invoice_lines').select('trade_invoice_id, job_id, job_number').in('job_id', extraJobIds))
+              }
+              if (extraJobNumbers.length > 0) {
+                duplicateLineReads.push(client.from('trade_invoice_lines').select('trade_invoice_id, job_id, job_number').in('job_number', extraJobNumbers))
+              }
+              const duplicateLineResults = duplicateLineReads.length > 0 ? await Promise.all(duplicateLineReads) : []
+              const duplicateLineErr = duplicateLineResults.find((r: any) => r.error)?.error
+              if (duplicateLineErr) throw duplicateLineErr
+              const duplicateLineMap = new Map<string, any>()
+              for (const line of duplicateLineResults.flatMap((r: any) => r.data || [])) {
+                if (line?.trade_invoice_id) {
+                  duplicateLineMap.set([line.trade_invoice_id, line.job_id || '', line.job_number || ''].join('|'), line)
+                }
+              }
+              const duplicateInvoiceIds = [...new Set([...duplicateLineMap.values()].map((l: any) => l.trade_invoice_id).filter(Boolean))]
+              if (duplicateInvoiceIds.length > 0) {
+                const { data: duplicateInvoices, error: duplicateInvErr } = await client.from('trade_invoices')
+                  .select('id, status, invoice_number, user_id')
+                  .in('id', duplicateInvoiceIds)
+                if (duplicateInvErr) throw duplicateInvErr
+                const releasedDuplicateStatuses = new Set(['draft', 'failed', 'ops-reject'])
+                const liveDuplicateInvoices = new Map((duplicateInvoices || [])
+                  .filter((ti: any) => !releasedDuplicateStatuses.has(ti.status))
+                  .map((ti: any) => [ti.id, ti]))
+                duplicateExtraMatches = [...duplicateLineMap.values()]
+                  .filter((line: any) => liveDuplicateInvoices.has(line.trade_invoice_id))
+                  .map((line: any) => ({ ...line, invoice: liveDuplicateInvoices.get(line.trade_invoice_id) }))
+              }
+            }
+            const duplicateExtraCount = duplicateExtraMatches.length
+            const duplicateExtraJobIds = new Set(duplicateExtraMatches.map((m: any) => m.job_id).filter(Boolean))
+            const duplicateExtraJobNumbers = new Set(duplicateExtraMatches.map((m: any) => String(m.job_number || '')).filter(Boolean))
+            const duplicateExtraInvoiceRefs = [...new Set(duplicateExtraMatches.map((m: any) => m.invoice?.invoice_number || m.trade_invoice_id).filter(Boolean))]
+
             // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq} (global sequence, never reused)
             const initials = (userProfile?.name || 'XX').split(' ').map((n: string) => n.charAt(0).toUpperCase()).join('').slice(0, 3)
             const today = new Date().toISOString().slice(2, 10).replace(/-/g, '')
@@ -4457,36 +4515,107 @@ if (import.meta.main) serve(async (req: Request) => {
               invoice = newInvoice
             }
 
-            // Insert labour line items
-            for (const line of lineItems) {
-              await client.from('trade_invoice_lines').insert({
+            const toTradeInvoiceLineRow = (line: any, defaults: any = {}) => {
+              // site_address is used for the Xero description below but is not
+              // a trade_invoice_lines column. Never send memory-only fields to PostgREST.
+              const { site_address: _siteAddress, ...dbLine } = { ...defaults, ...line }
+              return {
                 trade_invoice_id: invoice.id,
-                line_type: 'labour',
-                ...line,
-              })
+                job_id: dbLine.job_id || null,
+                job_number: dbLine.job_number || null,
+                client_name: dbLine.client_name || null,
+                total_hours: dbLine.total_hours ?? null,
+                hourly_rate: dbLine.hourly_rate ?? null,
+                line_total_ex: dbLine.line_total_ex ?? 0,
+                work_order_hours: dbLine.work_order_hours ?? null,
+                days_worked: dbLine.days_worked ?? null,
+                assignment_ids: dbLine.assignment_ids || null,
+                acknowledgment_status: dbLine.acknowledgment_status || 'pending',
+                query_note: dbLine.query_note || null,
+                line_type: dbLine.line_type || 'labour',
+                description: dbLine.description || null,
+                quantity: dbLine.quantity ?? null,
+                unit: dbLine.unit || null,
+                unit_rate: dbLine.unit_rate ?? null,
+                line_date: dbLine.line_date || null,
+                division: dbLine.division || null,
+              }
             }
+            const lineRows = [
+              ...lineItems.map((line: any) => toTradeInvoiceLineRow(line, { line_type: 'labour' })),
+              ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow(extra)),
+            ]
 
-            // Insert extra line items (travel, materials, equipment, other)
-            for (const extra of extraLineItems) {
-              await client.from('trade_invoice_lines').insert({
-                trade_invoice_id: invoice.id,
-                ...extra,
-              })
+            // Insert all local accounting lines before touching Xero. A line-save failure
+            // leaves the invoice recoverable and prevents a Xero bill with no P&L lines.
+            const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
+            if (lineErr) {
+              try {
+                await client.from('trade_invoices').update({
+                  status: 'failed',
+                  query_note: ('Invoice line save failed before Xero push: ' + lineErr.message).slice(0, 500),
+                }).eq('id', invoice.id)
+              } catch (markErr) {
+                console.log('[ops-api] Failed to mark invoice line-save failure:', (markErr as Error).message)
+              }
+              throw new Error('Failed to save invoice line items: ' + lineErr.message)
             }
 
             // ── Layer B: stamp invoiced_in on every included assignment ──────
             // Marks each manual/clocked assignment as belonging to this invoice so
             // myHours() and the dup-assignment guard hide it from future weeks
-            // (covers rescheduling across a week boundary). Non-blocking.     [F3]
+            // (covers rescheduling across a week boundary). Must complete before Xero. [F3]
             const includedAssignmentIds = lineItems
               .flatMap((l: any) => Array.isArray(l.assignment_ids) ? l.assignment_ids : [])
               .filter(Boolean)
             if (includedAssignmentIds.length > 0) {
-              try {
-                await client.from('job_assignments')
-                  .update({ invoiced_in: invoice.id })
-                  .in('id', includedAssignmentIds)
-              } catch (e) { /* non-blocking */ }
+              const expectedAssignmentIds = [...new Set(includedAssignmentIds)]
+              const failAssignmentStamp = async (stampMsg: string) => {
+                try {
+                  await client.from('trade_invoices').update({
+                    status: 'failed',
+                    query_note: ('Invoice assignment stamp failed before Xero push: ' + stampMsg).slice(0, 500),
+                  }).eq('id', invoice.id)
+                } catch (markErr) {
+                  console.log('[ops-api] Failed to mark assignment-stamp failure:', (markErr as Error).message)
+                }
+                throw new Error('Failed to lock invoiced job cards before Xero push: ' + stampMsg)
+              }
+              const { data: stampCandidates, error: stampReadErr } = await client.from('job_assignments')
+                .select('id, invoiced_in')
+                .eq('user_id', tradeUser.id)
+                .in('id', expectedAssignmentIds)
+              if (stampReadErr) await failAssignmentStamp(stampReadErr.message)
+              if ((stampCandidates || []).length !== expectedAssignmentIds.length) {
+                await failAssignmentStamp('Only found ' + (stampCandidates || []).length + ' of ' + expectedAssignmentIds.length + ' assignments')
+              }
+              const stampRefIds = [...new Set((stampCandidates || []).map((a: any) => a.invoiced_in).filter(Boolean))]
+              const RELEASED_STAMP_STATUSES = ['draft', 'failed', 'ops-reject']
+              let releasedStampInvoiceIds: string[] = []
+              if (stampRefIds.length > 0) {
+                const { data: stampRefInvoices, error: stampRefErr } = await client.from('trade_invoices')
+                  .select('id, status')
+                  .in('id', stampRefIds)
+                if (stampRefErr) await failAssignmentStamp(stampRefErr.message)
+                releasedStampInvoiceIds = (stampRefInvoices || [])
+                  .filter((ti: any) => RELEASED_STAMP_STATUSES.includes(ti.status))
+                  .map((ti: any) => ti.id)
+              }
+              let stampQuery = client.from('job_assignments')
+                .update({ invoiced_in: invoice.id })
+                .eq('user_id', tradeUser.id)
+                .in('id', expectedAssignmentIds)
+              stampQuery = releasedStampInvoiceIds.length > 0
+                ? stampQuery.or('invoiced_in.is.null,invoiced_in.in.(' + releasedStampInvoiceIds.join(',') + ')')
+                : stampQuery.is('invoiced_in', null)
+              const { data: stampedAssignments, error: stampErr } = await stampQuery.select('id')
+              const stampedIds = new Set((stampedAssignments || []).map((a: any) => a.id))
+              if (stampErr || stampedIds.size !== expectedAssignmentIds.length) {
+                const stampMsg = stampErr
+                  ? stampErr.message
+                  : 'Only stamped ' + stampedIds.size + ' of ' + expectedAssignmentIds.length + ' assignments'
+                await failAssignmentStamp(stampMsg)
+              }
             }
 
             // ── Change 6 (Q18): straight-to-Xero-draft, no in-app approval hold ──
@@ -4500,14 +4629,16 @@ if (import.meta.main) serve(async (req: Request) => {
             // manual check now: the bookkeeper reviews/approves it in Xero (drafts
             // pay no one until approved there). So soft flags ANNOTATE the invoice
             // (query_note) and PROCEED to draft.  [Q18 — supersedes F6/Q4 Option A]
-            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess'
+            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess' || duplicateExtraCount > 0
             if (softReviewFlag) {
               await client.from('trade_invoices').update({
-                query_note: reviewFlag === 'hours_excess'
-                  ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
-                  : clientPricedExtraCount > 0
-                    ? 'Manual hours/rates entered by trade — verify job, description, hours and rate in Xero before approving the draft.'
-                  : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
+                query_note: duplicateExtraCount > 0
+                  ? 'Possible duplicate searched-in job line(s): already appears on ' + duplicateExtraInvoiceRefs.slice(0, 5).join(', ') + '. Verify before approving the Xero draft.'
+                  : reviewFlag === 'hours_excess'
+                    ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
+                    : clientPricedExtraCount > 0
+                      ? 'Manual hours/rates entered by trade — verify job, description, hours and rate in Xero before approving the draft.'
+                      : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
               }).eq('id', invoice.id)
             }
 
@@ -4518,7 +4649,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 source: 'ops-api/generate_trade_invoice',
                 entity_type: 'trade_invoice',
                 entity_id: invoice.id,
-                payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, total_inc: totalInc, client_priced_lines: clientPricedExtraCount },
+                payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, total_inc: totalInc, client_priced_lines: clientPricedExtraCount, possible_duplicate_extra_lines: duplicateExtraCount },
               })
             } catch (e) { /* non-blocking */ }
 
@@ -4612,18 +4743,23 @@ if (import.meta.main) serve(async (req: Request) => {
                   TaxType: taxType,
                   Tracking: xeroTracking(l.job_number || ''),
                   }
-                }), ...extraLineItems.map((e: any) => ({
-                  Description: [
-                    e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
-                    (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
-                    e.client_name ? [e.client_name, e.site_address].filter(Boolean).join(', ') : '',
-                  ].filter(Boolean).join('\n'),
-                  Quantity: e.quantity || 1,
-                  UnitAmount: e.unit_rate || 0,
-                  AccountCode: '620', // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
-                  TaxType: taxType,
-                  Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
-                }))]
+                }), ...extraLineItems.map((e: any) => {
+                  const possibleDuplicate = (e.job_id && duplicateExtraJobIds.has(e.job_id)) ||
+                    (e.job_number && duplicateExtraJobNumbers.has(String(e.job_number)))
+                  return {
+                    Description: [
+                      possibleDuplicate ? 'POSSIBLE DUPLICATE - verify prior trade invoice before approving' : null,
+                      e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
+                      (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
+                      e.client_name ? [e.client_name, e.site_address].filter(Boolean).join(', ') : '',
+                    ].filter(Boolean).join('\n'),
+                    Quantity: e.quantity || 1,
+                    UnitAmount: e.unit_rate || 0,
+                    AccountCode: '620', // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
+                    TaxType: taxType,
+                    Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
+                  }
+                })]
 
                 // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
                 // so the insurer/builder ref appears in the bill header, not just the line descriptions.
