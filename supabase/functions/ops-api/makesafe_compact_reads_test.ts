@@ -309,8 +309,10 @@ Deno.test("GAP-1 inbound filter: own/outbound (ses@-group self-copy) emails are 
       // Our own outbound mail, self-copied into the group -> DROP (each own domain).
       { post_id: "post-OUT-WA", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "ses@secureworkswa.com.au", has_attachments: false, pii_purged_at: null },
       { post_id: "post-OUT-APP", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "invoices@secureworksgroup.app", has_attachments: false, pii_purged_at: null },
-      // Subdomain of an own domain -> DROP (suffix match).
-      { post_id: "post-OUT-SUB", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "no-reply@notifications.primeeco.tech", has_attachments: false, pii_purged_at: null },
+      // Subdomain of an own domain -> DROP (suffix match). Use a real own-domain
+      // subdomain (mail.secureworksgroup.app) — NOT primeeco.tech, which is an
+      // inbound builder platform and must NOT be classified as own (#208 fix).
+      { post_id: "post-OUT-SUB", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "no-reply@mail.secureworksgroup.app", has_attachments: false, pii_purged_at: null },
     ],
     makesafe_intake_drafts: [],
     email_attachments: [{ email_id: "post-BUILDER", status: "uploaded" }],
@@ -325,6 +327,33 @@ Deno.test("GAP-1 inbound filter: own/outbound (ses@-group self-copy) emails are 
   assertEquals(res.excluded_outbound, 3);
   // No surviving row is ever flagged outbound (the feed is inbound-only).
   assert(res.emails.every((e: any) => e.direction === "inbound"), "every retained GAP-1 row must be inbound");
+});
+
+Deno.test("GAP-1 regression (#208): an inbound primeeco.tech builder work order SURVIVES the inbound filter", async () => {
+  // Regression guard for PR #208: primeeco.tech was incorrectly listed in
+  // OWN_OUTBOUND_DOMAINS, causing every MLB/PrimeEco builder work order delivered
+  // via mlb.mailer@primeeco.tech to be dropped silently as "own outbound". After
+  // the fix it must survive the inbound filter and NOT be counted in excluded_outbound.
+  const { client } = makeClient({
+    emails: [
+      // Genuine inbound PrimeEco builder work order -> MUST SURVIVE.
+      { post_id: "post-PRIMEECO-WO", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "mlb.mailer@primeeco.tech", has_attachments: true, pii_purged_at: null },
+      // Own outbound self-copy -> still correctly excluded.
+      { post_id: "post-OWN-SELF", mailbox: "ses@secureworkswa.com.au", received_at: "2026-06-14T00:00:00Z", from_email: "ses@secureworkswa.com.au", has_attachments: false, pii_purged_at: null },
+    ],
+    makesafe_intake_drafts: [],
+    email_attachments: [{ email_id: "post-PRIMEECO-WO", status: "uploaded" }],
+  });
+  const res = await _makesafeNewEmails(client, { nowIso: "2026-06-15T00:00:00Z" });
+  // The PrimeEco builder WO survives; the own self-copy does not.
+  assertEquals(res.count, 1, "primeeco.tech builder WO must survive (not dropped as own-outbound)");
+  assertEquals(res.emails[0].post_id, "post-PRIMEECO-WO");
+  assertEquals(res.emails[0].from_domain, "primeeco.tech");
+  assertEquals(res.emails[0].direction, "inbound");
+  // The one own-domain self-copy is correctly counted.
+  assertEquals(res.excluded_outbound, 1, "only the genuine own-domain copy is excluded");
+  // The PrimeEco row is not in excluded_outbound — it survived.
+  assert(res.emails.every((e: any) => e.direction === "inbound"), "surviving rows must all be inbound");
 });
 
 // ════════════════════════════════════════════════════════════
