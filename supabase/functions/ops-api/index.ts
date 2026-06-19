@@ -233,6 +233,7 @@ import {
   isInvoiceAmbiguous,
   countLiveInvoices,
   checkPositiveInvoiceTotalGate,
+  canResetDraftPackGenerationLock,
   // Phase 1b — resume-aware feed mapping + close-only / failed-reset gates
   // (TASK A/B/D). Pure money-safety predicates; the orchestration supplies the
   // live client. deriveResumeAction is the single source of truth for the
@@ -17218,47 +17219,96 @@ async function makesafeSendPack(
   // resume from 'sending' REQUIRES an explicit operator decision in the body.
   if (priorStatus === 'sending') {
     if (priorPack?.failed_step === 'draft_pack') {
-      return {
-        error: 'draft pack is still generating or stalled; this is NOT an email-send state. Do not resolve via Sent Items. Reset/retry the draft pack generation first.',
-        status: 'sending',
-        failed_step: 'draft_pack',
-        send_started_at: priorPack?.send_started_at || null,
-        requires: 'draft_pack_retry_or_reset',
-        job_id: jobId,
+      // Draft Pack uses the same constrained `sending` status as the email-send
+      // lock, but failed_step='draft_pack' proves this is NOT an email in-flight
+      // state. Recover only the old-crash shape where the draft artifacts are
+      // already complete: typed report/invoice docs exist and the single live
+      // invoice is still DRAFT. Otherwise leave the existing fail-visible block.
+      const [detailForDraftLockRes, docsForDraftLockRes, invoicesForDraftLockRes] = await Promise.all([
+        client.from('makesafe_job_details')
+          .select('external_ref, report_type')
+          .eq('job_id', jobId).maybeSingle(),
+        client.from('job_documents')
+          .select('id, type, file_name')
+          .eq('job_id', jobId),
+        client.from('xero_invoices')
+          .select('xero_invoice_id, invoice_number, status, reference, job_id, invoice_date, sub_total, total, line_items')
+          .eq('job_id', jobId)
+          .order('invoice_date', { ascending: false }),
+      ])
+      const draftLockDocs = docsForDraftLockRes.data || []
+      const draftLockReportDoc = draftLockDocs.find((d: any) => d.type === 'makesafe_report') || null
+      const draftLockInvoiceDoc = draftLockDocs.find((d: any) => d.type === 'invoice') || null
+      const draftLockLiveInvoices = invoicesForDraftLockRes.data || []
+      const draftLockInvoice = _resolveMakesafeJobInvoices(
+        draftLockLiveInvoices,
+        jobId,
+        detailForDraftLockRes.data?.external_ref,
+      )
+      const draftLockCanReset = !isInvoiceAmbiguous(draftLockLiveInvoices) &&
+        canResetDraftPackGenerationLock({
+          packStatus: priorStatus,
+          failedStep: priorPack?.failed_step,
+          invoiceStatus: draftLockInvoice?.status,
+          hasInvoiceDoc: !!draftLockInvoiceDoc,
+          hasReportDoc: !!draftLockReportDoc,
+          reportRequired: !detailForDraftLockRes.data?.report_type,
+        })
+      if (draftLockCanReset) {
+        await _patchPack(client, jobId, packKind, {
+          status: 'drafted',
+          failed_step: null,
+          error_detail: null,
+          send_started_at: null,
+          report_doc_id: draftLockReportDoc?.id || null,
+          invoice_doc_id: draftLockInvoiceDoc?.id || null,
+          xero_invoice_id: draftLockInvoice?.xero_invoice_id || null,
+          invoice_status: draftLockInvoice?.status || null,
+        })
+      } else {
+        return {
+          error: 'draft pack is still generating or stalled; this is NOT an email-send state. Do not resolve via Sent Items. Reset/retry the draft pack generation first.',
+          status: 'sending',
+          failed_step: 'draft_pack',
+          send_started_at: priorPack?.send_started_at || null,
+          requires: 'draft_pack_retry_or_reset',
+          job_id: jobId,
+        }
       }
-    }
-    const resolution = planSendingResolution(body.sending_resolution)
-    if (!resolution) {
-      // No valid resolution -> 409. Operator must verify Sent Items and resubmit.
-      return {
-        error: 'in-flight: this pack is in the SENDING state (email may have gone out). Verify the Sent Items folder, then resubmit with body.sending_resolution = "confirmed_sent" (the email DID go) or "confirmed_not_sent" (it did NOT go).',
-        status: 'sending',
-        in_flight_stale: isSendingStale(priorStatus, priorPack?.send_started_at, Date.now()),
-        send_started_at: priorPack?.send_started_at || null,
-        requires: 'sending_resolution',
-        job_id: jobId,
+    } else {
+      const resolution = planSendingResolution(body.sending_resolution)
+      if (!resolution) {
+        // No valid resolution -> 409. Operator must verify Sent Items and resubmit.
+        return {
+          error: 'in-flight: this pack is in the SENDING state (email may have gone out). Verify the Sent Items folder, then resubmit with body.sending_resolution = "confirmed_sent" (the email DID go) or "confirmed_not_sent" (it did NOT go).',
+          status: 'sending',
+          in_flight_stale: isSendingStale(priorStatus, priorPack?.send_started_at, Date.now()),
+          send_started_at: priorPack?.send_started_at || null,
+          requires: 'sending_resolution',
+          job_id: jobId,
+        }
       }
-    }
-    if (resolution.writeMarkerAndClose) {
-      // confirmed_sent: the email DID go. Write marker + close, status='sent'.
-      // NO re-email, NO re-authorise.
-      const xeroId = priorPack?.xero_invoice_id || null
-      let recoverInvNo: string | null = null
-      if (xeroId) {
-        const { data: inv } = await client.from('xero_invoices')
-          .select('invoice_number').eq('xero_invoice_id', xeroId).maybeSingle()
-        recoverInvNo = inv?.invoice_number || null
+      if (resolution.writeMarkerAndClose) {
+        // confirmed_sent: the email DID go. Write marker + close, status='sent'.
+        // NO re-email, NO re-authorise.
+        const xeroId = priorPack?.xero_invoice_id || null
+        let recoverInvNo: string | null = null
+        if (xeroId) {
+          const { data: inv } = await client.from('xero_invoices')
+            .select('invoice_number').eq('xero_invoice_id', xeroId).maybeSingle()
+          recoverInvNo = inv?.invoice_number || null
+        }
+        const markerText = buildPackSentMarkerText({ invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
+        await client.from('job_events').insert({ job_id: jobId, event_type: 'note', detail_json: { text: markerText } })
+        await _applyMakesafeClose()
+        await _patchPack(client, jobId, packKind, { status: 'sent', sent_at: priorPack?.sent_at || nowIso(), failed_step: null, error_detail: null })
+        return { resumed: true, action: 'confirmed_sent_marker_and_close', status: 'sent', sent: true, closed: true, job_id: jobId, note: 'operator confirmed the email went out; reconciled (no re-email)' }
       }
-      const markerText = buildPackSentMarkerText({ invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
-      await client.from('job_events').insert({ job_id: jobId, event_type: 'note', detail_json: { text: markerText } })
-      await _applyMakesafeClose()
-      await _patchPack(client, jobId, packKind, { status: 'sent', sent_at: priorPack?.sent_at || nowIso(), failed_step: null, error_detail: null })
-      return { resumed: true, action: 'confirmed_sent_marker_and_close', status: 'sent', sent: true, closed: true, job_id: jobId, note: 'operator confirmed the email went out; reconciled (no re-email)' }
+      // confirmed_not_sent: the email did NOT go. The invoice is already AUTHORISED,
+      // so we move the pack to 'authorised_not_sent' (a lockable resume state) and
+      // fall through to the normal lock -> (skip re-authorise) -> gate -> send path.
+      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: null, error_detail: 'operator confirmed not-sent from sending; re-entering send' })
     }
-    // confirmed_not_sent: the email did NOT go. The invoice is already AUTHORISED,
-    // so we move the pack to 'authorised_not_sent' (a lockable resume state) and
-    // fall through to the normal lock -> (skip re-authorise) -> gate -> send path.
-    await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: null, error_detail: 'operator confirmed not-sent from sending; re-entering send' })
   }
 
   // ── Load job + makesafe detail (MLB detection, doc gate) ──

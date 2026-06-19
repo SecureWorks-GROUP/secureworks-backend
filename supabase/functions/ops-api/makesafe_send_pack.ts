@@ -466,6 +466,31 @@ export function canAcquireSendLock(
   return LOCKABLE_STATUSES.includes(String(currentStatus ?? ""));
 }
 
+// A 'sending' pack with failed_step='draft_pack' is NOT an email-send state. It is
+// the draft generator's temporary lock. Normally the feed must hide it from email
+// recovery; however an older draft run can crash after attaching the report and
+// invoice docs, leaving a completed draft invisible and un-sendable. This helper
+// is deliberately narrow: only a DRAFT invoice plus typed close-out docs can reset
+// that stale draft-generation lock back to the ordinary drafted state.
+export function canResetDraftPackGenerationLock(args: {
+  packStatus: string | null | undefined;
+  failedStep: string | null | undefined;
+  invoiceStatus: string | null | undefined;
+  hasInvoiceDoc: boolean;
+  hasReportDoc: boolean;
+  reportRequired?: boolean;
+}): boolean {
+  const status = String(args.packStatus ?? "");
+  const failedStep = String(args.failedStep ?? "");
+  const invoiceStatus = String(args.invoiceStatus ?? "").toUpperCase();
+  const reportOk = args.reportRequired === false || args.hasReportDoc === true;
+  return status === "sending" &&
+    failedStep === "draft_pack" &&
+    invoiceStatus === "DRAFT" &&
+    args.hasInvoiceDoc === true &&
+    reportOk;
+}
+
 // A tiny serialised lock cell: the FIRST acquire that finds a lockable status
 // wins and flips to 'sending'; every subsequent acquire fails until released.
 // Models the DB's conditional-UPDATE-RETURNING semantics exactly.
@@ -739,15 +764,16 @@ export function deriveResumeAction(
   const failedStep = String(args.failedStep ?? "");
   const marker = args.markerPresent === true;
 
-  // A Draft Pack generator lock is not an email send. Do this BEFORE the fresh
-  // readyForReview branch so a stale draft-generation row can never be offered as
-  // either "send" or "resolve whether email went out".
-  if (s === "sending" && failedStep === "draft_pack") return null;
-
   // A genuinely fresh drafted-not-sent pack — the normal authorise+send flow.
   // readyForReview already requires !sentClosed and a DRAFT invoice, so it can
-  // never collide with a post-send state.
+  // never collide with a post-send state. It also safely recovers a stale
+  // draft-generation lock when the typed docs and DRAFT invoice already prove the
+  // draft is complete; that lock is not an email in-flight state.
   if (args.readyForReview) return "send";
+
+  // A Draft Pack generator lock is not an email send. If it did not satisfy the
+  // fresh readyForReview predicate above, keep it out of the email recovery UI.
+  if (s === "sending" && failedStep === "draft_pack") return null;
 
   // Authorised but not sent, with NO proof of a prior send -> re-email ONCE.
   // The marker guard is the double-email firewall: if a marker is present the
