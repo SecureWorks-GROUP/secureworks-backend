@@ -21,6 +21,7 @@ import {
   canAcquireSendLock,
   checkClientSendGate,
   checkExactRecipientGate,
+  checkPositiveInvoiceTotalGate,
   checkResetFailedGate,
   checkResumeCloseGate,
   countLiveInvoices,
@@ -904,6 +905,31 @@ Deno.test("N-1: exactly one live invoice proceeds (authorise + send once)", () =
   assertEquals(r.packStatus, "sent");
   assertEquals(r.fx.authorise, 1);
   assertEquals(r.fx.email, 1);
+});
+
+Deno.test("money gate: zero-dollar invoice cannot be authorised or sent", () => {
+  const failures = checkPositiveInvoiceTotalGate({
+    status: "DRAFT",
+    total: 0,
+    sub_total: 0,
+    line_items: [
+      { Description: "Labour", Quantity: 4, UnitAmount: 0, LineAmount: 0 },
+    ],
+  });
+
+  assertEquals(failures.length, 1);
+  assert(failures[0].includes("greater than $0"));
+});
+
+Deno.test("money gate: positive header or line total is accepted", () => {
+  assertEquals(checkPositiveInvoiceTotalGate({ total: 704 }).length, 0);
+  assertEquals(
+    checkPositiveInvoiceTotalGate({
+      total: 0,
+      line_items: [{ Description: "Labour", Quantity: 2, UnitAmount: 80 }],
+    }).length,
+    0,
+  );
 });
 
 // N-1 pure-contract: isInvoiceAmbiguous / countLiveInvoices ignore VOIDED/DELETED.
