@@ -19,6 +19,7 @@ import {
   assertDraftOnlyText,
   buildDraftPackSystemPrompt,
   buildDraftPackUserPrompt,
+  cleanDraftReviewSummary,
   MAKESAFE_DRAFT_PACK_MODEL,
   normaliseDraftPackOutput,
   parseDraftPackResponse,
@@ -117,6 +118,42 @@ Deno.test("parseDraftPackResponse rejects irreversible claims in Claude JSON", (
       })),
     Error,
     "forbidden irreversible wording",
+  );
+});
+
+Deno.test("parseDraftPackResponse sanitises review-summary authorise wording before the draft-only guard", () => {
+  const parsed = parseDraftPackResponse(JSON.stringify({
+    report: {
+      ref: "AJBR-1",
+      address: "Site",
+      works: "Temporary works complete",
+    },
+    invoice: {
+      reference: "AJBR-1",
+      contact_name: "AJS",
+      line_items: [{
+        description: "Attendance",
+        quantity: 1,
+        unit_price: 1,
+      }],
+    },
+    change_summary:
+      "Human to confirm pricing before authorise. Draft invoice not approved.",
+  }));
+
+  assertEquals(
+    parsed.change_summary,
+    "Human to confirm pricing before finalise. Draft invoice not reviewed.",
+  );
+  assertDraftOnlyText(JSON.stringify(parsed));
+});
+
+Deno.test("cleanDraftReviewSummary keeps the summary in review/finalise language", () => {
+  assertEquals(
+    cleanDraftReviewSummary(
+      "Do not send email; authorising is later after approval.",
+    ),
+    "Do not prepare email; finalising is later after approval.",
   );
 });
 
