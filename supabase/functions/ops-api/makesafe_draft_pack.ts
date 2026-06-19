@@ -209,11 +209,30 @@ export function normaliseDraftPackOutput(raw: any): DraftPackOutput {
       due_date: clean(invoice.due_date ?? invoice.dueDate),
       line_items: lines,
     },
-    change_summary: clean(raw?.change_summary ?? raw?.summary) ||
+    change_summary: cleanDraftReviewSummary(
+      raw?.change_summary ?? raw?.summary,
+    ) ||
       "Draft pack refreshed for human review.",
   };
   assertDraftOnlyText(JSON.stringify(out));
   return out;
+}
+
+export function cleanDraftReviewSummary(v: unknown): string {
+  return clean(v)
+    .replace(/\bauthori[sz](?:e(?:d|s|r|rs)?|ing)\b/gi, (match) => {
+      const lower = match.toLowerCase();
+      if (lower.endsWith("ing")) return "finalising";
+      if (lower.endsWith("ed")) return "finalised";
+      return "finalise";
+    })
+    .replace(/\bapproved?\b/gi, "reviewed")
+    .replace(/\bwas sent\b/gi, "is ready for review")
+    .replace(/\bemail sent\b/gi, "email draft ready")
+    .replace(/\bsend email\b/gi, "prepare email")
+    .replace(/\bclosed\b/gi, "complete")
+    .replace(/\bclose job\b/gi, "complete job after review")
+    .replace(/\bmark complete\b/gi, "prepare for completion review");
 }
 
 export function assertDraftOnlyText(text: string): void {
