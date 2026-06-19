@@ -19,6 +19,7 @@ import {
 import {
   buildPackSentMarkerText,
   canAcquireSendLock,
+  canResetDraftPackGenerationLock,
   checkClientSendGate,
   checkExactRecipientGate,
   checkPositiveInvoiceTotalGate,
@@ -141,6 +142,49 @@ Deno.test("send-lock: lockable statuses only", () => {
   assert(!canAcquireSendLock("sent_not_closed"));
   assert(!canAcquireSendLock("failed"));
   assert(!canAcquireSendLock(undefined));
+});
+
+Deno.test("draft-pack lock recovery: only completed DRAFT artifacts can reset a draft-generation lock", () => {
+  assertEquals(
+    canResetDraftPackGenerationLock({
+      packStatus: "sending",
+      failedStep: "draft_pack",
+      invoiceStatus: "DRAFT",
+      hasInvoiceDoc: true,
+      hasReportDoc: true,
+    }),
+    true,
+  );
+  assertEquals(
+    canResetDraftPackGenerationLock({
+      packStatus: "sending",
+      failedStep: "draft_pack",
+      invoiceStatus: "AUTHORISED",
+      hasInvoiceDoc: true,
+      hasReportDoc: true,
+    }),
+    false,
+  );
+  assertEquals(
+    canResetDraftPackGenerationLock({
+      packStatus: "sending",
+      failedStep: "draft_pack",
+      invoiceStatus: "DRAFT",
+      hasInvoiceDoc: true,
+      hasReportDoc: false,
+    }),
+    false,
+  );
+  assertEquals(
+    canResetDraftPackGenerationLock({
+      packStatus: "sending",
+      failedStep: "email_send",
+      invoiceStatus: "DRAFT",
+      hasInvoiceDoc: true,
+      hasReportDoc: true,
+    }),
+    false,
+  );
 });
 
 Deno.test("send-lock: two racers -> exactly one acquires, the other gets 0 rows (409)", () => {
@@ -1236,8 +1280,8 @@ Deno.test("resume-map guard: sending + draft_pack is NOT an email-send recovery 
       failedStep: "draft_pack",
       markerPresent: false,
     }),
-    null,
-    "draft-generation lock must beat readyForReview so it cannot surface as send",
+    "send",
+    "completed DRAFT artifacts may surface as the normal review/send path; it is not an email-send recovery state",
   );
 });
 

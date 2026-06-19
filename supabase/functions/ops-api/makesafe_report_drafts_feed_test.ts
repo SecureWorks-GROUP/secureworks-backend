@@ -539,6 +539,26 @@ Deno.test("A feed guard: sending + failed_step=draft_pack is excluded from email
   assertEquals(res.count, 0);
 });
 
+Deno.test("A feed recovery: stale draft_pack lock with completed DRAFT docs is surfaced as send", async () => {
+  const seed = ferndaleSeed();
+  seed.xero_invoices[0].status = "DRAFT";
+  const started = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sending",
+    failed_step: "draft_pack",
+    report_doc_id: null,
+    sent_at: null,
+    send_started_at: started,
+  }];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].resume_action, "send");
+  assertEquals(res.drafts[0].pack_status.failed_step, "draft_pack");
+});
+
 Deno.test("A feed row 6: sending + marker -> 'finish_close_out'", async () => {
   const seed: any = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
