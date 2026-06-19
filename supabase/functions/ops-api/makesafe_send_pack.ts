@@ -635,6 +635,37 @@ export function isInvoiceAmbiguous(
   return countLiveInvoices(invoiceRows) > 1;
 }
 
+export function checkPositiveInvoiceTotalGate(invoice: any): string[] {
+  const failures: string[] = [];
+  const headerTotal = Number(invoice?.total ?? invoice?.Total ?? NaN);
+  const headerSubTotal = Number(
+    invoice?.sub_total ?? invoice?.subTotal ?? invoice?.SubTotal ?? NaN,
+  );
+  const rawLines = Array.isArray(invoice?.line_items)
+    ? invoice.line_items
+    : (Array.isArray(invoice?.LineItems) ? invoice.LineItems : []);
+  const lineTotal = rawLines.reduce((sum: number, li: any) => {
+    const explicit = li?.LineAmount ?? li?.line_total ?? li?.lineTotal;
+    if (explicit != null && Number.isFinite(Number(explicit))) {
+      return sum + Number(explicit);
+    }
+    const quantity = Number(li?.Quantity ?? li?.quantity ?? 1);
+    const unit = Number(li?.UnitAmount ?? li?.unit_price ?? li?.unitPrice ?? 0);
+    return sum + ((Number.isFinite(quantity) ? quantity : 1) *
+      (Number.isFinite(unit) ? unit : 0));
+  }, 0);
+  const positive = (Number.isFinite(headerTotal) && headerTotal > 0) ||
+    (Number.isFinite(headerSubTotal) && headerSubTotal > 0) ||
+    lineTotal > 0;
+
+  if (!positive) {
+    failures.push(
+      "invoice total must be greater than $0 before a make-safe pack can be authorised or sent",
+    );
+  }
+  return failures;
+}
+
 // ── Resume-aware feed action mapping (TASK A — the Ferndale fix) ──────────────
 //
 // The cockpit feed (makesafeReportDrafts) must surface not just a fresh

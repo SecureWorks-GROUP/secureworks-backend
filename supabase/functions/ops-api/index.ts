@@ -232,6 +232,7 @@ import {
   planSendingResolution,
   isInvoiceAmbiguous,
   countLiveInvoices,
+  checkPositiveInvoiceTotalGate,
   // Phase 1b — resume-aware feed mapping + close-only / failed-reset gates
   // (TASK A/B/D). Pure money-safety predicates; the orchestration supplies the
   // live client. deriveResumeAction is the single source of truth for the
@@ -16325,6 +16326,24 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       invoiceNumber: liveInvoice?.invoice_number || null,
       totalIncGst: totals.total_inc_gst,
     })
+    const positiveInvoiceFailures = liveInvoice ? checkPositiveInvoiceTotalGate(liveInvoice) : []
+    const zeroPriceLines = lines.filter((line: any) =>
+      Number(line?.line_total || 0) <= 0 || Number(line?.unit_price || 0) <= 0
+    )
+    const moneyReview = positiveInvoiceFailures.length > 0 || zeroPriceLines.length > 0
+      ? {
+        needs_money_review: true,
+        reason: positiveInvoiceFailures[0] ||
+          'one or more invoice lines have $0 pricing and need review before send',
+        flagged_lines: (zeroPriceLines.length ? zeroPriceLines : lines).map((line: any) => ({
+          description: line.description || 'Invoice line',
+          amount: Number(line.line_total || 0),
+          flag: Number(line.line_total || 0) <= 0
+            ? 'zero_line_total'
+            : 'zero_unit_price',
+        })),
+      }
+      : null
 
     return {
       job_id: d.job_id,
@@ -16405,7 +16424,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       //   needs_money_review: boolean
       //   reason: string           — human-readable explanation
       //   flagged_lines: Array<{ description, amount, flag }> — per-line flags
-      money_review: null as (null | {
+      money_review: moneyReview as (null | {
         needs_money_review: boolean
         reason: string
         flagged_lines: Array<{ description: string; amount: number; flag: string }>
@@ -17297,7 +17316,7 @@ async function makesafeSendPack(
 
   // ── PREFLIGHT: a Xero invoice (draft or authorised) must be linked to the job ──
   const { data: jobInvoices } = await client.from('xero_invoices')
-    .select('xero_invoice_id, invoice_number, status, reference, job_id, invoice_date')
+    .select('xero_invoice_id, invoice_number, status, reference, job_id, invoice_date, sub_total, total, line_items')
     .eq('job_id', jobId)
     .order('invoice_date', { ascending: false })
   const liveInvoiceMapped = _resolveMakesafeJobInvoices(jobInvoices || [], jobId, detail?.external_ref)
@@ -17318,6 +17337,16 @@ async function makesafeSendPack(
     await _ensurePackRow(client, jobId, packKind)
     await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_invoice', error_detail: 'no live Xero invoice linked to job' })
     throw new ApiError('preflight failed: no live Xero invoice linked to this job', 412)
+  }
+  const positiveInvoiceFailures = checkPositiveInvoiceTotalGate(liveInvoiceRow)
+  if (positiveInvoiceFailures.length > 0) {
+    await _ensurePackRow(client, jobId, packKind)
+    await _patchPack(client, jobId, packKind, {
+      status: 'failed',
+      failed_step: 'money_review_gate',
+      error_detail: positiveInvoiceFailures.join(' | ').slice(0, 500),
+    })
+    throw new ApiError('send blocked: ' + positiveInvoiceFailures.join('; '), 412)
   }
   const xeroInvoiceId = liveInvoiceRow.xero_invoice_id
   const invoiceNumber = liveInvoiceRow.invoice_number
