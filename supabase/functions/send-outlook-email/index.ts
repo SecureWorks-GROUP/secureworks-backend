@@ -135,6 +135,19 @@ async function fetchAttachment(url: string, name: string): Promise<{
 // ── Dynamic Signature Selection ──
 function getSignature(from: string): string {
   const email = (from || '').toLowerCase()
+  if (email.includes('admin@secureworkswa.com.au') || email === 'admin') {
+    return EMAIL_SIGNATURE
+      .replace('Marnin Stobbe', 'Maverick')
+      .replace('Operations Manager', 'Operations Assist')
+      .replace(
+        /<b style="color:#293C46">P:<\/b>[\s\S]*?<br\/>\s*/,
+        '',
+      )
+      .replace(
+        /<b style="color:#293C46">E:<\/b>[\s\S]*?<\/a>/,
+        '<b style="color:#293C46">E:</b> <a href="mailto:ses@secureworkswa.com.au" style="color:#F15A29;text-decoration:none">ses@secureworkswa.com.au</a><br/><b style="color:#293C46">W:</b> <a href="https://secureworksgroup.com.au" style="color:#4C6A7C;text-decoration:none">secureworksgroup.com.au</a>',
+      )
+  }
   if (email.includes('shaun')) {
     return EMAIL_SIGNATURE
       .replace('Marnin Stobbe', 'Shaun')
@@ -298,7 +311,7 @@ serve(async (req: Request) => {
 
     // 1. Log to po_communications (unified comms timeline)
     if (job_id) {
-      sb.from('po_communications').insert({
+      Promise.resolve(sb.from('po_communications').insert({
         job_id,
         direction: 'outbound',
         from_email: from,
@@ -309,11 +322,11 @@ serve(async (req: Request) => {
         communication_type: 'client',
         sent_at: new Date().toISOString(),
         created_by: sent_by || null,
-      }).then(() => {}).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
+      })).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
     }
 
     // 2. Log to email_events (delivery tracking)
-    sb.from('email_events').insert({
+    Promise.resolve(sb.from('email_events').insert({
       email_type: 'client_email',
       entity_type: job_id ? 'job' : 'contact',
       entity_id: job_id || ghl_contact_id || toStr,
@@ -323,7 +336,7 @@ serve(async (req: Request) => {
       subject,
       status: 'sent',
       sent_at: new Date().toISOString(),
-    }).then(() => {}).catch(() => {})
+    })).catch(() => {})
 
     // 3. Log to GHL contact (so it shows in GHL timeline)
     if (ghl_contact_id) {
