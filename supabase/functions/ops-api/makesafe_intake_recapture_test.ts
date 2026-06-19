@@ -26,7 +26,11 @@
 //   ~/.deno/bin/deno test --allow-all --no-check \
 //     supabase/functions/ops-api/makesafe_intake_recapture_test.ts
 
-import { assert, assertEquals, assertNotEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   attachmentKeyComponent,
   scoreWorkOrder,
@@ -39,8 +43,8 @@ import {
   SUPPRESSED_DRAFT_STATES,
 } from "./makesafe_intake_dedup.ts";
 import {
-  subjectLooksLikeNewWorkOrder,
   subjectIsExcludedNonWorkOrder,
+  subjectLooksLikeNewWorkOrder,
 } from "./makesafe_intake_gate.ts";
 import { _recaptureIntakeDraftForTest } from "./index.ts";
 
@@ -68,21 +72,28 @@ function isQualifyingNeedsReviewRow(nr: {
 }): boolean {
   if (nr.last_error && WO_BYTES_ERRORS.has(nr.last_error)) return true;
   const kind = nr.attachment_kind || "";
-  const isPdfRef =
-    (nr.name || "").toLowerCase().endsWith(".pdf") ||
+  const isPdfRef = (nr.name || "").toLowerCase().endsWith(".pdf") ||
     (nr.content_type || "").includes("pdf");
-  if ((kind === "referenceAttachment" || kind === "itemAttachment") && isPdfRef) return true;
+  if (
+    (kind === "referenceAttachment" || kind === "itemAttachment") && isPdfRef
+  ) return true;
   return false;
 }
 
 Deno.test("B1 gate (step 2): NEW WORK ORDER subjects pass subjectLooksLikeNewWorkOrder", () => {
-  assert(subjectLooksLikeNewWorkOrder("NEW WORK ORDER - MLB-25096 7 Broughton St, Balcatta, WA 6021"));
+  assert(
+    subjectLooksLikeNewWorkOrder(
+      "NEW WORK ORDER - MLB-25096 7 Broughton St, Balcatta, WA 6021",
+    ),
+  );
   assert(subjectLooksLikeNewWorkOrder("Make Safe - BICTON - Job No 67998"));
   assert(subjectLooksLikeNewWorkOrder("work order #12345"));
 });
 
 Deno.test("B1 gate (step 2): photo/report/invoice subjects do NOT pass (false-positive bound)", () => {
-  assert(!subjectLooksLikeNewWorkOrder("Photo Evidence - AJBR 67251 - Doubleview"));
+  assert(
+    !subjectLooksLikeNewWorkOrder("Photo Evidence - AJBR 67251 - Doubleview"),
+  );
   assert(!subjectLooksLikeNewWorkOrder("Invoice - AJBR 66902 - Dianella"));
   assert(!subjectLooksLikeNewWorkOrder("WhatsApp Crew Report - Yokine"));
 });
@@ -103,8 +114,17 @@ Deno.test("B1 gate (step 2): excluded subjects also fail the NEW-WO check (doubl
 });
 
 Deno.test("B1 classify (step 3): WO-bytes last_error is qualifying", () => {
-  for (const err of ["pdf_no_inline_bytes_value_path_required", "pdf_exceeds_inline_decode_cap", "pdf_magic_byte_validation_failed"]) {
-    assert(isQualifyingNeedsReviewRow({ last_error: err }), `${err} must qualify`);
+  for (
+    const err of [
+      "pdf_no_inline_bytes_value_path_required",
+      "pdf_exceeds_inline_decode_cap",
+      "pdf_magic_byte_validation_failed",
+    ]
+  ) {
+    assert(
+      isQualifyingNeedsReviewRow({ last_error: err }),
+      `${err} must qualify`,
+    );
   }
 });
 
@@ -126,21 +146,25 @@ Deno.test("B1 classify (step 3): itemAttachment with PDF content_type is qualify
 
 Deno.test("B1 classify (step 3): generic needs_review referenceAttachment WITHOUT PDF name/type is NOT qualifying (SharePoint signature false positive)", () => {
   // A SharePoint link in an email signature is a referenceAttachment but is NOT a PDF WO.
-  assert(!isQualifyingNeedsReviewRow({
-    attachment_kind: "referenceAttachment",
-    name: "Company SharePoint Site",       // no .pdf
-    content_type: "text/html",              // not PDF
-    last_error: "unsupported_attachment_kind:referenceAttachment",
-  }));
+  assert(
+    !isQualifyingNeedsReviewRow({
+      attachment_kind: "referenceAttachment",
+      name: "Company SharePoint Site", // no .pdf
+      content_type: "text/html", // not PDF
+      last_error: "unsupported_attachment_kind:referenceAttachment",
+    }),
+  );
 });
 
 Deno.test("B1 classify (step 3): a status=needs_review fileAttachment with generic last_error is NOT qualifying", () => {
   // E.g. a failed-but-not-WO-bytes attachment (e.g. a network error on a non-WO row)
-  assert(!isQualifyingNeedsReviewRow({
-    attachment_kind: "fileAttachment",
-    name: "photo.jpg",
-    last_error: "storage_upload_failed:network timeout",
-  }));
+  assert(
+    !isQualifyingNeedsReviewRow({
+      attachment_kind: "fileAttachment",
+      name: "photo.jpg",
+      last_error: "storage_upload_failed:network timeout",
+    }),
+  );
 });
 
 // ── 2-PDF capture: distinct keys + right WO designated (AC1, AC2) ────────────────
@@ -160,7 +184,11 @@ Deno.test("2-PDF email: both PDFs get distinct storage key components", () => {
   };
   const key1 = attachmentKeyComponent(pdfReport);
   const key2 = attachmentKeyComponent(pdfWo);
-  assertNotEquals(key1, key2, "two PDFs in one email must have different key components (no collision)");
+  assertNotEquals(
+    key1,
+    key2,
+    "two PDFs in one email must have different key components (no collision)",
+  );
 });
 
 Deno.test("2-PDF email: selectWorkOrderPdf designates the WO and places it first", () => {
@@ -176,7 +204,11 @@ Deno.test("2-PDF email: selectWorkOrderPdf designates the WO and places it first
   };
   const { selected, ordered } = selectWorkOrderPdf([pdfReport, pdfWo]);
   assertEquals(selected, pdfWo, "work_order PDF must be designated");
-  assertEquals(ordered[0], pdfWo, "WO must be first in ordered list (fed to Haiku first)");
+  assertEquals(
+    ordered[0],
+    pdfWo,
+    "WO must be first in ordered list (fed to Haiku first)",
+  );
   assertEquals(ordered[1], pdfReport, "report must follow in stable order");
   assertEquals(ordered.length, 2, "no PDFs dropped");
 });
@@ -184,7 +216,8 @@ Deno.test("2-PDF email: selectWorkOrderPdf designates the WO and places it first
 Deno.test("2-PDF email: second scan with same email is deduped as live_draft_exists (idempotency)", () => {
   // Simulate: a draft was already created from the group post_id (e.g. recapture ran once).
   // The next scan should NOT create another draft — the graph_message_id matches a live draft.
-  const groupPostId = "AAQkADA3OWRlMzg2LTA2YjEtNDJiMy04MzdmLTBlNjE1NzUzZmM1MA==";
+  const groupPostId =
+    "AAQkADA3OWRlMzg2LTA2YjEtNDJiMy04MzdmLTBlNjE1NzUzZmM1MA==";
   const liveDraft = {
     graph_message_id: groupPostId,
     external_ref: "MLB-25096",
@@ -199,8 +232,11 @@ Deno.test("2-PDF email: second scan with same email is deduped as live_draft_exi
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
   };
-  assertEquals(isDuplicateIntake(candidate, index), "graph_message_id",
-    "second scan of a recaptured email must be a no-op");
+  assertEquals(
+    isDuplicateIntake(candidate, index),
+    "graph_message_id",
+    "second scan of a recaptured email must be a no-op",
+  );
 });
 
 // ── AC5: suppressed_rejected (already tested in dedup_test.ts, key case here) ────
@@ -216,7 +252,7 @@ Deno.test("AC5: scan guard — rejected Balcatta (MLB-25096) is NOT re-created b
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
     status: "rejected",
-    received_at: "2026-06-16T12:48:00.000Z",  // real Balcatta received_at
+    received_at: "2026-06-16T12:48:00.000Z", // real Balcatta received_at
   };
   const index = buildIntakeDedupIndex([], [], [rejectedBalcatta]);
   const newScanCandidate = {
@@ -225,11 +261,14 @@ Deno.test("AC5: scan guard — rejected Balcatta (MLB-25096) is NOT re-created b
     external_ref: "MLB-25096",
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
-    received_at: "2026-06-16T12:48:00.000Z",  // same email -> suppressed
+    received_at: "2026-06-16T12:48:00.000Z", // same email -> suppressed
     // No force_recapture = normal scan
   };
-  assertEquals(isDuplicateIntake(newScanCandidate, index), "suppressed_rejected",
-    "Balcatta MLB-25096 must be suppressed on normal scan after rejection");
+  assertEquals(
+    isDuplicateIntake(newScanCandidate, index),
+    "suppressed_rejected",
+    "Balcatta MLB-25096 must be suppressed on normal scan after rejection",
+  );
 });
 
 Deno.test("AC5: corrected Balcatta resend (newer email) is NOT suppressed", () => {
@@ -249,10 +288,13 @@ Deno.test("AC5: corrected Balcatta resend (newer email) is NOT suppressed", () =
     external_ref: "MLB-25096",
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
-    received_at: "2026-06-17T09:30:00.000Z",  // NEWER -> not suppressed
+    received_at: "2026-06-17T09:30:00.000Z", // NEWER -> not suppressed
   };
-  assertEquals(isDuplicateIntake(correctedResend, index), null,
-    "Corrected resend (newer received_at) must NOT be suppressed");
+  assertEquals(
+    isDuplicateIntake(correctedResend, index),
+    null,
+    "Corrected resend (newer received_at) must NOT be suppressed",
+  );
 });
 
 Deno.test("AC5: force_recapture bypasses suppressed Balcatta and allows recapture", () => {
@@ -271,11 +313,14 @@ Deno.test("AC5: force_recapture bypasses suppressed Balcatta and allows recaptur
     external_ref: "MLB-25096",
     requesting_company_slug: "mlb",
     requesting_company_name: "ML Builders",
-    received_at: "2026-06-16T12:48:00.000Z",  // same date but force_recapture overrides
+    received_at: "2026-06-16T12:48:00.000Z", // same date but force_recapture overrides
     force_recapture: true, // targeted recapture
   };
-  assertEquals(isDuplicateIntake(recaptureCandidate, index), null,
-    "force_recapture must allow creation of fresh draft for Balcatta");
+  assertEquals(
+    isDuplicateIntake(recaptureCandidate, index),
+    null,
+    "force_recapture must allow creation of fresh draft for Balcatta",
+  );
 });
 
 // ── AC6: recapture not routine-callable (structural property, confirmed by inspection) ──
@@ -323,7 +368,12 @@ Deno.test("AC6 (structural): recapture_intake_draft is NOT in ROUTINE_ALLOWED_AC
     "update_makesafe_substatus",
     "create_makesafe_draft_invoice",
     "makesafe_render_report",
+    "draft_makesafe_report_pack",
+    "draft_makesafe_report_pack_due",
     "makesafe_report_drafts",
+    "list_draft_notes",
+    "add_draft_note",
+    "rerun_draft_report",
   ]);
   assert(
     !ROUTINE_ALLOWED_ACTIONS.has("recapture_intake_draft"),
@@ -410,7 +460,14 @@ function makeRecaptureStub(opts: {
       },
       insert: (row: any) => {
         inserts.push({ table, row });
-        return { select: () => ({ single: async () => ({ data: { id: "flag-draft-id" }, error: null }) }) };
+        return {
+          select: () => ({
+            single: async () => ({
+              data: { id: "flag-draft-id" },
+              error: null,
+            }),
+          }),
+        };
       },
     };
     return b;
@@ -423,131 +480,153 @@ function makeRecaptureStub(opts: {
 }
 
 Deno.test({
-  name: "live_job_exists guard: recapture refuses to create a draft when a live job already covers the ref",
+  name:
+    "live_job_exists guard: recapture refuses to create a draft when a live job already covers the ref",
   // supabase-js createClient starts auth auto-refresh timers; disable leak detection.
   sanitizeOps: false,
   sanitizeResources: false,
   async fn() {
-  // recaptureIntakeDraft calls createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) at the
-  // top. Provide stub values so the constructor does not throw; adminClient is never called
-  // before the guard fires (storage calls are in step 4, after the guard returns).
-  Deno.env.set("SUPABASE_URL", "https://stub-supabase.invalid");
-  Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
+    // recaptureIntakeDraft calls createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) at the
+    // top. Provide stub values so the constructor does not throw; adminClient is never called
+    // before the guard fires (storage calls are in step 4, after the guard returns).
+    Deno.env.set("SUPABASE_URL", "https://stub-supabase.invalid");
+    Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
 
-  const DRAFT_ID = "draft-uuid-mlb-25096";
-  const GROUP_POST_ID = "AAQkADA3_ses_group_balcatta==";
-  const LIVE_JOB_ID = "5520cb13-b1cc-4d07-b923-69eae05462a8"; // SWMS-26655
+    const DRAFT_ID = "draft-uuid-mlb-25096";
+    const GROUP_POST_ID = "AAQkADA3_ses_group_balcatta==";
+    const LIVE_JOB_ID = "5520cb13-b1cc-4d07-b923-69eae05462a8"; // SWMS-26655
 
-  // _SES_MAILBOX = "ses@secureworkswa.com.au" (from makesafe_compact_reads.ts)
-  const draft = {
-    id: DRAFT_ID,
-    mailbox: "ses@secureworkswa.com.au",
-    graph_message_id: GROUP_POST_ID,
-    external_ref: "MLB-25096",
-    requesting_company_slug: "mlb",
-    requesting_company_name: "ML Builders",
-    received_at: "2026-06-16T12:48:00.000Z",
-    status: "rejected",
-    from_email: "admin@primeeco.tech",
-    from_name: "ML Builders",
-    subject: "NEW WORK ORDER - MLB-25096 7 Broughton St, Balcatta, WA 6021",
-    body_preview: "New make safe work order",
-    client_name: "Test Client",
-    client_phone: null,
-    site_address: "7 Broughton St",
-    site_suburb: "Balcatta",
-    description: "Make safe required",
-    confidence: "high",
-    extraction_json: {},
-  };
+    // _SES_MAILBOX = "ses@secureworkswa.com.au" (from makesafe_compact_reads.ts)
+    const draft = {
+      id: DRAFT_ID,
+      mailbox: "ses@secureworkswa.com.au",
+      graph_message_id: GROUP_POST_ID,
+      external_ref: "MLB-25096",
+      requesting_company_slug: "mlb",
+      requesting_company_name: "ML Builders",
+      received_at: "2026-06-16T12:48:00.000Z",
+      status: "rejected",
+      from_email: "admin@primeeco.tech",
+      from_name: "ML Builders",
+      subject: "NEW WORK ORDER - MLB-25096 7 Broughton St, Balcatta, WA 6021",
+      body_preview: "New make safe work order",
+      client_name: "Test Client",
+      client_phone: null,
+      site_address: "7 Broughton St",
+      site_suburb: "Balcatta",
+      description: "Make safe required",
+      confidence: "high",
+      extraction_json: {},
+    };
 
-  // Live job that already covers MLB-25096 (normalises to same ref)
-  const { client, inserts } = makeRecaptureStub({
-    draft,
-    groupEmailPostId: GROUP_POST_ID,
-    jobRows: [
-      { job_id: LIVE_JOB_ID, external_ref: "MLB-25096" },
-    ],
-  });
+    // Live job that already covers MLB-25096 (normalises to same ref)
+    const { client, inserts } = makeRecaptureStub({
+      draft,
+      groupEmailPostId: GROUP_POST_ID,
+      jobRows: [
+        { job_id: LIVE_JOB_ID, external_ref: "MLB-25096" },
+      ],
+    });
 
-  const result = await _recaptureIntakeDraftForTest(client, { draft_id: DRAFT_ID });
+    const result = await _recaptureIntakeDraftForTest(client, {
+      draft_id: DRAFT_ID,
+    });
 
-  // Must refuse to create a new draft
-  assertEquals(result.ok, true, "ok must be true");
-  assertEquals(result.recaptured, false, "recaptured must be false when a live job covers the ref");
-  assertEquals(result.reason, "live_job_exists", "reason must be live_job_exists");
-  assertEquals(result.existing_job_id, LIVE_JOB_ID, "must surface the existing job_id");
+    // Must refuse to create a new draft
+    assertEquals(result.ok, true, "ok must be true");
+    assertEquals(
+      result.recaptured,
+      false,
+      "recaptured must be false when a live job covers the ref",
+    );
+    assertEquals(
+      result.reason,
+      "live_job_exists",
+      "reason must be live_job_exists",
+    );
+    assertEquals(
+      result.existing_job_id,
+      LIVE_JOB_ID,
+      "must surface the existing job_id",
+    );
 
-  // CRITICAL: no new draft row must be inserted
-  assertEquals(inserts.length, 0, "must NOT insert a new makesafe_intake_drafts row");
+    // CRITICAL: no new draft row must be inserted
+    assertEquals(
+      inserts.length,
+      0,
+      "must NOT insert a new makesafe_intake_drafts row",
+    );
   },
 });
 
 Deno.test({
-  name: "live_job_exists guard: recapture proceeds when no live job matches the ref",
+  name:
+    "live_job_exists guard: recapture proceeds when no live job matches the ref",
   sanitizeOps: false,
   sanitizeResources: false,
   async fn() {
-  // When the job table has rows but NONE match the draft's ref, the guard must NOT fire.
-  // The function will try to proceed to step 4 (storage download) and fail because the
-  // stub returns no attachments — but the guard itself must not trigger.
-  Deno.env.set("SUPABASE_URL", "https://stub-supabase.invalid");
-  Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
+    // When the job table has rows but NONE match the draft's ref, the guard must NOT fire.
+    // The function will try to proceed to step 4 (storage download) and fail because the
+    // stub returns no attachments — but the guard itself must not trigger.
+    Deno.env.set("SUPABASE_URL", "https://stub-supabase.invalid");
+    Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
 
-  const DRAFT_ID = "draft-uuid-ajs-67251";
-  const GROUP_POST_ID = "AAQkADA3_ses_group_doubleview==";
+    const DRAFT_ID = "draft-uuid-ajs-67251";
+    const GROUP_POST_ID = "AAQkADA3_ses_group_doubleview==";
 
-  const draft = {
-    id: DRAFT_ID,
-    mailbox: "ses@secureworkswa.com.au",
-    graph_message_id: GROUP_POST_ID,
-    external_ref: "AJBR-67251",
-    requesting_company_slug: "ajs",
-    requesting_company_name: "AJS Building",
-    received_at: "2026-06-16T10:00:00.000Z",
-    status: "rejected",
-    from_email: "admin@ajsbuilding.com.au",
-    from_name: "AJS Building",
-    subject: "NEW WORK ORDER - AJBR-67251 Doubleview",
-    body_preview: "New work order",
-    client_name: null,
-    client_phone: null,
-    site_address: "1 Test St",
-    site_suburb: "Doubleview",
-    description: null,
-    confidence: "medium",
-    extraction_json: {},
-  };
+    const draft = {
+      id: DRAFT_ID,
+      mailbox: "ses@secureworkswa.com.au",
+      graph_message_id: GROUP_POST_ID,
+      external_ref: "AJBR-67251",
+      requesting_company_slug: "ajs",
+      requesting_company_name: "AJS Building",
+      received_at: "2026-06-16T10:00:00.000Z",
+      status: "rejected",
+      from_email: "admin@ajsbuilding.com.au",
+      from_name: "AJS Building",
+      subject: "NEW WORK ORDER - AJBR-67251 Doubleview",
+      body_preview: "New work order",
+      client_name: null,
+      client_phone: null,
+      site_address: "1 Test St",
+      site_suburb: "Doubleview",
+      description: null,
+      confidence: "medium",
+      extraction_json: {},
+    };
 
-  // Job table only has MLB jobs — no AJBR match
-  const { client, inserts } = makeRecaptureStub({
-    draft,
-    groupEmailPostId: GROUP_POST_ID,
-    jobRows: [
-      { job_id: "some-other-job-id", external_ref: "MLB-25096" },
-    ],
-  });
+    // Job table only has MLB jobs — no AJBR match
+    const { client, inserts } = makeRecaptureStub({
+      draft,
+      groupEmailPostId: GROUP_POST_ID,
+      jobRows: [
+        { job_id: "some-other-job-id", external_ref: "MLB-25096" },
+      ],
+    });
 
-  // The function will proceed past the guard and into step 4 (attachment fetch).
-  // It should NOT return live_job_exists.
-  let result: any;
-  try {
-    result = await _recaptureIntakeDraftForTest(client, { draft_id: DRAFT_ID });
-  } catch (_e) {
-    // A downstream error (e.g. adminClient storage call with empty URL) is acceptable here —
-    // what matters is that the guard did NOT fire live_job_exists.
-    result = null;
-  }
+    // The function will proceed past the guard and into step 4 (attachment fetch).
+    // It should NOT return live_job_exists.
+    let result: any;
+    try {
+      result = await _recaptureIntakeDraftForTest(client, {
+        draft_id: DRAFT_ID,
+      });
+    } catch (_e) {
+      // A downstream error (e.g. adminClient storage call with empty URL) is acceptable here —
+      // what matters is that the guard did NOT fire live_job_exists.
+      result = null;
+    }
 
-  if (result !== null) {
-    assert(
-      result.reason !== "live_job_exists",
-      `guard must not fire for unmatched ref; got reason=${result.reason}`,
-    );
-  }
-  // The guard was bypassed — function proceeds to step 4+5+6 (insert fresh draft).
-  // We do NOT assert inserts.length here because the function legitimately inserts a
-  // new draft when no live job covers the ref. The key contract is that live_job_exists
-  // was NOT returned (asserted above).
+    if (result !== null) {
+      assert(
+        result.reason !== "live_job_exists",
+        `guard must not fire for unmatched ref; got reason=${result.reason}`,
+      );
+    }
+    // The guard was bypassed — function proceeds to step 4+5+6 (insert fresh draft).
+    // We do NOT assert inserts.length here because the function legitimately inserts a
+    // new draft when no live job covers the ref. The key contract is that live_job_exists
+    // was NOT returned (asserted above).
   },
 });

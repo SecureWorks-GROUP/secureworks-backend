@@ -23,47 +23,55 @@
 // no 'routine' class yet) this predicate is identical in behaviour: dashboard
 // api_key + admin/owner jwt are allowed. Belt-and-braces with the central deny-list.
 export function sendPackAllowed(
-  authMode: 'api_key' | 'jwt' | 'routine',
+  authMode: "api_key" | "jwt" | "routine",
   authUser: { role?: string } | null | undefined,
 ): boolean {
-  return authMode === 'api_key' ||
-    (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+  return authMode === "api_key" ||
+    (authMode === "jwt" &&
+      (authUser?.role === "admin" || authUser?.role === "owner"));
 }
 
 // ── Marker idempotency (mirrors index.ts isPackSentMainEvent) ──
-export const MAKESAFE_PACK_SENT_MAIN_PREFIX = 'MAKESAFE_PACK_SENT | main'
+export const MAKESAFE_PACK_SENT_MAIN_PREFIX = "MAKESAFE_PACK_SENT | main";
 
 export function isPackSentMainEvent(ev: any): boolean {
-  if (!ev || String(ev.event_type) !== 'note') return false
-  let dj = ev.detail_json
-  if (typeof dj === 'string') {
-    try { dj = JSON.parse(dj) } catch (_) { dj = { text: dj } }
+  if (!ev || String(ev.event_type) !== "note") return false;
+  let dj = ev.detail_json;
+  if (typeof dj === "string") {
+    try {
+      dj = JSON.parse(dj);
+    } catch (_) {
+      dj = { text: dj };
+    }
   }
-  const text = dj && typeof dj === 'object' ? dj.text : null
-  return typeof text === 'string' && text.trim().startsWith(MAKESAFE_PACK_SENT_MAIN_PREFIX)
+  const text = dj && typeof dj === "object" ? dj.text : null;
+  return typeof text === "string" &&
+    text.trim().startsWith(MAKESAFE_PACK_SENT_MAIN_PREFIX);
 }
 
 // True if any note row in the set carries the verified main-pack marker.
-export function hasPackSentMainMarker(events: any[] | null | undefined): boolean {
-  return (events || []).some((ev) => isPackSentMainEvent(ev))
+export function hasPackSentMainMarker(
+  events: any[] | null | undefined,
+): boolean {
+  return (events || []).some((ev) => isPackSentMainEvent(ev));
 }
 
 // Build the marker text the send writes on success. Bakes the live invoice
 // number at send time (the board's M3 resolver never trusts this number for
 // resolution; it is a triage breadcrumb only -- see makesafe_marker_integrity).
 export function buildPackSentMarkerText(args: {
-  invoiceNumber: string | null | undefined
-  to: string
-  nowIso: string
-  messageId?: string | null
+  invoiceNumber: string | null | undefined;
+  to: string;
+  nowIso: string;
+  messageId?: string | null;
 }): string {
   return [
     MAKESAFE_PACK_SENT_MAIN_PREFIX,
-    args.invoiceNumber || '?',
+    args.invoiceNumber || "?",
     `to=${args.to}`,
     args.nowIso,
-    `msgid=${args.messageId || ''}`,
-  ].join(' | ')
+    `msgid=${args.messageId || ""}`,
+  ].join(" | ");
 }
 
 // ── Duplicate-invoice 3-tier resolver (TS port of
@@ -76,25 +84,25 @@ export function buildPackSentMarkerText(args: {
 //   reference         -- norm(invoice.reference) === norm(external_ref)
 //   reference_substr  -- norm(external_ref) is a substring of norm(reference),
 //                        external_ref >= 5 chars (short tokens cannot false-match)
-const VOID_STATUSES = ['VOIDED', 'DELETED']
+const VOID_STATUSES = ["VOIDED", "DELETED"];
 
 // Strips case + ALL whitespace AND hyphens so spaced/dashed/compact variants of
 // the same ref collapse to one key ('AJBR 67713' == 'AJBR-67713' == 'AJBR67713'
 // -> 'ajbr67713'), making the dup-resolver robust to hyphen/space variants
 // (BLOCKER B pt2). The >=5-char substring tier still works on this normalised form.
 export function normRef(s: unknown): string {
-  return String(s ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')
+  return String(s ?? "").trim().toLowerCase().replace(/[\s-]+/g, "");
 }
 
 export function isVoidStatus(status: unknown): boolean {
-  return VOID_STATUSES.includes(String(status ?? '').toUpperCase())
+  return VOID_STATUSES.includes(String(status ?? "").toUpperCase());
 }
 
 export interface ExistingInvoiceHit {
-  invoice_number: string | null
-  status: string | null
-  xero_invoice_id: string | null
-  match_method: 'job_id' | 'reference' | 'reference_substring'
+  invoice_number: string | null;
+  status: string | null;
+  xero_invoice_id: string | null;
+  match_method: "job_id" | "reference" | "reference_substring";
 }
 
 export function resolveExistingInvoice(
@@ -102,43 +110,48 @@ export function resolveExistingInvoice(
   jobId: string | null | undefined,
   externalRef: string | null | undefined,
 ): ExistingInvoiceHit | null {
-  const all = rows || []
+  const all = rows || [];
   const liveHit = (cands: any[]): any | null => {
-    const live = cands.filter((c) => !isVoidStatus(c?.status))
-    return live.length ? live[0] : null
-  }
-  const toHit = (r: any, method: ExistingInvoiceHit['match_method']): ExistingInvoiceHit => ({
+    const live = cands.filter((c) => !isVoidStatus(c?.status));
+    return live.length ? live[0] : null;
+  };
+  const toHit = (
+    r: any,
+    method: ExistingInvoiceHit["match_method"],
+  ): ExistingInvoiceHit => ({
     invoice_number: r?.invoice_number ?? null,
     status: r?.status ?? null,
     xero_invoice_id: r?.xero_invoice_id ?? null,
     match_method: method,
-  })
+  });
 
   // Tier 1: job_id
   if (jobId) {
-    const byJob = all.filter((r) => r?.job_id && r.job_id === jobId)
-    const hit = liveHit(byJob)
-    if (hit) return toHit(hit, 'job_id')
+    const byJob = all.filter((r) => r?.job_id && r.job_id === jobId);
+    const hit = liveHit(byJob);
+    if (hit) return toHit(hit, "job_id");
   }
 
-  const nref = normRef(externalRef)
-  if (!nref) return null
+  const nref = normRef(externalRef);
+  if (!nref) return null;
 
   // Tier 2: exact normalised reference
-  const exact = all.filter((r) => normRef(r?.reference) === nref && normRef(r?.reference) !== '')
-  const exactHit = liveHit(exact)
-  if (exactHit) return toHit(exactHit, 'reference')
+  const exact = all.filter((r) =>
+    normRef(r?.reference) === nref && normRef(r?.reference) !== ""
+  );
+  const exactHit = liveHit(exact);
+  if (exactHit) return toHit(exactHit, "reference");
 
   // Tier 3: reference substring (>= 5 chars)
   if (nref.length >= 5) {
     const sub = all.filter((r) => {
-      const ir = normRef(r?.reference)
-      return ir !== '' && ir.includes(nref)
-    })
-    const subHit = liveHit(sub)
-    if (subHit) return toHit(subHit, 'reference_substring')
+      const ir = normRef(r?.reference);
+      return ir !== "" && ir.includes(nref);
+    });
+    const subHit = liveHit(sub);
+    if (subHit) return toHit(subHit, "reference_substring");
   }
-  return null
+  return null;
 }
 
 // ── Client-send gate (TS port of check_client_send_gate.py:validate) ──
@@ -148,59 +161,76 @@ export function resolveExistingInvoice(
 // object) from the Python is NOT re-required here: in the autopilot the human
 // approval is the admin/owner JWT on send_pack, and the structural facts below
 // (sender/cc/subject/attachments) are what the backend can actually verify.
-export const MAKESAFE_ADMIN_FROM = 'admin@secureworkswa.com.au'
-export const MAKESAFE_CC = 'ses@secureworkswa.com.au'
-export const REVIEW_MARKERS = ['TEST', 'ROUND', 'DRAFT', 'REVIEW', 'INTERNAL', 'PREVIEW']
+export const MAKESAFE_ADMIN_FROM = "admin@secureworkswa.com.au";
+export const MAKESAFE_CC = "ses@secureworkswa.com.au";
+export const REVIEW_MARKERS = [
+  "TEST",
+  "ROUND",
+  "DRAFT",
+  "REVIEW",
+  "INTERNAL",
+  "PREVIEW",
+];
 
 export function splitEmails(value: unknown): string[] {
-  if (Array.isArray(value)) return value.flatMap((v) => splitEmails(v))
-  if (typeof value !== 'string') return []
-  return value.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean)
+  if (Array.isArray(value)) return value.flatMap((v) => splitEmails(v));
+  if (typeof value !== "string") return [];
+  return value.split(",").map((p) => p.trim().toLowerCase()).filter(Boolean);
 }
 
 export function attachmentNames(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  const names: string[] = []
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
   for (const item of value) {
-    if (item && typeof item === 'object' && (item as any).name) names.push(String((item as any).name))
-    else if (typeof item === 'string') names.push(item.split('/').pop() || item)
+    if (item && typeof item === "object" && (item as any).name) {
+      names.push(String((item as any).name));
+    } else if (typeof item === "string") {
+      names.push(item.split("/").pop() || item);
+    }
   }
-  return names
+  return names;
 }
 
 // Marker present as a whole token (not a substring of an unrelated word).
 export function hasReviewMarker(name: string): string | null {
-  const upper = name.toUpperCase()
+  const upper = name.toUpperCase();
   for (const marker of REVIEW_MARKERS) {
-    const re = new RegExp(`(^|[^A-Z0-9])${marker}([^A-Z0-9]|$)`)
-    if (re.test(upper)) return marker
+    const re = new RegExp(`(^|[^A-Z0-9])${marker}([^A-Z0-9]|$)`);
+    if (re.test(upper)) return marker;
   }
-  return null
+  return null;
 }
 
 export function isReportPdf(name: string): boolean {
-  const lower = name.toLowerCase()
-  return lower.endsWith('.pdf') && (lower.includes('make safe report') || lower.includes('makesafe report'))
+  const lower = name.toLowerCase();
+  return lower.endsWith(".pdf") &&
+    (lower.includes("make safe report") || lower.includes("makesafe report"));
 }
 
 export function isXeroInvoicePdf(name: string): boolean {
-  const lower = name.toLowerCase()
-  const rejected = ['invoice line review', 'line review', 'local price', 'price summary', 'invoice_lines']
-  return lower.endsWith('.pdf') &&
-    lower.includes('xero') &&
-    lower.includes('invoice') &&
-    !rejected.some((t) => lower.includes(t))
+  const lower = name.toLowerCase();
+  const rejected = [
+    "invoice line review",
+    "line review",
+    "local price",
+    "price summary",
+    "invoice_lines",
+  ];
+  return lower.endsWith(".pdf") &&
+    lower.includes("xero") &&
+    lower.includes("invoice") &&
+    !rejected.some((t) => lower.includes(t));
 }
 
 export interface ClientSendPayload {
-  from?: string
-  from_email?: string
-  to?: unknown
-  cc?: unknown
-  subject?: string
-  htmlBody?: string
-  html_body?: string
-  attachments?: unknown
+  from?: string;
+  from_email?: string;
+  to?: unknown;
+  cc?: unknown;
+  subject?: string;
+  htmlBody?: string;
+  html_body?: string;
+  attachments?: unknown;
 }
 
 // ── Exact-recipient gate (BLOCKER C — money/comms, FAIL CLOSED) ──
@@ -218,86 +248,200 @@ export interface ClientSendPayload {
 // Returns [] when the recipient set is exactly correct; otherwise a list of hard
 // failures. The caller MUST treat any non-empty result as a do-not-send stop.
 export function checkExactRecipientGate(args: {
-  configuredReportRecipient: string | null | undefined
-  to: unknown
-  cc: unknown
+  configuredReportRecipient: string | null | undefined;
+  to: unknown;
+  cc: unknown;
 }): string[] {
-  const failures: string[] = []
+  const failures: string[] = [];
 
-  const configured = String(args.configuredReportRecipient ?? '').trim().toLowerCase()
+  const configured = String(args.configuredReportRecipient ?? "").trim()
+    .toLowerCase();
   if (!configured) {
-    failures.push('no work-order recipient (report_recipient) configured for this builder; cannot send')
+    failures.push(
+      "no work-order recipient (report_recipient) configured for this builder; cannot send",
+    );
   }
 
-  const toList = splitEmails(args.to)
+  const toList = splitEmails(args.to);
   if (toList.length === 0) {
-    failures.push('to recipient is missing')
+    failures.push("to recipient is missing");
   } else if (toList.length > 1) {
-    failures.push(`to must be exactly the configured work-orders inbox; got ${toList.length} recipients: ${toList.join(', ')}`)
+    failures.push(
+      `to must be exactly the configured work-orders inbox; got ${toList.length} recipients: ${
+        toList.join(", ")
+      }`,
+    );
   } else if (configured && toList[0] !== configured) {
-    failures.push(`to must equal the configured work-orders inbox '${configured}'; got '${toList[0]}'`)
+    failures.push(
+      `to must equal the configured work-orders inbox '${configured}'; got '${
+        toList[0]
+      }'`,
+    );
   }
 
   // CC MUST equal exactly [ses@]. Reject any extra (vanessa, etc.) or a miss.
-  const ccList = splitEmails(args.cc)
-  const extras = ccList.filter((c) => c !== MAKESAFE_CC)
+  const ccList = splitEmails(args.cc);
+  const extras = ccList.filter((c) => c !== MAKESAFE_CC);
   if (!ccList.includes(MAKESAFE_CC)) {
-    failures.push(`cc must be exactly ${MAKESAFE_CC}; got ${ccList.length ? ccList.join(', ') : '<missing>'}`)
+    failures.push(
+      `cc must be exactly ${MAKESAFE_CC}; got ${
+        ccList.length ? ccList.join(", ") : "<missing>"
+      }`,
+    );
   }
   if (extras.length > 0) {
-    failures.push(`cc must be EXACTLY ${MAKESAFE_CC} only; rejected extra cc(s): ${extras.join(', ')}`)
+    failures.push(
+      `cc must be EXACTLY ${MAKESAFE_CC} only; rejected extra cc(s): ${
+        extras.join(", ")
+      }`,
+    );
   }
 
-  return failures
+  return failures;
 }
 
 // Returns [] when the payload is safe to send; otherwise a list of failure
 // strings. Empty == PASS. The caller MUST treat any non-empty result as a hard
 // stop (no send, no authorise).
 export function checkClientSendGate(payload: ClientSendPayload): string[] {
-  const failures: string[] = []
+  const failures: string[] = [];
 
-  const fromEmail = String(payload.from || payload.from_email || '').trim().toLowerCase()
+  const fromEmail = String(payload.from || payload.from_email || "").trim()
+    .toLowerCase();
   if (fromEmail !== MAKESAFE_ADMIN_FROM) {
-    failures.push(`sender must be ${MAKESAFE_ADMIN_FROM}; got ${fromEmail || '<missing>'}`)
+    failures.push(
+      `sender must be ${MAKESAFE_ADMIN_FROM}; got ${fromEmail || "<missing>"}`,
+    );
   }
 
-  if (splitEmails(payload.to).length === 0) failures.push('to recipient is missing')
+  if (splitEmails(payload.to).length === 0) {
+    failures.push("to recipient is missing");
+  }
 
-  const cc = splitEmails(payload.cc)
-  if (!cc.includes(MAKESAFE_CC)) failures.push(`cc must include ${MAKESAFE_CC}`)
+  const cc = splitEmails(payload.cc);
+  if (!cc.includes(MAKESAFE_CC)) {
+    failures.push(`cc must include ${MAKESAFE_CC}`);
+  }
 
-  const subject = String(payload.subject || '').trim()
+  const subject = String(payload.subject || "").trim();
   if (!subject) {
-    failures.push('subject is missing')
+    failures.push("subject is missing");
   } else {
-    const marker = hasReviewMarker(subject)
-    if (marker) failures.push(`client subject contains review/test marker '${marker}': ${subject}`)
+    const marker = hasReviewMarker(subject);
+    if (marker) {
+      failures.push(
+        `client subject contains review/test marker '${marker}': ${subject}`,
+      );
+    }
   }
 
-  const html = String(payload.htmlBody || payload.html_body || '')
-  if (!html.trim()) failures.push('html body is missing')
+  const html = String(payload.htmlBody || payload.html_body || "");
+  if (!html.trim()) failures.push("html body is missing");
 
-  const names = attachmentNames(payload.attachments)
+  const names = attachmentNames(payload.attachments);
   if (names.length < 2) {
-    failures.push('client send requires at least two separate PDF attachments: report and Xero invoice')
+    failures.push(
+      "client send requires at least two separate PDF attachments: report and Xero invoice",
+    );
   }
-  const reportNames = names.filter((n) => isReportPdf(n))
-  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n))
+  const reportNames = names.filter((n) => isReportPdf(n));
+  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n));
   if (reportNames.length !== 1) {
-    failures.push(`expected exactly one final make-safe report PDF attachment; got ${reportNames.length}`)
+    failures.push(
+      `expected exactly one final make-safe report PDF attachment; got ${reportNames.length}`,
+    );
   }
   if (invoiceNames.length !== 1) {
-    failures.push(`expected exactly one actual Xero invoice PDF attachment; got ${invoiceNames.length}`)
+    failures.push(
+      `expected exactly one actual Xero invoice PDF attachment; got ${invoiceNames.length}`,
+    );
   }
   for (const name of names) {
-    if (!name.toLowerCase().endsWith('.pdf')) {
-      failures.push(`attachment must be a PDF for formal client send: ${name}`)
+    if (!name.toLowerCase().endsWith(".pdf")) {
+      failures.push(`attachment must be a PDF for formal client send: ${name}`);
     }
-    const marker = hasReviewMarker(name)
-    if (marker) failures.push(`client attachment filename contains review/test marker '${marker}': ${name}`)
+    const marker = hasReviewMarker(name);
+    if (marker) {
+      failures.push(
+        `client attachment filename contains review/test marker '${marker}': ${name}`,
+      );
+    }
   }
-  return failures
+  return failures;
+}
+
+// Report-type jobs (`roof_report`, `assessment_report`, etc.) are invoice-only:
+// the builder's report lives on their portal, so SecureWorks must not require or
+// send a generated make-safe report PDF. This gate shares the same sender,
+// recipient, CC, subject/body, filename-marker and PDF checks as the standard
+// client gate, but requires exactly one attachment: the actual Xero invoice PDF.
+export function checkReportJobClientSendGate(
+  payload: ClientSendPayload,
+): string[] {
+  const failures: string[] = [];
+
+  const fromEmail = String(payload.from || payload.from_email || "").trim()
+    .toLowerCase();
+  if (fromEmail !== MAKESAFE_ADMIN_FROM) {
+    failures.push(
+      `sender must be ${MAKESAFE_ADMIN_FROM}; got ${fromEmail || "<missing>"}`,
+    );
+  }
+
+  if (splitEmails(payload.to).length === 0) {
+    failures.push("to recipient is missing");
+  }
+
+  const cc = splitEmails(payload.cc);
+  if (!cc.includes(MAKESAFE_CC)) {
+    failures.push(`cc must include ${MAKESAFE_CC}`);
+  }
+
+  const subject = String(payload.subject || "").trim();
+  if (!subject) {
+    failures.push("subject is missing");
+  } else {
+    const marker = hasReviewMarker(subject);
+    if (marker) {
+      failures.push(
+        `client subject contains review/test marker '${marker}': ${subject}`,
+      );
+    }
+  }
+
+  const html = String(payload.htmlBody || payload.html_body || "");
+  if (!html.trim()) failures.push("html body is missing");
+
+  const names = attachmentNames(payload.attachments);
+  if (names.length !== 1) {
+    failures.push(
+      "report-job client send requires exactly one PDF attachment: Xero invoice only",
+    );
+  }
+  const reportNames = names.filter((n) => isReportPdf(n));
+  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n));
+  if (reportNames.length !== 0) {
+    failures.push(
+      `report-job send must not include a SecureWorks make-safe report PDF; got ${reportNames.length}`,
+    );
+  }
+  if (invoiceNames.length !== 1) {
+    failures.push(
+      `expected exactly one actual Xero invoice PDF attachment; got ${invoiceNames.length}`,
+    );
+  }
+  for (const name of names) {
+    if (!name.toLowerCase().endsWith(".pdf")) {
+      failures.push(`attachment must be a PDF for formal client send: ${name}`);
+    }
+    const marker = hasReviewMarker(name);
+    if (marker) {
+      failures.push(
+        `client attachment filename contains review/test marker '${marker}': ${name}`,
+      );
+    }
+  }
+  return failures;
 }
 
 // ── Atomic send-lock model (pure reference implementation) ──
@@ -310,30 +454,36 @@ export function checkClientSendGate(payload: ClientSendPayload): string[] {
 // Postgres serialises concurrent UPDATEs on the same row, so exactly one racer
 // transitions a lockable row to 'sending'; the other sees 0 rows -> 409. This
 // pure model proves that invariant for the tests without a database.
-export const LOCKABLE_STATUSES = ['admin_to_send_report', 'drafted', 'authorised_not_sent']
+export const LOCKABLE_STATUSES = [
+  "admin_to_send_report",
+  "drafted",
+  "authorised_not_sent",
+];
 
-export function canAcquireSendLock(currentStatus: string | null | undefined): boolean {
-  return LOCKABLE_STATUSES.includes(String(currentStatus ?? ''))
+export function canAcquireSendLock(
+  currentStatus: string | null | undefined,
+): boolean {
+  return LOCKABLE_STATUSES.includes(String(currentStatus ?? ""));
 }
 
 // A tiny serialised lock cell: the FIRST acquire that finds a lockable status
 // wins and flips to 'sending'; every subsequent acquire fails until released.
 // Models the DB's conditional-UPDATE-RETURNING semantics exactly.
 export class SendLockCell {
-  status: string
+  status: string;
   constructor(initial: string) {
-    this.status = initial
+    this.status = initial;
   }
   // Returns true and flips to 'sending' iff the current status is lockable.
   tryAcquire(): boolean {
     if (canAcquireSendLock(this.status)) {
-      this.status = 'sending'
-      return true
+      this.status = "sending";
+      return true;
     }
-    return false
+    return false;
   }
   set(status: string): void {
-    this.status = status
+    this.status = status;
   }
 }
 
@@ -355,31 +505,51 @@ export class SendLockCell {
 //                                                                action='close'
 // Anything else -> no recovery (null): the caller proceeds to the normal
 // lock/authorise/send path (or, for 'sending', the explicit-resolution path P-1).
-export type PostSendResumeAction = 'marker_and_close' | 'close'
+export type PostSendResumeAction = "marker_and_close" | "close";
 
 export interface PostSendResumePlan {
-  action: PostSendResumeAction
-  writeMarker: boolean // marker_and_close writes it (idempotent); close does not
-  applyClose: boolean // both apply the make-safe close
-  reEmail: false // NEVER — the email already went out
-  reAuthorise: false // NEVER — the invoice is already authorised
-  finalStatus: 'sent'
+  action: PostSendResumeAction;
+  writeMarker: boolean; // marker_and_close writes it (idempotent); close does not
+  applyClose: boolean; // both apply the make-safe close
+  reEmail: false; // NEVER — the email already went out
+  reAuthorise: false; // NEVER — the invoice is already authorised
+  finalStatus: "sent";
 }
 
-export const POST_SEND_RECOVERABLE_STATUSES = ['sent_marker_failed', 'sent_not_closed', 'close_failed']
+export const POST_SEND_RECOVERABLE_STATUSES = [
+  "sent_marker_failed",
+  "sent_not_closed",
+  "close_failed",
+];
 
 // Pure: given the current pack status, return the recovery plan for the post-send
 // failure states, or null when no post-send recovery applies. Cross-ref
 // index.ts:makesafeSendPack resume block (just after the pack-row load).
-export function planPostSendResume(currentStatus: string | null | undefined): PostSendResumePlan | null {
-  const s = String(currentStatus ?? '')
-  if (s === 'sent_marker_failed') {
-    return { action: 'marker_and_close', writeMarker: true, applyClose: true, reEmail: false, reAuthorise: false, finalStatus: 'sent' }
+export function planPostSendResume(
+  currentStatus: string | null | undefined,
+): PostSendResumePlan | null {
+  const s = String(currentStatus ?? "");
+  if (s === "sent_marker_failed") {
+    return {
+      action: "marker_and_close",
+      writeMarker: true,
+      applyClose: true,
+      reEmail: false,
+      reAuthorise: false,
+      finalStatus: "sent",
+    };
   }
-  if (s === 'sent_not_closed' || s === 'close_failed') {
-    return { action: 'close', writeMarker: false, applyClose: true, reEmail: false, reAuthorise: false, finalStatus: 'sent' }
+  if (s === "sent_not_closed" || s === "close_failed") {
+    return {
+      action: "close",
+      writeMarker: false,
+      applyClose: true,
+      reEmail: false,
+      reAuthorise: false,
+      finalStatus: "sent",
+    };
   }
-  return null
+  return null;
 }
 
 // ── Hard-crash 'sending' window (P-1) — human-visible signal + GUARDED resume. ──
@@ -388,7 +558,7 @@ export function planPostSendResume(currentStatus: string | null | undefined): Po
 // We do NOT auto-reclaim 'sending' (that would reintroduce double-send risk).
 // Instead the read endpoint surfaces it as stale for an attention card, and a
 // resume from 'sending' REQUIRES an explicit operator decision in the body.
-export const SENDING_STALE_SECONDS = 120 // ~2 minutes
+export const SENDING_STALE_SECONDS = 120; // ~2 minutes
 
 // Pure: is a 'sending' pack stale (send_started_at older than the threshold)?
 // Non-'sending' packs are never "in-flight stale". Unparseable/absent timestamps
@@ -400,38 +570,50 @@ export function isSendingStale(
   nowMs: number,
   thresholdSeconds: number = SENDING_STALE_SECONDS,
 ): boolean {
-  if (String(status ?? '') !== 'sending') return false
-  if (!sendStartedAt) return true
-  const started = Date.parse(String(sendStartedAt))
-  if (Number.isNaN(started)) return true
-  return (nowMs - started) >= thresholdSeconds * 1000
+  if (String(status ?? "") !== "sending") return false;
+  if (!sendStartedAt) return true;
+  const started = Date.parse(String(sendStartedAt));
+  if (Number.isNaN(started)) return true;
+  return (nowMs - started) >= thresholdSeconds * 1000;
 }
 
 // The two operator resolutions for a 'sending' pack (P-1). The cockpit's two
 // buttons send body.sending_resolution = one of these. Any other value (or none)
 // -> 409, instructing the operator to verify Sent Items first.
-export type SendingResolution = 'confirmed_sent' | 'confirmed_not_sent'
+export type SendingResolution = "confirmed_sent" | "confirmed_not_sent";
 
 export interface SendingResolutionPlan {
-  resolution: SendingResolution
+  resolution: SendingResolution;
   // confirmed_not_sent -> re-enter the send path (invoice already authorised, so
   //   skip re-authorise; re-run the gate + send exactly once).
-  reEnterSend: boolean
+  reEnterSend: boolean;
   // confirmed_sent -> write marker + close, status='sent', NO re-email.
-  writeMarkerAndClose: boolean
-  reAuthorise: false // NEVER from 'sending' (the invoice is already authorised)
+  writeMarkerAndClose: boolean;
+  reAuthorise: false; // NEVER from 'sending' (the invoice is already authorised)
 }
 
 // Pure: validate + plan a 'sending' resolution. Returns null for an absent/invalid
 // value so the caller returns a 409 (verify Sent Items, resubmit with a resolution).
-export function planSendingResolution(raw: unknown): SendingResolutionPlan | null {
-  if (raw === 'confirmed_not_sent') {
-    return { resolution: 'confirmed_not_sent', reEnterSend: true, writeMarkerAndClose: false, reAuthorise: false }
+export function planSendingResolution(
+  raw: unknown,
+): SendingResolutionPlan | null {
+  if (raw === "confirmed_not_sent") {
+    return {
+      resolution: "confirmed_not_sent",
+      reEnterSend: true,
+      writeMarkerAndClose: false,
+      reAuthorise: false,
+    };
   }
-  if (raw === 'confirmed_sent') {
-    return { resolution: 'confirmed_sent', reEnterSend: false, writeMarkerAndClose: true, reAuthorise: false }
+  if (raw === "confirmed_sent") {
+    return {
+      resolution: "confirmed_sent",
+      reEnterSend: false,
+      writeMarkerAndClose: true,
+      reAuthorise: false,
+    };
   }
-  return null
+  return null;
 }
 
 // ── Ambiguous-invoice guard (N-1) — money-safety, FAIL CLOSED. ──
@@ -440,13 +622,17 @@ export function planSendingResolution(raw: unknown): SendingResolutionPlan | nul
 // VOIDED/DELETED) ACCREC invoice mapped to the job. If MORE THAN ONE maps, we do
 // not guess: send_pack fails closed (412) and the read endpoint flags it so the
 // cockpit shows the ambiguity rather than a wrong amount.
-export function countLiveInvoices(invoiceRows: any[] | null | undefined): number {
-  return (invoiceRows || []).filter((inv) => !isVoidStatus(inv?.status)).length
+export function countLiveInvoices(
+  invoiceRows: any[] | null | undefined,
+): number {
+  return (invoiceRows || []).filter((inv) => !isVoidStatus(inv?.status)).length;
 }
 
 // True when more than one non-void invoice maps to the job (ambiguous -> stop).
-export function isInvoiceAmbiguous(invoiceRows: any[] | null | undefined): boolean {
-  return countLiveInvoices(invoiceRows) > 1
+export function isInvoiceAmbiguous(
+  invoiceRows: any[] | null | undefined,
+): boolean {
+  return countLiveInvoices(invoiceRows) > 1;
 }
 
 // ── Resume-aware feed action mapping (TASK A — the Ferndale fix) ──────────────
@@ -472,32 +658,38 @@ export function isInvoiceAmbiguous(invoiceRows: any[] | null | undefined): boole
 //   - 'sending' is NEVER auto-resolved: with no marker the operator must decide
 //     ('resolve_send_state'); once a marker exists the email demonstrably went
 //     out and the only remaining step is the close ('finish_close_out').
+//   - 'sending' + failed_step='draft_pack' is NOT an email-send state. It is a
+//     draft-generation lock and must never surface as resolve_send_state.
 export type ResumeAction =
-  | 'send' // a fresh ready-to-review draft: authorise + send (the normal flow)
-  | 'finish_send' // authorised, NOT sent, NO marker: re-email ONCE (no re-authorise)
-  | 'finish_close_out' // marker present, only the close remains: close-only, NO email
-  | 'resolve_send_state' // 'sending' + NO marker: operator must confirm sent / not-sent
+  | "send" // a fresh ready-to-review draft: authorise + send (the normal flow)
+  | "finish_send" // authorised, NOT sent, NO marker: re-email ONCE (no re-authorise)
+  | "finish_close_out" // marker present, only the close remains: close-only, NO email
+  | "resolve_send_state"; // 'sending' + NO marker: operator must confirm sent / not-sent
 
 // The pack statuses the feed must ALSO surface beyond the
 // substatus=admin_to_send_report outer filter, because a resume can move the
 // substatus off admin_to_send_report (e.g. authorised_not_sent). The feed unions
 // the job_ids of packs in these statuses into its detail fetch.
 export const RESUMABLE_PACK_STATUSES = [
-  'authorised_not_sent',
-  'sent_marker_failed',
-  'sent_not_closed',
-  'close_failed',
-  'sending',
-]
+  "authorised_not_sent",
+  "sent_marker_failed",
+  "sent_not_closed",
+  "close_failed",
+  "sending",
+];
 
 export interface DeriveResumeActionArgs {
   // From _deriveMakesafeSurfacing (reused, never relaxed).
-  readyForReview: boolean
-  invoiceAuthorisedLive: boolean
+  readyForReview: boolean;
+  invoiceAuthorisedLive: boolean;
   // The durable pack row status (makesafe_report_packs.status).
-  packStatus: string | null | undefined
+  packStatus: string | null | undefined;
+  // Diagnostic step on the pack row. Used to keep Draft Pack in-flight locks out
+  // of the irreversible email-send recovery path even though both currently use
+  // the constrained DB status value 'sending'.
+  failedStep?: string | null | undefined;
   // Whether the MAKESAFE_PACK_SENT | main marker note is present for the job.
-  markerPresent: boolean
+  markerPresent: boolean;
 }
 
 // Pure: map a candidate job to its resume_action, or null to EXCLUDE it.
@@ -509,19 +701,29 @@ export interface DeriveResumeActionArgs {
 //   sending && NO marker                                        -> 'resolve_send_state'
 //   sending && marker PRESENT                                   -> 'finish_close_out'
 //   anything else (sent / terminal / marker-only)               -> null (EXCLUDE)
-export function deriveResumeAction(args: DeriveResumeActionArgs): ResumeAction | null {
-  const s = String(args.packStatus ?? '')
-  const marker = args.markerPresent === true
+export function deriveResumeAction(
+  args: DeriveResumeActionArgs,
+): ResumeAction | null {
+  const s = String(args.packStatus ?? "");
+  const failedStep = String(args.failedStep ?? "");
+  const marker = args.markerPresent === true;
+
+  // A Draft Pack generator lock is not an email send. Do this BEFORE the fresh
+  // readyForReview branch so a stale draft-generation row can never be offered as
+  // either "send" or "resolve whether email went out".
+  if (s === "sending" && failedStep === "draft_pack") return null;
 
   // A genuinely fresh drafted-not-sent pack — the normal authorise+send flow.
   // readyForReview already requires !sentClosed and a DRAFT invoice, so it can
   // never collide with a post-send state.
-  if (args.readyForReview) return 'send'
+  if (args.readyForReview) return "send";
 
   // Authorised but not sent, with NO proof of a prior send -> re-email ONCE.
   // The marker guard is the double-email firewall: if a marker is present the
   // email already went out and we must NOT offer another send.
-  if (s === 'authorised_not_sent' && args.invoiceAuthorisedLive && !marker) return 'finish_send'
+  if (s === "authorised_not_sent" && args.invoiceAuthorisedLive && !marker) {
+    return "finish_send";
+  }
 
   // Email went out but the marker write failed AND the marker is still absent ->
   // 'finish_send' is the cockpit BUTTON, but it does NOT re-email for this state:
@@ -531,18 +733,22 @@ export function deriveResumeAction(args: DeriveResumeActionArgs): ResumeAction |
   // path is reached. So no double-email is possible. If the marker is now present
   // this instead falls through to exclude (a bare marker-only terminal) — the
   // marker-stop short-circuits any send regardless. (See planPostSendResume.)
-  if (s === 'sent_marker_failed' && !marker) return 'finish_send'
+  if (s === "sent_marker_failed" && !marker) return "finish_send";
 
   // Email out + marker written; only the close failed -> close-only, NO email.
-  if ((s === 'sent_not_closed' || s === 'close_failed') && marker) return 'finish_close_out'
+  if ((s === "sent_not_closed" || s === "close_failed") && marker) {
+    return "finish_close_out";
+  }
 
   // Hard-crash 'sending' window. No marker -> the operator must verify Sent
   // Items and decide. Marker present -> the email demonstrably went out, so the
   // only remaining step is the close.
-  if (s === 'sending') return marker ? 'finish_close_out' : 'resolve_send_state'
+  if (s === "sending") {
+    return marker ? "finish_close_out" : "resolve_send_state";
+  }
 
   // sent / marker-only terminal / genuine closed -> EXCLUDE (null), as today.
-  return null
+  return null;
 }
 
 // ── Email-outcome classifier (D-d, TASK C — double-email firewall) ───────────
@@ -558,13 +764,13 @@ export function deriveResumeAction(args: DeriveResumeActionArgs): ResumeAction |
 // and ALL 5xx are AMBIGUOUS (the fn may have handed the message to Outlook then
 // errored), so they are treated as unknown-outcome => 'sending'. FAIL CLOSED:
 // anything not explicitly proven pre-dispatch is ambiguous.
-const PROVABLY_PRE_DISPATCH_STATUSES = new Set([400, 401, 403, 404, 422])
+const PROVABLY_PRE_DISPATCH_STATUSES = new Set([400, 401, 403, 404, 422]);
 
 export function emailFailureIsProvablyPreDispatch(status: number): boolean {
   // Defensive: a 0/NaN/negative (e.g. a thrown fetch surfaced as status 0) is
   // NOT provably pre-dispatch -> ambiguous.
-  if (!Number.isFinite(status) || status <= 0) return false
-  return PROVABLY_PRE_DISPATCH_STATUSES.has(status)
+  if (!Number.isFinite(status) || status <= 0) return false;
+  return PROVABLY_PRE_DISPATCH_STATUSES.has(status);
 }
 
 // ── makesafe_resume_close assertions (TASK B — close-only, fail-closed) ──────
@@ -575,37 +781,43 @@ export function emailFailureIsProvablyPreDispatch(status: number): boolean {
 //   2. the MAKESAFE_PACK_SENT | main marker is PRESENT (proof the email went
 //      out). No marker == no proof of send == refuse (never close a pack that
 //      may not have emailed; the operator routes it through send instead).
-export const RESUME_CLOSE_ALLOWED_STATUSES = ['sent_not_closed', 'close_failed']
+export const RESUME_CLOSE_ALLOWED_STATUSES = [
+  "sent_not_closed",
+  "close_failed",
+];
 
 export interface ResumeCloseGate {
-  ok: boolean
+  ok: boolean;
   // HTTP status for the failure (409 for a wrong-state pack, 409 for no marker —
   // both are conflict/precondition failures the operator must resolve first).
-  httpStatus: number
-  reason: string | null
+  httpStatus: number;
+  reason: string | null;
 }
 
 // Pure: gate a makesafe_resume_close call. ok only when BOTH asserts pass.
 export function checkResumeCloseGate(args: {
-  packStatus: string | null | undefined
-  markerPresent: boolean
+  packStatus: string | null | undefined;
+  markerPresent: boolean;
 }): ResumeCloseGate {
-  const s = String(args.packStatus ?? '')
+  const s = String(args.packStatus ?? "");
   if (!RESUME_CLOSE_ALLOWED_STATUSES.includes(s)) {
     return {
       ok: false,
       httpStatus: 409,
-      reason: `makesafe_resume_close requires pack status in {${RESUME_CLOSE_ALLOWED_STATUSES.join(', ')}}; got '${s || '<none>'}'`,
-    }
+      reason: `makesafe_resume_close requires pack status in {${
+        RESUME_CLOSE_ALLOWED_STATUSES.join(", ")
+      }}; got '${s || "<none>"}'`,
+    };
   }
   if (args.markerPresent !== true) {
     return {
       ok: false,
       httpStatus: 409,
-      reason: 'makesafe_resume_close refused: MAKESAFE_PACK_SENT marker absent (no proof the email was sent); resolve via send, not close',
-    }
+      reason:
+        "makesafe_resume_close refused: MAKESAFE_PACK_SENT marker absent (no proof the email was sent); resolve via send, not close",
+    };
   }
-  return { ok: true, httpStatus: 200, reason: null }
+  return { ok: true, httpStatus: 200, reason: null };
 }
 
 // ── makesafe_reset_failed_pack guards (TASK D — no permanent dead-ends) ──────
@@ -622,42 +834,219 @@ export function checkResumeCloseGate(args: {
 // POST-SEND/ambiguous failed_steps that must NEVER be reset by this path:
 //   send (the email dispatch step — outcome may be unknown), marker, close.
 export const RESET_FAILED_PRESEND_STEPS = [
-  'recipient_gate',
-  'preflight_docs',
-  'preflight_invoice',
-  'preflight_invoice_ambiguous',
-  'load_report_pdf',
-  'client_send_gate',
-  'unexpected',
-]
+  "recipient_gate",
+  "preflight_docs",
+  "preflight_invoice",
+  "preflight_invoice_ambiguous",
+  "load_report_pdf",
+  "client_send_gate",
+  "unexpected",
+];
 // Steps at/after the actual email dispatch — a reset here could mask a real send.
-export const RESET_FAILED_FORBIDDEN_STEPS = ['send', 'marker', 'close']
+export const RESET_FAILED_FORBIDDEN_STEPS = ["send", "marker", "close"];
 
 export interface ResetFailedGate {
-  ok: boolean
-  httpStatus: number
-  reason: string | null
+  ok: boolean;
+  httpStatus: number;
+  reason: string | null;
 }
 
 // Pure: gate a makesafe_reset_failed_pack call. ok only when the pack is 'failed',
 // the failed_step is a recognised PRE-SEND step, and NO marker is present.
 export function checkResetFailedGate(args: {
-  packStatus: string | null | undefined
-  failedStep: string | null | undefined
-  markerPresent: boolean
+  packStatus: string | null | undefined;
+  failedStep: string | null | undefined;
+  markerPresent: boolean;
 }): ResetFailedGate {
-  const s = String(args.packStatus ?? '')
-  const step = String(args.failedStep ?? '')
-  if (s !== 'failed') {
-    return { ok: false, httpStatus: 409, reason: `makesafe_reset_failed_pack requires pack status 'failed'; got '${s || '<none>'}'` }
+  const s = String(args.packStatus ?? "");
+  const step = String(args.failedStep ?? "");
+  if (s !== "failed") {
+    return {
+      ok: false,
+      httpStatus: 409,
+      reason: `makesafe_reset_failed_pack requires pack status 'failed'; got '${
+        s || "<none>"
+      }'`,
+    };
   }
   // FAIL CLOSED on a marker: a marker means the email went out — never reset.
   if (args.markerPresent === true) {
-    return { ok: false, httpStatus: 409, reason: 'reset refused: MAKESAFE_PACK_SENT marker present (the email may have gone out); this pack cannot be reset' }
+    return {
+      ok: false,
+      httpStatus: 409,
+      reason:
+        "reset refused: MAKESAFE_PACK_SENT marker present (the email may have gone out); this pack cannot be reset",
+    };
   }
-  if (RESET_FAILED_FORBIDDEN_STEPS.includes(step) || !RESET_FAILED_PRESEND_STEPS.includes(step)) {
-    return { ok: false, httpStatus: 409, reason: `reset refused: failed_step '${step || '<none>'}' is not a recognised PRE-SEND step; only ${RESET_FAILED_PRESEND_STEPS.join(', ')} are resettable` }
+  if (
+    RESET_FAILED_FORBIDDEN_STEPS.includes(step) ||
+    !RESET_FAILED_PRESEND_STEPS.includes(step)
+  ) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      reason: `reset refused: failed_step '${
+        step || "<none>"
+      }' is not a recognised PRE-SEND step; only ${
+        RESET_FAILED_PRESEND_STEPS.join(", ")
+      } are resettable`,
+    };
   }
-  return { ok: true, httpStatus: 200, reason: null }
+  return { ok: true, httpStatus: 200, reason: null };
 }
 
+// ── Stage 1-2a: Photo follow-up idempotency marker ──────────────────────────
+//
+// Email 2 for AJS/MLB: the approved site photos sent as individual attachments
+// AFTER the main pack (email 1). Idempotent via the MAKESAFE_PACK_SENT | photo
+// prefix in job_events. Independent of the main pack marker.
+export const MAKESAFE_PACK_PHOTO_SENT_PREFIX = "MAKESAFE_PACK_SENT | photo";
+
+export function isPackPhotoSentEvent(ev: any): boolean {
+  if (!ev || String(ev.event_type) !== "note") return false;
+  let dj = ev.detail_json;
+  if (typeof dj === "string") {
+    try {
+      dj = JSON.parse(dj);
+    } catch (_) {
+      dj = { text: dj };
+    }
+  }
+  const text = dj && typeof dj === "object" ? dj.text : null;
+  return typeof text === "string" &&
+    text.trim().startsWith(MAKESAFE_PACK_PHOTO_SENT_PREFIX);
+}
+
+export function hasPackPhotoSentMarker(
+  events: any[] | null | undefined,
+): boolean {
+  return (events || []).some((ev) => isPackPhotoSentEvent(ev));
+}
+
+export function buildPhotoFollowUpMarkerText(args: {
+  photoCount: number;
+  to: string;
+  nowIso: string;
+  messageId?: string | null;
+}): string {
+  return [
+    MAKESAFE_PACK_PHOTO_SENT_PREFIX,
+    `photos=${args.photoCount}`,
+    `to=${args.to}`,
+    args.nowIso,
+    `msgid=${args.messageId || ""}`,
+  ].join(" | ");
+}
+
+// ── Stage 1-2a: Portal-prep idempotency marker ───────────────────────────────
+//
+// Western Building / Builderwest are portal-only builders: NO email is sent.
+// We prep the doc list for manual portal submission and write this marker so
+// the cockpit shows 'portal_ready' and a second prep call returns early.
+export const MAKESAFE_PACK_PORTAL_READY_PREFIX = "MAKESAFE_PACK_PORTAL_READY";
+
+export function isPackPortalReadyEvent(ev: any): boolean {
+  if (!ev || String(ev.event_type) !== "note") return false;
+  let dj = ev.detail_json;
+  if (typeof dj === "string") {
+    try {
+      dj = JSON.parse(dj);
+    } catch (_) {
+      dj = { text: dj };
+    }
+  }
+  const text = dj && typeof dj === "object" ? dj.text : null;
+  return typeof text === "string" &&
+    text.trim().startsWith(MAKESAFE_PACK_PORTAL_READY_PREFIX);
+}
+
+export function hasPackPortalReadyMarker(
+  events: any[] | null | undefined,
+): boolean {
+  return (events || []).some((ev) => isPackPortalReadyEvent(ev));
+}
+
+export function buildPortalReadyMarkerText(args: { nowIso: string }): string {
+  return [MAKESAFE_PACK_PORTAL_READY_PREFIX, args.nowIso].join(" | ");
+}
+
+// ── Stage 1-2a: isSwmsPdf — detect SWMS attachment filenames ─────────────────
+//
+// Used by checkClientSendGateWithSwms to identify the SWMS PDF among attachments.
+export function isSwmsPdf(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.endsWith(".pdf") && lower.includes("swms");
+}
+
+// ── Stage 1-2a: checkClientSendGateWithSwms — 3-attachment gate for MLB ──────
+//
+// MLB email 1 requires THREE PDFs: report + Xero invoice + SWMS. This gate
+// extends checkClientSendGate's logic with the additional SWMS requirement.
+// Returns [] when the payload is safe to send; otherwise a list of failure
+// strings. The caller MUST treat any non-empty result as a hard stop.
+export function checkClientSendGateWithSwms(
+  payload: ClientSendPayload,
+): string[] {
+  const failures: string[] = [];
+  const fromEmail = String(payload.from || payload.from_email || "").trim()
+    .toLowerCase();
+  if (fromEmail !== MAKESAFE_ADMIN_FROM) {
+    failures.push(
+      `sender must be ${MAKESAFE_ADMIN_FROM}; got ${fromEmail || "<missing>"}`,
+    );
+  }
+  if (splitEmails(payload.to).length === 0) {
+    failures.push("to recipient is missing");
+  }
+  const cc = splitEmails(payload.cc);
+  if (!cc.includes(MAKESAFE_CC)) {
+    failures.push(`cc must include ${MAKESAFE_CC}`);
+  }
+  const subject = String(payload.subject || "").trim();
+  if (!subject) {
+    failures.push("subject is missing");
+  } else {
+    const marker = hasReviewMarker(subject);
+    if (marker) {
+      failures.push(
+        `client subject contains review/test marker '${marker}': ${subject}`,
+      );
+    }
+  }
+  const html = String(payload.htmlBody || payload.html_body || "");
+  if (!html.trim()) failures.push("html body is missing");
+  const names = attachmentNames(payload.attachments);
+  if (names.length < 3) {
+    failures.push(
+      "MLB client send requires at least three separate PDF attachments: report, Xero invoice, and SWMS",
+    );
+  }
+  const reportNames = names.filter((n) => isReportPdf(n));
+  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n));
+  const swmsNames = names.filter((n) => isSwmsPdf(n));
+  if (reportNames.length !== 1) {
+    failures.push(
+      `expected exactly one final make-safe report PDF; got ${reportNames.length}`,
+    );
+  }
+  if (invoiceNames.length !== 1) {
+    failures.push(
+      `expected exactly one actual Xero invoice PDF; got ${invoiceNames.length}`,
+    );
+  }
+  if (swmsNames.length !== 1) {
+    failures.push(`expected exactly one SWMS PDF; got ${swmsNames.length}`);
+  }
+  for (const name of names) {
+    if (!name.toLowerCase().endsWith(".pdf")) {
+      failures.push(`attachment must be a PDF for formal client send: ${name}`);
+    }
+    const marker = hasReviewMarker(name);
+    if (marker) {
+      failures.push(
+        `client attachment filename contains review/test marker '${marker}': ${name}`,
+      );
+    }
+  }
+  return failures;
+}

@@ -22,51 +22,74 @@
 //
 // No network. No live Supabase. No live Xero.
 
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts"
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 
 // ── C2: the exact gate predicate from index.ts route case 'approve_intake_draft' ──
 //   const approveIsPrivileged = authMode === 'api_key' ||
 //     (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
 //   if (!approveIsPrivileged) return json({ error: '...' }, 403)
-type AuthMode = "api_key" | "jwt" | "routine"
-type AuthUser = { id: string; email: string; role: string } | null
+type AuthMode = "api_key" | "jwt" | "routine";
+type AuthUser = { id: string; email: string; role: string } | null;
 
-function approveGate(authMode: AuthMode, authUser: AuthUser): { allowed: boolean; status: number } {
+function approveGate(
+  authMode: AuthMode,
+  authUser: AuthUser,
+): { allowed: boolean; status: number } {
   const approveIsPrivileged = authMode === "api_key" ||
-    (authMode === "jwt" && (authUser?.role === "admin" || authUser?.role === "owner"))
-  return approveIsPrivileged ? { allowed: true, status: 200 } : { allowed: false, status: 403 }
+    (authMode === "jwt" &&
+      (authUser?.role === "admin" || authUser?.role === "owner"));
+  return approveIsPrivileged
+    ? { allowed: true, status: 200 }
+    : { allowed: false, status: 403 };
 }
 
 Deno.test("C2: routine key is REJECTED on approve_intake_draft (403)", () => {
   // The scoped automation routine presents MAKESAFE_ROUTINE_KEY -> authMode='routine'.
-  const r = approveGate("routine", null)
-  assertEquals(r.allowed, false, "the make-safe automation routine must never approve a draft")
-  assertEquals(r.status, 403)
-})
+  const r = approveGate("routine", null);
+  assertEquals(
+    r.allowed,
+    false,
+    "the make-safe automation routine must never approve a draft",
+  );
+  assertEquals(r.status, 403);
+});
 
 Deno.test("C2 regression FIX: the ops dashboard (privileged SW_API_KEY = api_key) CAN approve", () => {
   // The dashboard authenticates with SW_API_KEY + anon bearer -> authMode='api_key',
   // NEVER a user JWT. The earlier jwt-only gate 403'd it; the privileged-key allowance
   // restores the live approve button.
-  const r = approveGate("api_key", null)
-  assertEquals(r.allowed, true, "the ops dashboard approve button (SW_API_KEY) must work")
-  assertEquals(r.status, 200)
-})
+  const r = approveGate("api_key", null);
+  assertEquals(
+    r.allowed,
+    true,
+    "the ops dashboard approve button (SW_API_KEY) must work",
+  );
+  assertEquals(r.status, 200);
+});
 
 Deno.test("C2: a logged-in admin/owner JWT IS allowed (the human tick)", () => {
-  assertEquals(approveGate("jwt", { id: "u1", email: "marnin@x", role: "admin" }).allowed, true)
-  assertEquals(approveGate("jwt", { id: "u2", email: "shaun@x", role: "owner" }).allowed, true)
-})
+  assertEquals(
+    approveGate("jwt", { id: "u1", email: "marnin@x", role: "admin" }).allowed,
+    true,
+  );
+  assertEquals(
+    approveGate("jwt", { id: "u2", email: "shaun@x", role: "owner" }).allowed,
+    true,
+  );
+});
 
 Deno.test("C2: a non-admin/owner JWT is rejected (403)", () => {
   for (const role of ["ops", "trade", "viewer", "unknown", ""]) {
-    const r = approveGate("jwt", { id: "u", email: "u@x", role })
-    assertEquals(r.allowed, false, `jwt + role=${role} must be rejected`)
-    assertEquals(r.status, 403)
+    const r = approveGate("jwt", { id: "u", email: "u@x", role });
+    assertEquals(r.allowed, false, `jwt + role=${role} must be rejected`);
+    assertEquals(r.status, 403);
   }
   // A jwt with no user object (shouldn't happen, but must fail closed).
-  assertEquals(approveGate("jwt", null).allowed, false)
-})
+  assertEquals(approveGate("jwt", null).allowed, false);
+});
 
 // ── SCOPED ROUTINE KEY (decision scoped-routine-key-2026-06-17) ──
 // 1) The central routine ALLOW-LIST from index.ts. DEFAULT-DENY: the routine may call
@@ -95,123 +118,255 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   // the AUTHORISE + SEND stays in makesafe_send_pack (NOT allow-listed -> denied).
   "create_makesafe_draft_invoice",
   "makesafe_render_report",
+  "draft_makesafe_report_pack",
+  "draft_makesafe_report_pack_due",
   "makesafe_report_drafts",
-])
+  "list_draft_notes",
+  "rerun_draft_report",
+]);
 // Default-deny: a routine caller is allowed ONLY if the action is in the allow-list.
 function routineDenied(authMode: AuthMode, action: string): boolean {
-  return authMode === "routine" && !ROUTINE_ALLOWED_ACTIONS.has(action)
+  return authMode === "routine" && !ROUTINE_ALLOWED_ACTIONS.has(action);
 }
 
 // The General's required deny cases plus the campaign's whole comms surface. NONE of
 // these is in the allow-list, so default-deny must reject the routine on every one.
 const ROUTINE_MUST_DENY = [
   // comms (the campaign #1 rule: the AI never sends)
-  "send_email", "send_sms", "send_po_email", "send_client_update", "send_quote",
-  "send_chase_sms", "send_review_request", "send_invoice_email", "send_telegram_message",
-  "send_acceptance_invoice", "send_payment_link", "send_variation", "send_work_order",
-  "send_comms_message", "send_council_email", "send_quick_quote_email",
+  "send_email",
+  "send_sms",
+  "send_po_email",
+  "send_client_update",
+  "send_quote",
+  "send_chase_sms",
+  "send_review_request",
+  "send_invoice_email",
+  "send_telegram_message",
+  "send_acceptance_invoice",
+  "send_payment_link",
+  "send_variation",
+  "send_work_order",
+  "send_comms_message",
+  "send_council_email",
+  "send_quick_quote_email",
   // money / authorise
-  "approve_invoice", "approve_and_send_invoice", "void_invoice", "update_invoice",
-  "mark_invoice_paid", "create_invoice", "create_deposit_invoice", "push_po_to_xero",
+  "approve_invoice",
+  "approve_and_send_invoice",
+  "void_invoice",
+  "update_invoice",
+  "mark_invoice_paid",
+  "create_invoice",
+  "create_deposit_invoice",
+  "push_po_to_xero",
   // approve / send-pack
-  "approve_intake_draft", "makesafe_send_pack", "approve_variation", "approve_expense",
+  "approve_intake_draft",
+  "makesafe_send_pack",
+  "approve_variation",
+  "approve_expense",
   // crew / PO / assignment / status-mutation (the broader default-deny the General extended)
-  "create_po", "update_job_status", "create_assignment", "update_job_field",
-  "complete_job", "complete_and_invoice", "create_work_order",
+  "create_po",
+  "update_job_status",
+  "create_assignment",
+  "update_job_field",
+  "complete_job",
+  "complete_and_invoice",
+  "create_work_order",
+  // feedback writes are human/privileged only; the routine may read notes and
+  // refresh eligible drafts, but it cannot inject note text into arbitrary jobs.
+  "add_draft_note",
   // a NEW dangerous action nobody has added to the allow-list yet (fail-safe proof)
   "some_future_dangerous_action",
-]
+];
 
 Deno.test("ScopedKey (default-deny): routine is DENIED on all comms, money, approve, crew/PO/status, and any unknown action", () => {
   for (const action of ROUTINE_MUST_DENY) {
-    assert(routineDenied("routine", action), `default-deny must reject the routine on ${action}`)
+    assert(
+      routineDenied("routine", action),
+      `default-deny must reject the routine on ${action}`,
+    );
   }
-})
+});
 
 Deno.test("ScopedKey (default-deny): a brand-new unenumerated action is denied by DEFAULT (fail-safe)", () => {
   // This is the whole point of flipping to an allow-list: a future send/authorise
   // action added elsewhere is NOT routine-callable unless explicitly allow-listed.
-  assert(routineDenied("routine", "send_some_new_channel"), "unknown action must fail safe (denied)")
-  assert(routineDenied("routine", "authorise_anything_new"), "unknown action must fail safe (denied)")
-})
+  assert(
+    routineDenied("routine", "send_some_new_channel"),
+    "unknown action must fail safe (denied)",
+  );
+  assert(
+    routineDenied("routine", "authorise_anything_new"),
+    "unknown action must fail safe (denied)",
+  );
+});
 
 Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach few", () => {
-  for (const action of ["job_detail", "create_intake_draft", "scan_ses_makesafes",
-    "list_intake_drafts", "attach_makesafe_document", "submit_makesafe_report",
-    "ops_summary", "makesafe_pipeline",
-    // Wave 2 (Scribe) draft/render/read actions — routine-safe (no send/authorise).
-    "create_makesafe_draft_invoice", "makesafe_render_report", "makesafe_report_drafts"]) {
-    assert(!routineDenied("routine", action), `routine must be allowed on the safe action ${action}`)
+  for (
+    const action of [
+      "job_detail",
+      "create_intake_draft",
+      "scan_ses_makesafes",
+      "list_intake_drafts",
+      "attach_makesafe_document",
+      "submit_makesafe_report",
+      "ops_summary",
+      "makesafe_pipeline",
+      // Wave 2 (Scribe) draft/render/read actions — routine-safe (no send/authorise).
+      "create_makesafe_draft_invoice",
+      "makesafe_render_report",
+      "draft_makesafe_report_pack",
+      "draft_makesafe_report_pack_due",
+      "makesafe_report_drafts",
+      "list_draft_notes",
+      "rerun_draft_report",
+    ]
+  ) {
+    assert(
+      !routineDenied("routine", action),
+      `routine must be allowed on the safe action ${action}`,
+    );
   }
-})
+});
 
-Deno.test("ScopedKey (Wave 2): the draft/render/read trio is allow-listed but makesafe_send_pack stays DENIED", () => {
-  // Scribe's extension adds exactly the draft/render/read trio. The SEND verb is
+Deno.test("ScopedKey (Wave 2/3): draft/render/read/revise actions are allow-listed but makesafe_send_pack stays DENIED", () => {
+  // Scribe/Ludwig's extension adds draft/render/read/revise actions. The SEND verb is
   // deliberately NOT allow-listed, so the routine still hits the central 403 BEFORE
   // its per-case sendPackAllowed() gate (belt-and-braces).
-  assert(!routineDenied("routine", "create_makesafe_draft_invoice"))
-  assert(!routineDenied("routine", "makesafe_render_report"))
-  assert(!routineDenied("routine", "makesafe_report_drafts"))
-  assert(routineDenied("routine", "makesafe_send_pack"), "send_pack must remain denied by default-deny")
-})
+  assert(!routineDenied("routine", "create_makesafe_draft_invoice"));
+  assert(!routineDenied("routine", "makesafe_render_report"));
+  assert(!routineDenied("routine", "draft_makesafe_report_pack"));
+  assert(!routineDenied("routine", "draft_makesafe_report_pack_due"));
+  assert(!routineDenied("routine", "makesafe_report_drafts"));
+  assert(!routineDenied("routine", "rerun_draft_report"));
+  assert(
+    routineDenied("routine", "makesafe_send_pack"),
+    "send_pack must remain denied by default-deny",
+  );
+});
 
 Deno.test("ScopedKey: privileged + jwt callers are NEVER blocked by the routine allow-list", () => {
   // The allow-list gate only fires for authMode==='routine'. Every action the routine
   // is denied must still be reachable by the dashboard (api_key) and a jwt caller.
   for (const action of [...ROUTINE_MUST_DENY, ...ROUTINE_ALLOWED_ACTIONS]) {
-    assert(!routineDenied("api_key", action), `api_key must never be blocked by the routine gate (${action})`)
-    assert(!routineDenied("jwt", action), `jwt must never be blocked by the routine gate (${action})`)
+    assert(
+      !routineDenied("api_key", action),
+      `api_key must never be blocked by the routine gate (${action})`,
+    );
+    assert(
+      !routineDenied("jwt", action),
+      `jwt must never be blocked by the routine gate (${action})`,
+    );
   }
-})
+});
 
 // 2) create_makesafe_job dispatch from index.ts route case: routine -> draft, else live.
-type CreateOutcome = "live_job" | "needs_review_draft"
+type CreateOutcome = "live_job" | "needs_review_draft";
 function createMakesafeDispatch(authMode: AuthMode): CreateOutcome {
   // case 'create_makesafe_job': if (authMode === 'routine') -> createMakesafeDraftFromProposal
   //                             else -> createMakesafeJob (live)
-  return authMode === "routine" ? "needs_review_draft" : "live_job"
+  return authMode === "routine" ? "needs_review_draft" : "live_job";
 }
 
 Deno.test("ScopedKey: routine create_makesafe_job is REDIRECTED to a draft, never a live job", () => {
-  assertEquals(createMakesafeDispatch("routine"), "needs_review_draft",
-    "the routine must not put a live make-safe job on the board")
-})
+  assertEquals(
+    createMakesafeDispatch("routine"),
+    "needs_review_draft",
+    "the routine must not put a live make-safe job on the board",
+  );
+});
 
 Deno.test("ScopedKey: privileged SW_API_KEY (dashboard) and jwt create a LIVE job, as today", () => {
-  assertEquals(createMakesafeDispatch("api_key"), "live_job",
-    "the ops dashboard manual create button stays live")
-  assertEquals(createMakesafeDispatch("jwt"), "live_job")
-})
+  assertEquals(
+    createMakesafeDispatch("api_key"),
+    "live_job",
+    "the ops dashboard manual create button stays live",
+  );
+  assertEquals(createMakesafeDispatch("jwt"), "live_job");
+});
 
 // 3) Defensive: an UNSET MAKESAFE_ROUTINE_KEY env must never classify a caller as
 //    routine (the morning-provisioning reality). Mirrors index.ts:
 //      const routineKey = env && env.length > 0 ? env : null
 //      if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) 'routine'
 function classifyAuthMode(opts: {
-  routineKeyEnv: string | null; swApiKey: string; xApiKey: string | null; bearer: string | null
+  routineKeyEnv: string | null;
+  swApiKey: string;
+  xApiKey: string | null;
+  bearer: string | null;
 }): AuthMode | "unauthorized" {
-  const routineKey = opts.routineKeyEnv && opts.routineKeyEnv.length > 0 ? opts.routineKeyEnv : null
-  if (routineKey && (opts.xApiKey === routineKey || opts.bearer === routineKey)) return "routine"
-  if (opts.xApiKey && opts.xApiKey === opts.swApiKey) return "api_key"
-  if (opts.bearer && opts.bearer === opts.swApiKey) return "api_key"
-  if (opts.bearer) return "jwt" // (would then be validated as a real JWT)
-  return "unauthorized"
+  const routineKey = opts.routineKeyEnv && opts.routineKeyEnv.length > 0
+    ? opts.routineKeyEnv
+    : null;
+  if (
+    routineKey && (opts.xApiKey === routineKey || opts.bearer === routineKey)
+  ) return "routine";
+  if (opts.xApiKey && opts.xApiKey === opts.swApiKey) return "api_key";
+  if (opts.bearer && opts.bearer === opts.swApiKey) return "api_key";
+  if (opts.bearer) return "jwt"; // (would then be validated as a real JWT)
+  return "unauthorized";
 }
 
 Deno.test("ScopedKey: an UNSET routine key env never classifies anyone as routine", () => {
   // Routine key not provisioned yet (env unset). A caller sending an empty/no key must
   // not become 'routine'; a caller with SW_API_KEY is still 'api_key' as before.
-  assertEquals(classifyAuthMode({ routineKeyEnv: null, swApiKey: "MASTER", xApiKey: null, bearer: null }), "unauthorized")
-  assertEquals(classifyAuthMode({ routineKeyEnv: "", swApiKey: "MASTER", xApiKey: "", bearer: null }), "unauthorized")
-  assertEquals(classifyAuthMode({ routineKeyEnv: null, swApiKey: "MASTER", xApiKey: "MASTER", bearer: null }), "api_key")
-})
+  assertEquals(
+    classifyAuthMode({
+      routineKeyEnv: null,
+      swApiKey: "MASTER",
+      xApiKey: null,
+      bearer: null,
+    }),
+    "unauthorized",
+  );
+  assertEquals(
+    classifyAuthMode({
+      routineKeyEnv: "",
+      swApiKey: "MASTER",
+      xApiKey: "",
+      bearer: null,
+    }),
+    "unauthorized",
+  );
+  assertEquals(
+    classifyAuthMode({
+      routineKeyEnv: null,
+      swApiKey: "MASTER",
+      xApiKey: "MASTER",
+      bearer: null,
+    }),
+    "api_key",
+  );
+});
 
 Deno.test("ScopedKey: when provisioned, the routine key classifies as routine and SW_API_KEY stays api_key", () => {
-  assertEquals(classifyAuthMode({ routineKeyEnv: "ROUTINE", swApiKey: "MASTER", xApiKey: "ROUTINE", bearer: null }), "routine")
-  assertEquals(classifyAuthMode({ routineKeyEnv: "ROUTINE", swApiKey: "MASTER", xApiKey: "MASTER", bearer: null }), "api_key")
+  assertEquals(
+    classifyAuthMode({
+      routineKeyEnv: "ROUTINE",
+      swApiKey: "MASTER",
+      xApiKey: "ROUTINE",
+      bearer: null,
+    }),
+    "routine",
+  );
+  assertEquals(
+    classifyAuthMode({
+      routineKeyEnv: "ROUTINE",
+      swApiKey: "MASTER",
+      xApiKey: "MASTER",
+      bearer: null,
+    }),
+    "api_key",
+  );
   // The routine key and master key are distinct; presenting the master is never routine.
-  assert(classifyAuthMode({ routineKeyEnv: "ROUTINE", swApiKey: "MASTER", xApiKey: "MASTER", bearer: null }) !== "routine")
-})
+  assert(
+    classifyAuthMode({
+      routineKeyEnv: "ROUTINE",
+      swApiKey: "MASTER",
+      xApiKey: "MASTER",
+      bearer: null,
+    }) !== "routine",
+  );
+});
 
 // ── C3: the exact atomic-claim from approveIntakeDraft in index.ts ──
 //   const { data: claimed } = await client.from('makesafe_intake_drafts')
@@ -227,78 +382,95 @@ Deno.test("ScopedKey: when provisioned, the routine key classifies as routine an
 // matched the pre-image (status in needs_review/draft) gets a row back.
 
 function makeDraftStore(initialStatus: string) {
-  let status = initialStatus
+  let status = initialStatus;
   return {
     // Mirrors the chained PostgREST call: update(...).eq('id',id).in('status',set).select()
-    atomicClaim(_id: string, allowedFrom: string[]): { rows: Array<{ id: string; status: string }> } {
+    atomicClaim(
+      _id: string,
+      allowedFrom: string[],
+    ): { rows: Array<{ id: string; status: string }> } {
       // Postgres evaluates the WHERE against the current row and updates it in one
       // atomic statement; a concurrent statement sees the already-committed result.
       if (allowedFrom.includes(status)) {
-        status = "approved"
-        return { rows: [{ id: _id, status }] }
+        status = "approved";
+        return { rows: [{ id: _id, status }] };
       }
-      return { rows: [] }
+      return { rows: [] };
     },
     current(): string {
-      return status
+      return status;
     },
     // Unconditional set, modelling the catch-path .update({status:...}).eq('id',id)
     // (no pre-image guard; the catch already owns the row via the prior claim).
     forceStatus(s: string) {
-      status = s
+      status = s;
     },
-  }
+  };
 }
 
 // One approval attempt = the claim + (on success) create the job. Returns whether
 // THIS caller created a live job.
-function attemptApprove(store: ReturnType<typeof makeDraftStore>, jobsCreated: { n: number }): { created: boolean } {
-  const { rows } = store.atomicClaim("draft-1", ["needs_review", "draft"])
+function attemptApprove(
+  store: ReturnType<typeof makeDraftStore>,
+  jobsCreated: { n: number },
+): { created: boolean } {
+  const { rows } = store.atomicClaim("draft-1", ["needs_review", "draft"]);
   if (rows.length === 0) {
-    return { created: false } // concurrent/invalid -> blocked, no job
+    return { created: false }; // concurrent/invalid -> blocked, no job
   }
-  jobsCreated.n += 1 // only the winner reaches createMakesafeJob
-  return { created: true }
+  jobsCreated.n += 1; // only the winner reaches createMakesafeJob
+  return { created: true };
 }
 
 Deno.test("C3: two concurrent approvals of a needs_review draft -> exactly ONE live job", () => {
-  const store = makeDraftStore("needs_review")
-  const jobsCreated = { n: 0 }
+  const store = makeDraftStore("needs_review");
+  const jobsCreated = { n: 0 };
   // Serialized claims model the DB applying both UPDATEs one after the other.
-  const a = attemptApprove(store, jobsCreated)
-  const b = attemptApprove(store, jobsCreated)
-  assertEquals(jobsCreated.n, 1, "the double-click race must create exactly one job, not two")
-  assert(a.created !== b.created, "exactly one of the two concurrent approvals wins")
-  assertEquals(store.current(), "approved")
-})
+  const a = attemptApprove(store, jobsCreated);
+  const b = attemptApprove(store, jobsCreated);
+  assertEquals(
+    jobsCreated.n,
+    1,
+    "the double-click race must create exactly one job, not two",
+  );
+  assert(
+    a.created !== b.created,
+    "exactly one of the two concurrent approvals wins",
+  );
+  assertEquals(store.current(), "approved");
+});
 
 Deno.test("C3: a draft that is already approved cannot be re-approved (0 rows -> blocked)", () => {
-  const store = makeDraftStore("approved")
-  const jobsCreated = { n: 0 }
-  const r = attemptApprove(store, jobsCreated)
-  assertEquals(r.created, false, "re-approving an approved draft must not create another job")
-  assertEquals(jobsCreated.n, 0)
-})
+  const store = makeDraftStore("approved");
+  const jobsCreated = { n: 0 };
+  const r = attemptApprove(store, jobsCreated);
+  assertEquals(
+    r.created,
+    false,
+    "re-approving an approved draft must not create another job",
+  );
+  assertEquals(jobsCreated.n, 0);
+});
 
 Deno.test("C3: rejected/superseded drafts cannot be approved", () => {
   for (const s of ["rejected", "superseded"]) {
-    const store = makeDraftStore(s)
-    const jobsCreated = { n: 0 }
-    const r = attemptApprove(store, jobsCreated)
-    assertEquals(r.created, false, `a ${s} draft must not be approvable`)
-    assertEquals(jobsCreated.n, 0)
+    const store = makeDraftStore(s);
+    const jobsCreated = { n: 0 };
+    const r = attemptApprove(store, jobsCreated);
+    assertEquals(r.created, false, `a ${s} draft must not be approvable`);
+    assertEquals(jobsCreated.n, 0);
   }
-})
+});
 
 Deno.test("C3: a 'draft' status (incomplete intake) is still claimable from the queue", () => {
   // scanSesMakesafes can land an incomplete draft as status='draft' (Eng P0-C);
   // the claim set includes 'draft' so it remains approvable once a human completes it.
-  const store = makeDraftStore("draft")
-  const jobsCreated = { n: 0 }
-  const r = attemptApprove(store, jobsCreated)
-  assertEquals(r.created, true)
-  assertEquals(jobsCreated.n, 1)
-})
+  const store = makeDraftStore("draft");
+  const jobsCreated = { n: 0 };
+  const r = attemptApprove(store, jobsCreated);
+  assertEquals(r.created, true);
+  assertEquals(jobsCreated.n, 1);
+});
 
 // ── Concern 2 (auditor): C3 post-claim catch must not orphan-double-create ──
 // Models the new approveIntakeDraft catch branch in index.ts:
@@ -309,63 +481,94 @@ Deno.test("C3: a 'draft' status (incomplete intake) is still claimable from the 
 // The hazard: if the job was created but a LATER step throws, the OLD code reset the
 // draft to needs_review -> it could be approved again -> SECOND live job for one draft.
 
-type FailPoint = "before_job" | "after_job" | "none"
+type FailPoint = "before_job" | "after_job" | "none";
 
-function approveWithFailure(failAt: FailPoint, store: ReturnType<typeof makeDraftStore>, jobsCreated: { n: number }):
-  { finalStatus: string; approvedJobId: string | null; threw: boolean } {
+function approveWithFailure(
+  failAt: FailPoint,
+  store: ReturnType<typeof makeDraftStore>,
+  jobsCreated: { n: number },
+): { finalStatus: string; approvedJobId: string | null; threw: boolean } {
   // Claim first (the C3 atomic claim).
-  const { rows } = store.atomicClaim("draft-1", ["needs_review", "draft"])
-  if (rows.length === 0) return { finalStatus: store.current(), approvedJobId: null, threw: false }
-  let createdJobId: string | null = null
-  let approvedJobId: string | null = null
+  const { rows } = store.atomicClaim("draft-1", ["needs_review", "draft"]);
+  if (rows.length === 0) {
+    return { finalStatus: store.current(), approvedJobId: null, threw: false };
+  }
+  let createdJobId: string | null = null;
+  let approvedJobId: string | null = null;
   try {
-    if (failAt === "before_job") throw new Error("createMakesafeJob failed")
+    if (failAt === "before_job") throw new Error("createMakesafeJob failed");
     // job created
-    jobsCreated.n += 1
-    createdJobId = "job-" + jobsCreated.n
-    approvedJobId = createdJobId
-    if (failAt === "after_job") throw new Error("audit update failed AFTER job insert")
-    return { finalStatus: store.current(), approvedJobId, threw: false }
+    jobsCreated.n += 1;
+    createdJobId = "job-" + jobsCreated.n;
+    approvedJobId = createdJobId;
+    if (failAt === "after_job") {
+      throw new Error("audit update failed AFTER job insert");
+    }
+    return { finalStatus: store.current(), approvedJobId, threw: false };
   } catch (_e) {
     if (!createdJobId) {
       // safe to re-queue
-      store.forceStatus("needs_review")
-      return { finalStatus: store.current(), approvedJobId: null, threw: true }
+      store.forceStatus("needs_review");
+      return { finalStatus: store.current(), approvedJobId: null, threw: true };
     }
     // job exists: do NOT re-queue; keep approved + point at the orphan job
-    store.forceStatus("approved")
-    return { finalStatus: store.current(), approvedJobId: createdJobId, threw: true }
+    store.forceStatus("approved");
+    return {
+      finalStatus: store.current(),
+      approvedJobId: createdJobId,
+      threw: true,
+    };
   }
 }
 
 Deno.test("Concern2: pre-insert failure re-queues the draft (needs_review), no job", () => {
-  const store = makeDraftStore("needs_review")
-  const jobsCreated = { n: 0 }
-  const r = approveWithFailure("before_job", store, jobsCreated)
-  assertEquals(r.threw, true)
-  assertEquals(jobsCreated.n, 0, "no job created when the failure is before the insert")
-  assertEquals(r.finalStatus, "needs_review", "a pre-insert failure must release the claim")
-})
+  const store = makeDraftStore("needs_review");
+  const jobsCreated = { n: 0 };
+  const r = approveWithFailure("before_job", store, jobsCreated);
+  assertEquals(r.threw, true);
+  assertEquals(
+    jobsCreated.n,
+    0,
+    "no job created when the failure is before the insert",
+  );
+  assertEquals(
+    r.finalStatus,
+    "needs_review",
+    "a pre-insert failure must release the claim",
+  );
+});
 
 Deno.test("Concern2: post-insert failure does NOT re-queue (no orphan double-create)", () => {
-  const store = makeDraftStore("needs_review")
-  const jobsCreated = { n: 0 }
-  const r = approveWithFailure("after_job", store, jobsCreated)
-  assertEquals(r.threw, true)
-  assertEquals(jobsCreated.n, 1, "exactly one job was created")
-  assertEquals(r.finalStatus, "approved", "a post-insert failure must leave the draft approved, NOT re-queued")
-  assertEquals(r.approvedJobId, "job-1", "the draft must point at the orphan job for reconciliation")
-})
+  const store = makeDraftStore("needs_review");
+  const jobsCreated = { n: 0 };
+  const r = approveWithFailure("after_job", store, jobsCreated);
+  assertEquals(r.threw, true);
+  assertEquals(jobsCreated.n, 1, "exactly one job was created");
+  assertEquals(
+    r.finalStatus,
+    "approved",
+    "a post-insert failure must leave the draft approved, NOT re-queued",
+  );
+  assertEquals(
+    r.approvedJobId,
+    "job-1",
+    "the draft must point at the orphan job for reconciliation",
+  );
+});
 
 Deno.test("Concern2: a post-insert failure cannot be re-approved into a second job", () => {
   // Replays the real attack: job created, later step throws, then someone clicks
   // approve again. Because status stayed 'approved', the re-approval claim gets 0 rows.
-  const store = makeDraftStore("needs_review")
-  const jobsCreated = { n: 0 }
-  approveWithFailure("after_job", store, jobsCreated) // first attempt: job-1, then audit fails
-  assertEquals(store.current(), "approved")
+  const store = makeDraftStore("needs_review");
+  const jobsCreated = { n: 0 };
+  approveWithFailure("after_job", store, jobsCreated); // first attempt: job-1, then audit fails
+  assertEquals(store.current(), "approved");
   // second click:
-  const second = attemptApprove(store, jobsCreated)
-  assertEquals(second.created, false, "re-approving an approved-but-failed draft must NOT create a second job")
-  assertEquals(jobsCreated.n, 1, "still exactly one job total")
-})
+  const second = attemptApprove(store, jobsCreated);
+  assertEquals(
+    second.created,
+    false,
+    "re-approving an approved-but-failed draft must NOT create a second job",
+  );
+  assertEquals(jobsCreated.n, 1, "still exactly one job total");
+});

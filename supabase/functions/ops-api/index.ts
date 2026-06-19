@@ -243,6 +243,16 @@ import {
   RESUME_CLOSE_ALLOWED_STATUSES,
   checkResetFailedGate,
   emailFailureIsProvablyPreDispatch,
+  // Stage 1-2a — per-builder send parity
+  isPackPhotoSentEvent as _isPackPhotoSentEvent,
+  hasPackPhotoSentMarker,
+  buildPhotoFollowUpMarkerText,
+  isPackPortalReadyEvent,
+  hasPackPortalReadyMarker,
+  buildPortalReadyMarkerText,
+  isSwmsPdf as _isSwmsPdf,
+  checkClientSendGateWithSwms,
+  checkReportJobClientSendGate,
 } from './makesafe_send_pack.ts'
 // Wave 2 -- READ-ONLY report-draft cockpit feed (the informed-approve content
 // gate). Pure composers + normalisers; the orchestration below supplies the
@@ -255,6 +265,27 @@ import {
   computeInvoiceTotals,
   resolveRecipientEmail,
 } from './makesafe_report_drafts.ts'
+// Review & Send mission — threaded Draft Pack / Revise Pack feedback notes.
+// Pure helpers enforce that a draft note can never be confused with the
+// irreversible MAKESAFE_PACK_SENT business event marker.
+import {
+  rejectIfPackSentMarker,
+  AGENT_REPLY_PREFIX,
+  buildAgentReplyBody,
+  noteIsAddressable,
+} from './makesafe_draft_notes.ts'
+// Review & Send mission — Claude-backed Draft Pack / Revise Pack generator.
+// Pure helpers only; this file supplies the draft-only Supabase/Xero/storage
+// orchestration and keeps every irreversible send/authorise step in
+// makesafe_send_pack.
+import {
+  buildDraftPackSystemPrompt,
+  buildDraftPackUserPrompt,
+  MAKESAFE_DRAFT_PACK_MODEL,
+  parseDraftPackResponse,
+  selectDraftPackDueJobIds,
+  type DraftPackContext,
+} from './makesafe_draft_pack.ts'
 
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
@@ -274,7 +305,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 232
+const OPS_API_EXPECTED_ACTION_COUNT = 233
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -1803,7 +1834,15 @@ if (import.meta.main) serve(async (req: Request) => {
       // which is DELIBERATELY NOT in this allow-list and so is denied by default-deny.
       'create_makesafe_draft_invoice', // creates a Xero DRAFT invoice (reversible, no authorise)
       'makesafe_render_report', // renders the report PDF artifact (no send)
+      'draft_makesafe_report_pack', // Claude Draft Pack: report + DRAFT invoice + draft PDFs only
+      'draft_makesafe_report_pack_due', // cron batch: find trade-report-in jobs and run Draft Pack only
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
+      // Review & Send Revise Pack loop — notes and draft-refresh requests only.
+      'list_draft_notes',
+      // add_draft_note is intentionally privileged-human only: the routine may
+      // read notes and refresh eligible drafts, but cannot inject feedback text
+      // into arbitrary jobs.
+      'rerun_draft_report',
     ])
     if (authMode === 'routine' && action && !ROUTINE_ALLOWED_ACTIONS.has(action)) {
       return json({ error: `forbidden: '${action}' is not permitted for the make-safe automation routine; the routine key may only create/read drafts and render/attach report artifacts (default-deny). A human tick (privileged ops key or admin/owner) performs every send, authorise, and approve.` }, 403)
@@ -3023,6 +3062,19 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await createMakesafeDraftInvoice(client, body))
       case 'makesafe_render_report':
         return json(await makesafeRenderReport(client, body))
+      case 'draft_makesafe_report_pack':
+        return json(await draftMakesafeReportPack(client, body, authMode))
+      case 'draft_makesafe_report_pack_due':
+        return json(await draftMakesafeReportPackDue(client, body, authMode))
+      // Draft Pack / Revise Pack feedback loop. These actions are draft-only:
+      // they store/read the human feedback thread and queue a draft refresh note.
+      // They never send, authorise, close, charge, or email a builder.
+      case 'add_draft_note':
+        return json(await addDraftNote(client, body, authMode))
+      case 'list_draft_notes':
+        return json(await listDraftNotes(client, url.searchParams))
+      case 'rerun_draft_report':
+        return json(await rerunDraftReport(client, body, authMode))
       case 'makesafe_send_pack': {
         // auth per decision scoped-routine-key-2026-06-17: privileged SW_API_KEY
         // (dashboard) OR jwt admin/owner; the scoped routine key (authMode='routine',
@@ -3038,6 +3090,17 @@ if (import.meta.main) serve(async (req: Request) => {
           approverId: authUser?.id || null,
           approverEmail: authUser?.email || null,
         }))
+      }
+      // makesafe_send_photo_followup (Stage 1-2a) — EMAIL 2 for AJS/MLB.
+      // Sends the approved site photos as individual attachments after the main
+      // pack (email 1) has already been sent. Idempotent via the
+      // MAKESAFE_PACK_SENT | photo marker. PRIVILEGED-CALLER ONLY (same gate as
+      // makesafe_send_pack). NOT routine-callable. No Xero authorise in this path.
+      case 'makesafe_send_photo_followup': {
+        if (!sendPackAllowed(authMode, authUser)) {
+          return json({ error: 'forbidden: makesafe_send_photo_followup requires the privileged dashboard key or an admin/owner session' }, 403)
+        }
+        return json(await makesafeSendPhotoFollowup(client, body))
       }
       // makesafe_resume_close (TASK B) — CLOSE-ONLY resume for sent_not_closed /
       // close_failed. PRIVILEGED-CALLER ONLY, gated EXACTLY like makesafe_send_pack
@@ -16025,13 +16088,18 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   // half-sent pack still surfaces for the operator to finish.
   const { data: resumablePacks, error: rpErr } = await client
     .from('makesafe_report_packs')
-    .select('job_id, pack_kind, status')
+    .select('job_id, pack_kind, status, failed_step')
     .in('status', RESUMABLE_PACK_STATUSES)
     .limit(limit)
   if (rpErr) throw new ApiError('makesafe_report_drafts: resumable packs read failed: ' + rpErr.message, 500)
   const extraJobIds = Array.from(new Set(
     (resumablePacks || [])
-      .filter((p: any) => (p.pack_kind || 'main') === 'main' && p.job_id && !detailJobIdSet.has(p.job_id))
+      .filter((p: any) =>
+        (p.pack_kind || 'main') === 'main' &&
+        p.job_id &&
+        !detailJobIdSet.has(p.job_id) &&
+        !(p.status === 'sending' && p.failed_step === 'draft_pack')
+      )
       .map((p: any) => p.job_id),
   )) as string[]
   if (extraJobIds.length > 0) {
@@ -16204,6 +16272,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       readyForReview: surf.readyForReview,
       invoiceAuthorisedLive: surf.invoiceAuthorisedLive,
       packStatus: pack?.status,
+      failedStep: pack?.failed_step,
       markerPresent,
     })
     if (resumeAction === null) return null
@@ -16527,6 +16596,461 @@ async function makesafeRenderReport(client: any, body: any) {
   }
 }
 
+interface DraftMakesafeReportPackDueDeps {
+  listDueJobs?: (
+    client: any,
+    opts: { limit: number; packKind: string },
+  ) => Promise<Array<{ job_id: string }>>
+  draftPack?: (client: any, body: any, authMode: string) => Promise<any>
+}
+
+function clampDraftPackBatchLimit(raw: any): number {
+  const n = Math.floor(Number(raw ?? 5))
+  if (!Number.isFinite(n) || n <= 0) return 5
+  return Math.max(1, Math.min(20, n))
+}
+
+async function listDraftPackDueJobs(
+  client: any,
+  opts: { limit: number; packKind: string },
+): Promise<Array<{ job_id: string }>> {
+  const scanLimit = Math.max(50, opts.limit * 4)
+  const { data: details, error: detErr } = await client
+    .from('makesafe_job_details')
+    .select('job_id, substatus, report_received_at, report_sent_at, report_type')
+    .eq('substatus', REPORT_DRAFT_READY_SUBSTATUS)
+    .limit(scanLimit)
+  if (detErr) throw new ApiError('draft pack due scan failed: ' + detErr.message, 500)
+
+  const rows = details || []
+  const jobIds = rows.map((d: any) => d.job_id).filter(Boolean)
+  if (jobIds.length === 0) return []
+
+  const { data: packs, error: packErr } = await client
+    .from('makesafe_report_packs')
+    .select('job_id, pack_kind, status, report_doc_id, invoice_doc_id, xero_invoice_id')
+    .in('job_id', jobIds)
+  if (packErr) throw new ApiError('draft pack due pack-state scan failed: ' + packErr.message, 500)
+
+  const dueIds = selectDraftPackDueJobIds(rows, packs || [], opts.limit, opts.packKind)
+  return dueIds.map((job_id) => ({ job_id }))
+}
+
+// draft_makesafe_report_pack_due — cron/batch activation for Draft Pack.
+// This is the server-side "automatic skill" entrypoint Marnin asked for:
+// pg_cron calls this action, it finds trade-report-in jobs that do NOT already
+// have a ready/resumable/sent pack row, and then reuses draft_makesafe_report_pack
+// for each job. It is routine-callable but draft-only; it never authorises,
+// emails, closes, or writes sent markers.
+async function draftMakesafeReportPackDue(
+  client: any,
+  body: any,
+  authMode: string,
+  deps: DraftMakesafeReportPackDueDeps = {},
+): Promise<any> {
+  const limit = clampDraftPackBatchLimit(body?.limit)
+  const packKind = body?.pack_kind || body?.packKind || 'main'
+  const operator = body?.operator || body?.operator_email || 'makesafe draft pack cron'
+  const dryRun = body?.dry_run === true || body?.dryRun === true || body?.dry_run === 'true'
+  const _listDueJobs = deps.listDueJobs || listDraftPackDueJobs
+  const _draftPack = deps.draftPack || draftMakesafeReportPack
+
+  const due = await _listDueJobs(client, { limit, packKind })
+  if (dryRun) {
+    return {
+      success: true,
+      dry_run: true,
+      action: 'draft_makesafe_report_pack_due',
+      pack_kind: packKind,
+      due_count: due.length,
+      due_jobs: due,
+    }
+  }
+
+  const drafted: any[] = []
+  const errors: any[] = []
+  for (const item of due) {
+    const jobId = item?.job_id
+    if (!jobId) continue
+    try {
+      const result = await _draftPack(client, {
+        job_id: jobId,
+        pack_kind: packKind,
+        operator,
+        source: 'draft_makesafe_report_pack_due',
+      }, authMode)
+      drafted.push({ job_id: jobId, result })
+    } catch (e) {
+      errors.push({ job_id: jobId, error: (e as Error).message || String(e) })
+    }
+  }
+
+  return {
+    success: errors.length === 0,
+    action: 'draft_makesafe_report_pack_due',
+    pack_kind: packKind,
+    due_count: due.length,
+    attempted_count: drafted.length + errors.length,
+    drafted_count: drafted.length,
+    error_count: errors.length,
+    drafted,
+    errors,
+  }
+}
+
+export const _listDraftPackDueJobsForTest = listDraftPackDueJobs
+export const _draftMakesafeReportPackDueForTest = draftMakesafeReportPackDue
+
+interface DraftMakesafeReportPackDeps {
+  loadContext?: (client: any, body: any) => Promise<DraftPackContext>
+  assertRoutineEligible?: (client: any, jobId: string, packKind: string, authMode: string) => Promise<void>
+  claimDraftPack?: (client: any, jobId: string, packKind: string, authMode: string) => Promise<void>
+  markDraftPackFailed?: (client: any, jobId: string, packKind: string, err: unknown) => Promise<void>
+  callClaude?: (model: string, system: string, userContent: string, maxTokens?: number) => Promise<string>
+  createDraftInvoice?: (client: any, body: any) => Promise<any>
+  renderReport?: (client: any, body: any) => Promise<any>
+  getToken?: (client: any) => Promise<{ accessToken: string; tenantId: string }>
+  fetchInvoicePdfBytes?: (accessToken: string, tenantId: string, xeroInvoiceId: string) => Promise<Uint8Array>
+  attachDoc?: (client: any, body: any) => Promise<{ document_id?: string | null }>
+  ensurePackRow?: (client: any, jobId: string, packKind: string, extra?: Record<string, any>) => Promise<void>
+  patchPack?: (client: any, jobId: string, packKind: string, patch: Record<string, any>) => Promise<void>
+  markReady?: (client: any, jobId: string, detail: any) => Promise<void>
+}
+
+async function assertDraftPackRoutineEligible(
+  client: any,
+  jobId: string,
+  packKind: string,
+  authMode: string,
+): Promise<void> {
+  if (authMode !== 'routine') return
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
+    .select('job_id, substatus, report_received_at, report_sent_at, report_type')
+    .eq('job_id', jobId).maybeSingle()
+  if (detailErr) throw new ApiError('draft pack eligibility detail read failed: ' + detailErr.message, 500)
+  if (!detail) throw new ApiError('draft pack routine blocked: make-safe detail row not found', 404)
+
+  const { data: packRows, error: packErr } = await client.from('makesafe_report_packs')
+    .select('job_id, pack_kind, status, report_doc_id, invoice_doc_id, xero_invoice_id')
+    .eq('job_id', jobId).eq('pack_kind', packKind)
+  if (packErr) throw new ApiError('draft pack eligibility pack read failed: ' + packErr.message, 500)
+
+  const due = selectDraftPackDueJobIds([detail], packRows || [], 1, packKind)
+  if (!due.includes(jobId)) {
+    throw new ApiError('draft pack routine blocked: job is not an eligible trade-report-in draft candidate', 409)
+  }
+}
+
+async function claimDraftPackForDrafting(
+  client: any,
+  jobId: string,
+  packKind: string,
+  authMode: string,
+): Promise<void> {
+  await _ensurePackRowStrict(client, jobId, packKind)
+  const now = new Date().toISOString()
+  const fromStatuses = authMode === 'routine'
+    ? ['drafted']
+    : ['drafted', REPORT_DRAFT_READY_SUBSTATUS]
+  const { data: locked, error: lockErr } = await client.from('makesafe_report_packs')
+    .update({
+      status: 'sending',
+      send_started_at: now,
+      failed_step: 'draft_pack',
+      error_detail: null,
+      updated_at: now,
+    })
+    .eq('job_id', jobId).eq('pack_kind', packKind)
+    .in('status', fromStatuses)
+    .select('id, status')
+  if (lockErr) throw new ApiError('draft pack claim failed: ' + lockErr.message, 500)
+  if (!locked || locked.length === 0) {
+    const { data: current } = await client.from('makesafe_report_packs')
+      .select('status, failed_step').eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
+    throw new ApiError(`draft pack claim blocked: current status is '${current?.status || 'missing'}'`, 409)
+  }
+}
+
+async function markDraftPackFailed(
+  client: any,
+  jobId: string,
+  packKind: string,
+  err: unknown,
+): Promise<void> {
+  const detail = (err as Error)?.message || String(err)
+  await _patchPackStrict(client, jobId, packKind, {
+    status: 'failed',
+    failed_step: 'draft_pack',
+    error_detail: detail.slice(0, 500),
+    send_started_at: null,
+  })
+}
+
+// Load the context the Claude Draft Pack skill sees. This is read-only: job,
+// make-safe details, the trade/service report, current documents/photos, and the
+// feedback thread. The selected photo set is carried explicitly so a Revise Pack
+// request can exclude photos before re-rendering.
+async function loadDraftPackContext(client: any, body: any): Promise<DraftPackContext> {
+  const jobId = body.job_id || body.jobId
+  if (!jobId) throw new ApiError('job_id required', 400)
+  const selectedPhotoUrls = normaliseStringArray(body.selected_photo_urls || body.selectedPhotoUrls)
+
+  const [jobRes, detailRes, reportRes, docsRes, mediaRes, notesRes] = await Promise.all([
+    client.from('jobs')
+      .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, created_at, updated_at')
+      .eq('id', jobId).maybeSingle(),
+    client.from('makesafe_job_details')
+      .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, invoice_notes, report_type, makesafe_companies(slug, name, invoice_email, report_recipient)')
+      .eq('job_id', jobId).maybeSingle(),
+    client.from('job_service_reports')
+      .select('id, checklist_json, notes, status, submitted_at')
+      .eq('job_id', jobId)
+      .order('submitted_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    client.from('job_documents')
+      .select('id, type, file_name, storage_url, pdf_url, version')
+      .eq('job_id', jobId),
+    client.from('job_media')
+      .select('id, phase, type, storage_url, thumbnail_url, label')
+      .eq('job_id', jobId)
+      .eq('type', 'photo'),
+    client.from('draft_notes')
+      .select('id, draft_kind, author, role, body, addressed, created_at')
+      .eq('job_id', jobId)
+      .eq('draft_kind', body.draft_kind || body.draftKind || 'makesafe_report')
+      .order('created_at', { ascending: true }),
+  ])
+
+  const media = mediaRes.data || []
+  const allPhotoUrls = (media || [])
+    .map((m: any) => m.storage_url || m.thumbnail_url || null)
+    .filter(Boolean)
+  const selected = selectedPhotoUrls.length ? selectedPhotoUrls : allPhotoUrls
+
+  return {
+    job: jobRes.data || null,
+    detail: detailRes.data || null,
+    service_report: reportRes.data || null,
+    feedback_notes: Array.isArray(body.feedback_notes) ? body.feedback_notes : (notesRes.data || []),
+    selected_photo_urls: selected,
+    source_docs: [
+      ...((docsRes.data || []) as any[]),
+      ...((media || []) as any[]).map((m: any) => ({
+        type: 'photo',
+        label: m.label || null,
+        url: m.storage_url || m.thumbnail_url || null,
+      })),
+    ],
+  }
+}
+
+function normaliseStringArray(v: any): string[] {
+  if (!Array.isArray(v)) return []
+  return v.map((x) => String(x || '').trim()).filter(Boolean)
+}
+
+function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhotoUrls: string[]): any {
+  const job: any = ctx.job || {}
+  const detail: any = ctx.detail || {}
+  const checklist = ((ctx.service_report as any)?.checklist_json || {}) as any
+  const ref = parsed.report.ref || parsed.invoice.reference || detail.external_ref || job.job_number || job.id
+  const address = parsed.report.address || job.site_address || job.site_suburb || 'Address TBC'
+  return {
+    ref,
+    address,
+    contact: parsed.report.contact || job.client_name || '',
+    date: parsed.report.date || (ctx.service_report as any)?.submitted_at || job.updated_at || '',
+    arrival: parsed.report.arrival || checklist.arrival_time || '',
+    crew: parsed.report.crew || '',
+    billing_note: parsed.report.billing_note || detail.invoice_notes || '',
+    scope: parsed.report.scope || checklist.damage_description || '',
+    findings: parsed.report.findings || checklist.damage_cause || '',
+    works: parsed.report.works || checklist.work_done || (ctx.service_report as any)?.notes || '',
+    materials: parsed.report.materials || (Array.isArray(checklist.materials_used) ? checklist.materials_used.join(', ') : (checklist.materials_used || '')),
+    photos: selectedPhotoUrls.map((url) => ({ url })),
+    photo_limit: parsed.report.photo_limit || 8,
+  }
+}
+
+function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string, operator: string): any {
+  const job: any = ctx.job || {}
+  const detail: any = ctx.detail || {}
+  const company: any = detail.makesafe_companies || {}
+  return {
+    job_id: jobId,
+    reference: parsed.invoice.reference || parsed.report.ref || detail.external_ref || job.job_number || jobId,
+    contact_name: parsed.invoice.contact_name || detail.requesting_company_name || company.name || job.client_name,
+    due_date: parsed.invoice.due_date || undefined,
+    line_items: parsed.invoice.line_items,
+    operator,
+  }
+}
+
+function draftPackXeroId(invoiceResult: any): string | null {
+  return invoiceResult?.xero_invoice_id ||
+    invoiceResult?.existing_invoice?.xero_invoice_id ||
+    invoiceResult?.existing_invoice?.id ||
+    null
+}
+
+function draftPackInvoiceNumber(invoiceResult: any, fallbackId: string | null): string {
+  return invoiceResult?.invoice_number ||
+    invoiceResult?.existing_invoice?.invoice_number ||
+    fallbackId ||
+    'draft'
+}
+
+function draftPackInvoiceStatus(invoiceResult: any): string | null {
+  return invoiceResult?.status || invoiceResult?.existing_invoice?.status || (invoiceResult?.skipped ? null : 'DRAFT')
+}
+
+async function defaultMarkDraftPackReady(client: any, jobId: string, detail: any): Promise<void> {
+  const now = new Date().toISOString()
+  await client.from('makesafe_job_details')
+    .update({
+      substatus: REPORT_DRAFT_READY_SUBSTATUS,
+      report_received_at: detail?.report_received_at || now,
+      updated_at: now,
+    })
+    .eq('job_id', jobId)
+}
+
+// draft_makesafe_report_pack — the routine/cron-safe Draft Pack action.
+// It calls Claude to draft the report/invoice content, renders a report PDF,
+// creates or reuses a Xero DRAFT invoice, attaches the draft invoice PDF, and
+// marks the pack ready for human review. It never authorises, emails, closes,
+// or writes a MAKESAFE_PACK_SENT marker.
+async function draftMakesafeReportPack(
+  client: any,
+  body: any,
+  _authMode: string,
+  deps: DraftMakesafeReportPackDeps = {},
+) {
+  const jobId = body.job_id || body.jobId
+  const packKind = body.pack_kind || body.packKind || 'main'
+  if (!jobId) throw new ApiError('job_id required', 400)
+
+  const operator = body.operator || body.operator_email || 'makesafe draft pack routine'
+  const _loadContext = deps.loadContext || loadDraftPackContext
+  const _callDraftClaude = deps.callClaude || _callClaude
+  const _createDraftInvoice = deps.createDraftInvoice || createMakesafeDraftInvoice
+  const _renderReport = deps.renderReport || makesafeRenderReport
+  const _getToken = deps.getToken || getToken
+  const _fetchInvoicePdfBytes = deps.fetchInvoicePdfBytes || _fetchXeroInvoicePdfBytes
+  const _attachDoc = deps.attachDoc || attachMakesafeDocument
+  const _ensure = deps.ensurePackRow || _ensurePackRow
+  const _patch = deps.patchPack || _patchPack
+  const _markReady = deps.markReady || defaultMarkDraftPackReady
+  const _assertEligible = deps.assertRoutineEligible || assertDraftPackRoutineEligible
+  const _claimDraftPack = deps.claimDraftPack || claimDraftPackForDrafting
+  const _markDraftPackFailed = deps.markDraftPackFailed || markDraftPackFailed
+
+  let claimedDraft = false
+  try {
+    await _assertEligible(client, jobId, packKind, _authMode)
+    await _claimDraftPack(client, jobId, packKind, _authMode)
+    claimedDraft = true
+
+    const context = await _loadContext(client, body)
+    const selectedPhotoUrls = normaliseStringArray(body.selected_photo_urls || body.selectedPhotoUrls)
+    const photoSet = selectedPhotoUrls.length ? selectedPhotoUrls : (context.selected_photo_urls || [])
+    const promptContext: DraftPackContext = {
+      ...context,
+      feedback_notes: Array.isArray(body.feedback_notes) ? body.feedback_notes : context.feedback_notes,
+      selected_photo_urls: photoSet,
+    }
+
+    const raw = await _callDraftClaude(
+      MAKESAFE_DRAFT_PACK_MODEL,
+      buildDraftPackSystemPrompt(),
+      buildDraftPackUserPrompt(promptContext),
+      2500,
+    )
+    const parsed = parseDraftPackResponse(raw)
+
+    const reportPayload = draftPackReportPayload(parsed, context, photoSet)
+    const reportResult = await _renderReport(client, {
+      job_id: jobId,
+      pack_kind: packKind,
+      job: reportPayload,
+      operator,
+    })
+
+    const invoiceResult = await _createDraftInvoice(
+      client,
+      draftPackInvoiceBody(parsed, context, jobId, operator),
+    )
+    const xeroInvoiceId = draftPackXeroId(invoiceResult)
+    const invoiceStatus = draftPackInvoiceStatus(invoiceResult)
+    let invoiceDoc: { document_id?: string | null } | null = null
+    const warnings: string[] = []
+
+    // Attach the DRAFT invoice PDF when the invoice is still DRAFT. If the dup guard
+    // finds an already-authorised invoice, do not pretend it is a fresh draft; leave
+    // that state to the send/resume state machine.
+    if (xeroInvoiceId && String(invoiceStatus || 'DRAFT').toUpperCase() === 'DRAFT') {
+      const { accessToken, tenantId } = await _getToken(client)
+      const invoiceBytes = await _fetchInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
+      const invoicePdfName = `Draft Xero Invoice - ${draftPackInvoiceNumber(invoiceResult, xeroInvoiceId)}.pdf`
+      invoiceDoc = await _attachDoc(client, {
+        job_id: jobId,
+        type: 'invoice',
+        file_name: invoicePdfName,
+        pdf_base64: _bytesToBase64(invoiceBytes),
+        uploaded_by: operator,
+      })
+    } else {
+      warnings.push('draft_invoice_pdf_not_attached_existing_invoice_not_draft')
+    }
+
+    const packPatch: Record<string, any> = {
+      status: REPORT_DRAFT_READY_SUBSTATUS,
+      xero_invoice_id: xeroInvoiceId,
+      invoice_status: invoiceStatus || 'DRAFT',
+      report_doc_id: reportResult?.document_id || null,
+      invoice_doc_id: invoiceDoc?.document_id || null,
+      last_render_hash: reportResult?.render_hash || null,
+      send_started_at: null,
+      failed_step: null,
+      error_detail: null,
+    }
+    await _ensure(client, jobId, packKind, packPatch)
+    await _patch(client, jobId, packKind, packPatch)
+    await _markReady(client, jobId, (context as any).detail || null)
+
+    return {
+      success: true,
+      draft_pack: true,
+      model: MAKESAFE_DRAFT_PACK_MODEL,
+      job_id: jobId,
+      pack_kind: packKind,
+      report: {
+        rendered: reportResult?.success !== false,
+        skipped: reportResult?.skipped === true,
+        document_id: reportResult?.document_id || null,
+        render_hash: reportResult?.render_hash || null,
+      },
+      invoice: {
+        skipped_existing: invoiceResult?.skipped === true,
+        xero_invoice_id: xeroInvoiceId,
+        invoice_number: draftPackInvoiceNumber(invoiceResult, xeroInvoiceId),
+        status: invoiceStatus || 'DRAFT',
+        document_id: invoiceDoc?.document_id || null,
+      },
+      selected_photo_count: photoSet.length,
+      change_summary: parsed.change_summary,
+      warnings,
+    }
+  } catch (e) {
+    if (claimedDraft) {
+      await _markDraftPackFailed(client, jobId, packKind, e)
+    }
+    throw e
+  }
+}
+export const _draftMakesafeReportPackForTest = draftMakesafeReportPack
+
 // Convert a Xero PDF arrayBuffer to base64 (mirrors getInvoicePdf / send-invoice).
 function _bytesToBase64(bytes: Uint8Array): string {
   let bin = ''
@@ -16612,9 +17136,11 @@ async function makesafeSendPack(
   const subject = body.subject
   const htmlBody = body.html_body || body.htmlBody
   if (!jobId) throw new ApiError('job_id required', 400)
-  if (!recipientEmail) throw new ApiError('recipient_email required', 400)
-  if (!subject) throw new ApiError('subject required', 400)
-  if (!htmlBody) throw new ApiError('html_body required', 400)
+  // Stage 1 (D3): recipient_email / subject / html_body are required ONLY for the
+  // EMAIL send path (AJS / MLB). Portal builders (Western / Builderwest) submit a
+  // pack manually and carry none of these. We therefore DEFER these checks until
+  // after the portal-builder branch (which returns early), enforcing them right
+  // before the atomic send-lock — see the email-required check below.
   const nowIso = () => new Date().toISOString()
 
   // ── PARTIAL-FAILURE / IDEMPOTENCY STOP (before anything irreversible) ──
@@ -16632,7 +17158,7 @@ async function makesafeSendPack(
   // re-authorise. This is reconciliation of an email that ALREADY went out (or a
   // human-confirmed not-sent), not a re-send. ──
   const { data: priorPack } = await client.from('makesafe_report_packs')
-    .select('status, send_started_at, sent_at, xero_invoice_id, invoice_status')
+    .select('status, send_started_at, sent_at, xero_invoice_id, invoice_status, failed_step')
     .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
   const priorStatus = priorPack?.status || null
 
@@ -16673,6 +17199,16 @@ async function makesafeSendPack(
   // not have gone out (process killed after email 200, before the marker). A
   // resume from 'sending' REQUIRES an explicit operator decision in the body.
   if (priorStatus === 'sending') {
+    if (priorPack?.failed_step === 'draft_pack') {
+      return {
+        error: 'draft pack is still generating or stalled; this is NOT an email-send state. Do not resolve via Sent Items. Reset/retry the draft pack generation first.',
+        status: 'sending',
+        failed_step: 'draft_pack',
+        send_started_at: priorPack?.send_started_at || null,
+        requires: 'draft_pack_retry_or_reset',
+        job_id: jobId,
+      }
+    }
     const resolution = planSendingResolution(body.sending_resolution)
     if (!resolution) {
       // No valid resolution -> 409. Operator must verify Sent Items and resubmit.
@@ -16717,6 +17253,14 @@ async function makesafeSendPack(
     .eq('job_id', jobId).maybeSingle()
   // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
   const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
+  // Stage 1 (D3): Western Building / Builderwest are PORTAL builders — they do NOT
+  // receive email and have NO report_recipient inbox (Wave 0 resolution). The
+  // EXACT-RECIPIENT GATE below is an EMAIL-send gate, so it MUST be skipped for
+  // portal builders (otherwise the null report_recipient fails it closed and the
+  // portal-prep branch further down is never reached). The portal-prep branch
+  // still runs AFTER both preflights (docs incl. SWMS via requiresSwms, + invoice),
+  // so the same compliance is enforced; only the email-recipient check is bypassed.
+  const isPortalBuilder = _isMakesafeWesternCompany(detail, job)
 
   // ── BLOCKER C — EXACT-RECIPIENT GATE (money/comms, FAIL CLOSED) ──
   // Re-derive the builder's WORK-ORDERS inbox SERVER-SIDE from
@@ -16725,16 +17269,19 @@ async function makesafeSendPack(
   // CC MUST be EXACTLY ses@secureworkswa.com.au. This blocks vanessa@ajs.build
   // (the billing contact) ever being the To, and blocks any extra/legacy CC
   // (e.g. a 'CC vanessa@ajs.build' special_instructions value).
-  const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
-  const recipientFailures = checkExactRecipientGate({
-    configuredReportRecipient,
-    to: recipientEmail,
-    cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
-  })
-  if (recipientFailures.length > 0) {
-    await _ensurePackRow(client, jobId, packKind)
-    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'recipient_gate', error_detail: recipientFailures.join(' | ').slice(0, 500) })
-    throw new ApiError('recipient gate failed (no send; fix the work-orders recipient): ' + recipientFailures.join('; '), 403)
+  // Skipped for portal builders (no email -> no recipient to gate).
+  if (!isPortalBuilder) {
+    const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
+    const recipientFailures = checkExactRecipientGate({
+      configuredReportRecipient,
+      to: recipientEmail,
+      cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
+    })
+    if (recipientFailures.length > 0) {
+      await _ensurePackRow(client, jobId, packKind)
+      await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'recipient_gate', error_detail: recipientFailures.join(' | ').slice(0, 500) })
+      throw new ApiError('recipient gate failed (no send; fix the work-orders recipient): ' + recipientFailures.join('; '), 403)
+    }
   }
 
   // ── PREFLIGHT: typed close-out docs must exist (report + invoice + swms if MLB) ──
@@ -16801,6 +17348,59 @@ async function makesafeSendPack(
     await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'money_review_gate', error_detail: 'invoice flagged needs_money_review; pass money_review_confirmed=true to proceed' })
     throw new ApiError('send blocked: invoice is flagged for money review. Review the flagged lines in the cockpit, then approve with money_review_confirmed=true in the send body.', 412)
   }
+
+  // ── PORTAL-BUILDER BRANCH (Western Building / Builderwest) ─────────────────
+  // These builders do NOT receive email. We produce the pack docs list for
+  // manual submission on their Prime-system portal. No email, no Xero authorise.
+  // isPortalBuilder is computed above (before the recipient gate, which is skipped
+  // for these builders). Reaching here means BOTH preflights have passed (docs incl.
+  // the required SWMS, + a single live invoice + money-review gate), so the portal
+  // pack is fully compliant; we just don't email it.
+  if (isPortalBuilder) {
+    // Idempotency: if already portal-prepped, return early.
+    const { data: portalEvents } = await client.from('job_events')
+      .select('job_id, event_type, detail_json')
+      .eq('job_id', jobId).eq('event_type', 'note')
+    if ((portalEvents || []).some((ev: any) => isPackPortalReadyEvent(ev))) {
+      return { portal_ready: true, already_prepped: true, job_id: jobId }
+    }
+    // Collect the docs for portal submission
+    const portalDocs: Array<{ type: string; file_name: string; doc_id: string }> = []
+    const rDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+    if (rDoc) portalDocs.push({ type: 'report', file_name: rDoc.file_name, doc_id: rDoc.id })
+    const iDoc = (docRows || []).find((d: any) => d.type === 'invoice')
+    if (iDoc) portalDocs.push({ type: 'invoice', file_name: iDoc.file_name, doc_id: iDoc.id })
+    const sDoc = (docRows || []).find((d: any) => d.type === 'swms')
+    if (sDoc) portalDocs.push({ type: 'swms', file_name: sDoc.file_name, doc_id: sDoc.id })
+    // Write the portal-ready pack row + marker
+    await _ensurePackRow(client, jobId, packKind, {
+      status: 'portal_ready',
+      approver_id: ctx.approverId,
+      approved_at: new Date().toISOString(),
+    })
+    await _patchPack(client, jobId, packKind, { status: 'portal_ready' })
+    const portalMarkerText = buildPortalReadyMarkerText({ nowIso: new Date().toISOString() })
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'note',
+      detail_json: { text: portalMarkerText },
+    })
+    return {
+      portal_ready: true,
+      docs: portalDocs,
+      job_id: jobId,
+      builder: detail?.makesafe_companies?.name || detail?.requesting_company_name || null,
+    }
+  }
+
+  // ── EMAIL-PATH REQUIRED FIELDS (deferred from the top — see note above) ──
+  // From here the flow is the email send path (AJS / MLB only; portal builders
+  // returned above). recipient_email / subject / html_body are mandatory and the
+  // send is structurally impossible without them. The recipient gate above has
+  // already confirmed recipientEmail equals the configured work-orders inbox.
+  if (!recipientEmail) throw new ApiError('recipient_email required', 400)
+  if (!subject) throw new ApiError('subject required', 400)
+  if (!htmlBody) throw new ApiError('html_body required', 400)
 
   // ── ATOMIC SEND-LOCK ──
   // Ensure a pack row exists in a lockable state, then take the lock with a
@@ -16916,13 +17516,45 @@ async function makesafeSendPack(
       }
     }
 
+    // ── STEP 3b: For normal MLB make-safe packs, also load the SWMS PDF ──────
+    // Normal MLB email 1 attaches 3 PDFs: report + Xero invoice + SWMS.
+    // Report-type jobs (`report_type` present) are invoice-only regardless of
+    // builder, because the report lives on the builder portal; do not require or
+    // attach a SecureWorks report/SWMS for those invoice-only sends.
+    // Western Building is a portal-builder (no email), so SWMS is only loaded here
+    // for normal MLB email sends.
+    const isMlbBuilder = _isMakesafeMlbCompany(detail, job)
+    const shouldAttachSwms = isMlbBuilder && !isReportJob
+    let swmsPdfB64: string | null = null
+    let swmsFileName: string | null = null
+    if (shouldAttachSwms) {
+      const swmsDoc = (docRows || []).find((d: any) => d.type === 'swms')
+      if (swmsDoc) {
+        const { data: freshSwms } = await client.from('job_documents')
+          .select('file_name, storage_url, pdf_url').eq('id', swmsDoc.id).maybeSingle()
+        swmsFileName = freshSwms?.file_name || swmsDoc.file_name || 'SWMS.pdf'
+        const swmsUrl = freshSwms?.pdf_url || freshSwms?.storage_url
+        if (swmsUrl) {
+          const bytes = await _fetchReportPdfBytes(swmsUrl)
+          if (bytes) swmsPdfB64 = _bytesToBase64(bytes)
+        }
+      }
+      if (!swmsPdfB64) {
+        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'load_swms_pdf', error_detail: 'SWMS PDF bytes unavailable for MLB send' })
+        throw new ApiError('send failed: could not load SWMS PDF for MLB attachment (invoice already authorised; safe to resume)', 502)
+      }
+    }
+
     // ── STEP 4: assemble + CLIENT-SEND GATE (hard, fail-closed) ──
-    // Report jobs send invoice-only; normal WO jobs send report + invoice.
+    // Report jobs send invoice-only. Normal AJS sends report + invoice. Normal
+    // MLB sends report + invoice + SWMS. This preserves both the Stage 4
+    // report-job rule and the Stage 1 send-parity rule.
     const attachments = isReportJob
       ? [{ contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' }]
       : [
           { contentBytes: reportPdfB64!, name: reportFileName, contentType: 'application/pdf' },
           { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
+          ...(swmsPdfB64 ? [{ contentBytes: swmsPdfB64, name: swmsFileName!, contentType: 'application/pdf' }] : []),
         ]
     const gatePayload = {
       from: MAKESAFE_ADMIN_FROM,
@@ -16932,7 +17564,13 @@ async function makesafeSendPack(
       htmlBody,
       attachments: attachments.map((a) => ({ name: a.name })),
     }
-    const gateFailures = checkClientSendGate(gatePayload)
+    // Report jobs use a stricter invoice-only gate; normal MLB uses the SWMS gate;
+    // normal AJS/other email builders use the standard report+invoice gate.
+    const gateFailures = isReportJob
+      ? checkReportJobClientSendGate(gatePayload)
+      : shouldAttachSwms
+        ? checkClientSendGateWithSwms(gatePayload)
+        : checkClientSendGate(gatePayload)
     if (gateFailures.length > 0) {
       // Invoice authorised but the send is unsafe. Recoverable — resume after fix.
       await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'client_send_gate', error_detail: gateFailures.join(' | ') })
@@ -17093,6 +17731,250 @@ async function _ensurePackRow(client: any, jobId: string, packKind: string, extr
   }
 }
 
+async function _ensurePackRowStrict(client: any, jobId: string, packKind: string, extra?: Record<string, any>) {
+  const { data: existing, error: readErr } = await client.from('makesafe_report_packs')
+    .select('id, status').eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
+  if (readErr) throw new ApiError(`pack row read failed (${packKind}): ${readErr.message}`, 500)
+  if (!existing) {
+    const { error: insertErr } = await client.from('makesafe_report_packs').insert({
+      org_id: DEFAULT_ORG_ID,
+      job_id: jobId,
+      pack_kind: packKind,
+      status: 'drafted',
+      ...(extra || {}),
+      updated_at: new Date().toISOString(),
+    })
+    // Concurrent first callers may race on UNIQUE(job_id, pack_kind). That is
+    // fine: the conditional UPDATE below is the real atomic claim.
+    if (insertErr && insertErr.code !== '23505') {
+      throw new ApiError(`pack row insert failed (${packKind}): ${insertErr.message}`, 500)
+    }
+    return
+  }
+  if (extra && Object.keys(extra).length > 0) {
+    const { error: patchErr } = await client.from('makesafe_report_packs')
+      .update({ ...extra, updated_at: new Date().toISOString() })
+      .eq('id', existing.id)
+    if (patchErr) throw new ApiError(`pack row patch failed (${packKind}): ${patchErr.message}`, 500)
+  }
+}
+
+async function _patchPackStrict(client: any, jobId: string, packKind: string, patch: Record<string, any>) {
+  const { error } = await client.from('makesafe_report_packs')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('job_id', jobId).eq('pack_kind', packKind)
+  if (error) throw new ApiError(`pack patch failed (${packKind}): ${error.message}`, 500)
+}
+
+// (3c-ii) makesafe_send_photo_followup — Stage 1-2a EMAIL 2 for AJS/MLB.
+// Sends the approved site photos as individual email attachments after the main
+// pack (email 1) is confirmed sent. The main MAKESAFE_PACK_SENT | main marker
+// MUST already be present (proof email 1 went out). Idempotent via the
+// MAKESAFE_PACK_SENT | photo marker.
+//
+// MONEY/COMMS SAFETY: NO Xero authorise, NO invoice PDF, NO pack state machine.
+// This is purely the photo delivery step. It uses the SAME recipient as the main
+// pack (report_recipient from makesafe_companies). Fails closed if the main pack
+// marker is absent (email 1 not yet confirmed sent).
+async function makesafeSendPhotoFollowup(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  if (!jobId) throw new ApiError('job_id required', 400)
+
+  const approvedPhotos: Array<{ url: string; name: string; contentType?: string }> =
+    Array.isArray(body.approved_photos) ? body.approved_photos : []
+  if (approvedPhotos.length === 0) throw new ApiError('approved_photos array is required and must be non-empty', 400)
+
+  // ── PRECONDITION: main pack MUST already be sent ──
+  const { data: events } = await client.from('job_events')
+    .select('job_id, event_type, detail_json')
+    .eq('job_id', jobId).eq('event_type', 'note')
+  if (!(events || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))) {
+    throw new ApiError('photo follow-up blocked: main pack (MAKESAFE_PACK_SENT | main marker) must be sent first', 409)
+  }
+
+  // ── IDEMPOTENCY: if photo follow-up already sent, return early ──
+  if (hasPackPhotoSentMarker(events || [])) {
+    return { already_sent: true, reason: 'MAKESAFE_PACK_SENT | photo marker present', job_id: jobId }
+  }
+
+  // ── ATOMIC PHOTO LOCK: EMAIL 2 must be idempotent under double-click,
+  // retries, and concurrent operators. The marker check above is not enough by
+  // itself because two callers could both read "no marker" and both send. Reuse
+  // makesafe_report_packs with pack_kind='photo': only a row still in drafted /
+  // failed may transition to sending. sent/sending/sent_marker_failed block.
+  const photoPackKind = 'photo'
+  const lockStartedAt = new Date().toISOString()
+  await _ensurePackRowStrict(client, jobId, photoPackKind)
+  const { data: photoLock, error: photoLockErr } = await client.from('makesafe_report_packs')
+    .update({
+      status: 'sending',
+      send_started_at: lockStartedAt,
+      failed_step: 'photo_followup',
+      error_detail: null,
+      updated_at: lockStartedAt,
+    })
+    .eq('job_id', jobId).eq('pack_kind', photoPackKind)
+    .in('status', ['drafted', 'failed'])
+    .select('id, status')
+  if (photoLockErr) throw new ApiError('photo follow-up lock failed: ' + photoLockErr.message, 500)
+  if (!photoLock || photoLock.length === 0) {
+    const { data: currentPhotoPack } = await client.from('makesafe_report_packs')
+      .select('status, failed_step').eq('job_id', jobId).eq('pack_kind', photoPackKind).maybeSingle()
+    const currentStatus = currentPhotoPack?.status || 'missing'
+    if (currentStatus === 'sent') {
+      return { already_sent: true, reason: 'photo pack row already sent', job_id: jobId }
+    }
+    throw new ApiError(`photo follow-up blocked: current photo pack status is '${currentStatus}'`, 409)
+  }
+
+  let emailAttempted = false
+
+  // ── Load job + builder detail for recipient + address ──
+  try {
+    const { data: job } = await client.from('jobs')
+      .select('id, job_number, type, metadata, client_name')
+      .eq('id', jobId).maybeSingle()
+    if (!job) throw new ApiError('job not found', 404)
+    const { data: detail } = await client.from('makesafe_job_details')
+      .select('*, makesafe_companies(slug,name,report_recipient)')
+      .eq('job_id', jobId).maybeSingle()
+
+    const recipientEmail = detail?.makesafe_companies?.report_recipient || null
+    if (!recipientEmail) {
+      throw new ApiError('photo follow-up blocked: no work-orders recipient (report_recipient) configured for this builder', 412)
+    }
+
+    // ── MONEY/COMMS SAFETY (FAIL CLOSED): every approved photo URL MUST belong to
+    // this job's own media. The body is caller-supplied; we never trust it to point
+    // the builder at an arbitrary file. Build the allow-set from job_media for this
+    // job (by URL base, ignoring the ?v= cache-bust + any signing query), and reject
+    // any approved_photos URL not in it. ──
+    const { data: jobMedia } = await client.from('job_media')
+      .select('storage_url, thumbnail_url').eq('job_id', jobId)
+    const _urlBase = (u: unknown) => String(u ?? '').split('?')[0].split('#')[0].trim().toLowerCase()
+    const allowedPhotoUrls = new Set<string>()
+    for (const m of (jobMedia || [])) {
+      if (m?.storage_url) allowedPhotoUrls.add(_urlBase(m.storage_url))
+      if (m?.thumbnail_url) allowedPhotoUrls.add(_urlBase(m.thumbnail_url))
+    }
+    const foreignPhotos = approvedPhotos.filter((p) => !allowedPhotoUrls.has(_urlBase(p?.url)))
+    if (foreignPhotos.length > 0) {
+      throw new ApiError(
+        `photo follow-up blocked (FAIL CLOSED): ${foreignPhotos.length} approved photo URL(s) do not belong to this job's media; only the job's own submitted photos can be sent`,
+        403,
+      )
+    }
+
+    const builderName = detail?.makesafe_companies?.name || detail?.requesting_company_name || 'team'
+    const address = job?.metadata?.address || job?.client_name || jobId
+    const ref = detail?.external_ref || job?.job_number || ''
+    const subject = `Make Safe - Site Photos - ${ref ? ref + ' - ' : ''}${address}`
+    const htmlBody = `<p>Hi ${builderName},</p><p>Please find attached site photos from the make safe works at ${address}.</p><p>These photos are provided for your records.</p>`
+
+    // ── Fetch photo bytes and build attachments ──
+    const attachments: Array<{ contentBytes: string; name: string; contentType: string }> = []
+    for (const photo of approvedPhotos) {
+      try {
+        const resp = await fetch(photo.url)
+        if (!resp.ok) {
+          console.log(`[makesafe_send_photo_followup] photo fetch failed (${resp.status}): ${photo.url}`)
+          continue
+        }
+        const bytes = new Uint8Array(await resp.arrayBuffer())
+        const b64 = _bytesToBase64(bytes)
+        attachments.push({
+          contentBytes: b64,
+          name: photo.name || `photo-${attachments.length + 1}.jpg`,
+          contentType: photo.contentType || 'image/jpeg',
+        })
+      } catch (e) {
+        console.log(`[makesafe_send_photo_followup] photo fetch threw: ${(e as Error).message}`)
+      }
+    }
+    if (attachments.length === 0) {
+      throw new ApiError('photo follow-up failed: could not fetch any approved photo bytes', 502)
+    }
+
+    // ── Send email ──
+    emailAttempted = true
+    const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+      body: JSON.stringify({
+        from: MAKESAFE_ADMIN_FROM,
+        to: recipientEmail,
+        cc: MAKESAFE_CC,
+        subject,
+        htmlBody,
+        attachments,
+      }),
+    })
+    if (!emailResp.ok) {
+      const errText = await emailResp.text().catch(() => '')
+      throw new ApiError(`photo follow-up email failed (${emailResp.status}): ${errText}`.slice(0, 400), 502)
+    }
+    let emailResult: any = {}
+    try { emailResult = await emailResp.json() } catch { emailResult = {} }
+    const messageId = emailResult?.message_id || emailResult?.id || null
+
+    // ── Write the photo follow-up marker (idempotency record) ──
+    const nowIso = new Date().toISOString()
+    const markerText = buildPhotoFollowUpMarkerText({
+      photoCount: attachments.length,
+      to: recipientEmail,
+      nowIso,
+      messageId,
+    })
+    const { error: markerErr } = await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'note',
+      detail_json: { text: markerText },
+    })
+    if (markerErr) {
+      await _patchPackStrict(client, jobId, photoPackKind, {
+        status: 'sent_marker_failed',
+        failed_step: 'photo_marker',
+        error_detail: markerErr.message.slice(0, 500),
+      })
+      // Photos genuinely sent but the idempotency marker write failed. Tell the
+      // operator clearly: the email WENT OUT. Do NOT retry.
+      return {
+        sent: true,
+        photo_count: attachments.length,
+        to: recipientEmail,
+        message_id: messageId,
+        job_id: jobId,
+        marker_failed: true,
+        warning: 'PHOTOS WERE SENT but the idempotency marker write failed. Do NOT re-send (it would double-email the builder). Detail: ' + markerErr.message,
+      }
+    }
+
+    await _patchPackStrict(client, jobId, photoPackKind, {
+      status: 'sent',
+      sent_at: nowIso,
+      failed_step: null,
+      error_detail: null,
+    })
+
+    return {
+      sent: true,
+      photo_count: attachments.length,
+      to: recipientEmail,
+      message_id: messageId,
+      job_id: jobId,
+    }
+  } catch (e) {
+    const message = ((e as Error).message || String(e)).slice(0, 500)
+    await _patchPack(client, jobId, photoPackKind, {
+      status: emailAttempted ? 'sending' : 'failed',
+      failed_step: emailAttempted ? 'photo_send_unknown_outcome' : 'photo_followup',
+      error_detail: message,
+    })
+    throw e
+  }
+}
+export const _makesafeSendPhotoFollowupForTest = makesafeSendPhotoFollowup
+
 // (3d) makesafe_resume_close — TASK B / B1: CLOSE-ONLY resume for the
 // sent_not_closed / close_failed states. PRIVILEGED-CALLER ONLY (route-gated by
 // sendPackAllowed, exactly like makesafe_send_pack; NOT routine-callable).
@@ -17197,6 +18079,144 @@ async function makesafeResetFailedPack(client: any, body: any) {
   return { reset: true, status: targetStatus, job_id: jobId, note: `failed pack reset to '${targetStatus}'; normal send flow can re-run` }
 }
 export const _makesafeResetFailedPackForTest = makesafeResetFailedPack
+
+// ════════════════════════════════════════════════════════════
+// DRAFT PACK / REVISE PACK NOTES — human feedback thread for draft artefacts
+// ════════════════════════════════════════════════════════════
+//
+// These actions are draft-only. They never send, authorise, close, charge, or
+// email a builder. The load-bearing invariant is namespace isolation: a feedback
+// note must never look like the irreversible MAKESAFE_PACK_SENT send marker.
+
+async function addDraftNote(client: any, body: any, _authMode: string): Promise<any> {
+  const job_id = body.job_id || body.jobId
+  const note_body = body.note_body ?? body.body
+  const author = body.author || body.operator_email || 'Ops'
+  const role = body.role
+  const draft_kind = body.draft_kind || body.draftKind
+  if (!job_id) throw new ApiError('job_id required', 400)
+  if (!note_body || !String(note_body).trim()) throw new ApiError('note_body required', 400)
+  if (!author || !String(author).trim()) throw new ApiError('author required', 400)
+
+  try {
+    rejectIfPackSentMarker(String(note_body).trim())
+  } catch (e) {
+    throw new ApiError((e as Error).message, 400)
+  }
+
+  const noteRole = role === 'agent' ? 'agent' : 'human'
+  const kind = draft_kind || 'makesafe_report'
+  const cleanBody = String(note_body).trim()
+  if (noteRole === 'agent' && !cleanBody.startsWith(AGENT_REPLY_PREFIX)) {
+    throw new ApiError(`agent notes must start with '${AGENT_REPLY_PREFIX}'`, 400)
+  }
+
+  const { data, error } = await client.from('draft_notes').insert({
+    org_id: DEFAULT_ORG_ID,
+    job_id,
+    draft_kind: kind,
+    author: String(author).trim(),
+    role: noteRole,
+    body: cleanBody,
+    addressed: false,
+  }).select().single()
+
+  if (error) throw new ApiError('add_draft_note failed: ' + error.message, 500)
+  return { note: data }
+}
+
+async function listDraftNotes(client: any, params: URLSearchParams): Promise<any> {
+  const jobId = params.get('job_id') || params.get('jobId')
+  if (!jobId) throw new ApiError('job_id required', 400)
+  const kind = params.get('draft_kind') || params.get('draftKind') || null
+
+  let q = client.from('draft_notes')
+    .select('id, job_id, draft_kind, author, role, body, addressed, created_at')
+    .eq('job_id', jobId)
+    .order('created_at', { ascending: true })
+
+  if (kind) q = q.eq('draft_kind', kind)
+
+  const { data, error } = await q
+  if (error) throw new ApiError('list_draft_notes failed: ' + error.message, 500)
+  return { notes: data || [] }
+}
+
+async function rerunDraftReport(client: any, body: any, authMode: string): Promise<any> {
+  const job_id = body.job_id || body.jobId
+  const change_description = body.change_description || body.changeDescription
+  const kind = body.draft_kind || body.draftKind || 'makesafe_report'
+  const selectedPhotoUrls = Array.isArray(body.selected_photo_urls)
+    ? body.selected_photo_urls.filter(Boolean)
+    : (Array.isArray(body.approved_photos)
+      ? body.approved_photos.map((p: any) => typeof p === 'string' ? p : p?.url).filter(Boolean)
+      : [])
+  if (!job_id) throw new ApiError('job_id required', 400)
+
+  const { data: unaddressedNotes, error: fetchErr } = await client.from('draft_notes')
+    .select('id, role, addressed, body')
+    .eq('job_id', job_id)
+    .eq('draft_kind', kind)
+    .eq('role', 'human')
+    .eq('addressed', false)
+    .order('created_at', { ascending: true })
+  if (fetchErr) throw new ApiError('rerun_draft_report fetch failed: ' + fetchErr.message, 500)
+
+  const addressable = (unaddressedNotes || []).filter((n: any) => noteIsAddressable(n))
+  if (addressable.length === 0) {
+    return { skipped: true, reason: 'no unaddressed human notes for this job', selected_photo_count: selectedPhotoUrls.length }
+  }
+
+  const noteIds = addressable.map((n: any) => n.id)
+
+  // Reuse the same draft-only action as the cron/automatic Draft Pack path. If
+  // this fails, leave the human notes unaddressed so the loop can be retried.
+  const draftPack = await draftMakesafeReportPack(client, {
+    ...body,
+    job_id,
+    draft_kind: kind,
+    feedback_notes: addressable,
+    selected_photo_urls: selectedPhotoUrls,
+    change_description,
+  }, authMode)
+
+  const { error: updateErr } = await client.from('draft_notes')
+    .update({ addressed: true })
+    .in('id', noteIds)
+  if (updateErr) throw new ApiError('failed to mark notes addressed: ' + updateErr.message, 500)
+
+  const photoSuffix = selectedPhotoUrls.length
+    ? ` Selected photo set captured for draft refresh (${selectedPhotoUrls.length} photo${selectedPhotoUrls.length === 1 ? '' : 's'}).`
+    : ''
+  const description = change_description || draftPack?.change_summary ||
+    `Revise Pack requested; draft artefacts must be refreshed in response to the feedback.${photoSuffix}`
+  const replyBody = buildAgentReplyBody(description)
+  rejectIfPackSentMarker(replyBody)
+
+  const { data: replyNote, error: insertErr } = await client.from('draft_notes').insert({
+    org_id: DEFAULT_ORG_ID,
+    job_id,
+    draft_kind: kind,
+    author: 'MAKESAFE_AGENT',
+    role: 'agent',
+    body: replyBody,
+    addressed: false,
+  }).select().single()
+  if (insertErr) throw new ApiError('notes addressed but reply note failed: ' + insertErr.message, 500)
+
+  return {
+    rerun: true,
+    draft_refresh_required: true,
+    draft_pack: draftPack,
+    addressed_count: noteIds.length,
+    selected_photo_count: selectedPhotoUrls.length,
+    reply_note: replyNote,
+  }
+}
+
+export const _addDraftNoteForTest = addDraftNote
+export const _listDraftNotesForTest = listDraftNotes
+export const _rerunDraftReportForTest = rerunDraftReport
 
 // ════════════════════════════════════════════════════════════
 // REOPEN-MAKESAFE — simple human-triggered job reactivation
