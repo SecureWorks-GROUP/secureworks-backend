@@ -17055,6 +17055,42 @@ function _bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
+// Canary mode for Review & Send live testing. While the pack/email templates are
+// being proven on real make-safe jobs, every canary email MUST go only to Marnin
+// and MUST NOT write the irreversible MAKESAFE_PACK_SENT marker or close the job.
+// The intended builder recipient is preserved in the email banner for review.
+const MAKESAFE_CANARY_RECIPIENT = 'marnin@secureworkswa.com.au'
+
+function _truthyFlag(v: unknown): boolean {
+  return v === true || v === 'true' || v === '1' || v === 1
+}
+
+function _htmlEscape(v: unknown): string {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+async function _loadMakesafeStoredPdfAttachment(
+  client: any,
+  doc: any,
+  fetchPdfBytes: (url: string) => Promise<Uint8Array | null>,
+  fallbackName: string,
+): Promise<{ contentBytes: string; name: string; contentType: string }> {
+  if (!doc?.id) throw new ApiError(`canary send failed: missing ${fallbackName} document row`, 412)
+  const { data: freshDoc } = await client.from('job_documents')
+    .select('file_name, storage_url, pdf_url').eq('id', doc.id).maybeSingle()
+  const fileName = freshDoc?.file_name || doc.file_name || fallbackName
+  const url = freshDoc?.pdf_url || freshDoc?.storage_url || doc.pdf_url || doc.storage_url
+  if (!url) throw new ApiError(`canary send failed: ${fileName} has no storage/pdf URL`, 412)
+  const bytes = await fetchPdfBytes(url)
+  if (!bytes) throw new ApiError(`canary send failed: could not load ${fileName} bytes`, 502)
+  return { contentBytes: _bytesToBase64(bytes), name: fileName, contentType: 'application/pdf' }
+}
+
 // Fetch the AUTHORISED invoice PDF from Xero (Accept: application/pdf). Used to
 // attach the REAL authorised invoice, not the draft.
 async function _fetchXeroInvoicePdfBytes(
@@ -17398,6 +17434,127 @@ async function makesafeSendPack(
   if (!recipientEmail) throw new ApiError('recipient_email required', 400)
   if (!subject) throw new ApiError('subject required', 400)
   if (!htmlBody) throw new ApiError('html_body required', 400)
+
+  // ── CANARY EMAIL MODE (Marnin-only, no authorise, no builder sent marker) ──
+  // This is the "send it to Marnin first" proving lane. It exercises the live
+  // report/invoice/SWMS attachment assembly and email formatting, but it stops
+  // BEFORE the atomic send-lock/Xero authorise path. Therefore it cannot falsely
+  // close a job or claim AJS/MLB received a pack.
+  const canaryMode = _truthyFlag(body.canary_mode ?? body.canaryMode)
+  if (canaryMode) {
+    const canaryDryRun = _truthyFlag(body.canary_dry_run ?? body.canaryDryRun)
+    const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+    const invoiceDoc = (docRows || []).find((d: any) => d.type === 'invoice')
+    const swmsDoc = (docRows || []).find((d: any) => d.type === 'swms')
+    const isMlbBuilder = _isMakesafeMlbCompany(detail, job)
+    const shouldAttachSwms = isMlbBuilder && !isReportJob
+
+    const attachments = isReportJob
+      ? [await _loadMakesafeStoredPdfAttachment(client, invoiceDoc, _fetchReportPdfBytes, `Invoice - ${invoiceNumber || xeroInvoiceId}.pdf`)]
+      : [
+          await _loadMakesafeStoredPdfAttachment(client, reportDoc, _fetchReportPdfBytes, 'Make Safe Report.pdf'),
+          await _loadMakesafeStoredPdfAttachment(client, invoiceDoc, _fetchReportPdfBytes, `Invoice - ${invoiceNumber || xeroInvoiceId}.pdf`),
+          ...(shouldAttachSwms
+            ? [await _loadMakesafeStoredPdfAttachment(client, swmsDoc, _fetchReportPdfBytes, 'SWMS.pdf')]
+            : []),
+        ]
+    const canarySubject = `[MAKESAFE CANARY - NOT SENT TO BUILDER] ${subject}`
+    const canaryHtmlBody = [
+      '<div style="border:2px solid #F97316;background:#FFF7ED;color:#7C2D12;padding:14px 16px;border-radius:10px;margin-bottom:16px;font-family:Arial,sans-serif;">',
+      '<div style="font-weight:800;font-size:15px;">CANARY ONLY — NOT SENT TO BUILDER</div>',
+      '<div style="margin-top:6px;font-size:13px;">Actual recipient: <strong>',
+      _htmlEscape(MAKESAFE_CANARY_RECIPIENT),
+      '</strong></div><div style="font-size:13px;">Intended builder recipient when approved: <strong>',
+      _htmlEscape(recipientEmail),
+      '</strong></div><div style="font-size:13px;">Job: <strong>',
+      _htmlEscape(job?.job_number || jobId),
+      '</strong> · Ref: <strong>',
+      _htmlEscape(detail?.external_ref || ''),
+      '</strong> · Invoice: <strong>',
+      _htmlEscape(invoiceNumber || xeroInvoiceId),
+      '</strong></div></div>',
+      htmlBody,
+    ].join('')
+
+    if (canaryDryRun) {
+      return {
+        success: true,
+        dry_run: true,
+        canary: true,
+        sent: false,
+        builder_not_sent: true,
+        authorised: false,
+        closed: false,
+        job_id: jobId,
+        to: MAKESAFE_CANARY_RECIPIENT,
+        intended_to: recipientEmail,
+        subject: canarySubject,
+        invoice_number: invoiceNumber,
+        attachments: attachments.map((a) => ({ name: a.name, contentType: a.contentType })),
+      }
+    }
+
+    const emailResp = await _sendEmail({
+      from: MAKESAFE_ADMIN_FROM,
+      to: MAKESAFE_CANARY_RECIPIENT,
+      cc: '',
+      subject: canarySubject,
+      htmlBody: canaryHtmlBody,
+      attachments,
+    })
+    if (!emailResp.ok) {
+      const errText = await emailResp.bodyText().catch(() => '')
+      throw new ApiError(`canary email failed (${emailResp.status}); no builder email/authorise/close occurred: ${errText}`.slice(0, 500), 502)
+    }
+    let emailResult: any = {}
+    try { emailResult = await emailResp.json() } catch { emailResult = {} }
+    const messageId = emailResult?.message_id || emailResult?.id || null
+    const now = nowIso()
+    try {
+      await client.from('job_events').insert({
+        job_id: jobId,
+        event_type: 'note',
+        detail_json: {
+          text: `MAKESAFE_CANARY_SENT | main | invoice=${invoiceNumber || xeroInvoiceId || '?'} | actual_to=${MAKESAFE_CANARY_RECIPIENT} | intended_to=${recipientEmail} | ${now} | msgid=${messageId || ''}`,
+        },
+      })
+      await client.from('business_events').insert({
+        event_type: 'makesafe.pack_canary_sent',
+        source: 'ops-api/makesafe_send_pack',
+        entity_type: 'job',
+        entity_id: jobId,
+        job_id: jobId,
+        correlation_id: jobId,
+        payload: {
+          pack_kind: packKind,
+          invoice_number: invoiceNumber,
+          actual_to: MAKESAFE_CANARY_RECIPIENT,
+          intended_to: recipientEmail,
+          message_id: messageId,
+          attachment_names: attachments.map((a) => a.name),
+        },
+        metadata: { operator: ctx.approverEmail || null, canary: true },
+      })
+    } catch (e) {
+      console.log('[makesafe_send_pack] canary marker/business event non-blocking:', (e as Error).message)
+    }
+    return {
+      success: true,
+      canary_sent: true,
+      sent: false,
+      builder_not_sent: true,
+      authorised: false,
+      closed: false,
+      status: priorStatus || 'drafted',
+      job_id: jobId,
+      invoice_number: invoiceNumber,
+      to: MAKESAFE_CANARY_RECIPIENT,
+      intended_to: recipientEmail,
+      message_id: messageId,
+      attachments: attachments.map((a) => ({ name: a.name, contentType: a.contentType })),
+      note: 'Canary email sent to Marnin only; builder send marker and close-out were not written.',
+    }
+  }
 
   // ── ATOMIC SEND-LOCK ──
   // Ensure a pack row exists in a lockable state, then take the lock with a
