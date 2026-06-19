@@ -16751,7 +16751,7 @@ async function claimDraftPackForDrafting(
   const now = new Date().toISOString()
   const fromStatuses = authMode === 'routine'
     ? ['drafted']
-    : ['drafted', REPORT_DRAFT_READY_SUBSTATUS]
+    : ['drafted', REPORT_DRAFT_READY_SUBSTATUS, 'failed']
   const { data: locked, error: lockErr } = await client.from('makesafe_report_packs')
     .update({
       status: 'sending',
@@ -16770,6 +16770,8 @@ async function claimDraftPackForDrafting(
     throw new ApiError(`draft pack claim blocked: current status is '${current?.status || 'missing'}'`, 409)
   }
 }
+
+export const _claimDraftPackForDraftingForTest = claimDraftPackForDrafting
 
 async function markDraftPackFailed(
   client: any,

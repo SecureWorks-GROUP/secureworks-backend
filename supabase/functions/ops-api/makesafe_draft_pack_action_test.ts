@@ -15,6 +15,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _claimDraftPackForDraftingForTest as claimDraftPackForDrafting,
   _draftMakesafeReportPackDueForTest as draftMakesafeReportPackDue,
   _draftMakesafeReportPackForTest as draftMakesafeReportPack,
 } from "./index.ts";
@@ -279,6 +280,66 @@ Deno.test("draftMakesafeReportPack: claimed draft failures are marked failed", a
   assertEquals(calls.markFailed.length, 1);
   assertEquals(calls.markFailed[0].jobId, "job-fail");
   assertEquals(calls.markFailed[0].packKind, "main");
+});
+
+Deno.test("claimDraftPackForDrafting: failed packs are retryable only by privileged callers", async () => {
+  const makeClient = (currentStatus: string) => {
+    const inStatuses: string[][] = [];
+    return {
+      inStatuses,
+      from: (_table: string) => {
+        const state: { mode: "read" | "update"; statuses: string[] } = {
+          mode: "read",
+          statuses: [],
+        };
+        const builder: any = {
+          select: () => builder,
+          update: () => {
+            state.mode = "update";
+            return builder;
+          },
+          eq: () => builder,
+          in: (_col: string, values: string[]) => {
+            state.statuses = values;
+            inStatuses.push(values);
+            return builder;
+          },
+          maybeSingle: () =>
+            Promise.resolve({
+              data: { id: "pack-1", status: currentStatus },
+              error: null,
+            }),
+          then: (resolve: (value: any) => void) => {
+            if (state.mode === "update") {
+              const locked = state.statuses.includes(currentStatus)
+                ? [{ id: "pack-1", status: currentStatus }]
+                : [];
+              resolve({ data: locked, error: null });
+              return;
+            }
+            resolve({ data: [], error: null });
+          },
+        };
+        return builder;
+      },
+    };
+  };
+
+  const privileged = makeClient("failed");
+  await claimDraftPackForDrafting(privileged, "job-1", "main", "api_key");
+  assertEquals(privileged.inStatuses[0], [
+    "drafted",
+    "admin_to_send_report",
+    "failed",
+  ]);
+
+  const routine = makeClient("failed");
+  await assertRejects(
+    () => claimDraftPackForDrafting(routine, "job-1", "main", "routine"),
+    Error,
+    "current status is 'failed'",
+  );
+  assertEquals(routine.inStatuses[0], ["drafted"]);
 });
 
 Deno.test("draftMakesafeReportPackDue: batch runner reuses Draft Pack per due job", async () => {
