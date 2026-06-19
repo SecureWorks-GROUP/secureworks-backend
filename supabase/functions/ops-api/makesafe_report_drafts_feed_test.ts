@@ -10,7 +10,10 @@
 //
 // Run: deno test --no-check --allow-env --allow-net=127.0.0.1 \
 //        supabase/functions/ops-api/makesafe_report_drafts_feed_test.ts
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _makesafeReportDraftsForTest } from "./index.ts";
 import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
@@ -24,12 +27,24 @@ function makeFeedClient(rowsByTable: Record<string, any[]>) {
     let maxRows: number | null = null;
     const b: any = {
       select: () => b,
-      eq: (col: string, val: any) => { preds.push((r) => r?.[col] === val); return b; },
-      neq: (col: string, val: any) => { preds.push((r) => r?.[col] !== val); return b; },
+      eq: (col: string, val: any) => {
+        preds.push((r) => r?.[col] === val);
+        return b;
+      },
+      neq: (col: string, val: any) => {
+        preds.push((r) => r?.[col] !== val);
+        return b;
+      },
       not: () => b,
-      in: (col: string, vals: any[]) => { preds.push((r) => vals.includes(r?.[col])); return b; },
+      in: (col: string, vals: any[]) => {
+        preds.push((r) => vals.includes(r?.[col]));
+        return b;
+      },
       order: () => b,
-      limit: (n: number) => { maxRows = n; return b; },
+      limit: (n: number) => {
+        maxRows = n;
+        return b;
+      },
       // .range() supports buildPackSentMap's paginated job_events read.
       range: async (from: number, to: number) => ({
         data: rows.filter((r) => preds.every((p) => p(r))).slice(from, to + 1),
@@ -71,25 +86,81 @@ function ferndaleSeed() {
       substatus: "admin_to_send_report",
       report_received_at: "2026-06-16T01:00:00Z",
       report_sent_at: null,
-      makesafe_companies: { slug: "mlb", name: "MLB Constructions", invoice_email: "accounts@mlb.com.au" },
+      makesafe_companies: {
+        slug: "mlb",
+        name: "MLB Constructions",
+        invoice_email: "accounts@mlb.com.au",
+      },
     }],
     jobs: [{
-      id: "job-ferndale", job_number: "SWMS-25248", client_name: "Jane Homeowner",
-      client_email: "jane@x.com", site_address: "12 Smith St", site_suburb: "Ferndale", status: "invoiced", type: "makesafe",
+      id: "job-ferndale",
+      job_number: "SWMS-25248",
+      client_name: "Jane Homeowner",
+      client_email: "jane@x.com",
+      site_address: "12 Smith St",
+      site_suburb: "Ferndale",
+      status: "invoiced",
+      type: "makesafe",
     }],
     xero_invoices: [{
-      xero_invoice_id: "xi-1", invoice_number: "INV-1234", status: "DRAFT", reference: "MLB-25248",
-      sub_total: 1000, total: 1100, total_tax: 100, line_items: [], job_id: "job-ferndale", invoice_date: "2026-06-16",
+      xero_invoice_id: "xi-1",
+      invoice_number: "INV-1234",
+      status: "DRAFT",
+      reference: "MLB-25248",
+      sub_total: 1000,
+      total: 1100,
+      total_tax: 100,
+      line_items: [],
+      job_id: "job-ferndale",
+      invoice_date: "2026-06-16",
     }],
     job_documents: [
-      { id: "d-rep", job_id: "job-ferndale", type: "makesafe_report", file_name: "Make Safe Report MLB-25248.pdf", storage_url: "https://docs.test/report.pdf", pdf_url: null, version: 1 },
-      { id: "d-inv", job_id: "job-ferndale", type: "invoice", file_name: "Tax Invoice INV-1234.pdf", storage_url: "https://docs.test/invoice.pdf", pdf_url: null, version: 1 },
-      { id: "d-wo", job_id: "job-ferndale", type: "work_order", file_name: "Work Order.pdf", storage_url: "https://docs.test/wo.pdf", pdf_url: null, version: 1 },
+      {
+        id: "d-rep",
+        job_id: "job-ferndale",
+        type: "makesafe_report",
+        file_name: "Make Safe Report MLB-25248.pdf",
+        storage_url: "https://docs.test/report.pdf",
+        pdf_url: null,
+        version: 1,
+      },
+      {
+        id: "d-inv",
+        job_id: "job-ferndale",
+        type: "invoice",
+        file_name: "Tax Invoice INV-1234.pdf",
+        storage_url: "https://docs.test/invoice.pdf",
+        pdf_url: null,
+        version: 1,
+      },
+      {
+        id: "d-wo",
+        job_id: "job-ferndale",
+        type: "work_order",
+        file_name: "Work Order.pdf",
+        storage_url: "https://docs.test/wo.pdf",
+        pdf_url: null,
+        version: 1,
+      },
     ],
     job_media: [
-      { id: "m1", job_id: "job-ferndale", phase: "completion", type: "photo", storage_url: "https://media.test/p1.jpg", thumbnail_url: "https://media.test/p1t.jpg", label: "Front" },
+      {
+        id: "m1",
+        job_id: "job-ferndale",
+        phase: "completion",
+        type: "photo",
+        storage_url: "https://media.test/p1.jpg",
+        thumbnail_url: "https://media.test/p1t.jpg",
+        label: "Front",
+      },
     ],
-    makesafe_report_packs: [{ job_id: "job-ferndale", pack_kind: "main", status: "drafted", report_doc_id: "d-rep", sent_at: null }],
+    makesafe_report_packs: [{
+      job_id: "job-ferndale",
+      pack_kind: "main",
+      status: "drafted",
+      report_doc_id: "d-rep",
+      sent_at: null,
+    }],
   };
 }
 
@@ -104,10 +175,20 @@ Deno.test("T3 feed: a genuine Ferndale-shaped draft is INCLUDED", async () => {
 Deno.test("T3 feed: a sent-but-stale job (pack status sent) is EXCLUDED", async () => {
   const seed = ferndaleSeed();
   // Same substatus (admin_to_send_report) but the pack already SENT -> sentClosed.
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sent", report_doc_id: "d-rep", sent_at: "2026-06-16T05:00:00Z" }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sent",
+    report_doc_id: "d-rep",
+    sent_at: "2026-06-16T05:00:00Z",
+  }];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
-  assertEquals(res.count, 0, "a sent pack must be excluded from the cockpit feed");
+  assertEquals(
+    res.count,
+    0,
+    "a sent pack must be excluded from the cockpit feed",
+  );
 });
 
 Deno.test("T3 feed: a LEGACY marker-only sent job (job_events marker, no pack row, no report_sent_at) is EXCLUDED", async () => {
@@ -118,14 +199,23 @@ Deno.test("T3 feed: a LEGACY marker-only sent job (job_events marker, no pack ro
   seed.makesafe_report_packs = []; // no durable pack row
   seed.makesafe_job_details[0].report_sent_at = null;
   seed.job_events = [{
-    id: "ev-1", job_id: "job-ferndale", event_type: "note",
-    detail_json: { text: "MAKESAFE_PACK_SENT | main | INV-1234 | to=b@x.com | 2026-06-16T00:00:00Z" },
+    id: "ev-1",
+    job_id: "job-ferndale",
+    event_type: "note",
+    detail_json: {
+      text:
+        "MAKESAFE_PACK_SENT | main | INV-1234 | to=b@x.com | 2026-06-16T00:00:00Z",
+    },
   }];
   // The report doc still exists so hasReportDoc would be true; only the marker
   // (via buildPackSentMap) excludes it.
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
-  assertEquals(res.count, 0, "a legacy marker-only sent job must be excluded from the feed");
+  assertEquals(
+    res.count,
+    0,
+    "a legacy marker-only sent job must be excluded from the feed",
+  );
 });
 
 Deno.test("T3 feed: report_sent_at set (close-out went out) is EXCLUDED", async () => {
@@ -159,24 +249,47 @@ Deno.test("D3 feed: draft_docs[] + source_docs[] are returned with kinds, existi
   // Existing fields unchanged (backward compat).
   assert(row.report_pdf_url, "report_pdf_url still present");
   assert(row.invoice_pdf_url, "invoice_pdf_url still present");
-  assert(Array.isArray(row.photos) && row.photos.length === 1, "photos still present");
-  assert(row.default_subject && row.default_html_body, "send defaults still present");
+  assert(
+    Array.isArray(row.photos) && row.photos.length === 1,
+    "photos still present",
+  );
+  assert(
+    row.default_subject && row.default_html_body,
+    "send defaults still present",
+  );
   // D3 arrays.
   const draftLabels = row.draft_docs.map((d: any) => d.label);
   assert(draftLabels.includes("Make Safe Report"), "draft_docs has the report");
-  assert(draftLabels.includes("Draft Invoice"), "draft_docs has the draft invoice");
+  assert(
+    draftLabels.includes("Draft Invoice"),
+    "draft_docs has the draft invoice",
+  );
   // SWMS only when attached — none here.
   assert(!draftLabels.includes("SWMS"), "no SWMS attached -> none surfaced");
   // source_docs has the work order + the photo (image kind).
   const srcLabels = row.source_docs.map((d: any) => d.label);
   assert(srcLabels.includes("Work Order"), "source_docs has the work order");
-  assert(row.source_docs.some((d: any) => d.kind === "image"), "source_docs includes a photo image");
-  assert(row.draft_docs.every((d: any) => d.kind === "pdf"), "draft_docs are pdf kind");
+  assert(
+    row.source_docs.some((d: any) => d.kind === "image"),
+    "source_docs includes a photo image",
+  );
+  assert(
+    row.draft_docs.every((d: any) => d.kind === "pdf"),
+    "draft_docs are pdf kind",
+  );
 });
 
 Deno.test("D3 feed: an attached SWMS is surfaced in draft_docs", async () => {
   const seed = ferndaleSeed();
-  seed.job_documents.push({ id: "d-swms", job_id: "job-ferndale", type: "swms", file_name: "SWMS.pdf", storage_url: "https://docs.test/swms.pdf", pdf_url: null, version: 1 });
+  seed.job_documents.push({
+    id: "d-swms",
+    job_id: "job-ferndale",
+    type: "swms",
+    file_name: "SWMS.pdf",
+    storage_url: "https://docs.test/swms.pdf",
+    pdf_url: null,
+    version: 1,
+  });
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   const draftLabels = res.drafts[0].draft_docs.map((d: any) => d.label);
@@ -193,14 +306,20 @@ Deno.test("C feed: report_recipient set -> recipient_email = work-orders inbox, 
   // AJS-shaped: a billing contact (invoice_email = vanessa) PLUS the work-orders
   // inbox (report_recipient). The To must be the work-orders inbox, never vanessa.
   seed.makesafe_job_details[0].makesafe_companies = {
-    slug: "aj", name: "AJS", invoice_email: "vanessa@ajs.build", report_recipient: "workorders@ajs.build",
+    slug: "aj",
+    name: "AJS",
+    invoice_email: "vanessa@ajs.build",
+    report_recipient: "workorders@ajs.build",
   } as any;
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 1);
   const row = res.drafts[0];
   assertEquals(row.recipient_email, "workorders@ajs.build");
-  assert(row.recipient_email !== "vanessa@ajs.build", "vanessa (billing) must NEVER be the To");
+  assert(
+    row.recipient_email !== "vanessa@ajs.build",
+    "vanessa (billing) must NEVER be the To",
+  );
   assertEquals(row.cc, [MAKESAFE_CC]);
 });
 
@@ -208,14 +327,24 @@ Deno.test("C feed: report_recipient null -> recipient_email null (warning), NOT 
   const seed = ferndaleSeed();
   // Only a billing contact configured, no work-orders inbox.
   seed.makesafe_job_details[0].makesafe_companies = {
-    slug: "aj", name: "AJS", invoice_email: "vanessa@ajs.build", report_recipient: null,
+    slug: "aj",
+    name: "AJS",
+    invoice_email: "vanessa@ajs.build",
+    report_recipient: null,
   } as any;
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 1);
   const row = res.drafts[0];
-  assertEquals(row.recipient_email, null, "no work-orders inbox -> null (cockpit warns)");
-  assert(row.recipient_email !== "vanessa@ajs.build", "must NOT fall back to the billing contact");
+  assertEquals(
+    row.recipient_email,
+    null,
+    "no work-orders inbox -> null (cockpit warns)",
+  );
+  assert(
+    row.recipient_email !== "vanessa@ajs.build",
+    "must NOT fall back to the billing contact",
+  );
   // cc is still exactly ses@ (the send hard-enforces this server-side too).
   assertEquals(row.cc, [MAKESAFE_CC]);
 });
@@ -225,8 +354,28 @@ Deno.test("T3 feed: invoice_ambiguous is still returned (UX gates on it)", async
   // Two non-void invoices on the job -> ambiguous. Keep one DRAFT so the row still
   // qualifies as a draft to review.
   seed.xero_invoices = [
-    { xero_invoice_id: "xi-1", invoice_number: "INV-1", status: "DRAFT", reference: "MLB-25248", sub_total: 1000, total: 1100, line_items: [], job_id: "job-ferndale", invoice_date: "2026-06-16" },
-    { xero_invoice_id: "xi-2", invoice_number: "INV-2", status: "DRAFT", reference: "MLB-25248", sub_total: 900, total: 990, line_items: [], job_id: "job-ferndale", invoice_date: "2026-06-15" },
+    {
+      xero_invoice_id: "xi-1",
+      invoice_number: "INV-1",
+      status: "DRAFT",
+      reference: "MLB-25248",
+      sub_total: 1000,
+      total: 1100,
+      line_items: [],
+      job_id: "job-ferndale",
+      invoice_date: "2026-06-16",
+    },
+    {
+      xero_invoice_id: "xi-2",
+      invoice_number: "INV-2",
+      status: "DRAFT",
+      reference: "MLB-25248",
+      sub_total: 900,
+      total: 990,
+      line_items: [],
+      job_id: "job-ferndale",
+      invoice_date: "2026-06-15",
+    },
   ];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
@@ -248,7 +397,15 @@ Deno.test("T3 feed: invoice_ambiguous is still returned (UX gates on it)", async
 
 // A marker note for a job (used to drive markerPresent via buildPackSentMap).
 function markerNote(jobId: string) {
-  return { id: `ev-${jobId}`, job_id: jobId, event_type: "note", detail_json: { text: `MAKESAFE_PACK_SENT | main | INV | to=x@y.com | 2026-06-17T00:00:00Z` } };
+  return {
+    id: `ev-${jobId}`,
+    job_id: jobId,
+    event_type: "note",
+    detail_json: {
+      text:
+        `MAKESAFE_PACK_SENT | main | INV | to=x@y.com | 2026-06-17T00:00:00Z`,
+    },
+  };
 }
 
 Deno.test("A feed row 1: a ready draft -> resume_action 'send'", async () => {
@@ -261,7 +418,13 @@ Deno.test("A feed row 1: a ready draft -> resume_action 'send'", async () => {
 Deno.test("A feed row 2: authorised_not_sent + authorised invoice + NO marker -> 'finish_send'", async () => {
   const seed = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "authorised_not_sent", report_doc_id: "d-rep", sent_at: null }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "authorised_not_sent",
+    report_doc_id: "d-rep",
+    sent_at: null,
+  }];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 1);
@@ -271,17 +434,33 @@ Deno.test("A feed row 2: authorised_not_sent + authorised invoice + NO marker ->
 Deno.test("A feed firewall: authorised_not_sent WITH a marker -> EXCLUDED (no double-email)", async () => {
   const seed: any = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "authorised_not_sent", report_doc_id: "d-rep", sent_at: null }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "authorised_not_sent",
+    report_doc_id: "d-rep",
+    sent_at: null,
+  }];
   seed.job_events = [markerNote("job-ferndale")];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
-  assertEquals(res.count, 0, "a marker means it was sent -> never re-offer a send");
+  assertEquals(
+    res.count,
+    0,
+    "a marker means it was sent -> never re-offer a send",
+  );
 });
 
 Deno.test("A feed row 3: sent_marker_failed + NO marker -> 'finish_send'", async () => {
   const seed = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sent_marker_failed", report_doc_id: "d-rep", sent_at: null }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sent_marker_failed",
+    report_doc_id: "d-rep",
+    sent_at: null,
+  }];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 1);
@@ -291,7 +470,13 @@ Deno.test("A feed row 3: sent_marker_failed + NO marker -> 'finish_send'", async
 Deno.test("A feed row 4: sent_not_closed + marker -> 'finish_close_out'", async () => {
   const seed: any = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sent_not_closed", report_doc_id: "d-rep", sent_at: "2026-06-17T01:00:00Z" }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sent_not_closed",
+    report_doc_id: "d-rep",
+    sent_at: "2026-06-17T01:00:00Z",
+  }];
   seed.job_events = [markerNote("job-ferndale")];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
@@ -302,7 +487,13 @@ Deno.test("A feed row 4: sent_not_closed + marker -> 'finish_close_out'", async 
 Deno.test("A feed row 4b: close_failed + marker -> 'finish_close_out'", async () => {
   const seed: any = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "close_failed", report_doc_id: "d-rep", sent_at: "2026-06-17T01:00:00Z" }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "close_failed",
+    report_doc_id: "d-rep",
+    sent_at: "2026-06-17T01:00:00Z",
+  }];
   seed.job_events = [markerNote("job-ferndale")];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
@@ -314,7 +505,14 @@ Deno.test("A feed row 5: sending + NO marker -> 'resolve_send_state' (with send_
   const seed = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
   const started = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sending", report_doc_id: "d-rep", sent_at: null, send_started_at: started }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sending",
+    report_doc_id: "d-rep",
+    sent_at: null,
+    send_started_at: started,
+  }];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 1);
@@ -323,10 +521,35 @@ Deno.test("A feed row 5: sending + NO marker -> 'resolve_send_state' (with send_
   assertEquals(res.drafts[0].pack_status.in_flight_stale, true);
 });
 
+Deno.test("A feed guard: sending + failed_step=draft_pack is excluded from email-send resolution", async () => {
+  const seed = ferndaleSeed();
+  seed.xero_invoices[0].status = "AUTHORISED";
+  const started = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sending",
+    failed_step: "draft_pack",
+    report_doc_id: "d-rep",
+    sent_at: null,
+    send_started_at: started,
+  }];
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 0);
+});
+
 Deno.test("A feed row 6: sending + marker -> 'finish_close_out'", async () => {
   const seed: any = ferndaleSeed();
   seed.xero_invoices[0].status = "AUTHORISED";
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sending", report_doc_id: "d-rep", sent_at: null, send_started_at: new Date().toISOString() }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sending",
+    report_doc_id: "d-rep",
+    sent_at: null,
+    send_started_at: new Date().toISOString(),
+  }];
   seed.job_events = [markerNote("job-ferndale")];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
@@ -336,7 +559,13 @@ Deno.test("A feed row 6: sending + marker -> 'finish_close_out'", async () => {
 
 Deno.test("A feed row 7: a sent/terminal job is EXCLUDED (resume_action null -> dropped)", async () => {
   const seed = ferndaleSeed();
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "sent", report_doc_id: "d-rep", sent_at: "2026-06-17T05:00:00Z" }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "sent",
+    report_doc_id: "d-rep",
+    sent_at: "2026-06-17T05:00:00Z",
+  }];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 0, "a terminal sent job must be excluded");
@@ -349,10 +578,20 @@ Deno.test("A feed UNION: an authorised_not_sent pack whose substatus MOVED OFF a
   const seed = ferndaleSeed();
   seed.makesafe_job_details[0].substatus = "ready_to_invoice"; // moved off admin_to_send_report
   seed.xero_invoices[0].status = "AUTHORISED";
-  seed.makesafe_report_packs = [{ job_id: "job-ferndale", pack_kind: "main", status: "authorised_not_sent", report_doc_id: "d-rep", sent_at: null }];
+  seed.makesafe_report_packs = [{
+    job_id: "job-ferndale",
+    pack_kind: "main",
+    status: "authorised_not_sent",
+    report_doc_id: "d-rep",
+    sent_at: null,
+  }];
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
-  assertEquals(res.count, 1, "the resumable pack is unioned in despite the moved substatus");
+  assertEquals(
+    res.count,
+    1,
+    "the resumable pack is unioned in despite the moved substatus",
+  );
   assertEquals(res.drafts[0].job_id, "job-ferndale");
   assertEquals(res.drafts[0].resume_action, "finish_send");
 });
