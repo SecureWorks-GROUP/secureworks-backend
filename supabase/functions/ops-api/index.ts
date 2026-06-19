@@ -16795,6 +16795,7 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
   if (!jobId) throw new ApiError('job_id required', 400)
   const selectedPhotoUrls = normaliseStringArray(body.selected_photo_urls || body.selectedPhotoUrls)
 
+  const draftKind = body.draft_kind || body.draftKind || 'makesafe_report'
   const [jobRes, detailRes, reportRes, docsRes, mediaRes, notesRes] = await Promise.all([
     client.from('jobs')
       .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, created_at, updated_at')
@@ -16815,11 +16816,7 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
       .select('id, phase, type, storage_url, thumbnail_url, label')
       .eq('job_id', jobId)
       .eq('type', 'photo'),
-    client.from('draft_notes')
-      .select('id, draft_kind, author, role, body, addressed, created_at')
-      .eq('job_id', jobId)
-      .eq('draft_kind', body.draft_kind || body.draftKind || 'makesafe_report')
-      .order('created_at', { ascending: true }),
+    loadDraftNotesThread(client, jobId, draftKind),
   ])
 
   const media = mediaRes.data || []
@@ -16832,7 +16829,7 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
     job: jobRes.data || null,
     detail: detailRes.data || null,
     service_report: reportRes.data || null,
-    feedback_notes: Array.isArray(body.feedback_notes) ? body.feedback_notes : (notesRes.data || []),
+    feedback_notes: Array.isArray(body.feedback_notes) ? body.feedback_notes : (notesRes.notes || []),
     selected_photo_urls: selected,
     source_docs: [
       ...((docsRes.data || []) as any[]),
@@ -18088,6 +18085,148 @@ export const _makesafeResetFailedPackForTest = makesafeResetFailedPack
 // email a builder. The load-bearing invariant is namespace isolation: a feedback
 // note must never look like the irreversible MAKESAFE_PACK_SENT send marker.
 
+const DRAFT_NOTE_EVENT_TYPE = 'makesafe_draft_note'
+
+function isMissingDraftNotesTable(error: any): boolean {
+  const msg = String(error?.message || error?.details || error?.hint || '')
+  const code = String(error?.code || '')
+  return code === '42P01' ||
+    msg.includes("Could not find the table 'public.draft_notes'") ||
+    msg.includes('relation "public.draft_notes" does not exist') ||
+    msg.includes('draft_notes') && msg.includes('schema cache')
+}
+
+function draftNoteFromFallbackEvent(ev: any, includeRaw = false): any {
+  const detail = ev?.detail_json || {}
+  const note: any = {
+    id: ev?.id,
+    job_id: ev?.job_id,
+    draft_kind: detail.draft_kind || 'makesafe_report',
+    author: detail.author || 'Ops',
+    role: detail.role === 'agent' ? 'agent' : 'human',
+    body: detail.body || '',
+    addressed: detail.addressed === true,
+    created_at: ev?.created_at || null,
+    storage: 'job_events_fallback',
+  }
+  if (includeRaw) note._fallback_event_detail = detail
+  return note
+}
+
+function publicDraftNote(note: any): any {
+  const { _fallback_event_detail: _ignored, ...rest } = note || {}
+  return rest
+}
+
+async function loadDraftNotesThread(
+  client: any,
+  jobId: string,
+  kind: string | null = null,
+  opts: { humanUnaddressedOnly?: boolean; includeRaw?: boolean } = {},
+): Promise<{ notes: any[]; storage: 'draft_notes' | 'job_events_fallback' }> {
+  let q = client.from('draft_notes')
+    .select('id, job_id, draft_kind, author, role, body, addressed, created_at')
+    .eq('job_id', jobId)
+    .order('created_at', { ascending: true })
+
+  if (kind) q = q.eq('draft_kind', kind)
+  if (opts.humanUnaddressedOnly) {
+    q = q.eq('role', 'human').eq('addressed', false)
+  }
+
+  const { data, error } = await q
+  if (!error) {
+    return { notes: (data || []).map(publicDraftNote), storage: 'draft_notes' }
+  }
+  if (!isMissingDraftNotesTable(error)) {
+    throw new ApiError('list_draft_notes failed: ' + error.message, 500)
+  }
+
+  const { data: events, error: eventErr } = await client.from('job_events')
+    .select('id, job_id, event_type, detail_json, created_at')
+    .eq('job_id', jobId)
+    .eq('event_type', DRAFT_NOTE_EVENT_TYPE)
+    .order('created_at', { ascending: true })
+  if (eventErr) throw new ApiError('list_draft_notes fallback failed: ' + eventErr.message, 500)
+
+  const notes = (events || [])
+    .map((ev: any) => draftNoteFromFallbackEvent(ev, opts.includeRaw))
+    .filter((note: any) => !kind || note.draft_kind === kind)
+    .filter((note: any) => !opts.humanUnaddressedOnly || noteIsAddressable(note))
+
+  return { notes, storage: 'job_events_fallback' }
+}
+
+async function insertDraftNoteWithFallback(client: any, note: {
+  job_id: string
+  draft_kind: string
+  author: string
+  role: 'human' | 'agent'
+  body: string
+  addressed?: boolean
+}): Promise<{ note: any; storage: 'draft_notes' | 'job_events_fallback' }> {
+  const addressed = note.addressed === true
+  const { data, error } = await client.from('draft_notes').insert({
+    org_id: DEFAULT_ORG_ID,
+    job_id: note.job_id,
+    draft_kind: note.draft_kind,
+    author: note.author,
+    role: note.role,
+    body: note.body,
+    addressed,
+  }).select().single()
+
+  if (!error) return { note: data, storage: 'draft_notes' }
+  if (!isMissingDraftNotesTable(error)) {
+    throw new ApiError('add_draft_note failed: ' + error.message, 500)
+  }
+
+  const { data: ev, error: eventErr } = await client.from('job_events').insert({
+    job_id: note.job_id,
+    event_type: DRAFT_NOTE_EVENT_TYPE,
+    detail_json: {
+      draft_kind: note.draft_kind,
+      author: note.author,
+      role: note.role,
+      body: note.body,
+      addressed,
+      source: 'draft_notes_fallback',
+    },
+  }).select('id, job_id, event_type, detail_json, created_at').single()
+  if (eventErr) throw new ApiError('add_draft_note fallback failed: ' + eventErr.message, 500)
+  return { note: draftNoteFromFallbackEvent(ev), storage: 'job_events_fallback' }
+}
+
+async function markDraftNotesAddressed(
+  client: any,
+  notes: any[],
+  storage: 'draft_notes' | 'job_events_fallback',
+): Promise<void> {
+  const noteIds = notes.map((n: any) => n.id).filter(Boolean)
+  if (noteIds.length === 0) return
+
+  if (storage === 'draft_notes') {
+    const { error } = await client.from('draft_notes')
+      .update({ addressed: true })
+      .in('id', noteIds)
+    if (error) throw new ApiError('failed to mark notes addressed: ' + error.message, 500)
+    return
+  }
+
+  const addressedAt = new Date().toISOString()
+  for (const note of notes) {
+    const detail = {
+      ...(note._fallback_event_detail || {}),
+      addressed: true,
+      addressed_at: addressedAt,
+    }
+    const { error } = await client.from('job_events')
+      .update({ detail_json: detail })
+      .eq('id', note.id)
+    if (error) throw new ApiError('failed to mark fallback notes addressed: ' + error.message, 500)
+  }
+}
+
 async function addDraftNote(client: any, body: any, _authMode: string): Promise<any> {
   const job_id = body.job_id || body.jobId
   const note_body = body.note_body ?? body.body
@@ -18111,18 +18250,16 @@ async function addDraftNote(client: any, body: any, _authMode: string): Promise<
     throw new ApiError(`agent notes must start with '${AGENT_REPLY_PREFIX}'`, 400)
   }
 
-  const { data, error } = await client.from('draft_notes').insert({
-    org_id: DEFAULT_ORG_ID,
+  const inserted = await insertDraftNoteWithFallback(client, {
     job_id,
     draft_kind: kind,
     author: String(author).trim(),
     role: noteRole,
     body: cleanBody,
     addressed: false,
-  }).select().single()
+  })
 
-  if (error) throw new ApiError('add_draft_note failed: ' + error.message, 500)
-  return { note: data }
+  return { note: publicDraftNote(inserted.note), storage: inserted.storage }
 }
 
 async function listDraftNotes(client: any, params: URLSearchParams): Promise<any> {
@@ -18130,16 +18267,8 @@ async function listDraftNotes(client: any, params: URLSearchParams): Promise<any
   if (!jobId) throw new ApiError('job_id required', 400)
   const kind = params.get('draft_kind') || params.get('draftKind') || null
 
-  let q = client.from('draft_notes')
-    .select('id, job_id, draft_kind, author, role, body, addressed, created_at')
-    .eq('job_id', jobId)
-    .order('created_at', { ascending: true })
-
-  if (kind) q = q.eq('draft_kind', kind)
-
-  const { data, error } = await q
-  if (error) throw new ApiError('list_draft_notes failed: ' + error.message, 500)
-  return { notes: data || [] }
+  const result = await loadDraftNotesThread(client, jobId, kind)
+  return { notes: result.notes.map(publicDraftNote), storage: result.storage }
 }
 
 async function rerunDraftReport(client: any, body: any, authMode: string): Promise<any> {
@@ -18153,21 +18282,14 @@ async function rerunDraftReport(client: any, body: any, authMode: string): Promi
       : [])
   if (!job_id) throw new ApiError('job_id required', 400)
 
-  const { data: unaddressedNotes, error: fetchErr } = await client.from('draft_notes')
-    .select('id, role, addressed, body')
-    .eq('job_id', job_id)
-    .eq('draft_kind', kind)
-    .eq('role', 'human')
-    .eq('addressed', false)
-    .order('created_at', { ascending: true })
-  if (fetchErr) throw new ApiError('rerun_draft_report fetch failed: ' + fetchErr.message, 500)
-
-  const addressable = (unaddressedNotes || []).filter((n: any) => noteIsAddressable(n))
+  const noteResult = await loadDraftNotesThread(client, job_id, kind, {
+    humanUnaddressedOnly: true,
+    includeRaw: true,
+  })
+  const addressable = (noteResult.notes || []).filter((n: any) => noteIsAddressable(n))
   if (addressable.length === 0) {
     return { skipped: true, reason: 'no unaddressed human notes for this job', selected_photo_count: selectedPhotoUrls.length }
   }
-
-  const noteIds = addressable.map((n: any) => n.id)
 
   // Reuse the same draft-only action as the cron/automatic Draft Pack path. If
   // this fails, leave the human notes unaddressed so the loop can be retried.
@@ -18180,10 +18302,7 @@ async function rerunDraftReport(client: any, body: any, authMode: string): Promi
     change_description,
   }, authMode)
 
-  const { error: updateErr } = await client.from('draft_notes')
-    .update({ addressed: true })
-    .in('id', noteIds)
-  if (updateErr) throw new ApiError('failed to mark notes addressed: ' + updateErr.message, 500)
+  await markDraftNotesAddressed(client, addressable, noteResult.storage)
 
   const photoSuffix = selectedPhotoUrls.length
     ? ` Selected photo set captured for draft refresh (${selectedPhotoUrls.length} photo${selectedPhotoUrls.length === 1 ? '' : 's'}).`
@@ -18193,24 +18312,23 @@ async function rerunDraftReport(client: any, body: any, authMode: string): Promi
   const replyBody = buildAgentReplyBody(description)
   rejectIfPackSentMarker(replyBody)
 
-  const { data: replyNote, error: insertErr } = await client.from('draft_notes').insert({
-    org_id: DEFAULT_ORG_ID,
+  const replyNote = await insertDraftNoteWithFallback(client, {
     job_id,
     draft_kind: kind,
     author: 'MAKESAFE_AGENT',
     role: 'agent',
     body: replyBody,
     addressed: false,
-  }).select().single()
-  if (insertErr) throw new ApiError('notes addressed but reply note failed: ' + insertErr.message, 500)
+  })
 
   return {
     rerun: true,
     draft_refresh_required: true,
     draft_pack: draftPack,
-    addressed_count: noteIds.length,
+    addressed_count: addressable.length,
     selected_photo_count: selectedPhotoUrls.length,
-    reply_note: replyNote,
+    notes_storage: noteResult.storage,
+    reply_note: publicDraftNote(replyNote.note),
   }
 }
 
