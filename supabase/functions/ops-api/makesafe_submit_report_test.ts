@@ -5,6 +5,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _makesafePipelineForTest,
+  _normaliseOpsAttachJobPhotoInputForTest,
   _submitMakesafeReportForTest,
 } from "./index.ts";
 
@@ -151,6 +152,46 @@ function validBody(overrides: Record<string, any> = {}) {
     ...overrides,
   };
 }
+
+Deno.test("ops attach job photo normalises recovered completion photo input", () => {
+  const body = {
+    job_id: "96e9b216-5e06-408e-a8af-e51d665da22b",
+    dataUrl: "data:image/jpeg;base64,aGVsbG8=",
+    label: "Mirrabooka recovered photo 1 — 11 Jun 2026",
+  };
+
+  const parsed = _normaliseOpsAttachJobPhotoInputForTest(body);
+
+  assertEquals(parsed.jId, body.job_id);
+  assertEquals(parsed.phase, "completion");
+  assertEquals(parsed.mime, "image/jpeg");
+  assertEquals(parsed.ext, "jpg");
+  assertEquals(parsed.bytes.byteLength, 5);
+  assertEquals(parsed.label, body.label);
+});
+
+Deno.test("ops attach job photo rejects non-completion or non-image recovery payloads", () => {
+  assertRejects(
+    async () =>
+      _normaliseOpsAttachJobPhotoInputForTest({
+        job_id: "96e9b216-5e06-408e-a8af-e51d665da22b",
+        phase: "scope",
+        dataUrl: "data:image/jpeg;base64,aGVsbG8=",
+      }),
+    Error,
+    "only attaches completion photos",
+  );
+
+  assertRejects(
+    async () =>
+      _normaliseOpsAttachJobPhotoInputForTest({
+        job_id: "96e9b216-5e06-408e-a8af-e51d665da22b",
+        dataUrl: "data:text/plain;base64,aGVsbG8=",
+      }),
+    Error,
+    "base64 jpeg, png, or webp image data URL",
+  );
+});
 
 Deno.test("submit_makesafe_report rejects final submit with fewer than 5 photos", async () => {
   const { client, rows } = makeSubmitClient(baseRows({

@@ -3150,6 +3150,14 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'upsert_ops_note': return json(await upsertOpsNote(client, body))
       case 'delete_ops_note': return json(await deleteOpsNote(client, body))
       case 'get_ops_upload_url': return json(await getOpsUploadUrl(client, body))
+      case 'ops_attach_job_photo': {
+        const attachIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!attachIsPrivileged) {
+          return json({ error: 'forbidden: ops_attach_job_photo requires the privileged ops key or an admin/owner session; the make-safe automation routine cannot attach recovered photos' }, 403)
+        }
+        return json(await opsAttachJobPhoto(client, body))
+      }
       case 'send_ops_note_to_trade': return json(await sendOpsNoteToTrade(client, body))
 
       // ── Proposed Actions (SMS drafts etc.) ──
@@ -15601,6 +15609,90 @@ async function uploadPhoto(client: any, body: any) {
 
   return { id: mediaRecord.id, url: urlData.publicUrl }
 }
+
+function normaliseOpsAttachJobPhotoInput(body: any) {
+  const jId = body?.jobId || body?.job_id
+  const dataUrl = String(body?.dataUrl || body?.data_url || '')
+  if (!jId || !dataUrl) throw new ApiError('job_id and dataUrl required', 400)
+  if (!String(jId).match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+    throw new ApiError('job_id must be a valid UUID', 400)
+  }
+
+  const phase = String(body?.phase || 'completion').trim().toLowerCase()
+  if (phase !== 'completion') {
+    throw new ApiError('ops_attach_job_photo only attaches completion photos for reporting recovery', 400)
+  }
+
+  const match = dataUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (!match) throw new ApiError('dataUrl must be a base64 jpeg, png, or webp image data URL', 400)
+
+  const mime = match[1].toLowerCase().replace('image/jpg', 'image/jpeg')
+  const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg'
+  const base64 = match[2].replace(/\s/g, '')
+  let bytes: Uint8Array
+  try {
+    bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0))
+  } catch {
+    throw new ApiError('dataUrl base64 payload is invalid', 400)
+  }
+  if (!bytes.byteLength) throw new ApiError('dataUrl image payload is empty', 400)
+  if (bytes.byteLength > 12 * 1024 * 1024) throw new ApiError('image payload exceeds 12MB limit', 413)
+
+  const label = String(body?.label || 'Recovered completion photo').trim().slice(0, 160) || 'Recovered completion photo'
+  const sourceNote = String(body?.source_note || body?.sourceNote || 'Recovered by Ops for MakeSafe reporting').trim().slice(0, 500)
+  return { jId, phase, dataUrl, mime, ext, bytes, label, sourceNote }
+}
+
+async function opsAttachJobPhoto(client: any, body: any) {
+  const parsed = normaliseOpsAttachJobPhotoInput(body)
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, job_number')
+    .eq('id', parsed.jId)
+    .maybeSingle()
+  if (jobErr) throw jobErr
+  if (!job) throw new ApiError('Job not found', 404)
+
+  const photoId = crypto.randomUUID()
+  const path = `${DEFAULT_ORG_ID}/${parsed.jId}/photos/${photoId}.${parsed.ext}`
+
+  try { await client.storage.createBucket('job-photos', { public: true }) } catch { /* exists */ }
+
+  const { error: uploadError } = await client.storage
+    .from('job-photos')
+    .upload(path, parsed.bytes, { contentType: parsed.mime, upsert: false })
+  if (uploadError) throw uploadError
+
+  const { data: urlData } = client.storage.from('job-photos').getPublicUrl(path)
+  const mediaInsert: any = {
+    job_id: parsed.jId,
+    type: 'photo',
+    storage_url: urlData.publicUrl,
+    thumbnail_url: urlData.publicUrl,
+    label: parsed.label,
+    phase: parsed.phase,
+    uploaded_by: null,
+    notes: parsed.sourceNote,
+  }
+
+  const { data: mediaRecord, error: mediaError } = await client.from('job_media').insert(mediaInsert).select().single()
+  if (mediaError) throw mediaError
+
+  await client.from('job_events').insert({
+    job_id: parsed.jId,
+    user_id: null,
+    event_type: 'photo_added',
+    detail_json: {
+      media_id: mediaRecord.id,
+      phase: parsed.phase,
+      source: 'ops_attach_job_photo',
+      label: parsed.label,
+    },
+  })
+
+  return { ok: true, job_id: parsed.jId, job_number: job.job_number, media_id: mediaRecord.id, url: urlData.publicUrl }
+}
+
+export const _normaliseOpsAttachJobPhotoInputForTest = normaliseOpsAttachJobPhotoInput
 
 async function submitServiceReport(client: any, body: any) {
   const { jobId, job_id, userId, user_id, checklist, notes, signatureData, signatureName, status, weather, start_time, end_time, variations } = body
