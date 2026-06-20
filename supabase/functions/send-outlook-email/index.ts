@@ -210,6 +210,12 @@ serve(async (req: Request) => {
   try {
     const body = await req.json()
     const {
+      // NOTE: the default sender is marnin@ for general/ad-hoc sends only.
+      // Make-safe pack sends MUST always pass `from` explicitly (admin@secureworkswa.com.au).
+      // The checkClientSendGate in makesafe_send_pack.ts will reject any send that
+      // reaches graph with the wrong from address - this default is a final fallback
+      // for non-make-safe callers only. If this function is called for a make-safe send
+      // without `from` in the body, the gate will have already failed before dispatch.
       from = 'marnin@secureworkswa.com.au',
       to,
       cc,
