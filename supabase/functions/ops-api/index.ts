@@ -16381,8 +16381,13 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       source_type: sourceType || doc?.type || null,
     })
     const draftDocs: MakesafeCockpitDoc[] = []
+    const invoiceDocLabel = ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(
+      String(liveInvoice?.status || pack?.invoice_status || '').toUpperCase(),
+    )
+      ? 'Xero Invoice'
+      : 'Draft Invoice'
     if (reportPdfUrl) draftDocs.push({ label: 'Make Safe Report', url: reportPdfUrl, kind: 'pdf', ...docMeta(reportDoc, reportDoc?.created_at || null, 'makesafe_report') })
-    if (invoicePdfUrl) draftDocs.push({ label: 'Draft Invoice', url: invoicePdfUrl, kind: 'pdf', ...docMeta(invoiceDoc, invoiceDoc?.created_at || null, 'invoice') })
+    if (invoicePdfUrl) draftDocs.push({ label: invoiceDocLabel, url: invoicePdfUrl, kind: 'pdf', ...docMeta(invoiceDoc, invoiceDoc?.created_at || null, 'invoice') })
     if (swmsPdfUrl) draftDocs.push({ label: 'SWMS', url: swmsPdfUrl, kind: 'pdf', ...docMeta(swmsDoc, swmsDoc?.created_at || null, 'swms') })
 
     const rawServiceReport = serviceReportByJob[d.job_id] || null

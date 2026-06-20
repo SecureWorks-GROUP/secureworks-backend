@@ -562,6 +562,14 @@ Deno.test("A feed row 2: authorised_not_sent + authorised invoice + NO marker ->
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 1);
   assertEquals(res.drafts[0].resume_action, "finish_send");
+  assert(
+    res.drafts[0].draft_docs.some((d: any) => d.label === "Xero Invoice"),
+    "authorised resume packs label the active invoice as Xero Invoice, not Draft Invoice",
+  );
+  assert(
+    !res.drafts[0].draft_docs.some((d: any) => d.label === "Draft Invoice"),
+    "authorised resume packs must not keep the confusing draft invoice label",
+  );
 });
 
 Deno.test("A feed firewall: authorised_not_sent WITH a marker -> EXCLUDED (no double-email)", async () => {
