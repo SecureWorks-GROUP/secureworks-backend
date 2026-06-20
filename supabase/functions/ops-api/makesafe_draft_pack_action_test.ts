@@ -16,6 +16,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _claimDraftPackForDraftingForTest as claimDraftPackForDrafting,
+  _createMakesafeDraftInvoiceForTest as createMakesafeDraftInvoice,
   _draftMakesafeReportPackDueForTest as draftMakesafeReportPackDue,
   _draftMakesafeReportPackForTest as draftMakesafeReportPack,
 } from "./index.ts";
@@ -247,6 +248,100 @@ Deno.test("draftMakesafeReportPack: existing non-DRAFT invoice does not attach a
   ]);
   assertEquals(calls.getToken.length, 0);
   assertEquals(calls.attachDoc.length, 0);
+});
+
+Deno.test("createMakesafeDraftInvoice: revises an existing DRAFT invoice instead of silently reusing it", async () => {
+  const calls: Record<string, any[]> = { update: [], create: [] };
+  const result = await createMakesafeDraftInvoice(
+    {},
+    {
+      reference: "MLB-25767",
+      contact_name: "ML Builders",
+      line_items: [
+        {
+          description: "Mould remediation make-safe labour",
+          quantity: 3,
+          unit_price: 85,
+          account_code: "210",
+        },
+        {
+          description: "Mould killer",
+          quantity: 1,
+          unit_price: 25,
+          account_code: "210",
+        },
+      ],
+      operator: "ops-test",
+    },
+    {
+      fetchAllAccrecInvoices: async () => [{
+        xero_invoice_id: "xero-draft-25767",
+        invoice_number: "INV-0743",
+        status: "DRAFT",
+        reference: "SWMS-26604 / MLB-25767",
+      }],
+      updateExistingDraftInvoice: async (_client, args) => {
+        calls.update.push(args);
+        return {
+          success: true,
+          skipped: false,
+          updated_existing: true,
+          xero_invoice_id: args.existing.xero_invoice_id,
+          invoice_number: args.existing.invoice_number,
+          status: "DRAFT",
+          total: 308,
+          reference: args.reference,
+        };
+      },
+      createInvoiceFn: async (_client, body) => {
+        calls.create.push(body);
+        throw new Error("should not create a duplicate invoice");
+      },
+    },
+  );
+
+  assertEquals(result.updated_existing, true);
+  assertEquals(result.skipped, false);
+  assertEquals(result.xero_invoice_id, "xero-draft-25767");
+  assertEquals(calls.update.length, 1);
+  assertEquals(calls.create.length, 0);
+  assertEquals(calls.update[0].contact, "Major Loss Builders");
+  assertEquals(calls.update[0].lineItems.length, 2);
+});
+
+Deno.test("createMakesafeDraftInvoice: Revise Pack fails closed on existing non-DRAFT invoice when requested", async () => {
+  await assertRejects(
+    () =>
+      createMakesafeDraftInvoice(
+        {},
+        {
+          reference: "MLB-25767",
+          contact_name: "Major Loss Builders",
+          line_items: [{
+            description: "Mould remediation make-safe labour",
+            quantity: 3,
+            unit_price: 85,
+          }],
+          fail_on_existing_non_draft: true,
+        },
+        {
+          fetchAllAccrecInvoices: async () => [{
+            xero_invoice_id: "xero-auth-25767",
+            invoice_number: "INV-0743",
+            status: "AUTHORISED",
+            reference: "SWMS-26604 / MLB-25767",
+          }],
+          updateExistingDraftInvoice: async () => {
+            throw new Error("should not update non-DRAFT invoices");
+          },
+          createInvoiceFn: async () => {
+            throw new Error("should not create duplicate invoices");
+          },
+        },
+      ),
+    Error,
+    "Revise Pack cannot rewrite a non-DRAFT invoice",
+  );
 });
 
 Deno.test("draftMakesafeReportPack: claimed draft failures are marked failed", async () => {
