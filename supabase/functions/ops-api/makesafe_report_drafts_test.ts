@@ -116,9 +116,9 @@ Deno.test("stripReviewMarkers removes only whole-token markers, not substrings",
 });
 
 // ─────────────────────────────────────────────────────────────────
-// 2. Default html body - present, branded-ish, no review marker, no em dash.
+// 2. Default html body - present, professional, no review marker, no em dash.
 // ─────────────────────────────────────────────────────────────────
-Deno.test("default html body is non-empty, branded, marker-free, em-dash-free", () => {
+Deno.test("default html body is non-empty, marker-free, em-dash-free, and leaves signature to Outlook", () => {
   const html = composeDefaultHtmlBody({
     builderName: "MLB Constructions",
     externalRef: "MLB-25248",
@@ -128,9 +128,10 @@ Deno.test("default html body is non-empty, branded, marker-free, em-dash-free", 
     totalIncGst: 1234.5,
   });
   assert(html.trim().length > 0, "html body must not be empty");
-  assert(html.includes("SecureWorks Group"), "html should be branded");
   assert(html.includes("MLB Constructions"), "html should greet the builder");
   assert(html.includes("$1,234.50"), "html should show the inc-GST total");
+  assert(!html.includes("Kind regards"), "typed sign-off must not duplicate the Maverick mailbox signature");
+  assert(!html.includes("SecureWorks Group"), "typed sign-off must not duplicate the Maverick mailbox signature");
   assertEquals(hasReviewMarker(html), null, "html body must not carry a review marker token");
   assert(!html.includes("—"), "html must not contain an em dash");
 });

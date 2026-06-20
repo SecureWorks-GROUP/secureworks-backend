@@ -63,8 +63,9 @@ export function composeDefaultSubject(args: {
 
 // ── Default html body composer ──
 //
-// A short, branded-ish completion note. Plain, professional, no review markers,
-// no em dashes. The recipient sees + can edit it in the cockpit before sending.
+// A short completion note. Plain, professional, no review markers, no em
+// dashes. The sender mailbox appends the Maverick/SecureWorks signature, so the
+// body deliberately does NOT add a second typed sign-off.
 export function composeDefaultHtmlBody(args: {
   builderName?: string | null
   externalRef?: string | null
@@ -96,7 +97,6 @@ export function composeDefaultHtmlBody(args: {
       : '',
     '<p>The completion report sets out the work carried out and the site condition on completion. The attached tax invoice covers these works.</p>',
     '<p>Please let us know if you need anything further.</p>',
-    '<p style="margin-top:18px;">Kind regards,<br>SecureWorks Group</p>',
     '</div>',
   ].filter(Boolean).join('')
 }
