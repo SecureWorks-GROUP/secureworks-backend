@@ -15,6 +15,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _canonicalMakesafeBuilderDisplayNameForTest,
   _canonicalMakesafeInvoiceContactNameForTest,
   _makesafeReportDraftsForTest,
   _makesafeTrustedInvoiceRefTokenForTest,
@@ -331,6 +332,19 @@ Deno.test("MLB Xero contact: draft/sync contact names canonicalise to Major Loss
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("SWMS-26651 / MLB-26003", "MLB"), "Major Loss Builders");
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "Major Loss Builder"), "Major Loss Builders");
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("AJS-123", "AJS Group"), "AJS Group");
+  assertEquals(_canonicalMakesafeBuilderDisplayNameForTest("MLB-26003", "ML Builders", "ML Builders"), "Major Loss Builders");
+});
+
+Deno.test("T3 feed: legacy ML Builders label is surfaced as Major Loss Builders", async () => {
+  const seed = ferndaleSeed();
+  seed.makesafe_job_details[0].requesting_company_name = "ML Builders";
+  seed.makesafe_job_details[0].makesafe_companies.name = "ML Builders";
+  seed.makesafe_job_details[0].external_ref = "MLB-26003";
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].builder, "Major Loss Builders");
+  assertEquals(res.drafts[0].requesting_company_name, "Major Loss Builders");
 });
 
 Deno.test("Xero sync reference tokens: only structured job/external refs are trusted", () => {

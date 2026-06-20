@@ -16374,7 +16374,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       detailInvoiceEmail: null, // no per-job recipient column on makesafe_job_details
     })
 
-    const builderName = d.requesting_company_name || company.name || ''
+    const builderName = canonicalMakesafeBuilderDisplayName(d.external_ref, d.requesting_company_name, company.name)
     const siteAddress = job.site_address || null
     const subject = composeDefaultSubject({
       externalRef: d.external_ref,
@@ -16549,6 +16549,11 @@ function canonicalMakesafeInvoiceContactName(reference: any, contact: any): stri
   return raw
 }
 export const _canonicalMakesafeInvoiceContactNameForTest = canonicalMakesafeInvoiceContactName
+
+function canonicalMakesafeBuilderDisplayName(reference: any, requestedName: any, companyName: any): string {
+  return canonicalMakesafeInvoiceContactName(reference, requestedName || companyName || '')
+}
+export const _canonicalMakesafeBuilderDisplayNameForTest = canonicalMakesafeBuilderDisplayName
 
 // (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
 // full-ACCREC-scan 3-tier dup guard FIRST; if a live invoice already maps to the
