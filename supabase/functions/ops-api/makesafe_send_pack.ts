@@ -378,6 +378,14 @@ export function checkClientSendGate(payload: ClientSendPayload): string[] {
   return failures;
 }
 
+export function checkApprovedPhotoFollowupGate(
+  approvedPhotos: unknown[],
+): string[] {
+  return Array.isArray(approvedPhotos) && approvedPhotos.length > 0 ? [] : [
+    "approved photos are required before MakeSafe email send because the JPEG photo follow-up is mandatory",
+  ];
+}
+
 // Report-type jobs (`roof_report`, `assessment_report`, etc.) are invoice-only:
 // the builder's report lives on their portal, so SecureWorks must not require or
 // send a generated make-safe report PDF. This gate shares the same sender,
