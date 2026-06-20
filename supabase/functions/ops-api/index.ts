@@ -16685,6 +16685,24 @@ function evaluateMakesafeDraftInvoicePricing(lines: any[], opts: { allowZeroPric
 }
 export const _evaluateMakesafeDraftInvoicePricingForTest = evaluateMakesafeDraftInvoicePricing
 
+function existingDraftInvoiceHasUsablePricing(existing: any): boolean {
+  const existingLines = normaliseLineItems(existing?.line_items)
+  const existingTotals = computeInvoiceTotals({
+    subTotal: existing?.sub_total ?? null,
+    total: existing?.total ?? null,
+    lines: existingLines,
+  })
+  const existingLineFailures = existingLines.length > 0
+    ? evaluateMakesafeDraftInvoicePricing(existingLines)
+    : []
+  return existingTotals.total_inc_gst > 0 && existingLineFailures.length === 0
+}
+
+function isXeroProjectLineUpdateError(err: any): boolean {
+  const msg = String(err?.message || err || '')
+  return /Project/i.test(msg) && /LineItemID|LineItemIDs|associated/i.test(msg)
+}
+
 function makesafeDraftInvoicePayloadLinesForXeroUpdate(lineItems: any[], liveInvoice: any): any[] {
   const existingLines = Array.isArray(liveInvoice?.LineItems) ? liveInvoice.LineItems : []
   return lineItems.map((line: any, index: number) => {
@@ -16914,15 +16932,32 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
   if (existing) {
     const existingStatus = String(existing.status || '').toUpperCase()
     if (existingStatus === 'DRAFT' && body.update_existing_draft !== false) {
-      return await _updateExistingDraft(client, {
-        existing,
-        jobId,
-        reference,
-        contact,
-        lineItems: lines,
-        dueDate: body.due_date || body.dueDate || null,
-        operator: body.operator || null,
-      })
+      try {
+        return await _updateExistingDraft(client, {
+          existing,
+          jobId,
+          reference,
+          contact,
+          lineItems: lines,
+          dueDate: body.due_date || body.dueDate || null,
+          operator: body.operator || null,
+        })
+      } catch (e) {
+        const preserveExistingDraft = body.preserve_existing_draft_on_project_line_error === true ||
+          body.preserveExistingDraftOnProjectLineError === true
+        if (preserveExistingDraft && isXeroProjectLineUpdateError(e) && existingDraftInvoiceHasUsablePricing(existing)) {
+          return {
+            skipped: true,
+            project_line_pricing_preserved: true,
+            reference,
+            existing_invoice: existing,
+            scanned: allInvoices.length,
+            update_error: String((e as Error)?.message || e).slice(0, 500),
+            note: `Xero refused draft invoice rewrite because existing lines are linked to a Project, so Draft Pack preserved existing DRAFT invoice ${existing.invoice_number || existing.xero_invoice_id}`,
+          }
+        }
+        throw e
+      }
     }
     if (body.fail_on_existing_non_draft === true) {
       throw new ApiError(
@@ -17374,6 +17409,8 @@ function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string,
     fail_on_existing_non_draft: sourceBody.fail_on_existing_non_draft,
     preserve_existing_draft_on_invalid_pricing: sourceBody.preserve_existing_draft_on_invalid_pricing === true ||
       sourceBody.preserveExistingDraftOnInvalidPricing === true,
+    preserve_existing_draft_on_project_line_error: sourceBody.preserve_existing_draft_on_project_line_error === true ||
+      sourceBody.preserveExistingDraftOnProjectLineError === true,
   }
 }
 
@@ -17479,6 +17516,9 @@ async function draftMakesafeReportPack(
     const warnings: string[] = []
     if (invoiceResult?.pricing_preserved_from_existing === true) {
       warnings.push('existing_draft_invoice_pricing_preserved_after_invalid_claude_pricing')
+    }
+    if (invoiceResult?.project_line_pricing_preserved === true) {
+      warnings.push('existing_draft_invoice_pricing_preserved_after_xero_project_line_restriction')
     }
 
     // Attach the DRAFT invoice PDF when the invoice is still DRAFT. If the dup guard

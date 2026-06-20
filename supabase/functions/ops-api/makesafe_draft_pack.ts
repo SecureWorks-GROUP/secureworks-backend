@@ -131,7 +131,7 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
       "Invoice lines must be DRAFT-only and exclude GST in unit_price.",
       "Every invoice line must have quantity > 0 and unit_price > 0. Never output a $0 placeholder line.",
       "Use account_code 210 unless the context clearly specifies another make-safe account.",
-      "For Major Loss Builders / MLB routine make-safe work, default to 1 trade x 3 hours at $85 ex GST per hour unless the source data or human feedback explicitly says otherwise.",
+      "For Major Loss Builders / MLB routine make-safe work, use a minimum/default of 1 trade x 3 hours at $85 ex GST per hour. Do not reduce below 3 labour hours just because a checklist records fewer hours unless human Ops feedback explicitly says to discount/reduce it.",
       "The report.billing_note must be terse and must match the invoice labour basis. Use wording like '1 trade x 3 hours' or '2 trades x 2 hours (4 labour hours total)'.",
       "Do not put travel/material/pricing uncertainty in report.billing_note. Put materials in report.materials and unresolved review items in change_summary.",
       "If costing is uncertain, use the best available SecureWorks/ops pricing from the context and say it needs pricing review in change_summary.",
