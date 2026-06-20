@@ -12551,6 +12551,20 @@ async function createInvoice(client: any, body: any) {
 }
 
 // ── Sync Job Invoices — pull invoices from Xero for a specific job and link them ──
+function _makesafeTrustedInvoiceRefToken(value: any): string | null {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const norm = _makesafeNormRef(raw)
+  // Ref tokens must be structured job/builder refs, not loose numerics,
+  // addresses, names, or tiny fragments. This keeps Xero Reference.Contains
+  // from broad-linking unrelated invoices on common substrings.
+  if (norm.length < 5) return null
+  if (!/[a-z]/i.test(norm) || !/\d/.test(norm)) return null
+  if (!/^[a-z]{2,8}\d{3,}/i.test(norm)) return null
+  return raw
+}
+export const _makesafeTrustedInvoiceRefTokenForTest = _makesafeTrustedInvoiceRefToken
+
 async function syncJobInvoices(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -12572,7 +12586,7 @@ async function syncJobInvoices(client: any, body: any) {
     msDetail?.external_ref,
     job.metadata?.external_ref,
     body.external_ref || body.externalRef,
-  ].filter(Boolean).map((x: any) => String(x).trim()).filter(Boolean)))
+  ].map(_makesafeTrustedInvoiceRefToken).filter(Boolean) as string[]))
 
   if (refTokens.length === 0) {
     return { success: true, synced: 0, job_number: job.job_number, invoices: [], note: 'no job/reference token available; skipped Xero sync to avoid broad contact linking' }
