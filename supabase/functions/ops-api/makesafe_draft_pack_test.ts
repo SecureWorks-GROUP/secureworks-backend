@@ -50,6 +50,9 @@ Deno.test("user prompt carries selected photo urls and feedback notes", () => {
   assertStringIncludes(prompt, "exclude the hallway photo");
   assertStringIncludes(prompt, "unit_price > 0");
   assertStringIncludes(prompt, "Never output a $0 placeholder line");
+  assertStringIncludes(prompt, "Major Loss Builders");
+  assertStringIncludes(prompt, "1 trade x 3 hours");
+  assertStringIncludes(prompt, "report.billing_note must be terse");
 });
 
 Deno.test("user prompt schema does not teach Claude to emit zero-priced invoice lines", () => {

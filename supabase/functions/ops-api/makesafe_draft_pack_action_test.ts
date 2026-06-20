@@ -16,11 +16,14 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _claimDraftPackForDraftingForTest as claimDraftPackForDrafting,
+  _compactDraftPackBillingNoteForTest as compactDraftPackBillingNote,
   _createMakesafeDraftInvoiceForTest as createMakesafeDraftInvoice,
   _draftMakesafeReportPackDueForTest as draftMakesafeReportPackDue,
   _draftMakesafeReportPackForTest as draftMakesafeReportPack,
   _evaluateMakesafeDraftInvoicePricingForTest
     as evaluateMakesafeDraftInvoicePricing,
+  _makesafeDraftInvoicePayloadLinesForXeroUpdateForTest
+    as makesafeDraftInvoicePayloadLinesForXeroUpdate,
 } from "./index.ts";
 
 function claudeJson(summary = "Draft pack refreshed for human review.") {
@@ -266,6 +269,52 @@ Deno.test("draftMakesafeReportPack: rejects zero-priced Claude output before ren
   assertStringIncludes(calls.markFailed[0].message, "$0/invalid unit_price");
 });
 
+Deno.test("draftMakesafeReportPack: invoice/Xero failure stops before report render", async () => {
+  const calls: Record<string, any[]> = { render: [], markFailed: [] };
+
+  await assertRejects(
+    () =>
+      draftMakesafeReportPack(
+        {},
+        { job_id: "job-project-line" },
+        "api_key",
+        {
+          assertRoutineEligible: async () => {},
+          claimDraftPack: async () => {},
+          markDraftPackFailed: async (_client, jobId, packKind, err) => {
+            calls.markFailed.push({
+              jobId,
+              packKind,
+              message: (err as Error).message,
+            });
+          },
+          loadContext: async () => ({
+            job: { id: "job-project-line", site_address: "1 Project St" },
+            detail: {
+              external_ref: "AJBR-67870",
+              requesting_company_name: "AJ Building & Restoration",
+            },
+            selected_photo_urls: [],
+          }),
+          callClaude: async () =>
+            claudeJson("Draft should fail at invoice first."),
+          createDraftInvoice: async () => {
+            throw new Error("Xero validation error: project line IDs required");
+          },
+          renderReport: async () => {
+            calls.render.push({});
+            throw new Error("report render must not run after Xero failure");
+          },
+        },
+      ),
+    Error,
+    "project line IDs required",
+  );
+
+  assertEquals(calls.render.length, 0);
+  assertEquals(calls.markFailed.length, 1);
+});
+
 Deno.test("draftMakesafeReportPack: existing non-DRAFT invoice does not attach a fake draft PDF", async () => {
   const calls: Record<string, any[]> = { getToken: [], attachDoc: [] };
   const result = await draftMakesafeReportPack(
@@ -386,6 +435,54 @@ Deno.test("createMakesafeDraftInvoice: revises an existing DRAFT invoice instead
   assertEquals(calls.create.length, 0);
   assertEquals(calls.update[0].contact, "Major Loss Builders");
   assertEquals(calls.update[0].lineItems.length, 2);
+});
+
+Deno.test("compactDraftPackBillingNote: MLB standard invoice basis becomes a terse report note", () => {
+  const note = compactDraftPackBillingNote({
+    invoice: {
+      reference: "MLB-25767",
+      contact_name: "Major Loss Builders",
+      line_items: [{
+        description: "Mould remediation make-safe labour",
+        quantity: 3,
+        unit_price: 85,
+      }, {
+        description: "Mould killer",
+        quantity: 1,
+        unit_price: 25,
+      }],
+    },
+  }, { detail: { external_ref: "MLB-25767" } });
+
+  assertEquals(note, "1 trade x 3 hours.");
+});
+
+Deno.test("Xero DRAFT invoice update payload preserves existing LineItemIDs by index", () => {
+  const lines = makesafeDraftInvoicePayloadLinesForXeroUpdate([
+    {
+      Description: "Make-safe labour revised",
+      Quantity: 3,
+      UnitAmount: 85,
+      AccountCode: "210",
+      TaxType: "OUTPUT",
+    },
+    {
+      Description: "Mould killer",
+      Quantity: 1,
+      UnitAmount: 25,
+      AccountCode: "210",
+      TaxType: "OUTPUT",
+    },
+  ], {
+    LineItems: [
+      { LineItemID: "line-1", Description: "Old labour" },
+      { LineItemID: "line-2", Description: "Old materials" },
+    ],
+  });
+
+  assertEquals(lines[0].LineItemID, "line-1");
+  assertEquals(lines[1].LineItemID, "line-2");
+  assertEquals(lines[0].Description, "Make-safe labour revised");
 });
 
 Deno.test("createMakesafeDraftInvoice: blocks $0/invalid MakeSafe pricing before Xero create or update", async () => {

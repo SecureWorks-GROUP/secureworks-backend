@@ -16685,6 +16685,16 @@ function evaluateMakesafeDraftInvoicePricing(lines: any[], opts: { allowZeroPric
 }
 export const _evaluateMakesafeDraftInvoicePricingForTest = evaluateMakesafeDraftInvoicePricing
 
+function makesafeDraftInvoicePayloadLinesForXeroUpdate(lineItems: any[], liveInvoice: any): any[] {
+  const existingLines = Array.isArray(liveInvoice?.LineItems) ? liveInvoice.LineItems : []
+  return lineItems.map((line: any, index: number) => {
+    const existing = existingLines[index] || {}
+    const lineItemId = existing.LineItemID || existing.LineItemId || existing.lineItemID || existing.line_item_id
+    return lineItemId ? { ...line, LineItemID: lineItemId } : line
+  })
+}
+export const _makesafeDraftInvoicePayloadLinesForXeroUpdateForTest = makesafeDraftInvoicePayloadLinesForXeroUpdate
+
 function normaliseXeroNameForCompare(value: any): string {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
 }
@@ -16741,6 +16751,13 @@ async function updateMakesafeExistingDraftInvoice(client: any, args: {
 
   const contactName = canonicalMakesafeInvoiceContactName(args.reference, args.contact)
   const matchedContact = await resolveXeroContactByExactName(accessToken, tenantId, contactName)
+  const draftPayloadLines = lineItems.map((li: any) => ({
+    Description: li.description || '',
+    Quantity: li.quantity ?? 1,
+    UnitAmount: li.unit_price ?? 0,
+    AccountCode: li.account_code || '210',
+    TaxType: 'OUTPUT',
+  }))
   const payload: any = {
     InvoiceID: xeroInvoiceId,
     Type: 'ACCREC',
@@ -16748,13 +16765,7 @@ async function updateMakesafeExistingDraftInvoice(client: any, args: {
       ? { ContactID: matchedContact.ContactID }
       : { Name: contactName },
     LineAmountTypes: 'Exclusive',
-    LineItems: lineItems.map((li: any) => ({
-      Description: li.description || '',
-      Quantity: li.quantity ?? 1,
-      UnitAmount: li.unit_price ?? 0,
-      AccountCode: li.account_code || '210',
-      TaxType: 'OUTPUT',
-    })),
+    LineItems: makesafeDraftInvoicePayloadLinesForXeroUpdate(draftPayloadLines, liveInvoice),
     Reference: args.reference || liveInvoice?.Reference || '',
     Status: 'DRAFT',
   }
@@ -17279,12 +17290,58 @@ function normaliseStringArray(v: any): string[] {
   return v.map((x) => String(x || '').trim()).filter(Boolean)
 }
 
+function formatCompactHours(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 10) / 10)
+}
+
+function compactDraftPackBillingNote(parsed: any, ctx: DraftPackContext): string {
+  const lines = Array.isArray(parsed?.invoice?.line_items) ? parsed.invoice.line_items : []
+  const ref = String(parsed?.invoice?.reference || parsed?.report?.ref || (ctx.detail as any)?.external_ref || '').toUpperCase()
+  const company = String(
+    parsed?.invoice?.contact_name ||
+      (ctx.detail as any)?.requesting_company_name ||
+      (ctx.detail as any)?.makesafe_companies?.name ||
+      '',
+  ).toLowerCase()
+  const isMlb = ref.includes('MLB') || company.includes('major loss') || company.includes('ml builders')
+  const labourLines = lines.filter((li: any) => {
+    const desc = String(li?.description || '').toLowerCase()
+    if (!desc) return false
+    if (/material|mould killer|tarp|panel|base|feet|fixing|consumable|photo|swms/.test(desc)) return false
+    return /labou?r|attendance|make[- ]safe|make safe|crew|trade/.test(desc)
+  })
+  const labourHours = labourLines.reduce((sum: number, li: any) => {
+    const qty = Number(li?.quantity ?? 0)
+    return sum + (Number.isFinite(qty) && qty > 0 ? qty : 0)
+  }, 0)
+  if (labourHours <= 0) return ''
+
+  const desc = labourLines.map((li: any) => String(li?.description || '')).join(' ')
+  const tradeHourMatch = desc.match(/(\d+(?:\.\d+)?)\s*(?:x\s*)?(?:trades?|crew|attendees?)\b[\s\S]{0,90}?(\d+(?:\.\d+)?)\s*(?:x\s*)?hours?/i)
+  if (tradeHourMatch) {
+    const trades = Number(tradeHourMatch[1])
+    const hours = Number(tradeHourMatch[2])
+    if (Number.isFinite(trades) && trades > 0 && Number.isFinite(hours) && hours > 0) {
+      const total = trades * hours
+      const tradeLabel = trades === 1 ? 'trade' : 'trades'
+      const totalSuffix = Math.abs(total - labourHours) < 0.2 || trades === 1
+        ? ''
+        : ` (${formatCompactHours(labourHours)} labour hours total)`
+      return `${formatCompactHours(trades)} ${tradeLabel} x ${formatCompactHours(hours)} hours${totalSuffix}.`
+    }
+  }
+  if (isMlb && Math.abs(labourHours - 3) < 0.2) return '1 trade x 3 hours.'
+  return `${formatCompactHours(labourHours)} labour hours total.`
+}
+export const _compactDraftPackBillingNoteForTest = compactDraftPackBillingNote
+
 function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhotoUrls: string[]): any {
   const job: any = ctx.job || {}
   const detail: any = ctx.detail || {}
   const checklist = ((ctx.service_report as any)?.checklist_json || {}) as any
   const ref = parsed.report.ref || parsed.invoice.reference || detail.external_ref || job.job_number || job.id
   const address = parsed.report.address || job.site_address || job.site_suburb || 'Address TBC'
+  const compactBillingNote = compactDraftPackBillingNote(parsed, ctx)
   return {
     ref,
     address,
@@ -17292,7 +17349,7 @@ function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhot
     date: parsed.report.date || (ctx.service_report as any)?.submitted_at || job.updated_at || '',
     arrival: parsed.report.arrival || checklist.arrival_time || '',
     crew: parsed.report.crew || '',
-    billing_note: parsed.report.billing_note || detail.invoice_notes || '',
+    billing_note: compactBillingNote || parsed.report.billing_note || detail.invoice_notes || '',
     scope: parsed.report.scope || checklist.damage_description || '',
     findings: parsed.report.findings || checklist.damage_cause || '',
     works: parsed.report.works || checklist.work_done || (ctx.service_report as any)?.notes || '',
@@ -17405,6 +17462,10 @@ async function draftMakesafeReportPack(
     )
     const parsed = parseDraftPackResponse(raw)
 
+    const invoiceResult = await _createDraftInvoice(
+      client,
+      draftPackInvoiceBody(parsed, context, jobId, operator, body),
+    )
     const reportPayload = draftPackReportPayload(parsed, context, photoSet)
     const reportResult = await _renderReport(client, {
       job_id: jobId,
@@ -17412,11 +17473,6 @@ async function draftMakesafeReportPack(
       job: reportPayload,
       operator,
     })
-
-    const invoiceResult = await _createDraftInvoice(
-      client,
-      draftPackInvoiceBody(parsed, context, jobId, operator, body),
-    )
     const xeroInvoiceId = draftPackXeroId(invoiceResult)
     const invoiceStatus = draftPackInvoiceStatus(invoiceResult)
     let invoiceDoc: { document_id?: string | null } | null = null
