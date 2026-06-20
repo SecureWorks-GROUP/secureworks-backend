@@ -1447,6 +1447,7 @@ Deno.test("reset gate: failed + pre-send step + NO marker -> ok", () => {
       "preflight_invoice_ambiguous",
       "load_report_pdf",
       "client_send_gate",
+      "draft_pack",
       "unexpected",
     ]
   ) {
