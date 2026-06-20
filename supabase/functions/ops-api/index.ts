@@ -12557,109 +12557,90 @@ async function syncJobInvoices(client: any, body: any) {
 
   const { data: job, error: jobErr } = await client
     .from('jobs')
-    .select('id, job_number, client_name, xero_contact_id')
+    .select('id, job_number, client_name, xero_contact_id, metadata')
     .eq('id', jId)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
 
-  const { accessToken, tenantId } = await getToken(client)
+  const { data: msDetail } = await client.from('makesafe_job_details')
+    .select('external_ref')
+    .eq('job_id', jId)
+    .maybeSingle()
 
+  const refTokens = Array.from(new Set([
+    job.job_number,
+    msDetail?.external_ref,
+    job.metadata?.external_ref,
+    body.external_ref || body.externalRef,
+  ].filter(Boolean).map((x: any) => String(x).trim()).filter(Boolean)))
+
+  if (refTokens.length === 0) {
+    return { success: true, synced: 0, job_number: job.job_number, invoices: [], note: 'no job/reference token available; skipped Xero sync to avoid broad contact linking' }
+  }
+
+  const { accessToken, tenantId } = await getToken(client)
   let synced = 0
   const syncedInvoices: any[] = []
-
-  // Strategy 1: Search by Xero contact ID
-  if (job.xero_contact_id) {
-    try {
-      const result = await xeroGet('/Invoices', accessToken, tenantId, {
-        where: `Contact.ContactID=guid("${job.xero_contact_id}") AND Type=="ACCREC"`,
-        Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
-      })
-      const invoices = result?.Invoices || []
-      for (const inv of invoices) {
-        const record: any = {
-          org_id: DEFAULT_ORG_ID,
-          xero_invoice_id: inv.InvoiceID,
-          xero_contact_id: inv.Contact?.ContactID || null,
-          contact_name: inv.Contact?.Name || null,
-          invoice_number: inv.InvoiceNumber || null,
-          invoice_type: inv.Type,
-          status: inv.Status,
-          reference: inv.Reference || null,
-          sub_total: inv.SubTotal || 0,
-          total_tax: inv.TotalTax || 0,
-          total: inv.Total || 0,
-          amount_due: inv.AmountDue || 0,
-          amount_paid: inv.AmountPaid || 0,
-          invoice_date: inv.DateString || null,
-          due_date: inv.DueDateString || null,
-          line_items: inv.LineItems || [],
-          raw_json: inv,
-          job_id: job.id,
-          synced_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }
-        const { error } = await client.from('xero_invoices').upsert(record, {
-          onConflict: 'org_id,xero_invoice_id',
-        })
-        if (!error) {
-          synced++
-          syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status })
-        }
-      }
-    } catch (e: any) {
-      console.log('[sync_job_invoices] Xero contact search failed:', e.message)
+  const seenInvoiceIds = new Set<string>()
+  const tokenKeys = refTokens.map((t) => _makesafeNormRef(t)).filter(Boolean)
+  const invoiceMatchesThisJob = (inv: any): boolean => {
+    const ref = _makesafeNormRef(inv?.Reference || '')
+    if (!ref) return false
+    return tokenKeys.some((tok) => tok && (ref === tok || ref.includes(tok)))
+  }
+  const upsertInvoice = async (inv: any, matchMethod: string) => {
+    if (!inv?.InvoiceID || seenInvoiceIds.has(inv.InvoiceID)) return
+    if (!invoiceMatchesThisJob(inv)) return
+    seenInvoiceIds.add(inv.InvoiceID)
+    const record: any = {
+      org_id: DEFAULT_ORG_ID,
+      xero_invoice_id: inv.InvoiceID,
+      xero_contact_id: inv.Contact?.ContactID || null,
+      contact_name: canonicalMakesafeInvoiceContactName(inv.Reference || refTokens[0], inv.Contact?.Name || null),
+      invoice_number: inv.InvoiceNumber || null,
+      invoice_type: inv.Type,
+      status: inv.Status,
+      reference: inv.Reference || null,
+      sub_total: inv.SubTotal || 0,
+      total_tax: inv.TotalTax || 0,
+      total: inv.Total || 0,
+      amount_due: inv.AmountDue || 0,
+      amount_paid: inv.AmountPaid || 0,
+      invoice_date: inv.DateString || null,
+      due_date: inv.DueDateString || null,
+      line_items: inv.LineItems || [],
+      raw_json: inv,
+      job_id: job.id,
+      synced_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    const { error } = await client.from('xero_invoices').upsert(record, {
+      onConflict: 'org_id,xero_invoice_id',
+    })
+    if (!error) {
+      synced++
+      syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status, reference: inv.Reference || null, match_method: matchMethod })
     }
   }
 
-  // Strategy 2: Search by reference containing job number
-  if (job.job_number) {
+  // Money-safety: never sync by broad Xero contact. MLB/Major Loss Builders can
+  // have many active invoices on the same contact; linking all of them to one
+  // MakeSafe job makes the send pack ambiguous. Search only by job/external refs.
+  for (const token of refTokens) {
+    const safeToken = token.replace(/"/g, '')
     try {
       const result = await xeroGet('/Invoices', accessToken, tenantId, {
-        where: `Reference.Contains("${job.job_number}") AND Type=="ACCREC"`,
+        where: `Reference.Contains("${safeToken}") AND Type=="ACCREC"`,
         Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
       })
       const invoices = result?.Invoices || []
-      for (const inv of invoices) {
-        // Skip if already synced from Strategy 1
-        const alreadySynced = syncedInvoices.some(s => s.invoice_number === inv.InvoiceNumber)
-        if (alreadySynced) continue
-
-        const record: any = {
-          org_id: DEFAULT_ORG_ID,
-          xero_invoice_id: inv.InvoiceID,
-          xero_contact_id: inv.Contact?.ContactID || null,
-          contact_name: inv.Contact?.Name || null,
-          invoice_number: inv.InvoiceNumber || null,
-          invoice_type: inv.Type,
-          status: inv.Status,
-          reference: inv.Reference || null,
-          sub_total: inv.SubTotal || 0,
-          total_tax: inv.TotalTax || 0,
-          total: inv.Total || 0,
-          amount_due: inv.AmountDue || 0,
-          amount_paid: inv.AmountPaid || 0,
-          invoice_date: inv.DateString || null,
-          due_date: inv.DueDateString || null,
-          line_items: inv.LineItems || [],
-          raw_json: inv,
-          job_id: job.id,
-          synced_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }
-        const { error } = await client.from('xero_invoices').upsert(record, {
-          onConflict: 'org_id,xero_invoice_id',
-        })
-        if (!error) {
-          synced++
-          syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status })
-        }
-      }
+      for (const inv of invoices) await upsertInvoice(inv, token === job.job_number ? 'job_number_reference' : 'external_reference')
     } catch (e: any) {
-      console.log('[sync_job_invoices] Xero reference search failed:', e.message)
+      console.log('[sync_job_invoices] Xero reference search failed:', safeToken, e.message)
     }
   }
 
-  return { success: true, synced, job_number: job.job_number, invoices: syncedInvoices }
+  return { success: true, synced, job_number: job.job_number, reference_tokens: refTokens, invoices: syncedInvoices }
 }
 
 // ── Update Invoice — edit line items on an existing Xero invoice ──
@@ -16123,19 +16104,19 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const jobIds: string[] = detailRows.map((d: any) => d.job_id).filter(Boolean)
 
   // 2) Bulk-load the related rows for those jobs (each a single .in() read).
-  const [jobsRes, invoicesRes, docsRes, mediaRes, packsRes] = await Promise.all([
+  const [jobsRes, invoicesRes, docsRes, mediaRes, packsRes, serviceReportsRes] = await Promise.all([
     client.from('jobs')
-      .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, status, type')
+      .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, status, type, created_at')
       .in('id', jobIds),
     client.from('xero_invoices')
       .select('xero_invoice_id, invoice_number, status, reference, sub_total, total, total_tax, line_items, job_id, invoice_date')
       .in('job_id', jobIds)
       .order('invoice_date', { ascending: false }),
     client.from('job_documents')
-      .select('id, job_id, type, file_name, storage_url, pdf_url, version')
+      .select('id, job_id, type, file_name, storage_url, pdf_url, version, created_at')
       .in('job_id', jobIds),
     client.from('job_media')
-      .select('id, job_id, phase, type, storage_url, thumbnail_url, label')
+      .select('id, job_id, phase, type, storage_url, thumbnail_url, label, taken_at, created_at')
       .in('job_id', jobIds)
       .eq('phase', 'completion'),
     client.from('makesafe_report_packs')
@@ -16144,6 +16125,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       // cache-bust never appends, leaving the stale-doc fix inert.
       .select('job_id, pack_kind, status, report_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail, last_render_hash')
       .in('job_id', jobIds),
+    client.from('job_service_reports')
+      .select('id, job_id, status, checklist_json, notes, signature_name, submitted_at, submitted_by, created_at, updated_at')
+      .in('job_id', jobIds)
+      .order('created_at', { ascending: false }),
   ])
 
   // T3 (adversarial review #1) — load the MAKESAFE_PACK_SENT | main marker map so
@@ -16168,6 +16153,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const packByJob: Record<string, any> = {}
   for (const p of (packsRes.data || [])) {
     if ((p.pack_kind || 'main') === 'main') packByJob[p.job_id] = p
+  }
+  const serviceReportByJob: Record<string, any> = {}
+  for (const r of (serviceReportsRes.data || [])) {
+    if (r?.job_id && !serviceReportByJob[r.job_id]) serviceReportByJob[r.job_id] = r
   }
 
   // Mint a short-lived signed url for a job_documents storage path. The
@@ -16239,6 +16228,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     // versioned URL minting below. The pack row is also used downstream for surface
     // derivation and pack_status — the value is the same object reference.
     const pack = packByJob[d.job_id] || null
+    if (pack?.status === 'sending' && pack?.failed_step === 'draft_pack') return null
     const renderHash = pack?.last_render_hash || null
     const [reportPdfUrl, invoicePdfUrl, swmsPdfUrl, workOrderPdfUrl, serviceReportPdfUrl] = await Promise.all([
       // B1: the report URL carries the render hash so a re-render always yields a new URL.
@@ -16283,23 +16273,81 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       url: m.storage_url || null,
       thumbnail_url: m.thumbnail_url || m.storage_url || null,
       label: m.label || null,
+      taken_at: m.taken_at || null,
+      created_at: m.created_at || null,
+      received_at: m.taken_at || m.created_at || null,
     })).filter((p: any) => p.url)
 
     // D3 — carousel doc arrays. draft_docs: the artifacts WE produced for this
     // close-out (rendered report PDF, draft invoice PDF, attached SWMS if any).
     // source_docs: the inputs (original trade/service report, work order, photos).
-    // Each {label, url, kind}. SWMS is surfaced ONLY when one is attached (we do
-    // NOT generate one). Reuses the same signed-url mechanism as report/invoice.
-    const draftDocs: Array<{ label: string; url: string; kind: 'pdf' | 'image' }> = []
-    if (reportPdfUrl) draftDocs.push({ label: 'Make Safe Report', url: reportPdfUrl, kind: 'pdf' })
-    if (invoicePdfUrl) draftDocs.push({ label: 'Draft Invoice', url: invoicePdfUrl, kind: 'pdf' })
-    if (swmsPdfUrl) draftDocs.push({ label: 'SWMS', url: swmsPdfUrl, kind: 'pdf' })
+    // Each object keeps the legacy {label,url,kind} contract and adds optional
+    // timestamp metadata so the cockpit can prove WHEN each source/draft arrived.
+    // SWMS is surfaced ONLY when one is attached (we do NOT generate one). Reuses
+    // the same signed-url mechanism as report/invoice.
+    type MakesafeCockpitDoc = {
+      label: string
+      url: string
+      kind: 'pdf' | 'image' | 'html'
+      created_at?: string | null
+      received_at?: string | null
+      source_type?: string | null
+      raw_report?: any
+    }
+    const docMeta = (doc: any, receivedAt?: string | null, sourceType?: string | null) => ({
+      created_at: doc?.created_at || null,
+      received_at: receivedAt || doc?.created_at || null,
+      source_type: sourceType || doc?.type || null,
+    })
+    const draftDocs: MakesafeCockpitDoc[] = []
+    if (reportPdfUrl) draftDocs.push({ label: 'Make Safe Report', url: reportPdfUrl, kind: 'pdf', ...docMeta(reportDoc, reportDoc?.created_at || null, 'makesafe_report') })
+    if (invoicePdfUrl) draftDocs.push({ label: 'Draft Invoice', url: invoicePdfUrl, kind: 'pdf', ...docMeta(invoiceDoc, invoiceDoc?.created_at || null, 'invoice') })
+    if (swmsPdfUrl) draftDocs.push({ label: 'SWMS', url: swmsPdfUrl, kind: 'pdf', ...docMeta(swmsDoc, swmsDoc?.created_at || null, 'swms') })
 
-    const sourceDocs: Array<{ label: string; url: string; kind: 'pdf' | 'image' }> = []
-    if (serviceReportPdfUrl) sourceDocs.push({ label: 'Trade Report', url: serviceReportPdfUrl, kind: 'pdf' })
-    if (workOrderPdfUrl) sourceDocs.push({ label: 'Work Order', url: workOrderPdfUrl, kind: 'pdf' })
+    const rawServiceReport = serviceReportByJob[d.job_id] || null
+    const rawServiceReportReceivedAt = d.report_received_at || rawServiceReport?.submitted_at || rawServiceReport?.created_at || null
+
+    const sourceDocs: MakesafeCockpitDoc[] = []
+    if (rawServiceReport) sourceDocs.push({
+      label: 'Raw Trade Report',
+      url: '',
+      kind: 'html',
+      created_at: rawServiceReport.created_at || null,
+      received_at: rawServiceReportReceivedAt,
+      source_type: 'trade_report',
+      raw_report: {
+        id: rawServiceReport.id,
+        status: rawServiceReport.status || null,
+        checklist_json: rawServiceReport.checklist_json || null,
+        notes: rawServiceReport.notes || null,
+        signature_name: rawServiceReport.signature_name || null,
+        submitted_at: rawServiceReport.submitted_at || null,
+        created_at: rawServiceReport.created_at || null,
+        updated_at: rawServiceReport.updated_at || null,
+        submitted_by: rawServiceReport.submitted_by || null,
+      },
+    })
+    if (serviceReportPdfUrl) sourceDocs.push({
+      label: rawServiceReport ? 'Trade Report PDF' : 'Trade Report',
+      url: serviceReportPdfUrl,
+      kind: 'pdf',
+      ...docMeta(serviceReportDoc, d.report_received_at || serviceReportDoc?.created_at || null, 'trade_report'),
+    })
+    if (workOrderPdfUrl) sourceDocs.push({
+      label: 'Work Order',
+      url: workOrderPdfUrl,
+      kind: 'pdf',
+      ...docMeta(workOrderDoc, workOrderDoc?.created_at || job.created_at || null, 'work_order'),
+    })
     for (const p of photos) {
-      if (p.url) sourceDocs.push({ label: p.label || 'Site Photo', url: p.url, kind: 'image' })
+      if (p.url) sourceDocs.push({
+        label: p.label || 'Site Photo',
+        url: p.url,
+        kind: 'image',
+        created_at: p.created_at || null,
+        received_at: p.received_at || p.taken_at || p.created_at || null,
+        source_type: 'photo',
+      })
     }
 
     // BLOCKER C — the To is the builder's WORK-ORDERS inbox (report_recipient),
@@ -16473,6 +16521,21 @@ export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, r
   return `msafe-draft-${jobId || 'nojob'}-${_makesafeNormRef(reference)}`.slice(0, 120)
 }
 
+// MLB/Prime jobs must bill through the canonical Xero contact. Intake/board
+// labels may say "ML Builders", but Xero should use "Major Loss Builders" so
+// draft invoices do not create/use the wrong duplicate contact.
+function canonicalMakesafeInvoiceContactName(reference: any, contact: any): string {
+  const raw = String(contact || '').trim()
+  const ref = String(reference || '').trim().toUpperCase()
+  const norm = raw.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  const hasMlbRef = /(^|[^A-Z0-9])MLB([^A-Z0-9]|$)/.test(ref) || /(^|[^A-Z0-9])MLB[-\s]*\d+/.test(ref) || ref.startsWith('MLB')
+  if (hasMlbRef || norm === 'mlbuilders' || norm === 'mlbuilder' || norm === 'majorlossbuilder' || norm === 'majorlossbuilders') {
+    return 'Major Loss Builders'
+  }
+  return raw
+}
+export const _canonicalMakesafeInvoiceContactNameForTest = canonicalMakesafeInvoiceContactName
+
 // (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
 // full-ACCREC-scan 3-tier dup guard FIRST; if a live invoice already maps to the
 // job, returns {skipped:true, existing_invoice} and creates nothing. Routine-safe
@@ -16480,7 +16543,7 @@ export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, r
 async function createMakesafeDraftInvoice(client: any, body: any) {
   const jobId = body.job_id || body.jobId || null
   const reference = body.reference
-  const contact = body.contact_name || body.contactName
+  const contact = canonicalMakesafeInvoiceContactName(reference, body.contact_name || body.contactName)
   const lines = body.line_items || body.lineItems || body.lines
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
