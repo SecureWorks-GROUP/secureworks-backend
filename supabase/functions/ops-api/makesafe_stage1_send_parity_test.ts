@@ -291,6 +291,20 @@ Deno.test("isSwmsPdf: rejects non-SWMS or non-PDF files", () => {
     "report PDF is not SWMS",
   );
   assertEquals(
+    isSwmsPdf(
+      "Make Safe Report - SWMS-26642-MLB-25045 - U3-63-Carrington-Street-Palmyra-WA-6157.pdf",
+    ),
+    false,
+    "report PDF carrying a SWMS job number is not the SWMS document",
+  );
+  assertEquals(
+    isSwmsPdf(
+      "Make Safe Report - SWMS-26604-MLB-25767 - 170-Hampden-Road-Nedlands-WA.pdf",
+    ),
+    false,
+    "Nedlands report PDF carrying a SWMS job number is not the SWMS document",
+  );
+  assertEquals(
     isSwmsPdf("Xero Invoice - INV-1234.pdf"),
     false,
     "invoice PDF is not SWMS",
@@ -319,6 +333,26 @@ const MLB_VALID_PAYLOAD = {
 
 Deno.test("checkClientSendGateWithSwms: PASS with 3 correct PDFs", () => {
   const failures = checkClientSendGateWithSwms(MLB_VALID_PAYLOAD);
+  assertEquals(
+    failures,
+    [],
+    `expected no failures; got: ${failures.join(", ")}`,
+  );
+});
+
+Deno.test("checkClientSendGateWithSwms: PASS when report filename contains SWMS job number plus one real SWMS PDF", () => {
+  const payload = {
+    ...MLB_VALID_PAYLOAD,
+    attachments: [
+      {
+        name:
+          "Make Safe Report - SWMS-26642-MLB-25045 - U3-63-Carrington-Street-Palmyra-WA-6157.pdf",
+      },
+      { name: "Xero Invoice - INV-0710.pdf" },
+      { name: "SecureWorks_SWMS_MLB25045_Palmyra_Roof.pdf" },
+    ],
+  };
+  const failures = checkClientSendGateWithSwms(payload);
   assertEquals(
     failures,
     [],
