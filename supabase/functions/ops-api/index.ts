@@ -17490,6 +17490,149 @@ async function _patchPack(client: any, jobId: string, packKind: string, patch: R
   }
 }
 
+function normaliseApprovedPhotosForFollowup(input: any): Array<{ url: string; name?: string; contentType?: string }> {
+  const raw = Array.isArray(input)
+    ? input
+    : Array.isArray(input?.approved_photos)
+      ? input.approved_photos
+      : Array.isArray(input?.approvedPhotos)
+        ? input.approvedPhotos
+        : Array.isArray(input?.approved_photo_urls)
+          ? input.approved_photo_urls
+          : Array.isArray(input?.approvedPhotoUrls)
+            ? input.approvedPhotoUrls
+            : Array.isArray(input?.selected_photo_urls)
+              ? input.selected_photo_urls
+              : Array.isArray(input?.selectedPhotoUrls)
+                ? input.selectedPhotoUrls
+                : Array.isArray(input?.selected_photos)
+                  ? input.selected_photos
+                  : Array.isArray(input?.selectedPhotos)
+                    ? input.selectedPhotos
+                    : []
+  const seen = new Set<string>()
+  const out: Array<{ url: string; name?: string; contentType?: string }> = []
+  raw.forEach((item: any, index: number) => {
+    const url = String(
+      typeof item === 'string'
+        ? item
+        : item?.url || item?.storage_url || item?.thumbnail_url || item?.photo_url || item?.href || ''
+    ).trim()
+    if (!url) return
+    const key = url.split('?')[0].split('#')[0].trim().toLowerCase()
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    const contentType = typeof item === 'object'
+      ? (item?.contentType || item?.content_type || item?.mime_type || item?.mimeType || undefined)
+      : undefined
+    const explicitName = typeof item === 'object'
+      ? (item?.name || item?.file_name || item?.filename || item?.label || undefined)
+      : undefined
+    out.push({
+      url,
+      name: normalisePhotoAttachmentName(explicitName, url, index + 1),
+      contentType: contentType ? String(contentType) : undefined,
+    })
+  })
+  return out
+}
+export const _normaliseApprovedPhotosForTest = normaliseApprovedPhotosForFollowup
+
+function normalisePhotoAttachmentName(candidate: any, url: string, index: number): string {
+  const cleanCandidate = String(candidate || '').trim()
+  if (cleanCandidate && /\.[a-z0-9]{2,5}$/i.test(cleanCandidate)) return cleanCandidate
+  let fromUrl = ''
+  try {
+    const path = new URL(url).pathname
+    fromUrl = decodeURIComponent(path.split('/').filter(Boolean).pop() || '')
+  } catch (_) {
+    fromUrl = decodeURIComponent(String(url || '').split('?')[0].split('#')[0].split('/').pop() || '')
+  }
+  if (fromUrl && /\.[a-z0-9]{2,5}$/i.test(fromUrl)) return fromUrl
+  if (cleanCandidate) {
+    const safe = cleanCandidate.replace(/[^A-Za-z0-9._ -]+/g, '').replace(/\s+/g, ' ').trim()
+    if (safe) return `${safe}.jpg`
+  }
+  return `site-photo-${index}.jpg`
+}
+
+async function applyMakesafeCloseOut(
+  client: any,
+  jobId: string,
+  opts: { nowIso?: () => string; operatorEmail?: string | null; source?: string } = {},
+) {
+  const now = opts.nowIso ? opts.nowIso() : new Date().toISOString()
+  const source = opts.source || 'ops-api/makesafe_close_out'
+
+  const { data: msd } = await client.from('makesafe_job_details')
+    .select('report_sent_at')
+    .eq('job_id', jobId)
+    .maybeSingle()
+  const reportSentAt = msd?.report_sent_at || now
+  const detailPatch: Record<string, any> = { substatus: 'complete', updated_at: now }
+  if (!msd?.report_sent_at) detailPatch.report_sent_at = reportSentAt
+  const { data: detailRows, error: detailErr } = await client.from('makesafe_job_details')
+    .update(detailPatch)
+    .eq('job_id', jobId)
+    .select()
+  if (detailErr) throw new ApiError('make-safe close detail update failed: ' + detailErr.message, 500)
+  if (!detailRows || detailRows.length === 0) {
+    throw new ApiError('make-safe close detail update affected 0 rows; verify the makesafe_job_details row exists', 409)
+  }
+
+  const { data: job } = await client.from('jobs')
+    .select('id, status, completed_at')
+    .eq('id', jobId)
+    .maybeSingle()
+  if (!job) throw new ApiError('make-safe close job update failed: job row not found', 404)
+
+  const oldStatus = String(job.status || '').toLowerCase()
+  const noCloseStatuses = new Set(['cancelled', 'canceled', 'lost', 'deleted'])
+  if (noCloseStatuses.has(oldStatus)) {
+    throw new ApiError(`make-safe close refused: job status '${oldStatus}' is terminal and cannot be auto-closed`, 409)
+  }
+  const nextStatus = oldStatus === 'archived' ? 'archived' : 'invoiced'
+  const jobPatch: Record<string, any> = { status: nextStatus, updated_at: now }
+  if (!job.completed_at) jobPatch.completed_at = reportSentAt
+  const { data: jobRows, error: jobErr } = await client.from('jobs')
+    .update(jobPatch)
+    .eq('id', jobId)
+    .select()
+  if (jobErr) throw new ApiError('make-safe close job update failed: ' + jobErr.message, 500)
+  if (!jobRows || jobRows.length === 0) {
+    throw new ApiError('make-safe close job update affected 0 rows; pack remains close-recoverable', 409)
+  }
+
+  if (oldStatus !== nextStatus) {
+    try {
+      await client.from('job_events').insert({
+        job_id: jobId,
+        event_type: 'status_changed',
+        detail_json: { old_status: oldStatus, new_status: nextStatus, source, operator: opts.operatorEmail || null },
+      })
+    } catch (_) { /* non-blocking audit trail */ }
+    try {
+      await client.from('business_events').insert({
+        event_type: 'makesafe.job_closed',
+        source,
+        entity_type: 'job',
+        entity_id: jobId,
+        job_id: jobId,
+        correlation_id: jobId,
+        payload: {
+          status: { from: oldStatus, to: nextStatus },
+          substatus: 'complete',
+          report_sent_at: reportSentAt,
+        },
+        metadata: { operator: opts.operatorEmail || null },
+      })
+    } catch (_) { /* non-blocking audit trail */ }
+  }
+
+  return { report_sent_at: reportSentAt, job_status: nextStatus }
+}
+export const _applyMakesafeCloseOutForTest = applyMakesafeCloseOut
+
 // (3c) makesafe_send_pack — the RESUMABLE STATE MACHINE. PRIVILEGED-CALLER ONLY
 // (gated at the route case: dashboard SW_API_KEY or admin/owner JWT; the make-safe
 // routine key is rejected — decision scoped-routine-key-2026-06-17). Authorises
@@ -17507,6 +17650,7 @@ export interface MakesafeSendPackDeps {
   attachDoc: (client: any, body: any) => Promise<{ document_id?: string | null }>
   fetchReportPdfBytes: (url: string) => Promise<Uint8Array | null>
   sendEmail: (payload: any) => Promise<{ ok: boolean; status: number; bodyText: () => Promise<string>; json: () => Promise<any> }>
+  sendPhotoFollowup: (client: any, body: any) => Promise<any>
 }
 
 async function makesafeSendPack(
@@ -17533,6 +17677,7 @@ async function makesafeSendPack(
     })
     return { ok: r.ok, status: r.status, bodyText: () => r.text(), json: () => r.json() }
   })
+  const _sendPhotoFollowup = deps?.sendPhotoFollowup || makesafeSendPhotoFollowup
 
   const jobId = body.job_id || body.jobId
   const packKind = body.pack_kind || 'main'
@@ -17567,14 +17712,14 @@ async function makesafeSendPack(
   const priorStatus = priorPack?.status || null
 
   // Helper: apply the make-safe close (idempotent). NOT completeJob — its status
-  // allow-list excludes make-safe substatuses. report_sent_at is set only if not
-  // already present so a re-run preserves the original send time.
+  // allow-list excludes make-safe substatuses. report_sent_at/completed_at are
+  // set only if absent so a re-run preserves the original send time.
   const _applyMakesafeClose = async () => {
-    const patch: Record<string, any> = { substatus: 'complete', updated_at: nowIso() }
-    const { data: msd } = await client.from('makesafe_job_details')
-      .select('report_sent_at').eq('job_id', jobId).maybeSingle()
-    if (!msd?.report_sent_at) patch.report_sent_at = nowIso()
-    await client.from('makesafe_job_details').update(patch).eq('job_id', jobId)
+    return await applyMakesafeCloseOut(client, jobId, {
+      nowIso,
+      operatorEmail: ctx.approverEmail || null,
+      source: 'ops-api/makesafe_send_pack',
+    })
   }
 
   const postSendPlan = planPostSendResume(priorStatus)
@@ -17872,8 +18017,7 @@ async function makesafeSendPack(
   if (!recipientEmail) throw new ApiError('recipient_email required', 400)
   if (!subject) throw new ApiError('subject required', 400)
   if (!htmlBody) throw new ApiError('html_body required', 400)
-  const approvedPhotosForFollowup: Array<{ url: string; name?: string; contentType?: string }> =
-    Array.isArray(body.approved_photos) ? body.approved_photos : []
+  const approvedPhotosForFollowup = normaliseApprovedPhotosForFollowup(body)
 
   // ── ATOMIC SEND-LOCK ──
   // Ensure a pack row exists in a lockable state, then take the lock with a
@@ -18147,7 +18291,7 @@ async function makesafeSendPack(
     let photoFollowupResult: any = null
     if (approvedPhotosForFollowup.length > 0) {
       try {
-        photoFollowupResult = await makesafeSendPhotoFollowup(client, {
+        photoFollowupResult = await _sendPhotoFollowup(client, {
           job_id: jobId,
           approved_photos: approvedPhotosForFollowup,
         })
@@ -18165,10 +18309,10 @@ async function makesafeSendPack(
 
     // ── STEP 7: CLOSE via make-safe semantics (substatus=complete + report_sent_at) ──
     // NOT completeJob — its status allow-list excludes make-safe substatuses.
+    // Also sync the canonical jobs row to invoiced/completed_at so the job leaves
+    // the active ops board, not just the MakeSafe reporting queue.
     try {
-      await client.from('makesafe_job_details')
-        .update({ substatus: 'complete', report_sent_at: nowIso(), updated_at: nowIso() })
-        .eq('job_id', jobId)
+      await _applyMakesafeClose()
     } catch (closeErr) {
       // Sent + marker written, but close failed. Recoverable: resume re-applies
       // the close only (marker present -> no re-email, invoice authorised -> no
@@ -18280,8 +18424,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
 
-  const approvedPhotos: Array<{ url: string; name: string; contentType?: string }> =
-    Array.isArray(body.approved_photos) ? body.approved_photos : []
+  const approvedPhotos = normaliseApprovedPhotosForFollowup(body)
   if (approvedPhotos.length === 0) throw new ApiError('approved_photos array is required and must be non-empty', 400)
 
   // ── PRECONDITION: main pack MUST already be sent ──
@@ -18519,22 +18662,19 @@ async function makesafeResumeClose(client: any, body: any) {
   }
 
   // CLOSE ONLY. Apply the make-safe close (substatus=complete + report_sent_at if
-  // absent). NO email, NO authorise anywhere in this path.
-  const closePatch: Record<string, any> = { substatus: 'complete', updated_at: nowIso() }
-  const { data: msd } = await client.from('makesafe_job_details')
-    .select('report_sent_at').eq('job_id', jobId).maybeSingle()
-  if (!msd?.report_sent_at) closePatch.report_sent_at = nowIso()
-  const { error: closeErr, data: closedRows } = await client.from('makesafe_job_details')
-    .update(closePatch).eq('job_id', jobId).select()
-  // Verify the close actually landed BEFORE flipping the pack to 'sent'. Do NOT
-  // silently mark a pack sent on a failed/no-op update.
-  if (closeErr) {
-    await _patchPack(client, jobId, packKind, { failed_step: 'resume_close', error_detail: ('resume_close update failed: ' + closeErr.message).slice(0, 500) })
-    throw new ApiError('makesafe_resume_close: close update failed (pack NOT marked sent; safe to retry): ' + closeErr.message, 500)
-  }
-  if (!closedRows || closedRows.length === 0) {
-    await _patchPack(client, jobId, packKind, { failed_step: 'resume_close', error_detail: 'resume_close affected 0 rows (no makesafe_job_details row updated)' })
-    throw new ApiError('makesafe_resume_close: close affected 0 rows (pack NOT marked sent); verify the job detail row exists', 409)
+  // absent) and sync jobs.status/jobs.completed_at. NO email, NO authorise
+  // anywhere in this path. Verify the close actually landed BEFORE flipping the
+  // pack to 'sent'. Do NOT silently mark a pack sent on a failed/no-op update.
+  try {
+    await applyMakesafeCloseOut(client, jobId, {
+      nowIso,
+      operatorEmail: body.operator_email || body.user_email || null,
+      source: 'ops-api/makesafe_resume_close',
+    })
+  } catch (closeErr) {
+    const msg = ((closeErr as Error).message || String(closeErr)).slice(0, 500)
+    await _patchPack(client, jobId, packKind, { failed_step: 'resume_close', error_detail: ('resume_close update failed: ' + msg).slice(0, 500) })
+    throw new ApiError('makesafe_resume_close: close update failed (pack NOT marked sent; safe to retry): ' + msg, (closeErr as any)?.status || 500)
   }
 
   // Close confirmed -> flip the pack to terminal 'sent', clear diagnostics.

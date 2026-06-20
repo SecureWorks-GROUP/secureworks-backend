@@ -171,6 +171,8 @@ function makeSeams(opts: {
     fetchReportUrls: [] as string[],
     email: 0,
     emailPayloads: [] as any[],
+    photoFollowup: 0,
+    photoPayloads: [] as any[],
   };
   const deps = {
     getToken: async (_c: any) => {
@@ -233,6 +235,16 @@ function makeSeams(opts: {
         json: async () => ({ message_id: "msg-1" }),
       };
     },
+    sendPhotoFollowup: async (_client: any, payload: any) => {
+      counts.photoFollowup++;
+      counts.photoPayloads.push(payload);
+      return {
+        sent: true,
+        photo_count: Array.isArray(payload?.approved_photos)
+          ? payload.approved_photos.length
+          : 0,
+      };
+    },
   };
   return { counts, deps };
 }
@@ -251,6 +263,7 @@ function readySeed(extra: Partial<Rows> = {}): Rows {
       type: "makesafe",
       status: "invoiced",
       client_name: "Jane",
+      completed_at: null,
     }],
     makesafe_job_details: [{
       job_id: "job-1",
@@ -321,7 +334,16 @@ function markerCount(client: any) {
 // 1. HAPPY PATH baseline — one email, one authorise, marker written, closed.
 // ═════════════════════════════════════════════════════════════════
 Deno.test("send_pack: happy path -> ONE authorise + ONE email + marker + close", async () => {
-  const client = makeClient(readySeed());
+  const client = makeClient(readySeed({
+    jobs: [{
+      id: "job-1",
+      job_number: "MS-1",
+      type: "makesafe",
+      status: "scheduled",
+      client_name: "Jane",
+      completed_at: null,
+    }],
+  }));
   const { counts, deps } = makeSeams({ emailMode: "ok" });
   const res: any = await _makesafeSendPackForTest(
     client,
@@ -338,8 +360,65 @@ Deno.test("send_pack: happy path -> ONE authorise + ONE email + marker + close",
   assertEquals(res.status, "sent");
   assertEquals(counts.authorise, 1, "exactly one authorise");
   assertEquals(counts.email, 1, "exactly one email");
+  assertEquals(
+    counts.photoFollowup,
+    0,
+    "no photo follow-up when no photos approved",
+  );
   assertEquals(markerCount(client), 1, "one marker written");
   assertEquals(packOf(client).status, "sent");
+  assertEquals(client._tables.makesafe_job_details[0].substatus, "complete");
+  assertEquals(client._tables.jobs[0].status, "invoiced");
+  assert(client._tables.jobs[0].completed_at, "jobs.completed_at stamped");
+});
+
+Deno.test("send_pack: approved photos are normalised and sent as the immediate follow-up", async () => {
+  const client = makeClient(readySeed({
+    jobs: [{
+      id: "job-1",
+      job_number: "MS-1",
+      type: "makesafe",
+      status: "scheduled",
+      client_name: "Jane",
+      completed_at: null,
+    }],
+  }));
+  const { counts, deps } = makeSeams({ emailMode: "ok" });
+  const res: any = await _makesafeSendPackForTest(
+    client,
+    {
+      job_id: "job-1",
+      recipient_email: "workorders@b.com",
+      subject: "Make Safe Completion B-1",
+      html_body: "<p>done</p>",
+      approved_photo_urls: [
+        "https://docs.test/photos/wall-propped.jpeg?sig=1",
+        "https://docs.test/photos/wall-propped.jpeg?sig=2",
+        { url: "https://docs.test/photos/temp-fence", label: "Temp fence" },
+      ],
+    },
+    CTX,
+    deps,
+  );
+  assertEquals(res.photo_followup.sent, true);
+  assertEquals(
+    counts.photoFollowup,
+    1,
+    "exactly one immediate photo follow-up",
+  );
+  assertEquals(
+    counts.photoPayloads[0].approved_photos.length,
+    2,
+    "photo URLs deduped by base URL",
+  );
+  assertEquals(
+    counts.photoPayloads[0].approved_photos[0].name,
+    "wall-propped.jpeg",
+  );
+  assertEquals(
+    counts.photoPayloads[0].approved_photos[1].name,
+    "Temp fence.jpg",
+  );
 });
 
 Deno.test("send_pack: pack report_doc_id anchors the emailed report when duplicate reports exist", async () => {
@@ -390,13 +469,22 @@ Deno.test("send_pack: pack report_doc_id anchors the emailed report when duplica
     deps,
   );
 
-  assertEquals(counts.fetchReportUrls[0], "https://docs.test/full-reviewed-report.pdf");
-  assertEquals(counts.emailPayloads[0].attachments[0].name, "Make Safe Report B-1 Full Reviewed.pdf");
+  assertEquals(
+    counts.fetchReportUrls[0],
+    "https://docs.test/full-reviewed-report.pdf",
+  );
+  assertEquals(
+    counts.emailPayloads[0].attachments[0].name,
+    "Make Safe Report B-1 Full Reviewed.pdf",
+  );
 });
 
 Deno.test("send_pack: legacy MLB rows use the vetted MLB report-recipient backstop", async () => {
   const seed = readySeed();
-  seed.jobs[0].metadata = { external_ref: "MLB-24732", requesting_company: { slug: "mlb", name: "ML Builders" } };
+  seed.jobs[0].metadata = {
+    external_ref: "MLB-24732",
+    requesting_company: { slug: "mlb", name: "ML Builders" },
+  };
   seed.makesafe_job_details[0].external_ref = "MLB-24732";
   seed.makesafe_job_details[0].requesting_company_slug = "mlb";
   seed.makesafe_job_details[0].requesting_company_name = "ML Builders";
@@ -853,6 +941,13 @@ Deno.test("D-d contrast: a CLEAN 4xx pre-dispatch reject -> authorised_not_sent 
 // ═════════════════════════════════════════════════════════════════
 function closeSeed(packStatus: string, withMarker: boolean): Rows {
   return {
+    jobs: [{
+      id: "job-1",
+      job_number: "MS-1",
+      type: "makesafe",
+      status: "scheduled",
+      completed_at: null,
+    }],
     makesafe_report_packs: [{
       id: "p-1",
       job_id: "job-1",
@@ -882,6 +977,8 @@ Deno.test("resume_close: sent_not_closed + marker -> close applied, pack->sent, 
   assertEquals(res.authorised, false);
   assertEquals(packOf(client).status, "sent");
   assertEquals(client._tables.makesafe_job_details[0].substatus, "complete");
+  assertEquals(client._tables.jobs[0].status, "invoiced");
+  assert(client._tables.jobs[0].completed_at, "jobs.completed_at stamped");
   assert(
     client._tables.makesafe_job_details[0].report_sent_at,
     "report_sent_at stamped",
