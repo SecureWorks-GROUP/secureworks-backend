@@ -1247,30 +1247,148 @@ function xeroContactWherePath(field: string, value: string): string {
   return '/Contacts?where=' + encodeURIComponent(`${field}=="${escaped}"`)
 }
 
+function xeroContactContainsPath(field: string, value: string): string {
+  const escaped = String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return '/Contacts?where=' + encodeURIComponent(`${field}.Contains("${escaped}")`)
+}
+
+function normaliseContactToken(value: unknown): string {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function normaliseContactCompact(value: unknown): string {
+  return normaliseContactToken(value).replace(/\s+/g, '')
+}
+
+function isSecureWorksInternalEmail(email: unknown): boolean {
+  return /@secureworkswa\.com\.au$/i.test(String(email || '').trim())
+}
+
+function pushStringCandidate(out: string[], value: unknown) {
+  const s = String(value || '').trim()
+  if (s && !out.some((existing) => existing.toLowerCase() === s.toLowerCase())) out.push(s)
+}
+
+function tradeContactNameCandidates(name: string, tradeDetails: any): string[] {
+  const candidates: string[] = []
+  pushStringCandidate(candidates, name)
+
+  const fields = [
+    'xero_contact_name', 'xeroContactName', 'xero_supplier_name', 'xeroSupplierName',
+    'supplier_name', 'supplierName', 'business_name', 'businessName', 'trading_name',
+    'tradingName', 'legal_name', 'legalName', 'invoice_name', 'invoiceName',
+  ]
+  for (const f of fields) pushStringCandidate(candidates, tradeDetails?.[f])
+
+  const aliases = tradeDetails?.xero_contact_aliases || tradeDetails?.xeroContactAliases ||
+    tradeDetails?.supplier_aliases || tradeDetails?.supplierAliases
+  if (Array.isArray(aliases)) {
+    for (const alias of aliases) pushStringCandidate(candidates, alias)
+  }
+
+  return candidates
+}
+
+function tradeContactEmailCandidates(email: string, tradeDetails: any): string[] {
+  const candidates: string[] = []
+  const pushEmailCandidate = (value: unknown) => {
+    const s = String(value || '').trim()
+    if (!s || isSecureWorksInternalEmail(s)) return
+    pushStringCandidate(candidates, s)
+  }
+  const fields = [
+    'xero_contact_email', 'xeroContactEmail', 'xero_supplier_email', 'xeroSupplierEmail',
+    'supplier_email', 'supplierEmail', 'invoice_email', 'invoiceEmail', 'accounts_email',
+    'accountsEmail', 'payment_email', 'paymentEmail',
+  ]
+  for (const f of fields) pushEmailCandidate(tradeDetails?.[f])
+
+  const aliases = tradeDetails?.xero_contact_emails || tradeDetails?.xeroContactEmails ||
+    tradeDetails?.supplier_emails || tradeDetails?.supplierEmails
+  if (Array.isArray(aliases)) {
+    for (const alias of aliases) pushEmailCandidate(alias)
+  }
+
+  // SecureWorks login emails are staff/app identities, not supplier identities.
+  // Do not let nithin@secureworkswa.com.au, marnin@secureworkswa.com.au, etc.
+  // match unrelated Xero supplier contacts that also use those inboxes.
+  pushEmailCandidate(email)
+  return candidates
+}
+
+function contactLooksLikeTrade(contact: any, nameCandidates: string[], emailCandidates: string[]): boolean {
+  const contactName = contact?.Name || contact?.name || ''
+  const contactEmail = String(contact?.EmailAddress || contact?.email || '').trim().toLowerCase()
+  const contactCompact = normaliseContactCompact(contactName)
+
+  if (contactEmail && emailCandidates.some((e) => contactEmail === e.trim().toLowerCase())) return true
+
+  return nameCandidates.some((candidate) => {
+    const candidateCompact = normaliseContactCompact(candidate)
+    return !!candidateCompact && !!contactCompact && (
+      contactCompact === candidateCompact ||
+      contactCompact.includes(candidateCompact) ||
+      candidateCompact.includes(contactCompact)
+    )
+  })
+}
+
+async function xeroContactById(contactId: string, accessToken: string, tenantId: string): Promise<any | null> {
+  if (!contactId) return null
+  try {
+    const res = await xeroGet('/Contacts/' + encodeURIComponent(contactId), accessToken, tenantId)
+    return res?.Contacts?.[0] || null
+  } catch {
+    return null
+  }
+}
+
 async function resolveTradeXeroSupplierContact(
   client: any,
   args: {
     userId?: string | null
     name?: string | null
     email?: string | null
+    tradeDetails?: any
     cachedContactId?: string | null
     accessToken: string
     tenantId: string
   },
 ): Promise<string | null> {
-  const cachedContactId = (args.cachedContactId || '').trim()
-  if (cachedContactId) return cachedContactId
-
   const tradeName = (args.name || 'Trade').trim() || 'Trade'
   const tradeEmail = (args.email || '').trim()
-  let xeroContactId: string | null = null
+  const nameCandidates = tradeContactNameCandidates(tradeName, args.tradeDetails)
+  const emailCandidates = tradeContactEmailCandidates(tradeEmail, args.tradeDetails)
 
-  // 1) Email match covers the normal path where the Supabase login email is
-  // the same as the Xero supplier contact email.
-  if (tradeEmail) {
+  const cachedContactId = (args.cachedContactId || '').trim()
+  if (cachedContactId) {
+    const cached = await xeroContactById(cachedContactId, args.accessToken, args.tenantId)
+    if (cached && contactLooksLikeTrade(cached, nameCandidates, emailCandidates)) return cachedContactId
+    console.log('[ops-api] Ignoring stale trade Xero contact cache', {
+      user_id: args.userId || null,
+      trade_name: tradeName,
+      cached_contact_id: cachedContactId,
+      cached_contact_name: cached?.Name || null,
+      cached_contact_email: cached?.EmailAddress || null,
+    })
+  }
+
+  let xeroContactId: string | null = null
+  let ambiguousXeroContact = false
+
+  // 1) Email match covers the normal path where the trade login email is the
+  // same as the Xero supplier contact email. SecureWorks internal login emails
+  // are intentionally excluded above because they can also belong to unrelated
+  // Xero supplier contacts (Nithin/B&D Metals was the regression case).
+  for (const emailCandidate of emailCandidates) {
     try {
-      const contacts = await xeroGet(xeroContactWherePath('EmailAddress', tradeEmail), args.accessToken, args.tenantId)
-      if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+      const contacts = await xeroGet(xeroContactWherePath('EmailAddress', emailCandidate), args.accessToken, args.tenantId)
+      const matches = (contacts?.Contacts || []).filter((c: any) => contactLooksLikeTrade(c, nameCandidates, emailCandidates))
+      if (matches.length === 1 && matches[0]?.ContactID) {
+        xeroContactId = matches[0].ContactID
+        break
+      }
+      if (matches.length > 1) ambiguousXeroContact = true
     } catch { /* fallback to name lookup/create */ }
   }
 
@@ -1278,15 +1396,47 @@ async function resolveTradeXeroSupplierContact(
   // already exists under the trade name but has a different primary email.
   // Without this, the create step hits Xero's duplicate-name validation and
   // the mobile invoice is only saved locally.
-  if (!xeroContactId && tradeName) {
-    try {
-      const contacts = await xeroGet(xeroContactWherePath('Name', tradeName), args.accessToken, args.tenantId)
-      if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
-    } catch { /* fallback to create */ }
+  if (!xeroContactId) {
+    for (const nameCandidate of nameCandidates) {
+      try {
+        const exact = await xeroGet(xeroContactWherePath('Name', nameCandidate), args.accessToken, args.tenantId)
+        const exactMatch = (exact?.Contacts || []).find((c: any) => contactLooksLikeTrade(c, nameCandidates, emailCandidates))
+        if (exactMatch?.ContactID) {
+          xeroContactId = exactMatch.ContactID
+          break
+        }
+
+        const contains = await xeroGet(xeroContactContainsPath('Name', nameCandidate), args.accessToken, args.tenantId)
+        const containsMatches = (contains?.Contacts || []).filter((c: any) => contactLooksLikeTrade(c, nameCandidates, emailCandidates))
+        if (containsMatches.length === 1 && containsMatches[0]?.ContactID) {
+          xeroContactId = containsMatches[0].ContactID
+          break
+        }
+        if (containsMatches.length > 1) ambiguousXeroContact = true
+      } catch { /* fallback to create */ }
+    }
   }
 
   // 3) Create only when the contact is genuinely absent.
   if (!xeroContactId) {
+    if (ambiguousXeroContact) {
+      console.log('[ops-api] Refusing to guess ambiguous Xero supplier contact', {
+        user_id: args.userId || null,
+        trade_name: tradeName,
+        trade_email: tradeEmail,
+        name_candidates: nameCandidates,
+        email_candidates: emailCandidates,
+      })
+      return null
+    }
+    if (isSecureWorksInternalEmail(tradeEmail)) {
+      console.log('[ops-api] Refusing to auto-create Xero supplier contact from internal SecureWorks email', {
+        user_id: args.userId || null,
+        trade_name: tradeName,
+        trade_email: tradeEmail,
+      })
+      return null
+    }
     const createRes = await xeroPost('/Contacts', args.accessToken, args.tenantId, {
       Contacts: [{ Name: tradeName, EmailAddress: tradeEmail || undefined, IsSupplier: true }],
     }, 'PUT')
@@ -2776,7 +2926,7 @@ if (import.meta.main) serve(async (req: Request) => {
 
         // Get the invoice + lines + user
         const { data: inv } = await client.from('trade_invoices')
-          .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
+          .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id, trade_details)')
           .eq('id', invoice_id)
           .maybeSingle()
         if (!inv) throw new ApiError('Invoice not found', 404)
@@ -2873,6 +3023,7 @@ if (import.meta.main) serve(async (req: Request) => {
           userId: inv.user_id,
           name: tradeName,
           email: tradeEmail,
+          tradeDetails: inv.user?.trade_details || null,
           cachedContactId,
           accessToken,
           tenantId,
@@ -4759,6 +4910,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 userId: tradeUser.id,
                 name: userProfile?.name || 'Trade',
                 email: tradeEmail,
+                tradeDetails: userProfile?.trade_details || null,
                 cachedContactId: userProfile?.xero_contact_id || null,
                 accessToken,
                 tenantId,
@@ -19352,6 +19504,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     userId,
     name: tradeUser?.name || 'Trade',
     email: tradeUser?.email || '',
+    tradeDetails: tradeUser?.trade_details || null,
     cachedContactId: tradeUser?.xero_contact_id || null,
     accessToken: stAt,
     tenantId: stTi,

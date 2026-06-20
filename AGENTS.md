@@ -5,24 +5,18 @@
 `ops-api` and `send-quote` are production backend functions. They must have one
 deployable reality only.
 
-Production deploys are allowed only from:
+Current source of truth:
 
-- GitHub repo: `SecureWorks-GROUP/secureworks-site`
+- GitHub repo: `SecureWorks-GROUP/secureworks-backend`
 - Branch: `main`
-- Local release worktree: `/Users/marninstobbe/Projects/_release/secureworks-site-main`
+- Canonical source path: `supabase/functions/`
+- Deploy lane: PR -> CI -> merge to `main` -> GitHub Actions auto-deploy
 
-Do not deploy these functions from dashboard repos, stale worktrees, feature
-branches, temporary folders, or copied source trees.
+Do not deploy these functions manually from dashboard repos, stale worktrees,
+feature branches, temporary folders, copied source trees, or any old
+`secureworks-site` release checkout.
 
-Allowed local command:
-
-```bash
-cd /Users/marninstobbe/Projects/_release/secureworks-site-main
-SW_API_KEY=... scripts/deploy-edge-function.sh ops-api
-SW_API_KEY=... scripts/deploy-edge-function.sh send-quote
-```
-
-Disallowed command from any other folder:
+Disallowed local command:
 
 ```bash
 supabase functions deploy ops-api
@@ -37,7 +31,8 @@ multiple old local copies. A deploy from a stale folder overwrites production an
 can remove live actions used by Ops, Sales, Finance, Evidence, Scope Freeze, and
 quote sending.
 
-If you are unsure, do not deploy. Open a PR or run the read-only smoke script:
+If you are unsure, do not deploy. Open a PR against
+`SecureWorks-GROUP/secureworks-backend` or run the read-only smoke script:
 
 ```bash
 SW_API_KEY=... scripts/smoke-edge-functions.sh
