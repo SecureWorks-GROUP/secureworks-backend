@@ -16555,11 +16555,183 @@ function canonicalMakesafeBuilderDisplayName(reference: any, requestedName: any,
 }
 export const _canonicalMakesafeBuilderDisplayNameForTest = canonicalMakesafeBuilderDisplayName
 
+interface CreateMakesafeDraftInvoiceDeps {
+  fetchAllAccrecInvoices?: (client: any) => Promise<any[]>
+  updateExistingDraftInvoice?: (client: any, args: {
+    existing: any
+    jobId: string | null
+    reference: string
+    contact: string
+    lineItems: any[]
+    dueDate?: string | null
+    operator?: string | null
+  }) => Promise<any>
+  createInvoiceFn?: (client: any, body: any) => Promise<any>
+}
+
+function makesafeDraftLinesForXero(lines: any[]): any[] {
+  return lines.map((li: any) => ({
+    description: li.description || '',
+    quantity: li.quantity ?? 1,
+    unit_price: li.unit_price ?? li.unitPrice ?? 0,
+    account_code: li.account_code || li.accountCode || '210',
+  }))
+}
+
+function normaliseXeroNameForCompare(value: any): string {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+async function resolveXeroContactByExactName(accessToken: string, tenantId: string, contactName: string): Promise<any> {
+  const clean = String(contactName || '').trim()
+  if (!clean) return null
+  try {
+    const result = await xeroGet('/Contacts', accessToken, tenantId, {
+      where: `Name=="${clean.replace(/"/g, '')}"`,
+    })
+    return result?.Contacts?.[0] || null
+  } catch (e) {
+    console.log('[makesafe_draft_invoice] Xero contact name lookup failed:', (e as Error).message)
+    return null
+  }
+}
+
+async function updateMakesafeExistingDraftInvoice(client: any, args: {
+  existing: any
+  jobId: string | null
+  reference: string
+  contact: string
+  lineItems: any[]
+  dueDate?: string | null
+  operator?: string | null
+}): Promise<any> {
+  const xeroInvoiceId = args.existing?.xero_invoice_id || args.existing?.id || args.existing?.InvoiceID
+  if (!xeroInvoiceId) throw new ApiError('existing draft invoice missing xero_invoice_id; cannot revise safely', 409)
+
+  const { accessToken, tenantId } = await getToken(client)
+  const live = await xeroGet(`/Invoices/${xeroInvoiceId}`, accessToken, tenantId)
+  const liveInvoice = live?.Invoices?.[0] || null
+  const liveStatus = String(liveInvoice?.Status || args.existing?.status || '').toUpperCase()
+  if (liveStatus !== 'DRAFT') {
+    throw new ApiError(
+      `existing invoice ${args.existing?.invoice_number || xeroInvoiceId} is ${liveStatus || 'not DRAFT'}; Revise Pack cannot rewrite a non-DRAFT invoice`,
+      409,
+    )
+  }
+
+  const lineItems = makesafeDraftLinesForXero(args.lineItems)
+  const expectedExGst = lineItems.reduce((sum: number, li: any) => {
+    return sum + Number(li.quantity ?? 1) * Number(li.unit_price ?? 0)
+  }, 0)
+  if (expectedExGst <= 0) {
+    throw new ApiError('existing draft invoice update refused: revised line items sum to $0 or less', 400)
+  }
+
+  const contactName = canonicalMakesafeInvoiceContactName(args.reference, args.contact)
+  const matchedContact = await resolveXeroContactByExactName(accessToken, tenantId, contactName)
+  const payload: any = {
+    InvoiceID: xeroInvoiceId,
+    Type: 'ACCREC',
+    Contact: matchedContact?.ContactID
+      ? { ContactID: matchedContact.ContactID }
+      : { Name: contactName },
+    LineAmountTypes: 'Exclusive',
+    LineItems: lineItems.map((li: any) => ({
+      Description: li.description || '',
+      Quantity: li.quantity ?? 1,
+      UnitAmount: li.unit_price ?? 0,
+      AccountCode: li.account_code || '210',
+      TaxType: 'OUTPUT',
+    })),
+    Reference: args.reference || liveInvoice?.Reference || '',
+    Status: 'DRAFT',
+  }
+  if (args.dueDate) payload.DueDate = args.dueDate
+
+  const updateResult = await xeroPost(`/Invoices/${xeroInvoiceId}`, accessToken, tenantId, { Invoices: [payload] }, 'POST')
+  const updated = updateResult?.Invoices?.[0]
+  if (!updated) throw new ApiError('Xero did not return the revised DRAFT invoice', 502)
+  const updatedStatus = String(updated.Status || '').toUpperCase()
+  if (updatedStatus !== 'DRAFT') {
+    throw new ApiError(`Xero returned invoice status ${updatedStatus || 'unknown'} after draft revision; expected DRAFT`, 502)
+  }
+
+  const actualContact = updated.Contact?.Name || contactName
+  if (normaliseXeroNameForCompare(actualContact) !== normaliseXeroNameForCompare(contactName)) {
+    throw new ApiError(`Xero returned contact '${actualContact}' after draft revision; expected '${contactName}'`, 502)
+  }
+
+  const subTotal = Number(updated.SubTotal ?? expectedExGst)
+  const total = Number(updated.Total ?? expectedExGst * 1.1)
+  if (!Number.isFinite(subTotal) || subTotal <= 0 || !Number.isFinite(total) || total <= 0) {
+    throw new ApiError('Xero returned a zero/invalid total after draft invoice revision', 502)
+  }
+
+  const cachePatch: any = {
+    xero_contact_id: updated.Contact?.ContactID || matchedContact?.ContactID || args.existing?.xero_contact_id || null,
+    contact_name: contactName,
+    invoice_number: updated.InvoiceNumber || args.existing?.invoice_number || null,
+    invoice_type: updated.Type || 'ACCREC',
+    status: updated.Status || 'DRAFT',
+    reference: updated.Reference || args.reference || null,
+    sub_total: subTotal,
+    total_tax: Number(updated.TotalTax ?? total - subTotal),
+    total,
+    amount_due: Number(updated.AmountDue ?? total),
+    due_date: updated.DueDateString || updated.DueDate || args.dueDate || null,
+    line_items: updated.LineItems || payload.LineItems,
+    raw_json: updated,
+    job_id: args.jobId || args.existing?.job_id || null,
+    synced_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+  const { data: cacheRows, error: cacheErr } = await client.from('xero_invoices')
+    .update(cachePatch)
+    .eq('xero_invoice_id', xeroInvoiceId)
+    .select('xero_invoice_id')
+  if (cacheErr) {
+    throw new ApiError(`local invoice cache update failed after Xero draft revision: ${cacheErr.message}`, 500)
+  }
+  if (!cacheRows || cacheRows.length === 0) {
+    throw new ApiError('local invoice cache update affected 0 rows after Xero draft revision', 500)
+  }
+  if (args.jobId) {
+    try {
+      await client.from('job_events').insert({
+        job_id: args.jobId,
+        event_type: 'invoice_updated',
+        detail_json: {
+          source: 'makesafe_revise_pack',
+          xero_invoice_id: xeroInvoiceId,
+          invoice_number: updated.InvoiceNumber || args.existing?.invoice_number || null,
+          total,
+          contact_name: contactName,
+          line_count: payload.LineItems.length,
+        },
+      })
+    } catch (e) {
+      console.log('[makesafe_draft_invoice] invoice_updated event insert failed:', (e as Error).message)
+    }
+  }
+
+  return {
+    success: true,
+    skipped: false,
+    updated_existing: true,
+    xero_invoice_id: xeroInvoiceId,
+    invoice_number: updated.InvoiceNumber || args.existing?.invoice_number || null,
+    status: updated.Status || 'DRAFT',
+    total,
+    reference: updated.Reference || args.reference,
+  }
+}
+
 // (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
-// full-ACCREC-scan 3-tier dup guard FIRST; if a live invoice already maps to the
-// job, returns {skipped:true, existing_invoice} and creates nothing. Routine-safe
+// full-ACCREC-scan 3-tier dup guard FIRST. If a DRAFT invoice already maps to
+// the job, revise that DRAFT in place from the latest Claude JSON; if a non-DRAFT
+// invoice maps to the job, skip or fail per caller policy. Routine-safe
 // (drafts only) — NO human-only gate.
-async function createMakesafeDraftInvoice(client: any, body: any) {
+async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMakesafeDraftInvoiceDeps = {}) {
   const jobId = body.job_id || body.jobId || null
   const reference = body.reference
   const contact = canonicalMakesafeInvoiceContactName(reference, body.contact_name || body.contactName)
@@ -16583,9 +16755,30 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
   // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
   // to the make-safe reference. A VOIDED/DELETED invoice never blocks.
   const externalRef = body.external_ref || reference
-  const allInvoices = await _fetchAllAccrecInvoices(client)
+  const _fetchInvoices = deps.fetchAllAccrecInvoices || _fetchAllAccrecInvoices
+  const _updateExistingDraft = deps.updateExistingDraftInvoice || updateMakesafeExistingDraftInvoice
+  const _createInvoice = deps.createInvoiceFn || createInvoice
+  const allInvoices = await _fetchInvoices(client)
   const existing = resolveExistingInvoice(allInvoices, jobId, externalRef)
   if (existing) {
+    const existingStatus = String(existing.status || '').toUpperCase()
+    if (existingStatus === 'DRAFT' && body.update_existing_draft !== false) {
+      return await _updateExistingDraft(client, {
+        existing,
+        jobId,
+        reference,
+        contact,
+        lineItems: lines,
+        dueDate: body.due_date || body.dueDate || null,
+        operator: body.operator || null,
+      })
+    }
+    if (body.fail_on_existing_non_draft === true) {
+      throw new ApiError(
+        `existing invoice ${existing.invoice_number || existing.xero_invoice_id || ''} is ${existingStatus || 'not DRAFT'}; Revise Pack cannot rewrite a non-DRAFT invoice`,
+        409,
+      )
+    }
     return {
       skipped: true,
       reference,
@@ -16598,12 +16791,7 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
   // Safe to create the single DRAFT. Hardcoded guardrails: DRAFT + no send.
   // account_code default 210 (per the make-safe draft spec), not createInvoice's
   // default of 200 — stamp it onto every line that did not specify one.
-  const draftLines = lines.map((li: any) => ({
-    description: li.description || '',
-    quantity: li.quantity ?? 1,
-    unit_price: li.unit_price ?? li.unitPrice ?? 0,
-    account_code: li.account_code || li.accountCode || '210',
-  }))
+  const draftLines = makesafeDraftLinesForXero(lines)
   // D2 — STABLE Xero idempotency key per (job, reference), NO time component.
   // The old key baked the current minute, so a retry a minute later created a
   // second DRAFT. A stable key makes Xero collapse identical create calls to one
@@ -16611,7 +16799,7 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
   // pre-read dup-guard above races. Kept short (Xero caps the header) and
   // namespaced to the make-safe draft path.
   const stableIdempotencyKey = _makesafeDraftIdempotencyKey(jobId, reference)
-  const created = await createInvoice(client, {
+  const created = await _createInvoice(client, {
     job_id: jobId || undefined,
     contact_name: contact,
     line_items: draftLines,
@@ -17008,13 +17196,16 @@ function draftPackInvoiceStatus(invoiceResult: any): string | null {
 
 async function defaultMarkDraftPackReady(client: any, jobId: string, detail: any): Promise<void> {
   const now = new Date().toISOString()
-  await client.from('makesafe_job_details')
+  const { data, error } = await client.from('makesafe_job_details')
     .update({
       substatus: REPORT_DRAFT_READY_SUBSTATUS,
       report_received_at: detail?.report_received_at || now,
       updated_at: now,
     })
     .eq('job_id', jobId)
+    .select('job_id')
+  if (error) throw new ApiError('draft pack ready mark failed: ' + error.message, 500)
+  if (!data || data.length === 0) throw new ApiError('draft pack ready mark affected 0 rows', 500)
 }
 
 // draft_makesafe_report_pack — the routine/cron-safe Draft Pack action.
@@ -17040,8 +17231,8 @@ async function draftMakesafeReportPack(
   const _getToken = deps.getToken || getToken
   const _fetchInvoicePdfBytes = deps.fetchInvoicePdfBytes || _fetchXeroInvoicePdfBytes
   const _attachDoc = deps.attachDoc || attachMakesafeDocument
-  const _ensure = deps.ensurePackRow || _ensurePackRow
-  const _patch = deps.patchPack || _patchPack
+  const _ensure = deps.ensurePackRow || _ensurePackRowStrict
+  const _patch = deps.patchPack || _patchPackStrict
   const _markReady = deps.markReady || defaultMarkDraftPackReady
   const _assertEligible = deps.assertRoutineEligible || assertDraftPackRoutineEligible
   const _claimDraftPack = deps.claimDraftPack || claimDraftPackForDrafting
@@ -18493,6 +18684,8 @@ async function rerunDraftReport(client: any, body: any, authMode: string): Promi
     feedback_notes: addressable,
     selected_photo_urls: selectedPhotoUrls,
     change_description,
+    update_existing_draft: true,
+    fail_on_existing_non_draft: true,
   }, authMode)
 
   await markDraftNotesAddressed(client, addressable, noteResult.storage)
