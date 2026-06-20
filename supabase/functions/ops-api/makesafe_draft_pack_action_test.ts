@@ -19,6 +19,8 @@ import {
   _createMakesafeDraftInvoiceForTest as createMakesafeDraftInvoice,
   _draftMakesafeReportPackDueForTest as draftMakesafeReportPackDue,
   _draftMakesafeReportPackForTest as draftMakesafeReportPack,
+  _evaluateMakesafeDraftInvoicePricingForTest
+    as evaluateMakesafeDraftInvoicePricing,
 } from "./index.ts";
 
 function claudeJson(summary = "Draft pack refreshed for human review.") {
@@ -307,6 +309,41 @@ Deno.test("createMakesafeDraftInvoice: revises an existing DRAFT invoice instead
   assertEquals(calls.create.length, 0);
   assertEquals(calls.update[0].contact, "Major Loss Builders");
   assertEquals(calls.update[0].lineItems.length, 2);
+});
+
+Deno.test("createMakesafeDraftInvoice: blocks $0/invalid MakeSafe pricing before Xero create or update", async () => {
+  const failures = evaluateMakesafeDraftInvoicePricing([
+    { description: "Make-safe labour", quantity: 4, unit_price: 0 },
+  ]);
+  assertEquals(failures.length >= 1, true);
+
+  await assertRejects(
+    () =>
+      createMakesafeDraftInvoice(
+        {},
+        {
+          reference: "MLB-26003",
+          contact_name: "Major Loss Builders",
+          line_items: [
+            { description: "Make-safe labour", quantity: 4, unit_price: 0 },
+          ],
+        },
+        {
+          fetchAllAccrecInvoices: async () => {
+            throw new Error(
+              "Xero duplicate scan should not run when pricing is invalid",
+            );
+          },
+          createInvoiceFn: async () => {
+            throw new Error(
+              "Xero create should not run when pricing is invalid",
+            );
+          },
+        },
+      ),
+    Error,
+    "draft invoice pricing review required",
+  );
 });
 
 Deno.test("createMakesafeDraftInvoice: Revise Pack fails closed on existing non-DRAFT invoice when requested", async () => {

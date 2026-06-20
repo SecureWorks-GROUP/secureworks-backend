@@ -961,8 +961,28 @@ Deno.test("money gate: zero-dollar invoice cannot be authorised or sent", () => 
     ],
   });
 
-  assertEquals(failures.length, 1);
+  assertEquals(failures.length, 2);
   assert(failures[0].includes("greater than $0"));
+});
+
+Deno.test("money gate: positive invoice with zero-priced line still needs review", () => {
+  const failures = checkPositiveInvoiceTotalGate({
+    status: "DRAFT",
+    total: 255,
+    sub_total: 255,
+    line_items: [
+      { Description: "Labour", Quantity: 3, UnitAmount: 85, LineAmount: 255 },
+      {
+        Description: "Temporary fencing",
+        Quantity: 1,
+        UnitAmount: 0,
+        LineAmount: 0,
+      },
+    ],
+  });
+
+  assertEquals(failures.length, 1);
+  assert(failures[0].includes("Temporary fencing"));
 });
 
 Deno.test("money gate: positive header or line total is accepted", () => {

@@ -16469,7 +16469,8 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
         needs_money_review: true,
         reason: positiveInvoiceFailures[0] ||
           'one or more invoice lines have $0 pricing and need review before send',
-        flagged_lines: (zeroPriceLines.length ? zeroPriceLines : lines).map((line: any) => ({
+        flagged_lines: (zeroPriceLines.length ? zeroPriceLines : lines).map((line: any, index: number) => ({
+          line_index: index,
           description: line.description || 'Invoice line',
           amount: Number(line.line_total || 0),
           flag: Number(line.line_total || 0) <= 0
@@ -16561,8 +16562,9 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       money_review: moneyReview as (null | {
         needs_money_review: boolean
         reason: string
-        flagged_lines: Array<{ description: string; amount: number; flag: string }>
+        flagged_lines: Array<{ line_index: number; description: string; amount: number; flag: string }>
       }),
+      needs_money_review: moneyReview?.needs_money_review === true,
     }
   }))
 
@@ -16649,6 +16651,35 @@ function makesafeDraftLinesForXero(lines: any[]): any[] {
   }))
 }
 
+function evaluateMakesafeDraftInvoicePricing(lines: any[], opts: { allowZeroPricing?: boolean; noChargeReason?: string | null } = {}): string[] {
+  const failures: string[] = []
+  if (!Array.isArray(lines) || lines.length === 0) return ['line_items required']
+  const allowZeroPricing = opts.allowZeroPricing === true && String(opts.noChargeReason || '').trim().length > 0
+  const draftLines = makesafeDraftLinesForXero(lines)
+  const totalExGst = draftLines.reduce((sum: number, li: any) => {
+    const quantity = Number(li.quantity ?? 1)
+    const unit = Number(li.unit_price ?? 0)
+    return sum + ((Number.isFinite(quantity) ? quantity : 1) * (Number.isFinite(unit) ? unit : 0))
+  }, 0)
+  if (!allowZeroPricing && (!Number.isFinite(totalExGst) || totalExGst <= 0)) {
+    failures.push('invoice total must be greater than $0 before a make-safe draft invoice can be created or revised')
+  }
+  draftLines.forEach((li: any, idx: number) => {
+    const quantity = Number(li.quantity ?? 1)
+    const unit = Number(li.unit_price ?? 0)
+    const desc = String(li.description || `line ${idx + 1}`).trim()
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      failures.push(`invoice line ${idx + 1} has invalid quantity: ${desc}`.slice(0, 220))
+      return
+    }
+    if (!allowZeroPricing && (!Number.isFinite(unit) || unit <= 0)) {
+      failures.push(`invoice line ${idx + 1} has $0/invalid unit price: ${desc}`.slice(0, 220))
+    }
+  })
+  return failures
+}
+export const _evaluateMakesafeDraftInvoicePricingForTest = evaluateMakesafeDraftInvoicePricing
+
 function normaliseXeroNameForCompare(value: any): string {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
 }
@@ -16688,6 +16719,11 @@ async function updateMakesafeExistingDraftInvoice(client: any, args: {
       `existing invoice ${args.existing?.invoice_number || xeroInvoiceId} is ${liveStatus || 'not DRAFT'}; Revise Pack cannot rewrite a non-DRAFT invoice`,
       409,
     )
+  }
+
+  const pricingFailures = evaluateMakesafeDraftInvoicePricing(args.lineItems)
+  if (pricingFailures.length > 0) {
+    throw new ApiError('existing draft invoice update refused: ' + pricingFailures.join('; '), 400)
   }
 
   const lineItems = makesafeDraftLinesForXero(args.lineItems)
@@ -16810,17 +16846,17 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
   if (!Array.isArray(lines) || lines.length === 0) throw new ApiError('line_items required', 400)
-  // Report job $0 gate: if a job_id is supplied and the job is a report type,
-  // block $0 or empty-amount invoices (the trade's charge must be present).
-  if (jobId) {
-    const { data: msDetail } = await client.from('makesafe_job_details')
-      .select('report_type').eq('job_id', jobId).maybeSingle()
-    if (msDetail?.report_type) {
-      const totalExGst = lines.reduce((sum: number, li: any) => sum + (Number(li.unit_price ?? li.unitPrice ?? 0)) * (Number(li.quantity ?? 1)), 0)
-      if (totalExGst <= 0) {
-        throw new ApiError('report job needs a charge amount before invoicing: line items sum to $0 or less', 400)
-      }
-    }
+  // All MakeSafe draft invoices must carry real pricing before Xero is touched.
+  // Claude may draft the commercial intent, but the backend is the money-safety
+  // boundary: a normal make-safe pack cannot create/revise a $0 invoice unless a
+  // future explicit no-charge operator path supplies both allow_zero_pricing=true
+  // and a no_charge_reason.
+  const pricingFailures = evaluateMakesafeDraftInvoicePricing(lines, {
+    allowZeroPricing: body.allow_zero_pricing === true || body.allowZeroPricing === true,
+    noChargeReason: body.no_charge_reason || body.noChargeReason || null,
+  })
+  if (pricingFailures.length > 0) {
+    throw new ApiError('draft invoice pricing review required: ' + pricingFailures.join('; '), 400)
   }
 
   // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
