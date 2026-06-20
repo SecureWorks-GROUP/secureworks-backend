@@ -52,6 +52,7 @@ Deno.test("user prompt carries selected photo urls and feedback notes", () => {
   assertStringIncludes(prompt, "Never output a $0 placeholder line");
   assertStringIncludes(prompt, "Major Loss Builders");
   assertStringIncludes(prompt, "1 trade x 3 hours");
+  assertStringIncludes(prompt, "Do not reduce below 3 labour hours");
   assertStringIncludes(prompt, "report.billing_note must be terse");
 });
 

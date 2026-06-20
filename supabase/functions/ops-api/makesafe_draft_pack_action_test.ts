@@ -576,6 +576,66 @@ Deno.test("createMakesafeDraftInvoice: renderer repair can preserve an existing 
   assertEquals(calls.create, 0);
 });
 
+Deno.test("createMakesafeDraftInvoice: preserves existing priced DRAFT when Xero project lines block rewrite", async () => {
+  const calls: Record<string, number> = { update: 0, create: 0 };
+  const result = await createMakesafeDraftInvoice(
+    {},
+    {
+      reference: "MLB-25457",
+      contact_name: "Major Loss Builders",
+      line_items: [
+        {
+          description: "Make-safe labour revised",
+          quantity: 3,
+          unit_price: 85,
+        },
+      ],
+      preserve_existing_draft_on_project_line_error: true,
+    },
+    {
+      fetchAllAccrecInvoices: async () => [{
+        xero_invoice_id: "xero-draft-25457",
+        invoice_number: "INV-0708",
+        status: "DRAFT",
+        reference: "MLB-25457",
+        sub_total: 703.5,
+        total: 773.85,
+        line_items: [
+          {
+            Description: "Temporary fencing make-safe",
+            Quantity: 2,
+            UnitAmount: 85,
+            LineAmount: 170,
+          },
+          {
+            Description: "Temporary fencing retrieval",
+            Quantity: 1,
+            UnitAmount: 180,
+            LineAmount: 180,
+          },
+        ],
+      }],
+      updateExistingDraftInvoice: async () => {
+        calls.update += 1;
+        throw new Error(
+          "Xero validation error: This document has lines associated to a Project, please either supply LineItemIDs so that this association can be maintained, or else remove the connection to the Project",
+        );
+      },
+      createInvoiceFn: async () => {
+        calls.create += 1;
+        throw new Error("should not create a duplicate invoice");
+      },
+    },
+  );
+
+  assertEquals(result.skipped, true);
+  assertEquals(result.project_line_pricing_preserved, true);
+  assertStringIncludes(result.update_error, "Project");
+  assertEquals(result.existing_invoice.invoice_number, "INV-0708");
+  assertEquals(calls.update, 1);
+  assertEquals(calls.create, 0);
+});
+
 Deno.test("createMakesafeDraftInvoice: Revise Pack fails closed on existing non-DRAFT invoice when requested", async () => {
   await assertRejects(
     () =>
