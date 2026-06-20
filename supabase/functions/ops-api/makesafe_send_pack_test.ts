@@ -20,6 +20,7 @@ import {
   buildPackSentMarkerText,
   canAcquireSendLock,
   canResetDraftPackGenerationLock,
+  checkApprovedPhotoFollowupGate,
   checkClientSendGate,
   checkExactRecipientGate,
   checkPositiveInvoiceTotalGate,
@@ -409,6 +410,14 @@ Deno.test("client-gate: exactly one report + one Xero invoice required", () => {
   }));
   assert(f.some((x) => x.includes("exactly one final make-safe report")));
   assert(f.some((x) => x.includes("exactly one actual Xero invoice")));
+});
+
+Deno.test("photo follow-up gate: approved photos are mandatory before email-path send", () => {
+  assertEquals(checkApprovedPhotoFollowupGate([]).length, 1);
+  assertEquals(
+    checkApprovedPhotoFollowupGate([{ url: "https://example.com/photo.jpg" }]),
+    [],
+  );
 });
 
 Deno.test("client-gate classifiers: report/invoice/marker detection", () => {

@@ -255,6 +255,7 @@ import {
   isSwmsPdf as _isSwmsPdf,
   checkClientSendGateWithSwms,
   checkReportJobClientSendGate,
+  checkApprovedPhotoFollowupGate,
 } from './makesafe_send_pack.ts'
 // Wave 2 -- READ-ONLY report-draft cockpit feed (the informed-approve content
 // gate). Pure composers + normalisers; the orchestration below supplies the
@@ -18149,6 +18150,10 @@ async function makesafeSendPack(
   if (!subject) throw new ApiError('subject required', 400)
   if (!htmlBody) throw new ApiError('html_body required', 400)
   const approvedPhotosForFollowup = normaliseApprovedPhotosForFollowup(body)
+  const photoGateFailures = checkApprovedPhotoFollowupGate(approvedPhotosForFollowup)
+  if (photoGateFailures.length > 0) {
+    throw new ApiError(`photo follow-up preflight failed: ${photoGateFailures.join('; ')}`, 412)
+  }
 
   // ── ATOMIC SEND-LOCK ──
   // Ensure a pack row exists in a lockable state, then take the lock with a
