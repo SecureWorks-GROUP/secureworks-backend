@@ -8745,6 +8745,78 @@ function makesafeDocBooleans(docRows: any[] | null | undefined) {
   }
 }
 
+function docCreatedAtMs(doc: any): number {
+  const t = doc?.created_at ? new Date(doc.created_at).getTime() : NaN
+  return Number.isFinite(t) ? t : 0
+}
+
+function bestMakesafeDocByType(docRows: any[] | null | undefined, type: string, preferredId?: string | null) {
+  const docs = (docRows || []).filter((d: any) => String(d?.type || '') === type)
+  if (preferredId) {
+    const preferred = docs.find((d: any) => d?.id === preferredId)
+    if (preferred) return preferred
+  }
+  docs.sort((a: any, b: any) =>
+    (Number(b?.version || 1) - Number(a?.version || 1)) ||
+    (docCreatedAtMs(b) - docCreatedAtMs(a)) ||
+    String(a?.file_name || '').localeCompare(String(b?.file_name || '')) ||
+    String(a?.id || '').localeCompare(String(b?.id || ''))
+  )
+  return docs[0] || null
+}
+
+function selectMakesafePackDocs(docRows: any[] | null | undefined, pack?: any | null) {
+  return {
+    reportDoc: bestMakesafeDocByType(docRows, 'makesafe_report', pack?.report_doc_id || null),
+    invoiceDoc: bestMakesafeDocByType(docRows, 'invoice', pack?.invoice_doc_id || null),
+    swmsDoc: bestMakesafeDocByType(docRows, 'swms', pack?.swms_doc_id || null),
+    workOrderDoc: bestMakesafeDocByType(docRows, 'work_order', null),
+    serviceReportDoc:
+      bestMakesafeDocByType(docRows, 'service_report', null) ||
+      bestMakesafeDocByType(docRows, 'client_reference', null),
+  }
+}
+
+const MAKESAFE_MLB_REPORT_RECIPIENT = 'makesafes@mlbuilders.com.au'
+
+function knownMakesafeReportRecipient(args: {
+  companySlug?: string | null
+  companyName?: string | null
+  externalRef?: string | null
+}): string | null {
+  const slug = String(args.companySlug || '').trim().toLowerCase()
+  const name = String(args.companyName || '').trim().toLowerCase()
+  const ref = String(args.externalRef || '').trim().toUpperCase()
+  if (
+    slug === 'mlb' ||
+    /^MLB[-\s]?\d+/.test(ref) ||
+    name === 'ml builders' ||
+    name === 'major loss builders'
+  ) return MAKESAFE_MLB_REPORT_RECIPIENT
+  return null
+}
+
+function resolveMakesafeReportRecipient(args: {
+  companyReportRecipient?: string | null
+  companyInvoiceEmail?: string | null
+  detailInvoiceEmail?: string | null
+  companySlug?: string | null
+  companyName?: string | null
+  externalRef?: string | null
+}): string | null {
+  const configured = resolveRecipientEmail({
+    companyReportRecipient: args.companyReportRecipient,
+    companyInvoiceEmail: args.companyInvoiceEmail,
+    detailInvoiceEmail: args.detailInvoiceEmail,
+  })
+  if (configured) return configured
+  // Data backstop for known builder work-orders inboxes. This is deliberately
+  // NOT a fallback to invoice_email or arbitrary job metadata: it preserves the
+  // exact-recipient gate while letting legacy MLB rows send after the vetted
+  // report-recipient address was split out of the wiki into Supabase.
+  return knownMakesafeReportRecipient(args)
+}
+
 // The marker note the reporting skill writes on a successful make-safe pack send
 // (send_makesafe_email.py). It rides the job_events note stream as
 // `MAKESAFE_PACK_SENT | <kind: main|photo> | ...`. The board only treats the
@@ -16137,7 +16209,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       // B1 (Wave 0): last_render_hash feeds the versioned report doc URL (?v={hash})
       // below — without it pack?.last_render_hash is always undefined and the
       // cache-bust never appends, leaving the stale-doc fix inert.
-      .select('job_id, pack_kind, status, report_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail, last_render_hash')
+      .select('job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail, last_render_hash')
       .in('job_id', jobIds),
     client.from('job_service_reports')
       .select('id, job_id, status, checklist_json, notes, signature_name, submitted_at, submitted_by, created_at, updated_at')
@@ -16226,23 +16298,18 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     })
 
     const docs = docsByJob[d.job_id] || []
-    const pickLatest = (type: string) => {
-      const cands = docs.filter((x: any) => x.type === type)
-      cands.sort((a: any, b: any) => (b.version || 1) - (a.version || 1))
-      return cands[0] || null
-    }
-    const reportDoc = pickLatest('makesafe_report')
-    const invoiceDoc = pickLatest('invoice')
-    const swmsDoc = pickLatest('swms')
-    const workOrderDoc = pickLatest('work_order')
-    // The original trade/service report doc (the source the close-out report is
-    // built from), distinct from the rendered makesafe_report draft above.
-    const serviceReportDoc = pickLatest('service_report') || pickLatest('client_reference')
     // B1 (Wave 0): read the pack row early so last_render_hash is available for
     // versioned URL minting below. The pack row is also used downstream for surface
     // derivation and pack_status — the value is the same object reference.
     const pack = packByJob[d.job_id] || null
     if (pack?.status === 'sending' && pack?.failed_step === 'draft_pack') return null
+    const {
+      reportDoc,
+      invoiceDoc,
+      swmsDoc,
+      workOrderDoc,
+      serviceReportDoc,
+    } = selectMakesafePackDocs(docs, pack)
     const renderHash = pack?.last_render_hash || null
     const [reportPdfUrl, invoicePdfUrl, swmsPdfUrl, workOrderPdfUrl, serviceReportPdfUrl] = await Promise.all([
       // B1: the report URL carries the render hash so a re-render always yields a new URL.
@@ -16367,11 +16434,15 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     // BLOCKER C — the To is the builder's WORK-ORDERS inbox (report_recipient),
     // NEVER the billing contact (invoice_email = vanessa@ajs.build for AJS). When
     // report_recipient is unset the recipient is null and the cockpit shows the
-    // "no work-order recipient configured" warning (no fallback to invoice_email).
-    const recipientEmail = resolveRecipientEmail({
+    // "no work-order recipient configured" warning, except for vetted
+    // known-builder backstops such as MLB. Never fall back to invoice_email.
+    const recipientEmail = resolveMakesafeReportRecipient({
       companyReportRecipient: company.report_recipient,
       companyInvoiceEmail: company.invoice_email, // accepted for back-compat; never used as To
       detailInvoiceEmail: null, // no per-job recipient column on makesafe_job_details
+      companySlug: company.slug || d.requesting_company_slug,
+      companyName: company.name || d.requesting_company_name,
+      externalRef: d.external_ref,
     })
 
     const builderName = canonicalMakesafeBuilderDisplayName(d.external_ref, d.requesting_company_name, company.name)
@@ -17450,7 +17521,7 @@ async function makesafeSendPack(
   // re-authorise. This is reconciliation of an email that ALREADY went out (or a
   // human-confirmed not-sent), not a re-send. ──
   const { data: priorPack } = await client.from('makesafe_report_packs')
-    .select('status, send_started_at, sent_at, xero_invoice_id, invoice_status, failed_step')
+    .select('status, send_started_at, sent_at, xero_invoice_id, invoice_status, failed_step, report_doc_id, invoice_doc_id, swms_doc_id')
     .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
   const priorStatus = priorPack?.status || null
 
@@ -17612,7 +17683,14 @@ async function makesafeSendPack(
   // (e.g. a 'CC vanessa@ajs.build' special_instructions value).
   // Skipped for portal builders (no email -> no recipient to gate).
   if (!isPortalBuilder) {
-    const configuredReportRecipient = detail?.makesafe_companies?.report_recipient || null
+    const configuredReportRecipient = resolveMakesafeReportRecipient({
+      companyReportRecipient: detail?.makesafe_companies?.report_recipient || null,
+      companyInvoiceEmail: null,
+      detailInvoiceEmail: null,
+      companySlug: detail?.requesting_company_slug || detail?.makesafe_companies?.slug || null,
+      companyName: detail?.requesting_company_name || detail?.makesafe_companies?.name || null,
+      externalRef: detail?.external_ref || job?.metadata?.external_ref || job?.job_number || null,
+    })
     const recipientFailures = checkExactRecipientGate({
       configuredReportRecipient,
       to: recipientEmail,
@@ -17627,7 +17705,8 @@ async function makesafeSendPack(
 
   // ── PREFLIGHT: typed close-out docs must exist (report + invoice + swms if MLB) ──
   const { data: docRows } = await client.from('job_documents')
-    .select('id, type, file_name').eq('job_id', jobId)
+    .select('id, type, file_name, version, created_at').eq('job_id', jobId)
+  const selectedDocs = selectMakesafePackDocs(docRows || [], priorPack)
   const docFlags = makesafeDocBooleans(docRows || [])
   const isReportJob = !!(detail?.report_type)
   const missing = _makesafeMissingCloseoutDocs(docFlags, requiresSwms, isReportJob)
@@ -17717,11 +17796,11 @@ async function makesafeSendPack(
     }
     // Collect the docs for portal submission
     const portalDocs: Array<{ type: string; file_name: string; doc_id: string }> = []
-    const rDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+    const rDoc = selectedDocs.reportDoc
     if (rDoc) portalDocs.push({ type: 'report', file_name: rDoc.file_name, doc_id: rDoc.id })
-    const iDoc = (docRows || []).find((d: any) => d.type === 'invoice')
+    const iDoc = selectedDocs.invoiceDoc
     if (iDoc) portalDocs.push({ type: 'invoice', file_name: iDoc.file_name, doc_id: iDoc.id })
-    const sDoc = (docRows || []).find((d: any) => d.type === 'swms')
+    const sDoc = selectedDocs.swmsDoc
     if (sDoc) portalDocs.push({ type: 'swms', file_name: sDoc.file_name, doc_id: sDoc.id })
     // Write the portal-ready pack row + marker
     await _ensurePackRow(client, jobId, packKind, {
@@ -17761,9 +17840,9 @@ async function makesafeSendPack(
   await _ensurePackRow(client, jobId, packKind, {
     xero_invoice_id: xeroInvoiceId,
     invoice_status: liveInvoiceRow.status || null,
-    report_doc_id: (docRows || []).find((d: any) => d.type === 'makesafe_report')?.id || null,
-    invoice_doc_id: (docRows || []).find((d: any) => d.type === 'invoice')?.id || null,
-    swms_doc_id: (docRows || []).find((d: any) => d.type === 'swms')?.id || null,
+    report_doc_id: selectedDocs.reportDoc?.id || null,
+    invoice_doc_id: selectedDocs.invoiceDoc?.id || null,
+    swms_doc_id: selectedDocs.swmsDoc?.id || null,
     approver_id: ctx.approverId,
     approved_at: nowIso(),
   })
@@ -17850,7 +17929,7 @@ async function makesafeSendPack(
     let reportPdfB64: string | null = null
     let reportFileName = ''
     if (!isReportJob) {
-      const reportDoc = (docRows || []).find((d: any) => d.type === 'makesafe_report')
+      const reportDoc = selectedDocs.reportDoc
       reportFileName = reportDoc?.file_name || ''
       if (reportDoc) {
         const { data: freshReport } = await client.from('job_documents')
@@ -17881,7 +17960,7 @@ async function makesafeSendPack(
     let swmsPdfB64: string | null = null
     let swmsFileName: string | null = null
     if (shouldAttachSwms) {
-      const swmsDoc = (docRows || []).find((d: any) => d.type === 'swms')
+      const swmsDoc = selectedDocs.swmsDoc
       if (swmsDoc) {
         const { data: freshSwms } = await client.from('job_documents')
           .select('file_name, storage_url, pdf_url').eq('id', swmsDoc.id).maybeSingle()
@@ -18219,7 +18298,14 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       .select('*, makesafe_companies(slug,name,report_recipient)')
       .eq('job_id', jobId).maybeSingle()
 
-    const recipientEmail = detail?.makesafe_companies?.report_recipient || null
+    const recipientEmail = resolveMakesafeReportRecipient({
+      companyReportRecipient: detail?.makesafe_companies?.report_recipient || null,
+      companyInvoiceEmail: null,
+      detailInvoiceEmail: null,
+      companySlug: detail?.requesting_company_slug || detail?.makesafe_companies?.slug || null,
+      companyName: detail?.requesting_company_name || detail?.makesafe_companies?.name || null,
+      externalRef: detail?.external_ref || job?.metadata?.external_ref || job?.job_number || null,
+    })
     if (!recipientEmail) {
       throw new ApiError('photo follow-up blocked: no work-orders recipient (report_recipient) configured for this builder', 412)
     }

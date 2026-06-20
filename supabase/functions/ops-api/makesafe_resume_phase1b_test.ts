@@ -168,6 +168,7 @@ function makeSeams(opts: {
     fetchInvoicePdf: 0,
     attachDoc: 0,
     fetchReportPdf: 0,
+    fetchReportUrls: [] as string[],
     email: 0,
     emailPayloads: [] as any[],
   };
@@ -198,8 +199,9 @@ function makeSeams(opts: {
       counts.attachDoc++;
       return { document_id: "doc-x" };
     },
-    fetchReportPdfBytes: async () => {
+    fetchReportPdfBytes: async (url: string) => {
       counts.fetchReportPdf++;
+      counts.fetchReportUrls.push(url);
       return new Uint8Array([4, 5, 6]);
     },
     sendEmail: async (payload: any) => {
@@ -286,6 +288,8 @@ function readySeed(extra: Partial<Rows> = {}): Rows {
       reference: "B-1",
       job_id: "job-1",
       invoice_date: "2026-06-17",
+      sub_total: 100,
+      total: 110,
     }],
     makesafe_report_packs: [{
       id: "p-1",
@@ -336,6 +340,102 @@ Deno.test("send_pack: happy path -> ONE authorise + ONE email + marker + close",
   assertEquals(counts.email, 1, "exactly one email");
   assertEquals(markerCount(client), 1, "one marker written");
   assertEquals(packOf(client).status, "sent");
+});
+
+Deno.test("send_pack: pack report_doc_id anchors the emailed report when duplicate reports exist", async () => {
+  const seed = readySeed();
+  seed.job_documents = [
+    {
+      id: "d-rep-placeholder",
+      job_id: "job-1",
+      type: "makesafe_report",
+      file_name: "Make Safe Report B-1 Placeholder.pdf",
+      storage_url: "https://docs.test/placeholder-report.pdf",
+      pdf_url: null,
+      version: 9,
+      created_at: "2026-06-17T02:00:00Z",
+    },
+    {
+      id: "d-rep",
+      job_id: "job-1",
+      type: "makesafe_report",
+      file_name: "Make Safe Report B-1 Full Reviewed.pdf",
+      storage_url: "https://docs.test/full-reviewed-report.pdf",
+      pdf_url: null,
+      version: 1,
+      created_at: "2026-06-17T01:00:00Z",
+    },
+    {
+      id: "d-inv",
+      job_id: "job-1",
+      type: "invoice",
+      file_name: "Xero Invoice INV-1.pdf",
+      storage_url: "https://docs.test/i.pdf",
+      pdf_url: null,
+    },
+  ];
+  seed.makesafe_report_packs[0].report_doc_id = "d-rep";
+  const client = makeClient(seed);
+  const { counts, deps } = makeSeams({ emailMode: "ok" });
+
+  await _makesafeSendPackForTest(
+    client,
+    {
+      job_id: "job-1",
+      recipient_email: "workorders@b.com",
+      subject: "Make Safe Completion B-1",
+      html_body: "<p>done</p>",
+    },
+    CTX,
+    deps,
+  );
+
+  assertEquals(counts.fetchReportUrls[0], "https://docs.test/full-reviewed-report.pdf");
+  assertEquals(counts.emailPayloads[0].attachments[0].name, "Make Safe Report B-1 Full Reviewed.pdf");
+});
+
+Deno.test("send_pack: legacy MLB rows use the vetted MLB report-recipient backstop", async () => {
+  const seed = readySeed();
+  seed.jobs[0].metadata = { external_ref: "MLB-24732", requesting_company: { slug: "mlb", name: "ML Builders" } };
+  seed.makesafe_job_details[0].external_ref = "MLB-24732";
+  seed.makesafe_job_details[0].requesting_company_slug = "mlb";
+  seed.makesafe_job_details[0].requesting_company_name = "ML Builders";
+  seed.makesafe_job_details[0].makesafe_companies = {
+    slug: "mlb",
+    name: "ML Builders",
+    report_recipient: null,
+  };
+  seed.job_documents.push({
+    id: "d-swms",
+    job_id: "job-1",
+    type: "swms",
+    file_name: "SWMS - MLB-24732.pdf",
+    storage_url: "https://docs.test/swms.pdf",
+    pdf_url: null,
+  });
+  seed.makesafe_report_packs[0].swms_doc_id = "d-swms";
+  const client = makeClient(seed);
+  const { counts, deps } = makeSeams({ emailMode: "ok" });
+
+  const res: any = await _makesafeSendPackForTest(
+    client,
+    {
+      job_id: "job-1",
+      recipient_email: "makesafes@mlbuilders.com.au",
+      subject: "Make Safe Completion - MLB-24732",
+      html_body: "<p>done</p>",
+    },
+    CTX,
+    deps,
+  );
+
+  assertEquals(res.sent, true);
+  assertEquals(counts.emailPayloads[0].to, "makesafes@mlbuilders.com.au");
+  assertEquals(counts.emailPayloads[0].attachments.map((a: any) => a.name), [
+    "Make Safe Report B-1.pdf",
+    "Xero Invoice - INV-1.pdf",
+    "SWMS - MLB-24732.pdf",
+  ]);
 });
 
 // ═════════════════════════════════════════════════════════════════
