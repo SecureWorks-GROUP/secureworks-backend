@@ -1074,7 +1074,11 @@ export function buildPortalReadyMarkerText(args: { nowIso: string }): string {
 // Used by checkClientSendGateWithSwms to identify the SWMS PDF among attachments.
 export function isSwmsPdf(name: string): boolean {
   const lower = name.toLowerCase();
-  return lower.endsWith(".pdf") && lower.includes("swms");
+  if (!lower.endsWith(".pdf")) return false;
+  // Do not treat the MakeSafe job number prefix (for example SWMS-26642) as a
+  // SWMS document. MLB report filenames include the SWMS job number, and the
+  // client-send gate must count only the actual SWMS attachment.
+  return /(^|[^a-z0-9])swms(?![-\s]?\d)(?=$|[^a-z0-9])/i.test(name);
 }
 
 // ── Stage 1-2a: checkClientSendGateWithSwms — 3-attachment gate for MLB ──────
