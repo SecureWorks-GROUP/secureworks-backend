@@ -13,7 +13,7 @@
 //     Billing time noted)
 //   - four prose sections (Work Order Scope, Site Findings, Works Completed,
 //     Materials and Equipment) with doc.splitTextToSize wrapping
-//   - one-photo-per-page evidence (default limit 8)
+//   - compact photo evidence grid (default/hard cap 8)
 //
 // Colours: orange #F15A29, dark #293C46, mid #4C6A7C, light #F0F4F7.
 
@@ -119,8 +119,34 @@ const PAGE_W = 210;
 const PAGE_H = 297;
 const MARGIN = 14;
 const CONTENT_W = PAGE_W - 2 * MARGIN;
+const DEFAULT_REPORT_PHOTO_LIMIT = 8;
+const MAX_REPORT_PHOTO_LIMIT = 8;
 
 const REPORT_TITLE = "Make Safe Completion Report";
+
+export function aspectFitBox(
+  sourceW: number,
+  sourceH: number,
+  boxX: number,
+  boxY: number,
+  boxW: number,
+  boxH: number,
+): { x: number; y: number; w: number; h: number } {
+  const sw = Number(sourceW);
+  const sh = Number(sourceH);
+  if (!Number.isFinite(sw) || !Number.isFinite(sh) || sw <= 0 || sh <= 0) {
+    return { x: boxX, y: boxY, w: boxW, h: boxH };
+  }
+  const scale = Math.min(boxW / sw, boxH / sh);
+  const w = sw * scale;
+  const h = sh * scale;
+  return {
+    x: boxX + (boxW - w) / 2,
+    y: boxY + (boxH - h) / 2,
+    w,
+    h,
+  };
+}
 
 // Decode a base64 photo to the data URL jsPDF.addImage accepts. Returns null on
 // any failure (the renderer then skips the photo rather than aborting the pack).
@@ -301,12 +327,21 @@ export async function renderMakesafeReportPdf(
     y = para(text);
   }
 
-  // Photo evidence: one large photo per page.
+  // Photo evidence: compact 2x2 grid per page. The first implementation used
+  // one 190mm photo cell per page, so routine drafts with 10-12 trade photos
+  // ballooned into 13-15 page reports with blank gaps. The follow-up photo
+  // email still carries every approved JPEG; this report keeps evidence readable
+  // and reviewer-friendly.
   const limit = Number.isFinite(job.photo_limit as number)
     ? Math.max(0, Math.floor(job.photo_limit as number))
-    : 8;
+    : DEFAULT_REPORT_PHOTO_LIMIT;
   const resolved: MakesafeReportPhoto[] = [];
-  for (const p of (job.photos || []).slice(0, limit)) {
+  for (
+    const p of (job.photos || []).slice(
+      0,
+      Math.min(limit, MAX_REPORT_PHOTO_LIMIT),
+    )
+  ) {
     const r = await resolvePhotoBytes(p);
     if (r) resolved.push(r);
   }
@@ -322,60 +357,90 @@ export async function renderMakesafeReportPdf(
     );
     y += 5;
   } else {
-    const cellH = 190;
+    const cols = 2;
+    const rows = 2;
+    const gap = 5;
+    const cellW = (CONTENT_W - gap) / cols;
+    const cellH = 82;
+    const gridH = rows * cellH + gap;
     let idx = 0;
-    for (const p of resolved) {
-      idx++;
-      if (idx === 1) {
-        y = section("Photo Evidence", cellH + 7);
+    while (idx < resolved.length) {
+      if (idx === 0) {
+        y = section("Photo Evidence", gridH + 4);
       } else {
         y = newPage();
+        y = section("Photo Evidence", gridH + 4);
       }
-      ensureSpace(cellH + 7);
-      const dataUrl = photoDataUrl(p);
-      doc.setDrawColor(...RULE);
-      doc.setFillColor(255, 255, 255);
-      doc.setLineWidth(0.2);
-      doc.rect(MARGIN, y, CONTENT_W, cellH, "FD");
-      if (dataUrl) {
-        try {
-          const fmt = (p.contentType || "").toLowerCase().includes("png")
-            ? "PNG"
-            : "JPEG";
-          // Fit inside the cell with a margin; preserve aspect by letting jsPDF
-          // scale to the box (we pass a box and rely on a conservative size).
-          const boxW = CONTENT_W - 6;
-          const boxH = cellH - 16;
-          // jsPDF needs explicit w/h; use the box and accept letterboxing.
-          doc.addImage(
-            dataUrl,
-            fmt,
-            MARGIN + 3,
-            y + 4,
-            boxW,
-            boxH,
-            undefined,
-            "FAST",
-          );
-        } catch {
-          doc.setTextColor(...MID);
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(8);
-          doc.text(
-            `Photo evidence ${idx} (could not embed)`,
-            PAGE_W / 2,
-            y + cellH / 2,
-            { align: "center" },
-          );
+      ensureSpace(gridH + 4);
+      const gridTop = y;
+      for (let slot = 0; slot < cols * rows && idx < resolved.length; slot++) {
+        const p = resolved[idx];
+        idx++;
+        const col = slot % cols;
+        const row = Math.floor(slot / cols);
+        const cellX = MARGIN + col * (cellW + gap);
+        const cellY = gridTop + row * (cellH + gap);
+        const dataUrl = photoDataUrl(p);
+        doc.setDrawColor(...RULE);
+        doc.setFillColor(255, 255, 255);
+        doc.setLineWidth(0.2);
+        doc.rect(cellX, cellY, cellW, cellH, "FD");
+        if (dataUrl) {
+          try {
+            const fmt = (p.contentType || "").toLowerCase().includes("png")
+              ? "PNG"
+              : "JPEG";
+            const boxX = cellX + 3;
+            const boxY = cellY + 4;
+            const boxW = cellW - 6;
+            const boxH = cellH - 15;
+            const props = doc.getImageProperties(dataUrl) as {
+              width?: number;
+              height?: number;
+            };
+            const fit = aspectFitBox(
+              Number(props?.width || 0),
+              Number(props?.height || 0),
+              boxX,
+              boxY,
+              boxW,
+              boxH,
+            );
+            doc.addImage(
+              dataUrl,
+              fmt,
+              fit.x,
+              fit.y,
+              fit.w,
+              fit.h,
+              undefined,
+              "FAST",
+            );
+          } catch {
+            doc.setTextColor(...MID);
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(8);
+            doc.text(
+              `Photo evidence ${idx} (could not embed)`,
+              cellX + cellW / 2,
+              cellY + cellH / 2,
+              { align: "center" },
+            );
+          }
         }
+        doc.setTextColor(...MID);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8);
+        doc.text(
+          `Photo evidence ${idx}`,
+          cellX + cellW / 2,
+          cellY + cellH - 4,
+          {
+            align: "center",
+          },
+        );
       }
-      doc.setTextColor(...MID);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(8);
-      doc.text(`Photo evidence ${idx}`, PAGE_W / 2, y + cellH - 4, {
-        align: "center",
-      });
-      y += cellH + 7;
+      y = gridTop + gridH + 7;
     }
   }
 

@@ -118,7 +118,7 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
           {
             description: "line description",
             quantity: 1,
-            unit_price: 0,
+            unit_price: 85,
             account_code: "210",
           },
         ],
@@ -128,8 +128,9 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
     },
     rules: [
       "Invoice lines must be DRAFT-only and exclude GST in unit_price.",
+      "Every invoice line must have quantity > 0 and unit_price > 0. Never output a $0 placeholder line.",
       "Use account_code 210 unless the context clearly specifies another make-safe account.",
-      "If costing is uncertain, include the best draft line and say it needs pricing review in change_summary.",
+      "If costing is uncertain, use the best available SecureWorks/ops pricing from the context and say it needs pricing review in change_summary.",
       "Only use selected_photo_urls as the approved photo set for this draft refresh.",
       "Never include MAKESAFE_PACK_SENT or any wording that says the pack was sent/authorised/closed.",
     ],
@@ -184,6 +185,24 @@ export function normaliseDraftPackOutput(raw: any): DraftPackOutput {
       "Claude draft response must include at least one invoice line item",
     );
   }
+  const badPricing = lines
+    .map((li: DraftPackLineItem, index: number) => {
+      if (!Number.isFinite(li.quantity) || li.quantity <= 0) {
+        return `invoice line ${index + 1} has invalid quantity`;
+      }
+      if (!Number.isFinite(li.unit_price) || li.unit_price <= 0) {
+        return `invoice line ${index + 1} has $0/invalid unit_price`;
+      }
+      return "";
+    })
+    .filter(Boolean);
+  if (badPricing.length > 0) {
+    throw new Error(
+      `Claude draft response has invalid invoice pricing: ${
+        badPricing.join("; ")
+      }`,
+    );
+  }
 
   const out: DraftPackOutput = {
     report: {
@@ -200,7 +219,7 @@ export function normaliseDraftPackOutput(raw: any): DraftPackOutput {
       materials: clean(report.materials),
       photo_limit: Math.max(
         1,
-        Math.min(12, Math.round(num(report.photo_limit, 8))),
+        Math.min(8, Math.round(num(report.photo_limit, 8))),
       ),
     },
     invoice: {

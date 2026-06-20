@@ -11,6 +11,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  aspectFitBox,
   makesafeReportFileName,
   makesafeReportHashInput,
   renderHash,
@@ -113,4 +114,43 @@ Deno.test("render PDF: top-down layout keeps normal no-photo reports to sane pag
     `no-photo make-safe report should not inflate to ${pages} pages`,
   );
   assert(rendered.fileName.toLowerCase().includes("make safe report"));
+});
+
+Deno.test("aspectFitBox: preserves image aspect inside a target rectangle", () => {
+  const fit = aspectFitBox(400, 200, 10, 20, 100, 100);
+  assertEquals(Math.round(fit.w), 100);
+  assertEquals(Math.round(fit.h), 50);
+  assertEquals(Math.round(fit.x), 10);
+  assertEquals(Math.round(fit.y), 45);
+});
+
+Deno.test("render PDF: many photos use compact grid instead of one runaway page per photo", async () => {
+  const onePixelPng =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+  const rendered = await renderMakesafeReportPdf({
+    ref: "SWMS-26652 / AJBR 67996",
+    address: "23 James Cook Avenue, Quinns Rocks WA",
+    contact: "Luke Edwards | 0490 032 177",
+    date: "2026-06-17",
+    arrival: "08:00",
+    crew: "2 trades",
+    billing_note: "2 trades x 2 hours, draft pricing to be confirmed",
+    scope: "Temporary fencing make-safe after Hardifence fell down.",
+    findings: "Hardifence had fallen on the side boundary fence.",
+    works:
+      "Stacked fallen Hardifence neatly, installed temporary fencing and made dog-proof.",
+    materials:
+      "Temporary fence panels x 7, bases/feet x 6, fixings/consumables x 11.",
+    photo_limit: 12,
+    photos: Array.from({ length: 12 }, () => ({
+      bytesBase64: onePixelPng,
+      contentType: "image/png",
+    })),
+  });
+
+  const pages = countPdfPages(rendered.bytes);
+  assert(
+    pages <= 5,
+    `12-photo make-safe report should be compact, got ${pages} pages`,
+  );
 });

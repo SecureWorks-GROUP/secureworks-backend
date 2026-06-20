@@ -48,6 +48,14 @@ Deno.test("user prompt carries selected photo urls and feedback notes", () => {
   assertStringIncludes(prompt, "selected_photo_urls");
   assertStringIncludes(prompt, "https://example.com/a.jpg");
   assertStringIncludes(prompt, "exclude the hallway photo");
+  assertStringIncludes(prompt, "unit_price > 0");
+  assertStringIncludes(prompt, "Never output a $0 placeholder line");
+});
+
+Deno.test("user prompt schema does not teach Claude to emit zero-priced invoice lines", () => {
+  const prompt = buildDraftPackUserPrompt({});
+  const schema = JSON.parse(prompt).output_schema;
+  assertEquals(schema.invoice.line_items[0].unit_price > 0, true);
 });
 
 Deno.test("parseDraftPackResponse strips code fences and normalises invoice lines", () => {
@@ -85,6 +93,46 @@ Deno.test("normaliseDraftPackOutput rejects missing invoice line items", () => {
     Error,
     "at least one invoice line item",
   );
+});
+
+Deno.test("normaliseDraftPackOutput rejects zero-priced invoice lines", () => {
+  assertThrows(
+    () =>
+      normaliseDraftPackOutput({
+        report: { ref: "AJBR-67996", address: "23 James Cook Avenue" },
+        invoice: {
+          reference: "AJBR-67996",
+          contact_name: "AJ Building & Restoration",
+          line_items: [{
+            description: "Make-safe labour",
+            quantity: 4,
+            unit_price: 0,
+          }],
+        },
+      }),
+    Error,
+    "$0/invalid unit_price",
+  );
+});
+
+Deno.test("normaliseDraftPackOutput caps report photo limit to eight", () => {
+  const parsed = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-67996",
+      address: "23 James Cook Avenue",
+      photo_limit: 12,
+    },
+    invoice: {
+      reference: "AJBR-67996",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 4,
+        unit_price: 80,
+      }],
+    },
+  });
+  assertEquals(parsed.report.photo_limit, 8);
 });
 
 Deno.test("draft-only guard rejects irreversible send markers/claims", () => {

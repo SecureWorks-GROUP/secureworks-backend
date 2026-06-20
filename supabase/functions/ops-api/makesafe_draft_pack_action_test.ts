@@ -189,6 +189,83 @@ Deno.test("draftMakesafeReportPack: drafts report + DRAFT invoice + invoice PDF 
   assertEquals(calls.markReady.length, 1);
 });
 
+Deno.test("draftMakesafeReportPack: rejects zero-priced Claude output before rendering report or invoice", async () => {
+  const calls: Record<string, any[]> = {
+    render: [],
+    createDraftInvoice: [],
+    markFailed: [],
+    markReady: [],
+  };
+
+  await assertRejects(
+    () =>
+      draftMakesafeReportPack(
+        {},
+        { job_id: "job-zero" },
+        "routine",
+        {
+          assertRoutineEligible: async () => {},
+          claimDraftPack: async () => {},
+          markDraftPackFailed: async (_client, jobId, packKind, err) => {
+            calls.markFailed.push({
+              jobId,
+              packKind,
+              message: (err as Error).message,
+            });
+          },
+          loadContext: async () => ({
+            job: {
+              id: "job-zero",
+              job_number: "SWMS-26652",
+              site_address: "23 James Cook Avenue",
+            },
+            detail: {
+              external_ref: "AJBR-67996",
+              requesting_company_name: "AJ Building & Restoration",
+            },
+            selected_photo_urls: ["https://example.com/site.jpg"],
+          }),
+          callClaude: async () =>
+            JSON.stringify({
+              report: {
+                ref: "AJBR-67996",
+                address: "23 James Cook Avenue",
+                works: "Temporary fencing and hardifence made safe.",
+              },
+              invoice: {
+                reference: "AJBR-67996",
+                contact_name: "AJ Building & Restoration",
+                line_items: [{
+                  description: "Make-safe labour placeholder",
+                  quantity: 4,
+                  unit_price: 0,
+                }],
+              },
+            }),
+          renderReport: async () => {
+            calls.render.push({});
+            throw new Error("report render must not run after bad pricing");
+          },
+          createDraftInvoice: async () => {
+            calls.createDraftInvoice.push({});
+            throw new Error("invoice draft must not run after bad pricing");
+          },
+          markReady: async () => {
+            calls.markReady.push({});
+          },
+        },
+      ),
+    Error,
+    "$0/invalid unit_price",
+  );
+
+  assertEquals(calls.render.length, 0);
+  assertEquals(calls.createDraftInvoice.length, 0);
+  assertEquals(calls.markReady.length, 0);
+  assertEquals(calls.markFailed.length, 1);
+  assertStringIncludes(calls.markFailed[0].message, "$0/invalid unit_price");
+});
+
 Deno.test("draftMakesafeReportPack: existing non-DRAFT invoice does not attach a fake draft PDF", async () => {
   const calls: Record<string, any[]> = { getToken: [], attachDoc: [] };
   const result = await draftMakesafeReportPack(
