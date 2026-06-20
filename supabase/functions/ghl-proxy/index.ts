@@ -1501,6 +1501,7 @@ serve(async (req: Request) => {
         site_address: siteAddress || '',
         site_suburb: siteSuburb || '',
         created_by: salespersonFor(resolvedType),
+        // has_scope / quoted_amount / neighbour_count are set by the DB trigger on insert.
       }
       // GHL link is optional — walk-up scopes may not have an opportunity
       if (opportunityId) insertData.ghl_opportunity_id = opportunityId
@@ -1749,6 +1750,11 @@ serve(async (req: Request) => {
         if (meta.pricing_json) update.pricing_json = meta.pricing_json
         if (meta.notes) update.notes = meta.notes
       }
+
+      // Note: has_scope, quoted_amount, neighbour_count are maintained by a
+      // BEFORE INSERT OR UPDATE trigger (jobs_lean_columns_trigger, migration
+      // 20260617000003). No app-level population needed — the trigger fires on
+      // every write that touches scope_json or pricing_json.
 
       const { data, error } = await sb.from('jobs')
         .update(update)
