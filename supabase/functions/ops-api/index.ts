@@ -16593,7 +16593,7 @@ async function _fetchAllAccrecInvoices(client: any): Promise<any[]> {
   // Bounded loop — never spin forever even if the table is huge.
   for (let guard = 0; guard < 40; guard++) {
     const { data, error } = await client.from('xero_invoices')
-      .select('xero_invoice_id, invoice_number, reference, status, job_id, invoice_type, invoice_date')
+      .select('xero_invoice_id, invoice_number, reference, status, job_id, invoice_type, invoice_date, sub_total, total, total_tax, line_items')
       .eq('invoice_type', 'ACCREC')
       .order('invoice_date', { ascending: false })
       .range(offset, offset + page - 1)
@@ -16851,6 +16851,17 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
   if (!Array.isArray(lines) || lines.length === 0) throw new ApiError('line_items required', 400)
+  // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
+  // to the make-safe reference. A VOIDED/DELETED invoice never blocks. We run
+  // this before the pricing refusal so a renderer-only repair can preserve an
+  // already-priced DRAFT invoice when Claude emits zero-priced placeholder lines.
+  const externalRef = body.external_ref || reference
+  const _fetchInvoices = deps.fetchAllAccrecInvoices || _fetchAllAccrecInvoices
+  const _updateExistingDraft = deps.updateExistingDraftInvoice || updateMakesafeExistingDraftInvoice
+  const _createInvoice = deps.createInvoiceFn || createInvoice
+  const allInvoices = await _fetchInvoices(client)
+  const existing = resolveExistingInvoice(allInvoices, jobId, externalRef)
+
   // All MakeSafe draft invoices must carry real pricing before Xero is touched.
   // Claude may draft the commercial intent, but the backend is the money-safety
   // boundary: a normal make-safe pack cannot create/revise a $0 invoice unless a
@@ -16861,17 +16872,34 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
     noChargeReason: body.no_charge_reason || body.noChargeReason || null,
   })
   if (pricingFailures.length > 0) {
+    const preserveExistingDraft = body.preserve_existing_draft_on_invalid_pricing === true ||
+      body.preserveExistingDraftOnInvalidPricing === true
+    const existingStatus = String(existing?.status || '').toUpperCase()
+    if (preserveExistingDraft && existing && existingStatus === 'DRAFT') {
+      const existingLines = normaliseLineItems((existing as any).line_items)
+      const existingTotals = computeInvoiceTotals({
+        subTotal: (existing as any).sub_total ?? null,
+        total: (existing as any).total ?? null,
+        lines: existingLines,
+      })
+      const existingLineFailures = existingLines.length > 0
+        ? evaluateMakesafeDraftInvoicePricing(existingLines)
+        : []
+      if (existingTotals.total_inc_gst > 0 && existingLineFailures.length === 0) {
+        return {
+          skipped: true,
+          pricing_preserved_from_existing: true,
+          pricing_failures: pricingFailures,
+          reference,
+          existing_invoice: existing,
+          scanned: allInvoices.length,
+          note: `Claude returned invalid draft pricing, so renderer repair preserved existing DRAFT invoice ${existing.invoice_number || existing.xero_invoice_id}`,
+        }
+      }
+    }
     throw new ApiError('draft invoice pricing review required: ' + pricingFailures.join('; '), 400)
   }
 
-  // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
-  // to the make-safe reference. A VOIDED/DELETED invoice never blocks.
-  const externalRef = body.external_ref || reference
-  const _fetchInvoices = deps.fetchAllAccrecInvoices || _fetchAllAccrecInvoices
-  const _updateExistingDraft = deps.updateExistingDraftInvoice || updateMakesafeExistingDraftInvoice
-  const _createInvoice = deps.createInvoiceFn || createInvoice
-  const allInvoices = await _fetchInvoices(client)
-  const existing = resolveExistingInvoice(allInvoices, jobId, externalRef)
   if (existing) {
     const existingStatus = String(existing.status || '').toUpperCase()
     if (existingStatus === 'DRAFT' && body.update_existing_draft !== false) {
@@ -17274,7 +17302,7 @@ function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhot
   }
 }
 
-function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string, operator: string): any {
+function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string, operator: string, sourceBody: any = {}): any {
   const job: any = ctx.job || {}
   const detail: any = ctx.detail || {}
   const company: any = detail.makesafe_companies || {}
@@ -17285,6 +17313,10 @@ function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string,
     due_date: parsed.invoice.due_date || undefined,
     line_items: parsed.invoice.line_items,
     operator,
+    update_existing_draft: sourceBody.update_existing_draft,
+    fail_on_existing_non_draft: sourceBody.fail_on_existing_non_draft,
+    preserve_existing_draft_on_invalid_pricing: sourceBody.preserve_existing_draft_on_invalid_pricing === true ||
+      sourceBody.preserveExistingDraftOnInvalidPricing === true,
   }
 }
 
@@ -17383,12 +17415,15 @@ async function draftMakesafeReportPack(
 
     const invoiceResult = await _createDraftInvoice(
       client,
-      draftPackInvoiceBody(parsed, context, jobId, operator),
+      draftPackInvoiceBody(parsed, context, jobId, operator, body),
     )
     const xeroInvoiceId = draftPackXeroId(invoiceResult)
     const invoiceStatus = draftPackInvoiceStatus(invoiceResult)
     let invoiceDoc: { document_id?: string | null } | null = null
     const warnings: string[] = []
+    if (invoiceResult?.pricing_preserved_from_existing === true) {
+      warnings.push('existing_draft_invoice_pricing_preserved_after_invalid_claude_pricing')
+    }
 
     // Attach the DRAFT invoice PDF when the invoice is still DRAFT. If the dup guard
     // finds an already-authorised invoice, do not pretend it is a fresh draft; leave
@@ -18696,6 +18731,7 @@ async function makesafeResetFailedPack(client: any, body: any) {
   const packKind = body.pack_kind || 'main'
   if (!jobId) throw new ApiError('job_id required', 400)
   const nowIso = () => new Date().toISOString()
+  const targetStatus = body.target_status === 'admin_to_send_report' ? 'admin_to_send_report' : 'drafted'
 
   const { data: pack } = await client.from('makesafe_report_packs')
     .select('id, status, failed_step')
@@ -18708,6 +18744,21 @@ async function makesafeResetFailedPack(client: any, body: any) {
     .eq('job_id', jobId).eq('event_type', 'note')
   const markerPresent = (events || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))
 
+  // A crashed draft generator can leave status='sending' + failed_step='draft_pack'.
+  // That is not an email/send state: no builder email has started. Let privileged
+  // ops recover it to the review/drafted queue when no sent marker exists.
+  if (pack.status === 'sending' && pack.failed_step === 'draft_pack' && !markerPresent) {
+    const { error: lockResetErr, data: lockResetRows } = await client.from('makesafe_report_packs')
+      .update({ status: targetStatus, failed_step: null, error_detail: null, send_started_at: null, updated_at: nowIso() })
+      .eq('id', pack.id).eq('status', 'sending').eq('failed_step', 'draft_pack')
+      .select()
+    if (lockResetErr) throw new ApiError('makesafe_reset_failed_pack: draft lock reset failed: ' + lockResetErr.message, 500)
+    if (!lockResetRows || lockResetRows.length === 0) {
+      return { error: 'draft lock reset affected 0 rows (the pack was no longer in draft generation state); re-read and retry', job_id: jobId }
+    }
+    return { reset: true, reset_kind: 'draft_pack_generation_lock', status: targetStatus, job_id: jobId, note: `draft-generation lock reset to '${targetStatus}'; no email/send state was touched` }
+  }
+
   const gate = checkResetFailedGate({ packStatus: pack.status, failedStep: pack.failed_step, markerPresent })
   if (!gate.ok) {
     return { error: gate.reason, status: pack.status || null, failed_step: pack.failed_step || null, marker_present: markerPresent, job_id: jobId }
@@ -18715,7 +18766,6 @@ async function makesafeResetFailedPack(client: any, body: any) {
 
   // Reset to a lockable state ('drafted'); the normal send flow re-runs from
   // scratch (re-runs preflight + the atomic lock). Clear the failure diagnostics.
-  const targetStatus = body.target_status === 'admin_to_send_report' ? 'admin_to_send_report' : 'drafted'
   const { error: resetErr, data: resetRows } = await client.from('makesafe_report_packs')
     .update({ status: targetStatus, failed_step: null, error_detail: null, send_started_at: null, updated_at: nowIso() })
     .eq('id', pack.id).eq('status', 'failed') // conditional: only reset a still-failed row

@@ -316,6 +316,7 @@ Deno.test("createMakesafeDraftInvoice: blocks $0/invalid MakeSafe pricing before
     { description: "Make-safe labour", quantity: 4, unit_price: 0 },
   ]);
   assertEquals(failures.length >= 1, true);
+  const calls: Record<string, number> = { scan: 0, create: 0 };
 
   await assertRejects(
     () =>
@@ -330,11 +331,11 @@ Deno.test("createMakesafeDraftInvoice: blocks $0/invalid MakeSafe pricing before
         },
         {
           fetchAllAccrecInvoices: async () => {
-            throw new Error(
-              "Xero duplicate scan should not run when pricing is invalid",
-            );
+            calls.scan += 1;
+            return [];
           },
           createInvoiceFn: async () => {
+            calls.create += 1;
             throw new Error(
               "Xero create should not run when pricing is invalid",
             );
@@ -344,6 +345,61 @@ Deno.test("createMakesafeDraftInvoice: blocks $0/invalid MakeSafe pricing before
     Error,
     "draft invoice pricing review required",
   );
+  assertEquals(calls.scan, 1);
+  assertEquals(calls.create, 0);
+});
+
+Deno.test("createMakesafeDraftInvoice: renderer repair can preserve an existing priced DRAFT when Claude emits zero pricing", async () => {
+  const calls: Record<string, number> = { update: 0, create: 0 };
+  const result = await createMakesafeDraftInvoice(
+    {},
+    {
+      reference: "MLB-25045",
+      contact_name: "Major Loss Builders",
+      line_items: [
+        {
+          description: "Make-safe labour placeholder",
+          quantity: 4,
+          unit_price: 0,
+        },
+      ],
+      preserve_existing_draft_on_invalid_pricing: true,
+    },
+    {
+      fetchAllAccrecInvoices: async () => [{
+        xero_invoice_id: "xero-draft-25045",
+        invoice_number: "INV-0710",
+        status: "DRAFT",
+        reference: "SWMS-26642 / MLB-25045",
+        sub_total: 300,
+        total: 330,
+        line_items: [
+          {
+            Description: "Make-safe labour",
+            Quantity: 3,
+            UnitAmount: 100,
+            LineAmount: 300,
+          },
+        ],
+      }],
+      updateExistingDraftInvoice: async () => {
+        calls.update += 1;
+        throw new Error(
+          "should preserve, not update, when incoming pricing is invalid",
+        );
+      },
+      createInvoiceFn: async () => {
+        calls.create += 1;
+        throw new Error("should not create a duplicate invoice");
+      },
+    },
+  );
+
+  assertEquals(result.skipped, true);
+  assertEquals(result.pricing_preserved_from_existing, true);
+  assertEquals(result.existing_invoice.invoice_number, "INV-0710");
+  assertEquals(calls.update, 0);
+  assertEquals(calls.create, 0);
 });
 
 Deno.test("createMakesafeDraftInvoice: Revise Pack fails closed on existing non-DRAFT invoice when requested", async () => {

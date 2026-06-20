@@ -102,6 +102,10 @@ export interface ExistingInvoiceHit {
   invoice_number: string | null;
   status: string | null;
   xero_invoice_id: string | null;
+  sub_total?: number | null;
+  total?: number | null;
+  total_tax?: number | null;
+  line_items?: unknown;
   match_method: "job_id" | "reference" | "reference_substring";
 }
 
@@ -122,6 +126,10 @@ export function resolveExistingInvoice(
     invoice_number: r?.invoice_number ?? null,
     status: r?.status ?? null,
     xero_invoice_id: r?.xero_invoice_id ?? null,
+    sub_total: r?.sub_total ?? null,
+    total: r?.total ?? null,
+    total_tax: r?.total_tax ?? null,
+    line_items: r?.line_items ?? null,
     match_method: method,
   });
 
@@ -912,7 +920,7 @@ export function checkResumeCloseGate(args: {
 //
 // PRE-SEND failed_steps are the steps that run BEFORE the email is dispatched:
 //   recipient_gate, preflight_docs, preflight_invoice, preflight_invoice_ambiguous,
-//   load_report_pdf, client_send_gate, unexpected (pre-authorise getToken etc.)
+//   load_report_pdf, client_send_gate, draft_pack, unexpected (pre-authorise getToken etc.)
 // POST-SEND/ambiguous failed_steps that must NEVER be reset by this path:
 //   send (the email dispatch step — outcome may be unknown), marker, close.
 export const RESET_FAILED_PRESEND_STEPS = [
@@ -922,6 +930,7 @@ export const RESET_FAILED_PRESEND_STEPS = [
   "preflight_invoice_ambiguous",
   "load_report_pdf",
   "client_send_gate",
+  "draft_pack",
   "unexpected",
 ];
 // Steps at/after the actual email dispatch — a reset here could mask a real send.
