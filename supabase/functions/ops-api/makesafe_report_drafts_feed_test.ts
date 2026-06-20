@@ -17,6 +17,7 @@ import {
 import {
   _canonicalMakesafeInvoiceContactNameForTest,
   _makesafeReportDraftsForTest,
+  _makesafeTrustedInvoiceRefTokenForTest,
 } from "./index.ts";
 import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
@@ -330,6 +331,15 @@ Deno.test("MLB Xero contact: draft/sync contact names canonicalise to Major Loss
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("SWMS-26651 / MLB-26003", "MLB"), "Major Loss Builders");
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "Major Loss Builder"), "Major Loss Builders");
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("AJS-123", "AJS Group"), "AJS Group");
+});
+
+Deno.test("Xero sync reference tokens: only structured job/external refs are trusted", () => {
+  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("MLB-26003"), "MLB-26003");
+  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("SWMS-26651"), "SWMS-26651");
+  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("AJBR 67713"), "AJBR 67713");
+  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("26003"), null, "numeric-only tokens are too broad");
+  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("MLB"), null, "short alpha-only tokens are too broad");
+  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("U1/25 Kimbara Street"), null, "addresses are not invoice reference tokens");
 });
 
 Deno.test("D3 feed: an attached SWMS is surfaced in draft_docs", async () => {
