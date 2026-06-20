@@ -11,11 +11,12 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  slug,
   makesafeReportFileName,
-  renderHash,
   makesafeReportHashInput,
+  renderHash,
+  renderMakesafeReportPdf,
   sanitiseText,
+  slug,
 } from "./makesafe_report_render.ts";
 
 Deno.test("slug: sanitises non-alphanumerics, trims, caps length", () => {
@@ -44,7 +45,12 @@ Deno.test("filename: is deterministic for the same ref+address", () => {
 });
 
 Deno.test("renderHash: stable for identical jobs, differs on content change", async () => {
-  const job = { ref: "MLB-1", address: "1 A St", scope: "make safe the boundary", photos: [] };
+  const job = {
+    ref: "MLB-1",
+    address: "1 A St",
+    scope: "make safe the boundary",
+    photos: [],
+  };
   const h1 = await renderHash(job);
   const h2 = await renderHash({ ...job });
   assertEquals(h1, h2, "same content -> same hash");
@@ -54,8 +60,16 @@ Deno.test("renderHash: stable for identical jobs, differs on content change", as
 });
 
 Deno.test("hash input: photos contribute length/type, not raw bytes", () => {
-  const a = makesafeReportHashInput({ ref: "r", address: "a", photos: [{ bytesBase64: "AAAA", contentType: "image/jpeg" }] });
-  const b = makesafeReportHashInput({ ref: "r", address: "a", photos: [{ bytesBase64: "BBBB", contentType: "image/jpeg" }] });
+  const a = makesafeReportHashInput({
+    ref: "r",
+    address: "a",
+    photos: [{ bytesBase64: "AAAA", contentType: "image/jpeg" }],
+  });
+  const b = makesafeReportHashInput({
+    ref: "r",
+    address: "a",
+    photos: [{ bytesBase64: "BBBB", contentType: "image/jpeg" }],
+  });
   // Same length + type -> same serialisation (cheap, stable across re-encodes).
   assertEquals(a, b);
 });
@@ -63,4 +77,40 @@ Deno.test("hash input: photos contribute length/type, not raw bytes", () => {
 Deno.test("sanitiseText: em/en dashes normalised to hyphen (house comms rule)", () => {
   assertEquals(sanitiseText("scope — done – ok"), "scope - done - ok");
   assertEquals(sanitiseText(null), "");
+});
+
+function countPdfPages(bytes: Uint8Array): number {
+  const text = new TextDecoder().decode(bytes);
+  return (text.match(/\/Type\s*\/Page\b/g) || []).length;
+}
+
+Deno.test("render PDF: top-down layout keeps normal no-photo reports to sane page count", async () => {
+  const rendered = await renderMakesafeReportPdf({
+    ref: "SWMS-26651 / MLB-26003 / PO-53480",
+    address: "U1 / 25 Kimbara Street, Nollamara WA",
+    contact:
+      "The Owners of 25 Kimbara Street Nollamara Strata Plan 26544 | 0439 631 353 | Requesting builder: Major Loss Builders",
+    date: "2026-06-18",
+    arrival: "to confirm",
+    crew: "2 trades",
+    billing_note:
+      "2 trades x 2 hours plus materials, final pricing to be confirmed",
+    scope:
+      "Make-safe attendance following storm/wind event. Inspect and make safe detached cornice in garage, clear debris, install temporary fencing as required.",
+    findings:
+      "Garage cornice had detached and debris was present. Ceiling/cornice area required make-safe inspection and temporary controls before builder review.",
+    works:
+      "Attended site, inspected affected ceiling/cornice area, cleared loose debris, checked immediate safety risks, and documented site condition for builder review.",
+    materials:
+      "Temporary fencing panels, bases/feet, tarps/roof materials, fixings and consumables where required.",
+    photos: [],
+  });
+
+  const pages = countPdfPages(rendered.bytes);
+  assert(pages >= 1, `expected at least one page, got ${pages}`);
+  assert(
+    pages <= 3,
+    `no-photo make-safe report should not inflate to ${pages} pages`,
+  );
+  assert(rendered.fileName.toLowerCase().includes("make safe report"));
 });

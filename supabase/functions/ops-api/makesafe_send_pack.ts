@@ -688,6 +688,31 @@ export function checkPositiveInvoiceTotalGate(invoice: any): string[] {
       "invoice total must be greater than $0 before a make-safe pack can be authorised or sent",
     );
   }
+  rawLines.forEach((li: any, idx: number) => {
+    const quantity = Number(li?.Quantity ?? li?.quantity ?? 1);
+    const unit = Number(li?.UnitAmount ?? li?.unit_price ?? li?.unitPrice ?? 0);
+    const explicit = li?.LineAmount ?? li?.line_total ?? li?.lineTotal;
+    const lineAmount = explicit != null && Number.isFinite(Number(explicit))
+      ? Number(explicit)
+      : ((Number.isFinite(quantity) ? quantity : 1) *
+        (Number.isFinite(unit) ? unit : 0));
+    const desc = String(li?.Description ?? li?.description ?? `line ${idx + 1}`)
+      .trim();
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      failures.push(
+        `invoice line ${idx + 1} has invalid quantity: ${desc}`.slice(0, 220),
+      );
+      return;
+    }
+    if (
+      (!Number.isFinite(unit) || unit <= 0) ||
+      (!Number.isFinite(lineAmount) || lineAmount <= 0)
+    ) {
+      failures.push(
+        `invoice line ${idx + 1} has $0/invalid pricing: ${desc}`.slice(0, 220),
+      );
+    }
+  });
   return failures;
 }
 
