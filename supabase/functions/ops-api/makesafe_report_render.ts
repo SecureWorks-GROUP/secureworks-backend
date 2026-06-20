@@ -327,11 +327,10 @@ export async function renderMakesafeReportPdf(
     y = para(text);
   }
 
-  // Photo evidence: compact 2x2 grid per page. The first implementation used
-  // one 190mm photo cell per page, so routine drafts with 10-12 trade photos
-  // ballooned into 13-15 page reports with blank gaps. The follow-up photo
-  // email still carries every approved JPEG; this report keeps evidence readable
-  // and reviewer-friendly.
+  // Photo evidence: two large photos per page. Four-up pages made the review
+  // pack compact, but the photos were too small for builder/report review. The
+  // follow-up photo email still carries every approved JPEG; this report keeps
+  // the chosen evidence readable without returning to one-photo runaway packs.
   const limit = Number.isFinite(job.photo_limit as number)
     ? Math.max(0, Math.floor(job.photo_limit as number))
     : DEFAULT_REPORT_PHOTO_LIMIT;
@@ -357,11 +356,11 @@ export async function renderMakesafeReportPdf(
     );
     y += 5;
   } else {
-    const cols = 2;
+    const cols = 1;
     const rows = 2;
     const gap = 5;
-    const cellW = (CONTENT_W - gap) / cols;
-    const cellH = 82;
+    const cellW = CONTENT_W;
+    const cellH = 100;
     const gridH = rows * cellH + gap;
     let idx = 0;
     while (idx < resolved.length) {
@@ -376,9 +375,8 @@ export async function renderMakesafeReportPdf(
       for (let slot = 0; slot < cols * rows && idx < resolved.length; slot++) {
         const p = resolved[idx];
         idx++;
-        const col = slot % cols;
-        const row = Math.floor(slot / cols);
-        const cellX = MARGIN + col * (cellW + gap);
+        const row = slot;
+        const cellX = MARGIN;
         const cellY = gridTop + row * (cellH + gap);
         const dataUrl = photoDataUrl(p);
         doc.setDrawColor(...RULE);
