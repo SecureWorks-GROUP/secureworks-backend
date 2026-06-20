@@ -327,6 +327,41 @@ Deno.test("D3 feed: draft_docs[] + source_docs[] are returned with kinds, existi
   assertEquals(photo.received_at, "2026-06-16T00:30:00Z", "photo received timestamp prefers taken_at");
 });
 
+Deno.test("D3 feed: pack doc ids anchor the reviewed report/invoice when duplicate docs exist", async () => {
+  const seed = ferndaleSeed();
+  seed.makesafe_report_packs[0].report_doc_id = "d-rep";
+  seed.makesafe_report_packs[0].invoice_doc_id = "d-inv";
+  seed.job_documents.unshift({
+    id: "d-rep-placeholder",
+    job_id: "job-ferndale",
+    type: "makesafe_report",
+    file_name: "Make Safe Report MLB-25248 Placeholder.pdf",
+    storage_url: "https://docs.test/placeholder-report.pdf",
+    pdf_url: null,
+    version: 9,
+    created_at: "2026-06-16T04:00:00Z",
+  }, {
+    id: "d-inv-other",
+    job_id: "job-ferndale",
+    type: "invoice",
+    file_name: "Draft Xero Invoice Other.pdf",
+    storage_url: "https://docs.test/other-invoice.pdf",
+    pdf_url: null,
+    version: 9,
+    created_at: "2026-06-16T04:01:00Z",
+  });
+
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  const row = res.drafts[0];
+  assertEquals(row.report_pdf_url, "https://docs.test/report.pdf");
+  assertEquals(row.invoice_pdf_url, "https://docs.test/invoice.pdf");
+  assertEquals(row.draft_docs.map((d: any) => d.url), [
+    "https://docs.test/report.pdf",
+    "https://docs.test/invoice.pdf",
+  ], "the cockpit preview must match the docs recorded on the reviewed pack row");
+});
+
 Deno.test("MLB Xero contact: draft/sync contact names canonicalise to Major Loss Builders", () => {
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "ML Builders"), "Major Loss Builders");
   assertEquals(_canonicalMakesafeInvoiceContactNameForTest("SWMS-26651 / MLB-26003", "MLB"), "Major Loss Builders");
@@ -402,6 +437,9 @@ Deno.test("C feed: report_recipient set -> recipient_email = work-orders inbox, 
 
 Deno.test("C feed: report_recipient null -> recipient_email null (warning), NOT invoice_email", async () => {
   const seed = ferndaleSeed();
+  seed.makesafe_job_details[0].requesting_company_slug = "aj";
+  seed.makesafe_job_details[0].requesting_company_name = "AJS";
+  seed.makesafe_job_details[0].external_ref = "AJS-123";
   // Only a billing contact configured, no work-orders inbox.
   seed.makesafe_job_details[0].makesafe_companies = {
     slug: "aj",
@@ -424,6 +462,24 @@ Deno.test("C feed: report_recipient null -> recipient_email null (warning), NOT 
   );
   // cc is still exactly ses@ (the send hard-enforces this server-side too).
   assertEquals(row.cc, [MAKESAFE_CC]);
+});
+
+Deno.test("C feed: legacy MLB rows use the vetted MLB report-recipient backstop", async () => {
+  const seed = ferndaleSeed();
+  seed.makesafe_job_details[0].requesting_company_slug = "mlb";
+  seed.makesafe_job_details[0].requesting_company_name = "ML Builders";
+  seed.makesafe_job_details[0].external_ref = "MLB-24732";
+  seed.makesafe_job_details[0].makesafe_companies = {
+    slug: "mlb",
+    name: "ML Builders",
+    invoice_email: null,
+    report_recipient: null,
+  } as any;
+  const client = makeFeedClient(seed);
+  const res: any = await _makesafeReportDraftsForTest(client, params());
+  assertEquals(res.count, 1);
+  assertEquals(res.drafts[0].recipient_email, "makesafes@mlbuilders.com.au");
+  assertEquals(res.drafts[0].cc, [MAKESAFE_CC]);
 });
 
 Deno.test("T3 feed: invoice_ambiguous is still returned (UX gates on it)", async () => {
