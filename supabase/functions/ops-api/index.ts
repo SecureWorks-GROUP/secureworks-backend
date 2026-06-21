@@ -18430,11 +18430,9 @@ async function makesafeSendPack(
       const draftLockReportDoc = draftLockDocs.find((d: any) => d.type === 'makesafe_report') || null
       const draftLockInvoiceDoc = draftLockDocs.find((d: any) => d.type === 'invoice') || null
       const draftLockLiveInvoices = invoicesForDraftLockRes.data || []
-      const draftLockInvoice = _resolveMakesafeJobInvoices(
-        draftLockLiveInvoices,
-        jobId,
-        detailForDraftLockRes.data?.external_ref,
-      )
+      const draftLockInvoice = (draftLockLiveInvoices || []).find((inv: any) =>
+        !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase())
+      ) || null
       const draftLockCanReset = !isInvoiceAmbiguous(draftLockLiveInvoices) &&
         canResetDraftPackGenerationLock({
           packStatus: priorStatus,

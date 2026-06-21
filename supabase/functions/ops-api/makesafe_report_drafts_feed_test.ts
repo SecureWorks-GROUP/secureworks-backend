@@ -81,7 +81,7 @@ const params = () => new URLSearchParams();
 
 // A genuine Ferndale-shaped draft: admin_to_send_report, DRAFT invoice, rendered
 // report doc + a pack row with report_doc_id, NOT sent.
-function ferndaleSeed() {
+function ferndaleSeed(): any {
   return {
     makesafe_job_details: [{
       job_id: "job-ferndale",
