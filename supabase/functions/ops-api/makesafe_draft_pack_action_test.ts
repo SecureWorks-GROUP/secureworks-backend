@@ -40,8 +40,8 @@ function claudeJson(summary = "Draft pack refreshed for human review.") {
       line_items: [
         {
           description: "Emergency make-safe attendance",
-          quantity: 1,
-          unit_price: 420,
+          quantity: 4,
+          unit_price: 80,
           account_code: "210",
         },
       ],
@@ -176,7 +176,7 @@ Deno.test("draftMakesafeReportPack: drafts report + DRAFT invoice + invoice PDF 
     calls.createDraftInvoice[0].line_items[0].description,
     "Emergency make-safe attendance",
   );
-  assertEquals(calls.createDraftInvoice[0].line_items[0].unit_price, 420);
+  assertEquals(calls.createDraftInvoice[0].line_items[0].unit_price, 80);
 
   assertEquals(calls.getToken.length, 1);
   assertEquals(calls.fetchInvoicePdf.length, 1);
@@ -269,6 +269,203 @@ Deno.test("draftMakesafeReportPack: rejects zero-priced Claude output before ren
   assertStringIncludes(calls.markFailed[0].message, "$0/invalid unit_price");
 });
 
+Deno.test("draftMakesafeReportPack: verifier blocks builder-rule violations before Xero or render", async () => {
+  const calls: Record<string, any[]> = {
+    render: [],
+    createDraftInvoice: [],
+    markFailed: [],
+  };
+
+  await assertRejects(
+    () =>
+      draftMakesafeReportPack(
+        {},
+        { job_id: "job-feedback-block" },
+        "api_key",
+        {
+          assertRoutineEligible: async () => {},
+          claimDraftPack: async () => {},
+          markDraftPackFailed: async (_client, jobId, packKind, err) => {
+            calls.markFailed.push({
+              jobId,
+              packKind,
+              message: (err as Error).message,
+            });
+          },
+          loadContext: async () => ({
+            job: {
+              id: "job-feedback-block",
+              site_address: "25 Kimbara Street",
+            },
+            detail: {
+              external_ref: "MLB-26003",
+              requesting_company_name: "Major Loss Builders",
+            },
+            selected_photo_urls: [],
+          }),
+          callClaude: async () =>
+            JSON.stringify({
+              report: {
+                ref: "MLB-26003",
+                address: "25 Kimbara Street",
+                billing_note: "1 trade x 2 hours",
+                works: "Make-safe attendance completed.",
+              },
+              invoice: {
+                reference: "MLB-26003",
+                contact_name: "Major Loss Builders",
+                line_items: [{
+                  description: "Make-safe labour",
+                  quantity: 2,
+                  unit_price: 85,
+                }],
+              },
+              change_summary: "Draft revised.",
+            }),
+          createDraftInvoice: async () => {
+            calls.createDraftInvoice.push({});
+            throw new Error("invoice must not run after verifier blocker");
+          },
+          renderReport: async () => {
+            calls.render.push({});
+            throw new Error("render must not run after verifier blocker");
+          },
+        },
+      ),
+    Error,
+    "draft pack verification failed",
+  );
+
+  assertEquals(calls.createDraftInvoice.length, 0);
+  assertEquals(calls.render.length, 0);
+  assertEquals(calls.markFailed.length, 1);
+  assertStringIncludes(calls.markFailed[0].message, "below 3 hours");
+});
+
+Deno.test("draftMakesafeReportPack: final render payload scrubs feedback-banned fallback terms", async () => {
+  const calls: Record<string, any[]> = {
+    render: [],
+    createDraftInvoice: [],
+    getToken: [],
+    fetchInvoicePdf: [],
+    attachDoc: [],
+    ensure: [],
+    patch: [],
+    markReady: [],
+    markFailed: [],
+  };
+
+  const result = await draftMakesafeReportPack(
+    {},
+    { job_id: "job-render-feedback-clean" },
+    "api_key",
+    {
+      assertRoutineEligible: async () => {},
+      claimDraftPack: async () => {},
+      markDraftPackFailed: async (_client, jobId, packKind, err) => {
+        calls.markFailed.push({
+          jobId,
+          packKind,
+          message: (err as Error).message,
+        });
+      },
+      loadContext: async () => ({
+        job: {
+          id: "job-render-feedback-clean",
+          site_address: "170 Hampden Road",
+        },
+        detail: {
+          external_ref: "MLB-25767",
+          requesting_company_name: "Major Loss Builders",
+        },
+        service_report: {
+          checklist_json: {
+            damage_description:
+              "Temporary fencing was discussed, but this should not appear in the revised report.",
+          },
+        },
+        feedback_notes: [{
+          role: "human",
+          body: "there should be no mention of temp fencing in the report",
+        }],
+        selected_photo_urls: [],
+      }),
+      callClaude: async () =>
+        JSON.stringify({
+          report: {
+            ref: "MLB-25767",
+            address: "170 Hampden Road",
+            billing_note: "1 trade x 3 hours",
+            works: "Ceiling and mould make-safe completed.",
+          },
+          invoice: {
+            reference: "MLB-25767",
+            contact_name: "Major Loss Builders",
+            line_items: [{
+              description: "Make-safe labour",
+              quantity: 3,
+              unit_price: 85,
+            }],
+          },
+          change_summary: "Draft revised.",
+        }),
+      createDraftInvoice: async (_client, body) => {
+        calls.createDraftInvoice.push(body);
+        return {
+          success: true,
+          skipped: false,
+          xero_invoice_id: "xero-draft-clean",
+          invoice_number: "INV-DRAFT-CLEAN",
+        };
+      },
+      renderReport: async (_client, body) => {
+        calls.render.push(body);
+        return {
+          success: true,
+          document_id: "report-doc-clean",
+          render_hash: "hash-clean",
+        };
+      },
+      getToken: async () => {
+        calls.getToken.push({});
+        return { accessToken: "token", tenantId: "tenant" };
+      },
+      fetchInvoicePdfBytes: async (_at, _tenant, xeroInvoiceId) => {
+        calls.fetchInvoicePdf.push({ xeroInvoiceId });
+        return new Uint8Array([37, 80, 68, 70]);
+      },
+      attachDoc: async (_client, body) => {
+        calls.attachDoc.push(body);
+        return { document_id: "invoice-doc-clean" };
+      },
+      ensurePackRow: async (_client, jobId, packKind, extra) => {
+        calls.ensure.push({ jobId, packKind, extra });
+      },
+      patchPack: async (_client, jobId, packKind, patch) => {
+        calls.patch.push({ jobId, packKind, patch });
+      },
+      markReady: async (_client, jobId, detail) => {
+        calls.markReady.push({ jobId, detail });
+      },
+    },
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(calls.createDraftInvoice.length, 1);
+  assertEquals(calls.render.length, 1);
+  assertEquals(calls.markFailed.length, 0);
+  assertEquals(
+    JSON.stringify(calls.render[0].job).toLowerCase().includes("temp fencing"),
+    false,
+  );
+  assertEquals(
+    JSON.stringify(calls.render[0].job).toLowerCase().includes(
+      "temporary fencing",
+    ),
+    false,
+  );
+});
+
 Deno.test("draftMakesafeReportPack: invoice/Xero failure stops before report render", async () => {
   const calls: Record<string, any[]> = { render: [], markFailed: [] };
 
@@ -313,6 +510,87 @@ Deno.test("draftMakesafeReportPack: invoice/Xero failure stops before report ren
 
   assertEquals(calls.render.length, 0);
   assertEquals(calls.markFailed.length, 1);
+});
+
+Deno.test("draftMakesafeReportPack: preserved invoice pricing blocks ready state", async () => {
+  const calls: Record<string, any[]> = {
+    render: [],
+    markReady: [],
+    markFailed: [],
+  };
+
+  await assertRejects(
+    () =>
+      draftMakesafeReportPack(
+        {},
+        { job_id: "job-preserved-invoice" },
+        "api_key",
+        {
+          assertRoutineEligible: async () => {},
+          claimDraftPack: async () => {},
+          markDraftPackFailed: async (_client, jobId, packKind, err) => {
+            calls.markFailed.push({
+              jobId,
+              packKind,
+              message: (err as Error).message,
+            });
+          },
+          loadContext: async () => ({
+            job: {
+              id: "job-preserved-invoice",
+              site_address: "63 Carrington Street",
+            },
+            detail: {
+              external_ref: "MLB-25045",
+              requesting_company_name: "Major Loss Builders",
+            },
+            selected_photo_urls: [],
+          }),
+          callClaude: async () =>
+            JSON.stringify({
+              report: {
+                ref: "MLB-25045",
+                address: "63 Carrington Street",
+                billing_note: "1 trade x 3 hours",
+                works: "Garage ceiling make-safe completed.",
+              },
+              invoice: {
+                reference: "MLB-25045",
+                contact_name: "Major Loss Builders",
+                line_items: [{
+                  description: "Make-safe labour",
+                  quantity: 3,
+                  unit_price: 85,
+                }],
+              },
+              change_summary: "Draft revised.",
+            }),
+          createDraftInvoice: async () => ({
+            skipped: true,
+            pricing_preserved_from_existing: true,
+            existing_invoice: {
+              xero_invoice_id: "xero-old",
+              invoice_number: "INV-OLD",
+              status: "DRAFT",
+            },
+          }),
+          renderReport: async () => {
+            calls.render.push({});
+            throw new Error("render must not run when invoice was preserved");
+          },
+          markReady: async () => {
+            calls.markReady.push({});
+          },
+        },
+      ),
+    Error,
+    "invoice revision blocked",
+  );
+
+  assertEquals(calls.render.length, 0);
+  assertEquals(calls.markReady.length, 0);
+  assertEquals(calls.markFailed.length, 1);
+  assertStringIncludes(calls.markFailed[0].message, "preserved");
 });
 
 Deno.test("draftMakesafeReportPack: existing non-DRAFT invoice does not attach a fake draft PDF", async () => {
