@@ -16741,6 +16741,12 @@ interface CreateMakesafeDraftInvoiceDeps {
     dueDate?: string | null
     operator?: string | null
   }) => Promise<any>
+  deleteExistingDraftInvoice?: (client: any, args: {
+    existing: any
+    jobId: string | null
+    operator?: string | null
+    reason?: string | null
+  }) => Promise<any>
   createInvoiceFn?: (client: any, body: any) => Promise<any>
 }
 
@@ -16964,6 +16970,71 @@ async function updateMakesafeExistingDraftInvoice(client: any, args: {
   }
 }
 
+async function deleteMakesafeExistingDraftInvoice(client: any, args: {
+  existing: any
+  jobId: string | null
+  operator?: string | null
+  reason?: string | null
+}): Promise<any> {
+  const xeroInvoiceId = args.existing?.xero_invoice_id || args.existing?.id || args.existing?.InvoiceID
+  if (!xeroInvoiceId) throw new ApiError('existing draft invoice missing xero_invoice_id; cannot replace safely', 409)
+  const existingStatus = String(args.existing?.status || '').toUpperCase()
+  if (existingStatus && existingStatus !== 'DRAFT') {
+    throw new ApiError(
+      `existing invoice ${args.existing?.invoice_number || xeroInvoiceId} is ${existingStatus}; cannot delete/replace a non-DRAFT invoice`,
+      409,
+    )
+  }
+
+  const { accessToken, tenantId } = await getToken(client)
+  const deleted = await xeroPost(
+    `/Invoices/${xeroInvoiceId}`,
+    accessToken,
+    tenantId,
+    { Invoices: [{ InvoiceID: xeroInvoiceId, Status: 'DELETED' }] },
+    'POST',
+  )
+  const deletedInvoice = deleted?.Invoices?.[0] || null
+
+  const { error: cacheErr } = await client.from('xero_invoices')
+    .update({
+      status: 'DELETED',
+      raw_json: deletedInvoice || args.existing?.raw_json || null,
+      updated_at: new Date().toISOString(),
+      synced_at: new Date().toISOString(),
+    })
+    .eq('xero_invoice_id', xeroInvoiceId)
+  if (cacheErr) {
+    throw new ApiError(`local invoice cache update failed after Xero draft delete: ${cacheErr.message}`, 500)
+  }
+
+  if (args.jobId) {
+    try {
+      await client.from('job_events').insert({
+        job_id: args.jobId,
+        event_type: 'invoice_deleted',
+        detail_json: {
+          source: 'makesafe_revise_pack',
+          xero_invoice_id: xeroInvoiceId,
+          invoice_number: args.existing?.invoice_number || deletedInvoice?.InvoiceNumber || null,
+          reason: args.reason || 'replace_project_linked_draft',
+          operator: args.operator || null,
+        },
+      })
+    } catch (e) {
+      console.log('[makesafe_draft_invoice] invoice_deleted event insert failed:', (e as Error).message)
+    }
+  }
+
+  return {
+    success: true,
+    deleted_existing_draft: true,
+    xero_invoice_id: xeroInvoiceId,
+    invoice_number: args.existing?.invoice_number || deletedInvoice?.InvoiceNumber || null,
+    status: 'DELETED',
+  }
+}
+
 // (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
 // full-ACCREC-scan 3-tier dup guard FIRST. If a DRAFT invoice already maps to
 // the job, revise that DRAFT in place from the latest Claude JSON; if a non-DRAFT
@@ -16984,6 +17055,7 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
   const externalRef = body.external_ref || reference
   const _fetchInvoices = deps.fetchAllAccrecInvoices || _fetchAllAccrecInvoices
   const _updateExistingDraft = deps.updateExistingDraftInvoice || updateMakesafeExistingDraftInvoice
+  const _deleteExistingDraft = deps.deleteExistingDraftInvoice || deleteMakesafeExistingDraftInvoice
   const _createInvoice = deps.createInvoiceFn || createInvoice
   const allInvoices = await _fetchInvoices(client)
   const existing = resolveExistingInvoice(allInvoices, jobId, externalRef)
@@ -17040,6 +17112,33 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
           operator: body.operator || null,
         })
       } catch (e) {
+        const replaceProjectLinkedDraft = body.replace_project_linked_draft_on_project_line_error === true ||
+          body.replaceProjectLinkedDraftOnProjectLineError === true
+        if (replaceProjectLinkedDraft && isXeroProjectLineUpdateError(e)) {
+          const deleted = await _deleteExistingDraft(client, {
+            existing,
+            jobId,
+            operator: body.operator || null,
+            reason: 'xero_project_line_rewrite_replacement',
+          })
+          const created = await _createInvoice(client, {
+            job_id: jobId,
+            reference,
+            contact_name: contact,
+            due_date: body.due_date || body.dueDate || null,
+            line_items: lines,
+            operator: body.operator || null,
+          })
+          return {
+            ...created,
+            replaced_project_linked_draft: true,
+            deleted_existing_draft: deleted,
+            update_error: String((e as Error)?.message || e).slice(0, 500),
+            reference,
+            scanned: allInvoices.length,
+            note: `Xero refused draft invoice rewrite because existing lines are linked to a Project, so Draft Pack deleted DRAFT invoice ${existing.invoice_number || existing.xero_invoice_id} and created a clean replacement draft`,
+          }
+        }
         const preserveExistingDraft = body.preserve_existing_draft_on_project_line_error === true ||
           body.preserveExistingDraftOnProjectLineError === true
         if (preserveExistingDraft && isXeroProjectLineUpdateError(e) && existingDraftInvoiceHasUsablePricing(existing)) {
@@ -17508,6 +17607,8 @@ function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string,
       sourceBody.preserveExistingDraftOnInvalidPricing === true,
     preserve_existing_draft_on_project_line_error: sourceBody.preserve_existing_draft_on_project_line_error === true ||
       sourceBody.preserveExistingDraftOnProjectLineError === true,
+    replace_project_linked_draft_on_project_line_error: sourceBody.replace_project_linked_draft_on_project_line_error === true ||
+      sourceBody.replaceProjectLinkedDraftOnProjectLineError === true,
   }
 }
 
@@ -19204,6 +19305,7 @@ async function rerunDraftReport(client: any, body: any, authMode: string): Promi
     change_description,
     update_existing_draft: true,
     fail_on_existing_non_draft: true,
+    replace_project_linked_draft_on_project_line_error: true,
   }, authMode)
 
   await markDraftNotesAddressed(client, addressable, noteResult.storage)

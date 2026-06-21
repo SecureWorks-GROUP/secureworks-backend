@@ -636,6 +636,103 @@ Deno.test("createMakesafeDraftInvoice: preserves existing priced DRAFT when Xero
   assertEquals(calls.create, 0);
 });
 
+Deno.test("createMakesafeDraftInvoice: can replace project-linked DRAFT when a revise pass must remove stale lines", async () => {
+  const calls: Record<string, number> = { update: 0, delete: 0, create: 0 };
+  const result = await createMakesafeDraftInvoice(
+    {},
+    {
+      job_id: "job-greenfields",
+      reference: "AJBR 66949",
+      contact_name: "AJ Building & Restoration",
+      line_items: [
+        {
+          description: "Make Safe Labour - Greenfields - 2 trades x 3 hours",
+          quantity: 6,
+          unit_price: 80,
+        },
+      ],
+      replace_project_linked_draft_on_project_line_error: true,
+    },
+    {
+      fetchAllAccrecInvoices: async () => {
+        await Promise.resolve();
+        return [{
+          xero_invoice_id: "xero-draft-66949-old",
+          invoice_number: "INV-0718",
+          status: "DRAFT",
+          reference: "SWMS-26394 / AJBR 66949",
+          job_id: "job-greenfields",
+          sub_total: 856,
+          total: 941.6,
+          line_items: [
+            {
+              Description: "Make Safe Labour",
+              Quantity: 6,
+              UnitAmount: 80,
+              LineAmount: 480,
+            },
+            {
+              Description: "Temporary Fence Panels supplied x 4",
+              Quantity: 4,
+              UnitAmount: 59,
+              LineAmount: 236,
+            },
+            {
+              Description: "Cement Bases supplied x 5",
+              Quantity: 5,
+              UnitAmount: 28,
+              LineAmount: 140,
+            },
+          ],
+        }];
+      },
+      updateExistingDraftInvoice: async () => {
+        await Promise.resolve();
+        calls.update += 1;
+        throw new Error(
+          "Xero validation error: This document has lines associated to a Project, please either supply LineItemIDs so that this association can be maintained, or else remove the connection to the Project",
+        );
+      },
+      deleteExistingDraftInvoice: async (_client, args) => {
+        await Promise.resolve();
+        calls.delete += 1;
+        assertEquals(args.existing.invoice_number, "INV-0718");
+        assertEquals(args.jobId, "job-greenfields");
+        return {
+          deleted_existing_draft: true,
+          xero_invoice_id: "xero-draft-66949-old",
+          status: "DELETED",
+        };
+      },
+      createInvoiceFn: async (_client, body) => {
+        await Promise.resolve();
+        calls.create += 1;
+        assertEquals(body.line_items.length, 1);
+        assertEquals(body.line_items[0].unit_price, 80);
+        return {
+          success: true,
+          xero_invoice_id: "xero-draft-66949-new",
+          invoice_number: "INV-0777",
+          total: 528,
+          status: "DRAFT",
+        };
+      },
+    },
+  );
+
+  assertEquals(result.replaced_project_linked_draft, true);
+  assertEquals(result.xero_invoice_id, "xero-draft-66949-new");
+  assertEquals(result.invoice_number, "INV-0777");
+  assertEquals(
+    result.deleted_existing_draft.xero_invoice_id,
+    "xero-draft-66949-old",
+  );
+  assertStringIncludes(result.update_error, "Project");
+  assertEquals(calls.update, 1);
+  assertEquals(calls.delete, 1);
+  assertEquals(calls.create, 1);
+});
+
 Deno.test("createMakesafeDraftInvoice: Revise Pack fails closed on existing non-DRAFT invoice when requested", async () => {
   await assertRejects(
     () =>
