@@ -284,6 +284,7 @@ import {
 import {
   buildDraftPackSystemPrompt,
   buildDraftPackUserPrompt,
+  applyDraftPackFeedbackOverrides,
   MAKESAFE_DRAFT_PACK_MODEL,
   parseDraftPackResponse,
   selectDraftPackDueJobIds,
@@ -16407,7 +16408,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     const [reportPdfUrl, invoicePdfUrl, swmsPdfUrl, workOrderPdfUrl, serviceReportPdfUrl] = await Promise.all([
       // B1: the report URL carries the render hash so a re-render always yields a new URL.
       signDocUrl(reportDoc?.pdf_url || reportDoc?.storage_url, renderHash),
-      signDocUrl(invoiceDoc?.pdf_url || invoiceDoc?.storage_url),
+      signDocUrl(
+        invoiceDoc?.pdf_url || invoiceDoc?.storage_url,
+        invoiceDoc?.version ? `invoice-v${invoiceDoc.version}` : renderHash,
+      ),
       signDocUrl(swmsDoc?.pdf_url || swmsDoc?.storage_url),
       signDocUrl(workOrderDoc?.pdf_url || workOrderDoc?.storage_url),
       signDocUrl(serviceReportDoc?.pdf_url || serviceReportDoc?.storage_url),
@@ -17590,7 +17594,7 @@ async function draftMakesafeReportPack(
       buildDraftPackUserPrompt(promptContext),
       2500,
     )
-    const parsed = parseDraftPackResponse(raw)
+    const parsed = applyDraftPackFeedbackOverrides(parseDraftPackResponse(raw), promptContext)
 
     const invoiceResult = await _createDraftInvoice(
       client,
@@ -19177,21 +19181,25 @@ async function rerunDraftReport(client: any, body: any, authMode: string): Promi
   if (!job_id) throw new ApiError('job_id required', 400)
 
   const noteResult = await loadDraftNotesThread(client, job_id, kind, {
-    humanUnaddressedOnly: true,
     includeRaw: true,
   })
-  const addressable = (noteResult.notes || []).filter((n: any) => noteIsAddressable(n))
+  const allNotes = noteResult.notes || []
+  const addressable = allNotes.filter((n: any) => noteIsAddressable(n))
   if (addressable.length === 0) {
     return { skipped: true, reason: 'no unaddressed human notes for this job', selected_photo_count: selectedPhotoUrls.length }
   }
+  const feedbackNotes = allNotes.filter((n: any) => String(n?.role || '').toLowerCase() === 'human')
 
   // Reuse the same draft-only action as the cron/automatic Draft Pack path. If
-  // this fails, leave the human notes unaddressed so the loop can be retried.
+  // this fails, leave the current human notes unaddressed so the loop can be
+  // retried. The generator receives the full chronological human thread so a
+  // second note like "remove the $1 placeholder" refines the first note instead
+  // of accidentally discarding the earlier labour/material instruction.
   const draftPack = await draftMakesafeReportPack(client, {
     ...body,
     job_id,
     draft_kind: kind,
-    feedback_notes: addressable,
+    feedback_notes: feedbackNotes,
     selected_photo_urls: selectedPhotoUrls,
     change_description,
     update_existing_draft: true,
