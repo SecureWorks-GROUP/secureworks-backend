@@ -145,7 +145,7 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
       "Treat feedback_notes as chronological cumulative human instructions. Later human notes refine earlier human notes; do not forget an earlier requested labour basis when the latest note only says retry/remove a placeholder.",
       "For MLB / Major Loss Builders temporary-fence hire, use the SecureWorks hire card when the evidence gives quantities: labour $85 ex/hr weekday with 3-hour minimum (4 hours for solo temp-fence), retrieval allowance 2 hours x $90, panel hire $5 per panel per week for 12 weeks minimum, star pickets $13.50 each, cable ties/small consumables $25 flat. Do not price MLB panels as a sale.",
       "For AJS / AJ Building & Restoration / AJBR, normal labour is $80 ex/hr per trade unless the source evidence explicitly says public-holiday/after-hours/special rate. Do not use the generic $85 builder rate for AJBR/AJS.",
-      "For AJS/AJBR temporary fencing, materials depend on who supplied them: if SecureWorks supplied the panels/blocks, sell panels at $59 ex GST each and cement bases/blocks at $28 ex GST each; never charge AJS cable ties/clips/small consumables. If counts or supplier evidence are unclear, hold for human review instead of inventing a $1 placeholder.",
+      "For AJS/AJBR temporary fencing, default to labour/travel only because AJS normally supplies/uses its own panels/blocks. Sell panels to AJS at $59 ex GST each and cement bases/blocks at $28 ex GST each only when source evidence explicitly says SecureWorks supplied/sold those materials to AJS. Counts alone are not sale evidence. Never charge AJS cable ties/clips/small consumables.",
       "Only use selected_photo_urls as the approved photo set for this draft refresh.",
       "Never include MAKESAFE_PACK_SENT or any wording that says the pack was sent/authorised/closed.",
     ],
@@ -668,6 +668,35 @@ function contextSearchText(
   ].join("\n").toLowerCase();
 }
 
+function ajsSaleEvidenceText(
+  ctx: DraftPackContext,
+  feedbackText = "",
+): string {
+  // Deliberately exclude model-generated invoice/report text here. AJS sale
+  // pricing is allowed only from source evidence or human Ops feedback, not
+  // from a prior draft line that may have invented "supplied" wording.
+  return [
+    feedbackText,
+    JSON.stringify(ctx.service_report || {}),
+    JSON.stringify(ctx.detail || {}),
+    JSON.stringify(ctx.job || {}),
+  ].join("\n").toLowerCase();
+}
+
+function hasExplicitAjsTempFenceSaleEvidence(text: string): boolean {
+  const lower = String(text || "").toLowerCase();
+  if (!lower.trim()) return false;
+  const negatedSale =
+    /\b(?:never|not|no|don't|do\s+not|didn'?t|wasn'?t|isn'?t|without)\b[\s\S]{0,45}\b(?:sell|sold|sale|selling|suppl(?:y|ied)|provided?|charge|bill|invoice)\b/;
+  if (negatedSale.test(lower)) return false;
+  return [
+    /\b(?:sell|sold|sale|selling)\b[\s\S]{0,120}\b(?:ajs|ajbr|them|panels?|bases?|blocks?)\b/,
+    /\b(?:charge|bill|invoice)\s+(?:ajs|ajbr|them)\s+for[\s\S]{0,80}\b(?:panels?|bases?|blocks?|temp(?:orary)?\s+fenc(?:e|ing))\b/,
+    /\b(?:secureworks|we|our)\s+(?:supplied|provided|supply|provide|sold|sell)[\s\S]{0,80}\b(?:panels?|bases?|blocks?|temp(?:orary)?\s+fenc(?:e|ing))\b/,
+    /\b(?:panels?|bases?|blocks?|temp(?:orary)?\s+fenc(?:e|ing))\b[\s\S]{0,80}\b(?:supplied|provided|sold)\s+by\s+(?:secureworks|us|our)\b/,
+  ].some((pattern) => pattern.test(lower));
+}
+
 function extractCountNear(text: string, patterns: RegExp[]): number | null {
   for (const pattern of patterns) {
     const m = lastRegexMatch(text, pattern);
@@ -725,6 +754,9 @@ function applyAjsPricingFeedbackOverrides(
   if (!isAjsDraft(ctx, output)) return output;
 
   const searchable = contextSearchText(output, ctx, feedbackText);
+  const hasSaleEvidence = hasExplicitAjsTempFenceSaleEvidence(
+    ajsSaleEvidenceText(ctx, feedbackText),
+  );
   const contextPanels = extractPanelCount(searchable);
   const contextBases = extractBaseCount(searchable);
   const accountCode =
@@ -738,6 +770,7 @@ function applyAjsPricingFeedbackOverrides(
   let hasBaseLine = false;
   let labourRateChanged = false;
   let removedPlaceholderLine = false;
+  let removedAjsTempFenceMaterials = false;
   let removedAjsConsumables = false;
 
   const retained: DraftPackLineItem[] = [];
@@ -759,11 +792,28 @@ function applyAjsPricingFeedbackOverrides(
     const isAjsConsumableLine =
       /cable\s*ties?|clips?|small\s+consumables|temp(?:orary)?\s+fenc(?:e|ing)[\s\S]{0,60}fixings?/
         .test(desc);
+    const isAjsPicketLine = /star\s+pickets?|pickets?/.test(desc) &&
+      /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|make[- ]safe/.test(desc);
+    const isAjsTempFenceMaterialLine = isPanelLine || isBaseLine ||
+      isGenericTempFencePlaceholder || isAjsPicketLine;
 
     if (shouldUseAjsDefaultLabourRate(line, feedbackText)) {
       retained.push({ ...line, unit_price: 80 });
       changed = true;
       labourRateChanged = true;
+      continue;
+    }
+
+    if (isAjsConsumableLine || isAjsPicketLine) {
+      removedAjsConsumables = true;
+      changed = true;
+      continue;
+    }
+
+    if (!hasSaleEvidence && isAjsTempFenceMaterialLine) {
+      removedAjsTempFenceMaterials = true;
+      removedPlaceholderLine ||= isPlaceholderInvoiceLine(line);
+      changed = true;
       continue;
     }
 
@@ -815,12 +865,6 @@ function applyAjsPricingFeedbackOverrides(
       }
     }
 
-    if (isAjsConsumableLine) {
-      removedAjsConsumables = true;
-      changed = true;
-      continue;
-    }
-
     retained.push(line);
   }
 
@@ -858,16 +902,27 @@ function applyAjsPricingFeedbackOverrides(
       "applied AJS/AJBR normal labour at $80 ex/hr where the draft had the generic $85 rate",
     );
   }
+  if (removedAjsTempFenceMaterials) {
+    summaryParts.push(
+      "removed AJS/AJBR temp-fence material charges because no explicit SecureWorks sale/supply evidence was present",
+    );
+  }
   if (pendingPanelQty) {
     summaryParts.push(
-      `temporary fence panels ${formatQty(pendingPanelQty)} x $59`,
+      `explicit AJS/AJBR sale evidence: temporary fence panels ${
+        formatQty(pendingPanelQty)
+      } x $59`,
     );
   }
   if (pendingBaseQty) {
-    summaryParts.push(`cement bases ${formatQty(pendingBaseQty)} x $28`);
+    summaryParts.push(
+      `explicit AJS/AJBR sale evidence: cement bases ${
+        formatQty(pendingBaseQty)
+      } x $28`,
+    );
   }
   if (removedAjsConsumables) {
-    summaryParts.push("removed AJS cable ties/consumables charge");
+    summaryParts.push("removed AJS pickets/cable ties/consumables charge");
   }
   if (removedPlaceholderLine && additions.length === 0) {
     summaryParts.push("removed unresolved AJS/AJBR material line");
