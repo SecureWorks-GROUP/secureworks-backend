@@ -254,6 +254,17 @@ export function cleanDraftReviewSummary(v: unknown): string {
   return softenDraftReviewLanguage(clean(v));
 }
 
+function scrubStalePricingReviewSummary(v: unknown): string {
+  return cleanDraftReviewSummary(v)
+    .replace(
+      /(?:^|[.;]\s*)[^.;]*(?:placeholder|pricing\s+schedule|pricing\s+review|unit[_\s-]?prices?|must\s+be\s+reviewed\s+and\s+updated|price(?:s|d)?\s+to\s+be\s+confirmed)[^.;]*[.;]?/gi,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .replace(/\s+([.;,])/g, "$1")
+    .trim();
+}
+
 function cleanDraftText(v: unknown): string {
   return softenDraftReviewLanguage(clean(v));
 }
@@ -427,11 +438,13 @@ function applyLabourInstruction(
       line_items: lineItems,
     },
     change_summary: cleanDraftReviewSummary(
-      `${output.change_summary} ${summaryPrefix}: ${
-        formatQty(instruction.trades)
-      } ${tradeLabel} x ${formatQty(instruction.hoursEach)} hours at $${
-        formatQty(instruction.rate)
-      } ex GST.`,
+      `${
+        replaceAllLines
+          ? scrubStalePricingReviewSummary(output.change_summary)
+          : output.change_summary
+      } ${summaryPrefix}: ${formatQty(instruction.trades)} ${tradeLabel} x ${
+        formatQty(instruction.hoursEach)
+      } hours at $${formatQty(instruction.rate)} ex GST.`,
     ),
   };
 }
@@ -542,7 +555,9 @@ function applyPlaceholderRemoval(
     ...output,
     invoice: { ...output.invoice, line_items: filtered },
     change_summary: cleanDraftReviewSummary(
-      `${output.change_summary} Removed the $1 placeholder invoice line per Ops feedback.`,
+      `${
+        scrubStalePricingReviewSummary(output.change_summary)
+      } Removed the $1 placeholder invoice line per Ops feedback.`,
     ),
   };
 }
@@ -723,11 +738,13 @@ function applyMlbTempFenceHireFeedback(
       line_items: [...withoutOldHireLines, ...additions],
     },
     change_summary: cleanDraftReviewSummary(
-      `${output.change_summary} Applied MLB temporary fencing hire card${
+      `${
+        scrubStalePricingReviewSummary(output.change_summary)
+      } Applied MLB temporary fencing hire card from SecureWorks wiki: retrieval 2 hours x $90, panel hire $5/panel/week x 12 weeks${
         panels ? ` (${formatQty(panels)} panels)` : ""
       }${
-        pickets ? ` and star pickets (${formatQty(pickets)})` : ""
-      }; retrieval allowance included.`,
+        pickets ? `, star pickets ${formatQty(pickets)} x $13.50` : ""
+      }, cable ties/small consumables $25.`,
     ),
   };
 }

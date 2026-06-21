@@ -239,7 +239,8 @@ Deno.test("feedback overrides keep prior labour instruction while removing $1 pl
         },
       ],
     },
-    change_summary: "Draft ready for review.",
+    change_summary:
+      "Draft ready for review. Materials line unit_price is a placeholder at $1 and needs pricing review.",
   });
 
   const revised = applyDraftPackFeedbackOverrides(output, {
@@ -276,6 +277,10 @@ Deno.test("feedback overrides keep prior labour instruction while removing $1 pl
   );
   assertEquals(
     JSON.stringify(revised.report).toLowerCase().includes("roofing"),
+    false,
+  );
+  assertEquals(
+    /placeholder|pricing review/i.test(revised.change_summary),
     false,
   );
 });
@@ -336,7 +341,8 @@ Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", 
         unit_price: 85,
       }],
     },
-    change_summary: "Draft ready for review.",
+    change_summary:
+      "Unit prices for hire lines are placeholder estimates only and MUST be reviewed and updated by Ops against the pricing schedule.",
   });
 
   const revised = applyDraftPackFeedbackOverrides(output, {
@@ -384,6 +390,14 @@ Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", 
     lines.some((line) => /base|feet/i.test(line.description)),
     false,
   );
+  assertEquals(
+    /placeholder|pricing review|must be reviewed|pricing schedule/i.test(
+      revised.change_summary,
+    ),
+    false,
+  );
+  assertStringIncludes(revised.change_summary, "2 hours x $90");
+  assertStringIncludes(revised.change_summary, "11 x $13.50");
 });
 
 Deno.test("selectDraftPackDueJobIds only returns safe first-draft candidates", () => {
