@@ -9703,12 +9703,39 @@ function cleanReviewedString(value: any): string | null {
   return text || null
 }
 
+function intakeAttachmentName(attachment: any): string {
+  return cleanReviewedString(attachment?.file_name || attachment?.name || attachment?.label) || ''
+}
+
+function attachmentNameLooksLikeWorkOrder(attachment: any): boolean {
+  return /(^|[^a-z0-9])(w\/o|wo|works?[-_\s]*order|work[-_\s]*order)([^a-z0-9]|$)/i.test(intakeAttachmentName(attachment))
+}
+
+function attachmentNameLooksReportOnly(attachment: any): boolean {
+  return /(^|[^a-z0-9])(report|assessment|photo[-_\s]*evidence|invoice)([^a-z0-9]|$)/i.test(intakeAttachmentName(attachment))
+}
+
+function hasWorkOrderAttachmentEvidence(attachments: any[]): boolean {
+  const available = availableIntakeAttachments(attachments)
+  if (available.some((a: any) => a?.is_work_order === true)) return true
+  if (available.some((a: any) => attachmentNameLooksLikeWorkOrder(a) && !attachmentNameLooksReportOnly(a))) return true
+  // Legacy rows from before WO designation often have exactly one servable PDF.
+  // If it is not named like a report/invoice/photo-evidence document, treat it as
+  // the work order evidence for auto-intake rather than stranding the card.
+  return available.length === 1 && !attachmentNameLooksReportOnly(available[0])
+}
+
 function effectiveIntakeReportType(draft: any): string | null {
   const explicit = cleanReviewedString(draft?.report_type)
   if (explicit) return explicit
 
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
+  // Legacy rows can have body text that mentions "roof report" while the actual
+  // attached document is a work order. Do not let fallback report classification
+  // override clear WO evidence; otherwise clean intake never auto-promotes.
+  if (hasWorkOrderAttachmentEvidence(attachments)) return null
+
   const attachmentNames = attachments
     .map((a: any) => cleanReviewedString(a?.file_name || a?.name || a?.label))
     .filter(Boolean)
@@ -9779,9 +9806,21 @@ function shouldAutoApproveCleanIntake(input: {
   attachments?: any[]
 }): { ok: boolean; reason: string } {
   if (input.enabled === false) return { ok: false, reason: 'disabled' }
-  if (input.isReportCapture) return { ok: false, reason: 'report_capture_manual_review' }
-  if (input.tagReportType) return { ok: false, reason: 'report_tagged_manual_review' }
-  if (_isReportOnlyType(input.reportType)) return { ok: false, reason: 'report_only_manual_review' }
+
+  const attachments = input.attachments || []
+  const available = availableIntakeAttachments(attachments)
+  if (available.length === 0) return { ok: false, reason: 'missing_work_order_pdf' }
+  const hasUnavailablePdf = attachments.some((a: any) => a?.pdf_unavailable)
+  if (hasUnavailablePdf) return { ok: false, reason: 'pdf_capture_needs_review' }
+  const hasDesignatedWo = hasWorkOrderAttachmentEvidence(available)
+  if (available.length > 1 && !hasDesignatedWo) return { ok: false, reason: 'multiple_pdfs_no_designated_work_order' }
+
+  // A report-capture email with no WO PDF must stay manual. But if the email has
+  // a servable/designated work-order PDF, the work order is the action: subject/body
+  // words like "report" or "roof" should not strand clean intake in review.
+  if (input.isReportCapture && !hasDesignatedWo) return { ok: false, reason: 'report_capture_manual_review' }
+  if (input.tagReportType && !hasDesignatedWo) return { ok: false, reason: 'report_tagged_manual_review' }
+  if (_isReportOnlyType(input.reportType) && !hasDesignatedWo) return { ok: false, reason: 'report_only_manual_review' }
 
   const confidence = String(input.confidence || '').trim().toLowerCase()
   if (confidence !== 'high') return { ok: false, reason: 'confidence_not_high' }
@@ -9794,14 +9833,6 @@ function shouldAutoApproveCleanIntake(input: {
   if (!cleanReviewedString(input.externalRef)) return { ok: false, reason: 'missing_external_ref' }
   if (!cleanReviewedString(input.clientName)) return { ok: false, reason: 'missing_client_name' }
   if (!cleanReviewedString(input.siteAddress)) return { ok: false, reason: 'missing_site_address' }
-
-  const attachments = input.attachments || []
-  const available = availableIntakeAttachments(attachments)
-  if (available.length === 0) return { ok: false, reason: 'missing_work_order_pdf' }
-  const hasUnavailablePdf = attachments.some((a: any) => a?.pdf_unavailable)
-  if (hasUnavailablePdf) return { ok: false, reason: 'pdf_capture_needs_review' }
-  const hasDesignatedWo = available.some((a: any) => a?.is_work_order === true)
-  if (available.length > 1 && !hasDesignatedWo) return { ok: false, reason: 'multiple_pdfs_no_designated_work_order' }
 
   return { ok: true, reason: 'clean_high_confidence_work_order' }
 }
