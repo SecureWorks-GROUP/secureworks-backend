@@ -40,8 +40,8 @@ function claudeJson(summary = "Draft pack refreshed for human review.") {
       line_items: [
         {
           description: "Emergency make-safe attendance",
-          quantity: 1,
-          unit_price: 420,
+          quantity: 4,
+          unit_price: 80,
           account_code: "210",
         },
       ],
@@ -176,7 +176,7 @@ Deno.test("draftMakesafeReportPack: drafts report + DRAFT invoice + invoice PDF 
     calls.createDraftInvoice[0].line_items[0].description,
     "Emergency make-safe attendance",
   );
-  assertEquals(calls.createDraftInvoice[0].line_items[0].unit_price, 420);
+  assertEquals(calls.createDraftInvoice[0].line_items[0].unit_price, 80);
 
   assertEquals(calls.getToken.length, 1);
   assertEquals(calls.fetchInvoicePdf.length, 1);
@@ -269,6 +269,166 @@ Deno.test("draftMakesafeReportPack: rejects zero-priced Claude output before ren
   assertStringIncludes(calls.markFailed[0].message, "$0/invalid unit_price");
 });
 
+Deno.test("draftMakesafeReportPack: verifier blocks builder-rule violations before Xero or render", async () => {
+  const calls: Record<string, any[]> = {
+    render: [],
+    createDraftInvoice: [],
+    markFailed: [],
+  };
+
+  await assertRejects(
+    () =>
+      draftMakesafeReportPack(
+        {},
+        { job_id: "job-feedback-block" },
+        "api_key",
+        {
+          assertRoutineEligible: async () => {},
+          claimDraftPack: async () => {},
+          markDraftPackFailed: async (_client, jobId, packKind, err) => {
+            calls.markFailed.push({
+              jobId,
+              packKind,
+              message: (err as Error).message,
+            });
+          },
+          loadContext: async () => ({
+            job: {
+              id: "job-feedback-block",
+              site_address: "25 Kimbara Street",
+            },
+            detail: {
+              external_ref: "MLB-26003",
+              requesting_company_name: "Major Loss Builders",
+            },
+            selected_photo_urls: [],
+          }),
+          callClaude: async () =>
+            JSON.stringify({
+              report: {
+                ref: "MLB-26003",
+                address: "25 Kimbara Street",
+                billing_note: "1 trade x 2 hours",
+                works: "Make-safe attendance completed.",
+              },
+              invoice: {
+                reference: "MLB-26003",
+                contact_name: "Major Loss Builders",
+                line_items: [{
+                  description: "Make-safe labour",
+                  quantity: 2,
+                  unit_price: 85,
+                }],
+              },
+              change_summary: "Draft revised.",
+            }),
+          createDraftInvoice: async () => {
+            calls.createDraftInvoice.push({});
+            throw new Error("invoice must not run after verifier blocker");
+          },
+          renderReport: async () => {
+            calls.render.push({});
+            throw new Error("render must not run after verifier blocker");
+          },
+        },
+      ),
+    Error,
+    "draft pack verification failed",
+  );
+
+  assertEquals(calls.createDraftInvoice.length, 0);
+  assertEquals(calls.render.length, 0);
+  assertEquals(calls.markFailed.length, 1);
+  assertStringIncludes(calls.markFailed[0].message, "below 3 hours");
+});
+
+Deno.test("draftMakesafeReportPack: final render payload cannot reintroduce feedback-banned report terms", async () => {
+  const calls: Record<string, any[]> = {
+    render: [],
+    createDraftInvoice: [],
+    markFailed: [],
+  };
+
+  await assertRejects(
+    () =>
+      draftMakesafeReportPack(
+        {},
+        { job_id: "job-render-feedback-block" },
+        "api_key",
+        {
+          assertRoutineEligible: async () => {},
+          claimDraftPack: async () => {},
+          markDraftPackFailed: async (_client, jobId, packKind, err) => {
+            calls.markFailed.push({
+              jobId,
+              packKind,
+              message: (err as Error).message,
+            });
+          },
+          loadContext: async () => ({
+            job: {
+              id: "job-render-feedback-block",
+              site_address: "170 Hampden Road",
+            },
+            detail: {
+              external_ref: "MLB-25767",
+              requesting_company_name: "Major Loss Builders",
+            },
+            service_report: {
+              checklist_json: {
+                damage_description:
+                  "Temporary fencing was discussed, but this should not appear in the revised report.",
+              },
+            },
+            feedback_notes: [{
+              role: "human",
+              body: "there should be no mention of temp fencing in the report",
+            }],
+            selected_photo_urls: [],
+          }),
+          callClaude: async () =>
+            JSON.stringify({
+              report: {
+                ref: "MLB-25767",
+                address: "170 Hampden Road",
+                billing_note: "1 trade x 3 hours",
+                works: "Ceiling and mould make-safe completed.",
+              },
+              invoice: {
+                reference: "MLB-25767",
+                contact_name: "Major Loss Builders",
+                line_items: [{
+                  description: "Make-safe labour",
+                  quantity: 3,
+                  unit_price: 85,
+                }],
+              },
+              change_summary: "Draft revised.",
+            }),
+          createDraftInvoice: async () => {
+            calls.createDraftInvoice.push({});
+            throw new Error(
+              "invoice must not run after render verifier blocker",
+            );
+          },
+          renderReport: async () => {
+            calls.render.push({});
+            throw new Error(
+              "render must not run after render verifier blocker",
+            );
+          },
+        },
+      ),
+    Error,
+    "draft pack render verification failed",
+  );
+
+  assertEquals(calls.createDraftInvoice.length, 0);
+  assertEquals(calls.render.length, 0);
+  assertEquals(calls.markFailed.length, 1);
+  assertStringIncludes(calls.markFailed[0].message, "feedback-banned term");
+});
+
 Deno.test("draftMakesafeReportPack: invoice/Xero failure stops before report render", async () => {
   const calls: Record<string, any[]> = { render: [], markFailed: [] };
 
@@ -313,6 +473,87 @@ Deno.test("draftMakesafeReportPack: invoice/Xero failure stops before report ren
 
   assertEquals(calls.render.length, 0);
   assertEquals(calls.markFailed.length, 1);
+});
+
+Deno.test("draftMakesafeReportPack: preserved invoice pricing blocks ready state", async () => {
+  const calls: Record<string, any[]> = {
+    render: [],
+    markReady: [],
+    markFailed: [],
+  };
+
+  await assertRejects(
+    () =>
+      draftMakesafeReportPack(
+        {},
+        { job_id: "job-preserved-invoice" },
+        "api_key",
+        {
+          assertRoutineEligible: async () => {},
+          claimDraftPack: async () => {},
+          markDraftPackFailed: async (_client, jobId, packKind, err) => {
+            calls.markFailed.push({
+              jobId,
+              packKind,
+              message: (err as Error).message,
+            });
+          },
+          loadContext: async () => ({
+            job: {
+              id: "job-preserved-invoice",
+              site_address: "63 Carrington Street",
+            },
+            detail: {
+              external_ref: "MLB-25045",
+              requesting_company_name: "Major Loss Builders",
+            },
+            selected_photo_urls: [],
+          }),
+          callClaude: async () =>
+            JSON.stringify({
+              report: {
+                ref: "MLB-25045",
+                address: "63 Carrington Street",
+                billing_note: "1 trade x 3 hours",
+                works: "Garage ceiling make-safe completed.",
+              },
+              invoice: {
+                reference: "MLB-25045",
+                contact_name: "Major Loss Builders",
+                line_items: [{
+                  description: "Make-safe labour",
+                  quantity: 3,
+                  unit_price: 85,
+                }],
+              },
+              change_summary: "Draft revised.",
+            }),
+          createDraftInvoice: async () => ({
+            skipped: true,
+            pricing_preserved_from_existing: true,
+            existing_invoice: {
+              xero_invoice_id: "xero-old",
+              invoice_number: "INV-OLD",
+              status: "DRAFT",
+            },
+          }),
+          renderReport: async () => {
+            calls.render.push({});
+            throw new Error("render must not run when invoice was preserved");
+          },
+          markReady: async () => {
+            calls.markReady.push({});
+          },
+        },
+      ),
+    Error,
+    "invoice revision blocked",
+  );
+
+  assertEquals(calls.render.length, 0);
+  assertEquals(calls.markReady.length, 0);
+  assertEquals(calls.markFailed.length, 1);
+  assertStringIncludes(calls.markFailed[0].message, "preserved");
 });
 
 Deno.test("draftMakesafeReportPack: existing non-DRAFT invoice does not attach a fake draft PDF", async () => {

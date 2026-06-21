@@ -41,6 +41,8 @@ export interface DraftPackOutput {
     line_items: DraftPackLineItem[];
   };
   change_summary: string;
+  revision_assertions?: string[];
+  applied_rule_ids?: string[];
 }
 
 export interface DraftPackContext {
@@ -50,6 +52,13 @@ export interface DraftPackContext {
   feedback_notes?: Array<Record<string, unknown>>;
   selected_photo_urls?: string[];
   source_docs?: Array<Record<string, unknown>>;
+}
+
+export interface DraftPackVerificationResult {
+  ok: boolean;
+  blockers: string[];
+  warnings: string[];
+  applied_rule_ids: string[];
 }
 
 export interface DraftPackDueDetail {
@@ -132,6 +141,12 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
       },
       change_summary:
         "short note explaining what changed and what still needs human review",
+      revision_assertions: [
+        "specific human feedback/rules satisfied by this draft, e.g. 'removed temp fencing wording from report'",
+      ],
+      applied_rule_ids: [
+        "pricing/reporting rule identifiers applied, e.g. MLB_ROUTINE_MIN_3H_85 or AJS_LABOUR_80",
+      ],
     },
     rules: [
       "Invoice lines must be DRAFT-only and exclude GST in unit_price.",
@@ -143,6 +158,7 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
       "If costing is uncertain, use the best available SecureWorks/ops pricing from the context and say it needs pricing review in change_summary.",
       "If the latest Ops feedback says the invoice should read specific labour/trade/hour/rate wording and says 'that's it', 'thats it', 'that is it', 'labour only', or 'no materials', output ONLY those requested invoice line(s). Do not add placeholder materials or best-estimate lines.",
       "Treat feedback_notes as chronological cumulative human instructions. Later human notes refine earlier human notes; do not forget an earlier requested labour basis when the latest note only says retry/remove a placeholder.",
+      "If Ops feedback says there should be no mention of a topic, no report field may contain that topic after revision. If you cannot satisfy a feedback instruction, say so in change_summary and do not pretend it was done.",
       "For MLB / Major Loss Builders temporary-fence hire, use the SecureWorks hire card when the evidence gives quantities: labour $85 ex/hr weekday with 3-hour minimum (4 hours for solo temp-fence), retrieval allowance 2 hours x $90, panel hire $5 per panel per week for 12 weeks minimum, star pickets $13.50 each, cable ties/small consumables $25 flat. Do not price MLB panels as a sale.",
       "For AJS / AJ Building & Restoration / AJBR, normal labour is $80 ex/hr per trade unless the source evidence explicitly says public-holiday/after-hours/special rate. Do not use the generic $85 builder rate for AJBR/AJS.",
       "For AJS/AJBR temporary fencing, default to labour/travel only because AJS normally supplies/uses its own panels/blocks. Sell panels to AJS at $59 ex GST each and cement bases/blocks at $28 ex GST each only when source evidence explicitly says SecureWorks supplied/sold those materials to AJS. Counts alone are not sale evidence. Never charge AJS cable ties/clips/small consumables.",
@@ -247,6 +263,12 @@ export function normaliseDraftPackOutput(raw: unknown): DraftPackOutput {
       root.change_summary ?? root.summary,
     ) ||
       "Draft pack refreshed for human review.",
+    revision_assertions: cleanStringArray(
+      root.revision_assertions ?? root.revisionAssertions,
+    ),
+    applied_rule_ids: cleanStringArray(
+      root.applied_rule_ids ?? root.appliedRuleIds,
+    ),
   };
   assertDraftOnlyText(JSON.stringify(out));
   return out;
@@ -568,17 +590,46 @@ function applyPlaceholderRemoval(
 function extractReportRemovalTerms(feedbackText: string): string[] {
   const lower = String(feedbackText || "").toLowerCase();
   const out: string[] = [];
-  const re =
-    /remove(?:\s+all)?\s+mentions?\s+of\s+([^.;\n]+?)(?:\s+from\s+(?:the\s+)?report|\s+from\s+report|[.;\n]|$)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(lower)) !== null) {
-    const chunk = m[1] || "";
-    chunk.split(/\s*(?:,|\/|&|\band\b|\bor\b)\s*/i)
-      .map((term) => term.replace(/\b(all|the|any|mentions?|of)\b/g, "").trim())
-      .filter((term) => term.length >= 3)
-      .forEach((term) => out.push(term));
+  const patterns = [
+    /remove(?:\s+all)?\s+(?:mentions?|references?)\s+(?:of|to)\s+([^.;\n]+?)(?:\s+from\s+(?:the\s+)?report|\s+from\s+report|[.;\n]|$)/gi,
+    /(?:there\s+should\s+be\s+)?no\s+(?:mention|mentions|reference|references)\s+(?:of|to)\s+([^.;\n]+?)(?:\s+(?:in|on)\s+(?:the\s+)?report|[.;\n]|$)/gi,
+    /(?:the\s+)?report\s+should\s+(?:have\s+)?no\s+(?:mention|mentions|reference|references)\s+(?:of|to)\s+([^.;\n]+?)(?:[.;\n]|$)/gi,
+  ];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(lower)) !== null) {
+      addRemovalTerms(out, m[1] || "");
+    }
   }
   return Array.from(new Set(out));
+}
+
+function addRemovalTerms(out: string[], chunk: string): void {
+  const trimmed = String(chunk || "")
+    .replace(/\banything\s+outside\s+of[\s\S]*$/i, "")
+    .replace(/\bbecause[\s\S]*$/i, "")
+    .trim();
+  const parts = trimmed.split(/\s*(?:,|\/|&|\band\b|\bor\b)\s*/i);
+  for (const rawPart of parts) {
+    let term = rawPart
+      .replace(
+        /\b(all|the|any|mentions?|references?|reference|from|report|there|should|be|no|mention|of|to)\b/gi,
+        " ",
+      )
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!term) continue;
+    if (/temp(?:orary)?\s+fenc/.test(term)) {
+      out.push(
+        "temporary fencing",
+        "temp fencing",
+        "temporary fence",
+        "temp fence",
+      );
+      continue;
+    }
+    if (term.length >= 3 && term.length <= 80) out.push(term);
+  }
 }
 
 function scrubTermsFromText(text: string | undefined, terms: string[]): string {
@@ -620,6 +671,409 @@ function applyReportTermRemovals(
       }.`,
     ),
   };
+}
+
+function invoiceLabourLines(output: DraftPackOutput): DraftPackLineItem[] {
+  return (output.invoice.line_items || []).filter((line) => isLabourLine(line));
+}
+
+function totalLabourHours(output: DraftPackOutput): number {
+  return invoiceLabourLines(output).reduce((sum, line) => {
+    const qty = Number(line.quantity);
+    return sum + (Number.isFinite(qty) ? qty : 0);
+  }, 0);
+}
+
+function sourceAndFeedbackText(
+  ctx: DraftPackContext,
+  feedbackText = "",
+): string {
+  return [
+    feedbackText,
+    JSON.stringify(ctx.service_report || {}),
+    JSON.stringify(ctx.detail || {}),
+    JSON.stringify(ctx.job || {}),
+    JSON.stringify(ctx.source_docs || []),
+  ].join("\n").toLowerCase();
+}
+
+function hasSpecialRateEvidence(text: string): boolean {
+  return /\b(?:after[-\s]?hours?|public\s+holiday|saturday|weekend|special\s+rate|emergency\s+rate|night\s+rate)\b/
+    .test(String(text || "").toLowerCase());
+}
+
+function hasTempFenceContext(text: string): boolean {
+  return /\b(?:temp(?:orary)?\s+fenc(?:e|ing)|hardifence|fence\s+panels?|fencing\s+panels?)\b/
+    .test(String(text || "").toLowerCase());
+}
+
+function hasHumanSpecificLabourInstruction(
+  bodies: string[],
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+): boolean {
+  return !!parseExactLabourOnlyFeedback(bodies) ||
+    !!parseGeneralLabourFeedback(bodies, output, ctx);
+}
+
+function humanExplicitlyOverridesStandardPricing(text: string): boolean {
+  const lower = String(text || "").toLowerCase();
+  return /\b(?:discount|reduce|reduced|only\s+charge|just\s+charge|can't\s+charge|cant\s+charge|cannot\s+charge|not\s+fully\s+charge|charge\s+around|bill\s+\d|make\s+it\s+\d|fixed\s+price|lump\s+sum)\b/
+    .test(lower);
+}
+
+function reportText(output: DraftPackOutput): string {
+  return [
+    output.report.scope,
+    output.report.findings,
+    output.report.works,
+    output.report.materials,
+  ].join("\n").toLowerCase();
+}
+
+function billingNoteMatchesHours(note: string, expectedHours: number): boolean {
+  const lower = String(note || "").toLowerCase();
+  if (!lower.trim() || !Number.isFinite(expectedHours) || expectedHours <= 0) {
+    return true;
+  }
+  const tradeHours = parseTradeHourInstruction(lower);
+  if (
+    tradeHours &&
+    Math.abs(tradeHours.trades * tradeHours.hoursEach - expectedHours) <= 0.01
+  ) return true;
+  const hourMatches = Array.from(
+    lower.matchAll(/(\d+(?:\.\d+)?)\s*(?:labou?r\s*)?(?:hours?|hrs?)\b/g),
+  )
+    .map((m) => Number(m[1]))
+    .filter((n) => Number.isFinite(n));
+  if (!hourMatches.length) return false;
+  return hourMatches.some((n) => Math.abs(n - expectedHours) <= 0.01);
+}
+
+export function verifyDraftPackOutput(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+): DraftPackVerificationResult {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  const applied = new Set<string>();
+  const bodies = humanFeedbackBodies(ctx);
+  const feedbackText = bodies.join("\n");
+  const sourceText = sourceAndFeedbackText(ctx, feedbackText);
+  const searchText = contextSearchText(output, ctx, feedbackText);
+  const nonFeedbackSearchText = contextSearchText(output, ctx, "");
+  const labourLines = invoiceLabourLines(output);
+  const labourHours = totalLabourHours(output);
+  const humanSpecificLabour = hasHumanSpecificLabourInstruction(
+    bodies,
+    output,
+    ctx,
+  );
+  const humanOverride = humanSpecificLabour ||
+    humanExplicitlyOverridesStandardPricing(feedbackText);
+
+  const removalTerms = extractReportRemovalTerms(feedbackText);
+  if (removalTerms.length > 0) {
+    applied.add("REPORT_FEEDBACK_TERM_REMOVAL");
+    const stillPresent = removalTerms.filter((term) => {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${escaped}\\b`, "i").test(reportText(output));
+    });
+    if (stillPresent.length) {
+      blockers.push(
+        `report still mentions feedback-banned term(s): ${
+          stillPresent.join(", ")
+        }`,
+      );
+    }
+  }
+
+  if (isAjsDraft(ctx, output)) {
+    applied.add("AJS_LABOUR_80");
+    const specialRate = hasSpecialRateEvidence(sourceText);
+    if (labourLines.length === 0) {
+      blockers.push("AJS/AJBR make-safe drafts must include a labour line");
+    }
+    const wrongAjsRates = labourLines.filter((line) => {
+      const unit = Number(line.unit_price);
+      if (!Number.isFinite(unit)) return true;
+      if (Math.abs(unit - 80) <= 0.005) return false;
+      if (specialRate && unit > 80) return false;
+      return !humanOverride;
+    });
+    if (wrongAjsRates.length) {
+      blockers.push(
+        "AJS/AJBR labour must use $80 ex/hr unless source evidence or human feedback explicitly sets a special rate",
+      );
+    }
+    verifyAjsTempFenceInvoiceLines(
+      output,
+      ctx,
+      feedbackText,
+      blockers,
+      applied,
+    );
+  }
+
+  if (isMlbDraft(ctx, output)) {
+    applied.add("MLB_ROUTINE_MIN_3H_85");
+    const removedTempFence = removalTerms.some((term) =>
+      /temp(?:orary)?\s+fenc/.test(term)
+    );
+    const tempFence = !removedTempFence &&
+      hasTempFenceContext(nonFeedbackSearchText);
+    const specialRate = hasSpecialRateEvidence(sourceText);
+    if (labourLines.length === 0) {
+      blockers.push(
+        "MLB/Major Loss make-safe drafts must include a labour line",
+      );
+    }
+    if (!humanOverride && labourHours > 0 && labourHours < 3) {
+      blockers.push(
+        "MLB/Major Loss routine make-safe labour must not be below 3 hours unless Ops explicitly discounts it",
+      );
+    }
+    const wrongMlbRates = labourLines.filter((line) => {
+      const unit = Number(line.unit_price);
+      if (!Number.isFinite(unit)) return true;
+      if (Math.abs(unit - 85) <= 0.005) return false;
+      if (specialRate && unit >= 100) return false;
+      return !humanOverride;
+    });
+    if (wrongMlbRates.length) {
+      blockers.push(
+        "MLB/Major Loss labour must use $85 ex/hr unless source evidence or human feedback explicitly sets a different rate",
+      );
+    }
+    if (tempFence) {
+      applied.add("MLB_TEMP_FENCE_CARD");
+      const soloTempFence = /\b(?:solo|1\s+trade|one\s+trade)\b/.test(
+        searchText,
+      ) || labourLines.length === 1;
+      if (
+        !humanOverride && soloTempFence && labourHours > 0 && labourHours < 4
+      ) {
+        blockers.push(
+          "MLB solo temporary-fence make-safe labour must be at least 4 hours unless Ops explicitly discounts it",
+        );
+      }
+      verifyMlbTempFenceInvoiceLines(
+        output,
+        nonFeedbackSearchText,
+        humanOverride,
+        blockers,
+        applied,
+      );
+    }
+  }
+
+  const billingNote = String(output.report.billing_note || "");
+  if (
+    /\b(?:pricing|cost(?:ing)?|rate|unit\s*price|invoice)\s+(?:to\s+be\s+)?(?:confirm|confirmed|reviewed|tbc)\b/i
+      .test(billingNote)
+  ) {
+    blockers.push(
+      "report.billing_note still contains pricing-to-confirm wording instead of a concrete labour basis",
+    );
+  }
+  if (!billingNoteMatchesHours(billingNote, labourHours)) {
+    warnings.push(
+      `report.billing_note does not clearly match invoice labour hours (${
+        formatQty(labourHours)
+      } hours)`,
+    );
+  }
+
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    warnings,
+    applied_rule_ids: Array.from(applied),
+  };
+}
+
+export function enforceDraftPackReportFeedbackTerms(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+): DraftPackOutput {
+  const terms = extractReportRemovalTerms(humanFeedbackBodies(ctx).join("\n"));
+  if (!terms.length) return output;
+  return applyReportTermRemovals(output, terms);
+}
+
+function lineDescription(line: DraftPackLineItem): string {
+  return String(line?.description || "").toLowerCase();
+}
+
+function isPanelLine(line: DraftPackLineItem): boolean {
+  return /panel/.test(lineDescription(line)) &&
+    /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|make[- ]safe/.test(
+      lineDescription(line),
+    );
+}
+
+function isBaseLine(line: DraftPackLineItem): boolean {
+  const desc = lineDescription(line);
+  return /(?:cement\s+)?(?:bases?|blocks?|base\/foot|bases?\/feet|feet)/
+    .test(desc) &&
+    /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|panel|make[- ]safe|cement/.test(desc);
+}
+
+function isPicketLine(line: DraftPackLineItem): boolean {
+  return /star\s+pickets?|pickets?/.test(lineDescription(line)) &&
+    /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|make[- ]safe/.test(
+      lineDescription(line),
+    );
+}
+
+function isConsumableLine(line: DraftPackLineItem): boolean {
+  return /cable\s*ties?|clips?|small\s+consumables|consumables?|fixings?/.test(
+    lineDescription(line),
+  );
+}
+
+function near(value: number, expected: number, tolerance = 0.005): boolean {
+  return Number.isFinite(value) && Math.abs(value - expected) <= tolerance;
+}
+
+function verifyAjsTempFenceInvoiceLines(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+  feedbackText: string,
+  blockers: string[],
+  applied: Set<string>,
+): void {
+  const lines = output.invoice.line_items || [];
+  const tempFenceContext = hasTempFenceContext(
+    contextSearchText(output, ctx, feedbackText),
+  );
+  const materialLines = lines.filter((line) =>
+    isPanelLine(line) || isBaseLine(line) || isPicketLine(line) ||
+    (tempFenceContext && isConsumableLine(line))
+  );
+  if (!materialLines.length) return;
+  applied.add("AJS_TEMP_FENCE_MATERIAL_GUARD");
+  const hasSaleEvidence = hasExplicitAjsTempFenceSaleEvidence(
+    ajsSaleEvidenceText(ctx, feedbackText),
+  );
+  for (const line of materialLines) {
+    if (isPicketLine(line) || isConsumableLine(line)) {
+      blockers.push(
+        "AJS/AJBR temp-fence drafts must not charge pickets, cable ties, clips, fixings, or small consumables",
+      );
+      continue;
+    }
+    if ((isPanelLine(line) || isBaseLine(line)) && !hasSaleEvidence) {
+      blockers.push(
+        "AJS/AJBR temp-fence panel/base charges require explicit SecureWorks sale/supply evidence",
+      );
+      continue;
+    }
+    if (isPanelLine(line) && !near(Number(line.unit_price), 59)) {
+      blockers.push(
+        "AJS/AJBR sold temp-fence panels must be priced at $59 ex GST each",
+      );
+    }
+    if (isBaseLine(line) && !near(Number(line.unit_price), 28)) {
+      blockers.push(
+        "AJS/AJBR sold cement bases/blocks must be priced at $28 ex GST each",
+      );
+    }
+  }
+}
+
+function hasLine(
+  lines: DraftPackLineItem[],
+  predicate: (line: DraftPackLineItem) => boolean,
+): boolean {
+  return lines.some(predicate);
+}
+
+function verifyMlbTempFenceInvoiceLines(
+  output: DraftPackOutput,
+  evidenceText: string,
+  humanOverride: boolean,
+  blockers: string[],
+  applied: Set<string>,
+): void {
+  if (humanOverride) return;
+  const lines = output.invoice.line_items || [];
+  const panels = extractPanelCount(evidenceText);
+  const pickets = extractCountNear(evidenceText, [
+    /star\s*pickets?\s*(?:x|×|:|-)?\s*(\d+(?:\.\d+)?)/gi,
+    /(\d+(?:\.\d+)?)\s*star\s*pickets?/gi,
+  ]);
+  const mentionsRetrieval =
+    /\b(?:retrieval|retrieve|collection|collect|pickup|pick\s*up|remove|dismantle|loading|hire|rental)\b/
+      .test(evidenceText);
+
+  if (mentionsRetrieval) {
+    applied.add("MLB_TEMP_FENCE_RETRIEVAL_2H_90");
+    const ok = hasLine(lines, (line) => {
+      const desc = lineDescription(line);
+      return /retrieval|collection|loading|pick\s*up|pickup/.test(desc) &&
+        Number(line.quantity) >= 2 && near(Number(line.unit_price), 90);
+    });
+    if (!ok) {
+      blockers.push(
+        "MLB temporary-fence hire/retrieval evidence requires retrieval allowance 2 hours x $90",
+      );
+    }
+  }
+
+  if (panels) {
+    applied.add("MLB_TEMP_FENCE_PANEL_HIRE_12W");
+    const saleStyle = hasLine(lines, (line) =>
+      isPanelLine(line) &&
+      (!/hire|rental|week/.test(lineDescription(line)) ||
+        near(Number(line.unit_price), 59)));
+    if (saleStyle) {
+      blockers.push(
+        "MLB temporary-fence panels must be hire lines, not sale-priced panel lines",
+      );
+    }
+    const ok = hasLine(lines, (line) =>
+      isPanelLine(line) &&
+      /hire|rental|week/.test(lineDescription(line)) &&
+      Number(line.quantity) >= 12 &&
+      near(Number(line.unit_price), panels * 5));
+    if (!ok) {
+      blockers.push(
+        `MLB temporary-fence hire requires ${
+          formatQty(panels)
+        } panels x $5/panel/week x 12 weeks minimum`,
+      );
+    }
+  }
+
+  if (pickets) {
+    applied.add("MLB_TEMP_FENCE_PICKETS_13_50");
+    const ok = hasLine(lines, (line) =>
+      isPicketLine(line) &&
+      Number(line.quantity) >= pickets &&
+      near(Number(line.unit_price), 13.5));
+    if (!ok) {
+      blockers.push(
+        "MLB temporary-fence star pickets must be priced at $13.50 each",
+      );
+    }
+  }
+
+  const consumablesNeeded = panels || pickets || mentionsRetrieval;
+  if (consumablesNeeded) {
+    applied.add("MLB_TEMP_FENCE_CONSUMABLES_25");
+    const ok = hasLine(
+      lines,
+      (line) =>
+        isConsumableLine(line) && Number(line.quantity) >= 1 &&
+        near(Number(line.unit_price), 25),
+    );
+    if (!ok) {
+      blockers.push(
+        "MLB temporary-fence hire requires $25 cable ties/small consumables line",
+      );
+    }
+  }
 }
 
 function isMlbDraft(ctx: DraftPackContext, output: DraftPackOutput): boolean {
@@ -665,6 +1119,7 @@ function contextSearchText(
     JSON.stringify(ctx.service_report || {}),
     JSON.stringify(ctx.detail || {}),
     JSON.stringify(ctx.job || {}),
+    JSON.stringify(ctx.source_docs || []),
   ].join("\n").toLowerCase();
 }
 
@@ -1214,6 +1669,11 @@ function clean(v: unknown): string {
     .trim();
 }
 
+function cleanStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((item) => cleanDraftText(item)).filter(Boolean);
+}
+
 function num(v: unknown, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -1226,4 +1686,5 @@ export const _parseDraftPackResponse = parseDraftPackResponse;
 export const _normaliseDraftPackOutput = normaliseDraftPackOutput;
 export const _assertDraftOnlyText = assertDraftOnlyText;
 export const _applyDraftPackFeedbackOverrides = applyDraftPackFeedbackOverrides;
+export const _verifyDraftPackOutput = verifyDraftPackOutput;
 export const _selectDraftPackDueJobIds = selectDraftPackDueJobIds;

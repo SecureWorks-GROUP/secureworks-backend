@@ -206,6 +206,9 @@ Deno.test("T3 feed: a genuine Ferndale-shaped draft is INCLUDED", async () => {
   assertEquals(res.count, 1);
   assertEquals(res.drafts[0].job_id, "job-ferndale");
   assertEquals(res.drafts[0].invoice.status, "DRAFT");
+  assertEquals(res.drafts[0].report_photo_limit, 8);
+  assertEquals(res.drafts[0].report_photos.length, 1);
+  assertEquals(res.drafts[0].report_photo_urls, ["https://media.test/p1.jpg"]);
 });
 
 Deno.test("T3 feed: a sent-but-stale job (pack status sent) is EXCLUDED", async () => {
@@ -304,8 +307,14 @@ Deno.test("D3 feed: draft_docs[] + source_docs[] are returned with kinds, existi
   assert(!draftLabels.includes("SWMS"), "no SWMS attached -> none surfaced");
   // source_docs has raw trade report data, trade report PDF, work order + the photo.
   const srcLabels = row.source_docs.map((d: any) => d.label);
-  assert(srcLabels.includes("Raw Trade Report"), "source_docs has raw app-submitted trade report data");
-  assert(srcLabels.includes("Trade Report PDF"), "source_docs has the raw trade report PDF");
+  assert(
+    srcLabels.includes("Raw Trade Report"),
+    "source_docs has raw app-submitted trade report data",
+  );
+  assert(
+    srcLabels.includes("Trade Report PDF"),
+    "source_docs has the raw trade report PDF",
+  );
   assert(srcLabels.includes("Work Order"), "source_docs has the work order");
   assert(
     row.source_docs.some((d: any) => d.kind === "image"),
@@ -315,16 +324,43 @@ Deno.test("D3 feed: draft_docs[] + source_docs[] are returned with kinds, existi
     row.draft_docs.every((d: any) => d.kind === "pdf"),
     "draft_docs are pdf kind",
   );
-  const rawTrade = row.source_docs.find((d: any) => d.label === "Raw Trade Report");
-  assertEquals(rawTrade.kind, "html", "raw app report is rendered as an HTML click-through tab");
-  assertEquals(rawTrade.received_at, "2026-06-16T01:00:00Z", "raw trade report uses report_received_at as received timestamp");
-  assertEquals(rawTrade.raw_report.checklist_json.work_done, "Made safe and cleaned debris.");
-  const tradePdf = row.source_docs.find((d: any) => d.label === "Trade Report PDF");
-  assertEquals(tradePdf.created_at, "2026-06-16T00:45:00Z", "trade PDF preserves document created_at");
+  const rawTrade = row.source_docs.find((d: any) =>
+    d.label === "Raw Trade Report"
+  );
+  assertEquals(
+    rawTrade.kind,
+    "html",
+    "raw app report is rendered as an HTML click-through tab",
+  );
+  assertEquals(
+    rawTrade.received_at,
+    "2026-06-16T01:00:00Z",
+    "raw trade report uses report_received_at as received timestamp",
+  );
+  assertEquals(
+    rawTrade.raw_report.checklist_json.work_done,
+    "Made safe and cleaned debris.",
+  );
+  const tradePdf = row.source_docs.find((d: any) =>
+    d.label === "Trade Report PDF"
+  );
+  assertEquals(
+    tradePdf.created_at,
+    "2026-06-16T00:45:00Z",
+    "trade PDF preserves document created_at",
+  );
   const workOrder = row.source_docs.find((d: any) => d.label === "Work Order");
-  assertEquals(workOrder.received_at, "2026-06-15T23:55:00Z", "work order exposes received timestamp");
+  assertEquals(
+    workOrder.received_at,
+    "2026-06-15T23:55:00Z",
+    "work order exposes received timestamp",
+  );
   const photo = row.source_docs.find((d: any) => d.kind === "image");
-  assertEquals(photo.received_at, "2026-06-16T00:30:00Z", "photo received timestamp prefers taken_at");
+  assertEquals(
+    photo.received_at,
+    "2026-06-16T00:30:00Z",
+    "photo received timestamp prefers taken_at",
+  );
 });
 
 Deno.test("D3 feed: pack doc ids anchor the reviewed report/invoice when duplicate docs exist", async () => {
@@ -355,19 +391,51 @@ Deno.test("D3 feed: pack doc ids anchor the reviewed report/invoice when duplica
   const res: any = await _makesafeReportDraftsForTest(client, params());
   const row = res.drafts[0];
   assertEquals(row.report_pdf_url, "https://docs.test/report.pdf");
-  assertEquals(row.invoice_pdf_url, "https://docs.test/invoice.pdf");
-  assertEquals(row.draft_docs.map((d: any) => d.url), [
-    "https://docs.test/report.pdf",
-    "https://docs.test/invoice.pdf",
-  ], "the cockpit preview must match the docs recorded on the reviewed pack row");
+  assertEquals(
+    row.invoice_pdf_url,
+    "https://docs.test/invoice.pdf?v=invoice-v1",
+  );
+  assertEquals(
+    row.draft_docs.map((d: any) => d.url),
+    [
+      "https://docs.test/report.pdf",
+      "https://docs.test/invoice.pdf?v=invoice-v1",
+    ],
+    "the cockpit preview must match the docs recorded on the reviewed pack row",
+  );
 });
 
 Deno.test("MLB Xero contact: draft/sync contact names canonicalise to Major Loss Builders", () => {
-  assertEquals(_canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "ML Builders"), "Major Loss Builders");
-  assertEquals(_canonicalMakesafeInvoiceContactNameForTest("SWMS-26651 / MLB-26003", "MLB"), "Major Loss Builders");
-  assertEquals(_canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "Major Loss Builder"), "Major Loss Builders");
-  assertEquals(_canonicalMakesafeInvoiceContactNameForTest("AJS-123", "AJS Group"), "AJS Group");
-  assertEquals(_canonicalMakesafeBuilderDisplayNameForTest("MLB-26003", "ML Builders", "ML Builders"), "Major Loss Builders");
+  assertEquals(
+    _canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "ML Builders"),
+    "Major Loss Builders",
+  );
+  assertEquals(
+    _canonicalMakesafeInvoiceContactNameForTest(
+      "SWMS-26651 / MLB-26003",
+      "MLB",
+    ),
+    "Major Loss Builders",
+  );
+  assertEquals(
+    _canonicalMakesafeInvoiceContactNameForTest(
+      "MLB-26003",
+      "Major Loss Builder",
+    ),
+    "Major Loss Builders",
+  );
+  assertEquals(
+    _canonicalMakesafeInvoiceContactNameForTest("AJS-123", "AJS Group"),
+    "AJS Group",
+  );
+  assertEquals(
+    _canonicalMakesafeBuilderDisplayNameForTest(
+      "MLB-26003",
+      "ML Builders",
+      "ML Builders",
+    ),
+    "Major Loss Builders",
+  );
 });
 
 Deno.test("T3 feed: legacy ML Builders label is surfaced as Major Loss Builders", async () => {
@@ -383,12 +451,33 @@ Deno.test("T3 feed: legacy ML Builders label is surfaced as Major Loss Builders"
 });
 
 Deno.test("Xero sync reference tokens: only structured job/external refs are trusted", () => {
-  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("MLB-26003"), "MLB-26003");
-  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("SWMS-26651"), "SWMS-26651");
-  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("AJBR 67713"), "AJBR 67713");
-  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("26003"), null, "numeric-only tokens are too broad");
-  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("MLB"), null, "short alpha-only tokens are too broad");
-  assertEquals(_makesafeTrustedInvoiceRefTokenForTest("U1/25 Kimbara Street"), null, "addresses are not invoice reference tokens");
+  assertEquals(
+    _makesafeTrustedInvoiceRefTokenForTest("MLB-26003"),
+    "MLB-26003",
+  );
+  assertEquals(
+    _makesafeTrustedInvoiceRefTokenForTest("SWMS-26651"),
+    "SWMS-26651",
+  );
+  assertEquals(
+    _makesafeTrustedInvoiceRefTokenForTest("AJBR 67713"),
+    "AJBR 67713",
+  );
+  assertEquals(
+    _makesafeTrustedInvoiceRefTokenForTest("26003"),
+    null,
+    "numeric-only tokens are too broad",
+  );
+  assertEquals(
+    _makesafeTrustedInvoiceRefTokenForTest("MLB"),
+    null,
+    "short alpha-only tokens are too broad",
+  );
+  assertEquals(
+    _makesafeTrustedInvoiceRefTokenForTest("U1/25 Kimbara Street"),
+    null,
+    "addresses are not invoice reference tokens",
+  );
 });
 
 Deno.test("D3 feed: an attached SWMS is surfaced in draft_docs", async () => {

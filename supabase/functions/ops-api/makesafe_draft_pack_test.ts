@@ -25,6 +25,7 @@ import {
   normaliseDraftPackOutput,
   parseDraftPackResponse,
   selectDraftPackDueJobIds,
+  verifyDraftPackOutput,
 } from "./makesafe_draft_pack.ts";
 
 Deno.test("Draft Pack model is pinned to current high-quality Claude Sonnet", () => {
@@ -289,6 +290,236 @@ Deno.test("feedback overrides keep prior labour instruction while removing $1 pl
   assertEquals(
     /placeholder|pricing review/i.test(revised.change_summary),
     false,
+  );
+});
+
+Deno.test("feedback overrides understand no-mention wording and scrub report terms", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "MLB-25767",
+      address: "170 Hampden Road",
+      billing_note: "1 trade x 3 hours",
+      scope:
+        "Ceiling and mould make-safe. Temporary fencing was installed near the carport.",
+      findings: "Mould noted. Temp fencing was not part of the ceiling works.",
+      works: "Temporary fence checked and ceiling cleaned.",
+      materials: "Mould killer and temp fence materials.",
+    },
+    invoice: {
+      reference: "MLB-25767",
+      contact_name: "Major Loss Builders",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 3,
+        unit_price: 85,
+      }, {
+        description: "Mould killer",
+        quantity: 1,
+        unit_price: 25,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+
+  const revised = applyDraftPackFeedbackOverrides(output, {
+    detail: {
+      external_ref: "MLB-25767",
+      requesting_company_name: "Major Loss Builders",
+    },
+    feedback_notes: [{
+      role: "human",
+      body:
+        "there should be no mention of temp fencing or anything outside of the ceiling and mould makesafe and roof inspection",
+    }],
+  });
+
+  assertEquals(
+    JSON.stringify(revised.report).toLowerCase().includes("temp fencing"),
+    false,
+  );
+  assertEquals(
+    JSON.stringify(revised.report).toLowerCase().includes("temporary fencing"),
+    false,
+  );
+  const verification = verifyDraftPackOutput(revised, {
+    detail: {
+      external_ref: "MLB-25767",
+      requesting_company_name: "Major Loss Builders",
+    },
+    feedback_notes: [{
+      role: "human",
+      body:
+        "there should be no mention of temp fencing or anything outside of the ceiling and mould makesafe and roof inspection",
+    }],
+  });
+  assertEquals(verification.ok, true);
+  assertEquals(
+    verification.applied_rule_ids.includes("REPORT_FEEDBACK_TERM_REMOVAL"),
+    true,
+  );
+});
+
+Deno.test("draft verifier blocks rule violations before Xero/render", () => {
+  const ajsWrongRate = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-67996",
+      address: "23 James Cook Avenue",
+      billing_note: "2 trades x 2 hours",
+      works: "Temporary fencing make-safe completed.",
+    },
+    invoice: {
+      reference: "AJBR-67996",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 4,
+        unit_price: 85,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+  const ajsVerification = verifyDraftPackOutput(ajsWrongRate, {
+    detail: {
+      external_ref: "AJBR-67996",
+      requesting_company_name: "AJ Building & Restoration",
+    },
+  });
+  assertEquals(ajsVerification.ok, false);
+  assertStringIncludes(ajsVerification.blockers.join("; "), "AJS/AJBR labour");
+
+  const mlbUnderMinimum = normaliseDraftPackOutput({
+    report: {
+      ref: "MLB-26003",
+      address: "25 Kimbara Street",
+      billing_note: "1 trade x 2 hours",
+      works: "Make-safe attendance completed.",
+    },
+    invoice: {
+      reference: "MLB-26003",
+      contact_name: "Major Loss Builders",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 2,
+        unit_price: 85,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+  const mlbVerification = verifyDraftPackOutput(mlbUnderMinimum, {
+    detail: {
+      external_ref: "MLB-26003",
+      requesting_company_name: "Major Loss Builders",
+    },
+  });
+  assertEquals(mlbVerification.ok, false);
+  assertStringIncludes(mlbVerification.blockers.join("; "), "below 3 hours");
+
+  const mlbNoLabour = normaliseDraftPackOutput({
+    report: {
+      ref: "MLB-26003",
+      address: "25 Kimbara Street",
+      billing_note: "materials only",
+      works: "Make-safe attendance completed.",
+    },
+    invoice: {
+      reference: "MLB-26003",
+      contact_name: "Major Loss Builders",
+      line_items: [{
+        description: "Materials - consumables",
+        quantity: 1,
+        unit_price: 25,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+  const noLabourVerification = verifyDraftPackOutput(mlbNoLabour, {
+    detail: {
+      external_ref: "MLB-26003",
+      requesting_company_name: "Major Loss Builders",
+    },
+  });
+  assertEquals(noLabourVerification.ok, false);
+  assertStringIncludes(
+    noLabourVerification.blockers.join("; "),
+    "must include a labour line",
+  );
+
+  const ajsBadTempFenceMaterials = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-67996",
+      address: "23 James Cook Avenue",
+      billing_note: "2 trades x 3 hours",
+      works: "Temporary fencing make-safe completed.",
+    },
+    invoice: {
+      reference: "AJBR-67996",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 6,
+        unit_price: 80,
+      }, {
+        description: "Cable ties and small consumables for temporary fencing",
+        quantity: 1,
+        unit_price: 25,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+  const ajsMaterialVerification = verifyDraftPackOutput(
+    ajsBadTempFenceMaterials,
+    {
+      detail: {
+        external_ref: "AJBR-67996",
+        requesting_company_name: "AJ Building & Restoration",
+      },
+    },
+  );
+  assertEquals(ajsMaterialVerification.ok, false);
+  assertStringIncludes(
+    ajsMaterialVerification.blockers.join("; "),
+    "must not charge pickets, cable ties",
+  );
+
+  const mlbBadTempFenceHire = normaliseDraftPackOutput({
+    report: {
+      ref: "MLB-24732",
+      address: "Noranda",
+      billing_note: "2 trades x 5 hours",
+      works: "Temporary fencing installed.",
+    },
+    invoice: {
+      reference: "MLB-24732",
+      contact_name: "Major Loss Builders",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 10,
+        unit_price: 85,
+      }, {
+        description: "Temporary fence panels supplied",
+        quantity: 7,
+        unit_price: 59,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+  const mlbTempFenceVerification = verifyDraftPackOutput(
+    mlbBadTempFenceHire,
+    {
+      detail: {
+        external_ref: "MLB-24732",
+        requesting_company_name: "Major Loss Builders",
+      },
+      source_docs: [{
+        type: "trade_report",
+        text: "Temporary fencing panels x 7 installed and retrieval required.",
+      }],
+    },
+  );
+  assertEquals(mlbTempFenceVerification.ok, false);
+  assertStringIncludes(
+    mlbTempFenceVerification.blockers.join("; "),
+    "must be hire lines",
   );
 });
 

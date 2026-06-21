@@ -282,12 +282,14 @@ import {
 // orchestration and keeps every irreversible send/authorise step in
 // makesafe_send_pack.
 import {
+  applyDraftPackFeedbackOverrides,
   buildDraftPackSystemPrompt,
   buildDraftPackUserPrompt,
-  applyDraftPackFeedbackOverrides,
+  enforceDraftPackReportFeedbackTerms,
   MAKESAFE_DRAFT_PACK_MODEL,
   parseDraftPackResponse,
   selectDraftPackDueJobIds,
+  verifyDraftPackOutput,
   type DraftPackContext,
 } from './makesafe_draft_pack.ts'
 
@@ -1817,7 +1819,10 @@ if (import.meta.main) serve(async (req: Request) => {
       'job_detail',
       'list_intake_drafts',
       'list_makesafe_companies',
-      // Make-safe DRAFT creation (intake). scan/create_intake_draft produce drafts only.
+      // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
+      // normal work-order drafts through the internal auto-approval gate; it never
+      // sends, authorises, invoices, closes, or allocates. create_intake_draft stays
+      // draft-only.
       'scan_ses_makesafes',
       'create_intake_draft',
       // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
@@ -9657,7 +9662,8 @@ async function listIntakeDrafts(client: any, params: URLSearchParams) {
     .order('received_at', { ascending: false })
     .limit(50)
   if (error) throw error
-  return { drafts: data || [] }
+  const drafts = (data || []).map((draft: any) => enrichIntakeDraftForReview(draft))
+  return { drafts }
 }
 
 function parseJsonObject(value: any): Record<string, any> {
@@ -9689,6 +9695,112 @@ function cleanReviewedString(value: any): string | null {
   return text || null
 }
 
+function effectiveIntakeReportType(draft: any): string | null {
+  const explicit = cleanReviewedString(draft?.report_type)
+  if (explicit) return explicit
+
+  const extraction = parseJsonObject(draft?.extraction_json)
+  const attachments = parseJsonArray(draft?.attachments_json)
+  const attachmentNames = attachments
+    .map((a: any) => cleanReviewedString(a?.file_name || a?.name || a?.label))
+    .filter(Boolean)
+    .join('\n')
+  const text = [
+    draft?.subject,
+    draft?.body_preview,
+    draft?.description,
+    draft?.safety_requirements,
+    draft?.special_instructions,
+    extraction?.description,
+    extraction?.scope,
+    extraction?.notes,
+    extraction?.job_type,
+    extraction?.makesafe_type,
+    extraction?.report_type,
+    attachmentNames,
+  ].map((v) => cleanReviewedString(v)).filter(Boolean).join('\n')
+
+  const classified = _classifyReportType(draft?.subject || null, text || null)
+  return _isReportOnlyType(classified) ? classified : null
+}
+
+function enrichIntakeDraftForReview(draft: any): any {
+  if (!draft) return draft
+  const detected = effectiveIntakeReportType(draft)
+  if (!detected) return { ...draft, detected_report_type: null, report_type_source: draft.report_type ? 'stored' : null }
+  const hasStored = !!cleanReviewedString(draft.report_type)
+  return {
+    ...draft,
+    report_type: draft.report_type || detected,
+    detected_report_type: detected,
+    report_type_source: hasStored ? 'stored' : 'fallback_classifier',
+  }
+}
+
+const AUTO_APPROVE_ALLOWED_MISSING_FIELDS = new Set([
+  'client_phone',
+  'phone',
+  'client_email',
+  'email',
+  'site_suburb',
+  'suburb',
+  'safety_requirements',
+  'special_instructions',
+  'portal_link',
+])
+
+function cleanMissingFieldName(value: any): string {
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+function availableIntakeAttachments(attachments: any[]): any[] {
+  return (attachments || []).filter((a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url))
+}
+
+function shouldAutoApproveCleanIntake(input: {
+  enabled?: boolean
+  isReportCapture?: boolean
+  tagReportType?: boolean
+  reportType?: string | null
+  confidence?: string | null
+  missingFields?: any[]
+  matchedCompany?: any
+  externalRef?: string | null
+  clientName?: string | null
+  siteAddress?: string | null
+  attachments?: any[]
+}): { ok: boolean; reason: string } {
+  if (input.enabled === false) return { ok: false, reason: 'disabled' }
+  if (input.isReportCapture) return { ok: false, reason: 'report_capture_manual_review' }
+  if (input.tagReportType) return { ok: false, reason: 'report_tagged_manual_review' }
+  if (_isReportOnlyType(input.reportType)) return { ok: false, reason: 'report_only_manual_review' }
+
+  const confidence = String(input.confidence || '').trim().toLowerCase()
+  if (confidence !== 'high') return { ok: false, reason: 'confidence_not_high' }
+
+  const missing = (input.missingFields || []).map(cleanMissingFieldName).filter(Boolean)
+  const blockingMissing = missing.filter((m) => !AUTO_APPROVE_ALLOWED_MISSING_FIELDS.has(m))
+  if (blockingMissing.length > 0) return { ok: false, reason: 'missing_fields:' + blockingMissing.join(',') }
+
+  if (!input.matchedCompany?.slug && !input.matchedCompany?.name) return { ok: false, reason: 'missing_requesting_company' }
+  if (!cleanReviewedString(input.externalRef)) return { ok: false, reason: 'missing_external_ref' }
+  if (!cleanReviewedString(input.clientName)) return { ok: false, reason: 'missing_client_name' }
+  if (!cleanReviewedString(input.siteAddress)) return { ok: false, reason: 'missing_site_address' }
+
+  const attachments = input.attachments || []
+  const available = availableIntakeAttachments(attachments)
+  if (available.length === 0) return { ok: false, reason: 'missing_work_order_pdf' }
+  const hasUnavailablePdf = attachments.some((a: any) => a?.pdf_unavailable)
+  if (hasUnavailablePdf) return { ok: false, reason: 'pdf_capture_needs_review' }
+  const hasDesignatedWo = available.some((a: any) => a?.is_work_order === true)
+  if (available.length > 1 && !hasDesignatedWo) return { ok: false, reason: 'multiple_pdfs_no_designated_work_order' }
+
+  return { ok: true, reason: 'clean_high_confidence_work_order' }
+}
+
+export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
+export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
+
 // ── Slice 7: approve intake draft -> create job ──
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
@@ -9699,14 +9811,14 @@ async function approveIntakeDraft(client: any, body: any) {
     .select('*').eq('id', draft_id).single()
   if (dErr || !draft) throw new Error('Draft not found')
 
-  // Codex issue 2: report-ONLY drafts (roof_report / assessment_report) are now
-  // approvable — they create a report-type make-safe job (no WO PDF required, no
-  // report PDF produced, substatus advances to ready_to_invoice immediately).
-  // Combined make-safe-AND-report drafts (report_type='unknown_report' etc.) are
-  // NOT report-only and approve normally as work orders.
-  const isReportOnlyDraft = _isReportOnlyType(draft.report_type)
-
   const extraction = parseJsonObject(draft.extraction_json)
+  // Codex issue 2 + live roof/assessment backlog: older drafts may have
+  // report_type=NULL even though the subject/body/attachment names clearly say
+  // roof report / assessment report. Treat that as a computed report-only type
+  // at approval time so they take the report-only path instead of the physical
+  // make-safe WO path.
+  const effectiveReportType = effectiveIntakeReportType(draft)
+  const isReportOnlyDraft = _isReportOnlyType(effectiveReportType)
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
 
@@ -9830,7 +9942,7 @@ async function approveIntakeDraft(client: any, body: any) {
     if (isReportOnlyDraft && createdJobId) {
       try {
         await client.from('makesafe_job_details').update({
-          report_type: draft.report_type,
+          report_type: effectiveReportType,
           substatus: 'ready_to_invoice',
           updated_at: new Date().toISOString(),
         }).eq('job_id', createdJobId)
@@ -9858,6 +9970,7 @@ async function approveIntakeDraft(client: any, body: any) {
       description: approvedFields.description,
       safety_requirements: approvedFields.safety_requirements,
       special_instructions: approvedFields.special_instructions,
+      report_type: effectiveReportType || draft.report_type || null,
       updated_at: new Date().toISOString(),
     }).eq('id', draft_id)
 
@@ -9880,7 +9993,7 @@ async function approveIntakeDraft(client: any, body: any) {
       }
     }
 
-    return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields }
+    return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields, report_type: effectiveReportType || null }
   } catch (postClaimErr) {
     if (!createdJobId) {
       // Pre-insert failure: no live job exists, so release the claim back to the
@@ -10333,8 +10446,9 @@ async function _shortStorageKey(input: string): Promise<string> {
 // ops-dash cockpit keeps working with NO change. PDF bytes now come from the
 // PRIVATE makesafe-emails bucket (where the group sync stored them) instead of a
 // live Graph attachment download. The api-key-callable wiring is deliberately
-// unchanged so the 5-min monitor cron can tail-call this to create DRAFTS (it can
-// never approve — approve_intake_draft is human-JWT-only, Wave 0 C2 gate).
+// unchanged so the 5-min monitor cron can tail-call this. It may auto-promote
+// only a strict clean/high-confidence normal WO; it still cannot send, authorise,
+// invoice, close, allocate, or call approve_intake_draft directly.
 async function scanSesMakesafes(client: any) {
   // The group-sync projection keys ses@ mail under this mailbox (the canonical
   // value used by monitor-ses-makesafes + reconcile + the GAP reads).
@@ -10475,6 +10589,8 @@ async function scanSesMakesafes(client: any) {
 
   const newDrafts: any[] = []
   let skippedDuplicates = 0
+  const autoApproved: any[] = []
+  const autoApproveFailed: any[] = []
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
 
   for (const msg of makesafeEmails) {
@@ -10948,7 +11064,65 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       },
       dedupIndex,
     )
-    newDrafts.push(inserted)
+
+    const autoApprovalDecision = shouldAutoApproveCleanIntake({
+      enabled: Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+      isReportCapture,
+      tagReportType,
+      reportType: draftReportType,
+      confidence,
+      missingFields,
+      matchedCompany,
+      externalRef: extractedRef,
+      clientName: extraction.client_name || null,
+      siteAddress: extraction.site_address || null,
+      attachments,
+    })
+
+    if (autoApprovalDecision.ok) {
+      try {
+        const approved = await approveIntakeDraft(client, {
+          draft_id: inserted.id,
+          approved_by: 'auto_intake_clean_gate',
+          review_notes: 'Auto-approved clean make-safe intake: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
+        })
+        const autoRow = {
+          ...inserted,
+          status: 'approved',
+          approved_job_id: approved?.job?.id || null,
+          auto_approved: true,
+          auto_approval_reason: autoApprovalDecision.reason,
+        }
+        newDrafts.push(autoRow)
+        autoApproved.push({
+          draft_id: inserted.id,
+          job_id: approved?.job?.id || null,
+          external_ref: extractedRef,
+          reason: autoApprovalDecision.reason,
+        })
+      } catch (e) {
+        const msgText = e instanceof Error ? e.message : String(e)
+        console.log('[ops-api] intake auto-approve failed; leaving draft for review:', msgText)
+        newDrafts.push({
+          ...inserted,
+          auto_approved: false,
+          auto_approval_reason: autoApprovalDecision.reason,
+          auto_approve_error: msgText,
+        })
+        autoApproveFailed.push({
+          draft_id: inserted.id,
+          external_ref: extractedRef,
+          reason: autoApprovalDecision.reason,
+          error: msgText,
+        })
+      }
+    } else {
+      newDrafts.push({
+        ...inserted,
+        auto_approved: false,
+        auto_approval_reason: autoApprovalDecision.reason,
+      })
+    }
   }
 
   return {
@@ -10962,6 +11136,10 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     already_processed: skippedDuplicates,
     new_drafts: newDrafts,
     new_count: newDrafts.length,
+    auto_approved: autoApproved,
+    auto_approved_count: autoApproved.length,
+    auto_approve_failed: autoApproveFailed,
+    auto_approve_failed_count: autoApproveFailed.length,
     // Observability: confirms the redirected source is live (not the old Graph
     // USER-mailbox scan).
     source: 'group_sync_projection',
@@ -16298,7 +16476,8 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     client.from('job_media')
       .select('id, job_id, phase, type, storage_url, thumbnail_url, label, taken_at, created_at')
       .in('job_id', jobIds)
-      .eq('phase', 'completion'),
+      .eq('phase', 'completion')
+      .order('created_at', { ascending: true }),
     client.from('makesafe_report_packs')
       // B1 (Wave 0): last_render_hash feeds the versioned report doc URL (?v={hash})
       // below — without it pack?.last_render_hash is always undefined and the
@@ -16455,6 +16634,11 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       created_at: m.created_at || null,
       received_at: m.taken_at || m.created_at || null,
     })).filter((p: any) => p.url)
+    const reportPhotoLimit = 8
+    // The photo follow-up must default to the same photo set the report PDF uses,
+    // not every raw/source photo. Persisted selected_photo_urls can be added later;
+    // until then the report renderer's deterministic cap is mirrored here.
+    const reportPhotos = photos.slice(0, reportPhotoLimit)
 
     // D3 — carousel doc arrays. draft_docs: the artifacts WE produced for this
     // close-out (rendered report PDF, draft invoice PDF, attached SWMS if any).
@@ -16630,6 +16814,9 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       report_pdf_url: reportPdfUrl,
       invoice_pdf_url: invoicePdfUrl,
       photos,
+      report_photo_limit: reportPhotoLimit,
+      report_photos: reportPhotos,
+      report_photo_urls: reportPhotos.map((p: any) => p.url).filter(Boolean),
       // D3 — carousel arrays for the cockpit (existing fields above unchanged for
       // backward compat). draft_docs = artifacts we produced; source_docs = inputs.
       draft_docs: draftDocs,
@@ -17696,12 +17883,48 @@ async function draftMakesafeReportPack(
       2500,
     )
     const parsed = applyDraftPackFeedbackOverrides(parseDraftPackResponse(raw), promptContext)
+    const verification = verifyDraftPackOutput(parsed, promptContext)
+    if (!verification.ok) {
+      throw new ApiError(
+        'draft pack verification failed: ' + verification.blockers.join('; '),
+        422,
+      )
+    }
+    const reportPayload = draftPackReportPayload(parsed, context, photoSet)
+    const renderVerification = verifyDraftPackOutput({
+      ...parsed,
+      report: {
+        ...parsed.report,
+        billing_note: reportPayload.billing_note,
+        scope: reportPayload.scope,
+        findings: reportPayload.findings,
+        works: reportPayload.works,
+        materials: reportPayload.materials,
+      },
+    }, promptContext)
+    if (!renderVerification.ok) {
+      throw new ApiError(
+        'draft pack render verification failed: ' + renderVerification.blockers.join('; '),
+        422,
+      )
+    }
 
     const invoiceResult = await _createDraftInvoice(
       client,
       draftPackInvoiceBody(parsed, context, jobId, operator, body),
     )
-    const reportPayload = draftPackReportPayload(parsed, context, photoSet)
+    if (invoiceResult?.pricing_preserved_from_existing === true) {
+      throw new ApiError(
+        'draft pack invoice revision blocked: Claude/override pricing was invalid so the existing draft invoice was preserved instead of revised',
+        409,
+      )
+    }
+    if (invoiceResult?.project_line_pricing_preserved === true) {
+      throw new ApiError(
+        'draft pack invoice revision blocked: Xero project-linked lines prevented rewriting the existing draft invoice',
+        409,
+      )
+    }
     const reportResult = await _renderReport(client, {
       job_id: jobId,
       pack_kind: packKind,
@@ -17712,13 +17935,6 @@ async function draftMakesafeReportPack(
     const invoiceStatus = draftPackInvoiceStatus(invoiceResult)
     let invoiceDoc: { document_id?: string | null } | null = null
     const warnings: string[] = []
-    if (invoiceResult?.pricing_preserved_from_existing === true) {
-      warnings.push('existing_draft_invoice_pricing_preserved_after_invalid_claude_pricing')
-    }
-    if (invoiceResult?.project_line_pricing_preserved === true) {
-      warnings.push('existing_draft_invoice_pricing_preserved_after_xero_project_line_restriction')
-    }
-
     // Attach the DRAFT invoice PDF when the invoice is still DRAFT. If the dup guard
     // finds an already-authorised invoice, do not pretend it is a fresh draft; leave
     // that state to the send/resume state machine.
@@ -17773,7 +17989,9 @@ async function draftMakesafeReportPack(
       },
       selected_photo_count: photoSet.length,
       change_summary: parsed.change_summary,
-      warnings,
+      verification: renderVerification,
+      applied_rule_ids: renderVerification.applied_rule_ids,
+      warnings: [...verification.warnings, ...renderVerification.warnings, ...warnings],
     }
   } catch (e) {
     if (claimedDraft) {
