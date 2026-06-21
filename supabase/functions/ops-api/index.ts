@@ -194,6 +194,8 @@ import {
   classifyReportType as _classifyReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
+  classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
+  makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
 } from './makesafe_intake_gate.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
@@ -6150,6 +6152,8 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
         builder_email_text_for_trade: jobMetadata.builder_email_text_for_trade || null,
         builder_email_subject: jobMetadata.builder_email_subject || null,
         builder_email_received_at: jobMetadata.builder_email_received_at || null,
+        makesafe_job_family: jobMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(ms?.external_ref || jobRes.data?.job_number || '', [ms?.report_type, jobRes.data?.notes].filter(Boolean).join('\n'), ms?.report_type || null),
+        makesafe_job_family_label: jobMetadata.makesafe_job_family_label || _makeSafeJobFamilyLabel(jobMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(ms?.external_ref || jobRes.data?.job_number || '', [ms?.report_type, jobRes.data?.notes].filter(Boolean).join('\n'), ms?.report_type || null)),
       } : null
     } catch (e) {
       console.log('[ops-api] makesafe details fetch skipped (non-blocking):', (e as Error).message)
@@ -7920,6 +7924,7 @@ async function createMakesafeJob(client: any, body: any) {
     safety_requirements, special_instructions,
     pdf_base64, external_links,
     builder_email_text_for_trade, builder_email_subject, builder_email_received_at,
+    makesafe_job_family, makesafe_job_family_label,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -7967,6 +7972,8 @@ async function createMakesafeJob(client: any, body: any) {
   const reviewedMakeSafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
   const reviewedSafety = safety_requirements || companyData?.safety_requirements || null
   const reviewedSpecialInstructions = special_instructions || companyData?.special_instructions || null
+  const reviewedJobFamily = makesafe_job_family || _classifyMakeSafeJobFamily(external_ref || null, description || reviewedMakeSafeType || null, null)
+  const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
 
   const metadata: any = {
     requesting_company: companyData ? { slug: companyData.slug, name: companyData.name } : reviewedCompanyName ? { slug: requesting_company_slug || null, name: reviewedCompanyName } : null,
@@ -7980,6 +7987,8 @@ async function createMakesafeJob(client: any, body: any) {
     builder_email_text_for_trade: builder_email_text_for_trade || null,
     builder_email_subject: builder_email_subject || null,
     builder_email_received_at: builder_email_received_at || null,
+    makesafe_job_family: reviewedJobFamily,
+    makesafe_job_family_label: reviewedJobFamilyLabel,
   }
 
   // Create the job
@@ -9536,6 +9545,11 @@ async function approveIntakeDraft(client: any, body: any) {
     // set substatus=ready_to_invoice immediately (skips the report-production stage).
     const portalLinks = _normalizeReportExternalLinks(extraction)
     const reportJobExternalLinks = isReportOnlyDraft && portalLinks.length ? portalLinks : null
+    const approvedJobFamily = extraction?.makesafe_job_family || _classifyMakeSafeJobFamily(
+      draft?.subject || approvedFields.external_ref || '',
+      [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
+      draft?.report_type || null,
+    )
     const jobResult = await createMakesafeJob(client, {
       client_name: approvedFields.client_name,
       site_address: approvedFields.site_address,
@@ -9551,6 +9565,8 @@ async function approveIntakeDraft(client: any, body: any) {
       special_instructions: approvedFields.special_instructions,
       suppress_notifications: true,
       ...(reportJobExternalLinks ? { external_links: reportJobExternalLinks } : {}),
+      makesafe_job_family: approvedJobFamily,
+      makesafe_job_family_label: _makeSafeJobFamilyLabel(approvedJobFamily),
       ...(isReportOnlyDraft ? {
         builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
         builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
@@ -10627,6 +10643,13 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     if (tagReportType) {
       draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
     }
+    const draftJobFamily = _classifyMakeSafeJobFamily(
+      subject,
+      [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
+      draftReportType,
+    )
+    extraction.makesafe_job_family = draftJobFamily
+    extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
     if (isReportCapture) {
       draftStatus = 'needs_review'
     } else {
@@ -15055,6 +15078,8 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
         builder_email_text_for_trade: jobMetadata.builder_email_text_for_trade || null,
         builder_email_subject: jobMetadata.builder_email_subject || null,
         builder_email_received_at: jobMetadata.builder_email_received_at || null,
+        makesafe_job_family: jobMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(ms?.external_ref || jobRes.data?.job_number || '', [ms?.report_type, jobRes.data?.notes].filter(Boolean).join('\n'), ms?.report_type || null),
+        makesafe_job_family_label: jobMetadata.makesafe_job_family_label || _makeSafeJobFamilyLabel(jobMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(ms?.external_ref || jobRes.data?.job_number || '', [ms?.report_type, jobRes.data?.notes].filter(Boolean).join('\n'), ms?.report_type || null)),
       } : null
     } catch (e) {
       console.log('[ops-api] trade makesafe details fetch skipped:', (e as Error).message)
