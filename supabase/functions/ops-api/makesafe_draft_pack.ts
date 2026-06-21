@@ -688,7 +688,7 @@ function applyMlbTempFenceHireFeedback(
     "210";
   const withoutOldHireLines = output.invoice.line_items.filter((line) => {
     const desc = String(line.description || "").toLowerCase();
-    return !/temporary\s+fence\s+hire|star\s*pickets?|retrieval|collection|loading|cable\s+ties|small\s+consumables|fence\s+bases|feet/
+    return !/temporary[\s\S]{0,80}fenc(?:e|ing)[\s\S]{0,80}hire|star\s*pickets?|retrieval|collection|loading|cable\s+ties|small\s+consumables|fixings?|consumables?|base\/foot|bases?\/feet|fence\s+bases|feet/
       .test(desc);
   });
   const additions: DraftPackLineItem[] = [];
