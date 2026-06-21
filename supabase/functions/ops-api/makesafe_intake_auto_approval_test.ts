@@ -28,6 +28,22 @@ Deno.test("effectiveIntakeReportType preserves explicit report_type", () => {
   assertEquals(reportType, "assessment_report");
 });
 
+Deno.test("effectiveIntakeReportType does not fallback-classify rows with clear WO PDFs", () => {
+  const reportType = _effectiveIntakeReportTypeForTest({
+    subject: "Our Ref: MLB-26010 - Eaton",
+    body_preview:
+      "roof report wording appears here but the attachment is the work order",
+    report_type: null,
+    extraction_json: {},
+    attachments_json: [{
+      file_name: "Work Order MLB-26010.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(reportType, null);
+});
+
 Deno.test("clean intake auto-approval allows only high-confidence normal WOs with servable WO PDF", () => {
   const decision = _shouldAutoApproveCleanIntakeForTest({
     confidence: "high",
@@ -45,8 +61,8 @@ Deno.test("clean intake auto-approval allows only high-confidence normal WOs wit
   assert(decision.ok, decision.reason);
 });
 
-Deno.test("clean intake auto-approval blocks report-tagged and report-only drafts", () => {
-  const reportTagged = _shouldAutoApproveCleanIntakeForTest({
+Deno.test("clean intake auto-approval allows report-worded rows only when a WO PDF is clear", () => {
+  const reportWordedWorkOrder = _shouldAutoApproveCleanIntakeForTest({
     tagReportType: true,
     reportType: "roof_report",
     confidence: "high",
@@ -55,12 +71,16 @@ Deno.test("clean intake auto-approval blocks report-tagged and report-only draft
     clientName: "Test Client",
     siteAddress: "1 Example St",
     attachments: [{
-      pdf_url: "https://example.test/report.pdf",
+      file_name: "Work Order MLB-26010.pdf",
+      pdf_url: "https://example.test/wo.pdf",
       is_work_order: true,
     }],
   });
-  assertEquals(reportTagged.ok, false);
-  assertEquals(reportTagged.reason, "report_tagged_manual_review");
+  assertEquals(reportWordedWorkOrder.ok, true);
+  assertEquals(
+    reportWordedWorkOrder.reason,
+    "clean_high_confidence_work_order",
+  );
 
   const reportOnly = _shouldAutoApproveCleanIntakeForTest({
     reportType: "assessment_report",
@@ -70,8 +90,8 @@ Deno.test("clean intake auto-approval blocks report-tagged and report-only draft
     clientName: "Test Client",
     siteAddress: "1 Example St",
     attachments: [{
+      file_name: "assessment_report_scope.pdf",
       pdf_url: "https://example.test/report.pdf",
-      is_work_order: true,
     }],
   });
   assertEquals(reportOnly.ok, false);
@@ -166,7 +186,6 @@ Deno.test("clean intake board sweep blocks report-only legacy rows before auto p
     attachments_json: [{
       file_name: "roof_report_scope.pdf",
       pdf_url: "https://example.test/report.pdf",
-      is_work_order: true,
     }],
   });
   assertEquals(decision.ok, false);
