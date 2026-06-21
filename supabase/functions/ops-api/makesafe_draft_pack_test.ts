@@ -16,6 +16,7 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  applyDraftPackFeedbackOverrides,
   assertDraftOnlyText,
   buildDraftPackSystemPrompt,
   buildDraftPackUserPrompt,
@@ -152,11 +153,15 @@ Deno.test("draft-only guard rejects irreversible send markers/claims", () => {
   );
 });
 
-Deno.test("parseDraftPackResponse rejects irreversible claims in Claude JSON", () => {
+Deno.test("parseDraftPackResponse rejects irreversible send markers in Claude JSON", () => {
   assertThrows(
     () =>
       parseDraftPackResponse(JSON.stringify({
-        report: { ref: "AJBR-1", address: "Site", works: "Pack was sent" },
+        report: {
+          ref: "AJBR-1",
+          address: "Site",
+          works: "MAKESAFE_PACK_SENT | main",
+        },
         invoice: {
           reference: "AJBR-1",
           contact_name: "AJS",
@@ -206,6 +211,178 @@ Deno.test("cleanDraftReviewSummary keeps the summary in review/finalise language
       "Do not send email; authorising is later after approval.",
     ),
     "Do not prepare email; finalising is later after approval.",
+  );
+});
+
+Deno.test("feedback overrides keep prior labour instruction while removing $1 placeholder and report terms", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-67996",
+      address: "23 James Cook Avenue",
+      billing_note: "2 trades x 2 hours",
+      scope:
+        "Make-safe tarp and roofing works completed. Temporary fencing collected from yard.",
+      findings: "Tarp was noted near the damaged roofing.",
+      works:
+        "Temporary fencing placed. Roofing materials removed from hazard area.",
+      materials: "Tarp and roofing sheets.",
+    },
+    invoice: {
+      reference: "AJBR-67996",
+      contact_name: "AJ Building & Restoration",
+      line_items: [
+        { description: "Make-safe labour", quantity: 4, unit_price: 80 },
+        {
+          description: "Materials placeholder to confirm",
+          quantity: 1,
+          unit_price: 1,
+        },
+      ],
+    },
+    change_summary: "Draft ready for review.",
+  });
+
+  const revised = applyDraftPackFeedbackOverrides(output, {
+    detail: {
+      external_ref: "AJBR-67996",
+      requesting_company_name: "AJ Building & Restoration",
+    },
+    feedback_notes: [
+      {
+        role: "human",
+        body:
+          "invoice should read, 2 trades 3 hours each at $80 per hour. thats it. includes getting temp fencing from yard. and remove all mentions of tarp and roofing from the report",
+      },
+      {
+        role: "human",
+        body:
+          "shouldnt be that $1 on the invoice. remove that and we good to go",
+      },
+    ],
+  });
+
+  assertEquals(revised.invoice.line_items.length, 1);
+  assertEquals(revised.invoice.line_items[0].quantity, 6);
+  assertEquals(revised.invoice.line_items[0].unit_price, 80);
+  assertEquals(
+    revised.report.billing_note,
+    "2 trades x 3 hours (6 labour hours total).",
+  );
+  assertEquals(JSON.stringify(revised.invoice).includes("$1"), false);
+  assertEquals(JSON.stringify(revised.invoice).includes("placeholder"), false);
+  assertEquals(
+    JSON.stringify(revised.report).toLowerCase().includes("tarp"),
+    false,
+  );
+  assertEquals(
+    JSON.stringify(revised.report).toLowerCase().includes("roofing"),
+    false,
+  );
+});
+
+Deno.test("feedback override sanitises draft review language instead of blocking harmless authorise wording", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "MLB-25096",
+      address: "7 Broughton St",
+      works: "Draft is ready to authorise after review.",
+    },
+    invoice: {
+      reference: "MLB-25096",
+      contact_name: "Major Loss Builders",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 6,
+        unit_price: 85,
+      }],
+    },
+    change_summary: "Human should authorise after confirming pricing.",
+  });
+
+  const revised = applyDraftPackFeedbackOverrides(output, {
+    detail: {
+      external_ref: "MLB-25096",
+      requesting_company_name: "Major Loss Builders",
+    },
+    feedback_notes: [{
+      role: "human",
+      body: "try again with the same draft please",
+    }],
+  });
+
+  assertEquals(
+    JSON.stringify(revised).toLowerCase().includes("authorise"),
+    false,
+  );
+  assertDraftOnlyText(JSON.stringify(revised));
+});
+
+Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "MLB-25457",
+      address: "46 Hillwater Prom",
+      billing_note: "1 trade x 2 hours",
+      scope:
+        "Temporary fencing panels x3 installed with star pickets x11 and fence bases x3.",
+      works: "Temp fencing made safe.",
+    },
+    invoice: {
+      reference: "MLB-25457",
+      contact_name: "Major Loss Builders",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 2,
+        unit_price: 85,
+      }],
+    },
+    change_summary: "Draft ready for review.",
+  });
+
+  const revised = applyDraftPackFeedbackOverrides(output, {
+    job: { site_suburb: "Bennett Springs" },
+    detail: {
+      external_ref: "MLB-25457",
+      requesting_company_name: "Major Loss Builders",
+    },
+    feedback_notes: [
+      {
+        role: "human",
+        body:
+          "need to put explicitly that the client wanted the extra temporary fencing panels. charge 1 trade 3 hours. instead of 2 hours. otherwise good",
+      },
+      {
+        role: "human",
+        body:
+          "we need to charge hire fee for temp fencing, star pickets and retrieval fee as per the skill because this is mlb not ajs. so we hire the fencing out to them",
+      },
+    ],
+  });
+
+  const lines = revised.invoice.line_items;
+  const labour = lines.find((line) => /labou?r/i.test(line.description));
+  const retrieval = lines.find((line) => /retrieval/i.test(line.description));
+  const panels = lines.find((line) =>
+    /temporary fence hire/i.test(line.description)
+  );
+  const pickets = lines.find((line) => /star pickets/i.test(line.description));
+  const consumables = lines.find((line) =>
+    /consumables/i.test(line.description)
+  );
+
+  assertEquals(labour?.quantity, 3);
+  assertEquals(labour?.unit_price, 85);
+  assertEquals(retrieval?.quantity, 2);
+  assertEquals(retrieval?.unit_price, 90);
+  assertEquals(panels?.quantity, 12);
+  assertEquals(panels?.unit_price, 15);
+  assertEquals(pickets?.quantity, 11);
+  assertEquals(pickets?.unit_price, 13.5);
+  assertEquals(consumables?.quantity, 1);
+  assertEquals(consumables?.unit_price, 25);
+  assertEquals(
+    lines.some((line) => /base|feet/i.test(line.description)),
+    false,
   );
 });
 
