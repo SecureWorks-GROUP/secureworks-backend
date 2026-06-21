@@ -2047,6 +2047,14 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'geocode_job': return json(await geocodeJob(client, body))
       case 'geocode_missing_makesafes': return json(await geocodeMissingMakesafes(client))
       case 'list_intake_drafts': return json(await listIntakeDrafts(client, url.searchParams))
+      case 'auto_approve_clean_intake_drafts': {
+        const autoApproveIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!autoApproveIsPrivileged) {
+          return json({ error: 'forbidden: auto_approve_clean_intake_drafts requires the privileged ops key or an admin/owner session; the make-safe automation routine cannot batch-approve drafts' }, 403)
+        }
+        return json(await autoApproveCleanIntakeDrafts(client, body))
+      }
       // Wave 0 C2 gate (red-team + decision scoped-routine-key-2026-06-17): approving a
       // draft creates a LIVE make-safe job, so it is a PRIVILEGED action. Allowed callers:
       // the master SW_API_KEY (the ops dashboard, authMode='api_key') OR a logged-in
@@ -9798,10 +9806,107 @@ function shouldAutoApproveCleanIntake(input: {
   return { ok: true, reason: 'clean_high_confidence_work_order' }
 }
 
+function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason: string } {
+  const extraction = parseJsonObject(draft?.extraction_json)
+  const attachments = parseJsonArray(draft?.attachments_json)
+  const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
+
+  return shouldAutoApproveCleanIntake({
+    enabled: Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+    reportType: effectiveReportType,
+    confidence: draft?.confidence,
+    missingFields: parseJsonArray(draft?.missing_fields),
+    matchedCompany: {
+      slug: cleanReviewedString(draft?.requesting_company_slug) || cleanReviewedString(extraction.requesting_company_slug),
+      name: cleanReviewedString(draft?.requesting_company_name) || cleanReviewedString(extraction.requesting_company_name),
+    },
+    externalRef: cleanReviewedString(draft?.external_ref) || cleanReviewedString(extraction.external_ref),
+    clientName: cleanReviewedString(draft?.client_name) || cleanReviewedString(extraction.client_name),
+    siteAddress: cleanReviewedString(draft?.site_address) || cleanReviewedString(extraction.site_address),
+    attachments,
+  })
+}
+
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
+export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCleanIntakeDraftRow
 
 // ── Slice 7: approve intake draft -> create job ──
+async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
+  const rawLimit = Number(body.limit || body.max || 60)
+  const limit = Math.max(1, Math.min(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 60, 100))
+  const dryRun = body.dry_run === true || body.dryRun === true
+  const statuses = Array.isArray(body.statuses) && body.statuses.length
+    ? body.statuses.map((s: any) => String(s || '').trim()).filter(Boolean)
+    : ['needs_review', 'draft']
+
+  const { data: drafts, error } = await client.from('makesafe_intake_drafts')
+    .select('*')
+    .in('status', statuses)
+    .order('received_at', { ascending: true })
+    .limit(limit)
+  if (error) throw error
+
+  const checked = drafts || []
+  const autoApproved: any[] = []
+  const eligible: any[] = []
+  const skipped: any[] = []
+  const failed: any[] = []
+
+  for (const draft of checked) {
+    const decision = shouldAutoApproveCleanIntakeDraftRow(draft)
+    if (!decision.ok) {
+      skipped.push({
+        draft_id: draft?.id || null,
+        external_ref: draft?.external_ref || null,
+        reason: decision.reason,
+      })
+      continue
+    }
+
+    eligible.push({
+      draft_id: draft?.id || null,
+      external_ref: draft?.external_ref || null,
+      reason: decision.reason,
+    })
+    if (dryRun) continue
+
+    try {
+      const approved = await approveIntakeDraft(client, {
+        draft_id: draft.id,
+        approved_by: body.triggered_by || 'auto_intake_clean_gate',
+        review_notes: 'Auto-approved clean make-safe intake from board sweep: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
+      })
+      autoApproved.push({
+        draft_id: draft.id,
+        job_id: approved?.job?.id || null,
+        external_ref: draft.external_ref || null,
+        reason: decision.reason,
+      })
+    } catch (e) {
+      failed.push({
+        draft_id: draft?.id || null,
+        external_ref: draft?.external_ref || null,
+        reason: decision.reason,
+        error: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+
+  return {
+    ok: true,
+    dry_run: dryRun,
+    checked_count: checked.length,
+    eligible_count: eligible.length,
+    auto_approved: autoApproved,
+    auto_approved_count: autoApproved.length,
+    skipped_count: skipped.length,
+    failed,
+    failed_count: failed.length,
+    skipped,
+  }
+}
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
