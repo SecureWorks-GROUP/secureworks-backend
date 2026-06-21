@@ -19,6 +19,7 @@ import {
   _canonicalMakesafeInvoiceContactNameForTest,
   _makesafeReportDraftsForTest,
   _makesafeTrustedInvoiceRefTokenForTest,
+  _selectMakesafeReportPhotosForTest,
 } from "./index.ts";
 import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
@@ -78,6 +79,28 @@ function makeFeedClient(rowsByTable: Record<string, any[]>) {
 }
 
 const params = () => new URLSearchParams();
+
+Deno.test("report photo selection keeps context and latest completion evidence when over the 8-photo cap", () => {
+  const photos = Array.from({ length: 9 }, (_, i) => ({
+    url: `https://photos.test/${i + 1}.jpg`,
+    created_at: `2026-06-17T04:25:${String(i).padStart(2, "0")}Z`,
+  }));
+
+  const selected = _selectMakesafeReportPhotosForTest(photos, 8).map((p) =>
+    p.url
+  );
+
+  assertEquals(selected, [
+    "https://photos.test/1.jpg",
+    "https://photos.test/2.jpg",
+    "https://photos.test/3.jpg",
+    "https://photos.test/4.jpg",
+    "https://photos.test/6.jpg",
+    "https://photos.test/7.jpg",
+    "https://photos.test/8.jpg",
+    "https://photos.test/9.jpg",
+  ]);
+});
 
 // A genuine Ferndale-shaped draft: admin_to_send_report, DRAFT invoice, rendered
 // report doc + a pack row with report_doc_id, NOT sent.

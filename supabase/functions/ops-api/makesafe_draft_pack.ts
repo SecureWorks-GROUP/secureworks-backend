@@ -1004,8 +1004,10 @@ function verifyMlbTempFenceInvoiceLines(
   const mentionsRetrieval =
     /\b(?:retrieval|retrieve|collection|collect|pickup|pick\s*up|remove|dismantle|loading|hire|rental)\b/
       .test(evidenceText);
+  const requiresRetrieval = mentionsRetrieval ||
+    hasTempFenceContext(evidenceText);
 
-  if (mentionsRetrieval) {
+  if (requiresRetrieval) {
     applied.add("MLB_TEMP_FENCE_RETRIEVAL_2H_90");
     const ok = hasLine(lines, (line) => {
       const desc = lineDescription(line);
@@ -1405,13 +1407,11 @@ function applyMlbTempFenceHireFeedback(
 ): DraftPackOutput {
   const lowerFeedback = String(feedbackText || "").toLowerCase();
   if (!isMlbDraft(ctx, output)) return output;
-  if (
+  const feedbackRequestsHire =
     !/\b(?:hire|rental|retrieval|star\s*pickets?|temp(?:orary)?\s+fenc(?:e|ing)|panels?)\b/
-      .test(lowerFeedback)
-  ) return output;
-  if (!/\b(?:charge|add|include|hire|we\s+hire|fee)\b/.test(lowerFeedback)) {
-    return output;
-  }
+        .test(lowerFeedback)
+      ? false
+      : /\b(?:charge|add|include|hire|we\s+hire|fee)\b/.test(lowerFeedback);
 
   const searchable = [
     contextSearchText(output, ctx, feedbackText),
@@ -1422,6 +1422,18 @@ function applyMlbTempFenceHireFeedback(
     /star\s*pickets?\s*(?:x|×|:|-)?\s*(\d+(?:\.\d+)?)/gi,
     /(\d+(?:\.\d+)?)\s*star\s*pickets?/gi,
   ]);
+  const evidenceTriggersHire = hasTempFenceContext(searchable) &&
+    (Boolean(panels) || Boolean(pickets));
+  const exactLabourOnly = !!parseExactLabourOnlyFeedback(
+    humanFeedbackBodies(ctx),
+  );
+  if (
+    !feedbackRequestsHire &&
+    (!evidenceTriggersHire || exactLabourOnly ||
+      humanExplicitlyOverridesStandardPricing(feedbackText))
+  ) {
+    return output;
+  }
 
   const detail = asRecord(ctx.detail);
   const job = asRecord(ctx.job);
