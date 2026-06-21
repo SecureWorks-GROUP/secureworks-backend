@@ -2569,6 +2569,29 @@ serve(async (req: Request) => {
       const { contactId, message, jobId, userId } = body
       if (!contactId || !message) return json({ error: 'contactId and message required' }, 400)
 
+      // Optional per-message sending number (GHL `fromNumber`, E.164).
+      // When omitted, GHL falls back to the location default (+61489267774
+      // SecureWorks Patios) exactly as before — so existing callers are
+      // unaffected. The booking/make-safe path passes +61489267776
+      // (SecureWorks Group Ops) so those SMS go out from the Ops number.
+      // Only allow the known SecureWorks location numbers — a typo or a
+      // foreign number would otherwise be silently rejected by GHL.
+      const SW_FROM_NUMBERS = [
+        '+61489267771', // SecureWorks Group Admin
+        '+61489267772', // SecureWorks Fencing Sales
+        '+61489267774', // SecureWorks Patios (location default)
+        '+61489267776', // SecureWorks Group Ops
+        '+61489267778', // SecureWorks Fencing Mgmt
+      ]
+      let fromNumber: string | undefined
+      if (body.fromNumber) {
+        const normalized = String(body.fromNumber).trim()
+        if (!SW_FROM_NUMBERS.includes(normalized)) {
+          return json({ error: `Invalid fromNumber: ${normalized}. Must be a SecureWorks number in E.164 form (e.g. +61489267776).` }, 400)
+        }
+        fromNumber = normalized
+      }
+
       // Contact-job mismatch guard: if both contactId and jobId supplied, verify they match
       if (contactId && jobId) {
         try {
@@ -2617,9 +2640,12 @@ serve(async (req: Request) => {
             type: 'SMS',
             contactId,
             message,
+            // Only include when a valid SecureWorks number was supplied;
+            // omitting it preserves the GHL location-default behaviour.
+            ...(fromNumber ? { fromNumber } : {}),
           }),
         })
-        console.log(`[ghl-proxy] SMS sent to contact ${contactId}`)
+        console.log(`[ghl-proxy] SMS sent to contact ${contactId}${fromNumber ? ` from ${fromNumber}` : ''}`)
 
         // ── T7 Loop 4: closes G1 (outbound SMS missing job_id) ──
         // When ON: recordEvidence with channel='sms', direction='outbound'.
