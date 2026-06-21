@@ -160,6 +160,7 @@ const ROUTINE_MUST_DENY = [
   "push_po_to_xero",
   // approve / send-pack
   "approve_intake_draft",
+  "auto_approve_clean_intake_drafts",
   "makesafe_send_pack",
   "approve_variation",
   "approve_expense",

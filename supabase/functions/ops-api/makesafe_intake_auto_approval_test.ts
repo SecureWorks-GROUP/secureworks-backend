@@ -4,6 +4,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _effectiveIntakeReportTypeForTest,
+  _shouldAutoApproveCleanIntakeDraftRowForTest,
   _shouldAutoApproveCleanIntakeForTest,
 } from "./index.ts";
 
@@ -123,4 +124,51 @@ Deno.test("clean intake auto-approval blocks weak or ambiguous intake", () => {
     }).reason,
     "multiple_pdfs_no_designated_work_order",
   );
+});
+
+Deno.test("clean intake board sweep accepts legacy pending draft rows with complete WO fields", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "ajs",
+    requesting_company_name: "AJ Building & Restoration",
+    external_ref: "AJBR 68001",
+    client_name: "Test Client",
+    site_address: "10 Example Rd, Perth WA",
+    missing_fields: ["client_phone"],
+    report_type: null,
+    subject: "AJBR 68001 Work Order",
+    body_preview: "Please attend make safe",
+    extraction_json: {},
+    attachments_json: [{
+      file_name: "Work Order.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
+Deno.test("clean intake board sweep blocks report-only legacy rows before auto promotion", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-26072",
+    client_name: "Test Client",
+    site_address: "1 Roof Way",
+    subject: "MLB-26072 roof assessment report request",
+    body_preview: "Please complete the roof report only",
+    report_type: null,
+    attachments_json: [{
+      file_name: "roof_report_scope.pdf",
+      pdf_url: "https://example.test/report.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision.ok, false);
+  assertEquals(decision.reason, "report_only_manual_review");
 });
