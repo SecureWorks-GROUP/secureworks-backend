@@ -17891,7 +17891,7 @@ async function draftMakesafeReportPack(
       )
     }
     const reportPayload = draftPackReportPayload(parsed, context, photoSet)
-    const renderVerification = verifyDraftPackOutput({
+    const renderOutput = enforceDraftPackReportFeedbackTerms({
       ...parsed,
       report: {
         ...parsed.report,
@@ -17902,6 +17902,14 @@ async function draftMakesafeReportPack(
         materials: reportPayload.materials,
       },
     }, promptContext)
+    Object.assign(reportPayload, {
+      billing_note: renderOutput.report.billing_note,
+      scope: renderOutput.report.scope,
+      findings: renderOutput.report.findings,
+      works: renderOutput.report.works,
+      materials: renderOutput.report.materials,
+    })
+    const renderVerification = verifyDraftPackOutput(renderOutput, promptContext)
     if (!renderVerification.ok) {
       throw new ApiError(
         'draft pack render verification failed: ' + renderVerification.blockers.join('; '),

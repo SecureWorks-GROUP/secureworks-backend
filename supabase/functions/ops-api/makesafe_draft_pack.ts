@@ -896,9 +896,7 @@ export function enforceDraftPackReportFeedbackTerms(
   output: DraftPackOutput,
   ctx: DraftPackContext,
 ): DraftPackOutput {
-  const terms = extractReportRemovalTerms(humanFeedbackBodies(ctx).join("\n"));
-  if (!terms.length) return output;
-  return applyReportTermRemovals(output, terms);
+  return applyReportTermRemovals(output, humanFeedbackBodies(ctx).join("\n"));
 }
 
 function lineDescription(line: DraftPackLineItem): string {
