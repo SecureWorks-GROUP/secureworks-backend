@@ -55,6 +55,11 @@ Deno.test("user prompt carries selected photo urls and feedback notes", () => {
   assertStringIncludes(prompt, "1 trade x 3 hours");
   assertStringIncludes(prompt, "Do not reduce below 3 labour hours");
   assertStringIncludes(prompt, "report.billing_note must be terse");
+  assertStringIncludes(prompt, "AJS / AJ Building & Restoration / AJBR");
+  assertStringIncludes(prompt, "$80 ex/hr");
+  assertStringIncludes(prompt, "panels at $59");
+  assertStringIncludes(prompt, "cement bases/blocks at $28");
+  assertStringIncludes(prompt, "never charge AJS cable ties");
 });
 
 Deno.test("user prompt schema does not teach Claude to emit zero-priced invoice lines", () => {
@@ -412,6 +417,166 @@ Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", 
   );
   assertStringIncludes(revised.change_summary, "2 hours x $90");
   assertStringIncludes(revised.change_summary, "11 x $13.50");
+});
+
+Deno.test("AJS temp-fence feedback uses wiki sale pricing and AJS labour rate", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-66949",
+      address: "Greenfields",
+      billing_note: "2 trades x 3 hours",
+      works:
+        "Removed fallen Hardie panels and installed temporary fence panels with cement bases.",
+      materials: "4x temp fence panels, 5x cement bases, 3x cable ties.",
+    },
+    invoice: {
+      reference: "AJBR-66949",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 6,
+        unit_price: 85,
+      }, {
+        description: "Temporary fence panels supplied",
+        quantity: 4,
+        unit_price: 1,
+      }, {
+        description: "Cement bases for temporary fencing",
+        quantity: 5,
+        unit_price: 1,
+      }, {
+        description: "Cable ties and small consumables",
+        quantity: 1,
+        unit_price: 25,
+      }],
+    },
+    change_summary:
+      "Materials line unit_price is a placeholder and needs pricing review.",
+  });
+
+  const revised = applyDraftPackFeedbackOverrides(output, {
+    job: { site_suburb: "Greenfields" },
+    detail: {
+      external_ref: "AJBR-66949",
+      requesting_company_name: "AJ Building & Restoration",
+    },
+    service_report: {
+      invoice_notes: "3hrs x 2 trades + 4 temp panels + 5 bases",
+      materials_used: [
+        "4x temp fence panels",
+        "5x cement bases",
+        "3x cable ties",
+      ],
+    },
+    feedback_notes: [{
+      role: "human",
+      body:
+        "apply the AJS/AJBR makesafe reporting skill rates from the wiki and remove the $1 placeholders",
+    }],
+  });
+
+  const lines = revised.invoice.line_items;
+  const labour = lines.find((line) => /labou?r/i.test(line.description));
+  const panels = lines.find((line) => /panels/i.test(line.description));
+  const bases = lines.find((line) => /bases/i.test(line.description));
+
+  assertEquals(lines.length, 3);
+  assertEquals(labour?.quantity, 6);
+  assertEquals(labour?.unit_price, 80);
+  assertEquals(panels?.quantity, 4);
+  assertEquals(panels?.unit_price, 59);
+  assertEquals(bases?.quantity, 5);
+  assertEquals(bases?.unit_price, 28);
+  assertEquals(
+    lines.some((line) => /cable\s*ties?|consumables/i.test(line.description)),
+    false,
+  );
+  assertEquals(JSON.stringify(lines).includes("$1"), false);
+  assertEquals(
+    /placeholder|pricing review/i.test(revised.change_summary),
+    false,
+  );
+});
+
+Deno.test("AJS generic $1 placeholder is removed when Ops says remove it", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-67217-R",
+      address: "Mount Richon",
+      billing_note: "2 trades x 3 hours",
+      works: "Attendance and roof make-safe review completed.",
+    },
+    invoice: {
+      reference: "AJBR-67217-R",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 6,
+        unit_price: 80,
+      }, {
+        description:
+          "Materials placeholder for temporary fence panels, bases/feet, tarps/roof materials, fixings and consumables",
+        quantity: 1,
+        unit_price: 1,
+      }],
+    },
+    change_summary:
+      "Materials line unit_price is a placeholder at $1 and needs pricing review.",
+  });
+
+  const revised = applyDraftPackFeedbackOverrides(output, {
+    detail: {
+      external_ref: "AJBR-67217-R",
+      requesting_company_name: "AJ Building & Restoration",
+    },
+    feedback_notes: [{
+      role: "human",
+      body:
+        "remove the $1 material placeholder; no material charge unless actual cost evidence",
+    }],
+  });
+
+  assertEquals(revised.invoice.line_items.length, 1);
+  assertEquals(revised.invoice.line_items[0].quantity, 6);
+  assertEquals(revised.invoice.line_items[0].unit_price, 80);
+  assertEquals(JSON.stringify(revised.invoice).includes("placeholder"), false);
+  assertEquals(
+    /placeholder|pricing review/i.test(revised.change_summary),
+    false,
+  );
+});
+
+Deno.test("draft validation rejects unresolved $1 material placeholders", () => {
+  const output = normaliseDraftPackOutput({
+    report: { ref: "AJBR-1", address: "Unknown" },
+    invoice: {
+      reference: "AJBR-1",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 4,
+        unit_price: 80,
+      }, {
+        description: "Materials placeholder to confirm",
+        quantity: 1,
+        unit_price: 1,
+      }],
+    },
+    change_summary: "Needs pricing review.",
+  });
+
+  assertThrows(
+    () =>
+      applyDraftPackFeedbackOverrides(output, {
+        detail: {
+          external_ref: "AJBR-1",
+          requesting_company_name: "AJ Building & Restoration",
+        },
+        feedback_notes: [],
+      }),
+    Error,
+    "$1 placeholder",
+  );
 });
 
 Deno.test("selectDraftPackDueJobIds only returns safe first-draft candidates", () => {
