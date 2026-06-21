@@ -144,6 +144,8 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
       "If the latest Ops feedback says the invoice should read specific labour/trade/hour/rate wording and says 'that's it', 'thats it', 'that is it', 'labour only', or 'no materials', output ONLY those requested invoice line(s). Do not add placeholder materials or best-estimate lines.",
       "Treat feedback_notes as chronological cumulative human instructions. Later human notes refine earlier human notes; do not forget an earlier requested labour basis when the latest note only says retry/remove a placeholder.",
       "For MLB / Major Loss Builders temporary-fence hire, use the SecureWorks hire card when the evidence gives quantities: labour $85 ex/hr weekday with 3-hour minimum (4 hours for solo temp-fence), retrieval allowance 2 hours x $90, panel hire $5 per panel per week for 12 weeks minimum, star pickets $13.50 each, cable ties/small consumables $25 flat. Do not price MLB panels as a sale.",
+      "For AJS / AJ Building & Restoration / AJBR, normal labour is $80 ex/hr per trade unless the source evidence explicitly says public-holiday/after-hours/special rate. Do not use the generic $85 builder rate for AJBR/AJS.",
+      "For AJS/AJBR temporary fencing, materials depend on who supplied them: if SecureWorks supplied the panels/blocks, sell panels at $59 ex GST each and cement bases/blocks at $28 ex GST each; never charge AJS cable ties/clips/small consumables. If counts or supplier evidence are unclear, hold for human review instead of inventing a $1 placeholder.",
       "Only use selected_photo_urls as the approved photo set for this draft refresh.",
       "Never include MAKESAFE_PACK_SENT or any wording that says the pack was sent/authorised/closed.",
     ],
@@ -532,9 +534,10 @@ function isPlaceholderInvoiceLine(line: DraftPackLineItem): boolean {
   const desc = String(line?.description || "").toLowerCase();
   const unit = Number(line?.unit_price ?? 0);
   return unit > 0 && unit <= 1.01 &&
-    /placeholder|tbc|to\s+confirm|materials?|consumables?|sundries|misc/.test(
-      desc,
-    );
+    /placeholder|tbc|to\s+confirm|materials?|consumables?|sundries|misc|panel|temporary\s+fenc|bases?|blocks?|feet|fixings?|pickets?/
+      .test(
+        desc,
+      );
 }
 
 function applyPlaceholderRemoval(
@@ -633,6 +636,38 @@ function isMlbDraft(ctx: DraftPackContext, output: DraftPackOutput): boolean {
     company.includes("ml builders");
 }
 
+function isAjsDraft(ctx: DraftPackContext, output: DraftPackOutput): boolean {
+  const detail = asRecord(ctx.detail);
+  const makesafeCompany = asRecord(detail.makesafe_companies);
+  const ref = String(
+    output.invoice.reference || output.report.ref || detail.external_ref || "",
+  ).toUpperCase();
+  const company = String(
+    output.invoice.contact_name || detail.requesting_company_name ||
+      makesafeCompany.name || "",
+  ).toLowerCase();
+  return ref.startsWith("AJBR") || company.includes("aj building") ||
+    company.includes("ajbr") || company.includes("ajs");
+}
+
+function contextSearchText(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+  feedbackText = "",
+): string {
+  return [
+    feedbackText,
+    output.report.scope,
+    output.report.findings,
+    output.report.works,
+    output.report.materials,
+    JSON.stringify(output.invoice.line_items || []),
+    JSON.stringify(ctx.service_report || {}),
+    JSON.stringify(ctx.detail || {}),
+    JSON.stringify(ctx.job || {}),
+  ].join("\n").toLowerCase();
+}
+
 function extractCountNear(text: string, patterns: RegExp[]): number | null {
   for (const pattern of patterns) {
     const m = lastRegexMatch(text, pattern);
@@ -641,6 +676,218 @@ function extractCountNear(text: string, patterns: RegExp[]): number | null {
     if (Number.isFinite(n) && n > 0) return n;
   }
   return null;
+}
+
+function extractPanelCount(text: string): number | null {
+  return extractCountNear(text, [
+    /(?:temp(?:orary)?\s+)?(?:fenc(?:e|ing)\s+)?panels?\s*(?:x|×|:|-)?\s*(\d+(?:\.\d+)?)/gi,
+    /(\d+(?:\.\d+)?)\s*(?:x|×)?\s*(?:temp(?:orary)?\s+)?(?:fenc(?:e|ing)\s+)?panels?/gi,
+  ]);
+}
+
+function extractBaseCount(text: string): number | null {
+  return extractCountNear(text, [
+    /(?:cement\s+)?(?:bases?|blocks?|base\/foot|bases?\/feet|feet)\s*(?:x|×|:|-)?\s*(\d+(?:\.\d+)?)/gi,
+    /(\d+(?:\.\d+)?)\s*(?:x|×)?\s*(?:cement\s+)?(?:bases?|blocks?|base\/foot|bases?\/feet|feet)/gi,
+  ]);
+}
+
+function buildInvoicePrefix(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+): string {
+  const detail = asRecord(ctx.detail);
+  const job = asRecord(ctx.job);
+  const ref = String(
+    output.invoice.reference || output.report.ref || detail.external_ref || "",
+  ).trim();
+  const suburb = String(job.site_suburb || detail.site_suburb || "").trim();
+  return [ref, suburb].filter(Boolean).join(" - ");
+}
+
+function shouldUseAjsDefaultLabourRate(
+  line: DraftPackLineItem,
+  feedbackText: string,
+): boolean {
+  if (!isLabourLine(line)) return false;
+  const unit = Number(line.unit_price);
+  if (Math.abs(unit - 85) > 0.005) return false;
+  const lower = String(feedbackText || "").toLowerCase();
+  return !/\b(?:after[-\s]?hours?|public\s+holiday|saturday|weekend|special\s+rate)\b/
+    .test(lower);
+}
+
+function applyAjsPricingFeedbackOverrides(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+  feedbackText: string,
+): DraftPackOutput {
+  if (!isAjsDraft(ctx, output)) return output;
+
+  const searchable = contextSearchText(output, ctx, feedbackText);
+  const contextPanels = extractPanelCount(searchable);
+  const contextBases = extractBaseCount(searchable);
+  const accountCode =
+    output.invoice.line_items.find((line) => line.account_code)?.account_code ||
+    "210";
+  const prefix = buildInvoicePrefix(output, ctx);
+  let changed = false;
+  let pendingPanelQty: number | null = null;
+  let pendingBaseQty: number | null = null;
+  let hasPanelLine = false;
+  let hasBaseLine = false;
+  let labourRateChanged = false;
+  let removedPlaceholderLine = false;
+  let removedAjsConsumables = false;
+
+  const retained: DraftPackLineItem[] = [];
+  for (const line of output.invoice.line_items) {
+    const desc = String(line.description || "").toLowerCase();
+    const lineText = desc + "\n" + searchable;
+    const isPanelLine = /panel/.test(desc) &&
+      /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|make[- ]safe/.test(desc);
+    const isBaseLine =
+      /(?:cement\s+)?(?:bases?|blocks?|base\/foot|bases?\/feet|feet)/.test(
+        desc,
+      ) &&
+      /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|panel|make[- ]safe|cement/.test(
+        desc,
+      );
+    const isGenericTempFencePlaceholder = isPlaceholderInvoiceLine(line) &&
+      /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|panels?|bases?|blocks?|feet|fixings?|consumables?|materials?/
+        .test(desc);
+    const isAjsConsumableLine =
+      /cable\s*ties?|clips?|small\s+consumables|temp(?:orary)?\s+fenc(?:e|ing)[\s\S]{0,60}fixings?/
+        .test(desc);
+
+    if (shouldUseAjsDefaultLabourRate(line, feedbackText)) {
+      retained.push({ ...line, unit_price: 80 });
+      changed = true;
+      labourRateChanged = true;
+      continue;
+    }
+
+    if (isPanelLine && Math.abs(Number(line.unit_price) - 59) <= 0.005) {
+      hasPanelLine = true;
+      retained.push(line);
+      continue;
+    }
+    if (isBaseLine && Math.abs(Number(line.unit_price) - 28) <= 0.005) {
+      hasBaseLine = true;
+      retained.push(line);
+      continue;
+    }
+
+    if (isPanelLine) {
+      const qty = extractPanelCount(lineText) ||
+        (Number(line.quantity) > 1 ? Number(line.quantity) : contextPanels);
+      if (qty) {
+        pendingPanelQty = qty;
+        changed = true;
+        continue;
+      }
+    }
+
+    if (isBaseLine) {
+      const qty = extractBaseCount(lineText) ||
+        (Number(line.quantity) > 1 ? Number(line.quantity) : contextBases);
+      if (qty) {
+        pendingBaseQty = qty;
+        changed = true;
+        continue;
+      }
+    }
+
+    if (isGenericTempFencePlaceholder) {
+      if ((/panel/.test(desc) || contextPanels) && contextPanels) {
+        pendingPanelQty = contextPanels;
+      }
+      if ((/(?:base|block|feet)/.test(desc) || contextBases) && contextBases) {
+        pendingBaseQty = contextBases;
+      }
+      if (
+        contextPanels || contextBases ||
+        feedbackRequestsPlaceholderRemoval(feedbackText)
+      ) {
+        changed = true;
+        removedPlaceholderLine = true;
+        continue;
+      }
+    }
+
+    if (isAjsConsumableLine) {
+      removedAjsConsumables = true;
+      changed = true;
+      continue;
+    }
+
+    retained.push(line);
+  }
+
+  const additions: DraftPackLineItem[] = [];
+  if (pendingPanelQty && !hasPanelLine) {
+    additions.push({
+      description: `${
+        prefix ? prefix + " - " : ""
+      }Temporary fence panels supplied for make-safe - ${
+        formatQty(pendingPanelQty)
+      } panels`,
+      quantity: pendingPanelQty,
+      unit_price: 59,
+      account_code: accountCode,
+    });
+  }
+  if (pendingBaseQty && !hasBaseLine) {
+    additions.push({
+      description: `${
+        prefix ? prefix + " - " : ""
+      }Cement bases supplied for temporary fencing make-safe - ${
+        formatQty(pendingBaseQty)
+      } bases`,
+      quantity: pendingBaseQty,
+      unit_price: 28,
+      account_code: accountCode,
+    });
+  }
+
+  if (additions.length === 0 && !changed) return output;
+
+  const summaryParts = [];
+  if (labourRateChanged) {
+    summaryParts.push(
+      "applied AJS/AJBR normal labour at $80 ex/hr where the draft had the generic $85 rate",
+    );
+  }
+  if (pendingPanelQty) {
+    summaryParts.push(
+      `temporary fence panels ${formatQty(pendingPanelQty)} x $59`,
+    );
+  }
+  if (pendingBaseQty) {
+    summaryParts.push(`cement bases ${formatQty(pendingBaseQty)} x $28`);
+  }
+  if (removedAjsConsumables) {
+    summaryParts.push("removed AJS cable ties/consumables charge");
+  }
+  if (removedPlaceholderLine && additions.length === 0) {
+    summaryParts.push("removed unresolved AJS/AJBR material line");
+  }
+  if (summaryParts.length === 0) {
+    summaryParts.push("applied AJS/AJBR wiki pricing guard");
+  }
+
+  return {
+    ...output,
+    invoice: {
+      ...output.invoice,
+      line_items: [...retained, ...additions],
+    },
+    change_summary: cleanDraftReviewSummary(
+      `${scrubStalePricingReviewSummary(output.change_summary)} ${
+        summaryParts.join("; ")
+      }.`,
+    ),
+  };
 }
 
 function applyMlbTempFenceHireFeedback(
@@ -659,19 +906,10 @@ function applyMlbTempFenceHireFeedback(
   }
 
   const searchable = [
-    feedbackText,
-    output.report.scope,
-    output.report.findings,
-    output.report.works,
-    output.report.materials,
-    JSON.stringify(ctx.service_report || {}),
-    JSON.stringify(ctx.detail || {}),
+    contextSearchText(output, ctx, feedbackText),
   ].join("\n").toLowerCase();
 
-  const panels = extractCountNear(searchable, [
-    /(?:temp(?:orary)?\s+)?(?:fenc(?:e|ing)\s+)?panels?\s*(?:x|×|:|-)?\s*(\d+(?:\.\d+)?)/gi,
-    /(\d+(?:\.\d+)?)\s*(?:temp(?:orary)?\s+)?(?:fenc(?:e|ing)\s+)?panels?/gi,
-  ]);
+  const panels = extractPanelCount(searchable);
   const pickets = extractCountNear(searchable, [
     /star\s*pickets?\s*(?:x|×|:|-)?\s*(\d+(?:\.\d+)?)/gi,
     /(\d+(?:\.\d+)?)\s*star\s*pickets?/gi,
@@ -803,6 +1041,16 @@ function sanitizeAndValidateDraftPackOutput(
       }`,
     );
   }
+  const placeholderLines = next.invoice.line_items
+    .map((li, index) => isPlaceholderInvoiceLine(li) ? index + 1 : 0)
+    .filter(Boolean);
+  if (placeholderLines.length) {
+    throw new Error(
+      `Draft pack still contains $1 placeholder invoice line(s): ${
+        placeholderLines.join(", ")
+      }`,
+    );
+  }
   assertDraftOnlyText(JSON.stringify(next));
   return next;
 }
@@ -838,6 +1086,7 @@ export function applyDraftPackFeedbackOverrides(
   }
 
   next = applyMlbTempFenceHireFeedback(next, ctx, feedbackText);
+  next = applyAjsPricingFeedbackOverrides(next, ctx, feedbackText);
   next = applyPlaceholderRemoval(next, feedbackText);
   next = applyReportTermRemovals(next, feedbackText);
   return sanitizeAndValidateDraftPackOutput(next);
