@@ -339,6 +339,19 @@ Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", 
         description: "Make-safe labour",
         quantity: 2,
         unit_price: 85,
+      }, {
+        description:
+          "Temporary fence panel hire - 3 panels - rate needs pricing review",
+        quantity: 36,
+        unit_price: 5,
+      }, {
+        description: "Temporary fence base/foot hire - 3 units",
+        quantity: 3,
+        unit_price: 8,
+      }, {
+        description: "Fixings and consumables",
+        quantity: 1,
+        unit_price: 25,
       }],
     },
     change_summary:
@@ -378,6 +391,7 @@ Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", 
 
   assertEquals(labour?.quantity, 3);
   assertEquals(labour?.unit_price, 85);
+  assertEquals(lines.length, 5);
   assertEquals(retrieval?.quantity, 2);
   assertEquals(retrieval?.unit_price, 90);
   assertEquals(panels?.quantity, 12);
