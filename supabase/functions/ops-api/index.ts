@@ -199,6 +199,12 @@ import {
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
 // scan. See makesafe_intake_dedup.ts.
 import {
+  stripEmailHtmlForTrade as _stripEmailHtmlForTrade,
+  extractBuilderEmailLinks as _extractBuilderEmailLinks,
+  mergeDeterministicAndClaudeLinks as _mergeDeterministicAndClaudeLinks,
+  normalizeReportExternalLinks as _normalizeReportExternalLinks,
+} from './makesafe_email_links.ts'
+import {
   buildIntakeDedupIndex as _buildIntakeDedupIndex,
   isDuplicateIntake as _isDuplicateIntake,
   registerIntakeDraft as _registerIntakeDraft,
@@ -6138,7 +6144,13 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
         .select('*, makesafe_companies:requesting_company_id(*)')
         .eq('job_id', jobId)
         .maybeSingle()
-      makesafeDetails = ms || null
+      const jobMetadata = parseJsonObject(jobRes.data?.metadata)
+      makesafeDetails = ms ? {
+        ...ms,
+        builder_email_text_for_trade: jobMetadata.builder_email_text_for_trade || null,
+        builder_email_subject: jobMetadata.builder_email_subject || null,
+        builder_email_received_at: jobMetadata.builder_email_received_at || null,
+      } : null
     } catch (e) {
       console.log('[ops-api] makesafe details fetch skipped (non-blocking):', (e as Error).message)
     }
@@ -7906,7 +7918,8 @@ async function createMakesafeJob(client: any, body: any) {
     requesting_company_slug, requesting_company_name, external_ref, description,
     makesafe_type, job_type_detail, makesafe_type_detail,
     safety_requirements, special_instructions,
-    pdf_base64, external_links
+    pdf_base64, external_links,
+    builder_email_text_for_trade, builder_email_subject, builder_email_received_at,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -7964,6 +7977,9 @@ async function createMakesafeJob(client: any, body: any) {
     special_instructions: reviewedSpecialInstructions,
     safety_requirements: reviewedSafety,
     external_links: external_links || null,
+    builder_email_text_for_trade: builder_email_text_for_trade || null,
+    builder_email_subject: builder_email_subject || null,
+    builder_email_received_at: builder_email_received_at || null,
   }
 
   // Create the job
@@ -9516,12 +9532,10 @@ async function approveIntakeDraft(client: any, body: any) {
   let createdJobId: string | null = null
   try {
     // Create the make-safe job using reviewed/edited fields, not stale extraction data.
-    // For report-only drafts: pass the builder portal link as external_links and
+    // For report-only drafts: pass all builder email/report links as external_links and
     // set substatus=ready_to_invoice immediately (skips the report-production stage).
-    const portalLink = extraction?.portal_link || null
-    const reportJobExternalLinks = isReportOnlyDraft && portalLink
-      ? [{ label: 'Builder Portal', url: portalLink }]
-      : null
+    const portalLinks = _normalizeReportExternalLinks(extraction)
+    const reportJobExternalLinks = isReportOnlyDraft && portalLinks.length ? portalLinks : null
     const jobResult = await createMakesafeJob(client, {
       client_name: approvedFields.client_name,
       site_address: approvedFields.site_address,
@@ -9537,6 +9551,11 @@ async function approveIntakeDraft(client: any, body: any) {
       special_instructions: approvedFields.special_instructions,
       suppress_notifications: true,
       ...(reportJobExternalLinks ? { external_links: reportJobExternalLinks } : {}),
+      ...(isReportOnlyDraft ? {
+        builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
+        builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
+        builder_email_received_at: extraction?.builder_email_received_at || draft?.received_at || null,
+      } : {}),
     })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
@@ -10207,12 +10226,13 @@ async function scanSesMakesafes(client: any) {
     const fromEmail = msg.from?.emailAddress?.address || ''
     const fromName = msg.from?.emailAddress?.name || ''
     const subject = msg.subject || ''
-    // Use full body for extraction (phone numbers are often past the 500-char preview cutoff)
-    let bodyText = (msg.bodyPreview || '').slice(0, 1000)
-    if (msg.body?.content) {
-      bodyText = msg.body.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 2000)
-    }
-    const bodyPreview = bodyText
+    // Use full body for extraction (phone numbers and report links are often past
+    // the 500-char preview cutoff). Keep a sanitized trade-readable copy for
+    // report-only jobs; the email body is the source of truth for Prime/MLB links.
+    const rawEmailBody = msg.body?.content || msg.bodyPreview || ''
+    const builderEmailTextForTrade = _stripEmailHtmlForTrade(rawEmailBody)
+    const deterministicPortalLinks = _extractBuilderEmailLinks(rawEmailBody)
+    const bodyPreview = (builderEmailTextForTrade || String(msg.bodyPreview || '')).slice(0, 2000)
 
     // Match sender to company
     let matchedCompany: { slug: string; name: string } | null = null
@@ -10363,12 +10383,13 @@ async function scanSesMakesafes(client: any) {
 
         const resp = await anthropic.messages.create({
           model: 'claude-haiku-4-5-20251001',
-          max_tokens: 500,
+          max_tokens: 900,
           system: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
-Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "portal_link": "https://..." or null, "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
 Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
 Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
-For portal_link: extract any https builder-portal URL in the email body (the report / photos / quote share link the builder wants SecureWorks to access).
+For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
+For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
 If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
           messages: [{ role: 'user', content: userContent }],
         })
@@ -10382,6 +10403,17 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       } catch (e) {
         console.log('[ops-api] make-safe extraction failed:', (e as Error).message)
       }
+    }
+
+    const mergedPortalLinks = _mergeDeterministicAndClaudeLinks(deterministicPortalLinks, extraction)
+    if (mergedPortalLinks.length) {
+      extraction.portal_links = mergedPortalLinks
+      extraction.portal_link = extraction.portal_link || mergedPortalLinks[0]?.url || null
+    }
+    if (builderEmailTextForTrade) {
+      extraction.builder_email_text_for_trade = builderEmailTextForTrade
+      extraction.builder_email_subject = subject || null
+      extraction.builder_email_received_at = msg.receivedDateTime || null
     }
 
     // Skip if not actually a work order (Haiku hint)
@@ -10593,7 +10625,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     let draftStatus: string
     let draftReportType: string | null = null
     if (tagReportType) {
-      draftReportType = _classifyReportType(subject, bodyPreview)
+      draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
     }
     if (isReportCapture) {
       draftStatus = 'needs_review'
@@ -14962,7 +14994,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
 
   const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes] = await Promise.all([
     client.from('jobs')
-      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, ghl_opportunity_id, ghl_contact_id')
+      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, ghl_opportunity_id, ghl_contact_id, metadata')
       .eq('id', jobId).single(),
     client.from('job_documents')
       .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
@@ -15017,14 +15049,22 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
         .select('*, makesafe_companies:requesting_company_id(*)')
         .eq('job_id', jobId)
         .maybeSingle()
-      makesafeDetails = ms || null
+      const jobMetadata = parseJsonObject(jobRes.data?.metadata)
+      makesafeDetails = ms ? {
+        ...ms,
+        builder_email_text_for_trade: jobMetadata.builder_email_text_for_trade || null,
+        builder_email_subject: jobMetadata.builder_email_subject || null,
+        builder_email_received_at: jobMetadata.builder_email_received_at || null,
+      } : null
     } catch (e) {
       console.log('[ops-api] trade makesafe details fetch skipped:', (e as Error).message)
     }
   }
 
+  const { metadata: _tradeJobMetadata, ...tradeSafeJob } = jobRes.data || {}
+
   return {
-    job: jobRes.data,
+    job: tradeSafeJob,
     documents: docsRes.data || [],
     media: mediaRes.data || [],
     notes: eventsRes.data || [],
