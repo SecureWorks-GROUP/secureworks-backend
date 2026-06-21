@@ -652,6 +652,98 @@ Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", 
   assertStringIncludes(revised.change_summary, "11 x $13.50");
 });
 
+Deno.test("MLB temp-fence placeholder removal applies hire card from evidence", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "SWMS-26655 / MLB-25096",
+      address: "7 Broughton St",
+      billing_note: "2 trades x 3 hours",
+      scope: "Temporary fencing make-safe.",
+      works:
+        "Put up 1 temp fence panel to close gap and secured it with 2 star pickets.",
+      materials: "Temp fence panels x 1, Star picket x 2",
+    },
+    invoice: {
+      reference: "SWMS-26655 / MLB-25096",
+      contact_name: "ML Builders",
+      line_items: [{
+        description: "Make-safe labour",
+        quantity: 6,
+        unit_price: 85,
+      }, {
+        description:
+          "Materials placeholder - temp fence panel and star pickets",
+        quantity: 1,
+        unit_price: 1,
+      }],
+    },
+    change_summary: "Removed the $1 placeholder.",
+  });
+
+  const revised = applyDraftPackFeedbackOverrides(output, {
+    job: { site_suburb: "Balcatta" },
+    detail: {
+      external_ref: "MLB-25096",
+      requesting_company_name: "ML Builders",
+    },
+    service_report: {
+      checklist_json: {
+        job_type: "Temporary fencing",
+        materials_used: ["Temp fence panels x 1", "Star picket x 2"],
+      },
+    },
+    feedback_notes: [{
+      role: "human",
+      body: "shouldnt be that $1 on the invoice. remove that and we good to go",
+    }],
+  });
+
+  assertEquals(
+    revised.invoice.line_items.some((line) => line.unit_price <= 1.01),
+    false,
+  );
+  assertEquals(revised.invoice.line_items.length, 5);
+  assertEquals(
+    revised.invoice.line_items.some((line) =>
+      /retrieval/.test(line.description) && line.quantity === 2 &&
+      line.unit_price === 90
+    ),
+    true,
+  );
+  assertEquals(
+    revised.invoice.line_items.some((line) =>
+      /temporary fence hire/i.test(line.description) &&
+      line.quantity === 12 && line.unit_price === 5
+    ),
+    true,
+  );
+  assertEquals(
+    revised.invoice.line_items.some((line) =>
+      /star pickets/i.test(line.description) && line.quantity === 2 &&
+      line.unit_price === 13.5
+    ),
+    true,
+  );
+  const verification = verifyDraftPackOutput(revised, {
+    job: { site_suburb: "Balcatta" },
+    detail: {
+      external_ref: "MLB-25096",
+      requesting_company_name: "ML Builders",
+    },
+    service_report: {
+      checklist_json: {
+        job_type: "Temporary fencing",
+        materials_used: ["Temp fence panels x 1", "Star picket x 2"],
+      },
+    },
+    feedback_notes: [{
+      role: "human",
+      body: "shouldnt be that $1 on the invoice. remove that and we good to go",
+    }],
+  });
+  assertEquals(verification.ok, true);
+});
+
 Deno.test("AJS temp-fence defaults to labour-only unless sale evidence is explicit", () => {
   const output = normaliseDraftPackOutput({
     report: {

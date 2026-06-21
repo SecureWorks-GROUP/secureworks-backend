@@ -13060,17 +13060,18 @@ async function updateInvoice(client: any, body: any) {
   if (!line_items || !Array.isArray(line_items) || line_items.length === 0) {
     throw new ApiError('line_items required (array of {description, quantity, unit_price})', 400)
   }
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   // ── REPORT-JOB $0 GATE ──
   // Mirror the create_invoice / complete_and_invoice guards: a report-type make-safe
   // job must always carry a non-zero charge. An edit that zeroes out the total is
   // rejected here before it reaches Xero. Normal (non-report) jobs are unaffected.
   {
-    const { data: invForGate } = await client.from('xero_invoices')
+    const { data: invForGate } = await adminClient.from('xero_invoices')
       .select('job_id').eq('xero_invoice_id', xero_invoice_id).maybeSingle()
     const jIdForGate = invForGate?.job_id
     if (jIdForGate) {
-      const { data: msGateDetail } = await client.from('makesafe_job_details')
+      const { data: msGateDetail } = await adminClient.from('makesafe_job_details')
         .select('report_type').eq('job_id', jIdForGate).maybeSingle()
       if (msGateDetail?.report_type) {
         const lineTotal = (line_items as Array<{ quantity?: number; unit_price?: number }>)
@@ -13095,7 +13096,7 @@ async function updateInvoice(client: any, body: any) {
   // skip if Xero returns nothing or throws).
   let updateTracking: any[] = []
   try {
-    const { data: invForTracking } = await client.from('xero_invoices')
+    const { data: invForTracking } = await adminClient.from('xero_invoices')
       .select('reference')
       .eq('xero_invoice_id', xero_invoice_id)
       .maybeSingle()
@@ -13133,16 +13134,34 @@ async function updateInvoice(client: any, body: any) {
   const xeroInvoice = result?.Invoices?.[0]
   if (!xeroInvoice) throw new Error('Xero did not return an updated invoice')
 
-  // Update local cache
-  await client.from('xero_invoices').update({
-    line_items: xeroInvoice.LineItems,
-    sub_total: xeroInvoice.SubTotal,
-    total_tax: xeroInvoice.TotalTax,
-    total: xeroInvoice.Total,
-    amount_due: xeroInvoice.AmountDue,
-    due_date: xeroInvoice.DueDate,
+  const lineSubtotal = (line_items as Array<{ quantity?: number; unit_price?: number }>).reduce((sum, li) => {
+    const qty = Number(li.quantity ?? 1)
+    const unit = Number(li.unit_price ?? 0)
+    return sum + (Number.isFinite(qty) && Number.isFinite(unit) ? qty * unit : 0)
+  }, 0)
+  const money = (value: any, fallback: number) => {
+    const n = Number(value)
+    return Number.isFinite(n) ? n : Math.round(fallback * 100) / 100
+  }
+  const cacheSubtotal = money(xeroInvoice.SubTotal, lineSubtotal)
+  const cacheTax = money(xeroInvoice.TotalTax, cacheSubtotal * 0.1)
+  const cacheTotal = money(xeroInvoice.Total, cacheSubtotal + cacheTax)
+  const cacheAmountDue = money(xeroInvoice.AmountDue, cacheTotal - money(xeroInvoice.AmountPaid, 0))
+
+  // Update local cache with service-role privileges. API-key/JWT callers can edit
+  // Xero, but RLS may block xero_invoices writes; failing silently leaves the
+  // board showing a stale amount even though Xero and the attached PDF are fixed.
+  const { error: cacheErr } = await adminClient.from('xero_invoices').update({
+    line_items: xeroInvoice.LineItems || payload.LineItems,
+    sub_total: cacheSubtotal,
+    total_tax: cacheTax,
+    total: cacheTotal,
+    amount_due: cacheAmountDue,
+    due_date: xeroInvoice.DueDateString || xeroInvoice.DueDate || due_date || null,
+    raw_json: xeroInvoice,
     updated_at: new Date().toISOString(),
   }).eq('xero_invoice_id', xero_invoice_id)
+  if (cacheErr) throw new ApiError('update_invoice cache update failed: ' + cacheErr.message, 500)
 
   // Resend email if requested
   if (resend_email) {
@@ -13154,13 +13173,13 @@ async function updateInvoice(client: any, body: any) {
   }
 
   // Log job event
-  const { data: invRecord } = await client.from('xero_invoices')
+  const { data: invRecord } = await adminClient.from('xero_invoices')
     .select('job_id, invoice_number')
     .eq('xero_invoice_id', xero_invoice_id)
     .maybeSingle()
 
   if (invRecord?.job_id) {
-    await client.from('job_events').insert({
+    await adminClient.from('job_events').insert({
       job_id: invRecord.job_id,
       event_type: 'invoice_updated',
       detail_json: {
@@ -16523,6 +16542,45 @@ async function attachMakesafeDocument(client: any, body: any) {
 // MakeSafe Reporting Autopilot (Wave 2) — draft invoice, render report, send pack
 // ════════════════════════════════════════════════════════════════════════════
 
+type MakesafeReportPhotoCandidate = {
+  url?: string | null
+  storage_url?: string | null
+  thumbnail_url?: string | null
+  label?: string | null
+  taken_at?: string | null
+  created_at?: string | null
+}
+
+function selectMakesafeReportPhotosForReport<T extends MakesafeReportPhotoCandidate>(
+  photos: T[],
+  limit = 8,
+): T[] {
+  const clean = (photos || []).filter((p: any) => p?.url || p?.storage_url || p?.thumbnail_url)
+  const cap = Math.max(0, Math.min(8, Math.floor(Number(limit) || 8)))
+  if (cap === 0) return []
+  if (clean.length <= cap) return clean.slice(0, cap)
+
+  // Field uploads are chronological: early shots carry address/damage context,
+  // late shots usually prove the completed make-safe. The old first-8 cap dropped
+  // photo 9 on 7 Broughton St, which was the clearest temporary fence/star-picket
+  // evidence. Preserve both ends and drop the middle duplicate/materials shots.
+  const headCount = Math.ceil(cap / 2)
+  const tailCount = cap - headCount
+  const out: T[] = []
+  const seen = new Set<string>()
+  const push = (photo: T) => {
+    const key = String(photo.url || photo.storage_url || photo.thumbnail_url || '')
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    out.push(photo)
+  }
+  clean.slice(0, headCount).forEach(push)
+  clean.slice(clean.length - tailCount).forEach(push)
+  return out.slice(0, cap)
+}
+
+export const _selectMakesafeReportPhotosForTest = selectMakesafeReportPhotosForReport
+
 // (3d) makesafe_report_drafts — READ-ONLY feed for the report-draft cockpit.
 // Returns every report-draft-ready job (makesafe_job_details.substatus =
 // 'admin_to_send_report') with the full informed-approve content set: invoice
@@ -16774,7 +16832,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     // The photo follow-up must default to the same photo set the report PDF uses,
     // not every raw/source photo. Persisted selected_photo_urls can be added later;
     // until then the report renderer's deterministic cap is mirrored here.
-    const reportPhotos = photos.slice(0, reportPhotoLimit)
+    const reportPhotos = selectMakesafeReportPhotosForReport(photos, reportPhotoLimit)
 
     // D3 — carousel doc arrays. draft_docs: the artifacts WE produced for this
     // close-out (rendered report PDF, draft invoice PDF, attached SWMS if any).
@@ -17810,17 +17868,19 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
       .select('id, type, file_name, storage_url, pdf_url, version')
       .eq('job_id', jobId),
     client.from('job_media')
-      .select('id, phase, type, storage_url, thumbnail_url, label')
+      .select('id, phase, type, storage_url, thumbnail_url, label, taken_at, created_at')
       .eq('job_id', jobId)
-      .eq('type', 'photo'),
+      .eq('type', 'photo')
+      .order('created_at', { ascending: true }),
     loadDraftNotesThread(client, jobId, draftKind),
   ])
 
   const media = mediaRes.data || []
-  const allPhotoUrls = (media || [])
+  const selectedMedia = selectMakesafeReportPhotosForReport(media || [], 8)
+  const selectedPhotoDefaults = (selectedMedia || [])
     .map((m: any) => m.storage_url || m.thumbnail_url || null)
     .filter(Boolean)
-  const selected = selectedPhotoUrls.length ? selectedPhotoUrls : allPhotoUrls
+  const selected = selectedPhotoUrls.length ? selectedPhotoUrls : selectedPhotoDefaults
 
   return {
     job: jobRes.data || null,
