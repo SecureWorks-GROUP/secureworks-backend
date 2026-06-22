@@ -23,6 +23,7 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import {
   _auditExclusion,
   _classifyPost,
+  _collectFallbackMailboxPosts,
   _collectPosts,
   _decodeJwtRole,
   _DEFAULT_REF_PREFIXES,
@@ -339,6 +340,45 @@ Deno.test("graphGetAll: 429 Retry-After is respected then the page succeeds", as
 function url0() {
   return "throttled-url";
 }
+
+
+Deno.test("fallback mailbox: ses-addressed Prime messages are collected for intake", async () => {
+  const realFetch = globalThis.fetch;
+  const calls: string[] = [];
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).fetch = (url: string) => {
+    calls.push(url);
+    if (url.includes("/users/marnin%40secureworkswa.com.au/mailFolders/inbox/messages")) {
+      return Promise.resolve(pageResponse([{
+        id: "user-msg-26109",
+        internetMessageId: "<prime-26109@example.test>",
+        conversationId: "conv-user-26109",
+        receivedDateTime: new Date().toISOString(),
+        from: { emailAddress: { address: "noreply@notifications.primeeco.tech" } },
+        toRecipients: [{ emailAddress: { address: "ses@secureworkswa.com.au" } }],
+        subject: "NEW WORK ORDER - MLB-26109 49 Shearers Cl, Quedjinup, WA 6281",
+        hasAttachments: true,
+        body: { contentType: "html", content: "Shed make safe attendance required" },
+      }]));
+    }
+    throw new Error("unexpected url " + url);
+  };
+  try {
+    const since = new Date(Date.now() - 60_000).toISOString();
+    const { posts, pages } = await _collectFallbackMailboxPosts("tok", since);
+    assertEquals(pages, 1);
+    assertEquals(posts.length, 1);
+    assertEquals(posts[0].sourceKind, "mailbox_message");
+    assertEquals(posts[0].mailboxAddress, "marnin@secureworkswa.com.au");
+    assertEquals(posts[0].subject, "NEW WORK ORDER - MLB-26109 49 Shearers Cl, Quedjinup, WA 6281");
+    const cls = _classifyPost(posts[0], COMPANIES);
+    assertEquals(cls.include, true);
+    assertEquals(cls.ref, "MLB-26109");
+    assert(calls[0].includes("receivedDateTime%20ge"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
 
 // ── collectPosts: Graph schema fix (subject from THREAD topic, not the post) ───
 // Regression for the live 400: "Could not find a property named 'subject' on type

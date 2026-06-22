@@ -49,7 +49,9 @@ const SW_API_KEY = Deno.env.get("SW_API_KEY") || "";
 // deno-lint-ignore no-explicit-any
 let _testClientFactory: ((url: string, key: string) => any) | null = null;
 // deno-lint-ignore no-explicit-any
-function _setTestClientFactory(f: ((url: string, key: string) => any) | null): void {
+function _setTestClientFactory(
+  f: ((url: string, key: string) => any) | null,
+): void {
   _testClientFactory = f;
 }
 
@@ -112,6 +114,18 @@ const SES_GROUP_MAIL = "ses@secureworkswa.com.au";
 const MAILBOX = SES_GROUP_MAIL; // mailbox key in mail_sync_cursors / sync_state
 const STORAGE_BUCKET = "makesafe-emails";
 const GRAPH = "https://graph.microsoft.com/v1.0";
+// Fallback mailbox scan for M365 group messages that are delivered to a subscribed
+// user mailbox but do not appear in the Groups conversations/posts API. Keep this
+// narrow: only messages addressed to ses@ are accepted, and the lookback is capped
+// so a historical group backfill never walks a personal mailbox forever.
+const FALLBACK_MAILBOXES =
+  (Deno.env.get("MAKESAFE_FALLBACK_MAILBOXES") || "marnin@secureworkswa.com.au")
+    .split(",")
+    .map((m) => m.trim().toLowerCase())
+    .filter(Boolean);
+const FALLBACK_MAX_LOOKBACK_DAYS = Number(
+  Deno.env.get("MAKESAFE_FALLBACK_MAX_LOOKBACK_DAYS") || "14",
+);
 
 // Projection / extractor versions — stamped on pipeline_items for rebuildability.
 const EXTRACTOR_VERSION = "v1";
@@ -155,6 +169,11 @@ interface GraphPost {
   // (toRecipients/ccRecipients live on the THREAD, not the post).
   toRecipients?: GraphFrom[];
   ccRecipients?: GraphFrom[];
+  // Fallback mailbox source metadata (group posts leave these unset).
+  sourceKind?: "group_post" | "mailbox_message";
+  mailboxAddress?: string;
+  rawMessageId?: string;
+  internetMessageId?: string | null;
 }
 
 // GROUP CONVERSATION THREAD (microsoft.graph.conversationThread). These ARE valid
@@ -167,6 +186,20 @@ interface GraphThread {
   hasAttachments?: boolean;
   toRecipients?: GraphFrom[];
   ccRecipients?: GraphFrom[];
+}
+
+interface GraphMailboxMessage {
+  id: string;
+  internetMessageId?: string;
+  conversationId?: string;
+  receivedDateTime?: string;
+  from?: GraphFrom;
+  sender?: GraphFrom;
+  toRecipients?: GraphFrom[];
+  ccRecipients?: GraphFrom[];
+  subject?: string;
+  hasAttachments?: boolean;
+  body?: { contentType?: string; content?: string };
 }
 interface GraphAttachment {
   id?: string;
@@ -227,7 +260,7 @@ async function graphGetAll<T>(
         if (urlRetries >= MAX_429_RETRIES_PER_URL || b.total <= 0) {
           throw new Error(
             `Graph 429 retry budget exhausted for ${url} ` +
-            `(url_retries=${urlRetries}, total_remaining=${b.total})`,
+              `(url_retries=${urlRetries}, total_remaining=${b.total})`,
           );
         }
         urlRetries++;
@@ -238,7 +271,9 @@ async function graphGetAll<T>(
           Math.max(retryAfter, 2 ** urlRetries),
           MAX_BACKOFF_SECONDS,
         );
-        console.log(`[monitor-ses] 429 throttled; backing off ${backoff}s (retry ${urlRetries})`);
+        console.log(
+          `[monitor-ses] 429 throttled; backing off ${backoff}s (retry ${urlRetries})`,
+        );
         await new Promise((r) => setTimeout(r, backoff * 1000));
         continue; // re-fetch same url
       }
@@ -246,11 +281,82 @@ async function graphGetAll<T>(
         const err = await resp.text();
         throw new Error(`Graph GET failed ${resp.status} for ${url}: ${err}`);
       }
-      const data: { value?: T[]; "@odata.nextLink"?: string } = await resp.json();
+      const data: { value?: T[]; "@odata.nextLink"?: string } = await resp
+        .json();
       pages++;
       for (const v of (data.value || [])) values.push(v);
       url = data["@odata.nextLink"] || null;
       break; // move to next page (or exit while if null)
+    }
+  }
+  return { values, pages };
+}
+
+// Conversation pages are ordered newest-first. Unlike graphGetAll, this helper
+// stops as soon as a page reaches conversations older than the requested window.
+// The previous all-page drain made a */5 poll walk the whole group history before
+// filtering posts, which can timeout and delay new work orders.
+async function graphGetConversationsSince(
+  firstUrl: string,
+  token: string,
+  sinceIso: string,
+  budget?: { total: number },
+): Promise<
+  {
+    values: Array<{ id: string; lastDeliveredDateTime?: string }>;
+    pages: number;
+  }
+> {
+  const b = budget ?? { total: MAX_429_RETRIES_TOTAL };
+  const values: Array<{ id: string; lastDeliveredDateTime?: string }> = [];
+  let url: string | null = firstUrl;
+  let pages = 0;
+  let stop = false;
+  while (url && !stop) {
+    let urlRetries = 0;
+    for (;;) {
+      const resp: Response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (resp.status === 429) {
+        if (urlRetries >= MAX_429_RETRIES_PER_URL || b.total <= 0) {
+          throw new Error(
+            `Graph 429 retry budget exhausted for ${url} ` +
+              `(url_retries=${urlRetries}, total_remaining=${b.total})`,
+          );
+        }
+        urlRetries++;
+        b.total--;
+        const retryAfter = Number(resp.headers.get("Retry-After") || "5");
+        const backoff = Math.min(
+          Math.max(retryAfter, 2 ** urlRetries),
+          MAX_BACKOFF_SECONDS,
+        );
+        console.log(
+          `[monitor-ses] 429 throttled; backing off ${backoff}s (retry ${urlRetries})`,
+        );
+        await new Promise((r) => setTimeout(r, backoff * 1000));
+        continue;
+      }
+      if (!resp.ok) {
+        const err = await resp.text();
+        throw new Error(`Graph GET failed ${resp.status} for ${url}: ${err}`);
+      }
+      const data: {
+        value?: Array<{ id: string; lastDeliveredDateTime?: string }>;
+        "@odata.nextLink"?: string;
+      } = await resp.json();
+      pages++;
+      for (const conv of (data.value || [])) {
+        const delivered = conv.lastDeliveredDateTime || "";
+        if (delivered && delivered < sinceIso) {
+          stop = true;
+          break;
+        }
+        values.push(conv);
+      }
+      url = stop ? null : (data["@odata.nextLink"] || null);
+      break;
     }
   }
   return { values, pages };
@@ -356,9 +462,15 @@ function classifyPost(
   // company's parsing_rules.ref_prefixes). Defaults to the floor so pure callers
   // / tests still recognise MLB/AJBR/MS without wiring the company set.
   prefixes: readonly string[] = DEFAULT_REF_PREFIXES,
-): { include: boolean; reason: string; ref: string | null; company: CompanyPattern | null } {
+): {
+  include: boolean;
+  reason: string;
+  ref: string | null;
+  company: CompanyPattern | null;
+} {
   const fromEmail =
-    (post.from?.emailAddress?.address || post.sender?.emailAddress?.address || "")
+    (post.from?.emailAddress?.address || post.sender?.emailAddress?.address ||
+      "")
       .toLowerCase();
   const subject = post.subject || "";
 
@@ -382,7 +494,12 @@ function classifyPost(
   const ref = extractRef(subject, body, prefixes);
 
   if (matchedCompany) {
-    return { include: true, reason: `sender:${matchedCompany.slug}`, ref, company: matchedCompany };
+    return {
+      include: true,
+      reason: `sender:${matchedCompany.slug}`,
+      ref,
+      company: matchedCompany,
+    };
   }
   if (subjectRefMatch) {
     return { include: true, reason: "subject_ref", ref, company: null };
@@ -461,38 +578,65 @@ async function processAttachments(
 ): Promise<number> {
   if (!post.hasAttachments) return 0;
 
-  // Fetch the post's attachments via $expand=attachments on the post itself.
-  // IMPORTANT (root cause of the 75/75 live failure): the direct sub-resource list
-  // `GET /groups/{id}/threads/{tid}/posts/{pid}/attachments` is DELEGATED-ONLY in
-  // Graph v1.0 — it is NOT supported for Application (client_credentials) tokens,
-  // which is what _shared/graph_client.ts mints, so it 4xxs for every group post.
-  // `GET .../posts/{pid}?$expand=attachments` IS app-only supported and returns the
-  // SAME fileAttachment objects with inline contentBytes, so the per-attachment
-  // loop below is unchanged. On failure we record the REAL Graph status/body — the
-  // old opaque "attachment_list_fetch_failed" label hid it and made this
-  // undiagnosable. (Make-safe WO emails carry a handful of PDFs; $expand returns
-  // them all for a single post — no pagination needed at this volume.)
-  const expandUrl =
-    `${GRAPH}/groups/${groupId}/threads/${post.conversationThreadId}/posts/${post.id}?$expand=attachments`;
   let attachments: GraphAttachment[] = [];
   let listOk = false;
   let fetchError = "";
   try {
-    const resp = await fetch(expandUrl, { headers: { Authorization: `Bearer ${token}` } });
-    if (!resp.ok) {
-      const body = await resp.text();
-      throw new Error(`Graph GET failed ${resp.status} for ${expandUrl}: ${body.slice(0, 300)}`);
+    if (post.sourceKind === "mailbox_message") {
+      if (!post.mailboxAddress || !post.rawMessageId) {
+        throw new Error(
+          "mailbox fallback post missing mailboxAddress/rawMessageId",
+        );
+      }
+      const mailbox = encodeURIComponent(post.mailboxAddress);
+      const messageId = encodeURIComponent(post.rawMessageId);
+      const listUrl =
+        `${GRAPH}/users/${mailbox}/messages/${messageId}/attachments`;
+      const resp = await fetch(listUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        const body = await resp.text();
+        throw new Error(
+          `Graph GET failed ${resp.status} for ${listUrl}: ${
+            body.slice(0, 300)
+          }`,
+        );
+      }
+      const data = await resp.json() as { value?: GraphAttachment[] };
+      attachments = data.value || [];
+      listOk = true;
+      console.log(
+        `[monitor-ses] mailbox message ${post.id}: ${attachments.length} attachments`,
+      );
+    } else {
+      // Fetch the group post's attachments via $expand=attachments on the post itself.
+      // IMPORTANT: the direct group post attachments sub-resource is delegated-only;
+      // the $expand path works with this app-only token.
+      const expandUrl =
+        `${GRAPH}/groups/${groupId}/threads/${post.conversationThreadId}/posts/${post.id}?$expand=attachments`;
+      const resp = await fetch(expandUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        const body = await resp.text();
+        throw new Error(
+          `Graph GET failed ${resp.status} for ${expandUrl}: ${
+            body.slice(0, 300)
+          }`,
+        );
+      }
+      const data = await resp.json() as { attachments?: GraphAttachment[] };
+      attachments = data.attachments || [];
+      listOk = true;
+      console.log(
+        `[monitor-ses] post ${post.id}: ${attachments.length} attachments (expand)`,
+      );
     }
-    const data = await resp.json() as { attachments?: GraphAttachment[] };
-    attachments = data.attachments || [];
-    listOk = true;
-    console.log(
-      `[monitor-ses] post ${post.id}: ${attachments.length} attachments (expand)`,
-    );
   } catch (e) {
     fetchError = (e as Error).message;
     console.error(
-      `[monitor-ses] attachment expand fetch failed for ${post.id}: ${fetchError}`,
+      `[monitor-ses] attachment fetch failed for ${post.id}: ${fetchError}`,
     );
   }
 
@@ -503,7 +647,10 @@ async function processAttachments(
     // REAL Graph status/body for diagnosis.
     const synthetic = "_list_fetch_failed";
     const attempts = (await priorAttempts(sb, post.id, synthetic)) + 1;
-    const realErr = `attachment_list_fetch_failed: ${fetchError}`.slice(0, 1000);
+    const realErr = `attachment_list_fetch_failed: ${fetchError}`.slice(
+      0,
+      1000,
+    );
     const { error } = await upsertAttachmentRow(sb, {
       email_id: post.id,
       graph_attachment_id: synthetic,
@@ -523,7 +670,7 @@ async function processAttachments(
       // (the same window is retried next cycle). Never a no-record continue.
       throw new Error(
         `attachment expand fetch failed AND failed-placeholder upsert failed for ${post.id}: ` +
-        `fetch_error=${fetchError}; upsert_error=${error.message}`,
+          `fetch_error=${fetchError}; upsert_error=${error.message}`,
       );
     }
     return 1;
@@ -604,7 +751,9 @@ async function processAttachments(
         updated_at: new Date().toISOString(),
       });
       if (error) {
-        throw new Error(`needs_review attachment upsert failed for ${post.id}/${gaid}: ${error.message}`);
+        throw new Error(
+          `needs_review attachment upsert failed for ${post.id}/${gaid}: ${error.message}`,
+        );
       }
       unresolved++;
       // TODO(Phase 2): emit Telegram needs_review alert for this attachment.
@@ -627,12 +776,16 @@ async function processAttachments(
         size_bytes: att.size || null,
         status: "skipped",
         attachment_kind: isInline ? "inline" : "fileAttachment",
-        last_error: isInline ? "inline_attachment_skipped" : "non_pdf_file_attachment_skipped",
+        last_error: isInline
+          ? "inline_attachment_skipped"
+          : "non_pdf_file_attachment_skipped",
         attempts,
         updated_at: new Date().toISOString(),
       });
       if (error) {
-        throw new Error(`skipped(non-pdf) upsert failed for ${post.id}/${gaid}: ${error.message}`);
+        throw new Error(
+          `skipped(non-pdf) upsert failed for ${post.id}/${gaid}: ${error.message}`,
+        );
       }
       continue; // resolved-as-skipped: NOT unresolved
     }
@@ -658,7 +811,9 @@ async function processAttachments(
         updated_at: new Date().toISOString(),
       });
       if (error) {
-        throw new Error(`pdf-no-bytes upsert failed for ${post.id}/${gaid}: ${error.message}`);
+        throw new Error(
+          `pdf-no-bytes upsert failed for ${post.id}/${gaid}: ${error.message}`,
+        );
       }
       unresolved++;
       continue;
@@ -683,7 +838,9 @@ async function processAttachments(
         updated_at: new Date().toISOString(),
       });
       if (error) {
-        throw new Error(`pdf-oversize upsert failed for ${post.id}/${gaid}: ${error.message}`);
+        throw new Error(
+          `pdf-oversize upsert failed for ${post.id}/${gaid}: ${error.message}`,
+        );
       }
       unresolved++;
       continue;
@@ -694,12 +851,26 @@ async function processAttachments(
     try {
       bytes = b64ToBytes(att.contentBytes);
     } catch {
-      await markAttachmentFailed(sb, post.id, att, gaid, attempts, "base64_decode_failed");
+      await markAttachmentFailed(
+        sb,
+        post.id,
+        att,
+        gaid,
+        attempts,
+        "base64_decode_failed",
+      );
       unresolved++;
       continue;
     }
     if (!isPdfMagic(bytes)) {
-      await markAttachmentFailed(sb, post.id, att, gaid, attempts, "pdf_magic_byte_validation_failed");
+      await markAttachmentFailed(
+        sb,
+        post.id,
+        att,
+        gaid,
+        attempts,
+        "pdf_magic_byte_validation_failed",
+      );
       unresolved++;
       continue;
     }
@@ -718,13 +889,26 @@ async function processAttachments(
 
     // One Storage object per (email, sha). Path includes sha so identical bytes
     // re-uploaded are byte-identical and upsert is a no-op.
-    const safeName = (att.name || "work-order.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
+    const safeName = (att.name || "work-order.pdf").replace(
+      /[^a-zA-Z0-9._-]/g,
+      "_",
+    );
     const storagePath = `${post.id}/${sha}_${safeName}`;
     const { error: upErr } = await sb.storage
       .from(STORAGE_BUCKET)
-      .upload(storagePath, bytes, { contentType: "application/pdf", upsert: true });
+      .upload(storagePath, bytes, {
+        contentType: "application/pdf",
+        upsert: true,
+      });
     if (upErr) {
-      await markAttachmentFailed(sb, post.id, att, gaid, attempts, `storage_upload_failed:${upErr.message}`);
+      await markAttachmentFailed(
+        sb,
+        post.id,
+        att,
+        gaid,
+        attempts,
+        `storage_upload_failed:${upErr.message}`,
+      );
       unresolved++;
       continue;
     }
@@ -747,17 +931,34 @@ async function processAttachments(
       // M4 — the bytes uploaded but the row write failed -> an orphaned Storage
       // object with no tracking row. Delete the object we just wrote, then mark
       // the row failed so the retry worker re-attempts cleanly.
-      console.error(`[monitor-ses] attachment row upsert failed for ${post.id}/${gaid}: ${rowErr.message}; deleting orphaned object`);
+      console.error(
+        `[monitor-ses] attachment row upsert failed for ${post.id}/${gaid}: ${rowErr.message}; deleting orphaned object`,
+      );
       try {
         await sb.storage.from(STORAGE_BUCKET).remove([storagePath]);
       } catch (e) {
-        console.error(`[monitor-ses] orphan cleanup failed for ${storagePath}: ${(e as Error).message}`);
+        console.error(
+          `[monitor-ses] orphan cleanup failed for ${storagePath}: ${
+            (e as Error).message
+          }`,
+        );
       }
-      await markAttachmentFailed(sb, post.id, att, gaid, attempts, `row_upsert_failed:${rowErr.message}`);
+      await markAttachmentFailed(
+        sb,
+        post.id,
+        att,
+        gaid,
+        attempts,
+        `row_upsert_failed:${rowErr.message}`,
+      );
       unresolved++;
       continue;
     }
-    console.log(`[monitor-ses] stored attachment for post ${post.id} (sha ${sha.slice(0, 12)}…)`);
+    console.log(
+      `[monitor-ses] stored attachment for post ${post.id} (sha ${
+        sha.slice(0, 12)
+      }…)`,
+    );
   }
 
   // Supersede stale synthetic placeholders. We reached here only when the list
@@ -769,7 +970,10 @@ async function processAttachments(
   const { error: supersedeErr } = await sb.from("email_attachments")
     .delete()
     .eq("email_id", post.id)
-    .in("graph_attachment_id", ["_list_fetch_failed", "_hasattachments_true_empty_list"]);
+    .in("graph_attachment_id", [
+      "_list_fetch_failed",
+      "_hasattachments_true_empty_list",
+    ]);
   if (supersedeErr) {
     console.error(
       `[monitor-ses] stale-placeholder supersede failed for ${post.id}: ${supersedeErr.message}`,
@@ -802,7 +1006,9 @@ async function markAttachmentFailed(
     updated_at: new Date().toISOString(),
   });
   if (error) {
-    throw new Error(`markAttachmentFailed upsert failed for ${emailId}/${graphAttachmentId}: ${error.message}`);
+    throw new Error(
+      `markAttachmentFailed upsert failed for ${emailId}/${graphAttachmentId}: ${error.message}`,
+    );
   }
 }
 
@@ -822,7 +1028,11 @@ async function matchTargetJob(
     .ilike("external_ref", ref)
     .limit(2);
   if (data && data.length === 1 && (data[0] as { job_id?: string }).job_id) {
-    return { jobId: (data[0] as { job_id: string }).job_id, score: 1, method: "exact_external_ref" };
+    return {
+      jobId: (data[0] as { job_id: string }).job_id,
+      score: 1,
+      method: "exact_external_ref",
+    };
   }
   // TODO(Phase 2): normalised candidate match with sender/date corroboration.
   return { jobId: null, score: 0, method: "no_exact_match" };
@@ -849,7 +1059,10 @@ async function persistPost(
   const bodyType = post.body?.contentType || null;
   const receivedAt = post.receivedDateTime || post.createdDateTime || null;
   const bodyPreview = bodyContent
-    ? bodyContent.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 500)
+    ? bodyContent.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(
+      0,
+      500,
+    )
     : null;
 
   // Envelope fingerprint (NON-PII): hash of stable identity fields only.
@@ -861,10 +1074,10 @@ async function persistPost(
   const { error: emailErr } = await sb.from("emails").upsert({
     post_id: post.id,
     mailbox: MAILBOX,
-    // Group posts (microsoft.graph.post) do NOT expose internetMessageId — it is not
-    // a valid Post property. Dedup is on post.id (post_id is the ON CONFLICT key); the
-    // emails.internet_message_id partial-unique index is disabled and tolerates null.
-    internet_message_id: null,
+    // Group posts do not expose internetMessageId; mailbox fallback messages do.
+    // Dedup remains on post.id, with internet_message_id retained when available
+    // for operator traceability across mailbox/group projections.
+    internet_message_id: post.internetMessageId || null,
     conversation_id: post.conversationId || null,
     thread_id: post.conversationThreadId || null,
     from_email: fromEmail,
@@ -896,29 +1109,36 @@ async function persistPost(
   // key: if an equivalent row already exists, REUSE its id instead of inserting a new
   // one. (The append-only contract is preserved for genuinely distinct events — the
   // D2 'inventory_scan' rows are a different change_type and are never deduped here.)
-  const { data: existingEvent, error: existingEvErr } = await sb.from("email_events_raw")
+  const { data: existingEvent, error: existingEvErr } = await sb.from(
+    "email_events_raw",
+  )
     .select("id")
     .eq("post_id", post.id)
     .eq("change_type", "created")
     .maybeSingle();
   if (existingEvErr) {
-    throw new Error(`email_events_raw dedupe read failed for ${post.id}: ${existingEvErr.message}`);
+    throw new Error(
+      `email_events_raw dedupe read failed for ${post.id}: ${existingEvErr.message}`,
+    );
   }
   let eventId = (existingEvent as { id?: string } | null)?.id || null;
   if (!eventId) {
-    const { data: eventRow, error: evErr } = await sb.from("email_events_raw").insert({
-      mailbox: MAILBOX,
-      post_id: post.id,
-      change_type: "created",
-      received_at: receivedAt,
-      content_sha256: contentSha,
-      extracted_ref: cls.ref,
-      conversation_id: post.conversationId || null,
-      thread_id: post.conversationThreadId || null,
-      page_meta: {},
-    }).select("id").single();
+    const { data: eventRow, error: evErr } = await sb.from("email_events_raw")
+      .insert({
+        mailbox: MAILBOX,
+        post_id: post.id,
+        change_type: "created",
+        received_at: receivedAt,
+        content_sha256: contentSha,
+        extracted_ref: cls.ref,
+        conversation_id: post.conversationId || null,
+        thread_id: post.conversationThreadId || null,
+        page_meta: {},
+      }).select("id").single();
     if (evErr) {
-      throw new Error(`email_events_raw insert failed for ${post.id}: ${evErr.message}`);
+      throw new Error(
+        `email_events_raw insert failed for ${post.id}: ${evErr.message}`,
+      );
     }
     eventId = (eventRow as { id?: string } | null)?.id || null;
   }
@@ -943,7 +1163,9 @@ async function persistPost(
       .eq("ref", cls.ref)
       .maybeSingle();
     if (exReadErr) {
-      throw new Error(`pipeline_items read failed for ${cls.ref}: ${exReadErr.message}`);
+      throw new Error(
+        `pipeline_items read failed for ${cls.ref}: ${exReadErr.message}`,
+      );
     }
     const ex = (existing || {}) as {
       attachment_refs?: string[];
@@ -975,7 +1197,9 @@ async function persistPost(
     if (piErr) {
       // B2/M2-adjacent: a failed projection write must not let the watermark
       // advance silently. Throw to abort before cursor commit.
-      throw new Error(`pipeline_items upsert failed for ${cls.ref}: ${piErr.message}`);
+      throw new Error(
+        `pipeline_items upsert failed for ${cls.ref}: ${piErr.message}`,
+      );
     }
   }
 
@@ -990,7 +1214,9 @@ async function persistPost(
     .update({ attachments_settled: true, updated_at: new Date().toISOString() })
     .eq("post_id", post.id);
   if (settledErr) {
-    throw new Error(`attachments_settled marker write failed for ${post.id}: ${settledErr.message}`);
+    throw new Error(
+      `attachments_settled marker write failed for ${post.id}: ${settledErr.message}`,
+    );
   }
 
   return unresolved;
@@ -1011,7 +1237,9 @@ async function auditExclusion(
   const fromEmail = post.from?.emailAddress?.address ||
     post.sender?.emailAddress?.address || null;
   const fromDomain = parseSenderDomain(fromEmail);
-  const fromEmailHash = fromEmail ? await sha256Hex(fromEmail.toLowerCase()) : null;
+  const fromEmailHash = fromEmail
+    ? await sha256Hex(fromEmail.toLowerCase())
+    : null;
   const subjectHash = post.subject ? await sha256Hex(post.subject) : null;
 
   // B3 — the exclusion audit write is REQUIRED. If it fails, throw so the caller
@@ -1024,13 +1252,17 @@ async function auditExclusion(
   // insert if an equivalent row already exists. (The classifier-exclusions row below
   // already upserts ON CONFLICT(post_id), so it was idempotent; this closes the gap
   // on the event-log side.)
-  const { data: existingExcl, error: existingExclErr } = await sb.from("email_events_raw")
+  const { data: existingExcl, error: existingExclErr } = await sb.from(
+    "email_events_raw",
+  )
     .select("id")
     .eq("post_id", post.id)
     .eq("change_type", "excluded")
     .maybeSingle();
   if (existingExclErr) {
-    throw new Error(`exclusion event dedupe read failed for ${post.id}: ${existingExclErr.message}`);
+    throw new Error(
+      `exclusion event dedupe read failed for ${post.id}: ${existingExclErr.message}`,
+    );
   }
   if (!existingExcl) {
     const { error: evErr } = await sb.from("email_events_raw").insert({
@@ -1044,7 +1276,9 @@ async function auditExclusion(
       page_meta: {},
     });
     if (evErr) {
-      throw new Error(`exclusion event insert failed for ${post.id}: ${evErr.message}`);
+      throw new Error(
+        `exclusion event insert failed for ${post.id}: ${evErr.message}`,
+      );
     }
   }
   const { error: exErr } = await sb.from("email_classifier_exclusions").upsert({
@@ -1056,7 +1290,9 @@ async function auditExclusion(
     exclusion_reason: reason,
   }, { onConflict: "post_id" });
   if (exErr) {
-    throw new Error(`exclusion row upsert failed for ${post.id}: ${exErr.message}`);
+    throw new Error(
+      `exclusion row upsert failed for ${post.id}: ${exErr.message}`,
+    );
   }
 }
 
@@ -1094,7 +1330,12 @@ async function loadCompanyPatterns(
   const patterns: CompanyPattern[] = [];
   for (
     const co of (companies || []) as Array<
-      { slug: string; name: string; sender_patterns: string[]; parsing_rules?: unknown }
+      {
+        slug: string;
+        name: string;
+        sender_patterns: string[];
+        parsing_rules?: unknown;
+      }
     >
   ) {
     for (const p of (co.sender_patterns || [])) {
@@ -1109,6 +1350,88 @@ async function loadCompanyPatterns(
   return { patterns, refPrefixes };
 }
 
+function isAddressedToSes(
+  msg: { toRecipients?: GraphFrom[]; ccRecipients?: GraphFrom[] },
+): boolean {
+  const recipients = [...(msg.toRecipients || []), ...(msg.ccRecipients || [])];
+  return recipients.some((r) =>
+    (r.emailAddress?.address || "").trim().toLowerCase() === SES_GROUP_MAIL
+  );
+}
+
+function fallbackSinceIso(requestedSinceIso: string): string {
+  if (
+    !Number.isFinite(FALLBACK_MAX_LOOKBACK_DAYS) ||
+    FALLBACK_MAX_LOOKBACK_DAYS <= 0
+  ) {
+    return requestedSinceIso;
+  }
+  const cap = new Date(Date.now() - FALLBACK_MAX_LOOKBACK_DAYS * 86_400_000)
+    .toISOString();
+  return requestedSinceIso < cap ? cap : requestedSinceIso;
+}
+
+async function mailboxPostId(
+  mailbox: string,
+  msg: GraphMailboxMessage,
+): Promise<string> {
+  const stable = msg.internetMessageId || msg.id;
+  return `mailbox_${await sha256Hex(`${mailbox}|${stable}`)}`;
+}
+
+async function collectFallbackMailboxPosts(
+  token: string,
+  sinceIso: string,
+): Promise<{ posts: GraphPost[]; pages: number }> {
+  const posts: GraphPost[] = [];
+  let pages = 0;
+  if (!FALLBACK_MAILBOXES.length) return { posts, pages };
+
+  const effectiveSince = fallbackSinceIso(sinceIso);
+  // Do not use a subscribed personal mailbox as a historical backfill source.
+  // If the requested group window is older than the fallback cap, skip fallback
+  // entirely instead of silently changing the claimed coverage floor.
+  if (effectiveSince !== sinceIso) return { posts, pages };
+
+  for (const mailbox of FALLBACK_MAILBOXES) {
+    const encodedMailbox = encodeURIComponent(mailbox);
+    const firstUrl =
+      `${GRAPH}/users/${encodedMailbox}/mailFolders/inbox/messages` +
+      `?$filter=${
+        encodeURIComponent(`receivedDateTime ge ${effectiveSince}`)
+      }` +
+      `&$top=50` +
+      `&$select=id,internetMessageId,conversationId,receivedDateTime,from,sender,toRecipients,ccRecipients,subject,hasAttachments,body` +
+      `&$orderby=receivedDateTime desc`;
+    const result = await graphGetAll<GraphMailboxMessage>(firstUrl, token);
+    pages += result.pages;
+
+    for (const msg of result.values) {
+      if (!isAddressedToSes(msg)) continue;
+      const received = msg.receivedDateTime || null;
+      if (!received || received < effectiveSince) continue;
+      posts.push({
+        id: await mailboxPostId(mailbox, msg),
+        conversationId: msg.conversationId || undefined,
+        conversationThreadId: msg.conversationId || undefined,
+        receivedDateTime: msg.receivedDateTime,
+        from: msg.from,
+        sender: msg.sender,
+        subject: msg.subject || "",
+        hasAttachments: msg.hasAttachments || false,
+        body: msg.body,
+        toRecipients: msg.toRecipients,
+        ccRecipients: msg.ccRecipients,
+        sourceKind: "mailbox_message",
+        mailboxAddress: mailbox,
+        rawMessageId: msg.id,
+        internetMessageId: msg.internetMessageId || null,
+      });
+    }
+  }
+  return { posts, pages };
+}
+
 // ════════════════════════════════════════════════════════════
 // Full traversal: conversations -> threads -> posts, @odata.nextLink exhausted
 // at every level. Returns all posts within the overlapping window + page counts.
@@ -1117,7 +1440,12 @@ async function collectPosts(
   token: string,
   groupId: string,
   sinceIso: string,
-): Promise<{ posts: GraphPost[]; pageCounts: { conversations: number; threads: number; posts: number } }> {
+): Promise<
+  {
+    posts: GraphPost[];
+    pageCounts: { conversations: number; threads: number; posts: number };
+  }
+> {
   const posts: GraphPost[] = [];
   let convPages = 0;
   let threadPages = 0;
@@ -1129,9 +1457,10 @@ async function collectPosts(
   // Conversations (top-level). Order newest first; we filter posts by window.
   const convUrl =
     `${GRAPH}/groups/${groupId}/conversations?$select=id,lastDeliveredDateTime&$orderby=lastDeliveredDateTime desc`;
-  const conversations = await graphGetAll<{ id: string; lastDeliveredDateTime?: string }>(
+  const conversations = await graphGetConversationsSince(
     convUrl,
     token,
+    sinceIso,
     budget,
   );
   convPages += conversations.pages;
@@ -1141,7 +1470,8 @@ async function collectPosts(
     // (it is NOT a Post property), so request topic + the other valid thread fields
     // (lastDeliveredDateTime, hasAttachments, toRecipients, ccRecipients on
     // microsoft.graph.conversationThread) and thread them down to each post.
-    const threadUrl = `${GRAPH}/groups/${groupId}/conversations/${conv.id}/threads` +
+    const threadUrl =
+      `${GRAPH}/groups/${groupId}/conversations/${conv.id}/threads` +
       `?$select=id,topic,lastDeliveredDateTime,hasAttachments,toRecipients,ccRecipients`;
     const threads = await graphGetAll<GraphThread>(threadUrl, token, budget);
     threadPages += threads.pages;
@@ -1150,8 +1480,7 @@ async function collectPosts(
       // Posts under each thread. Request ONLY valid microsoft.graph.post fields.
       // `subject` and `internetMessageId` are NOT Post properties (requesting
       // `subject` 400s); the subject comes from thread.topic, set on each post below.
-      const postUrl =
-        `${GRAPH}/groups/${groupId}/threads/${thread.id}/posts` +
+      const postUrl = `${GRAPH}/groups/${groupId}/threads/${thread.id}/posts` +
         `?$select=id,createdDateTime,receivedDateTime,from,sender,hasAttachments,body,conversationId,conversationThreadId`;
       const threadPosts = await graphGetAll<GraphPost>(postUrl, token, budget);
       postPages += threadPosts.pages;
@@ -1167,13 +1496,29 @@ async function collectPosts(
         // any To/Cc-based classification has them.
         if (thread.toRecipients) post.toRecipients = thread.toRecipients;
         if (thread.ccRecipients) post.ccRecipients = thread.ccRecipients;
+        post.sourceKind = "group_post";
         const ts = post.receivedDateTime || post.createdDateTime;
         // Overlapping window filter: include anything at/after the lower bound.
         if (!ts || ts >= sinceIso) posts.push(post);
       }
     }
   }
-  return { posts, pageCounts: { conversations: convPages, threads: threadPages, posts: postPages } };
+  const fallback = await collectFallbackMailboxPosts(token, sinceIso);
+  if (fallback.posts.length > 0) {
+    console.log(
+      `[monitor-ses] fallback mailbox scan found ${fallback.posts.length} ses-addressed messages ` +
+        `(pages=${fallback.pages})`,
+    );
+    posts.push(...fallback.posts);
+  }
+  return {
+    posts,
+    pageCounts: {
+      conversations: convPages,
+      threads: threadPages,
+      posts: postPages,
+    },
+  };
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1292,7 +1637,7 @@ async function fetchAllRows(
 ): Promise<Record<string, unknown>[]> {
   const PAGE = 1000;
   const out: Record<string, unknown>[] = [];
-  for (let from = 0; ; from += PAGE) {
+  for (let from = 0;; from += PAGE) {
     let q = sb.from(table).select(columns);
     for (const [c, v] of eqFilters) q = q.eq(c, v);
     const { data, error } = await q.range(from, from + PAGE - 1);
@@ -1318,9 +1663,17 @@ async function loadBackfillState(
 ): Promise<{ settledIds: Set<string>; excludedIds: Set<string> }> {
   const settledIds = new Set<string>();
   const excludedIds = new Set<string>();
-  const em = await fetchAllRows(sb, "emails", "post_id", [["mailbox", MAILBOX], ["attachments_settled", true]]);
+  const em = await fetchAllRows(sb, "emails", "post_id", [
+    ["mailbox", MAILBOX],
+    ["attachments_settled", true],
+  ]);
   for (const r of em) settledIds.add(r.post_id as string);
-  const ex = await fetchAllRows(sb, "email_classifier_exclusions", "post_id", []);
+  const ex = await fetchAllRows(
+    sb,
+    "email_classifier_exclusions",
+    "post_id",
+    [],
+  );
   for (const r of ex) excludedIds.add(r.post_id as string);
   return { settledIds, excludedIds };
 }
@@ -1334,7 +1687,10 @@ async function loadIngestedFloor(
   // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
   sb: any,
 ): Promise<string | null> {
-  const rows = await fetchAllRows(sb, "emails", "received_at", [["mailbox", MAILBOX]]);
+  const rows = await fetchAllRows(sb, "emails", "received_at", [[
+    "mailbox",
+    MAILBOX,
+  ]]);
   let min: string | null = null;
   for (const r of rows) {
     const ts = r.received_at as string | null | undefined;
@@ -1404,7 +1760,9 @@ async function runBackfillFull(
   const groupId = await deps.resolveGroupId(token);
   // Same data-driven classifier inputs as the poll (sender patterns + ref prefixes),
   // so historical posts are classified identically to live ones.
-  const { patterns: companies, refPrefixes } = await deps.loadCompanyPatterns(sb);
+  const { patterns: companies, refPrefixes } = await deps.loadCompanyPatterns(
+    sb,
+  );
 
   // Epoch lower bound — the WHOLE history. collectPosts drains every conversation/
   // thread/post page via @odata.nextLink; the >= epoch filter keeps everything.
@@ -1414,7 +1772,11 @@ async function runBackfillFull(
       `since>=${sinceIso} (epoch) start=${backfillStartIso}`,
   );
 
-  const { posts, pageCounts } = await deps.collectPosts(token, groupId, sinceIso);
+  const { posts, pageCounts } = await deps.collectPosts(
+    token,
+    groupId,
+    sinceIso,
+  );
   console.log(
     `[monitor-ses][backfill] traversal drained pages conv=${pageCounts.conversations} ` +
       `thread=${pageCounts.threads} post=${pageCounts.posts}; ${posts.length} posts total`,
@@ -1436,7 +1798,10 @@ async function runBackfillFull(
 
   for (const post of posts) {
     if (isDone(post)) continue; // handled by a prior invoke
-    if (processedThisInvoke >= BACKFILL_MAX_POSTS_PER_INVOKE) { remaining++; continue; }
+    if (processedThisInvoke >= BACKFILL_MAX_POSTS_PER_INVOKE) {
+      remaining++;
+      continue;
+    }
     const cls = classifyPost(post, companies, refPrefixes);
     if (!cls.include) {
       await deps.auditExclusion(sb, post, cls.reason);
@@ -1496,12 +1861,15 @@ async function runBackfillFull(
   // (against the existing row), so re-running on a now-larger history never regresses
   // coverage — the same invariant the old separate read+compute path enforced.
   const nowStamp = new Date().toISOString();
-  const { data: committed, error: commitErr } = await sb.rpc("commit_makesafe_backfill", {
-    p_mailbox: MAILBOX,
-    p_floor: floorIso,
-    p_ceiling: ceilingIso,
-    p_cursor: backfillStartIso,
-  });
+  const { data: committed, error: commitErr } = await sb.rpc(
+    "commit_makesafe_backfill",
+    {
+      p_mailbox: MAILBOX,
+      p_floor: floorIso,
+      p_ceiling: ceilingIso,
+      p_cursor: backfillStartIso,
+    },
+  );
   if (commitErr) {
     // FAIL CLOSED: the atomic commit failed -> NEITHER coverage bounds NOR the live
     // cursor NOR the backfill_complete marker were written (the RPC body is one
@@ -1586,16 +1954,22 @@ async function handler(req: Request): Promise<Response> {
   let backfillFull = false;
   try {
     const u = new URL(req.url);
-    if ((u.searchParams.get("backfill") || "").toLowerCase() === "full") backfillFull = true;
+    if ((u.searchParams.get("backfill") || "").toLowerCase() === "full") {
+      backfillFull = true;
+    }
   } catch (_) { /* non-URL request line; ignore */ }
   if (!backfillFull && req.method === "POST") {
     try {
       const raw = await req.text();
       if (raw) {
         const body = JSON.parse(raw);
-        if (body && typeof body === "object" && body.mode === "backfill_full") backfillFull = true;
+        if (body && typeof body === "object" && body.mode === "backfill_full") {
+          backfillFull = true;
+        }
       }
-    } catch (_) { /* empty / non-JSON body (cron posts {}); treat as regular poll */ }
+    } catch (_) {
+      /* empty / non-JSON body (cron posts {}); treat as regular poll */
+    }
   }
 
   const sb = _testClientFactory
@@ -1609,14 +1983,19 @@ async function handler(req: Request): Promise<Response> {
   // a crashed run frees it when its Postgres backend connection closes.
   let lockHeld = false;
   try {
-    const { data: locked, error: lockErr } = await sb.rpc("try_lock_mailbox_sync", {
-      p_mailbox: MAILBOX,
-    });
+    const { data: locked, error: lockErr } = await sb.rpc(
+      "try_lock_mailbox_sync",
+      {
+        p_mailbox: MAILBOX,
+      },
+    );
     if (lockErr) {
       throw new Error(`advisory lock RPC failed: ${lockErr.message}`);
     }
     if (locked !== true) {
-      console.log(`[monitor-ses] another run holds the ${MAILBOX} lock; exiting early`);
+      console.log(
+        `[monitor-ses] another run holds the ${MAILBOX} lock; exiting early`,
+      );
       return new Response(
         JSON.stringify({ success: true, skipped: "locked", mailbox: MAILBOX }),
         { headers: { ...CORS, "Content-Type": "application/json" } },
@@ -1626,7 +2005,9 @@ async function handler(req: Request): Promise<Response> {
   } catch (e) {
     const msg = (e as Error).message;
     console.error("[monitor-ses] lock acquisition error:", msg);
-    try { await refreshSyncState(sb, false, msg); } catch (_) { /* best-effort */ }
+    try {
+      await refreshSyncState(sb, false, msg);
+    } catch (_) { /* best-effort */ }
     return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { ...CORS, "Content-Type": "application/json" },
@@ -1649,9 +2030,12 @@ async function handler(req: Request): Promise<Response> {
         persistPost,
         auditExclusion,
       });
-      return new Response(JSON.stringify({ ...result, mode: "backfill_full" }), {
-        headers: { ...CORS, "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ ...result, mode: "backfill_full" }),
+        {
+          headers: { ...CORS, "Content-Type": "application/json" },
+        },
+      );
     }
 
     const token = await getGraphToken();
@@ -1662,7 +2046,9 @@ async function handler(req: Request): Promise<Response> {
     const { patterns: companies, refPrefixes } = await loadCompanyPatterns(sb);
 
     // ── Overlapping watermark: read cursor, compute lower bound (>=, not >). ──
-    const { data: cursor, error: cursorReadErr } = await sb.from("mail_sync_cursors")
+    const { data: cursor, error: cursorReadErr } = await sb.from(
+      "mail_sync_cursors",
+    )
       .select("last_completed_max, overlap_seconds")
       .eq("mailbox", MAILBOX)
       .maybeSingle();
@@ -1676,8 +2062,9 @@ async function handler(req: Request): Promise<Response> {
     const envOverlap = Number(Deno.env.get("MAKESAFE_OVERLAP_SECONDS") || "");
     const overlapSeconds =
       (cursor as { overlap_seconds?: number } | null)?.overlap_seconds ??
-      (Number.isFinite(envOverlap) && envOverlap > 0 ? envOverlap : 900);
-    const lastMax = (cursor as { last_completed_max?: string } | null)?.last_completed_max;
+        (Number.isFinite(envOverlap) && envOverlap > 0 ? envOverlap : 900);
+    const lastMax = (cursor as { last_completed_max?: string } | null)
+      ?.last_completed_max;
 
     // M7 — FIRST RUN handling. With no cursor we do a bounded recent-mail lookback,
     // but we must NOT commit a live watermark off that partial window — doing so
@@ -1700,7 +2087,7 @@ async function handler(req: Request): Promise<Response> {
 
     console.log(
       `[monitor-ses] poll start group=${groupId} since>=${sinceIso} ` +
-      `(overlap=${overlapSeconds}s, initialBackfill=${initialBackfill})`,
+        `(overlap=${overlapSeconds}s, initialBackfill=${initialBackfill})`,
     );
 
     // ── Full traversal (nextLink exhausted at every level). ──
@@ -1760,7 +2147,8 @@ async function handler(req: Request): Promise<Response> {
     // so re-triggering on every poll is safe. The scan creates DRAFTS only; it can
     // never approve (Wave 0 C2 gate: approve_intake_draft is human-JWT-only).
     try {
-      const opsApiUrl = `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
+      const opsApiUrl =
+        `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
       const scanResp = await fetch(opsApiUrl, {
         method: "POST",
         headers: {
@@ -1770,9 +2158,14 @@ async function handler(req: Request): Promise<Response> {
         },
         body: JSON.stringify({}),
       });
-      console.log(`[monitor-ses] intake scan tail-call status=${scanResp.status}`);
+      console.log(
+        `[monitor-ses] intake scan tail-call status=${scanResp.status}`,
+      );
     } catch (scanErr) {
-      console.error("[monitor-ses] intake scan tail-call failed (non-fatal):", (scanErr as Error).message);
+      console.error(
+        "[monitor-ses] intake scan tail-call failed (non-fatal):",
+        (scanErr as Error).message,
+      );
     }
 
     const result = {
@@ -1810,7 +2203,10 @@ async function handler(req: Request): Promise<Response> {
       try {
         await sb.rpc("unlock_mailbox_sync", { p_mailbox: MAILBOX });
       } catch (e) {
-        console.error("[monitor-ses] lock release failed:", (e as Error).message);
+        console.error(
+          "[monitor-ses] lock release failed:",
+          (e as Error).message,
+        );
       }
     }
   }
@@ -1828,9 +2224,11 @@ if (import.meta.main) {
 // collectPosts / resolveGroupId / graphGetAll are reused by the D2 full-post
 // inventory reconcile (see makesafe_reconcile.ts).
 export {
+  _setTestClientFactory,
   auditExclusion as _auditExclusion,
   buildSubjectRef as _buildSubjectRef,
   classifyPost as _classifyPost,
+  collectFallbackMailboxPosts as _collectFallbackMailboxPosts,
   collectPosts as _collectPosts,
   decodeJwtRole as _decodeJwtRole,
   DEFAULT_REF_PREFIXES as _DEFAULT_REF_PREFIXES,
@@ -1848,6 +2246,5 @@ export {
   resolveGroupId as _resolveGroupId,
   runBackfillFull as _runBackfillFull,
   senderMatchesPattern as _senderMatchesPattern,
-  _setTestClientFactory,
   sha256Hex as _sha256Hex,
 };
