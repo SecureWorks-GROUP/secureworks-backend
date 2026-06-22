@@ -63,10 +63,10 @@ const REPLY_FORWARD_RE = /^\s*(re|fw|fwd)\s*:/i;
 // The MLB "Our Ref: MLB-XXXXX" format and the BWCWA "New Make Safe and Report
 // Request" format are the two live archetypes (8+ drops in 60 days confirmed).
 const REPORT_CAPTURE_PATTERNS: readonly RegExp[] = [
-  /\bour\s*ref\b.*\b(mlb|wb|bw|bwc|kba)-?\s*\d+/i,   // "Our Ref: MLB-25795 ..."
-  /###\s*urgent\s*###.*our\s*ref/i,                    // "### URGENT ### Our Ref"
-  /\burgent\b.*\bour\s*ref\b/i,                        // "URGENT ... Our Ref"
-  /new\s*make\s*safe\s*and\s*report\s*request/i,       // BWCWA format
+  /\bour\s*ref\b.*\b(mlb|wb|bw|bwc|kba)-?\s*\d+/i, // "Our Ref: MLB-25795 ..."
+  /###\s*urgent\s*###.*our\s*ref/i, // "### URGENT ### Our Ref"
+  /\burgent\b.*\bour\s*ref\b/i, // "URGENT ... Our Ref"
+  /new\s*make\s*safe\s*and\s*report\s*request/i, // BWCWA format
 ] as const;
 
 // ── REPORT-TYPE classifier ─────────────────────────────────────────────────────
@@ -92,18 +92,91 @@ export function classifyReportType(
 
   // Subject-level signals (most reliable). roof checked before assess/inspect
   // because "roof inspection" is a roof report, not a generic assessment.
-  if (/temp\s*fenc|collect|pick\s*up|pickup|retriev/i.test(s)) return "temp_fence";
+  if (/temp\s*fenc|collect|pick\s*up|pickup|retriev/i.test(s)) {
+    return "temp_fence";
+  }
   if (/re.?attend|reattend/i.test(s)) return "re_attend";
   if (/roof/i.test(s)) return "roof_report";
   if (/assessment|inspect/i.test(s)) return "assessment_report";
 
   // Body-level signals — used when subject is generic ("Our Ref: ...")
-  if (/temp\s*fenc|collect|pick\s*up|pickup|retriev/i.test(b)) return "temp_fence";
+  if (/temp\s*fenc|collect|pick\s*up|pickup|retriev/i.test(b)) {
+    return "temp_fence";
+  }
   if (/re.?attend|reattend/i.test(b)) return "re_attend";
   if (/roof/i.test(b)) return "roof_report";
   if (/assessment|inspect/i.test(b)) return "assessment_report";
 
   return "unknown_report";
+}
+
+// ── PRACTICAL JOB FAMILY classifier ──────────────────────────────────────────
+// This is the operator-facing four-way taxonomy. It deliberately does NOT replace
+// report_type yet; it maps the older report_type/work-order signals into the
+// families Marnin wants the board/trade app to reason about.
+export type MakeSafeJobFamily =
+  | "assessment_report_quote"
+  | "roof_report"
+  | "temp_fence_makesafe"
+  | "general_makesafe";
+
+export function makeSafeJobFamilyLabel(
+  family: MakeSafeJobFamily | string | null | undefined,
+): string {
+  switch (family) {
+    case "assessment_report_quote":
+      return "Assessment / Quote Report";
+    case "roof_report":
+      return "Roof Report";
+    case "temp_fence_makesafe":
+      return "Temporary Fence MakeSafe";
+    case "general_makesafe":
+      return "MakeSafe";
+    default:
+      return "MakeSafe";
+  }
+}
+
+/**
+ * Classify the practical job family from full subject/body context plus the
+ * legacy report_type when available. Priority is intentional:
+ * temp fence > explicit roof report > assessment/quote > general physical make-safe.
+ * A physical roof make-safe must remain general_makesafe unless the text says
+ * roof REPORT / external reporting-system work.
+ */
+export function classifyMakeSafeJobFamily(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+  reportType?: string | null,
+): MakeSafeJobFamily {
+  const text = `${subject || ""}\n${body || ""}`.toLowerCase();
+  const rt = String(reportType || "").toLowerCase();
+
+  if (
+    rt === "temp_fence" ||
+    /(temp(?:orary)?\s*fenc|fenc(?:e|ing)\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i
+      .test(text)
+  ) {
+    return "temp_fence_makesafe";
+  }
+
+  if (
+    rt === "roof_report" ||
+    /\b(roof\s+(report|assessment\s*report|inspection\s*report)|report\s+.*\broof\b|prime\s+roof\s+report)\b/i
+      .test(text)
+  ) {
+    return "roof_report";
+  }
+
+  if (
+    rt === "assessment_report" ||
+    /\b(assessment\s*(report)?|assess\s+and\s+quote|inspect\s+and\s+(provide\s+)?quote|quote\s*(request|link|report)?|quotation|scope\s+of\s+works?)\b/i
+      .test(text)
+  ) {
+    return "assessment_report_quote";
+  }
+
+  return "general_makesafe";
 }
 
 // ── REPORT-CAPTURE: map ref prefix -> canonical company slug ──────────────────
@@ -115,15 +188,22 @@ export function classifyReportType(
 //   kba          -> KBA Insurance Repairs (KBA prefix)
 // If a prefix cannot be resolved, returns null so the normal company-match
 // fallback (sender pattern) takes over.
-export function slugFromRefPrefix(prefix: string | null | undefined): string | null {
+export function slugFromRefPrefix(
+  prefix: string | null | undefined,
+): string | null {
   switch ((prefix || "").toUpperCase()) {
-    case "MLB": return "mlb";
+    case "MLB":
+      return "mlb";
     case "BWC":
     case "BW":
-    case "BWCWA": return "builderwest";
-    case "WB": return "western-building";
-    case "KBA": return "kba";
-    default: return null;
+    case "BWCWA":
+      return "builderwest";
+    case "WB":
+      return "western-building";
+    case "KBA":
+      return "kba";
+    default:
+      return null;
   }
 }
 
@@ -155,7 +235,9 @@ const NEW_WORK_ORDER_SUBJECT_PHRASES: readonly RegExp[] = [
  * report, invoice, correction, crew chatter) or is a reply/forward. Subject-only;
  * safe to run as a cheap pre-filter before any attachment/Haiku work.
  */
-export function subjectIsExcludedNonWorkOrder(subject: string | null | undefined): boolean {
+export function subjectIsExcludedNonWorkOrder(
+  subject: string | null | undefined,
+): boolean {
   const s = (subject || "").trim();
   if (!s) return false; // empty subject is not, by itself, an exclusion signal
   if (REPLY_FORWARD_RE.test(s)) return true;
@@ -166,7 +248,9 @@ export function subjectIsExcludedNonWorkOrder(subject: string | null | undefined
 }
 
 /** True when the subject carries a positive NEW work-order signal. */
-export function subjectLooksLikeNewWorkOrder(subject: string | null | undefined): boolean {
+export function subjectLooksLikeNewWorkOrder(
+  subject: string | null | undefined,
+): boolean {
   const s = (subject || "").trim();
   if (!s) return false;
   for (const re of NEW_WORK_ORDER_SUBJECT_PHRASES) {
@@ -181,7 +265,9 @@ export function subjectLooksLikeNewWorkOrder(subject: string | null | undefined)
  * carries a PDF — a roof/assessment report that arrives WITH a PDF is still a
  * report, not a plain work order (Codex issue 1).
  */
-export function subjectMatchesReportCapture(subject: string | null | undefined): boolean {
+export function subjectMatchesReportCapture(
+  subject: string | null | undefined,
+): boolean {
   const s = (subject || "").trim();
   if (!s) return false;
   for (const re of REPORT_CAPTURE_PATTERNS) {
@@ -199,16 +285,20 @@ const REPORT_ONLY_TYPES: ReadonlySet<ReportType> = new Set([
 ]);
 
 /** True for a report-only type that cannot yet be turned into a make-safe job. */
-export function isReportOnlyType(reportType: string | null | undefined): boolean {
+export function isReportOnlyType(
+  reportType: string | null | undefined,
+): boolean {
   return !!reportType && REPORT_ONLY_TYPES.has(reportType as ReportType);
 }
 
 // A clear, non-actionable acknowledgement: subject is ONLY a thanks/noted/received
 // courtesy line with NO address, NO job detail, NO action verb. Err HARD toward
 // capture — anything ambiguous stays captured (Codex issue 3, never-miss > tidy).
-const ACK_ONLY_RE = /^\s*(re|fw|fwd\s*:)?\s*(many\s+)?(thanks|thank\s*you|ta|cheers|noted|received|acknowledg(e|ed|ement)|confirmed|got\s*it|ok(ay)?|received\s*with\s*thanks)\b/i;
+const ACK_ONLY_RE =
+  /^\s*(re|fw|fwd\s*:)?\s*(many\s+)?(thanks|thank\s*you|ta|cheers|noted|received|acknowledg(e|ed|ement)|confirmed|got\s*it|ok(ay)?|received\s*with\s*thanks)\b/i;
 // Action / detail words that mean "still do something" — if ANY appear, KEEP.
-const ACTION_OR_DETAIL_RE = /\b(attend|re.?attend|reattend|report|assess|inspect|roof|fenc|collect|pick\s*up|pickup|retriev|quote|invoice|urgent|asap|site|address|st\b|street|rd\b|road|ave\b|avenue|wa\s*\d{4}|\d{1,4}\s+\w+\s+(st|street|rd|road|ave|avenue|way|cl|close|cres|crescent|pl|place|dr|drive)\b)/i;
+const ACTION_OR_DETAIL_RE =
+  /\b(attend|re.?attend|reattend|report|assess|inspect|roof|fenc|collect|pick\s*up|pickup|retriev|quote|invoice|urgent|asap|site|address|st\b|street|rd\b|road|ave\b|avenue|wa\s*\d{4}|\d{1,4}\s+\w+\s+(st|street|rd|road|ave|avenue|way|cl|close|cres|crescent|pl|place|dr|drive)\b)/i;
 
 /**
  * Light over-capture guard: returns true ONLY for a clear non-actionable
@@ -229,7 +319,10 @@ export function isPureAckNoAction(
   // Strip a leading ref token ("Our Ref: MLB-25795 -") so the courtesy phrase that
   // follows can be matched at the start of the remaining subject.
   const afterRef = s
-    .replace(/\bour\s*ref\b\s*:?[\s-]*\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+\b/i, "")
+    .replace(
+      /\bour\s*ref\b\s*:?[\s-]*\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+\b/i,
+      "",
+    )
     .replace(/^[\s\-–—:]+/, "")
     .trim();
   // Drop ONLY when what remains is itself just a courtesy line (thanks/noted/etc).
@@ -268,15 +361,27 @@ export function isGenuineNewWorkOrder(
   subject: string | null | undefined,
   fromEmail: string | null | undefined,
   workOrderPdfCount: number,
-): { ok: boolean; reason: string; kind: "work_order" | "report"; reportSubjectPattern: boolean } {
+): {
+  ok: boolean;
+  reason: string;
+  kind: "work_order" | "report";
+  reportSubjectPattern: boolean;
+} {
   const s = (subject || "").trim();
 
   // 1) Our own outbound mail must never become an inbound intake draft. The ses@
   //    group poll sees sent items (Report/Invoice/Photo Evidence sends).
   const at = (fromEmail || "").lastIndexOf("@");
-  const fromDomain = at >= 0 ? (fromEmail as string).slice(at + 1).trim().toLowerCase() : null;
+  const fromDomain = at >= 0
+    ? (fromEmail as string).slice(at + 1).trim().toLowerCase()
+    : null;
   if (isOwnDomain(fromDomain)) {
-    return { ok: false, reason: `outbound:${fromDomain}`, kind: "work_order", reportSubjectPattern: false };
+    return {
+      ok: false,
+      reason: `outbound:${fromDomain}`,
+      kind: "work_order",
+      reportSubjectPattern: false,
+    };
   }
 
   // 2) Unambiguous non-WO subjects (photo evidence / report / invoice /
@@ -284,7 +389,12 @@ export function isGenuineNewWorkOrder(
   //    OR a report-capture candidate, regardless of any PDF.
   //    This is what keeps blocking our outbound acks ("Make Safe Report and Invoice").
   if (subjectIsExcludedNonWorkOrder(s)) {
-    return { ok: false, reason: "excluded_non_work_order_subject", kind: "work_order", reportSubjectPattern: false };
+    return {
+      ok: false,
+      reason: "excluded_non_work_order_subject",
+      kind: "work_order",
+      reportSubjectPattern: false,
+    };
   }
 
   // Codex issue 1: whether the SUBJECT matches a report-capture pattern is
@@ -299,10 +409,20 @@ export function isGenuineNewWorkOrder(
   //    may legitimately also be a make-safe WO; it stays kind='work_order' but
   //    carries reportSubjectPattern so the caller tags report_type too.
   if (hasWorkOrderPdf) {
-    return { ok: true, reason: "work_order_pdf", kind: "work_order", reportSubjectPattern };
+    return {
+      ok: true,
+      reason: "work_order_pdf",
+      kind: "work_order",
+      reportSubjectPattern,
+    };
   }
   if (subjectLooksLikeNewWorkOrder(s)) {
-    return { ok: true, reason: "new_work_order_subject", kind: "work_order", reportSubjectPattern };
+    return {
+      ok: true,
+      reason: "new_work_order_subject",
+      kind: "work_order",
+      reportSubjectPattern,
+    };
   }
 
   // 4) REPORT-CAPTURE: genuine builder follow-up emails that carry a recognised
@@ -314,12 +434,27 @@ export function isGenuineNewWorkOrder(
     // acknowledgement (just thanks/noted, no address/job detail/action, no PDF).
     // Anything ambiguous or possibly-real STAYS captured (never-miss > tidy).
     if (isPureAckNoAction(s, hasWorkOrderPdf)) {
-      return { ok: false, reason: "pure_ack_no_action", kind: "work_order", reportSubjectPattern: true };
+      return {
+        ok: false,
+        reason: "pure_ack_no_action",
+        kind: "work_order",
+        reportSubjectPattern: true,
+      };
     }
-    return { ok: true, reason: "report_capture_pattern", kind: "report", reportSubjectPattern: true };
+    return {
+      ok: true,
+      reason: "report_capture_pattern",
+      kind: "report",
+      reportSubjectPattern: true,
+    };
   }
 
   // 5) No positive signal and no PDF — not enough to call it a new work order
   //    or a report. Drop to avoid flooding the review queue.
-  return { ok: false, reason: "no_work_order_signal", kind: "work_order", reportSubjectPattern: false };
+  return {
+    ok: false,
+    reason: "no_work_order_signal",
+    kind: "work_order",
+    reportSubjectPattern: false,
+  };
 }

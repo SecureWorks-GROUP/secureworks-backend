@@ -194,6 +194,8 @@ import {
   classifyReportType as _classifyReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
+  classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
+  makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
 } from './makesafe_intake_gate.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
@@ -212,6 +214,7 @@ import {
   SUPPRESSED_DRAFT_STATES as _SUPPRESSED_DRAFT_STATES,
   normaliseRef as _normaliseDedupRef,
   normaliseCompany as _normaliseDedupCompany,
+  normaliseJobFamily as _normaliseDedupJobFamily,
 } from './makesafe_intake_dedup.ts'
 // GAP-A (WO selection + unique per-attachment key).
 // Mission: makesafe-wo-capture-recovery-2026-06-17.
@@ -7384,7 +7387,7 @@ async function searchJobs(client: any, params: URLSearchParams) {
   const term = `%${q}%`
 
   // Search across jobs, invoices, quotes, contacts in parallel
-  const [jobRes, invoiceRes, contactRes, quoteRes] = await Promise.all([
+  const [jobRes, invoiceRes, contactRes, quoteRes, makesafeRefRes] = await Promise.all([
     // Direct job fields: client name, job number, address, suburb, email, phone
     client.from('jobs')
       .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, type, status')
@@ -7411,6 +7414,11 @@ async function searchJobs(client: any, params: URLSearchParams) {
       .select('job_id, quote_number')
       .ilike('quote_number', term)
       .limit(10),
+    // MakeSafe external builder refs live on makesafe_job_details, not jobs.
+    client.from('makesafe_job_details')
+      .select('job_id, external_ref, requesting_company_name')
+      .ilike('external_ref', term)
+      .limit(20),
   ])
 
   // Collect all matched job IDs from secondary tables
@@ -7433,6 +7441,12 @@ async function searchJobs(client: any, params: URLSearchParams) {
     if (qr.job_id) {
       secondaryJobIds.add(qr.job_id)
       matchContext[qr.job_id] = `Quote: ${qr.quote_number}`
+    }
+  }
+  for (const ms of (makesafeRefRes.data || [])) {
+    if (ms.job_id) {
+      secondaryJobIds.add(ms.job_id)
+      matchContext[ms.job_id] = `Builder ref: ${ms.external_ref || ''}`
     }
   }
 
@@ -8144,6 +8158,7 @@ async function createMakesafeJob(client: any, body: any) {
     safety_requirements, special_instructions,
     pdf_base64, external_links,
     builder_email_text_for_trade, builder_email_subject, builder_email_received_at,
+    makesafe_job_family, makesafe_job_family_label,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -8191,6 +8206,8 @@ async function createMakesafeJob(client: any, body: any) {
   const reviewedMakeSafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
   const reviewedSafety = safety_requirements || companyData?.safety_requirements || null
   const reviewedSpecialInstructions = special_instructions || companyData?.special_instructions || null
+  const reviewedJobFamily = makesafe_job_family || _classifyMakeSafeJobFamily(external_ref || null, description || reviewedMakeSafeType || null, null)
+  const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
 
   const metadata: any = {
     requesting_company: companyData ? { slug: companyData.slug, name: companyData.name } : reviewedCompanyName ? { slug: requesting_company_slug || null, name: reviewedCompanyName } : null,
@@ -8204,6 +8221,8 @@ async function createMakesafeJob(client: any, body: any) {
     builder_email_text_for_trade: builder_email_text_for_trade || null,
     builder_email_subject: builder_email_subject || null,
     builder_email_received_at: builder_email_received_at || null,
+    makesafe_job_family: reviewedJobFamily,
+    makesafe_job_family_label: reviewedJobFamilyLabel,
   }
 
   // Create the job
@@ -10011,6 +10030,17 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!isReportOnlyDraft && availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
+  const approvedJobFamily = extraction?.makesafe_job_family || _classifyMakeSafeJobFamily(
+    draft?.subject || approvedFields.external_ref || '',
+    [
+      extraction?.builder_email_text_for_trade,
+      approvedFields.description,
+      approvedFields.makesafe_type,
+    ].filter(Boolean).join('\n'),
+    effectiveReportType || null,
+  )
+  const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
+
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
   // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
   // so "AJBR 67200", "AJBR-67200" and "AJBR67200" all collapse to one canonical key
@@ -10023,12 +10053,23 @@ async function approveIntakeDraft(client: any, body: any) {
       // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
       // the refs already on live jobs is cheap and lets us match on normalised form.
       const { data: candidates } = await client.from('makesafe_job_details')
-        .select('job_id, external_ref, jobs(job_number, client_name, site_address, status)')
+        .select('job_id, external_ref, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
         .not('external_ref', 'is', null)
-      const dup = (candidates || []).find((row: any) => normaliseRef(row.external_ref, prefixes) === normTarget)
+      const dup = (candidates || []).find((row: any) => {
+        if (normaliseRef(row.external_ref, prefixes) !== normTarget) return false
+        const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs
+        const existingMetadata = parseJsonObject(existingJob?.metadata)
+        const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
+          row.external_ref || '',
+          [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),
+          row.report_type || null,
+        )
+        const existingFamilyKey = _normaliseDedupJobFamily(existingFamily)
+        return !existingFamilyKey || existingFamilyKey === approvedJobFamilyKey
+      })
       if (dup?.job_id) {
         const existingJob = Array.isArray(dup.jobs) ? dup.jobs[0] : dup.jobs
-        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id))
+        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same MakeSafe job family')
       }
     }
   }
@@ -10084,6 +10125,8 @@ async function approveIntakeDraft(client: any, body: any) {
       makesafe_type: approvedFields.makesafe_type,
       safety_requirements: approvedFields.safety_requirements,
       special_instructions: approvedFields.special_instructions,
+      makesafe_job_family: approvedJobFamily,
+      makesafe_job_family_label: _makeSafeJobFamilyLabel(approvedJobFamily),
       suppress_notifications: true,
       ...(reportJobExternalLinks ? { external_links: reportJobExternalLinks } : {}),
       ...(isReportOnlyDraft ? {
@@ -10701,7 +10744,7 @@ async function scanSesMakesafes(client: any) {
   // so (ref + company) is the workhorse cross-path key. See makesafe_intake_dedup.ts.
   const existingDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
-      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, report_type, subject, body_preview, description, extraction_json')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _LIVE_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (dedup index) read',
@@ -10724,25 +10767,43 @@ async function scanSesMakesafes(client: any) {
   //       collisions (two builders can share a ref number like "67998"; without the
   //       company scope the map would overwrite one builder's job with the other's).
   const { data: existingJobs } = await client.from('makesafe_job_details')
-    .select('job_id, external_ref, requesting_company_slug, jobs(status)')
+    .select('job_id, external_ref, requesting_company_slug, report_type, jobs(status, metadata, notes)')
     .not('external_ref', 'is', null)
-  // Build a (normalised-ref|company-slug) -> { jobId, status } lookup.
+  // Build a (normalised-ref|company-slug|job-family) -> { jobId, status } lookup.
   const refToJobId = new Map<string, { jobId: string; status: string | null }>()
-  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; requesting_company_slug: string | null; jobs: { status: string } | { status: string }[] | null }>) {
+  const existingJobDedupRows: Array<{ external_ref: string | null; makesafe_job_family: string | null }> = []
+  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; requesting_company_slug: string | null; report_type?: string | null; jobs: { status: string; metadata?: any; notes?: string | null } | { status: string; metadata?: any; notes?: string | null }[] | null }>) {
     const nr = _normaliseDedupRef(j.external_ref)
     if (nr && j.job_id) {
       const jobsData = Array.isArray(j.jobs) ? j.jobs[0] : j.jobs
       const companyKey = (j.requesting_company_slug || '').toLowerCase()
-      // Primary key: ref|company so two builders' jobs with the same ref never collide.
-      refToJobId.set(`${nr}|${companyKey}`, { jobId: j.job_id, status: jobsData?.status ?? null })
-      // Fallback key: ref alone, so a match still occurs when company slug is missing.
-      // The company-scoped key always wins if present (map is set in order above).
+      const jobMetadata = parseJsonObject(jobsData?.metadata)
+      const jobFamily = jobMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
+        j.external_ref || '',
+        [j.report_type, jobsData?.notes].filter(Boolean).join('\n'),
+        j.report_type || null,
+      )
+      const familyKey = _normaliseDedupJobFamily(jobFamily)
+      existingJobDedupRows.push({ external_ref: j.external_ref, makesafe_job_family: familyKey || null })
+      // Primary key: ref|company|family so one builder ref can have separate report/temp/general jobs.
+      refToJobId.set(`${nr}|${companyKey}|${familyKey}`, { jobId: j.job_id, status: jobsData?.status ?? null })
+      // Fallbacks for old jobs where company/family metadata is missing.
+      refToJobId.set(`${nr}|${companyKey}|`, { jobId: j.job_id, status: jobsData?.status ?? null })
       if (!refToJobId.has(nr)) refToJobId.set(nr, { jobId: j.job_id, status: jobsData?.status ?? null })
     }
   }
+  const existingDraftDedupRows = (existingDrafts || []).map((d: any) => {
+    const extractionJson = parseJsonObject(d.extraction_json)
+    const draftFamily = extractionJson.makesafe_job_family || _classifyMakeSafeJobFamily(
+      d.subject || d.external_ref || '',
+      [d.report_type, d.body_preview, d.description].filter(Boolean).join('\n'),
+      d.report_type || null,
+    )
+    return { ...d, makesafe_job_family: draftFamily || null }
+  })
   const dedupIndex = _buildIntakeDedupIndex(
-    existingDrafts || [],
-    (existingJobs || []).map((j: any) => j.external_ref),
+    existingDraftDedupRows,
+    existingJobDedupRows,
     rejectedDrafts || [],
   )
 
@@ -11050,6 +11111,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       }
     }
 
+    let draftReportType: string | null = null
+    if (tagReportType) {
+      draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
+    }
+    const draftJobFamily = _classifyMakeSafeJobFamily(
+      subject,
+      [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
+      draftReportType,
+    )
+    extraction.makesafe_job_family = draftJobFamily
+    extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+
     // BUG 1 — POST-EXTRACTION CROSS-PATH DEDUP. Now that Haiku has given us the
     // external_ref and we've matched the requesting company, re-run the dedup with
     // those keys. This is what catches the OLD-path draft of the SAME work order
@@ -11063,6 +11136,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         external_ref: extractedRef,
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
+        makesafe_job_family: draftJobFamily,
         received_at: msg.receivedDateTime || null,
       },
       dedupIndex,
@@ -11083,8 +11157,11 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         // ref number — creating a reopen_candidate against whichever job won the
         // fallback slot would point at the wrong job. Fall through to skippedDuplicates
         // instead (safer: treat it like any other duplicate).
+        const familyKey = _normaliseDedupJobFamily(draftJobFamily)
         const companyScopedEntry = normRef && companyKey
-          ? refToJobId.get(`${normRef}|${companyKey}`) ?? null
+          ? refToJobId.get(`${normRef}|${companyKey}|${familyKey}`) ??
+            refToJobId.get(`${normRef}|${companyKey}|`) ??
+            null
           : null
         const matchedEntry = companyScopedEntry
         const matchedJobId = matchedEntry?.jobId ?? null
@@ -11145,6 +11222,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
               external_ref: extractedRef,
               requesting_company_slug: matchedCompany?.slug || null,
               requesting_company_name: matchedCompany?.name || null,
+              makesafe_job_family: draftJobFamily,
             },
             dedupIndex,
           )
@@ -11162,10 +11240,6 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // Codex issue 1: report_type is set whenever the subject matched a report
     // pattern (tagReportType), even for a kind='work_order' make-safe-and-report.
     let draftStatus: string
-    let draftReportType: string | null = null
-    if (tagReportType) {
-      draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
-    }
     if (isReportCapture) {
       draftStatus = 'needs_review'
     } else {
@@ -11233,6 +11307,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         external_ref: extractedRef,
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
+        makesafe_job_family: draftJobFamily,
       },
       dedupIndex,
     )
