@@ -68,7 +68,10 @@ Deno.test("buildIntakeDedupIndex: reopen_candidate draft blocks a second create 
 Deno.test("isDuplicateIntake returns job_external_ref when ref matches an existing job", () => {
   const index = buildIntakeDedupIndex(
     [], // no existing drafts
-    ["AJBR 99001"], // existing job with this ref
+    [{
+      external_ref: "AJBR 99001",
+      requesting_company_slug: "aj",
+    }], // existing job with this ref+company
     [],
   )
   const dup = isDuplicateIntake(

@@ -12,9 +12,13 @@
 //   ~/.deno/bin/deno test --allow-all --no-check \
 //     supabase/functions/ops-api/makesafe_intake_gate_test.ts
 
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   isGenuineNewWorkOrder,
+  subjectHasReplyForwardPrefix,
   subjectIsExcludedNonWorkOrder,
   subjectLooksLikeNewWorkOrder,
 } from "./makesafe_intake_gate.ts";
@@ -31,9 +35,6 @@ const JUNK_SUBJECTS = [
   "Invoice - AJBR 66902 - Dianella",
   "WhatsApp Crew Report - Yokine - Sylvia Perrin - 10 June 2026",
   "Correction - AJBR 66902 - Dianella",
-  "RE: Make Safe - QUINNS ROCKS - Job No 67996",
-  "FW: NEW WORK ORDER - MLB-25096",
-  "Fwd: Make Safe - BICTON - Job No 67998",
 ];
 
 // ── Real genuine NEW work orders — MUST still come through ─────────────────────
@@ -68,19 +69,40 @@ Deno.test("subjectIsExcludedNonWorkOrder: genuine WO subjects are NOT excluded",
   }
 });
 
+Deno.test("subjectIsExcludedNonWorkOrder: RE/FW valid work orders are risk-flagged, not excluded", () => {
+  for (
+    const s of [
+      "RE: Make Safe - QUINNS ROCKS - Job No 67996",
+      "FW: NEW WORK ORDER - MLB-25096",
+      "Fwd: Make Safe - BICTON - Job No 67998",
+    ]
+  ) {
+    assert(
+      subjectHasReplyForwardPrefix(s),
+      `expected reply/forward risk flag: ${s}`,
+    );
+    assert(!subjectIsExcludedNonWorkOrder(s), `expected NOT excluded: ${s}`);
+  }
+});
+
 Deno.test("subjectLooksLikeNewWorkOrder: genuine WO subjects carry a positive signal", () => {
   for (const s of [...GENUINE_WO_SUBJECTS, ...LEGIT_SUBURB_WOS]) {
-    assert(subjectLooksLikeNewWorkOrder(s), `expected positive new-WO signal: ${s}`);
+    assert(
+      subjectLooksLikeNewWorkOrder(s),
+      `expected positive new-WO signal: ${s}`,
+    );
   }
 });
 
 Deno.test("subjectLooksLikeNewWorkOrder: junk subjects carry NO positive signal", () => {
   // Photo Evidence / Invoice / Crew Report should not look like a new WO.
-  for (const s of [
-    "Photo Evidence - AJBR 67251 - Doubleview",
-    "Invoice - AJBR 66902 - Dianella",
-    "WhatsApp Crew Report - Yokine - Sylvia Perrin",
-  ]) {
+  for (
+    const s of [
+      "Photo Evidence - AJBR 67251 - Doubleview",
+      "Invoice - AJBR 66902 - Dianella",
+      "WhatsApp Crew Report - Yokine - Sylvia Perrin",
+    ]
+  ) {
     assert(!subjectLooksLikeNewWorkOrder(s), `unexpected new-WO signal: ${s}`);
   }
 });
@@ -112,11 +134,28 @@ Deno.test("isGenuineNewWorkOrder: genuine NEW WORK ORDER subject is let IN (no P
   }
 });
 
+Deno.test("isGenuineNewWorkOrder: RE/FW work-order evidence still comes IN for review", () => {
+  for (
+    const s of [
+      "RE: Make Safe - QUINNS ROCKS - Job No 67996",
+      "FW: NEW WORK ORDER - MLB-25096",
+      "Fwd: Make Safe - BICTON - Job No 67998",
+    ]
+  ) {
+    const r = isGenuineNewWorkOrder(s, BUILDER, 0);
+    assertEquals(r.ok, true, `expected let IN: ${s} (reason=${r.reason})`);
+  }
+});
+
 Deno.test("isGenuineNewWorkOrder: builder WO with a PDF but no keyword still comes IN (adversarial)", () => {
   // A builder who emails a work order WITHOUT the words "work order" and without
   // "Job No", but WITH a work-order PDF, must still be intaken. PDF is a positive
   // signal on its own.
-  const r = isGenuineNewWorkOrder("Emergency attend - 12 Smith St Carine", BUILDER, 1);
+  const r = isGenuineNewWorkOrder(
+    "Emergency attend - 12 Smith St Carine",
+    BUILDER,
+    1,
+  );
   assertEquals(r.ok, true);
   assertEquals(r.reason, "work_order_pdf");
 });
@@ -136,7 +175,10 @@ Deno.test("isGenuineNewWorkOrder: our OWN outbound domain is gated OUT", () => {
     1,
   );
   assertEquals(r.ok, false);
-  assert(r.reason.startsWith("outbound:"), `expected outbound reason, got ${r.reason}`);
+  assert(
+    r.reason.startsWith("outbound:"),
+    `expected outbound reason, got ${r.reason}`,
+  );
 });
 
 Deno.test("isGenuineNewWorkOrder: empty/whitespace subject with no PDF is gated OUT", () => {

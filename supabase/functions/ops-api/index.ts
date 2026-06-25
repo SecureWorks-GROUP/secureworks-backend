@@ -159,10 +159,20 @@ import {
   makesafeDraftHeartbeat as _makesafeDraftHeartbeat,
 } from './makesafe_reconcile.ts'
 import {
+  makesafeIntakeReconciliation as _makesafeIntakeReconciliation,
+} from './makesafe_intake_reconciliation.ts'
+import {
+  makesafeIntakeBackfillReport as _makesafeIntakeBackfillReport,
+} from './makesafe_intake_backfill_report.ts'
+import {
   _collectPosts as _monitorCollectPosts,
   _resolveGroupId as _monitorResolveGroupId,
 } from '../monitor-ses-makesafes/index.ts'
 import { getGraphToken as _getGraphToken } from '../_shared/graph_client.ts'
+import {
+  findMatchingSenderCompany as _findMatchingSenderCompany,
+  senderMatchesPattern as _senderMatchesPattern,
+} from '../_shared/makesafe_intake_classification.ts'
 
 // Mission makesafe-live-truth-2026-06-14 (M2) — compact READ endpoints GAP-1..6.
 // These let the make-safe skills read the email-sync Supabase projection instead
@@ -185,11 +195,13 @@ import {
 
 // Mission makesafe-inbound-filter-2026-06-16 — intake-draft gate. scanSesMakesafes
 // is the ONLY layer that creates makesafe_intake_drafts; this gate keeps it from
-// drafting photo-evidence / report / invoice / outbound / reply emails that merely
-// carry a builder ref (the needs_review flood). See makesafe_intake_gate.ts.
+// drafting photo-evidence / report / invoice / outbound emails that merely carry
+// a builder ref (the needs_review flood). RE/FW is risk-flagged later, not
+// excluded by subject prefix alone. See makesafe_intake_gate.ts.
 import {
   isGenuineNewWorkOrder as _isGenuineNewWorkOrder,
   subjectIsExcludedNonWorkOrder as _subjectIsExcludedNonWorkOrder,
+  subjectHasReplyForwardPrefix as _subjectHasReplyForwardPrefix,
   subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
   classifyReportType as _classifyReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
@@ -212,6 +224,7 @@ import {
   registerIntakeDraft as _registerIntakeDraft,
   LIVE_DRAFT_STATES as _LIVE_DRAFT_STATES,
   SUPPRESSED_DRAFT_STATES as _SUPPRESSED_DRAFT_STATES,
+  interleaveOldestNewestForFairScan as _interleaveOldestNewestForFairScan,
   normaliseRef as _normaliseDedupRef,
   normaliseCompany as _normaliseDedupCompany,
   normaliseJobFamily as _normaliseDedupJobFamily,
@@ -1827,6 +1840,8 @@ if (import.meta.main) serve(async (req: Request) => {
       'get_makesafe_attachment_url',
       'job_detail',
       'list_intake_drafts',
+      'makesafe_intake_reconciliation',
+      'makesafe_intake_backfill_report',
       'list_makesafe_companies',
       // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
       // normal work-order drafts through the internal auto-approval gate; it never
@@ -2051,6 +2066,18 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: makesafe_draft_heartbeat requires service/API key or admin/owner role' }, 403)
         }
         return json(await _makesafeDraftHeartbeat(client, makeReconAlertSink()))
+      }
+      case 'makesafe_intake_reconciliation': {
+        return json(await _makesafeIntakeReconciliation(client, {
+          windowDays: Number(url.searchParams.get('window_days') || '') || undefined,
+          staleMinutes: Number(url.searchParams.get('stale_minutes') || '') || undefined,
+          limitItems: Number(url.searchParams.get('limit') || '') || undefined,
+        }))
+      }
+      case 'makesafe_intake_backfill_report': {
+        return json(await _makesafeIntakeBackfillReport(client, {
+          limitItems: Number(url.searchParams.get('limit') || '') || undefined,
+        }))
       }
       case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
       case 'geocode_job': return json(await geocodeJob(client, body))
@@ -10052,11 +10079,17 @@ async function approveIntakeDraft(client: any, body: any) {
     if (normTarget) {
       // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
       // the refs already on live jobs is cheap and lets us match on normalised form.
+      const approvedCompanyKey = String(approvedFields.requesting_company_slug || approvedFields.requesting_company_name || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
       const { data: candidates } = await client.from('makesafe_job_details')
-        .select('job_id, external_ref, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
+        .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
         .not('external_ref', 'is', null)
       const dup = (candidates || []).find((row: any) => {
         if (normaliseRef(row.external_ref, prefixes) !== normTarget) return false
+        const existingCompanyKey = String(row.requesting_company_slug || row.requesting_company_name || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+        // Known-company approvals must only block against the same known company.
+        // If either side lacks company metadata, fail open to the review queue
+        // rather than silently suppress a different builder's same-number ref.
+        if (!approvedCompanyKey || !existingCompanyKey || approvedCompanyKey !== existingCompanyKey) return false
         const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs
         const existingMetadata = parseJsonObject(existingJob?.metadata)
         const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
@@ -10108,10 +10141,12 @@ async function approveIntakeDraft(client: any, body: any) {
   let createdJobId: string | null = null
   try {
     // Create the make-safe job using reviewed/edited fields, not stale extraction data.
-    // For report-only drafts: pass all builder email/report links as external_links and
-    // set substatus=ready_to_invoice immediately (skips the report-production stage).
+    // Preserve builder email source context for EVERY family so board/trade users can
+    // see original instructions, links, and received timestamps after approval. For
+    // report-only drafts, the same source links also support the report/quote workflow
+    // and the job is advanced to ready_to_invoice below.
     const portalLinks = _normalizeReportExternalLinks(extraction)
-    const reportJobExternalLinks = isReportOnlyDraft && portalLinks.length ? portalLinks : null
+    const sourceExternalLinks = portalLinks.length ? portalLinks : null
     const jobResult = await createMakesafeJob(client, {
       client_name: approvedFields.client_name,
       site_address: approvedFields.site_address,
@@ -10128,12 +10163,10 @@ async function approveIntakeDraft(client: any, body: any) {
       makesafe_job_family: approvedJobFamily,
       makesafe_job_family_label: _makeSafeJobFamilyLabel(approvedJobFamily),
       suppress_notifications: true,
-      ...(reportJobExternalLinks ? { external_links: reportJobExternalLinks } : {}),
-      ...(isReportOnlyDraft ? {
-        builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
-        builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
-        builder_email_received_at: extraction?.builder_email_received_at || draft?.received_at || null,
-      } : {}),
+      ...(sourceExternalLinks ? { external_links: sourceExternalLinks } : {}),
+      builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
+      builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
+      builder_email_received_at: extraction?.builder_email_received_at || draft?.received_at || null,
     })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
@@ -10460,12 +10493,21 @@ async function recaptureIntakeDraft(client: any, body: any) {
   //     recovery action — recapture must NOT auto-attach or create a redundant draft.
   if (draft.external_ref) {
     const normDraftRef = _normaliseDedupRef(draft.external_ref)
+    const normDraftCompany = _normaliseDedupCompany(
+      draft.requesting_company_slug,
+      draft.requesting_company_name,
+    )
     if (normDraftRef) {
       const { data: jobRows } = await client.from('makesafe_job_details')
-        .select('job_id, external_ref')
+        .select('job_id, external_ref, requesting_company_slug, requesting_company_name')
         .not('external_ref', 'is', null)
       for (const jobRow of (jobRows || [])) {
-        if (jobRow.external_ref && _normaliseDedupRef(jobRow.external_ref) === normDraftRef) {
+        if (!jobRow.external_ref || _normaliseDedupRef(jobRow.external_ref) !== normDraftRef) continue
+        const normJobCompany = _normaliseDedupCompany(
+          jobRow.requesting_company_slug,
+          jobRow.requesting_company_name,
+        )
+        if (normDraftCompany && normJobCompany && normDraftCompany === normJobCompany) {
           return {
             ok: true,
             recaptured: false,
@@ -10719,18 +10761,28 @@ async function scanSesMakesafes(client: any) {
     const subject = (msg.subject || '').toLowerCase()
     // makesafe-inbound-filter — cheap SUBJECT pre-filter: drop the unambiguous
     // non-WO subjects (Photo Evidence / Report / Invoice / Correction / Crew
-    // Report / RE:/FW:) BEFORE the expensive attachment read + Haiku call.
+    // Report) BEFORE the expensive attachment read + Haiku call. RE/FW is a
+    // downstream risk flag when work-order evidence exists, not a hard drop.
     // The hard isGenuineNewWorkOrder gate still runs before insert below.
     if (_subjectIsExcludedNonWorkOrder(msg.subject || '')) return false
-    // Match if sender matches a known pattern OR subject contains work order keywords
-    const senderMatch = senderPatterns.some(sp => fromEmail.includes(sp.pattern))
+    // Match if sender matches a known pattern OR subject contains work order keywords.
+    // Sender matching is shared with monitor-ses-makesafes and uses anchored domain
+    // suffix logic, not substring includes(), so lookalike domains cannot drift in.
+    const senderMatch = senderPatterns.some(sp => _senderMatchesPattern(fromEmail, sp.pattern))
     const subjectMatch = /work\s*order|make\s*safe|emergency|storm|urgent\s*(attend|repair)/i.test(subject)
     return senderMatch || (subjectMatch && (fromEmail.includes('.build') || fromEmail.includes('primeeco.tech')))
   })
 
-  // Cap the candidate set at the first 50 (matched are already received_at desc)
-  // to keep Haiku cost bounded — parity with the old $top=50 Graph window.
-  const makesafeEmails = matchedMessages.slice(0, 50)
+  // Process a bounded number of UNPROCESSED candidates, not a blind "newest 50"
+  // slice. Cheap duplicate checks still run across the full paged matched window.
+  // The scan order interleaves oldest/newest matches before applying the budget
+  // so a sustained flood of fresh mail cannot permanently starve older real work
+  // orders that are still inside the seven-day candidate window.
+  const fairMatchedMessages = _interleaveOldestNewestForFairScan(matchedMessages)
+  const maxUnprocessedCandidates = Math.max(
+    1,
+    Number(Deno.env.get('MAKESAFE_INTAKE_SCAN_MAX_UNPROCESSED') || '200') || 200,
+  )
 
   // BUG 1 — CROSS-PATH DEDUP. The OLD user-mailbox path and the NEW group-sync path
   // assign DIFFERENT graph_message_id values to the SAME work-order email, so a
@@ -10771,7 +10823,7 @@ async function scanSesMakesafes(client: any) {
     .not('external_ref', 'is', null)
   // Build a (normalised-ref|company-slug|job-family) -> { jobId, status } lookup.
   const refToJobId = new Map<string, { jobId: string; status: string | null }>()
-  const existingJobDedupRows: Array<{ external_ref: string | null; makesafe_job_family: string | null }> = []
+  const existingJobDedupRows: Array<{ external_ref: string | null; requesting_company_slug?: string | null; makesafe_job_family: string | null }> = []
   for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; requesting_company_slug: string | null; report_type?: string | null; jobs: { status: string; metadata?: any; notes?: string | null } | { status: string; metadata?: any; notes?: string | null }[] | null }>) {
     const nr = _normaliseDedupRef(j.external_ref)
     if (nr && j.job_id) {
@@ -10784,7 +10836,11 @@ async function scanSesMakesafes(client: any) {
         j.report_type || null,
       )
       const familyKey = _normaliseDedupJobFamily(jobFamily)
-      existingJobDedupRows.push({ external_ref: j.external_ref, makesafe_job_family: familyKey || null })
+      existingJobDedupRows.push({
+        external_ref: j.external_ref,
+        requesting_company_slug: companyKey || null,
+        makesafe_job_family: familyKey || null,
+      })
       // Primary key: ref|company|family so one builder ref can have separate report/temp/general jobs.
       refToJobId.set(`${nr}|${companyKey}|${familyKey}`, { jobId: j.job_id, status: jobsData?.status ?? null })
       // Fallbacks for old jobs where company/family metadata is missing.
@@ -10809,11 +10865,16 @@ async function scanSesMakesafes(client: any) {
 
   const newDrafts: any[] = []
   let skippedDuplicates = 0
+  let processedCandidates = 0
+  let cappedCandidates = 0
+  let skippedAiOnly = 0
+  let skippedNotWorkOrderGate = 0
+  const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
 
-  for (const msg of makesafeEmails) {
+  for (const msg of fairMatchedMessages) {
     // Cheap pre-extraction dedup on the message ids we already have (graph /
     // internet). The (ref + company) check runs again AFTER Haiku extraction, once
     // we know the ref + matched company.
@@ -10821,11 +10882,26 @@ async function scanSesMakesafes(client: any) {
       { graph_message_id: msg.id, internet_message_id: msg.internetMessageId || null },
       dedupIndex,
     )
-    if (earlyDup) { skippedDuplicates++; continue }
+    if (earlyDup) {
+      skippedDuplicates++
+      skippedItems.push({ id: msg.id, subject: msg.subject || null, reason: earlyDup })
+      continue
+    }
+    if (processedCandidates >= maxUnprocessedCandidates) {
+      cappedCandidates++
+      skippedItems.push({
+        id: msg.id,
+        subject: msg.subject || null,
+        reason: 'scan_budget_capped',
+      })
+      continue
+    }
+    processedCandidates++
 
     const fromEmail = msg.from?.emailAddress?.address || ''
     const fromName = msg.from?.emailAddress?.name || ''
     const subject = msg.subject || ''
+    const replyForwardRisk = _subjectHasReplyForwardPrefix(subject)
     // Use full body for extraction (phone numbers and report links are often past
     // the 500-char preview cutoff). Keep a sanitized trade-readable copy for
     // report-only jobs; the email body is the source of truth for Prime/MLB links.
@@ -10836,11 +10912,9 @@ async function scanSesMakesafes(client: any) {
 
     // Match sender to company
     let matchedCompany: { slug: string; name: string } | null = null
-    for (const sp of senderPatterns) {
-      if (fromEmail.toLowerCase().includes(sp.pattern)) {
-        matchedCompany = { slug: sp.slug, name: sp.name }
-        break
-      }
+    const matchedSenderPattern = _findMatchingSenderCompany(fromEmail, senderPatterns)
+    if (matchedSenderPattern) {
+      matchedCompany = { slug: matchedSenderPattern.slug, name: matchedSenderPattern.name }
     }
 
     // Read PDF attachments FIRST so we can feed them to Haiku.
@@ -11016,9 +11090,6 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       extraction.builder_email_received_at = msg.receivedDateTime || null
     }
 
-    // Skip if not actually a work order (Haiku hint)
-    if (missingFields.includes('not_a_work_order')) continue
-
     // BUG 2 (CAPTURE): `attachments` may now include an entry whose re-upload FAILED
     // (pdf_unavailable=true, null URLs). Such an entry is NOT a servable work-order
     // PDF. Count only AVAILABLE WO PDFs (a real pdf_url, not flagged unavailable) for
@@ -11029,6 +11100,41 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     const availableWoCount = attachments.filter(
       (a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url),
     ).length
+
+    // Capture-first guard: Haiku can flag "not_a_work_order", but that must not be
+    // the sole reason a deterministic builder work item disappears. If deterministic
+    // evidence exists, keep the item in the normal hard gate path and mark it for
+    // human review rather than silently continuing.
+    const aiNotWorkOrder = missingFields.includes('not_a_work_order')
+    const deterministicRefEvidence =
+      /\b(ajbr|ajs|mlb|bwc|bwcwa|wb|kba)[-\s#]*\d{3,}\b/i.test(`${subject}\n${bodyPreview}`)
+    const deterministicWorkOrderEvidence =
+      availableWoCount > 0 ||
+      _subjectLooksLikeNewWorkOrder(subject) ||
+      mergedPortalLinks.length > 0 ||
+      deterministicRefEvidence ||
+      !!matchedCompany
+    if (aiNotWorkOrder && !deterministicWorkOrderEvidence) {
+      skippedAiOnly++
+      skippedItems.push({
+        id: msg.id,
+        subject,
+        reason: 'ai_not_a_work_order_no_deterministic_evidence',
+      })
+      continue
+    }
+    if (aiNotWorkOrder) {
+      missingFields = missingFields.filter((f: string) => f !== 'not_a_work_order')
+      if (!missingFields.includes('ai_not_a_work_order_needs_review')) {
+        missingFields.push('ai_not_a_work_order_needs_review')
+      }
+      extraction.classification_reason =
+        'AI suggested not_a_work_order, but deterministic intake evidence was present; kept for review.'
+    }
+    if (replyForwardRisk) {
+      if (!missingFields.includes('reply_forward_risk')) missingFields.push('reply_forward_risk')
+      extraction.reply_forward_risk = true
+    }
 
     // GAP-B (B1 detect-and-flag) — mission makesafe-wo-capture-recovery-2026-06-17.
     // If no servable PDF was captured AND the email passes a NEW-WO SUBJECT check,
@@ -11087,10 +11193,13 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
 
     // makesafe-inbound-filter — HARD GATE: a GENUINE new work order OR a captured
     // report/re-attend email becomes a draft. Drops photo-evidence / report /
-    // invoice / outbound / reply emails. Report-capture emails get kind='report'.
+    // invoice / outbound emails. RE/FW work-order evidence is kept with a risk
+    // flag. Report-capture emails get kind='report'.
     const woGate = _isGenuineNewWorkOrder(subject, fromEmail, availableWoCount)
     if (!woGate.ok) {
       console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
+      skippedNotWorkOrderGate++
+      skippedItems.push({ id: msg.id, subject, reason: woGate.reason })
       continue
     }
 
@@ -11147,7 +11256,15 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       // sees "this matches job X — reopen it?". Other dup reasons (same draft already
       // exists, same message id) remain silent drops (the human already has the draft
       // or the email is a re-scan of the same post).
-      if (refDup === 'job_external_ref' && extractedRef) {
+      if (refDup === 'unknown_family_needs_review' || refDup === 'job_unknown_family_needs_review') {
+        // G023: a legacy unknown-family row must not permanently suppress a
+        // known-family same-ref variant. Keep this candidate visible as a manual
+        // review draft and block auto-approval via missing_fields.
+        if (!missingFields.includes(refDup)) missingFields.push(refDup)
+        extraction.classification_reason = extraction.classification_reason ||
+          'Existing same-ref row has no make-safe job family; kept for human review instead of silently suppressing a possible separate job-family variant.'
+        extraction.dedup_review_reason = refDup
+      } else if (refDup === 'job_external_ref' && extractedRef) {
         const normRef = _normaliseDedupRef(extractedRef)
         // Prefer the company-scoped key (ref|slug) to avoid cross-builder collisions.
         // Fall back to the ref-only key when the company slug is absent.
@@ -11176,6 +11293,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           const skipReason = matchedEntry == null ? 'no company-scoped match (ambiguous ref)' : 'active job, not reopen-eligible'
           console.log('[ops-api] intake skip (' + skipReason + '):', matchedJobStatus, '|', extractedRef, '|', matchedJobId)
           skippedDuplicates++
+          skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: `job_external_ref:${skipReason}` })
           continue
         }
         const reopenDraft = {
@@ -11228,11 +11346,13 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           )
           newDrafts.push({ ...reopenDraft, _is_reopen_candidate: true })
         }
+        continue
       } else {
         console.log('[ops-api] intake skip (duplicate across paths):', refDup, '|', extractedRef, '|', subject)
         skippedDuplicates++
+        skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: refDup })
+        continue
       }
-      continue
     }
 
     // Report-capture drafts always go to needs_review (they are human-review items,
@@ -11377,10 +11497,17 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // Wave 1: emails READ from the group-sync projection (the candidate window),
     // not a live Graph message count.
     scanned: (emailRows || []).length,
-    makesafe_candidates: makesafeEmails.length,
+    makesafe_candidates: processedCandidates,
+    matched_candidates: matchedMessages.length,
+    processed_candidates: processedCandidates,
+    capped_candidates: cappedCandidates,
     // BUG 1: count of candidates skipped because a draft/job already exists for them
     // (across BOTH the old user-mailbox path and the new group-sync path).
     already_processed: skippedDuplicates,
+    skipped_ai_only: skippedAiOnly,
+    skipped_not_work_order_gate: skippedNotWorkOrderGate,
+    skipped_items: skippedItems.slice(0, 100),
+    scan_order: 'oldest_newest_interleave',
     new_drafts: newDrafts,
     new_count: newDrafts.length,
     auto_approved: autoApproved,

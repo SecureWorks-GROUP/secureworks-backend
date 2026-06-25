@@ -524,7 +524,11 @@ Deno.test({
       draft,
       groupEmailPostId: GROUP_POST_ID,
       jobRows: [
-        { job_id: LIVE_JOB_ID, external_ref: "MLB-25096" },
+        {
+          job_id: LIVE_JOB_ID,
+          external_ref: "MLB-25096",
+          requesting_company_slug: "mlb",
+        },
       ],
     });
 
