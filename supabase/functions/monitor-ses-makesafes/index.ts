@@ -25,6 +25,10 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getGraphToken } from "../_shared/graph_client.ts";
+import {
+  parseSenderDomain,
+  senderMatchesPattern,
+} from "../_shared/makesafe_intake_classification.ts";
 // SINGLE SOURCE OF TRUTH for ref prefixes + normalisation, shared with the
 // reconciler (ops-api/makesafe_reconcile.ts) so the email side and the board side
 // can never drift on which prefixes / normal forms are recognised. The local
@@ -430,30 +434,6 @@ async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
 // underscore-prefixed test export.
 const DEFAULT_REF_PREFIXES = REF_PREFIX_FLOOR;
 const SUBJECT_KEYWORD = /make\s*safe|work\s*order/i;
-
-// N1 — extract the sender domain (lowercased) from an email address. Used for
-// anchored/boundary matching instead of fromEmail.includes(pattern), which
-// over-matches (e.g. pattern "mlb.com" hits "notmlb.com.evil.test").
-function parseSenderDomain(email: string | null): string | null {
-  if (!email) return null;
-  const at = email.lastIndexOf("@");
-  if (at < 0) return null;
-  const domain = email.slice(at + 1).trim().toLowerCase();
-  return domain || null;
-}
-
-// N1 — does the sender domain match a company pattern with a proper boundary?
-// A pattern matches when it equals the domain OR is a dot-anchored suffix of it
-// (so "mlb.com.au" matches "noreply.mlb.com.au" but NOT "evilmlb.com.au"). If the
-// pattern itself looks like a full address (contains '@'), match the whole address.
-function senderMatchesPattern(fromEmail: string, pattern: string): boolean {
-  const p = pattern.toLowerCase().trim();
-  if (!p) return false;
-  if (p.includes("@")) return fromEmail === p;
-  const domain = parseSenderDomain(fromEmail);
-  if (!domain) return false;
-  return domain === p || domain.endsWith(`.${p}`);
-}
 
 function classifyPost(
   post: GraphPost,

@@ -15,7 +15,7 @@
 //   - "Invoice - AJBR 66902 - Dianella"                 (our outbound / billing)
 //   - "Make Safe Report and Invoice - MLB-25369 - ..."  (our outbound send)
 //   - "Correction - ...", "WhatsApp Crew Report - ..."  (chatter)
-//   - "RE: ...", "FW: ..." replies/forwards
+//   - reply/forward-only chatter with no work-order evidence
 // These have NO work-order PDF and become "0 work order file(s) / Missing:
 // work_order_pdf" drafts that a human must reject one by one.
 //
@@ -30,7 +30,8 @@
 // Two-stage gate, applied in scanSesMakesafes:
 //   1. subjectIsExcludedNonWorkOrder(subject) — a SUBJECT-only pre-filter that
 //      drops the unambiguous non-WO subjects (Photo Evidence / Report / Invoice
-//      / Correction / Crew Report / reply-forward prefixes). Cheap; runs BEFORE
+//      / Correction / Crew Report). Reply/forward prefixes are kept as risk
+//      flags when evidence exists. Cheap; runs BEFORE
 //      the expensive Graph attachment fetch + Haiku call.
 //   2. isGenuineNewWorkOrder(subject, fromEmail, workOrderPdfCount) — the hard
 //      gate right before the draft insert. A row is created ONLY when the email
@@ -53,7 +54,9 @@ import { isOwnDomain } from "./makesafe_compact_reads.ts";
 
 // Reply / forward prefixes — anchored at the START of the (trimmed) subject so
 // "Software Review" is not treated as a forward. Covers RE:, FW:, FWD:, and the
-// space/colon variants Outlook/Graph emit.
+// space/colon variants Outlook/Graph emit. A reply/forward is a RISK SIGNAL, not
+// an exclusion by itself: builders do forward legitimate work orders, and those
+// must still be captured when deterministic work-order evidence exists.
 const REPLY_FORWARD_RE = /^\s*(re|fw|fwd)\s*:/i;
 
 // ── REPORT-CAPTURE: recognised existing-ref / report-request patterns ─────────
@@ -231,16 +234,26 @@ const NEW_WORK_ORDER_SUBJECT_PHRASES: readonly RegExp[] = [
 ] as const;
 
 /**
+ * True when the subject carries a reply/forward prefix. This is intentionally
+ * exported separately from `subjectIsExcludedNonWorkOrder` so scan code can keep
+ * the item visible with review context instead of silently rejecting it.
+ */
+export function subjectHasReplyForwardPrefix(
+  subject: string | null | undefined,
+): boolean {
+  return REPLY_FORWARD_RE.test((subject || "").trim());
+}
+
+/**
  * True when the subject is UNAMBIGUOUSLY not a new work order (crew evidence,
- * report, invoice, correction, crew chatter) or is a reply/forward. Subject-only;
- * safe to run as a cheap pre-filter before any attachment/Haiku work.
+ * report, invoice, correction, crew chatter). Reply/forward is not included here:
+ * it is only a risk flag when deterministic work-order evidence exists.
  */
 export function subjectIsExcludedNonWorkOrder(
   subject: string | null | undefined,
 ): boolean {
   const s = (subject || "").trim();
   if (!s) return false; // empty subject is not, by itself, an exclusion signal
-  if (REPLY_FORWARD_RE.test(s)) return true;
   for (const re of NON_WORK_ORDER_SUBJECT_PHRASES) {
     if (re.test(s)) return true;
   }
@@ -385,7 +398,7 @@ export function isGenuineNewWorkOrder(
   }
 
   // 2) Unambiguous non-WO subjects (photo evidence / report / invoice /
-  //    correction / crew chatter / reply-forward) are NEVER a new work order
+  //    correction / crew chatter) are NEVER a new work order
   //    OR a report-capture candidate, regardless of any PDF.
   //    This is what keeps blocking our outbound acks ("Make Safe Report and Invoice").
   if (subjectIsExcludedNonWorkOrder(s)) {

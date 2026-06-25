@@ -17,6 +17,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildIntakeDedupIndex,
+  interleaveOldestNewestForFairScan,
   isDuplicateIntake,
   normaliseCompany,
   normaliseRef,
@@ -78,6 +79,22 @@ Deno.test("refCompanyKey: ref WITHOUT a known company yields empty key (no cross
   // emails sharing a ref from DIFFERENT builders would wrongly dedup against each other.
   assertEquals(refCompanyKey("AJBR 67998", null, null), "");
   assertEquals(refCompanyKey("AJBR 67998", "", ""), "");
+});
+
+Deno.test("SCAN FAIRNESS: bounded scans sample oldest and newest candidates", () => {
+  const newestFirst = ["newest", "newer", "middle", "older", "oldest"];
+  assertEquals(interleaveOldestNewestForFairScan(newestFirst), [
+    "oldest",
+    "newest",
+    "older",
+    "newer",
+    "middle",
+  ]);
+  assertEquals(
+    interleaveOldestNewestForFairScan(newestFirst).slice(0, 4),
+    ["oldest", "newest", "older", "newer"],
+    "a cap of four must include both oldest backlog and fresh mail",
+  );
 });
 
 Deno.test("BUG-1 SAFETY: two unknown-company candidates with the SAME ref do NOT collide", () => {
@@ -166,10 +183,31 @@ Deno.test("JOB-FAMILY: same MLB ref/company and same family is still a duplicate
   );
 });
 
+Deno.test("JOB-FAMILY: legacy unknown-family draft routes known-family candidate to review", () => {
+  const index = buildIntakeDedupIndex([{
+    graph_message_id: "old-path",
+    external_ref: "MLB-26001",
+    requesting_company_slug: "mlb",
+    status: "draft",
+    makesafe_job_family: null,
+  }]);
+
+  assertEquals(
+    isDuplicateIntake({
+      graph_message_id: "new-path",
+      external_ref: "MLB 26001",
+      requesting_company_slug: "mlb",
+      makesafe_job_family: "roof_report",
+    }, index),
+    "unknown_family_needs_review",
+  );
+});
+
 Deno.test("JOB-FAMILY: existing live job on same ref only blocks matching family", () => {
   const index = buildIntakeDedupIndex([], [
     {
       external_ref: "MLB-25911",
+      requesting_company_slug: "mlb",
       makesafe_job_family: "assessment_report_quote",
     },
   ]);
@@ -197,6 +235,23 @@ Deno.test("JOB-FAMILY: existing live job on same ref only blocks matching family
   );
 });
 
+Deno.test("JOB-FAMILY: legacy unknown-family job routes known-family candidate to review", () => {
+  const index = buildIntakeDedupIndex([], [{
+    external_ref: "MLB-26002",
+    requesting_company_slug: "mlb",
+    makesafe_job_family: null,
+  }]);
+
+  assertEquals(
+    isDuplicateIntake({
+      external_ref: "MLB 26002",
+      requesting_company_slug: "mlb",
+      makesafe_job_family: "temp_fence_makesafe",
+    }, index),
+    "job_unknown_family_needs_review",
+  );
+});
+
 Deno.test("graph_message_id exact match is caught first (within-path)", () => {
   const index = buildIntakeDedupIndex([BICTON_OLD]);
   const reason = isDuplicateIntake(
@@ -219,12 +274,29 @@ Deno.test("internet_message_id exact match is caught (old<->old)", () => {
 });
 
 Deno.test("an existing JOB on the same ref makes the candidate a duplicate", () => {
-  const index = buildIntakeDedupIndex([], ["MLB-25096"]);
+  const index = buildIntakeDedupIndex([], [{
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+  }]);
   const reason = isDuplicateIntake({
     external_ref: "MLB 25096",
     requesting_company_slug: "mlb",
   }, index);
   assertEquals(reason, "job_external_ref");
+});
+
+Deno.test("JOB-COMPANY: same ref/family but different live-job company does NOT suppress", () => {
+  const index = buildIntakeDedupIndex([], [{
+    external_ref: "25096",
+    requesting_company_slug: "mlb",
+    makesafe_job_family: "general_makesafe",
+  }]);
+  const reason = isDuplicateIntake({
+    external_ref: "25096",
+    requesting_company_slug: "aj",
+    makesafe_job_family: "general_makesafe",
+  }, index);
+  assertEquals(reason, null);
 });
 
 Deno.test("a genuinely NEW email (new ref, new ids) is NOT a duplicate", () => {

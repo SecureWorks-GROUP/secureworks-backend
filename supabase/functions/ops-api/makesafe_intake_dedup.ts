@@ -111,6 +111,12 @@ export interface DedupIndex {
   jobRefFamily: Set<string>;
   /** normalised refs for existing jobs where the family is unknown */
   jobUnknownFamilyRefs: Set<string>;
+  /** normalised `${ref}|${company}` for existing jobs with a known company */
+  jobRefCompany: Set<string>;
+  /** normalised `${ref}|${company}|${family}` for existing jobs with known company+family */
+  jobRefCompanyFamily: Set<string>;
+  /** normalised `${ref}|${company}` for existing jobs with known company but unknown family */
+  jobRefCompanyUnknownFamily: Set<string>;
   /**
    * normalised `${ref}|${company}` -> latest rejected received_at (ISO string).
    * Maps each rejected/superseded ref+company key to the MAX received_at among
@@ -220,6 +226,34 @@ export function refFamilyKey(
 }
 
 /**
+ * Reorder a newest-first intake scan window so a bounded processor samples both
+ * ends of the candidate window: oldest, newest, second-oldest, second-newest...
+ *
+ * Why this lives with intake dedup helpers: the scan budget is applied AFTER
+ * cheap dedup. If we only process the newest N unprocessed rows, sustained
+ * high-volume inbound mail can permanently starve older real work orders still
+ * inside the seven-day window. Interleaving makes every run give old backlog a
+ * chance without ignoring fresh work.
+ */
+export function interleaveOldestNewestForFairScan<T>(
+  newestFirstItems: T[],
+): T[] {
+  const items = [...(newestFirstItems || [])];
+  const ordered: T[] = [];
+  let newest = 0;
+  let oldest = items.length - 1;
+  while (newest <= oldest) {
+    ordered.push(items[oldest]);
+    oldest--;
+    if (newest <= oldest) {
+      ordered.push(items[newest]);
+      newest++;
+    }
+  }
+  return ordered;
+}
+
+/**
  * Build a dedup index from the existing drafts (in any LIVE state) and, optionally,
  * existing jobs' external refs, and previously-rejected/superseded drafts.
  *
@@ -242,6 +276,9 @@ export function buildIntakeDedupIndex(
   const jobRefs = new Set<string>();
   const jobRefFamily = new Set<string>();
   const jobUnknownFamilyRefs = new Set<string>();
+  const jobRefCompany = new Set<string>();
+  const jobRefCompanyFamily = new Set<string>();
+  const jobRefCompanyUnknownFamily = new Set<string>();
   const rejectedRefCompany = new Map<string, string>();
 
   for (const d of existingDrafts || []) {
@@ -265,14 +302,40 @@ export function buildIntakeDedupIndex(
     }
   }
   for (const row of existingJobRefs || []) {
-    const ref = typeof row === "string" ? row : row?.external_ref;
-    const family = typeof row === "string" ? null : row?.makesafe_job_family;
+    const rowObj: IntakeDedupRow | null = typeof row === "string"
+      ? null
+      : row ??
+        null;
+    const ref = typeof row === "string" ? row : rowObj?.external_ref;
+    const family = rowObj?.makesafe_job_family ?? null;
     const nr = normaliseRef(ref);
     if (nr) {
-      jobRefs.add(nr);
-      const rf = refFamilyKey(ref, family);
-      if (rf) jobRefFamily.add(rf);
-      else jobUnknownFamilyRefs.add(nr);
+      const rc = rowObj
+        ? refCompanyKey(
+          rowObj.external_ref,
+          rowObj.requesting_company_slug,
+          rowObj.requesting_company_name,
+        )
+        : "";
+      if (rc) {
+        jobRefCompany.add(rc);
+        const rcf = refCompanyFamilyKey(
+          rowObj?.external_ref,
+          rowObj?.requesting_company_slug,
+          rowObj?.requesting_company_name,
+          family,
+        );
+        if (rcf) jobRefCompanyFamily.add(rcf);
+        else jobRefCompanyUnknownFamily.add(rc);
+      } else {
+        // Legacy/no-company job rows are intentionally the only rows that fall
+        // back to ref-only job suppression. Company-known rows must not collide
+        // across builders that happen to share the same external ref.
+        jobRefs.add(nr);
+        const rf = refFamilyKey(ref, family);
+        if (rf) jobRefFamily.add(rf);
+        else jobUnknownFamilyRefs.add(nr);
+      }
     }
   }
   for (const d of rejectedDrafts || []) {
@@ -303,6 +366,9 @@ export function buildIntakeDedupIndex(
     jobRefs,
     jobRefFamily,
     jobUnknownFamilyRefs,
+    jobRefCompany,
+    jobRefCompanyFamily,
+    jobRefCompanyUnknownFamily,
     rejectedRefCompany,
   };
 }
@@ -349,14 +415,15 @@ export function isDuplicateIntake(
         candidate.requesting_company_name,
         family,
       );
-      // Same ref/company/family is a duplicate. Unknown-family existing drafts
-      // are treated conservatively as duplicates because we cannot prove they
-      // are a different job family.
-      if (
-        (rcf && index.refCompanyFamily.has(rcf)) ||
-        index.refCompanyUnknownFamily.has(rc)
-      ) {
+      // Same ref/company/family is a duplicate. A legacy unknown-family draft on
+      // the same ref/company is NOT allowed to permanently suppress a new
+      // known-family candidate; surface it to review so ops can backfill or split
+      // the family explicitly.
+      if (rcf && index.refCompanyFamily.has(rcf)) {
         return "external_ref+company";
+      }
+      if (index.refCompanyUnknownFamily.has(rc)) {
+        return "unknown_family_needs_review";
       }
     } else if (index.refCompany.has(rc)) {
       return "external_ref+company";
@@ -364,12 +431,34 @@ export function isDuplicateIntake(
   }
   const nr = normaliseRef(candidate.external_ref);
   if (nr) {
-    if (family) {
+    if (rc) {
+      if (family) {
+        const rcf = refCompanyFamilyKey(
+          candidate.external_ref,
+          candidate.requesting_company_slug,
+          candidate.requesting_company_name,
+          family,
+        );
+        if (
+          rcf && index.jobRefCompanyFamily.has(rcf)
+        ) {
+          return "job_external_ref";
+        }
+        if (index.jobRefCompanyUnknownFamily.has(rc)) {
+          return "job_unknown_family_needs_review";
+        }
+      } else if (index.jobRefCompany.has(rc)) {
+        return "job_external_ref";
+      }
+    } else if (family) {
       const rf = refFamilyKey(candidate.external_ref, family);
       if (
-        (rf && index.jobRefFamily.has(rf)) || index.jobUnknownFamilyRefs.has(nr)
+        rf && index.jobRefFamily.has(rf)
       ) {
         return "job_external_ref";
+      }
+      if (index.jobUnknownFamilyRefs.has(nr)) {
+        return "job_unknown_family_needs_review";
       }
     } else if (index.jobRefs.has(nr)) {
       return "job_external_ref";
