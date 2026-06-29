@@ -8487,8 +8487,33 @@ function buildMakesafeFamilyBackfillCandidates(
   return out
 }
 
+function normalizeBackfillJobNumberFilter(value: any): Set<string> | null {
+  const raw = Array.isArray(value)
+    ? value
+    : (typeof value === 'string' ? value.split(/[,\s]+/) : [])
+  const normalized = raw
+    .map((v) => String(v || '').trim().toUpperCase())
+    .filter(Boolean)
+  return normalized.length ? new Set(normalized) : null
+}
+
+function filterMakesafeFamilyBackfillCandidatesForScope(
+  candidates: MakesafeFamilyBackfillCandidate[],
+  body: any,
+): MakesafeFamilyBackfillCandidate[] {
+  const includeJobNumbers = normalizeBackfillJobNumberFilter(body?.job_numbers)
+  const excludeJobNumbers = normalizeBackfillJobNumberFilter(body?.exclude_job_numbers)
+  return candidates.filter((candidate) => {
+    const jobNumber = String(candidate.job_number || '').trim().toUpperCase()
+    if (includeJobNumbers && !includeJobNumbers.has(jobNumber)) return false
+    if (excludeJobNumbers && excludeJobNumbers.has(jobNumber)) return false
+    return true
+  })
+}
+
 export const _inferMakesafeFamilyForActiveBackfillForTest = inferMakesafeFamilyForActiveBackfill
 export const _buildMakesafeFamilyBackfillCandidatesForTest = buildMakesafeFamilyBackfillCandidates
+export const _filterMakesafeFamilyBackfillCandidatesForScopeForTest = filterMakesafeFamilyBackfillCandidatesForScope
 
 async function backfillMakesafeJobFamilies(client: any, body: any) {
   const dryRun = body?.dry_run !== false
@@ -8530,8 +8555,9 @@ async function backfillMakesafeJobFamilies(client: any, body: any) {
     }
   }
 
-  const candidates = buildMakesafeFamilyBackfillCandidates(jobs || [], detailsMap, stageMap)
+  const allCandidates = buildMakesafeFamilyBackfillCandidates(jobs || [], detailsMap, stageMap)
     .filter((c) => allowedFamilies.has(c.inferred_family))
+  const candidates = filterMakesafeFamilyBackfillCandidatesForScope(allCandidates, body)
 
   if (expectedCount !== null && candidates.length !== expectedCount) {
     return {
@@ -8540,6 +8566,7 @@ async function backfillMakesafeJobFamilies(client: any, body: any) {
       error: `expected_count mismatch: expected ${expectedCount}, got ${candidates.length}`,
       expected_count: expectedCount,
       candidate_count: candidates.length,
+      unfiltered_candidate_count: allCandidates.length,
       candidates,
     }
   }
@@ -8548,6 +8575,7 @@ async function backfillMakesafeJobFamilies(client: any, body: any) {
     ok: true,
     dry_run: dryRun,
     candidate_count: candidates.length,
+    unfiltered_candidate_count: allCandidates.length,
     candidates,
     updated: [] as any[],
     skipped: [] as any[],
