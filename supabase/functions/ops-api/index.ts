@@ -3113,6 +3113,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'upload_document': return json(await uploadDocument(client, body))
       case 'confirm_document_upload': return json(await confirmDocumentUpload(client, body))
       case 'attach_makesafe_document': return json(await attachMakesafeDocument(client, body))
+      case 'attach_email_attachment_to_job': return json(await attachEmailAttachmentToJob(client, body))
 
       // ── MakeSafe Reporting Autopilot (Wave 2) ──
       // create_makesafe_draft_invoice + makesafe_render_report are routine-safe
@@ -16863,6 +16864,88 @@ async function confirmDocumentUpload(client: any, body: any) {
   })
 
   return { success: true, document_id: doc?.id, url: publicUrl }
+}
+
+// ── attach_email_attachment_to_job ──────────────────────────────────────────
+// Copy a work-order PDF that already lives in the PRIVATE `makesafe-emails`
+// bucket (referenced by an `email_attachments` row) onto a live make-safe job's
+// document list in the PUBLIC `job-documents` bucket, so the WO PDF renders on
+// the board card.
+//
+// WHY THIS EXISTS: the email sync drops the builder WO PDF into the private
+// `makesafe-emails` bucket and records it in `email_attachments` (status
+// 'uploaded'). The board reads documents from the public `job-documents`
+// bucket. The manual terminal intake skill can READ the PDF (ms365) but cannot
+// fetch the private bucket bytes to re-host them — that needs the service-role
+// key, which the terminal must not hold. This action does the byte-copy
+// SERVER-SIDE with the service key, then delegates to attachMakesafeDocument so
+// the job_documents row, idempotency, visibility and ledger logic are identical
+// to every other typed attach.
+//
+// Accepts: job_id, and EITHER email_attachment_id (preferred) OR
+// (email_id [+ optional sha256 / file_name]) to resolve the row. Optional:
+// type (default 'work_order'), file_name override, visible_to_trades,
+// operator_email. Read of the private bytes + upload of the public copy run on
+// the admin (service-role) client; the job_documents write reuses the caller's
+// client via attachMakesafeDocument. Does NOT change job status or send.
+async function attachEmailAttachmentToJob(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new Error('job_id required')
+  const type = body.type || 'work_order'
+
+  // Resolve the source email_attachments row.
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  let att: any = null
+  if (body.email_attachment_id || body.attachment_id) {
+    const { data, error } = await adminClient.from('email_attachments')
+      .select('id, name, content_type, storage_path, status, sha256, size_bytes')
+      .eq('id', body.email_attachment_id || body.attachment_id).maybeSingle()
+    if (error) throw new Error('email_attachments lookup failed: ' + error.message)
+    att = data
+  } else if (body.email_id) {
+    let q = adminClient.from('email_attachments')
+      .select('id, name, content_type, storage_path, status, sha256, size_bytes')
+      .eq('email_id', body.email_id).eq('status', 'uploaded')
+    if (body.sha256) q = q.eq('sha256', body.sha256)
+    if (body.file_name || body.name) q = q.eq('name', body.file_name || body.name)
+    const { data, error } = await q.order('created_at', { ascending: true })
+    if (error) throw new Error('email_attachments lookup failed: ' + error.message)
+    // Prefer a PDF when multiple match and no exact name was given.
+    const rows = data || []
+    att = rows.find((r: any) => (r.content_type || '').includes('pdf') || (r.name || '').toLowerCase().endsWith('.pdf')) || rows[0]
+  } else {
+    throw new Error('email_attachment_id (preferred) or email_id required to resolve the source PDF')
+  }
+
+  if (!att) throw new Error('no matching email_attachments row found')
+  if (!att.storage_path) throw new Error(`email_attachments ${att.id} has no storage_path (status='${att.status}') — bytes not synced yet`)
+
+  // Download the private bytes (service role).
+  const { data: blob, error: dlErr } = await adminClient.storage
+    .from('makesafe-emails')
+    .download(att.storage_path)
+  if (dlErr || !blob) throw new Error('private bucket download failed: ' + (dlErr?.message || 'no blob') + ` (path=${att.storage_path})`)
+  const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+
+  // Delegate to the shared attach path (job-documents upload + job_documents
+  // row + idempotency + ledger). file_name defaults to the source name.
+  const fileName = body.file_name || body.name || att.name || `work-order-${jId}.pdf`
+  const result = await attachMakesafeDocument(client, {
+    job_id: jId,
+    type,
+    pdf_base64: bytesToBase64(fileBuffer),
+    file_name: fileName,
+    visible_to_trades: body.visible_to_trades,
+    operator_email: body.operator_email || body.uploaded_by,
+  })
+
+  return {
+    ...result,
+    source: 'email_attachment',
+    email_attachment_id: att.id,
+    source_storage_path: att.storage_path,
+    bytes: fileBuffer.length,
+  }
 }
 
 // ── Make-Safe close-out doc attach (typed + idempotent) ──
