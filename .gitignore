@@ -20,3 +20,5 @@ scratch/
 drafts/
 
 .gstack/
+
+.playwright-mcp/
