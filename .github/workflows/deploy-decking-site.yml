@@ -1,0 +1,39 @@
+name: Deploy decking-site
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/decking-site/**'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.repository == 'SecureWorks-GROUP/secureworks-backend'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      # The Vercel project serves all apps from one root deployment governed by
+      # the root vercel.json. The path filter above is the isolation guarantee:
+      # this workflow runs ONLY when apps/decking-site/** changes, so a change to one
+      # app never triggers another app's deploy workflow.
+      - name: Pull Vercel environment
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel pull --yes --environment=production --token "${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Deploy decking-site to Vercel (production)
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel deploy --prod --yes --token "${{ secrets.VERCEL_TOKEN }}"

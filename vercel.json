@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "trailingSlash": true,
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/fencing/:path*", "destination": "/apps/fencing-site/:path*" },
+    { "source": "/decking/:path*", "destination": "/apps/decking-site/:path*" },
+    { "source": "/fencing-tool/:path*", "destination": "/apps/fencing-tool/:path*" },
+    { "source": "/patio-general", "destination": "/apps/patio-site/patio-general.html" },
+    { "source": "/", "destination": "/apps/patio-site/index.html" }
+  ]
+}

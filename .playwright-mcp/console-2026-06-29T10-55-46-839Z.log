@@ -1,0 +1,11 @@
+[     191ms] [LOG] [SecureWorks Cloud] URL: found @ http://localhost:4321/apps/fencing-tool/shared/cloud.js:62
+[     191ms] [LOG] [SecureWorks Cloud] Key: found @ http://localhost:4321/apps/fencing-tool/shared/cloud.js:63
+[     191ms] [LOG] [SecureWorks Cloud] supabase global: object @ http://localhost:4321/apps/fencing-tool/shared/cloud.js:64
+[     191ms] [LOG] [SecureWorks Cloud] Initialising... @ http://localhost:4321/apps/fencing-tool/shared/cloud.js:78
+[     194ms] [LOG] [Integration] Script loaded @ http://localhost:4321/apps/fencing-tool/shared/integration.js:27
+[     259ms] [LOG] Panel texture loaded OK: 2816 x 1536 @ http://localhost:4321/apps/fencing-tool/:3509
+[     400ms] [LOG] [Integration] init() called @ http://localhost:4321/apps/fencing-tool/shared/integration.js:769
+[     401ms] [LOG] [Integration] Tool type: fencing | Cloud: true @ http://localhost:4321/apps/fencing-tool/shared/integration.js:772
+[     401ms] [LOG] [Integration] Header found: true @ http://localhost:4321/apps/fencing-tool/shared/integration.js:148
+[     401ms] [LOG] [Integration] Cloud bar injected @ http://localhost:4321/apps/fencing-tool/shared/integration.js:189
+[     401ms] [LOG] [Integration] UI updated: not signed in, showing Sign In button @ http://localhost:4321/apps/fencing-tool/shared/integration.js:226

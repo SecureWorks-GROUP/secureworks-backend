@@ -1,0 +1,199 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - img [ref=e4]:
+      - generic [ref=e16]: Group
+    - generic [ref=e19]:
+      - generic [ref=e20]: Job Ref
+      - textbox "SW9248" [ref=e21]
+    - generic [ref=e22]:
+      - generic [ref=e23]: Client
+      - textbox "Client name" [ref=e24]
+    - generic [ref=e25]:
+      - generic [ref=e26]: Address
+      - textbox "Site address" [ref=e27]
+    - generic [ref=e28]:
+      - generic [ref=e29]: Email
+      - textbox "client@email.com" [ref=e30]
+    - generic [ref=e31]:
+      - generic [ref=e32]: Phone
+      - textbox "0412 345 678" [ref=e33]
+    - generic [ref=e34]:
+      - generic [ref=e35]: Supplier
+      - combobox [ref=e36]:
+        - option "RNR" [selected]
+        - option "Metroll"
+        - option "Lysaght"
+        - option "Stratco"
+    - generic [ref=e37]:
+      - generic [ref=e38]: Profile
+      - combobox [ref=e39]:
+        - option "Ridgeside" [selected]
+        - option "Sameside"
+    - generic [ref=e40]:
+      - generic [ref=e41]: Colour
+      - combobox [ref=e42]:
+        - option "Surfmist" [selected]
+        - option "Domain"
+        - option "Evening Haze"
+        - option "Paperbark"
+        - option "Dune"
+        - option "Shale Grey"
+        - option "Riversand"
+        - option "Bluegum"
+        - option "Pale Eucalypt"
+        - option "Wilderness"
+        - option "Basalt"
+        - option "Woodland Grey"
+        - option "Ironstone"
+        - option "Monument"
+        - option "Wollemi"
+        - option "Deep Ocean (SO)"
+        - option "Cottage Green (SO)"
+        - option "Night Sky (SO)"
+        - option "Manor Red (SO)"
+        - option "Jasper (SO)"
+        - option "Windspray (SO)"
+    - generic [ref=e43]:
+      - generic [ref=e44]: $/Metre
+      - spinbutton [ref=e45]: "120"
+    - generic [ref=e46]:
+      - generic [ref=e47]: Saved
+      - button "Save Local" [ref=e48] [cursor=pointer]
+      - button "Cloud Save" [ref=e49] [cursor=pointer]
+      - button "Scope Complete" [ref=e50] [cursor=pointer]
+      - button "New" [ref=e51] [cursor=pointer]
+  - generic [ref=e52]:
+    - generic [ref=e53]:
+      - generic [ref=e54]:
+        - generic [ref=e55] [cursor=pointer]: Rear
+        - button "+ Add Run" [ref=e56] [cursor=pointer]
+      - generic [ref=e57]:
+        - generic [ref=e58]:
+          - heading "Run Settings" [level=3] [ref=e59]
+          - generic [ref=e60]:
+            - generic [ref=e61]:
+              - generic [ref=e62]: Name
+              - textbox [ref=e63]: Rear
+            - generic [ref=e64]:
+              - generic [ref=e65]: Length (m)
+              - spinbutton [ref=e66]
+            - generic [ref=e67]:
+              - generic [ref=e68]: Sheet Height
+              - combobox [ref=e69]:
+                - option "1200mm"
+                - option "1500mm"
+                - option "1800mm" [selected]
+                - option "2100mm"
+            - generic [ref=e70]:
+              - generic [ref=e71]: Extension
+              - combobox [ref=e72]:
+                - option "None" [selected]
+                - option "Slat"
+                - option "Solid Fill"
+                - option "Lattice"
+          - generic [ref=e73]:
+            - button "Apply Height to All" [ref=e74] [cursor=pointer]
+            - button "Delete Run" [ref=e75] [cursor=pointer]
+        - generic [ref=e76]:
+          - heading "Ground Slope" [level=3] [ref=e77]
+          - generic [ref=e78]:
+            - generic [ref=e79]:
+              - generic [ref=e80]: Direction
+              - generic [ref=e81]:
+                - button "Falls left → right" [ref=e82] [cursor=pointer]
+                - button "Falls right → left" [ref=e83] [cursor=pointer]
+            - generic [ref=e84]:
+              - generic [ref=e85]: Total Fall
+              - spinbutton [ref=e86]: "0"
+              - generic [ref=e87]: mm
+            - generic [ref=e88]: Flat ground (no slope)
+            - generic [ref=e89]:
+              - generic [ref=e90]: Starts at
+              - combobox [ref=e91]:
+                - option "From start" [selected]
+                - option "From 25%"
+                - option "From 50%"
+                - option "From 75%"
+          - generic [ref=e92] [cursor=pointer]: Advanced mode →
+        - generic [ref=e93]:
+          - heading "Quick Retaining Tool" [level=3] [ref=e94]
+          - generic [ref=e95]:
+            - generic [ref=e96]:
+              - generic [ref=e97]: From Panel
+              - spinbutton [ref=e98]: "1"
+            - generic [ref=e99]:
+              - generic [ref=e100]: To Panel
+              - spinbutton [ref=e101]: "0"
+            - generic [ref=e102]:
+              - generic [ref=e103]: Retaining (mm)
+              - combobox [ref=e104]:
+                - option "0" [selected]
+                - option "150"
+                - option "300"
+                - option "450"
+                - option "600"
+            - button "Apply" [ref=e105] [cursor=pointer]
+        - generic [ref=e106]:
+          - heading "Panel Table" [level=3] [ref=e107]
+          - table [ref=e109]:
+            - rowgroup [ref=e110]:
+              - row "P# Sheet Ht Slope Ret (mm) Plinths Step Total Post ×" [ref=e111]:
+                - columnheader "P#" [ref=e112]
+                - columnheader "Sheet Ht" [ref=e113]
+                - columnheader "Slope" [ref=e114]
+                - columnheader "Ret (mm)" [ref=e115]
+                - columnheader "Plinths" [ref=e116]
+                - columnheader "Step" [ref=e117]
+                - columnheader "Total" [ref=e118]
+                - columnheader "Post" [ref=e119]
+                - columnheader "×" [ref=e120]
+            - rowgroup
+        - generic [ref=e121]:
+          - heading "Gates" [level=3] [ref=e122]
+          - paragraph [ref=e123]: No gates added.
+          - button "+ Add Gate" [ref=e124] [cursor=pointer]
+        - button "Job Settings & Scope ▶" [ref=e126] [cursor=pointer]:
+          - generic [ref=e127]: Job Settings & Scope
+          - generic [ref=e128]: ▶
+        - generic [ref=e129]:
+          - generic [ref=e130]:
+            - heading "Site Photos (0)" [level=3] [ref=e131]
+            - generic [ref=e132]:
+              - button "Take Photo" [ref=e133] [cursor=pointer]
+              - button "From Library" [ref=e134] [cursor=pointer]
+          - generic [ref=e135]:
+            - heading "Site Video" [level=3] [ref=e136]
+            - button "Upload Video" [ref=e138] [cursor=pointer]
+            - paragraph [ref=e139]: Record walkthrough in Camera app first, then upload here.
+    - generic [ref=e140]:
+      - generic [ref=e141]:
+        - button "Profile View" [ref=e142] [cursor=pointer]
+        - button "3D View" [ref=e143] [cursor=pointer]
+      - button "Reset View" [ref=e146] [cursor=pointer]
+      - generic [ref=e147]:
+        - generic [ref=e148]:
+          - generic [ref=e149]:
+            - generic [ref=e150]: Metres
+            - generic [ref=e151]: 0.0m
+          - generic [ref=e152]:
+            - generic [ref=e153]: Panels
+            - generic [ref=e154]: "0"
+          - generic [ref=e155]:
+            - generic [ref=e156]: Posts
+            - generic [ref=e157]: "1"
+          - generic [ref=e158]:
+            - generic [ref=e159]: Plinths
+            - generic [ref=e160]: "0"
+          - generic [ref=e161]:
+            - generic [ref=e162]: Est. Total
+            - generic [ref=e163]: $0
+        - button "Review & Sign Off" [ref=e165] [cursor=pointer]
+        - generic [ref=e166]:
+          - button "HTML Outputs" [ref=e167]
+          - button "All PDFs" [ref=e168]
+          - button "Send Quote" [ref=e169]
+          - button "Share PDF" [ref=e170]
+        - generic [ref=e171]:
+          - button "Material Order" [ref=e172]
+          - button "Work Order" [ref=e173]
+          - button "AI Preview" [ref=e174] [cursor=pointer]
