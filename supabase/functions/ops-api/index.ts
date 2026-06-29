@@ -1942,6 +1942,14 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
+      case 'backfill_makesafe_job_families': {
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({ error: 'forbidden: backfill_makesafe_job_families requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        return json(await backfillMakesafeJobFamilies(client, body))
+      }
       case 'update_makesafe_substatus': {
         // B3 (Wave 0): AUTH-MODE TRANSITION GUARD. The automation routine key
         // (authMode='routine') MUST NOT set ready_to_invoice or complete — those are
@@ -8385,6 +8393,197 @@ async function updateMakesafeDetails(client: any, body: any) {
     .single()
   if (error) throw error
   return { ok: true, details: data }
+}
+
+type MakesafeFamilyBackfillCandidate = {
+  job_id: string
+  job_number: string | null
+  external_ref: string | null
+  stage: string | null
+  status: string | null
+  substatus: string | null
+  current_family: string | null
+  inferred_family: string
+  inferred_label: string
+  notes_excerpt: string
+  link_count: number
+}
+
+type ActiveBackfillMakeSafeJobFamily =
+  | 'assessment_report_quote'
+  | 'roof_report'
+  | 'temp_fence_makesafe'
+  | 'general_makesafe'
+
+function inferMakesafeFamilyForActiveBackfill(args: {
+  notes?: string | null
+  metadata?: any
+  detail?: any
+}): ActiveBackfillMakeSafeJobFamily | null {
+  const metadata = parseJsonObject(args.metadata)
+  const detail = args.detail || {}
+  const text = [
+    metadata?.makesafe_type,
+    metadata?.job_type_detail,
+    metadata?.scope,
+    metadata?.scope_json,
+    detail?.report_type,
+    args.notes,
+  ].map((v) => {
+    if (v == null) return ''
+    if (typeof v === 'string') return v
+    try { return JSON.stringify(v) } catch (_) { return String(v) }
+  }).filter(Boolean).join('\n').toLowerCase()
+
+  // Match the agreed four-family model. This deliberately does not classify
+  // physical roof make-safe, ceiling collapse, board-up, structural, asbestos,
+  // watertight, etc. as their own family; if those rows lack canonical metadata
+  // they remain exceptions/general work until explicitly reviewed.
+  if (/(temp(?:orary)?\s*fenc|fenc(?:e|ing)?\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i.test(text)) {
+    return 'temp_fence_makesafe'
+  }
+  if (/\b(roof\s+(report|assessment\s*report|inspection\s*report)|report\s+.*\broof\b|prime\s+roof\s+report|single\s+storey\s+roof\s+report|two\s+storey\s+roof\s+report|cause\s+of\s+damage\/point\s+of\s+water\s+entry)\b/i.test(text)) {
+    return 'roof_report'
+  }
+  if (/\b(assessment\s*(report)?|assess\s+and\s+quote|inspect\s+and\s+(provide\s+)?quote|inspection\s+and\s+assessment|contractor\s+(inspection|assessment)|quote\s*(request|link|report)?|quotation|scope\s+of\s+works?)\b/i.test(text)) {
+    return 'assessment_report_quote'
+  }
+  return null
+}
+
+function buildMakesafeFamilyBackfillCandidates(
+  jobs: any[],
+  detailsMap: Record<string, any>,
+  stageMap: Record<string, string>,
+): MakesafeFamilyBackfillCandidate[] {
+  const out: MakesafeFamilyBackfillCandidate[] = []
+  for (const job of (jobs || [])) {
+    const metadata = parseJsonObject(job?.metadata)
+    const currentFamily = metadata?.makesafe_job_family ? String(metadata.makesafe_job_family) : null
+    if (currentFamily) continue
+    const detail = detailsMap[job.id] || null
+    const inferred = inferMakesafeFamilyForActiveBackfill({
+      notes: job?.notes || null,
+      metadata,
+      detail,
+    })
+    if (!inferred) continue
+    out.push({
+      job_id: job.id,
+      job_number: job.job_number || null,
+      external_ref: detail?.external_ref || metadata?.external_ref || null,
+      stage: stageMap[job.id] || null,
+      status: job.status || null,
+      substatus: normalizeMakesafeSubstatus(detail?.substatus) || null,
+      current_family: currentFamily,
+      inferred_family: inferred,
+      inferred_label: _makeSafeJobFamilyLabel(inferred),
+      notes_excerpt: String(job?.notes || '').slice(0, 160),
+      link_count: Array.isArray(detail?.external_links)
+        ? detail.external_links.length
+        : (Array.isArray(metadata?.external_links) ? metadata.external_links.length : 0),
+    })
+  }
+  return out
+}
+
+export const _inferMakesafeFamilyForActiveBackfillForTest = inferMakesafeFamilyForActiveBackfill
+export const _buildMakesafeFamilyBackfillCandidatesForTest = buildMakesafeFamilyBackfillCandidates
+
+async function backfillMakesafeJobFamilies(client: any, body: any) {
+  const dryRun = body?.dry_run !== false
+  const expectedCount = body?.expected_count === undefined || body?.expected_count === null
+    ? null
+    : Number(body.expected_count)
+  const allowedFamilies = new Set([
+    'assessment_report_quote',
+    'roof_report',
+    'temp_fence_makesafe',
+    'general_makesafe',
+  ])
+
+  const { data: jobs, error: jobsErr } = await client.from('jobs')
+    .select('id, job_number, status, notes, metadata, created_at')
+    .eq('type', 'makesafe')
+    .not('status', 'in', '("cancelled","archived","lost","invoiced","completed")')
+    .is('completed_at', null)
+    .order('created_at', { ascending: false })
+  if (jobsErr) throw jobsErr
+
+  const jobIds = (jobs || []).map((j: any) => j.id)
+  const details = jobIds.length
+    ? await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_job_details',
+      'job_id, external_ref, substatus, report_type, external_links',
+      jobIds,
+    )
+    : []
+  const detailsMap: Record<string, any> = {}
+  for (const d of (details || [])) detailsMap[d.job_id] = d
+
+  const stageMap: Record<string, string> = {}
+  const pipeline = await makesafePipeline(client, new URLSearchParams())
+  for (const rows of Object.values(pipeline?.columns || {}) as any[]) {
+    for (const row of (rows || [])) {
+      if (row?.id) stageMap[row.id] = row.board_stage || row.stage || ''
+    }
+  }
+
+  const candidates = buildMakesafeFamilyBackfillCandidates(jobs || [], detailsMap, stageMap)
+    .filter((c) => allowedFamilies.has(c.inferred_family))
+
+  if (expectedCount !== null && candidates.length !== expectedCount) {
+    return {
+      ok: false,
+      dry_run: dryRun,
+      error: `expected_count mismatch: expected ${expectedCount}, got ${candidates.length}`,
+      expected_count: expectedCount,
+      candidate_count: candidates.length,
+      candidates,
+    }
+  }
+
+  const result: any = {
+    ok: true,
+    dry_run: dryRun,
+    candidate_count: candidates.length,
+    candidates,
+    updated: [] as any[],
+    skipped: [] as any[],
+  }
+  if (dryRun) return result
+
+  for (const c of candidates) {
+    const job = (jobs || []).find((j: any) => j.id === c.job_id)
+    const metadata = parseJsonObject(job?.metadata)
+    if (metadata?.makesafe_job_family) {
+      result.skipped.push({ ...c, reason: 'family became non-null before write' })
+      continue
+    }
+    const nextMetadata = {
+      ...metadata,
+      makesafe_job_family: c.inferred_family,
+      makesafe_job_family_label: c.inferred_label,
+    }
+    const { data: updated, error } = await client.from('jobs')
+      .update({ metadata: nextMetadata, updated_at: new Date().toISOString() })
+      .eq('id', c.job_id)
+      .eq('type', 'makesafe')
+      .not('status', 'in', '("cancelled","archived","lost","invoiced","completed")')
+      .select('id, job_number, status, metadata')
+      .single()
+    if (error) throw error
+    result.updated.push({
+      job_id: updated.id,
+      job_number: updated.job_number,
+      status: updated.status,
+      makesafe_job_family: updated.metadata?.makesafe_job_family || null,
+      makesafe_job_family_label: updated.metadata?.makesafe_job_family_label || null,
+    })
+  }
+
+  return result
 }
 
 // ── Slice 2: move substatus forward with timestamp tracking ──
