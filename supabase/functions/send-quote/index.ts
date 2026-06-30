@@ -1180,7 +1180,24 @@ serve(async (req: Request) => {
       // (zero regression). Multi-option and per-run fencing paths have already returned
       // above, so this only fires for the single-doc case.
       if (doc.html_url) {
-        return Response.redirect(`${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(doc.html_url)}`, 302)
+        // html_url is uploaded best-effort by the client-side scoping tool and can be
+        // absent on a significant portion of sent quotes. Verify the object exists before
+        // redirecting; if missing, timed-out, or errored, fall through to the reliable
+        // server-render so the client never lands on a blank 404 viewer page.
+        let htmlExists = false
+        try {
+          const ac = new AbortController()
+          const t = setTimeout(() => ac.abort(), 2500)
+          const head = await fetch(doc.html_url, { method: 'HEAD', signal: ac.signal })
+          clearTimeout(t)
+          htmlExists = head.ok
+        } catch (_e) {
+          htmlExists = false  // missing / network error / timeout -> safe fallback
+        }
+        if (htmlExists) {
+          return Response.redirect(`${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(doc.html_url)}`, 302)
+        }
+        // Object missing — fall through to the reliable server-rendered client page below
       }
 
       return await htmlResponse(buildClientPage(doc, token, heroUrl))
