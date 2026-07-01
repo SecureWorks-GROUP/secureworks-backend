@@ -728,8 +728,8 @@ serve(async (req: Request) => {
         try {
           const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
           const { data: jobMatches } = await sb.from('jobs')
-            .select('id, job_number, client_name, contact_phone, contact_email, status, suburb, address, quoted_value, ghl_opportunity_id')
-            .or(`client_name.ilike.%${q}%,contact_phone.ilike.%${q}%,suburb.ilike.%${q}%,address.ilike.%${q}%`)
+            .select('id, job_number, client_name, client_phone, client_email, status, site_suburb, site_address, pricing_json, ghl_opportunity_id')
+            .or(`client_name.ilike.%${q}%,client_phone.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`)
             .not('status', 'in', '("cancelled","lost")')
             .order('created_at', { ascending: false })
             .limit(10)
@@ -739,12 +739,12 @@ serve(async (req: Request) => {
               id: j.ghl_opportunity_id || null,
               name: j.client_name || 'Unknown',
               status: j.status || 'unknown',
-              monetaryValue: j.quoted_value || 0,
-              contact: { name: j.client_name, phone: j.contact_phone, email: j.contact_email },
+              monetaryValue: (j.pricing_json && (j.pricing_json.totalIncGST || j.pricing_json.total || j.pricing_json.grandTotal)) || 0,
+              contact: { name: j.client_name, phone: j.client_phone, email: j.client_email },
               supabaseJobId: j.id,
               jobNumber: j.job_number,
-              address: j.address,
-              suburb: j.suburb,
+              address: j.site_address,
+              suburb: j.site_suburb,
               _source: 'supabase_fallback',
               _loadedFromSupabase: !j.ghl_opportunity_id,
               _supabaseJobId: j.id,
