@@ -683,6 +683,27 @@ serve(async (req: Request) => {
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
+      // ── Atomic claim (double-send idempotency guard) ──
+      // Optimistically mark sent_to_client=true BEFORE calling Resend. The
+      // conditional NOT(sent_to_client IS TRUE) filter means only the first
+      // concurrent caller claims the row; subsequent callers get data=null and
+      // return a success-ish "already_sent" response without sending a second
+      // email. If the claim succeeds but the email send fails below, we revert
+      // the claim (set sent_to_client=false, sent_at=null) so a retry can
+      // re-claim and resend.
+      const { data: claimed } = await sb
+        .from('job_documents')
+        .update({ sent_to_client: true, sent_at: new Date().toISOString() })
+        .eq('id', document_id)
+        .not('sent_to_client', 'is', true)
+        .select('id')
+        .maybeSingle()
+
+      if (!claimed) {
+        // Another call already claimed this document — suppress duplicate email.
+        console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
+        return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
+      }
       {
         const emailHtml = buildQuoteEmail({
           clientName: client_name,
@@ -717,22 +738,32 @@ serve(async (req: Request) => {
           }
         }
 
-        const emailRes = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${RESEND_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            from: `${FROM_NAME} <${FROM_EMAIL}>`,
-            reply_to: getClientReplyTo(doc.jobs?.type, doc.jobs?.job_number),
-            to: client_email,
-            subject: emailSubject,
-            html: emailHtml,
-            cc: [...new Set([...(cc_emails || []), getDivisionInbox(doc.jobs?.type), 'admin@secureworkswa.com.au'])],
-            ...(attachments.length > 0 ? { attachments } : {}),
-          }),
-        })
+        let emailRes: Response
+        try {
+          emailRes = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${RESEND_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from: `${FROM_NAME} <${FROM_EMAIL}>`,
+              reply_to: getClientReplyTo(doc.jobs?.type, doc.jobs?.job_number),
+              to: client_email,
+              subject: emailSubject,
+              html: emailHtml,
+              cc: [...new Set([...(cc_emails || []), getDivisionInbox(doc.jobs?.type), 'admin@secureworkswa.com.au'])],
+              ...(attachments.length > 0 ? { attachments } : {}),
+            }),
+          })
+        } catch (fetchErr) {
+          // Network-level throw — revert claim so a retry can resend.
+          await sb.from('job_documents')
+            .update({ sent_to_client: false, sent_at: null })
+            .eq('id', document_id)
+          console.log('[send-quote] Resend fetch threw (claim reverted):', (fetchErr as Error).message)
+          return jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
+        }
 
         if (emailRes.ok) {
           const resendData = await emailRes.json()
@@ -761,15 +792,16 @@ serve(async (req: Request) => {
             failureReason: errData.message || `HTTP ${emailRes.status}`,
             metadata: { document_id: doc.id, client_name: client_name },
           })
+          // Revert claim — email not sent, so a retry must be able to re-claim.
+          await sb.from('job_documents')
+            .update({ sent_to_client: false, sent_at: null })
+            .eq('id', document_id)
           return jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
         }
       }
 
-      // Mark as sent (only reached if email succeeded)
-      await sb
-        .from('job_documents')
-        .update({ sent_to_client: true, sent_at: new Date().toISOString() })
-        .eq('id', document_id)
+      // sent_to_client was already set to true by the atomic claim above
+      // (before the email send). No redundant update needed.
 
       // Update job status to quoted (release moment per ADR 2026-04-27)
       if (doc.job_id) {

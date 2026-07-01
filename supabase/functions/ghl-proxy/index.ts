@@ -2059,7 +2059,112 @@ serve(async (req: Request) => {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const orgId = '00000000-0000-0000-0000-000000000001'
 
-      // Get latest version for this doc type
+      // ── Idempotent reuse-or-create ──
+      // Before creating a new draft row, check for an existing live-unsent
+      // draft for the same scope (single-quote path: run_label IS NULL,
+      // job_contact_id IS NULL). Reusing avoids duplicate rows from browser
+      // retries, tab reloads, or network glitches that cause the client to
+      // call prepare_quote more than once before uploading.
+      const { data: reusableDraft } = await sb.from('job_documents')
+        .select('id, version, pdf_url, html_url, share_token, quote_number')
+        .eq('job_id', jobId)
+        .eq('type', 'quote')
+        .not('sent_to_client', 'is', true)
+        .is('superseded_at', null)
+        .is('accepted_at', null)
+        .is('declined_at', null)
+        .is('run_label', null)
+        .is('job_contact_id', null)
+        .order('version', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      try {
+        await sb.storage.createBucket('job-pdfs', { public: true })
+      } catch (e) { /* bucket exists */ }
+
+      if (reusableDraft) {
+        // ── REUSE path ──
+        // An abandoned draft already exists for this job. Reuse it instead of
+        // creating a new row, to keep a single live-unsent draft invariant.
+
+        let { quote_number: reuseQuoteNumber } = reusableDraft
+
+        // Mint a quote number if the draft doesn't have one yet
+        if (reuseQuoteNumber == null) {
+          const { data: qnData } = await sb.rpc('next_quote_number')
+          reuseQuoteNumber = qnData || null
+          if (reuseQuoteNumber != null) {
+            await sb.from('job_documents')
+              .update({ quote_number: reuseQuoteNumber })
+              .eq('id', reusableDraft.id)
+          }
+        }
+
+        // Supersede any OTHER live-unsent sibling drafts for the same scope,
+        // keeping only the reused row active (enforces one-live-draft invariant).
+        await sb.from('job_documents')
+          .update({ superseded_at: new Date().toISOString() })
+          .eq('job_id', jobId)
+          .eq('type', 'quote')
+          .not('sent_to_client', 'is', true)
+          .is('superseded_at', null)
+          .is('accepted_at', null)
+          .is('declined_at', null)
+          .is('run_label', null)
+          .is('job_contact_id', null)
+          .neq('id', reusableDraft.id)
+
+        // Re-issue signed upload URLs for the EXISTING storage paths so the
+        // client can overwrite the previously uploaded (or never-uploaded) file.
+        const bucketPublicBase = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/`
+        const existingPdfPath = reusableDraft.pdf_url?.startsWith(bucketPublicBase)
+          ? reusableDraft.pdf_url.slice(bucketPublicBase.length)
+          : `${orgId}/${jobId}/quote_v${reusableDraft.version}_${(fileName || 'quote').replace(/[^a-zA-Z0-9._-]/g, '_')}`
+        const existingHtmlPath = reusableDraft.html_url?.startsWith(bucketPublicBase)
+          ? reusableDraft.html_url.slice(bucketPublicBase.length)
+          : `${orgId}/${jobId}/quote_v${reusableDraft.version}_web.html`
+
+        const { data: reuseUploadData, error: reuseUploadErr } = await sb.storage
+          .from('job-pdfs')
+          .createSignedUploadUrl(existingPdfPath, { upsert: true })
+
+        if (reuseUploadErr) {
+          console.log('[ghl-proxy] PDF signed URL error (reuse):', reuseUploadErr)
+          return json({ error: reuseUploadErr.message }, 500)
+        }
+
+        const { data: reuseHtmlUploadData, error: reuseHtmlUploadErr } = await sb.storage
+          .from('job-pdfs')
+          .createSignedUploadUrl(existingHtmlPath, { upsert: true })
+
+        if (reuseHtmlUploadErr) {
+          console.log('[ghl-proxy] HTML signed URL error (reuse):', reuseHtmlUploadErr)
+          return json({ error: reuseHtmlUploadErr.message }, 500)
+        }
+
+        const { data: reusePdfUrlData } = sb.storage.from('job-pdfs').getPublicUrl(existingPdfPath)
+        const { data: reuseHtmlUrlData } = sb.storage.from('job-pdfs').getPublicUrl(existingHtmlPath)
+
+        console.log(`[ghl-proxy] Quote reused: job=${jobId} v${reusableDraft.version} doc=${reusableDraft.id} quote#=${reuseQuoteNumber}`)
+
+        return json({
+          documentId: reusableDraft.id,
+          shareToken: reusableDraft.share_token,
+          quoteNumber: reuseQuoteNumber,
+          version: reusableDraft.version,
+          uploadUrl: reuseUploadData.signedUrl,
+          publicUrl: reusePdfUrlData.publicUrl,
+          path: existingPdfPath,
+          htmlUploadUrl: reuseHtmlUploadData.signedUrl,
+          htmlPublicUrl: reuseHtmlUrlData.publicUrl,
+          htmlPath: existingHtmlPath,
+        })
+      }
+
+      // ── INSERT path (no reusable draft found) ──
+      // Compute version as MAX(version)+1 across ALL existing quotes (not just
+      // live-unsent ones), so version numbers are always monotonically increasing.
       let version = 1
       const { data: existing } = await sb.from('job_documents')
         .select('version')
@@ -2075,13 +2180,9 @@ serve(async (req: Request) => {
       const safeName = (fileName || 'quote').replace(/[^a-zA-Z0-9._-]/g, '_')
       const path = `${orgId}/${jobId}/quote_v${version}_${safeName}`
 
-      try {
-        await sb.storage.createBucket('job-pdfs', { public: true })
-      } catch (e) { /* bucket exists */ }
-
       const { data: uploadData, error: uploadErr } = await sb.storage
         .from('job-pdfs')
-        .createSignedUploadUrl(path)
+        .createSignedUploadUrl(path, { upsert: true })
 
       if (uploadErr) {
         console.log('[ghl-proxy] PDF signed URL error:', uploadErr)
@@ -2095,7 +2196,7 @@ serve(async (req: Request) => {
       const htmlPath = `${orgId}/${jobId}/quote_v${version}_web.html`
       const { data: htmlUploadData, error: htmlUploadErr } = await sb.storage
         .from('job-pdfs')
-        .createSignedUploadUrl(htmlPath)
+        .createSignedUploadUrl(htmlPath, { upsert: true })
 
       if (htmlUploadErr) {
         console.log('[ghl-proxy] HTML signed URL error:', htmlUploadErr)
@@ -2111,7 +2212,10 @@ serve(async (req: Request) => {
       const { data: qnData } = await sb.rpc('next_quote_number')
       const quoteNumber = qnData || null
 
-      // Create job_documents record
+      // Create job_documents record.
+      // On unique-violation (code 23505, from ux_job_docs_live_unsent_quote index)
+      // a concurrent prepare_quote beat us to the insert — re-select the winner
+      // and reuse it (insert-on-conflict-then-reselect pattern).
       const docInsert: Record<string, unknown> = {
         job_id: jobId,
         type: 'quote',
@@ -2127,16 +2231,81 @@ serve(async (req: Request) => {
         .select()
         .maybeSingle()
 
+      if (docErr) {
+        if (docErr.code === '23505') {
+          // Unique violation — concurrent prepare_quote won the race.
+          // Re-select the winner and treat it as a reuse (same path as above).
+          const { data: concurrent } = await sb.from('job_documents')
+            .select('id, version, pdf_url, html_url, share_token, quote_number')
+            .eq('job_id', jobId)
+            .eq('type', 'quote')
+            .not('sent_to_client', 'is', true)
+            .is('superseded_at', null)
+            .is('accepted_at', null)
+            .is('declined_at', null)
+            .is('run_label', null)
+            .is('job_contact_id', null)
+            .order('version', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+
+          if (concurrent) {
+            // Mint a quote number if the concurrent winner's row doesn't have one yet
+            // (mirrors the primary reuse path — both paths must return a quote number).
+            let concurrentQuoteNumber = concurrent.quote_number
+            if (concurrentQuoteNumber == null) {
+              const { data: cqnData } = await sb.rpc('next_quote_number')
+              concurrentQuoteNumber = cqnData || null
+              if (concurrentQuoteNumber != null) {
+                await sb.from('job_documents')
+                  .update({ quote_number: concurrentQuoteNumber })
+                  .eq('id', concurrent.id)
+              }
+            }
+
+            const bucketPublicBase = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/`
+            const cPdfPath = concurrent.pdf_url?.startsWith(bucketPublicBase)
+              ? concurrent.pdf_url.slice(bucketPublicBase.length)
+              : `${orgId}/${jobId}/quote_v${concurrent.version}_${safeName}`
+            const cHtmlPath = concurrent.html_url?.startsWith(bucketPublicBase)
+              ? concurrent.html_url.slice(bucketPublicBase.length)
+              : `${orgId}/${jobId}/quote_v${concurrent.version}_web.html`
+
+            const { data: cUploadData, error: cUploadErr } = await sb.storage
+              .from('job-pdfs').createSignedUploadUrl(cPdfPath, { upsert: true })
+            if (cUploadErr) return json({ error: cUploadErr.message }, 500)
+
+            const { data: cHtmlUploadData, error: cHtmlUploadErr } = await sb.storage
+              .from('job-pdfs').createSignedUploadUrl(cHtmlPath, { upsert: true })
+            if (cHtmlUploadErr) return json({ error: cHtmlUploadErr.message }, 500)
+
+            const { data: cPdfUrlData } = sb.storage.from('job-pdfs').getPublicUrl(cPdfPath)
+            const { data: cHtmlUrlData } = sb.storage.from('job-pdfs').getPublicUrl(cHtmlPath)
+
+            console.log(`[ghl-proxy] Quote reused (concurrent): job=${jobId} v${concurrent.version} doc=${concurrent.id} quote#=${concurrentQuoteNumber}`)
+            return json({
+              documentId: concurrent.id,
+              shareToken: concurrent.share_token,
+              quoteNumber: concurrentQuoteNumber,
+              version: concurrent.version,
+              uploadUrl: cUploadData.signedUrl,
+              publicUrl: cPdfUrlData.publicUrl,
+              path: cPdfPath,
+              htmlUploadUrl: cHtmlUploadData.signedUrl,
+              htmlPublicUrl: cHtmlUrlData.publicUrl,
+              htmlPath: cHtmlPath,
+            })
+          }
+        }
+        console.log('[ghl-proxy] job_documents insert error:', docErr)
+        return json({ error: docErr.message }, 500)
+      }
+
       // Store supporting docs selection in data_snapshot_json (column always exists)
       if (docRecord && supportingDocs && supportingDocs.length > 0) {
         await sb.from('job_documents')
           .update({ data_snapshot_json: { supporting_docs: supportingDocs } })
           .eq('id', docRecord.id)
-      }
-
-      if (docErr) {
-        console.log('[ghl-proxy] job_documents insert error:', docErr)
-        return json({ error: docErr.message }, 500)
       }
 
       console.log(`[ghl-proxy] Quote prepared: job=${jobId} v${version} doc=${docRecord.id} quote#=${quoteNumber}`)

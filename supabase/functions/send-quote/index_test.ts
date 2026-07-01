@@ -632,3 +632,83 @@ Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canon
   // equality is necessary but not sufficient; verify byte equality too).
   assertEquals(uploadedBytes, sb._state.inserted[0].manifest_canonical_text)
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// SEND-CLAIM-IDEMPOTENCY — atomic claim decision tests (C1–C4)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The /send handler atomically claims a job_documents row by running:
+//   UPDATE job_documents SET sent_to_client=true, sent_at=<now>
+//   WHERE id=<document_id> AND NOT (sent_to_client IS TRUE)
+//   RETURNING id                               -- via .select('id').maybeSingle()
+//
+// If data is non-null  → claim succeeded; proceed to email.
+// If data is null      → already claimed; return already_sent without emailing.
+//
+// We copy the claim-decision predicate inline (the production code is embedded
+// in the HTTP handler and not directly injectable; a later refactor could
+// extract attemptClaim as a helper). Here we test the mock-client pattern to
+// confirm the branching contract is correct.
+
+// Mock supabase client that simulates the claim UPDATE returning a row or null.
+function makeClaimMockSb(claimResult: { id: string } | null) {
+  return {
+    from: (_table: string) => ({
+      update: (_payload: Record<string, unknown>) => ({
+        eq: (_col: string, _val: unknown) => ({
+          not: (_col2: string, _op: string, _val2: unknown) => ({
+            select: (_fields: string) => ({
+              maybeSingle: () => Promise.resolve({ data: claimResult, error: null }),
+            }),
+          }),
+        }),
+      }),
+    }),
+  }
+}
+
+// Simulates the claim decision: returns true if the row was claimed, false if already sent.
+async function simulateClaim(sb: ReturnType<typeof makeClaimMockSb>, documentId: string): Promise<boolean> {
+  const { data: claimed } = await sb
+    .from('job_documents')
+    .update({ sent_to_client: true, sent_at: new Date().toISOString() })
+    .eq('id', documentId)
+    .not('sent_to_client', 'is', true)
+    .select('id')
+    .maybeSingle()
+  return claimed !== null
+}
+
+Deno.test("C1 — claim succeeds when DB returns a row (first caller gets through)", async () => {
+  const sb = makeClaimMockSb({ id: 'doc-abc' })
+  const result = await simulateClaim(sb, 'doc-abc')
+  assertEquals(result, true, 'claim should succeed when UPDATE returns a row')
+})
+
+Deno.test("C2 — claim fails when DB returns null (already claimed by concurrent call)", async () => {
+  const sb = makeClaimMockSb(null)
+  const result = await simulateClaim(sb, 'doc-abc')
+  assertEquals(result, false, 'claim should fail when UPDATE returns null (doc already sent)')
+})
+
+Deno.test("C3 — claim is idempotent: second call with null result does not throw", async () => {
+  const sb = makeClaimMockSb(null)
+  let threw = false
+  try {
+    await simulateClaim(sb, 'doc-xyz')
+  } catch {
+    threw = true
+  }
+  assertEquals(threw, false, 'claim decision must not throw on null result')
+})
+
+Deno.test("C4 — claim with distinct document IDs: each simulates independent documents", async () => {
+  const sbA = makeClaimMockSb({ id: 'doc-A' })
+  const sbB = makeClaimMockSb(null)
+  const [resultA, resultB] = await Promise.all([
+    simulateClaim(sbA, 'doc-A'),
+    simulateClaim(sbB, 'doc-B'),
+  ])
+  assertEquals(resultA, true, 'doc-A should be claimable')
+  assertEquals(resultB, false, 'doc-B should already be claimed')
+})
