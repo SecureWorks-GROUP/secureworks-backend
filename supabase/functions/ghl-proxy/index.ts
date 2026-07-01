@@ -1796,7 +1796,23 @@ serve(async (req: Request) => {
         .single()
 
       if (error) return json({ error: error.message }, 500)
-      return json({ job: data })
+
+      // (M4 G-B3) Surface the latest frozen scope revision + count so the tool can
+      // default a reopened quoted job to the read-only finalized view.
+      let latest_frozen_scope_revision_id: string | null = null
+      let frozen_revision_count = 0
+      try {
+        const { data: revs } = await sb.from('scope_revisions')
+          .select('id, revision_number')
+          .eq('job_id', jobId)
+          .eq('status', 'frozen')
+          .order('revision_number', { ascending: false })
+        if (revs && revs.length) {
+          latest_frozen_scope_revision_id = revs[0].id
+          frozen_revision_count = revs.length
+        }
+      } catch (_e) { /* non-fatal: leave nulls, tool falls back to editable load */ }
+      return json({ job: data, latest_frozen_scope_revision_id, frozen_revision_count })
     }
 
     // ── List media (photos/videos) for a job ──

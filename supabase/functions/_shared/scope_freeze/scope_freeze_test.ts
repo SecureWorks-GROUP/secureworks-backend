@@ -806,22 +806,28 @@ Deno.test('monotonic revision numbering across mixed cycles, exactly one frozen 
   const a = await freezeScope(client as any, { job_id: 'J-MONO', tool_kind: 'patio' })
   assert(a.ok); if (!a.ok) return
   assertEquals(countFrozen(), 1)
-  // v2 via direct refreeze (no clone) → case C: supersede v1
+
+  // G-B4: direct refreeze with IDENTICAL scope → dedup path, same revision returned, no new row.
+  // (Pre-G-B4, this was "Case C: INSERT v2, supersede v1". Now identical hashes are a no-op.)
   const b = await freezeScope(client as any, { job_id: 'J-MONO', tool_kind: 'patio' })
   assert(b.ok); if (!b.ok) return
-  assertEquals(b.superseded_revision_id, a.scope_revision_id)
-  assertEquals(countFrozen(), 1)
-  // v3 via clone+freeze → case B: supersede v2
+  assertEquals((b as any).deduped, true, 'identical re-freeze is a dedup no-op')
+  assertEquals(b.scope_revision_id, a.scope_revision_id, 'dedup returns the same revision id')
+  assertEquals(b.revision_number, 1, 'dedup: revision_number stays at 1')
+  assertEquals(b.superseded_revision_id, null, 'dedup: no predecessor superseded')
+  assertEquals(countFrozen(), 1, 'dedup: still exactly one frozen row')
+
+  // v2 via clone+freeze → case B: supersede v1
   const c = await cloneScopeForEdit(client as any, { scope_revision_id: b.scope_revision_id })
   assert(c.ok); if (!c.ok) return
   const d = await freezeScope(client as any, { job_id: 'J-MONO', tool_kind: 'patio' })
   assert(d.ok); if (!d.ok) return
-  assertEquals(d.superseded_revision_id, b.scope_revision_id)
+  assertEquals(d.superseded_revision_id, b.scope_revision_id, 'promote-draft supersedes v1')
   assertEquals(countFrozen(), 1)
   assertEquals(a.revision_number, 1)
-  assertEquals(b.revision_number, 2)
-  assertEquals(c.revision_number, 3)
-  assertEquals(d.revision_number, 3) // promote-draft kept the draft's number
+  assertEquals(b.revision_number, 1) // deduped, same as a
+  assertEquals(c.revision_number, 2) // draft cloned from v1
+  assertEquals(d.revision_number, 2) // promote-draft kept the draft's number
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -954,5 +960,42 @@ Deno.test('freezeScope — fresh-freeze path returns empty additional_superseded
   assertEquals(result.revision_number, 1)
   assertEquals(result.superseded_revision_id, null)
   assertEquals(result.additional_superseded_revision_ids, [])
+})
+
+// ── G-B4 dedup test ──────────────────────────────────────────────────────────
+
+Deno.test('freezeScope G-B4 — re-freeze with identical scope returns same revision id, no new row, deduped:true', async () => {
+  // First freeze (Case A): writes revision 1.
+  const client = makeMockClient({
+    jobs: [seedJob({ id: 'J-DEDUP', scope_json: PATIO_SCOPE, pricing_json: PATIO_PRICING })],
+  })
+  const first = await freezeScope(client as any, { job_id: 'J-DEDUP', tool_kind: 'patio' })
+  assert(first.ok, 'first freeze must succeed'); if (!first.ok) return
+  assertEquals(first.revision_number, 1)
+  const rowCountAfterFirst = client._state.scope_revisions.length
+
+  // Second freeze (Case C) with IDENTICAL scope — scope_json and pricing_json
+  // unchanged, so hashes match. Must return the same revision, no new INSERT.
+  const second = await freezeScope(client as any, { job_id: 'J-DEDUP', tool_kind: 'patio' })
+  assert(second.ok, 'second freeze must succeed (dedup path)'); if (!second.ok) return
+
+  assertEquals(second.scope_revision_id, first.scope_revision_id, 'dedup: same revision id returned')
+  assertEquals(second.revision_number, 1, 'dedup: revision_number unchanged')
+  assertEquals(second.status, 'frozen')
+  assertEquals((second as any).deduped, true, 'dedup flag set')
+  assertEquals(second.superseded_revision_id, null, 'dedup: no predecessor superseded')
+  assertEquals(second.additional_superseded_revision_ids, [])
+
+  // Critical: no new row inserted.
+  assertEquals(
+    client._state.scope_revisions.length,
+    rowCountAfterFirst,
+    'dedup: scope_revisions row count must not increase on identical re-freeze',
+  )
+
+  // Sanity: the existing frozen row was not mutated (still frozen, not superseded).
+  const row = client._state.scope_revisions.find((r) => (r as any).id === first.scope_revision_id)
+  assertExists(row, 'original row must still exist')
+  assertEquals((row as any).status, 'frozen', 'original row must remain frozen')
 })
 

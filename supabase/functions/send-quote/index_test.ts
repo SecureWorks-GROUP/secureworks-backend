@@ -712,3 +712,36 @@ Deno.test("C4 — claim with distinct document IDs: each simulates independent d
   assertEquals(resultA, true, 'doc-A should be claimable')
   assertEquals(resultB, false, 'doc-B should already be claimed')
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// G-B2 SUPERSESSION SCOPE-MATCH — manual test documentation
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The G-B2 supersession logic is inline in the /send handler and not extracted
+// into a unit-testable helper, so we document the manual test here rather than
+// forcing a refactor. Verify in Supabase directly after a resend:
+//
+//   1. Send version 1 of a quote (doc A, version=1, job_contact_id=X, run_label=Y).
+//      Confirm: doc A has sent_to_client=true, superseded_at IS NULL.
+//
+//   2. Create doc B (version=2, same job_id, same job_contact_id=X, same run_label=Y).
+//      Call /send on doc B.
+//
+//   Expected: doc A gets superseded_at=<now> set; doc B does NOT.
+//   Query: SELECT id, version, superseded_at FROM job_documents
+//          WHERE job_id='<id>' AND doc_type='quote' ORDER BY version;
+//
+//   3. Scope isolation: a third doc C (same job, different job_contact_id or run_label)
+//      sent at version 1 must NOT be superseded when doc B is sent.
+//   Expected: doc C retains superseded_at IS NULL.
+//
+//   4. Null-scope isolation: when both job_contact_id and run_label are null,
+//      only rows with both null are matched (IS NULL filter, not eq(null)).
+//
+//   5. Non-blocking: if the UPDATE throws (e.g. DB outage), /send still returns
+//      200 with success=true and logs "[send-quote] G-B2 supersede-prior failed".
+//
+// The scope-match branching (is(...null) vs eq(...value)) is the only
+// non-trivial logic. The Supabase `.is('col', null)` form generates
+// `col IS NULL` in SQL; `.eq('col', val)` generates `col = 'val'`.
+// This distinction matters when job_contact_id or run_label is null.
