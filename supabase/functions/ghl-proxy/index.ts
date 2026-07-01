@@ -736,7 +736,7 @@ serve(async (req: Request) => {
           if (jobMatches && jobMatches.length > 0) {
             // Return as opportunities-shaped objects so the agent can use them
             const fallbackOpps = jobMatches.map((j: any) => ({
-              id: j.ghl_opportunity_id || j.id,
+              id: j.ghl_opportunity_id || null,
               name: j.client_name || 'Unknown',
               status: j.status || 'unknown',
               monetaryValue: j.quoted_value || 0,
@@ -746,6 +746,9 @@ serve(async (req: Request) => {
               address: j.address,
               suburb: j.suburb,
               _source: 'supabase_fallback',
+              _loadedFromSupabase: !j.ghl_opportunity_id,
+              _supabaseJobId: j.id,
+              isSupabaseOnly: !j.ghl_opportunity_id,
             }))
             return json({ opportunities: fallbackOpps, _note: 'Results from Supabase fallback (GHL returned 0)' })
           }
@@ -1373,7 +1376,7 @@ serve(async (req: Request) => {
       if (jobType) {
         query = query.eq('type', jobType)
       }
-      query = query.limit(1)
+      query = query.order('created_at', { ascending: true }).limit(1)
 
       const { data, error } = await query
 
@@ -1505,6 +1508,20 @@ serve(async (req: Request) => {
       // GHL link is optional — walk-up scopes may not have an opportunity
       if (opportunityId) insertData.ghl_opportunity_id = opportunityId
       if (body.contactId) insertData.ghl_contact_id = body.contactId
+
+      // Idempotency guard: return existing job for same opportunity+type instead of creating a duplicate
+      if (opportunityId) {
+        const { data: existing } = await sb.from('jobs')
+          .select()
+          .eq('ghl_opportunity_id', opportunityId)
+          .eq('type', resolvedType)
+          .order('created_at', { ascending: true })
+          .limit(1)
+        if (existing && existing.length > 0) {
+          console.log('[ghl-proxy] create_job: idempotent return existing job', existing[0].id)
+          return json({ job: existing[0] })
+        }
+      }
 
       const { data, error } = await sb.from('jobs').insert(insertData).select().single()
 
