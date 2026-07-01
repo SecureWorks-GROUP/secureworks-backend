@@ -625,7 +625,7 @@ serve(async (req: Request) => {
 
     // ── SEND QUOTE EMAIL ──
     if (path === 'send' && req.method === 'POST') {
-      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name } = await req.json()
+      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior } = await req.json()
 
       if (!document_id) {
         return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
@@ -825,6 +825,10 @@ serve(async (req: Request) => {
           .eq('status', 'draft') // only if still draft
           .select('id')
         const transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
+        // (M4 G-B2) Hoisted so the supersession step below can read it after
+        // the if(transitioned) block closes regardless of whether a release
+        // transition occurred on this call.
+        let releasedRevisionId: string | null = null
 
         // Legacy event (preserved for back-compat with daily-digest / older readers)
         await sb.from('job_events').insert({
@@ -902,7 +906,7 @@ serve(async (req: Request) => {
           // helper failed (release moment is irreversible — email sent and
           // jobs.status flipped, so canonical events still emit, just with
           // quote_revision_id=null).
-          const releasedRevisionId = await recordReleasedQuoteRevision(sb, {
+          releasedRevisionId = await recordReleasedQuoteRevision(sb, {
             job_id: doc.job_id,
             job_document_id: doc.id,
             version: doc.version || 1,
@@ -1026,6 +1030,35 @@ serve(async (req: Request) => {
             console.log('[send-quote] Xero Quote creation failed (non-blocking):', (e as Error).message)
           }
         }
+
+        // (M4 G-B2) Supersede prior sent quote versions so old client links show the
+        // branded "quote was updated" page (see /view + G-B1). Gated on the caller
+        // explicitly passing supersede_prior:true — a plain or multi-option send must NOT
+        // supersede coexisting option docs; only the fence "Make a revision" flow sets
+        // the flag. Scope key = (job_id, job_contact_id, run_label); only lower versions
+        // matched. Best-effort: a failure here must not fail the send (email already went).
+        if (supersede_prior === true) {
+          try {
+            const curVersion = doc.version || 1
+            let supSel = sb.from('job_documents')
+              .update({ superseded_at: new Date().toISOString(), superseded_by_revision_id: releasedRevisionId ?? null })
+              .eq('job_id', doc.job_id)
+              .eq('type', 'quote')
+              .eq('sent_to_client', true)
+              .is('superseded_at', null)
+              .lt('version', curVersion)
+              .neq('id', doc.id)
+            // Match the scope exactly: null-to-null on job_contact_id and run_label.
+            supSel = (doc.job_contact_id == null) ? supSel.is('job_contact_id', null) : supSel.eq('job_contact_id', doc.job_contact_id)
+            supSel = (doc.run_label == null) ? supSel.is('run_label', null) : supSel.eq('run_label', doc.run_label)
+            const { data: superseded } = await supSel.select('id')
+            if (superseded && superseded.length) {
+              console.log(`[send-quote] G-B2 superseded ${superseded.length} prior sent quote(s) for job ${doc.job_id}`)
+            }
+          } catch (e) {
+            console.error('[send-quote] G-B2 supersede-prior failed (non-blocking):', (e as Error).message)
+          }
+        }
       }
 
       return jsonResponse({ success: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
@@ -1040,7 +1073,7 @@ serve(async (req: Request) => {
         .from('job_documents')
         .select('id, quote_number, sent_at, viewed_at, accepted_at, declined_at, share_token')
         .eq('job_id', jobId)
-        .eq('doc_type', 'quote')
+        .eq('type', 'quote')
         .order('created_at', { ascending: false })
         .limit(5)
 
@@ -1091,6 +1124,32 @@ serve(async (req: Request) => {
         if (variation) {
           // Render variation-specific client page
           return await htmlResponse(buildVariationPage(variation, token))
+        }
+
+        // (M4 G-B1) If the token points at a SUPERSEDED quote (client kept an old link
+        // after a revision was sent), show a friendly "this quote was updated" page that
+        // links to the current live quote — never a dead end, never a stale price.
+        const { data: supDoc } = await sb
+          .from('job_documents')
+          .select('id, job_id, superseded_at, jobs(client_name, type)')
+          .eq('share_token', token)
+          .eq('sent_to_client', true)
+          .not('superseded_at', 'is', null)
+          .maybeSingle()
+        if (supDoc && supDoc.superseded_at) {
+          // Find the current live quote for the same job to link forward to.
+          const { data: liveDoc } = await sb
+            .from('job_documents')
+            .select('share_token')
+            .eq('job_id', supDoc.job_id)
+            .eq('type', 'quote')
+            .eq('sent_to_client', true)
+            .is('superseded_at', null)
+            .order('version', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+          const currentUrl = liveDoc?.share_token ? `${url.origin}${url.pathname}?token=${liveDoc.share_token}` : null
+          return await htmlResponse(supersededQuotePage((supDoc.jobs as any)?.client_name || '', currentUrl))
         }
 
         return await htmlResponse(errorPage('Quote not found or link has expired'))
@@ -4405,6 +4464,29 @@ function errorPage(message: string): string {
     <h1 style="color:#293C46;font-size:20px;margin-bottom:12px;">${message}</h1>
     <p style="color:#4C6A7C;font-size:14px;">Please contact SecureWorks Group if you need assistance.</p>
     <a href="mailto:admin@secureworkswa.com.au" style="display:inline-block;margin-top:16px;padding:10px 24px;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">Contact Us</a>
+  </div>
+</body></html>`
+}
+
+// (M4 G-B1) Branded page shown when a client follows an old quote link after a
+// revision has been sent. Never shows a stale price — links forward to the
+// current live quote when one exists, or prompts them to call us if not.
+function supersededQuotePage(clientName: string, currentUrl: string | null): string {
+  const greeting = clientName ? `Hi ${clientName},` : 'Hi there,'
+  const ctaBlock = currentUrl
+    ? `<a href="${currentUrl}" style="display:inline-block;margin-top:20px;padding:12px 28px;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">View your current quote</a>`
+    : `<p style="color:#4C6A7C;font-size:14px;margin-top:16px;">Please contact us and we will send you the latest version.</p>
+    <a href="mailto:admin@secureworkswa.com.au" style="display:inline-block;margin-top:8px;padding:10px 24px;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">Contact Us</a>`
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SecureWorks Group</title></head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;">
+  <div style="background:#fff;border-radius:12px;padding:40px;max-width:440px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+    <div style="width:48px;height:48px;background:#FFF3EE;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:22px;">&#128260;</div>
+    <h1 style="color:#293C46;font-size:20px;margin-bottom:8px;">This quote has been updated</h1>
+    <p style="color:#4C6A7C;font-size:14px;margin-bottom:4px;">${greeting}</p>
+    <p style="color:#4C6A7C;font-size:14px;">A newer version of your quote is available. The link you followed is no longer current.</p>
+    ${ctaBlock}
   </div>
 </body></html>`
 }

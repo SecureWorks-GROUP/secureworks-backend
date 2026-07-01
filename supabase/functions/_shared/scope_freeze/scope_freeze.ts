@@ -100,6 +100,10 @@ export type FreezeScopeOk = {
   // when a previous incident had left more than one row in 'frozen' state
   // for this job. Empty in the normal happy path.
   additional_superseded_revision_ids: string[]
+  // Set to true when Case C detected that the scope + pricing hashes are
+  // identical to the current frozen revision and returned the existing row
+  // without inserting a new one (idempotent re-freeze dedup).
+  deduped?: true
 }
 
 export type FreezeScopeResult = FreezeScopeOk | { ok: false; error: FreezeScopeError }
@@ -270,6 +274,25 @@ export async function freezeScope(
   }
 
   if (prior.status === 'frozen') {
+    // (M4 G-B4) Idempotent re-freeze dedup: if the scope + pricing hashes
+    // match the existing frozen revision, the scope is unchanged — return the
+    // existing row as a successful no-op instead of inserting revision N+1.
+    // This prevents revision spam when freeze-on-every-sign-off fires on an
+    // unchanged job (e.g. the scoper posts to job twice without editing).
+    if (prior.scope_hash === scope_hash && prior.pricing_hash === pricing_hash) {
+      return {
+        ok: true,
+        scope_revision_id: prior.id,
+        revision_number: prior.revision_number,
+        scope_hash: prior.scope_hash,
+        pricing_hash: prior.pricing_hash,
+        tool_kind,
+        status: 'frozen',
+        superseded_revision_id: null,
+        additional_superseded_revision_ids: [],
+        deduped: true,
+      }
+    }
     return await insertNextFrozen(client, prior, {
       job_id: input.job_id,
       revision_number: prior.revision_number + 1,
