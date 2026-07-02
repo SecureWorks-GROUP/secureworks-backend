@@ -42,13 +42,13 @@
 //   send_work_order     — Mark WO as sent to trade
 //   create_invoice      — POST invoice to Xero API
 //   complete_and_invoice — Mark complete + create Xero invoice (deposit-aware)
-//   create_deposit_invoice — Create deposit invoice (% of quoted total)
+//   create_deposit_invoice — Create deposit invoice (% of quoted total; DRAFT by default)
 //   sync_suppliers      — Pull suppliers from Xero contacts
 //
 //   ── Job Completion Package ──
 //   complete_job         — Mark job complete + GHL stage sync
-//   send_payment_link    — Get Xero online invoice URL + SMS to client
-//   send_acceptance_invoice — Create deposit invoice + send payment link in one call
+//   send_payment_link    — Get Xero online invoice URL + SMS to client (AUTHORISED invoices only — 409 otherwise)
+//   send_acceptance_invoice — Create AUTHORISED deposit invoice + send payment link in one call (Pay Now gated on chargeability)
 //   send_review_request  — SMS client with Google review link
 //
 //   ── Crew & Scheduling ──
@@ -14809,6 +14809,10 @@ function buildScopeSummaryLine(job: any): string {
 // Creates a Xero ACCREC invoice for a configurable % of the quoted total,
 // with rich description, tracking category, and SWP-25042-DEP reference.
 // Sends via Xero email. Saves deposit_invoice_id + deposit_amount on jobs.
+// xero_status defaults to DRAFT (drafts-for-review for make-safe / manual / MCP
+// callers — do not change); sendAcceptanceInvoice defaults it to AUTHORISED.
+// Returns xero_status (the status Xero actually assigned) so callers can gate
+// client-facing payment links. See "Acceptance Deposit Invoice Invariant" in AGENTS.md.
 async function createDepositInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -21824,6 +21828,10 @@ async function completeJob(client: any, body: any) {
 }
 
 // ── send_payment_link: get Xero online invoice URL + SMS to client ──
+// AUTHORISED invoices only: throws ApiError 409 for any other status (DRAFT etc.),
+// because a non-AUTHORISED invoice's online link cannot take payment. Callers
+// (daily-digest deposit chaser, JARVIS sw_send_payment_link) must treat a
+// non-success response as "reminder NOT sent".
 async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
