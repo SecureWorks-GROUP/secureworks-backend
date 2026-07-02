@@ -724,6 +724,21 @@ serve(async (req: Request) => {
 
       if (!claimed) {
         // Another call already claimed this document — suppress duplicate email.
+        // Multi-option: still re-run the sibling mark-sent before returning. If a
+        // prior attempt crashed between Resend success and the sibling mark, the
+        // extras would stay unsent forever (this early return would skip them on
+        // every retry). The update is idempotent, only-if-unsent and scoped to
+        // live sibling quotes on the primary's job, and sends no email.
+        if (extraOptionIds.length > 0) {
+          const { error: optMarkErr } = await sb.from('job_documents')
+            .update({ sent_to_client: true, sent_at: new Date().toISOString() })
+            .in('id', extraOptionIds)
+            .eq('job_id', doc.job_id)
+            .eq('type', 'quote')
+            .is('superseded_at', null)
+            .not('sent_to_client', 'is', true)
+          if (optMarkErr) console.log('[send-quote] multi-option sibling mark-sent on already_sent path failed (non-blocking):', optMarkErr.message)
+        }
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
       }
@@ -731,15 +746,27 @@ serve(async (req: Request) => {
         // ── Multi-option: gather every option document for the client email ──
         // Only when extra option ids were supplied. Single-doc sends skip this
         // entirely (emailOptions stays undefined → email renders identically).
+        // Extras are validated server-side: only live (non-superseded) quote
+        // docs on the SAME job as the primary qualify, so a caller bug passing a
+        // foreign document id can't leak another job's quote link into this
+        // client's email or mark that doc sent.
         let emailOptions: QuoteEmailOption[] | undefined
+        let validatedExtraIds: string[] = []
         if (extraOptionIds.length > 0) {
-          const { data: extraDocs } = await sb
+          const { data: extraDocs, error: extraErr } = await sb
             .from('job_documents')
-            .select('id, quote_number, pdf_url, html_url, share_token, data_snapshot_json')
+            .select('id, job_id, type, superseded_at, quote_number, pdf_url, html_url, share_token, data_snapshot_json')
             .in('id', extraOptionIds)
+            .eq('job_id', doc.job_id)
+            .eq('type', 'quote')
+            .is('superseded_at', null)
+          if (extraErr) console.log('[send-quote] multi-option extras fetch failed (email degrades to single-option):', extraErr.message)
           const byId = new Map<string, any>((extraDocs || []).map((d: any) => [d.id, d]))
-          // Primary first (built from the already-fetched `doc`), then extras in
-          // the caller's order. Drop any id that didn't resolve to a real doc.
+          validatedExtraIds = extraOptionIds.filter((id) => byId.has(id))
+          const droppedExtraIds = extraOptionIds.filter((id) => !byId.has(id))
+          if (droppedExtraIds.length > 0) console.log(`[send-quote] multi-option extras dropped (foreign job / superseded / non-quote): ${droppedExtraIds.join(', ')}`)
+          // Primary first (built from the already-fetched `doc`), then validated
+          // extras in the caller's order.
           emailOptions = orderedOptionIds
             .map((id): QuoteEmailOption | undefined =>
               id === document_id
@@ -836,13 +863,19 @@ serve(async (req: Request) => {
           // picker (and the accept→supersede flow) treats them as live siblings.
           // Done AFTER a confirmed Resend success so a failed send leaves no doc
           // marked. Only-if-unsent (.not sent_to_client) so we never clobber an
-          // already-sent doc's sent_at. Best-effort: the per-option direct links
-          // in the email work regardless of this flag, so a failure here degrades
-          // (picker shows fewer options) rather than breaking the sent email.
-          if (extraOptionIds.length > 0) {
+          // already-sent doc's sent_at, and scoped to validated same-job live
+          // quotes only. Non-blocking for THIS response, but not merely cosmetic:
+          // options whose email link fell back to the share_token /view URL (no
+          // html_url/pdf_url) depend on sent_to_client=true because the /view
+          // picker gates on it — which is why the already_sent retry path above
+          // re-runs this same idempotent mark to cover a crash landing here.
+          if (validatedExtraIds.length > 0) {
             const { error: optMarkErr } = await sb.from('job_documents')
               .update({ sent_to_client: true, sent_at: new Date().toISOString() })
-              .in('id', extraOptionIds)
+              .in('id', validatedExtraIds)
+              .eq('job_id', doc.job_id)
+              .eq('type', 'quote')
+              .is('superseded_at', null)
               .not('sent_to_client', 'is', true)
             if (optMarkErr) console.log('[send-quote] multi-option sibling mark-sent failed (non-blocking):', optMarkErr.message)
           }
