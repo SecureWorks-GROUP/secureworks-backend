@@ -20,8 +20,11 @@ Invariants (do not regress):
   `acceptance_invoice_authorise_failed` job_event, and a `{ success:false }` return
   that the accept flow handles gracefully (acceptance is still confirmed to the
   client, just without a payment link).
-- The debt-followup chase cron (`daily-digest` "Unpaid Deposit Chasers") excludes
-  `DRAFT` from the unpaid-deposit query — never re-email a payment link for a draft.
+- The debt-followup chase cron (`daily-digest` "Unpaid Deposit Chasers") only acts
+  on `AUTHORISED` deposits (positive filter) — any non-AUTHORISED status means an
+  unpayable link, never chase. Likewise `sendPaymentLink` (ops-api
+  `send_payment_link`) throws a 409 for any non-AUTHORISED invoice, and the cron
+  only records "reminder sent" when the send actually succeeded.
 
 ## Production Edge Deploy Rule
 

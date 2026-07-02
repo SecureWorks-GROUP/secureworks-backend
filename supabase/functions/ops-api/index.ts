@@ -21865,8 +21865,8 @@ async function sendPaymentLink(client: any, body: any) {
   if (!invoices || invoices.length === 0) throw new Error('No invoice found for this job')
   const invoice = invoices[0]
 
-  if (invoice.status === 'DRAFT') {
-    throw new ApiError(`Invoice ${invoice.invoice_number || invoice.xero_invoice_id} is still a DRAFT in Xero — a draft's online link cannot take payment. Authorise the invoice in Xero, then resend the payment link.`, 409)
+  if (invoice.status !== 'AUTHORISED') {
+    throw new ApiError(`Invoice ${invoice.invoice_number || invoice.xero_invoice_id} is ${invoice.status || 'not AUTHORISED'} in Xero, not AUTHORISED — its online link cannot take payment. Authorise the invoice in Xero (a just-authorised invoice may need a sync first), then resend the payment link.`, 409)
   }
 
   // Get Xero online invoice URL
