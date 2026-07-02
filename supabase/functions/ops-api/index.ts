@@ -13366,7 +13366,7 @@ async function createInvoice(client: any, body: any) {
         contact_name: contact || xeroInv?.Contact?.Name || null,
         invoice_number: invNumber,
         invoice_type: 'ACCREC',
-        status: invoiceStatus,
+        status: xeroInv?.Status || invoiceStatus,
         reference: reference || '',
         sub_total: invSubTotal,
         total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
@@ -13400,7 +13400,7 @@ async function createInvoice(client: any, body: any) {
     await client.from('job_events').insert({
       job_id: jId,
       event_type: 'invoice_created',
-      detail_json: { xero_invoice_id: xeroInvId, invoice_number: invNumber, status: invoiceStatus, total: invTotal, emailed: !!send_email },
+      detail_json: { xero_invoice_id: xeroInvId, invoice_number: invNumber, status: xeroInv?.Status || invoiceStatus, total: invTotal, emailed: !!send_email },
     })
     // Update job status to invoiced if complete
     await client.from('jobs')
@@ -21864,6 +21864,10 @@ async function sendPaymentLink(client: any, body: any) {
 
   if (!invoices || invoices.length === 0) throw new Error('No invoice found for this job')
   const invoice = invoices[0]
+
+  if (invoice.status === 'DRAFT') {
+    throw new ApiError(`Invoice ${invoice.invoice_number || invoice.xero_invoice_id} is still a DRAFT in Xero — a draft's online link cannot take payment. Authorise the invoice in Xero, then resend the payment link.`, 409)
+  }
 
   // Get Xero online invoice URL
   const { accessToken, tenantId } = await getToken(client)
