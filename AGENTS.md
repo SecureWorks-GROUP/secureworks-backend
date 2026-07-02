@@ -68,3 +68,25 @@ If you are unsure, do not deploy. Open a PR or run the read-only smoke script:
 ```bash
 SW_API_KEY=... scripts/smoke-edge-functions.sh
 ```
+
+## send-quote: multi-option quote emails
+
+The `/view` endpoint already renders a multi-option picker
+(`buildMultiOptionPage`) whenever a job has more than one live quote document.
+Its sibling query is gated on `sent_to_client = true` — so an option document
+that was never marked sent is invisible to the picker AND to the accept →
+supersede flow (both scope on `sent_to_client = true`).
+
+`POST /send` therefore accepts an optional `document_ids: string[]` (ordered,
+primary first) alongside the legacy `document_id`. When it carries >1 id, the
+handler references every option in the client email and marks each extra option
+doc `sent_to_client = true` (only after a confirmed Resend success) so the
+picker surfaces them all. The primary — the doc that drives idempotency, the
+CTA link, the `draft → quoted` flip and the canonical release events — is
+`document_id` if given, else `document_ids[0]`.
+
+Back-compat is load-bearing: a `document_id`-only call takes none of the
+multi-option branches and the email is byte-for-byte the single-option version.
+Tests live in `index_test.ts` (M/L/E/B cases). The helper bodies in that file
+are inline copies of `index.ts` (the handler is not import-safe — importing it
+starts `serve()`); keep them in sync when editing the email template.

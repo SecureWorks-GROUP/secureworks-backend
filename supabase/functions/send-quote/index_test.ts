@@ -745,3 +745,313 @@ Deno.test("C4 — claim with distinct document IDs: each simulates independent d
 // non-trivial logic. The Supabase `.is('col', null)` form generates
 // `col IS NULL` in SQL; `.eq('col', val)` generates `col = 'val'`.
 // This distinction matters when job_contact_id or run_label is null.
+
+// ════════════════════════════════════════════════════════════════════════════
+// MULTIDOC-SEND — multi-option quote email (patio-parity D2 option C)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The /send handler gained an optional `document_ids: string[]` field. When it
+// carries >1 id, the client email references every option document and each
+// extra option doc is marked sent_to_client so the existing /view multi-option
+// picker (buildMultiOptionPage) surfaces them all. Back-compat is a hard
+// requirement: a `document_id`-only call must behave byte-for-byte as before.
+//
+// These tests cover the PURE pieces (email rendering + the request-parse id
+// derivation). LOCAL-ONLY, so — matching the convention above — helper bodies
+// are copied inline verbatim from index.ts; drift is caught at PR review by grep.
+//
+// Module constants (index.ts:47-50 defaults, no env in test):
+const QUOTE_VIEWER_BASE = 'https://secureworks-website.pages.dev/quote.html'
+const BASE_URL = SUPABASE_URL // PUBLIC_URL unset → falls back to SUPABASE_URL
+
+// ── EXACT COPY of getDivisionPhone / getDivisionPhoneHref from index.ts:69-74 ──
+function getDivisionPhone(jobType: string | null | undefined): string {
+  return jobType === 'fencing' ? '0489 267 772' : '0489 267 771'
+}
+function getDivisionPhoneHref(jobType: string | null | undefined): string {
+  return 'tel:+61' + getDivisionPhone(jobType).replace(/\s+/g, '').slice(1)
+}
+// ── END EXACT COPY ──
+
+// ── EXACT COPY of QuoteEmailOption / optionDocumentLink / buildOptionsListHtml from index.ts ──
+type QuoteEmailOption = {
+  id: string
+  quote_number: string | null
+  pdf_url: string | null
+  html_url: string | null
+  share_token: string | null
+  data_snapshot_json: any
+}
+
+function optionDocumentLink(o: QuoteEmailOption): string {
+  if (o.html_url) return `${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(o.html_url)}`
+  if (o.pdf_url) return `${o.pdf_url}#view=Fit&toolbar=0`
+  if (o.share_token) return `${BASE_URL}/functions/v1/send-quote/view?token=${o.share_token}`
+  return '#'
+}
+
+function buildOptionsListHtml(options: QuoteEmailOption[]): string {
+  if (!options || options.length <= 1) return ''
+  const rows = options.map((o, i) => {
+    const snapshot = o.data_snapshot_json || {}
+    const price = snapshot.totalIncGST || snapshot.total || ''
+    const priceStr = price ? '$' + Number(price).toLocaleString('en-AU', { minimumFractionDigits: 0 }) : ''
+    const qn = o.quote_number || ''
+    const meta = [qn, priceStr].filter(Boolean).join(' &middot; ')
+    return `        <a href="${optionDocumentLink(o)}" style="display:block;padding:12px 16px;margin:0 0 8px;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">Option ${i + 1}${meta ? ` <span style="font-weight:400;color:#4C6A7C;">${meta}</span>` : ''} <span style="color:#F15A29;">View &rarr;</span></a>`
+  }).join('\n')
+  return `
+      <p style="color:#4C6A7C;font-size:12px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;margin:0 0 10px;">Your ${options.length} options</p>
+${rows}`
+}
+
+function buildQuoteEmail(opts: {
+  clientName: string
+  viewUrl: string
+  pdfUrl: string
+  projectType: string
+  suburb: string
+  customMessage: string
+  scoperName: string
+  options?: QuoteEmailOption[]
+}): string {
+  const hasMultipleOptions = !!(opts.options && opts.options.length > 1)
+  const optionCount = opts.options?.length ?? 0
+  const optionsBlock = buildOptionsListHtml(opts.options ?? [])
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;">
+    <!-- Header -->
+    <tr><td style="background:#F15A29;height:4px;"></td></tr>
+    <tr><td style="background:#293C46;padding:20px 32px;">
+      <span style="color:#fff;font-size:18px;font-weight:700;letter-spacing:0.5px;">SecureWorks</span>
+      <span style="color:rgba(255,255,255,0.6);font-size:16px;font-weight:400;margin-left:4px;">Group</span>
+    </td></tr>
+
+    <!-- Body -->
+    <tr><td style="padding:32px;">
+      <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">${hasMultipleOptions ? `Your ${opts.projectType} quote options are ready` : `Your ${opts.projectType} quote is ready`}</h1>
+      <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
+        Hi ${opts.clientName},
+      </p>
+      ${opts.customMessage ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.customMessage}</p>` : ''}
+      <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
+        Thank you for giving us the opportunity to quote on your ${opts.projectType} project${opts.suburb ? ' in ' + opts.suburb : ''}.
+        ${hasMultipleOptions ? `We've prepared ${optionCount} options for you. Compare them and choose using the button below.` : 'You can view your detailed quote using the button below.'}
+      </p>
+
+      <!-- CTA Button -->
+      <table cellpadding="0" cellspacing="0" style="margin:0 auto 24px;">
+        <tr><td style="background:#F15A29;border-radius:8px;">
+          <a href="${opts.viewUrl}" style="display:inline-block;padding:14px 32px;color:#fff;text-decoration:none;font-size:16px;font-weight:600;">
+            ${hasMultipleOptions ? 'View Your Options' : 'View Your Quote'}
+          </a>
+        </td></tr>
+      </table>${optionsBlock}
+
+      <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
+
+      <p style="color:#4C6A7C;font-size:14px;line-height:1.6;margin:0 0 8px;">
+        If you have any questions, don't hesitate to reach out. We're happy to walk through the quote with you.
+      </p>
+      <p style="color:#293C46;font-size:14px;font-weight:600;margin:0;">
+        ${opts.scoperName}<br>
+        <span style="font-weight:400;color:#4C6A7C;">SecureWorks Group</span><br>
+        <a href="${getDivisionPhoneHref(opts.projectType)}" style="color:#F15A29;text-decoration:none;">Call us</a> &nbsp;|&nbsp;
+        <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;text-decoration:none;">Email</a>
+      </p>
+    </td></tr>
+
+    <!-- Cross-sell footer -->
+    <tr><td style="background:#293C46;padding:20px 32px;">
+      <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
+        <strong>SecureWorks Group</strong> - Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
+        <span style="color:#F15A29;">Transform your entire outdoor space - ask us about a complete package</span>
+      </p>
+    </td></tr>
+
+    <!-- Footer -->
+    <tr><td style="background:#f5f5f7;padding:20px 32px;border-top:1px solid #eee;">
+      <p style="color:#999;font-size:11px;margin:0;line-height:1.5;">
+        SecureWorks Group Pty Ltd | ABN 64 689 223 416<br>
+        This quote is valid for 30 days from the date of issue.
+      </p>
+    </td></tr>
+  </table>
+</body>
+</html>`
+}
+// ── END EXACT COPY ──
+
+// ── MIRROR of the /send handler's document_ids derivation (index.ts inline) ──
+// The derivation is inline in the HTTP handler (not an extractable helper), so —
+// as with simulateClaim / the G-B2 doc-only test above — we mirror it here.
+function deriveOptionDocs(rawDocumentId: any, rawDocumentIds: any): {
+  document_id: string | undefined
+  extraOptionIds: string[]
+  orderedOptionIds: string[]
+} {
+  const optionDocumentIds: string[] = Array.isArray(rawDocumentIds)
+    ? rawDocumentIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+    : []
+  const document_id: string | undefined = rawDocumentId || optionDocumentIds[0]
+  const extraOptionIds: string[] = [...new Set(optionDocumentIds.filter((id) => id !== document_id))]
+  const orderedOptionIds: string[] = extraOptionIds.length > 0 ? [document_id!, ...extraOptionIds] : [document_id!]
+  return { document_id, extraOptionIds, orderedOptionIds }
+}
+
+const emailBase = {
+  clientName: 'Jordan',
+  viewUrl: `${BASE_URL}/functions/v1/send-quote/view?token=primary-tok`,
+  pdfUrl: 'https://example.com/primary.pdf',
+  projectType: 'patio',
+  suburb: 'Joondalup',
+  customMessage: 'Great to meet you today.',
+  scoperName: 'Nithin',
+}
+
+// ── Request-shape derivation (back-compat is the load-bearing property) ──
+
+Deno.test("M1 — document_id only (no document_ids): primary preserved, no extras, single-option shape", () => {
+  const d = deriveOptionDocs('doc-A', undefined)
+  assertEquals(d.document_id, 'doc-A')
+  assertEquals(d.extraOptionIds, [])
+  assertEquals(d.orderedOptionIds, ['doc-A'])
+})
+
+Deno.test("M2 — document_id + single-entry document_ids: still single-option (no extras)", () => {
+  const d = deriveOptionDocs('doc-A', ['doc-A'])
+  assertEquals(d.document_id, 'doc-A')
+  assertEquals(d.extraOptionIds, [])
+  assertEquals(d.orderedOptionIds, ['doc-A'])
+})
+
+Deno.test("M3 — document_ids only (no document_id): primary = first, rest are extras", () => {
+  const d = deriveOptionDocs(undefined, ['doc-A', 'doc-B', 'doc-C'])
+  assertEquals(d.document_id, 'doc-A')
+  assertEquals(d.extraOptionIds, ['doc-B', 'doc-C'])
+  assertEquals(d.orderedOptionIds, ['doc-A', 'doc-B', 'doc-C'])
+})
+
+Deno.test("M4 — document_id + multi document_ids: document_id wins as primary, remainder are extras", () => {
+  const d = deriveOptionDocs('doc-A', ['doc-A', 'doc-B', 'doc-C'])
+  assertEquals(d.document_id, 'doc-A')
+  assertEquals(d.extraOptionIds, ['doc-B', 'doc-C'])
+  assertEquals(d.orderedOptionIds, ['doc-A', 'doc-B', 'doc-C'])
+})
+
+Deno.test("M5 — duplicate ids in document_ids are de-duplicated in extras", () => {
+  const d = deriveOptionDocs('doc-A', ['doc-A', 'doc-B', 'doc-B', 'doc-A', 'doc-C'])
+  assertEquals(d.extraOptionIds, ['doc-B', 'doc-C'])
+  assertEquals(d.orderedOptionIds, ['doc-A', 'doc-B', 'doc-C'])
+})
+
+Deno.test("M6 — non-string / empty entries in document_ids are filtered out", () => {
+  const d = deriveOptionDocs(undefined, ['doc-A', '', null, 42, 'doc-B', undefined])
+  assertEquals(d.document_id, 'doc-A')
+  assertEquals(d.extraOptionIds, ['doc-B'])
+})
+
+Deno.test("M7 — no ids at all: primary undefined (handler returns 400 upstream)", () => {
+  const d = deriveOptionDocs(undefined, undefined)
+  assertEquals(d.document_id, undefined)
+  assertEquals(d.extraOptionIds, [])
+})
+
+// ── optionDocumentLink precedence (mirrors the picker card) ──
+
+Deno.test("L1 — html_url wins: links to the interactive viewer with encoded src", () => {
+  const url = optionDocumentLink({ id: '1', quote_number: null, pdf_url: 'https://x/p.pdf', html_url: 'https://x/q.html', share_token: 'tok', data_snapshot_json: null })
+  assertEquals(url, `${QUOTE_VIEWER_BASE}?src=${encodeURIComponent('https://x/q.html')}`)
+})
+
+Deno.test("L2 — no html_url: falls back to the raw PDF with view params", () => {
+  const url = optionDocumentLink({ id: '1', quote_number: null, pdf_url: 'https://x/p.pdf', html_url: null, share_token: 'tok', data_snapshot_json: null })
+  assertEquals(url, 'https://x/p.pdf#view=Fit&toolbar=0')
+})
+
+Deno.test("L3 — only share_token: falls back to the tracked /view page", () => {
+  const url = optionDocumentLink({ id: '1', quote_number: null, pdf_url: null, html_url: null, share_token: 'tok', data_snapshot_json: null })
+  assertEquals(url, `${BASE_URL}/functions/v1/send-quote/view?token=tok`)
+})
+
+Deno.test("L4 — nothing to link: safe '#' placeholder", () => {
+  const url = optionDocumentLink({ id: '1', quote_number: null, pdf_url: null, html_url: null, share_token: null, data_snapshot_json: null })
+  assertEquals(url, '#')
+})
+
+// ── buildOptionsListHtml ──
+
+Deno.test("E1 — zero options renders nothing", () => {
+  assertEquals(buildOptionsListHtml([]), '')
+})
+
+Deno.test("E2 — a single option renders nothing (single-option email stays unchanged)", () => {
+  const one: QuoteEmailOption = { id: '1', quote_number: 'SWP-1', pdf_url: 'https://x/1.pdf', html_url: null, share_token: 't1', data_snapshot_json: { totalIncGST: 5000 } }
+  assertEquals(buildOptionsListHtml([one]), '')
+})
+
+Deno.test("E3 — two options: both labelled, priced, and linked; header shows the count", () => {
+  const opts: QuoteEmailOption[] = [
+    { id: '1', quote_number: 'SWP-1', pdf_url: null, html_url: 'https://x/1.html', share_token: 't1', data_snapshot_json: { totalIncGST: 12000 } },
+    { id: '2', quote_number: 'SWP-2', pdf_url: 'https://x/2.pdf', html_url: null, share_token: 't2', data_snapshot_json: { total: 9500 } },
+  ]
+  const html = buildOptionsListHtml(opts)
+  assert(html.includes('Your 2 options'), 'header count present')
+  assert(html.includes('Option 1'), 'Option 1 label')
+  assert(html.includes('Option 2'), 'Option 2 label')
+  assert(html.includes('SWP-1') && html.includes('SWP-2'), 'quote numbers present')
+  assert(html.includes('$12,000'), 'primary price formatted (totalIncGST)')
+  assert(html.includes('$9,500'), 'fallback price formatted (total)')
+  assert(html.includes(`${QUOTE_VIEWER_BASE}?src=${encodeURIComponent('https://x/1.html')}`), 'option 1 → viewer')
+  assert(html.includes('https://x/2.pdf#view=Fit&toolbar=0'), 'option 2 → pdf')
+})
+
+Deno.test("E4 — option with no price/quote_number: label renders without a metadata span", () => {
+  const opts: QuoteEmailOption[] = [
+    { id: '1', quote_number: null, pdf_url: null, html_url: null, share_token: 't1', data_snapshot_json: null },
+    { id: '2', quote_number: 'SWP-2', pdf_url: null, html_url: null, share_token: 't2', data_snapshot_json: { totalIncGST: 4000 } },
+  ]
+  const html = buildOptionsListHtml(opts)
+  // Option 1 has no meta → the label is immediately followed by the View span, no middot separator span for it.
+  assert(html.includes('Option 1 <span style="color:#F15A29;">View &rarr;</span>'), 'Option 1 has no metadata span')
+  assert(html.includes('$4,000'), 'Option 2 still priced')
+})
+
+// ── buildQuoteEmail BACK-COMPAT (byte-for-byte) ──
+
+Deno.test("B1 — single-option email is byte-for-byte identical whether options is absent, undefined, or a 1-element array", () => {
+  const noOptions = buildQuoteEmail({ ...emailBase })
+  const undefinedOptions = buildQuoteEmail({ ...emailBase, options: undefined })
+  const oneOption = buildQuoteEmail({ ...emailBase, options: [
+    { id: '1', quote_number: 'SWP-1', pdf_url: 'https://x/1.pdf', html_url: null, share_token: 't1', data_snapshot_json: { totalIncGST: 5000 } },
+  ] })
+  assertEquals(noOptions, undefinedOptions, 'undefined options must not change output')
+  assertEquals(noOptions, oneOption, 'a single option must not change output')
+  // And the single-option email keeps the original copy verbatim.
+  assert(noOptions.includes('Your patio quote is ready'), 'original headline')
+  assert(noOptions.includes('View Your Quote'), 'original CTA label')
+  assert(noOptions.includes('You can view your detailed quote using the button below.'), 'original intro')
+  assert(!noOptions.includes('Your 1 options'), 'no options block leaks in')
+})
+
+Deno.test("B2 — multi-option email: option-aware copy + every option document referenced", () => {
+  const html = buildQuoteEmail({ ...emailBase, options: [
+    { id: '1', quote_number: 'SWP-1', pdf_url: null, html_url: 'https://x/1.html', share_token: 't1', data_snapshot_json: { totalIncGST: 12000 } },
+    { id: '2', quote_number: 'SWP-2', pdf_url: 'https://x/2.pdf', html_url: null, share_token: 't2', data_snapshot_json: { totalIncGST: 9500 } },
+    { id: '3', quote_number: 'SWP-3', pdf_url: 'https://x/3.pdf', html_url: null, share_token: 't3', data_snapshot_json: { totalIncGST: 15000 } },
+  ] })
+  // Option-aware copy
+  assert(html.includes('Your patio quote options are ready'), 'plural headline')
+  assert(html.includes("We've prepared 3 options for you"), 'plural intro w/ count')
+  assert(html.includes('View Your Options'), 'CTA links to the picker (once)')
+  // Picker link is still the primary /view (the picker page lists+accepts)
+  assert(html.includes(emailBase.viewUrl), 'primary /view (picker) linked once via CTA')
+  // Every option document is referenced by its own direct link
+  assert(html.includes(`${QUOTE_VIEWER_BASE}?src=${encodeURIComponent('https://x/1.html')}`), 'option 1 doc linked')
+  assert(html.includes('https://x/2.pdf#view=Fit&toolbar=0'), 'option 2 doc linked')
+  assert(html.includes('https://x/3.pdf#view=Fit&toolbar=0'), 'option 3 doc linked')
+  assert(html.includes('Option 1') && html.includes('Option 2') && html.includes('Option 3'), 'all three labelled')
+})
