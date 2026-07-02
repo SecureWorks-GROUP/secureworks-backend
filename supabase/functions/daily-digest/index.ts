@@ -4067,11 +4067,17 @@ async function createDailyAnnotations(sb: any, digest: any) {
   }
 
   // ── 4b. Unpaid Deposit Chasers (7/14 day tiers) ──
-  // Query deposit invoices that haven't been paid
+  // Query deposit invoices that haven't been paid.
+  // HOTFIX (chase-cron mute): also exclude DRAFT. A draft deposit's Xero online
+  // link cannot take card payment, so re-emailing it via send_payment_link chases
+  // the client with a dead link — harmful. A DRAFT was never a real client-facing
+  // receivable, so it must not enter the chaser at all (neither the SMS reminder
+  // nor the "unpaid deposit" annotation). Acceptance deposits are AUTHORISED at
+  // creation now, so this only skips intentional drafts-for-review + legacy drafts.
   const { data: unpaidDeposits } = await sb.from('xero_invoices')
     .select('id, xero_invoice_id, invoice_number, job_id, reference, total, amount_due, amount_paid, invoice_date, status')
     .eq('invoice_type', 'ACCREC')
-    .not('status', 'in', '("VOIDED","DELETED","PAID")')
+    .not('status', 'in', '("VOIDED","DELETED","PAID","DRAFT")')
     .ilike('reference', '%DEP%')
     .gt('amount_due', 0)
 

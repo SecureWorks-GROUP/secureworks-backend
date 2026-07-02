@@ -1,5 +1,28 @@
 # SecureWorks Agent Instructions
 
+## Acceptance Deposit Invoice Invariant
+
+The quote self-accept flow (`send-quote` /accept → `ops-api`
+`send_acceptance_invoice`) emails the client a branded "Pay Now" deposit invoice.
+For that link to work, the Xero invoice MUST be `AUTHORISED` — a `DRAFT` invoice's
+online link cannot take card payment and bank transfers against it land
+unreconciled.
+
+Invariants (do not regress):
+
+- `sendAcceptanceInvoice` defaults `xero_status` to `AUTHORISED` when calling
+  `createDepositInvoice` (one authoritative place). Do NOT change `createInvoice`'s
+  or `createDepositInvoice`'s global `DRAFT` default — make-safe / manual / MCP
+  `create_deposit_invoice` paths intentionally create drafts for review.
+- The branded Pay Now email/SMS only goes out when the invoice actually came back
+  `AUTHORISED` AND the OnlineInvoice URL fetch succeeded (see
+  `_acceptanceInvoiceChargeable`). On failure: no client email, a loud
+  `acceptance_invoice_authorise_failed` job_event, and a `{ success:false }` return
+  that the accept flow handles gracefully (acceptance is still confirmed to the
+  client, just without a payment link).
+- The debt-followup chase cron (`daily-digest` "Unpaid Deposit Chasers") excludes
+  `DRAFT` from the unpaid-deposit query — never re-email a payment link for a draft.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one
