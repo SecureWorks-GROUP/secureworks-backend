@@ -4,6 +4,7 @@ import {
   compareTemplateToActual,
   parseSubjectFields,
   parseWithTemplate,
+  resolveSubjectRef,
   TEMPLATE_DEFAULT_REQUIRED,
   type TemplateParsingRules,
 } from "./makesafe_template_parser.ts";
@@ -145,4 +146,30 @@ Deno.test("parseSubjectFields: no ref / no street address -> nulls (model fills)
   assertEquals(r.site_suburb, null);
   // A bare number with no builder prefix must NOT be mistaken for a ref.
   assertEquals(parseSubjectFields("Job 12345 update").external_ref, null);
+});
+
+// ── M2: subject ref must NOT override the model ref on a RE:/FW: reply ──
+Deno.test("resolveSubjectRef: off a reply, the subject ref is authoritative (overrides model)", () => {
+  const r = resolveSubjectRef(false, "MLB-26499", "MLB-99999");
+  assertEquals(r.external_ref, "MLB-26499"); // subject wins
+  assertEquals(r.subject_ref_hint, null);
+});
+
+Deno.test("resolveSubjectRef: on a reply, subject ref is a HINT ONLY — model ref kept", () => {
+  // The reply subject quotes ANOTHER job's ref; must not misroute the dedup/job key.
+  const r = resolveSubjectRef(true, "MLB-26499", "MLB-88888");
+  assertEquals(r.external_ref, "MLB-88888"); // model ref preserved
+  assertEquals(r.subject_ref_hint, "MLB-26499"); // quoted ref kept only as a hint
+});
+
+Deno.test("resolveSubjectRef: on a reply with a null model ref, external_ref stays null", () => {
+  const r = resolveSubjectRef(true, "MLB-26499", null);
+  assertEquals(r.external_ref, null); // stays null -> needs_review, not misrouted
+  assertEquals(r.subject_ref_hint, "MLB-26499");
+});
+
+Deno.test("resolveSubjectRef: off a reply with no subject ref, falls back to the model ref", () => {
+  const r = resolveSubjectRef(false, null, "MLB-77777");
+  assertEquals(r.external_ref, "MLB-77777");
+  assertEquals(r.subject_ref_hint, null);
 });

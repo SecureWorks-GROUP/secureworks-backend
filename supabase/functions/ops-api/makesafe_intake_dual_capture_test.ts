@@ -91,6 +91,93 @@ Deno.test("D0: contentFingerprint is stable across capture paths, distinct acros
   assertEquals(contentFingerprint(null, SUBJECT, "2026-07-03T02:15:30Z"), "");
 });
 
+// ── H2: a ref-less generic subject must dedupe on BODY, never collapse two jobs ──
+const GENERIC_SUBJECT = "Make safe request"; // no builder ref in the subject
+const bodyA = "Attend 18 Eagleglen Rise Gidgegannup, tarp the roof after storm.";
+const bodyB = "Attend 5 Other Street Perth, board up the smashed front window.";
+
+Deno.test("H2: same sender + minute + generic subject, DIFFERENT body -> two drafts (not merged)", () => {
+  const draftA: IntakeDedupRow = {
+    graph_message_id: "AAMk-generic-A",
+    external_ref: null,
+    from_email: FROM,
+    subject: GENERIC_SUBJECT,
+    received_at: "2026-07-03T02:15:30Z",
+    body_preview: bodyA,
+  };
+  const index = buildIntakeDedupIndex([draftA]);
+  // A genuinely DIFFERENT ref-less job, same sender/subject/minute, different body.
+  const jobB = {
+    graph_message_id: "AAMk-generic-B",
+    from_email: FROM,
+    subject: GENERIC_SUBJECT,
+    received_at: "2026-07-03T02:15:31Z",
+    body: bodyB,
+  };
+  assertEquals(isDuplicateIntake(jobB, index), null); // MUST NOT be dropped
+});
+
+Deno.test("H2: same sender + minute + generic subject, SAME body (true twin) -> deduped", () => {
+  const draftA: IntakeDedupRow = {
+    graph_message_id: "AAMk-generic-A2",
+    external_ref: null,
+    from_email: FROM,
+    subject: GENERIC_SUBJECT,
+    received_at: "2026-07-03T02:15:30Z",
+    body_preview: bodyA,
+  };
+  const index = buildIntakeDedupIndex([draftA]);
+  const twin = {
+    graph_message_id: "mailbox-generic-A2",
+    from_email: FROM,
+    subject: GENERIC_SUBJECT,
+    received_at: "2026-07-03T02:15:31Z",
+    body: bodyA, // identical content -> same body-hash discriminator
+  };
+  assertEquals(isDuplicateIntake(twin, index), "duplicate_content_fingerprint");
+});
+
+Deno.test("H2: no ref AND no body -> fail-open (no fingerprint, not deduped)", () => {
+  const draftA: IntakeDedupRow = {
+    graph_message_id: "AAMk-nobody",
+    external_ref: null,
+    from_email: FROM,
+    subject: GENERIC_SUBJECT,
+    received_at: "2026-07-03T02:15:30Z",
+    body_preview: null,
+  };
+  const index = buildIntakeDedupIndex([draftA]);
+  const twin = {
+    graph_message_id: "mailbox-nobody",
+    from_email: FROM,
+    subject: GENERIC_SUBJECT,
+    received_at: "2026-07-03T02:15:31Z",
+    body: null,
+  };
+  assertEquals(isDuplicateIntake(twin, index), null); // cannot safely dedupe -> fail open
+});
+
+// ── M1: the two capture rows can straddle a minute boundary ──
+Deno.test("M1: a twin straddling the :59 -> :00 minute boundary is still deduped", () => {
+  const draftA: IntakeDedupRow = {
+    graph_message_id: "AAMk-boundary",
+    external_ref: null,
+    from_email: FROM,
+    subject: SUBJECT, // carries the ref
+    received_at: "2026-07-03T02:15:59Z", // :59
+    body_preview: bodyA,
+  };
+  const index = buildIntakeDedupIndex([draftA]);
+  const twin = {
+    graph_message_id: "mailbox-boundary",
+    from_email: FROM,
+    subject: SUBJECT,
+    received_at: "2026-07-03T02:16:01Z", // NEXT minute — adjacent bucket
+    body: bodyA,
+  };
+  assertEquals(isDuplicateIntake(twin, index), "duplicate_content_fingerprint");
+});
+
 Deno.test("D0: fingerprint dedup does NOT disturb the existing graph-id / ref dedup", () => {
   // A pre-existing draft with a ref but different sender content still dedupes on ref.
   const withRef: IntakeDedupRow = {

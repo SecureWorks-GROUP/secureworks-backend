@@ -185,6 +185,7 @@ import {
 import {
   parseWithTemplate as _parseWithTemplate,
   parseSubjectFields as _parseSubjectFields,
+  resolveSubjectRef as _resolveSubjectRef,
 } from './makesafe_template_parser.ts'
 import {
   readUsage as _readUsage,
@@ -10239,20 +10240,31 @@ async function writeIntakeHealth(client: any, input: {
 }): Promise<void> {
   try {
     const nowIso = new Date().toISOString()
-    const { data: prev } = await client.from('makesafe_intake_health')
-      .select('extraction_status, degraded_since, last_successful_extraction_at, total_model_calls, total_model_skips, total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens')
+    // H1: read the M1 BASE columns separately (always exist) so the fail-loud banner's
+    // ok<->degraded transition is tracked even if the M1.5 ledger columns don't exist
+    // yet. The cost totals are a SEPARATE best-effort read (may 400 pre-migration).
+    const { data: prevBase } = await client.from('makesafe_intake_health')
+      .select('extraction_status, degraded_since, last_successful_extraction_at')
       .eq('id', true).maybeSingle()
-    const wasDegraded = String(prev?.extraction_status || '') === 'degraded'
+    let prevCost: any = null
+    if (input.cost) {
+      const { data } = await client.from('makesafe_intake_health')
+        .select('total_model_calls, total_model_skips, total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens')
+        .eq('id', true).maybeSingle()
+      prevCost = data || null // null pre-migration (columns absent) -> counters start at 0
+    }
+    const wasDegraded = String(prevBase?.extraction_status || '') === 'degraded'
     const isDegraded = input.extractionStatus === 'degraded'
     // degraded_since: keep the existing start if still degraded; stamp now on a fresh
     // ok->degraded transition; clear when recovered.
     const degradedSince = isDegraded
-      ? (wasDegraded && prev?.degraded_since ? prev.degraded_since : nowIso)
+      ? (wasDegraded && prevBase?.degraded_since ? prevBase.degraded_since : nowIso)
       : null
     const lastSuccess = input.anyExtractionSucceeded
       ? nowIso
-      : (prev?.last_successful_extraction_at || null)
-    const row: any = {
+      : (prevBase?.last_successful_extraction_at || null)
+    // The M1 fail-loud banner — must be written on EVERY run, migration or not.
+    const baseRow: any = {
       id: true,
       extraction_status: input.extractionStatus,
       degraded_reason: isDegraded ? (input.degradedReason || 'key_unset') : null,
@@ -10263,9 +10275,8 @@ async function writeIntakeHealth(client: any, input: {
       last_scan_auto_filed: input.autoFiled,
       updated_at: nowIso,
     }
+    const row: any = { ...baseRow }
     // M1.5: write the last-scan snapshot + increment the lifetime running counters.
-    // Guarded by `if (input.cost)` so pre-M1.5 callers (and the group-post path) leave
-    // the ledger columns exactly as they were.
     if (input.cost) {
       const u = input.cost.usage
       const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0)
@@ -10276,14 +10287,27 @@ async function writeIntakeHealth(client: any, input: {
       row.last_scan_cache_read_tokens = u.cache_read_input_tokens
       row.last_scan_cache_write_tokens = u.cache_creation_input_tokens
       row.last_scan_estimated_cost_usd = _usdCost(u)
-      row.total_model_calls = n(prev?.total_model_calls) + input.cost.model_calls
-      row.total_model_skips = n(prev?.total_model_skips) + input.cost.model_skips
-      row.total_input_tokens = n(prev?.total_input_tokens) + u.input_tokens
-      row.total_output_tokens = n(prev?.total_output_tokens) + u.output_tokens
-      row.total_cache_read_tokens = n(prev?.total_cache_read_tokens) + u.cache_read_input_tokens
-      row.total_cache_write_tokens = n(prev?.total_cache_write_tokens) + u.cache_creation_input_tokens
+      row.total_model_calls = n(prevCost?.total_model_calls) + input.cost.model_calls
+      row.total_model_skips = n(prevCost?.total_model_skips) + input.cost.model_skips
+      row.total_input_tokens = n(prevCost?.total_input_tokens) + u.input_tokens
+      row.total_output_tokens = n(prevCost?.total_output_tokens) + u.output_tokens
+      row.total_cache_read_tokens = n(prevCost?.total_cache_read_tokens) + u.cache_read_input_tokens
+      row.total_cache_write_tokens = n(prevCost?.total_cache_write_tokens) + u.cache_creation_input_tokens
     }
-    await client.from('makesafe_intake_health').upsert(row, { onConflict: 'id' })
+    // H1 (INVARIANT #5 — health must never go silently dark): supabase-js does NOT throw
+    // on a PostgREST error; it returns {error}. In the window between merge->auto-deploy
+    // and the hand-applied M1.5 migration, the ledger columns don't exist, so the FULL
+    // upsert is rejected — which would silently drop the M1 fail-loud banner too. So
+    // CHECK the error and RETRY with only the base M1 columns; a dead key in that window
+    // must still be visible.
+    const { error: upErr } = await client.from('makesafe_intake_health').upsert(row, { onConflict: 'id' })
+    if (upErr) {
+      console.warn('[ops-api] writeIntakeHealth full upsert failed (ledger columns likely pre-migration); retrying M1 base columns:', upErr.message)
+      const { error: baseErr } = await client.from('makesafe_intake_health').upsert(baseRow, { onConflict: 'id' })
+      if (baseErr) {
+        console.error('[ops-api] writeIntakeHealth base upsert ALSO failed — health banner NOT written:', baseErr.message)
+      }
+    }
   } catch (e) {
     console.warn('[ops-api] writeIntakeHealth failed (non-fatal):', (e as Error).message)
   }
@@ -10357,6 +10381,9 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
 
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
+// H1: exported so a test can simulate the pre-migration schema (ledger columns absent)
+// and prove the M1 fail-loud banner is still written via the base-only retry.
+export const _writeIntakeHealthForTest = writeIntakeHealth
 export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCleanIntakeDraftRow
 // D-a fail-loud: exported so a test can prove auth-failure (dead key) is distinguished
 // from a transient failure, and the extraction-down marker is a stable constant.
@@ -11350,6 +11377,9 @@ async function scanSesMakesafes(client: any) {
         from_email: msg.from?.emailAddress?.address || null,
         subject: msg.subject || null,
         received_at: msg.receivedDateTime || null,
+        // H2: body feeds the fingerprint discriminator when no ref is parseable, so two
+        // different ref-less jobs with an identical generic subject never collapse.
+        body: msg.body?.content || msg.bodyPreview || null,
       },
       dedupIndex,
     )
@@ -11679,12 +11709,20 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // is degenerate while null); the address only fills what the model didn't produce,
     // so accuracy is same-or-better, never regressed.
     const subjectFields = _parseSubjectFields(subject)
-    if (subjectFields.external_ref) extraction.external_ref = subjectFields.external_ref
-    if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) {
-      extraction.site_address = subjectFields.site_address
-    }
-    if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) {
-      extraction.site_suburb = subjectFields.site_suburb
+    // M2: on a RE:/FW: reply the subject may quote ANOTHER job's ref; overriding the
+    // model's ref would misroute the (ref, family) dedup key + job creation. resolveSubjectRef
+    // makes the subject ref authoritative off a reply, and a HINT only on a reply. The
+    // reply_forward_risk needs_review marker (added below) still fires either way.
+    const refDecision = _resolveSubjectRef(replyForwardRisk, subjectFields.external_ref, extraction.external_ref || null)
+    if (refDecision.external_ref) extraction.external_ref = refDecision.external_ref
+    if (refDecision.subject_ref_hint) extraction.subject_ref_hint = refDecision.subject_ref_hint
+    if (!replyForwardRisk) {
+      if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) {
+        extraction.site_address = subjectFields.site_address
+      }
+      if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) {
+        extraction.site_suburb = subjectFields.site_suburb
+      }
     }
 
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
@@ -11968,6 +12006,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
               from_email: fromEmail,
               subject,
               received_at: msg.receivedDateTime || null,
+              body: msg.body?.content || msg.bodyPreview || null,
             },
             dedupIndex,
           )
@@ -12064,6 +12103,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         from_email: fromEmail,
         subject,
         received_at: msg.receivedDateTime || null,
+        body: msg.body?.content || msg.bodyPreview || null,
       },
       dedupIndex,
     )

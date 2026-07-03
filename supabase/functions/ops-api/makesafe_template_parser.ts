@@ -108,6 +108,24 @@ export interface SubjectFields {
   site_suburb: string | null;
 }
 
+/**
+ * M2 — decide the external_ref to use, given the deterministic subject ref, the model's
+ * ref, and whether the email is a RE:/FW: reply. Off a reply, the subject ref is
+ * AUTHORITATIVE (exact, from the builder's own new subject) and overrides the model.
+ * On a reply the subject may quote ANOTHER job's ref, so it is a HINT only and never
+ * overrides the model's ref — protecting the (ref, family) dedup key + job creation.
+ */
+export function resolveSubjectRef(
+  replyForwardRisk: boolean,
+  subjectRef: string | null | undefined,
+  modelRef: string | null | undefined,
+): { external_ref: string | null; subject_ref_hint: string | null } {
+  const sr = subjectRef || null;
+  const mr = modelRef || null;
+  if (replyForwardRisk) return { external_ref: mr, subject_ref_hint: sr };
+  return { external_ref: sr || mr, subject_ref_hint: null };
+}
+
 /** Deterministically lift the ref + street address + suburb out of a subject line.
  * Never throws; returns nulls when nothing matches. */
 export function parseSubjectFields(subject: string | null | undefined): SubjectFields {
