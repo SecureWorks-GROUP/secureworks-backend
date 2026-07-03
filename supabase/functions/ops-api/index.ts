@@ -175,6 +175,26 @@ import {
 import {
   makesafeIntakeGoldenReplay as _makesafeIntakeGoldenReplay,
 } from './makesafe_intake_golden_replay.ts'
+// M1.5 cost hardening — local PDF text extraction, per-builder template parsers, and
+// the token/cost ledger. See makesafe_pdf_text.ts / makesafe_template_parser.ts /
+// makesafe_cost.ts. All deterministic + key-less; the model call is the only paid step.
+import {
+  extractPdfText as _extractPdfText,
+  PDF_TEXT_MIN_CHARS as _PDF_TEXT_MIN_CHARS,
+} from './makesafe_pdf_text.ts'
+import {
+  parseWithTemplate as _parseWithTemplate,
+} from './makesafe_template_parser.ts'
+import {
+  readUsage as _readUsage,
+  emailCostRecord as _emailCostRecord,
+  emptyScanTotals as _emptyScanTotals,
+  accrueScanTotals as _accrueScanTotals,
+  usdCost as _usdCost,
+  rollup24h as _rollup24h,
+  ZERO_USAGE as _ZERO_USAGE,
+  HAIKU_4_5_RATES as _HAIKU_4_5_RATES,
+} from './makesafe_cost.ts'
 import {
   _collectPosts as _monitorCollectPosts,
   _resolveGroupId as _monitorResolveGroupId,
@@ -2112,10 +2132,26 @@ if (import.meta.main) serve(async (req: Request) => {
         }))
       }
       // Auto-Intake v2 (M1): golden-set replay proof (D-f). Read-only, key-less.
+      // M1.5: also a COST preview — pass a bounded WO-PDF download so the replay can
+      // extract each PDF's text layer (pdf_mode) and compare the template parse vs the
+      // actual draft. Still NO Anthropic call; the PDF extraction is local + deterministic.
       case 'intake_golden_replay': {
+        const goldenAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const goldenDownloadPdf = async (storagePath: string): Promise<Uint8Array | null> => {
+          try {
+            const { data: blob, error } = await goldenAdmin.storage
+              .from('makesafe-emails').download(storagePath)
+            if (error || !blob) return null
+            return new Uint8Array(await blob.arrayBuffer())
+          } catch (_) {
+            return null
+          }
+        }
         return json(await _makesafeIntakeGoldenReplay(client, _senderMatchesPattern, _SES_MAILBOX, {
           days: Number(url.searchParams.get('days') || '') || undefined,
           limit: Number(url.searchParams.get('limit') || '') || undefined,
+          downloadPdf: goldenDownloadPdf,
+          maxPdfExtractions: Number(url.searchParams.get('max_pdf') || '') || undefined,
         }))
       }
       case 'makesafe_intake_backfill_report': {
@@ -10187,11 +10223,23 @@ async function writeIntakeHealth(client: any, input: {
   anyExtractionSucceeded: boolean
   draftsCreated: number
   autoFiled: number
+  // M1.5 cost ledger for this scan (optional so callers that don't extract, e.g. the
+  // group-post capture path, can omit it and leave the ledger untouched).
+  cost?: {
+    model_calls: number
+    model_skips: number
+    usage: {
+      input_tokens: number
+      output_tokens: number
+      cache_read_input_tokens: number
+      cache_creation_input_tokens: number
+    }
+  }
 }): Promise<void> {
   try {
     const nowIso = new Date().toISOString()
     const { data: prev } = await client.from('makesafe_intake_health')
-      .select('extraction_status, degraded_since, last_successful_extraction_at')
+      .select('extraction_status, degraded_since, last_successful_extraction_at, total_model_calls, total_model_skips, total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens')
       .eq('id', true).maybeSingle()
     const wasDegraded = String(prev?.extraction_status || '') === 'degraded'
     const isDegraded = input.extractionStatus === 'degraded'
@@ -10203,7 +10251,7 @@ async function writeIntakeHealth(client: any, input: {
     const lastSuccess = input.anyExtractionSucceeded
       ? nowIso
       : (prev?.last_successful_extraction_at || null)
-    await client.from('makesafe_intake_health').upsert({
+    const row: any = {
       id: true,
       extraction_status: input.extractionStatus,
       degraded_reason: isDegraded ? (input.degradedReason || 'key_unset') : null,
@@ -10213,7 +10261,28 @@ async function writeIntakeHealth(client: any, input: {
       last_scan_drafts_created: input.draftsCreated,
       last_scan_auto_filed: input.autoFiled,
       updated_at: nowIso,
-    }, { onConflict: 'id' })
+    }
+    // M1.5: write the last-scan snapshot + increment the lifetime running counters.
+    // Guarded by `if (input.cost)` so pre-M1.5 callers (and the group-post path) leave
+    // the ledger columns exactly as they were.
+    if (input.cost) {
+      const u = input.cost.usage
+      const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+      row.last_scan_model_calls = input.cost.model_calls
+      row.last_scan_model_skips = input.cost.model_skips
+      row.last_scan_input_tokens = u.input_tokens
+      row.last_scan_output_tokens = u.output_tokens
+      row.last_scan_cache_read_tokens = u.cache_read_input_tokens
+      row.last_scan_cache_write_tokens = u.cache_creation_input_tokens
+      row.last_scan_estimated_cost_usd = _usdCost(u)
+      row.total_model_calls = n(prev?.total_model_calls) + input.cost.model_calls
+      row.total_model_skips = n(prev?.total_model_skips) + input.cost.model_skips
+      row.total_input_tokens = n(prev?.total_input_tokens) + u.input_tokens
+      row.total_output_tokens = n(prev?.total_output_tokens) + u.output_tokens
+      row.total_cache_read_tokens = n(prev?.total_cache_read_tokens) + u.cache_read_input_tokens
+      row.total_cache_write_tokens = n(prev?.total_cache_write_tokens) + u.cache_creation_input_tokens
+    }
+    await client.from('makesafe_intake_health').upsert(row, { onConflict: 'id' })
   } catch (e) {
     console.warn('[ops-api] writeIntakeHealth failed (non-fatal):', (e as Error).message)
   }
@@ -11071,14 +11140,19 @@ async function scanSesMakesafes(client: any) {
   // re-upload below (hoisted out of the loop — was re-created per attachment).
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-  // Load known make-safe company sender patterns
+  // Load known make-safe company sender patterns + per-builder template parsing rules
+  // (M1.5: parsing_rules drives the deterministic template-parse cost lever).
   const { data: companies } = await client.from('makesafe_companies')
-    .select('slug, name, sender_patterns')
+    .select('slug, name, sender_patterns, parsing_rules')
     .eq('active', true)
   const senderPatterns: Array<{ slug: string; name: string; pattern: string }> = []
+  const parsingRulesBySlug = new Map<string, any>()
   for (const co of (companies || [])) {
     for (const p of (co.sender_patterns || [])) {
       senderPatterns.push({ slug: co.slug, name: co.name, pattern: p.toLowerCase() })
+    }
+    if (co.slug && co.parsing_rules && typeof co.parsing_rules === 'object') {
+      parsingRulesBySlug.set(String(co.slug).toLowerCase(), co.parsing_rules)
     }
   }
 
@@ -11241,10 +11315,17 @@ async function scanSesMakesafes(client: any) {
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
+  // M1.5 cost ledger: per-scan running totals of model calls / template skips / tokens.
+  let scanCostTotals = _emptyScanTotals()
 
   // D-d kill switch (Captain D1 default TRUE): the DB flag decides whether the scan
   // may auto-file clean drafts this run. Read ONCE per scan.
   const autoFileEnabled = await isAutoFileEnabled(client)
+
+  // M1.5 lever 1 kill switch: local PDF text extraction is ON by default; set
+  // MAKESAFE_INTAKE_PDF_TEXT_MODE=false to force the document-block path with no
+  // redeploy if the text path ever regresses extraction accuracy.
+  const pdfTextModeEnabled = Deno.env.get('MAKESAFE_INTAKE_PDF_TEXT_MODE') !== 'false'
 
   // D-a FAIL-LOUD preflight. keyDegraded starts true when the key is UNSET (v1's exact
   // silent-death shape) and flips true the moment a classifier call fails auth (revoked
@@ -11419,38 +11500,116 @@ async function scanSesMakesafes(client: any) {
     let extraction: any = {}
     let confidence = 'low'
     let missingFields: string[] = []
-    // D-a: run the classifier ONLY while the key is healthy. If the key is unset the
-    // guard is false from the first email; if it dies mid-run the catch flips keyDegraded
-    // and every subsequent email skips the call (no silent empty-extraction spray).
-    if (ANTHROPIC_API_KEY && !keyDegraded) {
+    // M1.5 cost-path bookkeeping. Recorded on the draft (extraction_json.cost /
+    // pdf_mode / parser / model_called) and folded into the per-scan cost totals below.
+    let pdfMode: 'text' | 'document' | 'none' = pdfBase64List.length ? 'document' : 'none'
+    let extractionParser: 'template' | 'none' = 'none'
+    let modelCalled = false
+    let callUsage = { ..._ZERO_USAGE }
+    const templateSlug = (matchedCompany?.slug || '').toLowerCase()
+
+    // M1.5 LEVER 1 — local PDF text extraction. Pull the text layer out of each
+    // captured WO PDF in Deno (deterministic, key-less). If EVERY PDF yields clean text
+    // over the threshold, feed cheap text blocks to the model instead of the ~10x
+    // document blocks; a scanned/low-text PDF falls back to the document path unchanged.
+    const pdfTexts: string[] = []
+    if (pdfBase64List.length && pdfTextModeEnabled) {
+      let allText = true
+      for (const pdf of pdfBase64List) {
+        try {
+          const bytes = Uint8Array.from(atob(pdf.base64), (c) => c.charCodeAt(0))
+          const r = await _extractPdfText(bytes)
+          if (r.mode === 'text') pdfTexts.push(`[${pdf.name}]\n${r.text}`)
+          else allText = false
+        } catch (_) {
+          allText = false
+        }
+      }
+      const combinedLen = pdfTexts.join('\n').length
+      pdfMode = (allText && pdfTexts.length === pdfBase64List.length && combinedLen >= _PDF_TEXT_MIN_CHARS)
+        ? 'text'
+        : 'document'
+    }
+    const combinedPdfText = pdfTexts.join('\n')
+
+    // M1.5 LEVER 2 — per-builder deterministic template parse. Runs for every builder
+    // that has parsing_rules (as a preview). Only when the builder is flipped
+    // template_first AND every required field parses does it SKIP the model entirely.
+    const templateResult = _parseWithTemplate(parsingRulesBySlug.get(templateSlug), {
+      subject,
+      body: builderEmailTextForTrade || bodyPreview,
+      pdfText: combinedPdfText,
+    })
+
+    if (templateResult?.model_skipped && !keyDegraded) {
+      // Full deterministic parse on a template-first builder — no classifier call.
+      const f = templateResult.fields
+      extraction = {
+        external_ref: f.external_ref || null,
+        client_name: f.client_name || null,
+        client_phone: f.client_phone || null,
+        site_address: f.site_address || null,
+        site_suburb: f.site_suburb || null,
+        description: f.description || null,
+        safety_requirements: f.safety_requirements || null,
+      }
+      confidence = templateResult.confidence
+      missingFields = []
+      extractionParser = 'template'
+      modelCalled = false
+      anyExtractionSucceeded = true
+    } else if (ANTHROPIC_API_KEY && !keyDegraded) {
+      // D-a: run the classifier ONLY while the key is healthy. If the key is unset the
+      // guard is false from the first email; if it dies mid-run the catch flips
+      // keyDegraded and every subsequent email skips the call (no silent spray).
       try {
         const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
         const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
-        // Build message content: email text + any PDF documents
+        // Build message content: email text + PDF (text blocks when the text layer was
+        // extracted, else document blocks — same information, far fewer tokens on text).
         const userContent: any[] = [
           { type: 'text', text: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` },
         ]
-        for (const pdf of pdfBase64List) {
-          userContent.push({
-            type: 'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 },
-          })
-          userContent.push({ type: 'text', text: `[Attached PDF: ${pdf.name}]` })
+        if (pdfMode === 'text') {
+          for (const t of pdfTexts) {
+            userContent.push({ type: 'text', text: `[Work order PDF text]\n${t}` })
+          }
+        } else {
+          for (const pdf of pdfBase64List) {
+            userContent.push({
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 },
+            })
+            userContent.push({ type: 'text', text: `[Attached PDF: ${pdf.name}]` })
+          }
         }
 
+        // M1.5 LEVER 3 — prompt caching. The static instruction prefix is marked
+        // cache_control:ephemeral so repeat calls within the 5-minute TTL pay the
+        // 0.1x cached-input rate. (Haiku 4.5's cache minimum is 4096 tokens, so this
+        // only bites once the static prefix is large enough; the usage ledger below
+        // captures cache_read/cache_creation tokens so the effect is measurable.)
+        // Mark the call as made BEFORE awaiting so a transient throw is still counted
+        // as a model call (not miscounted as a template skip) in the cost ledger.
+        modelCalled = true
         const resp = await anthropic.messages.create({
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 900,
-          system: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
+          system: [{
+            type: 'text',
+            cache_control: { type: 'ephemeral' },
+            text: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
 Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
 Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
 Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
 For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
 For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
 If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
+          }],
           messages: [{ role: 'user', content: userContent }],
         })
+        callUsage = _readUsage(resp.usage)
         const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
         const jsonMatch = text.match(/\{[\s\S]*\}/)
         if (jsonMatch) {
@@ -11475,6 +11634,32 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           console.error('[ops-api] make-safe extraction failed (transient, kept for review):', em)
         }
       }
+    }
+
+    // M1.5 cost ledger: stamp which path this email used + its token cost onto the
+    // draft, and fold it into the per-scan totals. Only real extraction attempts
+    // (template skip or a model call) are recorded — a dead-key draft is not a "skip".
+    if (extractionParser === 'template' || modelCalled) {
+      const emailCost = _emailCostRecord({
+        model_called: modelCalled,
+        pdf_mode: pdfMode,
+        parser: extractionParser,
+        usage: callUsage,
+      })
+      extraction.cost = emailCost
+      extraction.pdf_mode = pdfMode
+      extraction.parser = extractionParser
+      extraction.model_called = modelCalled
+      // When the model was called but a template parse also ran, keep a compact preview
+      // so the Captain / golden-replay can compare before flipping this builder.
+      if (templateResult && modelCalled) {
+        extraction.template_preview = {
+          full_parse: templateResult.full_parse,
+          fields: templateResult.fields,
+          missing_required: templateResult.missing_required,
+        }
+      }
+      scanCostTotals = _accrueScanTotals(scanCostTotals, emailCost)
     }
 
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
@@ -11946,6 +12131,8 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     anyExtractionSucceeded,
     draftsCreated: newDrafts.length,
     autoFiled: autoApproved.length,
+    // M1.5 cost ledger: this scan's model-call/skip split + token totals.
+    cost: scanCostTotals,
   })
 
   return {
@@ -11977,6 +12164,14 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     auto_approved_count: autoApproved.length,
     auto_approve_failed: autoApproveFailed,
     auto_approve_failed_count: autoApproveFailed.length,
+    // M1.5 cost summary for this scan: how many drafts used a template skip vs a model
+    // call, the token totals, and the estimated USD at the Haiku 4.5 rate constants.
+    cost: {
+      model_calls: scanCostTotals.model_calls,
+      model_skips: scanCostTotals.model_skips,
+      tokens: scanCostTotals.usage,
+      estimated_cost_usd: _usdCost(scanCostTotals.usage),
+    },
     // Observability: confirms the redirected source is live (not the old Graph
     // USER-mailbox scan).
     source: 'group_sync_projection',
@@ -12010,6 +12205,23 @@ async function intakeHealth(client: any) {
     .select('id', { count: 'exact', head: true })
     .in('approved_by', ['auto-intake', 'auto_intake_clean_gate'])
     .gte('approved_at', since24h)
+
+  // M1.5 cost dashboard: read the per-draft cost records for the last 24h and roll them
+  // up (model calls, template skips, tokens, and estimated USD at the Haiku 4.5 rates).
+  let cost24h: any = null
+  try {
+    const { data: costDrafts } = await client.from('makesafe_intake_drafts')
+      .select('extraction_json')
+      .gte('created_at', since24h)
+      .limit(3000)
+    const costRecords = (costDrafts || []).map((d: any) => {
+      const ex = parseJsonObject(d.extraction_json)
+      return ex && ex.cost && typeof ex.cost === 'object' ? ex.cost : null
+    })
+    cost24h = _rollup24h(costRecords)
+  } catch (e) {
+    cost24h = { error: (e as Error).message }
+  }
 
   let unaccounted: any = null
   try {
@@ -12057,6 +12269,41 @@ async function intakeHealth(client: any) {
     last_24h: {
       drafts_created: drafts24h ?? 0,
       auto_filed: autoFiled24h ?? 0,
+    },
+    // M1.5 cost ledger. `last_24h` is the Captain's headline (model calls, the
+    // template-skip share, tokens, and estimated USD at the Haiku 4.5 rate constants);
+    // `last_scan` + `lifetime` come off the health row's running counters.
+    cost: {
+      rates: {
+        model: _HAIKU_4_5_RATES.model,
+        as_of: _HAIKU_4_5_RATES.as_of,
+        input_per_mtok: _HAIKU_4_5_RATES.input_per_mtok,
+        output_per_mtok: _HAIKU_4_5_RATES.output_per_mtok,
+        cache_read_per_mtok: _HAIKU_4_5_RATES.cache_read_per_mtok,
+        cache_write_per_mtok: _HAIKU_4_5_RATES.cache_write_per_mtok,
+      },
+      last_24h: cost24h,
+      // Convenience mirrors of the two headline figures the mission calls out.
+      model_calls_24h: cost24h?.model_calls_24h ?? null,
+      model_skip_rate: cost24h?.model_skip_rate ?? null,
+      estimated_cost_usd_24h: cost24h?.estimated_cost_usd_24h ?? null,
+      last_scan: {
+        model_calls: health?.last_scan_model_calls ?? null,
+        model_skips: health?.last_scan_model_skips ?? null,
+        input_tokens: health?.last_scan_input_tokens ?? null,
+        output_tokens: health?.last_scan_output_tokens ?? null,
+        cache_read_tokens: health?.last_scan_cache_read_tokens ?? null,
+        cache_write_tokens: health?.last_scan_cache_write_tokens ?? null,
+        estimated_cost_usd: health?.last_scan_estimated_cost_usd ?? null,
+      },
+      lifetime: {
+        model_calls: health?.total_model_calls ?? null,
+        model_skips: health?.total_model_skips ?? null,
+        input_tokens: health?.total_input_tokens ?? null,
+        output_tokens: health?.total_output_tokens ?? null,
+        cache_read_tokens: health?.total_cache_read_tokens ?? null,
+        cache_write_tokens: health?.total_cache_write_tokens ?? null,
+      },
     },
     unaccounted,
   }
