@@ -10,6 +10,7 @@ import {
   isDuplicateIntake,
   registerIntakeDraft,
 } from "./makesafe_intake_dedup.ts";
+import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 
 const FROM = "dispatch@mlb.com.au";
 const SUBJECT = "NEW WORK ORDER - MLB-26499 18 Eagleglen Rise, Gidgegannup";
@@ -117,14 +118,19 @@ Deno.test("H2: same sender + minute + generic subject, DIFFERENT body -> two dra
   assertEquals(isDuplicateIntake(jobB, index), null); // MUST NOT be dropped
 });
 
-Deno.test("H2: same sender + minute + generic subject, SAME body (true twin) -> deduped", () => {
+Deno.test("H2-residual: true twin dedupes even when the draft stored body_preview and the candidate has RAW body", () => {
+  // The two capture rows are asymmetric: the FIRST landed in a prior scan and stored a
+  // PROCESSED body_preview (HTML-stripped, trade-cleaned); the SECOND arrives as a RAW
+  // HTML msg body. The fingerprint must normalise both to the same input and dedupe.
+  const rawHtmlBody = "<p>Attend 18 Eagleglen Rise, Gidgegannup WA.</p><br><div>Tarp the roof after storm damage. Contact the homeowner first.</div>";
+  const storedPreview = stripEmailHtmlForTrade(rawHtmlBody).slice(0, 2000); // what the draft stored
   const draftA: IntakeDedupRow = {
     graph_message_id: "AAMk-generic-A2",
     external_ref: null,
     from_email: FROM,
     subject: GENERIC_SUBJECT,
     received_at: "2026-07-03T02:15:30Z",
-    body_preview: bodyA,
+    body_preview: storedPreview, // draft side: PREVIEW-processed
   };
   const index = buildIntakeDedupIndex([draftA]);
   const twin = {
@@ -132,7 +138,7 @@ Deno.test("H2: same sender + minute + generic subject, SAME body (true twin) -> 
     from_email: FROM,
     subject: GENERIC_SUBJECT,
     received_at: "2026-07-03T02:15:31Z",
-    body: bodyA, // identical content -> same body-hash discriminator
+    body: rawHtmlBody, // candidate side: RAW body
   };
   assertEquals(isDuplicateIntake(twin, index), "duplicate_content_fingerprint");
 });

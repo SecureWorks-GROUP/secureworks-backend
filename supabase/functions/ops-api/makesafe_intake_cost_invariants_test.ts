@@ -59,43 +59,22 @@ Deno.test("INVARIANT: a clean template-skipped draft WITH a servable WO PDF pass
 });
 
 // M3 — INVARIANT #1: the WO PDF is stored + attached on EVERY extraction path, and the
-// cost levers never drop it. The PDF capture/upload/attachments_json build runs BEFORE
-// the cost branch in the scan, so the same servable WO PDF must be recognised by the
-// gate on the text, document, template-skip, AND classification-failure paths. We pin
-// this at the gate: the PDF is present and recognised regardless of the extraction
-// outcome — a classification failure blocks on confidence, NOT on a missing PDF.
-const WO_ATTACHMENTS = [{ pdf_url: "https://example/job-documents/wo.pdf", is_work_order: true }];
-const CLEAN_FIELDS = {
-  matchedCompany: { slug: "mlb" },
-  externalRef: "MLB-25795",
-  clientName: "Jane Doe",
-  siteAddress: "12 Smith Street Perth",
-};
-
-Deno.test("INVARIANT #1: WO PDF recognised on text / document / template-skip paths (gate ok)", () => {
-  // These three paths all produce a high-confidence extraction with the WO PDF captured.
-  for (const path of ["text", "document", "template"]) {
-    const decision = shouldAutoApprove({
-      enabled: true,
-      confidence: "high",
-      missingFields: [],
-      ...CLEAN_FIELDS,
-      attachments: WO_ATTACHMENTS,
-    });
-    assert(decision.ok, `path=${path}: expected WO PDF recognised + ok, got ${decision.reason}`);
-  }
-});
-
+// cost levers never drop it. The capture/upload/attachments_json build runs BEFORE the
+// cost branch, so the PDF must survive even a CLASSIFICATION FAILURE. The gate is the
+// observable seam: when extraction fails (low confidence) but the WO PDF was captured,
+// the gate must block on CONFIDENCE, not on a missing PDF — proving the PDF was not
+// dropped by the failed extraction. (The high-confidence WO-PDF-present -> ok case that
+// the text/document/template paths share is already pinned by the test above.)
 Deno.test("INVARIANT #1: on a CLASSIFICATION FAILURE the WO PDF is STILL present (blocked on confidence, not missing PDF)", () => {
-  // Extraction failed (dead key / bad JSON) -> low confidence, but the WO PDF was
-  // captured upstream and is unchanged. The gate must block on confidence, proving the
-  // PDF was NOT dropped by the failed extraction.
   const decision = shouldAutoApprove({
     enabled: true,
-    confidence: "low", // classification failure
+    confidence: "low", // classification failure (dead key / bad JSON)
     missingFields: [],
-    ...CLEAN_FIELDS,
-    attachments: WO_ATTACHMENTS,
+    matchedCompany: { slug: "mlb" },
+    externalRef: "MLB-25795",
+    clientName: "Jane Doe",
+    siteAddress: "12 Smith Street Perth",
+    attachments: [{ pdf_url: "https://example/job-documents/wo.pdf", is_work_order: true }],
   });
   assertEquals(decision.ok, false);
   assertEquals(decision.reason, "confidence_not_high"); // NOT "missing_work_order_pdf"

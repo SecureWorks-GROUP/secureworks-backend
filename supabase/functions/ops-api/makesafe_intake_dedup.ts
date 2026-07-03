@@ -54,8 +54,25 @@
 //     collapse to the same key but two genuinely different refs never collide.
 
 // M1.5 D0/H2: the fingerprint discriminator parses the subject the SAME way the scan
-// does (so existing drafts and candidates resolve to the same ref).
+// does (so existing drafts and candidates resolve to the same ref), and normalises the
+// body with the SAME function that produces the stored body_preview — so a candidate's
+// RAW msg body and an existing draft's already-processed body_preview hash to the same
+// input (H2-residual: without this a ref-less cross-scan twin would never match).
 import { parseSubjectFields } from "./makesafe_template_parser.ts";
+import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
+
+// Body length cap used when producing body_preview (slice(0, 2000) in the scan).
+const FINGERPRINT_BODY_MAX = 2000;
+
+/** Normalise a body to the SAME representation the scan stores as body_preview, so the
+ * raw candidate body and the stored preview reduce to identical hash input. */
+function normaliseBodyForFingerprint(body: string | null | undefined): string {
+  return stripEmailHtmlForTrade(String(body ?? ""))
+    .slice(0, FINGERPRINT_BODY_MAX)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 /** A draft/job row as seen by the dedup index (only the keying fields matter). */
 export interface IntakeDedupRow {
@@ -244,8 +261,10 @@ export function contentFingerprint(
   let disc = "";
   if (ref) disc = `r:${ref}`;
   else {
-    const nb = String(body ?? "").toLowerCase().replace(/\s+/g, " ").trim();
-    if (nb) disc = `b:${simpleHash(nb.slice(0, 4000))}`;
+    // Normalise the body the SAME way both sides are stored, so a candidate's RAW body
+    // and an existing draft's body_preview hash identically (H2-residual).
+    const nb = normaliseBodyForFingerprint(body);
+    if (nb) disc = `b:${simpleHash(nb)}`;
   }
   if (!disc) return ""; // no ref and no body -> cannot safely dedupe -> fail open
   return `${from}|${subj}|${recv}|${disc}`;
