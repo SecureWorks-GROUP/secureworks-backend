@@ -625,11 +625,34 @@ serve(async (req: Request) => {
 
     // ── SEND QUOTE EMAIL ──
     if (path === 'send' && req.method === 'POST') {
-      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior } = await req.json()
+      const { document_id: rawDocumentId, document_ids: rawDocumentIds, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior } = await req.json()
+
+      // ── Multi-option document support (patio-parity D2 option C) ──
+      // Back-compat is a hard requirement: callers that send only `document_id`
+      // behave byte-for-byte as before — `rawDocumentIds` is undefined, so
+      // `optionDocumentIds` is empty, `extraOptionIds` is empty, and every
+      // multi-option branch below is a no-op.
+      //
+      // When `document_ids` (an ordered list, primary first) is supplied, the
+      // client email references every option document and each extra option doc
+      // is marked sent so the existing /view multi-option picker (shipped
+      // ~18 Jun) surfaces them all. The PRIMARY — the doc that drives idempotency,
+      // the email link/CTA, the job status flip and the canonical release events —
+      // is `document_id` when given, otherwise `document_ids[0]`.
+      const optionDocumentIds: string[] = Array.isArray(rawDocumentIds)
+        ? rawDocumentIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+        : []
+      const document_id: string | undefined = rawDocumentId || optionDocumentIds[0]
 
       if (!document_id) {
         return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
       }
+
+      // Extra option docs = every supplied option id that isn't the primary
+      // (order-preserving, de-duplicated). Empty for single-doc sends.
+      const extraOptionIds: string[] = [...new Set(optionDocumentIds.filter((id) => id !== document_id))]
+      // Ordered id list for the email option list: primary first, then extras.
+      const orderedOptionIds: string[] = extraOptionIds.length > 0 ? [document_id, ...extraOptionIds] : [document_id]
 
       // Get document record (include job_contact for per-neighbour routing).
       // Cap 0 Job Release Packet V1: pricing_json + site_address are needed at
@@ -701,10 +724,67 @@ serve(async (req: Request) => {
 
       if (!claimed) {
         // Another call already claimed this document — suppress duplicate email.
+        // Multi-option: still re-run the sibling mark-sent before returning. If a
+        // prior attempt crashed between Resend success and the sibling mark, the
+        // extras would stay unsent forever (this early return would skip them on
+        // every retry). The update is idempotent, only-if-unsent and scoped to
+        // live sibling quotes on the primary's job, and sends no email.
+        if (extraOptionIds.length > 0) {
+          let optMarkQuery = sb.from('job_documents')
+            .update({ sent_to_client: true, sent_at: new Date().toISOString() })
+            .in('id', extraOptionIds)
+            .eq('job_id', doc.job_id)
+            .eq('type', 'quote')
+            .is('superseded_at', null)
+            .not('sent_to_client', 'is', true)
+          optMarkQuery = doc.job_contact_id
+            ? optMarkQuery.eq('job_contact_id', doc.job_contact_id)
+            : optMarkQuery.is('job_contact_id', null)
+          const { error: optMarkErr } = await optMarkQuery
+          if (optMarkErr) console.log('[send-quote] multi-option sibling mark-sent on already_sent path failed (non-blocking):', optMarkErr.message)
+        }
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
       }
       {
+        // ── Multi-option: gather every option document for the client email ──
+        // Only when extra option ids were supplied. Single-doc sends skip this
+        // entirely (emailOptions stays undefined → email renders identically).
+        // Extras are validated server-side: only live (non-superseded) quote
+        // docs on the SAME job as the primary qualify, so a caller bug passing a
+        // foreign document id can't leak another job's quote link into this
+        // client's email or mark that doc sent.
+        let emailOptions: QuoteEmailOption[] | undefined
+        let validatedExtraIds: string[] = []
+        if (extraOptionIds.length > 0) {
+          let extraQuery = sb
+            .from('job_documents')
+            .select('id, job_id, type, superseded_at, quote_number, pdf_url, html_url, share_token, data_snapshot_json')
+            .in('id', extraOptionIds)
+            .eq('job_id', doc.job_id)
+            .eq('type', 'quote')
+            .is('superseded_at', null)
+          extraQuery = doc.job_contact_id
+            ? extraQuery.eq('job_contact_id', doc.job_contact_id)
+            : extraQuery.is('job_contact_id', null)
+          const { data: extraDocs, error: extraErr } = await extraQuery
+          if (extraErr) console.log('[send-quote] multi-option extras fetch failed (email degrades to single-option):', extraErr.message)
+          const byId = new Map<string, any>((extraDocs || []).map((d: any) => [d.id, d]))
+          validatedExtraIds = extraOptionIds.filter((id) => byId.has(id))
+          const droppedExtraIds = extraOptionIds.filter((id) => !byId.has(id))
+          if (droppedExtraIds.length > 0) console.log(`[send-quote] multi-option extras dropped (foreign job / superseded / non-quote): ${droppedExtraIds.join(', ')}`)
+          // Primary first (built from the already-fetched `doc`), then validated
+          // extras in the caller's order.
+          emailOptions = orderedOptionIds
+            .map((id): QuoteEmailOption | undefined =>
+              id === document_id
+                ? { id: doc.id, quote_number: doc.quote_number, pdf_url: doc.pdf_url, html_url: doc.html_url, share_token: doc.share_token, data_snapshot_json: doc.data_snapshot_json }
+                : byId.get(id))
+            .filter((o): o is QuoteEmailOption => !!o)
+          // If only the primary resolved, treat it as a single-option send.
+          if (emailOptions.length <= 1) emailOptions = undefined
+        }
+
         const emailHtml = buildQuoteEmail({
           clientName: client_name,
           viewUrl,
@@ -713,6 +793,7 @@ serve(async (req: Request) => {
           suburb: doc.jobs?.site_suburb || '',
           customMessage: message || '',
           scoperName: scoper_name || 'The SecureWorks Team',
+          options: emailOptions,
         })
 
         // Build attachments array
@@ -783,6 +864,33 @@ serve(async (req: Request) => {
           }).then(() => {}, () => {})
           // Log note to GHL contact
           logEmailToGHL(doc.jobs?.ghl_contact_id, emailSubject, client_email)
+
+          // ── Multi-option: flag the sibling option docs as sent ──
+          // The primary was claimed atomically above; the extra option docs must
+          // also carry sent_to_client=true so the existing /view multi-option
+          // picker (and the accept→supersede flow) treats them as live siblings.
+          // Done AFTER a confirmed Resend success so a failed send leaves no doc
+          // marked. Only-if-unsent (.not sent_to_client) so we never clobber an
+          // already-sent doc's sent_at, and scoped to validated same-job live
+          // quotes only. Non-blocking for THIS response, but not merely cosmetic:
+          // options whose email link fell back to the share_token /view URL (no
+          // html_url/pdf_url) depend on sent_to_client=true because the /view
+          // picker gates on it — which is why the already_sent retry path above
+          // re-runs this same idempotent mark to cover a crash landing here.
+          if (validatedExtraIds.length > 0) {
+            let optMarkQuery = sb.from('job_documents')
+              .update({ sent_to_client: true, sent_at: new Date().toISOString() })
+              .in('id', validatedExtraIds)
+              .eq('job_id', doc.job_id)
+              .eq('type', 'quote')
+              .is('superseded_at', null)
+              .not('sent_to_client', 'is', true)
+            optMarkQuery = doc.job_contact_id
+              ? optMarkQuery.eq('job_contact_id', doc.job_contact_id)
+              : optMarkQuery.is('job_contact_id', null)
+            const { error: optMarkErr } = await optMarkQuery
+            if (optMarkErr) console.log('[send-quote] multi-option sibling mark-sent failed (non-blocking):', optMarkErr.message)
+          }
         } else {
           const errData = await emailRes.json().catch(() => ({}))
           console.log('[send-quote] Resend failed:', JSON.stringify(errData))
@@ -2932,6 +3040,49 @@ async function htmlResponse(html: string) {
 // EMAIL TEMPLATE
 // ════════════════════════════════════════════════════════════
 
+// Minimal shape of a quote option document as needed by the client email.
+// Sourced from job_documents (primary from the full row, extras from a slim
+// select). Mirrors the fields the /view multi-option picker reads.
+type QuoteEmailOption = {
+  id: string
+  quote_number: string | null
+  pdf_url: string | null
+  html_url: string | null
+  share_token: string | null
+  data_snapshot_json: any
+}
+
+// Per-option link precedence — kept identical to the /view multi-option picker
+// cards (buildMultiOptionPage) so the email and the picker point at the same
+// document: interactive HTML viewer first, then the raw PDF, then the tracked
+// /view page as a last resort.
+function optionDocumentLink(o: QuoteEmailOption): string {
+  if (o.html_url) return `${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(o.html_url)}`
+  if (o.pdf_url) return `${o.pdf_url}#view=Fit&toolbar=0`
+  if (o.share_token) return `${BASE_URL}/functions/v1/send-quote/view?token=${o.share_token}`
+  return '#'
+}
+
+// Renders the per-option link list injected into the client quote email when a
+// job has more than one live option. Returns '' for 0/1 options so the
+// single-option email is byte-for-byte unchanged. Labels follow the picker's
+// "Option N" convention (index-based; the docs carry no option-name column),
+// annotated with quote number and inc-GST price when available.
+function buildOptionsListHtml(options: QuoteEmailOption[]): string {
+  if (!options || options.length <= 1) return ''
+  const rows = options.map((o, i) => {
+    const snapshot = o.data_snapshot_json || {}
+    const price = snapshot.totalIncGST || snapshot.total || ''
+    const priceStr = price ? '$' + Number(price).toLocaleString('en-AU', { minimumFractionDigits: 0 }) : ''
+    const qn = o.quote_number || ''
+    const meta = [qn, priceStr].filter(Boolean).join(' &middot; ')
+    return `        <a href="${optionDocumentLink(o)}" style="display:block;padding:12px 16px;margin:0 0 8px;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">Option ${i + 1}${meta ? ` <span style="font-weight:400;color:#4C6A7C;">${meta}</span>` : ''} <span style="color:#F15A29;">View &rarr;</span></a>`
+  }).join('\n')
+  return `
+      <p style="color:#4C6A7C;font-size:12px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;margin:0 0 10px;">Your ${options.length} options</p>
+${rows}`
+}
+
 function buildQuoteEmail(opts: {
   clientName: string
   viewUrl: string
@@ -2940,7 +3091,15 @@ function buildQuoteEmail(opts: {
   suburb: string
   customMessage: string
   scoperName: string
+  // Multi-option (patio-parity D2 option C): when present with >1 entry the
+  // email lists every option and the copy switches to option-aware wording.
+  // Absent / single-entry → the email renders byte-for-byte as the single-doc
+  // version (all branches below collapse to their original text).
+  options?: QuoteEmailOption[]
 }): string {
+  const hasMultipleOptions = !!(opts.options && opts.options.length > 1)
+  const optionCount = opts.options?.length ?? 0
+  const optionsBlock = buildOptionsListHtml(opts.options ?? [])
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -2955,24 +3114,24 @@ function buildQuoteEmail(opts: {
 
     <!-- Body -->
     <tr><td style="padding:32px;">
-      <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">Your ${opts.projectType} quote is ready</h1>
+      <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">${hasMultipleOptions ? `Your ${opts.projectType} quote options are ready` : `Your ${opts.projectType} quote is ready`}</h1>
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
         Hi ${opts.clientName},
       </p>
       ${opts.customMessage ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.customMessage}</p>` : ''}
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
         Thank you for giving us the opportunity to quote on your ${opts.projectType} project${opts.suburb ? ' in ' + opts.suburb : ''}.
-        You can view your detailed quote using the button below.
+        ${hasMultipleOptions ? `We've prepared ${optionCount} options for you. Compare them and choose using the button below.` : 'You can view your detailed quote using the button below.'}
       </p>
 
       <!-- CTA Button -->
       <table cellpadding="0" cellspacing="0" style="margin:0 auto 24px;">
         <tr><td style="background:#F15A29;border-radius:8px;">
           <a href="${opts.viewUrl}" style="display:inline-block;padding:14px 32px;color:#fff;text-decoration:none;font-size:16px;font-weight:600;">
-            View Your Quote
+            ${hasMultipleOptions ? 'View Your Options' : 'View Your Quote'}
           </a>
         </td></tr>
-      </table>
+      </table>${optionsBlock}
 
       <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
 
