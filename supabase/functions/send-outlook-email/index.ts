@@ -188,6 +188,191 @@ function getSignature(from: string): string {
   return EMAIL_SIGNATURE
 }
 
+// ── Group resolution (M365 Group email -> group ID) ──
+
+const _groupIdCache = new Map<string, string>()
+
+async function resolveGroupId(groupEmail: string, token: string): Promise<string> {
+  const cached = _groupIdCache.get(groupEmail.toLowerCase())
+  if (cached) return cached
+
+  const resp = await fetch(
+    `https://graph.microsoft.com/v1.0/groups?$filter=${encodeURIComponent(`mail eq '${groupEmail}'`)}&$select=id,mail&$top=1`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  )
+  if (!resp.ok) throw new Error(`Group lookup failed: ${resp.status} ${await resp.text()}`)
+  const data = await resp.json()
+  const groups = data.value || []
+  if (groups.length === 0) throw new Error(`No M365 Group found for email: ${groupEmail}`)
+
+  const groupId = groups[0].id
+  _groupIdCache.set(groupEmail.toLowerCase(), groupId)
+  return groupId
+}
+
+// ── Forward Handler ──
+//
+// Two source shapes, matching the two mailbox types this system reads from:
+//
+//  1. Regular user mailbox message (mailbox + message_id):
+//     createForward -> optional PATCH ccRecipients -> send. Full fidelity —
+//     Graph auto-carries the original body + attachments into the draft, and
+//     this path supports cc (a plain `forward` action does not).
+//
+//  2. M365 Group conversation post (group + thread_id + post_id):
+//     Groups don't expose createForward on posts, so this uses the direct
+//     `forward` action instead. Graph still auto-carries body + attachments,
+//     but there is no cc step for this path — fold any cc addresses into
+//     `to` when forwarding from a group.
+//
+async function handleForward(
+  body: Record<string, unknown>,
+  splitEmails: (v: unknown) => string[],
+): Promise<Response> {
+  const {
+    mailbox,
+    message_id,
+    group,
+    thread_id,
+    post_id,
+    to_email,
+    cc,
+    comment,
+    job_id,
+    sent_by,
+  } = body as Record<string, string | undefined>
+
+  const toRecipients = splitEmails(to_email).map((email: string) => ({ emailAddress: { address: email } }))
+  if (toRecipients.length === 0) {
+    return json({ error: 'Missing required field for forward: to' }, 400)
+  }
+
+  const token = await getGraphToken()
+  let sourceType: 'mailbox' | 'group'
+  let subject = '(forwarded email)'
+  let fromAddress: string
+
+  if (group && thread_id && post_id) {
+    // ── Group conversation post forward ──
+    sourceType = 'group'
+    fromAddress = group
+    const ccList = cc ? splitEmails(cc) : []
+    const allRecipients = ccList.length > 0
+      ? [...toRecipients, ...ccList.map((email: string) => ({ emailAddress: { address: email } }))]
+      : toRecipients
+
+    const groupId = await resolveGroupId(group, token)
+    const fwdResp = await fetch(
+      `https://graph.microsoft.com/v1.0/groups/${groupId}/threads/${thread_id}/posts/${post_id}/forward`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comment: comment || '', toRecipients: allRecipients }),
+      },
+    )
+    if (!fwdResp.ok) {
+      const errBody = await fwdResp.text()
+      console.error('[send-outlook-email] Graph API error (group forward):', fwdResp.status, errBody)
+      return json({ error: 'Graph API error (group forward)', status: fwdResp.status, detail: errBody }, 502)
+    }
+  } else if (message_id) {
+    // ── Regular mailbox message forward (with cc support) ──
+    sourceType = 'mailbox'
+    fromAddress = mailbox || 'marnin@secureworkswa.com.au'
+
+    const createResp = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${fromAddress}/messages/${message_id}/createForward`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toRecipients, comment: comment || '' }),
+      },
+    )
+    if (!createResp.ok) {
+      const errBody = await createResp.text()
+      console.error('[send-outlook-email] Graph API error (createForward):', createResp.status, errBody)
+      return json({ error: 'Graph API error (createForward)', status: createResp.status, detail: errBody }, 502)
+    }
+    const draft = await createResp.json()
+    const draftId = draft.id
+    subject = draft.subject || subject
+
+    const ccList = cc ? splitEmails(cc) : []
+    if (ccList.length > 0) {
+      const patchResp = await fetch(
+        `https://graph.microsoft.com/v1.0/users/${fromAddress}/messages/${draftId}`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ccRecipients: ccList.map((email: string) => ({ emailAddress: { address: email } })),
+          }),
+        },
+      )
+      if (!patchResp.ok) {
+        const errBody = await patchResp.text()
+        console.error('[send-outlook-email] Graph API error (patch cc):', patchResp.status, errBody)
+        return json({ error: 'Graph API error (patch cc)', status: patchResp.status, detail: errBody }, 502)
+      }
+    }
+
+    const sendResp = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${fromAddress}/messages/${draftId}/send`,
+      { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
+    )
+    if (!sendResp.ok) {
+      const errBody = await sendResp.text()
+      console.error('[send-outlook-email] Graph API error (send forward):', sendResp.status, errBody)
+      return json({ error: 'Graph API error (send forward)', status: sendResp.status, detail: errBody }, 502)
+    }
+  } else {
+    return json({
+      error: 'Missing required fields for forward: either message_id (mailbox forward) or group+thread_id+post_id (group forward)',
+    }, 400)
+  }
+
+  // ── Post-send logging (fire-and-forget, mirrors the plain-send path) ──
+  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const toStr = toRecipients.map((r) => r.emailAddress.address).join(', ')
+  const ccList = cc ? splitEmails(cc) : []
+
+  if (job_id) {
+    Promise.resolve(sb.from('po_communications').insert({
+      job_id,
+      direction: 'outbound',
+      from_email: fromAddress,
+      to_email: toStr,
+      cc_emails: ccList.length > 0 ? ccList : null,
+      subject,
+      body_html: comment || '',
+      communication_type: 'internal_forward',
+      sent_at: new Date().toISOString(),
+      created_by: sent_by || null,
+    })).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
+  }
+  Promise.resolve(sb.from('email_events').insert({
+    email_type: 'forward',
+    entity_type: job_id ? 'job' : 'message',
+    entity_id: job_id || message_id || post_id,
+    job_id: job_id || null,
+    recipient: toRecipients[0]?.emailAddress?.address,
+    sender: fromAddress,
+    subject,
+    status: 'sent',
+    sent_at: new Date().toISOString(),
+  })).catch(() => {})
+
+  return json({
+    success: true,
+    action: 'forward',
+    sourceType,
+    from: fromAddress,
+    to: toRecipients.map((r) => r.emailAddress.address),
+    cc: ccList,
+    subject,
+  })
+}
+
 // ── Main Handler ──
 
 serve(async (req: Request) => {
@@ -209,6 +394,19 @@ serve(async (req: Request) => {
 
   try {
     const body = await req.json()
+
+    // Build recipients — split comma-separated strings into arrays
+    const splitEmails = (v: unknown): string[] => {
+      if (Array.isArray(v)) return v.flatMap((e: string) => e.split(',').map(s => s.trim()).filter(Boolean))
+      if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean)
+      return []
+    }
+
+    // ── Forward action — genuine Graph forward, preserves original body + attachments ──
+    if (body.action === 'forward') {
+      return await handleForward(body, splitEmails)
+    }
+
     const {
       from = 'marnin@secureworkswa.com.au',
       to,
@@ -226,12 +424,6 @@ serve(async (req: Request) => {
       return json({ error: 'Missing required fields: to, subject, htmlBody' }, 400)
     }
 
-    // Build recipients — split comma-separated strings into arrays
-    const splitEmails = (v: unknown): string[] => {
-      if (Array.isArray(v)) return v.flatMap((e: string) => e.split(',').map(s => s.trim()).filter(Boolean))
-      if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean)
-      return []
-    }
     const toRecipients = splitEmails(to).map((email: string) => ({
       emailAddress: { address: email },
     }))
