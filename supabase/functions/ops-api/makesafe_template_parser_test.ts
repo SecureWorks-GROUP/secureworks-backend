@@ -2,6 +2,7 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   compareTemplateToActual,
+  parseSubjectFields,
   parseWithTemplate,
   TEMPLATE_DEFAULT_REQUIRED,
   type TemplateParsingRules,
@@ -112,4 +113,36 @@ Deno.test("compareTemplateToActual: agrees (normalised) vs disagrees", () => {
 Deno.test("INVARIANT: template required set matches the intake required extraction fields", () => {
   // A template full-parse skip must not auto-file on fewer fields than the human gate.
   assertEquals(TEMPLATE_DEFAULT_REQUIRED, ["external_ref", "client_name", "site_address"]);
+});
+
+// ── UNIVERSAL SUBJECT PARSE (M1.5, runs for every builder before the model) ──
+Deno.test("parseSubjectFields: lifts ref + address + suburb from a real builder subject", () => {
+  const r = parseSubjectFields("NEW WORK ORDER - MLB-26499 18 Eagleglen Rise, Gidgegannup");
+  assertEquals(r.external_ref, "MLB-26499");
+  assertEquals(r.site_address, "18 Eagleglen Rise, Gidgegannup");
+  assertEquals(r.site_suburb, "Gidgegannup");
+});
+
+Deno.test("parseSubjectFields: canonicalises a spaced ref to PREFIX-DIGITS uppercase", () => {
+  assertEquals(parseSubjectFields("Make Safe mlb 26499 storm").external_ref, "MLB-26499");
+  assertEquals(parseSubjectFields("AJBR-67200 Erskine make safe").external_ref, "AJBR-67200");
+  assertEquals(parseSubjectFields("BWCWA 1234 fence").external_ref, "BWCWA-1234");
+});
+
+Deno.test("parseSubjectFields: street core captured, trailing postcode never gobbled", () => {
+  // No comma before the suburb -> street core only (still better than null; the model
+  // fills the suburb). The "WA 6000" postcode must not leak into the address.
+  const r = parseSubjectFields("Work Order MLB-26500 - 5 Smith Street Perth WA 6000");
+  assertEquals(r.external_ref, "MLB-26500");
+  assertEquals(r.site_address, "5 Smith Street");
+  assertEquals(r.site_suburb, null);
+});
+
+Deno.test("parseSubjectFields: no ref / no street address -> nulls (model fills)", () => {
+  const r = parseSubjectFields("Photo evidence uploaded, please review");
+  assertEquals(r.external_ref, null);
+  assertEquals(r.site_address, null);
+  assertEquals(r.site_suburb, null);
+  // A bare number with no builder prefix must NOT be mistaken for a ref.
+  assertEquals(parseSubjectFields("Job 12345 update").external_ref, null);
 });

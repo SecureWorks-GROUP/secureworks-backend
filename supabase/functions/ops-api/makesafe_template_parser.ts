@@ -73,6 +73,66 @@ export interface TemplateParseResult {
 // scan separately, so the template covers the extraction-side required fields).
 export const TEMPLATE_DEFAULT_REQUIRED = ["external_ref", "client_name", "site_address"];
 
+// ── UNIVERSAL DETERMINISTIC SUBJECT PARSE (M1.5, every builder) ──────────────
+// Live audit: builder subjects literally read
+//   "NEW WORK ORDER - MLB-26499 18 Eagleglen Rise, Gidgegannup"
+// yet every draft had external_ref=null AND site_address=null — the model was missing
+// fields that are sitting in the subject line. This runs for EVERY email before the
+// model call: the external_ref it lifts is authoritative (exact, from the builder's own
+// subject) and feeds the (external_ref, family) dedup key (degenerate while null); the
+// address is used as a fallback the model can refine. Pure + deterministic — no model.
+
+// Known builder ref prefixes (mirrors slugFromRefPrefix + the intake ref regex).
+const SUBJECT_REF_RE =
+  /\b((?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,6})\b/i;
+
+// WA-common street-type suffixes; anchors a "<number> <words> <type>" street match.
+const STREET_TYPE =
+  "St|Street|Rd|Road|Ave|Avenue|Av|Rise|Way|Dr|Drive|Cl|Close|Ct|Court|Pl|Place|Cres|Crescent|Cct|Cir|Circle|Circuit|Loop|Gr|Grove|Gdns|Gardens|Pde|Parade|Tce|Terrace|Blvd|Boulevard|Lane|Ln|Hwy|Highway|Prom|Promenade|Mews|Vista|View|Ramble|Retreat|Green|Entrance|Approach|Brace|Bend|Gate|Turn|Nook|Elbow|Pass|Ridge|Crossing|Cross|Corner|Heights|Hts|Row|Walk|Quay|Quays|Esplanade|Espl|Grange|Meander|Outlook|Haven|Chase|Glade|Dale|Fairway|Link|Links";
+// Street core only: "<number> <1-5 words> <street-type>". The suburb is grabbed
+// separately from the remainder (below) so a bare-word suburb or trailing "WA 6000"
+// postcode never corrupts the street match.
+const SUBJECT_STREET_RE = new RegExp(
+  `\\b(\\d{1,5}[A-Za-z]?(?:[-/]\\d{1,5}[A-Za-z]?)?\\s+[A-Za-z][A-Za-z'.]*(?:\\s+[A-Za-z][A-Za-z'.]*){0,4}\\s+(?:${STREET_TYPE}))\\b`,
+  "i",
+);
+// A comma-delimited suburb immediately after the street, bounded so a postcode
+// ("WA 6000") is not pulled in. Only a comma suburb is taken; a bare-word suburb is
+// left to the model (street-only is still strictly better than the current null).
+const SUBURB_AFTER_STREET_RE =
+  /^\s*,\s*([A-Za-z][A-Za-z' ]*?[A-Za-z])\s*(?:,|\d{4}\b|WA\b|W\.A\.|[-–|]|$)/i;
+
+export interface SubjectFields {
+  external_ref: string | null;
+  site_address: string | null;
+  site_suburb: string | null;
+}
+
+/** Deterministically lift the ref + street address + suburb out of a subject line.
+ * Never throws; returns nulls when nothing matches. */
+export function parseSubjectFields(subject: string | null | undefined): SubjectFields {
+  const s = String(subject ?? "");
+  const out: SubjectFields = { external_ref: null, site_address: null, site_suburb: null };
+
+  const refM = SUBJECT_REF_RE.exec(s);
+  if (refM) {
+    // Canonicalise to PREFIX-DIGITS (uppercase): "mlb 26499" -> "MLB-26499".
+    const m = /^([A-Za-z]+)[-\s#]*(\d+)$/.exec(refM[1].trim());
+    out.external_ref = m ? `${m[1].toUpperCase()}-${m[2]}` : refM[1].trim().toUpperCase();
+  }
+
+  const addrM = SUBJECT_STREET_RE.exec(s);
+  if (addrM) {
+    const street = addrM[1].replace(/\s+/g, " ").trim();
+    const remainder = s.slice(addrM.index + addrM[0].length);
+    const subM = SUBURB_AFTER_STREET_RE.exec(remainder);
+    const suburb = subM ? subM[1].replace(/\s+/g, " ").trim() : "";
+    out.site_address = suburb ? `${street}, ${suburb}` : street;
+    out.site_suburb = suburb || null;
+  }
+  return out;
+}
+
 function applyTransform(value: string, t?: TemplateFieldRule["transform"]): string {
   switch (t) {
     case "trim": return value.trim();

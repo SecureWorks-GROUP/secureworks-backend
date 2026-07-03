@@ -184,6 +184,7 @@ import {
 } from './makesafe_pdf_text.ts'
 import {
   parseWithTemplate as _parseWithTemplate,
+  parseSubjectFields as _parseSubjectFields,
 } from './makesafe_template_parser.ts'
 import {
   readUsage as _readUsage,
@@ -11239,7 +11240,7 @@ async function scanSesMakesafes(client: any) {
   // so (ref + company) is the workhorse cross-path key. See makesafe_intake_dedup.ts.
   const existingDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
-      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, report_type, subject, body_preview, description, extraction_json')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, report_type, subject, body_preview, description, extraction_json, from_email, received_at')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _LIVE_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (dedup index) read',
@@ -11337,11 +11338,19 @@ async function scanSesMakesafes(client: any) {
   let anyExtractionSucceeded = false
 
   for (const msg of fairMatchedMessages) {
-    // Cheap pre-extraction dedup on the message ids we already have (graph /
-    // internet). The (ref + company) check runs again AFTER Haiku extraction, once
-    // we know the ref + matched company.
+    // Cheap pre-extraction dedup on the ids AND the M1.5 D0 dual-capture content
+    // fingerprint (sender + subject + received minute) — the fingerprint catches the
+    // group-post / mailbox-fallback twin of the same email BEFORE the model call, so
+    // the redundant capture path never costs a second Haiku call. The (ref + company)
+    // check runs again AFTER extraction once we know the ref + matched company.
     const earlyDup = _isDuplicateIntake(
-      { graph_message_id: msg.id, internet_message_id: msg.internetMessageId || null },
+      {
+        graph_message_id: msg.id,
+        internet_message_id: msg.internetMessageId || null,
+        from_email: msg.from?.emailAddress?.address || null,
+        subject: msg.subject || null,
+        received_at: msg.receivedDateTime || null,
+      },
       dedupIndex,
     )
     if (earlyDup) {
@@ -11662,6 +11671,22 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       scanCostTotals = _accrueScanTotals(scanCostTotals, emailCost)
     }
 
+    // M1.5 UNIVERSAL PRE-MODEL PARSE — runs for EVERY builder, EVERY path (template
+    // skip / model call / dead-key). Live audit: subjects read "NEW WORK ORDER -
+    // MLB-26499 18 Eagleglen Rise, Gidgegannup" yet every draft had external_ref/
+    // site_address null. The deterministic subject ref is AUTHORITATIVE (exact, from
+    // the builder's own subject, and it feeds the (external_ref, family) dedup key that
+    // is degenerate while null); the address only fills what the model didn't produce,
+    // so accuracy is same-or-better, never regressed.
+    const subjectFields = _parseSubjectFields(subject)
+    if (subjectFields.external_ref) extraction.external_ref = subjectFields.external_ref
+    if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) {
+      extraction.site_address = subjectFields.site_address
+    }
+    if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) {
+      extraction.site_suburb = subjectFields.site_suburb
+    }
+
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
     // needs_review docket with an explicit marker, never a silent empty draft — and,
     // because the marker is a blocking missing field + confidence is forced low, it can
@@ -11938,6 +11963,11 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
               requesting_company_slug: matchedCompany?.slug || null,
               requesting_company_name: matchedCompany?.name || null,
               makesafe_job_family: draftJobFamily,
+              // M1.5 D0: register the dual-capture fingerprint so the twin capture row
+              // of the SAME email later in this batch is caught.
+              from_email: fromEmail,
+              subject,
+              received_at: msg.receivedDateTime || null,
             },
             dedupIndex,
           )
@@ -12029,6 +12059,11 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
         makesafe_job_family: draftJobFamily,
+        // M1.5 D0: register the dual-capture fingerprint so the twin capture row of the
+        // SAME email later in this batch is caught before a second model call.
+        from_email: fromEmail,
+        subject,
+        received_at: msg.receivedDateTime || null,
       },
       dedupIndex,
     )

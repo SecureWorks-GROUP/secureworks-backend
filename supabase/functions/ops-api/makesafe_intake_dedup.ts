@@ -70,6 +70,9 @@ export interface IntakeDedupRow {
   status?: string | null;
   /** ISO timestamp of when the email was received — used by suppressed_rejected date check. */
   received_at?: string | null;
+  /** M1.5 D0: sender + subject feed the DUAL-CAPTURE content fingerprint. */
+  from_email?: string | null;
+  subject?: string | null;
 }
 
 /** A candidate email being considered for a new draft. */
@@ -80,6 +83,9 @@ export interface IntakeDedupCandidate {
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
   makesafe_job_family?: string | null;
+  /** M1.5 D0: sender + subject feed the DUAL-CAPTURE content fingerprint. */
+  from_email?: string | null;
+  subject?: string | null;
   /**
    * When true, bypasses the suppressed_rejected check so a targeted recapture
    * action can create a fresh draft for a previously-rejected email. It does NOT
@@ -127,6 +133,19 @@ export interface DedupIndex {
    * (fail-open) is NOT suppressed.
    */
   rejectedRefCompany: Map<string, string>;
+  /**
+   * M1.5 D0 — DUAL-CAPTURE content fingerprints of existing live drafts.
+   * The ses@ email sync writes TWO `emails` rows for the same underlying email: one
+   * from the group-post poll (id "AAMk…", internet_message_id null) and one from the
+   * mailbox fallback poll (id "mailbox_<hash>"). Their graph_message_ids differ and,
+   * pre-M1.5, external_ref was null on both — so neither the graph-id nor the
+   * (ref+company) key could collapse them and the scan produced two drafts + two model
+   * calls per email. The content fingerprint (sender + normalised subject + received
+   * minute) is stable across both capture paths and catches the twin BEFORE the model
+   * call. Two genuinely different work orders differ in subject (the ref/address ride
+   * in the subject) so they never collide.
+   */
+  fingerprints: Set<string>;
 }
 
 // Draft states that mean "a draft already exists, do not make another". rejected /
@@ -178,6 +197,28 @@ export function normaliseCompany(
 /** Normalise a MakeSafe job-family token for dedupe keys. */
 export function normaliseJobFamily(family: string | null | undefined): string {
   return String(family ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+}
+
+/**
+ * M1.5 D0 — DUAL-CAPTURE content fingerprint. Stable across the group-post and
+ * mailbox-fallback capture paths for the SAME email:
+ *   normalise(from_email) | normalise(subject) | received_at truncated to the minute
+ * Returns "" (never matches) unless sender, subject AND received_at are all present —
+ * a fingerprint we can't build fails OPEN (not deduped), matching the module's rule
+ * that a possible duplicate review draft is safer than a silently missed work order.
+ * The received-minute component keeps two genuinely-distinct same-minute emails from
+ * ever colliding while tolerating sub-second differences between the two capture rows.
+ */
+export function contentFingerprint(
+  fromEmail: string | null | undefined,
+  subject: string | null | undefined,
+  receivedAt: string | null | undefined,
+): string {
+  const from = String(fromEmail ?? "").trim().toLowerCase();
+  const subj = String(subject ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  const recv = String(receivedAt ?? "").slice(0, 16); // YYYY-MM-DDTHH:MM
+  if (!from || !subj || recv.length < 16) return "";
+  return `${from}|${subj}|${recv}`;
 }
 
 /**
@@ -280,10 +321,13 @@ export function buildIntakeDedupIndex(
   const jobRefCompanyFamily = new Set<string>();
   const jobRefCompanyUnknownFamily = new Set<string>();
   const rejectedRefCompany = new Map<string, string>();
+  const fingerprints = new Set<string>();
 
   for (const d of existingDrafts || []) {
     if (d.graph_message_id) graphIds.add(d.graph_message_id);
     if (d.internet_message_id) internetIds.add(d.internet_message_id);
+    const fp = contentFingerprint(d.from_email, d.subject, d.received_at);
+    if (fp) fingerprints.add(fp);
     const rc = refCompanyKey(
       d.external_ref,
       d.requesting_company_slug,
@@ -370,6 +414,7 @@ export function buildIntakeDedupIndex(
     jobRefCompanyFamily,
     jobRefCompanyUnknownFamily,
     rejectedRefCompany,
+    fingerprints,
   };
 }
 
@@ -400,6 +445,21 @@ export function isDuplicateIntake(
     index.internetIds.has(candidate.internet_message_id)
   ) {
     return "internet_message_id";
+  }
+  // M1.5 D0 — DUAL-CAPTURE content fingerprint. Catches the group-post / mailbox-
+  // fallback twin of the SAME email even when their graph_message_ids differ and the
+  // external_ref is null (the pre-M1.5 blind spot that produced two drafts + two model
+  // calls per email). A live-state check: fires for force_recapture too (cannot
+  // duplicate a LIVE draft).
+  {
+    const fp = contentFingerprint(
+      candidate.from_email,
+      candidate.subject,
+      candidate.received_at,
+    );
+    if (fp && index.fingerprints.has(fp)) {
+      return "duplicate_content_fingerprint";
+    }
   }
   const rc = refCompanyKey(
     candidate.external_ref,
@@ -505,6 +565,14 @@ export function registerIntakeDraft(
   if (candidate.internet_message_id) {
     index.internetIds.add(candidate.internet_message_id);
   }
+  // M1.5 D0: register the fingerprint so the SAME email captured twice within one scan
+  // batch (group-post + mailbox-fallback rows) is caught on the second occurrence.
+  const fp = contentFingerprint(
+    candidate.from_email,
+    candidate.subject,
+    candidate.received_at,
+  );
+  if (fp) index.fingerprints.add(fp);
   const rc = refCompanyKey(
     candidate.external_ref,
     candidate.requesting_company_slug,
