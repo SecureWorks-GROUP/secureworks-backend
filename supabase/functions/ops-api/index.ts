@@ -160,10 +160,21 @@ import {
 } from './makesafe_reconcile.ts'
 import {
   makesafeIntakeReconciliation as _makesafeIntakeReconciliation,
+  makesafeIntakeReconcileInvariant as _makesafeIntakeReconcileInvariant,
 } from './makesafe_intake_reconciliation.ts'
 import {
   makesafeIntakeBackfillReport as _makesafeIntakeBackfillReport,
 } from './makesafe_intake_backfill_report.ts'
+// D-c: portal-link backfill for report-family jobs missing links (dry-run-first,
+// in-place metadata patch only — no delete / reopen / status change).
+import {
+  makesafeIntakeLinkBackfill as _makesafeIntakeLinkBackfill,
+} from './makesafe_intake_link_backfill.ts'
+// D-f: golden-set replay — key-less deterministic replay of recent ses@ emails vs the
+// drafts/jobs that were actually created. No writes, no Anthropic call.
+import {
+  makesafeIntakeGoldenReplay as _makesafeIntakeGoldenReplay,
+} from './makesafe_intake_golden_replay.ts'
 import {
   _collectPosts as _monitorCollectPosts,
   _resolveGroupId as _monitorResolveGroupId,
@@ -1842,6 +1853,14 @@ if (import.meta.main) serve(async (req: Request) => {
       'list_intake_drafts',
       'makesafe_intake_reconciliation',
       'makesafe_intake_backfill_report',
+      // Auto-Intake v2 (M1) read-only health + audit-invariant checks.
+      'intake_health',
+      'intake_reconcile',
+      // Link backfill: routine may run the DRY-RUN only; the live patch (dry_run:false)
+      // is blocked inside the case for a routine caller (privileged-only).
+      'makesafe_intake_link_backfill',
+      // Golden-set replay proof — read-only, key-less, no writes.
+      'intake_golden_replay',
       'list_makesafe_companies',
       // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
       // normal work-order drafts through the internal auto-approval gate; it never
@@ -2082,9 +2101,43 @@ if (import.meta.main) serve(async (req: Request) => {
           limitItems: Number(url.searchParams.get('limit') || '') || undefined,
         }))
       }
+      // Auto-Intake v2 (M1): the one-call fail-loud health check (D-a).
+      case 'intake_health': return json(await intakeHealth(client))
+      // Auto-Intake v2 (M1): the strict "did we miss anything" invariant (D-e).
+      // Read-only; ZERO unaccounted = the board is live and true.
+      case 'intake_reconcile': {
+        return json(await _makesafeIntakeReconcileInvariant(client, {
+          windowDays: Number(url.searchParams.get('window_days') || '') || undefined,
+          limitUnaccounted: Number(url.searchParams.get('limit') || '') || undefined,
+        }))
+      }
+      // Auto-Intake v2 (M1): golden-set replay proof (D-f). Read-only, key-less.
+      case 'intake_golden_replay': {
+        return json(await _makesafeIntakeGoldenReplay(client, _senderMatchesPattern, _SES_MAILBOX, {
+          days: Number(url.searchParams.get('days') || '') || undefined,
+          limit: Number(url.searchParams.get('limit') || '') || undefined,
+        }))
+      }
       case 'makesafe_intake_backfill_report': {
         return json(await _makesafeIntakeBackfillReport(client, {
           limitItems: Number(url.searchParams.get('limit') || '') || undefined,
+        }))
+      }
+      // D-c: portal-link backfill. DRY-RUN by default; a live patch (dry_run:false)
+      // is a privileged, in-place metadata write only (no delete / reopen / status
+      // change), so it requires the ops key or an admin/owner session.
+      case 'makesafe_intake_link_backfill': {
+        const linkBackfillPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        const wantsLive = body?.dry_run === false || body?.dryRun === false ||
+          url.searchParams.get('dry_run') === 'false'
+        if (wantsLive && !linkBackfillPrivileged) {
+          return json({ error: 'forbidden: a live link backfill (dry_run:false) requires the privileged ops key or an admin/owner session; the routine may only run the dry-run' }, 403)
+        }
+        return json(await _makesafeIntakeLinkBackfill(client, {
+          dryRun: !wantsLive,
+          includeArchived: body?.include_archived === true || url.searchParams.get('include_archived') === 'true',
+          limit: Number(url.searchParams.get('limit') || body?.limit || '') || undefined,
         }))
       }
       case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
@@ -10082,6 +10135,90 @@ function availableIntakeAttachments(attachments: any[]): any[] {
   return (attachments || []).filter((a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url))
 }
 
+// ── D-a (Auto-Intake v2 M1): FAIL-LOUD extraction key preflight ──────────────
+// v1's core sin was silence: when the ANTHROPIC_API_KEY was revoked, scanSesMakesafes
+// skipped extraction with a bare console.log and kept producing empty drafts (missing
+// portal links on 31 of 35 roof jobs) for weeks. v2 refuses to be silent: a dead/absent
+// key degrades the WHOLE scan loud — every draft made this run is tagged with this
+// marker (a BLOCKING missing field, so auto-file can never fire on a degraded draft),
+// forced to needs_review, and a visible makesafe_intake_health banner is written.
+const INTAKE_EXTRACTION_DOWN_MARKER = 'extraction_down_key_dead'
+
+// True when an Anthropic SDK/HTTP error indicates the KEY is dead (unset/revoked/
+// invalid), as opposed to a transient network/5xx blip. A dead key degrades the whole
+// scan; a transient failure only flags the one email and retries next cycle.
+function isAnthropicAuthFailure(err: unknown): boolean {
+  const anyErr = err as any
+  const status = Number(anyErr?.status ?? anyErr?.statusCode ?? anyErr?.response?.status)
+  if (status === 401 || status === 403) return true
+  const hay = `${anyErr?.name || ''} ${anyErr?.type || ''} ${anyErr?.error?.type || ''} ${anyErr?.message || String(err)}`.toLowerCase()
+  // 'authentication' (bare) matches both the SDK error TYPE 'authentication_error' and
+  // the error CLASS name 'AuthenticationError'; the rest cover revoked/absent-key text.
+  return /authentication|permission_error|invalid x-api-key|invalid api key|invalid_api_key|unauthorized|401|403/.test(hay)
+}
+
+// D-d kill switch: read makesafe_cron_settings.auto_file_enabled (Captain D1 default
+// TRUE). Fail-OPEN to true on a read error/missing row so a transient DB blip does not
+// silently disable the Captain-locked day-one auto-file decision — the env override
+// (MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false) and the degraded-extraction block remain
+// as independent brakes.
+async function isAutoFileEnabled(client: any): Promise<boolean> {
+  try {
+    const { data, error } = await client.from('makesafe_cron_settings')
+      .select('auto_file_enabled').eq('id', true).maybeSingle()
+    if (error) {
+      console.warn('[ops-api] auto_file_enabled read failed; defaulting ON:', error.message)
+      return true
+    }
+    if (!data || data.auto_file_enabled == null) return true
+    return data.auto_file_enabled !== false
+  } catch (e) {
+    console.warn('[ops-api] auto_file_enabled read threw; defaulting ON:', (e as Error).message)
+    return true
+  }
+}
+
+// D-a: write the single-row makesafe_intake_health record every scan. Computes the
+// ok<->degraded transition so degraded_since answers "how long has the key been dead".
+// Best-effort: a health-write failure must never fail the scan itself.
+async function writeIntakeHealth(client: any, input: {
+  extractionStatus: 'ok' | 'degraded'
+  degradedReason: string | null
+  anyExtractionSucceeded: boolean
+  draftsCreated: number
+  autoFiled: number
+}): Promise<void> {
+  try {
+    const nowIso = new Date().toISOString()
+    const { data: prev } = await client.from('makesafe_intake_health')
+      .select('extraction_status, degraded_since, last_successful_extraction_at')
+      .eq('id', true).maybeSingle()
+    const wasDegraded = String(prev?.extraction_status || '') === 'degraded'
+    const isDegraded = input.extractionStatus === 'degraded'
+    // degraded_since: keep the existing start if still degraded; stamp now on a fresh
+    // ok->degraded transition; clear when recovered.
+    const degradedSince = isDegraded
+      ? (wasDegraded && prev?.degraded_since ? prev.degraded_since : nowIso)
+      : null
+    const lastSuccess = input.anyExtractionSucceeded
+      ? nowIso
+      : (prev?.last_successful_extraction_at || null)
+    await client.from('makesafe_intake_health').upsert({
+      id: true,
+      extraction_status: input.extractionStatus,
+      degraded_reason: isDegraded ? (input.degradedReason || 'key_unset') : null,
+      degraded_since: degradedSince,
+      last_scan_at: nowIso,
+      last_successful_extraction_at: lastSuccess,
+      last_scan_drafts_created: input.draftsCreated,
+      last_scan_auto_filed: input.autoFiled,
+      updated_at: nowIso,
+    }, { onConflict: 'id' })
+  } catch (e) {
+    console.warn('[ops-api] writeIntakeHealth failed (non-fatal):', (e as Error).message)
+  }
+}
+
 function shouldAutoApproveCleanIntake(input: {
   enabled?: boolean
   isReportCapture?: boolean
@@ -10151,6 +10288,10 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
 export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCleanIntakeDraftRow
+// D-a fail-loud: exported so a test can prove auth-failure (dead key) is distinguished
+// from a transient failure, and the extraction-down marker is a stable constant.
+export const _isAnthropicAuthFailureForTest = isAnthropicAuthFailure
+export const _INTAKE_EXTRACTION_DOWN_MARKER = INTAKE_EXTRACTION_DOWN_MARKER
 export const _stripEmailHtmlForTradeForTest = _stripEmailHtmlForTrade
 export const _extractBuilderEmailLinksForTest = _extractBuilderEmailLinks
 export const _mergeDeterministicAndClaudeLinksForTest = _mergeDeterministicAndClaudeLinks
@@ -11100,7 +11241,19 @@ async function scanSesMakesafes(client: any) {
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
+
+  // D-d kill switch (Captain D1 default TRUE): the DB flag decides whether the scan
+  // may auto-file clean drafts this run. Read ONCE per scan.
+  const autoFileEnabled = await isAutoFileEnabled(client)
+
+  // D-a FAIL-LOUD preflight. keyDegraded starts true when the key is UNSET (v1's exact
+  // silent-death shape) and flips true the moment a classifier call fails auth (revoked
+  // key). While degraded every draft is tagged, forced to needs_review, and never
+  // auto-filed, and a visible makesafe_intake_health banner is written after the loop.
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
+  let keyDegraded = !ANTHROPIC_API_KEY
+  let keyDegradedReason: string | null = ANTHROPIC_API_KEY ? null : 'key_unset'
+  let anyExtractionSucceeded = false
 
   for (const msg of fairMatchedMessages) {
     // Cheap pre-extraction dedup on the message ids we already have (graph /
@@ -11266,7 +11419,10 @@ async function scanSesMakesafes(client: any) {
     let extraction: any = {}
     let confidence = 'low'
     let missingFields: string[] = []
-    if (ANTHROPIC_API_KEY) {
+    // D-a: run the classifier ONLY while the key is healthy. If the key is unset the
+    // guard is false from the first email; if it dies mid-run the catch flips keyDegraded
+    // and every subsequent email skips the call (no silent empty-extraction spray).
+    if (ANTHROPIC_API_KEY && !keyDegraded) {
       try {
         const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
         const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
@@ -11301,10 +11457,38 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           extraction = JSON.parse(jsonMatch[0])
           confidence = extraction.confidence || 'low'
           missingFields = extraction.missing_fields || []
+          anyExtractionSucceeded = true
         }
       } catch (e) {
-        console.log('[ops-api] make-safe extraction failed:', (e as Error).message)
+        const em = (e as Error).message || String(e)
+        if (isAnthropicAuthFailure(e)) {
+          // KEY IS DEAD. Degrade the whole scan loud (this + every later draft is tagged
+          // + forced to needs_review below, and the health banner is written after the
+          // loop). This is the exact failure that went silent for weeks in v1.
+          keyDegraded = true
+          keyDegradedReason = 'auth_failed'
+          console.error('[ops-api] make-safe extraction AUTH FAILURE — ANTHROPIC_API_KEY dead; degrading intake:', em)
+        } else {
+          // Transient (network / 5xx / bad JSON). Flag THIS draft and keep scanning; the
+          // 2-minute cron retries it next cycle. Not a system-wide degradation.
+          extraction._extraction_error = em.slice(0, 200)
+          console.error('[ops-api] make-safe extraction failed (transient, kept for review):', em)
+        }
       }
+    }
+
+    // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
+    // needs_review docket with an explicit marker, never a silent empty draft — and,
+    // because the marker is a blocking missing field + confidence is forced low, it can
+    // never be auto-filed.
+    const draftExtractionDegraded = keyDegraded || !ANTHROPIC_API_KEY
+    if (draftExtractionDegraded) {
+      extraction.extraction_degraded = true
+      extraction.extraction_degraded_reason = keyDegradedReason || 'key_unset'
+      if (!missingFields.includes(INTAKE_EXTRACTION_DOWN_MARKER)) {
+        missingFields.push(INTAKE_EXTRACTION_DOWN_MARKER)
+      }
+      confidence = 'low'
     }
 
     const mergedPortalLinks = _mergeDeterministicAndClaudeLinks(deterministicPortalLinks, extraction)
@@ -11588,7 +11772,11 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // Codex issue 1: report_type is set whenever the subject matched a report
     // pattern (tagReportType), even for a kind='work_order' make-safe-and-report.
     let draftStatus: string
-    if (isReportCapture) {
+    if (draftExtractionDegraded) {
+      // D-a: a degraded-extraction draft is ALWAYS a human docket ("EXTRACTION DOWN -
+      // key dead"), never stranded in 'draft' where the needs_review queue can't see it.
+      draftStatus = 'needs_review'
+    } else if (isReportCapture) {
       draftStatus = 'needs_review'
     } else {
       // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
@@ -11660,8 +11848,16 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       dedupIndex,
     )
 
+    // D-d auto-file gate. THREE independent brakes decide `enabled`:
+    //   1. autoFileEnabled  — the DB kill switch makesafe_cron_settings.auto_file_enabled
+    //      (Captain D1 default TRUE; one UPDATE falls back to drafts-only, no redeploy),
+    //   2. !draftExtractionDegraded — a dead-key run never auto-files (belt-and-braces
+    //      with the forced-low confidence above),
+    //   3. the MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false env override.
+    // The gate itself still requires confidence:high + the SAME required fields as the
+    // human approveIntakeDraft (company + ref + client + address + servable WO PDF).
     const autoApprovalDecision = shouldAutoApproveCleanIntake({
-      enabled: Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+      enabled: autoFileEnabled && !draftExtractionDegraded && Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
       isReportCapture,
       tagReportType,
       reportType: draftReportType,
@@ -11676,11 +11872,33 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
 
     if (autoApprovalDecision.ok) {
       try {
+        // Provenance (D-d): approved_by:'auto-intake' distinguishes an auto-filed job
+        // from a human tick. This is the gated INTERNAL path — approveIntakeDraft is
+        // called at the function level, NOT through the route (the Wave-0 rule that the
+        // routine key can't call approve_intake_draft stays intact).
         const approved = await approveIntakeDraft(client, {
           draft_id: inserted.id,
-          approved_by: 'auto_intake_clean_gate',
-          review_notes: 'Auto-approved clean make-safe intake: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
+          approved_by: 'auto-intake',
+          review_notes: 'Auto-filed clean make-safe intake (Auto-Intake v2): high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
         })
+        // D-d audit row: an explicit, queryable job_events trail for every auto-filed job
+        // (createMakesafeJob writes makesafe_created; this adds the auto-file provenance).
+        if (approved?.job?.id) {
+          try {
+            await client.from('job_events').insert({
+              job_id: approved.job.id,
+              event_type: 'makesafe_auto_filed',
+              detail_json: {
+                draft_id: inserted.id,
+                external_ref: extractedRef || null,
+                requesting_company: matchedCompany?.slug || matchedCompany?.name || null,
+                confidence,
+                gate_reason: autoApprovalDecision.reason,
+                source: 'auto-intake',
+              },
+            })
+          } catch (_) { /* non-blocking audit write */ }
+        }
         const autoRow = {
           ...inserted,
           status: 'approved',
@@ -11720,11 +11938,28 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     }
   }
 
+  // D-a: write the fail-loud health banner every run so a dead key is visible in
+  // intake_health + the morning report, and auto-file stays suppressed until it recovers.
+  await writeIntakeHealth(client, {
+    extractionStatus: keyDegraded ? 'degraded' : 'ok',
+    degradedReason: keyDegraded ? (keyDegradedReason || 'key_unset') : null,
+    anyExtractionSucceeded,
+    draftsCreated: newDrafts.length,
+    autoFiled: autoApproved.length,
+  })
+
   return {
     ok: true,
     // Wave 1: emails READ from the group-sync projection (the candidate window),
     // not a live Graph message count.
     scanned: (emailRows || []).length,
+    // D-a fail-loud state: true when the classifier key is dead/unset this run. Every
+    // draft made while degraded carries the extraction_down_key_dead marker and is a
+    // needs_review docket; nothing is silently empty and nothing is auto-filed.
+    extraction_degraded: keyDegraded,
+    extraction_degraded_reason: keyDegraded ? (keyDegradedReason || 'key_unset') : null,
+    // D-d: whether auto-file was permitted this run (DB kill switch AND not degraded).
+    auto_file_enabled: autoFileEnabled && !keyDegraded,
     makesafe_candidates: processedCandidates,
     matched_candidates: matchedMessages.length,
     processed_candidates: processedCandidates,
@@ -11745,6 +11980,85 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // Observability: confirms the redirected source is live (not the old Graph
     // USER-mailbox scan).
     source: 'group_sync_projection',
+  }
+}
+
+// ── D-a: intake_health — the one-call health check ───────────────────────────
+// Read-only. The single call the terminal skill and the morning report make first:
+// is the classifier key alive? is the cron on? is auto-file on? how many drafts /
+// auto-files in 24h? and the D-e "did we miss anything" unaccounted count (0 = live
+// and true). This is what makes a dead key impossible to miss.
+async function intakeHealth(client: any) {
+  const nowIso = new Date().toISOString()
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+  const { data: health } = await client.from('makesafe_intake_health')
+    .select('*').eq('id', true).maybeSingle()
+  const { data: settings } = await client.from('makesafe_cron_settings')
+    .select('cron_enabled, auto_file_enabled, enabled_at, enabled_by, updated_at')
+    .eq('id', true).maybeSingle()
+  const { data: sync } = await client.from('sync_state')
+    .select('last_successful_sync_at, last_attempt_at, mode, pending_attachments, last_error')
+    .eq('mailbox', _SES_MAILBOX).maybeSingle()
+
+  const { count: drafts24h } = await client.from('makesafe_intake_drafts')
+    .select('id', { count: 'exact', head: true })
+    .gte('created_at', since24h)
+  // Auto-filed = approved by the internal auto-intake path (new label 'auto-intake';
+  // the older 'auto_intake_clean_gate' label is still counted for continuity).
+  const { count: autoFiled24h } = await client.from('makesafe_intake_drafts')
+    .select('id', { count: 'exact', head: true })
+    .in('approved_by', ['auto-intake', 'auto_intake_clean_gate'])
+    .gte('approved_at', since24h)
+
+  let unaccounted: any = null
+  try {
+    const inv = await _makesafeIntakeReconcileInvariant(client, { windowDays: 7, limitUnaccounted: 25 })
+    unaccounted = {
+      count: inv.counts.unaccounted,
+      live_and_true: inv.live_and_true,
+      window_days: inv.window_days,
+      sample: inv.unaccounted.slice(0, 10),
+    }
+  } catch (e) {
+    unaccounted = { error: (e as Error).message }
+  }
+
+  const status = String(health?.extraction_status || 'unknown')
+  return {
+    ok: true,
+    generated_at: nowIso,
+    // healthy = classifier extracting AND nothing unaccounted. This is the single
+    // boolean the morning report keys off.
+    healthy: status === 'ok' && (unaccounted?.count === 0),
+    extraction: {
+      status,
+      degraded_reason: health?.degraded_reason || null,
+      degraded_since: health?.degraded_since || null,
+      last_scan_at: health?.last_scan_at || null,
+      last_successful_extraction_at: health?.last_successful_extraction_at || null,
+      last_scan_drafts_created: health?.last_scan_drafts_created ?? null,
+      last_scan_auto_filed: health?.last_scan_auto_filed ?? null,
+    },
+    cron: {
+      cron_enabled: settings?.cron_enabled ?? null,
+      auto_file_enabled: settings?.auto_file_enabled ?? null,
+      enabled_at: settings?.enabled_at || null,
+      enabled_by: settings?.enabled_by || null,
+    },
+    last_poll: {
+      mailbox: _SES_MAILBOX,
+      last_successful_sync_at: sync?.last_successful_sync_at || null,
+      last_attempt_at: sync?.last_attempt_at || null,
+      mode: sync?.mode || null,
+      pending_attachments: sync?.pending_attachments ?? null,
+      last_error: sync?.last_error || null,
+    },
+    last_24h: {
+      drafts_created: drafts24h ?? 0,
+      auto_filed: autoFiled24h ?? 0,
+    },
+    unaccounted,
   }
 }
 

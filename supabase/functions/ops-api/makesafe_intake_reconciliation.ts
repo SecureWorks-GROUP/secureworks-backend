@@ -15,6 +15,14 @@ import {
   normaliseJobFamily,
   normaliseRef,
 } from "./makesafe_intake_dedup.ts";
+import {
+  isPureAckNoAction,
+  subjectIsExcludedNonWorkOrder,
+  subjectLooksLikeNewWorkOrder,
+  subjectMatchesReportCapture,
+} from "./makesafe_intake_gate.ts";
+import { isOwnDomain } from "./makesafe_compact_reads.ts";
+import { senderMatchesPattern } from "../_shared/makesafe_intake_classification.ts";
 
 export interface IntakeReconEmail {
   post_id?: string | null;
@@ -499,5 +507,207 @@ export async function makesafeIntakeReconciliation(
     windowDays,
     staleMinutes: opts.staleMinutes,
     limitItems: opts.limitItems,
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+// D-e — THE AUDIT INVARIANT ("did we miss anything")
+// ════════════════════════════════════════════════════════════
+// The strict one-line invariant the Captain asked for: every source email in the
+// window is ACCOUNTED FOR — a linked draft (any status), OR a live job already on
+// its ref (dedup would skip it), OR a deterministic non-work-order classification
+// with a reason (own outbound, excluded subject, pure ack, or not a make-safe
+// candidate at all). Anything left is a genuine inbound make-safe candidate with no
+// draft and no job. ZERO unaccounted = the board is live and true. This reuses the
+// SAME gate helpers the scan uses, so the accounting matches what the scan would do.
+
+export interface IntakeReconcileInvariantItem {
+  post_id: string | null;
+  subject: string | null;
+  from_email: string | null;
+  received_at: string | null;
+  age_minutes: number | null;
+  state: "accounted" | "unaccounted";
+  reason: string;
+}
+
+export interface IntakeReconcileInvariant {
+  ok: true;
+  window_days: number;
+  generated_at: string;
+  live_and_true: boolean;
+  counts: {
+    source_emails: number;
+    accounted: number;
+    unaccounted: number;
+  };
+  unaccounted: IntakeReconcileInvariantItem[];
+}
+
+export function summarizeIntakeReconcileInvariant(input: {
+  emails: IntakeReconEmail[];
+  drafts: IntakeReconDraft[];
+  jobs: IntakeReconJob[];
+  senderPatterns?: string[];
+  nowIso?: string;
+  windowDays?: number;
+  limitUnaccounted?: number;
+}): IntakeReconcileInvariant {
+  const nowMs = input.nowIso ? Date.parse(input.nowIso) : Date.now();
+  const windowDays = input.windowDays ?? 7;
+  const limit = input.limitUnaccounted ?? 200;
+  const senderPatterns = (input.senderPatterns || [])
+    .map((p) => String(p || "").toLowerCase())
+    .filter(Boolean);
+
+  // Linkage: a draft's graph_message_id equals the source email post_id.
+  const draftedPostIds = new Set<string>();
+  for (const d of input.drafts || []) {
+    if (d.graph_message_id) draftedPostIds.add(d.graph_message_id);
+  }
+  const jobRefs: string[] = [];
+  for (const j of input.jobs || []) {
+    const nr = normaliseRef(j.external_ref);
+    if (nr.length >= 5) jobRefs.push(nr);
+  }
+
+  const unaccounted: IntakeReconcileInvariantItem[] = [];
+  let accounted = 0;
+
+  for (const e of input.emails || []) {
+    const postId = e.post_id || null;
+    const subject = e.subject || "";
+    const fromEmail = e.from_email || "";
+
+    // 1) linked draft (any status)
+    if (postId && draftedPostIds.has(postId)) {
+      accounted++;
+      continue;
+    }
+    // 2) our own outbound copy — never an inbound intake candidate
+    const at = fromEmail.lastIndexOf("@");
+    const domain = at >= 0 ? fromEmail.slice(at + 1).trim().toLowerCase() : null;
+    if (isOwnDomain(domain)) {
+      accounted++;
+      continue;
+    }
+    // 3) gate-excluded non-work-order subject (photo evidence / report / invoice / …)
+    if (subjectIsExcludedNonWorkOrder(subject)) {
+      accounted++;
+      continue;
+    }
+    // 4) pure acknowledgement (thanks/noted, no action, no attachment)
+    if (isPureAckNoAction(subject, !!e.has_attachments)) {
+      accounted++;
+      continue;
+    }
+    // 5) not a make-safe candidate at all — the scan's matchedMessages filter would
+    //    never draft it (unknown sender AND no WO/report subject on a builder-ish domain).
+    const senderMatch = senderPatterns.some((p) =>
+      senderMatchesPattern(fromEmail, p)
+    );
+    const woSubject = subjectLooksLikeNewWorkOrder(subject) ||
+      subjectMatchesReportCapture(subject) ||
+      /work\s*order|make\s*safe|emergency|storm|urgent\s*(attend|repair)/i.test(
+        subject,
+      );
+    const builderish = fromEmail.includes(".build") ||
+      fromEmail.includes("primeeco.tech");
+    if (!(senderMatch || (woSubject && builderish))) {
+      accounted++;
+      continue;
+    }
+    // 6) candidate with no draft: is a live job already on a ref named in the subject?
+    const normSubject = normaliseRef(subject);
+    if (jobRefs.some((r) => normSubject.includes(r))) {
+      accounted++;
+      continue;
+    }
+    // 7) a real inbound make-safe candidate with NO draft and NO job — UNACCOUNTED.
+    unaccounted.push({
+      post_id: postId,
+      subject: e.subject || null,
+      from_email: e.from_email || null,
+      received_at: e.received_at || null,
+      age_minutes: minutesOld(e.received_at, nowMs),
+      state: "unaccounted",
+      reason: "make_safe_candidate_no_draft_no_job",
+    });
+  }
+
+  return {
+    ok: true,
+    window_days: windowDays,
+    generated_at: new Date(nowMs).toISOString(),
+    live_and_true: unaccounted.length === 0,
+    counts: {
+      source_emails: (input.emails || []).length,
+      accounted,
+      unaccounted: unaccounted.length,
+    },
+    unaccounted: unaccounted.slice(0, limit),
+  };
+}
+
+export async function makesafeIntakeReconcileInvariant(
+  client: any,
+  opts: { nowIso?: string; windowDays?: number; limitUnaccounted?: number } = {},
+): Promise<IntakeReconcileInvariant> {
+  const windowDays = opts.windowDays ?? 7;
+  const nowMs = opts.nowIso ? Date.parse(opts.nowIso) : Date.now();
+  const sinceIso = new Date(nowMs - windowDays * 86_400_000).toISOString();
+
+  const [emailsRes, draftsRes, jobsRes, companiesRes] = await Promise.all([
+    client.from("emails")
+      .select("post_id, subject, from_email, received_at, has_attachments")
+      .eq("mailbox", "ses@secureworkswa.com.au")
+      .is("pii_purged_at", null)
+      .gte("received_at", sinceIso)
+      .order("received_at", { ascending: false })
+      .limit(1000),
+    client.from("makesafe_intake_drafts")
+      .select("graph_message_id, status, received_at, created_at")
+      .gte("received_at", sinceIso)
+      .limit(1000),
+    client.from("makesafe_job_details")
+      .select("external_ref")
+      .not("external_ref", "is", null)
+      .limit(2000),
+    client.from("makesafe_companies")
+      .select("sender_patterns")
+      .eq("active", true),
+  ]);
+
+  if (emailsRes.error) {
+    throw new Error(
+      `emails read failed: ${emailsRes.error.message ?? emailsRes.error}`,
+    );
+  }
+  if (draftsRes.error) {
+    throw new Error(
+      `intake drafts read failed: ${draftsRes.error.message ?? draftsRes.error}`,
+    );
+  }
+  if (jobsRes.error) {
+    throw new Error(
+      `makesafe jobs read failed: ${jobsRes.error.message ?? jobsRes.error}`,
+    );
+  }
+
+  const senderPatterns: string[] = [];
+  for (const co of (companiesRes.data || [])) {
+    for (const p of (co.sender_patterns || [])) {
+      if (p) senderPatterns.push(String(p).toLowerCase());
+    }
+  }
+
+  return summarizeIntakeReconcileInvariant({
+    emails: emailsRes.data || [],
+    drafts: draftsRes.data || [],
+    jobs: jobsRes.data || [],
+    senderPatterns,
+    nowIso: opts.nowIso,
+    windowDays,
+    limitUnaccounted: opts.limitUnaccounted,
   });
 }
