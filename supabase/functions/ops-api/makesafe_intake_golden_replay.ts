@@ -28,7 +28,16 @@ import {
   subjectMatchesReportCapture,
 } from "./makesafe_intake_gate.ts";
 import { normalizeReportExternalLinks } from "./makesafe_email_links.ts";
-import { normaliseJobFamily, normaliseRef } from "./makesafe_intake_dedup.ts";
+import { normaliseJobFamily } from "./makesafe_intake_dedup.ts";
+// M1.5: the same deterministic template parser + PDF text extractor the live scan uses,
+// so the replay is a truthful COST preview (would_call_model / pdf_mode / parser) AND
+// proves the template output agrees with the live draft before a builder is flipped.
+import {
+  compareTemplateToActual,
+  parseWithTemplate,
+  type TemplateParsingRules,
+} from "./makesafe_template_parser.ts";
+import { extractPdfText, PDF_TEXT_MIN_CHARS } from "./makesafe_pdf_text.ts";
 
 export interface GoldenSenderPattern {
   slug: string;
@@ -46,6 +55,13 @@ export interface GoldenEmail {
   received_at?: string | null;
   /** count of servable work-order PDFs the sync captured for this email. */
   wo_pdf_count?: number | null;
+  /** M1.5: text-vs-document decision from local PDF extraction. When the DB action
+   * downloaded + extracted the WO PDF this is 'text' | 'document' | 'none'; when it
+   * didn't (or in fixture tests) it is left undefined and a conservative default is
+   * derived from wo_pdf_count. */
+  pdf_mode?: "text" | "document" | "none";
+  /** M1.5: extracted PDF text layer, fed to the template parser for the cost preview. */
+  pdf_text?: string | null;
 }
 
 export interface GoldenDraft {
@@ -79,6 +95,17 @@ export interface GoldenReplayItem {
     would_draft: boolean;
     would_auto_file: "yes" | "no" | "requires_live_extraction";
     auto_file_blockers: string[];
+    // M1.5 cost preview (deterministic, key-less):
+    /** true = this candidate would incur a Haiku call; false = template-first skip. */
+    would_call_model: boolean;
+    /** which PDF path the scan would use for this email. */
+    pdf_mode: "text" | "document" | "none";
+    /** 'template' only when the builder is template-first AND a full parse succeeds. */
+    parser: "template" | "none";
+    /** whether this builder is flipped to template-first (default false). */
+    template_first: boolean;
+    /** whether the template parsed ALL required fields (independent of the toggle). */
+    template_full_parse: boolean;
   };
   actual: {
     has_draft: boolean;
@@ -95,6 +122,15 @@ export interface GoldenReplayItem {
     family_match: boolean | null;
     draft_presence_match: boolean;
     notes: string[];
+    // M1.5: template-parser output vs the fields on the ACTUAL historical draft. This
+    // is the proof the Captain reads before flipping a builder to template_first — per
+    // field true=agree / false=differ / null=nothing to compare, plus an overall
+    // `agrees` and the count compared. null when no draft or no template rules.
+    template_agreement: {
+      per_field: Record<string, boolean | null>;
+      agrees: boolean;
+      compared: number;
+    } | null;
   };
 }
 
@@ -111,6 +147,13 @@ export interface GoldenReplayReport {
     pending_live_extraction: number;
     drafts_present: number;
     disagreements: number;
+    // M1.5 cost preview counts.
+    would_call_model: number;
+    would_skip_model: number;
+    pdf_text_path: number;
+    pdf_document_path: number;
+    template_agreements: number;
+    template_disagreements: number;
   };
   items: GoldenReplayItem[];
 }
@@ -129,20 +172,6 @@ function parseObj(value: any): Record<string, any> {
   return {};
 }
 
-function parseArr(value: any): any[] {
-  if (!value) return [];
-  if (Array.isArray(value)) return value;
-  if (typeof value === "string") {
-    try {
-      const p = JSON.parse(value);
-      return Array.isArray(p) ? p : [];
-    } catch (_) {
-      return [];
-    }
-  }
-  return [];
-}
-
 // Mirrors the scan's own-domain contamination filter without importing the async DB
 // layer. Kept deliberately small; the authoritative isOwnDomain lives in
 // makesafe_compact_reads and the reconcile invariant uses it directly.
@@ -156,6 +185,7 @@ export function replayGoldenEmail(
   email: GoldenEmail,
   senderPatterns: GoldenSenderPattern[],
   matchSender: (fromEmail: string, pattern: string) => boolean,
+  rulesBySlug?: Map<string, TemplateParsingRules>,
 ): GoldenReplayItem["replay"] {
   const subject = email.subject || "";
   const fromEmail = (email.from_email || "").toLowerCase();
@@ -206,6 +236,25 @@ export function replayGoldenEmail(
     blockers.push("needs_confidence_high", "needs_extracted_fields");
   }
 
+  // M1.5 cost preview — deterministic, key-less. A candidate email reaches the
+  // extraction step (the model call happens BEFORE the WO gate in the live scan), so
+  // `would_call_model` keys off is_candidate. `pdf_mode` is the extraction path; when
+  // the DB action didn't extract, derive a conservative default from wo_pdf_count.
+  const pdfMode: "text" | "document" | "none" =
+    email.pdf_mode ?? (woPdfCount > 0 ? "document" : "none");
+  const rules = matchedCompany ? rulesBySlug?.get(matchedCompany) : undefined;
+  const template = parseWithTemplate(rules, {
+    subject,
+    body,
+    pdfText: email.pdf_text || "",
+  });
+  const templateFirst = template?.template_first ?? false;
+  const templateFullParse = template?.full_parse ?? false;
+  const modelSkipped = template?.model_skipped === true;
+  // Only candidates reach extraction; a template-first full parse skips the call.
+  const wouldCallModel = isCandidate && !modelSkipped;
+  const parser: "template" | "none" = isCandidate && modelSkipped ? "template" : "none";
+
   return {
     is_own_outbound: isOwnOutbound,
     is_candidate: isCandidate,
@@ -218,6 +267,11 @@ export function replayGoldenEmail(
     would_draft: wouldDraft,
     would_auto_file: wouldAutoFile,
     auto_file_blockers: blockers,
+    would_call_model: wouldCallModel,
+    pdf_mode: pdfMode,
+    parser,
+    template_first: templateFirst,
+    template_full_parse: templateFullParse,
   };
 }
 
@@ -226,6 +280,10 @@ export function summarizeGoldenReplay(input: {
   drafts: GoldenDraft[];
   senderPatterns: GoldenSenderPattern[];
   matchSender: (fromEmail: string, pattern: string) => boolean;
+  /** M1.5: per-builder parsing_rules, keyed by slug — drives the cost preview and the
+   * template-vs-actual agreement. Omit (fixture tests / no rules) and every builder is
+   * treated as model-first with no template agreement. */
+  rulesBySlug?: Map<string, TemplateParsingRules>;
   nowIso?: string;
   days?: number;
   limit?: number;
@@ -246,18 +304,32 @@ export function summarizeGoldenReplay(input: {
   let pendingLive = 0;
   let draftsPresent = 0;
   let disagreements = 0;
+  let wouldCallModelN = 0;
+  let wouldSkipModelN = 0;
+  let pdfTextPath = 0;
+  let pdfDocumentPath = 0;
+  let templateAgreements = 0;
+  let templateDisagreements = 0;
 
   for (const email of input.emails || []) {
-    const replay = replayGoldenEmail(email, input.senderPatterns, input.matchSender);
+    const replay = replayGoldenEmail(email, input.senderPatterns, input.matchSender, input.rulesBySlug);
     if (replay.would_draft) wouldDraftN++;
     else if (replay.is_candidate) wouldGateDrop++;
     if (replay.would_auto_file === "yes") wouldAutoFileN++;
     if (replay.would_auto_file === "requires_live_extraction") pendingLive++;
+    // Cost-preview tallies count only candidates (they reach the extraction step).
+    if (replay.is_candidate) {
+      if (replay.would_call_model) wouldCallModelN++;
+      else wouldSkipModelN++;
+      if (replay.pdf_mode === "text") pdfTextPath++;
+      else if (replay.pdf_mode === "document") pdfDocumentPath++;
+    }
 
     const draft = email.post_id ? draftByPost.get(email.post_id) || null : null;
     let actual: GoldenReplayItem["actual"] = null;
     const notes: string[] = [];
     let familyMatch: boolean | null = null;
+    let templateAgreement: GoldenReplayItem["agreement"]["template_agreement"] = null;
 
     if (draft) {
       draftsPresent++;
@@ -282,6 +354,32 @@ export function summarizeGoldenReplay(input: {
           String(draft.approved_by || "") === "auto_intake_clean_gate",
         created_job_id: draft.approved_job_id || null,
       };
+
+      // M1.5 proof: run the SAME template parse against this email and compare its
+      // output to the fields on the ACTUAL historical draft. This is what proves a
+      // builder is safe to flip template_first before the toggle is ever set.
+      const slug = replay.matched_company;
+      const rules = slug ? input.rulesBySlug?.get(slug) : undefined;
+      const template = parseWithTemplate(rules, {
+        subject: email.subject || "",
+        body: email.body || "",
+        pdfText: email.pdf_text || "",
+      });
+      if (template && Object.keys(template.fields).length > 0) {
+        templateAgreement = compareTemplateToActual(template.fields, {
+          external_ref: draft.external_ref || extraction.external_ref,
+          client_name: extraction.client_name,
+          site_address: extraction.site_address,
+          client_phone: extraction.client_phone,
+        });
+        if (templateAgreement.compared > 0) {
+          if (templateAgreement.agrees) templateAgreements++;
+          else {
+            templateDisagreements++;
+            notes.push("template_disagrees_with_draft");
+          }
+        }
+      }
     }
 
     // Disagreement: the scan WOULD draft this email but no draft exists, OR the reverse.
@@ -302,7 +400,12 @@ export function summarizeGoldenReplay(input: {
       received_at: email.received_at || null,
       replay,
       actual,
-      agreement: { family_match: familyMatch, draft_presence_match: draftPresenceMatch, notes },
+      agreement: {
+        family_match: familyMatch,
+        draft_presence_match: draftPresenceMatch,
+        notes,
+        template_agreement: templateAgreement,
+      },
     });
   }
 
@@ -319,6 +422,12 @@ export function summarizeGoldenReplay(input: {
       pending_live_extraction: pendingLive,
       drafts_present: draftsPresent,
       disagreements,
+      would_call_model: wouldCallModelN,
+      would_skip_model: wouldSkipModelN,
+      pdf_text_path: pdfTextPath,
+      pdf_document_path: pdfDocumentPath,
+      template_agreements: templateAgreements,
+      template_disagreements: templateDisagreements,
     },
     items: items.slice(0, limit),
   };
@@ -333,7 +442,17 @@ export async function makesafeIntakeGoldenReplay(
   client: any,
   matchSender: (fromEmail: string, pattern: string) => boolean,
   sesMailbox: string,
-  opts: { days?: number; limit?: number; nowIso?: string } = {},
+  opts: {
+    days?: number;
+    limit?: number;
+    nowIso?: string;
+    /** M1.5: optional storage download used to extract each email's WO-PDF text layer
+     * so the cost preview (pdf_mode) and template agreement are real, not estimated.
+     * Bounded + best-effort; when absent, pdf_mode is derived from wo_pdf_count. */
+    downloadPdf?: (storagePath: string) => Promise<Uint8Array | null>;
+    /** Cap on WO-PDF downloads per replay (protects the manual action). */
+    maxPdfExtractions?: number;
+  } = {},
 ): Promise<GoldenReplayReport> {
   const days = opts.days ?? 30;
   const nowMs = opts.nowIso ? Date.parse(opts.nowIso) : Date.now();
@@ -347,8 +466,9 @@ export async function makesafeIntakeGoldenReplay(
       .gte("received_at", sinceIso)
       .order("received_at", { ascending: false })
       .limit(2000),
+    // M1.5: parsing_rules drives the cost preview + template-vs-actual agreement.
     client.from("makesafe_companies")
-      .select("slug, name, sender_patterns")
+      .select("slug, name, sender_patterns, parsing_rules")
       .eq("active", true),
   ]);
   if (emailsRes.error) throw new Error(`emails read failed: ${emailsRes.error.message ?? emailsRes.error}`);
@@ -356,13 +476,14 @@ export async function makesafeIntakeGoldenReplay(
   const emailRows = emailsRes.data || [];
   const postIds = emailRows.map((e: any) => e.post_id).filter(Boolean);
 
-  // Servable WO-PDF count per email (status='uploaded' PDFs).
+  // Servable WO-PDF count + the WO PDF's storage path per email (status='uploaded').
   const woCountByPost = new Map<string, number>();
+  const woPathByPost = new Map<string, string>();
   const draftByPost = new Map<string, any>();
   if (postIds.length) {
     const [attRes, draftRes] = await Promise.all([
       client.from("email_attachments")
-        .select("email_id, content_type, name, status")
+        .select("email_id, content_type, name, status, storage_path")
         .in("email_id", postIds)
         .eq("status", "uploaded"),
       client.from("makesafe_intake_drafts")
@@ -373,6 +494,7 @@ export async function makesafeIntakeGoldenReplay(
       const isPdf = (a.content_type || "").includes("pdf") || (a.name || "").toLowerCase().endsWith(".pdf");
       if (!isPdf) continue;
       woCountByPost.set(a.email_id, (woCountByPost.get(a.email_id) || 0) + 1);
+      if (a.storage_path && !woPathByPost.has(a.email_id)) woPathByPost.set(a.email_id, a.storage_path);
     }
     for (const d of (draftRes.data || [])) {
       if (d.graph_message_id && !draftByPost.has(d.graph_message_id)) draftByPost.set(d.graph_message_id, d);
@@ -380,9 +502,13 @@ export async function makesafeIntakeGoldenReplay(
   }
 
   const senderPatterns: GoldenSenderPattern[] = [];
+  const rulesBySlug = new Map<string, TemplateParsingRules>();
   for (const co of (companiesRes.data || [])) {
     for (const p of (co.sender_patterns || [])) {
       if (p) senderPatterns.push({ slug: co.slug, name: co.name, pattern: String(p).toLowerCase() });
+    }
+    if (co.slug && co.parsing_rules && typeof co.parsing_rules === "object") {
+      rulesBySlug.set(String(co.slug).toLowerCase(), co.parsing_rules as TemplateParsingRules);
     }
   }
 
@@ -396,6 +522,36 @@ export async function makesafeIntakeGoldenReplay(
     received_at: e.received_at,
     wo_pdf_count: woCountByPost.get(e.post_id) || 0,
   }));
+
+  // M1.5 cost preview: extract each WO PDF's text layer (bounded, best-effort) so
+  // pdf_mode is real and the template parse has the PDF-sourced fields to compare.
+  if (opts.downloadPdf) {
+    const cap = Math.max(0, Math.min(opts.maxPdfExtractions ?? 150, 500));
+    let done = 0;
+    for (const e of emails) {
+      if (done >= cap) break;
+      const path = e.post_id ? woPathByPost.get(e.post_id) : undefined;
+      const woCount = Number(e.wo_pdf_count || 0);
+      if (!path || woCount === 0) continue;
+      try {
+        const bytes = await opts.downloadPdf(path);
+        if (!bytes) continue;
+        done++;
+        const r = await extractPdfText(bytes);
+        if (r.mode === "text" && r.text) {
+          e.pdf_text = r.text;
+          // Only claim the cheap text path when this is the SOLE PDF (so we know every
+          // captured PDF is text); with multiple PDFs, stay conservative on document.
+          e.pdf_mode = (woCount === 1 && r.charCount >= PDF_TEXT_MIN_CHARS) ? "text" : "document";
+        } else {
+          e.pdf_mode = "document"; // has a WO PDF but no usable text layer (scanned)
+        }
+      } catch (_) {
+        // best-effort: leave pdf_mode undefined → derived from wo_pdf_count in replay
+      }
+    }
+  }
+
   const drafts: GoldenDraft[] = [...draftByPost.values()];
 
   return summarizeGoldenReplay({
@@ -403,6 +559,7 @@ export async function makesafeIntakeGoldenReplay(
     drafts,
     senderPatterns,
     matchSender,
+    rulesBySlug,
     nowIso: opts.nowIso,
     days,
     limit: opts.limit,
