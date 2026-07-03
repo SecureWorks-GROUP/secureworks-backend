@@ -42,13 +42,13 @@
 //   send_work_order     — Mark WO as sent to trade
 //   create_invoice      — POST invoice to Xero API
 //   complete_and_invoice — Mark complete + create Xero invoice (deposit-aware)
-//   create_deposit_invoice — Create deposit invoice (% of quoted total)
+//   create_deposit_invoice — Create deposit invoice (% of quoted total; DRAFT by default)
 //   sync_suppliers      — Pull suppliers from Xero contacts
 //
 //   ── Job Completion Package ──
 //   complete_job         — Mark job complete + GHL stage sync
-//   send_payment_link    — Get Xero online invoice URL + SMS to client
-//   send_acceptance_invoice — Create deposit invoice + send payment link in one call
+//   send_payment_link    — Get Xero online invoice URL + SMS to client (AUTHORISED invoices only — 409 otherwise)
+//   send_acceptance_invoice — Create AUTHORISED deposit invoice + send payment link in one call (Pay Now gated on chargeability)
 //   send_review_request  — SMS client with Google review link
 //
 //   ── Crew & Scheduling ──
@@ -13366,7 +13366,7 @@ async function createInvoice(client: any, body: any) {
         contact_name: contact || xeroInv?.Contact?.Name || null,
         invoice_number: invNumber,
         invoice_type: 'ACCREC',
-        status: invoiceStatus,
+        status: xeroInv?.Status || invoiceStatus,
         reference: reference || '',
         sub_total: invSubTotal,
         total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
@@ -13400,7 +13400,7 @@ async function createInvoice(client: any, body: any) {
     await client.from('job_events').insert({
       job_id: jId,
       event_type: 'invoice_created',
-      detail_json: { xero_invoice_id: xeroInvId, invoice_number: invNumber, status: invoiceStatus, total: invTotal, emailed: !!send_email },
+      detail_json: { xero_invoice_id: xeroInvId, invoice_number: invNumber, status: xeroInv?.Status || invoiceStatus, total: invTotal, emailed: !!send_email },
     })
     // Update job status to invoiced if complete
     await client.from('jobs')
@@ -13409,7 +13409,10 @@ async function createInvoice(client: any, body: any) {
       .eq('status', 'complete')
   }
 
-  return { success: true, xero_invoice_id: xeroInvId, invoice_number: invNumber, total: invTotal }
+  // Return the status Xero actually assigned (xeroInv.Status), not just what we
+  // requested. Callers that gate client-facing payment links (sendAcceptanceInvoice)
+  // must verify the invoice really came back AUTHORISED before emailing a Pay Now.
+  return { success: true, xero_invoice_id: xeroInvId, invoice_number: invNumber, total: invTotal, status: xeroInv?.Status || invoiceStatus }
 }
 
 // ── Sync Job Invoices — pull invoices from Xero for a specific job and link them ──
@@ -14806,6 +14809,10 @@ function buildScopeSummaryLine(job: any): string {
 // Creates a Xero ACCREC invoice for a configurable % of the quoted total,
 // with rich description, tracking category, and SWP-25042-DEP reference.
 // Sends via Xero email. Saves deposit_invoice_id + deposit_amount on jobs.
+// xero_status defaults to DRAFT (drafts-for-review for make-safe / manual / MCP
+// callers — do not change); sendAcceptanceInvoice defaults it to AUTHORISED.
+// Returns xero_status (the status Xero actually assigned) so callers can gate
+// client-facing payment links. See "Acceptance Deposit Invoice Invariant" in AGENTS.md.
 async function createDepositInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -14987,6 +14994,8 @@ async function createDepositInvoice(client: any, body: any) {
     quoted_total: quotedTotal,
     reference,
     description,
+    // Surface the Xero status so acceptance callers can gate the Pay Now email.
+    xero_status: invoiceResult.status,
   }
 }
 
@@ -21819,6 +21828,10 @@ async function completeJob(client: any, body: any) {
 }
 
 // ── send_payment_link: get Xero online invoice URL + SMS to client ──
+// AUTHORISED invoices only: throws ApiError 409 for any other status (DRAFT etc.),
+// because a non-AUTHORISED invoice's online link cannot take payment. Callers
+// (daily-digest deposit chaser, JARVIS sw_send_payment_link) must treat a
+// non-success response as "reminder NOT sent".
 async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -21859,6 +21872,10 @@ async function sendPaymentLink(client: any, body: any) {
 
   if (!invoices || invoices.length === 0) throw new Error('No invoice found for this job')
   const invoice = invoices[0]
+
+  if (invoice.status !== 'AUTHORISED') {
+    throw new ApiError(`Invoice ${invoice.invoice_number || invoice.xero_invoice_id} is ${invoice.status || 'not AUTHORISED'} in Xero, not AUTHORISED — its online link cannot take payment. Authorise the invoice in Xero (a just-authorised invoice may need a sync first), then resend the payment link.`, 409)
+  }
 
   // Get Xero online invoice URL
   const { accessToken, tenantId } = await getToken(client)
@@ -21918,6 +21935,15 @@ async function sendPaymentLink(client: any, body: any) {
     payment_url: onlineUrl,
     sms_sent: smsResult.success || false,
   }
+}
+
+// Acceptance-invoice charge gate. The branded "Pay Now" email/SMS may only go out
+// when the Xero invoice actually came back AUTHORISED AND we have a live OnlineInvoice
+// URL. A DRAFT status (or a missing URL) means the link is unpayable — emailing it
+// stranded clients with dead links (INV-0859/0687/0686). Pure so it can be unit-tested
+// without Xero/Supabase.
+export function _acceptanceInvoiceChargeable(xeroStatus: unknown, paymentUrl: unknown): boolean {
+  return xeroStatus === 'AUTHORISED' && typeof paymentUrl === 'string' && paymentUrl.length > 0
 }
 
 // ── send_acceptance_invoice: create deposit invoice + send payment link in one call ──
@@ -22046,7 +22072,13 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     })
   }
 
-  // Create the deposit invoice — Xero email DISABLED, we send branded email ourselves
+  // Create the deposit invoice — Xero email DISABLED, we send branded email ourselves.
+  // HOTFIX: the ACCEPTANCE deposit invoice MUST be AUTHORISED, not DRAFT. A DRAFT's
+  // Xero online link cannot take card payment and bank transfers against it land
+  // unreconciled — yet the self-accept flow emails a branded "Pay Now" against it.
+  // Default xero_status to AUTHORISED here (one authoritative place) rather than
+  // trusting each caller. createDepositInvoice keeps its DRAFT default for the
+  // make-safe / manual / MCP paths, where drafts-for-review are intentional.
   const invoiceResult = await createDepositInvoice(client, {
     job_id: jId,
     deposit_percent: depositPercent,
@@ -22055,6 +22087,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     send_email: false, // DISABLED — branded email via send-quote/send-invoice
     job_contact_id: body.job_contact_id || null,
     run_label: body.run_label || null,
+    xero_status: body.xero_status || 'AUTHORISED',
   })
 
   // Get Xero online invoice URL for payment
@@ -22070,6 +22103,52 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     paymentUrl = onlineResult?.OnlineInvoices?.[0]?.OnlineInvoiceUrl || ''
   } catch (e) {
     console.log('[send_acceptance_invoice] Could not get online invoice URL:', (e as Error).message)
+  }
+
+  // ── HOTFIX GUARD: never email a branded "Pay Now" against an unpayable invoice ──
+  // Only send the client-facing payment link when the Xero invoice ACTUALLY came
+  // back AUTHORISED (fix #1 requests it, but Xero is the source of truth) AND the
+  // OnlineInvoice URL fetch succeeded. A DRAFT link cannot take card payment and
+  // bank transfers against it land unreconciled — this stranded INV-0859/0687/0686
+  // with dead links. On failure: no client email/SMS, write a loud job_event so ops
+  // sees it, and return an error surface. The accept flow (send-quote /accept)
+  // handles a { success:false } response gracefully — it still confirms acceptance
+  // to the client and simply omits the payment link — so acceptance is preserved.
+  if (!_acceptanceInvoiceChargeable(invoiceResult.xero_status, paymentUrl)) {
+    const failureReason = invoiceResult.xero_status !== 'AUTHORISED'
+      ? 'invoice_not_authorised'
+      : 'online_invoice_url_unavailable'
+    console.error('[send_acceptance_invoice] ABORT client email — invoice not chargeable:', JSON.stringify({
+      job_id: jId,
+      xero_invoice_id: invoiceResult.xero_invoice_id,
+      invoice_number: invoiceResult.invoice_number,
+      xero_status: invoiceResult.xero_status || null,
+      payment_url_fetched: !!paymentUrl,
+      reason: failureReason,
+    }))
+    await client.from('job_events').insert({
+      job_id: jId,
+      event_type: 'acceptance_invoice_authorise_failed',
+      detail_json: {
+        xero_invoice_id: invoiceResult.xero_invoice_id,
+        invoice_number: invoiceResult.invoice_number,
+        xero_status: invoiceResult.xero_status || null,
+        payment_url_fetched: !!paymentUrl,
+        reason: failureReason,
+        job_contact_id: body.job_contact_id || null,
+        run_label: body.run_label || null,
+      },
+    })
+    return {
+      success: false,
+      error: 'Acceptance invoice was not authorised or has no payable link — client was NOT emailed. Needs manual review in Xero.',
+      reason: failureReason,
+      job_id: jId,
+      invoice_number: invoiceResult.invoice_number,
+      xero_invoice_id: invoiceResult.xero_invoice_id,
+      xero_status: invoiceResult.xero_status || null,
+      payment_url: paymentUrl || '',
+    }
   }
 
   // Resolve client details (prefer neighbour contact if provided)
