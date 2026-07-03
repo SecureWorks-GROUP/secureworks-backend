@@ -730,13 +730,17 @@ serve(async (req: Request) => {
         // every retry). The update is idempotent, only-if-unsent and scoped to
         // live sibling quotes on the primary's job, and sends no email.
         if (extraOptionIds.length > 0) {
-          const { error: optMarkErr } = await sb.from('job_documents')
+          let optMarkQuery = sb.from('job_documents')
             .update({ sent_to_client: true, sent_at: new Date().toISOString() })
             .in('id', extraOptionIds)
             .eq('job_id', doc.job_id)
             .eq('type', 'quote')
             .is('superseded_at', null)
             .not('sent_to_client', 'is', true)
+          optMarkQuery = doc.job_contact_id
+            ? optMarkQuery.eq('job_contact_id', doc.job_contact_id)
+            : optMarkQuery.is('job_contact_id', null)
+          const { error: optMarkErr } = await optMarkQuery
           if (optMarkErr) console.log('[send-quote] multi-option sibling mark-sent on already_sent path failed (non-blocking):', optMarkErr.message)
         }
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
@@ -753,13 +757,17 @@ serve(async (req: Request) => {
         let emailOptions: QuoteEmailOption[] | undefined
         let validatedExtraIds: string[] = []
         if (extraOptionIds.length > 0) {
-          const { data: extraDocs, error: extraErr } = await sb
+          let extraQuery = sb
             .from('job_documents')
             .select('id, job_id, type, superseded_at, quote_number, pdf_url, html_url, share_token, data_snapshot_json')
             .in('id', extraOptionIds)
             .eq('job_id', doc.job_id)
             .eq('type', 'quote')
             .is('superseded_at', null)
+          extraQuery = doc.job_contact_id
+            ? extraQuery.eq('job_contact_id', doc.job_contact_id)
+            : extraQuery.is('job_contact_id', null)
+          const { data: extraDocs, error: extraErr } = await extraQuery
           if (extraErr) console.log('[send-quote] multi-option extras fetch failed (email degrades to single-option):', extraErr.message)
           const byId = new Map<string, any>((extraDocs || []).map((d: any) => [d.id, d]))
           validatedExtraIds = extraOptionIds.filter((id) => byId.has(id))
@@ -870,13 +878,17 @@ serve(async (req: Request) => {
           // picker gates on it — which is why the already_sent retry path above
           // re-runs this same idempotent mark to cover a crash landing here.
           if (validatedExtraIds.length > 0) {
-            const { error: optMarkErr } = await sb.from('job_documents')
+            let optMarkQuery = sb.from('job_documents')
               .update({ sent_to_client: true, sent_at: new Date().toISOString() })
               .in('id', validatedExtraIds)
               .eq('job_id', doc.job_id)
               .eq('type', 'quote')
               .is('superseded_at', null)
               .not('sent_to_client', 'is', true)
+            optMarkQuery = doc.job_contact_id
+              ? optMarkQuery.eq('job_contact_id', doc.job_contact_id)
+              : optMarkQuery.is('job_contact_id', null)
+            const { error: optMarkErr } = await optMarkQuery
             if (optMarkErr) console.log('[send-quote] multi-option sibling mark-sent failed (non-blocking):', optMarkErr.message)
           }
         } else {
