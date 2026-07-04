@@ -2962,17 +2962,26 @@ function buildQuoteEmail(opts: {
       ${opts.customMessage ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.customMessage}</p>` : ''}
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
         Thank you for giving us the opportunity to quote on your ${opts.projectType} project${opts.suburb ? ' in ' + opts.suburb : ''}.
-        You can view your detailed quote using the button below.
+        You can view your detailed quote online, or download it as a PDF, using the buttons below.
       </p>
 
-      <!-- CTA Button -->
-      <table cellpadding="0" cellspacing="0" style="margin:0 auto 24px;">
+      <!-- CTA Button (view online) -->
+      <table cellpadding="0" cellspacing="0" style="margin:0 auto 8px;">
         <tr><td style="background:#F15A29;border-radius:8px;">
           <a href="${opts.viewUrl}" style="display:inline-block;padding:14px 32px;color:#fff;text-decoration:none;font-size:16px;font-weight:600;">
             View Your Quote
           </a>
         </td></tr>
       </table>
+      ${opts.pdfUrl ? `
+      <!-- Download PDF Button -->
+      <table cellpadding="0" cellspacing="0" style="margin:0 auto 24px;">
+        <tr><td style="background:#293C46;border-radius:8px;">
+          <a href="${opts.pdfUrl}" style="display:inline-block;padding:14px 32px;color:#fff;text-decoration:none;font-size:16px;font-weight:600;">
+            Download your PDF quote
+          </a>
+        </td></tr>
+      </table>` : ''}
 
       <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
 
