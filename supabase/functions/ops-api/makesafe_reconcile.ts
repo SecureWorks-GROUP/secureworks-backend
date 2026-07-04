@@ -100,12 +100,14 @@ export interface ReconAlert {
   //   missing_post  — (D2) a group post id absent from the emails table
   //   ambiguous     — a normalised candidate match with no corroboration (needs_review)
   //   canary_missing — (D4) expected canary marker not in store within SLA
+  //   extraction_degraded — (B1) intake classifier degraded OR scan stalled (health row)
   direction:
     | "email_no_job"
     | "job_no_email"
     | "missing_post"
     | "ambiguous"
-    | "canary_missing";
+    | "canary_missing"
+    | "extraction_degraded";
   severity: Severity;
   ref: string | null;
   detail: string;
@@ -1710,4 +1712,189 @@ export async function makesafeDraftHeartbeat(
   }
 
   return { stalled, shouldAlert, alerted: shouldAlert, detail };
+}
+
+// ── B1 — EXTRACTION-HEALTH ALARM (dead key / scan stall) ────────────────────────
+// The v1 sin: the intake classifier key died and the board silently filled with
+// empty/degraded cards for weeks. Post-fix, scanSesMakesafes writes a fail-loud
+// makesafe_intake_health row (extraction_status=degraded on a dead key), but NOTHING
+// watches it — the D5 draft heartbeat stays quiet because degraded runs still create
+// (needs_review) drafts (recentDraftCount>0). This alarm is the missing watcher: it
+// reads that health row on the SAME 15-min canary cron and fires the SAME Telegram +
+// business_events ERROR path when the classifier is degraded OR the scan has stalled
+// (last_scan_at older than the freshness budget — e.g. the tail-call is 500ing so
+// writeIntakeHealth never runs). No new cron, table, or channel — one coherent seam.
+
+// Freshness budget: the ses poll runs every 2 min and writes last_scan_at on every
+// completed scan, so a last_scan_at older than this means the scan is not completing.
+export const EXTRACTION_STALE_MINUTES = 10;
+
+export interface ExtractionHealthInput {
+  // makesafe_intake_health.extraction_status: 'ok' | 'degraded' | 'unknown'.
+  extractionStatus: string | null | undefined;
+  extractionDegradedReason: string | null | undefined;
+  // ISO timestamp the row went degraded (answers "how long has the key been dead").
+  degradedSince: string | null | undefined;
+  // ISO timestamp of the last completed scan (freshness signal).
+  lastScanAt: string | null | undefined;
+  // ISO timestamp of the last extraction-degraded alert (null = never alerted).
+  lastAlertAt: string | null;
+  nowIso?: string;
+}
+
+export interface ExtractionHealthResult {
+  // True when the classifier is degraded OR the scan has stalled.
+  alarm: boolean;
+  // 'degraded' | 'stale_scan' | 'unknown_never_scanned' | null.
+  reason: string | null;
+  // Whether to emit this run (alarm AND not rate-limited).
+  shouldAlert: boolean;
+  detail: string;
+}
+
+// Pure logic — no DB, injectable for unit tests.
+export function checkExtractionHealth(input: ExtractionHealthInput): ExtractionHealthResult {
+  const {
+    extractionStatus,
+    extractionDegradedReason,
+    degradedSince,
+    lastScanAt,
+    lastAlertAt,
+    nowIso,
+  } = input;
+  const now = nowIso ? Date.parse(nowIso) : Date.now();
+  const status = String(extractionStatus || "").toLowerCase();
+
+  let reason: string | null = null;
+  let detail = "";
+
+  if (status === "degraded") {
+    reason = "degraded";
+    const sinceTxt = degradedSince ? ` since ${degradedSince}` : "";
+    detail =
+      `make-safe intake extraction DEGRADED (reason: ${extractionDegradedReason || "unknown"})${sinceTxt}. ` +
+      `The classifier is not producing valid extractions — new intake cards are empty/needs_review dockets until it recovers.`;
+  } else {
+    // Not degraded — check scan freshness. A stale last_scan_at means the scan is not
+    // completing (tail-call 500 / crash), so writeIntakeHealth never runs.
+    const scanMs = lastScanAt ? Date.parse(lastScanAt) : NaN;
+    if (Number.isNaN(scanMs)) {
+      // Never scanned (status 'unknown' with no last_scan_at) — surface once so a
+      // never-started scan is not silent. If a valid last_scan_at is simply absent on
+      // an otherwise-ok row, treat that as stale too.
+      if (status === "unknown" || !lastScanAt) {
+        reason = "unknown_never_scanned";
+        detail =
+          `make-safe intake health has no last_scan_at (extraction_status=${status || "unknown"}). ` +
+          `The intake scan may never have completed a run.`;
+      }
+    } else {
+      const ageMin = (now - scanMs) / 60_000;
+      if (ageMin > EXTRACTION_STALE_MINUTES) {
+        reason = "stale_scan";
+        detail =
+          `make-safe intake scan STALLED: last completed scan was ${Math.round(ageMin)} min ago ` +
+          `(> ${EXTRACTION_STALE_MINUTES} min budget on a 2-min cron). The email->card pipeline is not running ` +
+          `(tail-call failing / scan crashing) even though the classifier key is not flagged degraded.`;
+      }
+    }
+  }
+
+  const alarm = reason !== null;
+  if (!alarm) {
+    return {
+      alarm: false,
+      reason: null,
+      shouldAlert: false,
+      detail: `intake extraction healthy: status=${status || "unknown"}, last_scan_at=${lastScanAt || "n/a"}`,
+    };
+  }
+
+  // Rate-limit: reuse the draft-heartbeat resend window.
+  let shouldAlert = true;
+  if (lastAlertAt) {
+    const lastMs = Date.parse(lastAlertAt);
+    if (!Number.isNaN(lastMs)) {
+      const hoursSinceAlert = (now - lastMs) / 3_600_000;
+      if (hoursSinceAlert < HEARTBEAT_RESEND_HOURS) shouldAlert = false;
+    }
+  }
+
+  return { alarm, reason, shouldAlert, detail };
+}
+
+// DB-bound B1 alarm. Reads the single makesafe_intake_health row, checks
+// heartbeat_state for rate-limiting under the 'extraction_degraded' key, emits the
+// standard ERROR alert if needed, then records state. Mirrors makesafeDraftHeartbeat.
+export const EXTRACTION_HEALTH_STATE_KEY = "extraction_degraded";
+
+export async function makesafeExtractionHealthAlarm(
+  client: SB,
+  sink: AlertSink,
+  opts: { nowIso?: string } = {},
+): Promise<{ alarm: boolean; reason: string | null; shouldAlert: boolean; alerted: boolean; detail: string }> {
+  const now = opts.nowIso ? new Date(Date.parse(opts.nowIso)) : new Date();
+
+  // Read the single-row health record. FAIL CLOSED: a DB error must not silently
+  // suppress the alarm — THROW so the caller fails closed (500) rather than swallow a
+  // possible dead-key state.
+  const { data: health, error: healthErr } = await client
+    .from("makesafe_intake_health")
+    .select("extraction_status, degraded_reason, degraded_since, last_scan_at")
+    .eq("id", true)
+    .maybeSingle();
+  if (healthErr) throw new Error(`extraction health read failed: ${healthErr.message}`);
+
+  // Read last-alert-at from state (gracefully absent — table may not exist yet).
+  let lastAlertAt: string | null = null;
+  try {
+    const { data: stateRow } = await client
+      .from("makesafe_heartbeat_state")
+      .select("last_alert_at")
+      .eq("key", EXTRACTION_HEALTH_STATE_KEY)
+      .maybeSingle();
+    lastAlertAt = stateRow?.last_alert_at ?? null;
+  } catch {
+    // Table absent or RLS issue — treat as never alerted (safe: may over-alert once).
+  }
+
+  const { alarm, reason, shouldAlert, detail } = checkExtractionHealth({
+    extractionStatus: health?.extraction_status,
+    extractionDegradedReason: health?.degraded_reason,
+    degradedSince: health?.degraded_since,
+    lastScanAt: health?.last_scan_at,
+    lastAlertAt,
+    nowIso: now.toISOString(),
+  });
+
+  if (shouldAlert) {
+    const alert: ReconAlert = {
+      direction: "extraction_degraded",
+      severity: "ERROR",
+      ref: reason,
+      detail,
+    };
+    await emitAlerts(client, sink, "B1-extraction-health", [alert]);
+    try {
+      await client.from("makesafe_heartbeat_state").upsert({
+        key: EXTRACTION_HEALTH_STATE_KEY,
+        last_alert_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      }, { onConflict: "key" });
+    } catch {
+      // Non-fatal — over-alerting beats a silent stall.
+    }
+  } else if (!alarm) {
+    try {
+      await client.from("makesafe_heartbeat_state").upsert({
+        key: EXTRACTION_HEALTH_STATE_KEY,
+        last_ok_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      }, { onConflict: "key" });
+    } catch {
+      // Non-fatal.
+    }
+  }
+
+  return { alarm, reason, shouldAlert, alerted: shouldAlert, detail };
 }

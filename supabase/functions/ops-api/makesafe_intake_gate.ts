@@ -113,6 +113,57 @@ export function classifyReportType(
   return "unknown_report";
 }
 
+// ── B2 — MODEL-COMMITTED report_type (classification commitment) ────────────────
+// The Haiku extraction schema now asks the model to COMMIT a report_type from a
+// fixed enum, using the email body + PDF text (which classifyReportType never sees).
+// Allowed model values and how they map back to the stored report_type space:
+//   roof_report | assessment_report | temp_fence | re_attend  -> committed as-is
+//   general_makesafe | not_a_report                           -> null (a physical
+//       make-safe work order, NOT a report-only card; storing null keeps it out of
+//       the "unclassified report" pile and never forces report-only handling).
+//   (anything else / null / "unknown")                        -> model ABSTAINED.
+// On abstain we fall back to the keyword classifyReportType(subject, body); its
+// unknown_report result is PRESERVED as the safety valve for genuine ambiguity.
+const MODEL_REPORT_TYPE_ALIASES: Readonly<Record<string, ReportType | "general_makesafe">> = {
+  roof_report: "roof_report",
+  roof: "roof_report",
+  assessment_report: "assessment_report",
+  assessment: "assessment_report",
+  assessment_report_quote: "assessment_report",
+  temp_fence: "temp_fence",
+  temp_fence_makesafe: "temp_fence",
+  re_attend: "re_attend",
+  reattend: "re_attend",
+  general_makesafe: "general_makesafe",
+  general: "general_makesafe",
+  make_safe: "general_makesafe",
+  makesafe: "general_makesafe",
+  not_a_report: "general_makesafe",
+  none: "general_makesafe",
+};
+
+/**
+ * Resolve the report_type to store, preferring the model's committed classification
+ * (body + PDF aware) and demoting the subject/body keyword heuristic to a fallback
+ * used ONLY when the model abstains. Returns a ReportType string or null (null = a
+ * general physical make-safe, i.e. not a report-only card). unknown_report is only
+ * ever returned by the keyword fallback and is preserved as the needs_review valve.
+ */
+export function resolveCommittedReportType(
+  modelReportType: string | null | undefined,
+  subject: string | null | undefined,
+  body: string | null | undefined,
+): ReportType | null {
+  const raw = String(modelReportType ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const mapped = raw ? MODEL_REPORT_TYPE_ALIASES[raw] : undefined;
+  if (mapped) {
+    // A committed general/physical make-safe is stored as null (not a report-only type).
+    return mapped === "general_makesafe" ? null : mapped;
+  }
+  // Model abstained (empty / "unknown_report" / unrecognised) — fall back to keywords.
+  return classifyReportType(subject, body);
+}
+
 // ── PRACTICAL JOB FAMILY classifier ──────────────────────────────────────────
 // This is the operator-facing four-way taxonomy. It deliberately does NOT replace
 // report_type yet; it maps the older report_type/work-order signals into the
@@ -232,6 +283,39 @@ const NEW_WORK_ORDER_SUBJECT_PHRASES: readonly RegExp[] = [
   // "Make Safe - <…> - Job No <ref>" — the AJS/other "Job No" new-WO format.
   /make\s*safe\b.*\bjob\s*(no|number|#)/i,
 ] as const;
+
+// ── B4 — KNOWN-BUILDER NOISE (pricing / disregard / enquiry replies) ───────────
+// Narrow, high-confidence phrases for builder follow-ups that are NOT a work order
+// or a report: "please disregard", "pricing query/enquiry". These currently ride in
+// on a builder ref (matchedCompany!=null -> deterministic evidence) and land a junk
+// needs_review card. This list is deliberately conservative and is only ever applied
+// when NO work-order PDF and NO positive new-WO subject signal is present (see
+// isGenuineNewWorkOrder step 3.5) — so it FAILS OPEN: a WO PDF or a real new-WO
+// subject always wins. Deliberately NOT matching bare "quote" (real assessment+quote
+// reports use it) or "query" alone (too broad).
+const KNOWN_BUILDER_NOISE_SUBJECT_PHRASES: readonly RegExp[] = [
+  /please\s+disregard/i, // "please disregard previous"
+  /\bdisregard\s+(this|the\s+)?(previous|last|earlier|below)/i,
+  /pricing\s+(query|queries|enquiry|enquiries|question|questions|request)/i,
+  /\bprice\s+(query|enquiry|question)/i,
+] as const;
+
+/**
+ * True when the subject is a recognised known-builder NOISE reply (pricing enquiry /
+ * "please disregard"). Narrow by design. The caller (isGenuineNewWorkOrder) only
+ * consults this when there is no WO PDF and no positive new-WO subject, so it can
+ * never drop a genuine work order.
+ */
+export function subjectIsKnownBuilderNoise(
+  subject: string | null | undefined,
+): boolean {
+  const s = (subject || "").trim();
+  if (!s) return false;
+  for (const re of KNOWN_BUILDER_NOISE_SUBJECT_PHRASES) {
+    if (re.test(s)) return true;
+  }
+  return false;
+}
 
 /**
  * True when the subject carries a reply/forward prefix. This is intentionally
@@ -433,6 +517,20 @@ export function isGenuineNewWorkOrder(
     return {
       ok: true,
       reason: "new_work_order_subject",
+      kind: "work_order",
+      reportSubjectPattern,
+    };
+  }
+
+  // 3.5) B4 NOISE GATE — a known-builder pricing/enquiry/"please disregard" reply
+  //      with NO WO PDF and NO new-WO subject is not a work order or a report. Drop
+  //      it here so it never becomes a junk needs_review card. FAIL OPEN: this only
+  //      runs after the PDF and new-WO-subject keeps above, so any real work order
+  //      has already returned ok:true; a report-pattern email still reaches step 4.
+  if (!hasWorkOrderPdf && subjectIsKnownBuilderNoise(s)) {
+    return {
+      ok: false,
+      reason: "known_builder_noise",
       kind: "work_order",
       reportSubjectPattern,
     };

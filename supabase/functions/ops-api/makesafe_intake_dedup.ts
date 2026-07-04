@@ -232,12 +232,30 @@ function simpleHash(s: string): string {
   return h.toString(36);
 }
 
+// B3 (dual-capture close-out) — "Job No <NNNNN>" work-order number lifted from the
+// subject. This is the AJS/"Make Safe - <Suburb> - Job No 68592" archetype whose ref
+// prefix is NOT in SUBJECT_REF_RE (parseSubjectFields returns null), so pre-B3 its
+// dual-capture twin fell all the way to the body-hash discriminator — and the two
+// capture paths' bodies do NOT always normalise identically (live: 7 of 116 twin
+// windows differ, ALL of them this "Job No" builder), so the twin survived as two
+// drafts. The job number is a WO-UNIQUE token shared verbatim by both capture rows,
+// so using it as the fingerprint discriminator collapses the twin WITHOUT ever
+// merging two genuinely different work orders (different jobs = different numbers).
+const SUBJECT_JOB_NUMBER_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*(\d{3,7})\b/i;
+
+/** Lift a bare "Job No <digits>" work-order number from a subject; null when absent. */
+export function subjectJobNumber(subject: string | null | undefined): string | null {
+  const m = SUBJECT_JOB_NUMBER_RE.exec(String(subject ?? ""));
+  return m ? m[1] : null;
+}
+
 /**
  * M1.5 D0 — DUAL-CAPTURE content fingerprint. Stable across the group-post and
  * mailbox-fallback capture paths for the SAME email:
  *   normalise(from_email) | normalise(subject) | received-minute | discriminator
- * where the DISCRIMINATOR is the parsed subject/stored ref when present, else a hash of
- * the normalised body. It exists so two GENUINELY DIFFERENT work orders — same sender,
+ * where the DISCRIMINATOR is the parsed subject/stored ref when present, else a bare
+ * "Job No <NNNNN>" work-order number (B3), else a hash of the normalised body. It
+ * exists so two GENUINELY DIFFERENT work orders — same sender,
  * same minute, identical generic subject ("Make safe request") — can NEVER collapse
  * (H2): a different job has a different ref, and a ref-less different job has a
  * different body. Returns "" (fail OPEN, not deduped) when sender/subject/received are
@@ -258,8 +276,14 @@ export function contentFingerprint(
   // Prefer the stored/parsed ref (job-unique); the caller passes the SAME subject we
   // parse here, so existing drafts and candidates resolve to the same ref.
   const ref = normaliseRef(externalRef) || normaliseRef(parseSubjectFields(subj).external_ref);
+  // B3: a "Job No <NNNNN>" work-order number (AJS archetype) is also a WO-unique
+  // discriminator shared verbatim across both capture paths — checked BEFORE the body
+  // hash so a "Job No" twin whose bodies diverge across paths still collapses. A
+  // different work order carries a different job number, so this never merges two jobs.
+  const jobNo = ref ? null : subjectJobNumber(subj);
   let disc = "";
   if (ref) disc = `r:${ref}`;
+  else if (jobNo) disc = `j:${jobNo}`;
   else {
     // Normalise the body the SAME way both sides are stored, so a candidate's RAW body
     // and an existing draft's body_preview hash identically (H2-residual).
