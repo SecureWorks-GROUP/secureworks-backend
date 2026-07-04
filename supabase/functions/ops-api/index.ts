@@ -157,6 +157,7 @@ import {
   makesafeEmailReconcileFullInventory as _makesafeEmailReconcileFullInventory,
   makesafeEmailCanary as _makesafeEmailCanary,
   makesafeDraftHeartbeat as _makesafeDraftHeartbeat,
+  makesafeExtractionHealthAlarm as _makesafeExtractionHealthAlarm,
 } from './makesafe_reconcile.ts'
 import {
   makesafeIntakeReconciliation as _makesafeIntakeReconciliation,
@@ -243,11 +244,15 @@ import {
   subjectHasReplyForwardPrefix as _subjectHasReplyForwardPrefix,
   subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
   classifyReportType as _classifyReportType,
+  resolveCommittedReportType as _resolveCommittedReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
 } from './makesafe_intake_gate.ts'
+// B5 SLA: pure email-received -> card-created latency percentiles for the health row
+// + the 24h intake_health rollup. See makesafe_intake_sla.ts.
+import { computeLatencySla as _computeLatencySla } from './makesafe_intake_sla.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
 // scan. See makesafe_intake_dedup.ts.
@@ -2108,7 +2113,11 @@ if (import.meta.main) serve(async (req: Request) => {
         // every-15-min cadence, no extra cron needed).
         const canaryResult = await _makesafeEmailCanary(client, makeReconAlertSink())
         const heartbeatResult = await _makesafeDraftHeartbeat(client, makeReconAlertSink())
-        return json({ ...canaryResult, heartbeat: heartbeatResult })
+        // B1: extraction-health alarm on the SAME 15-min canary cron. Fires the same
+        // Telegram + business_events ERROR path when the classifier is degraded OR the
+        // scan has stalled (last_scan_at stale) — the watcher the health row lacked.
+        const extractionHealthResult = await _makesafeExtractionHealthAlarm(client, makeReconAlertSink())
+        return json({ ...canaryResult, heartbeat: heartbeatResult, extraction_health: extractionHealthResult })
       }
       // D5 draft-creation heartbeat — standalone action for manual invocation and
       // future dedicated scheduling. Detects "builder emails arriving but 0 new
@@ -10243,6 +10252,17 @@ async function writeIntakeHealth(client: any, input: {
       cache_creation_input_tokens: number
     }
   }
+  // B5 SLA: this scan's email-received -> draft-created latency snapshot (seconds) +
+  // the count of candidates deferred past the per-run scan budget. Optional +
+  // pre-migration-safe: written into the FULL row only, so a pre-migration base-only
+  // retry silently drops them (same posture as the M1.5 cost columns).
+  sla?: {
+    p50_sec: number
+    p95_sec: number
+    max_sec: number
+    samples: number
+  }
+  cappedCandidates?: number
 }): Promise<void> {
   try {
     const nowIso = new Date().toISOString()
@@ -10299,6 +10319,18 @@ async function writeIntakeHealth(client: any, input: {
       row.total_output_tokens = n(prevCost?.total_output_tokens) + u.output_tokens
       row.total_cache_read_tokens = n(prevCost?.total_cache_read_tokens) + u.cache_read_input_tokens
       row.total_cache_write_tokens = n(prevCost?.total_cache_write_tokens) + u.cache_creation_input_tokens
+    }
+    // B5 SLA: last-scan latency snapshot + capped-candidate count. In the FULL row
+    // only (dropped by the base-only retry pre-migration). Written even on a quiet scan
+    // (samples 0 -> all-zero) so the metric is always current.
+    if (input.sla) {
+      row.last_scan_latency_p50_sec = input.sla.p50_sec
+      row.last_scan_latency_p95_sec = input.sla.p95_sec
+      row.last_scan_latency_max_sec = input.sla.max_sec
+      row.last_scan_latency_samples = input.sla.samples
+    }
+    if (typeof input.cappedCandidates === 'number') {
+      row.last_scan_capped_candidates = input.cappedCandidates
     }
     // H1 (INVARIANT #5 — health must never go silently dark): supabase-js does NOT throw
     // on a PostgREST error; it returns {error}. In the window between merge->auto-deploy
@@ -11690,9 +11722,10 @@ async function scanSesMakesafes(client: any) {
             type: 'text',
             cache_control: { type: 'ephemeral' },
             text: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
-Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "report_type": "roof_report"|"assessment_report"|"temp_fence"|"re_attend"|"general_makesafe"|"not_a_report", "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
 Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
 Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
+For report_type, COMMIT the single best classification of the work using the body AND the PDF: "roof_report" (roof report/inspection), "assessment_report" (assessment / assess-and-quote / scope of works), "temp_fence" (temporary fence collect/pickup), "re_attend" (return visit to an existing job), "general_makesafe" (a physical make-safe work order that is not primarily a report), or "not_a_report". Do not leave it blank; pick "general_makesafe" for an ordinary physical make-safe.
 For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
 For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
 If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
@@ -11951,9 +11984,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       }
     }
 
+    // B2 (classification commitment): prefer the model's COMMITTED report_type
+    // (body + PDF aware) over the subject/body keyword heuristic; the keyword
+    // classifier is the fallback used only when the model abstains, and its
+    // unknown_report stays the needs_review safety valve. This is what stops the
+    // high-volume MLB "Our Ref:" cards from piling up unclassified.
     let draftReportType: string | null = null
     if (tagReportType) {
-      draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
+      draftReportType = _resolveCommittedReportType(
+        extraction.report_type,
+        subject,
+        builderEmailTextForTrade || bodyPreview,
+      )
     }
     const draftJobFamily = _classifyMakeSafeJobFamily(
       subject,
@@ -12277,6 +12319,11 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
   })
   const scannedMarked = markResult.marked
 
+  // B5 SLA: latency of the drafts created THIS scan (email received_at -> row
+  // created_at). Uses the inserted rows accumulated in newDrafts (each carries both
+  // timestamps). Pure + deterministic; excludes rows missing a timestamp.
+  const scanSla = _computeLatencySla(newDrafts as any[])
+
   // D-a: write the fail-loud health banner every run so a dead key is visible in
   // intake_health + the morning report, and auto-file stays suppressed until it recovers.
   await writeIntakeHealth(client, {
@@ -12287,6 +12334,9 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     autoFiled: autoApproved.length,
     // M1.5 cost ledger: this scan's model-call/skip split + token totals.
     cost: scanCostTotals,
+    // B5 SLA: this scan's arrival->card latency snapshot + deferred-candidate count.
+    sla: scanSla,
+    cappedCandidates,
   })
 
   return {
@@ -12384,6 +12434,20 @@ async function intakeHealth(client: any) {
     cost24h = { error: (e as Error).message }
   }
 
+  // B5 SLA: 24h rolling email-received -> card-created latency, computed on read from
+  // the per-draft timestamps (same "24h rollups on read" pattern as the cost ledger).
+  // This is the daily-provable statement: "N cards in 24h, p95 arrival->card M sec".
+  let sla24h: any = null
+  try {
+    const { data: slaDrafts } = await client.from('makesafe_intake_drafts')
+      .select('received_at, created_at')
+      .gte('created_at', since24h)
+      .limit(5000)
+    sla24h = _computeLatencySla(slaDrafts || [])
+  } catch (e) {
+    sla24h = { error: (e as Error).message }
+  }
+
   let unaccounted: any = null
   try {
     const inv = await _makesafeIntakeReconcileInvariant(client, { windowDays: 7, limitUnaccounted: 25 })
@@ -12430,6 +12494,20 @@ async function intakeHealth(client: any) {
     last_24h: {
       drafts_created: drafts24h ?? 0,
       auto_filed: autoFiled24h ?? 0,
+    },
+    // B5 SLA: the email->card latency proof. `last_scan` is the snapshot written every
+    // 2-min run; `last_24h` is the daily-provable rolling percentile over per-draft
+    // timestamps. `capped_candidates` on the last scan flags a draining backlog.
+    sla: {
+      last_scan: {
+        latency_p50_sec: health?.last_scan_latency_p50_sec ?? null,
+        latency_p95_sec: health?.last_scan_latency_p95_sec ?? null,
+        latency_max_sec: health?.last_scan_latency_max_sec ?? null,
+        latency_samples: health?.last_scan_latency_samples ?? null,
+        capped_candidates: health?.last_scan_capped_candidates ?? null,
+      },
+      last_24h: sla24h,
+      target_sec: 120,
     },
     // M1.5 cost ledger. `last_24h` is the Captain's headline (model calls, the
     // template-skip share, tokens, and estimated USD at the Haiku 4.5 rate constants);
