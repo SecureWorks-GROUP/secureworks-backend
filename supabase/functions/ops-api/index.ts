@@ -187,6 +187,12 @@ import {
   parseSubjectFields as _parseSubjectFields,
   resolveSubjectRef as _resolveSubjectRef,
 } from './makesafe_template_parser.ts'
+// Cost-leak fix: extract-at-most-once marker helpers (mark-eligibility rule + the
+// batched, chunked, pre-migration-safe, idempotent DB write).
+import {
+  scanMarkEligible as _scanMarkEligible,
+  markEmailsScanned as _markEmailsScanned,
+} from './makesafe_intake_scan_marker.ts'
 import {
   readUsage as _readUsage,
   emailCostRecord as _emailCostRecord,
@@ -11189,15 +11195,36 @@ async function scanSesMakesafes(client: any) {
   // tombstoned rows, paginated (PostgREST 1000-row cap) so a busy week isn't
   // silently truncated. Mirrors makesafe_new_emails (GAP-1) sourcing.
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-  const emailRows = await _fetchAllRows<any>(
-    () => client.from('emails')
-      .select('post_id, mailbox, subject, body_preview, body_content, body_content_type, from_email, from_name, has_attachments, received_at, pii_purged_at')
-      .eq('mailbox', SES_MAILBOX)
-      .is('pii_purged_at', null)
-      .gte('received_at', sevenDaysAgo)
-      .order('received_at', { ascending: false }),
-    'emails (intake scan) read',
-  )
+  // Cost-leak fix: read the extract-at-most-once marker (makesafe_scanned_at) so an
+  // already-scanned email is skipped before the model call. PRE-MIGRATION SAFE: if the
+  // column doesn't exist yet (the code auto-deploys before the migration is hand-
+  // applied), fall back to the base select and behave exactly as before (no marker).
+  const EMAILS_BASE_COLS = 'post_id, mailbox, subject, body_preview, body_content, body_content_type, from_email, from_name, has_attachments, received_at, pii_purged_at'
+  let scannedColumnAvailable = true
+  let emailRows: any[]
+  try {
+    emailRows = await _fetchAllRows<any>(
+      () => client.from('emails')
+        .select(`${EMAILS_BASE_COLS}, makesafe_scanned_at`)
+        .eq('mailbox', SES_MAILBOX)
+        .is('pii_purged_at', null)
+        .gte('received_at', sevenDaysAgo)
+        .order('received_at', { ascending: false }),
+      'emails (intake scan) read',
+    )
+  } catch (e) {
+    scannedColumnAvailable = false
+    console.warn('[ops-api] emails read with makesafe_scanned_at failed (pre-migration?); falling back to base select:', (e as Error).message)
+    emailRows = await _fetchAllRows<any>(
+      () => client.from('emails')
+        .select(EMAILS_BASE_COLS)
+        .eq('mailbox', SES_MAILBOX)
+        .is('pii_purged_at', null)
+        .gte('received_at', sevenDaysAgo)
+        .order('received_at', { ascending: false }),
+      'emails (intake scan) read (fallback)',
+    )
+  }
 
   // Map each emails row into the SAME shape the rest of the loop expects (it was
   // written against the Graph message shape: msg.id, msg.from.emailAddress.*,
@@ -11215,6 +11242,7 @@ async function scanSesMakesafes(client: any) {
     receivedDateTime: row.received_at,
     hasAttachments: row.has_attachments,
     _post_id: row.post_id, // internal — used for the private-bucket attachment lookup
+    _makesafe_scanned_at: row.makesafe_scanned_at ?? null, // extract-at-most-once marker
   }))
 
   // INBOUND-ONLY contamination filter (BEFORE sender/subject match): ses@ is a
@@ -11345,6 +11373,11 @@ async function scanSesMakesafes(client: any) {
   const autoApproveFailed: any[] = []
   // M1.5 cost ledger: per-scan running totals of model calls / template skips / tokens.
   let scanCostTotals = _emptyScanTotals()
+  // Cost-leak fix: emails skipped because they were already extracted (marker set), and
+  // the post_ids to STAMP as scanned this run (successful extraction/classification —
+  // draft or not). Batch-marked at the end so each email is extracted at most once.
+  let skippedAlreadyScanned = 0
+  const scannedEmailIds: string[] = []
 
   // D-d kill switch (Captain D1 default TRUE): the DB flag decides whether the scan
   // may auto-file clean drafts this run. Read ONCE per scan.
@@ -11365,6 +11398,15 @@ async function scanSesMakesafes(client: any) {
   let anyExtractionSucceeded = false
 
   for (const msg of fairMatchedMessages) {
+    // Cost-leak fix: EXTRACT-AT-MOST-ONCE. If this email was already scanned in a prior
+    // run (marker set), skip it BEFORE the model call — this is what stops the ~4
+    // non-work-order emails (no draft, so nothing for the draft-dedup to catch) being
+    // re-extracted every 2-minute cycle. Cheap check, no cost.
+    if (msg._makesafe_scanned_at) {
+      skippedAlreadyScanned++
+      skippedItems.push({ id: msg.id, subject: msg.subject || null, reason: 'already_scanned' })
+      continue
+    }
     // Cheap pre-extraction dedup on the ids AND the M1.5 D0 dual-capture content
     // fingerprint (sender + subject + received minute) — the fingerprint catches the
     // group-post / mailbox-fallback twin of the same email BEFORE the model call, so
@@ -11545,6 +11587,14 @@ async function scanSesMakesafes(client: any) {
     let extractionParser: 'template' | 'none' = 'none'
     let modelCalled = false
     let callUsage = { ..._ZERO_USAGE }
+    // Cost-leak fix: per-email extraction signals -> scanMarkEligible decides whether to
+    // stamp the scanned marker (extract-at-most-once). A dead/absent key or an
+    // auth/transient failure leaves the email UNMARKED so it retries when the key
+    // recovers (fail-loud backfill preserved).
+    let emailTemplateParsed = false
+    let emailModelValidResult = false
+    let emailAuthFailed = false
+    let emailTransientFailed = false
     const templateSlug = (matchedCompany?.slug || '').toLowerCase()
 
     // M1.5 LEVER 1 — local PDF text extraction. Pull the text layer out of each
@@ -11597,6 +11647,7 @@ async function scanSesMakesafes(client: any) {
       extractionParser = 'template'
       modelCalled = false
       anyExtractionSucceeded = true
+      emailTemplateParsed = true
     } else if (ANTHROPIC_API_KEY && !keyDegraded) {
       // D-a: run the classifier ONLY while the key is healthy. If the key is unset the
       // guard is false from the first email; if it dies mid-run the catch flips
@@ -11656,6 +11707,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           confidence = extraction.confidence || 'low'
           missingFields = extraction.missing_fields || []
           anyExtractionSucceeded = true
+          emailModelValidResult = true
         }
       } catch (e) {
         const em = (e as Error).message || String(e)
@@ -11665,11 +11717,13 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
           // loop). This is the exact failure that went silent for weeks in v1.
           keyDegraded = true
           keyDegradedReason = 'auth_failed'
+          emailAuthFailed = true
           console.error('[ops-api] make-safe extraction AUTH FAILURE — ANTHROPIC_API_KEY dead; degrading intake:', em)
         } else {
           // Transient (network / 5xx / bad JSON). Flag THIS draft and keep scanning; the
           // 2-minute cron retries it next cycle. Not a system-wide degradation.
           extraction._extraction_error = em.slice(0, 200)
+          emailTransientFailed = true
           console.error('[ops-api] make-safe extraction failed (transient, kept for review):', em)
         }
       }
@@ -11723,6 +11777,23 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) {
         extraction.site_suburb = subjectFields.site_suburb
       }
+    }
+
+    // Cost-leak fix: if this email got a valid extraction/classification, mark it
+    // scanned — WHETHER OR NOT it becomes a draft below. This is the key fix: a
+    // non-work-order email that the gate drops (no draft) is still marked here, so it is
+    // never re-extracted. Placed BEFORE the gate-drop `continue`s. scanMarkEligible
+    // returns false on an auth/transient failure or a dead/absent key, so those emails
+    // stay unmarked and retry when the key recovers (fail-loud backfill preserved).
+    const thisEmailExtractionOk = _scanMarkEligible({
+      templateParsed: emailTemplateParsed,
+      modelValidResult: emailModelValidResult,
+      authFailed: emailAuthFailed,
+      transientFailed: emailTransientFailed,
+      keyDegradedOrAbsent: keyDegraded || !ANTHROPIC_API_KEY,
+    })
+    if (thisEmailExtractionOk && msg._post_id) {
+      scannedEmailIds.push(msg._post_id)
     }
 
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
@@ -12198,6 +12269,14 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     }
   }
 
+  // Cost-leak fix: STAMP makesafe_scanned_at on every email that got a valid extraction
+  // this run (draft or not), so it is never re-extracted. Batched + chunked + idempotent
+  // + error-checked + pre-migration-safe — see markEmailsScanned.
+  const markResult = await _markEmailsScanned(client, scannedEmailIds, {
+    columnAvailable: scannedColumnAvailable,
+  })
+  const scannedMarked = markResult.marked
+
   // D-a: write the fail-loud health banner every run so a dead key is visible in
   // intake_health + the morning report, and auto-file stays suppressed until it recovers.
   await writeIntakeHealth(client, {
@@ -12231,6 +12310,13 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     already_processed: skippedDuplicates,
     skipped_ai_only: skippedAiOnly,
     skipped_not_work_order_gate: skippedNotWorkOrderGate,
+    // Cost-leak fix observability: emails skipped because already extracted (marker
+    // set), and emails freshly stamped this run. In steady state on a quiet inbox both
+    // fall to ~0 new work; a re-extraction leak would show as scanned_marked climbing
+    // with new_count flat, which it no longer does.
+    skipped_already_scanned: skippedAlreadyScanned,
+    scanned_marked: scannedMarked,
+    scanned_marker_active: scannedColumnAvailable,
     skipped_items: skippedItems.slice(0, 100),
     scan_order: 'oldest_newest_interleave',
     new_drafts: newDrafts,
