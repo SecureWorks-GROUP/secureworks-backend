@@ -164,6 +164,34 @@ export function resolveCommittedReportType(
   return classifyReportType(subject, body);
 }
 
+// ── SHARED draft-status decision ────────────────────────────────────────────────
+// A single source of truth for "does this draft go to needs_review or stay draft",
+// used by BOTH the scanner (scanSesMakesafes) and the admin reextract action so the
+// two paths can never drift. A degraded (dead-key) or report-capture draft is always a
+// human docket; a normal WO draft mirrors approveIntakeDraft's required fields (company
+// + ref + client + address + a servable WO PDF). Both values are valid per the status
+// CHECK constraint (migration 20260602000001).
+export function computeIntakeDraftStatus(input: {
+  extractionDegraded: boolean;
+  isReportCapture: boolean;
+  hasCompany: boolean;
+  externalRef: string | null | undefined;
+  clientName: string | null | undefined;
+  siteAddress: string | null | undefined;
+  availableWoCount: number;
+}): "draft" | "needs_review" {
+  if (input.extractionDegraded) return "needs_review";
+  if (input.isReportCapture) return "needs_review";
+  const missingRequired = (
+    !input.hasCompany ||
+    !input.externalRef ||
+    !input.clientName ||
+    !input.siteAddress ||
+    input.availableWoCount === 0
+  );
+  return missingRequired ? "draft" : "needs_review";
+}
+
 // ── PRACTICAL JOB FAMILY classifier ──────────────────────────────────────────
 // This is the operator-facing four-way taxonomy. It deliberately does NOT replace
 // report_type yet; it maps the older report_type/work-order signals into the
