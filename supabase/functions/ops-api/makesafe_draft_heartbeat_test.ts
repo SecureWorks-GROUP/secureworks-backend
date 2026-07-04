@@ -193,7 +193,7 @@ Deno.test("DB-bound: emails present, no drafts -> alert emitted, state upserted"
   const capturedTelegrams: string[] = [];
   const sink = {
     logBusinessEvent: async (_client: any, event: any) => { capturedAlerts.push(event); },
-    notifyTelegram: async (text: string) => { capturedTelegrams.push(text); },
+    notifySms: async (text: string) => { capturedTelegrams.push(text); },
   };
 
   const result = await makesafeDraftHeartbeat(client, sink, { nowIso: NOW });
@@ -221,7 +221,7 @@ Deno.test("DB-bound: stalled, alerted 1h ago -> alert suppressed", async () => {
   const capturedAlerts: any[] = [];
   const sink = {
     logBusinessEvent: async (_client: any, event: any) => { capturedAlerts.push(event); },
-    notifyTelegram: async (_text: string) => {},
+    notifySms: async (_text: string) => {},
   };
 
   const result = await makesafeDraftHeartbeat(client, sink, { nowIso: NOW });
@@ -239,7 +239,7 @@ Deno.test("DB-bound: emails present, drafts present -> no alert, last_ok_at writ
   const capturedAlerts: any[] = [];
   const sink = {
     logBusinessEvent: async (_client: any, event: any) => { capturedAlerts.push(event); },
-    notifyTelegram: async (_text: string) => {},
+    notifySms: async (_text: string) => {},
   };
 
   const result = await makesafeDraftHeartbeat(client, sink, { nowIso: NOW });
@@ -260,7 +260,7 @@ Deno.test("DB-bound: heartbeat_state table absent -> graceful degradation, alert
   const capturedAlerts: any[] = [];
   const sink = {
     logBusinessEvent: async (_client: any, event: any) => { capturedAlerts.push(event); },
-    notifyTelegram: async (_text: string) => {},
+    notifySms: async (_text: string) => {},
   };
 
   const result = await makesafeDraftHeartbeat(client, sink, { nowIso: NOW });

@@ -196,6 +196,24 @@ export const SUPPRESSED_DRAFT_STATES: readonly string[] = [
   "superseded",
 ] as const;
 
+// ── A2 — scan-insert self-heal decision ─────────────────────────────────────────
+// The (org_id, graph_message_id) UNIQUE key can be hit on a fresh scan INSERT when a
+// NON-LIVE shell (a superseded/rejected row) still occupies the slot for that email
+// (exactly the supersede-to-re-extract failure in wave2-reextract-diagnosis.json).
+// Deciding what to do on a 23505 collision is a pure function of the occupying row's
+// status:
+//   * occupying row is a suppressed shell (superseded/rejected) -> 'heal': re-populate
+//     that row in place (recovering the WO into its existing slot — immune to the key).
+//   * occupying row is LIVE (draft/needs_review/approved/reopen_candidate) -> the app-
+//     level dedup should already have caught this; a LIVE collision means dedup failed
+//     upstream, so DO NOT clobber a live draft/job — breadcrumb + alarm instead.
+export function decideInsertConflictAction(
+  occupyingStatus: string | null | undefined,
+): "heal" | "live_collision" {
+  const s = String(occupyingStatus ?? "").toLowerCase();
+  return (LIVE_DRAFT_STATES as readonly string[]).includes(s) ? "live_collision" : "heal";
+}
+
 /**
  * Normalise an external ref for cross-path comparison: upper-case, strip every
  * non-alphanumeric char (spaces, dashes, slashes). "AJBR 67998" -> "AJBR67998".

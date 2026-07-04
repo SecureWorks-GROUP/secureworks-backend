@@ -160,7 +160,7 @@ Deno.test("B1 DB-bound: degraded -> alert emitted + state upserted under extract
   const telegrams: string[] = [];
   const sink = {
     logBusinessEvent: async (_c: any, e: any) => { alerts.push(e); },
-    notifyTelegram: async (t: string) => { telegrams.push(t); },
+    notifySms: async (t: string) => { telegrams.push(t); },
   };
   const r = await makesafeExtractionHealthAlarm(client, sink, { nowIso: NOW });
   assertEquals(r.alarm, true);
@@ -182,7 +182,7 @@ Deno.test("B1 DB-bound: healthy fresh scan -> no alert, last_ok_at recorded", as
   const alerts: any[] = [];
   const sink = {
     logBusinessEvent: async (_c: any, e: any) => { alerts.push(e); },
-    notifyTelegram: async (_t: string) => {},
+    notifySms: async (_t: string) => {},
   };
   const r = await makesafeExtractionHealthAlarm(client, sink, { nowIso: NOW });
   assertEquals(r.alarm, false);
@@ -199,7 +199,7 @@ Deno.test("B1 DB-bound: stale scan on an ok row -> alert fires", async () => {
   const alerts: any[] = [];
   const sink = {
     logBusinessEvent: async (_c: any, e: any) => { alerts.push(e); },
-    notifyTelegram: async (_t: string) => {},
+    notifySms: async (_t: string) => {},
   };
   const r = await makesafeExtractionHealthAlarm(client, sink, { nowIso: NOW });
   assertEquals(r.reason, "stale_scan");
@@ -209,7 +209,7 @@ Deno.test("B1 DB-bound: stale scan on an ok row -> alert fires", async () => {
 
 Deno.test("B1 DB-bound: health read error FAILS CLOSED (throws)", async () => {
   const client = makeStubClient({ health: null, lastAlertAt: null, healthReadError: "boom" });
-  const sink = { logBusinessEvent: async () => {}, notifyTelegram: async () => {} };
+  const sink = { logBusinessEvent: async () => {}, notifySms: async () => {} };
   let threw = false;
   try {
     await makesafeExtractionHealthAlarm(client, sink, { nowIso: NOW });

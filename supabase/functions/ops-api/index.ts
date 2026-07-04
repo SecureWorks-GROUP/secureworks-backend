@@ -249,6 +249,7 @@ import {
   isReportOnlyType as _isReportOnlyType,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
+  computeIntakeDraftStatus as _computeIntakeDraftStatus,
 } from './makesafe_intake_gate.ts'
 // B5 SLA: pure email-received -> card-created latency percentiles for the health row
 // + the 24h intake_health rollup. See makesafe_intake_sla.ts.
@@ -272,7 +273,15 @@ import {
   normaliseRef as _normaliseDedupRef,
   normaliseCompany as _normaliseDedupCompany,
   normaliseJobFamily as _normaliseDedupJobFamily,
+  decideInsertConflictAction as _decideInsertConflictAction,
 } from './makesafe_intake_dedup.ts'
+// A4/A5: SMS arrival texts + notify config (Telegram retired business-wide).
+import {
+  loadNotifySettings as _loadNotifySettings,
+  sendMakesafeArrivalTexts as _sendMakesafeArrivalTexts,
+  shouldSendArrival as _shouldSendArrival,
+  type NotifySettings as _NotifySettings,
+} from './makesafe_notify.ts'
 // GAP-A (WO selection + unique per-attachment key).
 // Mission: makesafe-wo-capture-recovery-2026-06-17.
 import {
@@ -643,38 +652,64 @@ async function logBusinessEvent(client: any, event: {
   }
 }
 
-// Broadcast a one-line alert to the business-events Telegram channel. Reuses the
-// existing TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID broadcast pattern (resend-webhook).
-// Non-blocking: a Telegram outage never breaks reconciliation. Used by the
-// make-safe reconcile/canary actions (Mission makesafe-live-truth-2026-06-14).
-async function notifyBusinessEventsTelegram(text: string): Promise<void> {
-  const token = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-  const chatId = Deno.env.get('TELEGRAM_CHAT_ID') || ''
-  if (!token || !chatId) return
+// A4 — SMS delivery glue. Sends one SMS to a RAW E.164 phone via the existing
+// ghl-proxy send_sms path (which now find-or-creates a contact from a bare `phone`).
+// Non-blocking: returns true on a delivered send, false otherwise. Never throws.
+async function sendSmsViaGhl(phone: string, message: string, fromNumber?: string): Promise<boolean> {
+  const to = String(phone || '').trim()
+  if (!to || !message) return false
   try {
-    const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const resp = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text }),
+      headers: {
+        'Content-Type': 'application/json',
+        // service-role auth so the tail-call is accepted by ghl-proxy.
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+      body: JSON.stringify({ phone: to, message, ...(fromNumber ? { fromNumber } : {}) }),
     })
-    // N2 — a non-2xx (bad token, wrong chat_id, rate limit) previously passed
-    // silently, so an alert-delivery failure went unnoticed. Check resp.ok and log
-    // the Telegram error body so a broken alert channel is at least visible in logs.
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '<unreadable>')
-      console.error(`[ops-api] reconcile Telegram notify non-OK ${resp.status}: ${errBody}`)
+      console.error(`[ops-api] send_sms non-OK ${resp.status} to ${to}: ${errBody}`)
+      return false
+    }
+    const body = await resp.json().catch(() => ({}))
+    return body?.success !== false
+  } catch (e) {
+    console.error('[ops-api] send_sms failed to', to, (e as Error).message)
+    return false
+  }
+}
+
+// A4 — the make-safe alert channel. Telegram is RETIRED business-wide; reconcile /
+// heartbeat / extraction-health alarms now deliver by SMS to the configured
+// alarm_phones in makesafe_notify_settings (recipient is CONFIG, never hardcoded).
+// If no alarm number is configured yet the alert still writes its business_event (the
+// canonical record) — it just cannot SMS. Non-blocking; never throws.
+async function notifyBusinessEventsSms(text: string): Promise<void> {
+  try {
+    const svc = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    const settings = await _loadNotifySettings(svc)
+    if (!settings.alarm_enabled) return
+    const recipients = (settings.alarm_phones || []).map((p) => String(p || '').trim()).filter(Boolean)
+    if (!recipients.length) {
+      console.warn('[ops-api] extraction alarm has no alarm_phones configured; business_event written, no SMS sent. Seed makesafe_notify_settings.alarm_phones with the owner number.')
+      return
+    }
+    for (const phone of recipients) {
+      await sendSmsViaGhl(phone, text, settings.from_number)
     }
   } catch (e) {
-    console.error('[ops-api] reconcile Telegram notify failed:', (e as Error).message)
+    console.error('[ops-api] notifyBusinessEventsSms failed:', (e as Error).message)
   }
 }
 
 // Build the AlertSink the make-safe reconciliation actions consume — wires their
-// alerts into the EXISTING business_events + Telegram channels (no new system).
+// alerts into the EXISTING business_events channel + SMS (Telegram retired).
 function makeReconAlertSink() {
   return {
     logBusinessEvent,
-    notifyTelegram: notifyBusinessEventsTelegram,
+    notifySms: notifyBusinessEventsSms,
   }
 }
 
@@ -2116,7 +2151,10 @@ if (import.meta.main) serve(async (req: Request) => {
         // B1: extraction-health alarm on the SAME 15-min canary cron. Fires the same
         // Telegram + business_events ERROR path when the classifier is degraded OR the
         // scan has stalled (last_scan_at stale) — the watcher the health row lacked.
-        const extractionHealthResult = await _makesafeExtractionHealthAlarm(client, makeReconAlertSink())
+        const extractionHealthResult = await _makesafeExtractionHealthAlarm(client, makeReconAlertSink(), {
+          // Empty-feed threshold in Perth business hours (config default 6; env override).
+          emptyFeedStaleHours: Number(Deno.env.get('MAKESAFE_EMPTY_FEED_STALE_HOURS') || '') || undefined,
+        })
         return json({ ...canaryResult, heartbeat: heartbeatResult, extraction_health: extractionHealthResult })
       }
       // D5 draft-creation heartbeat — standalone action for manual invocation and
@@ -2130,6 +2168,18 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: makesafe_draft_heartbeat requires service/API key or admin/owner role' }, 403)
         }
         return json(await _makesafeDraftHeartbeat(client, makeReconAlertSink()))
+      }
+      // A1: admin re-extract a NAMED intake draft IN PLACE (immune to the unique-key drop
+      // that swallowed the supersede-then-rescan recovery). Mutates a draft (and may
+      // auto-file), so it is gated to service/API key or admin/owner — same posture as
+      // the other privileged make-safe intake actions; the routine key cannot call it.
+      case 'reextract_intake_draft': {
+        const rxIsAdmin = authMode === 'api_key' ||
+          authUser?.role === 'admin' || authUser?.role === 'owner'
+        if (!rxIsAdmin) {
+          return json({ error: 'forbidden: reextract_intake_draft requires service/API key or admin/owner role' }, 403)
+        }
+        return json(await reextractIntakeDraft(client, body))
       }
       case 'makesafe_intake_reconciliation': {
         return json(await _makesafeIntakeReconciliation(client, {
@@ -10263,6 +10313,16 @@ async function writeIntakeHealth(client: any, input: {
     samples: number
   }
   cappedCandidates?: number
+  // A3 dropped-WO breadcrumb for this scan (folded into the health row + the alarm).
+  breadcrumb?: {
+    insertConflictsHealed: number
+    insertConflictsLive: number
+    droppedAfterExtraction: number
+    lastDroppedRef: string | null
+  }
+  // Empty-feed anomaly: the freshest inbound (non-own-domain) ses@ email this scan saw.
+  // Lets the alarm detect a Graph mirror returning 200-with-nothing (no new mail).
+  lastInboundEmailAt?: string | null
 }): Promise<void> {
   try {
     const nowIso = new Date().toISOString()
@@ -10278,6 +10338,14 @@ async function writeIntakeHealth(client: any, input: {
         .select('total_model_calls, total_model_skips, total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens')
         .eq('id', true).maybeSingle()
       prevCost = data || null // null pre-migration (columns absent) -> counters start at 0
+    }
+    // A3: prior lifetime breadcrumb totals (best-effort; null pre-migration -> start at 0).
+    let prevBreadcrumb: any = null
+    if (input.breadcrumb) {
+      const { data } = await client.from('makesafe_intake_health')
+        .select('total_insert_conflicts_healed, total_insert_conflicts_live, total_dropped_wo, dropped_wo_last_ref')
+        .eq('id', true).maybeSingle()
+      prevBreadcrumb = data || null
     }
     const wasDegraded = String(prevBase?.extraction_status || '') === 'degraded'
     const isDegraded = input.extractionStatus === 'degraded'
@@ -10331,6 +10399,28 @@ async function writeIntakeHealth(client: any, input: {
     }
     if (typeof input.cappedCandidates === 'number') {
       row.last_scan_capped_candidates = input.cappedCandidates
+    }
+    // A3: dropped-WO breadcrumb. last_scan_* reset every run (0 on a clean scan so the
+    // alarm clears); total_* accumulate for forensics. FULL row only (base fallback drops
+    // them pre-migration, like the SLA/cost columns).
+    if (input.breadcrumb) {
+      const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+      const b = input.breadcrumb
+      row.last_scan_insert_conflicts_healed = b.insertConflictsHealed
+      row.last_scan_insert_conflicts_live = b.insertConflictsLive
+      row.last_scan_dropped_wo = b.droppedAfterExtraction
+      row.total_insert_conflicts_healed = n(prevBreadcrumb?.total_insert_conflicts_healed) + b.insertConflictsHealed
+      row.total_insert_conflicts_live = n(prevBreadcrumb?.total_insert_conflicts_live) + b.insertConflictsLive
+      row.total_dropped_wo = n(prevBreadcrumb?.total_dropped_wo) + b.droppedAfterExtraction
+      if (b.droppedAfterExtraction > 0 || b.insertConflictsLive > 0) {
+        row.dropped_wo_last_at = nowIso
+        row.dropped_wo_last_ref = b.lastDroppedRef || prevBreadcrumb?.dropped_wo_last_ref || null
+      }
+    }
+    // Empty-feed anomaly: stamp the freshest inbound email this scan saw so the alarm can
+    // detect a Graph mirror returning nothing. Only ADVANCES (never rewind on a quiet run).
+    if (input.lastInboundEmailAt) {
+      row.last_inbound_email_at = input.lastInboundEmailAt
     }
     // H1 (INVARIANT #5 — health must never go silently dark): supabase-js does NOT throw
     // on a PostgREST error; it returns {error}. In the window between merge->auto-deploy
@@ -11197,6 +11287,519 @@ async function _shortStorageKey(input: string): Promise<string> {
 // unchanged so the 5-min monitor cron can tail-call this. It may auto-promote
 // only a strict clean/high-confidence normal WO; it still cannot send, authorise,
 // invoice, close, allocate, or call approve_intake_draft directly.
+// Shared make-safe extraction model + system prompt. Used by BOTH the scanner
+// (scanSesMakesafes) and the admin reextract_intake_draft action so a re-extraction
+// runs the SAME classifier with the SAME prompt as a fresh scan — zero drift.
+const MAKESAFE_EXTRACTION_MODEL = 'claude-haiku-4-5-20251001'
+const MAKESAFE_EXTRACTION_MAX_TOKENS = 900
+const MAKESAFE_EXTRACTION_SYSTEM_PROMPT = `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "report_type": "roof_report"|"assessment_report"|"temp_fence"|"re_attend"|"general_makesafe"|"not_a_report", "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
+Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
+For report_type, COMMIT the single best classification of the work using the body AND the PDF: "roof_report" (roof report/inspection), "assessment_report" (assessment / assess-and-quote / scope of works), "temp_fence" (temporary fence collect/pickup), "re_attend" (return visit to an existing job), "general_makesafe" (a physical make-safe work order that is not primarily a report), or "not_a_report". Do not leave it blank; pick "general_makesafe" for an ordinary physical make-safe.
+For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
+For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
+If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`
+
+// ── A1 — reextract_intake_draft (in-place re-extraction, immune to the unique key) ──
+// ROOT CAUSE (wave2-reextract-diagnosis.json): the supersede-then-rescan recipe hits the
+// (org_id, graph_message_id) UNIQUE key on re-insert and the error is swallowed, so a real
+// WO never re-populates. This admin action re-runs the SAME extraction (template/model,
+// PDF text, links, committed report_type) for a NAMED draft and UPDATEs the existing draft
+// row IN PLACE (same id, same graph_message_id) — no INSERT, immune to the root cause, no
+// marker interaction. A clean result may then auto-file through the existing gate exactly
+// like a fresh scan. Refuses approved/rejected drafts.
+
+// Pure guard: a reextract may run on an in-flight/parked draft but NEVER on a finalised one.
+export function _assertDraftReextractable(status: string | null | undefined): void {
+  const s = String(status ?? '').toLowerCase()
+  if (s === 'approved' || s === 'rejected') {
+    throw new ApiError(`reextract refused: draft is ${s} (only non-finalised drafts can be re-extracted)`, 409)
+  }
+}
+
+// Re-run the SAME extraction pipeline the scanner uses for ONE email (template parse +
+// Haiku on body + PDF text, PDF re-upload, subject parse, link merge, committed
+// report_type + job family). Returns the recomputed field-set; the caller UPDATEs in place.
+async function _reextractExtractFields(
+  client: any,
+  input: {
+    graphMessageId: string
+    postId: string
+    fromEmail: string
+    fromName: string
+    subject: string
+    body: string
+    receivedAt: string | null
+    hasAttachments: boolean
+    senderPatterns: Array<{ slug: string; name: string; pattern: string }>
+    parsingRulesBySlug: Map<string, any>
+  },
+): Promise<{
+  extraction: any
+  attachments: any[]
+  confidence: string
+  missingFields: string[]
+  matchedCompany: { slug: string; name: string } | null
+  draftReportType: string | null
+  draftJobFamily: string
+  availableWoCount: number
+  isReportCapture: boolean
+  extractionDegraded: boolean
+  woGateOk: boolean
+  woGateReason: string
+}> {
+  const { subject, fromEmail, fromName } = input
+  // Admin/service client for the private-bucket download + public re-upload (created here
+  // so the injectable test extractor path never triggers createClient with empty env).
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const rawEmailBody = input.body || ''
+  const builderEmailTextForTrade = _stripEmailHtmlForTrade(rawEmailBody)
+  const deterministicPortalLinks = _extractBuilderEmailLinks(rawEmailBody)
+  const bodyPreview = (builderEmailTextForTrade || '').slice(0, 2000)
+  const replyForwardRisk = _subjectHasReplyForwardPrefix(subject)
+
+  // Match sender to company (same anchored-suffix logic as the scanner).
+  let matchedCompany: { slug: string; name: string } | null = null
+  const matchedSenderPattern = _findMatchingSenderCompany(fromEmail, input.senderPatterns)
+  if (matchedSenderPattern) matchedCompany = { slug: matchedSenderPattern.slug, name: matchedSenderPattern.name }
+
+  // PDF read from the PRIVATE makesafe-emails bucket + re-upload to PUBLIC job-documents,
+  // identical attachments_json shape + WO designation as the scanner.
+  const attachments: any[] = []
+  const pdfBase64List: Array<{ name: string; base64: string }> = []
+  if (input.hasAttachments) {
+    try {
+      const { data: attRows } = await client.from('email_attachments')
+        .select('id, graph_attachment_id, name, content_type, storage_path, size_bytes')
+        .eq('email_id', input.postId)
+        .eq('status', 'uploaded')
+      const uploadedPdfRows = (attRows || []).filter((att: any) => {
+        const isPdf = (att.content_type || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+        return isPdf && att.storage_path
+      })
+      const { selected: designatedWo, ordered: orderedPdfs } = _selectWorkOrderPdf(uploadedPdfRows)
+      const keyHash = await _shortStorageKey(input.graphMessageId)
+      for (let attIdx = 0; attIdx < orderedPdfs.length; attIdx++) {
+        const att = orderedPdfs[attIdx]
+        try {
+          const { data: blob, error: dlErr } = await adminClient.storage.from('makesafe-emails').download(att.storage_path!)
+          if (dlErr || !blob) { console.log('[ops-api] reextract PDF download failed:', dlErr?.message || 'no blob', att.storage_path); continue }
+          const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+          if (pdfBase64List.length < 2 && fileBuffer.length < 5000000) {
+            pdfBase64List.push({ name: att.name ?? 'work-order.pdf', base64: bytesToBase64(fileBuffer) })
+          }
+          const safeName = (att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)
+          const keyComponent = _attachmentKeyComponent(att, attIdx)
+          const storagePath = `makesafe-intake/${keyHash}-${keyComponent}/${safeName}`
+          const { error: upErr } = await adminClient.storage.from('job-documents')
+            .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
+          if (upErr) {
+            attachments.push({ name: att.name, file_name: att.name, storage_url: null, pdf_url: null, pdf_unavailable: true, pdf_error: `upload_failed:${upErr.message}`.slice(0, 200), size: att.size_bytes, is_work_order: (att === designatedWo) })
+            continue
+          }
+          const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(storagePath)
+          attachments.push({ name: att.name, file_name: att.name, storage_url: storagePath, pdf_url: urlData?.publicUrl || null, size: att.size_bytes, is_work_order: (att === designatedWo) })
+        } catch (e) { console.log('[ops-api] reextract PDF re-upload failed:', (e as Error).message) }
+      }
+    } catch (e) { console.log('[ops-api] reextract attachment read failed:', (e as Error).message) }
+  }
+
+  // Extraction: template-first when a full parse is available, else the Haiku model on
+  // body + PDF text (SAME model + SAME system prompt as the scanner).
+  let extraction: any = {}
+  let confidence = 'low'
+  let missingFields: string[] = []
+  let extractionDegraded = false
+  const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
+  const pdfTextModeEnabled = Deno.env.get('MAKESAFE_INTAKE_PDF_TEXT_MODE') !== 'false'
+  const templateSlug = (matchedCompany?.slug || '').toLowerCase()
+
+  const pdfTexts: string[] = []
+  let pdfMode: 'text' | 'document' | 'none' = pdfBase64List.length ? 'document' : 'none'
+  if (pdfBase64List.length && pdfTextModeEnabled) {
+    let allText = true
+    for (const pdf of pdfBase64List) {
+      try {
+        const bytes = Uint8Array.from(atob(pdf.base64), (c) => c.charCodeAt(0))
+        const r = await _extractPdfText(bytes)
+        if (r.mode === 'text') pdfTexts.push(`[${pdf.name}]\n${r.text}`)
+        else allText = false
+      } catch (_) { allText = false }
+    }
+    const combinedLen = pdfTexts.join('\n').length
+    pdfMode = (allText && pdfTexts.length === pdfBase64List.length && combinedLen >= _PDF_TEXT_MIN_CHARS) ? 'text' : 'document'
+  }
+  const combinedPdfText = pdfTexts.join('\n')
+
+  const templateResult = _parseWithTemplate(input.parsingRulesBySlug.get(templateSlug), {
+    subject, body: builderEmailTextForTrade || bodyPreview, pdfText: combinedPdfText,
+  })
+
+  if (templateResult?.model_skipped) {
+    const f = templateResult.fields
+    extraction = {
+      external_ref: f.external_ref || null, client_name: f.client_name || null, client_phone: f.client_phone || null,
+      site_address: f.site_address || null, site_suburb: f.site_suburb || null, description: f.description || null,
+      safety_requirements: f.safety_requirements || null,
+    }
+    confidence = templateResult.confidence
+    missingFields = []
+  } else if (ANTHROPIC_API_KEY) {
+    try {
+      const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+      const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
+      const userContent: any[] = [{ type: 'text', text: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` }]
+      if (pdfMode === 'text') {
+        for (const t of pdfTexts) userContent.push({ type: 'text', text: `[Work order PDF text]\n${t}` })
+      } else {
+        for (const pdf of pdfBase64List) {
+          userContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 } })
+          userContent.push({ type: 'text', text: `[Attached PDF: ${pdf.name}]` })
+        }
+      }
+      const resp = await anthropic.messages.create({
+        model: MAKESAFE_EXTRACTION_MODEL,
+        max_tokens: MAKESAFE_EXTRACTION_MAX_TOKENS,
+        system: [{ type: 'text', cache_control: { type: 'ephemeral' }, text: MAKESAFE_EXTRACTION_SYSTEM_PROMPT }],
+        messages: [{ role: 'user', content: userContent }],
+      })
+      const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        extraction = JSON.parse(jsonMatch[0])
+        confidence = extraction.confidence || 'low'
+        missingFields = extraction.missing_fields || []
+      }
+    } catch (e) {
+      // Dead/absent key or transient failure -> degrade (do not make the draft worse).
+      extractionDegraded = true
+      console.error('[ops-api] reextract model call failed:', (e as Error).message)
+    }
+  } else {
+    extractionDegraded = true
+  }
+
+  // Universal deterministic subject parse (authoritative ref; address only fills gaps).
+  const subjectFields = _parseSubjectFields(subject)
+  const refDecision = _resolveSubjectRef(replyForwardRisk, subjectFields.external_ref, extraction.external_ref || null)
+  if (refDecision.external_ref) extraction.external_ref = refDecision.external_ref
+  if (refDecision.subject_ref_hint) extraction.subject_ref_hint = refDecision.subject_ref_hint
+  if (!replyForwardRisk) {
+    if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) extraction.site_address = subjectFields.site_address
+    if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) extraction.site_suburb = subjectFields.site_suburb
+  }
+
+  if (extractionDegraded) {
+    extraction.extraction_degraded = true
+    if (!missingFields.includes(INTAKE_EXTRACTION_DOWN_MARKER)) missingFields.push(INTAKE_EXTRACTION_DOWN_MARKER)
+    confidence = 'low'
+  }
+
+  const mergedPortalLinks = _mergeDeterministicAndClaudeLinks(deterministicPortalLinks, extraction)
+  if (mergedPortalLinks.length) {
+    extraction.portal_links = mergedPortalLinks
+    extraction.portal_link = extraction.portal_link || mergedPortalLinks[0]?.url || null
+  }
+  if (builderEmailTextForTrade) {
+    extraction.builder_email_text_for_trade = builderEmailTextForTrade
+    extraction.builder_email_subject = subject || null
+    extraction.builder_email_received_at = input.receivedAt || null
+  }
+
+  const availableWoCount = attachments.filter((a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url)).length
+
+  // Report-capture derivation + report_type/family (same helpers as the scanner).
+  const woGate = _isGenuineNewWorkOrder(subject, fromEmail, availableWoCount)
+  const isReportCapture = woGate.kind === 'report'
+  const tagReportType = isReportCapture || (woGate as any).reportSubjectPattern === true
+  if ((isReportCapture || tagReportType) && !matchedCompany?.slug) {
+    const refPrefixMatch = subject.match(/\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
+    const derivedSlug = _slugFromRefPrefix(refPrefixMatch?.[1] ?? null)
+    if (derivedSlug) matchedCompany = { slug: derivedSlug, name: derivedSlug }
+  }
+  let draftReportType: string | null = null
+  if (tagReportType) draftReportType = _resolveCommittedReportType(extraction.report_type, subject, builderEmailTextForTrade || bodyPreview)
+  const draftJobFamily = _classifyMakeSafeJobFamily(subject, [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'), draftReportType)
+  extraction.makesafe_job_family = draftJobFamily
+  extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+  extraction.reextracted_at = new Date().toISOString()
+
+  return {
+    extraction, attachments, confidence, missingFields, matchedCompany,
+    draftReportType, draftJobFamily, availableWoCount, isReportCapture, extractionDegraded,
+    woGateOk: woGate.ok, woGateReason: woGate.reason,
+  }
+}
+
+// Admin action: re-extract a NAMED draft in place. deps.extractFields is injectable so the
+// orchestration (load / refuse / update / auto-file / breadcrumb) is testable without the
+// model or storage; production uses the real _reextractExtractFields.
+export async function reextractIntakeDraft(
+  client: any,
+  body: any,
+  deps?: { extractFields?: typeof _reextractExtractFields },
+): Promise<any> {
+  const draftId = body?.draft_id
+  if (!draftId) throw new ApiError('draft_id required', 400)
+
+  const { data: draft, error: dErr } = await client.from('makesafe_intake_drafts')
+    .select('*').eq('id', draftId).single()
+  if (dErr || !draft) throw new ApiError('Draft not found', 404)
+  _assertDraftReextractable(draft.status)
+
+  // Load the source email (post_id = the draft's graph_message_id) + companies for parsing.
+  const { data: email } = await client.from('emails')
+    .select('post_id, subject, body_content, body_preview, from_email, from_name, has_attachments, received_at')
+    .eq('post_id', draft.graph_message_id)
+    .maybeSingle()
+  if (!email) throw new ApiError(`source email not found for graph_message_id ${draft.graph_message_id}`, 404)
+
+  const { data: companies } = await client.from('makesafe_companies')
+    .select('slug, name, sender_patterns, parsing_rules').eq('active', true)
+  const senderPatterns: Array<{ slug: string; name: string; pattern: string }> = []
+  const parsingRulesBySlug = new Map<string, any>()
+  for (const co of (companies || [])) {
+    for (const p of (co.sender_patterns || [])) senderPatterns.push({ slug: co.slug, name: co.name, pattern: String(p).toLowerCase() })
+    if (co.slug && co.parsing_rules && typeof co.parsing_rules === 'object') parsingRulesBySlug.set(String(co.slug).toLowerCase(), co.parsing_rules)
+  }
+
+  const extractFields = deps?.extractFields || _reextractExtractFields
+  const r = await extractFields(client, {
+    graphMessageId: draft.graph_message_id,
+    postId: email.post_id,
+    fromEmail: email.from_email || draft.from_email || '',
+    fromName: email.from_name || draft.from_name || '',
+    subject: email.subject || draft.subject || '',
+    body: email.body_content || email.body_preview || '',
+    receivedAt: email.received_at || draft.received_at || null,
+    hasAttachments: !!email.has_attachments,
+    senderPatterns,
+    parsingRulesBySlug,
+  })
+
+  const draftStatus = _computeIntakeDraftStatus({
+    extractionDegraded: r.extractionDegraded,
+    isReportCapture: r.isReportCapture,
+    hasCompany: !!(r.matchedCompany?.slug || r.matchedCompany?.name),
+    externalRef: r.extraction.external_ref || null,
+    clientName: r.extraction.client_name || null,
+    siteAddress: r.extraction.site_address || null,
+    availableWoCount: r.availableWoCount,
+  })
+
+  // UPDATE the existing row IN PLACE — same id, same graph_message_id. No INSERT, immune
+  // to the (org_id, graph_message_id) unique key that swallowed the original re-extraction.
+  const update = {
+    requesting_company_slug: r.matchedCompany?.slug || null,
+    requesting_company_name: r.matchedCompany?.name || null,
+    external_ref: r.extraction.external_ref || null,
+    client_name: r.extraction.client_name || null,
+    client_phone: r.extraction.client_phone || null,
+    site_address: r.extraction.site_address || null,
+    site_suburb: r.extraction.site_suburb || null,
+    description: r.extraction.description || null,
+    safety_requirements: r.extraction.safety_requirements || null,
+    confidence: r.confidence,
+    missing_fields: r.missingFields,
+    extraction_json: r.extraction,
+    attachments_json: r.attachments,
+    report_type: r.draftReportType,
+    status: draftStatus,
+    review_notes: `Re-extracted in place ${new Date().toISOString()} (admin reextract_intake_draft). WO gate: ${r.woGateOk ? 'pass' : 'fail:' + r.woGateReason}.`,
+    updated_at: new Date().toISOString(),
+  }
+  const { data: updated, error: upErr } = await client.from('makesafe_intake_drafts')
+    .update(update).eq('id', draftId).select().single()
+  if (upErr) throw new ApiError('reextract update failed: ' + upErr.message, 500)
+
+  // Business_event breadcrumb (board trace for the recovery).
+  try {
+    await logBusinessEvent(client, {
+      event_type: 'makesafe.intake_reextracted',
+      source: 'app/makesafe-intake',
+      entity_type: 'makesafe_ref',
+      entity_id: String(r.extraction.external_ref || draft.graph_message_id),
+      body_preview: `Re-extracted draft ${draftId}: ref ${r.extraction.external_ref || 'none'}, status ${draftStatus}`,
+      payload: { draft_id: draftId, external_ref: r.extraction.external_ref || null, confidence: r.confidence, status: draftStatus, prior_status: draft.status, available_wo: r.availableWoCount },
+      metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+    })
+  } catch { /* non-blocking */ }
+
+  // Auto-file a clean, high-confidence result through the SAME gate the scanner uses.
+  let autoFiled: any = null
+  const autoFileEnabled = await isAutoFileEnabled(client)
+  const autoDecision = shouldAutoApproveCleanIntake({
+    enabled: autoFileEnabled && !r.extractionDegraded && Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+    isReportCapture: r.isReportCapture,
+    tagReportType: r.draftReportType != null,
+    reportType: r.draftReportType,
+    confidence: r.confidence,
+    missingFields: r.missingFields,
+    matchedCompany: r.matchedCompany,
+    externalRef: r.extraction.external_ref || null,
+    clientName: r.extraction.client_name || null,
+    siteAddress: r.extraction.site_address || null,
+    attachments: r.attachments,
+  })
+  if (autoDecision.ok) {
+    try {
+      const approved = await approveIntakeDraft(client, {
+        draft_id: draftId,
+        approved_by: 'auto-intake-reextract',
+        review_notes: 'Auto-filed after in-place re-extraction (reextract_intake_draft): high-confidence, required fields + servable WO PDF present.',
+      })
+      autoFiled = { job_id: approved?.job?.id || null, reason: autoDecision.reason }
+    } catch (e) {
+      autoFiled = { job_id: null, error: (e as Error).message, reason: autoDecision.reason }
+    }
+  }
+
+  return {
+    ok: true,
+    draft_id: draftId,
+    prior_status: draft.status,
+    status: draftStatus,
+    external_ref: r.extraction.external_ref || null,
+    site_address: r.extraction.site_address || null,
+    confidence: r.confidence,
+    available_wo: r.availableWoCount,
+    extraction_degraded: r.extractionDegraded,
+    wo_gate: { ok: r.woGateOk, reason: r.woGateReason },
+    auto_filed: autoFiled,
+    draft: updated,
+  }
+}
+
+// ── A2/A3 — scan-insert self-heal + dropped-WO breadcrumb ───────────────────────
+// ROOT CAUSE (wave2-reextract-diagnosis.json): a genuine WO whose INSERT hit the
+// (org_id, graph_message_id) UNIQUE key was SILENTLY dropped with only a console.log.
+// This replaces that silent `continue` with:
+//   * heal — the occupying row is a NON-LIVE shell (superseded/rejected): re-populate
+//            it in place (same id, same graph_message_id, no new INSERT) so a released
+//            email auto-recovers into its own slot. Returns the healed row.
+//   * live_collision — the occupying row is LIVE (dedup failed upstream): DO NOT clobber
+//            a live draft/job. Breadcrumb only.
+//   * dropped — any other insert failure, or a heal UPDATE that itself fails: a real WO
+//            would be lost. Breadcrumb so the alarm can fire; never a silent log again.
+// Every outcome writes a business_event so a dropped/collided WO is visible on the board.
+export async function _selfHealIntakeInsert(
+  client: any,
+  input: {
+    draft: any
+    insErr: any
+    orgId: string
+    graphMessageId: string
+    externalRef: string | null
+    subject: string
+  },
+): Promise<{ outcome: 'healed' | 'live_collision' | 'dropped'; row: any | null }> {
+  const { draft, insErr, orgId, graphMessageId, externalRef, subject } = input
+  const refOrId = externalRef || graphMessageId
+  const isUniqueViolation = String(insErr?.code) === '23505' ||
+    /duplicate key|unique constraint|already exists/i.test(insErr?.message || '')
+
+  const dropBreadcrumb = async (reason: string) => {
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'makesafe.intake_wo_dropped',
+        source: 'app/makesafe-intake',
+        entity_type: 'makesafe_ref',
+        entity_id: String(refOrId),
+        body_preview: `Intake WO dropped (${reason}): ${subject}`,
+        payload: { external_ref: externalRef, graph_message_id: graphMessageId, reason, error: (insErr?.message || '').slice(0, 300) },
+        metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+      })
+    } catch { /* non-blocking breadcrumb */ }
+  }
+
+  if (!isUniqueViolation) {
+    console.error('[ops-api] intake draft insert failed (WO DROPPED):', insErr?.message, '| ref', externalRef, '| subject', subject)
+    await dropBreadcrumb('insert_error')
+    return { outcome: 'dropped', row: null }
+  }
+
+  // 23505 on (org_id, graph_message_id): find the row occupying that slot.
+  const { data: occ } = await client.from('makesafe_intake_drafts')
+    .select('id, status')
+    .eq('org_id', orgId)
+    .eq('graph_message_id', graphMessageId)
+    .maybeSingle()
+
+  const action = occ?.id ? _decideInsertConflictAction(occ.status) : 'dropped'
+
+  if (occ?.id && action === 'heal') {
+    // Re-populate the non-live shell IN PLACE — immune to the unique key.
+    const { data: healed, error: healErr } = await client.from('makesafe_intake_drafts')
+      .update({
+        received_at: draft.received_at,
+        from_email: draft.from_email,
+        from_name: draft.from_name,
+        subject: draft.subject,
+        body_preview: draft.body_preview,
+        requesting_company_slug: draft.requesting_company_slug,
+        requesting_company_name: draft.requesting_company_name,
+        external_ref: draft.external_ref,
+        client_name: draft.client_name,
+        client_phone: draft.client_phone,
+        client_email: draft.client_email,
+        site_address: draft.site_address,
+        site_suburb: draft.site_suburb,
+        description: draft.description,
+        safety_requirements: draft.safety_requirements,
+        special_instructions: draft.special_instructions,
+        confidence: draft.confidence,
+        missing_fields: draft.missing_fields,
+        extraction_json: draft.extraction_json,
+        attachments_json: draft.attachments_json,
+        report_type: draft.report_type,
+        status: draft.status,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', occ.id)
+      .select().single()
+    if (healErr || !healed) {
+      console.error('[ops-api] intake self-heal UPDATE failed (WO DROPPED):', healErr?.message, '| ref', externalRef)
+      await dropBreadcrumb('heal_update_failed')
+      return { outcome: 'dropped', row: null }
+    }
+    console.log('[ops-api] intake self-heal: re-populated', occ.status, 'shell in place for', refOrId)
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'makesafe.intake_insert_healed',
+        source: 'app/makesafe-intake',
+        entity_type: 'makesafe_ref',
+        entity_id: String(refOrId),
+        body_preview: `Intake insert self-healed (${occ.status} shell re-populated): ${subject}`,
+        payload: { external_ref: externalRef, graph_message_id: graphMessageId, prior_status: occ.status, draft_id: occ.id },
+        metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+      })
+    } catch { /* non-blocking breadcrumb */ }
+    return { outcome: 'healed', row: healed }
+  }
+
+  if (occ?.id && action === 'live_collision') {
+    console.error('[ops-api] intake insert LIVE collision (dedup miss?) — NOT clobbering live row:', refOrId, '| status', occ.status)
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'makesafe.intake_insert_live_collision',
+        source: 'app/makesafe-intake',
+        entity_type: 'makesafe_ref',
+        entity_id: String(refOrId),
+        body_preview: `Intake insert LIVE collision (dedup miss): ${subject}`,
+        payload: { external_ref: externalRef, graph_message_id: graphMessageId, live_status: occ.status, live_draft_id: occ.id },
+        metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+      })
+    } catch { /* non-blocking breadcrumb */ }
+    return { outcome: 'live_collision', row: null }
+  }
+
+  // Unique violation but no occupying row found (race / RLS) — treat as a drop, loud.
+  console.error('[ops-api] intake insert 23505 but no occupying row found (WO DROPPED):', refOrId)
+  await dropBreadcrumb('unique_violation_no_row')
+  return { outcome: 'dropped', row: null }
+}
+
 async function scanSesMakesafes(client: any) {
   // The group-sync projection keys ses@ mail under this mailbox (the canonical
   // value used by monitor-ses-makesafes + reconcile + the GAP reads).
@@ -11285,6 +11888,15 @@ async function scanSesMakesafes(client: any) {
   const inboundMessages = mappedMessages.filter(
     (msg: any) => !_isOwnDomain(_deriveFromDomain(msg.from?.emailAddress?.address || null)),
   )
+
+  // Empty-feed anomaly signal: the freshest INBOUND (non-own-domain) email this scan can
+  // see. If the Graph mirror starts returning nothing, this stops advancing and the alarm
+  // trips during business hours. Own outbound is excluded so our own sends can't mask it.
+  let mostRecentInboundIso: string | null = null
+  for (const m of inboundMessages) {
+    const r = m.receivedDateTime || null
+    if (r && (!mostRecentInboundIso || String(r) > mostRecentInboundIso)) mostRecentInboundIso = String(r)
+  }
 
   // Filter to known make-safe senders (UNCHANGED logic, now over the inbound set)
   const matchedMessages = inboundMessages.filter((msg: any) => {
@@ -11403,6 +12015,14 @@ async function scanSesMakesafes(client: any) {
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
+  // A2/A3 dropped-WO breadcrumb accumulators (folded into makesafe_intake_health after
+  // the loop; the health alarm fires when live-collision + dropped > 0).
+  let insertConflictsHealed = 0
+  let insertConflictsLive = 0
+  let droppedAfterExtraction = 0
+  let lastDroppedRef: string | null = null
+  // A5 arrival texts fired this scan (observability only).
+  let arrivalTextsSent = 0
   // M1.5 cost ledger: per-scan running totals of model calls / template skips / tokens.
   let scanCostTotals = _emptyScanTotals()
   // Cost-leak fix: emails skipped because they were already extracted (marker set), and
@@ -11414,6 +12034,10 @@ async function scanSesMakesafes(client: any) {
   // D-d kill switch (Captain D1 default TRUE): the DB flag decides whether the scan
   // may auto-file clean drafts this run. Read ONCE per scan.
   const autoFileEnabled = await isAutoFileEnabled(client)
+
+  // A5 arrival-text config (recipients + kill switch). Read ONCE per scan; a genuine
+  // new WO texts the owner crew once (fire-once via makesafe_notify_log).
+  const notifySettings: _NotifySettings = await _loadNotifySettings(client)
 
   // M1.5 lever 1 kill switch: local PDF text extraction is ON by default; set
   // MAKESAFE_INTAKE_PDF_TEXT_MODE=false to force the document-block path with no
@@ -11716,19 +12340,12 @@ async function scanSesMakesafes(client: any) {
         // as a model call (not miscounted as a template skip) in the cost ledger.
         modelCalled = true
         const resp = await anthropic.messages.create({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 900,
+          model: MAKESAFE_EXTRACTION_MODEL,
+          max_tokens: MAKESAFE_EXTRACTION_MAX_TOKENS,
           system: [{
             type: 'text',
             cache_control: { type: 'ephemeral' },
-            text: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
-Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "report_type": "roof_report"|"assessment_report"|"temp_fence"|"re_attend"|"general_makesafe"|"not_a_report", "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
-Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
-Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
-For report_type, COMMIT the single best classification of the work using the body AND the PDF: "roof_report" (roof report/inspection), "assessment_report" (assessment / assess-and-quote / scope of works), "temp_fence" (temporary fence collect/pickup), "re_attend" (return visit to an existing job), "general_makesafe" (a physical make-safe work order that is not primarily a report), or "not_a_report". Do not leave it blank; pick "general_makesafe" for an ordinary physical make-safe.
-For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
-For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
-If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
+            text: MAKESAFE_EXTRACTION_SYSTEM_PROMPT,
           }],
           messages: [{ role: 'user', content: userContent }],
         })
@@ -12135,33 +12752,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     }
 
     // Report-capture drafts always go to needs_review (they are human-review items,
-    // never auto-approved). Normal WO drafts use the existing completeness logic.
-    // Codex issue 1: report_type is set whenever the subject matched a report
-    // pattern (tagReportType), even for a kind='work_order' make-safe-and-report.
-    let draftStatus: string
-    if (draftExtractionDegraded) {
-      // D-a: a degraded-extraction draft is ALWAYS a human docket ("EXTRACTION DOWN -
-      // key dead"), never stranded in 'draft' where the needs_review queue can't see it.
-      draftStatus = 'needs_review'
-    } else if (isReportCapture) {
-      draftStatus = 'needs_review'
-    } else {
-      // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
-      // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
-      // same required-field logic approveIntakeDraft uses (requesting_company, external_
-      // ref, client_name, site_address, and a work-order PDF via attachments.length): a
-      // draft missing any required field stays 'draft', a complete one goes to
-      // 'needs_review'. Both values are valid per the status CHECK constraint
-      // (migration 20260602000001).
-      const missingRequired = (
-        (!matchedCompany?.slug && !matchedCompany?.name) ||
-        !extractedRef ||
-        !extraction.client_name ||
-        !extraction.site_address ||
-        availableWoCount === 0
-      )
-      draftStatus = missingRequired ? 'draft' : 'needs_review'
-    }
+    // never auto-approved). Normal WO drafts use the existing completeness logic —
+    // now the SHARED computeIntakeDraftStatus so the scanner and the admin reextract
+    // action can never drift on "draft vs needs_review".
+    const draftStatus: string = _computeIntakeDraftStatus({
+      extractionDegraded: draftExtractionDegraded,
+      isReportCapture,
+      hasCompany: !!(matchedCompany?.slug || matchedCompany?.name),
+      externalRef: extractedRef,
+      clientName: extraction.client_name || null,
+      siteAddress: extraction.site_address || null,
+      availableWoCount,
+    })
 
     // Create draft
     const draft = {
@@ -12194,11 +12796,34 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       status: draftStatus,
     }
 
-    const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')
+    const insResult = await client.from('makesafe_intake_drafts')
       .insert(draft).select().single()
+    let inserted = insResult.data
+    const insErr = insResult.error
     if (insErr) {
-      console.log('[ops-api] intake draft insert failed:', insErr.message)
-      continue
+      // A2/A3 — no more silent drop. On the (org_id, graph_message_id) unique-key
+      // collision, re-populate a non-live shell in place (heal) so a released email
+      // recovers into its own slot; a LIVE collision or any other error becomes a loud
+      // breadcrumb + alarm signal instead of a swallowed console.log.
+      const heal = await _selfHealIntakeInsert(client, {
+        draft,
+        insErr,
+        orgId: DEFAULT_ORG_ID,
+        graphMessageId: msg.id,
+        externalRef: extractedRef,
+        subject,
+      })
+      if (heal.outcome === 'healed' && heal.row) {
+        inserted = heal.row
+        insertConflictsHealed++
+      } else if (heal.outcome === 'live_collision') {
+        insertConflictsLive++
+        continue
+      } else {
+        droppedAfterExtraction++
+        lastDroppedRef = extractedRef || msg.id
+        continue
+      }
     }
 
     // BUG 1 — register the new draft in the in-memory index so a SECOND copy of the
@@ -12220,6 +12845,40 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       },
       dedupIndex,
     )
+
+    // A5 — ARRIVAL TEXT. A genuine NEW work order just landed as a usable card (fresh
+    // insert or a healed shell). Text the owner crew ONCE per WO (fire-once via the
+    // makesafe_notify_log ledger; twins / re-sends / re-extractions collide and skip).
+    // reopen_candidate drafts never reach here (they `continue` earlier); a dead-key
+    // degraded draft is skipped (no address to text about, extraction failed).
+    const arrivalGate = _shouldSendArrival({
+      notifyEnabled: notifySettings.notify_enabled,
+      isReopen: false,
+      extractionDegraded: draftExtractionDegraded,
+      hasDedupKey: !!(extractedRef || msg.id),
+    })
+    if (arrivalGate.ok) {
+      try {
+        const arrival = await _sendMakesafeArrivalTexts(
+          client,
+          notifySettings,
+          { sendSms: (phone, message, fromNumber) => sendSmsViaGhl(phone, message, fromNumber), logBusinessEvent },
+          {
+            orgId: DEFAULT_ORG_ID,
+            externalRef: extractedRef,
+            graphMessageId: msg.id,
+            family: draftJobFamily,
+            reportType: draftReportType,
+            siteAddress: extraction.site_address || null,
+            siteSuburb: extraction.site_suburb || null,
+            companyName: matchedCompany?.name || matchedCompany?.slug || null,
+          },
+        )
+        if (arrival.sent) arrivalTextsSent++
+      } catch (e) {
+        console.warn('[ops-api] arrival text send failed (non-blocking):', (e as Error).message)
+      }
+    }
 
     // D-d auto-file gate. THREE independent brakes decide `enabled`:
     //   1. autoFileEnabled  — the DB kill switch makesafe_cron_settings.auto_file_enabled
@@ -12337,6 +12996,15 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // B5 SLA: this scan's arrival->card latency snapshot + deferred-candidate count.
     sla: scanSla,
     cappedCandidates,
+    // A3: dropped-WO breadcrumb (self-heal outcomes this scan) -> feeds the alarm.
+    breadcrumb: {
+      insertConflictsHealed,
+      insertConflictsLive,
+      droppedAfterExtraction,
+      lastDroppedRef,
+    },
+    // Empty-feed anomaly: freshest inbound email seen this scan.
+    lastInboundEmailAt: mostRecentInboundIso,
   })
 
   return {
@@ -12375,6 +13043,13 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     auto_approved_count: autoApproved.length,
     auto_approve_failed: autoApproveFailed,
     auto_approve_failed_count: autoApproveFailed.length,
+    // A2/A3 dropped-WO breadcrumb this scan (>0 live/dropped raises the health alarm).
+    insert_conflicts_healed: insertConflictsHealed,
+    insert_conflicts_live: insertConflictsLive,
+    dropped_after_extraction: droppedAfterExtraction,
+    last_dropped_ref: lastDroppedRef,
+    // A5 arrival texts fired this scan (fire-once per WO via the notify ledger).
+    arrival_texts_sent: arrivalTextsSent,
     // M1.5 cost summary for this scan: how many drafts used a template skip vs a model
     // call, the token totals, and the estimated USD at the Haiku 4.5 rate constants.
     cost: {
