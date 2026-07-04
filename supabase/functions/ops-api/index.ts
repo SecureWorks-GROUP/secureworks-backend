@@ -8967,6 +8967,24 @@ export interface MakesafeSurfacing {
 // pack statuses that mean the pack was actually sent / closed (never re-surface).
 const MAKESAFE_PACK_SENT_STATUSES = ['sent', 'sent_marker_failed', 'sent_not_closed', 'close_failed']
 
+// CHIP-TRUTH (audit F5): the TRUSTWORTHY "sent to builder" signal for the board's
+// SENT chip. TRUE only when there is a REAL send record:
+//   - the MAKESAFE_PACK_SENT | main marker note (packSent), or
+//   - the durable makesafe_report_packs row is in a sent/closed status.
+// It deliberately EXCLUDES detail.report_sent_at, which updateMakesafeSubstatus
+// stamps on the move to ready_to_invoice (admin marking the report ready to
+// invoice) — NOT necessarily at send time — so it is not proof of a send. It also
+// does NOT use the board stage: today the SENT chip greened for EVERY
+// completed/archive card as a column proxy (makesafeReportStatus -> 'processed'),
+// asserting "sent" with no record behind it. Fail-closed: unknown -> not sent.
+export function _makesafeSentToBuilder(
+  packSent: boolean | undefined,
+  pack: MakesafeReportPackLike | null | undefined,
+): boolean {
+  const packStatus = String(pack?.status || '').toLowerCase()
+  return packSent === true || MAKESAFE_PACK_SENT_STATUSES.includes(packStatus)
+}
+
 export function _deriveMakesafeSurfacing(
   job: any,
   detail: any,
@@ -9200,23 +9218,51 @@ function makesafeInvoiceStatus(boardStage: string, invoice: any): string {
 }
 
 // Build the per-job close-out doc booleans from this job's job_documents rows.
-// has_wo: a work order doc; has_report_doc / has_invoice_doc / has_swms_doc:
-// matched by file_name (the PDFs the reporting skill attaches at close-out).
+// has_wo: a work order doc; has_report_doc / has_invoice_doc / has_swms_doc.
+//
+// CHIP-TRUTH (audit F6): PREFER the typed job_documents.type over the filename
+// heuristic. The reporting skill now writes TYPED rows — an invoice as
+// type='invoice' named 'INV-0776.pdf', the report as type='makesafe_report',
+// the SWMS as type='swms'. A filename-only match therefore both:
+//   - MISSES real typed docs (INV-0776.pdf has no 'invoice' substring, so the
+//     invoice read as missing — stranding 8 fully-packed MLB jobs and failing
+//     the send preflight's close-out doc gate); and
+//   - can FAKE a doc from a mistyped 'general' file whose NAME happens to match.
+// Rule, per row:
+//   - a MEANINGFUL type (present and not 'general') is AUTHORITATIVE — the row
+//     counts ONLY for that kind, never via filename.
+//   - an ABSENT or 'general' type FALLS BACK to the filename heuristic (legacy
+//     rows the skill has not re-typed yet).
+// Fail-closed: an unknown/other type counts for no kind; empty docs -> all false.
 function makesafeDocBooleans(docRows: any[] | null | undefined) {
   const rows = docRows || []
-  const nameMatches = (needle: string) =>
-    rows.some((d: any) => String(d?.file_name || '').toLowerCase().includes(needle))
-  // SWMS match must NOT catch the make-safe job-number prefix `SWMS-NNNNN`, which
-  // appears in most attached filenames. Match "swms" only when it is not the
-  // job-number token (i.e. not immediately followed by a hyphen + digit).
-  const hasSwms = rows.some((d: any) => /swms(?![-\s]?\d)/i.test(String(d?.file_name || '')))
+  const isFallbackType = (t: string) => t === '' || t === 'general'
+  const nameOf = (d: any) => String(d?.file_name || '').toLowerCase()
+  const typeOf = (d: any) => String(d?.type || '').toLowerCase()
+  // SWMS filename fallback must NOT catch the make-safe job-number prefix
+  // `SWMS-NNNNN`, which appears in most attached filenames. Match "swms" only
+  // when it is not the job-number token (not immediately followed by hyphen+digit).
+  const swmsInName = (name: string) => /swms(?![-\s]?\d)/i.test(name)
+  // A row counts for `canonicalType` when its type IS that type, or when the row
+  // is untyped/'general' and the filename fallback matches.
+  const has = (canonicalType: string, nameMatches: (name: string) => boolean) =>
+    rows.some((d: any) => {
+      const t = typeOf(d)
+      if (t === canonicalType) return true
+      if (isFallbackType(t)) return nameMatches(nameOf(d))
+      return false
+    })
   return {
-    has_wo: rows.some((d: any) => String(d?.type || '').toLowerCase() === 'work_order'),
-    has_report_doc: nameMatches('make safe report'),
-    has_invoice_doc: nameMatches('invoice'),
-    has_swms_doc: hasSwms,
+    // has_wo stays type-only (no legacy filename WO fallback) — never inferred
+    // from a filename to avoid a stray 'general' file spoofing a work order.
+    has_wo: rows.some((d: any) => typeOf(d) === 'work_order'),
+    has_report_doc: has('makesafe_report', (n) => n.includes('make safe report')),
+    has_invoice_doc: has('invoice', (n) => n.includes('invoice')),
+    has_swms_doc: has('swms', (n) => swmsInName(n)),
   }
 }
+// Test-only export for the chip-truth doc-boolean derivation.
+export const _makesafeDocBooleansForTest = makesafeDocBooleans
 
 function docCreatedAtMs(doc: any): number {
   const t = doc?.created_at ? new Date(doc.created_at).getTime() : NaN
@@ -9443,6 +9489,11 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     crew_members: crew.crew_members,
     report_status: makesafeReportStatus(boardStage, detail, report),
     invoice_status: makesafeInvoiceStatus(boardStage, invoice),
+    // sent_to_builder (audit F5): the honest SENT-chip signal. TRUE only with a
+    // real send record (pack-sent marker OR durable pack sent-status) — NEVER a
+    // bare completed/archive column proxy. Completed cards with no send record
+    // read as not-sent, not green. Fail-closed (unknown -> false).
+    sent_to_builder: _makesafeSentToBuilder(packSent, pack),
     ...(docFlags || {}),
     // pack_sent is only meaningful (defined) when the caller loaded the marker.
     ...(packSent !== undefined ? { pack_sent: packSent === true } : {}),
@@ -9452,6 +9503,8 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     warning_docs: softWarning ? missingDocs : undefined,
   }
 }
+// Test-only export for the board-job enrichment (chip-truth wiring).
+export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 
 async function updateMakesafeSubstatus(client: any, body: any) {
   const { job_id, jobId, substatus } = body
