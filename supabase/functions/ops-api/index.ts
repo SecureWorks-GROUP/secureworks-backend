@@ -3652,19 +3652,23 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'clock_event':
       case 'submit_makesafe_report': {
         const tradeUser = await authTrade(req, client)
-        // Look up user role for admin visibility
-        const { data: userRec } = await client.from('users').select('role').eq('id', tradeUser.id).maybeSingle()
-        const tradeRole = userRec?.role || 'trade'
-        const isAdmin = tradeRole === 'admin'
-        // Dispatcher = the ops manager / admin who runs the board. They get a
-        // see-all view of every job and are the only non-assigned users who can
-        // see the full open MakeSafe pool (other trades see only their own).
-        const isDispatcher = isAdmin || tradeRole === 'ops_manager'
+        // Look up user role + make-safe manager flag for trade-app visibility.
+        const { data: userRec } = await client.from('users').select('role, makesafe_manager').eq('id', tradeUser.id).maybeSingle()
+        // Dispatcher = the ops manager / admin who runs the board: see-all view of
+        // every job plus the full open MakeSafe pool (other trades see only their
+        // own). A make-safe manager (users.makesafe_manager = true, e.g. Hugo +
+        // Nithin) is NOT a dispatcher: they get the SAME full open MakeSafe pool
+        // unioned with only their own assignments (showAll stays false). Resolved
+        // server-side via the pure _resolveMakesafeVisibility helper.
+        const { isAdmin, isDispatcher, isMakesafeManager } = _resolveMakesafeVisibility({
+          role: userRec?.role,
+          makesafeManager: userRec?.makesafe_manager,
+        })
         switch (action) {
           case 'my_jobs': {
             const mode = url.searchParams.get('mode') // 'all' for dispatcher view, 'mine' for personal
             const showAll = isDispatcher && mode !== 'mine'
-            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher))
+            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager))
           }
           case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
@@ -17198,7 +17202,44 @@ export function _groupTradeAssignmentsForTest(assignments: any[], today: string,
   return grouped
 }
 
-async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false) {
+// ── Make-safe pool visibility (trade app) ──────────────────────────────────
+// Statuses that EXCLUDE a make-safe job from the open trade pool. Extracted to a
+// single constant so the two queries that build the pool cannot drift and so the
+// exclusion contract (notably 'archived') can be unit-tested. Rendered into a
+// PostgREST `not in (...)` filter via _makesafePoolExcludedStatusFilter().
+export const _MAKESAFE_POOL_EXCLUDED_STATUSES = [
+  'cancelled', 'archived', 'lost', 'deleted', 'complete', 'completed',
+  'invoiced', 'paid', 'closed', 'duplicate', 'duplicated', 'void', 'voided',
+] as const
+
+export function _makesafePoolExcludedStatusFilter(): string {
+  return '(' + _MAKESAFE_POOL_EXCLUDED_STATUSES.map((s) => `"${s}"`).join(',') + ')'
+}
+
+// Pure resolver for trade-app make-safe visibility. Single source of truth used
+// by the route and unit tests.
+//  - Dispatcher (admin / ops_manager): see-all view of every job PLUS the full
+//    open make-safe pool. Runs with showAll=true.
+//  - Make-safe manager (users.makesafe_manager = true, e.g. Hugo + Nithin): NOT a
+//    dispatcher. Gets the SAME full open make-safe pool UNIONED with only their
+//    own assignments. showAll stays false so the per-user assignment query runs.
+export function _resolveMakesafeVisibility(
+  input: { role?: string | null; makesafeManager?: boolean | null },
+): { isAdmin: boolean; isDispatcher: boolean; isMakesafeManager: boolean; canSeeMakesafePool: boolean } {
+  const role = String(input?.role || '').toLowerCase()
+  const isAdmin = role === 'admin'
+  const isDispatcher = isAdmin || role === 'ops_manager'
+  const isMakesafeManager = input?.makesafeManager === true
+  return { isAdmin, isDispatcher, isMakesafeManager, canSeeMakesafePool: isDispatcher || isMakesafeManager }
+}
+
+// Gate used inside myJobs: a flagged make-safe manager gets the same full
+// non-archived make-safe pool a dispatcher gets.
+export function _canSeeFullMakesafePool(isDispatcher: boolean, isMakesafeManager: boolean): boolean {
+  return isDispatcher === true || isMakesafeManager === true
+}
+
+async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false) {
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -17301,18 +17342,22 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
     }
   }
 
-  // MakeSafe dispatch flow: the full open MakeSafe pool is visible only to the
-  // dispatcher (ops manager / admin) as open field-report cards, even before a
-  // named assignment exists. Other trades see a MakeSafe only once it is
-  // allocated to them (their named assignment). Keep this specific to MakeSafe
-  // and expose only the same slim job fields the mobile job list already uses.
-  if (isDispatcher) {
+  // MakeSafe dispatch flow: the full open MakeSafe pool is visible to the
+  // dispatcher (ops manager / admin) AND to a flagged make-safe manager
+  // (users.makesafe_manager, e.g. Hugo + Nithin) as open field-report cards,
+  // even before a named assignment exists. Other trades see a MakeSafe only once
+  // it is allocated to them (their named assignment). A manager is not a
+  // dispatcher, so showAll stays false: their own assignments (fetched above)
+  // are unioned with this pool, and pool cards already assigned to them are
+  // de-duplicated via assignedJobIds below. Keep this specific to MakeSafe and
+  // expose only the same slim job fields the mobile job list already uses.
+  if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
     const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
       .or('type.eq.makesafe,job_number.ilike.SWMS-%')
-      .not('status', 'in', '("cancelled","archived","lost","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
+      .not('status', 'in', _makesafePoolExcludedStatusFilter())
       .order('created_at', { ascending: false })
       .limit(80)
     if (msErr) throw msErr
@@ -17342,7 +17387,7 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
         .from('jobs')
         .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
         .in('id', detailJobIds)
-        .not('status', 'in', '("cancelled","archived","lost","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
+        .not('status', 'in', _makesafePoolExcludedStatusFilter())
         .order('created_at', { ascending: false })
         .limit(80)
       if (detailJobsErr) throw detailJobsErr
