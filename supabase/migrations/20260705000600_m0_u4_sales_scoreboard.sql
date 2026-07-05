@@ -102,6 +102,10 @@ LEFT JOIN LATERAL (
    WHERE be.job_id = j.id
      AND be.event_type = 'quote.sent'
      AND be.payload ->> 'from_site' = 'true'
+     -- Event-level test exclusion: U3's sandbox validation fires a real
+     -- quote.sent that self-marks payload.is_test=true. jobs.is_test cannot
+     -- catch a no-job sandbox event, so exclude it here at the event grain.
+     AND coalesce(be.payload ->> 'is_test', 'false') <> 'true'
 ) fs ON true
 LEFT JOIN LATERAL (
   SELECT min(l.created_at) AS lost_at,

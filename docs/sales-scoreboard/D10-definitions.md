@@ -80,7 +80,12 @@ timestamp) is surfaced on the scoreboard.
   but are never in this number.
 - The flag is written server-side by the scoping tool's on-site sign-off flow (U3).
   This view is the single consumer of that flag, so U3 must write it into the
-  `quote.sent` payload. 0 until U3 ships; correct now.
+  `quote.sent` payload (`payload->>'from_site'='true'`, evidence at
+  `payload->'from_site_evidence'`). It never counts `payload->>'from_site_estimated'`.
+  0 until U3 ships; correct now.
+- **Test events excluded.** A `quote.sent` that self-marks
+  `payload->>'is_test'='true'` (U3's sandbox validation) is never counted, since
+  `jobs.is_test` cannot catch a no-job sandbox event.
 
 ### 5. Won / Lost
 - **Won** = episodes with `jobs.accepted_at` in the week.
