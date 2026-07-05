@@ -46,6 +46,10 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+// Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
+// discipline. Same source of truth used by the Xero PO push (ops-api/pushPOToXero)
+// so the canonical job ref + quote-back ask never drift between the two channels.
+import { canonicalJobRef, poEmailReferenceBanner } from '../_shared/po_reference.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -270,8 +274,11 @@ if (import.meta.main) serve(async (req: Request) => {
 
     // Build subject — auto-append PO/job reference if not already present
     const poRef = po.po_number || ''
+    // U2 reference discipline — the canonical job ref the supplier is asked to
+    // quote back. jobs.job_number is authoritative; po.reference is the fallback.
+    const jobRef = canonicalJobRef(jobNumber || po.reference, jobNumber)
     let subject = rawSubject
-    const refTag = `${poRef}${jobNumber ? ' | ' + jobNumber : ''}`
+    const refTag = `${poRef}${jobRef ? ' | ' + jobRef : ''}`
     if (poRef && subject.indexOf(poRef) === -1) {
       subject = `${subject} | ${refTag}`
     }
@@ -282,9 +289,13 @@ if (import.meta.main) serve(async (req: Request) => {
     const replyToTag = `${poRef}${jobNumber ? '-' + jobNumber : ''}`.replace(/\s+/g, '')
     const replyTo = `orders+${replyToTag}@${fromDomain}`
 
-    // Build email HTML with signature
+    // Build email HTML with a leading reference banner + signature.
+    // U2 — the banner is injected SERVER-SIDE so reference discipline holds
+    // regardless of what the caller composed (the live ops.html composer is
+    // currently broken/dead, so this choke point is the guarantee, not the UI).
     const htmlBody = body_html || `<pre>${body_text}</pre>`
-    const fullHtml = `${htmlBody}
+    const referenceBanner = jobRef ? poEmailReferenceBanner(jobRef) : ''
+    const fullHtml = `${referenceBanner}${htmlBody}
 <br><hr style="border:none;border-top:1px solid #ddd;margin:20px 0;">
 <p style="font-size:12px;color:#666;">
   <strong>SecureWorks Group Pty Ltd</strong><br>
