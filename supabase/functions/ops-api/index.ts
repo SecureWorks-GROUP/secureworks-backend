@@ -224,6 +224,17 @@ import {
   type HoursFlagOutcome,
   isMakeSafeLine,
 } from './makesafe_hours_flag.ts'
+// M4 U3 (same mission) — finance review email for flagged trade invoices. Pure
+// builder + send-ledger decision live in the module; recordFinanceReviewEmail
+// (below) does the ledger DB writes and the CP2-gated Resend send.
+import {
+  buildFinanceReviewEmail,
+  computeFlagSetHash,
+  decideLedgerAction,
+  type FlaggedReviewLine,
+  type LedgerRow,
+  xeroDraftBillUrl,
+} from './finance_review_email.ts'
 
 // Mission makesafe-live-truth-2026-06-14 (M2) — compact READ endpoints GAP-1..6.
 // These let the make-safe skills read the email-sync Supabase projection instead
@@ -514,6 +525,137 @@ async function fetchMakesafeAllowanceInputs(
   } catch (e) { console.log('[ops-api] hours-flag report read failed (non-blocking):', (e as Error).message) }
 
   return out
+}
+
+// ── M4 U3: finance review email — send-ledger + CP2-gated Resend send ────────
+// Records ONE review email per flagged trade invoice in finance_review_emails,
+// keyed by trade_invoice_id + flagged-line-set hash, with exactly-one + supersede
+// semantics (finding #1). The actual Resend send is GATED OFF by default
+// (FINANCE_REVIEW_EMAIL_SEND != 'on') — v1 records the rendered email
+// (status='recorded') and sends nothing; the send only fires after Marnin
+// approves the exact draft at CP2 and the env flag is flipped on. This helper is
+// NON-BLOCKING: any failure is caught and logged, never failing the invoice
+// submit (the invoice + Xero draft are already committed).
+//
+// Job cost report URL (U5, Deckhand B): stable placeholder pattern
+// `<FINANCE_REVIEW_REPORT_BASE>/job-cost-report?job=<jobId>&invoice=<invoiceId>`.
+// Base defaults to the ops app; repoint via env when U5's surface is finalised.
+async function recordFinanceReviewEmail(
+  client: any,
+  params: {
+    tradeInvoiceId: string
+    invoiceNumber: string
+    tradeName?: string | null
+    flaggedLines: FlaggedReviewLine[]
+    xeroBillId?: string | null
+  },
+): Promise<{ action: string } | null> {
+  const flaggedLines = params.flaggedLines || []
+  if (flaggedLines.length === 0) return null
+  try {
+    const flagSetHash = computeFlagSetHash(flaggedLines)
+
+    // Existing ACTIVE ledger rows for this invoice (recorded or sent).
+    const { data: existing } = await client.from('finance_review_emails')
+      .select('id, flag_set_hash')
+      .eq('trade_invoice_id', params.tradeInvoiceId)
+      .in('status', ['recorded', 'sent'])
+    const activeRows: LedgerRow[] = (existing || []).map((r: any) => ({ id: r.id, flag_set_hash: r.flag_set_hash }))
+
+    const decision = decideLedgerAction(activeRows, flagSetHash)
+    if (decision.action === 'skip') return { action: 'skip' }
+
+    // Build the deterministic email (subject/body reflect the supersede state).
+    const reportBase = (Deno.env.get('FINANCE_REVIEW_REPORT_BASE') || 'https://ops.secureworksgroup.app').replace(/\/+$/, '')
+    const jobCostReportUrls: Record<string, string> = {}
+    for (const l of flaggedLines) {
+      if (l.jobId && !jobCostReportUrls[l.jobId]) {
+        jobCostReportUrls[l.jobId] = reportBase + '/job-cost-report?job=' + encodeURIComponent(l.jobId) +
+          '&invoice=' + encodeURIComponent(params.tradeInvoiceId)
+      }
+    }
+    const email = buildFinanceReviewEmail({
+      invoiceNumber: params.invoiceNumber,
+      tradeInvoiceId: params.tradeInvoiceId,
+      tradeName: params.tradeName || null,
+      flaggedLines,
+      xeroDraftBillUrl: xeroDraftBillUrl(params.xeroBillId),
+      jobCostReportUrls,
+      isUpdate: decision.isUpdate,
+    })
+
+    // Supersede prior active rows before inserting the new one (history is kept).
+    if (decision.supersedesIds.length > 0) {
+      await client.from('finance_review_emails')
+        .update({ status: 'superseded' })
+        .in('id', decision.supersedesIds)
+    }
+
+    // Insert the new ledger row (recorded, not sent). The partial unique index
+    // (trade_invoice_id, flag_set_hash) WHERE status IN (recorded,sent) makes a
+    // concurrent double-submit collide here → treated as an idempotent skip.
+    const { data: inserted, error: insErr } = await client.from('finance_review_emails')
+      .insert({
+        trade_invoice_id: params.tradeInvoiceId,
+        invoice_number: params.invoiceNumber,
+        flag_set_hash: flagSetHash,
+        flagged_line_count: email.flaggedLineCount,
+        recipient: email.recipient,
+        subject: email.subject,
+        body_text: email.text,
+        body_html: email.html,
+        status: 'recorded',
+        is_update: decision.isUpdate,
+        supersedes_id: decision.supersedesIds[0] || null,
+      })
+      .select('id')
+      .single()
+    if (insErr) {
+      // 23505 = unique_violation → another concurrent submit won the race.
+      if ((insErr as any).code === '23505') return { action: 'skip_conflict' }
+      throw insErr
+    }
+
+    // ── CP2-GATED live send (Resend). OFF by default. ──
+    const sendEnabled = Deno.env.get('FINANCE_REVIEW_EMAIL_SEND') === 'on'
+    const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
+    if (sendEnabled && RESEND_API_KEY && inserted?.id) {
+      try {
+        const resendResp = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from: email.from,
+            reply_to: email.replyTo,
+            to: [email.recipient],
+            subject: email.subject,
+            text: email.text,
+            html: email.html,
+          }),
+        })
+        const resendResult = await resendResp.json().catch(() => ({}))
+        if (resendResp.ok) {
+          await client.from('finance_review_emails')
+            .update({ status: 'sent', sent_at: new Date().toISOString() })
+            .eq('id', inserted.id)
+        } else {
+          await client.from('finance_review_emails')
+            .update({ send_error: ('Resend ' + resendResp.status + ': ' + (resendResult.message || '')).slice(0, 500) })
+            .eq('id', inserted.id)
+        }
+      } catch (sendErr) {
+        await client.from('finance_review_emails')
+          .update({ send_error: ('send threw: ' + (sendErr as Error).message).slice(0, 500) })
+          .eq('id', inserted.id)
+      }
+    }
+
+    return { action: decision.action }
+  } catch (e) {
+    // Non-blocking: the invoice + Xero draft are already committed.
+    console.log('[ops-api] finance review email record failed (non-blocking):', (e as Error).message)
+    return { action: 'error' }
+  }
 }
 
 async function resolveJobsByExternalRef(
@@ -5358,6 +5500,33 @@ if (import.meta.main) serve(async (req: Request) => {
                   schema_version: '1.0',
                 })
               } catch (logErr) { console.log('[ops-api] Failed to record xero_push_failed event:', (logErr as Error).message) }
+            }
+
+            // ── M4 U3: finance review email for a flagged invoice ─────────────
+            // Fires for both the success and push-failed paths (the flag is about
+            // the hours, not the Xero outcome); links the draft bill only when one
+            // exists. Records ONE email per flagged invoice in the send-ledger with
+            // exactly-one + supersede semantics. Non-blocking + CP2-gated: v1
+            // records but does not send. Runs before the XERO_PUSH_FAILED return.
+            if (anyHoursFlag) {
+              const flaggedReviewLines: FlaggedReviewLine[] = [...lineItems, ...extraLineItems]
+                .filter((l: any) => l._hoursFlag?.flagged)
+                .map((l: any) => ({
+                  jobId: l.job_id || null,
+                  jobNumber: l.job_number || null,
+                  clientName: l.client_name || null,
+                  allowedHours: l._hoursFlag.allowed_hours,
+                  source: l._hoursFlag.allowed_source,
+                  chargedHours: l._hoursFlag.charged_hours,
+                  justification: l._hoursFlag.justification ?? null,
+                }))
+              await recordFinanceReviewEmail(client, {
+                tradeInvoiceId: invoice.id,
+                invoiceNumber,
+                tradeName: userProfile?.name || null,
+                flaggedLines: flaggedReviewLines,
+                xeroBillId,
+              })
             }
 
             // B3: XERO_PUSH_FAILED — invoice is saved locally in 'approved' state (recoverable)
