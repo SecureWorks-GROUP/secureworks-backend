@@ -149,6 +149,48 @@ Deno.test("from_site STRICT: every disqualifier returns null", async () => {
   }), null);
 });
 
+// Postgres `payload->>'key'` semantics: returns the value's TEXT form, or null
+// when the key is absent. A JSON string "true" and a JSON boolean true both
+// extract to the text 'true'. This mirror lets the fixture assert Deckhand B's
+// exact reader expression against the row send-quote writes.
+function pgArrowArrowText(payload: Record<string, unknown>, key: string): string | null {
+  const v = payload[key];
+  if (v === undefined || v === null) return null;
+  return typeof v === "string" ? v : String(v);
+}
+
+Deno.test("INTERFACE: B's reader payload->>'from_site'='true' matches the written row", async () => {
+  // 1. A qualifying send produces server-verified evidence.
+  const evidence = await verifyFromSiteProof(makeDb([signoffEvent()]), {
+    jobId: JOB, assignedScoperId: SCOPER, toolSessionId: SESSION,
+    sendAtIso: iso("2026-06-01T10:05:00Z"),
+  });
+  assert(evidence !== null);
+
+  // 2. send-quote writes exactly this into the quote.sent payload (mirrors the
+  //    `salesMeasureFields` spread in send-quote/index.ts).
+  const quoteSentPayload: Record<string, unknown> = {
+    document_id: "doc-1",
+    job_number: "P-123",
+    ...{ from_site: "true", from_site_evidence: evidence },
+  };
+
+  // 3. Deckhand B's scoreboard view reads payload->>'from_site' = 'true'.
+  assertEquals(pgArrowArrowText(quoteSentPayload, "from_site"), "true"); // COUNTS
+  assert(typeof quoteSentPayload.from_site_evidence === "object"); // jsonb object
+  assertEquals((quoteSentPayload.from_site_evidence as { verifier: string }).verifier, "server");
+
+  // 4. A non-qualifying send writes NO from_site key → the view's filter
+  //    excludes it (never counted).
+  const officeResendPayload: Record<string, unknown> = { document_id: "doc-2", job_number: "P-124" };
+  assertEquals(pgArrowArrowText(officeResendPayload, "from_site"), null);
+  assert(pgArrowArrowText(officeResendPayload, "from_site") !== "true");
+
+  // 5. estimate label never satisfies the strict reader.
+  const estimatedOnly: Record<string, unknown> = { from_site_estimated: "true" };
+  assertEquals(pgArrowArrowText(estimatedOnly, "from_site"), null);
+});
+
 Deno.test("from_site STRICT: repeat client's old session does not qualify a new send", async () => {
   // Two sign-offs for the job across two sessions; a send in session B must not
   // match session A's sign-off.
