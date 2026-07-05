@@ -28,7 +28,10 @@ export type EvidenceFlagKey =
   | "evidence_capture_v1"
   | "evidence_audio_capture"
   | "evidence_transcript_capture"
-  | "evidence_refs_strict_mode";
+  | "evidence_refs_strict_mode"
+  // M0/U2: gates first-contact + lead-source stamping. Default OFF until
+  // migration 20260705000100 is applied and Marnin approves the flip.
+  | "first_contact_stamp_v1";
 
 /**
  * Returns true when the flag is ON. Default OFF on any error.

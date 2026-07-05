@@ -31,6 +31,11 @@ import { resolveMatch } from "./match.ts";
 import { writeBody } from "./storage.ts";
 import { makeEvidenceRef } from "./evidence_ref.ts";
 import { isFlagOn } from "./feature_flag.ts";
+import {
+  isFirstContactEligible,
+  stampContactFirstSeen,
+  stampJobFirstContact,
+} from "./first_contact.ts";
 
 /**
  * Supabase client surface. Typed as `any` because the @supabase/supabase-js
@@ -295,6 +300,36 @@ export async function recordEvidence(
       // dedupe constraint) the enqueue is structurally idempotent —
       // a queue row already exists for this (source_table, source_id,
       // extractor_version). Not a warning.
+    }
+  }
+
+  // M0/U2 — first-contact + lead-source stamping. Runs only after a real spine
+  // insert (effectiveDryRun false), only for eligible client touches
+  // (sms|call|email, inbound|outbound), and only when the kill-switch flag is
+  // ON. Non-fatal by design: a stamping failure must never block the evidence
+  // write that already succeeded above.
+  if (!effectiveDryRun && isFirstContactEligible(capture.channel, capture.direction)) {
+    try {
+      const stampOn = await isFlagOn(supabase, "first_contact_stamp_v1", options.org_id);
+      if (stampOn) {
+        // Lifetime (contact-level). Recompute-from-min self-heals late resolution.
+        if (capture.contact_id) {
+          const r = await stampContactFirstSeen(supabase, { ghlContactId: capture.contact_id });
+          if (r.changed) warnings.push(`contact_first_seen_at set ${r.after}`);
+        }
+        // Episode (this job). O(1) monotonic-min with the current touch.
+        if (match.job_id) {
+          const r = await stampJobFirstContact(supabase, {
+            jobId: match.job_id,
+            occurredAt: inserted_occurred_at,
+            channel: capture.channel,
+            direction: capture.direction,
+          });
+          if (r.changed) warnings.push(`job.first_contacted_at set ${r.after}`);
+        }
+      }
+    } catch (e) {
+      warnings.push(`first_contact stamp failed: ${(e as Error).message}`);
     }
   }
 
