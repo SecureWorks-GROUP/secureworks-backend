@@ -39,6 +39,7 @@ import {
 // match_status + extraction enqueue). When OFF, legacy raw insert.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { FROM_SITE_FLAG, isSandboxSend, verifyFromSiteProof, type FromSiteEvidence } from '../_shared/scope/from_site.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -625,7 +626,7 @@ serve(async (req: Request) => {
 
     // ── SEND QUOTE EMAIL ──
     if (path === 'send' && req.method === 'POST') {
-      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior } = await req.json()
+      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior, from_site_context, is_test } = await req.json()
 
       if (!document_id) {
         return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
@@ -649,6 +650,13 @@ serve(async (req: Request) => {
       if (!client_email) {
         return jsonResponse({ error: 'No email address found for this contact' }, 400, corsHeaders)
       }
+
+      // M0/U3 — sandbox validation send. When set, the real Resend dispatch is
+      // skipped (cannot reach a real client) and every business_event this send
+      // emits self-marks payload.is_test='true' so Deckhand B's scoreboard views
+      // exclude them. Triggered by an explicit is_test flag OR a sandbox-sink
+      // recipient (defense-in-depth).
+      const isTestSend = isSandboxSend(is_test, client_email)
 
       // ── Server-side pricing gate ──
       // The scoping tools embed pricing_validation_passed in pricing_json and the
@@ -739,6 +747,13 @@ serve(async (req: Request) => {
         }
 
         let emailRes: Response
+        if (isTestSend) {
+          // Sandbox validation: do NOT dispatch a real email or write to GHL /
+          // po_communications. The canonical business_events still emit below
+          // (marked is_test) so the from_site proof + evidence can be validated
+          // end-to-end without any client contact.
+          console.log('[send-quote] is_test sandbox send — real email dispatch + client-facing logging skipped')
+        } else {
         try {
           emailRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
@@ -798,6 +813,7 @@ serve(async (req: Request) => {
             .eq('id', document_id)
           return jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
         }
+        } // end real-dispatch branch (skipped for is_test sandbox sends)
       }
 
       // sent_to_client was already set to true by the atomic claim above
@@ -810,9 +826,33 @@ serve(async (req: Request) => {
         // the UPDATE's affected-row count below, which closes the SELECT-then-UPDATE race.
         const { data: jobBefore } = await sb
           .from('jobs')
-          .select('job_number, type, pricing_json, client_name')
+          .select('job_number, type, pricing_json, client_name, created_by')
           .eq('id', doc.job_id)
           .single()
+
+        // M0/U3 — "quoted from site" proof (STRICT, server-verified). Only sets
+        // the flag when this send verifiably originates from the on-site scope
+        // sign-off flow: same tool session as a real scope.signed_off event, by
+        // the assigned scoper (jobs.created_by). Office resends / regenerations
+        // and any client that merely asserts from_site never qualify. Gated by
+        // the FROM_SITE_FLAG kill-switch (absent => OFF).
+        let fromSiteEvidence: FromSiteEvidence | null = null
+        try {
+          if (from_site_context?.tool_session_id && await isFlagOn(sb, FROM_SITE_FLAG, DEFAULT_ORG_ID)) {
+            fromSiteEvidence = await verifyFromSiteProof(sb, {
+              jobId: doc.job_id,
+              assignedScoperId: jobBefore?.created_by ?? null,
+              toolSessionId: from_site_context.tool_session_id,
+              sendAtIso: new Date().toISOString(),
+            })
+          }
+        } catch (e) {
+          console.error('[send-quote] from_site proof check failed (non-fatal):', (e as Error)?.message)
+        }
+        const salesMeasureFields: Record<string, unknown> = {
+          ...(fromSiteEvidence ? { from_site: 'true', from_site_evidence: fromSiteEvidence } : {}),
+          ...(isTestSend ? { is_test: 'true' } : {}),
+        }
 
         // Conditional UPDATE returning affected rows — only this call's atomic
         // draft → quoted flip emits canonical release events. If a concurrent writer
@@ -957,6 +997,7 @@ serve(async (req: Request) => {
               job_type: jobBefore?.type || null,
               sent_to: client_email,
               total_inc_gst: totalIncGST,
+              ...salesMeasureFields,
             },
             metadata: { handler: 'send-quote/send' },
             schema_version: '1.0',
