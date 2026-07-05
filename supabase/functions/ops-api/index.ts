@@ -328,6 +328,15 @@ import {
   markReconNotJobRelated as _markReconNotJobRelated,
   resolveActor as _resolveReconActor,
 } from './materials_recon.ts'
+// M4 U5 -- finance job cost report (read-only, token-gated share page).
+import {
+  MAKESAFE_COST_REPORT_ACTION,
+  costReportSecret,
+  verifyCostReportToken,
+  getJobCostReport,
+  renderCostReportHtml,
+  renderCostReportError,
+} from './makesafe_cost_report.ts'
 import {
   sendPackAllowed,
   resolveExistingInvoice,
@@ -2065,6 +2074,30 @@ if (import.meta.main) serve(async (req: Request) => {
     return new Response(JSON.stringify({ version: '2026-05-30.v3', function: 'ops-api' }), {
       status: 200, headers: { ...CORS, 'Content-Type': 'application/json' }
     })
+  }
+
+  // ── M4 U5: finance job cost report (public, HMAC-token-gated, READ-ONLY) ──
+  // Finance opens this from a link in the U3 review email — no Bearer. The HMAC
+  // token over job_id makes the URL unguessable; the handler only SELECTs and
+  // renders HTML, never mutates. Served here (pre-auth) so the email link opens.
+  if (_preAuthUrl.searchParams.get('action') === MAKESAFE_COST_REPORT_ACTION) {
+    const _crHtml = { ...CORS, 'Content-Type': 'text/html; charset=utf-8' }
+    const _jobId = _preAuthUrl.searchParams.get('job_id') || ''
+    const _token = _preAuthUrl.searchParams.get('token') || ''
+    if (!_jobId || !(await verifyCostReportToken(_jobId, _token, costReportSecret()))) {
+      return new Response(renderCostReportError('This link is invalid or has expired. Ask the office to resend the review email.'), { status: 403, headers: _crHtml })
+    }
+    try {
+      const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const _crData = await getJobCostReport(_crClient, _jobId)
+      if (!_crData) {
+        return new Response(renderCostReportError('That job could not be found.'), { status: 404, headers: _crHtml })
+      }
+      return new Response(renderCostReportHtml(_crData), { status: 200, headers: _crHtml })
+    } catch (_crErr) {
+      console.error('[ops-api] makesafe_job_cost_report error:', _crErr)
+      return new Response(renderCostReportError('The report could not be loaded right now.'), { status: 500, headers: _crHtml })
+    }
   }
 
   // ── Authentication: API key (server-to-server) + JWT (browser) + scoped routine ──
