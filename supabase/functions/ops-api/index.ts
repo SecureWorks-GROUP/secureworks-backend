@@ -149,6 +149,14 @@ import {
   getScopeRevisionForViewer as _getScopeRevisionForViewer,
 } from '../_shared/scope_freeze/get_scope_revision_for_viewer.ts'
 
+// Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
+// discipline. Single source of truth for the canonical job ref + quote-back ask
+// stamped on the Xero PO (here) and the Resend PO email (send-po-email).
+import {
+  canonicalJobRef as _canonicalJobRef,
+  poDeliveryInstruction as _poDeliveryInstruction,
+} from '../_shared/po_reference.ts'
+
 // Mission makesafe-live-truth-2026-06-14 (Phase 2) — reconciliation D1-D4.
 // Pure diff/inventory/canary logic + DB-bound action wrappers. The D2 inventory
 // reuses the Phase-1 group traversal exported from monitor-ses-makesafes.
@@ -14215,6 +14223,21 @@ async function pushPOToXero(client: any, body: any) {
   if (error || !po) throw new Error('PO not found')
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
 
+  // U2 reference discipline — resolve the canonical outbound job ref ONCE so both
+  // the Xero Reference field and the DeliveryInstructions quote-back ask carry the
+  // exact SW[PFD]-##### form the inbound bill-linker recognises. Prefer the
+  // authoritative jobs.job_number; fall back to whatever the PO stored.
+  let poJobNumber = ''
+  if (po.job_id) {
+    const { data: poJob } = await client
+      .from('jobs')
+      .select('job_number')
+      .eq('id', po.job_id)
+      .maybeSingle()
+    poJobNumber = poJob?.job_number || ''
+  }
+  const jobRef = _canonicalJobRef(po.reference, poJobNumber)
+
   const { accessToken, tenantId } = await getToken(client)
 
   // Resolve supplier contact in Xero — find or create
@@ -14258,7 +14281,7 @@ async function pushPOToXero(client: any, body: any) {
     const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
     const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
     if (divisionCat) {
-      const poRef = po.reference || ''
+      const poRef = jobRef || po.reference || ''
       const optionName = trackingCategoryForJob(poRef)
       const validOption = (divisionCat.Options || []).find((o: any) => o.Name === optionName && o.Status === 'ACTIVE')
       if (validOption) poTracking = [{ Name: 'Business Unit', Option: optionName }]
@@ -14278,14 +14301,19 @@ async function pushPOToXero(client: any, body: any) {
   const xeroStatus = requestedStatus === 'authorised' ? 'AUTHORISED' : 'SUBMITTED'
   const localStatus = requestedStatus === 'authorised' ? 'authorised' : 'submitted'
 
+  // U2 — stamp the canonical job ref in Reference (what the supplier is asked to
+  // quote back) and ride the quote-back ask onto Xero's own PO PDF via the
+  // DeliveryInstructions free-text field (the only lever we have on Xero's
+  // un-templatable PO email; see _shared/po_reference.ts for why not a line item).
   const xeroPO = {
     PurchaseOrders: [{
       Contact: supplierContactId
         ? { ContactID: supplierContactId }
         : { Name: po.supplier_name },
       PurchaseOrderNumber: po.po_number,
-      Reference: po.reference || '',
+      Reference: jobRef || po.reference || '',
       DeliveryDate: po.delivery_date || undefined,
+      ...(jobRef ? { DeliveryInstructions: _poDeliveryInstruction(jobRef) } : {}),
       LineAmountTypes: 'Exclusive',
       LineItems: lineItems,
       Status: xeroStatus,
