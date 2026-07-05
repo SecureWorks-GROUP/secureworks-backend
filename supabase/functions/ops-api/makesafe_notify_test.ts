@@ -72,13 +72,13 @@ Deno.test("notify: message format is plain, no em dashes, has ref/addr/company",
     siteSuburb: "Seville Grove",
     companyName: "ML Builders",
   });
-  assertEquals(m, "New make-safe MLB-26678: 80 San Jacinta Rd, Seville Grove (ML Builders)");
+  assertEquals(m, "SecureWorks: New make-safe MLB-26678: 80 San Jacinta Rd, Seville Grove (ML Builders)");
   assert(!/[‒–—―]/.test(m), "no em/en dashes allowed in owner comms");
 });
 
 Deno.test("notify: roof message uses the roof label", () => {
   const m = buildArrivalMessage({ reportType: "roof_report", externalRef: "MLB-1", siteAddress: "1 A St", companyName: "MLB" });
-  assertStringIncludes(m, "New roof report make-safe MLB-1");
+  assertStringIncludes(m, "SecureWorks: New roof report make-safe MLB-1");
 });
 
 Deno.test("notify: stripDashes converts em/en dashes to a hyphen", () => {
