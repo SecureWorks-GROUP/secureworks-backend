@@ -328,6 +328,16 @@ import {
   markReconNotJobRelated as _markReconNotJobRelated,
   resolveActor as _resolveReconActor,
 } from './materials_recon.ts'
+// M4 U5 -- finance job cost report (read-only, token-gated share page).
+import {
+  MAKESAFE_COST_REPORT_ACTION,
+  costReportSecret,
+  verifyCostReportToken,
+  getJobCostReport,
+  renderCostReportHtml,
+  renderCostReportError,
+  buildCostReportLink,
+} from './makesafe_cost_report.ts'
 import {
   sendPackAllowed,
   resolveExistingInvoice,
@@ -553,9 +563,8 @@ async function fetchMakesafeAllowanceInputs(
 // NON-BLOCKING: any failure is caught and logged, never failing the invoice
 // submit (the invoice + Xero draft are already committed).
 //
-// Job cost report URL (U5, Deckhand B): stable placeholder pattern
-// `<FINANCE_REVIEW_REPORT_BASE>/job-cost-report?job=<jobId>&invoice=<invoiceId>`.
-// Base defaults to the ops app; repoint via env when U5's surface is finalised.
+// Job cost report URL (U5, Deckhand B): the resolved token-gated ops-api page,
+// built per flagged job via buildCostReportLink(SUPABASE_URL, jobId).
 async function recordFinanceReviewEmail(
   client: any,
   params: {
@@ -582,12 +591,13 @@ async function recordFinanceReviewEmail(
     if (decision.action === 'skip') return { action: 'skip' }
 
     // Build the deterministic email (subject/body reflect the supersede state).
-    const reportBase = (Deno.env.get('FINANCE_REVIEW_REPORT_BASE') || 'https://ops.secureworksgroup.app').replace(/\/+$/, '')
+    // Resolved U5 cost-report link per flagged job — the real token-gated ops-api
+    // page (buildCostReportLink mints the HMAC token). U3's pure module consumes
+    // the URL map unchanged.
     const jobCostReportUrls: Record<string, string> = {}
     for (const l of flaggedLines) {
       if (l.jobId && !jobCostReportUrls[l.jobId]) {
-        jobCostReportUrls[l.jobId] = reportBase + '/job-cost-report?job=' + encodeURIComponent(l.jobId) +
-          '&invoice=' + encodeURIComponent(params.tradeInvoiceId)
+        jobCostReportUrls[l.jobId] = await buildCostReportLink(SUPABASE_URL, l.jobId)
       }
     }
     const email = buildFinanceReviewEmail({
@@ -2065,6 +2075,32 @@ if (import.meta.main) serve(async (req: Request) => {
     return new Response(JSON.stringify({ version: '2026-05-30.v3', function: 'ops-api' }), {
       status: 200, headers: { ...CORS, 'Content-Type': 'application/json' }
     })
+  }
+
+  // ── M4 U5: finance job cost report (public, HMAC-token-gated, READ-ONLY) ──
+  // Finance opens this from a link in the U3 review email — no Bearer. The HMAC
+  // token over job_id makes the URL unguessable; the handler only SELECTs and
+  // renders HTML, never mutates. Served here (pre-auth) so the email link opens.
+  if (_preAuthUrl.searchParams.get('action') === MAKESAFE_COST_REPORT_ACTION) {
+    const _crHtml = { ...CORS, 'Content-Type': 'text/html; charset=utf-8' }
+    // Accept the U3 link's param names (job/invoice), tolerant of job_id/invoice_id.
+    const _jobId = _preAuthUrl.searchParams.get('job') || _preAuthUrl.searchParams.get('job_id') || ''
+    const _invoiceId = _preAuthUrl.searchParams.get('invoice') || _preAuthUrl.searchParams.get('invoice_id') || null
+    const _token = _preAuthUrl.searchParams.get('token') || ''
+    if (!_jobId || !(await verifyCostReportToken(_jobId, _token, costReportSecret()))) {
+      return new Response(renderCostReportError('This link is invalid or has expired. Ask the office to resend the review email.'), { status: 403, headers: _crHtml })
+    }
+    try {
+      const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)
+      if (!_crData) {
+        return new Response(renderCostReportError('That job could not be found.'), { status: 404, headers: _crHtml })
+      }
+      return new Response(renderCostReportHtml(_crData), { status: 200, headers: _crHtml })
+    } catch (_crErr) {
+      console.error('[ops-api] makesafe_job_cost_report error:', _crErr)
+      return new Response(renderCostReportError('The report could not be loaded right now.'), { status: 500, headers: _crHtml })
+    }
   }
 
   // ── Authentication: API key (server-to-server) + JWT (browser) + scoped routine ──
