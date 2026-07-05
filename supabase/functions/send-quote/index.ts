@@ -39,6 +39,7 @@ import {
 // match_status + extraction enqueue). When OFF, legacy raw insert.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -1575,6 +1576,20 @@ serve(async (req: Request) => {
           : 'quoted'
         await sb.from('jobs').update({ status: jobStatus, ...(jobStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}) }).eq('id', doc.job_id)
 
+        // M1 profitability-job-costing (U2): pin the write-once expected-cost
+        // baseline the first time this job reaches 'accepted'. Best-effort +
+        // non-blocking (mirrors the GHL-push / comms side effects below) — a
+        // snapshot failure must never break the customer's acceptance. Idempotent
+        // and write-once, so calling from both acceptance sites is safe.
+        if (jobStatus === 'accepted' && doc.job_id) {
+          try {
+            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id })
+            console.log('[send-quote] expected-cost baseline (run flow)', JSON.stringify({ job_id: doc.job_id, result: efc }))
+          } catch (e) {
+            console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
+          }
+        }
+
         if (allAccepted) {
           // ── RUN FULLY ACCEPTED — create deposit invoices for both parties ──
 
@@ -1690,6 +1705,20 @@ serve(async (req: Request) => {
             ...(newStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}),
           })
           .eq('id', doc.job_id)
+
+        // M1 profitability-job-costing (U2): pin the write-once expected-cost
+        // baseline the first time this job is fully accepted. Best-effort +
+        // non-blocking (same posture as the GHL stage push / comms triggers
+        // below). Skipped for partially_accepted — the baseline is pinned only
+        // once the whole job is accepted, matching the accepted_at write above.
+        if (newStatus === 'accepted') {
+          try {
+            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id })
+            console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
+          } catch (e) {
+            console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
+          }
+        }
 
         // Log rich event for Ops Dashboard attention panel
         const pricing = typeof job?.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job?.pricing_json || {})
