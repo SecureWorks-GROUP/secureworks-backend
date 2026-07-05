@@ -91,9 +91,9 @@ export interface ArrivalMessageInput {
   companyName?: string | null;
 }
 
-// Short, plain, no em dashes, e.g.:
-//   "New make-safe MLB-26678: 80 San Jacinta Rd, Seville Grove (ML Builders)"
-//   "New roof report make-safe MLB-26910: 12 Hale St, Eaton (ML Builders)"
+// Short, plain, no em dashes, SecureWorks-branded so the installer knows the sender, e.g.:
+//   "SecureWorks: New make-safe MLB-26678: 80 San Jacinta Rd, Seville Grove (ML Builders)"
+//   "SecureWorks: New roof report make-safe MLB-26910: 12 Hale St, Eaton (ML Builders)"
 export function buildArrivalMessage(input: ArrivalMessageInput): string {
   const label = isRoofArrival(input.family, input.reportType)
     ? "roof report make-safe"
@@ -103,7 +103,7 @@ export function buildArrivalMessage(input: ArrivalMessageInput): string {
   const suburb = String(input.siteSuburb ?? "").trim();
   const company = String(input.companyName ?? "").trim();
   const addrLine = [addr, suburb].filter(Boolean).join(", ");
-  let msg = `New ${label}`;
+  let msg = `SecureWorks: New ${label}`;
   if (ref) msg += ` ${ref}`;
   if (addrLine) msg += `: ${addrLine}`;
   if (company) msg += ` (${company})`;
