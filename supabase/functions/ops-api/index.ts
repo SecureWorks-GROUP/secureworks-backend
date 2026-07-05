@@ -221,6 +221,28 @@ import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
 } from '../_shared/makesafe_intake_classification.ts'
+// M4 U1 (profit-trade-invoice-intelligence-2026-07-03, wiki #112) — make-safe
+// trade-invoice hours control. All branching lives in the pure module (unit-
+// tested in makesafe_hours_flag_test.ts); generate_trade_invoice only gathers
+// inputs and attaches outputs, identically on both submit paths.
+import {
+  appendHoursFlagMarker,
+  type AllowanceCandidate,
+  evaluateHoursFlag,
+  type HoursFlagOutcome,
+  isMakeSafeLine,
+} from './makesafe_hours_flag.ts'
+// M4 U3 (same mission) — finance review email for flagged trade invoices. Pure
+// builder + send-ledger decision live in the module; recordFinanceReviewEmail
+// (below) does the ledger DB writes and the CP2-gated Resend send.
+import {
+  buildFinanceReviewEmail,
+  computeFlagSetHash,
+  decideLedgerAction,
+  type FlaggedReviewLine,
+  type LedgerRow,
+  xeroDraftBillUrl,
+} from './finance_review_email.ts'
 
 // Mission makesafe-live-truth-2026-06-14 (M2) — compact READ endpoints GAP-1..6.
 // These let the make-safe skills read the email-sync Supabase projection instead
@@ -452,6 +474,206 @@ export const _refMatchesExternalRefForTest = refMatchesExternalRef
 //   byRef: { [normRef]: Job[] } — per normalised input ref, the list of distinct active
 //                                 jobs that matched (length > 1 means the ref is ambiguous)
 // Only queries makesafe_job_details filtered by the digit core — never full-table-scan.
+// ── M4 U1: make-safe baseline-resolver INPUT gathering (TUNING POINT #2) ──────
+// For each make-safe job in a trade-invoice submit, gather the candidate
+// allowance hours from each source the resolver may draw on. This is the ONE
+// place that decides WHICH DB field feeds each source — CP1 can repoint a
+// source here without touching the resolver/trust registry in
+// makesafe_hours_flag.ts. Read-only; builder/client invoice amounts are never
+// read here (they must never raise the trade allowance — 2026-06-19 ruling).
+//
+//   • ops_set  ← work_orders.estimated_hours (office-set expectation; the only
+//                ops-set expected-hours field in the data model today).
+//   • report   ← job_service_reports.checklist_json (trade_count × labour_hours;
+//                the trade's OWN report — wired but UNTRUSTED by default until
+//                CP1 verifies reliability + the exact per-trade/total formula).
+//
+// Returns a per-job map of raw candidate hours; the resolver applies trust +
+// precedence. A job with no work order / no report simply yields nulls → the
+// resolver falls back to the 2hr rule default.
+async function fetchMakesafeAllowanceInputs(
+  client: any,
+  jobIds: string[],
+): Promise<Record<string, { ops_set: number | null; report: number | null }>> {
+  const out: Record<string, { ops_set: number | null; report: number | null }> = {}
+  const ids = [...new Set(jobIds.filter(Boolean))]
+  if (ids.length === 0) return out
+  for (const id of ids) out[id] = { ops_set: null, report: null }
+
+  // ops_set: latest non-cancelled work order's estimated_hours per job.
+  try {
+    const { data: wos } = await client.from('work_orders')
+      .select('job_id, estimated_hours, created_at, status')
+      .in('job_id', ids)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: false })
+    const seen = new Set<string>()
+    for (const wo of (wos || [])) {
+      if (!wo?.job_id || seen.has(wo.job_id)) continue
+      const h = Number(wo.estimated_hours)
+      if (Number.isFinite(h) && h > 0) {
+        out[wo.job_id].ops_set = h
+        seen.add(wo.job_id)
+      }
+    }
+  } catch (e) { console.log('[ops-api] hours-flag ops_set read failed (non-blocking):', (e as Error).message) }
+
+  // report: latest service report per job → trade_count × labour_hours.
+  // NOTE: labour_hours may be per-trade OR total in production data — this
+  // ambiguity is exactly why the source is UNTRUSTED by default (CP1 resolves).
+  try {
+    const { data: reports } = await client.from('job_service_reports')
+      .select('job_id, checklist_json, created_at')
+      .in('job_id', ids)
+      .order('created_at', { ascending: false })
+    const seen = new Set<string>()
+    for (const r of (reports || [])) {
+      if (!r?.job_id || seen.has(r.job_id)) continue
+      seen.add(r.job_id)
+      const cj = r.checklist_json || {}
+      const tradeCount = Number(cj.trade_count)
+      const labourHours = Number(cj.labour_hours)
+      if (Number.isFinite(labourHours) && labourHours > 0) {
+        const trades = Number.isFinite(tradeCount) && tradeCount > 0 ? tradeCount : 1
+        out[r.job_id].report = trades * labourHours
+      }
+    }
+  } catch (e) { console.log('[ops-api] hours-flag report read failed (non-blocking):', (e as Error).message) }
+
+  return out
+}
+
+// ── M4 U3: finance review email — send-ledger + CP2-gated Resend send ────────
+// Records ONE review email per flagged trade invoice in finance_review_emails,
+// keyed by trade_invoice_id + flagged-line-set hash, with exactly-one + supersede
+// semantics (finding #1). The actual Resend send is GATED OFF by default
+// (FINANCE_REVIEW_EMAIL_SEND != 'on') — v1 records the rendered email
+// (status='recorded') and sends nothing; the send only fires after Marnin
+// approves the exact draft at CP2 and the env flag is flipped on. This helper is
+// NON-BLOCKING: any failure is caught and logged, never failing the invoice
+// submit (the invoice + Xero draft are already committed).
+//
+// Job cost report URL (U5, Deckhand B): stable placeholder pattern
+// `<FINANCE_REVIEW_REPORT_BASE>/job-cost-report?job=<jobId>&invoice=<invoiceId>`.
+// Base defaults to the ops app; repoint via env when U5's surface is finalised.
+async function recordFinanceReviewEmail(
+  client: any,
+  params: {
+    tradeInvoiceId: string
+    invoiceNumber: string
+    tradeName?: string | null
+    flaggedLines: FlaggedReviewLine[]
+    xeroBillId?: string | null
+  },
+): Promise<{ action: string } | null> {
+  const flaggedLines = params.flaggedLines || []
+  if (flaggedLines.length === 0) return null
+  try {
+    const flagSetHash = computeFlagSetHash(flaggedLines)
+
+    // Existing ACTIVE ledger rows for this invoice (recorded or sent).
+    const { data: existing } = await client.from('finance_review_emails')
+      .select('id, flag_set_hash')
+      .eq('trade_invoice_id', params.tradeInvoiceId)
+      .in('status', ['recorded', 'sent'])
+    const activeRows: LedgerRow[] = (existing || []).map((r: any) => ({ id: r.id, flag_set_hash: r.flag_set_hash }))
+
+    const decision = decideLedgerAction(activeRows, flagSetHash)
+    if (decision.action === 'skip') return { action: 'skip' }
+
+    // Build the deterministic email (subject/body reflect the supersede state).
+    const reportBase = (Deno.env.get('FINANCE_REVIEW_REPORT_BASE') || 'https://ops.secureworksgroup.app').replace(/\/+$/, '')
+    const jobCostReportUrls: Record<string, string> = {}
+    for (const l of flaggedLines) {
+      if (l.jobId && !jobCostReportUrls[l.jobId]) {
+        jobCostReportUrls[l.jobId] = reportBase + '/job-cost-report?job=' + encodeURIComponent(l.jobId) +
+          '&invoice=' + encodeURIComponent(params.tradeInvoiceId)
+      }
+    }
+    const email = buildFinanceReviewEmail({
+      invoiceNumber: params.invoiceNumber,
+      tradeInvoiceId: params.tradeInvoiceId,
+      tradeName: params.tradeName || null,
+      flaggedLines,
+      xeroDraftBillUrl: xeroDraftBillUrl(params.xeroBillId),
+      jobCostReportUrls,
+      isUpdate: decision.isUpdate,
+    })
+
+    // Supersede prior active rows before inserting the new one (history is kept).
+    if (decision.supersedesIds.length > 0) {
+      await client.from('finance_review_emails')
+        .update({ status: 'superseded' })
+        .in('id', decision.supersedesIds)
+    }
+
+    // Insert the new ledger row (recorded, not sent). The partial unique index
+    // (trade_invoice_id, flag_set_hash) WHERE status IN (recorded,sent) makes a
+    // concurrent double-submit collide here → treated as an idempotent skip.
+    const { data: inserted, error: insErr } = await client.from('finance_review_emails')
+      .insert({
+        trade_invoice_id: params.tradeInvoiceId,
+        invoice_number: params.invoiceNumber,
+        flag_set_hash: flagSetHash,
+        flagged_line_count: email.flaggedLineCount,
+        recipient: email.recipient,
+        subject: email.subject,
+        body_text: email.text,
+        body_html: email.html,
+        status: 'recorded',
+        is_update: decision.isUpdate,
+        supersedes_id: decision.supersedesIds[0] || null,
+      })
+      .select('id')
+      .single()
+    if (insErr) {
+      // 23505 = unique_violation → another concurrent submit won the race.
+      if ((insErr as any).code === '23505') return { action: 'skip_conflict' }
+      throw insErr
+    }
+
+    // ── CP2-GATED live send (Resend). OFF by default. ──
+    const sendEnabled = Deno.env.get('FINANCE_REVIEW_EMAIL_SEND') === 'on'
+    const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
+    if (sendEnabled && RESEND_API_KEY && inserted?.id) {
+      try {
+        const resendResp = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from: email.from,
+            reply_to: email.replyTo,
+            to: [email.recipient],
+            subject: email.subject,
+            text: email.text,
+            html: email.html,
+          }),
+        })
+        const resendResult = await resendResp.json().catch(() => ({}))
+        if (resendResp.ok) {
+          await client.from('finance_review_emails')
+            .update({ status: 'sent', sent_at: new Date().toISOString() })
+            .eq('id', inserted.id)
+        } else {
+          await client.from('finance_review_emails')
+            .update({ send_error: ('Resend ' + resendResp.status + ': ' + (resendResult.message || '')).slice(0, 500) })
+            .eq('id', inserted.id)
+        }
+      } catch (sendErr) {
+        await client.from('finance_review_emails')
+          .update({ send_error: ('send threw: ' + (sendErr as Error).message).slice(0, 500) })
+          .eq('id', inserted.id)
+      }
+    }
+
+    return { action: decision.action }
+  } catch (e) {
+    // Non-blocking: the invoice + Xero draft are already committed.
+    console.log('[ops-api] finance review email record failed (non-blocking):', (e as Error).message)
+    return { action: 'error' }
+  }
+}
+
 async function resolveJobsByExternalRef(
   client: any,
   refs: string[],
@@ -4498,6 +4720,10 @@ if (import.meta.main) serve(async (req: Request) => {
                   id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: appliedRate,
                   rate_source: clientRateProvided ? 'client_entered' : 'server_resolved',
                   description: manualRow.description || null,
+                  // M4 U1: carry the trade's variation explanation (trade-app capture
+                  // is U2/Deckhand B) so the jobGroups loop can attach it to a flagged
+                  // make-safe line. Absent until U2 ships — the flag still fires.
+                  justification: manualRow.justification || null,
                   break_minutes: 0, manual_override_flag: false,
                   scheduled_date: a.scheduled_date, status: a.status,
                 })
@@ -4559,6 +4785,22 @@ if (import.meta.main) serve(async (req: Request) => {
               }
             }
 
+            // ── M4 U1: gather baseline-resolver inputs for make-safe jobs ────
+            // Populated for the assigned/clocked path here and merged for the
+            // searched-in extras path below, so both submit paths resolve their
+            // allowance from the SAME per-job candidate map. Any line that flags
+            // sets anyHoursFlag, which drives the `| HOURS-FLAG` bill Reference.
+            const makesafeAllowanceInputs: Record<string, { ops_set: number | null; report: number | null }> =
+              await fetchMakesafeAllowanceInputs(client, msJobIds)
+            let anyHoursFlag = false
+            const candidatesForJob = (jobId: string): AllowanceCandidate[] => {
+              const inp = makesafeAllowanceInputs[jobId] || { ops_set: null, report: null }
+              return [
+                { source: 'ops_set', hours: inp.ops_set },
+                { source: 'report', hours: inp.report },
+              ]
+            }
+
             // Build line items
             let totalHours = 0
             let totalBreaks = 0
@@ -4588,6 +4830,25 @@ if (import.meta.main) serve(async (req: Request) => {
               const lineTotal = Math.round(jobHours * rate * 100) / 100
               totalHours += jobHours
 
+              const rateNote = rateSource === 'client_entered'
+                ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                : 'Server-resolved rate from trade_rates.'
+
+              // ── M4 U1: make-safe hours flag (assigned/clocked path) ────────
+              // Structured activation (jobs.type='makesafe'); the SWMS- prefix is
+              // never required. The resolver sets the allowance; a charge over it
+              // flags — soft, never blocks, never touches $/hours.
+              let hoursFlag: HoursFlagOutcome | null = null
+              if (isMakeSafeLine({ jobType: job.type })) {
+                const justification = [...new Set(assigns.map((a: any) => a.justification).filter(Boolean))].join('; ') || null
+                hoursFlag = evaluateHoursFlag({
+                  chargedHours: jobHours,
+                  candidates: candidatesForJob(jobId),
+                  justification,
+                })
+                if (hoursFlag.flagged) anyHoursFlag = true
+              }
+
               lineItems.push({
                 job_id: jobId,
                 job_number: job.job_number || '',
@@ -4598,9 +4859,12 @@ if (import.meta.main) serve(async (req: Request) => {
                 days_worked: assigns.length,
                 assignment_ids: assignmentIds,
                 description: descriptions.length > 0 ? descriptions.join('; ') : null,
-                query_note: rateSource === 'client_entered'
-                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                  : 'Server-resolved rate from trade_rates.',
+                query_note: hoursFlag?.flagged
+                  ? hoursFlag.queryNote + ' | ' + rateNote
+                  : rateNote,
+                // Internal — consumed by toTradeInvoiceLineRow (flag columns) and
+                // the Xero description/reference builders; stripped before insert.
+                _hoursFlag: hoursFlag,
               })
             }
 
@@ -4687,6 +4951,25 @@ if (import.meta.main) serve(async (req: Request) => {
               // before payment, so a rare duplicate is caught there; do not hard-block a trade from
               // invoicing. (Assigned-card lane keeps its own assignment.invoiced_in guard, untouched.)
 
+              // ── M4 U1: gather resolver inputs for make-safe extra jobs ─────
+              // Merge into the same per-job map the assigned/clocked path uses,
+              // so a make-safe searched-in extra resolves its allowance the same
+              // way (the old PR #205 flagged only the assigned path — finding).
+              {
+                const extraMsJobIds = [...new Set(
+                  [...Object.values(jobById), ...Object.values(jobByNumber)]
+                    .filter((j: any) => j?.type === 'makesafe')
+                    .map((j: any) => j.id)
+                    .filter((id: string) => id && !(id in makesafeAllowanceInputs)),
+                )]
+                if (extraMsJobIds.length > 0) {
+                  const extraInputs = await fetchMakesafeAllowanceInputs(client, extraMsJobIds)
+                  for (const [jobId, inp] of Object.entries(extraInputs)) {
+                    makesafeAllowanceInputs[jobId] = inp
+                  }
+                }
+              }
+
               for (const item of extra_items) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
@@ -4705,6 +4988,25 @@ if (import.meta.main) serve(async (req: Request) => {
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 extraSubtotal += amt
+                const extraHours = Number(item.quantity ?? item.qty ?? item.hours ?? 0)
+                const extraRateNote = rateSource === 'client_entered'
+                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                  : 'Server-resolved rate from trade_rates.'
+
+                // ── M4 U1: make-safe hours flag (searched-in extras path) ────
+                // Structured activation via job type / division / line_type —
+                // never the SWMS- prefix. Same resolver + evaluator as the
+                // assigned path; soft, never blocks, never touches $/hours.
+                let extraHoursFlag: HoursFlagOutcome | null = null
+                if (isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
+                  extraHoursFlag = evaluateHoursFlag({
+                    chargedHours: extraHours,
+                    candidates: resolvedJob?.id ? candidatesForJob(resolvedJob.id) : [],
+                    justification: item.justification || null,
+                  })
+                  if (extraHoursFlag.flagged) anyHoursFlag = true
+                }
+
                 extraLineItems.push({
                   line_type: item.type ? item.type.toLowerCase() : 'other',
                   description: item.description || item.type || 'Extra item',
@@ -4712,7 +5014,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   // M0 guard reads total_hours for HOURLY_TYPES lines; extras carry their
                   // hours in `quantity` (searched-in make-safe/labour route here), so mirror
                   // it to total_hours or the guard rejects every searched-in line as "zero hours".
-                  total_hours: Number(item.quantity ?? item.qty ?? item.hours ?? 0),
+                  total_hours: extraHours,
                   unit: item.unit || 'ea',
                   unit_rate: Number(item.rate || 0),
                   line_total_ex: amt,
@@ -4724,9 +5026,11 @@ if (import.meta.main) serve(async (req: Request) => {
                   site_address: resolvedJob
                     ? [resolvedJob.site_address, resolvedJob.site_suburb].filter(Boolean).join(', ')
                     : (item.site_address || null),
-                  query_note: rateSource === 'client_entered'
-                    ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                    : 'Server-resolved rate from trade_rates.',
+                  query_note: extraHoursFlag?.flagged
+                    ? extraHoursFlag.queryNote + ' | ' + extraRateNote
+                    : extraRateNote,
+                  // Internal — consumed by toTradeInvoiceLineRow + Xero builders; stripped before insert.
+                  _hoursFlag: extraHoursFlag,
                 })
               }
             }
@@ -4893,8 +5197,15 @@ if (import.meta.main) serve(async (req: Request) => {
 
             const toTradeInvoiceLineRow = (line: any, defaults: any = {}) => {
               // site_address is used for the Xero description below but is not
-              // a trade_invoice_lines column. Never send memory-only fields to PostgREST.
-              const { site_address: _siteAddress, ...dbLine } = { ...defaults, ...line }
+              // a trade_invoice_lines column. _hoursFlag is memory-only metadata
+              // (its fields are unpacked into the flag columns below). Never send
+              // memory-only fields to PostgREST.
+              const { site_address: _siteAddress, _hoursFlag: _hf, ...dbLine } = { ...defaults, ...line }
+              // M4 U1: land the flag-fact fields (U4 contract) from the resolver
+              // outcome. baseline_hours/baseline_source are recorded for EVERY
+              // make-safe line; flag_type/hours_justification/flagged_at only when
+              // the line actually flags. Non-make-safe lines carry nulls.
+              const ff = (line?._hoursFlag ?? null) as HoursFlagOutcome | null
               return {
                 trade_invoice_id: invoice.id,
                 job_id: dbLine.job_id || null,
@@ -4915,6 +5226,11 @@ if (import.meta.main) serve(async (req: Request) => {
                 unit_rate: dbLine.unit_rate ?? null,
                 line_date: dbLine.line_date || null,
                 division: dbLine.division || null,
+                flag_type: ff?.lineFields.flag_type ?? null,
+                baseline_hours: ff?.lineFields.baseline_hours ?? null,
+                baseline_source: ff?.lineFields.baseline_source ?? null,
+                hours_justification: ff?.lineFields.hours_justification ?? null,
+                flagged_at: ff?.lineFields.flagged_at ?? null,
               }
             }
             const lineRows = [
@@ -5005,10 +5321,16 @@ if (import.meta.main) serve(async (req: Request) => {
             // manual check now: the bookkeeper reviews/approves it in Xero (drafts
             // pay no one until approved there). So soft flags ANNOTATE the invoice
             // (query_note) and PROCEED to draft.  [Q18 — supersedes F6/Q4 Option A]
-            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess' || duplicateExtraCount > 0
+            // M4 U1: anyHoursFlag folds a make-safe over-allowance line into the
+            // soft-review set. It leads the invoice query_note (money-relevant)
+            // but only fires for a flagged make-safe line, so existing (non-make-
+            // safe) invoices keep their exact prior message.
+            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess' || duplicateExtraCount > 0 || anyHoursFlag
             if (softReviewFlag) {
               await client.from('trade_invoices').update({
-                query_note: duplicateExtraCount > 0
+                query_note: anyHoursFlag
+                  ? 'HOURS-FLAG: one or more make-safe lines bill over the allowed hours — see the line note(s) for allowed vs charged + the trade\'s explanation. Verify before approving the Xero draft.'
+                  : duplicateExtraCount > 0
                   ? 'Possible duplicate searched-in job line(s): already appears on ' + duplicateExtraInvoiceRefs.slice(0, 5).join(', ') + '. Verify before approving the Xero draft.'
                   : reviewFlag === 'hours_excess'
                     ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
@@ -5111,6 +5433,8 @@ if (import.meta.main) serve(async (req: Request) => {
                     (l.job_number || 'Labour') + ' | ' + (trackingCategoryForJob(l.job_number || '') || 'Construction'),
                     builderRef ? 'Builder Ref: ' + builderRef : null,
                     'Labour — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr' + (l.days_worked > 1 ? ' (' + l.days_worked + ' days)' : ''),
+                    // M4 U1: inline hours-flag so finance sees it when approving the draft bill.
+                    l._hoursFlag?.xeroDescriptionLine || null,
                     [l.client_name, jobMap[l.job_id]?.site_address, jobMap[l.job_id]?.site_suburb].filter(Boolean).join(', '),
                   ].filter(Boolean).join('\n'),
                   Quantity: l.total_hours,
@@ -5127,6 +5451,8 @@ if (import.meta.main) serve(async (req: Request) => {
                       possibleDuplicate ? 'POSSIBLE DUPLICATE - verify prior trade invoice before approving' : null,
                       e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
                       (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
+                      // M4 U1: inline hours-flag on a searched-in make-safe extra line.
+                      e._hoursFlag?.xeroDescriptionLine || null,
                       e.client_name ? [e.client_name, e.site_address].filter(Boolean).join(', ') : '',
                     ].filter(Boolean).join('\n'),
                     Quantity: e.quantity || 1,
@@ -5142,9 +5468,15 @@ if (import.meta.main) serve(async (req: Request) => {
                 // _external_ref is already on jobMap entries (enriched above at Change 4 / L3464-3472).
                 const xeroExternalRefs = [...new Set(lineItems.map((l: any) => jobMap[l.job_id]?._external_ref).filter(Boolean))].join(', ')
                 const xeroInternalJobNums = [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', ')
-                const xeroReference = invoiceNumber
-                  + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
-                  + (xeroExternalRefs ? ' | ' + xeroExternalRefs : '')
+                // M4 U1: append the EXACT `| HOURS-FLAG` marker when any line on
+                // this invoice flagged, so finance can spot flagged bills in the
+                // Xero invoice list without opening each one (finding #7 verbatim).
+                const xeroReference = appendHoursFlagMarker(
+                  invoiceNumber
+                    + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
+                    + (xeroExternalRefs ? ' | ' + xeroExternalRefs : ''),
+                  anyHoursFlag,
+                )
 
                 const xeroPayload = {
                   Invoices: [{
@@ -5216,6 +5548,33 @@ if (import.meta.main) serve(async (req: Request) => {
                   schema_version: '1.0',
                 })
               } catch (logErr) { console.log('[ops-api] Failed to record xero_push_failed event:', (logErr as Error).message) }
+            }
+
+            // ── M4 U3: finance review email for a flagged invoice ─────────────
+            // Fires for both the success and push-failed paths (the flag is about
+            // the hours, not the Xero outcome); links the draft bill only when one
+            // exists. Records ONE email per flagged invoice in the send-ledger with
+            // exactly-one + supersede semantics. Non-blocking + CP2-gated: v1
+            // records but does not send. Runs before the XERO_PUSH_FAILED return.
+            if (anyHoursFlag) {
+              const flaggedReviewLines: FlaggedReviewLine[] = [...lineItems, ...extraLineItems]
+                .filter((l: any) => l._hoursFlag?.flagged)
+                .map((l: any) => ({
+                  jobId: l.job_id || null,
+                  jobNumber: l.job_number || null,
+                  clientName: l.client_name || null,
+                  allowedHours: l._hoursFlag.allowed_hours,
+                  source: l._hoursFlag.allowed_source,
+                  chargedHours: l._hoursFlag.charged_hours,
+                  justification: l._hoursFlag.justification ?? null,
+                }))
+              await recordFinanceReviewEmail(client, {
+                tradeInvoiceId: invoice.id,
+                invoiceNumber,
+                tradeName: userProfile?.name || null,
+                flaggedLines: flaggedReviewLines,
+                xeroBillId,
+              })
             }
 
             // B3: XERO_PUSH_FAILED — invoice is saved locally in 'approved' state (recoverable)

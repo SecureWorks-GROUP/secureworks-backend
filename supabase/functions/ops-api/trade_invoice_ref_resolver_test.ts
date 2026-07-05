@@ -142,7 +142,7 @@ Deno.test("trade invoice submit saves local lines before Xero and checks insert 
     new URL("./index.ts", import.meta.url),
   );
   const stripMemoryOnlyField = source.indexOf(
-    "const { site_address: _siteAddress, ...dbLine } = { ...defaults, ...line }",
+    "const { site_address: _siteAddress, _hoursFlag: _hf, ...dbLine } = { ...defaults, ...line }",
   );
   const normalizedShape = source.indexOf(
     "const toTradeInvoiceLineRow = (line: any, defaults: any = {})",
@@ -173,7 +173,7 @@ Deno.test("trade invoice submit saves local lines before Xero and checks insert 
 
   assert(
     stripMemoryOnlyField > -1,
-    "extra line insert strips site_address before PostgREST insert",
+    "extra line insert strips site_address and _hoursFlag before PostgREST insert",
   );
   assert(
     normalizedShape > -1,
