@@ -39,7 +39,7 @@ function deepCopy<T>(v: T): T {
   return JSON.parse(JSON.stringify(v))
 }
 
-type Filter = { col: string; val: unknown; op: 'eq' | 'is' }
+type Filter = { col: string; val: unknown; op: 'eq' | 'is' | 'in' | 'lte' }
 
 class MockChain {
   table: string
@@ -78,6 +78,14 @@ class MockChain {
     this.filters.push({ col, val, op: 'is' })
     return this
   }
+  in(col: string, val: unknown[]) {
+    this.filters.push({ col, val, op: 'in' })
+    return this
+  }
+  lte(col: string, val: unknown) {
+    this.filters.push({ col, val, op: 'lte' })
+    return this
+  }
   order(col: string, opts: { ascending?: boolean } = {}) {
     this.orderBy = { col, ascending: opts.ascending !== false }
     return this
@@ -114,6 +122,12 @@ class MockChain {
   private _match(r: Row): boolean {
     return this.filters.every((f) => {
       if (f.op === 'is' && f.val === null) return r[f.col] == null
+      if (f.op === 'in') return Array.isArray(f.val) && (f.val as unknown[]).includes(r[f.col])
+      if (f.op === 'lte') {
+        const v = r[f.col]
+        // PostgREST semantics: NULL never satisfies <=.
+        return v != null && (v as any) <= (f.val as any)
+      }
       return r[f.col] === f.val
     })
   }
@@ -228,6 +242,8 @@ const FROZEN_PRICING = {
 
 const ACCEPTED_AT = '2026-07-05T02:00:00.000Z'
 const FROZE_AT = '2026-07-05T02:00:01.000Z'
+const BEFORE_ACCEPT = '2026-07-05T01:00:00.000Z' // a freeze that happened pre-acceptance
+const AFTER_ACCEPT = '2026-07-05T03:00:00.000Z' // a post-accept edit's freeze
 
 function seedJob(opts: { id?: string; pricing_json?: unknown; accepted_at?: string | null; expected_costs?: unknown; expected_frozen_at?: string | null }): Row {
   return {
@@ -239,7 +255,11 @@ function seedJob(opts: { id?: string; pricing_json?: unknown; accepted_at?: stri
   }
 }
 
-async function seedFrozenRevision(job_id: string, pricing: unknown, opts?: { revision_number?: number; badHash?: boolean }): Promise<Row> {
+async function seedFrozenRevision(
+  job_id: string,
+  pricing: unknown,
+  opts?: { revision_number?: number; badHash?: boolean; frozen_at?: string; status?: 'frozen' | 'superseded' },
+): Promise<Row> {
   const canonical = JSON.stringify(canonicalize(pricing))
   const hash = opts?.badHash
     ? 'deadbeef'.repeat(8) // 64 hex chars but wrong
@@ -248,7 +268,8 @@ async function seedFrozenRevision(job_id: string, pricing: unknown, opts?: { rev
     id: newId('rev'),
     job_id,
     revision_number: opts?.revision_number ?? 1,
-    status: 'frozen',
+    status: opts?.status ?? 'frozen',
+    frozen_at: opts?.frozen_at ?? BEFORE_ACCEPT, // default: frozen before acceptance
     pricing_canonical_text: canonical,
     pricing_hash: hash,
   }
@@ -307,6 +328,72 @@ Deno.test('frozen_revision preferred over live — baseline pins the frozen figu
   assertEquals(ec.lanes.materials.amount_ex_gst, 500)
   assertEquals(ec.lanes.commission.amount_ex_gst, 150)
   assertEquals(ec.totals.total_cost_ex_gst, 850)
+})
+
+Deno.test('time-correct resolver — a post-accept freeze does NOT re-pin the baseline source (CP2 blocker)', async () => {
+  // The revision that was current AT acceptance (frozen before accepted_at).
+  // After acceptance the customer edited + re-froze, superseding this one.
+  const revAtAccept = await seedFrozenRevision('JT', FROZEN_PRICING, {
+    revision_number: 1,
+    frozen_at: BEFORE_ACCEPT,
+    status: 'superseded', // superseded by the post-accept freeze below
+  })
+  // The post-accept edit: higher revision_number, frozen AFTER accepted_at, and
+  // now the only 'frozen' row. A revision_number-ordered resolver would wrongly
+  // pick THIS (labour 777).
+  const revPostAccept = await seedFrozenRevision('JT', { ...FROZEN_PRICING, labourCostEstimate: 777 }, {
+    revision_number: 2,
+    frozen_at: AFTER_ACCEPT,
+    status: 'frozen',
+  })
+  const client = makeMockClient({
+    jobs: [seedJob({ id: 'JT', pricing_json: LIVE_PRICING, accepted_at: ACCEPTED_AT })],
+    scope_revisions: [revAtAccept, revPostAccept],
+  })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JT', now_iso: FROZE_AT })
+  if (!r.ok || r.snapshot !== true) throw new Error('expected a snapshot')
+  assertEquals(r.confidence, 'frozen_revision')
+  // Source is the PRE-accept revision, not the post-accept rev 2.
+  assertEquals(r.source_ref, revAtAccept.id)
+  assertEquals((client._state.jobs[0] as any).expected_costs.lanes.labour.amount_ex_gst, 200)
+})
+
+Deno.test('frozen only AFTER acceptance → live_fallback (no pre-accept frozen scope)', async () => {
+  const revPostAccept = await seedFrozenRevision('JT2', FROZEN_PRICING, { frozen_at: AFTER_ACCEPT, status: 'frozen' })
+  const client = makeMockClient({
+    jobs: [seedJob({ id: 'JT2', pricing_json: LIVE_PRICING, accepted_at: ACCEPTED_AT })],
+    scope_revisions: [revPostAccept],
+  })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JT2', now_iso: FROZE_AT })
+  if (!r.ok || r.snapshot !== true) throw new Error('expected a snapshot')
+  // The only frozen revision is post-acceptance, so it can't be the baseline —
+  // live pricing is used instead.
+  assertEquals(r.confidence, 'live_fallback')
+  assertEquals(r.scope_revision_id, null)
+})
+
+Deno.test('zero-filled pricing (0/0/0) → suppressed, no fabricated $0 baseline (CP2 major)', async () => {
+  const client = makeMockClient({
+    jobs: [seedJob({
+      id: 'JZ',
+      pricing_json: { labourCostEstimate: 0, materialCostEstimate: 0, commissionCostEstimate: 0, totalCostEstimate: 0, margin_pct: 0 },
+    })],
+  })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JZ', now_iso: FROZE_AT })
+  assertEquals(r.ok, true)
+  if (!r.ok || r.snapshot !== false) throw new Error('expected suppression')
+  assertEquals(r.reason, 'zero_filled_pricing')
+  assertEquals((client._state.jobs[0] as any).expected_costs, null)
+})
+
+Deno.test('one positive lane among zeros → snapshot still written (not a fabricated placeholder)', async () => {
+  const client = makeMockClient({
+    jobs: [seedJob({ id: 'JZ2', pricing_json: { labourCostEstimate: 300, materialCostEstimate: 0, commissionCostEstimate: 0 } })],
+  })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JZ2', now_iso: FROZE_AT })
+  if (!r.ok || r.snapshot !== true) throw new Error('expected a snapshot')
+  assertEquals(r.lanes_written.sort(), ['commission', 'labour', 'materials'])
+  assertEquals((client._state.jobs[0] as any).expected_costs.lanes.labour.amount_ex_gst, 300)
 })
 
 Deno.test('NULL-PRICING RULE — no frozen revision and null pricing → NO snapshot, suppressed', async () => {

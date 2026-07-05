@@ -112,6 +112,7 @@ export type FreezeExpectedCostsResult =
         | 'already_frozen' // baseline already present — write-once, left intact
         | 'no_pricing_source' // no frozen revision and no usable pricing_json
         | 'no_cost_lanes' // a pricing object exists but carries no cost lanes
+        | 'zero_filled_pricing' // lanes present but all 0 — fabricated placeholder, not a baseline
         | 'frozen_hash_mismatch_no_live' // frozen row failed verification, no live fallback
       existing_confidence?: ExpectedCostConfidence
     }
@@ -181,22 +182,40 @@ type FrozenRevisionRow = {
   id: string
   pricing_canonical_text: string
   pricing_hash: string
+  frozen_at?: string | null
 }
 
-// Latest frozen scope_revisions row for the job. The freeze invariant keeps at
-// most one 'frozen' row per job (see scope_freeze.ts healFrozenInvariant), so
-// ordering by revision_number DESC + limit 1 is the safe resolver the CP1
-// scout recommended ("latest frozen revision at/before accepted_at").
-async function fetchLatestFrozenRevision(
+// The frozen scope_revisions row that was the job's CURRENT frozen scope AT
+// ACCEPTANCE: the latest revision frozen at/before accepted_at.
+//
+// This is a TIME resolver, not a revision-number one (adversarial CP2 blocker,
+// Codex 2026-07-05). A revision frozen AFTER acceptance is a post-accept edit
+// and must never become the baseline source. Ordering by revision_number DESC
+// would pick it; we must not. The "at most one frozen row per job" invariant is
+// only APPLICATION-level — healFrozenInvariant is best-effort and the migration
+// index idx_scope_revisions_current_frozen is NON-unique — so we cannot lean on
+// "the single frozen row is the right one".
+//
+// We also consider 'superseded' rows, not just 'frozen': if a post-accept freeze
+// superseded the revision that was current at acceptance, that accepted revision
+// is now 'superseded' but is still the correct source. Selecting by frozen_at
+// (not status) recovers it. Frozen/superseded rows are immutable, so a
+// superseded row's pricing_canonical_text is just as safe to trust.
+async function fetchFrozenRevisionAsOfAcceptance(
   client: any,
   job_id: string,
+  accepted_at: string | null,
 ): Promise<{ ok: true; row: FrozenRevisionRow | null } | { ok: false; error: { code: 'db_error'; message: string } }> {
+  // No acceptance timestamp -> no time anchor -> we cannot certify any revision
+  // as pre-acceptance. Fall back to the live pricing path (CP1).
+  if (!accepted_at) return { ok: true, row: null }
   try {
     const { data, error } = await client.from('scope_revisions')
-      .select('id, pricing_canonical_text, pricing_hash')
+      .select('id, pricing_canonical_text, pricing_hash, frozen_at')
       .eq('job_id', job_id)
-      .eq('status', 'frozen')
-      .order('revision_number', { ascending: false })
+      .in('status', ['frozen', 'superseded'])
+      .lte('frozen_at', accepted_at) // excludes NULL frozen_at (NULL <= x is not true)
+      .order('frozen_at', { ascending: false })
       .limit(1)
     if (error) return { ok: false, error: { code: 'db_error', message: String(error?.message ?? error) } }
     const arr = (data as FrozenRevisionRow[] | null) ?? []
@@ -234,9 +253,9 @@ export async function freezeExpectedCostsOnAcceptance(
     }
   }
 
-  // Resolve the SOURCE per the CP1 order: frozen revision first (hash-verified),
-  // else live pricing_json, else suppress.
-  const frozenRes = await fetchLatestFrozenRevision(client, input.job_id)
+  // Resolve the SOURCE per the CP1 order: frozen revision AS OF ACCEPTANCE first
+  // (hash-verified), else live pricing_json, else suppress.
+  const frozenRes = await fetchFrozenRevisionAsOfAcceptance(client, input.job_id, job.accepted_at)
   if (!frozenRes.ok) return { ok: false, error: frozenRes.error }
 
   let confidence: ExpectedCostConfidence | null = null
@@ -300,6 +319,16 @@ export async function freezeExpectedCostsOnAcceptance(
   // suppress rather than fabricate an all-zero snapshot.
   if (lanes_written.length === 0) {
     return { ok: true, snapshot: false, reason: 'no_cost_lanes' }
+  }
+  // Adversarial CP2 finding (Codex 2026-07-05): a 0/0/0 pricing blob (all lane
+  // keys present but every cost zero) is a fabricated placeholder, not a real
+  // baseline — writing it would emit $0 expected facts. Only pin a snapshot when
+  // at least one lane carries a positive cost. (A real quote with one positive
+  // lane and an incidental $0 in another lane is a genuine baseline and still
+  // written — that $0 is real pricing, not a fabricated placeholder.)
+  const hasPositiveLane = lanes_written.some((l) => (lanes[l] as { amount_ex_gst: number }).amount_ex_gst > 0)
+  if (!hasPositiveLane) {
+    return { ok: true, snapshot: false, reason: 'zero_filled_pricing' }
   }
 
   const snapshot: ExpectedCostsSnapshot = {
