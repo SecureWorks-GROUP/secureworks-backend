@@ -2,7 +2,6 @@
 // Wiki issue #112; contract profit-trade-invoice-intelligence-2026-07-03.
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  allowanceSourceLabel,
   assembleCostReport,
   buildCostReportLink,
   costReportToken,
@@ -10,8 +9,11 @@ import {
   renderCostReportError,
   renderCostReportHtml,
   verifyCostReportToken,
-  xeroBillUrl,
 } from "./makesafe_cost_report.ts";
+// The report reuses these shared helpers; assert against them so the report and
+// the U3 email are proven to render identical labels/links.
+import { describeSource } from "./makesafe_hours_flag.ts";
+import { xeroDraftBillUrl } from "./finance_review_email.ts";
 
 const SECRET = "test-secret-123";
 const JOB = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -112,9 +114,9 @@ Deno.test("render: shows Allowed/Charged/Source/Justification the U3 email lists
   // The per-flagged-line figures the U3 email reports must all appear on the page.
   assertStringIncludes(html, "2h"); // allowed
   assertStringIncludes(html, "3h"); // charged
-  assertStringIncludes(html, allowanceSourceLabel("rule_default")); // source label
+  assertStringIncludes(html, describeSource("rule_default")); // source label (shared with U3 email)
   assertStringIncludes(html, "Roof unsafe, extra board-up"); // justification
-  assertStringIncludes(html, xeroBillUrl("xero-bill-778")!); // Xero bill link
+  assertStringIncludes(html, xeroDraftBillUrl("xero-bill-778")!); // Xero bill link (shared with U3 email)
   assertStringIncludes(html, "SWMS-26671"); // job identity
   assertStringIncludes(html, "SW-INV-TT-260630-001"); // invoice identity
 });
