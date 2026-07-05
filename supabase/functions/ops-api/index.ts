@@ -298,6 +298,14 @@ import {
 } from './makesafe_wo_selection.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
+// M2/U4 — materials reconciliation queue (ops worklist that drains unmatched
+// non-mirror ACCPAY bills into manual materials facts, auditably).
+import {
+  listReconQueue as _listReconQueue,
+  assignReconRow as _assignReconRow,
+  markReconNotJobRelated as _markReconNotJobRelated,
+  resolveActor as _resolveReconActor,
+} from './materials_recon.ts'
 import {
   sendPackAllowed,
   resolveExistingInvoice,
@@ -394,7 +402,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 233
+const OPS_API_EXPECTED_ACTION_COUNT = 236
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -2307,6 +2315,38 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))
       case 'list_pos': return json(await listPOs(client, url.searchParams))
+
+      // ── M2/U4 · Materials reconciliation queue (ops worklist) ──
+      // Read the queue (default status=open) + drain stats; and the three
+      // auditable operator actions. accept/assign land a manual materials FACT
+      // (confidence=high_manual, automation_source=manual_queue, assigned_by=actor)
+      // and flip the queue row to 'assigned'; not-job-related closes it and writes
+      // NO fact. Every write is keyed by xero_invoice_id → reversible by delete;
+      // xero_invoices / trade_invoices are never mutated (CP1 Option A).
+      case 'materials_recon_queue':
+        return json(await _listReconQueue(client, {
+          status: url.searchParams.get('status') || 'open',
+          limit: Number(url.searchParams.get('limit')) || 200,
+          orgId: DEFAULT_ORG_ID,
+        }))
+      case 'materials_recon_assign':
+        return json(await _assignReconRow(client, {
+          queueId: body.queue_id ?? body.queueId ?? null,
+          xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
+          jobId: body.job_id ?? body.jobId ?? null,
+          jobNumber: body.job_number ?? body.jobNumber ?? null,
+          useSuggestion: body.use_suggestion === true || body.useSuggestion === true,
+          actor: _resolveReconActor(body),
+          orgId: DEFAULT_ORG_ID,
+        }))
+      case 'materials_recon_not_job_related':
+        return json(await _markReconNotJobRelated(client, {
+          queueId: body.queue_id ?? body.queueId ?? null,
+          xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
+          actor: _resolveReconActor(body),
+          orgId: DEFAULT_ORG_ID,
+        }))
+
       case 'list_work_orders': return json(await listWorkOrders(client, url.searchParams))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
