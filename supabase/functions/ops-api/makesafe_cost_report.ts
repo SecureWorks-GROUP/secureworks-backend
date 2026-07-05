@@ -76,24 +76,31 @@ export async function verifyCostReportToken(
 }
 
 // Full openable URL for the U3 email link. `supabaseUrl` is the project URL
-// (e.g. https://<ref>.supabase.co); the function path is appended here.
+// (e.g. https://<ref>.supabase.co); the function path is appended here. Params
+// use the `job`/`invoice` names the U3 link builder already uses; `invoice` is
+// optional and only marks which invoice triggered the review.
 export function costReportUrl(
   supabaseUrl: string,
   jobId: string,
   token: string,
+  invoiceId?: string,
 ): string {
   const b = (supabaseUrl || "").replace(/\/$/, "");
-  return `${b}/functions/v1/ops-api?action=${MAKESAFE_COST_REPORT_ACTION}` +
-    `&job_id=${encodeURIComponent(jobId)}&token=${encodeURIComponent(token)}`;
+  let u = `${b}/functions/v1/ops-api?action=${MAKESAFE_COST_REPORT_ACTION}` +
+    `&job=${encodeURIComponent(jobId)}`;
+  if (invoiceId) u += `&invoice=${encodeURIComponent(invoiceId)}`;
+  u += `&token=${encodeURIComponent(token)}`;
+  return u;
 }
 
-// Convenience: mint the token and build the link in one call (for U3).
+// Convenience for U3: mint the token and build the whole link in one call.
 export async function buildCostReportLink(
   supabaseUrl: string,
   jobId: string,
+  invoiceId?: string,
   secret: string = costReportSecret(),
 ): Promise<string> {
-  return costReportUrl(supabaseUrl, jobId, await costReportToken(jobId, secret));
+  return costReportUrl(supabaseUrl, jobId, await costReportToken(jobId, secret), invoiceId);
 }
 
 // ── formatting + labels ──
@@ -163,6 +170,8 @@ export interface CostReportData {
     type: string;
   };
   generated_at: string;
+  // The invoice that triggered this review (from the U3 link), if supplied.
+  trigger_invoice_id: string | null;
   makesafe_lines: CostReportLine[];
   flagged_lines: CostReportLine[];
   all_lines: CostReportLine[];
@@ -204,6 +213,7 @@ export function assembleCostReport(
   // deno-lint-ignore no-explicit-any
   rawInvoices: any[],
   generatedAt: string,
+  triggerInvoiceId: string | null = null,
 ): CostReportData {
   const lines: CostReportLine[] = (rawLines || [])
     .filter((r) => !r.is_probable_test_line)
@@ -249,6 +259,7 @@ export function assembleCostReport(
       type: rawJob.type || "",
     },
     generated_at: generatedAt,
+    trigger_invoice_id: triggerInvoiceId,
     makesafe_lines,
     flagged_lines,
     all_lines: lines,
@@ -269,6 +280,7 @@ export async function getJobCostReport(
   // deno-lint-ignore no-explicit-any
   client: any,
   jobId: string,
+  triggerInvoiceId: string | null = null,
   now: string = new Date().toISOString(),
 ): Promise<CostReportData | null> {
   const { data: job } = await client
@@ -306,7 +318,7 @@ export async function getJobCostReport(
   }
 
   // deno-lint-ignore no-explicit-any
-  return assembleCostReport(job, (lines || []) as any[], fin, invoices as any[], now);
+  return assembleCostReport(job, (lines || []) as any[], fin, invoices as any[], now, triggerInvoiceId);
 }
 
 // ── render ──
@@ -416,7 +428,8 @@ export function renderCostReportHtml(d: CostReportData): string {
 <tbody>${
       d.invoices.map((i) => {
         const bill = xeroBillUrl(i.xero_bill_id);
-        return `<tr><td>${esc(i.invoice_number || i.id)}</td><td>${esc(i.week_start || "—")}</td><td>${esc(i.status || "—")}</td><td>${bill ? `<a class="xlink" href="${esc(bill)}">Xero draft bill ↗</a>` : '<span class="src">—</span>'}</td></tr>`;
+        const isTrigger = d.trigger_invoice_id && i.id === d.trigger_invoice_id;
+        return `<tr><td>${esc(i.invoice_number || i.id)}${isTrigger ? ' <span class="pill pill-over">review trigger</span>' : ""}</td><td>${esc(i.week_start || "—")}</td><td>${esc(i.status || "—")}</td><td>${bill ? `<a class="xlink" href="${esc(bill)}">Xero draft bill ↗</a>` : '<span class="src">—</span>'}</td></tr>`;
       }).join("")
     }</tbody>
 </table>`
