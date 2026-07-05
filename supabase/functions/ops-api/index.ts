@@ -2404,9 +2404,42 @@ if (import.meta.main) serve(async (req: Request) => {
       }
 
       // ── Ops Dashboard Write ──
-      case 'create_assignment': return json(await createAssignment(client, body))
-      case 'update_assignment': return json(await updateAssignment(client, body))
-      case 'delete_assignment': return json(await deleteAssignment(client, body))
+      // create/update/delete_assignment were previously ungated: any authenticated
+      // JWT (incl. a plain installer) could mutate any assignment. Now gated to the
+      // dashboard/service key (authMode='api_key'), a dispatcher (admin/owner/
+      // ops_manager JWT), or a manager of the job's vertical. ops.html uses the
+      // SW_API_KEY (api_key) and is unaffected.
+      case 'create_assignment': {
+        await assertAssignmentMutationAuthz(client, authMode, authUser, { jobId: body.jobId || body.job_id })
+        return json(await createAssignment(client, body))
+      }
+      case 'update_assignment': {
+        await assertAssignmentMutationAuthz(client, authMode, authUser, {
+          assignmentId: body.assignmentId || body.assignment_id || body.id,
+          jobId: body.jobId || body.job_id,
+        })
+        return json(await updateAssignment(client, body))
+      }
+      case 'delete_assignment': {
+        await assertAssignmentMutationAuthz(client, authMode, authUser, {
+          assignmentId: body.assignmentId || body.assignment_id || body.id,
+        })
+        return json(await deleteAssignment(client, body))
+      }
+      // Trade-side manager allocation (Manager View). JWT-authed via authTrade;
+      // caller must be a dispatcher or a manager of the job's vertical. Wraps
+      // createAssignment / updateAssignment (reassignment) with idempotency +
+      // archived-job refusal. Wires to the trade app's reassign flow in Wave 2-3.
+      case 'allocate_job': {
+        const tradeUser = await authTrade(req, client)
+        const { data: caller } = await client.from('users')
+          .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
+        return json(await allocateJob(client, {
+          body,
+          callerRole: caller?.role,
+          managedVerticals: caller?.managed_verticals,
+        }))
+      }
       case 'update_job_status': return json(await updateJobStatus(client, body))
       case 'create_po': return json(await createPO(client, body))
       case 'update_po': return json(await updatePO(client, body))
@@ -3652,23 +3685,25 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'clock_event':
       case 'submit_makesafe_report': {
         const tradeUser = await authTrade(req, client)
-        // Look up user role + make-safe manager flag for trade-app visibility.
-        const { data: userRec } = await client.from('users').select('role, makesafe_manager').eq('id', tradeUser.id).maybeSingle()
+        // Look up user role + managed verticals for trade-app visibility.
+        const { data: userRec } = await client.from('users').select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
         // Dispatcher = the ops manager / admin who runs the board: see-all view of
         // every job plus the full open MakeSafe pool (other trades see only their
-        // own). A make-safe manager (users.makesafe_manager = true, e.g. Hugo +
-        // Nithin) is NOT a dispatcher: they get the SAME full open MakeSafe pool
-        // unioned with only their own assignments (showAll stays false). Resolved
-        // server-side via the pure _resolveMakesafeVisibility helper.
-        const { isAdmin, isDispatcher, isMakesafeManager } = _resolveMakesafeVisibility({
+        // own). A vertical manager (users.managed_verticals contains the vertical,
+        // e.g. Hugo=makesafe, Henry=fencing, Nithin=patio) is NOT a dispatcher:
+        // they get the full open pool of EACH managed vertical unioned with only
+        // their own assignments (showAll stays false). Resolved server-side via the
+        // pure _resolveManagerVisibility helper. makesafe_manager is legacy input
+        // only (backfilled into managed_verticals); the runtime reads the list.
+        const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals } = _resolveManagerVisibility({
           role: userRec?.role,
-          makesafeManager: userRec?.makesafe_manager,
+          managedVerticals: userRec?.managed_verticals,
         })
         switch (action) {
           case 'my_jobs': {
             const mode = url.searchParams.get('mode') // 'all' for dispatcher view, 'mine' for personal
             const showAll = isDispatcher && mode !== 'mine'
-            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager))
+            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager, poolVerticals))
           }
           case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
@@ -13280,6 +13315,141 @@ async function intakeHealth(client: any) {
   }
 }
 
+// ── Assignment-mutation authz gate (Manager View) ──────────────────────────
+// Shared by the ops-dashboard create/update/delete_assignment actions. Resolves
+// the affected job's vertical, then applies _resolveAllocationAuthz. api_key
+// (dashboard / service) and dispatchers short-circuit with no DB read; only a
+// JWT vertical manager needs the job + their managed_verticals looked up. Closes
+// the pre-existing hole where ANY logged-in JWT user could mutate assignments.
+export async function assertAssignmentMutationAuthz(
+  client: any,
+  authMode: 'api_key' | 'jwt' | 'routine',
+  authUser: { id: string; email?: string; role: string } | null,
+  ref: { jobId?: string | null; assignmentId?: string | null },
+): Promise<void> {
+  // Fast paths: no DB read required.
+  if (authMode === 'api_key') return
+  if (authMode === 'routine') {
+    throw new ApiError('forbidden: the make-safe automation routine may not mutate assignments', 403)
+  }
+  const role = String(authUser?.role || '').toLowerCase()
+  if (role === 'admin' || role === 'owner' || role === 'ops_manager') return
+
+  // JWT vertical-manager path: resolve the job's vertical + the caller's list.
+  let jobId = ref.jobId || null
+  if (!jobId && ref.assignmentId) {
+    const { data: a } = await client.from('job_assignments').select('job_id').eq('id', ref.assignmentId).maybeSingle()
+    jobId = a?.job_id || null
+  }
+  let jobVertical: string | null = null
+  if (jobId) {
+    const { data: job } = await client.from('jobs').select('id, type, job_number').eq('id', jobId).maybeSingle()
+    if (job) jobVertical = _jobVertical(job)
+  }
+  const { data: userRec } = authUser?.id
+    ? await client.from('users').select('managed_verticals').eq('id', authUser.id).maybeSingle()
+    : { data: null as any }
+  const decision = _resolveAllocationAuthz({
+    authMode: 'jwt',
+    callerRole: role,
+    managedVerticals: userRec?.managed_verticals,
+    jobVertical,
+  })
+  if (!decision.allowed) {
+    throw new ApiError('Not authorized: you can only allocate jobs in a vertical you manage', 403)
+  }
+}
+
+// ── Trade-side manager allocation (Manager View) ───────────────────────────
+// A vertical manager (or dispatcher) allocates a job to — or moves it between —
+// installers from the trade app. JWT-authed by the caller (case above); gated
+// here by _resolveAllocationAuthz on the job's vertical. Wraps the SAME
+// createAssignment / updateAssignment primitives the ops dashboard uses, so the
+// installer Telegram DM, job_events, business_events, GHL push, and
+// visible_to_trades all fire identically. Idempotent against double-taps and
+// refuses archived / cancelled jobs.
+export async function allocateJob(client: any, args: {
+  body: any
+  callerRole?: string | null
+  managedVerticals?: unknown
+}): Promise<any> {
+  const { body, callerRole, managedVerticals } = args
+  const reassignId = body.assignmentId || body.assignment_id || null
+
+  // Resolve the target job — directly for a new allocation, via the existing
+  // assignment for a reassignment.
+  let jobId: string | null = body.jobId || body.job_id || null
+  let sourceAssignment: any = null
+  if (reassignId) {
+    const { data: a } = await client.from('job_assignments')
+      .select('id, job_id, user_id, scheduled_date, scheduled_end, start_time, end_time, assignment_type, crew_name, role, status')
+      .eq('id', reassignId).maybeSingle()
+    if (!a) throw new ApiError('assignment not found', 404)
+    sourceAssignment = a
+    jobId = a.job_id
+  }
+  if (!jobId) throw new ApiError('jobId (new allocation) or assignmentId (reassignment) required', 400)
+
+  const { data: job } = await client.from('jobs')
+    .select('id, type, job_number, status').eq('id', jobId).maybeSingle()
+  if (!job) throw new ApiError('job not found', 404)
+
+  // Refuse archived / cancelled / otherwise-terminal jobs (same terminal set the
+  // open pool excludes).
+  const jobStatus = String(job.status || '').toLowerCase()
+  if ((_MAKESAFE_POOL_EXCLUDED_STATUSES as readonly string[]).includes(jobStatus)) {
+    throw new ApiError(`cannot allocate a ${jobStatus} job`, 409)
+  }
+
+  // Authz: dispatcher OR a manager of this job's vertical.
+  const jobVertical = _jobVertical(job)
+  const decision = _resolveAllocationAuthz({ authMode: 'jwt', callerRole, managedVerticals, jobVertical })
+  if (!decision.allowed) {
+    throw new ApiError(`Not authorized to allocate ${jobVertical || 'this'} jobs`, 403)
+  }
+
+  // Target installer = any active user (owner's decision). Must exist.
+  const targetUserId = body.userId || body.user_id || body.toUserId || body.to_user_id || null
+  if (!targetUserId) throw new ApiError('target installer (userId) required', 400)
+  const { data: target } = await client.from('users').select('id').eq('id', targetUserId).maybeSingle()
+  if (!target) throw new ApiError('target installer not found', 404)
+
+  // ── Reassignment: move the existing assignment to the new installer ──
+  // Mirrors ops-side reassignment (updateAssignment can set user_id). Keeps the
+  // same row so scheduled_date / times / history are preserved unless overridden.
+  if (reassignId) {
+    if (sourceAssignment.user_id === targetUserId) {
+      return { ok: true, mode: 'reassign', deduped: true, assignment: sourceAssignment } // already on this installer
+    }
+    const updateBody: any = { assignmentId: reassignId, userId: targetUserId }
+    const sDateR = body.scheduledDate || body.scheduled_date || body.date
+    if (sDateR) updateBody.scheduledDate = sDateR
+    if (body.startTime || body.start_time) updateBody.startTime = body.startTime || body.start_time
+    if (body.endTime || body.end_time) updateBody.endTime = body.endTime || body.end_time
+    if (body.crewName || body.crew_name) updateBody.crewName = body.crewName || body.crew_name
+    if (body.notes !== undefined) updateBody.notes = body.notes
+    const res = await updateAssignment(client, updateBody)
+    return { ok: true, mode: 'reassign', ...res }
+  }
+
+  // ── New allocation ──
+  const sDate = body.scheduledDate || body.scheduled_date || body.date || null
+  if (!sDate) throw new ApiError('scheduledDate required for a new allocation', 400)
+
+  // Idempotency against double-taps: an existing non-cancelled assignment for the
+  // same job + installer + date returns instead of inserting a duplicate.
+  const { data: dup } = await client.from('job_assignments')
+    .select('id, scheduled_date, user_id, status, assignment_type')
+    .eq('job_id', jobId).eq('user_id', targetUserId).eq('scheduled_date', sDate)
+    .neq('status', 'cancelled').limit(1)
+  if (dup && dup.length > 0) {
+    return { ok: true, mode: 'idempotent', deduped: true, assignment: dup[0] }
+  }
+
+  const created = await createAssignment(client, { ...body, jobId, userId: targetUserId, scheduledDate: sDate })
+  return { ok: true, mode: 'create', ...created }
+}
+
 async function createAssignment(client: any, body: any) {
   const { jobId, job_id, userId, user_id, scheduledDate, scheduled_date, date,
           scheduledEnd, scheduled_end, startTime, start_time, endTime, end_time,
@@ -17242,7 +17412,13 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
 export function _groupTradeAssignmentsForTest(assignments: any[], today: string, weekEnd: string) {
   const grouped: any = { today: [] as any[], thisWeek: [] as any[], upcoming: [] as any[], recent: [] as any[], makesafePool: [] as any[] }
   for (const a of (assignments || [])) {
-    if (a?.assignment_type === 'makesafe_open' || a?.role === 'makesafe_open') {
+    // Open-pool cards (make-safe OR any managed vertical: fencing_open /
+    // patio_open / decking_open) go to the pool bucket, never the dated
+    // today/thisWeek buckets. The bucket key stays `makesafePool` for client
+    // compatibility; it is the generic open-pool lane.
+    const openType = String(a?.assignment_type || '')
+    const openRole = String(a?.role || '')
+    if (openType.endsWith('_open') || openRole.endsWith('_open')) {
       grouped.makesafePool.push(a)
       continue
     }
@@ -17292,7 +17468,100 @@ export function _canSeeFullMakesafePool(isDispatcher: boolean, isMakesafeManager
   return isDispatcher === true || isMakesafeManager === true
 }
 
-async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false) {
+// ── Manager View — per-vertical manager visibility + allocation ────────────
+// Marnin's locked model (2026-07-05): manager rights are ONE list per user
+// (users.managed_verticals), NOT three bespoke per-vertical booleans. A managed
+// vertical grants (a) the full open pool of that vertical in the trade app and
+// (b) allocation rights over that vertical. Values align to jobs.type. This
+// generalises the make-safe-only flag (users.makesafe_manager, now backfilled
+// into managed_verticals) to fencing / patio / decking with one mechanism.
+export const _MANAGED_VERTICALS = ['makesafe', 'fencing', 'patio', 'decking'] as const
+
+// Normalise a raw managed_verticals value (DB array, possibly null / mixed-case
+// / unknown entries) into a clean, de-duplicated list of valid verticals.
+export function _normalizeManagedVerticals(input: unknown): string[] {
+  if (!Array.isArray(input)) return []
+  const valid = _MANAGED_VERTICALS as readonly string[]
+  const out: string[] = []
+  for (const raw of input) {
+    const v = String(raw ?? '').trim().toLowerCase()
+    if (valid.includes(v) && !out.includes(v)) out.push(v)
+  }
+  return out
+}
+
+// Pure resolver for trade-app manager visibility, generalised from
+// _resolveMakesafeVisibility to every vertical. Single source of truth used by
+// the trade route + unit tests.
+//  - Dispatcher (admin / ops_manager): unchanged see-all behaviour + make-safe
+//    pool. isMakesafeManager / canSeeMakesafePool preserve the exact make-safe
+//    semantics the live flag gave (Hugo keeps the pool via the backfill).
+//  - Vertical manager (managed_verticals contains the vertical): gets that
+//    vertical's open pool unioned with their own assignments, WITHOUT dispatcher
+//    see-all.
+//  - poolVerticals: the set of verticals whose open pool myJobs should union in
+//    — every managed vertical, PLUS 'makesafe' for any dispatcher (so the
+//    dispatcher make-safe pool survives even with an empty managed list).
+export function _resolveManagerVisibility(
+  input: { role?: string | null; managedVerticals?: unknown },
+): {
+  isAdmin: boolean
+  isDispatcher: boolean
+  managedVerticals: string[]
+  poolVerticals: string[]
+  isMakesafeManager: boolean
+  canSeeMakesafePool: boolean
+} {
+  const role = String(input?.role || '').toLowerCase()
+  const isAdmin = role === 'admin'
+  const isDispatcher = isAdmin || role === 'ops_manager'
+  const managedVerticals = _normalizeManagedVerticals(input?.managedVerticals)
+  const isMakesafeManager = managedVerticals.includes('makesafe')
+  const canSeeMakesafePool = isDispatcher || isMakesafeManager
+  const poolSet = new Set<string>(managedVerticals)
+  if (canSeeMakesafePool) poolSet.add('makesafe')
+  // Deterministic order (matches _MANAGED_VERTICALS) so tests + payloads are stable.
+  const poolVerticals = (_MANAGED_VERTICALS as readonly string[]).filter((v) => poolSet.has(v))
+  return { isAdmin, isDispatcher, managedVerticals, poolVerticals, isMakesafeManager, canSeeMakesafePool }
+}
+
+// The vertical a job belongs to, for allocation-authz + pool purposes. Make-safe
+// wins on either jobs.type='makesafe' OR an SWMS- job_number (mirrors
+// isMakesafeAccessJob); otherwise the plain jobs.type (lower-cased).
+export function _jobVertical(job: any): string {
+  if (isMakesafeAccessJob(job)) return 'makesafe'
+  return String(job?.type || '').trim().toLowerCase()
+}
+
+// Pure resolver for who may create / move / delete a job_assignment. The ops
+// dashboard's create/update/delete_assignment path and the trade-side
+// allocate_job path share it. Marnin's rule: a privileged server key (ops
+// dashboard SW_API_KEY / service role, authMode='api_key') or a dispatcher
+// (admin / owner / ops_manager JWT) may allocate ANY job; a vertical manager may
+// allocate ONLY jobs of a vertical they manage; anyone else (a plain installer
+// JWT) is refused. The scoped make-safe routine may never mutate assignments
+// (also blocked upstream by the default-deny allow-list; refused here too).
+export function _resolveAllocationAuthz(input: {
+  authMode: 'api_key' | 'jwt' | 'routine'
+  callerRole?: string | null
+  managedVerticals?: unknown
+  jobVertical?: string | null
+}): { allowed: boolean; reason: string } {
+  if (input.authMode === 'api_key') return { allowed: true, reason: 'api_key' }
+  if (input.authMode === 'routine') return { allowed: false, reason: 'routine_forbidden' }
+  const role = String(input.callerRole || '').toLowerCase()
+  if (role === 'admin' || role === 'owner' || role === 'ops_manager') {
+    return { allowed: true, reason: 'dispatcher' }
+  }
+  const managed = _normalizeManagedVerticals(input.managedVerticals)
+  const vertical = String(input.jobVertical || '').trim().toLowerCase()
+  if (vertical && managed.includes(vertical)) {
+    return { allowed: true, reason: 'vertical_manager' }
+  }
+  return { allowed: false, reason: 'not_authorized' }
+}
+
+async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false, poolVerticals: string[] = []) {
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -17497,6 +17766,59 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
         job_phase: null,
         jobs: job,
       })
+    }
+  }
+
+  // ── Generic per-vertical open pool (fencing / patio / decking) ──
+  // Manager View: a vertical manager sees the full open pool of every vertical
+  // in their managed_verticals — active, non-archived jobs of that jobs.type —
+  // as synthetic 'available' cards, exactly like the make-safe pool above (which
+  // keeps its bespoke make-safe_job_details enrichment). Make-safe is handled
+  // above and excluded here. Cards are de-duped against the user's own
+  // assignments (and against each other). Same terminal-status exclusion as the
+  // make-safe pool via _makesafePoolExcludedStatusFilter().
+  const genericPoolVerticals = (poolVerticals || []).filter((v) => v !== 'makesafe')
+  if (genericPoolVerticals.length > 0) {
+    const assignedJobIdsPool = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+    for (const vertical of genericPoolVerticals) {
+      try {
+        const { data: openJobs, error: poolErr } = await client
+          .from('jobs')
+          .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+          .eq('type', vertical)
+          .not('status', 'in', _makesafePoolExcludedStatusFilter())
+          .order('created_at', { ascending: false })
+          .limit(80)
+        if (poolErr) throw poolErr
+        for (const job of (openJobs || [])) {
+          if (!job?.id || assignedJobIdsPool.has(job.id)) continue
+          assignedJobIdsPool.add(job.id)
+          assignments.push({
+            id: `${vertical}-open-${job.id}`,
+            scheduled_date: today,
+            scheduled_end: null,
+            start_time: null,
+            status: 'available',
+            role: `${vertical}_open`,
+            notes: null,
+            assignment_type: `${vertical}_open`,
+            crew_name: null,
+            started_at: null,
+            completed_at: null,
+            clocked_on_at: null,
+            clocked_off_at: null,
+            travel_started_at: null,
+            arrived_at: null,
+            break_minutes: null,
+            job_phase: null,
+            jobs: job,
+          })
+        }
+      } catch (poolErr: any) {
+        // Non-blocking: a failed vertical pool query must not break the trade's
+        // own assignment list.
+        console.log(`[ops-api] myJobs ${vertical} pool query failed (non-blocking):`, poolErr?.message)
+      }
     }
   }
 
