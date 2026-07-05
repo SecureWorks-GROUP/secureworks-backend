@@ -320,6 +320,7 @@ import {
   getJobCostReport,
   renderCostReportHtml,
   renderCostReportError,
+  buildCostReportLink,
 } from './makesafe_cost_report.ts'
 import {
   sendPackAllowed,
@@ -546,9 +547,8 @@ async function fetchMakesafeAllowanceInputs(
 // NON-BLOCKING: any failure is caught and logged, never failing the invoice
 // submit (the invoice + Xero draft are already committed).
 //
-// Job cost report URL (U5, Deckhand B): stable placeholder pattern
-// `<FINANCE_REVIEW_REPORT_BASE>/job-cost-report?job=<jobId>&invoice=<invoiceId>`.
-// Base defaults to the ops app; repoint via env when U5's surface is finalised.
+// Job cost report URL (U5, Deckhand B): the resolved token-gated ops-api page,
+// built per flagged job via buildCostReportLink(SUPABASE_URL, jobId).
 async function recordFinanceReviewEmail(
   client: any,
   params: {
@@ -575,12 +575,13 @@ async function recordFinanceReviewEmail(
     if (decision.action === 'skip') return { action: 'skip' }
 
     // Build the deterministic email (subject/body reflect the supersede state).
-    const reportBase = (Deno.env.get('FINANCE_REVIEW_REPORT_BASE') || 'https://ops.secureworksgroup.app').replace(/\/+$/, '')
+    // Resolved U5 cost-report link per flagged job — the real token-gated ops-api
+    // page (buildCostReportLink mints the HMAC token). U3's pure module consumes
+    // the URL map unchanged.
     const jobCostReportUrls: Record<string, string> = {}
     for (const l of flaggedLines) {
       if (l.jobId && !jobCostReportUrls[l.jobId]) {
-        jobCostReportUrls[l.jobId] = reportBase + '/job-cost-report?job=' + encodeURIComponent(l.jobId) +
-          '&invoice=' + encodeURIComponent(params.tradeInvoiceId)
+        jobCostReportUrls[l.jobId] = await buildCostReportLink(SUPABASE_URL, l.jobId)
       }
     }
     const email = buildFinanceReviewEmail({

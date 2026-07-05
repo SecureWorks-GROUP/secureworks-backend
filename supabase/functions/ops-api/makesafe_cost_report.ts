@@ -20,6 +20,13 @@
 // figures shown here come from the SAME view the U3 email reads, so the email and
 // this page reconcile by construction.
 
+// Reuse the shared helpers so the report and the U3 email render identical
+// source labels and Xero links (single source of truth):
+//   describeSource   — allowance-source label (U1 module).
+//   xeroDraftBillUrl — Xero AP bill deep-link (InvoiceID=..., U3 module).
+import { type AllowanceSource, describeSource } from "./makesafe_hours_flag.ts";
+import { xeroDraftBillUrl } from "./finance_review_email.ts";
+
 export const MAKESAFE_COST_REPORT_ACTION = "makesafe_job_cost_report";
 
 // ── env (cross-runtime so the module is testable under Deno and Node) ──
@@ -104,23 +111,10 @@ export async function buildCostReportLink(
 }
 
 // ── formatting + labels ──
-export function allowanceSourceLabel(source: string | null | undefined): string {
-  switch (source) {
-    case "ops_set":
-      return "Office-set expectation";
-    case "report":
-      return "Trade report (unverified)";
-    case "rule_default":
-      return "Rule default (2hr minimum)";
-    default:
-      return source ? String(source) : "—";
-  }
-}
-
-export function xeroBillUrl(xeroBillId: string | null | undefined): string | null {
-  return xeroBillId
-    ? `https://go.xero.com/AccountsPayable/View.aspx?invoiceID=${encodeURIComponent(xeroBillId)}`
-    : null;
+// Allowance-source label — delegates to U1's describeSource so the report and
+// the U3 email show identical wording; null-guards for defensiveness.
+function sourceLabel(source: string | null | undefined): string {
+  return source ? describeSource(source as AllowanceSource) : "—";
 }
 
 function money(n: number | null | undefined): string {
@@ -357,10 +351,10 @@ function flaggedRow(l: CostReportLine): string {
   const over = (l.charged_hours != null && l.allowed_hours != null)
     ? l.charged_hours - l.allowed_hours
     : null;
-  const bill = xeroBillUrl(l.xero_bill_id);
+  const bill = xeroDraftBillUrl(l.xero_bill_id);
   return `<tr class="flag">
 <td><div>${esc(l.description || l.line_type)}</div>${l.line_date ? `<div class="src">${esc(l.line_date)}</div>` : ""}</td>
-<td class="num">${hrs(l.allowed_hours)}<div class="src">${esc(allowanceSourceLabel(l.baseline_source))}</div></td>
+<td class="num">${hrs(l.allowed_hours)}<div class="src">${esc(sourceLabel(l.baseline_source))}</div></td>
 <td class="num">${hrs(l.charged_hours)}${over != null ? `<div class="src"><span class="pill pill-over">+${hrs(over)}</span></div>` : ""}</td>
 <td class="just">${l.hours_justification ? esc(l.hours_justification) : '<span class="src">No explanation given</span>'}</td>
 <td>${bill ? `<a class="xlink" href="${esc(bill)}">Xero bill ↗</a>` : '<span class="src">—</span>'}</td>
@@ -370,7 +364,7 @@ function flaggedRow(l: CostReportLine): string {
 function makesafeRow(l: CostReportLine): string {
   return `<tr>
 <td>${esc(l.description || l.line_type)}${l.is_hours_flagged ? ' <span class="pill pill-over">over</span>' : ""}</td>
-<td class="num">${hrs(l.allowed_hours)}<div class="src">${esc(allowanceSourceLabel(l.baseline_source))}</div></td>
+<td class="num">${hrs(l.allowed_hours)}<div class="src">${esc(sourceLabel(l.baseline_source))}</div></td>
 <td class="num">${hrs(l.charged_hours)}</td>
 <td class="num">${money(l.line_total_ex)}</td>
 </tr>`;
@@ -427,7 +421,7 @@ export function renderCostReportHtml(d: CostReportData): string {
 <thead><tr><th>Trade invoice</th><th>Week</th><th>Status</th><th>Bill</th></tr></thead>
 <tbody>${
       d.invoices.map((i) => {
-        const bill = xeroBillUrl(i.xero_bill_id);
+        const bill = xeroDraftBillUrl(i.xero_bill_id);
         const isTrigger = d.trigger_invoice_id && i.id === d.trigger_invoice_id;
         return `<tr><td>${esc(i.invoice_number || i.id)}${isTrigger ? ' <span class="pill pill-over">review trigger</span>' : ""}</td><td>${esc(i.week_start || "—")}</td><td>${esc(i.status || "—")}</td><td>${bill ? `<a class="xlink" href="${esc(bill)}">Xero draft bill ↗</a>` : '<span class="src">—</span>'}</td></tr>`;
       }).join("")
