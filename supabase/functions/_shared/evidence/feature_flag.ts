@@ -28,7 +28,10 @@ export type EvidenceFlagKey =
   | "evidence_capture_v1"
   | "evidence_audio_capture"
   | "evidence_transcript_capture"
-  | "evidence_refs_strict_mode";
+  | "evidence_refs_strict_mode"
+  // M0/U3: gates the "quoted from site" proof stamping. Default OFF (absent
+  // flag => OFF) until Marnin approves at CP4.
+  | "from_site_proof_v1";
 
 /**
  * Returns true when the flag is ON. Default OFF on any error.

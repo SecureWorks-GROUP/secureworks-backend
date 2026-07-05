@@ -115,6 +115,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { SALES_SCOPE_ASSIGNMENT_TYPE, SCOPE_SIGNOFF_EVENT_TYPE, buildScopeSignoffPayload, scopingToolDeepLink } from '../_shared/scope/from_site.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -2483,6 +2484,36 @@ if (import.meta.main) serve(async (req: Request) => {
             : result.error.code === 'inconsistent_state' ? 409
             : 500
           return json({ error: result.error }, status)
+        }
+        // M0/U3 — emit the on-site scope sign-off event. This is the durable
+        // proof send-quote's from_site gate verifies against (same session +
+        // assigned scoper). Carries the tool_session_id when the scoping tool
+        // supplies it; without it, no quote can ever be flagged from_site
+        // (STRICT). Additive + non-fatal — never blocks the freeze response.
+        try {
+          const signoffScoperId = authMode === 'jwt' ? authUser!.id : (body.frozen_by_user_id ?? body.userId ?? null)
+          const signoffToolSession = body.tool_session_id ?? body.toolSessionId ?? null
+          await recordEvidence(client, {
+            event_type: SCOPE_SIGNOFF_EVENT_TYPE,
+            source: 'ops-api/freeze_scope',
+            channel: 'scope',
+            direction: 'internal',
+            source_table: 'scope_revisions',
+            source_id: result.scope_revision_id,
+            job_id,
+            entity_type: 'scope_session',
+            entity_id: result.scope_revision_id,
+            match_method: 'direct_job_id',
+            payload: buildScopeSignoffPayload({
+              scopeRevisionId: result.scope_revision_id,
+              jobId: job_id,
+              scoperUserId: signoffScoperId,
+              toolSessionId: signoffToolSession,
+              signoffAt: new Date().toISOString(),
+            }),
+          }, { org_id: DEFAULT_ORG_ID, storage_client: client.storage, bypass_feature_flag: true })
+        } catch (e) {
+          console.error('[ops-api] freeze_scope scope.signed_off emit failed (non-fatal):', (e as Error)?.message)
         }
         return json(result)
       }
@@ -13599,6 +13630,16 @@ async function createAssignment(client: any, body: any) {
   fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jId}`, {
     headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
   }).catch(() => {})
+
+  // M0/U3 — a sales scope visit (assignment_type='sales_scope') carries the
+  // job's scoping-tool deep-link so the sales dash opens the job on an iPad
+  // straight from the calendar appointment. Deterministic from the job's type
+  // + id; surfaced here for the caller. 'sales_scope' is distinct from ops'
+  // 'scope' value (matched by exact equality everywhere), so it never leaks
+  // into ops scope counts.
+  if (insertRow.assignment_type === SALES_SCOPE_ASSIGNMENT_TYPE) {
+    return { assignment: data, scope_deeplink: scopingToolDeepLink(currentJob?.type, jId) }
+  }
 
   return { assignment: data }
 }
