@@ -2066,14 +2066,16 @@ if (import.meta.main) serve(async (req: Request) => {
   // renders HTML, never mutates. Served here (pre-auth) so the email link opens.
   if (_preAuthUrl.searchParams.get('action') === MAKESAFE_COST_REPORT_ACTION) {
     const _crHtml = { ...CORS, 'Content-Type': 'text/html; charset=utf-8' }
-    const _jobId = _preAuthUrl.searchParams.get('job_id') || ''
+    // Accept the U3 link's param names (job/invoice), tolerant of job_id/invoice_id.
+    const _jobId = _preAuthUrl.searchParams.get('job') || _preAuthUrl.searchParams.get('job_id') || ''
+    const _invoiceId = _preAuthUrl.searchParams.get('invoice') || _preAuthUrl.searchParams.get('invoice_id') || null
     const _token = _preAuthUrl.searchParams.get('token') || ''
     if (!_jobId || !(await verifyCostReportToken(_jobId, _token, costReportSecret()))) {
       return new Response(renderCostReportError('This link is invalid or has expired. Ask the office to resend the review email.'), { status: 403, headers: _crHtml })
     }
     try {
       const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const _crData = await getJobCostReport(_crClient, _jobId)
+      const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)
       if (!_crData) {
         return new Response(renderCostReportError('That job could not be found.'), { status: 404, headers: _crHtml })
       }

@@ -37,14 +37,19 @@ Deno.test("token: rejects empties and wrong secret", async () => {
   assertEquals(await verifyCostReportToken("", t, SECRET), false);
   assertEquals(await verifyCostReportToken(JOB, t, "different-secret"), false);
 });
-Deno.test("url: builds the openable ops-api link", async () => {
+Deno.test("url: builds the openable ops-api link with job/invoice/token", async () => {
   const t = await costReportToken(JOB, SECRET);
-  const u = costReportUrl("https://ref.supabase.co", JOB, t);
+  const u = costReportUrl("https://ref.supabase.co", JOB, t, "INV1");
   assertStringIncludes(u, "/functions/v1/ops-api?action=makesafe_job_cost_report");
-  assertStringIncludes(u, `job_id=${JOB}`);
+  assertStringIncludes(u, `job=${JOB}`); // matches the U3 link builder's param name
+  assertStringIncludes(u, "invoice=INV1");
   assertStringIncludes(u, `token=${t}`);
-  const u2 = await buildCostReportLink("https://ref.supabase.co", JOB, SECRET);
+  // buildCostReportLink mints the token and produces the identical URL.
+  const u2 = await buildCostReportLink("https://ref.supabase.co", JOB, "INV1", SECRET);
   assertEquals(u2, u);
+  // invoice is optional.
+  const u3 = costReportUrl("https://ref.supabase.co", JOB, t);
+  assert(!u3.includes("invoice="));
 });
 
 // ── Fixtures: v_trade_charge_resolved rows for one job ──
@@ -136,6 +141,12 @@ Deno.test("render: QA/test line never reaches the page", () => {
   const d = assembleCostReport(rawJob, rawLines, rawFin, rawInvoices, GEN);
   const html = renderCostReportHtml(d);
   assert(!html.includes("QA TEST"), "excluded test line absent from render");
+});
+
+Deno.test("render: marks the review-trigger invoice from the U3 link", () => {
+  const d = assembleCostReport(rawJob, rawLines, rawFin, rawInvoices, GEN, "INV1");
+  assertEquals(d.trigger_invoice_id, "INV1");
+  assertStringIncludes(renderCostReportHtml(d), "review trigger");
 });
 
 Deno.test("error page renders branded and escapes", () => {
