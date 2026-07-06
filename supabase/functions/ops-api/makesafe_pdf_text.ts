@@ -47,7 +47,11 @@ export interface PdfTextResult {
 
 // ── byte helpers (structural scan runs on raw bytes, not a decoded string, so
 // byte offsets into the compressed stream payload stay exact) ──
-function indexOfBytes(hay: Uint8Array, needle: Uint8Array, from: number): number {
+function indexOfBytes(
+  hay: Uint8Array,
+  needle: Uint8Array,
+  from: number,
+): number {
   const last = hay.length - needle.length;
   outer: for (let i = from; i <= last; i++) {
     for (let j = 0; j < needle.length; j++) {
@@ -75,7 +79,10 @@ function latin1(bytes: Uint8Array): string {
   }
 }
 
-async function inflate(bytes: Uint8Array, format: "deflate" | "deflate-raw"): Promise<Uint8Array | null> {
+async function inflate(
+  bytes: Uint8Array,
+  format: "deflate" | "deflate-raw",
+): Promise<Uint8Array | null> {
   try {
     const DS: any = (globalThis as any).DecompressionStream;
     if (typeof DS !== "function") return null;
@@ -130,20 +137,47 @@ function textFromContentStream(content: string): string {
         if (c === "\\") {
           const next = content[i + 1];
           switch (next) {
-            case "n": buf += "\n"; i += 2; break;
-            case "r": buf += "\r"; i += 2; break;
-            case "t": buf += "\t"; i += 2; break;
-            case "b": buf += "\b"; i += 2; break;
-            case "f": buf += "\f"; i += 2; break;
-            case "(": buf += "("; i += 2; break;
-            case ")": buf += ")"; i += 2; break;
-            case "\\": buf += "\\"; i += 2; break;
+            case "n":
+              buf += "\n";
+              i += 2;
+              break;
+            case "r":
+              buf += "\r";
+              i += 2;
+              break;
+            case "t":
+              buf += "\t";
+              i += 2;
+              break;
+            case "b":
+              buf += "\b";
+              i += 2;
+              break;
+            case "f":
+              buf += "\f";
+              i += 2;
+              break;
+            case "(":
+              buf += "(";
+              i += 2;
+              break;
+            case ")":
+              buf += ")";
+              i += 2;
+              break;
+            case "\\":
+              buf += "\\";
+              i += 2;
+              break;
             default: {
               // octal escape \ddd, else drop the backslash
               if (next >= "0" && next <= "7") {
                 let oct = "";
                 let k = i + 1;
-                while (k < n && oct.length < 3 && content[k] >= "0" && content[k] <= "7") {
+                while (
+                  k < n && oct.length < 3 && content[k] >= "0" &&
+                  content[k] <= "7"
+                ) {
                   oct += content[k];
                   k++;
                 }
@@ -174,7 +208,8 @@ function textFromContentStream(content: string): string {
     }
   }
   // Join with spaces; collapse runs of whitespace so the threshold reflects real text.
-  return pieces.join(" ").replace(/[ \t]{2,}/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+  return pieces.join(" ").replace(/[ \t]{2,}/g, " ").replace(/\s*\n\s*/g, "\n")
+    .trim();
 }
 
 /** True when the recovered text is plausibly real language, not mojibake from a
@@ -192,7 +227,29 @@ export function looksLikeText(text: string): boolean {
   const printableRatio = printable / text.length;
   const letterRatio = letters / text.length;
   // Real WO text is overwhelmingly printable ASCII with a healthy share of letters.
-  return printableRatio >= 0.85 && letterRatio >= 0.25;
+  if (printableRatio < 0.85 || letterRatio < 0.25) return false;
+
+  const words = text.toLowerCase().match(/[a-z][a-z0-9'-]{1,}/g) ?? [];
+  const counts = new Map<string, number>();
+  let dominantCount = 0;
+  for (const word of words) {
+    const count = (counts.get(word) ?? 0) + 1;
+    counts.set(word, count);
+    if (count > dominantCount) dominantCount = count;
+  }
+
+  // Some generated PDFs expose only repeated metadata/locale tokens (for example
+  // "en-AU en-AU ..."). That is printable and letter-heavy, but it is not usable
+  // work-order content, so force the safe document-block fallback.
+  if (
+    words.length >= 20 &&
+    (counts.size < 8 || dominantCount / words.length >= 0.45 ||
+      counts.size / words.length < 0.2)
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -201,12 +258,22 @@ export function looksLikeText(text: string): boolean {
  * feed the classifier cheaply; otherwise mode:'none' so the caller keeps the current
  * document-block path. NEVER throws — every failure degrades to mode:'none'.
  */
-export async function extractPdfText(bytes: Uint8Array): Promise<PdfTextResult> {
-  const empty: PdfTextResult = { text: "", charCount: 0, mode: "none", streamsDecoded: 0 };
+export async function extractPdfText(
+  bytes: Uint8Array,
+): Promise<PdfTextResult> {
+  const empty: PdfTextResult = {
+    text: "",
+    charCount: 0,
+    mode: "none",
+    streamsDecoded: 0,
+  };
   try {
     if (!bytes || bytes.length < 5) return { ...empty, note: "empty" };
     // Cheap sanity: a real PDF starts with %PDF-. If not, don't try.
-    if (!(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46)) {
+    if (
+      !(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 &&
+        bytes[3] === 0x46)
+    ) {
       return { ...empty, note: "not_pdf" };
     }
 
@@ -240,7 +307,10 @@ export async function extractPdfText(bytes: Uint8Array): Promise<PdfTextResult> 
       const dict = latin1(bytes.subarray(dictStart, sIdx));
       const isFlate = /\/(FlateDecode|Fl)\b/.test(dict);
       // Skip streams that clearly aren't page content we can read.
-      const isImageish = /\/Subtype\s*\/Image|\/DCTDecode|\/JPXDecode|\/CCITTFaxDecode/.test(dict);
+      const isImageish =
+        /\/Subtype\s*\/Image|\/DCTDecode|\/JPXDecode|\/CCITTFaxDecode/.test(
+          dict,
+        );
 
       searchFrom = eIdx + KW_ENDSTREAM.length;
       if (isImageish) continue;
@@ -250,7 +320,9 @@ export async function extractPdfText(bytes: Uint8Array): Promise<PdfTextResult> 
       let contentBytes: Uint8Array | null = null;
       if (isFlate) {
         contentBytes = await inflate(rawSlice, "deflate");
-        if (!contentBytes) contentBytes = await inflate(rawSlice, "deflate-raw");
+        if (!contentBytes) {
+          contentBytes = await inflate(rawSlice, "deflate-raw");
+        }
         if (!contentBytes) continue; // couldn't inflate — skip, stay safe
       } else if (!/\/Filter\b/.test(dict)) {
         // No filter → the stream is stored as-is; usable directly.
@@ -272,7 +344,13 @@ export async function extractPdfText(bytes: Uint8Array): Promise<PdfTextResult> 
 
     const text = parts.join("\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!looksLikeText(text)) {
-      return { text: "", charCount: text.length, mode: "none", streamsDecoded, note: text.length ? "low_quality_text" : "no_text_layer" };
+      return {
+        text: "",
+        charCount: text.length,
+        mode: "none",
+        streamsDecoded,
+        note: text.length ? "low_quality_text" : "no_text_layer",
+      };
     }
     return { text, charCount: text.length, mode: "text", streamsDecoded };
   } catch (e) {
