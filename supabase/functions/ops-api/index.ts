@@ -4005,7 +4005,7 @@ if (import.meta.main) serve(async (req: Request) => {
         // their own assignments (showAll stays false). Resolved server-side via the
         // pure _resolveManagerVisibility helper. makesafe_manager is legacy input
         // only (backfilled into managed_verticals); the runtime reads the list.
-        const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals } = _resolveManagerVisibility({
+        const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals, managedVerticals } = _resolveManagerVisibility({
           role: userRec?.role,
           managedVerticals: userRec?.managed_verticals,
         })
@@ -4013,7 +4013,13 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'my_jobs': {
             const mode = url.searchParams.get('mode') // 'all' for dispatcher view, 'mine' for personal
             const showAll = isDispatcher && mode !== 'mine'
-            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager, poolVerticals))
+            // U2b: a vertical manager (non-dispatcher with managed_verticals)
+            // viewing the board (mode:'all') sees their WHOLE vertical — every
+            // crew's in-vertical assignment, not just their own. Empty for
+            // dispatchers (global showAll) and for the personal Jobs view
+            // (mode:'mine' / no mode) so those paths are unchanged.
+            const managerBoardVerticals = _managerBoardVerticals({ isDispatcher, mode, managedVerticals })
+            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager, poolVerticals, managerBoardVerticals))
           }
           case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
@@ -18044,6 +18050,20 @@ export function _resolveManagerVisibility(
   return { isAdmin, isDispatcher, managedVerticals, poolVerticals, isMakesafeManager, canSeeMakesafePool }
 }
 
+// U2b (manager's Board accuracy): the verticals whose WHOLE board a vertical
+// manager may see via my_jobs(mode:'all'). A dispatcher already gets global
+// showAll, so this is empty for them; a non-dispatcher with managed_verticals
+// viewing the board (mode:'all') gets exactly their managed verticals — the
+// SAME set allocate_job authorises (no new global exposure). Any other mode
+// (personal 'mine' / default) returns [] so the personal Jobs view is untouched.
+export function _managerBoardVerticals(
+  input: { isDispatcher: boolean; mode?: string | null; managedVerticals?: unknown },
+): string[] {
+  if (input.isDispatcher) return []
+  if (String(input.mode || '') !== 'all') return []
+  return _normalizeManagedVerticals(input.managedVerticals)
+}
+
 // The vertical a job belongs to, for allocation-authz + pool purposes. Make-safe
 // wins on either jobs.type='makesafe' OR an SWMS- job_number (mirrors
 // isMakesafeAccessJob); otherwise the plain jobs.type (lower-cased).
@@ -18080,7 +18100,12 @@ export function _resolveAllocationAuthz(input: {
   return { allowed: false, reason: 'not_authorized' }
 }
 
-async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false, poolVerticals: string[] = []) {
+export async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false, poolVerticals: string[] = [], managerScopeVerticals: string[] = []) {
+  // U2b: manager's-Board widening. When set (non-dispatcher manager on
+  // mode:'all'), the assignment query returns ALL in-vertical assignments across
+  // every crew, not just this user's — scoped strictly to these verticals. Never
+  // set for a dispatcher (they use showAll) or the personal view.
+  const managerScope = !showAll ? _normalizeManagedVerticals(managerScopeVerticals) : []
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -18108,6 +18133,11 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
           site_address, site_suburb, notes, job_number
         )
       `
+  // Same columns as the admin select but with an INNER join on jobs so a
+  // referenced-table filter on jobs.type actually CONSTRAINS the parent rows
+  // (PostgREST semantics — see the make-safe backstop note below). Used only by
+  // the U2b manager's-Board query.
+  const ASSIGNMENT_SELECT_ADMIN_INNER = ASSIGNMENT_SELECT_ADMIN.replace('jobs:job_id (', 'jobs:job_id!inner (')
 
   let assignments: any[]
   let error: any
@@ -18119,6 +18149,30 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
       .select(ASSIGNMENT_SELECT_ADMIN)
       .neq('status', 'cancelled')
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .order('scheduled_date', { ascending: true })
+    assignments = res.data
+    error = res.error
+  } else if (managerScope.length > 0) {
+    // ── Manager's Board (U2b): all in-vertical assignments across every crew ──
+    // A vertical manager (non-dispatcher) on mode:'all' sees the WHOLE vertical,
+    // so widen past this user's own rows to every assignment whose job's vertical
+    // is one they manage — regardless of user_id — using the admin select (which
+    // carries the crew user, needed for the board's lanes). Scope is strictly
+    // managerScope (their managed_verticals), matching allocate_job authz: a
+    // fencing manager gets fencing only, etc. Make-safe is matched by type OR an
+    // SWMS- job_number, mirroring _jobVertical + the open-pool query. The 30-day
+    // window matches the dispatcher board. Because the open pools below de-dupe
+    // against this same (now vertical-wide) `assignments` set, jobs already
+    // assigned to OTHER crew can no longer show as false "available" cards.
+    const jobVerticalFilter = managerScope.flatMap((v) =>
+      v === 'makesafe' ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%'] : [`type.eq.${v}`]
+    ).join(',')
+    const res = await client
+      .from('job_assignments')
+      .select(ASSIGNMENT_SELECT_ADMIN_INNER)
+      .neq('status', 'cancelled')
+      .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .or(jobVerticalFilter, { referencedTable: 'jobs' })
       .order('scheduled_date', { ascending: true })
     assignments = res.data
     error = res.error
@@ -18156,7 +18210,10 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
           site_address, site_suburb, notes, job_number
         )
       `
-  if (!showAll) {
+  // U2b: skip in the manager's-Board path (managerScope non-empty) — that path is
+  // the vertical-wide 30-day set (matching the dispatcher board, which also runs
+  // no per-user backstop). For the personal view + installers this is unchanged.
+  if (!showAll && managerScope.length === 0) {
     try {
       const existing30DayIds = new Set((assignments || []).map((a: any) => a.id))
       const resMakesafe = await client
