@@ -24,6 +24,7 @@ import {
   refCompanyKey,
   registerIntakeDraft,
   SUPPRESSED_DRAFT_STATES,
+  workOrderCompanyKey,
 } from "./makesafe_intake_dedup.ts";
 
 // ── Real-shaped rows from the live BICTON 67998 duplicate (2026-06-16) ────────────
@@ -180,6 +181,140 @@ Deno.test("JOB-FAMILY: same MLB ref/company and same family is still a duplicate
     reason,
     "external_ref+company",
     "same-family resend must remain deduped",
+  );
+});
+
+Deno.test("WORK-ORDER IDENTITY: same MLB claim/family but different PO is NOT a duplicate", () => {
+  const index = buildIntakeDedupIndex([{
+    ...BICTON_OLD,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-25096PO-53582",
+    builder_po_number: "PO-53582",
+  }]);
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "morley-new-wo",
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-25096PO-53583",
+    builder_po_number: "PO-53583",
+  }, index);
+
+  assertEquals(
+    reason,
+    null,
+    "a new MLB PO/work-order under the same claim must surface as a new intake",
+  );
+});
+
+Deno.test("WORK-ORDER IDENTITY: same MLB claim/family and same PO is a duplicate", () => {
+  const index = buildIntakeDedupIndex([{
+    ...BICTON_OLD,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-25096PO-53582",
+    builder_po_number: "PO-53582",
+  }]);
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "morley-same-wo-rescan",
+    external_ref: "MLB 25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB 25096 PO 53582",
+    builder_po_number: "53582",
+  }, index);
+
+  assertEquals(reason, "builder_work_order_identity");
+});
+
+Deno.test("WORK-ORDER IDENTITY: same claim/family against legacy no-identity row routes to review", () => {
+  const index = buildIntakeDedupIndex([{
+    ...BICTON_OLD,
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+  }]);
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "morley-legacy-comparison",
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-25096PO-53582",
+    builder_po_number: "PO-53582",
+  }, index);
+
+  assertEquals(reason, "work_order_identity_needs_review");
+});
+
+Deno.test("WORK-ORDER IDENTITY: different draft PO still allows same live-job PO to block", () => {
+  const index = buildIntakeDedupIndex(
+    [{
+      ...BICTON_OLD,
+      external_ref: "MLB-25096",
+      requesting_company_slug: "mlb",
+      requesting_company_name: "ML Builders",
+      makesafe_job_family: "general_makesafe",
+      builder_work_order_number: "MLB-25096PO-53582",
+      builder_po_number: "PO-53582",
+    }],
+    [{
+      external_ref: "MLB-25096",
+      requesting_company_slug: "mlb",
+      makesafe_job_family: "general_makesafe",
+      builder_work_order_number: "MLB-25096PO-53583",
+      builder_po_number: "PO-53583",
+    }],
+  );
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "morley-same-as-live-job",
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-25096PO-53583",
+    builder_po_number: "PO-53583",
+  }, index);
+
+  assertEquals(reason, "job_external_ref");
+});
+
+Deno.test("WORK-ORDER IDENTITY: job-only full WO ref without metadata still blocks same PO", () => {
+  const index = buildIntakeDedupIndex([], [{
+    external_ref: "MLB-25096PO-53582",
+    requesting_company_slug: "mlb",
+    makesafe_job_family: "general_makesafe",
+  }]);
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "morley-same-as-full-ref-job",
+    external_ref: "MLB-25096",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-25096PO-53582",
+    builder_po_number: "PO-53582",
+  }, index);
+
+  assertEquals(reason, "job_external_ref");
+});
+
+Deno.test("WORK-ORDER IDENTITY: normalises work-order and PO with company", () => {
+  assertEquals(
+    workOrderCompanyKey("MLB 25096 PO 53582", "53582", "mlb", "ML Builders"),
+    "MLB25096PO53582|53582|mlb",
   );
 });
 

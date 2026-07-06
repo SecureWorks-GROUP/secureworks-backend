@@ -235,6 +235,10 @@ import {
   selectWorkOrderPdf as _selectWorkOrderPdf,
   attachmentKeyComponent as _attachmentKeyComponent,
 } from './makesafe_wo_selection.ts'
+import {
+  extractBuilderWorkOrderIdentity as _extractBuilderWorkOrderIdentity,
+  mergeBuilderWorkOrderIdentity as _mergeBuilderWorkOrderIdentity,
+} from './makesafe_builder_work_order_identity.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
 import {
@@ -8195,6 +8199,7 @@ async function createMakesafeJob(client: any, body: any) {
     pdf_base64, external_links,
     builder_email_text_for_trade, builder_email_subject, builder_email_received_at,
     makesafe_job_family, makesafe_job_family_label,
+    builder_claim_ref, builder_work_order_number, builder_po_number,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -8248,6 +8253,9 @@ async function createMakesafeJob(client: any, body: any) {
   const metadata: any = {
     requesting_company: companyData ? { slug: companyData.slug, name: companyData.name } : reviewedCompanyName ? { slug: requesting_company_slug || null, name: reviewedCompanyName } : null,
     external_ref: external_ref || null,
+    builder_claim_ref: builder_claim_ref || null,
+    builder_work_order_number: builder_work_order_number || null,
+    builder_po_number: builder_po_number || null,
     makesafe_type: reviewedMakeSafeType,
     job_type_detail: reviewedMakeSafeType,
     invoice_email: companyData?.invoice_email || null,
@@ -10395,6 +10403,9 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
       builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
       builder_email_received_at: extraction?.builder_email_received_at || draft?.received_at || null,
+      builder_claim_ref: extraction?.builder_claim_ref || null,
+      builder_work_order_number: extraction?.builder_work_order_number || null,
+      builder_po_number: extraction?.builder_po_number || null,
     })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
@@ -11035,7 +11046,7 @@ async function scanSesMakesafes(client: any) {
   // recapture (force_recapture=true) can bypass this guard.
   const rejectedDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
-      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, received_at')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, received_at, extraction_json')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _SUPPRESSED_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (rejected dedup index) read',
@@ -11051,7 +11062,7 @@ async function scanSesMakesafes(client: any) {
     .not('external_ref', 'is', null)
   // Build a (normalised-ref|company-slug|job-family) -> { jobId, status } lookup.
   const refToJobId = new Map<string, { jobId: string; status: string | null }>()
-  const existingJobDedupRows: Array<{ external_ref: string | null; requesting_company_slug?: string | null; makesafe_job_family: string | null }> = []
+  const existingJobDedupRows: Array<{ external_ref: string | null; requesting_company_slug?: string | null; makesafe_job_family: string | null; builder_work_order_number?: string | null; builder_po_number?: string | null }> = []
   for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; requesting_company_slug: string | null; report_type?: string | null; jobs: { status: string; metadata?: any; notes?: string | null } | { status: string; metadata?: any; notes?: string | null }[] | null }>) {
     const nr = _normaliseDedupRef(j.external_ref)
     if (nr && j.job_id) {
@@ -11064,10 +11075,13 @@ async function scanSesMakesafes(client: any) {
         j.report_type || null,
       )
       const familyKey = _normaliseDedupJobFamily(jobFamily)
+      const jobDedupRef = cleanReviewedString(jobMetadata.builder_claim_ref) || j.external_ref
       existingJobDedupRows.push({
-        external_ref: j.external_ref,
+        external_ref: jobDedupRef,
         requesting_company_slug: companyKey || null,
         makesafe_job_family: familyKey || null,
+        builder_work_order_number: cleanReviewedString(jobMetadata.builder_work_order_number) || null,
+        builder_po_number: cleanReviewedString(jobMetadata.builder_po_number) || null,
       })
       // Primary key: ref|company|family so one builder ref can have separate report/temp/general jobs.
       refToJobId.set(`${nr}|${companyKey}|${familyKey}`, { jobId: j.job_id, status: jobsData?.status ?? null })
@@ -11083,12 +11097,27 @@ async function scanSesMakesafes(client: any) {
       [d.report_type, d.body_preview, d.description].filter(Boolean).join('\n'),
       d.report_type || null,
     )
-    return { ...d, makesafe_job_family: draftFamily || null }
+    return {
+      ...d,
+      external_ref: cleanReviewedString(extractionJson.builder_claim_ref) || d.external_ref,
+      makesafe_job_family: draftFamily || null,
+      builder_work_order_number: cleanReviewedString(extractionJson.builder_work_order_number) || null,
+      builder_po_number: cleanReviewedString(extractionJson.builder_po_number) || null,
+    }
+  })
+  const rejectedDraftDedupRows = (rejectedDrafts || []).map((d: any) => {
+    const extractionJson = parseJsonObject(d.extraction_json)
+    return {
+      ...d,
+      external_ref: cleanReviewedString(extractionJson.builder_claim_ref) || d.external_ref,
+      builder_work_order_number: cleanReviewedString(extractionJson.builder_work_order_number) || null,
+      builder_po_number: cleanReviewedString(extractionJson.builder_po_number) || null,
+    }
   })
   const dedupIndex = _buildIntakeDedupIndex(
     existingDraftDedupRows,
     existingJobDedupRows,
-    rejectedDrafts || [],
+    rejectedDraftDedupRows,
   )
 
   const newDrafts: any[] = []
@@ -11317,6 +11346,19 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       extraction.builder_email_subject = subject || null
       extraction.builder_email_received_at = msg.receivedDateTime || null
     }
+    const builderIdentity = _extractBuilderWorkOrderIdentity({
+      externalRef: extraction.external_ref || null,
+      subject,
+      bodyText: builderEmailTextForTrade || bodyPreview,
+      attachmentNames: attachments.map((a: any) => a?.file_name || a?.name || null),
+    })
+    extraction = _mergeBuilderWorkOrderIdentity(extraction, builderIdentity)
+    if (extraction.external_ref) {
+      missingFields = missingFields.filter((f: string) => {
+        const clean = String(f || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+        return clean !== 'external_ref' && clean !== 'reference' && clean !== 'builder_ref'
+      })
+    }
 
     // BUG 2 (CAPTURE): `attachments` may now include an entry whose re-upload FAILED
     // (pdf_unavailable=true, null URLs). Such an entry is NOT a servable work-order
@@ -11341,6 +11383,8 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       _subjectLooksLikeNewWorkOrder(subject) ||
       mergedPortalLinks.length > 0 ||
       deterministicRefEvidence ||
+      !!builderIdentity.builder_claim_ref ||
+      !!builderIdentity.builder_work_order_number ||
       !!matchedCompany
     if (aiNotWorkOrder && !deterministicWorkOrderEvidence) {
       skippedAiOnly++
@@ -11466,11 +11510,14 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // whose graph_message_id differs from this group-sync candidate (the BICTON
     // 67998 case): same (normalised ref + company), or a live job already on the ref.
     const extractedRef = extraction.external_ref || null
+    const dedupExternalRef = extraction.builder_claim_ref || extractedRef
     const refDup = _isDuplicateIntake(
       {
         graph_message_id: msg.id,
         internet_message_id: msg.internetMessageId || null,
-        external_ref: extractedRef,
+        external_ref: dedupExternalRef,
+        builder_work_order_number: extraction.builder_work_order_number || null,
+        builder_po_number: extraction.builder_po_number || null,
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
         makesafe_job_family: draftJobFamily,
@@ -11484,13 +11531,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       // sees "this matches job X — reopen it?". Other dup reasons (same draft already
       // exists, same message id) remain silent drops (the human already has the draft
       // or the email is a re-scan of the same post).
-      if (refDup === 'unknown_family_needs_review' || refDup === 'job_unknown_family_needs_review') {
+      if (
+        refDup === 'unknown_family_needs_review' ||
+        refDup === 'job_unknown_family_needs_review' ||
+        refDup === 'work_order_identity_needs_review' ||
+        refDup === 'job_work_order_identity_needs_review'
+      ) {
         // G023: a legacy unknown-family row must not permanently suppress a
         // known-family same-ref variant. Keep this candidate visible as a manual
         // review draft and block auto-approval via missing_fields.
         if (!missingFields.includes(refDup)) missingFields.push(refDup)
         extraction.classification_reason = extraction.classification_reason ||
-          'Existing same-ref row has no make-safe job family; kept for human review instead of silently suppressing a possible separate job-family variant.'
+          'Existing same-ref row lacks the family or builder work-order identity needed to prove this is a duplicate; kept for human review.'
         extraction.dedup_review_reason = refDup
       } else if (refDup === 'job_external_ref' && extractedRef) {
         const normRef = _normaliseDedupRef(extractedRef)
@@ -11565,7 +11617,9 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
             {
               graph_message_id: msg.id,
               internet_message_id: msg.internetMessageId || null,
-              external_ref: extractedRef,
+              external_ref: dedupExternalRef,
+              builder_work_order_number: extraction.builder_work_order_number || null,
+              builder_po_number: extraction.builder_po_number || null,
               requesting_company_slug: matchedCompany?.slug || null,
               requesting_company_name: matchedCompany?.name || null,
               makesafe_job_family: draftJobFamily,
@@ -11652,7 +11706,9 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       {
         graph_message_id: msg.id,
         internet_message_id: msg.internetMessageId || null,
-        external_ref: extractedRef,
+        external_ref: dedupExternalRef,
+        builder_work_order_number: extraction.builder_work_order_number || null,
+        builder_po_number: extraction.builder_po_number || null,
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
         makesafe_job_family: draftJobFamily,

@@ -58,6 +58,8 @@ export interface IntakeDedupRow {
   graph_message_id?: string | null;
   internet_message_id?: string | null;
   external_ref?: string | null;
+  builder_work_order_number?: string | null;
+  builder_po_number?: string | null;
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
   /**
@@ -77,6 +79,8 @@ export interface IntakeDedupCandidate {
   graph_message_id?: string | null;
   internet_message_id?: string | null;
   external_ref?: string | null;
+  builder_work_order_number?: string | null;
+  builder_po_number?: string | null;
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
   makesafe_job_family?: string | null;
@@ -103,6 +107,16 @@ export interface DedupIndex {
   refCompany: Set<string>;
   /** normalised `${ref}|${company}|${family}` for existing drafts with a known family */
   refCompanyFamily: Set<string>;
+  /** existing draft ref/company/family rows that carry explicit builder WO/PO identity */
+  refCompanyFamilyWithWorkOrderIdentity: Set<string>;
+  /** existing draft ref/company/family rows that do not carry explicit builder WO/PO identity */
+  refCompanyFamilyWithoutWorkOrderIdentity: Set<string>;
+  /** existing draft ref/company rows that carry explicit builder WO/PO identity */
+  refCompanyWithWorkOrderIdentity: Set<string>;
+  /** existing draft ref/company rows that do not carry explicit builder WO/PO identity */
+  refCompanyWithoutWorkOrderIdentity: Set<string>;
+  /** normalised `${workOrderIdentity}|${company}` for existing drafts */
+  workOrderCompany: Set<string>;
   /** normalised `${ref}|${company}` for existing drafts where the family is unknown */
   refCompanyUnknownFamily: Set<string>;
   /** normalised ref for existing JOBS (a live job already covers this ref) */
@@ -115,6 +129,16 @@ export interface DedupIndex {
   jobRefCompany: Set<string>;
   /** normalised `${ref}|${company}|${family}` for existing jobs with known company+family */
   jobRefCompanyFamily: Set<string>;
+  /** existing job ref/company/family rows that carry explicit builder WO/PO identity */
+  jobRefCompanyFamilyWithWorkOrderIdentity: Set<string>;
+  /** existing job ref/company/family rows that do not carry explicit builder WO/PO identity */
+  jobRefCompanyFamilyWithoutWorkOrderIdentity: Set<string>;
+  /** existing job ref/company rows that carry explicit builder WO/PO identity */
+  jobRefCompanyWithWorkOrderIdentity: Set<string>;
+  /** existing job ref/company rows that do not carry explicit builder WO/PO identity */
+  jobRefCompanyWithoutWorkOrderIdentity: Set<string>;
+  /** normalised `${workOrderIdentity}|${company}` for existing jobs */
+  jobWorkOrderCompany: Set<string>;
   /** normalised `${ref}|${company}` for existing jobs with known company but unknown family */
   jobRefCompanyUnknownFamily: Set<string>;
   /**
@@ -127,6 +151,8 @@ export interface DedupIndex {
    * (fail-open) is NOT suppressed.
    */
   rejectedRefCompany: Map<string, string>;
+  /** normalised `${workOrderIdentity}|${company}` -> latest rejected received_at */
+  rejectedWorkOrderCompany: Map<string, string>;
 }
 
 // Draft states that mean "a draft already exists, do not make another". rejected /
@@ -226,6 +252,80 @@ export function refFamilyKey(
 }
 
 /**
+ * Normalise builder work-order / PO identity separately from the claim reference.
+ * MLB can send multiple work orders under one claim ref, e.g. MLB-25096 with
+ * work_order_MLB-25096PO-53582.pdf and later MLB-25096PO-53583.pdf. The claim is
+ * not enough to prove duplicate identity once a WO/PO discriminator exists.
+ */
+export function workOrderIdentityKey(
+  builderWorkOrderNumber: string | null | undefined,
+  builderPoNumber: string | null | undefined,
+): string {
+  const wo = normaliseRef(builderWorkOrderNumber);
+  const poFromWo = wo.match(/PO(\d{3,})$/)?.[1] || "";
+  const po = normaliseRef(builderPoNumber).replace(/^PO/, "") || poFromWo;
+  if (!wo || !po) return "";
+  return `${wo}|${po}`;
+}
+
+export function workOrderCompanyKey(
+  builderWorkOrderNumber: string | null | undefined,
+  builderPoNumber: string | null | undefined,
+  slug: string | null | undefined,
+  name: string | null | undefined,
+): string {
+  const identity = workOrderIdentityKey(
+    builderWorkOrderNumber,
+    builderPoNumber,
+  );
+  if (!identity) return "";
+  const c = normaliseCompany(slug, name);
+  if (!c) return "";
+  return `${identity}|${c}`;
+}
+
+function hasWorkOrderIdentity(
+  row: IntakeDedupRow | IntakeDedupCandidate,
+): boolean {
+  return !!rowWorkOrderIdentityKey(row);
+}
+
+function rowWorkOrderIdentityKey(
+  row: IntakeDedupRow | IntakeDedupCandidate,
+): string {
+  return workOrderIdentityKey(
+    row.builder_work_order_number || row.external_ref,
+    row.builder_po_number,
+  );
+}
+
+function rowWorkOrderCompanyKey(
+  row: IntakeDedupRow | IntakeDedupCandidate,
+): string {
+  const identity = rowWorkOrderIdentityKey(row);
+  if (!identity) return "";
+  const c = normaliseCompany(
+    row.requesting_company_slug,
+    row.requesting_company_name,
+  );
+  if (!c) return "";
+  return `${identity}|${c}`;
+}
+
+function setLatestReceivedAt(
+  map: Map<string, string>,
+  key: string,
+  receivedAt: string | null | undefined,
+): void {
+  if (!key) return;
+  const existing = map.get(key);
+  const ts = receivedAt || "";
+  if (!existing || ts > existing) {
+    map.set(key, ts);
+  }
+}
+
+/**
  * Reorder a newest-first intake scan window so a bounded processor samples both
  * ends of the candidate window: oldest, newest, second-oldest, second-newest...
  *
@@ -272,18 +372,31 @@ export function buildIntakeDedupIndex(
   const internetIds = new Set<string>();
   const refCompany = new Set<string>();
   const refCompanyFamily = new Set<string>();
+  const refCompanyFamilyWithWorkOrderIdentity = new Set<string>();
+  const refCompanyFamilyWithoutWorkOrderIdentity = new Set<string>();
+  const refCompanyWithWorkOrderIdentity = new Set<string>();
+  const refCompanyWithoutWorkOrderIdentity = new Set<string>();
+  const workOrderCompany = new Set<string>();
   const refCompanyUnknownFamily = new Set<string>();
   const jobRefs = new Set<string>();
   const jobRefFamily = new Set<string>();
   const jobUnknownFamilyRefs = new Set<string>();
   const jobRefCompany = new Set<string>();
   const jobRefCompanyFamily = new Set<string>();
+  const jobRefCompanyFamilyWithWorkOrderIdentity = new Set<string>();
+  const jobRefCompanyFamilyWithoutWorkOrderIdentity = new Set<string>();
+  const jobRefCompanyWithWorkOrderIdentity = new Set<string>();
+  const jobRefCompanyWithoutWorkOrderIdentity = new Set<string>();
+  const jobWorkOrderCompany = new Set<string>();
   const jobRefCompanyUnknownFamily = new Set<string>();
   const rejectedRefCompany = new Map<string, string>();
+  const rejectedWorkOrderCompany = new Map<string, string>();
 
   for (const d of existingDrafts || []) {
     if (d.graph_message_id) graphIds.add(d.graph_message_id);
     if (d.internet_message_id) internetIds.add(d.internet_message_id);
+    const woCompany = rowWorkOrderCompanyKey(d);
+    if (woCompany) workOrderCompany.add(woCompany);
     const rc = refCompanyKey(
       d.external_ref,
       d.requesting_company_slug,
@@ -291,14 +404,20 @@ export function buildIntakeDedupIndex(
     );
     if (rc) {
       refCompany.add(rc);
+      if (hasWorkOrderIdentity(d)) refCompanyWithWorkOrderIdentity.add(rc);
+      else refCompanyWithoutWorkOrderIdentity.add(rc);
       const rcf = refCompanyFamilyKey(
         d.external_ref,
         d.requesting_company_slug,
         d.requesting_company_name,
         d.makesafe_job_family,
       );
-      if (rcf) refCompanyFamily.add(rcf);
-      else refCompanyUnknownFamily.add(rc);
+      if (rcf) {
+        refCompanyFamily.add(rcf);
+        if (hasWorkOrderIdentity(d)) {
+          refCompanyFamilyWithWorkOrderIdentity.add(rcf);
+        } else refCompanyFamilyWithoutWorkOrderIdentity.add(rcf);
+      } else refCompanyUnknownFamily.add(rc);
     }
   }
   for (const row of existingJobRefs || []) {
@@ -317,16 +436,25 @@ export function buildIntakeDedupIndex(
           rowObj.requesting_company_name,
         )
         : "";
+      const woCompany = rowObj ? rowWorkOrderCompanyKey(rowObj) : "";
+      if (woCompany) jobWorkOrderCompany.add(woCompany);
       if (rc) {
         jobRefCompany.add(rc);
+        if (rowObj && hasWorkOrderIdentity(rowObj)) {
+          jobRefCompanyWithWorkOrderIdentity.add(rc);
+        } else jobRefCompanyWithoutWorkOrderIdentity.add(rc);
         const rcf = refCompanyFamilyKey(
           rowObj?.external_ref,
           rowObj?.requesting_company_slug,
           rowObj?.requesting_company_name,
           family,
         );
-        if (rcf) jobRefCompanyFamily.add(rcf);
-        else jobRefCompanyUnknownFamily.add(rc);
+        if (rcf) {
+          jobRefCompanyFamily.add(rcf);
+          if (rowObj && hasWorkOrderIdentity(rowObj)) {
+            jobRefCompanyFamilyWithWorkOrderIdentity.add(rcf);
+          } else jobRefCompanyFamilyWithoutWorkOrderIdentity.add(rcf);
+        } else jobRefCompanyUnknownFamily.add(rc);
       } else {
         // Legacy/no-company job rows are intentionally the only rows that fall
         // back to ref-only job suppression. Company-known rows must not collide
@@ -339,6 +467,10 @@ export function buildIntakeDedupIndex(
     }
   }
   for (const d of rejectedDrafts || []) {
+    const woCompany = rowWorkOrderCompanyKey(d);
+    if (woCompany) {
+      setLatestReceivedAt(rejectedWorkOrderCompany, woCompany, d.received_at);
+    }
     const rc = refCompanyKey(
       d.external_ref,
       d.requesting_company_slug,
@@ -350,11 +482,7 @@ export function buildIntakeDedupIndex(
     // Keep the LATEST received_at per key (max). This timestamp is the boundary:
     // candidates with the same or older received_at are the already-rejected email;
     // candidates with a NEWER received_at are corrected resends (must NOT suppress).
-    const existing = rejectedRefCompany.get(rc);
-    const ts = d.received_at || "";
-    if (!existing || ts > existing) {
-      rejectedRefCompany.set(rc, ts);
-    }
+    setLatestReceivedAt(rejectedRefCompany, rc, d.received_at);
   }
 
   return {
@@ -362,14 +490,25 @@ export function buildIntakeDedupIndex(
     internetIds,
     refCompany,
     refCompanyFamily,
+    refCompanyFamilyWithWorkOrderIdentity,
+    refCompanyFamilyWithoutWorkOrderIdentity,
+    refCompanyWithWorkOrderIdentity,
+    refCompanyWithoutWorkOrderIdentity,
+    workOrderCompany,
     refCompanyUnknownFamily,
     jobRefs,
     jobRefFamily,
     jobUnknownFamilyRefs,
     jobRefCompany,
     jobRefCompanyFamily,
+    jobRefCompanyFamilyWithWorkOrderIdentity,
+    jobRefCompanyFamilyWithoutWorkOrderIdentity,
+    jobRefCompanyWithWorkOrderIdentity,
+    jobRefCompanyWithoutWorkOrderIdentity,
+    jobWorkOrderCompany,
     jobRefCompanyUnknownFamily,
     rejectedRefCompany,
+    rejectedWorkOrderCompany,
   };
 }
 
@@ -407,6 +546,14 @@ export function isDuplicateIntake(
     candidate.requesting_company_name,
   );
   const family = normaliseJobFamily(candidate.makesafe_job_family);
+  const candidateHasWorkOrderIdentity = hasWorkOrderIdentity(candidate);
+  const candidateWorkOrderCompany = rowWorkOrderCompanyKey(candidate);
+  if (
+    candidateWorkOrderCompany &&
+    index.workOrderCompany.has(candidateWorkOrderCompany)
+  ) {
+    return "builder_work_order_identity";
+  }
   if (rc) {
     if (family) {
       const rcf = refCompanyFamilyKey(
@@ -415,22 +562,53 @@ export function isDuplicateIntake(
         candidate.requesting_company_name,
         family,
       );
+      let skipDraftRefFamilyDuplicate = false;
+      if (candidateHasWorkOrderIdentity && rcf) {
+        if (index.refCompanyFamilyWithoutWorkOrderIdentity.has(rcf)) {
+          return "work_order_identity_needs_review";
+        }
+        if (index.refCompanyFamilyWithWorkOrderIdentity.has(rcf)) {
+          skipDraftRefFamilyDuplicate = true;
+        }
+      }
       // Same ref/company/family is a duplicate. A legacy unknown-family draft on
       // the same ref/company is NOT allowed to permanently suppress a new
       // known-family candidate; surface it to review so ops can backfill or split
       // the family explicitly.
-      if (rcf && index.refCompanyFamily.has(rcf)) {
+      if (
+        !skipDraftRefFamilyDuplicate && rcf && index.refCompanyFamily.has(rcf)
+      ) {
         return "external_ref+company";
       }
       if (index.refCompanyUnknownFamily.has(rc)) {
         return "unknown_family_needs_review";
       }
     } else if (index.refCompany.has(rc)) {
-      return "external_ref+company";
+      let skipDraftRefDuplicate = false;
+      if (candidateHasWorkOrderIdentity) {
+        if (index.refCompanyWithoutWorkOrderIdentity.has(rc)) {
+          return "work_order_identity_needs_review";
+        }
+        if (index.refCompanyWithWorkOrderIdentity.has(rc)) {
+          skipDraftRefDuplicate = true;
+        }
+      }
+      if (skipDraftRefDuplicate) {
+        // A known, different WO/PO identity under this claim is not a draft
+        // duplicate, but later job/suppressed checks still need a chance to run.
+      } else {
+        return "external_ref+company";
+      }
     }
   }
   const nr = normaliseRef(candidate.external_ref);
   if (nr) {
+    if (
+      candidateWorkOrderCompany &&
+      index.jobWorkOrderCompany.has(candidateWorkOrderCompany)
+    ) {
+      return "job_external_ref";
+    }
     if (rc) {
       if (family) {
         const rcf = refCompanyFamilyKey(
@@ -439,8 +617,18 @@ export function isDuplicateIntake(
           candidate.requesting_company_name,
           family,
         );
+        let skipJobRefFamilyDuplicate = false;
+        if (candidateHasWorkOrderIdentity && rcf) {
+          if (index.jobRefCompanyFamilyWithoutWorkOrderIdentity.has(rcf)) {
+            return "job_work_order_identity_needs_review";
+          }
+          if (index.jobRefCompanyFamilyWithWorkOrderIdentity.has(rcf)) {
+            skipJobRefFamilyDuplicate = true;
+          }
+        }
         if (
-          rcf && index.jobRefCompanyFamily.has(rcf)
+          !skipJobRefFamilyDuplicate && rcf &&
+          index.jobRefCompanyFamily.has(rcf)
         ) {
           return "job_external_ref";
         }
@@ -448,7 +636,20 @@ export function isDuplicateIntake(
           return "job_unknown_family_needs_review";
         }
       } else if (index.jobRefCompany.has(rc)) {
-        return "job_external_ref";
+        let skipJobRefDuplicate = false;
+        if (candidateHasWorkOrderIdentity) {
+          if (index.jobRefCompanyWithoutWorkOrderIdentity.has(rc)) {
+            return "job_work_order_identity_needs_review";
+          }
+          if (index.jobRefCompanyWithWorkOrderIdentity.has(rc)) {
+            skipJobRefDuplicate = true;
+          }
+        }
+        if (skipJobRefDuplicate) {
+          // Known different WO/PO identity under this claim is not a job duplicate.
+        } else {
+          return "job_external_ref";
+        }
       }
     } else if (family) {
       const rf = refFamilyKey(candidate.external_ref, family);
@@ -473,6 +674,19 @@ export function isDuplicateIntake(
   // received_at is fail-open (let it through — prefer a possible duplicate review draft
   // over silently missing a real corrected work order).
   if (!candidate.force_recapture && rc) {
+    if (candidateWorkOrderCompany) {
+      const rejectedLatestTs = index.rejectedWorkOrderCompany.get(
+        candidateWorkOrderCompany,
+      );
+      if (rejectedLatestTs !== undefined) {
+        if (
+          candidate.received_at && candidate.received_at <= rejectedLatestTs
+        ) {
+          return "suppressed_rejected";
+        }
+      }
+      return null;
+    }
     const rejectedLatestTs = index.rejectedRefCompany.get(rc);
     if (rejectedLatestTs !== undefined) {
       // Only suppress when:
@@ -510,13 +724,25 @@ export function registerIntakeDraft(
     candidate.requesting_company_slug,
     candidate.requesting_company_name,
   );
-  if (rc) index.refCompany.add(rc);
+  const woCompany = rowWorkOrderCompanyKey(candidate);
+  const candidateHasWorkOrderIdentity = hasWorkOrderIdentity(candidate);
+  if (woCompany) index.workOrderCompany.add(woCompany);
+  if (rc) {
+    index.refCompany.add(rc);
+    if (candidateHasWorkOrderIdentity) {
+      index.refCompanyWithWorkOrderIdentity.add(rc);
+    } else index.refCompanyWithoutWorkOrderIdentity.add(rc);
+  }
   const rcf = refCompanyFamilyKey(
     candidate.external_ref,
     candidate.requesting_company_slug,
     candidate.requesting_company_name,
     candidate.makesafe_job_family,
   );
-  if (rcf) index.refCompanyFamily.add(rcf);
-  else if (rc) index.refCompanyUnknownFamily.add(rc);
+  if (rcf) {
+    index.refCompanyFamily.add(rcf);
+    if (candidateHasWorkOrderIdentity) {
+      index.refCompanyFamilyWithWorkOrderIdentity.add(rcf);
+    } else index.refCompanyFamilyWithoutWorkOrderIdentity.add(rcf);
+  } else if (rc) index.refCompanyUnknownFamily.add(rc);
 }
