@@ -100,12 +100,18 @@ export interface ReconAlert {
   //   missing_post  — (D2) a group post id absent from the emails table
   //   ambiguous     — a normalised candidate match with no corroboration (needs_review)
   //   canary_missing — (D4) expected canary marker not in store within SLA
+  //   extraction_degraded — (B1) intake classifier degraded OR scan stalled OR a WO was
+  //                          dropped after a valid extraction (A3 breadcrumb)
+  //   empty_feed          — (empty-feed anomaly) no inbound builder email for > threshold
+  //                          Perth business hours (Graph mirror returning nothing)
   direction:
     | "email_no_job"
     | "job_no_email"
     | "missing_post"
     | "ambiguous"
-    | "canary_missing";
+    | "canary_missing"
+    | "extraction_degraded"
+    | "empty_feed";
   severity: Severity;
   ref: string | null;
   detail: string;
@@ -841,11 +847,12 @@ async function reconFetchAllRowsInChunks<T = any>(
 }
 
 export interface AlertSink {
-  // Reuse ops-api logBusinessEvent (business_events) + Telegram path. Injected so
-  // tests can capture without writing.
+  // Reuse ops-api logBusinessEvent (business_events) + SMS path. Injected so tests can
+  // capture without writing.
   logBusinessEvent: (client: SB, event: any) => Promise<void>;
-  // Optional Telegram fan-out for ERROR/WARN. No-op if not supplied.
-  notifyTelegram?: (text: string) => Promise<void>;
+  // Optional SMS fan-out for ERROR/WARN (Telegram retired business-wide). No-op if not
+  // supplied. Recipient is resolved by the injected sender from config, never here.
+  notifySms?: (text: string) => Promise<void>;
 }
 
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -877,8 +884,8 @@ async function emitAlerts(
       metadata: { mission: "makesafe-live-truth-2026-06-14", reconciliation: source },
     });
   }
-  // One Telegram digest (avoid per-alert spam). ERROR > WARN > nothing for INFO.
-  if (sink.notifyTelegram) {
+  // One SMS digest (avoid per-alert spam). ERROR > WARN > nothing for INFO.
+  if (sink.notifySms) {
     const errors = alerts.filter((a) => a.severity === "ERROR");
     const warns = alerts.filter((a) => a.severity === "WARN");
     if (errors.length || warns.length) {
@@ -887,7 +894,7 @@ async function emitAlerts(
         ...errors.slice(0, 10).map((a) => `ERROR ${a.direction} ${a.ref ?? a.post_id ?? ""}`),
         ...warns.slice(0, 5).map((a) => `WARN ${a.direction} ${a.ref ?? ""}`),
       ];
-      await sink.notifyTelegram(lines.join("\n"));
+      await sink.notifySms(lines.join("\n"));
     }
   }
 }
@@ -1710,4 +1717,308 @@ export async function makesafeDraftHeartbeat(
   }
 
   return { stalled, shouldAlert, alerted: shouldAlert, detail };
+}
+
+// ── B1 — EXTRACTION-HEALTH ALARM (dead key / scan stall) ────────────────────────
+// The v1 sin: the intake classifier key died and the board silently filled with
+// empty/degraded cards for weeks. Post-fix, scanSesMakesafes writes a fail-loud
+// makesafe_intake_health row (extraction_status=degraded on a dead key), but NOTHING
+// watches it — the D5 draft heartbeat stays quiet because degraded runs still create
+// (needs_review) drafts (recentDraftCount>0). This alarm is the missing watcher: it
+// reads that health row on the SAME 15-min canary cron and fires the SAME Telegram +
+// business_events ERROR path when the classifier is degraded OR the scan has stalled
+// (last_scan_at older than the freshness budget — e.g. the tail-call is 500ing so
+// writeIntakeHealth never runs). No new cron, table, or channel — one coherent seam.
+
+// Freshness budget: the ses poll runs every 2 min and writes last_scan_at on every
+// completed scan, so a last_scan_at older than this means the scan is not completing.
+export const EXTRACTION_STALE_MINUTES = 10;
+
+// ── Empty-feed anomaly (coordinator red-team #1) ────────────────────────────────
+// A degraded Graph mirror / subscription / permission can return 200-with-NOTHING: the
+// scan completes on time (last_scan_at fresh, not degraded), the D5 heartbeat sees
+// recentEmailCount===0 and calls it "quiet", so no watcher trips. We detect it by
+// tracking the freshest INBOUND email the scan saw (makesafe_intake_health.last_inbound_
+// email_at) and alarming when NO inbound mail has arrived for longer than the threshold
+// measured in PERTH BUSINESS HOURS (so weekend/overnight quiet never false-positives).
+// Fail toward NOT alarming: only fires while it is CURRENTLY Perth business hours.
+export const EMPTY_FEED_STALE_BUSINESS_HOURS = 6;
+export const EMPTY_FEED_STATE_KEY = "empty_feed";
+
+const PERTH_OFFSET_MS = 8 * 3_600_000; // AWST is UTC+8, no DST.
+const BIZ_START_HOUR = 7; // 07:00 AWST
+const BIZ_END_HOUR = 18; // 18:00 AWST
+
+// True when the given instant is within Perth Mon-Fri business hours.
+export function isPerthBusinessHour(utcMs: number): boolean {
+  const p = new Date(utcMs + PERTH_OFFSET_MS);
+  const day = p.getUTCDay(); // 0 Sun .. 6 Sat (of the Perth-shifted clock)
+  const hour = p.getUTCHours();
+  return day >= 1 && day <= 5 && hour >= BIZ_START_HOUR && hour < BIZ_END_HOUR;
+}
+
+// Count Perth business hours between two instants (Mon-Fri 07:00-18:00 AWST), stepping
+// one hour at a time. Capped at a 14-day lookback so the loop is always bounded.
+export function perthBusinessHoursBetween(startMs: number, endMs: number): number {
+  if (!(endMs > startMs)) return 0;
+  const MAX_MS = 14 * 24 * 3_600_000;
+  const from = Math.max(startMs, endMs - MAX_MS);
+  let count = 0;
+  for (let t = from; t < endMs; t += 3_600_000) {
+    if (isPerthBusinessHour(t)) count += 1;
+  }
+  return count;
+}
+
+export interface ExtractionHealthInput {
+  // makesafe_intake_health.extraction_status: 'ok' | 'degraded' | 'unknown'.
+  extractionStatus: string | null | undefined;
+  extractionDegradedReason: string | null | undefined;
+  // ISO timestamp the row went degraded (answers "how long has the key been dead").
+  degradedSince: string | null | undefined;
+  // ISO timestamp of the last completed scan (freshness signal).
+  lastScanAt: string | null | undefined;
+  // A3: work orders DROPPED in the last scan (insert failed after a valid extraction).
+  lastScanDroppedWo?: number | null;
+  // A3: LIVE (org_id, graph_message_id) collisions in the last scan (dedup miss).
+  lastScanInsertConflictsLive?: number | null;
+  // Empty-feed anomaly: freshest inbound (non-own-domain) email the scan saw.
+  lastInboundEmailAt?: string | null;
+  // Threshold in Perth business hours before an empty feed alarms (default 6).
+  emptyFeedStaleHours?: number | null;
+  // ISO timestamp of the last extraction-degraded/dropped/stale alert (null = never).
+  lastAlertAt: string | null;
+  // ISO timestamp of the last EMPTY-FEED alert (its own rate-limit key).
+  lastEmptyFeedAlertAt?: string | null;
+  nowIso?: string;
+}
+
+export interface ExtractionHealthResult {
+  // True when the classifier is degraded OR the scan has stalled.
+  alarm: boolean;
+  // 'degraded' | 'stale_scan' | 'unknown_never_scanned' | null.
+  reason: string | null;
+  // Whether to emit this run (alarm AND not rate-limited).
+  shouldAlert: boolean;
+  detail: string;
+}
+
+// Pure logic — no DB, injectable for unit tests.
+export function checkExtractionHealth(input: ExtractionHealthInput): ExtractionHealthResult {
+  const {
+    extractionStatus,
+    extractionDegradedReason,
+    degradedSince,
+    lastScanAt,
+    lastScanDroppedWo,
+    lastScanInsertConflictsLive,
+    lastInboundEmailAt,
+    emptyFeedStaleHours,
+    lastAlertAt,
+    lastEmptyFeedAlertAt,
+    nowIso,
+  } = input;
+  const now = nowIso ? Date.parse(nowIso) : Date.now();
+  const status = String(extractionStatus || "").toLowerCase();
+
+  let reason: string | null = null;
+  let detail = "";
+
+  // A3 (loudest signal, checked FIRST): a genuine WO was DROPPED or a LIVE dedup
+  // collision occurred in the last scan. Fire regardless of status/freshness — a real
+  // WO may be missing from the board. last_scan_* reset to 0 on a clean scan, so the
+  // alarm clears itself once intake recovers.
+  const droppedWo = Number(lastScanDroppedWo ?? 0);
+  const liveCollisions = Number(lastScanInsertConflictsLive ?? 0);
+
+  if (droppedWo > 0 || liveCollisions > 0) {
+    reason = "dropped_wo";
+    detail =
+      `make-safe intake DROPPED ${droppedWo} work order(s) and hit ${liveCollisions} live dedup ` +
+      `collision(s) in the last scan (an INSERT failed after a valid extraction). A genuine WO ` +
+      `may be missing from the board — check makesafe_intake_drafts + the makesafe.intake_wo_dropped ` +
+      `business_events.`;
+  } else if (status === "degraded") {
+    reason = "degraded";
+    const sinceTxt = degradedSince ? ` since ${degradedSince}` : "";
+    detail =
+      `make-safe intake extraction DEGRADED (reason: ${extractionDegradedReason || "unknown"})${sinceTxt}. ` +
+      `The classifier is not producing valid extractions — new intake cards are empty/needs_review dockets until it recovers.`;
+  } else {
+    // Not degraded — check scan freshness. A stale last_scan_at means the scan is not
+    // completing (tail-call 500 / crash), so writeIntakeHealth never runs.
+    const scanMs = lastScanAt ? Date.parse(lastScanAt) : NaN;
+    if (Number.isNaN(scanMs)) {
+      // Never scanned (status 'unknown' with no last_scan_at) — surface once so a
+      // never-started scan is not silent. If a valid last_scan_at is simply absent on
+      // an otherwise-ok row, treat that as stale too.
+      if (status === "unknown" || !lastScanAt) {
+        reason = "unknown_never_scanned";
+        detail =
+          `make-safe intake health has no last_scan_at (extraction_status=${status || "unknown"}). ` +
+          `The intake scan may never have completed a run.`;
+      }
+    } else {
+      const ageMin = (now - scanMs) / 60_000;
+      if (ageMin > EXTRACTION_STALE_MINUTES) {
+        reason = "stale_scan";
+        detail =
+          `make-safe intake scan STALLED: last completed scan was ${Math.round(ageMin)} min ago ` +
+          `(> ${EXTRACTION_STALE_MINUTES} min budget on a 2-min cron). The email->card pipeline is not running ` +
+          `(tail-call failing / scan crashing) even though the classifier key is not flagged degraded.`;
+      }
+    }
+
+    // Empty-feed anomaly (lowest priority; only when nothing else already fired). The
+    // scan is fresh + not degraded but NO inbound mail has arrived for > threshold PERTH
+    // BUSINESS HOURS. Fail toward NOT alarming: only while it is CURRENTLY Perth business
+    // hours, and only with a valid last_inbound_email_at (never on an unknown/blank feed).
+    if (reason === null && lastInboundEmailAt && isPerthBusinessHour(now)) {
+      const inboundMs = Date.parse(lastInboundEmailAt);
+      if (!Number.isNaN(inboundMs)) {
+        const threshold = Number(emptyFeedStaleHours ?? EMPTY_FEED_STALE_BUSINESS_HOURS);
+        const bizHours = perthBusinessHoursBetween(inboundMs, now);
+        if (bizHours > threshold) {
+          reason = "empty_feed";
+          detail =
+            `make-safe feed may be EMPTY: no inbound builder email captured in ${Math.round(bizHours)} ` +
+            `Perth business hours (last inbound ${lastInboundEmailAt}, threshold ${threshold}h). The ses@ ` +
+            `Graph mirror / subscription may be returning nothing — check the sync, not the classifier.`;
+        }
+      }
+    }
+  }
+
+  const alarm = reason !== null;
+  if (!alarm) {
+    return {
+      alarm: false,
+      reason: null,
+      shouldAlert: false,
+      detail: `intake extraction healthy: status=${status || "unknown"}, last_scan_at=${lastScanAt || "n/a"}`,
+    };
+  }
+
+  // Rate-limit: reuse the draft-heartbeat resend window. Empty-feed uses its OWN
+  // last-alert timestamp (own state key) so it can't be suppressed by, or suppress, a
+  // degraded/stale/dropped alert.
+  const effLastAlert = reason === "empty_feed" ? (lastEmptyFeedAlertAt ?? null) : lastAlertAt;
+  let shouldAlert = true;
+  if (effLastAlert) {
+    const lastMs = Date.parse(effLastAlert);
+    if (!Number.isNaN(lastMs)) {
+      const hoursSinceAlert = (now - lastMs) / 3_600_000;
+      if (hoursSinceAlert < HEARTBEAT_RESEND_HOURS) shouldAlert = false;
+    }
+  }
+
+  return { alarm, reason, shouldAlert, detail };
+}
+
+// DB-bound B1 alarm. Reads the single makesafe_intake_health row, checks
+// heartbeat_state for rate-limiting under the 'extraction_degraded' key, emits the
+// standard ERROR alert if needed, then records state. Mirrors makesafeDraftHeartbeat.
+export const EXTRACTION_HEALTH_STATE_KEY = "extraction_degraded";
+
+export async function makesafeExtractionHealthAlarm(
+  client: SB,
+  sink: AlertSink,
+  opts: { nowIso?: string; emptyFeedStaleHours?: number } = {},
+): Promise<{ alarm: boolean; reason: string | null; shouldAlert: boolean; alerted: boolean; detail: string }> {
+  const now = opts.nowIso ? new Date(Date.parse(opts.nowIso)) : new Date();
+
+  // Read the single-row health record. FAIL CLOSED: a DB error must not silently
+  // suppress the alarm — THROW so the caller fails closed (500) rather than swallow a
+  // possible dead-key state.
+  // A3/empty-feed: request the breadcrumb + last-inbound columns too. They may be absent
+  // pre-migration; a failed full select falls back to the base columns so the dead-key
+  // alarm still works.
+  let health: any = null;
+  {
+    const full = await client
+      .from("makesafe_intake_health")
+      .select("extraction_status, degraded_reason, degraded_since, last_scan_at, last_scan_dropped_wo, last_scan_insert_conflicts_live, last_inbound_email_at")
+      .eq("id", true)
+      .maybeSingle();
+    if (full.error) {
+      const base = await client
+        .from("makesafe_intake_health")
+        .select("extraction_status, degraded_reason, degraded_since, last_scan_at")
+        .eq("id", true)
+        .maybeSingle();
+      if (base.error) throw new Error(`extraction health read failed: ${base.error.message}`);
+      health = base.data;
+    } else {
+      health = full.data;
+    }
+  }
+
+  // Read last-alert-at from state for BOTH keys (gracefully absent — table may not exist
+  // yet). Empty-feed has its own rate-limit key so it never suppresses / is suppressed by
+  // the degraded/stale/dropped alert.
+  let lastAlertAt: string | null = null;
+  let lastEmptyFeedAlertAt: string | null = null;
+  try {
+    const { data: stateRows } = await client
+      .from("makesafe_heartbeat_state")
+      .select("key, last_alert_at")
+      .in("key", [EXTRACTION_HEALTH_STATE_KEY, EMPTY_FEED_STATE_KEY]);
+    for (const r of (stateRows || []) as Array<{ key: string; last_alert_at: string | null }>) {
+      if (r.key === EXTRACTION_HEALTH_STATE_KEY) lastAlertAt = r.last_alert_at ?? null;
+      if (r.key === EMPTY_FEED_STATE_KEY) lastEmptyFeedAlertAt = r.last_alert_at ?? null;
+    }
+  } catch {
+    // Table absent or RLS issue — treat as never alerted (safe: may over-alert once).
+  }
+
+  const { alarm, reason, shouldAlert, detail } = checkExtractionHealth({
+    extractionStatus: health?.extraction_status,
+    extractionDegradedReason: health?.degraded_reason,
+    degradedSince: health?.degraded_since,
+    lastScanAt: health?.last_scan_at,
+    lastScanDroppedWo: health?.last_scan_dropped_wo,
+    lastScanInsertConflictsLive: health?.last_scan_insert_conflicts_live,
+    lastInboundEmailAt: health?.last_inbound_email_at,
+    emptyFeedStaleHours: opts.emptyFeedStaleHours,
+    lastAlertAt,
+    lastEmptyFeedAlertAt,
+    nowIso: now.toISOString(),
+  });
+
+  // Empty-feed alerts rate-limit under their OWN state key.
+  const stateKey = reason === "empty_feed" ? EMPTY_FEED_STATE_KEY : EXTRACTION_HEALTH_STATE_KEY;
+
+  if (shouldAlert) {
+    const alert: ReconAlert = {
+      direction: reason === "empty_feed" ? "empty_feed" : "extraction_degraded",
+      severity: "ERROR",
+      ref: reason,
+      detail,
+    };
+    await emitAlerts(client, sink, "B1-extraction-health", [alert]);
+    try {
+      await client.from("makesafe_heartbeat_state").upsert({
+        key: stateKey,
+        last_alert_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      }, { onConflict: "key" });
+    } catch {
+      // Non-fatal — over-alerting beats a silent stall.
+    }
+  } else if (!alarm) {
+    // Healthy — record last-ok on BOTH keys so neither drifts.
+    for (const key of [EXTRACTION_HEALTH_STATE_KEY, EMPTY_FEED_STATE_KEY]) {
+      try {
+        await client.from("makesafe_heartbeat_state").upsert({
+          key,
+          last_ok_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        }, { onConflict: "key" });
+      } catch {
+        // Non-fatal.
+      }
+    }
+  }
+
+  return { alarm, reason, shouldAlert, alerted: shouldAlert, detail };
 }

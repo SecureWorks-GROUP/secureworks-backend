@@ -2768,8 +2768,41 @@ serve(async (req: Request) => {
     // ── Send SMS via GHL conversations API ──
     if (action === 'send_sms' && req.method === 'POST') {
       const body = await req.json()
-      const { contactId, message, jobId, userId } = body
-      if (!contactId || !message) return json({ error: 'contactId and message required' }, 400)
+      let contactId = body.contactId
+      const { message, jobId, userId, phone } = body
+      if (!message) return json({ error: 'message required' }, 400)
+      if (!contactId && !phone) return json({ error: 'contactId or phone required' }, 400)
+
+      // A4 (make-safe alarms + arrival texts): resolve a RAW phone to a GHL contact
+      // (find-or-create) so a send can target a bare E.164 number, not just an existing
+      // contactId. Backward compatible: contactId callers skip this branch entirely.
+      if (!contactId && phone) {
+        const normalizedPhone = normalizeAUPhone(phone)
+        try {
+          const searchRes = await ghl(`/contacts/search/duplicate`, {
+            method: 'POST',
+            body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizedPhone }),
+          })
+          if (searchRes.contact && searchRes.contact.id) contactId = searchRes.contact.id
+        } catch (e) {
+          console.log('[ghl-proxy] send_sms phone dedup search failed:', e)
+        }
+        if (!contactId) {
+          try {
+            const createRes = await ghl('/contacts/', {
+              method: 'POST',
+              body: JSON.stringify({ phone, locationId: GHL_LOCATION_ID }),
+            })
+            contactId = createRes.contact?.id || null
+          } catch (e) {
+            const errMsg = (e as Error).message || ''
+            const dupMatch = errMsg.match(/"contactId"\s*:\s*"([^"]+)"/)
+            if (dupMatch && dupMatch[1]) contactId = dupMatch[1]
+            else return json({ error: 'Failed to resolve GHL contact from phone: ' + errMsg }, 500)
+          }
+        }
+      }
+      if (!contactId) return json({ error: 'could not resolve contactId from phone' }, 400)
 
       // Optional per-message sending number (GHL `fromNumber`, E.164).
       // When omitted, GHL falls back to the location default (+61489267774

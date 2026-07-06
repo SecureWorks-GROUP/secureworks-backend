@@ -1,0 +1,81 @@
+name: MakeSafe Intake Watchdog
+
+# WATCHDOG-OF-WATCHDOG (coordinator red-team #2).
+# The in-function B1/D5 alarms die together with pg_cron or a paused Supabase project
+# — nobody watches from OUTSIDE. This scheduled workflow curls the read-only ops-api
+# intake_health action every 30 minutes and FAILS the run when the pipeline is
+# unreachable or the last completed scan is stale. A failing scheduled workflow emails
+# the repo owners (GitHub's default), so this is an alert channel that survives the
+# ENTIRE Supabase project being down.
+#
+# NOTE: scheduled workflows only run on the default branch, so this activates on merge
+# to main. It reads the EXISTING repo secret SW_API_KEY (already used by the deploy
+# workflow) as the ops-api x-api-key; no new secret is required. The functions base URL
+# can be overridden with the optional OPS_API_BASE_URL secret (defaults to the known
+# project URL, whose ref is not sensitive).
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # every 30 minutes (UTC)
+  workflow_dispatch: {} # allow a manual check
+
+permissions:
+  contents: read
+
+jobs:
+  intake-health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe ops-api intake_health and fail on unreachable/stale
+        env:
+          SW_API_KEY: ${{ secrets.SW_API_KEY }}
+          OPS_API_BASE_URL: ${{ secrets.OPS_API_BASE_URL }}
+          # Fail if the last completed scan is older than this many minutes. The scan
+          # runs every 2 min; the workflow runs every 30 min. 30 min stale = clearly broken.
+          STALE_MINUTES: '30'
+        run: |
+          set -euo pipefail
+          if [ -z "${SW_API_KEY}" ]; then
+            echo "FAIL: SW_API_KEY secret is not set on this repo; the watchdog cannot authenticate to ops-api." >&2
+            exit 1
+          fi
+          BASE_URL="${OPS_API_BASE_URL:-https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api}"
+          URL="${BASE_URL}?action=intake_health"
+
+          echo "Probing ${URL}"
+          HTTP_CODE=$(curl -sS -o /tmp/health.json -w '%{http_code}' \
+            --max-time 25 \
+            -H "x-api-key: ${SW_API_KEY}" \
+            "${URL}" || echo "000")
+
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "FAIL: ops-api intake_health unreachable or non-200 (HTTP ${HTTP_CODE})." >&2
+            echo "--- response body (truncated) ---" >&2
+            head -c 2000 /tmp/health.json >&2 || true
+            exit 1
+          fi
+
+          LAST_SCAN=$(jq -r '.extraction.last_scan_at // empty' /tmp/health.json)
+          STATUS=$(jq -r '.extraction.status // "unknown"' /tmp/health.json)
+          echo "extraction.status=${STATUS} last_scan_at=${LAST_SCAN:-<none>}"
+
+          if [ -z "${LAST_SCAN}" ]; then
+            echo "FAIL: intake_health has no last_scan_at — the intake scan may never have completed a run." >&2
+            exit 1
+          fi
+
+          LAST_TS=$(date -u -d "${LAST_SCAN}" +%s 2>/dev/null || echo "")
+          if [ -z "${LAST_TS}" ]; then
+            echo "FAIL: could not parse last_scan_at='${LAST_SCAN}'." >&2
+            exit 1
+          fi
+          NOW_TS=$(date -u +%s)
+          AGE_MIN=$(( (NOW_TS - LAST_TS) / 60 ))
+          echo "last completed scan was ${AGE_MIN} min ago (budget ${STALE_MINUTES} min)"
+
+          if [ "${AGE_MIN}" -gt "${STALE_MINUTES}" ]; then
+            echo "FAIL: make-safe intake scan is STALE (${AGE_MIN} min > ${STALE_MINUTES} min). The email->card pipeline is not running and the in-function alarms may be down (pg_cron/project paused)." >&2
+            exit 1
+          fi
+
+          echo "OK: make-safe intake pipeline healthy (scan ${AGE_MIN} min ago, status=${STATUS})."

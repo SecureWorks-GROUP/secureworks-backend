@@ -4067,11 +4067,19 @@ async function createDailyAnnotations(sb: any, digest: any) {
   }
 
   // ── 4b. Unpaid Deposit Chasers (7/14 day tiers) ──
-  // Query deposit invoices that haven't been paid
+  // Query deposit invoices that haven't been paid.
+  // HOTFIX (chase-cron mute): only chase AUTHORISED deposits. Any non-AUTHORISED
+  // status (DRAFT, SUBMITTED, etc.) means the Xero online link cannot take card
+  // payment, so chasing via send_payment_link would send the client a dead link —
+  // harmful. Only an AUTHORISED invoice is a real, payable client-facing
+  // receivable; anything else must not enter the chaser at all (neither the SMS
+  // reminder nor the "unpaid deposit" annotation). Acceptance deposits are
+  // AUTHORISED at creation now, so this only skips intentional drafts-for-review
+  // + legacy drafts.
   const { data: unpaidDeposits } = await sb.from('xero_invoices')
     .select('id, xero_invoice_id, invoice_number, job_id, reference, total, amount_due, amount_paid, invoice_date, status')
     .eq('invoice_type', 'ACCREC')
-    .not('status', 'in', '("VOIDED","DELETED","PAID")')
+    .eq('status', 'AUTHORISED')
     .ilike('reference', '%DEP%')
     .gt('amount_due', 0)
 
@@ -4121,10 +4129,12 @@ async function createDailyAnnotations(sb: any, digest: any) {
       })
     } else {
       // 7-13 days: send SMS reminder via GHL + create annotation
+      let reminderSent = false
+      let reminderFailReason = 'no GHL contact on job'
       if (depJob?.ghl_contact_id && dep.job_id) {
         try {
           // Use send_payment_link to get Xero URL + send SMS in one call
-          await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_payment_link`, {
+          const linkResp = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_payment_link`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -4132,9 +4142,17 @@ async function createDailyAnnotations(sb: any, digest: any) {
             },
             body: JSON.stringify({ job_id: dep.job_id }),
           })
-          console.log(`[daily-digest] Deposit reminder sent to ${clientName} for ${dep.invoice_number}`)
+          const linkResult = await linkResp.json().catch(() => null)
+          if (linkResp.ok && linkResult?.success) {
+            reminderSent = true
+            console.log(`[daily-digest] Deposit reminder sent to ${clientName} for ${dep.invoice_number}`)
+          } else {
+            reminderFailReason = linkResult?.error || `HTTP ${linkResp.status}`
+            console.log(`[daily-digest] Deposit reminder NOT sent for ${dep.invoice_number}: ${reminderFailReason}`)
+          }
         } catch (e) {
-          console.log(`[daily-digest] Deposit reminder failed for ${dep.invoice_number}:`, (e as Error).message)
+          reminderFailReason = (e as Error).message
+          console.log(`[daily-digest] Deposit reminder failed for ${dep.invoice_number}:`, reminderFailReason)
         }
       }
 
@@ -4146,15 +4164,20 @@ async function createDailyAnnotations(sb: any, digest: any) {
         ui_location: 'job_money',
         annotation_type: 'unpaid_deposit',
         category: 'financial',
-        title: `Deposit reminder sent — $${depAmount.toLocaleString()} unpaid ${daysSinceInvoice}d`,
-        body: `${clientName}'s deposit invoice ${dep.invoice_number} is ${daysSinceInvoice} days old. SMS reminder sent automatically.`,
+        title: reminderSent
+          ? `Deposit reminder sent — $${depAmount.toLocaleString()} unpaid ${daysSinceInvoice}d`
+          : `Deposit unpaid ${daysSinceInvoice}d — $${depAmount.toLocaleString()}, reminder NOT sent`,
+        body: reminderSent
+          ? `${clientName}'s deposit invoice ${dep.invoice_number} is ${daysSinceInvoice} days old. SMS reminder sent automatically.`
+          : `${clientName}'s deposit invoice ${dep.invoice_number} is ${daysSinceInvoice} days old. SMS reminder NOT sent (${reminderFailReason}) — invoice may not be in a payable state or was already reminded recently. Chase manually if needed.`,
         structured_data: {
           xero_invoice_id: dep.xero_invoice_id,
           invoice_number: dep.invoice_number,
           days_since_invoice: daysSinceInvoice,
           amount_due: dep.amount_due,
           job_id: dep.job_id,
-          sms_reminder_sent: true,
+          sms_reminder_sent: reminderSent,
+          ...(reminderSent ? {} : { sms_reminder_fail_reason: reminderFailReason }),
         },
         response_type: 'choice',
         response_options: [

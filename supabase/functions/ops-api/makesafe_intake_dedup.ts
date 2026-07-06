@@ -53,6 +53,27 @@
 //     non-alphanumerics stripped, so "AJBR 67998", "AJBR-67998" and "ajbr67998"
 //     collapse to the same key but two genuinely different refs never collide.
 
+// M1.5 D0/H2: the fingerprint discriminator parses the subject the SAME way the scan
+// does (so existing drafts and candidates resolve to the same ref), and normalises the
+// body with the SAME function that produces the stored body_preview — so a candidate's
+// RAW msg body and an existing draft's already-processed body_preview hash to the same
+// input (H2-residual: without this a ref-less cross-scan twin would never match).
+import { parseSubjectFields } from "./makesafe_template_parser.ts";
+import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
+
+// Body length cap used when producing body_preview (slice(0, 2000) in the scan).
+const FINGERPRINT_BODY_MAX = 2000;
+
+/** Normalise a body to the SAME representation the scan stores as body_preview, so the
+ * raw candidate body and the stored preview reduce to identical hash input. */
+function normaliseBodyForFingerprint(body: string | null | undefined): string {
+  return stripEmailHtmlForTrade(String(body ?? ""))
+    .slice(0, FINGERPRINT_BODY_MAX)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /** A draft/job row as seen by the dedup index (only the keying fields matter). */
 export interface IntakeDedupRow {
   graph_message_id?: string | null;
@@ -72,6 +93,11 @@ export interface IntakeDedupRow {
   status?: string | null;
   /** ISO timestamp of when the email was received — used by suppressed_rejected date check. */
   received_at?: string | null;
+  /** M1.5 D0: sender + subject feed the DUAL-CAPTURE content fingerprint. */
+  from_email?: string | null;
+  subject?: string | null;
+  /** M1.5 H2: body feeds the fingerprint discriminator when no ref is parseable. */
+  body_preview?: string | null;
 }
 
 /** A candidate email being considered for a new draft. */
@@ -84,6 +110,11 @@ export interface IntakeDedupCandidate {
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
   makesafe_job_family?: string | null;
+  /** M1.5 D0: sender + subject feed the DUAL-CAPTURE content fingerprint. */
+  from_email?: string | null;
+  subject?: string | null;
+  /** M1.5 H2: body feeds the fingerprint discriminator when no ref is parseable. */
+  body?: string | null;
   /**
    * When true, bypasses the suppressed_rejected check so a targeted recapture
    * action can create a fresh draft for a previously-rejected email. It does NOT
@@ -153,6 +184,19 @@ export interface DedupIndex {
   rejectedRefCompany: Map<string, string>;
   /** normalised `${workOrderIdentity}|${company}` -> latest rejected received_at */
   rejectedWorkOrderCompany: Map<string, string>;
+  /**
+   * M1.5 D0 — DUAL-CAPTURE content fingerprints of existing live drafts.
+   * The ses@ email sync writes TWO `emails` rows for the same underlying email: one
+   * from the group-post poll (id "AAMk…", internet_message_id null) and one from the
+   * mailbox fallback poll (id "mailbox_<hash>"). Their graph_message_ids differ and,
+   * pre-M1.5, external_ref was null on both — so neither the graph-id nor the
+   * (ref+company) key could collapse them and the scan produced two drafts + two model
+   * calls per email. The content fingerprint (sender + normalised subject + received
+   * minute) is stable across both capture paths and catches the twin BEFORE the model
+   * call. Two genuinely different work orders differ in subject (the ref/address ride
+   * in the subject) so they never collide.
+   */
+  fingerprints: Set<string>;
 }
 
 // Draft states that mean "a draft already exists, do not make another". rejected /
@@ -177,6 +221,26 @@ export const SUPPRESSED_DRAFT_STATES: readonly string[] = [
   "rejected",
   "superseded",
 ] as const;
+
+// ── A2 — scan-insert self-heal decision ─────────────────────────────────────────
+// The (org_id, graph_message_id) UNIQUE key can be hit on a fresh scan INSERT when a
+// NON-LIVE shell (a superseded/rejected row) still occupies the slot for that email
+// (exactly the supersede-to-re-extract failure in wave2-reextract-diagnosis.json).
+// Deciding what to do on a 23505 collision is a pure function of the occupying row's
+// status:
+//   * occupying row is a suppressed shell (superseded/rejected) -> 'heal': re-populate
+//     that row in place (recovering the WO into its existing slot — immune to the key).
+//   * occupying row is LIVE (draft/needs_review/approved/reopen_candidate) -> the app-
+//     level dedup should already have caught this; a LIVE collision means dedup failed
+//     upstream, so DO NOT clobber a live draft/job — breadcrumb + alarm instead.
+export function decideInsertConflictAction(
+  occupyingStatus: string | null | undefined,
+): "heal" | "live_collision" {
+  const s = String(occupyingStatus ?? "").toLowerCase();
+  return (LIVE_DRAFT_STATES as readonly string[]).includes(s)
+    ? "live_collision"
+    : "heal";
+}
 
 /**
  * Normalise an external ref for cross-path comparison: upper-case, strip every
@@ -204,6 +268,110 @@ export function normaliseCompany(
 /** Normalise a MakeSafe job-family token for dedupe keys. */
 export function normaliseJobFamily(family: string | null | undefined): string {
   return String(family ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+}
+
+// djb2 string hash — deterministic, sync, no crypto dependency. Used to fold a
+// normalised body into the fingerprint discriminator when no ref is parseable.
+function simpleHash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+// B3 (dual-capture close-out) — "Job No <NNNNN>" work-order number lifted from the
+// subject. This is the AJS/"Make Safe - <Suburb> - Job No 68592" archetype whose ref
+// prefix is NOT in SUBJECT_REF_RE (parseSubjectFields returns null), so pre-B3 its
+// dual-capture twin fell all the way to the body-hash discriminator — and the two
+// capture paths' bodies do NOT always normalise identically (live: 7 of 116 twin
+// windows differ, ALL of them this "Job No" builder), so the twin survived as two
+// drafts. The job number is a WO-UNIQUE token shared verbatim by both capture rows,
+// so using it as the fingerprint discriminator collapses the twin WITHOUT ever
+// merging two genuinely different work orders (different jobs = different numbers).
+const SUBJECT_JOB_NUMBER_RE =
+  /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*(\d{3,7})\b/i;
+
+/** Lift a bare "Job No <digits>" work-order number from a subject; null when absent. */
+export function subjectJobNumber(
+  subject: string | null | undefined,
+): string | null {
+  const m = SUBJECT_JOB_NUMBER_RE.exec(String(subject ?? ""));
+  return m ? m[1] : null;
+}
+
+/**
+ * M1.5 D0 — DUAL-CAPTURE content fingerprint. Stable across the group-post and
+ * mailbox-fallback capture paths for the SAME email:
+ *   normalise(from_email) | normalise(subject) | received-minute | discriminator
+ * where the DISCRIMINATOR is the parsed subject/stored ref when present, else a bare
+ * "Job No <NNNNN>" work-order number (B3), else a hash of the normalised body. It
+ * exists so two GENUINELY DIFFERENT work orders — same sender,
+ * same minute, identical generic subject ("Make safe request") — can NEVER collapse
+ * (H2): a different job has a different ref, and a ref-less different job has a
+ * different body. Returns "" (fail OPEN, not deduped) when sender/subject/received are
+ * missing OR when NO discriminator can be built (no ref AND no body) — a possible
+ * duplicate review draft is always safer than a silently dropped work order.
+ */
+export function contentFingerprint(
+  fromEmail: string | null | undefined,
+  subject: string | null | undefined,
+  receivedAt: string | null | undefined,
+  externalRef?: string | null,
+  body?: string | null,
+): string {
+  const from = String(fromEmail ?? "").trim().toLowerCase();
+  const subj = String(subject ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  const recv = String(receivedAt ?? "").slice(0, 16); // YYYY-MM-DDTHH:MM
+  if (!from || !subj || recv.length < 16) return "";
+  // Prefer the stored/parsed ref (job-unique); the caller passes the SAME subject we
+  // parse here, so existing drafts and candidates resolve to the same ref.
+  const ref = normaliseRef(externalRef) ||
+    normaliseRef(parseSubjectFields(subj).external_ref);
+  // B3: a "Job No <NNNNN>" work-order number (AJS archetype) is also a WO-unique
+  // discriminator shared verbatim across both capture paths — checked BEFORE the body
+  // hash so a "Job No" twin whose bodies diverge across paths still collapses. A
+  // different work order carries a different job number, so this never merges two jobs.
+  const jobNo = ref ? null : subjectJobNumber(subj);
+  let disc = "";
+  if (ref) disc = `r:${ref}`;
+  else if (jobNo) disc = `j:${jobNo}`;
+  else {
+    // Normalise the body the SAME way both sides are stored, so a candidate's RAW body
+    // and an existing draft's body_preview hash identically (H2-residual).
+    const nb = normaliseBodyForFingerprint(body);
+    if (nb) disc = `b:${simpleHash(nb)}`;
+  }
+  if (!disc) return ""; // no ref and no body -> cannot safely dedupe -> fail open
+  return `${from}|${subj}|${recv}|${disc}`;
+}
+
+/**
+ * M1 — the two capture rows can straddle a minute boundary (received ~1s apart across
+ * :59 -> :00), so a single-minute bucket would miss the twin. Return the fingerprint at
+ * the candidate's minute AND the adjacent minutes (±1) so a boundary straddle still
+ * dedupes. The discriminator is unchanged across the three, so widening the TIME window
+ * never merges two different jobs (they differ in ref/body, not just minute).
+ */
+export function contentFingerprintChecks(
+  fromEmail: string | null | undefined,
+  subject: string | null | undefined,
+  receivedAt: string | null | undefined,
+  externalRef?: string | null,
+  body?: string | null,
+): string[] {
+  const ms = Date.parse(String(receivedAt ?? ""));
+  const bases = Number.isFinite(ms)
+    ? [
+      new Date(ms - 60_000).toISOString(),
+      receivedAt,
+      new Date(ms + 60_000).toISOString(),
+    ]
+    : [receivedAt];
+  const out = new Set<string>();
+  for (const r of bases) {
+    const fp = contentFingerprint(fromEmail, subject, r, externalRef, body);
+    if (fp) out.add(fp);
+  }
+  return [...out];
 }
 
 /**
@@ -391,12 +559,21 @@ export function buildIntakeDedupIndex(
   const jobRefCompanyUnknownFamily = new Set<string>();
   const rejectedRefCompany = new Map<string, string>();
   const rejectedWorkOrderCompany = new Map<string, string>();
+  const fingerprints = new Set<string>();
 
   for (const d of existingDrafts || []) {
     if (d.graph_message_id) graphIds.add(d.graph_message_id);
     if (d.internet_message_id) internetIds.add(d.internet_message_id);
     const woCompany = rowWorkOrderCompanyKey(d);
     if (woCompany) workOrderCompany.add(woCompany);
+    const fp = contentFingerprint(
+      d.from_email,
+      d.subject,
+      d.received_at,
+      d.external_ref,
+      d.body_preview,
+    );
+    if (fp) fingerprints.add(fp);
     const rc = refCompanyKey(
       d.external_ref,
       d.requesting_company_slug,
@@ -509,6 +686,7 @@ export function buildIntakeDedupIndex(
     jobRefCompanyUnknownFamily,
     rejectedRefCompany,
     rejectedWorkOrderCompany,
+    fingerprints,
   };
 }
 
@@ -539,6 +717,23 @@ export function isDuplicateIntake(
     index.internetIds.has(candidate.internet_message_id)
   ) {
     return "internet_message_id";
+  }
+  // M1.5 D0 — DUAL-CAPTURE content fingerprint. Catches the group-post / mailbox-
+  // fallback twin of the SAME email even when their graph_message_ids differ and the
+  // external_ref is null (the pre-M1.5 blind spot that produced two drafts + two model
+  // calls per email). A live-state check: fires for force_recapture too (cannot
+  // duplicate a LIVE draft).
+  {
+    const checks = contentFingerprintChecks(
+      candidate.from_email,
+      candidate.subject,
+      candidate.received_at,
+      candidate.external_ref,
+      candidate.body,
+    );
+    if (checks.some((fp) => index.fingerprints.has(fp))) {
+      return "duplicate_content_fingerprint";
+    }
   }
   const rc = refCompanyKey(
     candidate.external_ref,
@@ -719,6 +914,17 @@ export function registerIntakeDraft(
   if (candidate.internet_message_id) {
     index.internetIds.add(candidate.internet_message_id);
   }
+  // M1.5 D0: register the fingerprint so the SAME email captured twice within one scan
+  // batch (group-post + mailbox-fallback rows) is caught on the second occurrence.
+  // Register the exact-minute fingerprint; the CHECK widens to adjacent minutes (M1).
+  const fp = contentFingerprint(
+    candidate.from_email,
+    candidate.subject,
+    candidate.received_at,
+    candidate.external_ref,
+    candidate.body,
+  );
+  if (fp) index.fingerprints.add(fp);
   const rc = refCompanyKey(
     candidate.external_ref,
     candidate.requesting_company_slug,

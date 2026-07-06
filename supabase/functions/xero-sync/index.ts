@@ -19,6 +19,16 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import {
+  buildMaterialsFactRow,
+  buildQueueRow,
+  DEFAULT_MATCH_CONFIG,
+  extractJobNumber,
+  matchBill,
+  type BillInput,
+  type MatchConfig,
+  type POCandidate,
+} from './materials_ingest.ts'
 
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
 const XERO_CLIENT_SECRET = Deno.env.get('XERO_CLIENT_SECRET') || ''
@@ -108,8 +118,14 @@ serve(async (req: Request) => {
         return json(await syncAgedPayables(sb))
       case 'sync_bank_transactions':
         return json(await syncBankTransactions(sb))
+      case 'ingest_materials': {
+        // Standalone materials-actuals ingest (also runs inside sync_invoices).
+        const windowDays = parseInt(url.searchParams.get('window_days') || '90', 10)
+        const limit = parseInt(url.searchParams.get('limit') || '500', 10)
+        return json(await ingestMaterialsActuals(sb, { windowDays, limit }))
+      }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials' }, 400)
     }
   } catch (err: any) {
     console.error(`xero-sync [${action}] error:`, err)
@@ -640,6 +656,9 @@ async function syncInvoices(sb: any) {
   // ── Match unlinked invoices after sync ──
   const matchResult = await matchUnlinkedInvoices(sb)
 
+  // ── Materials-actuals ingestion (U3) — land supplier bills on jobs or queue ──
+  const materialsResult = await ingestMaterialsActuals(sb)
+
   // ── Reconciliation: verify stale local invoices against Xero ──
   // Find local AUTHORISED/SUBMITTED invoices that haven't been synced in 24h+
   // and check if they still exist in Xero with that status
@@ -702,11 +721,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult },
+    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, materials: materialsResult },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, reconciled, ...matchResult }
+  return { success: true, synced: totalSynced, reconciled, ...matchResult, materials: materialsResult }
 }
 
 
@@ -740,11 +759,15 @@ async function matchUnlinkedInvoices(client: any) {
       const contactName = inv.contact_name || ''
 
       // Strategy 1: Reference contains a job number (SWP-25029, SWF-25010, etc.)
-      const jobNumMatch = ref.match(/SW[PFDRIM]-\d{5}/i)
-      if (jobNumMatch) {
+      // UNIFIED with the sync-time linker via the shared canonical extractor —
+      // the old /SW[PFDRIM]-\d{5}/i missed SWMS-##### (make-safe), SWB-##### and
+      // 4-digit numbers, so make-safe/materials orders survived one pass but not
+      // this one. extractJobNumber() catches SW(MS|<letter>)-#### uniformly.
+      const jobNum = extractJobNumber(ref)
+      if (jobNum) {
         const { data: job } = await client.from('jobs')
           .select('id, job_number')
-          .eq('job_number', jobNumMatch[0].toUpperCase())
+          .eq('job_number', jobNum)
           .maybeSingle()
 
         if (job) {
@@ -842,6 +865,215 @@ async function matchUnlinkedInvoices(client: any) {
   } catch (e: any) {
     console.log('[xero-sync] Invoice matching failed:', (e as Error).message)
     return { matched: 0, flagged: 0 }
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// MATERIALS ACTUALS — BILL INGESTION (U3, mission profit-materials-actuals)
+//
+// Orchestrator around the PURE decision core in materials_ingest.ts. Runs after
+// each invoice sync. For every non-mirror ACCPAY bill in the window it lands a
+// DERIVED materials fact (job_materials_facts) or a queue suggestion
+// (materials_reconciliation_queue) — keyed by xero_invoice_id, reversible by
+// delete, sources never mutated. All matching decisions live in matchBill(); the
+// only logic here is I/O and the "never clobber a human decision" guards.
+//
+// HARD EXCLUSION: bills whose xero_invoice_id is a trade mirror
+// (trade_invoices.xero_bill_id) can never become a fact.
+// ════════════════════════════════════════════════════════════
+
+async function ingestMaterialsActuals(
+  sb: any,
+  opts: { windowDays?: number; limit?: number; config?: MatchConfig } = {},
+) {
+  const windowDays = opts.windowDays ?? 90
+  const limit = opts.limit ?? 500
+  const config = opts.config ?? DEFAULT_MATCH_CONFIG
+  const cutoff = new Date(Date.now() - windowDays * 86_400_000)
+    .toISOString()
+    .slice(0, 10)
+
+  const result = {
+    scanned: 0,
+    facts: 0,
+    queued: 0,
+    mirrors_excluded: 0,
+    cleaned: 0,
+    skipped_manual: 0,
+  }
+
+  try {
+    // 1. Mirror set — the hard exclusion key. Any ACCPAY bill whose id is a
+    //    trade-invoice mirror can never be a materials fact.
+    const mirrorSet = new Set<string>()
+    {
+      const { data: mirrors } = await sb
+        .from('trade_invoices')
+        .select('xero_bill_id')
+        .not('xero_bill_id', 'is', null)
+      for (const m of mirrors || []) {
+        if (m.xero_bill_id) mirrorSet.add(m.xero_bill_id)
+      }
+    }
+
+    // 2. Open PO candidates (all suppliers) — grouped by xero_contact_id. The PO
+    //    anchor date is delivery_date if set, else created_at.
+    const posByContact = new Map<string, POCandidate[]>()
+    {
+      const { data: pos } = await sb
+        .from('purchase_orders')
+        .select(
+          'id, po_number, xero_contact_id, status, subtotal, total, job_id, xero_bill_id, delivery_date, created_at',
+        )
+        .not('xero_contact_id', 'is', null)
+        .is('xero_bill_id', null)
+      for (const po of pos || []) {
+        const cand: POCandidate = {
+          id: po.id,
+          po_number: po.po_number,
+          xero_contact_id: po.xero_contact_id,
+          status: po.status,
+          subtotal: po.subtotal,
+          total: po.total,
+          job_id: po.job_id,
+          job_number: null,
+          po_date: (po.delivery_date || po.created_at || '').slice(0, 10) || null,
+          xero_bill_id: po.xero_bill_id,
+        }
+        const key = po.xero_contact_id as string
+        if (!posByContact.has(key)) posByContact.set(key, [])
+        posByContact.get(key)!.push(cand)
+      }
+    }
+
+    // 3. Candidate bills — ACCPAY, in window, not void/deleted.
+    const { data: bills } = await sb
+      .from('xero_invoices')
+      .select(
+        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type',
+      )
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('invoice_type', 'ACCPAY')
+      .gte('invoice_date', cutoff)
+      .not('status', 'in', '("VOIDED","DELETED")')
+      .limit(limit)
+
+    // Existing derived rows in the window — so we respect human decisions and
+    // never re-open a manually-resolved item.
+    const factSourceById = new Map<string, string>() // xero_invoice_id -> automation_source
+    const queueStatusById = new Map<string, string>() // xero_invoice_id -> status
+    {
+      const { data: facts } = await sb
+        .from('job_materials_facts')
+        .select('xero_invoice_id, automation_source')
+      for (const f of facts || []) factSourceById.set(f.xero_invoice_id, f.automation_source)
+      const { data: qrows } = await sb
+        .from('materials_reconciliation_queue')
+        .select('xero_invoice_id, status')
+      for (const q of qrows || []) queueStatusById.set(q.xero_invoice_id, q.status)
+    }
+
+    for (const b of bills || []) {
+      result.scanned++
+      const bill: BillInput = {
+        xero_invoice_id: b.xero_invoice_id,
+        invoice_number: b.invoice_number,
+        xero_contact_id: b.xero_contact_id,
+        contact_name: b.contact_name,
+        reference: b.reference,
+        sub_total: b.sub_total,
+        total: b.total,
+        invoice_date: b.invoice_date,
+        status: b.status,
+        invoice_type: b.invoice_type,
+      }
+
+      // Mirror — exclude, and defensively remove any stale derived rows.
+      if (mirrorSet.has(bill.xero_invoice_id)) {
+        result.mirrors_excluded++
+        if (factSourceById.get(bill.xero_invoice_id) === 'manual_queue') {
+          // A human somehow assigned a mirror — leave it, but flag in logs.
+          console.warn(`[materials] mirror ${bill.xero_invoice_id} has a manual fact — left untouched for review`)
+        } else if (factSourceById.has(bill.xero_invoice_id)) {
+          await sb.from('job_materials_facts').delete().eq('xero_invoice_id', bill.xero_invoice_id)
+          result.cleaned++
+        }
+        continue
+      }
+
+      // Respect human resolutions: never clobber a manual fact or a queue row a
+      // human has moved off 'open'.
+      if (factSourceById.get(bill.xero_invoice_id) === 'manual_queue') {
+        result.skipped_manual++
+        continue
+      }
+      const existingQueueStatus = queueStatusById.get(bill.xero_invoice_id)
+      if (existingQueueStatus && existingQueueStatus !== 'open') {
+        result.skipped_manual++
+        continue
+      }
+
+      // Resolve reference → job (the caller side of the pure function).
+      const token = extractJobNumber(bill.reference)
+      let jobFromRef: { id: string; job_number: string } | null = null
+      if (token) {
+        const { data: job } = await sb
+          .from('jobs')
+          .select('id, job_number')
+          .eq('org_id', DEFAULT_ORG_ID)
+          .eq('job_number', token)
+          .maybeSingle()
+        if (job) jobFromRef = { id: job.id, job_number: job.job_number }
+      }
+
+      const pos = bill.xero_contact_id
+        ? posByContact.get(bill.xero_contact_id) || []
+        : []
+
+      const m = matchBill(bill, { isMirror: false, jobFromRef, refToken: token, pos, config })
+
+      if (m.outcome === 'fact') {
+        const row = buildMaterialsFactRow(bill, m, DEFAULT_ORG_ID)
+        const { error: fErr } = await sb
+          .from('job_materials_facts')
+          .upsert(row, { onConflict: 'xero_invoice_id' })
+        if (fErr) {
+          console.error(`[materials] fact upsert failed ${bill.xero_invoice_id}:`, fErr.message)
+          continue
+        }
+        // A bill is a fact XOR a queue row — clear any open queue suggestion.
+        if (existingQueueStatus === 'open') {
+          await sb.from('materials_reconciliation_queue').delete().eq('xero_invoice_id', bill.xero_invoice_id)
+        }
+        result.facts++
+      } else if (m.outcome === 'queue') {
+        const row = buildQueueRow(bill, m, DEFAULT_ORG_ID)
+        const { error: qErr } = await sb
+          .from('materials_reconciliation_queue')
+          .upsert(row, { onConflict: 'xero_invoice_id' })
+        if (qErr) {
+          console.error(`[materials] queue upsert failed ${bill.xero_invoice_id}:`, qErr.message)
+          continue
+        }
+        result.queued++
+      }
+      // skip_mirror / skip_non_accpay: nothing to do (guards above already handled).
+    }
+
+    await sb.from('webhook_log').insert({
+      org_id: DEFAULT_ORG_ID,
+      source: 'xero',
+      event_type: 'ingest_materials',
+      payload: { window_days: windowDays, ...result },
+      status: 'processed',
+    }).catch(() => {})
+
+    console.log(`[materials] ingest: ${JSON.stringify(result)}`)
+    return { success: true, ...result }
+  } catch (e: any) {
+    console.error('[materials] ingest failed:', (e as Error).message)
+    return { success: false, error: (e as Error).message, ...result }
   }
 }
 

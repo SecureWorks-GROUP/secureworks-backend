@@ -42,13 +42,13 @@
 //   send_work_order     — Mark WO as sent to trade
 //   create_invoice      — POST invoice to Xero API
 //   complete_and_invoice — Mark complete + create Xero invoice (deposit-aware)
-//   create_deposit_invoice — Create deposit invoice (% of quoted total)
+//   create_deposit_invoice — Create deposit invoice (% of quoted total; DRAFT by default)
 //   sync_suppliers      — Pull suppliers from Xero contacts
 //
 //   ── Job Completion Package ──
 //   complete_job         — Mark job complete + GHL stage sync
-//   send_payment_link    — Get Xero online invoice URL + SMS to client
-//   send_acceptance_invoice — Create deposit invoice + send payment link in one call
+//   send_payment_link    — Get Xero online invoice URL + SMS to client (AUTHORISED invoices only — 409 otherwise)
+//   send_acceptance_invoice — Create AUTHORISED deposit invoice + send payment link in one call (Pay Now gated on chargeability)
 //   send_review_request  — SMS client with Google review link
 //
 //   ── Crew & Scheduling ──
@@ -149,6 +149,14 @@ import {
   getScopeRevisionForViewer as _getScopeRevisionForViewer,
 } from '../_shared/scope_freeze/get_scope_revision_for_viewer.ts'
 
+// Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
+// discipline. Single source of truth for the canonical job ref + quote-back ask
+// stamped on the Xero PO (here) and the Resend PO email (send-po-email).
+import {
+  canonicalJobRef as _canonicalJobRef,
+  poDeliveryInstruction as _poDeliveryInstruction,
+} from '../_shared/po_reference.ts'
+
 // Mission makesafe-live-truth-2026-06-14 (Phase 2) — reconciliation D1-D4.
 // Pure diff/inventory/canary logic + DB-bound action wrappers. The D2 inventory
 // reuses the Phase-1 group traversal exported from monitor-ses-makesafes.
@@ -157,13 +165,53 @@ import {
   makesafeEmailReconcileFullInventory as _makesafeEmailReconcileFullInventory,
   makesafeEmailCanary as _makesafeEmailCanary,
   makesafeDraftHeartbeat as _makesafeDraftHeartbeat,
+  makesafeExtractionHealthAlarm as _makesafeExtractionHealthAlarm,
 } from './makesafe_reconcile.ts'
 import {
   makesafeIntakeReconciliation as _makesafeIntakeReconciliation,
+  makesafeIntakeReconcileInvariant as _makesafeIntakeReconcileInvariant,
 } from './makesafe_intake_reconciliation.ts'
 import {
   makesafeIntakeBackfillReport as _makesafeIntakeBackfillReport,
 } from './makesafe_intake_backfill_report.ts'
+// D-c: portal-link backfill for report-family jobs missing links (dry-run-first,
+// in-place metadata patch only — no delete / reopen / status change).
+import {
+  makesafeIntakeLinkBackfill as _makesafeIntakeLinkBackfill,
+} from './makesafe_intake_link_backfill.ts'
+// D-f: golden-set replay — key-less deterministic replay of recent ses@ emails vs the
+// drafts/jobs that were actually created. No writes, no Anthropic call.
+import {
+  makesafeIntakeGoldenReplay as _makesafeIntakeGoldenReplay,
+} from './makesafe_intake_golden_replay.ts'
+// M1.5 cost hardening — local PDF text extraction, per-builder template parsers, and
+// the token/cost ledger. See makesafe_pdf_text.ts / makesafe_template_parser.ts /
+// makesafe_cost.ts. All deterministic + key-less; the model call is the only paid step.
+import {
+  extractPdfText as _extractPdfText,
+  PDF_TEXT_MIN_CHARS as _PDF_TEXT_MIN_CHARS,
+} from './makesafe_pdf_text.ts'
+import {
+  parseWithTemplate as _parseWithTemplate,
+  parseSubjectFields as _parseSubjectFields,
+  resolveSubjectRef as _resolveSubjectRef,
+} from './makesafe_template_parser.ts'
+// Cost-leak fix: extract-at-most-once marker helpers (mark-eligibility rule + the
+// batched, chunked, pre-migration-safe, idempotent DB write).
+import {
+  scanMarkEligible as _scanMarkEligible,
+  markEmailsScanned as _markEmailsScanned,
+} from './makesafe_intake_scan_marker.ts'
+import {
+  readUsage as _readUsage,
+  emailCostRecord as _emailCostRecord,
+  emptyScanTotals as _emptyScanTotals,
+  accrueScanTotals as _accrueScanTotals,
+  usdCost as _usdCost,
+  rollup24h as _rollup24h,
+  ZERO_USAGE as _ZERO_USAGE,
+  HAIKU_4_5_RATES as _HAIKU_4_5_RATES,
+} from './makesafe_cost.ts'
 import {
   _collectPosts as _monitorCollectPosts,
   _resolveGroupId as _monitorResolveGroupId,
@@ -173,6 +221,28 @@ import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
 } from '../_shared/makesafe_intake_classification.ts'
+// M4 U1 (profit-trade-invoice-intelligence-2026-07-03, wiki #112) — make-safe
+// trade-invoice hours control. All branching lives in the pure module (unit-
+// tested in makesafe_hours_flag_test.ts); generate_trade_invoice only gathers
+// inputs and attaches outputs, identically on both submit paths.
+import {
+  appendHoursFlagMarker,
+  type AllowanceCandidate,
+  evaluateHoursFlag,
+  type HoursFlagOutcome,
+  isMakeSafeLine,
+} from './makesafe_hours_flag.ts'
+// M4 U3 (same mission) — finance review email for flagged trade invoices. Pure
+// builder + send-ledger decision live in the module; recordFinanceReviewEmail
+// (below) does the ledger DB writes and the CP2-gated Resend send.
+import {
+  buildFinanceReviewEmail,
+  computeFlagSetHash,
+  decideLedgerAction,
+  type FlaggedReviewLine,
+  type LedgerRow,
+  xeroDraftBillUrl,
+} from './finance_review_email.ts'
 
 // Mission makesafe-live-truth-2026-06-14 (M2) — compact READ endpoints GAP-1..6.
 // These let the make-safe skills read the email-sync Supabase projection instead
@@ -204,11 +274,16 @@ import {
   subjectHasReplyForwardPrefix as _subjectHasReplyForwardPrefix,
   subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
   classifyReportType as _classifyReportType,
+  resolveCommittedReportType as _resolveCommittedReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
+  computeIntakeDraftStatus as _computeIntakeDraftStatus,
 } from './makesafe_intake_gate.ts'
+// B5 SLA: pure email-received -> card-created latency percentiles for the health row
+// + the 24h intake_health rollup. See makesafe_intake_sla.ts.
+import { computeLatencySla as _computeLatencySla } from './makesafe_intake_sla.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
 // scan. See makesafe_intake_dedup.ts.
@@ -228,7 +303,15 @@ import {
   normaliseRef as _normaliseDedupRef,
   normaliseCompany as _normaliseDedupCompany,
   normaliseJobFamily as _normaliseDedupJobFamily,
+  decideInsertConflictAction as _decideInsertConflictAction,
 } from './makesafe_intake_dedup.ts'
+// A4/A5: SMS arrival texts + notify config (Telegram retired business-wide).
+import {
+  loadNotifySettings as _loadNotifySettings,
+  sendMakesafeArrivalTexts as _sendMakesafeArrivalTexts,
+  shouldSendArrival as _shouldSendArrival,
+  type NotifySettings as _NotifySettings,
+} from './makesafe_notify.ts'
 // GAP-A (WO selection + unique per-attachment key).
 // Mission: makesafe-wo-capture-recovery-2026-06-17.
 import {
@@ -241,6 +324,24 @@ import {
 } from './makesafe_builder_work_order_identity.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
+// M2/U4 — materials reconciliation queue (ops worklist that drains unmatched
+// non-mirror ACCPAY bills into manual materials facts, auditably).
+import {
+  listReconQueue as _listReconQueue,
+  assignReconRow as _assignReconRow,
+  markReconNotJobRelated as _markReconNotJobRelated,
+  resolveActor as _resolveReconActor,
+} from './materials_recon.ts'
+// M4 U5 -- finance job cost report (read-only, token-gated share page).
+import {
+  MAKESAFE_COST_REPORT_ACTION,
+  costReportSecret,
+  verifyCostReportToken,
+  getJobCostReport,
+  renderCostReportHtml,
+  renderCostReportError,
+  buildCostReportLink,
+} from './makesafe_cost_report.ts'
 import {
   sendPackAllowed,
   resolveExistingInvoice,
@@ -337,7 +438,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 233
+const OPS_API_EXPECTED_ACTION_COUNT = 236
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -387,6 +488,206 @@ export const _refMatchesExternalRefForTest = refMatchesExternalRef
 //   byRef: { [normRef]: Job[] } — per normalised input ref, the list of distinct active
 //                                 jobs that matched (length > 1 means the ref is ambiguous)
 // Only queries makesafe_job_details filtered by the digit core — never full-table-scan.
+// ── M4 U1: make-safe baseline-resolver INPUT gathering (TUNING POINT #2) ──────
+// For each make-safe job in a trade-invoice submit, gather the candidate
+// allowance hours from each source the resolver may draw on. This is the ONE
+// place that decides WHICH DB field feeds each source — CP1 can repoint a
+// source here without touching the resolver/trust registry in
+// makesafe_hours_flag.ts. Read-only; builder/client invoice amounts are never
+// read here (they must never raise the trade allowance — 2026-06-19 ruling).
+//
+//   • ops_set  ← work_orders.estimated_hours (office-set expectation; the only
+//                ops-set expected-hours field in the data model today).
+//   • report   ← job_service_reports.checklist_json (trade_count × labour_hours;
+//                the trade's OWN report — wired but UNTRUSTED by default until
+//                CP1 verifies reliability + the exact per-trade/total formula).
+//
+// Returns a per-job map of raw candidate hours; the resolver applies trust +
+// precedence. A job with no work order / no report simply yields nulls → the
+// resolver falls back to the 2hr rule default.
+async function fetchMakesafeAllowanceInputs(
+  client: any,
+  jobIds: string[],
+): Promise<Record<string, { ops_set: number | null; report: number | null }>> {
+  const out: Record<string, { ops_set: number | null; report: number | null }> = {}
+  const ids = [...new Set(jobIds.filter(Boolean))]
+  if (ids.length === 0) return out
+  for (const id of ids) out[id] = { ops_set: null, report: null }
+
+  // ops_set: latest non-cancelled work order's estimated_hours per job.
+  try {
+    const { data: wos } = await client.from('work_orders')
+      .select('job_id, estimated_hours, created_at, status')
+      .in('job_id', ids)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: false })
+    const seen = new Set<string>()
+    for (const wo of (wos || [])) {
+      if (!wo?.job_id || seen.has(wo.job_id)) continue
+      const h = Number(wo.estimated_hours)
+      if (Number.isFinite(h) && h > 0) {
+        out[wo.job_id].ops_set = h
+        seen.add(wo.job_id)
+      }
+    }
+  } catch (e) { console.log('[ops-api] hours-flag ops_set read failed (non-blocking):', (e as Error).message) }
+
+  // report: latest service report per job → trade_count × labour_hours.
+  // NOTE: labour_hours may be per-trade OR total in production data — this
+  // ambiguity is exactly why the source is UNTRUSTED by default (CP1 resolves).
+  try {
+    const { data: reports } = await client.from('job_service_reports')
+      .select('job_id, checklist_json, created_at')
+      .in('job_id', ids)
+      .order('created_at', { ascending: false })
+    const seen = new Set<string>()
+    for (const r of (reports || [])) {
+      if (!r?.job_id || seen.has(r.job_id)) continue
+      seen.add(r.job_id)
+      const cj = r.checklist_json || {}
+      const tradeCount = Number(cj.trade_count)
+      const labourHours = Number(cj.labour_hours)
+      if (Number.isFinite(labourHours) && labourHours > 0) {
+        const trades = Number.isFinite(tradeCount) && tradeCount > 0 ? tradeCount : 1
+        out[r.job_id].report = trades * labourHours
+      }
+    }
+  } catch (e) { console.log('[ops-api] hours-flag report read failed (non-blocking):', (e as Error).message) }
+
+  return out
+}
+
+// ── M4 U3: finance review email — send-ledger + CP2-gated Resend send ────────
+// Records ONE review email per flagged trade invoice in finance_review_emails,
+// keyed by trade_invoice_id + flagged-line-set hash, with exactly-one + supersede
+// semantics (finding #1). The actual Resend send is GATED OFF by default
+// (FINANCE_REVIEW_EMAIL_SEND != 'on') — v1 records the rendered email
+// (status='recorded') and sends nothing; the send only fires after Marnin
+// approves the exact draft at CP2 and the env flag is flipped on. This helper is
+// NON-BLOCKING: any failure is caught and logged, never failing the invoice
+// submit (the invoice + Xero draft are already committed).
+//
+// Job cost report URL (U5, Deckhand B): the resolved token-gated ops-api page,
+// built per flagged job via buildCostReportLink(SUPABASE_URL, jobId).
+async function recordFinanceReviewEmail(
+  client: any,
+  params: {
+    tradeInvoiceId: string
+    invoiceNumber: string
+    tradeName?: string | null
+    flaggedLines: FlaggedReviewLine[]
+    xeroBillId?: string | null
+  },
+): Promise<{ action: string } | null> {
+  const flaggedLines = params.flaggedLines || []
+  if (flaggedLines.length === 0) return null
+  try {
+    const flagSetHash = computeFlagSetHash(flaggedLines)
+
+    // Existing ACTIVE ledger rows for this invoice (recorded or sent).
+    const { data: existing } = await client.from('finance_review_emails')
+      .select('id, flag_set_hash')
+      .eq('trade_invoice_id', params.tradeInvoiceId)
+      .in('status', ['recorded', 'sent'])
+    const activeRows: LedgerRow[] = (existing || []).map((r: any) => ({ id: r.id, flag_set_hash: r.flag_set_hash }))
+
+    const decision = decideLedgerAction(activeRows, flagSetHash)
+    if (decision.action === 'skip') return { action: 'skip' }
+
+    // Build the deterministic email (subject/body reflect the supersede state).
+    // Resolved U5 cost-report link per flagged job — the real token-gated ops-api
+    // page (buildCostReportLink mints the HMAC token). U3's pure module consumes
+    // the URL map unchanged.
+    const jobCostReportUrls: Record<string, string> = {}
+    for (const l of flaggedLines) {
+      if (l.jobId && !jobCostReportUrls[l.jobId]) {
+        jobCostReportUrls[l.jobId] = await buildCostReportLink(SUPABASE_URL, l.jobId)
+      }
+    }
+    const email = buildFinanceReviewEmail({
+      invoiceNumber: params.invoiceNumber,
+      tradeInvoiceId: params.tradeInvoiceId,
+      tradeName: params.tradeName || null,
+      flaggedLines,
+      xeroDraftBillUrl: xeroDraftBillUrl(params.xeroBillId),
+      jobCostReportUrls,
+      isUpdate: decision.isUpdate,
+    })
+
+    // Supersede prior active rows before inserting the new one (history is kept).
+    if (decision.supersedesIds.length > 0) {
+      await client.from('finance_review_emails')
+        .update({ status: 'superseded' })
+        .in('id', decision.supersedesIds)
+    }
+
+    // Insert the new ledger row (recorded, not sent). The partial unique index
+    // (trade_invoice_id, flag_set_hash) WHERE status IN (recorded,sent) makes a
+    // concurrent double-submit collide here → treated as an idempotent skip.
+    const { data: inserted, error: insErr } = await client.from('finance_review_emails')
+      .insert({
+        trade_invoice_id: params.tradeInvoiceId,
+        invoice_number: params.invoiceNumber,
+        flag_set_hash: flagSetHash,
+        flagged_line_count: email.flaggedLineCount,
+        recipient: email.recipient,
+        subject: email.subject,
+        body_text: email.text,
+        body_html: email.html,
+        status: 'recorded',
+        is_update: decision.isUpdate,
+        supersedes_id: decision.supersedesIds[0] || null,
+      })
+      .select('id')
+      .single()
+    if (insErr) {
+      // 23505 = unique_violation → another concurrent submit won the race.
+      if ((insErr as any).code === '23505') return { action: 'skip_conflict' }
+      throw insErr
+    }
+
+    // ── CP2-GATED live send (Resend). OFF by default. ──
+    const sendEnabled = Deno.env.get('FINANCE_REVIEW_EMAIL_SEND') === 'on'
+    const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
+    if (sendEnabled && RESEND_API_KEY && inserted?.id) {
+      try {
+        const resendResp = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from: email.from,
+            reply_to: email.replyTo,
+            to: [email.recipient],
+            subject: email.subject,
+            text: email.text,
+            html: email.html,
+          }),
+        })
+        const resendResult = await resendResp.json().catch(() => ({}))
+        if (resendResp.ok) {
+          await client.from('finance_review_emails')
+            .update({ status: 'sent', sent_at: new Date().toISOString() })
+            .eq('id', inserted.id)
+        } else {
+          await client.from('finance_review_emails')
+            .update({ send_error: ('Resend ' + resendResp.status + ': ' + (resendResult.message || '')).slice(0, 500) })
+            .eq('id', inserted.id)
+        }
+      } catch (sendErr) {
+        await client.from('finance_review_emails')
+          .update({ send_error: ('send threw: ' + (sendErr as Error).message).slice(0, 500) })
+          .eq('id', inserted.id)
+      }
+    }
+
+    return { action: decision.action }
+  } catch (e) {
+    // Non-blocking: the invoice + Xero draft are already committed.
+    console.log('[ops-api] finance review email record failed (non-blocking):', (e as Error).message)
+    return { action: 'error' }
+  }
+}
+
 async function resolveJobsByExternalRef(
   client: any,
   refs: string[],
@@ -603,38 +904,64 @@ async function logBusinessEvent(client: any, event: {
   }
 }
 
-// Broadcast a one-line alert to the business-events Telegram channel. Reuses the
-// existing TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID broadcast pattern (resend-webhook).
-// Non-blocking: a Telegram outage never breaks reconciliation. Used by the
-// make-safe reconcile/canary actions (Mission makesafe-live-truth-2026-06-14).
-async function notifyBusinessEventsTelegram(text: string): Promise<void> {
-  const token = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-  const chatId = Deno.env.get('TELEGRAM_CHAT_ID') || ''
-  if (!token || !chatId) return
+// A4 — SMS delivery glue. Sends one SMS to a RAW E.164 phone via the existing
+// ghl-proxy send_sms path (which now find-or-creates a contact from a bare `phone`).
+// Non-blocking: returns true on a delivered send, false otherwise. Never throws.
+async function sendSmsViaGhl(phone: string, message: string, fromNumber?: string): Promise<boolean> {
+  const to = String(phone || '').trim()
+  if (!to || !message) return false
   try {
-    const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const resp = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text }),
+      headers: {
+        'Content-Type': 'application/json',
+        // service-role auth so the tail-call is accepted by ghl-proxy.
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+      body: JSON.stringify({ phone: to, message, ...(fromNumber ? { fromNumber } : {}) }),
     })
-    // N2 — a non-2xx (bad token, wrong chat_id, rate limit) previously passed
-    // silently, so an alert-delivery failure went unnoticed. Check resp.ok and log
-    // the Telegram error body so a broken alert channel is at least visible in logs.
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '<unreadable>')
-      console.error(`[ops-api] reconcile Telegram notify non-OK ${resp.status}: ${errBody}`)
+      console.error(`[ops-api] send_sms non-OK ${resp.status} to ${to}: ${errBody}`)
+      return false
+    }
+    const body = await resp.json().catch(() => ({}))
+    return body?.success !== false
+  } catch (e) {
+    console.error('[ops-api] send_sms failed to', to, (e as Error).message)
+    return false
+  }
+}
+
+// A4 — the make-safe alert channel. Telegram is RETIRED business-wide; reconcile /
+// heartbeat / extraction-health alarms now deliver by SMS to the configured
+// alarm_phones in makesafe_notify_settings (recipient is CONFIG, never hardcoded).
+// If no alarm number is configured yet the alert still writes its business_event (the
+// canonical record) — it just cannot SMS. Non-blocking; never throws.
+async function notifyBusinessEventsSms(text: string): Promise<void> {
+  try {
+    const svc = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    const settings = await _loadNotifySettings(svc)
+    if (!settings.alarm_enabled) return
+    const recipients = (settings.alarm_phones || []).map((p) => String(p || '').trim()).filter(Boolean)
+    if (!recipients.length) {
+      console.warn('[ops-api] extraction alarm has no alarm_phones configured; business_event written, no SMS sent. Seed makesafe_notify_settings.alarm_phones with the owner number.')
+      return
+    }
+    for (const phone of recipients) {
+      await sendSmsViaGhl(phone, text, settings.from_number)
     }
   } catch (e) {
-    console.error('[ops-api] reconcile Telegram notify failed:', (e as Error).message)
+    console.error('[ops-api] notifyBusinessEventsSms failed:', (e as Error).message)
   }
 }
 
 // Build the AlertSink the make-safe reconciliation actions consume — wires their
-// alerts into the EXISTING business_events + Telegram channels (no new system).
+// alerts into the EXISTING business_events channel + SMS (Telegram retired).
 function makeReconAlertSink() {
   return {
     logBusinessEvent,
-    notifyTelegram: notifyBusinessEventsTelegram,
+    notifySms: notifyBusinessEventsSms,
   }
 }
 
@@ -1754,6 +2081,32 @@ if (import.meta.main) serve(async (req: Request) => {
     })
   }
 
+  // ── M4 U5: finance job cost report (public, HMAC-token-gated, READ-ONLY) ──
+  // Finance opens this from a link in the U3 review email — no Bearer. The HMAC
+  // token over job_id makes the URL unguessable; the handler only SELECTs and
+  // renders HTML, never mutates. Served here (pre-auth) so the email link opens.
+  if (_preAuthUrl.searchParams.get('action') === MAKESAFE_COST_REPORT_ACTION) {
+    const _crHtml = { ...CORS, 'Content-Type': 'text/html; charset=utf-8' }
+    // Accept the U3 link's param names (job/invoice), tolerant of job_id/invoice_id.
+    const _jobId = _preAuthUrl.searchParams.get('job') || _preAuthUrl.searchParams.get('job_id') || ''
+    const _invoiceId = _preAuthUrl.searchParams.get('invoice') || _preAuthUrl.searchParams.get('invoice_id') || null
+    const _token = _preAuthUrl.searchParams.get('token') || ''
+    if (!_jobId || !(await verifyCostReportToken(_jobId, _token, costReportSecret()))) {
+      return new Response(renderCostReportError('This link is invalid or has expired. Ask the office to resend the review email.'), { status: 403, headers: _crHtml })
+    }
+    try {
+      const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)
+      if (!_crData) {
+        return new Response(renderCostReportError('That job could not be found.'), { status: 404, headers: _crHtml })
+      }
+      return new Response(renderCostReportHtml(_crData), { status: 200, headers: _crHtml })
+    } catch (_crErr) {
+      console.error('[ops-api] makesafe_job_cost_report error:', _crErr)
+      return new Response(renderCostReportError('The report could not be loaded right now.'), { status: 500, headers: _crHtml })
+    }
+  }
+
   // ── Authentication: API key (server-to-server) + JWT (browser) + scoped routine ──
   // Three caller classes (decision: scoped-routine-key-2026-06-17):
   //   api_key  — the master SW_API_KEY (the ops dashboard) or the service-role key.
@@ -1846,6 +2199,14 @@ if (import.meta.main) serve(async (req: Request) => {
       'list_intake_drafts',
       'makesafe_intake_reconciliation',
       'makesafe_intake_backfill_report',
+      // Auto-Intake v2 (M1) read-only health + audit-invariant checks.
+      'intake_health',
+      'intake_reconcile',
+      // Link backfill: routine may run the DRY-RUN only; the live patch (dry_run:false)
+      // is blocked inside the case for a routine caller (privileged-only).
+      'makesafe_intake_link_backfill',
+      // Golden-set replay proof — read-only, key-less, no writes.
+      'intake_golden_replay',
       'list_makesafe_companies',
       // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
       // normal work-order drafts through the internal auto-approval gate; it never
@@ -2065,7 +2426,14 @@ if (import.meta.main) serve(async (req: Request) => {
         // every-15-min cadence, no extra cron needed).
         const canaryResult = await _makesafeEmailCanary(client, makeReconAlertSink())
         const heartbeatResult = await _makesafeDraftHeartbeat(client, makeReconAlertSink())
-        return json({ ...canaryResult, heartbeat: heartbeatResult })
+        // B1: extraction-health alarm on the SAME 15-min canary cron. Fires the same
+        // Telegram + business_events ERROR path when the classifier is degraded OR the
+        // scan has stalled (last_scan_at stale) — the watcher the health row lacked.
+        const extractionHealthResult = await _makesafeExtractionHealthAlarm(client, makeReconAlertSink(), {
+          // Empty-feed threshold in Perth business hours (config default 6; env override).
+          emptyFeedStaleHours: Number(Deno.env.get('MAKESAFE_EMPTY_FEED_STALE_HOURS') || '') || undefined,
+        })
+        return json({ ...canaryResult, heartbeat: heartbeatResult, extraction_health: extractionHealthResult })
       }
       // D5 draft-creation heartbeat — standalone action for manual invocation and
       // future dedicated scheduling. Detects "builder emails arriving but 0 new
@@ -2079,6 +2447,18 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await _makesafeDraftHeartbeat(client, makeReconAlertSink()))
       }
+      // A1: admin re-extract a NAMED intake draft IN PLACE (immune to the unique-key drop
+      // that swallowed the supersede-then-rescan recovery). Mutates a draft (and may
+      // auto-file), so it is gated to service/API key or admin/owner — same posture as
+      // the other privileged make-safe intake actions; the routine key cannot call it.
+      case 'reextract_intake_draft': {
+        const rxIsAdmin = authMode === 'api_key' ||
+          authUser?.role === 'admin' || authUser?.role === 'owner'
+        if (!rxIsAdmin) {
+          return json({ error: 'forbidden: reextract_intake_draft requires service/API key or admin/owner role' }, 403)
+        }
+        return json(await reextractIntakeDraft(client, body))
+      }
       case 'makesafe_intake_reconciliation': {
         return json(await _makesafeIntakeReconciliation(client, {
           windowDays: Number(url.searchParams.get('window_days') || '') || undefined,
@@ -2086,9 +2466,59 @@ if (import.meta.main) serve(async (req: Request) => {
           limitItems: Number(url.searchParams.get('limit') || '') || undefined,
         }))
       }
+      // Auto-Intake v2 (M1): the one-call fail-loud health check (D-a).
+      case 'intake_health': return json(await intakeHealth(client))
+      // Auto-Intake v2 (M1): the strict "did we miss anything" invariant (D-e).
+      // Read-only; ZERO unaccounted = the board is live and true.
+      case 'intake_reconcile': {
+        return json(await _makesafeIntakeReconcileInvariant(client, {
+          windowDays: Number(url.searchParams.get('window_days') || '') || undefined,
+          limitUnaccounted: Number(url.searchParams.get('limit') || '') || undefined,
+        }))
+      }
+      // Auto-Intake v2 (M1): golden-set replay proof (D-f). Read-only, key-less.
+      // M1.5: also a COST preview — pass a bounded WO-PDF download so the replay can
+      // extract each PDF's text layer (pdf_mode) and compare the template parse vs the
+      // actual draft. Still NO Anthropic call; the PDF extraction is local + deterministic.
+      case 'intake_golden_replay': {
+        const goldenAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const goldenDownloadPdf = async (storagePath: string): Promise<Uint8Array | null> => {
+          try {
+            const { data: blob, error } = await goldenAdmin.storage
+              .from('makesafe-emails').download(storagePath)
+            if (error || !blob) return null
+            return new Uint8Array(await blob.arrayBuffer())
+          } catch (_) {
+            return null
+          }
+        }
+        return json(await _makesafeIntakeGoldenReplay(client, _senderMatchesPattern, _SES_MAILBOX, {
+          days: Number(url.searchParams.get('days') || '') || undefined,
+          limit: Number(url.searchParams.get('limit') || '') || undefined,
+          downloadPdf: goldenDownloadPdf,
+          maxPdfExtractions: Number(url.searchParams.get('max_pdf') || '') || undefined,
+        }))
+      }
       case 'makesafe_intake_backfill_report': {
         return json(await _makesafeIntakeBackfillReport(client, {
           limitItems: Number(url.searchParams.get('limit') || '') || undefined,
+        }))
+      }
+      // D-c: portal-link backfill. DRY-RUN by default; a live patch (dry_run:false)
+      // is a privileged, in-place metadata write only (no delete / reopen / status
+      // change), so it requires the ops key or an admin/owner session.
+      case 'makesafe_intake_link_backfill': {
+        const linkBackfillPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        const wantsLive = body?.dry_run === false || body?.dryRun === false ||
+          url.searchParams.get('dry_run') === 'false'
+        if (wantsLive && !linkBackfillPrivileged) {
+          return json({ error: 'forbidden: a live link backfill (dry_run:false) requires the privileged ops key or an admin/owner session; the routine may only run the dry-run' }, 403)
+        }
+        return json(await _makesafeIntakeLinkBackfill(client, {
+          dryRun: !wantsLive,
+          includeArchived: body?.include_archived === true || url.searchParams.get('include_archived') === 'true',
+          limit: Number(url.searchParams.get('limit') || body?.limit || '') || undefined,
         }))
       }
       case 'makesafe_map': return json(await makesafeMap(client, url.searchParams))
@@ -2147,6 +2577,38 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))
       case 'list_pos': return json(await listPOs(client, url.searchParams))
+
+      // ── M2/U4 · Materials reconciliation queue (ops worklist) ──
+      // Read the queue (default status=open) + drain stats; and the three
+      // auditable operator actions. accept/assign land a manual materials FACT
+      // (confidence=high_manual, automation_source=manual_queue, assigned_by=actor)
+      // and flip the queue row to 'assigned'; not-job-related closes it and writes
+      // NO fact. Every write is keyed by xero_invoice_id → reversible by delete;
+      // xero_invoices / trade_invoices are never mutated (CP1 Option A).
+      case 'materials_recon_queue':
+        return json(await _listReconQueue(client, {
+          status: url.searchParams.get('status') || 'open',
+          limit: Number(url.searchParams.get('limit')) || 200,
+          orgId: DEFAULT_ORG_ID,
+        }))
+      case 'materials_recon_assign':
+        return json(await _assignReconRow(client, {
+          queueId: body.queue_id ?? body.queueId ?? null,
+          xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
+          jobId: body.job_id ?? body.jobId ?? null,
+          jobNumber: body.job_number ?? body.jobNumber ?? null,
+          useSuggestion: body.use_suggestion === true || body.useSuggestion === true,
+          actor: _resolveReconActor(body),
+          orgId: DEFAULT_ORG_ID,
+        }))
+      case 'materials_recon_not_job_related':
+        return json(await _markReconNotJobRelated(client, {
+          queueId: body.queue_id ?? body.queueId ?? null,
+          xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
+          actor: _resolveReconActor(body),
+          orgId: DEFAULT_ORG_ID,
+        }))
+
       case 'list_work_orders': return json(await listWorkOrders(client, url.searchParams))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
@@ -2252,9 +2714,42 @@ if (import.meta.main) serve(async (req: Request) => {
       }
 
       // ── Ops Dashboard Write ──
-      case 'create_assignment': return json(await createAssignment(client, body))
-      case 'update_assignment': return json(await updateAssignment(client, body))
-      case 'delete_assignment': return json(await deleteAssignment(client, body))
+      // create/update/delete_assignment were previously ungated: any authenticated
+      // JWT (incl. a plain installer) could mutate any assignment. Now gated to the
+      // dashboard/service key (authMode='api_key'), a dispatcher (admin/owner/
+      // ops_manager JWT), or a manager of the job's vertical. ops.html uses the
+      // SW_API_KEY (api_key) and is unaffected.
+      case 'create_assignment': {
+        await assertAssignmentMutationAuthz(client, authMode, authUser, { jobId: body.jobId || body.job_id })
+        return json(await createAssignment(client, body))
+      }
+      case 'update_assignment': {
+        await assertAssignmentMutationAuthz(client, authMode, authUser, {
+          assignmentId: body.assignmentId || body.assignment_id || body.id,
+          jobId: body.jobId || body.job_id,
+        })
+        return json(await updateAssignment(client, body))
+      }
+      case 'delete_assignment': {
+        await assertAssignmentMutationAuthz(client, authMode, authUser, {
+          assignmentId: body.assignmentId || body.assignment_id || body.id,
+        })
+        return json(await deleteAssignment(client, body))
+      }
+      // Trade-side manager allocation (Manager View). JWT-authed via authTrade;
+      // caller must be a dispatcher or a manager of the job's vertical. Wraps
+      // createAssignment / updateAssignment (reassignment) with idempotency +
+      // archived-job refusal. Wires to the trade app's reassign flow in Wave 2-3.
+      case 'allocate_job': {
+        const tradeUser = await authTrade(req, client)
+        const { data: caller } = await client.from('users')
+          .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
+        return json(await allocateJob(client, {
+          body,
+          callerRole: caller?.role,
+          managedVerticals: caller?.managed_verticals,
+        }))
+      }
       case 'update_job_status': return json(await updateJobStatus(client, body))
       case 'create_po': return json(await createPO(client, body))
       case 'update_po': return json(await updatePO(client, body))
@@ -3500,19 +3995,25 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'clock_event':
       case 'submit_makesafe_report': {
         const tradeUser = await authTrade(req, client)
-        // Look up user role for admin visibility
-        const { data: userRec } = await client.from('users').select('role').eq('id', tradeUser.id).maybeSingle()
-        const tradeRole = userRec?.role || 'trade'
-        const isAdmin = tradeRole === 'admin'
-        // Dispatcher = the ops manager / admin who runs the board. They get a
-        // see-all view of every job and are the only non-assigned users who can
-        // see the full open MakeSafe pool (other trades see only their own).
-        const isDispatcher = isAdmin || tradeRole === 'ops_manager'
+        // Look up user role + managed verticals for trade-app visibility.
+        const { data: userRec } = await client.from('users').select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
+        // Dispatcher = the ops manager / admin who runs the board: see-all view of
+        // every job plus the full open MakeSafe pool (other trades see only their
+        // own). A vertical manager (users.managed_verticals contains the vertical,
+        // e.g. Hugo=makesafe, Henry=fencing, Nithin=patio) is NOT a dispatcher:
+        // they get the full open pool of EACH managed vertical unioned with only
+        // their own assignments (showAll stays false). Resolved server-side via the
+        // pure _resolveManagerVisibility helper. makesafe_manager is legacy input
+        // only (backfilled into managed_verticals); the runtime reads the list.
+        const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals } = _resolveManagerVisibility({
+          role: userRec?.role,
+          managedVerticals: userRec?.managed_verticals,
+        })
         switch (action) {
           case 'my_jobs': {
             const mode = url.searchParams.get('mode') // 'all' for dispatcher view, 'mine' for personal
             const showAll = isDispatcher && mode !== 'mine'
-            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher))
+            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager, poolVerticals))
           }
           case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
@@ -4259,6 +4760,10 @@ if (import.meta.main) serve(async (req: Request) => {
                   id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: appliedRate,
                   rate_source: clientRateProvided ? 'client_entered' : 'server_resolved',
                   description: manualRow.description || null,
+                  // M4 U1: carry the trade's variation explanation (trade-app capture
+                  // is U2/Deckhand B) so the jobGroups loop can attach it to a flagged
+                  // make-safe line. Absent until U2 ships — the flag still fires.
+                  justification: manualRow.justification || null,
                   break_minutes: 0, manual_override_flag: false,
                   scheduled_date: a.scheduled_date, status: a.status,
                 })
@@ -4320,6 +4825,22 @@ if (import.meta.main) serve(async (req: Request) => {
               }
             }
 
+            // ── M4 U1: gather baseline-resolver inputs for make-safe jobs ────
+            // Populated for the assigned/clocked path here and merged for the
+            // searched-in extras path below, so both submit paths resolve their
+            // allowance from the SAME per-job candidate map. Any line that flags
+            // sets anyHoursFlag, which drives the `| HOURS-FLAG` bill Reference.
+            const makesafeAllowanceInputs: Record<string, { ops_set: number | null; report: number | null }> =
+              await fetchMakesafeAllowanceInputs(client, msJobIds)
+            let anyHoursFlag = false
+            const candidatesForJob = (jobId: string): AllowanceCandidate[] => {
+              const inp = makesafeAllowanceInputs[jobId] || { ops_set: null, report: null }
+              return [
+                { source: 'ops_set', hours: inp.ops_set },
+                { source: 'report', hours: inp.report },
+              ]
+            }
+
             // Build line items
             let totalHours = 0
             let totalBreaks = 0
@@ -4349,6 +4870,25 @@ if (import.meta.main) serve(async (req: Request) => {
               const lineTotal = Math.round(jobHours * rate * 100) / 100
               totalHours += jobHours
 
+              const rateNote = rateSource === 'client_entered'
+                ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                : 'Server-resolved rate from trade_rates.'
+
+              // ── M4 U1: make-safe hours flag (assigned/clocked path) ────────
+              // Structured activation (jobs.type='makesafe'); the SWMS- prefix is
+              // never required. The resolver sets the allowance; a charge over it
+              // flags — soft, never blocks, never touches $/hours.
+              let hoursFlag: HoursFlagOutcome | null = null
+              if (isMakeSafeLine({ jobType: job.type })) {
+                const justification = [...new Set(assigns.map((a: any) => a.justification).filter(Boolean))].join('; ') || null
+                hoursFlag = evaluateHoursFlag({
+                  chargedHours: jobHours,
+                  candidates: candidatesForJob(jobId),
+                  justification,
+                })
+                if (hoursFlag.flagged) anyHoursFlag = true
+              }
+
               lineItems.push({
                 job_id: jobId,
                 job_number: job.job_number || '',
@@ -4359,9 +4899,12 @@ if (import.meta.main) serve(async (req: Request) => {
                 days_worked: assigns.length,
                 assignment_ids: assignmentIds,
                 description: descriptions.length > 0 ? descriptions.join('; ') : null,
-                query_note: rateSource === 'client_entered'
-                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                  : 'Server-resolved rate from trade_rates.',
+                query_note: hoursFlag?.flagged
+                  ? hoursFlag.queryNote + ' | ' + rateNote
+                  : rateNote,
+                // Internal — consumed by toTradeInvoiceLineRow (flag columns) and
+                // the Xero description/reference builders; stripped before insert.
+                _hoursFlag: hoursFlag,
               })
             }
 
@@ -4448,6 +4991,25 @@ if (import.meta.main) serve(async (req: Request) => {
               // before payment, so a rare duplicate is caught there; do not hard-block a trade from
               // invoicing. (Assigned-card lane keeps its own assignment.invoiced_in guard, untouched.)
 
+              // ── M4 U1: gather resolver inputs for make-safe extra jobs ─────
+              // Merge into the same per-job map the assigned/clocked path uses,
+              // so a make-safe searched-in extra resolves its allowance the same
+              // way (the old PR #205 flagged only the assigned path — finding).
+              {
+                const extraMsJobIds = [...new Set(
+                  [...Object.values(jobById), ...Object.values(jobByNumber)]
+                    .filter((j: any) => j?.type === 'makesafe')
+                    .map((j: any) => j.id)
+                    .filter((id: string) => id && !(id in makesafeAllowanceInputs)),
+                )]
+                if (extraMsJobIds.length > 0) {
+                  const extraInputs = await fetchMakesafeAllowanceInputs(client, extraMsJobIds)
+                  for (const [jobId, inp] of Object.entries(extraInputs)) {
+                    makesafeAllowanceInputs[jobId] = inp
+                  }
+                }
+              }
+
               for (const item of extra_items) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
@@ -4466,6 +5028,25 @@ if (import.meta.main) serve(async (req: Request) => {
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 extraSubtotal += amt
+                const extraHours = Number(item.quantity ?? item.qty ?? item.hours ?? 0)
+                const extraRateNote = rateSource === 'client_entered'
+                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                  : 'Server-resolved rate from trade_rates.'
+
+                // ── M4 U1: make-safe hours flag (searched-in extras path) ────
+                // Structured activation via job type / division / line_type —
+                // never the SWMS- prefix. Same resolver + evaluator as the
+                // assigned path; soft, never blocks, never touches $/hours.
+                let extraHoursFlag: HoursFlagOutcome | null = null
+                if (isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
+                  extraHoursFlag = evaluateHoursFlag({
+                    chargedHours: extraHours,
+                    candidates: resolvedJob?.id ? candidatesForJob(resolvedJob.id) : [],
+                    justification: item.justification || null,
+                  })
+                  if (extraHoursFlag.flagged) anyHoursFlag = true
+                }
+
                 extraLineItems.push({
                   line_type: item.type ? item.type.toLowerCase() : 'other',
                   description: item.description || item.type || 'Extra item',
@@ -4473,7 +5054,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   // M0 guard reads total_hours for HOURLY_TYPES lines; extras carry their
                   // hours in `quantity` (searched-in make-safe/labour route here), so mirror
                   // it to total_hours or the guard rejects every searched-in line as "zero hours".
-                  total_hours: Number(item.quantity ?? item.qty ?? item.hours ?? 0),
+                  total_hours: extraHours,
                   unit: item.unit || 'ea',
                   unit_rate: Number(item.rate || 0),
                   line_total_ex: amt,
@@ -4485,9 +5066,11 @@ if (import.meta.main) serve(async (req: Request) => {
                   site_address: resolvedJob
                     ? [resolvedJob.site_address, resolvedJob.site_suburb].filter(Boolean).join(', ')
                     : (item.site_address || null),
-                  query_note: rateSource === 'client_entered'
-                    ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                    : 'Server-resolved rate from trade_rates.',
+                  query_note: extraHoursFlag?.flagged
+                    ? extraHoursFlag.queryNote + ' | ' + extraRateNote
+                    : extraRateNote,
+                  // Internal — consumed by toTradeInvoiceLineRow + Xero builders; stripped before insert.
+                  _hoursFlag: extraHoursFlag,
                 })
               }
             }
@@ -4654,8 +5237,15 @@ if (import.meta.main) serve(async (req: Request) => {
 
             const toTradeInvoiceLineRow = (line: any, defaults: any = {}) => {
               // site_address is used for the Xero description below but is not
-              // a trade_invoice_lines column. Never send memory-only fields to PostgREST.
-              const { site_address: _siteAddress, ...dbLine } = { ...defaults, ...line }
+              // a trade_invoice_lines column. _hoursFlag is memory-only metadata
+              // (its fields are unpacked into the flag columns below). Never send
+              // memory-only fields to PostgREST.
+              const { site_address: _siteAddress, _hoursFlag: _hf, ...dbLine } = { ...defaults, ...line }
+              // M4 U1: land the flag-fact fields (U4 contract) from the resolver
+              // outcome. baseline_hours/baseline_source are recorded for EVERY
+              // make-safe line; flag_type/hours_justification/flagged_at only when
+              // the line actually flags. Non-make-safe lines carry nulls.
+              const ff = (line?._hoursFlag ?? null) as HoursFlagOutcome | null
               return {
                 trade_invoice_id: invoice.id,
                 job_id: dbLine.job_id || null,
@@ -4676,6 +5266,11 @@ if (import.meta.main) serve(async (req: Request) => {
                 unit_rate: dbLine.unit_rate ?? null,
                 line_date: dbLine.line_date || null,
                 division: dbLine.division || null,
+                flag_type: ff?.lineFields.flag_type ?? null,
+                baseline_hours: ff?.lineFields.baseline_hours ?? null,
+                baseline_source: ff?.lineFields.baseline_source ?? null,
+                hours_justification: ff?.lineFields.hours_justification ?? null,
+                flagged_at: ff?.lineFields.flagged_at ?? null,
               }
             }
             const lineRows = [
@@ -4766,10 +5361,16 @@ if (import.meta.main) serve(async (req: Request) => {
             // manual check now: the bookkeeper reviews/approves it in Xero (drafts
             // pay no one until approved there). So soft flags ANNOTATE the invoice
             // (query_note) and PROCEED to draft.  [Q18 — supersedes F6/Q4 Option A]
-            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess' || duplicateExtraCount > 0
+            // M4 U1: anyHoursFlag folds a make-safe over-allowance line into the
+            // soft-review set. It leads the invoice query_note (money-relevant)
+            // but only fires for a flagged make-safe line, so existing (non-make-
+            // safe) invoices keep their exact prior message.
+            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess' || duplicateExtraCount > 0 || anyHoursFlag
             if (softReviewFlag) {
               await client.from('trade_invoices').update({
-                query_note: duplicateExtraCount > 0
+                query_note: anyHoursFlag
+                  ? 'HOURS-FLAG: one or more make-safe lines bill over the allowed hours — see the line note(s) for allowed vs charged + the trade\'s explanation. Verify before approving the Xero draft.'
+                  : duplicateExtraCount > 0
                   ? 'Possible duplicate searched-in job line(s): already appears on ' + duplicateExtraInvoiceRefs.slice(0, 5).join(', ') + '. Verify before approving the Xero draft.'
                   : reviewFlag === 'hours_excess'
                     ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
@@ -4872,6 +5473,8 @@ if (import.meta.main) serve(async (req: Request) => {
                     (l.job_number || 'Labour') + ' | ' + (trackingCategoryForJob(l.job_number || '') || 'Construction'),
                     builderRef ? 'Builder Ref: ' + builderRef : null,
                     'Labour — ' + l.total_hours + 'h @ $' + l.hourly_rate + '/hr' + (l.days_worked > 1 ? ' (' + l.days_worked + ' days)' : ''),
+                    // M4 U1: inline hours-flag so finance sees it when approving the draft bill.
+                    l._hoursFlag?.xeroDescriptionLine || null,
                     [l.client_name, jobMap[l.job_id]?.site_address, jobMap[l.job_id]?.site_suburb].filter(Boolean).join(', '),
                   ].filter(Boolean).join('\n'),
                   Quantity: l.total_hours,
@@ -4888,6 +5491,8 @@ if (import.meta.main) serve(async (req: Request) => {
                       possibleDuplicate ? 'POSSIBLE DUPLICATE - verify prior trade invoice before approving' : null,
                       e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
                       (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
+                      // M4 U1: inline hours-flag on a searched-in make-safe extra line.
+                      e._hoursFlag?.xeroDescriptionLine || null,
                       e.client_name ? [e.client_name, e.site_address].filter(Boolean).join(', ') : '',
                     ].filter(Boolean).join('\n'),
                     Quantity: e.quantity || 1,
@@ -4903,9 +5508,15 @@ if (import.meta.main) serve(async (req: Request) => {
                 // _external_ref is already on jobMap entries (enriched above at Change 4 / L3464-3472).
                 const xeroExternalRefs = [...new Set(lineItems.map((l: any) => jobMap[l.job_id]?._external_ref).filter(Boolean))].join(', ')
                 const xeroInternalJobNums = [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', ')
-                const xeroReference = invoiceNumber
-                  + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
-                  + (xeroExternalRefs ? ' | ' + xeroExternalRefs : '')
+                // M4 U1: append the EXACT `| HOURS-FLAG` marker when any line on
+                // this invoice flagged, so finance can spot flagged bills in the
+                // Xero invoice list without opening each one (finding #7 verbatim).
+                const xeroReference = appendHoursFlagMarker(
+                  invoiceNumber
+                    + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
+                    + (xeroExternalRefs ? ' | ' + xeroExternalRefs : ''),
+                  anyHoursFlag,
+                )
 
                 const xeroPayload = {
                   Invoices: [{
@@ -4977,6 +5588,33 @@ if (import.meta.main) serve(async (req: Request) => {
                   schema_version: '1.0',
                 })
               } catch (logErr) { console.log('[ops-api] Failed to record xero_push_failed event:', (logErr as Error).message) }
+            }
+
+            // ── M4 U3: finance review email for a flagged invoice ─────────────
+            // Fires for both the success and push-failed paths (the flag is about
+            // the hours, not the Xero outcome); links the draft bill only when one
+            // exists. Records ONE email per flagged invoice in the send-ledger with
+            // exactly-one + supersede semantics. Non-blocking + CP2-gated: v1
+            // records but does not send. Runs before the XERO_PUSH_FAILED return.
+            if (anyHoursFlag) {
+              const flaggedReviewLines: FlaggedReviewLine[] = [...lineItems, ...extraLineItems]
+                .filter((l: any) => l._hoursFlag?.flagged)
+                .map((l: any) => ({
+                  jobId: l.job_id || null,
+                  jobNumber: l.job_number || null,
+                  clientName: l.client_name || null,
+                  allowedHours: l._hoursFlag.allowed_hours,
+                  source: l._hoursFlag.allowed_source,
+                  chargedHours: l._hoursFlag.charged_hours,
+                  justification: l._hoursFlag.justification ?? null,
+                }))
+              await recordFinanceReviewEmail(client, {
+                tradeInvoiceId: invoice.id,
+                invoiceNumber,
+                tradeName: userProfile?.name || null,
+                flaggedLines: flaggedReviewLines,
+                xeroBillId,
+              })
             }
 
             // B3: XERO_PUSH_FAILED — invoice is saved locally in 'approved' state (recoverable)
@@ -8815,6 +9453,24 @@ export interface MakesafeSurfacing {
 // pack statuses that mean the pack was actually sent / closed (never re-surface).
 const MAKESAFE_PACK_SENT_STATUSES = ['sent', 'sent_marker_failed', 'sent_not_closed', 'close_failed']
 
+// CHIP-TRUTH (audit F5): the TRUSTWORTHY "sent to builder" signal for the board's
+// SENT chip. TRUE only when there is a REAL send record:
+//   - the MAKESAFE_PACK_SENT | main marker note (packSent), or
+//   - the durable makesafe_report_packs row is in a sent/closed status.
+// It deliberately EXCLUDES detail.report_sent_at, which updateMakesafeSubstatus
+// stamps on the move to ready_to_invoice (admin marking the report ready to
+// invoice) — NOT necessarily at send time — so it is not proof of a send. It also
+// does NOT use the board stage: today the SENT chip greened for EVERY
+// completed/archive card as a column proxy (makesafeReportStatus -> 'processed'),
+// asserting "sent" with no record behind it. Fail-closed: unknown -> not sent.
+export function _makesafeSentToBuilder(
+  packSent: boolean | undefined,
+  pack: MakesafeReportPackLike | null | undefined,
+): boolean {
+  const packStatus = String(pack?.status || '').toLowerCase()
+  return packSent === true || MAKESAFE_PACK_SENT_STATUSES.includes(packStatus)
+}
+
 export function _deriveMakesafeSurfacing(
   job: any,
   detail: any,
@@ -9048,23 +9704,51 @@ function makesafeInvoiceStatus(boardStage: string, invoice: any): string {
 }
 
 // Build the per-job close-out doc booleans from this job's job_documents rows.
-// has_wo: a work order doc; has_report_doc / has_invoice_doc / has_swms_doc:
-// matched by file_name (the PDFs the reporting skill attaches at close-out).
+// has_wo: a work order doc; has_report_doc / has_invoice_doc / has_swms_doc.
+//
+// CHIP-TRUTH (audit F6): PREFER the typed job_documents.type over the filename
+// heuristic. The reporting skill now writes TYPED rows — an invoice as
+// type='invoice' named 'INV-0776.pdf', the report as type='makesafe_report',
+// the SWMS as type='swms'. A filename-only match therefore both:
+//   - MISSES real typed docs (INV-0776.pdf has no 'invoice' substring, so the
+//     invoice read as missing — stranding 8 fully-packed MLB jobs and failing
+//     the send preflight's close-out doc gate); and
+//   - can FAKE a doc from a mistyped 'general' file whose NAME happens to match.
+// Rule, per row:
+//   - a MEANINGFUL type (present and not 'general') is AUTHORITATIVE — the row
+//     counts ONLY for that kind, never via filename.
+//   - an ABSENT or 'general' type FALLS BACK to the filename heuristic (legacy
+//     rows the skill has not re-typed yet).
+// Fail-closed: an unknown/other type counts for no kind; empty docs -> all false.
 function makesafeDocBooleans(docRows: any[] | null | undefined) {
   const rows = docRows || []
-  const nameMatches = (needle: string) =>
-    rows.some((d: any) => String(d?.file_name || '').toLowerCase().includes(needle))
-  // SWMS match must NOT catch the make-safe job-number prefix `SWMS-NNNNN`, which
-  // appears in most attached filenames. Match "swms" only when it is not the
-  // job-number token (i.e. not immediately followed by a hyphen + digit).
-  const hasSwms = rows.some((d: any) => /swms(?![-\s]?\d)/i.test(String(d?.file_name || '')))
+  const isFallbackType = (t: string) => t === '' || t === 'general'
+  const nameOf = (d: any) => String(d?.file_name || '').toLowerCase()
+  const typeOf = (d: any) => String(d?.type || '').toLowerCase()
+  // SWMS filename fallback must NOT catch the make-safe job-number prefix
+  // `SWMS-NNNNN`, which appears in most attached filenames. Match "swms" only
+  // when it is not the job-number token (not immediately followed by hyphen+digit).
+  const swmsInName = (name: string) => /swms(?![-\s]?\d)/i.test(name)
+  // A row counts for `canonicalType` when its type IS that type, or when the row
+  // is untyped/'general' and the filename fallback matches.
+  const has = (canonicalType: string, nameMatches: (name: string) => boolean) =>
+    rows.some((d: any) => {
+      const t = typeOf(d)
+      if (t === canonicalType) return true
+      if (isFallbackType(t)) return nameMatches(nameOf(d))
+      return false
+    })
   return {
-    has_wo: rows.some((d: any) => String(d?.type || '').toLowerCase() === 'work_order'),
-    has_report_doc: nameMatches('make safe report'),
-    has_invoice_doc: nameMatches('invoice'),
-    has_swms_doc: hasSwms,
+    // has_wo stays type-only (no legacy filename WO fallback) — never inferred
+    // from a filename to avoid a stray 'general' file spoofing a work order.
+    has_wo: rows.some((d: any) => typeOf(d) === 'work_order'),
+    has_report_doc: has('makesafe_report', (n) => n.includes('make safe report')),
+    has_invoice_doc: has('invoice', (n) => n.includes('invoice')),
+    has_swms_doc: has('swms', (n) => swmsInName(n)),
   }
 }
+// Test-only export for the chip-truth doc-boolean derivation.
+export const _makesafeDocBooleansForTest = makesafeDocBooleans
 
 function docCreatedAtMs(doc: any): number {
   const t = doc?.created_at ? new Date(doc.created_at).getTime() : NaN
@@ -9291,6 +9975,11 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     crew_members: crew.crew_members,
     report_status: makesafeReportStatus(boardStage, detail, report),
     invoice_status: makesafeInvoiceStatus(boardStage, invoice),
+    // sent_to_builder (audit F5): the honest SENT-chip signal. TRUE only with a
+    // real send record (pack-sent marker OR durable pack sent-status) — NEVER a
+    // bare completed/archive column proxy. Completed cards with no send record
+    // read as not-sent, not green. Fail-closed (unknown -> false).
+    sent_to_builder: _makesafeSentToBuilder(packSent, pack),
     ...(docFlags || {}),
     // pack_sent is only meaningful (defined) when the caller loaded the marker.
     ...(packSent !== undefined ? { pack_sent: packSent === true } : {}),
@@ -9300,6 +9989,8 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     warning_docs: softWarning ? missingDocs : undefined,
   }
 }
+// Test-only export for the board-job enrichment (chip-truth wiring).
+export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 
 async function updateMakesafeSubstatus(client: any, body: any) {
   const { job_id, jobId, substatus } = body
@@ -10090,6 +10781,209 @@ function availableIntakeAttachments(attachments: any[]): any[] {
   return (attachments || []).filter((a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url))
 }
 
+// ── D-a (Auto-Intake v2 M1): FAIL-LOUD extraction key preflight ──────────────
+// v1's core sin was silence: when the ANTHROPIC_API_KEY was revoked, scanSesMakesafes
+// skipped extraction with a bare console.log and kept producing empty drafts (missing
+// portal links on 31 of 35 roof jobs) for weeks. v2 refuses to be silent: a dead/absent
+// key degrades the WHOLE scan loud — every draft made this run is tagged with this
+// marker (a BLOCKING missing field, so auto-file can never fire on a degraded draft),
+// forced to needs_review, and a visible makesafe_intake_health banner is written.
+const INTAKE_EXTRACTION_DOWN_MARKER = 'extraction_down_key_dead'
+
+// True when an Anthropic SDK/HTTP error indicates the KEY is dead (unset/revoked/
+// invalid), as opposed to a transient network/5xx blip. A dead key degrades the whole
+// scan; a transient failure only flags the one email and retries next cycle.
+function isAnthropicAuthFailure(err: unknown): boolean {
+  const anyErr = err as any
+  const status = Number(anyErr?.status ?? anyErr?.statusCode ?? anyErr?.response?.status)
+  if (status === 401 || status === 403) return true
+  const hay = `${anyErr?.name || ''} ${anyErr?.type || ''} ${anyErr?.error?.type || ''} ${anyErr?.message || String(err)}`.toLowerCase()
+  // 'authentication' (bare) matches both the SDK error TYPE 'authentication_error' and
+  // the error CLASS name 'AuthenticationError'; the rest cover revoked/absent-key text.
+  return /authentication|permission_error|invalid x-api-key|invalid api key|invalid_api_key|unauthorized|401|403/.test(hay)
+}
+
+// D-d kill switch: read makesafe_cron_settings.auto_file_enabled (Captain D1 default
+// TRUE). Fail-OPEN to true on a read error/missing row so a transient DB blip does not
+// silently disable the Captain-locked day-one auto-file decision — the env override
+// (MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false) and the degraded-extraction block remain
+// as independent brakes.
+async function isAutoFileEnabled(client: any): Promise<boolean> {
+  try {
+    const { data, error } = await client.from('makesafe_cron_settings')
+      .select('auto_file_enabled').eq('id', true).maybeSingle()
+    if (error) {
+      console.warn('[ops-api] auto_file_enabled read failed; defaulting ON:', error.message)
+      return true
+    }
+    if (!data || data.auto_file_enabled == null) return true
+    return data.auto_file_enabled !== false
+  } catch (e) {
+    console.warn('[ops-api] auto_file_enabled read threw; defaulting ON:', (e as Error).message)
+    return true
+  }
+}
+
+// D-a: write the single-row makesafe_intake_health record every scan. Computes the
+// ok<->degraded transition so degraded_since answers "how long has the key been dead".
+// Best-effort: a health-write failure must never fail the scan itself.
+async function writeIntakeHealth(client: any, input: {
+  extractionStatus: 'ok' | 'degraded'
+  degradedReason: string | null
+  anyExtractionSucceeded: boolean
+  draftsCreated: number
+  autoFiled: number
+  // M1.5 cost ledger for this scan (optional so callers that don't extract, e.g. the
+  // group-post capture path, can omit it and leave the ledger untouched).
+  cost?: {
+    model_calls: number
+    model_skips: number
+    usage: {
+      input_tokens: number
+      output_tokens: number
+      cache_read_input_tokens: number
+      cache_creation_input_tokens: number
+    }
+  }
+  // B5 SLA: this scan's email-received -> draft-created latency snapshot (seconds) +
+  // the count of candidates deferred past the per-run scan budget. Optional +
+  // pre-migration-safe: written into the FULL row only, so a pre-migration base-only
+  // retry silently drops them (same posture as the M1.5 cost columns).
+  sla?: {
+    p50_sec: number
+    p95_sec: number
+    max_sec: number
+    samples: number
+  }
+  cappedCandidates?: number
+  // A3 dropped-WO breadcrumb for this scan (folded into the health row + the alarm).
+  breadcrumb?: {
+    insertConflictsHealed: number
+    insertConflictsLive: number
+    droppedAfterExtraction: number
+    lastDroppedRef: string | null
+  }
+  // Empty-feed anomaly: the freshest inbound (non-own-domain) ses@ email this scan saw.
+  // Lets the alarm detect a Graph mirror returning 200-with-nothing (no new mail).
+  lastInboundEmailAt?: string | null
+}): Promise<void> {
+  try {
+    const nowIso = new Date().toISOString()
+    // H1: read the M1 BASE columns separately (always exist) so the fail-loud banner's
+    // ok<->degraded transition is tracked even if the M1.5 ledger columns don't exist
+    // yet. The cost totals are a SEPARATE best-effort read (may 400 pre-migration).
+    const { data: prevBase } = await client.from('makesafe_intake_health')
+      .select('extraction_status, degraded_since, last_successful_extraction_at')
+      .eq('id', true).maybeSingle()
+    let prevCost: any = null
+    if (input.cost) {
+      const { data } = await client.from('makesafe_intake_health')
+        .select('total_model_calls, total_model_skips, total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens')
+        .eq('id', true).maybeSingle()
+      prevCost = data || null // null pre-migration (columns absent) -> counters start at 0
+    }
+    // A3: prior lifetime breadcrumb totals (best-effort; null pre-migration -> start at 0).
+    let prevBreadcrumb: any = null
+    if (input.breadcrumb) {
+      const { data } = await client.from('makesafe_intake_health')
+        .select('total_insert_conflicts_healed, total_insert_conflicts_live, total_dropped_wo, dropped_wo_last_ref')
+        .eq('id', true).maybeSingle()
+      prevBreadcrumb = data || null
+    }
+    const wasDegraded = String(prevBase?.extraction_status || '') === 'degraded'
+    const isDegraded = input.extractionStatus === 'degraded'
+    // degraded_since: keep the existing start if still degraded; stamp now on a fresh
+    // ok->degraded transition; clear when recovered.
+    const degradedSince = isDegraded
+      ? (wasDegraded && prevBase?.degraded_since ? prevBase.degraded_since : nowIso)
+      : null
+    const lastSuccess = input.anyExtractionSucceeded
+      ? nowIso
+      : (prevBase?.last_successful_extraction_at || null)
+    // The M1 fail-loud banner — must be written on EVERY run, migration or not.
+    const baseRow: any = {
+      id: true,
+      extraction_status: input.extractionStatus,
+      degraded_reason: isDegraded ? (input.degradedReason || 'key_unset') : null,
+      degraded_since: degradedSince,
+      last_scan_at: nowIso,
+      last_successful_extraction_at: lastSuccess,
+      last_scan_drafts_created: input.draftsCreated,
+      last_scan_auto_filed: input.autoFiled,
+      updated_at: nowIso,
+    }
+    const row: any = { ...baseRow }
+    // M1.5: write the last-scan snapshot + increment the lifetime running counters.
+    if (input.cost) {
+      const u = input.cost.usage
+      const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+      row.last_scan_model_calls = input.cost.model_calls
+      row.last_scan_model_skips = input.cost.model_skips
+      row.last_scan_input_tokens = u.input_tokens
+      row.last_scan_output_tokens = u.output_tokens
+      row.last_scan_cache_read_tokens = u.cache_read_input_tokens
+      row.last_scan_cache_write_tokens = u.cache_creation_input_tokens
+      row.last_scan_estimated_cost_usd = _usdCost(u)
+      row.total_model_calls = n(prevCost?.total_model_calls) + input.cost.model_calls
+      row.total_model_skips = n(prevCost?.total_model_skips) + input.cost.model_skips
+      row.total_input_tokens = n(prevCost?.total_input_tokens) + u.input_tokens
+      row.total_output_tokens = n(prevCost?.total_output_tokens) + u.output_tokens
+      row.total_cache_read_tokens = n(prevCost?.total_cache_read_tokens) + u.cache_read_input_tokens
+      row.total_cache_write_tokens = n(prevCost?.total_cache_write_tokens) + u.cache_creation_input_tokens
+    }
+    // B5 SLA: last-scan latency snapshot + capped-candidate count. In the FULL row
+    // only (dropped by the base-only retry pre-migration). Written even on a quiet scan
+    // (samples 0 -> all-zero) so the metric is always current.
+    if (input.sla) {
+      row.last_scan_latency_p50_sec = input.sla.p50_sec
+      row.last_scan_latency_p95_sec = input.sla.p95_sec
+      row.last_scan_latency_max_sec = input.sla.max_sec
+      row.last_scan_latency_samples = input.sla.samples
+    }
+    if (typeof input.cappedCandidates === 'number') {
+      row.last_scan_capped_candidates = input.cappedCandidates
+    }
+    // A3: dropped-WO breadcrumb. last_scan_* reset every run (0 on a clean scan so the
+    // alarm clears); total_* accumulate for forensics. FULL row only (base fallback drops
+    // them pre-migration, like the SLA/cost columns).
+    if (input.breadcrumb) {
+      const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+      const b = input.breadcrumb
+      row.last_scan_insert_conflicts_healed = b.insertConflictsHealed
+      row.last_scan_insert_conflicts_live = b.insertConflictsLive
+      row.last_scan_dropped_wo = b.droppedAfterExtraction
+      row.total_insert_conflicts_healed = n(prevBreadcrumb?.total_insert_conflicts_healed) + b.insertConflictsHealed
+      row.total_insert_conflicts_live = n(prevBreadcrumb?.total_insert_conflicts_live) + b.insertConflictsLive
+      row.total_dropped_wo = n(prevBreadcrumb?.total_dropped_wo) + b.droppedAfterExtraction
+      if (b.droppedAfterExtraction > 0 || b.insertConflictsLive > 0) {
+        row.dropped_wo_last_at = nowIso
+        row.dropped_wo_last_ref = b.lastDroppedRef || prevBreadcrumb?.dropped_wo_last_ref || null
+      }
+    }
+    // Empty-feed anomaly: stamp the freshest inbound email this scan saw so the alarm can
+    // detect a Graph mirror returning nothing. Only ADVANCES (never rewind on a quiet run).
+    if (input.lastInboundEmailAt) {
+      row.last_inbound_email_at = input.lastInboundEmailAt
+    }
+    // H1 (INVARIANT #5 — health must never go silently dark): supabase-js does NOT throw
+    // on a PostgREST error; it returns {error}. In the window between merge->auto-deploy
+    // and the hand-applied M1.5 migration, the ledger columns don't exist, so the FULL
+    // upsert is rejected — which would silently drop the M1 fail-loud banner too. So
+    // CHECK the error and RETRY with only the base M1 columns; a dead key in that window
+    // must still be visible.
+    const { error: upErr } = await client.from('makesafe_intake_health').upsert(row, { onConflict: 'id' })
+    if (upErr) {
+      console.warn('[ops-api] writeIntakeHealth full upsert failed (ledger columns likely pre-migration); retrying M1 base columns:', upErr.message)
+      const { error: baseErr } = await client.from('makesafe_intake_health').upsert(baseRow, { onConflict: 'id' })
+      if (baseErr) {
+        console.error('[ops-api] writeIntakeHealth base upsert ALSO failed — health banner NOT written:', baseErr.message)
+      }
+    }
+  } catch (e) {
+    console.warn('[ops-api] writeIntakeHealth failed (non-fatal):', (e as Error).message)
+  }
+}
+
 function shouldAutoApproveCleanIntake(input: {
   enabled?: boolean
   isReportCapture?: boolean
@@ -10158,7 +11052,14 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
 
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
+// H1: exported so a test can simulate the pre-migration schema (ledger columns absent)
+// and prove the M1 fail-loud banner is still written via the base-only retry.
+export const _writeIntakeHealthForTest = writeIntakeHealth
 export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCleanIntakeDraftRow
+// D-a fail-loud: exported so a test can prove auth-failure (dead key) is distinguished
+// from a transient failure, and the extraction-down marker is a stable constant.
+export const _isAnthropicAuthFailureForTest = isAnthropicAuthFailure
+export const _INTAKE_EXTRACTION_DOWN_MARKER = INTAKE_EXTRACTION_DOWN_MARKER
 export const _stripEmailHtmlForTradeForTest = _stripEmailHtmlForTrade
 export const _extractBuilderEmailLinksForTest = _extractBuilderEmailLinks
 export const _mergeDeterministicAndClaudeLinksForTest = _mergeDeterministicAndClaudeLinks
@@ -10932,6 +11833,519 @@ async function _shortStorageKey(input: string): Promise<string> {
 // unchanged so the 5-min monitor cron can tail-call this. It may auto-promote
 // only a strict clean/high-confidence normal WO; it still cannot send, authorise,
 // invoice, close, allocate, or call approve_intake_draft directly.
+// Shared make-safe extraction model + system prompt. Used by BOTH the scanner
+// (scanSesMakesafes) and the admin reextract_intake_draft action so a re-extraction
+// runs the SAME classifier with the SAME prompt as a fresh scan — zero drift.
+const MAKESAFE_EXTRACTION_MODEL = 'claude-haiku-4-5-20251001'
+const MAKESAFE_EXTRACTION_MAX_TOKENS = 900
+const MAKESAFE_EXTRACTION_SYSTEM_PROMPT = `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
+Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "report_type": "roof_report"|"assessment_report"|"temp_fence"|"re_attend"|"general_makesafe"|"not_a_report", "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
+Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
+Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
+For report_type, COMMIT the single best classification of the work using the body AND the PDF: "roof_report" (roof report/inspection), "assessment_report" (assessment / assess-and-quote / scope of works), "temp_fence" (temporary fence collect/pickup), "re_attend" (return visit to an existing job), "general_makesafe" (a physical make-safe work order that is not primarily a report), or "not_a_report". Do not leave it blank; pick "general_makesafe" for an ordinary physical make-safe.
+For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
+For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
+If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`
+
+// ── A1 — reextract_intake_draft (in-place re-extraction, immune to the unique key) ──
+// ROOT CAUSE (wave2-reextract-diagnosis.json): the supersede-then-rescan recipe hits the
+// (org_id, graph_message_id) UNIQUE key on re-insert and the error is swallowed, so a real
+// WO never re-populates. This admin action re-runs the SAME extraction (template/model,
+// PDF text, links, committed report_type) for a NAMED draft and UPDATEs the existing draft
+// row IN PLACE (same id, same graph_message_id) — no INSERT, immune to the root cause, no
+// marker interaction. A clean result may then auto-file through the existing gate exactly
+// like a fresh scan. Refuses approved/rejected drafts.
+
+// Pure guard: a reextract may run on an in-flight/parked draft but NEVER on a finalised one.
+export function _assertDraftReextractable(status: string | null | undefined): void {
+  const s = String(status ?? '').toLowerCase()
+  if (s === 'approved' || s === 'rejected') {
+    throw new ApiError(`reextract refused: draft is ${s} (only non-finalised drafts can be re-extracted)`, 409)
+  }
+}
+
+// Re-run the SAME extraction pipeline the scanner uses for ONE email (template parse +
+// Haiku on body + PDF text, PDF re-upload, subject parse, link merge, committed
+// report_type + job family). Returns the recomputed field-set; the caller UPDATEs in place.
+async function _reextractExtractFields(
+  client: any,
+  input: {
+    graphMessageId: string
+    postId: string
+    fromEmail: string
+    fromName: string
+    subject: string
+    body: string
+    receivedAt: string | null
+    hasAttachments: boolean
+    senderPatterns: Array<{ slug: string; name: string; pattern: string }>
+    parsingRulesBySlug: Map<string, any>
+  },
+): Promise<{
+  extraction: any
+  attachments: any[]
+  confidence: string
+  missingFields: string[]
+  matchedCompany: { slug: string; name: string } | null
+  draftReportType: string | null
+  draftJobFamily: string
+  availableWoCount: number
+  isReportCapture: boolean
+  extractionDegraded: boolean
+  woGateOk: boolean
+  woGateReason: string
+}> {
+  const { subject, fromEmail, fromName } = input
+  // Admin/service client for the private-bucket download + public re-upload (created here
+  // so the injectable test extractor path never triggers createClient with empty env).
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const rawEmailBody = input.body || ''
+  const builderEmailTextForTrade = _stripEmailHtmlForTrade(rawEmailBody)
+  const deterministicPortalLinks = _extractBuilderEmailLinks(rawEmailBody)
+  const bodyPreview = (builderEmailTextForTrade || '').slice(0, 2000)
+  const replyForwardRisk = _subjectHasReplyForwardPrefix(subject)
+
+  // Match sender to company (same anchored-suffix logic as the scanner).
+  let matchedCompany: { slug: string; name: string } | null = null
+  const matchedSenderPattern = _findMatchingSenderCompany(fromEmail, input.senderPatterns)
+  if (matchedSenderPattern) matchedCompany = { slug: matchedSenderPattern.slug, name: matchedSenderPattern.name }
+
+  // PDF read from the PRIVATE makesafe-emails bucket + re-upload to PUBLIC job-documents,
+  // identical attachments_json shape + WO designation as the scanner.
+  const attachments: any[] = []
+  const pdfBase64List: Array<{ name: string; base64: string }> = []
+  if (input.hasAttachments) {
+    try {
+      const { data: attRows } = await client.from('email_attachments')
+        .select('id, graph_attachment_id, name, content_type, storage_path, size_bytes')
+        .eq('email_id', input.postId)
+        .eq('status', 'uploaded')
+      const uploadedPdfRows = (attRows || []).filter((att: any) => {
+        const isPdf = (att.content_type || '').includes('pdf') || (att.name || '').endsWith('.pdf')
+        return isPdf && att.storage_path
+      })
+      const { selected: designatedWo, ordered: orderedPdfs } = _selectWorkOrderPdf(uploadedPdfRows)
+      const keyHash = await _shortStorageKey(input.graphMessageId)
+      for (let attIdx = 0; attIdx < orderedPdfs.length; attIdx++) {
+        const att = orderedPdfs[attIdx]
+        try {
+          const { data: blob, error: dlErr } = await adminClient.storage.from('makesafe-emails').download(att.storage_path!)
+          if (dlErr || !blob) { console.log('[ops-api] reextract PDF download failed:', dlErr?.message || 'no blob', att.storage_path); continue }
+          const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+          if (pdfBase64List.length < 2 && fileBuffer.length < 5000000) {
+            pdfBase64List.push({ name: att.name ?? 'work-order.pdf', base64: bytesToBase64(fileBuffer) })
+          }
+          const safeName = (att.name || 'work-order.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)
+          const keyComponent = _attachmentKeyComponent(att, attIdx)
+          const storagePath = `makesafe-intake/${keyHash}-${keyComponent}/${safeName}`
+          const { error: upErr } = await adminClient.storage.from('job-documents')
+            .upload(storagePath, fileBuffer, { contentType: 'application/pdf', upsert: true })
+          if (upErr) {
+            attachments.push({ name: att.name, file_name: att.name, storage_url: null, pdf_url: null, pdf_unavailable: true, pdf_error: `upload_failed:${upErr.message}`.slice(0, 200), size: att.size_bytes, is_work_order: (att === designatedWo) })
+            continue
+          }
+          const { data: urlData } = adminClient.storage.from('job-documents').getPublicUrl(storagePath)
+          attachments.push({ name: att.name, file_name: att.name, storage_url: storagePath, pdf_url: urlData?.publicUrl || null, size: att.size_bytes, is_work_order: (att === designatedWo) })
+        } catch (e) { console.log('[ops-api] reextract PDF re-upload failed:', (e as Error).message) }
+      }
+    } catch (e) { console.log('[ops-api] reextract attachment read failed:', (e as Error).message) }
+  }
+
+  // Extraction: template-first when a full parse is available, else the Haiku model on
+  // body + PDF text (SAME model + SAME system prompt as the scanner).
+  let extraction: any = {}
+  let confidence = 'low'
+  let missingFields: string[] = []
+  let extractionDegraded = false
+  const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
+  const pdfTextModeEnabled = Deno.env.get('MAKESAFE_INTAKE_PDF_TEXT_MODE') !== 'false'
+  const templateSlug = (matchedCompany?.slug || '').toLowerCase()
+
+  const pdfTexts: string[] = []
+  let pdfMode: 'text' | 'document' | 'none' = pdfBase64List.length ? 'document' : 'none'
+  if (pdfBase64List.length && pdfTextModeEnabled) {
+    let allText = true
+    for (const pdf of pdfBase64List) {
+      try {
+        const bytes = Uint8Array.from(atob(pdf.base64), (c) => c.charCodeAt(0))
+        const r = await _extractPdfText(bytes)
+        if (r.mode === 'text') pdfTexts.push(`[${pdf.name}]\n${r.text}`)
+        else allText = false
+      } catch (_) { allText = false }
+    }
+    const combinedLen = pdfTexts.join('\n').length
+    pdfMode = (allText && pdfTexts.length === pdfBase64List.length && combinedLen >= _PDF_TEXT_MIN_CHARS) ? 'text' : 'document'
+  }
+  const combinedPdfText = pdfTexts.join('\n')
+
+  const templateResult = _parseWithTemplate(input.parsingRulesBySlug.get(templateSlug), {
+    subject, body: builderEmailTextForTrade || bodyPreview, pdfText: combinedPdfText,
+  })
+
+  if (templateResult?.model_skipped) {
+    const f = templateResult.fields
+    extraction = {
+      external_ref: f.external_ref || null, client_name: f.client_name || null, client_phone: f.client_phone || null,
+      site_address: f.site_address || null, site_suburb: f.site_suburb || null, description: f.description || null,
+      safety_requirements: f.safety_requirements || null,
+    }
+    confidence = templateResult.confidence
+    missingFields = []
+  } else if (ANTHROPIC_API_KEY) {
+    try {
+      const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+      const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
+      const userContent: any[] = [{ type: 'text', text: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` }]
+      if (pdfMode === 'text') {
+        for (const t of pdfTexts) userContent.push({ type: 'text', text: `[Work order PDF text]\n${t}` })
+      } else {
+        for (const pdf of pdfBase64List) {
+          userContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 } })
+          userContent.push({ type: 'text', text: `[Attached PDF: ${pdf.name}]` })
+        }
+      }
+      const resp = await anthropic.messages.create({
+        model: MAKESAFE_EXTRACTION_MODEL,
+        max_tokens: MAKESAFE_EXTRACTION_MAX_TOKENS,
+        system: [{ type: 'text', cache_control: { type: 'ephemeral' }, text: MAKESAFE_EXTRACTION_SYSTEM_PROMPT }],
+        messages: [{ role: 'user', content: userContent }],
+      })
+      const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        extraction = JSON.parse(jsonMatch[0])
+        confidence = extraction.confidence || 'low'
+        missingFields = extraction.missing_fields || []
+      }
+    } catch (e) {
+      // Dead/absent key or transient failure -> degrade (do not make the draft worse).
+      extractionDegraded = true
+      console.error('[ops-api] reextract model call failed:', (e as Error).message)
+    }
+  } else {
+    extractionDegraded = true
+  }
+
+  // Universal deterministic subject parse (authoritative ref; address only fills gaps).
+  const subjectFields = _parseSubjectFields(subject)
+  const refDecision = _resolveSubjectRef(replyForwardRisk, subjectFields.external_ref, extraction.external_ref || null)
+  if (refDecision.external_ref) extraction.external_ref = refDecision.external_ref
+  if (refDecision.subject_ref_hint) extraction.subject_ref_hint = refDecision.subject_ref_hint
+  if (!replyForwardRisk) {
+    if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) extraction.site_address = subjectFields.site_address
+    if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) extraction.site_suburb = subjectFields.site_suburb
+  }
+
+  if (extractionDegraded) {
+    extraction.extraction_degraded = true
+    if (!missingFields.includes(INTAKE_EXTRACTION_DOWN_MARKER)) missingFields.push(INTAKE_EXTRACTION_DOWN_MARKER)
+    confidence = 'low'
+  }
+
+  const mergedPortalLinks = _mergeDeterministicAndClaudeLinks(deterministicPortalLinks, extraction)
+  if (mergedPortalLinks.length) {
+    extraction.portal_links = mergedPortalLinks
+    extraction.portal_link = extraction.portal_link || mergedPortalLinks[0]?.url || null
+  }
+  if (builderEmailTextForTrade) {
+    extraction.builder_email_text_for_trade = builderEmailTextForTrade
+    extraction.builder_email_subject = subject || null
+    extraction.builder_email_received_at = input.receivedAt || null
+  }
+
+  const availableWoCount = attachments.filter((a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url)).length
+
+  // Report-capture derivation + report_type/family (same helpers as the scanner).
+  const woGate = _isGenuineNewWorkOrder(subject, fromEmail, availableWoCount)
+  const isReportCapture = woGate.kind === 'report'
+  const tagReportType = isReportCapture || (woGate as any).reportSubjectPattern === true
+  if ((isReportCapture || tagReportType) && !matchedCompany?.slug) {
+    const refPrefixMatch = subject.match(/\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
+    const derivedSlug = _slugFromRefPrefix(refPrefixMatch?.[1] ?? null)
+    if (derivedSlug) matchedCompany = { slug: derivedSlug, name: derivedSlug }
+  }
+  let draftReportType: string | null = null
+  if (tagReportType) draftReportType = _resolveCommittedReportType(extraction.report_type, subject, builderEmailTextForTrade || bodyPreview)
+  const draftJobFamily = _classifyMakeSafeJobFamily(subject, [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'), draftReportType)
+  extraction.makesafe_job_family = draftJobFamily
+  extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+  extraction.reextracted_at = new Date().toISOString()
+
+  return {
+    extraction, attachments, confidence, missingFields, matchedCompany,
+    draftReportType, draftJobFamily, availableWoCount, isReportCapture, extractionDegraded,
+    woGateOk: woGate.ok, woGateReason: woGate.reason,
+  }
+}
+
+// Admin action: re-extract a NAMED draft in place. deps.extractFields is injectable so the
+// orchestration (load / refuse / update / auto-file / breadcrumb) is testable without the
+// model or storage; production uses the real _reextractExtractFields.
+export async function reextractIntakeDraft(
+  client: any,
+  body: any,
+  deps?: { extractFields?: typeof _reextractExtractFields },
+): Promise<any> {
+  const draftId = body?.draft_id
+  if (!draftId) throw new ApiError('draft_id required', 400)
+
+  const { data: draft, error: dErr } = await client.from('makesafe_intake_drafts')
+    .select('*').eq('id', draftId).single()
+  if (dErr || !draft) throw new ApiError('Draft not found', 404)
+  _assertDraftReextractable(draft.status)
+
+  // Load the source email (post_id = the draft's graph_message_id) + companies for parsing.
+  const { data: email } = await client.from('emails')
+    .select('post_id, subject, body_content, body_preview, from_email, from_name, has_attachments, received_at')
+    .eq('post_id', draft.graph_message_id)
+    .maybeSingle()
+  if (!email) throw new ApiError(`source email not found for graph_message_id ${draft.graph_message_id}`, 404)
+
+  const { data: companies } = await client.from('makesafe_companies')
+    .select('slug, name, sender_patterns, parsing_rules').eq('active', true)
+  const senderPatterns: Array<{ slug: string; name: string; pattern: string }> = []
+  const parsingRulesBySlug = new Map<string, any>()
+  for (const co of (companies || [])) {
+    for (const p of (co.sender_patterns || [])) senderPatterns.push({ slug: co.slug, name: co.name, pattern: String(p).toLowerCase() })
+    if (co.slug && co.parsing_rules && typeof co.parsing_rules === 'object') parsingRulesBySlug.set(String(co.slug).toLowerCase(), co.parsing_rules)
+  }
+
+  const extractFields = deps?.extractFields || _reextractExtractFields
+  const r = await extractFields(client, {
+    graphMessageId: draft.graph_message_id,
+    postId: email.post_id,
+    fromEmail: email.from_email || draft.from_email || '',
+    fromName: email.from_name || draft.from_name || '',
+    subject: email.subject || draft.subject || '',
+    body: email.body_content || email.body_preview || '',
+    receivedAt: email.received_at || draft.received_at || null,
+    hasAttachments: !!email.has_attachments,
+    senderPatterns,
+    parsingRulesBySlug,
+  })
+
+  const draftStatus = _computeIntakeDraftStatus({
+    extractionDegraded: r.extractionDegraded,
+    isReportCapture: r.isReportCapture,
+    hasCompany: !!(r.matchedCompany?.slug || r.matchedCompany?.name),
+    externalRef: r.extraction.external_ref || null,
+    clientName: r.extraction.client_name || null,
+    siteAddress: r.extraction.site_address || null,
+    availableWoCount: r.availableWoCount,
+  })
+
+  // UPDATE the existing row IN PLACE — same id, same graph_message_id. No INSERT, immune
+  // to the (org_id, graph_message_id) unique key that swallowed the original re-extraction.
+  const update = {
+    requesting_company_slug: r.matchedCompany?.slug || null,
+    requesting_company_name: r.matchedCompany?.name || null,
+    external_ref: r.extraction.external_ref || null,
+    client_name: r.extraction.client_name || null,
+    client_phone: r.extraction.client_phone || null,
+    site_address: r.extraction.site_address || null,
+    site_suburb: r.extraction.site_suburb || null,
+    description: r.extraction.description || null,
+    safety_requirements: r.extraction.safety_requirements || null,
+    confidence: r.confidence,
+    missing_fields: r.missingFields,
+    extraction_json: r.extraction,
+    attachments_json: r.attachments,
+    report_type: r.draftReportType,
+    status: draftStatus,
+    review_notes: `Re-extracted in place ${new Date().toISOString()} (admin reextract_intake_draft). WO gate: ${r.woGateOk ? 'pass' : 'fail:' + r.woGateReason}.`,
+    updated_at: new Date().toISOString(),
+  }
+  const { data: updated, error: upErr } = await client.from('makesafe_intake_drafts')
+    .update(update).eq('id', draftId).select().single()
+  if (upErr) throw new ApiError('reextract update failed: ' + upErr.message, 500)
+
+  // Business_event breadcrumb (board trace for the recovery).
+  try {
+    await logBusinessEvent(client, {
+      event_type: 'makesafe.intake_reextracted',
+      source: 'app/makesafe-intake',
+      entity_type: 'makesafe_ref',
+      entity_id: String(r.extraction.external_ref || draft.graph_message_id),
+      body_preview: `Re-extracted draft ${draftId}: ref ${r.extraction.external_ref || 'none'}, status ${draftStatus}`,
+      payload: { draft_id: draftId, external_ref: r.extraction.external_ref || null, confidence: r.confidence, status: draftStatus, prior_status: draft.status, available_wo: r.availableWoCount },
+      metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+    })
+  } catch { /* non-blocking */ }
+
+  // Auto-file a clean, high-confidence result through the SAME gate the scanner uses.
+  let autoFiled: any = null
+  const autoFileEnabled = await isAutoFileEnabled(client)
+  const autoDecision = shouldAutoApproveCleanIntake({
+    enabled: autoFileEnabled && !r.extractionDegraded && Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+    isReportCapture: r.isReportCapture,
+    tagReportType: r.draftReportType != null,
+    reportType: r.draftReportType,
+    confidence: r.confidence,
+    missingFields: r.missingFields,
+    matchedCompany: r.matchedCompany,
+    externalRef: r.extraction.external_ref || null,
+    clientName: r.extraction.client_name || null,
+    siteAddress: r.extraction.site_address || null,
+    attachments: r.attachments,
+  })
+  if (autoDecision.ok) {
+    try {
+      const approved = await approveIntakeDraft(client, {
+        draft_id: draftId,
+        approved_by: 'auto-intake-reextract',
+        review_notes: 'Auto-filed after in-place re-extraction (reextract_intake_draft): high-confidence, required fields + servable WO PDF present.',
+      })
+      autoFiled = { job_id: approved?.job?.id || null, reason: autoDecision.reason }
+    } catch (e) {
+      autoFiled = { job_id: null, error: (e as Error).message, reason: autoDecision.reason }
+    }
+  }
+
+  return {
+    ok: true,
+    draft_id: draftId,
+    prior_status: draft.status,
+    status: draftStatus,
+    external_ref: r.extraction.external_ref || null,
+    site_address: r.extraction.site_address || null,
+    confidence: r.confidence,
+    available_wo: r.availableWoCount,
+    extraction_degraded: r.extractionDegraded,
+    wo_gate: { ok: r.woGateOk, reason: r.woGateReason },
+    auto_filed: autoFiled,
+    draft: updated,
+  }
+}
+
+// ── A2/A3 — scan-insert self-heal + dropped-WO breadcrumb ───────────────────────
+// ROOT CAUSE (wave2-reextract-diagnosis.json): a genuine WO whose INSERT hit the
+// (org_id, graph_message_id) UNIQUE key was SILENTLY dropped with only a console.log.
+// This replaces that silent `continue` with:
+//   * heal — the occupying row is a NON-LIVE shell (superseded/rejected): re-populate
+//            it in place (same id, same graph_message_id, no new INSERT) so a released
+//            email auto-recovers into its own slot. Returns the healed row.
+//   * live_collision — the occupying row is LIVE (dedup failed upstream): DO NOT clobber
+//            a live draft/job. Breadcrumb only.
+//   * dropped — any other insert failure, or a heal UPDATE that itself fails: a real WO
+//            would be lost. Breadcrumb so the alarm can fire; never a silent log again.
+// Every outcome writes a business_event so a dropped/collided WO is visible on the board.
+export async function _selfHealIntakeInsert(
+  client: any,
+  input: {
+    draft: any
+    insErr: any
+    orgId: string
+    graphMessageId: string
+    externalRef: string | null
+    subject: string
+  },
+): Promise<{ outcome: 'healed' | 'live_collision' | 'dropped'; row: any | null }> {
+  const { draft, insErr, orgId, graphMessageId, externalRef, subject } = input
+  const refOrId = externalRef || graphMessageId
+  const isUniqueViolation = String(insErr?.code) === '23505' ||
+    /duplicate key|unique constraint|already exists/i.test(insErr?.message || '')
+
+  const dropBreadcrumb = async (reason: string) => {
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'makesafe.intake_wo_dropped',
+        source: 'app/makesafe-intake',
+        entity_type: 'makesafe_ref',
+        entity_id: String(refOrId),
+        body_preview: `Intake WO dropped (${reason}): ${subject}`,
+        payload: { external_ref: externalRef, graph_message_id: graphMessageId, reason, error: (insErr?.message || '').slice(0, 300) },
+        metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+      })
+    } catch { /* non-blocking breadcrumb */ }
+  }
+
+  if (!isUniqueViolation) {
+    console.error('[ops-api] intake draft insert failed (WO DROPPED):', insErr?.message, '| ref', externalRef, '| subject', subject)
+    await dropBreadcrumb('insert_error')
+    return { outcome: 'dropped', row: null }
+  }
+
+  // 23505 on (org_id, graph_message_id): find the row occupying that slot.
+  const { data: occ } = await client.from('makesafe_intake_drafts')
+    .select('id, status')
+    .eq('org_id', orgId)
+    .eq('graph_message_id', graphMessageId)
+    .maybeSingle()
+
+  const action = occ?.id ? _decideInsertConflictAction(occ.status) : 'dropped'
+
+  if (occ?.id && action === 'heal') {
+    // Re-populate the non-live shell IN PLACE — immune to the unique key.
+    const { data: healed, error: healErr } = await client.from('makesafe_intake_drafts')
+      .update({
+        received_at: draft.received_at,
+        from_email: draft.from_email,
+        from_name: draft.from_name,
+        subject: draft.subject,
+        body_preview: draft.body_preview,
+        requesting_company_slug: draft.requesting_company_slug,
+        requesting_company_name: draft.requesting_company_name,
+        external_ref: draft.external_ref,
+        client_name: draft.client_name,
+        client_phone: draft.client_phone,
+        client_email: draft.client_email,
+        site_address: draft.site_address,
+        site_suburb: draft.site_suburb,
+        description: draft.description,
+        safety_requirements: draft.safety_requirements,
+        special_instructions: draft.special_instructions,
+        confidence: draft.confidence,
+        missing_fields: draft.missing_fields,
+        extraction_json: draft.extraction_json,
+        attachments_json: draft.attachments_json,
+        report_type: draft.report_type,
+        status: draft.status,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', occ.id)
+      .select().single()
+    if (healErr || !healed) {
+      console.error('[ops-api] intake self-heal UPDATE failed (WO DROPPED):', healErr?.message, '| ref', externalRef)
+      await dropBreadcrumb('heal_update_failed')
+      return { outcome: 'dropped', row: null }
+    }
+    console.log('[ops-api] intake self-heal: re-populated', occ.status, 'shell in place for', refOrId)
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'makesafe.intake_insert_healed',
+        source: 'app/makesafe-intake',
+        entity_type: 'makesafe_ref',
+        entity_id: String(refOrId),
+        body_preview: `Intake insert self-healed (${occ.status} shell re-populated): ${subject}`,
+        payload: { external_ref: externalRef, graph_message_id: graphMessageId, prior_status: occ.status, draft_id: occ.id },
+        metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+      })
+    } catch { /* non-blocking breadcrumb */ }
+    return { outcome: 'healed', row: healed }
+  }
+
+  if (occ?.id && action === 'live_collision') {
+    console.error('[ops-api] intake insert LIVE collision (dedup miss?) — NOT clobbering live row:', refOrId, '| status', occ.status)
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'makesafe.intake_insert_live_collision',
+        source: 'app/makesafe-intake',
+        entity_type: 'makesafe_ref',
+        entity_id: String(refOrId),
+        body_preview: `Intake insert LIVE collision (dedup miss): ${subject}`,
+        payload: { external_ref: externalRef, graph_message_id: graphMessageId, live_status: occ.status, live_draft_id: occ.id },
+        metadata: { mission: 'fix/makesafe-reextract-and-notify-2026-07-04' },
+      })
+    } catch { /* non-blocking breadcrumb */ }
+    return { outcome: 'live_collision', row: null }
+  }
+
+  // Unique violation but no occupying row found (race / RLS) — treat as a drop, loud.
+  console.error('[ops-api] intake insert 23505 but no occupying row found (WO DROPPED):', refOrId)
+  await dropBreadcrumb('unique_violation_no_row')
+  return { outcome: 'dropped', row: null }
+}
+
 async function scanSesMakesafes(client: any) {
   // The group-sync projection keys ses@ mail under this mailbox (the canonical
   // value used by monitor-ses-makesafes + reconcile + the GAP reads).
@@ -10941,14 +12355,19 @@ async function scanSesMakesafes(client: any) {
   // re-upload below (hoisted out of the loop — was re-created per attachment).
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-  // Load known make-safe company sender patterns
+  // Load known make-safe company sender patterns + per-builder template parsing rules
+  // (M1.5: parsing_rules drives the deterministic template-parse cost lever).
   const { data: companies } = await client.from('makesafe_companies')
-    .select('slug, name, sender_patterns')
+    .select('slug, name, sender_patterns, parsing_rules')
     .eq('active', true)
   const senderPatterns: Array<{ slug: string; name: string; pattern: string }> = []
+  const parsingRulesBySlug = new Map<string, any>()
   for (const co of (companies || [])) {
     for (const p of (co.sender_patterns || [])) {
       senderPatterns.push({ slug: co.slug, name: co.name, pattern: p.toLowerCase() })
+    }
+    if (co.slug && co.parsing_rules && typeof co.parsing_rules === 'object') {
+      parsingRulesBySlug.set(String(co.slug).toLowerCase(), co.parsing_rules)
     }
   }
 
@@ -10957,15 +12376,36 @@ async function scanSesMakesafes(client: any) {
   // tombstoned rows, paginated (PostgREST 1000-row cap) so a busy week isn't
   // silently truncated. Mirrors makesafe_new_emails (GAP-1) sourcing.
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-  const emailRows = await _fetchAllRows<any>(
-    () => client.from('emails')
-      .select('post_id, mailbox, subject, body_preview, body_content, body_content_type, from_email, from_name, has_attachments, received_at, pii_purged_at')
-      .eq('mailbox', SES_MAILBOX)
-      .is('pii_purged_at', null)
-      .gte('received_at', sevenDaysAgo)
-      .order('received_at', { ascending: false }),
-    'emails (intake scan) read',
-  )
+  // Cost-leak fix: read the extract-at-most-once marker (makesafe_scanned_at) so an
+  // already-scanned email is skipped before the model call. PRE-MIGRATION SAFE: if the
+  // column doesn't exist yet (the code auto-deploys before the migration is hand-
+  // applied), fall back to the base select and behave exactly as before (no marker).
+  const EMAILS_BASE_COLS = 'post_id, mailbox, subject, body_preview, body_content, body_content_type, from_email, from_name, has_attachments, received_at, pii_purged_at'
+  let scannedColumnAvailable = true
+  let emailRows: any[]
+  try {
+    emailRows = await _fetchAllRows<any>(
+      () => client.from('emails')
+        .select(`${EMAILS_BASE_COLS}, makesafe_scanned_at`)
+        .eq('mailbox', SES_MAILBOX)
+        .is('pii_purged_at', null)
+        .gte('received_at', sevenDaysAgo)
+        .order('received_at', { ascending: false }),
+      'emails (intake scan) read',
+    )
+  } catch (e) {
+    scannedColumnAvailable = false
+    console.warn('[ops-api] emails read with makesafe_scanned_at failed (pre-migration?); falling back to base select:', (e as Error).message)
+    emailRows = await _fetchAllRows<any>(
+      () => client.from('emails')
+        .select(EMAILS_BASE_COLS)
+        .eq('mailbox', SES_MAILBOX)
+        .is('pii_purged_at', null)
+        .gte('received_at', sevenDaysAgo)
+        .order('received_at', { ascending: false }),
+      'emails (intake scan) read (fallback)',
+    )
+  }
 
   // Map each emails row into the SAME shape the rest of the loop expects (it was
   // written against the Graph message shape: msg.id, msg.from.emailAddress.*,
@@ -10983,6 +12423,7 @@ async function scanSesMakesafes(client: any) {
     receivedDateTime: row.received_at,
     hasAttachments: row.has_attachments,
     _post_id: row.post_id, // internal — used for the private-bucket attachment lookup
+    _makesafe_scanned_at: row.makesafe_scanned_at ?? null, // extract-at-most-once marker
   }))
 
   // INBOUND-ONLY contamination filter (BEFORE sender/subject match): ses@ is a
@@ -10993,6 +12434,15 @@ async function scanSesMakesafes(client: any) {
   const inboundMessages = mappedMessages.filter(
     (msg: any) => !_isOwnDomain(_deriveFromDomain(msg.from?.emailAddress?.address || null)),
   )
+
+  // Empty-feed anomaly signal: the freshest INBOUND (non-own-domain) email this scan can
+  // see. If the Graph mirror starts returning nothing, this stops advancing and the alarm
+  // trips during business hours. Own outbound is excluded so our own sends can't mask it.
+  let mostRecentInboundIso: string | null = null
+  for (const m of inboundMessages) {
+    const r = m.receivedDateTime || null
+    if (r && (!mostRecentInboundIso || String(r) > mostRecentInboundIso)) mostRecentInboundIso = String(r)
+  }
 
   // Filter to known make-safe senders (UNCHANGED logic, now over the inbound set)
   const matchedMessages = inboundMessages.filter((msg: any) => {
@@ -11035,7 +12485,7 @@ async function scanSesMakesafes(client: any) {
   // so (ref + company) is the workhorse cross-path key. See makesafe_intake_dedup.ts.
   const existingDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
-      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, report_type, subject, body_preview, description, extraction_json')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, report_type, subject, body_preview, description, extraction_json, from_email, received_at')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _LIVE_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (dedup index) read',
@@ -11129,14 +12579,70 @@ async function scanSesMakesafes(client: any) {
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
+  // A2/A3 dropped-WO breadcrumb accumulators (folded into makesafe_intake_health after
+  // the loop; the health alarm fires when live-collision + dropped > 0).
+  let insertConflictsHealed = 0
+  let insertConflictsLive = 0
+  let droppedAfterExtraction = 0
+  let lastDroppedRef: string | null = null
+  // A5 arrival texts fired this scan (observability only).
+  let arrivalTextsSent = 0
+  // M1.5 cost ledger: per-scan running totals of model calls / template skips / tokens.
+  let scanCostTotals = _emptyScanTotals()
+  // Cost-leak fix: emails skipped because they were already extracted (marker set), and
+  // the post_ids to STAMP as scanned this run (successful extraction/classification —
+  // draft or not). Batch-marked at the end so each email is extracted at most once.
+  let skippedAlreadyScanned = 0
+  const scannedEmailIds: string[] = []
+
+  // D-d kill switch (Captain D1 default TRUE): the DB flag decides whether the scan
+  // may auto-file clean drafts this run. Read ONCE per scan.
+  const autoFileEnabled = await isAutoFileEnabled(client)
+
+  // A5 arrival-text config (recipients + kill switch). Read ONCE per scan; a genuine
+  // new WO texts the owner crew once (fire-once via makesafe_notify_log).
+  const notifySettings: _NotifySettings = await _loadNotifySettings(client)
+
+  // M1.5 lever 1 kill switch: local PDF text extraction is ON by default; set
+  // MAKESAFE_INTAKE_PDF_TEXT_MODE=false to force the document-block path with no
+  // redeploy if the text path ever regresses extraction accuracy.
+  const pdfTextModeEnabled = Deno.env.get('MAKESAFE_INTAKE_PDF_TEXT_MODE') !== 'false'
+
+  // D-a FAIL-LOUD preflight. keyDegraded starts true when the key is UNSET (v1's exact
+  // silent-death shape) and flips true the moment a classifier call fails auth (revoked
+  // key). While degraded every draft is tagged, forced to needs_review, and never
+  // auto-filed, and a visible makesafe_intake_health banner is written after the loop.
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
+  let keyDegraded = !ANTHROPIC_API_KEY
+  let keyDegradedReason: string | null = ANTHROPIC_API_KEY ? null : 'key_unset'
+  let anyExtractionSucceeded = false
 
   for (const msg of fairMatchedMessages) {
-    // Cheap pre-extraction dedup on the message ids we already have (graph /
-    // internet). The (ref + company) check runs again AFTER Haiku extraction, once
-    // we know the ref + matched company.
+    // Cost-leak fix: EXTRACT-AT-MOST-ONCE. If this email was already scanned in a prior
+    // run (marker set), skip it BEFORE the model call — this is what stops the ~4
+    // non-work-order emails (no draft, so nothing for the draft-dedup to catch) being
+    // re-extracted every 2-minute cycle. Cheap check, no cost.
+    if (msg._makesafe_scanned_at) {
+      skippedAlreadyScanned++
+      skippedItems.push({ id: msg.id, subject: msg.subject || null, reason: 'already_scanned' })
+      continue
+    }
+    // Cheap pre-extraction dedup on the ids AND the M1.5 D0 dual-capture content
+    // fingerprint (sender + subject + received minute) — the fingerprint catches the
+    // group-post / mailbox-fallback twin of the same email BEFORE the model call, so
+    // the redundant capture path never costs a second Haiku call. The (ref + company)
+    // check runs again AFTER extraction once we know the ref + matched company.
     const earlyDup = _isDuplicateIntake(
-      { graph_message_id: msg.id, internet_message_id: msg.internetMessageId || null },
+      {
+        graph_message_id: msg.id,
+        internet_message_id: msg.internetMessageId || null,
+        from_email: msg.from?.emailAddress?.address || null,
+        subject: msg.subject || null,
+        received_at: msg.receivedDateTime || null,
+        // H2: body feeds the fingerprint discriminator when no ref is parseable, so two
+        // different ref-less jobs with an identical generic subject never collapse.
+        body: msg.body?.content || msg.bodyPreview || null,
+      },
       dedupIndex,
     )
     if (earlyDup) {
@@ -11295,45 +12801,227 @@ async function scanSesMakesafes(client: any) {
     let extraction: any = {}
     let confidence = 'low'
     let missingFields: string[] = []
-    if (ANTHROPIC_API_KEY) {
+    // M1.5 cost-path bookkeeping. Recorded on the draft (extraction_json.cost /
+    // pdf_mode / parser / model_called) and folded into the per-scan cost totals below.
+    let pdfMode: 'text' | 'document' | 'none' = pdfBase64List.length ? 'document' : 'none'
+    let extractionParser: 'template' | 'none' = 'none'
+    let modelCalled = false
+    let callUsage = { ..._ZERO_USAGE }
+    // Cost-leak fix: per-email extraction signals -> scanMarkEligible decides whether to
+    // stamp the scanned marker (extract-at-most-once). A dead/absent key or an
+    // auth/transient failure leaves the email UNMARKED so it retries when the key
+    // recovers (fail-loud backfill preserved).
+    let emailTemplateParsed = false
+    let emailModelValidResult = false
+    let emailAuthFailed = false
+    let emailTransientFailed = false
+    const templateSlug = (matchedCompany?.slug || '').toLowerCase()
+
+    // M1.5 LEVER 1 — local PDF text extraction. Pull the text layer out of each
+    // captured WO PDF in Deno (deterministic, key-less). If EVERY PDF yields clean text
+    // over the threshold, feed cheap text blocks to the model instead of the ~10x
+    // document blocks; a scanned/low-text PDF falls back to the document path unchanged.
+    const pdfTexts: string[] = []
+    if (pdfBase64List.length && pdfTextModeEnabled) {
+      let allText = true
+      for (const pdf of pdfBase64List) {
+        try {
+          const bytes = Uint8Array.from(atob(pdf.base64), (c) => c.charCodeAt(0))
+          const r = await _extractPdfText(bytes)
+          if (r.mode === 'text') pdfTexts.push(`[${pdf.name}]\n${r.text}`)
+          else allText = false
+        } catch (_) {
+          allText = false
+        }
+      }
+      const combinedLen = pdfTexts.join('\n').length
+      pdfMode = (allText && pdfTexts.length === pdfBase64List.length && combinedLen >= _PDF_TEXT_MIN_CHARS)
+        ? 'text'
+        : 'document'
+    }
+    const combinedPdfText = pdfTexts.join('\n')
+
+    // M1.5 LEVER 2 — per-builder deterministic template parse. Runs for every builder
+    // that has parsing_rules (as a preview). Only when the builder is flipped
+    // template_first AND every required field parses does it SKIP the model entirely.
+    const templateResult = _parseWithTemplate(parsingRulesBySlug.get(templateSlug), {
+      subject,
+      body: builderEmailTextForTrade || bodyPreview,
+      pdfText: combinedPdfText,
+    })
+
+    if (templateResult?.model_skipped && !keyDegraded) {
+      // Full deterministic parse on a template-first builder — no classifier call.
+      const f = templateResult.fields
+      extraction = {
+        external_ref: f.external_ref || null,
+        client_name: f.client_name || null,
+        client_phone: f.client_phone || null,
+        site_address: f.site_address || null,
+        site_suburb: f.site_suburb || null,
+        description: f.description || null,
+        safety_requirements: f.safety_requirements || null,
+      }
+      confidence = templateResult.confidence
+      missingFields = []
+      extractionParser = 'template'
+      modelCalled = false
+      anyExtractionSucceeded = true
+      emailTemplateParsed = true
+    } else if (ANTHROPIC_API_KEY && !keyDegraded) {
+      // D-a: run the classifier ONLY while the key is healthy. If the key is unset the
+      // guard is false from the first email; if it dies mid-run the catch flips
+      // keyDegraded and every subsequent email skips the call (no silent spray).
       try {
         const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
         const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
-        // Build message content: email text + any PDF documents
+        // Build message content: email text + PDF (text blocks when the text layer was
+        // extracted, else document blocks — same information, far fewer tokens on text).
         const userContent: any[] = [
           { type: 'text', text: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` },
         ]
-        for (const pdf of pdfBase64List) {
-          userContent.push({
-            type: 'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 },
-          })
-          userContent.push({ type: 'text', text: `[Attached PDF: ${pdf.name}]` })
+        if (pdfMode === 'text') {
+          for (const t of pdfTexts) {
+            userContent.push({ type: 'text', text: `[Work order PDF text]\n${t}` })
+          }
+        } else {
+          for (const pdf of pdfBase64List) {
+            userContent.push({
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 },
+            })
+            userContent.push({ type: 'text', text: `[Attached PDF: ${pdf.name}]` })
+          }
         }
 
+        // M1.5 LEVER 3 — prompt caching. The static instruction prefix is marked
+        // cache_control:ephemeral so repeat calls within the 5-minute TTL pay the
+        // 0.1x cached-input rate. (Haiku 4.5's cache minimum is 4096 tokens, so this
+        // only bites once the static prefix is large enough; the usage ledger below
+        // captures cache_read/cache_creation tokens so the effect is measurable.)
+        // Mark the call as made BEFORE awaiting so a transient throw is still counted
+        // as a model call (not miscounted as a template skip) in the cost ledger.
+        modelCalled = true
         const resp = await anthropic.messages.create({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 900,
-          system: `You extract make-safe work order details from emails and their attached PDF work orders for a Perth construction company.
-Return JSON only: { "external_ref": "AJBR 66897" or null, "client_name": "...", "client_phone": "...", "site_address": "...", "site_suburb": "...", "description": "brief scope of work", "safety_requirements": "any safety notes" or null, "portal_link": "https://..." or null, "portal_links": [{ "label": "Roof report link", "url": "https://...", "kind": "roof_report" }], "confidence": "high"|"medium"|"low", "missing_fields": ["field1", "field2"] }
-Extract the company reference number (e.g. AJBR XXXXX, MLB-XXXXX), homeowner/client name, site address, phone number, and work description.
-Check BOTH the email body AND any attached PDF work orders for these details. The PDF often contains client name, phone, and detailed scope that the email does not.
-For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
-For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
-If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`,
+          model: MAKESAFE_EXTRACTION_MODEL,
+          max_tokens: MAKESAFE_EXTRACTION_MAX_TOKENS,
+          system: [{
+            type: 'text',
+            cache_control: { type: 'ephemeral' },
+            text: MAKESAFE_EXTRACTION_SYSTEM_PROMPT,
+          }],
           messages: [{ role: 'user', content: userContent }],
         })
+        callUsage = _readUsage(resp.usage)
         const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
         const jsonMatch = text.match(/\{[\s\S]*\}/)
         if (jsonMatch) {
           extraction = JSON.parse(jsonMatch[0])
           confidence = extraction.confidence || 'low'
           missingFields = extraction.missing_fields || []
+          anyExtractionSucceeded = true
+          emailModelValidResult = true
         }
       } catch (e) {
-        console.log('[ops-api] make-safe extraction failed:', (e as Error).message)
+        const em = (e as Error).message || String(e)
+        if (isAnthropicAuthFailure(e)) {
+          // KEY IS DEAD. Degrade the whole scan loud (this + every later draft is tagged
+          // + forced to needs_review below, and the health banner is written after the
+          // loop). This is the exact failure that went silent for weeks in v1.
+          keyDegraded = true
+          keyDegradedReason = 'auth_failed'
+          emailAuthFailed = true
+          console.error('[ops-api] make-safe extraction AUTH FAILURE — ANTHROPIC_API_KEY dead; degrading intake:', em)
+        } else {
+          // Transient (network / 5xx / bad JSON). Flag THIS draft and keep scanning; the
+          // 2-minute cron retries it next cycle. Not a system-wide degradation.
+          extraction._extraction_error = em.slice(0, 200)
+          emailTransientFailed = true
+          console.error('[ops-api] make-safe extraction failed (transient, kept for review):', em)
+        }
       }
+    }
+
+    // M1.5 cost ledger: stamp which path this email used + its token cost onto the
+    // draft, and fold it into the per-scan totals. Only real extraction attempts
+    // (template skip or a model call) are recorded — a dead-key draft is not a "skip".
+    if (extractionParser === 'template' || modelCalled) {
+      const emailCost = _emailCostRecord({
+        model_called: modelCalled,
+        pdf_mode: pdfMode,
+        parser: extractionParser,
+        usage: callUsage,
+      })
+      extraction.cost = emailCost
+      extraction.pdf_mode = pdfMode
+      extraction.parser = extractionParser
+      extraction.model_called = modelCalled
+      // When the model was called but a template parse also ran, keep a compact preview
+      // so the Captain / golden-replay can compare before flipping this builder.
+      if (templateResult && modelCalled) {
+        extraction.template_preview = {
+          full_parse: templateResult.full_parse,
+          fields: templateResult.fields,
+          missing_required: templateResult.missing_required,
+        }
+      }
+      scanCostTotals = _accrueScanTotals(scanCostTotals, emailCost)
+    }
+
+    // M1.5 UNIVERSAL PRE-MODEL PARSE — runs for EVERY builder, EVERY path (template
+    // skip / model call / dead-key). Live audit: subjects read "NEW WORK ORDER -
+    // MLB-26499 18 Eagleglen Rise, Gidgegannup" yet every draft had external_ref/
+    // site_address null. The deterministic subject ref is AUTHORITATIVE (exact, from
+    // the builder's own subject, and it feeds the (external_ref, family) dedup key that
+    // is degenerate while null); the address only fills what the model didn't produce,
+    // so accuracy is same-or-better, never regressed.
+    const subjectFields = _parseSubjectFields(subject)
+    // M2: on a RE:/FW: reply the subject may quote ANOTHER job's ref; overriding the
+    // model's ref would misroute the (ref, family) dedup key + job creation. resolveSubjectRef
+    // makes the subject ref authoritative off a reply, and a HINT only on a reply. The
+    // reply_forward_risk needs_review marker (added below) still fires either way.
+    const refDecision = _resolveSubjectRef(replyForwardRisk, subjectFields.external_ref, extraction.external_ref || null)
+    if (refDecision.external_ref) extraction.external_ref = refDecision.external_ref
+    if (refDecision.subject_ref_hint) extraction.subject_ref_hint = refDecision.subject_ref_hint
+    if (!replyForwardRisk) {
+      if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) {
+        extraction.site_address = subjectFields.site_address
+      }
+      if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) {
+        extraction.site_suburb = subjectFields.site_suburb
+      }
+    }
+
+    // Cost-leak fix: if this email got a valid extraction/classification, mark it
+    // scanned — WHETHER OR NOT it becomes a draft below. This is the key fix: a
+    // non-work-order email that the gate drops (no draft) is still marked here, so it is
+    // never re-extracted. Placed BEFORE the gate-drop `continue`s. scanMarkEligible
+    // returns false on an auth/transient failure or a dead/absent key, so those emails
+    // stay unmarked and retry when the key recovers (fail-loud backfill preserved).
+    const thisEmailExtractionOk = _scanMarkEligible({
+      templateParsed: emailTemplateParsed,
+      modelValidResult: emailModelValidResult,
+      authFailed: emailAuthFailed,
+      transientFailed: emailTransientFailed,
+      keyDegradedOrAbsent: keyDegraded || !ANTHROPIC_API_KEY,
+    })
+    if (thisEmailExtractionOk && msg._post_id) {
+      scannedEmailIds.push(msg._post_id)
+    }
+
+    // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
+    // needs_review docket with an explicit marker, never a silent empty draft — and,
+    // because the marker is a blocking missing field + confidence is forced low, it can
+    // never be auto-filed.
+    const draftExtractionDegraded = keyDegraded || !ANTHROPIC_API_KEY
+    if (draftExtractionDegraded) {
+      extraction.extraction_degraded = true
+      extraction.extraction_degraded_reason = keyDegradedReason || 'key_unset'
+      if (!missingFields.includes(INTAKE_EXTRACTION_DOWN_MARKER)) {
+        missingFields.push(INTAKE_EXTRACTION_DOWN_MARKER)
+      }
+      confidence = 'low'
     }
 
     const mergedPortalLinks = _mergeDeterministicAndClaudeLinks(deterministicPortalLinks, extraction)
@@ -11492,9 +13180,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       }
     }
 
+    // B2 (classification commitment): prefer the model's COMMITTED report_type
+    // (body + PDF aware) over the subject/body keyword heuristic; the keyword
+    // classifier is the fallback used only when the model abstains, and its
+    // unknown_report stays the needs_review safety valve. This is what stops the
+    // high-volume MLB "Our Ref:" cards from piling up unclassified.
     let draftReportType: string | null = null
     if (tagReportType) {
-      draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
+      draftReportType = _resolveCommittedReportType(
+        extraction.report_type,
+        subject,
+        builderEmailTextForTrade || bodyPreview,
+      )
     }
     const draftJobFamily = _classifyMakeSafeJobFamily(
       subject,
@@ -11623,6 +13320,12 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
               requesting_company_slug: matchedCompany?.slug || null,
               requesting_company_name: matchedCompany?.name || null,
               makesafe_job_family: draftJobFamily,
+              // M1.5 D0: register the dual-capture fingerprint so the twin capture row
+              // of the SAME email later in this batch is caught.
+              from_email: fromEmail,
+              subject,
+              received_at: msg.receivedDateTime || null,
+              body: msg.body?.content || msg.bodyPreview || null,
             },
             dedupIndex,
           )
@@ -11638,29 +13341,18 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     }
 
     // Report-capture drafts always go to needs_review (they are human-review items,
-    // never auto-approved). Normal WO drafts use the existing completeness logic.
-    // Codex issue 1: report_type is set whenever the subject matched a report
-    // pattern (tagReportType), even for a kind='work_order' make-safe-and-report.
-    let draftStatus: string
-    if (isReportCapture) {
-      draftStatus = 'needs_review'
-    } else {
-      // Eng P0-C: set an explicit status. The DB default is 'draft', so omitting it
-      // could leave genuinely-reviewable rows out of the needs_review queue. Mirror the
-      // same required-field logic approveIntakeDraft uses (requesting_company, external_
-      // ref, client_name, site_address, and a work-order PDF via attachments.length): a
-      // draft missing any required field stays 'draft', a complete one goes to
-      // 'needs_review'. Both values are valid per the status CHECK constraint
-      // (migration 20260602000001).
-      const missingRequired = (
-        (!matchedCompany?.slug && !matchedCompany?.name) ||
-        !extractedRef ||
-        !extraction.client_name ||
-        !extraction.site_address ||
-        availableWoCount === 0
-      )
-      draftStatus = missingRequired ? 'draft' : 'needs_review'
-    }
+    // never auto-approved). Normal WO drafts use the existing completeness logic —
+    // now the SHARED computeIntakeDraftStatus so the scanner and the admin reextract
+    // action can never drift on "draft vs needs_review".
+    const draftStatus: string = _computeIntakeDraftStatus({
+      extractionDegraded: draftExtractionDegraded,
+      isReportCapture,
+      hasCompany: !!(matchedCompany?.slug || matchedCompany?.name),
+      externalRef: extractedRef,
+      clientName: extraction.client_name || null,
+      siteAddress: extraction.site_address || null,
+      availableWoCount,
+    })
 
     // Create draft
     const draft = {
@@ -11693,11 +13385,34 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       status: draftStatus,
     }
 
-    const { data: inserted, error: insErr } = await client.from('makesafe_intake_drafts')
+    const insResult = await client.from('makesafe_intake_drafts')
       .insert(draft).select().single()
+    let inserted = insResult.data
+    const insErr = insResult.error
     if (insErr) {
-      console.log('[ops-api] intake draft insert failed:', insErr.message)
-      continue
+      // A2/A3 — no more silent drop. On the (org_id, graph_message_id) unique-key
+      // collision, re-populate a non-live shell in place (heal) so a released email
+      // recovers into its own slot; a LIVE collision or any other error becomes a loud
+      // breadcrumb + alarm signal instead of a swallowed console.log.
+      const heal = await _selfHealIntakeInsert(client, {
+        draft,
+        insErr,
+        orgId: DEFAULT_ORG_ID,
+        graphMessageId: msg.id,
+        externalRef: extractedRef,
+        subject,
+      })
+      if (heal.outcome === 'healed' && heal.row) {
+        inserted = heal.row
+        insertConflictsHealed++
+      } else if (heal.outcome === 'live_collision') {
+        insertConflictsLive++
+        continue
+      } else {
+        droppedAfterExtraction++
+        lastDroppedRef = extractedRef || msg.id
+        continue
+      }
     }
 
     // BUG 1 — register the new draft in the in-memory index so a SECOND copy of the
@@ -11712,12 +13427,60 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
         makesafe_job_family: draftJobFamily,
+        // M1.5 D0: register the dual-capture fingerprint so the twin capture row of the
+        // SAME email later in this batch is caught before a second model call.
+        from_email: fromEmail,
+        subject,
+        received_at: msg.receivedDateTime || null,
+        body: msg.body?.content || msg.bodyPreview || null,
       },
       dedupIndex,
     )
 
+    // A5 — ARRIVAL TEXT. A genuine NEW work order just landed as a usable card (fresh
+    // insert or a healed shell). Text the owner crew ONCE per WO (fire-once via the
+    // makesafe_notify_log ledger; twins / re-sends / re-extractions collide and skip).
+    // reopen_candidate drafts never reach here (they `continue` earlier); a dead-key
+    // degraded draft is skipped (no address to text about, extraction failed).
+    const arrivalGate = _shouldSendArrival({
+      notifyEnabled: notifySettings.notify_enabled,
+      isReopen: false,
+      extractionDegraded: draftExtractionDegraded,
+      hasDedupKey: !!(extractedRef || msg.id),
+    })
+    if (arrivalGate.ok) {
+      try {
+        const arrival = await _sendMakesafeArrivalTexts(
+          client,
+          notifySettings,
+          { sendSms: (phone, message, fromNumber) => sendSmsViaGhl(phone, message, fromNumber), logBusinessEvent },
+          {
+            orgId: DEFAULT_ORG_ID,
+            externalRef: extractedRef,
+            graphMessageId: msg.id,
+            family: draftJobFamily,
+            reportType: draftReportType,
+            siteAddress: extraction.site_address || null,
+            siteSuburb: extraction.site_suburb || null,
+            companyName: matchedCompany?.name || matchedCompany?.slug || null,
+          },
+        )
+        if (arrival.sent) arrivalTextsSent++
+      } catch (e) {
+        console.warn('[ops-api] arrival text send failed (non-blocking):', (e as Error).message)
+      }
+    }
+
+    // D-d auto-file gate. THREE independent brakes decide `enabled`:
+    //   1. autoFileEnabled  — the DB kill switch makesafe_cron_settings.auto_file_enabled
+    //      (Captain D1 default TRUE; one UPDATE falls back to drafts-only, no redeploy),
+    //   2. !draftExtractionDegraded — a dead-key run never auto-files (belt-and-braces
+    //      with the forced-low confidence above),
+    //   3. the MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false env override.
+    // The gate itself still requires confidence:high + the SAME required fields as the
+    // human approveIntakeDraft (company + ref + client + address + servable WO PDF).
     const autoApprovalDecision = shouldAutoApproveCleanIntake({
-      enabled: Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+      enabled: autoFileEnabled && !draftExtractionDegraded && Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
       isReportCapture,
       tagReportType,
       reportType: draftReportType,
@@ -11732,11 +13495,33 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
 
     if (autoApprovalDecision.ok) {
       try {
+        // Provenance (D-d): approved_by:'auto-intake' distinguishes an auto-filed job
+        // from a human tick. This is the gated INTERNAL path — approveIntakeDraft is
+        // called at the function level, NOT through the route (the Wave-0 rule that the
+        // routine key can't call approve_intake_draft stays intact).
         const approved = await approveIntakeDraft(client, {
           draft_id: inserted.id,
-          approved_by: 'auto_intake_clean_gate',
-          review_notes: 'Auto-approved clean make-safe intake: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
+          approved_by: 'auto-intake',
+          review_notes: 'Auto-filed clean make-safe intake (Auto-Intake v2): high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
         })
+        // D-d audit row: an explicit, queryable job_events trail for every auto-filed job
+        // (createMakesafeJob writes makesafe_created; this adds the auto-file provenance).
+        if (approved?.job?.id) {
+          try {
+            await client.from('job_events').insert({
+              job_id: approved.job.id,
+              event_type: 'makesafe_auto_filed',
+              detail_json: {
+                draft_id: inserted.id,
+                external_ref: extractedRef || null,
+                requesting_company: matchedCompany?.slug || matchedCompany?.name || null,
+                confidence,
+                gate_reason: autoApprovalDecision.reason,
+                source: 'auto-intake',
+              },
+            })
+          } catch (_) { /* non-blocking audit write */ }
+        }
         const autoRow = {
           ...inserted,
           status: 'approved',
@@ -11776,11 +13561,55 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     }
   }
 
+  // Cost-leak fix: STAMP makesafe_scanned_at on every email that got a valid extraction
+  // this run (draft or not), so it is never re-extracted. Batched + chunked + idempotent
+  // + error-checked + pre-migration-safe — see markEmailsScanned.
+  const markResult = await _markEmailsScanned(client, scannedEmailIds, {
+    columnAvailable: scannedColumnAvailable,
+  })
+  const scannedMarked = markResult.marked
+
+  // B5 SLA: latency of the drafts created THIS scan (email received_at -> row
+  // created_at). Uses the inserted rows accumulated in newDrafts (each carries both
+  // timestamps). Pure + deterministic; excludes rows missing a timestamp.
+  const scanSla = _computeLatencySla(newDrafts as any[])
+
+  // D-a: write the fail-loud health banner every run so a dead key is visible in
+  // intake_health + the morning report, and auto-file stays suppressed until it recovers.
+  await writeIntakeHealth(client, {
+    extractionStatus: keyDegraded ? 'degraded' : 'ok',
+    degradedReason: keyDegraded ? (keyDegradedReason || 'key_unset') : null,
+    anyExtractionSucceeded,
+    draftsCreated: newDrafts.length,
+    autoFiled: autoApproved.length,
+    // M1.5 cost ledger: this scan's model-call/skip split + token totals.
+    cost: scanCostTotals,
+    // B5 SLA: this scan's arrival->card latency snapshot + deferred-candidate count.
+    sla: scanSla,
+    cappedCandidates,
+    // A3: dropped-WO breadcrumb (self-heal outcomes this scan) -> feeds the alarm.
+    breadcrumb: {
+      insertConflictsHealed,
+      insertConflictsLive,
+      droppedAfterExtraction,
+      lastDroppedRef,
+    },
+    // Empty-feed anomaly: freshest inbound email seen this scan.
+    lastInboundEmailAt: mostRecentInboundIso,
+  })
+
   return {
     ok: true,
     // Wave 1: emails READ from the group-sync projection (the candidate window),
     // not a live Graph message count.
     scanned: (emailRows || []).length,
+    // D-a fail-loud state: true when the classifier key is dead/unset this run. Every
+    // draft made while degraded carries the extraction_down_key_dead marker and is a
+    // needs_review docket; nothing is silently empty and nothing is auto-filed.
+    extraction_degraded: keyDegraded,
+    extraction_degraded_reason: keyDegraded ? (keyDegradedReason || 'key_unset') : null,
+    // D-d: whether auto-file was permitted this run (DB kill switch AND not degraded).
+    auto_file_enabled: autoFileEnabled && !keyDegraded,
     makesafe_candidates: processedCandidates,
     matched_candidates: matchedMessages.length,
     processed_candidates: processedCandidates,
@@ -11790,6 +13619,13 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     already_processed: skippedDuplicates,
     skipped_ai_only: skippedAiOnly,
     skipped_not_work_order_gate: skippedNotWorkOrderGate,
+    // Cost-leak fix observability: emails skipped because already extracted (marker
+    // set), and emails freshly stamped this run. In steady state on a quiet inbox both
+    // fall to ~0 new work; a re-extraction leak would show as scanned_marked climbing
+    // with new_count flat, which it no longer does.
+    skipped_already_scanned: skippedAlreadyScanned,
+    scanned_marked: scannedMarked,
+    scanned_marker_active: scannedColumnAvailable,
     skipped_items: skippedItems.slice(0, 100),
     scan_order: 'oldest_newest_interleave',
     new_drafts: newDrafts,
@@ -11798,10 +13634,319 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     auto_approved_count: autoApproved.length,
     auto_approve_failed: autoApproveFailed,
     auto_approve_failed_count: autoApproveFailed.length,
+    // A2/A3 dropped-WO breadcrumb this scan (>0 live/dropped raises the health alarm).
+    insert_conflicts_healed: insertConflictsHealed,
+    insert_conflicts_live: insertConflictsLive,
+    dropped_after_extraction: droppedAfterExtraction,
+    last_dropped_ref: lastDroppedRef,
+    // A5 arrival texts fired this scan (fire-once per WO via the notify ledger).
+    arrival_texts_sent: arrivalTextsSent,
+    // M1.5 cost summary for this scan: how many drafts used a template skip vs a model
+    // call, the token totals, and the estimated USD at the Haiku 4.5 rate constants.
+    cost: {
+      model_calls: scanCostTotals.model_calls,
+      model_skips: scanCostTotals.model_skips,
+      tokens: scanCostTotals.usage,
+      estimated_cost_usd: _usdCost(scanCostTotals.usage),
+    },
     // Observability: confirms the redirected source is live (not the old Graph
     // USER-mailbox scan).
     source: 'group_sync_projection',
   }
+}
+
+// ── D-a: intake_health — the one-call health check ───────────────────────────
+// Read-only. The single call the terminal skill and the morning report make first:
+// is the classifier key alive? is the cron on? is auto-file on? how many drafts /
+// auto-files in 24h? and the D-e "did we miss anything" unaccounted count (0 = live
+// and true). This is what makes a dead key impossible to miss.
+async function intakeHealth(client: any) {
+  const nowIso = new Date().toISOString()
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+  const { data: health } = await client.from('makesafe_intake_health')
+    .select('*').eq('id', true).maybeSingle()
+  const { data: settings } = await client.from('makesafe_cron_settings')
+    .select('cron_enabled, auto_file_enabled, enabled_at, enabled_by, updated_at')
+    .eq('id', true).maybeSingle()
+  const { data: sync } = await client.from('sync_state')
+    .select('last_successful_sync_at, last_attempt_at, mode, pending_attachments, last_error')
+    .eq('mailbox', _SES_MAILBOX).maybeSingle()
+
+  const { count: drafts24h } = await client.from('makesafe_intake_drafts')
+    .select('id', { count: 'exact', head: true })
+    .gte('created_at', since24h)
+  // Auto-filed = approved by the internal auto-intake path (new label 'auto-intake';
+  // the older 'auto_intake_clean_gate' label is still counted for continuity).
+  const { count: autoFiled24h } = await client.from('makesafe_intake_drafts')
+    .select('id', { count: 'exact', head: true })
+    .in('approved_by', ['auto-intake', 'auto_intake_clean_gate'])
+    .gte('approved_at', since24h)
+
+  // M1.5 cost dashboard: read the per-draft cost records for the last 24h and roll them
+  // up (model calls, template skips, tokens, and estimated USD at the Haiku 4.5 rates).
+  let cost24h: any = null
+  try {
+    const { data: costDrafts } = await client.from('makesafe_intake_drafts')
+      .select('extraction_json')
+      .gte('created_at', since24h)
+      .limit(3000)
+    const costRecords = (costDrafts || []).map((d: any) => {
+      const ex = parseJsonObject(d.extraction_json)
+      return ex && ex.cost && typeof ex.cost === 'object' ? ex.cost : null
+    })
+    cost24h = _rollup24h(costRecords)
+  } catch (e) {
+    cost24h = { error: (e as Error).message }
+  }
+
+  // B5 SLA: 24h rolling email-received -> card-created latency, computed on read from
+  // the per-draft timestamps (same "24h rollups on read" pattern as the cost ledger).
+  // This is the daily-provable statement: "N cards in 24h, p95 arrival->card M sec".
+  let sla24h: any = null
+  try {
+    const { data: slaDrafts } = await client.from('makesafe_intake_drafts')
+      .select('received_at, created_at')
+      .gte('created_at', since24h)
+      .limit(5000)
+    sla24h = _computeLatencySla(slaDrafts || [])
+  } catch (e) {
+    sla24h = { error: (e as Error).message }
+  }
+
+  let unaccounted: any = null
+  try {
+    const inv = await _makesafeIntakeReconcileInvariant(client, { windowDays: 7, limitUnaccounted: 25 })
+    unaccounted = {
+      count: inv.counts.unaccounted,
+      live_and_true: inv.live_and_true,
+      window_days: inv.window_days,
+      sample: inv.unaccounted.slice(0, 10),
+    }
+  } catch (e) {
+    unaccounted = { error: (e as Error).message }
+  }
+
+  const status = String(health?.extraction_status || 'unknown')
+  return {
+    ok: true,
+    generated_at: nowIso,
+    // healthy = classifier extracting AND nothing unaccounted. This is the single
+    // boolean the morning report keys off.
+    healthy: status === 'ok' && (unaccounted?.count === 0),
+    extraction: {
+      status,
+      degraded_reason: health?.degraded_reason || null,
+      degraded_since: health?.degraded_since || null,
+      last_scan_at: health?.last_scan_at || null,
+      last_successful_extraction_at: health?.last_successful_extraction_at || null,
+      last_scan_drafts_created: health?.last_scan_drafts_created ?? null,
+      last_scan_auto_filed: health?.last_scan_auto_filed ?? null,
+    },
+    cron: {
+      cron_enabled: settings?.cron_enabled ?? null,
+      auto_file_enabled: settings?.auto_file_enabled ?? null,
+      enabled_at: settings?.enabled_at || null,
+      enabled_by: settings?.enabled_by || null,
+    },
+    last_poll: {
+      mailbox: _SES_MAILBOX,
+      last_successful_sync_at: sync?.last_successful_sync_at || null,
+      last_attempt_at: sync?.last_attempt_at || null,
+      mode: sync?.mode || null,
+      pending_attachments: sync?.pending_attachments ?? null,
+      last_error: sync?.last_error || null,
+    },
+    last_24h: {
+      drafts_created: drafts24h ?? 0,
+      auto_filed: autoFiled24h ?? 0,
+    },
+    // B5 SLA: the email->card latency proof. `last_scan` is the snapshot written every
+    // 2-min run; `last_24h` is the daily-provable rolling percentile over per-draft
+    // timestamps. `capped_candidates` on the last scan flags a draining backlog.
+    sla: {
+      last_scan: {
+        latency_p50_sec: health?.last_scan_latency_p50_sec ?? null,
+        latency_p95_sec: health?.last_scan_latency_p95_sec ?? null,
+        latency_max_sec: health?.last_scan_latency_max_sec ?? null,
+        latency_samples: health?.last_scan_latency_samples ?? null,
+        capped_candidates: health?.last_scan_capped_candidates ?? null,
+      },
+      last_24h: sla24h,
+      target_sec: 120,
+    },
+    // M1.5 cost ledger. `last_24h` is the Captain's headline (model calls, the
+    // template-skip share, tokens, and estimated USD at the Haiku 4.5 rate constants);
+    // `last_scan` + `lifetime` come off the health row's running counters.
+    cost: {
+      rates: {
+        model: _HAIKU_4_5_RATES.model,
+        as_of: _HAIKU_4_5_RATES.as_of,
+        input_per_mtok: _HAIKU_4_5_RATES.input_per_mtok,
+        output_per_mtok: _HAIKU_4_5_RATES.output_per_mtok,
+        cache_read_per_mtok: _HAIKU_4_5_RATES.cache_read_per_mtok,
+        cache_write_per_mtok: _HAIKU_4_5_RATES.cache_write_per_mtok,
+      },
+      last_24h: cost24h,
+      // Convenience mirrors of the two headline figures the mission calls out.
+      model_calls_24h: cost24h?.model_calls_24h ?? null,
+      model_skip_rate: cost24h?.model_skip_rate ?? null,
+      estimated_cost_usd_24h: cost24h?.estimated_cost_usd_24h ?? null,
+      last_scan: {
+        model_calls: health?.last_scan_model_calls ?? null,
+        model_skips: health?.last_scan_model_skips ?? null,
+        input_tokens: health?.last_scan_input_tokens ?? null,
+        output_tokens: health?.last_scan_output_tokens ?? null,
+        cache_read_tokens: health?.last_scan_cache_read_tokens ?? null,
+        cache_write_tokens: health?.last_scan_cache_write_tokens ?? null,
+        estimated_cost_usd: health?.last_scan_estimated_cost_usd ?? null,
+      },
+      lifetime: {
+        model_calls: health?.total_model_calls ?? null,
+        model_skips: health?.total_model_skips ?? null,
+        input_tokens: health?.total_input_tokens ?? null,
+        output_tokens: health?.total_output_tokens ?? null,
+        cache_read_tokens: health?.total_cache_read_tokens ?? null,
+        cache_write_tokens: health?.total_cache_write_tokens ?? null,
+      },
+    },
+    unaccounted,
+  }
+}
+
+// ── Assignment-mutation authz gate (Manager View) ──────────────────────────
+// Shared by the ops-dashboard create/update/delete_assignment actions. Resolves
+// the affected job's vertical, then applies _resolveAllocationAuthz. api_key
+// (dashboard / service) and dispatchers short-circuit with no DB read; only a
+// JWT vertical manager needs the job + their managed_verticals looked up. Closes
+// the pre-existing hole where ANY logged-in JWT user could mutate assignments.
+export async function assertAssignmentMutationAuthz(
+  client: any,
+  authMode: 'api_key' | 'jwt' | 'routine',
+  authUser: { id: string; email?: string; role: string } | null,
+  ref: { jobId?: string | null; assignmentId?: string | null },
+): Promise<void> {
+  // Fast paths: no DB read required.
+  if (authMode === 'api_key') return
+  if (authMode === 'routine') {
+    throw new ApiError('forbidden: the make-safe automation routine may not mutate assignments', 403)
+  }
+  const role = String(authUser?.role || '').toLowerCase()
+  if (role === 'admin' || role === 'owner' || role === 'ops_manager') return
+
+  // JWT vertical-manager path: resolve the job's vertical + the caller's list.
+  let jobId = ref.jobId || null
+  if (!jobId && ref.assignmentId) {
+    const { data: a } = await client.from('job_assignments').select('job_id').eq('id', ref.assignmentId).maybeSingle()
+    jobId = a?.job_id || null
+  }
+  let jobVertical: string | null = null
+  if (jobId) {
+    const { data: job } = await client.from('jobs').select('id, type, job_number').eq('id', jobId).maybeSingle()
+    if (job) jobVertical = _jobVertical(job)
+  }
+  const { data: userRec } = authUser?.id
+    ? await client.from('users').select('managed_verticals').eq('id', authUser.id).maybeSingle()
+    : { data: null as any }
+  const decision = _resolveAllocationAuthz({
+    authMode: 'jwt',
+    callerRole: role,
+    managedVerticals: userRec?.managed_verticals,
+    jobVertical,
+  })
+  if (!decision.allowed) {
+    throw new ApiError('Not authorized: you can only allocate jobs in a vertical you manage', 403)
+  }
+}
+
+// ── Trade-side manager allocation (Manager View) ───────────────────────────
+// A vertical manager (or dispatcher) allocates a job to — or moves it between —
+// installers from the trade app. JWT-authed by the caller (case above); gated
+// here by _resolveAllocationAuthz on the job's vertical. Wraps the SAME
+// createAssignment / updateAssignment primitives the ops dashboard uses, so the
+// installer Telegram DM, job_events, business_events, GHL push, and
+// visible_to_trades all fire identically. Idempotent against double-taps and
+// refuses archived / cancelled jobs.
+export async function allocateJob(client: any, args: {
+  body: any
+  callerRole?: string | null
+  managedVerticals?: unknown
+}): Promise<any> {
+  const { body, callerRole, managedVerticals } = args
+  const reassignId = body.assignmentId || body.assignment_id || null
+
+  // Resolve the target job — directly for a new allocation, via the existing
+  // assignment for a reassignment.
+  let jobId: string | null = body.jobId || body.job_id || null
+  let sourceAssignment: any = null
+  if (reassignId) {
+    const { data: a } = await client.from('job_assignments')
+      .select('id, job_id, user_id, scheduled_date, scheduled_end, start_time, end_time, assignment_type, crew_name, role, status')
+      .eq('id', reassignId).maybeSingle()
+    if (!a) throw new ApiError('assignment not found', 404)
+    sourceAssignment = a
+    jobId = a.job_id
+  }
+  if (!jobId) throw new ApiError('jobId (new allocation) or assignmentId (reassignment) required', 400)
+
+  const { data: job } = await client.from('jobs')
+    .select('id, type, job_number, status').eq('id', jobId).maybeSingle()
+  if (!job) throw new ApiError('job not found', 404)
+
+  // Refuse archived / cancelled / otherwise-terminal jobs (same terminal set the
+  // open pool excludes).
+  const jobStatus = String(job.status || '').toLowerCase()
+  if ((_MAKESAFE_POOL_EXCLUDED_STATUSES as readonly string[]).includes(jobStatus)) {
+    throw new ApiError(`cannot allocate a ${jobStatus} job`, 409)
+  }
+
+  // Authz: dispatcher OR a manager of this job's vertical.
+  const jobVertical = _jobVertical(job)
+  const decision = _resolveAllocationAuthz({ authMode: 'jwt', callerRole, managedVerticals, jobVertical })
+  if (!decision.allowed) {
+    throw new ApiError(`Not authorized to allocate ${jobVertical || 'this'} jobs`, 403)
+  }
+
+  // Target installer = any active user (owner's decision). Must exist.
+  const targetUserId = body.userId || body.user_id || body.toUserId || body.to_user_id || null
+  if (!targetUserId) throw new ApiError('target installer (userId) required', 400)
+  const { data: target } = await client.from('users').select('id').eq('id', targetUserId).maybeSingle()
+  if (!target) throw new ApiError('target installer not found', 404)
+
+  // ── Reassignment: move the existing assignment to the new installer ──
+  // Mirrors ops-side reassignment (updateAssignment can set user_id). Keeps the
+  // same row so scheduled_date / times / history are preserved unless overridden.
+  if (reassignId) {
+    if (sourceAssignment.user_id === targetUserId) {
+      return { ok: true, mode: 'reassign', deduped: true, assignment: sourceAssignment } // already on this installer
+    }
+    const updateBody: any = { assignmentId: reassignId, userId: targetUserId }
+    const sDateR = body.scheduledDate || body.scheduled_date || body.date
+    if (sDateR) updateBody.scheduledDate = sDateR
+    if (body.startTime || body.start_time) updateBody.startTime = body.startTime || body.start_time
+    if (body.endTime || body.end_time) updateBody.endTime = body.endTime || body.end_time
+    if (body.crewName || body.crew_name) updateBody.crewName = body.crewName || body.crew_name
+    if (body.notes !== undefined) updateBody.notes = body.notes
+    const res = await updateAssignment(client, updateBody)
+    return { ok: true, mode: 'reassign', ...res }
+  }
+
+  // ── New allocation ──
+  const sDate = body.scheduledDate || body.scheduled_date || body.date || null
+  if (!sDate) throw new ApiError('scheduledDate required for a new allocation', 400)
+
+  // Idempotency against double-taps: an existing non-cancelled assignment for the
+  // same job + installer + date returns instead of inserting a duplicate.
+  const { data: dup } = await client.from('job_assignments')
+    .select('id, scheduled_date, user_id, status, assignment_type')
+    .eq('job_id', jobId).eq('user_id', targetUserId).eq('scheduled_date', sDate)
+    .neq('status', 'cancelled').limit(1)
+  if (dup && dup.length > 0) {
+    return { ok: true, mode: 'idempotent', deduped: true, assignment: dup[0] }
+  }
+
+  const created = await createAssignment(client, { ...body, jobId, userId: targetUserId, scheduledDate: sDate })
+  return { ok: true, mode: 'create', ...created }
 }
 
 async function createAssignment(client: any, body: any) {
@@ -12569,6 +14714,21 @@ async function pushPOToXero(client: any, body: any) {
   if (error || !po) throw new Error('PO not found')
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
 
+  // U2 reference discipline — resolve the canonical outbound job ref ONCE so both
+  // the Xero Reference field and the DeliveryInstructions quote-back ask carry the
+  // exact SW[PFD]-##### form the inbound bill-linker recognises. Prefer the
+  // authoritative jobs.job_number; fall back to whatever the PO stored.
+  let poJobNumber = ''
+  if (po.job_id) {
+    const { data: poJob } = await client
+      .from('jobs')
+      .select('job_number')
+      .eq('id', po.job_id)
+      .maybeSingle()
+    poJobNumber = poJob?.job_number || ''
+  }
+  const jobRef = _canonicalJobRef(po.reference, poJobNumber)
+
   const { accessToken, tenantId } = await getToken(client)
 
   // Resolve supplier contact in Xero — find or create
@@ -12612,7 +14772,7 @@ async function pushPOToXero(client: any, body: any) {
     const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
     const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
     if (divisionCat) {
-      const poRef = po.reference || ''
+      const poRef = jobRef || po.reference || ''
       const optionName = trackingCategoryForJob(poRef)
       const validOption = (divisionCat.Options || []).find((o: any) => o.Name === optionName && o.Status === 'ACTIVE')
       if (validOption) poTracking = [{ Name: 'Business Unit', Option: optionName }]
@@ -12632,14 +14792,19 @@ async function pushPOToXero(client: any, body: any) {
   const xeroStatus = requestedStatus === 'authorised' ? 'AUTHORISED' : 'SUBMITTED'
   const localStatus = requestedStatus === 'authorised' ? 'authorised' : 'submitted'
 
+  // U2 — stamp the canonical job ref in Reference (what the supplier is asked to
+  // quote back) and ride the quote-back ask onto Xero's own PO PDF via the
+  // DeliveryInstructions free-text field (the only lever we have on Xero's
+  // un-templatable PO email; see _shared/po_reference.ts for why not a line item).
   const xeroPO = {
     PurchaseOrders: [{
       Contact: supplierContactId
         ? { ContactID: supplierContactId }
         : { Name: po.supplier_name },
       PurchaseOrderNumber: po.po_number,
-      Reference: po.reference || '',
+      Reference: jobRef || po.reference || '',
       DeliveryDate: po.delivery_date || undefined,
+      ...(jobRef ? { DeliveryInstructions: _poDeliveryInstruction(jobRef) } : {}),
       LineAmountTypes: 'Exclusive',
       LineItems: lineItems,
       Status: xeroStatus,
@@ -13422,7 +15587,7 @@ async function createInvoice(client: any, body: any) {
         contact_name: contact || xeroInv?.Contact?.Name || null,
         invoice_number: invNumber,
         invoice_type: 'ACCREC',
-        status: invoiceStatus,
+        status: xeroInv?.Status || invoiceStatus,
         reference: reference || '',
         sub_total: invSubTotal,
         total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
@@ -13456,7 +15621,7 @@ async function createInvoice(client: any, body: any) {
     await client.from('job_events').insert({
       job_id: jId,
       event_type: 'invoice_created',
-      detail_json: { xero_invoice_id: xeroInvId, invoice_number: invNumber, status: invoiceStatus, total: invTotal, emailed: !!send_email },
+      detail_json: { xero_invoice_id: xeroInvId, invoice_number: invNumber, status: xeroInv?.Status || invoiceStatus, total: invTotal, emailed: !!send_email },
     })
     // Update job status to invoiced if complete
     await client.from('jobs')
@@ -13465,7 +15630,10 @@ async function createInvoice(client: any, body: any) {
       .eq('status', 'complete')
   }
 
-  return { success: true, xero_invoice_id: xeroInvId, invoice_number: invNumber, total: invTotal }
+  // Return the status Xero actually assigned (xeroInv.Status), not just what we
+  // requested. Callers that gate client-facing payment links (sendAcceptanceInvoice)
+  // must verify the invoice really came back AUTHORISED before emailing a Pay Now.
+  return { success: true, xero_invoice_id: xeroInvId, invoice_number: invNumber, total: invTotal, status: xeroInv?.Status || invoiceStatus }
 }
 
 // ── Sync Job Invoices — pull invoices from Xero for a specific job and link them ──
@@ -14862,6 +17030,10 @@ function buildScopeSummaryLine(job: any): string {
 // Creates a Xero ACCREC invoice for a configurable % of the quoted total,
 // with rich description, tracking category, and SWP-25042-DEP reference.
 // Sends via Xero email. Saves deposit_invoice_id + deposit_amount on jobs.
+// xero_status defaults to DRAFT (drafts-for-review for make-safe / manual / MCP
+// callers — do not change); sendAcceptanceInvoice defaults it to AUTHORISED.
+// Returns xero_status (the status Xero actually assigned) so callers can gate
+// client-facing payment links. See "Acceptance Deposit Invoice Invariant" in AGENTS.md.
 async function createDepositInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -15043,6 +17215,8 @@ async function createDepositInvoice(client: any, body: any) {
     quoted_total: quotedTotal,
     reference,
     description,
+    // Surface the Xero status so acceptance callers can gate the Pay Now email.
+    xero_status: invoiceResult.status,
   }
 }
 
@@ -15757,7 +17931,13 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
 export function _groupTradeAssignmentsForTest(assignments: any[], today: string, weekEnd: string) {
   const grouped: any = { today: [] as any[], thisWeek: [] as any[], upcoming: [] as any[], recent: [] as any[], makesafePool: [] as any[] }
   for (const a of (assignments || [])) {
-    if (a?.assignment_type === 'makesafe_open' || a?.role === 'makesafe_open') {
+    // Open-pool cards (make-safe OR any managed vertical: fencing_open /
+    // patio_open / decking_open) go to the pool bucket, never the dated
+    // today/thisWeek buckets. The bucket key stays `makesafePool` for client
+    // compatibility; it is the generic open-pool lane.
+    const openType = String(a?.assignment_type || '')
+    const openRole = String(a?.role || '')
+    if (openType.endsWith('_open') || openRole.endsWith('_open')) {
       grouped.makesafePool.push(a)
       continue
     }
@@ -15770,7 +17950,137 @@ export function _groupTradeAssignmentsForTest(assignments: any[], today: string,
   return grouped
 }
 
-async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false) {
+// ── Make-safe pool visibility (trade app) ──────────────────────────────────
+// Statuses that EXCLUDE a make-safe job from the open trade pool. Extracted to a
+// single constant so the two queries that build the pool cannot drift and so the
+// exclusion contract (notably 'archived') can be unit-tested. Rendered into a
+// PostgREST `not in (...)` filter via _makesafePoolExcludedStatusFilter().
+export const _MAKESAFE_POOL_EXCLUDED_STATUSES = [
+  'cancelled', 'archived', 'lost', 'deleted', 'complete', 'completed',
+  'invoiced', 'paid', 'closed', 'duplicate', 'duplicated', 'void', 'voided',
+] as const
+
+export function _makesafePoolExcludedStatusFilter(): string {
+  return '(' + _MAKESAFE_POOL_EXCLUDED_STATUSES.map((s) => `"${s}"`).join(',') + ')'
+}
+
+// Pure resolver for trade-app make-safe visibility. Single source of truth used
+// by the route and unit tests.
+//  - Dispatcher (admin / ops_manager): see-all view of every job PLUS the full
+//    open make-safe pool. Runs with showAll=true.
+//  - Make-safe manager (users.makesafe_manager = true, e.g. Hugo + Nithin): NOT a
+//    dispatcher. Gets the SAME full open make-safe pool UNIONED with only their
+//    own assignments. showAll stays false so the per-user assignment query runs.
+export function _resolveMakesafeVisibility(
+  input: { role?: string | null; makesafeManager?: boolean | null },
+): { isAdmin: boolean; isDispatcher: boolean; isMakesafeManager: boolean; canSeeMakesafePool: boolean } {
+  const role = String(input?.role || '').toLowerCase()
+  const isAdmin = role === 'admin'
+  const isDispatcher = isAdmin || role === 'ops_manager'
+  const isMakesafeManager = input?.makesafeManager === true
+  return { isAdmin, isDispatcher, isMakesafeManager, canSeeMakesafePool: isDispatcher || isMakesafeManager }
+}
+
+// Gate used inside myJobs: a flagged make-safe manager gets the same full
+// non-archived make-safe pool a dispatcher gets.
+export function _canSeeFullMakesafePool(isDispatcher: boolean, isMakesafeManager: boolean): boolean {
+  return isDispatcher === true || isMakesafeManager === true
+}
+
+// ── Manager View — per-vertical manager visibility + allocation ────────────
+// Marnin's locked model (2026-07-05): manager rights are ONE list per user
+// (users.managed_verticals), NOT three bespoke per-vertical booleans. A managed
+// vertical grants (a) the full open pool of that vertical in the trade app and
+// (b) allocation rights over that vertical. Values align to jobs.type. This
+// generalises the make-safe-only flag (users.makesafe_manager, now backfilled
+// into managed_verticals) to fencing / patio / decking with one mechanism.
+export const _MANAGED_VERTICALS = ['makesafe', 'fencing', 'patio', 'decking'] as const
+
+// Normalise a raw managed_verticals value (DB array, possibly null / mixed-case
+// / unknown entries) into a clean, de-duplicated list of valid verticals.
+export function _normalizeManagedVerticals(input: unknown): string[] {
+  if (!Array.isArray(input)) return []
+  const valid = _MANAGED_VERTICALS as readonly string[]
+  const out: string[] = []
+  for (const raw of input) {
+    const v = String(raw ?? '').trim().toLowerCase()
+    if (valid.includes(v) && !out.includes(v)) out.push(v)
+  }
+  return out
+}
+
+// Pure resolver for trade-app manager visibility, generalised from
+// _resolveMakesafeVisibility to every vertical. Single source of truth used by
+// the trade route + unit tests.
+//  - Dispatcher (admin / ops_manager): unchanged see-all behaviour + make-safe
+//    pool. isMakesafeManager / canSeeMakesafePool preserve the exact make-safe
+//    semantics the live flag gave (Hugo keeps the pool via the backfill).
+//  - Vertical manager (managed_verticals contains the vertical): gets that
+//    vertical's open pool unioned with their own assignments, WITHOUT dispatcher
+//    see-all.
+//  - poolVerticals: the set of verticals whose open pool myJobs should union in
+//    — every managed vertical, PLUS 'makesafe' for any dispatcher (so the
+//    dispatcher make-safe pool survives even with an empty managed list).
+export function _resolveManagerVisibility(
+  input: { role?: string | null; managedVerticals?: unknown },
+): {
+  isAdmin: boolean
+  isDispatcher: boolean
+  managedVerticals: string[]
+  poolVerticals: string[]
+  isMakesafeManager: boolean
+  canSeeMakesafePool: boolean
+} {
+  const role = String(input?.role || '').toLowerCase()
+  const isAdmin = role === 'admin'
+  const isDispatcher = isAdmin || role === 'ops_manager'
+  const managedVerticals = _normalizeManagedVerticals(input?.managedVerticals)
+  const isMakesafeManager = managedVerticals.includes('makesafe')
+  const canSeeMakesafePool = isDispatcher || isMakesafeManager
+  const poolSet = new Set<string>(managedVerticals)
+  if (canSeeMakesafePool) poolSet.add('makesafe')
+  // Deterministic order (matches _MANAGED_VERTICALS) so tests + payloads are stable.
+  const poolVerticals = (_MANAGED_VERTICALS as readonly string[]).filter((v) => poolSet.has(v))
+  return { isAdmin, isDispatcher, managedVerticals, poolVerticals, isMakesafeManager, canSeeMakesafePool }
+}
+
+// The vertical a job belongs to, for allocation-authz + pool purposes. Make-safe
+// wins on either jobs.type='makesafe' OR an SWMS- job_number (mirrors
+// isMakesafeAccessJob); otherwise the plain jobs.type (lower-cased).
+export function _jobVertical(job: any): string {
+  if (isMakesafeAccessJob(job)) return 'makesafe'
+  return String(job?.type || '').trim().toLowerCase()
+}
+
+// Pure resolver for who may create / move / delete a job_assignment. The ops
+// dashboard's create/update/delete_assignment path and the trade-side
+// allocate_job path share it. Marnin's rule: a privileged server key (ops
+// dashboard SW_API_KEY / service role, authMode='api_key') or a dispatcher
+// (admin / owner / ops_manager JWT) may allocate ANY job; a vertical manager may
+// allocate ONLY jobs of a vertical they manage; anyone else (a plain installer
+// JWT) is refused. The scoped make-safe routine may never mutate assignments
+// (also blocked upstream by the default-deny allow-list; refused here too).
+export function _resolveAllocationAuthz(input: {
+  authMode: 'api_key' | 'jwt' | 'routine'
+  callerRole?: string | null
+  managedVerticals?: unknown
+  jobVertical?: string | null
+}): { allowed: boolean; reason: string } {
+  if (input.authMode === 'api_key') return { allowed: true, reason: 'api_key' }
+  if (input.authMode === 'routine') return { allowed: false, reason: 'routine_forbidden' }
+  const role = String(input.callerRole || '').toLowerCase()
+  if (role === 'admin' || role === 'owner' || role === 'ops_manager') {
+    return { allowed: true, reason: 'dispatcher' }
+  }
+  const managed = _normalizeManagedVerticals(input.managedVerticals)
+  const vertical = String(input.jobVertical || '').trim().toLowerCase()
+  if (vertical && managed.includes(vertical)) {
+    return { allowed: true, reason: 'vertical_manager' }
+  }
+  return { allowed: false, reason: 'not_authorized' }
+}
+
+async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false, poolVerticals: string[] = []) {
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -15873,18 +18183,22 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
     }
   }
 
-  // MakeSafe dispatch flow: the full open MakeSafe pool is visible only to the
-  // dispatcher (ops manager / admin) as open field-report cards, even before a
-  // named assignment exists. Other trades see a MakeSafe only once it is
-  // allocated to them (their named assignment). Keep this specific to MakeSafe
-  // and expose only the same slim job fields the mobile job list already uses.
-  if (isDispatcher) {
+  // MakeSafe dispatch flow: the full open MakeSafe pool is visible to the
+  // dispatcher (ops manager / admin) AND to a flagged make-safe manager
+  // (users.makesafe_manager, e.g. Hugo + Nithin) as open field-report cards,
+  // even before a named assignment exists. Other trades see a MakeSafe only once
+  // it is allocated to them (their named assignment). A manager is not a
+  // dispatcher, so showAll stays false: their own assignments (fetched above)
+  // are unioned with this pool, and pool cards already assigned to them are
+  // de-duplicated via assignedJobIds below. Keep this specific to MakeSafe and
+  // expose only the same slim job fields the mobile job list already uses.
+  if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
     const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
       .or('type.eq.makesafe,job_number.ilike.SWMS-%')
-      .not('status', 'in', '("cancelled","archived","lost","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
+      .not('status', 'in', _makesafePoolExcludedStatusFilter())
       .order('created_at', { ascending: false })
       .limit(80)
     if (msErr) throw msErr
@@ -15914,7 +18228,7 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
         .from('jobs')
         .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
         .in('id', detailJobIds)
-        .not('status', 'in', '("cancelled","archived","lost","deleted","complete","completed","invoiced","paid","closed","duplicate","duplicated","void","voided")')
+        .not('status', 'in', _makesafePoolExcludedStatusFilter())
         .order('created_at', { ascending: false })
         .limit(80)
       if (detailJobsErr) throw detailJobsErr
@@ -15971,6 +18285,59 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
         job_phase: null,
         jobs: job,
       })
+    }
+  }
+
+  // ── Generic per-vertical open pool (fencing / patio / decking) ──
+  // Manager View: a vertical manager sees the full open pool of every vertical
+  // in their managed_verticals — active, non-archived jobs of that jobs.type —
+  // as synthetic 'available' cards, exactly like the make-safe pool above (which
+  // keeps its bespoke make-safe_job_details enrichment). Make-safe is handled
+  // above and excluded here. Cards are de-duped against the user's own
+  // assignments (and against each other). Same terminal-status exclusion as the
+  // make-safe pool via _makesafePoolExcludedStatusFilter().
+  const genericPoolVerticals = (poolVerticals || []).filter((v) => v !== 'makesafe')
+  if (genericPoolVerticals.length > 0) {
+    const assignedJobIdsPool = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+    for (const vertical of genericPoolVerticals) {
+      try {
+        const { data: openJobs, error: poolErr } = await client
+          .from('jobs')
+          .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+          .eq('type', vertical)
+          .not('status', 'in', _makesafePoolExcludedStatusFilter())
+          .order('created_at', { ascending: false })
+          .limit(80)
+        if (poolErr) throw poolErr
+        for (const job of (openJobs || [])) {
+          if (!job?.id || assignedJobIdsPool.has(job.id)) continue
+          assignedJobIdsPool.add(job.id)
+          assignments.push({
+            id: `${vertical}-open-${job.id}`,
+            scheduled_date: today,
+            scheduled_end: null,
+            start_time: null,
+            status: 'available',
+            role: `${vertical}_open`,
+            notes: null,
+            assignment_type: `${vertical}_open`,
+            crew_name: null,
+            started_at: null,
+            completed_at: null,
+            clocked_on_at: null,
+            clocked_off_at: null,
+            travel_started_at: null,
+            arrived_at: null,
+            break_minutes: null,
+            job_phase: null,
+            jobs: job,
+          })
+        }
+      } catch (poolErr: any) {
+        // Non-blocking: a failed vertical pool query must not break the trade's
+        // own assignment list.
+        console.log(`[ops-api] myJobs ${vertical} pool query failed (non-blocking):`, poolErr?.message)
+      }
     }
   }
 
@@ -21875,6 +24242,10 @@ async function completeJob(client: any, body: any) {
 }
 
 // ── send_payment_link: get Xero online invoice URL + SMS to client ──
+// AUTHORISED invoices only: throws ApiError 409 for any other status (DRAFT etc.),
+// because a non-AUTHORISED invoice's online link cannot take payment. Callers
+// (daily-digest deposit chaser, JARVIS sw_send_payment_link) must treat a
+// non-success response as "reminder NOT sent".
 async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -21915,6 +24286,10 @@ async function sendPaymentLink(client: any, body: any) {
 
   if (!invoices || invoices.length === 0) throw new Error('No invoice found for this job')
   const invoice = invoices[0]
+
+  if (invoice.status !== 'AUTHORISED') {
+    throw new ApiError(`Invoice ${invoice.invoice_number || invoice.xero_invoice_id} is ${invoice.status || 'not AUTHORISED'} in Xero, not AUTHORISED — its online link cannot take payment. Authorise the invoice in Xero (a just-authorised invoice may need a sync first), then resend the payment link.`, 409)
+  }
 
   // Get Xero online invoice URL
   const { accessToken, tenantId } = await getToken(client)
@@ -21974,6 +24349,15 @@ async function sendPaymentLink(client: any, body: any) {
     payment_url: onlineUrl,
     sms_sent: smsResult.success || false,
   }
+}
+
+// Acceptance-invoice charge gate. The branded "Pay Now" email/SMS may only go out
+// when the Xero invoice actually came back AUTHORISED AND we have a live OnlineInvoice
+// URL. A DRAFT status (or a missing URL) means the link is unpayable — emailing it
+// stranded clients with dead links (INV-0859/0687/0686). Pure so it can be unit-tested
+// without Xero/Supabase.
+export function _acceptanceInvoiceChargeable(xeroStatus: unknown, paymentUrl: unknown): boolean {
+  return xeroStatus === 'AUTHORISED' && typeof paymentUrl === 'string' && paymentUrl.length > 0
 }
 
 // ── send_acceptance_invoice: create deposit invoice + send payment link in one call ──
@@ -22102,7 +24486,13 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     })
   }
 
-  // Create the deposit invoice — Xero email DISABLED, we send branded email ourselves
+  // Create the deposit invoice — Xero email DISABLED, we send branded email ourselves.
+  // HOTFIX: the ACCEPTANCE deposit invoice MUST be AUTHORISED, not DRAFT. A DRAFT's
+  // Xero online link cannot take card payment and bank transfers against it land
+  // unreconciled — yet the self-accept flow emails a branded "Pay Now" against it.
+  // Default xero_status to AUTHORISED here (one authoritative place) rather than
+  // trusting each caller. createDepositInvoice keeps its DRAFT default for the
+  // make-safe / manual / MCP paths, where drafts-for-review are intentional.
   const invoiceResult = await createDepositInvoice(client, {
     job_id: jId,
     deposit_percent: depositPercent,
@@ -22111,6 +24501,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     send_email: false, // DISABLED — branded email via send-quote/send-invoice
     job_contact_id: body.job_contact_id || null,
     run_label: body.run_label || null,
+    xero_status: body.xero_status || 'AUTHORISED',
   })
 
   // Get Xero online invoice URL for payment
@@ -22126,6 +24517,52 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     paymentUrl = onlineResult?.OnlineInvoices?.[0]?.OnlineInvoiceUrl || ''
   } catch (e) {
     console.log('[send_acceptance_invoice] Could not get online invoice URL:', (e as Error).message)
+  }
+
+  // ── HOTFIX GUARD: never email a branded "Pay Now" against an unpayable invoice ──
+  // Only send the client-facing payment link when the Xero invoice ACTUALLY came
+  // back AUTHORISED (fix #1 requests it, but Xero is the source of truth) AND the
+  // OnlineInvoice URL fetch succeeded. A DRAFT link cannot take card payment and
+  // bank transfers against it land unreconciled — this stranded INV-0859/0687/0686
+  // with dead links. On failure: no client email/SMS, write a loud job_event so ops
+  // sees it, and return an error surface. The accept flow (send-quote /accept)
+  // handles a { success:false } response gracefully — it still confirms acceptance
+  // to the client and simply omits the payment link — so acceptance is preserved.
+  if (!_acceptanceInvoiceChargeable(invoiceResult.xero_status, paymentUrl)) {
+    const failureReason = invoiceResult.xero_status !== 'AUTHORISED'
+      ? 'invoice_not_authorised'
+      : 'online_invoice_url_unavailable'
+    console.error('[send_acceptance_invoice] ABORT client email — invoice not chargeable:', JSON.stringify({
+      job_id: jId,
+      xero_invoice_id: invoiceResult.xero_invoice_id,
+      invoice_number: invoiceResult.invoice_number,
+      xero_status: invoiceResult.xero_status || null,
+      payment_url_fetched: !!paymentUrl,
+      reason: failureReason,
+    }))
+    await client.from('job_events').insert({
+      job_id: jId,
+      event_type: 'acceptance_invoice_authorise_failed',
+      detail_json: {
+        xero_invoice_id: invoiceResult.xero_invoice_id,
+        invoice_number: invoiceResult.invoice_number,
+        xero_status: invoiceResult.xero_status || null,
+        payment_url_fetched: !!paymentUrl,
+        reason: failureReason,
+        job_contact_id: body.job_contact_id || null,
+        run_label: body.run_label || null,
+      },
+    })
+    return {
+      success: false,
+      error: 'Acceptance invoice was not authorised or has no payable link — client was NOT emailed. Needs manual review in Xero.',
+      reason: failureReason,
+      job_id: jId,
+      invoice_number: invoiceResult.invoice_number,
+      xero_invoice_id: invoiceResult.xero_invoice_id,
+      xero_status: invoiceResult.xero_status || null,
+      payment_url: paymentUrl || '',
+    }
   }
 
   // Resolve client details (prefer neighbour contact if provided)

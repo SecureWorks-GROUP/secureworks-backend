@@ -297,7 +297,7 @@ function makeSink() {
   return {
     sink: {
       logBusinessEvent: async (_c: any, e: any) => { events.push(e); },
-      notifyTelegram: async (t: string) => { telegrams.push(t); },
+      notifySms: async (t: string) => { telegrams.push(t); },
     },
     events,
     telegrams,
