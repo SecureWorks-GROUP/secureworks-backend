@@ -301,6 +301,7 @@ import {
   stripEmailHtmlForTrade as _stripEmailHtmlForTrade,
   extractBuilderEmailLinks as _extractBuilderEmailLinks,
   mergeDeterministicAndClaudeLinks as _mergeDeterministicAndClaudeLinks,
+  mergeIntoExternalLinks as _mergeIntoExternalLinks,
   normalizeReportExternalLinks as _normalizeReportExternalLinks,
   cleanUrl as _cleanBuilderLinkUrl,
 } from './makesafe_email_links.ts'
@@ -12904,6 +12905,40 @@ export async function _selfHealIntakeInsert(
   return { outcome: 'dropped', row: null }
 }
 
+// Intake item 4 (nudge-email pattern) — land a nudge's portal links onto the EXISTING
+// make-safe job it references, idempotently, instead of dropping them. A builder
+// "please complete the report" nudge carries the report portal link but NO new WO PDF
+// and references a ref that already has a live job; the scan otherwise silently skips
+// it and the link is lost (recon proof SWMS-26632). Writes the canonical
+// makesafe_job_details.external_links (+ the jobs.metadata alias the trade view/board
+// read), ADD-only (never clobbers an operator edit; re-scanning the same nudge is a
+// no-op). Returns the newly-added links. Throws on the canonical write so the caller
+// can log; the caller keeps it non-blocking (a patch failure never breaks the scan).
+async function _patchExistingJobExternalLinks(
+  // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+  client: any,
+  jobId: string,
+  incoming: any[],
+): Promise<{ added: any[] }> {
+  if (!jobId || !Array.isArray(incoming) || incoming.length === 0) return { added: [] }
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('external_links').eq('job_id', jobId).maybeSingle()
+  const { links, added } = _mergeIntoExternalLinks(detail?.external_links, incoming)
+  if (added.length === 0) return { added: [] }
+  const nowIso = new Date().toISOString()
+  const { error: upErr } = await client.from('makesafe_job_details')
+    .update({ external_links: links, updated_at: nowIso }).eq('job_id', jobId)
+  if (upErr) throw new Error(`external_links patch failed: ${upErr.message}`)
+  // Keep the jobs.metadata.external_links alias in sync (best-effort; canonical done).
+  try {
+    const { data: jobRow } = await client.from('jobs').select('metadata').eq('id', jobId).maybeSingle()
+    const md = parseJsonObject(jobRow?.metadata)
+    md.external_links = links
+    await client.from('jobs').update({ metadata: md, updated_at: nowIso }).eq('id', jobId)
+  } catch (_) { /* alias is best-effort */ }
+  return { added }
+}
+
 async function scanSesMakesafes(client: any) {
   // The group-sync projection keys ses@ mail under this mailbox (the canonical
   // value used by monitor-ses-makesafes + reconcile + the GAP reads).
@@ -13135,6 +13170,7 @@ async function scanSesMakesafes(client: any) {
   let skippedAiOnly = 0
   let skippedNotWorkOrderGate = 0
   let cancellationsDetected = 0
+  let nudgeLinksAttached = 0 // item 4: portal links landed on an existing job from a nudge email
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
@@ -13899,6 +13935,38 @@ async function scanSesMakesafes(client: any) {
         // no company slug) — treated as a safe skip, never points at the wrong job.
         if (!REOPEN_ELIGIBLE_STATUSES.includes(matchedJobStatus ?? '')) {
           const skipReason = matchedEntry == null ? 'no company-scoped match (ambiguous ref)' : 'active job, not reopen-eligible'
+          // Item 4 (nudge-email pattern): a "please complete the report" nudge for THIS
+          // active job carries the report portal link but no new WO. Land it on the
+          // existing job's external_links (idempotent) instead of dropping it — the
+          // link is why crews couldn't find the portal (SWMS-26632). Only when the ref
+          // resolved to a DEFINITE company-scoped job (matchedJobId, not an ambiguous
+          // ref-only fallback), so a shared ref number can never patch the wrong job.
+          if (matchedJobId) {
+            const nudgeLinks = _normalizeReportExternalLinks(extraction)
+            if (nudgeLinks.length) {
+              try {
+                const { added } = await _patchExistingJobExternalLinks(client, matchedJobId, nudgeLinks)
+                if (added.length) {
+                  nudgeLinksAttached++
+                  console.log('[ops-api] intake nudge link attached to job', matchedJobId, 'ref', extractedRef, '+' + added.length)
+                  try {
+                    await logBusinessEvent(client, {
+                      event_type: 'makesafe.intake_nudge_link_attached',
+                      source: 'app/makesafe-intake',
+                      entity_type: 'job',
+                      entity_id: matchedJobId,
+                      job_id: matchedJobId,
+                      body_preview: `Attached ${added.length} builder portal link(s) from a nudge email to existing job (ref ${extractedRef}); no draft minted.`,
+                      payload: { job_id: matchedJobId, external_ref: extractedRef, added_links: added, graph_message_id: msg.id },
+                      metadata: { mission: 'intake/nudge-email-links', reason: 'nudge_link_attached' },
+                    })
+                  } catch { /* non-blocking breadcrumb */ }
+                }
+              } catch (e) {
+                console.log('[ops-api] intake nudge link patch failed (non-blocking):', (e as Error).message)
+              }
+            }
+          }
           console.log('[ops-api] intake skip (' + skipReason + '):', matchedJobStatus, '|', extractedRef, '|', matchedJobId)
           skippedDuplicates++
           skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: `job_external_ref:${skipReason}` })
@@ -14270,6 +14338,9 @@ async function scanSesMakesafes(client: any) {
     // Item 2: cancellation emails recognised and dropped (no draft minted); each is
     // breadcrumbed as a makesafe.intake_cancellation_detected business_event.
     cancellations_detected: cancellationsDetected,
+    // Item 4: nudge emails whose portal link was landed on the existing job it
+    // references (idempotent add-only), instead of dropping the link / minting.
+    nudge_links_attached: nudgeLinksAttached,
     // Cost-leak fix observability: emails skipped because already extracted (marker
     // set), and emails freshly stamped this run. In steady state on a quiet inbox both
     // fall to ~0 new work; a re-extraction leak would show as scanned_marked climbing

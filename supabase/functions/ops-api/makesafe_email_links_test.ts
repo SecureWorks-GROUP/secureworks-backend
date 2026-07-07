@@ -6,10 +6,59 @@ import {
 import {
   extractBuilderEmailLinks,
   mergeDeterministicAndClaudeLinks,
+  mergeIntoExternalLinks,
   normalizeReportExternalLinks,
   stripEmailHtmlForTrade,
   urlIsBuilderPortalLink,
 } from "./makesafe_email_links.ts";
+
+// ── Intake item 4 (nudge-email pattern) — idempotent add-only link merge ──────
+
+const PRIME_LINK = {
+  label: "Roof report link",
+  url: "https://primeeco.tech/share/abc",
+  kind: "roof_report",
+  source: "email_body" as const,
+};
+
+Deno.test("nudge merge: adds a new link to an empty job", () => {
+  const { links, added } = mergeIntoExternalLinks([], [PRIME_LINK]);
+  assertEquals(added.length, 1);
+  assertEquals(links.length, 1);
+  assertEquals(links[0].url, "https://primeeco.tech/share/abc");
+});
+
+Deno.test("nudge merge: re-scanning the same nudge is a no-op (idempotent)", () => {
+  const existing = [{
+    label: "Roof report link",
+    url: "https://primeeco.tech/share/abc",
+    kind: "roof_report",
+  }];
+  const { added, links } = mergeIntoExternalLinks(existing, [PRIME_LINK]);
+  assertEquals(added.length, 0);
+  assertEquals(links.length, 1);
+});
+
+Deno.test("nudge merge: never clobbers an operator's existing link, appends the new one", () => {
+  const existing = [{
+    label: "Operator's own note link",
+    url: "https://ops.example/manual",
+    kind: "builder_portal",
+  }];
+  const { added, links } = mergeIntoExternalLinks(existing, [PRIME_LINK]);
+  assertEquals(added.length, 1);
+  assertEquals(links.length, 2);
+  assertEquals(links[0].url, "https://ops.example/manual"); // existing kept first
+  assertEquals(links[1].url, "https://primeeco.tech/share/abc");
+});
+
+Deno.test("nudge merge: tolerates a bare-string or null current value", () => {
+  assertEquals(mergeIntoExternalLinks(null, [PRIME_LINK]).added.length, 1);
+  const fromString = mergeIntoExternalLinks("https://primeeco.tech/share/abc", [
+    PRIME_LINK,
+  ]);
+  assertEquals(fromString.added.length, 0); // same URL already present as a string
+});
 
 // ── Intake item 4 — portal/report link capture hardening ─────────────────────
 

@@ -291,6 +291,39 @@ export function normalizeReportExternalLinks(
   return out;
 }
 
+// Intake item 4 (nudge-email pattern) — idempotently ADD incoming links to a job's
+// existing external_links WITHOUT overwriting. Used when a builder "please complete
+// the report" nudge (portal link, no new WO PDF) references a ref that already has a
+// live job: the link must land on that job, and re-scanning the same nudge must be a
+// no-op. Existing entries win (never clobber an operator edit); a URL already present
+// is not re-added. Returns the merged list plus exactly which links were newly added.
+export function mergeIntoExternalLinks(
+  current: unknown,
+  incoming: BuilderEmailLink[],
+): { links: BuilderEmailLink[]; added: BuilderEmailLink[] } {
+  const byUrl = new Map<string, BuilderEmailLink>();
+  const order: string[] = [];
+  const remember = (link: BuilderEmailLink | null) => {
+    if (!link) return false;
+    const key = link.url.toLowerCase();
+    if (byUrl.has(key)) return false;
+    byUrl.set(key, link);
+    order.push(key);
+    return true;
+  };
+  // Seed with whatever the job already carries (array of objects/strings, or a bare
+  // string), normalised through the same parser used everywhere else.
+  const currentArr = Array.isArray(current)
+    ? current
+    : (current == null ? [] : [current]);
+  for (const c of currentArr) remember(linkFromAny(c, "legacy_portal_link"));
+  const added: BuilderEmailLink[] = [];
+  for (const link of incoming || []) {
+    if (remember(link)) added.push(link);
+  }
+  return { links: order.map((k) => byUrl.get(k)!), added };
+}
+
 export function mergeDeterministicAndClaudeLinks(
   deterministic: BuilderEmailLink[],
   claudeExtraction: ExtractionLike | null | undefined,
