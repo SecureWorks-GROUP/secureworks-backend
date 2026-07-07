@@ -2332,6 +2332,15 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await updateMakesafeSubstatus(client, body))
       }
+      // B4 (makesafe-report-types): "Report completed on builder portal" marker.
+      // STATE/EVENT ONLY — no job_service_reports, no docs, no render, no invoice,
+      // no send, no notification. Restricted server-side to jobs whose PERSISTED
+      // makesafe_job_details.report_type is set (client flags are never trusted).
+      // Deliberately NOT in ROUTINE_ALLOWED_ACTIONS — the routine key is refused
+      // by the dispatch default-deny above; api_key / jwt callers pass like the
+      // adjacent make-safe actions.
+      case 'mark_makesafe_portal_report_done':
+        return json(await markMakesafePortalReportDone(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
       // Wave 2 — READ-ONLY feed for the report-draft cockpit (informed-approve
@@ -10037,6 +10046,113 @@ async function updateMakesafeSubstatus(client: any, body: any) {
 }
 // Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
 export const _updateMakesafeSubstatus = updateMakesafeSubstatus
+
+// ── B4 (makesafe-report-types): "Report completed on builder portal" marker ──
+// Dedicated action per the adversarial review (reuse of submitMakesafeReport was
+// REJECTED — it requires photos, writes a job_service_reports row treated as a
+// REAL report by board/audit paths, and would re-engage the close-out doc gate).
+//
+// This marker writes STATE + EVENT ONLY:
+//   - makesafe_job_details.substatus = 'admin_to_send_report'
+//   - makesafe_job_details.report_received_at = now()
+//   - optional external_links MERGE (append, dedupe by url — never replace) of a
+//     provided builder portal URL
+//   - one job_events row
+// It NEVER writes job_service_reports or job_documents, NEVER renders a report,
+// NEVER creates/authorises an invoice, NEVER sends anything, NEVER notifies.
+//
+// Restriction is SERVER-DERIVED: the PERSISTED makesafe_job_details.report_type
+// must be set. A client-supplied "invoice-only"/report-type flag is never
+// trusted (reviewer BLOCKER: a normal make-safe must not be able to masquerade
+// as a report-type and skip its real report).
+//
+// Idempotent: a job already at admin_to_send_report / ready_to_invoice /
+// complete returns ok with zero writes and zero events (mirrors the
+// allocate_job dedupe style) — and, importantly, a repeat call can never
+// REGRESS a job that has already advanced past admin_to_send_report.
+//
+// NOT in ROUTINE_ALLOWED_ACTIONS: the routine key is refused by the dispatch
+// default-deny; callable by the privileged api_key / trade JWT paths like the
+// adjacent make-safe actions (no new authz machinery).
+const _PORTAL_DONE_ALREADY_SUBSTATUSES = ['admin_to_send_report', 'ready_to_invoice', 'complete']
+
+async function markMakesafePortalReportDone(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new ApiError('job_id required', 400)
+
+  const portalUrl = String(body.portal_url || body.portalUrl || '').trim() || null
+  if (portalUrl && !/^https?:\/\//i.test(portalUrl)) {
+    throw new ApiError('portal_url must be an http(s) URL', 400)
+  }
+
+  const { data: detail, error } = await client.from('makesafe_job_details')
+    .select('job_id, substatus, report_type, external_links, report_received_at')
+    .eq('job_id', jId)
+    .maybeSingle()
+  if (error) throw error
+  if (!detail) {
+    throw new ApiError('no makesafe_job_details row for this job — mark_makesafe_portal_report_done only applies to make-safe jobs', 404)
+  }
+
+  // Server-side report-type restriction (never a client-supplied flag).
+  if (!String(detail.report_type || '').trim()) {
+    throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: makesafe_job_details.report_type is not set for this job. A normal make-safe must submit its real report.', 409)
+  }
+
+  // Idempotent repeat: already marked (or already further along) → ok, no writes.
+  const currentSubstatus = normalizeMakesafeSubstatus(detail.substatus)
+  if (currentSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(currentSubstatus)) {
+    return { ok: true, already_done: true, substatus: currentSubstatus }
+  }
+
+  const nowIso = new Date().toISOString()
+  const updates: Record<string, any> = {
+    substatus: 'admin_to_send_report',
+    report_received_at: nowIso,
+    updated_at: nowIso,
+  }
+
+  // external_links JSONB MERGE, not replace (reviewer MINOR: other links must
+  // survive). The column is an array of {label, url, kind, source} link objects
+  // (see makesafe_email_links.ts); append the portal link only if its URL is not
+  // already present (case-insensitive), preserving every existing entry.
+  if (portalUrl) {
+    const existingLinks = Array.isArray(detail.external_links) ? detail.external_links : []
+    const urlKey = portalUrl.toLowerCase()
+    const alreadyLinked = existingLinks.some((l: any) => String(l?.url || '').toLowerCase() === urlKey)
+    if (!alreadyLinked) {
+      updates.external_links = [
+        ...existingLinks,
+        { label: 'Builder Portal', url: portalUrl, kind: 'builder_portal', source: 'portal_done_marker' },
+      ]
+    }
+  }
+
+  const { data: updated, error: upErr } = await client.from('makesafe_job_details')
+    .update(updates)
+    .eq('job_id', jId)
+    .select()
+    .single()
+  if (upErr) throw upErr
+
+  // One event row, fire-and-forget with the .then().catch() idiom (same as
+  // updateMakesafeSubstatus — a PostgREST insert builder has no bare .catch).
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'makesafe_portal_report_done',
+    detail_json: {
+      substatus: 'admin_to_send_report',
+      report_on_portal: true,
+      builder_portal_url: portalUrl,
+      changed_at: nowIso,
+      operator: body.operator_email || body.user_email || null,
+    },
+  }).then(() => {}).catch(() => {})
+
+  return { ok: true, already_done: false, details: updated }
+}
+// Test-only export alias (mirrors the `_`-prefixed convention above).
+export const _markMakesafePortalReportDone = markMakesafePortalReportDone
 
 // ── Slice 3: dedicated make-safe pipeline ──
 async function makesafePipeline(client: any, params: URLSearchParams) {
