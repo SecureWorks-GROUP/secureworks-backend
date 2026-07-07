@@ -6767,7 +6767,7 @@ async function opsSummary(client: any) {
   }
 }
 
-async function calendarEvents(client: any, params: URLSearchParams) {
+export async function calendarEvents(client: any, params: URLSearchParams) {
   const from = params.get('from') || params.get('start_date') || new Date().toISOString().slice(0, 10)
   const to = params.get('to') || params.get('end_date') || (() => {
     const d = new Date(from); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10)
@@ -6779,15 +6779,22 @@ async function calendarEvents(client: any, params: URLSearchParams) {
     ? '*'
     : 'assignment_id, job_id, user_id, job_number, client_name, site_address, site_suburb, scheduled_date, scheduled_end, start_time, end_time, crew_name, assigned_to, assignment_type, assignment_status, confirmation_status, job_type, job_status, scope_json, ghl_contact_id, org_id'
 
+  // U-O3(a) M3c: window OVERLAP, not start-date containment. A multi-day job
+  // whose scheduled_date falls BEFORE `from` but which is still on site inside
+  // the window (scheduled_end >= from) must appear. Rows with no scheduled_end
+  // fall back to start-date containment. Effective filter:
+  //   scheduled_date <= to AND (scheduled_end >= from OR (scheduled_end IS NULL AND scheduled_date >= from))
+  const CAL_EVENT_LIMIT = 500
+  const overlapOr = `scheduled_end.gte.${from},and(scheduled_end.is.null,scheduled_date.gte.${from})`
   let query = client
     .from('calendar_events')
     .select(calSelect)
-    .gte('scheduled_date', from)
     .lte('scheduled_date', to)
+    .or(overlapOr)
     .eq('org_id', DEFAULT_ORG_ID)
     .neq('assignment_status', 'cancelled')
     .order('scheduled_date', { ascending: true })
-    .limit(500)
+    .limit(CAL_EVENT_LIMIT)
 
   if (jobType) query = query.eq('job_type', jobType)
 
@@ -6860,7 +6867,11 @@ async function calendarEvents(client: any, params: URLSearchParams) {
     return rest
   })
 
-  return { events: lightEvents, deliveries: deliveries || [], readiness }
+  // U-O3(e) M3c: the 500-row cap was silent — when hit, events just vanished
+  // with no signal. Surface it so the FE can warn the user the view is partial.
+  const truncated = (data?.length ?? 0) >= CAL_EVENT_LIMIT
+
+  return { events: lightEvents, deliveries: deliveries || [], readiness, truncated }
 }
 
 async function pipeline(client: any, params: URLSearchParams) {
@@ -15488,10 +15499,16 @@ async function createAssignment(client: any, body: any) {
   const requestedConfStatus = String(body.confirmationStatus || body.confirmation_status || '').toLowerCase()
   const allocatorUserId = body.allocated_by_user_id || null
   const isSelfAssign = !!allocatorUserId && String(allocatorUserId) === String(userId || user_id || '')
+  // U-O2 (M3c): a calendar meeting/reminder is a planning entry, never a job
+  // allocation — it must NEVER text an installer, whatever its status. Same
+  // skip block as the isSelfAssign guard above.
+  const notifyAssignmentType = String(assignmentType || assignment_type || 'install').toLowerCase()
+  const isNonNotifyingType = notifyAssignmentType === 'meeting' || notifyAssignmentType === 'reminder'
   const skipAllocationSms = !!body.suppress_notifications ||
     finalConfStatus === 'placeholder' ||
     requestedConfStatus === 'tentative' ||
-    isSelfAssign
+    isSelfAssign ||
+    isNonNotifyingType
   try {
     const assignedUserId = userId || user_id
     if (assignedUserId && !skipAllocationSms) {
