@@ -508,3 +508,164 @@ Deno.test("2.1 known_refs[] unions jobs (with source_email_id from the approved 
   assertEquals(draftRef.source_email_id, "EMAIL-NEW");
   assertEquals(draftRef.substatus, null);
 });
+
+// ─────────────────────────────────────────────────────────────────
+// W2-D — invoice-bleed fix. The audit jobs[] row must resolve THIS card's
+// invoice fields (invoice_status / invoice_no / live_invoice_* / invoices[])
+// STRICTLY by job_id. When two cards share an external_ref (a make-safe + its
+// roof-report / assessment sibling on the same property), a ref/substring
+// match must NEVER let one card inherit the other's invoice — an uninvoiced
+// card must read as uninvoiced, and the shared-ref invoice is surfaced under
+// sibling_invoices only (fails OBVIOUS, not silent).
+// Proven live bleed cases (2026-07-07 whole-board run, sw_job_detail cross-reads):
+//   MLB-25387, MLB-25911, MLB-26072 (sibling INV-0844),
+//   MLB-26122 (sibling PAID INV-0851 shown on an uninvoiced roof-report card).
+// ─────────────────────────────────────────────────────────────────
+
+// Two make-safe cards sharing one builder ref; exactly ONE invoice, linked by
+// job_id to card A. Card B (the uninvoiced sibling) must NOT inherit it.
+// Parametrised over three of the four proven refs (exact-reference tier).
+for (
+  const c of [
+    { ref: "MLB-26122", inv: "INV-0851", status: "PAID" }, //  PAID bleed onto a roof-report card
+    { ref: "MLB-26072", inv: "INV-0844", status: "AUTHORISED" },
+    { ref: "MLB-25387", inv: "INV-0777", status: "AUTHORISED" },
+  ]
+) {
+  Deno.test(`W2-D ${c.ref}: uninvoiced sibling does NOT inherit ${c.status} ${c.inv} (job_id-strict)`, async () => {
+    const client = makeQueryClient({
+      jobs: [
+        jobRow({ id: "jA", job_number: "SWMS-90001", status: "invoiced" }),
+        jobRow({ id: "jB", job_number: "SWMS-90002", status: "complete" }),
+      ],
+      makesafe_job_details: [
+        { job_id: "jA", external_ref: c.ref, requesting_company_slug: "mlb", substatus: "complete" },
+        { job_id: "jB", external_ref: c.ref, requesting_company_slug: "mlb", substatus: "waiting_on_trade_report" },
+      ],
+      job_documents: [],
+      job_service_reports: [],
+      // ONE invoice, linked to card A by job_id, sharing the property ref.
+      xero_invoices: [
+        {
+          job_id: "jA",
+          status: c.status,
+          invoice_number: c.inv,
+          reference: c.ref,
+          invoice_type: "ACCREC",
+          invoice_date: "2026-06-20",
+        },
+      ],
+      makesafe_intake_drafts: [],
+    });
+    const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+    const a = res.jobs.find((j: any) => j.job_id === "jA");
+    const b = res.jobs.find((j: any) => j.job_id === "jB");
+
+    // Card A owns the invoice (job_id tier).
+    assertEquals(a.invoice_status, c.status);
+    assertEquals(a.invoice_no, c.inv);
+    assertEquals(a.live_invoice_no, c.inv);
+    assertEquals(a.live_invoice_status, c.status);
+    assertEquals(a.invoices.length, 1);
+    assertEquals(a.invoices[0].match_tier, "job_id");
+    assertEquals(a.sibling_invoices.length, 0);
+
+    // Card B is UNINVOICED — every scalar invoice field is null (no bleed).
+    assertEquals(b.invoice_status, null);
+    assertEquals(b.invoice_no, null);
+    assertEquals(b.live_invoice_no, null);
+    assertEquals(b.live_invoice_status, null);
+    assertEquals(b.invoices.length, 0);
+    // ...but the shared-ref invoice is still VISIBLE under sibling_invoices.
+    assertEquals(b.sibling_invoices.length, 1);
+    assertEquals(b.sibling_invoices[0].invoice_number, c.inv);
+    assertEquals(b.sibling_invoices[0].status, c.status);
+    assertEquals(b.sibling_invoices[0].match_tier, "reference");
+  });
+}
+
+// MLB-25911 — the substring-tier bleed: the invoice's reference is a superset of
+// the card's external_ref (e.g. an appended stage/suffix), so the old
+// reference_substring fallback attributed it to the uninvoiced sibling.
+Deno.test("W2-D MLB-25911: substring-ref invoice does NOT bleed onto the uninvoiced sibling", async () => {
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({ id: "jA", job_number: "SWMS-91001", status: "invoiced" }),
+      jobRow({ id: "jB", job_number: "SWMS-91002", status: "complete" }),
+    ],
+    makesafe_job_details: [
+      { job_id: "jA", external_ref: "MLB-25911", requesting_company_slug: "mlb", substatus: "complete" },
+      { job_id: "jB", external_ref: "MLB-25911", requesting_company_slug: "mlb", substatus: "waiting_on_trade_report" },
+    ],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [
+      {
+        job_id: "jA",
+        status: "AUTHORISED",
+        invoice_number: "INV-0810",
+        // reference is a SUPERSET of the ref -> only the substring tier would match jB.
+        reference: "MLB-25911 STAGE2",
+        invoice_type: "ACCREC",
+        invoice_date: "2026-06-18",
+      },
+    ],
+    makesafe_intake_drafts: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const a = res.jobs.find((j: any) => j.job_id === "jA");
+  const b = res.jobs.find((j: any) => j.job_id === "jB");
+
+  assertEquals(a.invoice_no, "INV-0810");
+  assertEquals(a.invoices.length, 1);
+  assertEquals(a.sibling_invoices.length, 0);
+
+  assertEquals(b.invoice_status, null);
+  assertEquals(b.invoice_no, null);
+  assertEquals(b.invoices.length, 0);
+  assertEquals(b.sibling_invoices.length, 1);
+  assertEquals(b.sibling_invoices[0].invoice_number, "INV-0810");
+  assertEquals(b.sibling_invoices[0].match_tier, "reference_substring");
+});
+
+// Both siblings legitimately invoiced (each its own job_id-linked invoice under
+// the shared ref): each card shows ONLY its own invoice, neither cross-bleeds,
+// and the OTHER card's invoice appears in sibling_invoices (visible, not owned).
+Deno.test("W2-D two invoiced siblings: each owns only its own invoice, no cross-bleed", async () => {
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({ id: "jA", job_number: "SWMS-92001", status: "invoiced" }),
+      jobRow({ id: "jB", job_number: "SWMS-92002", status: "invoiced" }),
+    ],
+    makesafe_job_details: [
+      { job_id: "jA", external_ref: "MLB-26999", requesting_company_slug: "mlb", substatus: "complete" },
+      { job_id: "jB", external_ref: "MLB-26999", requesting_company_slug: "mlb", substatus: "complete" },
+    ],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [
+      { job_id: "jA", status: "AUTHORISED", invoice_number: "INV-0900", reference: "MLB-26999", invoice_type: "ACCREC", invoice_date: "2026-06-21" },
+      { job_id: "jB", status: "PAID", invoice_number: "INV-0901", reference: "MLB-26999", invoice_type: "ACCREC", invoice_date: "2026-06-22" },
+    ],
+    makesafe_intake_drafts: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const a = res.jobs.find((j: any) => j.job_id === "jA");
+  const b = res.jobs.find((j: any) => j.job_id === "jB");
+
+  // Each card's own invoice only.
+  assertEquals(a.invoice_no, "INV-0900");
+  assertEquals(a.invoice_status, "AUTHORISED");
+  assertEquals(a.invoices.length, 1);
+  assertEquals(a.invoices[0].invoice_number, "INV-0900");
+  assertEquals(b.invoice_no, "INV-0901");
+  assertEquals(b.invoice_status, "PAID");
+  assertEquals(b.invoices.length, 1);
+  assertEquals(b.invoices[0].invoice_number, "INV-0901");
+
+  // The other card's invoice is visible-but-not-owned (ref tier), never in invoices[].
+  assertEquals(a.sibling_invoices.length, 1);
+  assertEquals(a.sibling_invoices[0].invoice_number, "INV-0901");
+  assertEquals(b.sibling_invoices.length, 1);
+  assertEquals(b.sibling_invoices[0].invoice_number, "INV-0900");
+});
