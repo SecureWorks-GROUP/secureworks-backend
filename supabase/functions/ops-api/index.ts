@@ -191,6 +191,12 @@ import {
   extractPdfText as _extractPdfText,
   PDF_TEXT_MIN_CHARS as _PDF_TEXT_MIN_CHARS,
 } from './makesafe_pdf_text.ts'
+// Intake item 5 — deterministic WO-PDF client-block reader. Fills client_name /
+// client_phone / site_address from an unambiguous work-order-PDF client block when
+// the model/template left them null (MLB "NEW WORK ORDER" carries the homeowner
+// only in the PDF). Gated OFF by default (see pdfClientFillEnabled) because a fill
+// can lift a draft to clean/auto-approvable.
+import { decidePdfClientFill as _decidePdfClientFill } from './makesafe_pdf_client_fields.ts'
 import {
   parseWithTemplate as _parseWithTemplate,
   parseSubjectFields as _parseSubjectFields,
@@ -10905,6 +10911,15 @@ function autoApproveCleanIntakeEnabled(): boolean {
   return Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') === 'true'
 }
 
+// Intake item 5 — opt-in for the deterministic WO-PDF client-field fill. DEFAULT
+// OFF: a fill can populate client_name/site_address and (when unambiguous + else
+// clean) lift confidence to high, which makes a draft auto-approvable, so it must
+// not switch on silently. When off, the fill code below never runs.
+function pdfClientFillEnabled(): boolean {
+  return Deno.env.get('MAKESAFE_INTAKE_PDF_CLIENT_FILL') === 'true'
+}
+export const _pdfClientFillEnabledForTest = pdfClientFillEnabled
+
 // The free text a draft/email carries, for report-evidence + combined-intake detection.
 function intakeReportEvidenceText(draft: any, extraction: any, attachments: any[]): string {
   const attachmentNames = (attachments || [])
@@ -12275,6 +12290,7 @@ async function _reextractExtractFields(
   const templateSlug = (matchedCompany?.slug || '').toLowerCase()
 
   const pdfTexts: string[] = []
+  const pdfRawTexts: string[] = [] // item 5 — raw text layer for the client-block reader
   let pdfMode: 'text' | 'document' | 'none' = pdfBase64List.length ? 'document' : 'none'
   if (pdfBase64List.length && pdfTextModeEnabled) {
     let allText = true
@@ -12284,6 +12300,7 @@ async function _reextractExtractFields(
         const r = await _extractPdfText(bytes)
         if (r.mode === 'text') pdfTexts.push(`[${pdf.name}]\n${r.text}`)
         else allText = false
+        if (r.rawText) pdfRawTexts.push(`[${pdf.name}]\n${r.rawText}`)
       } catch (_) { allText = false }
     }
     const combinedLen = pdfTexts.join('\n').length
@@ -12347,6 +12364,33 @@ async function _reextractExtractFields(
   if (!replyForwardRisk) {
     if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) extraction.site_address = subjectFields.site_address
     if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) extraction.site_suburb = subjectFields.site_suburb
+  }
+
+  // Item 5 — deterministic WO-PDF client-field fill (opt-in, default OFF). Same
+  // policy as the live scan: fill only null client fields from a single unambiguous
+  // WO-PDF client block so a re-extracted MLB draft can reach clean. See scan path.
+  if (pdfClientFillEnabled()) {
+    const clientText = combinedPdfText || pdfRawTexts.join('\n')
+    if (clientText) {
+      const fill = _decidePdfClientFill(clientText, {
+        clientName: cleanReviewedString(extraction.client_name) || null,
+        clientPhone: cleanReviewedString(extraction.client_phone) || null,
+        siteAddress: cleanReviewedString(extraction.site_address) || null,
+        confidence,
+        missingFields,
+        externalRefPresent: !!cleanReviewedString(extraction.external_ref),
+        matchedCompanyPresent: !!(matchedCompany?.slug || matchedCompany?.name),
+      })
+      if (fill.applied) {
+        for (const f of fill.filledFields) extraction[f] = fill.fill[f]
+        extraction.pdf_sourced_fields = [
+          ...(Array.isArray(extraction.pdf_sourced_fields) ? extraction.pdf_sourced_fields : []),
+          ...fill.filledFields,
+        ]
+        missingFields = fill.missingFields
+        confidence = fill.confidence
+      }
+    }
   }
 
   if (extractionDegraded) {
@@ -13149,6 +13193,10 @@ async function scanSesMakesafes(client: any) {
     // over the threshold, feed cheap text blocks to the model instead of the ~10x
     // document blocks; a scanned/low-text PDF falls back to the document path unchanged.
     const pdfTexts: string[] = []
+    // Item 5 — also keep the RAW recovered text layer (even when it failed the
+    // model-quality gate) so the deterministic client-block reader can run a
+    // label-anchored parse on it. Never used for the model path.
+    const pdfRawTexts: string[] = []
     if (pdfBase64List.length && pdfTextModeEnabled) {
       let allText = true
       for (const pdf of pdfBase64List) {
@@ -13157,6 +13205,7 @@ async function scanSesMakesafes(client: any) {
           const r = await _extractPdfText(bytes)
           if (r.mode === 'text') pdfTexts.push(`[${pdf.name}]\n${r.text}`)
           else allText = false
+          if (r.rawText) pdfRawTexts.push(`[${pdf.name}]\n${r.rawText}`)
         } catch (_) {
           allText = false
         }
@@ -13317,6 +13366,36 @@ async function scanSesMakesafes(client: any) {
       }
       if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) {
         extraction.site_suburb = subjectFields.site_suburb
+      }
+    }
+
+    // Item 5 — deterministic WO-PDF client-field fill (opt-in, default OFF). MLB
+    // "NEW WORK ORDER" bodies carry the homeowner name/phone only in the WO PDF, so
+    // the model/template leaves client_name/client_phone null and the draft can
+    // never become clean. When enabled, read a single UNAMBIGUOUS client block from
+    // the recovered WO PDF text and fill ONLY the null fields (tagged PDF-sourced);
+    // an ambiguous / unreadable PDF fills nothing and stays manual.
+    if (pdfClientFillEnabled()) {
+      const clientText = combinedPdfText || pdfRawTexts.join('\n')
+      if (clientText) {
+        const fill = _decidePdfClientFill(clientText, {
+          clientName: cleanReviewedString(extraction.client_name) || null,
+          clientPhone: cleanReviewedString(extraction.client_phone) || null,
+          siteAddress: cleanReviewedString(extraction.site_address) || null,
+          confidence,
+          missingFields,
+          externalRefPresent: !!cleanReviewedString(extraction.external_ref),
+          matchedCompanyPresent: !!(matchedCompany?.slug || matchedCompany?.name),
+        })
+        if (fill.applied) {
+          for (const f of fill.filledFields) extraction[f] = fill.fill[f]
+          extraction.pdf_sourced_fields = [
+            ...(Array.isArray(extraction.pdf_sourced_fields) ? extraction.pdf_sourced_fields : []),
+            ...fill.filledFields,
+          ]
+          missingFields = fill.missingFields
+          confidence = fill.confidence
+        }
       }
     }
 
