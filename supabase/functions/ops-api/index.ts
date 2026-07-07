@@ -277,6 +277,7 @@ import {
   resolveCommittedReportType as _resolveCommittedReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
+  reportTypeForJobFamily as _reportTypeForJobFamily,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
@@ -8956,6 +8957,13 @@ async function createMakesafeJob(client: any, body: any) {
       special_instructions: reviewedSpecialInstructions,
       external_links: external_links || companyData?.external_links || [],
       billing_rules: companyData?.billing_rules || {},
+      // BE-2: report-family jobs persist their report_type token at creation
+      // (family 'roof_report' -> 'roof_report', 'assessment_report_quote' ->
+      // 'assessment_report'; null for non-report families). Previously only
+      // jobs.metadata.makesafe_job_family was written, so family-detected
+      // report jobs 409'd the portal-done marker and hid from send-time
+      // report-type logic. Same value convention as approveIntakeDraft.
+      report_type: _reportTypeForJobFamily(reviewedJobFamily),
     })
   } catch (e: any) {
     // Non-blocking until the migration is deployed everywhere. The base job
@@ -9016,6 +9024,8 @@ async function createMakesafeJob(client: any, body: any) {
 
   return { ok: true, job }
 }
+// Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
+export const _createMakesafeJob = createMakesafeJob
 
 // ══════════════════════════════════════════════════════════════
 // Make-Safe Slices 2-7 — API endpoints
@@ -10094,9 +10104,30 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     throw new ApiError('no makesafe_job_details row for this job — mark_makesafe_portal_report_done only applies to make-safe jobs', 404)
   }
 
-  // Server-side report-type restriction (never a client-supplied flag).
-  if (!String(detail.report_type || '').trim()) {
-    throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: makesafe_job_details.report_type is not set for this job. A normal make-safe must submit its real report.', 409)
+  // Server-side report-type restriction (never a client-supplied flag). Two
+  // PERSISTED server-read sources qualify:
+  //   1. makesafe_job_details.report_type (intake approval writes this), or
+  //   2. jobs.metadata.makesafe_job_family being a report family — BE-2: the
+  //      createMakesafeJob path historically wrote the family on the jobs row
+  //      but omitted report_type on the details insert, so a family-detected
+  //      report job showed the portal button yet 409'd here. Family acceptance
+  //      SELF-HEALS report_type onto the detail row (in the same update below)
+  //      so send-time report-type logic sees it from then on.
+  // Body-supplied report_type / is_report_type flags are IGNORED either way.
+  let reportType = String(detail.report_type || '').trim() || null
+  let healReportType: string | null = null
+  if (!reportType) {
+    const { data: jobRow } = await client.from('jobs')
+      .select('id, metadata').eq('id', jId).maybeSingle()
+    const persistedFamily = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
+    const familyType = _reportTypeForJobFamily(persistedFamily)
+    if (familyType) {
+      reportType = familyType
+      healReportType = familyType
+    }
+  }
+  if (!reportType) {
+    throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real report.', 409)
   }
 
   // Idempotent repeat: already marked (or already further along) → ok, no writes.
@@ -10111,6 +10142,9 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     report_received_at: nowIso,
     updated_at: nowIso,
   }
+  // BE-2 self-heal: accepted via the persisted job family -> persist the
+  // report_type token on the detail row in this same state update.
+  if (healReportType) updates.report_type = healReportType
 
   // external_links JSONB MERGE, not replace (reviewer MINOR: other links must
   // survive). The column is an array of {label, url, kind, source} link objects
@@ -10143,6 +10177,8 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     detail_json: {
       substatus: 'admin_to_send_report',
       report_on_portal: true,
+      report_type: reportType,
+      report_type_healed_from_family: !!healReportType,
       builder_portal_url: portalUrl,
       changed_at: nowIso,
       operator: body.operator_email || body.user_email || null,

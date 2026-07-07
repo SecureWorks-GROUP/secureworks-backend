@@ -416,6 +416,31 @@ export function isReportOnlyType(
   return !!reportType && REPORT_ONLY_TYPES.has(reportType as ReportType);
 }
 
+// BE-2 (report-types B4) — the canonical job-family -> report-only ReportType
+// mapping. classifyMakeSafeJobFamily already encodes the inverse (report_type
+// 'roof_report' -> family 'roof_report', 'assessment_report' -> family
+// 'assessment_report_quote'); this is the single explicit forward map so the
+// job-creation and portal-done-marker paths derive report_type from a PERSISTED
+// makesafe_job_family without duplicating the family/type lists.
+const REPORT_FAMILY_TO_TYPE: Readonly<Record<string, ReportType>> = {
+  roof_report: "roof_report",
+  assessment_report_quote: "assessment_report",
+};
+
+/**
+ * The report-only ReportType token for a report-family job family, or null for
+ * non-report families (temp_fence_makesafe, general_makesafe, unknown). The
+ * result is validated against REPORT_ONLY_TYPES so this map can never silently
+ * mint a token the report-only set does not recognise.
+ */
+export function reportTypeForJobFamily(
+  family: string | null | undefined,
+): ReportType | null {
+  const mapped =
+    REPORT_FAMILY_TO_TYPE[String(family || "").trim().toLowerCase()];
+  return mapped && REPORT_ONLY_TYPES.has(mapped) ? mapped : null;
+}
+
 // A clear, non-actionable acknowledgement: subject is ONLY a thanks/noted/received
 // courtesy line with NO address, NO job detail, NO action verb. Err HARD toward
 // capture — anything ambiguous stays captured (Codex issue 3, never-miss > tidy).
