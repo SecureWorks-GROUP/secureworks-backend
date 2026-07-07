@@ -14018,34 +14018,33 @@ async function createAssignment(client: any, body: any) {
     detail_json: { assignment_id: data.id, date: sDate, operator: body.operator_email || body.user_email || null },
   })
 
-  // ── Telegram DM to assigned trade ──
+  // ── SMS to assigned installer (Telegram is RETIRED business-wide) ──
+  // Plain-text SMS via the existing ghl-proxy send_sms path. Fire-and-forget:
+  // a notify failure must never fail or delay the assignment write, exactly like
+  // the old Telegram DM. sendSmsViaGhl swallows its own errors and returns a
+  // boolean, so the un-awaited call can never throw or reject.
   try {
     const assignedUserId = userId || user_id
     if (assignedUserId) {
       const { data: assignedUser } = await client.from('users')
-        .select('telegram_id, name').eq('id', assignedUserId).single()
-      if (assignedUser?.telegram_id) {
+        .select('name, phone').eq('id', assignedUserId).single()
+      if (assignedUser?.phone) {
         const { data: jobData2 } = await client.from('jobs')
           .select('job_number, client_name, site_address, site_suburb').eq('id', jId).single()
-        const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')
-        if (BOT_TOKEN && jobData2) {
-          const text = `📌 <b>New Assignment</b>\n\n<b>${jobData2.job_number || ''}</b> — ${jobData2.client_name || 'Client'}\n📍 ${jobData2.site_address || ''}${jobData2.site_suburb ? ', ' + jobData2.site_suburb : ''}\n📅 ${sDate}`
-          fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: assignedUser.telegram_id,
-              text,
-              parse_mode: 'HTML',
-              reply_markup: { inline_keyboard: [[
-                { text: '🔗 Open in Trade', url: `https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}` }
-              ]] }
-            })
-          }).catch(() => {})
+        if (jobData2) {
+          const site = `${jobData2.site_address || ''}${jobData2.site_suburb ? ', ' + jobData2.site_suburb : ''}`.trim()
+          const text = [
+            `New job assigned: ${jobData2.job_number || ''} - ${jobData2.client_name || 'Client'}`.trim(),
+            site ? `Site: ${site}` : '',
+            `Date: ${sDate}`,
+            `Open in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}`,
+          ].filter(Boolean).join('\n')
+          // Non-blocking — do NOT await; sendSmsViaGhl handles its own errors.
+          sendSmsViaGhl(assignedUser.phone, text)
         }
       }
     }
-  } catch (e) { console.log('[ops-api] assignment notification failed:', e) }
+  } catch (e) { console.log('[ops-api] assignment SMS notification failed:', e) }
 
   // Push schedule info to GHL custom fields (non-blocking)
   // Also grab job_number for business_events dual-write
