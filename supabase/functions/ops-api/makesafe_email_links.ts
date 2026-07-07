@@ -83,7 +83,10 @@ export function stripEmailHtmlForTrade(
   return normalisedLines.slice(0, Math.max(0, maxChars)).trim();
 }
 
-function cleanUrl(url: string): string {
+// Exported for the portal-done marker (index.ts): one URL-hygiene routine
+// (entity-decode, trailing-punctuation strip, http(s)-only) instead of a
+// parallel regex. Returns "" for anything that is not a clean http(s) URL.
+export function cleanUrl(url: string): string {
   let out = decodeEmailHtmlEntitiesForTest(String(url || "").trim());
   out = out.replace(/[)\].,;:'"!?]+$/g, "");
   try {

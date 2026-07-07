@@ -277,6 +277,7 @@ import {
   resolveCommittedReportType as _resolveCommittedReportType,
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
+  reportTypeForJobFamily as _reportTypeForJobFamily,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
@@ -292,6 +293,7 @@ import {
   extractBuilderEmailLinks as _extractBuilderEmailLinks,
   mergeDeterministicAndClaudeLinks as _mergeDeterministicAndClaudeLinks,
   normalizeReportExternalLinks as _normalizeReportExternalLinks,
+  cleanUrl as _cleanBuilderLinkUrl,
 } from './makesafe_email_links.ts'
 import {
   buildIntakeDedupIndex as _buildIntakeDedupIndex,
@@ -2332,6 +2334,15 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await updateMakesafeSubstatus(client, body))
       }
+      // B4 (makesafe-report-types): "Report completed on builder portal" marker.
+      // STATE/EVENT ONLY — no job_service_reports, no docs, no render, no invoice,
+      // no send, no notification. Restricted server-side to jobs whose PERSISTED
+      // makesafe_job_details.report_type is set (client flags are never trusted).
+      // Deliberately NOT in ROUTINE_ALLOWED_ACTIONS — the routine key is refused
+      // by the dispatch default-deny above; api_key / jwt callers pass like the
+      // adjacent make-safe actions.
+      case 'mark_makesafe_portal_report_done':
+        return json(await markMakesafePortalReportDone(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
       // Wave 2 — READ-ONLY feed for the report-draft cockpit (informed-approve
@@ -4005,7 +4016,7 @@ if (import.meta.main) serve(async (req: Request) => {
         // their own assignments (showAll stays false). Resolved server-side via the
         // pure _resolveManagerVisibility helper. makesafe_manager is legacy input
         // only (backfilled into managed_verticals); the runtime reads the list.
-        const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals } = _resolveManagerVisibility({
+        const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals, managedVerticals } = _resolveManagerVisibility({
           role: userRec?.role,
           managedVerticals: userRec?.managed_verticals,
         })
@@ -4013,7 +4024,13 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'my_jobs': {
             const mode = url.searchParams.get('mode') // 'all' for dispatcher view, 'mine' for personal
             const showAll = isDispatcher && mode !== 'mine'
-            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager, poolVerticals))
+            // U2b: a vertical manager (non-dispatcher with managed_verticals)
+            // viewing the board (mode:'all') sees their WHOLE vertical — every
+            // crew's in-vertical assignment, not just their own. Empty for
+            // dispatchers (global showAll) and for the personal Jobs view
+            // (mode:'mine' / no mode) so those paths are unchanged.
+            const managerBoardVerticals = _managerBoardVerticals({ isDispatcher, mode, managedVerticals })
+            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager, poolVerticals, managerBoardVerticals))
           }
           case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
@@ -8941,6 +8958,13 @@ async function createMakesafeJob(client: any, body: any) {
       special_instructions: reviewedSpecialInstructions,
       external_links: external_links || companyData?.external_links || [],
       billing_rules: companyData?.billing_rules || {},
+      // BE-2: report-family jobs persist their report_type token at creation
+      // (family 'roof_report' -> 'roof_report', 'assessment_report_quote' ->
+      // 'assessment_report'; null for non-report families). Previously only
+      // jobs.metadata.makesafe_job_family was written, so family-detected
+      // report jobs 409'd the portal-done marker and hid from send-time
+      // report-type logic. Same value convention as approveIntakeDraft.
+      report_type: _reportTypeForJobFamily(reviewedJobFamily),
     })
   } catch (e: any) {
     // Non-blocking until the migration is deployed everywhere. The base job
@@ -9001,6 +9025,8 @@ async function createMakesafeJob(client: any, body: any) {
 
   return { ok: true, job }
 }
+// Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
+export const _createMakesafeJob = createMakesafeJob
 
 // ══════════════════════════════════════════════════════════════
 // Make-Safe Slices 2-7 — API endpoints
@@ -10031,6 +10057,157 @@ async function updateMakesafeSubstatus(client: any, body: any) {
 }
 // Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
 export const _updateMakesafeSubstatus = updateMakesafeSubstatus
+
+// ── B4 (makesafe-report-types): "Report completed on builder portal" marker ──
+// Dedicated action per the adversarial review (reuse of submitMakesafeReport was
+// REJECTED — it requires photos, writes a job_service_reports row treated as a
+// REAL report by board/audit paths, and would re-engage the close-out doc gate).
+//
+// This marker writes STATE + EVENT ONLY:
+//   - makesafe_job_details.substatus = 'admin_to_send_report'
+//   - makesafe_job_details.report_received_at = now()
+//   - optional external_links MERGE (append, dedupe by url — never replace) of a
+//     provided builder portal URL
+//   - one job_events row
+// It NEVER writes job_service_reports or job_documents, NEVER renders a report,
+// NEVER creates/authorises an invoice, NEVER sends anything, NEVER notifies.
+//
+// Restriction is SERVER-DERIVED: the PERSISTED makesafe_job_details.report_type
+// must be set. A client-supplied "invoice-only"/report-type flag is never
+// trusted (reviewer BLOCKER: a normal make-safe must not be able to masquerade
+// as a report-type and skip its real report).
+//
+// Idempotent: a job already at admin_to_send_report / ready_to_invoice /
+// complete returns ok with zero writes and zero events (mirrors the
+// allocate_job dedupe style) — and, importantly, a repeat call can never
+// REGRESS a job that has already advanced past admin_to_send_report.
+//
+// NOT in ROUTINE_ALLOWED_ACTIONS: the routine key is refused by the dispatch
+// default-deny; callable by the privileged api_key / trade JWT paths like the
+// adjacent make-safe actions (no new authz machinery).
+const _PORTAL_DONE_ALREADY_SUBSTATUSES = ['admin_to_send_report', 'ready_to_invoice', 'complete']
+
+async function markMakesafePortalReportDone(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new ApiError('job_id required', 400)
+
+  // FIX 5a: same URL hygiene as builder-email link extraction (entity-decode,
+  // trailing-punctuation strip, http(s)-only) — reuse cleanUrl, no parallel regex.
+  const rawPortalUrl = String(body.portal_url || body.portalUrl || '').trim()
+  const portalUrl = rawPortalUrl ? (_cleanBuilderLinkUrl(rawPortalUrl) || null) : null
+  if (rawPortalUrl && !portalUrl) {
+    throw new ApiError('portal_url must be a valid http(s) URL', 400)
+  }
+
+  // Append-only merge of the portal link into external_links (array of
+  // {label, url, kind, source} objects — see makesafe_email_links.ts). Returns
+  // null when there is nothing to write (no URL supplied, or already present by
+  // case-insensitive URL); existing entries are always preserved.
+  const mergePortalLink = (existing: any): any[] | null => {
+    if (!portalUrl) return null
+    const links = Array.isArray(existing) ? existing : []
+    const urlKey = portalUrl.toLowerCase()
+    if (links.some((l: any) => String(l?.url || '').toLowerCase() === urlKey)) return null
+    return [
+      ...links,
+      { label: 'Builder Portal', url: portalUrl, kind: 'builder_portal', source: 'portal_done_marker' },
+    ]
+  }
+
+  const { data: detail, error } = await client.from('makesafe_job_details')
+    .select('job_id, substatus, report_type, external_links, report_received_at')
+    .eq('job_id', jId)
+    .maybeSingle()
+  if (error) throw error
+  if (!detail) {
+    throw new ApiError('no makesafe_job_details row for this job — mark_makesafe_portal_report_done only applies to make-safe jobs', 404)
+  }
+
+  // Server-side report-type restriction (never a client-supplied flag). Two
+  // PERSISTED server-read sources qualify:
+  //   1. makesafe_job_details.report_type (intake approval writes this), or
+  //   2. jobs.metadata.makesafe_job_family being a report family — BE-2: the
+  //      createMakesafeJob path historically wrote the family on the jobs row
+  //      but omitted report_type on the details insert, so a family-detected
+  //      report job showed the portal button yet 409'd here. Family acceptance
+  //      SELF-HEALS report_type onto the detail row (in the same update below)
+  //      so send-time report-type logic sees it from then on.
+  // Body-supplied report_type / is_report_type flags are IGNORED either way.
+  let reportType = String(detail.report_type || '').trim() || null
+  let healReportType: string | null = null
+  if (!reportType) {
+    const { data: jobRow } = await client.from('jobs')
+      .select('id, metadata').eq('id', jId).maybeSingle()
+    const persistedFamily = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
+    const familyType = _reportTypeForJobFamily(persistedFamily)
+    if (familyType) {
+      reportType = familyType
+      healReportType = familyType
+    }
+  }
+  if (!reportType) {
+    throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real report.', 409)
+  }
+
+  // Idempotent repeat: already marked (or already further along) → ok, no
+  // state/event writes. FIX 4: a job can reach admin_to_send_report via
+  // update_makesafe_substatus BEFORE the marker delivers the portal URL — a
+  // supplied portal_url is still link-merged (link-only update: no substatus
+  // change, no report_received_at, no event).
+  const currentSubstatus = normalizeMakesafeSubstatus(detail.substatus)
+  if (currentSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(currentSubstatus)) {
+    const idempotentLinks = mergePortalLink(detail.external_links)
+    if (idempotentLinks) {
+      const { error: linkErr } = await client.from('makesafe_job_details')
+        .update({ external_links: idempotentLinks, updated_at: new Date().toISOString() })
+        .eq('job_id', jId)
+      if (linkErr) throw linkErr
+    }
+    return { ok: true, already_done: true, substatus: currentSubstatus, portal_link_added: !!idempotentLinks }
+  }
+
+  const nowIso = new Date().toISOString()
+  const updates: Record<string, any> = {
+    substatus: 'admin_to_send_report',
+    report_received_at: nowIso,
+    updated_at: nowIso,
+  }
+  // BE-2 self-heal: accepted via the persisted job family -> persist the
+  // report_type token on the detail row in this same state update.
+  if (healReportType) updates.report_type = healReportType
+
+  // external_links JSONB MERGE, not replace (reviewer MINOR: other links must
+  // survive) — shared append-only merge, same rules as the idempotent path.
+  const mergedLinks = mergePortalLink(detail.external_links)
+  if (mergedLinks) updates.external_links = mergedLinks
+
+  const { data: updated, error: upErr } = await client.from('makesafe_job_details')
+    .update(updates)
+    .eq('job_id', jId)
+    .select()
+    .single()
+  if (upErr) throw upErr
+
+  // One event row, fire-and-forget with the .then().catch() idiom (same as
+  // updateMakesafeSubstatus — a PostgREST insert builder has no bare .catch).
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'makesafe_portal_report_done',
+    detail_json: {
+      substatus: 'admin_to_send_report',
+      report_on_portal: true,
+      report_type: reportType,
+      report_type_healed_from_family: !!healReportType,
+      builder_portal_url: portalUrl,
+      changed_at: nowIso,
+      operator: body.operator_email || body.user_email || null,
+    },
+  }).then(() => {}).catch(() => {})
+
+  return { ok: true, already_done: false, details: updated }
+}
+// Test-only export alias (mirrors the `_`-prefixed convention above).
+export const _markMakesafePortalReportDone = markMakesafePortalReportDone
 
 // ── Slice 3: dedicated make-safe pipeline ──
 async function makesafePipeline(client: any, params: URLSearchParams) {
@@ -13864,9 +14041,9 @@ export async function assertAssignmentMutationAuthz(
 // installers from the trade app. JWT-authed by the caller (case above); gated
 // here by _resolveAllocationAuthz on the job's vertical. Wraps the SAME
 // createAssignment / updateAssignment primitives the ops dashboard uses, so the
-// installer Telegram DM, job_events, business_events, GHL push, and
-// visible_to_trades all fire identically. Idempotent against double-taps and
-// refuses archived / cancelled jobs.
+// installer allocation SMS (DA-M3-8; Telegram is retired), job_events,
+// business_events, GHL push, and visible_to_trades all fire identically.
+// Idempotent against double-taps and refuses archived / cancelled jobs.
 export async function allocateJob(client: any, args: {
   body: any
   callerRole?: string | null
@@ -14012,34 +14189,54 @@ async function createAssignment(client: any, body: any) {
     detail_json: { assignment_id: data.id, date: sDate, operator: body.operator_email || body.user_email || null },
   })
 
-  // ── Telegram DM to assigned trade ──
+  // ── SMS to assigned installer (Telegram is RETIRED business-wide) ──
+  // Plain-text SMS via the existing ghl-proxy send_sms path. Non-blocking:
+  // a notify failure must never fail or delay the assignment write, exactly like
+  // the old Telegram DM. sendSmsViaGhl swallows its own errors and returns a
+  // boolean, so the send can never throw or reject.
+  //
+  // NOTIFY GATE (ship review FIX 2): ops-calendar planning creates assignments
+  // with an EXPLICIT confirmation_status of 'placeholder'/'tentative' — those
+  // are schedule drafts and must not text a real installer. The trade-app
+  // allocate_job path passes NO confirmation status (finalConfStatus falls back
+  // to its 'tentative' default), so the gate keys off the EXPLICIT request
+  // value, not the default — otherwise every trade allocation would silently
+  // stop texting. suppress_notifications mirrors the make-safe creation path.
+  const requestedConfStatus = String(body.confirmationStatus || body.confirmation_status || '').toLowerCase()
+  const skipAllocationSms = !!body.suppress_notifications ||
+    finalConfStatus === 'placeholder' ||
+    requestedConfStatus === 'tentative'
   try {
     const assignedUserId = userId || user_id
-    if (assignedUserId) {
+    if (assignedUserId && !skipAllocationSms) {
       const { data: assignedUser } = await client.from('users')
-        .select('telegram_id, name').eq('id', assignedUserId).single()
-      if (assignedUser?.telegram_id) {
+        .select('name, phone').eq('id', assignedUserId).single()
+      if (assignedUser?.phone) {
         const { data: jobData2 } = await client.from('jobs')
           .select('job_number, client_name, site_address, site_suburb').eq('id', jId).single()
-        const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')
-        if (BOT_TOKEN && jobData2) {
-          const text = `📌 <b>New Assignment</b>\n\n<b>${jobData2.job_number || ''}</b> — ${jobData2.client_name || 'Client'}\n📍 ${jobData2.site_address || ''}${jobData2.site_suburb ? ', ' + jobData2.site_suburb : ''}\n📅 ${sDate}`
-          fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: assignedUser.telegram_id,
-              text,
-              parse_mode: 'HTML',
-              reply_markup: { inline_keyboard: [[
-                { text: '🔗 Open in Trade', url: `https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}` }
-              ]] }
-            })
-          }).catch(() => {})
+        if (jobData2) {
+          const site = `${jobData2.site_address || ''}${jobData2.site_suburb ? ', ' + jobData2.site_suburb : ''}`.trim()
+          const text = [
+            `New job assigned: ${jobData2.job_number || ''} - ${jobData2.client_name || 'Client'}`.trim(),
+            site ? `Site: ${site}` : '',
+            `Date: ${sDate}`,
+            `Open in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}`,
+          ].filter(Boolean).join('\n')
+          // FIX 3: a bare un-awaited promise can be torn down with the isolate
+          // once the response returns. EdgeRuntime.waitUntil is the sanctioned
+          // keep-alive; outside the edge runtime (tests, local) fall back to
+          // awaiting — safe either way because sendSmsViaGhl never rejects.
+          const smsSend = sendSmsViaGhl(assignedUser.phone, text)
+          const edgeRuntime = (globalThis as any).EdgeRuntime
+          if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+            edgeRuntime.waitUntil(smsSend)
+          } else {
+            await smsSend
+          }
         }
       }
     }
-  } catch (e) { console.log('[ops-api] assignment notification failed:', e) }
+  } catch (e) { console.log('[ops-api] assignment SMS notification failed:', e) }
 
   // Push schedule info to GHL custom fields (non-blocking)
   // Also grab job_number for business_events dual-write
@@ -18044,6 +18241,20 @@ export function _resolveManagerVisibility(
   return { isAdmin, isDispatcher, managedVerticals, poolVerticals, isMakesafeManager, canSeeMakesafePool }
 }
 
+// U2b (manager's Board accuracy): the verticals whose WHOLE board a vertical
+// manager may see via my_jobs(mode:'all'). A dispatcher already gets global
+// showAll, so this is empty for them; a non-dispatcher with managed_verticals
+// viewing the board (mode:'all') gets exactly their managed verticals — the
+// SAME set allocate_job authorises (no new global exposure). Any other mode
+// (personal 'mine' / default) returns [] so the personal Jobs view is untouched.
+export function _managerBoardVerticals(
+  input: { isDispatcher: boolean; mode?: string | null; managedVerticals?: unknown },
+): string[] {
+  if (input.isDispatcher) return []
+  if (String(input.mode || '') !== 'all') return []
+  return _normalizeManagedVerticals(input.managedVerticals)
+}
+
 // The vertical a job belongs to, for allocation-authz + pool purposes. Make-safe
 // wins on either jobs.type='makesafe' OR an SWMS- job_number (mirrors
 // isMakesafeAccessJob); otherwise the plain jobs.type (lower-cased).
@@ -18080,7 +18291,12 @@ export function _resolveAllocationAuthz(input: {
   return { allowed: false, reason: 'not_authorized' }
 }
 
-async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false, poolVerticals: string[] = []) {
+export async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false, poolVerticals: string[] = [], managerScopeVerticals: string[] = []) {
+  // U2b: manager's-Board widening. When set (non-dispatcher manager on
+  // mode:'all'), the assignment query returns ALL in-vertical assignments across
+  // every crew, not just this user's — scoped strictly to these verticals. Never
+  // set for a dispatcher (they use showAll) or the personal view.
+  const managerScope = !showAll ? _normalizeManagedVerticals(managerScopeVerticals) : []
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -18108,6 +18324,17 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
           site_address, site_suburb, notes, job_number
         )
       `
+  // Same columns as the admin select but with an INNER join on jobs so a
+  // referenced-table filter on jobs.type actually CONSTRAINS the parent rows
+  // (PostgREST semantics — see the make-safe backstop note below). Used only by
+  // the U2b manager's-Board query.
+  const ASSIGNMENT_SELECT_ADMIN_INNER = ASSIGNMENT_SELECT_ADMIN.replace('jobs:job_id (', 'jobs:job_id!inner (')
+  // Guard the string-derivation: if the admin select's embed spelling ever
+  // changes, replace() silently no-ops and the manager query would stop
+  // constraining by vertical. Fail loudly instead.
+  if (ASSIGNMENT_SELECT_ADMIN_INNER === ASSIGNMENT_SELECT_ADMIN) {
+    throw new Error('ASSIGNMENT_SELECT_ADMIN_INNER inner-join derivation failed — embed spelling changed')
+  }
 
   let assignments: any[]
   let error: any
@@ -18119,6 +18346,30 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
       .select(ASSIGNMENT_SELECT_ADMIN)
       .neq('status', 'cancelled')
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .order('scheduled_date', { ascending: true })
+    assignments = res.data
+    error = res.error
+  } else if (managerScope.length > 0) {
+    // ── Manager's Board (U2b): all in-vertical assignments across every crew ──
+    // A vertical manager (non-dispatcher) on mode:'all' sees the WHOLE vertical,
+    // so widen past this user's own rows to every assignment whose job's vertical
+    // is one they manage — regardless of user_id — using the admin select (which
+    // carries the crew user, needed for the board's lanes). Scope is strictly
+    // managerScope (their managed_verticals), matching allocate_job authz: a
+    // fencing manager gets fencing only, etc. Make-safe is matched by type OR an
+    // SWMS- job_number, mirroring _jobVertical + the open-pool query. The 30-day
+    // window matches the dispatcher board. Because the open pools below de-dupe
+    // against this same (now vertical-wide) `assignments` set, jobs already
+    // assigned to OTHER crew can no longer show as false "available" cards.
+    const jobVerticalFilter = managerScope.flatMap((v) =>
+      v === 'makesafe' ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%'] : [`type.eq.${v}`]
+    ).join(',')
+    const res = await client
+      .from('job_assignments')
+      .select(ASSIGNMENT_SELECT_ADMIN_INNER)
+      .neq('status', 'cancelled')
+      .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .or(jobVerticalFilter, { referencedTable: 'jobs' })
       .order('scheduled_date', { ascending: true })
     assignments = res.data
     error = res.error
@@ -18156,13 +18407,26 @@ async function myJobs(client: any, userId: string, showAll = false, isDispatcher
           site_address, site_suburb, notes, job_number
         )
       `
-  if (!showAll) {
+  // U2b + ship-review FIX 1: the personal path runs this backstop per-user; the
+  // manager's-Board path MUST run it too when the scope includes make-safe —
+  // pre-U2b a make-safe manager's mode:'all' took the personal path (backstop
+  // included), so skipping it here silently dropped >30-day make-safe
+  // assignments from `assignments` AND let the open pool below re-surface those
+  // jobs as false "available" cards (double-allocation risk). For a make-safe
+  // manager the SAME 180-day window runs VERTICAL-WIDE (no user_id filter,
+  // admin select so board lanes keep the crew user). Managers without
+  // 'makesafe' in scope (e.g. fencing) are unaffected — the backstop is
+  // make-safe-only by its jobs filter. Dispatchers (showAll) unchanged.
+  const runManagerMakesafeBackstop = managerScope.includes('makesafe')
+  if (!showAll && (managerScope.length === 0 || runManagerMakesafeBackstop)) {
     try {
       const existing30DayIds = new Set((assignments || []).map((a: any) => a.id))
-      const resMakesafe = await client
+      let backstopQuery = client
         .from('job_assignments')
-        .select(ASSIGNMENT_SELECT_USER_MAKESAFE)
-        .eq('user_id', userId)
+        .select(runManagerMakesafeBackstop ? ASSIGNMENT_SELECT_ADMIN_INNER : ASSIGNMENT_SELECT_USER_MAKESAFE)
+      // Personal path stays scoped to this user; the manager path is vertical-wide.
+      if (!runManagerMakesafeBackstop) backstopQuery = backstopQuery.eq('user_id', userId)
+      const resMakesafe = await backstopQuery
         .neq('status', 'cancelled')
         .gte('scheduled_date', makesafeSixMonthsAgo.toISOString().slice(0, 10))
         .lt('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
