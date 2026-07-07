@@ -1,16 +1,22 @@
 -- profitability-job-costing M1 (profit-baseline-freeze) — U2 + U3
 -- Write-once expected-cost baseline on jobs + canonical expected-fact read path.
 --
--- Status: DRAFT — NOT APPLIED. Lives in supabase/migrations/_drafts/ so
---   `supabase db push` does NOT pick it up. Applying is Marnin-gated at CP2
---   (money path: Codex ground-truth AND Marnin sign-off). Do not promote to
---   supabase/migrations/ or run apply_migration / db push before that gate.
---
 -- Mission : coding/work/missions/profit-baseline-freeze-2026-07-03/CONTRACT.md
 -- CP1     : ratified by Marnin 2026-07-05 — write-once jobs.expected_costs at
 --           the acceptance transition, frozen-revision-sourced with a
 --           live_fallback, write-once trigger, null = suppressed.
 -- Wiki    : SecureWorks-GROUP/secureworks-wiki#110
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- HAND-APPLIED 2026-07-05 (M1 postflight gated batch; code shipped in PR #284
+-- 2026-07-05 21:27 +0800, first live freeze recorded 2026-07-06 07:46 UTC) —
+-- applied manually by the orchestrator after M1 CP2 + Marnin approval, NOT by CI
+-- auto-migrate, and NOT recorded in supabase_migrations.schema_migrations (this
+-- is why the repo was silent on it until M3-U1). Promoted out of _drafts/ and
+-- RENUMBERED from the drafted 20260705000001 to 20260705000005 to resolve the
+-- version collision with 20260705000001_users_managed_verticals.sql (Codex
+-- blocker C1). Additive + idempotent (ADD COLUMN IF NOT EXISTS / CREATE OR
+-- REPLACE / DROP TRIGGER IF EXISTS); a no-op on re-apply and on the live DB.
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Why
@@ -156,33 +162,13 @@ COMMENT ON VIEW public.v_job_expected_cost_facts IS
 COMMIT;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Apply notes (for the operator at CP2 — NOT executed by this file)
+-- Historical apply record (this file is the promoted, now-applied migration)
 -- ─────────────────────────────────────────────────────────────────────────────
--- 1. Promote out of _drafts/ to supabase/migrations/ and rename the prefix to
---    match the Supabase ledger version at apply time (the scope_revisions
---    migration header documents this promote-then-rename convention).
--- 2. Preflight (read-only):
---      - confirm jobs.expected_costs / expected_frozen_at do NOT already exist:
---          SELECT column_name FROM information_schema.columns
---            WHERE table_schema='public' AND table_name='jobs'
---              AND column_name IN ('expected_costs','expected_frozen_at');   -- expect 0 rows
--- 3. Apply via the approved Supabase path (Studio SQL editor paste, OR
---    `supabase db push` after promotion, OR apply_migration). Fully
---    transactional.
--- 4. Postflight verification (read-only):
---      - SELECT count(*) FROM information_schema.columns
---          WHERE table_schema='public' AND table_name='jobs'
---            AND column_name IN ('expected_costs','expected_frozen_at');      -- expect 2
---      - SELECT to_regclass('public.v_job_expected_cost_facts');              -- expect the view
---      - SELECT tgname FROM pg_trigger WHERE tgname='trg_jobs_expected_costs_write_once'; -- expect 1
--- 5. Negative test at canary (service-role client, disposable job):
---      a. UPDATE a job's pricing_json / status with expected_costs still NULL
---         -> expect success (trigger WHEN clause skips it).
---      b. UPDATE jobs SET expected_costs = '{"version":1,...}'::jsonb WHERE id=... (first write)
---         -> expect success.
---      c. UPDATE jobs SET expected_costs = '{"version":1,"tampered":true}'::jsonb WHERE id=...
---         -> expect 23514 raise (write-once).
---      d. UPDATE jobs SET expected_costs = NULL WHERE id=...
---         -> expect 23514 raise (cannot clear).
---      e. UPDATE the same job's pricing_json again (baseline already set)
---         -> expect success (only expected_costs/expected_frozen_at are locked).
+-- Postflight verification at apply time (read-only), re-confirmed live at M3-U1
+-- on 2026-07-07:
+--   - information_schema.columns: jobs.expected_costs + expected_frozen_at present (2 rows).
+--   - to_regclass('public.v_job_expected_cost_facts') resolves (7-col contract intact).
+--   - pg_trigger: trg_jobs_expected_costs_write_once present (1 row).
+-- Negative test proven at M1 canary (service-role, disposable job): first write
+-- succeeds; a subsequent CHANGE to expected_costs raises 23514; clearing to NULL
+-- raises 23514; pricing_json auto-saves on the same job still succeed.

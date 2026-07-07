@@ -11,6 +11,18 @@
 --   * Existing rows pushed to Xero before this lands keep their xero_bill_id.
 --     They are tagged legacy_accpay_push=true so analytics can split pre-DRAFT
 --     rows from post-DRAFT rows.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- HAND-APPLIED 2026-05-06 — applied manually to prod and recorded in the live
+-- ledger as supabase_migrations.schema_migrations version 20260506112430
+-- ("expense_evidence_contract"), but the migration file itself was left in
+-- supabase/migrations/_drafts/ (drafted version 20260506000001), so the repo
+-- was silent on live DDL until M3-U1. Promoted here and RENUMBERED to match the
+-- live ledger version 20260506112430 exactly, so repo version == live version.
+-- Additive + idempotent (ADD COLUMN IF NOT EXISTS / CREATE INDEX IF NOT EXISTS /
+-- ON CONFLICT DO NOTHING / guarded policy + backfill); a no-op on re-apply and
+-- on the live DB. Mission: coding/work/missions/profit-money-surface-2026-07-07.
+-- ─────────────────────────────────────────────────────────────────────────────
 
 -- ── 1. expense_receipts: evidence-contract columns ──────────────────────────
 
@@ -74,7 +86,8 @@ create index if not exists idx_expense_receipts_xero_status on expense_receipts(
 -- One-shot backfill: tag every row that has already been pushed to Xero so
 -- post-DRAFT analytics can exclude them. This runs once on apply; new pushes
 -- after this migration set legacy_accpay_push=false (the column default) and
--- set xero_status='draft' explicitly via the application code.
+-- set xero_status='draft' explicitly via the application code. Idempotent: the
+-- `= false` guard means a re-apply only touches rows not already flagged.
 update expense_receipts
    set legacy_accpay_push = true
  where xero_bill_id is not null
