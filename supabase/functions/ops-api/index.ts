@@ -437,6 +437,7 @@ import {
   AGENT_REPLY_PREFIX,
   buildAgentReplyBody,
   noteIsAddressable,
+  resolveNoteVisibility,
 } from './makesafe_draft_notes.ts'
 // Review & Send mission — Claude-backed Draft Pack / Revise Pack generator.
 // Pure helpers only; this file supplies the draft-only Supabase/Xero/storage
@@ -20141,7 +20142,16 @@ async function addNote(client: any, body: any, isAdmin = false) {
   // Sales cockpit notes are staff-only by default. GHL contact notes are CRM
   // notes, not customer messages; when explicitly requested, mirror there too
   // so the salesmen see the same context in LeadConnector/GHL.
-  const noteVisibility = visibility === 'internal_only' ? 'internal_only' : 'client_visible'
+  //
+  // Item 10 — a caller-stated visibility ALWAYS wins (backward compatible). When
+  // it is unspecified, a system/audit marker body (a MAKESAFE_PACK_SENT send
+  // breadcrumb, an agent-reply marker) DEFAULTS to internal_only so it never
+  // syncs to a client-facing GHL note. Before this, a marker written via
+  // sw_add_note (which passes no visibility) defaulted to client_visible +
+  // sync_to_ghl — the 2026-07-07 SWMS-26832 marker backfill hit exactly this,
+  // one GHL-linked job away from leaking an internal audit breadcrumb to a
+  // client. Ordinary notes are unchanged: unspecified => client_visible.
+  const noteVisibility = resolveNoteVisibility(visibility, text)
   const shouldSyncToGhl = sync_to_ghl === true || (sync_to_ghl !== false && noteVisibility === 'client_visible')
 
   const { data, error } = await client.from('job_events').insert({
