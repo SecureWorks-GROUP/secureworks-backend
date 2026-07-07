@@ -31,6 +31,14 @@
 // layer is just repeated "en-AU" locale tokens). On such a PDF this reader finds no
 // labels and correctly returns nothing. It becomes the live client-fill the moment
 // a builder ships a text-layer WO, or a ToUnicode decode lands upstream.
+//
+// LIVE-VERIFIED 2026-07-07 (mission M-A). All 35 live MLB WO PDFs sampled decode to
+// EXACTLY `Array(100).fill("en-AU").join(" ")` (599 chars, zero digits/residue), so this
+// reader fails closed on every one — it fills nothing and never invents a homeowner.
+// What actually makes live MLB WOs born-clean is the PRIMARY model reading the WO as a
+// DOCUMENT block (vision): extractPdfText returns mode:'none' on that noise (#294
+// looksLikeText gate) so the PDF is handed to the model, which fills client_name/
+// site_address/phone before the gate runs. Proof + regression: makesafe_intake_clean_fill_test.ts.
 
 export interface PdfClientFields {
   client_name: string | null;
