@@ -102,3 +102,23 @@ makesafe_new_emails
 makesafe_pipeline_items
 get_makesafe_attachment_url
 get_makesafe_email
+
+# ── Make-safe report-flow write/read actions (W2-C housekeeping, 2026-07-08).
+#    Live + load-bearing (routine allow-list / ops cockpit / reporting skill) but
+#    previously unlisted, so the deploy guard + smoke drift check now cover them.
+#    reattend_makesafe (M-C) + mark_makesafe_portal_report_done (B4) + the two
+#    portal-recheck actions (W2-C) are the genuinely new ones the contract calls out. ──
+update_makesafe_substatus
+submit_makesafe_report
+create_makesafe_draft_invoice
+makesafe_render_report
+makesafe_report_drafts
+draft_makesafe_report_pack
+draft_makesafe_report_pack_due
+makesafe_send_pack
+allocate_job
+reattend_makesafe
+mark_makesafe_portal_report_done
+# W2-C portal-truth honest fallback (this PR):
+makesafe_portal_recheck_queue
+makesafe_portal_recheck_enqueue

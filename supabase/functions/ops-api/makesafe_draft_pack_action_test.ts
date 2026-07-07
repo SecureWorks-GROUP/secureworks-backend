@@ -932,6 +932,9 @@ Deno.test("createMakesafeDraftInvoice: can replace project-linked DRAFT when a r
       replace_project_linked_draft_on_project_line_error: true,
     },
     {
+      // AJBR job is a normal make-safe, not a report-type card; the W2-C portal
+      // guard is covered in makesafe_portal_truth_test.ts, opt out with a stub client here.
+      assertPortalVerified: async () => {},
       fetchAllAccrecInvoices: async () => {
         await Promise.resolve();
         return [{
