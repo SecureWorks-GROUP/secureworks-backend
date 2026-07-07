@@ -10630,18 +10630,36 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       j.metadata?.requesting_company?.name || null
     const externalRef = detail?.external_ref || j.metadata?.external_ref || null
     const rawSub = detail?.substatus ?? null
-    // Resolve the FULL mapped invoice list (incl. voided/deleted) for this job.
-    const invoices = _resolveMakesafeJobInvoices(invoiceRows, j.id, externalRef)
-    // invoice_status / invoice_no = comma-joined DISTINCT (duplicates SHOW —
-    // a second invoice with the same status still surfaces via the list; a
-    // distinct status set keeps the summary compact while the list keeps detail).
+    // W2-D (invoice-bleed fix) — resolve THIS card's invoice fields STRICTLY by
+    // job_id. _resolveMakesafeJobInvoices still tags every match's tier; we split
+    // its output so ref/substring-matched rows (a SIBLING card sharing external_ref,
+    // or an invoice whose job_id link is missing) can NEVER masquerade as this
+    // card's own invoice. Proven bleed: MLB-25387 / MLB-25911 / MLB-26072 (sibling
+    // INV-0844) and MLB-26122 (sibling PAID INV-0851 shown on an uninvoiced roof-
+    // report card). Two cards sharing a builder ref used to both inherit the one
+    // invoice's status/number, so an uninvoiced card read as PAID at a glance and
+    // batch tooling built on this compact read described invoice state wrongly.
+    const allMatched = _resolveMakesafeJobInvoices(invoiceRows, j.id, externalRef)
+    // Own = job_id-linked only (incl. voided/deleted for void-history, item 2.4).
+    // Drives every scalar invoice field below.
+    const invoices = allMatched.filter((i) => i.match_tier === 'job_id')
+    // Ref/substring-matched but NOT job_id-linked. Surfaced under an explicitly
+    // named field (sibling_invoices) so no consumer mistakes it for the card's own
+    // — fails OBVIOUS, not silent: an auditor still SEES an invoice exists under
+    // the shared ref, but it never contaminates invoice_status / invoice_no /
+    // live_invoice_*. Empty in the common case; non-empty flags a genuine sibling
+    // claim or a broken job_id link.
+    const siblingInvoices = allMatched.filter((i) => i.match_tier !== 'job_id')
+    // invoice_status / invoice_no = comma-joined DISTINCT over the JOB-LINKED set
+    // (a duplicate on THIS job still SHOWS; a sibling's invoice never does). Both
+    // null when this card has no job_id-linked invoice — uninvoiced reads as
+    // uninvoiced.
     const distinctStatuses = Array.from(new Set(invoices.map((i) => i.status).filter(Boolean)))
     const distinctNumbers = Array.from(new Set(invoices.map((i) => i.invoice_number).filter(Boolean)))
-    // M3 marker-integrity: the SINGLE current LIVE invoice, resolved by job link /
-    // reference and preferring AUTHORISED over any non-void status. Voided/replaced
-    // numbers (and any baked sent-marker text) never win — invoice_no above keeps
-    // the full distinct blob for void-history, this is the one downstream should
-    // read as "the invoice we actually sent".
+    // M3 marker-integrity: the SINGLE current LIVE invoice, resolved from the
+    // job-linked set only, preferring PAID/AUTHORISED over any non-void status.
+    // Voided/replaced numbers (and any baked sent-marker text) never win — this is
+    // the one downstream should read as "the invoice we actually sent".
     const liveInvoice = _resolveLiveMakesafeInvoice(invoices)
     return {
       job_id: j.id,
@@ -10665,8 +10683,16 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       // GAP-4 — notes-based pack-sent marker (triage) + the sync-system verdict.
       pack_sent: packSentMap[j.id] === true,
       pipeline_item_sent_status: pipelineSentStatusMap[j.id] ?? null,
-      // Full per-row mapped invoice list incl. voided/deleted (item 2.4).
+      // Per-row mapped invoice list — JOB-LINKED only (incl. voided/deleted for
+      // void-history, item 2.4). Ref-matched-but-not-job-linked rows are moved to
+      // sibling_invoices so this board-truth read never bleeds a sibling's invoice
+      // onto an uninvoiced card (W2-D).
       invoices,
+      // Ref/substring-matched invoices NOT linked to this job by job_id (empty in
+      // the common case). Explicitly separate so no consumer treats them as this
+      // card's own; a non-empty value flags a broken job_id link or a genuine
+      // sibling claim under a shared builder ref (W2-D).
+      sibling_invoices: siblingInvoices,
     }
   })
 
