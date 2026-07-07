@@ -4,6 +4,8 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  canonicalizeKind,
+  extractAnchorTextMap,
   extractBuilderEmailLinks,
   mergeDeterministicAndClaudeLinks,
   mergeIntoExternalLinks,
@@ -173,4 +175,208 @@ Deno.test("normalizeReportExternalLinks supports new arrays and legacy portal_li
     kind: "assessment_report",
     source: "claude",
   }]);
+});
+
+// ── W3-F — link-typing capture hardening ─────────────────────────────────────
+// Reconstructions keyed to the REAL primeeco share URLs of the four cards that
+// degraded to a single generic builder_portal link (SWMS-26846/47/48/49), plus the
+// triad, canon and idempotent-upgrade behaviours. The bug: a primeeco …/share/<uuid>
+// link carries no descriptive path, so with only the wide-window keyword scan the type
+// (assessment_report / photos / quote) was lost and every link fell to generic.
+
+const U_2684 = {
+  report46: "https://primeeco.tech/share/3aa4a68c-3b5b-495c-9918-808926a47713",
+  report47: "https://primeeco.tech/share/6ce66bfb-02ed-41c3-b782-2a1e243be56d",
+  report48: "https://www.primeeco.tech/share/728fb9be-8582-451d-9b0b-09164312bf57",
+  report49: "https://primeeco.tech/share/8b6f70ac-fafe-4d51-8ff3-c1f75c04f6c6",
+};
+
+Deno.test("W3-F SWMS-26846: anchor-text labels type the whole prime triad (was 1 generic link)", () => {
+  // Prime's report email presents each artifact as a labelled <a>; the anchor text names
+  // the artifact even though every href is an indistinguishable /share/<uuid> link.
+  const html = `<html><body>
+    <p>Hi team, the assessment for MLB-25898 (19 Stuart Ct, Bateman) is complete.</p>
+    <p><a href="${U_2684.report46}">View Assessment Report</a></p>
+    <p><a href="https://primeeco.tech/share/aa11bb22-photos-4d24-c2b6-92050e12abcd">View Photos</a></p>
+    <p><a href="https://primeeco.tech/share/cc33dd44-quote-4d24-c2b6-92050e34efgh">View Quote</a></p>
+  </body></html>`;
+  const links = extractBuilderEmailLinks(html);
+  const byUrl = new Map(links.map((l) => [l.url, l]));
+  assertEquals(byUrl.get(U_2684.report46)!.kind, "assessment_report");
+  assertEquals(
+    byUrl.get("https://primeeco.tech/share/aa11bb22-photos-4d24-c2b6-92050e12abcd")!.kind,
+    "photos",
+  );
+  assertEquals(
+    byUrl.get("https://primeeco.tech/share/cc33dd44-quote-4d24-c2b6-92050e34efgh")!.kind,
+    "quote",
+  );
+  // No link left generic and nothing flagged — the triad is fully typed.
+  assert(links.every((l) => l.kind !== "builder_portal"));
+  assert(links.every((l) => l.evidence_gap === undefined));
+});
+
+Deno.test("W3-F SWMS-26847: a heading line above a bare share link types it", () => {
+  const body = "Report ready for MLB-26060, 37 Willshire Way.\n" +
+    "Assessment Report\n" +
+    `${U_2684.report47}\n` +
+    "Regards, Prime Eco";
+  const links = extractBuilderEmailLinks(body);
+  const prime = links.find((l) => l.url === U_2684.report47)!;
+  assertEquals(prime.kind, "assessment_report");
+  assertEquals(prime.evidence_gap, undefined);
+});
+
+Deno.test("W3-F SWMS-26848: www.primeeco host is a portal link and its own line types it", () => {
+  assert(urlIsBuilderPortalLink(U_2684.report48));
+  const body = `Photos: ${U_2684.report48}`;
+  const links = extractBuilderEmailLinks(body);
+  const prime = links.find((l) => l.url === U_2684.report48)!;
+  assertEquals(prime.kind, "photos");
+});
+
+Deno.test("W3-F SWMS-26849: a lone unlabelled share link stays generic BUT is flagged, never guessed", () => {
+  // The honest degraded shape: one share link, no anchor/heading/path/sibling signal.
+  const body = "Please see the builder portal for the submitted report.\n" +
+    `${U_2684.report49}`;
+  const links = extractBuilderEmailLinks(body);
+  assertEquals(links.length, 1);
+  assertEquals(links[0].url, U_2684.report49);
+  assertEquals(links[0].kind, "builder_portal"); // not guessed
+  assert(
+    typeof links[0].evidence_gap === "string" && links[0].evidence_gap.length > 0,
+    `expected an evidence-gap flag; got ${JSON.stringify(links[0])}`,
+  );
+});
+
+Deno.test("W3-F triad completion: a bare middle link between typed report+quote is inferred as photos", () => {
+  const body = "Assessment Report: https://primeeco.tech/share/rep-0000\n" +
+    "https://primeeco.tech/share/mid-0000\n" +
+    "Quote: https://primeeco.tech/share/quo-0000";
+  const links = extractBuilderEmailLinks(body);
+  const mid = links.find((l) => l.url === "https://primeeco.tech/share/mid-0000")!;
+  assertEquals(mid.kind, "photos"); // determined by elimination, not position-guessed
+  assertEquals(mid.evidence_gap, undefined); // resolved
+  assertEquals(
+    links.find((l) => l.url === "https://primeeco.tech/share/rep-0000")!.kind,
+    "assessment_report",
+  );
+  assertEquals(
+    links.find((l) => l.url === "https://primeeco.tech/share/quo-0000")!.kind,
+    "quote",
+  );
+});
+
+Deno.test("W3-F triad guard: three bare share links (none typed) are NOT positionally guessed", () => {
+  const body = "Reports are ready:\n" +
+    "https://primeeco.tech/share/a-0000\n" +
+    "https://primeeco.tech/share/b-0000\n" +
+    "https://primeeco.tech/share/c-0000";
+  const links = extractBuilderEmailLinks(body);
+  assertEquals(links.length, 3);
+  // All stay generic and flagged — a wrong type is worse than a flagged generic.
+  assert(links.every((l) => l.kind === "builder_portal"));
+  assert(links.every((l) => typeof l.evidence_gap === "string"));
+});
+
+Deno.test("W3-F prev-line guard: a stacked sibling link never bleeds its type onto the link below", () => {
+  // "Quote:" sits on the line above a DIFFERENT bare link; that bare link must not become
+  // a quote just because the sibling link-line mentions one.
+  const body = "Quote: https://primeeco.tech/share/quote-xyz\n" +
+    "https://primeeco.tech/share/bare-xyz";
+  const links = extractBuilderEmailLinks(body);
+  const bare = links.find((l) => l.url === "https://primeeco.tech/share/bare-xyz")!;
+  assertEquals(bare.kind, "builder_portal");
+  assert(typeof bare.evidence_gap === "string");
+});
+
+Deno.test("W3-F canon: kinds are normalised to the extractor's vocabulary at write time", () => {
+  assertEquals(canonicalizeKind("photo_schedule"), "photos");
+  assertEquals(canonicalizeKind("Photo Schedule"), "photos");
+  assertEquals(canonicalizeKind("photos"), "photos");
+  assertEquals(canonicalizeKind("quotation"), "quote");
+  assertEquals(canonicalizeKind("roof-report"), "roof_report");
+  assertEquals(canonicalizeKind("assessment_report_quote"), "assessment_report");
+  assertEquals(canonicalizeKind(""), "builder_portal");
+  assertEquals(canonicalizeKind("unknown_report"), "builder_portal");
+  // A Claude link carrying the legacy photo_schedule alias is stored as `photos`.
+  const merged = mergeDeterministicAndClaudeLinks([], {
+    portal_links: [{
+      label: "Photo schedule",
+      url: "https://primeeco.tech/share/ph-1",
+      kind: "photo_schedule",
+    }],
+  });
+  assertEquals(merged[0].kind, "photos");
+});
+
+Deno.test("W3-F upgrade-on-rescan: a stored generic link is retyped in place (idempotent, no duplicate)", () => {
+  // The live defect state: the job already carries the degraded generic capture.
+  const stored = [{
+    label: "Builder portal link",
+    url: U_2684.report46,
+    kind: "builder_portal",
+    source: "email_body",
+    evidence_gap: "portal link captured but type undetermined",
+  }];
+  // A re-scan by the hardened extractor now knows it is the assessment report.
+  const rescan = [{
+    label: "Assessment report link",
+    url: U_2684.report46,
+    kind: "assessment_report",
+    source: "email_body" as const,
+  }];
+  const { links, added, upgraded } = mergeIntoExternalLinks(stored, rescan);
+  assertEquals(links.length, 1); // no duplicate
+  assertEquals(added.length, 0);
+  assertEquals(upgraded.length, 1);
+  assertEquals(links[0].kind, "assessment_report");
+  assertEquals(links[0].evidence_gap, undefined); // flag cleared on upgrade
+  // Re-running the same re-scan is now a no-op (typed entry not re-upgraded).
+  const again = mergeIntoExternalLinks(links, rescan);
+  assertEquals(again.added.length, 0);
+  assertEquals(again.upgraded.length, 0);
+});
+
+Deno.test("W3-F upgrade-on-rescan: an operator's custom label survives the kind upgrade", () => {
+  const stored = [{
+    label: "Prime portal (see Hugo's note)",
+    url: U_2684.report49,
+    kind: "builder_portal",
+  }];
+  const rescan = [{
+    label: "Quote link",
+    url: U_2684.report49,
+    kind: "quote",
+    source: "email_body" as const,
+  }];
+  const { links, upgraded } = mergeIntoExternalLinks(stored, rescan);
+  assertEquals(upgraded.length, 1);
+  assertEquals(links[0].kind, "quote"); // kind sharpened
+  assertEquals(links[0].label, "Prime portal (see Hugo's note)"); // operator prose kept
+});
+
+Deno.test("W3-F regression: an already-working labelled triad still types cleanly", () => {
+  // SWMS-26716-class: report/photos/quote each on their own labelled line.
+  const links = extractBuilderEmailLinks(
+    "Assessment report https://primeeco.tech/share/r16\n" +
+      "Photos https://primeeco.tech/share/p16\n" +
+      "Quote https://primeeco.tech/share/q16",
+  );
+  assertEquals(links.map((l) => l.kind), [
+    "assessment_report",
+    "photos",
+    "quote",
+  ]);
+  assert(links.every((l) => l.evidence_gap === undefined));
+});
+
+Deno.test("W3-F extractAnchorTextMap: maps hrefs to anchor text, stripping nested tags", () => {
+  const map = extractAnchorTextMap(
+    `<a href="https://primeeco.tech/share/x1"><span>View </span><b>Assessment Report</b></a>`,
+  );
+  assertEquals(
+    map.get("https://primeeco.tech/share/x1"),
+    "View Assessment Report",
+  );
 });
