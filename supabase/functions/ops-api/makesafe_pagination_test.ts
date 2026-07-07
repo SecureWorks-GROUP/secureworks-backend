@@ -239,6 +239,8 @@ Deno.test("B2: draft idempotency key is identical for spaced vs hyphenated vs co
 Deno.test("T5: a second createMakesafeDraftInvoice with the same job/reference returns skipped (no duplicate)", async () => {
   // Simulate the first call having already created the invoice: seed it into the
   // ACCREC scan. The dup-guard must short-circuit to skipped BEFORE any Xero call.
+  // Since f16a4a1 the default is to UPDATE the existing draft in place (revise
+  // packs); update_existing_draft:false selects the explicit skip/dedup path.
   const existing = {
     xero_invoice_id: "xi-1", invoice_number: "INV-0700", reference: "MLB-25248",
     status: "DRAFT", job_id: "job-dup", invoice_type: "ACCREC", invoice_date: "2026-06-16",
@@ -249,6 +251,7 @@ Deno.test("T5: a second createMakesafeDraftInvoice with the same job/reference r
     reference: "MLB-25248",
     contact_name: "MLB Constructions",
     line_items: [{ description: "Make safe labour", quantity: 1, unit_price: 500 }],
+    update_existing_draft: false,
   });
   assertEquals(res.skipped, true, "second create is skipped (dup-guard)");
   assertEquals(res.existing_invoice.invoice_number, "INV-0700");

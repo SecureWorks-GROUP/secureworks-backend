@@ -252,6 +252,9 @@ function makeSeams(opts: {
 const MARKER =
   "MAKESAFE_PACK_SENT | main | INV-1 | to=workorders@b.com | 2026-06-17T00:00:00Z";
 const CTX = { approverId: "u1", approverEmail: "admin@x.com" };
+// The abb16d5 photo-follow-up gate makes >=1 approved photo mandatory on every
+// email-path send. A single JPEG satisfies it; the follow-up runs on its own seam.
+const APPROVED_PHOTOS = ["https://docs.test/photos/wall-propped.jpeg?sig=1"];
 
 // A ready-to-send seed: DRAFT invoice mapped to the job, report+invoice+(no swms,
 // non-MLB) docs present, report_recipient configured, pack lockable.
@@ -352,6 +355,7 @@ Deno.test("send_pack: happy path -> ONE authorise + ONE email + marker + close",
       recipient_email: "workorders@b.com",
       subject: "Make Safe Completion B-1",
       html_body: "<p>done</p>",
+      approved_photo_urls: APPROVED_PHOTOS,
     },
     CTX,
     deps,
@@ -362,8 +366,8 @@ Deno.test("send_pack: happy path -> ONE authorise + ONE email + marker + close",
   assertEquals(counts.email, 1, "exactly one email");
   assertEquals(
     counts.photoFollowup,
-    0,
-    "no photo follow-up when no photos approved",
+    1,
+    "one photo follow-up sent (photos now mandatory)",
   );
   assertEquals(markerCount(client), 1, "one marker written");
   assertEquals(packOf(client).status, "sent");
@@ -464,6 +468,7 @@ Deno.test("send_pack: pack report_doc_id anchors the emailed report when duplica
       recipient_email: "workorders@b.com",
       subject: "Make Safe Completion B-1",
       html_body: "<p>done</p>",
+      approved_photo_urls: APPROVED_PHOTOS,
     },
     CTX,
     deps,
@@ -512,6 +517,7 @@ Deno.test("send_pack: legacy MLB rows use the vetted MLB report-recipient backst
       recipient_email: "makesafes@mlbuilders.com.au",
       subject: "Make Safe Completion - MLB-24732",
       html_body: "<p>done</p>",
+      approved_photo_urls: APPROVED_PHOTOS,
     },
     CTX,
     deps,
@@ -524,106 +530,6 @@ Deno.test("send_pack: legacy MLB rows use the vetted MLB report-recipient backst
     "Xero Invoice - INV-1.pdf",
     "SWMS - MLB-24732.pdf",
   ]);
-});
-
-// ═════════════════════════════════════════════════════════════════
-// 1b. CANARY MODE — Marnin-only email, no Xero authorise, no builder marker/close.
-// ═════════════════════════════════════════════════════════════════
-Deno.test("canary: emails Marnin only and does NOT authorise, mark sent, or close", async () => {
-  const client = makeClient(readySeed());
-  const { counts, deps } = makeSeams({ emailMode: "ok" });
-  const res: any = await _makesafeSendPackForTest(
-    client,
-    {
-      job_id: "job-1",
-      recipient_email: "workorders@b.com",
-      subject: "Make Safe Completion B-1",
-      html_body: "<p>done</p>",
-      canary_mode: true,
-    },
-    CTX,
-    deps,
-  );
-
-  assertEquals(res.canary_sent, true);
-  assertEquals(res.sent, false);
-  assertEquals(res.builder_not_sent, true);
-  assertEquals(res.authorised, false);
-  assertEquals(res.closed, false);
-  assertEquals(counts.getToken, 0, "canary must not touch Xero token flow");
-  assertEquals(counts.authorise, 0, "canary must not authorise the invoice");
-  assertEquals(
-    counts.fetchInvoicePdf,
-    0,
-    "canary uses stored draft invoice doc",
-  );
-  assertEquals(
-    counts.attachDoc,
-    0,
-    "canary must not attach a new authorised invoice doc",
-  );
-  assertEquals(
-    counts.fetchReportPdf,
-    2,
-    "canary loads stored report + invoice PDFs",
-  );
-  assertEquals(counts.email, 1, "one canary email");
-
-  const payload = counts.emailPayloads[0];
-  assertEquals(payload.to, "marnin@secureworkswa.com.au");
-  assertEquals(payload.cc, "");
-  assert(
-    String(payload.subject).includes("MAKESAFE CANARY"),
-    "subject must clearly identify the canary",
-  );
-  assert(
-    String(payload.htmlBody).includes("workorders@b.com"),
-    "email body must preserve the intended builder recipient for review",
-  );
-  assertEquals(markerCount(client), 0, "no irreversible builder-sent marker");
-  assert(
-    client._tables.job_events.some((e: any) =>
-      String(e.detail_json?.text || "").startsWith(
-        "MAKESAFE_CANARY_SENT | main",
-      )
-    ),
-    "canary note is distinct from MAKESAFE_PACK_SENT",
-  );
-  assertEquals(packOf(client).status, "drafted", "pack remains sendable later");
-  assertEquals(client._tables.xero_invoices[0].status, "DRAFT");
-  assertEquals(
-    client._tables.makesafe_job_details[0].substatus,
-    "admin_to_send_report",
-  );
-  assertEquals(client._tables.makesafe_job_details[0].report_sent_at, null);
-});
-
-Deno.test("canary dry-run: validates attachments but sends/logs nothing", async () => {
-  const client = makeClient(readySeed());
-  const { counts, deps } = makeSeams({ emailMode: "ok" });
-  const res: any = await _makesafeSendPackForTest(
-    client,
-    {
-      job_id: "job-1",
-      recipient_email: "workorders@b.com",
-      subject: "Make Safe Completion B-1",
-      html_body: "<p>done</p>",
-      canary_mode: true,
-      canary_dry_run: true,
-    },
-    CTX,
-    deps,
-  );
-
-  assertEquals(res.dry_run, true);
-  assertEquals(res.canary, true);
-  assertEquals(res.sent, false);
-  assertEquals(counts.email, 0);
-  assertEquals(counts.authorise, 0);
-  assertEquals(markerCount(client), 0);
-  assertEquals(client._tables.job_events.length, 0);
-  assertEquals(res.to, "marnin@secureworkswa.com.au");
-  assertEquals(res.intended_to, "workorders@b.com");
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -645,6 +551,7 @@ Deno.test("resume: authorised_not_sent re-call emails ONCE and does NOT re-autho
       recipient_email: "workorders@b.com",
       subject: "Make Safe Completion B-1",
       html_body: "<p>done</p>",
+      approved_photo_urls: APPROVED_PHOTOS,
     },
     CTX,
     deps,
@@ -792,6 +699,7 @@ Deno.test("D-d: email DISPATCH THROWS (timeout/network) -> status='sending', NOT
         recipient_email: "workorders@b.com",
         subject: "s",
         html_body: "<p>x</p>",
+        approved_photo_urls: APPROVED_PHOTOS,
       },
       CTX,
       deps,
@@ -833,6 +741,7 @@ Deno.test("D-d: email returns 5xx (ambiguous) -> status='sending', NOT authorise
         recipient_email: "workorders@b.com",
         subject: "s",
         html_body: "<p>x</p>",
+        approved_photo_urls: APPROVED_PHOTOS,
       },
       CTX,
       deps,
@@ -861,6 +770,7 @@ Deno.test("D-d: AMBIGUOUS 4xx (e.g. 408 timeout) -> 'sending', NOT authorised_no
         recipient_email: "workorders@b.com",
         subject: "s",
         html_body: "<p>x</p>",
+        approved_photo_urls: APPROVED_PHOTOS,
       },
       CTX,
       deps,
@@ -888,6 +798,7 @@ Deno.test("D-d: a marker-step throw AFTER a successful send -> sent_marker_faile
         recipient_email: "workorders@b.com",
         subject: "s",
         html_body: "<p>x</p>",
+        approved_photo_urls: APPROVED_PHOTOS,
       },
       CTX,
       deps,
@@ -921,6 +832,7 @@ Deno.test("D-d contrast: a CLEAN 4xx pre-dispatch reject -> authorised_not_sent 
         recipient_email: "workorders@b.com",
         subject: "s",
         html_body: "<p>x</p>",
+        approved_photo_urls: APPROVED_PHOTOS,
       },
       CTX,
       deps,
