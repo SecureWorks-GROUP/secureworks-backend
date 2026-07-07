@@ -18,6 +18,8 @@
 // (no network) so the mapping + dedup filter are unit-testable.
 // ════════════════════════════════════════════════════════════
 
+import { attributeInboundLine } from "./telephony_lines.ts";
+
 export const INBOUND_SMS_EVENT_TYPE = "client.sms_in";
 export const INBOUND_NONSMS_EVENT_TYPE = "client.reply";
 
@@ -67,6 +69,13 @@ export interface InboundMapping {
  */
 export function mapInboundMessage(body: Record<string, unknown>): InboundMapping {
   const channel = inboundChannel(body);
+  // U1b-a: attribute the destination line from the GHL `to`/`toNumber` field,
+  // or a static per-workflow `line` label, via the shared telephony canon —
+  // exactly as CallCompleted attributes a call. Never guessed from the
+  // contact's own number; absent any destination signal → unknown.
+  const destinationNumber = str(body.to) ?? str(body.toNumber);
+  const staticLine = str(body.line);
+  const { line_label, department } = attributeInboundLine(destinationNumber, staticLine);
   return {
     eventType: inboundEventType(channel),
     channel,
@@ -76,6 +85,8 @@ export function mapInboundMessage(body: Record<string, unknown>): InboundMapping
       email: (body.email as string) || null,
       conversation_id: (body.conversationId as string) || null,
       channel,
+      line_label,
+      department,
       ghl_message_id: extractGhlMessageId(body),
       source: "ghl_webhook",
     },

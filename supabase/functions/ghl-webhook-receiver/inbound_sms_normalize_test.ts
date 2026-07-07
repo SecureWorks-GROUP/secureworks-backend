@@ -49,12 +49,13 @@ const ENQUEUER_ALLOWED_EVENT_TYPES = [
 
 // ── 1. Mapping fixtures ──────────────────────────────────────────────────────
 
-Deno.test("mapping: inbound SMS → client.sms_in with the exact envelope", () => {
+Deno.test("mapping: inbound SMS → client.sms_in with the exact envelope (incl. line attribution)", () => {
   const body = {
     type: "InboundMessage",
     contactId: "CT_123",
     message: "Yes 2pm Thursday works",
-    phone: "+61400111222",
+    phone: "+61400111222",   // the CLIENT's number (from)
+    to: "+61489267772",       // OUR fencing line (destination)
     conversationId: "CV_9",
     messageId: "MSG_abc123",
   };
@@ -67,6 +68,8 @@ Deno.test("mapping: inbound SMS → client.sms_in with the exact envelope", () =
     email: null,
     conversation_id: "CV_9",
     channel: "sms",
+    line_label: "fencing",
+    department: "sales-fencing",
     ghl_message_id: "MSG_abc123",
     source: "ghl_webhook",
   });
@@ -109,6 +112,53 @@ Deno.test("mapping: message_text truncates to 500 chars", () => {
   const long = "x".repeat(900);
   const out = mapInboundMessage({ phone: "1", message: long }).eventPayload.message_text as string;
   assertEquals(out.length, 500);
+});
+
+// ── 1b. Line attribution fixtures (U1b-a) ────────────────────────────────────
+
+function lineOf(body: Record<string, unknown>) {
+  const p = mapInboundMessage(body).eventPayload;
+  return { line_label: p.line_label, department: p.department };
+}
+
+Deno.test("line: destination `to` = fencing number (E.164 and local) → fencing", () => {
+  assertEquals(lineOf({ phone: "+61400111222", to: "+61489267772" }),
+    { line_label: "fencing", department: "sales-fencing" });
+  assertEquals(lineOf({ phone: "0400111222", to: "0489267772" }),
+    { line_label: "fencing", department: "sales-fencing" });
+});
+
+Deno.test("line: destination `to` = patios number (E.164 and local) → patios", () => {
+  assertEquals(lineOf({ phone: "+61400111222", to: "+61489267774" }),
+    { line_label: "patios", department: "sales-patios" });
+  assertEquals(lineOf({ phone: "0400111222", to: "0489267774" }),
+    { line_label: "patios", department: "sales-patios" });
+});
+
+Deno.test("line: `toNumber` is accepted as a destination alias", () => {
+  assertEquals(lineOf({ phone: "0400111222", toNumber: "0489267774" }),
+    { line_label: "patios", department: "sales-patios" });
+});
+
+Deno.test("line: static `line` label (per-workflow fallback) → mapped to department", () => {
+  assertEquals(lineOf({ phone: "0400111222", line: "fencing" }),
+    { line_label: "fencing", department: "sales-fencing" });
+  assertEquals(lineOf({ phone: "0400111222", line: "Patios" }), // case-insensitive
+    { line_label: "patios", department: "sales-patios" });
+});
+
+Deno.test("line: unrecognised static label is not trusted → unknown", () => {
+  assertEquals(lineOf({ phone: "0400111222", line: "fence" }),
+    { line_label: "unknown", department: "unknown" });
+});
+
+Deno.test("line: absent destination → unknown, and NEVER guessed from the contact number", () => {
+  // No `to`/`line`; the contact's own phone must not attribute a line even if
+  // it happened to be one of our line numbers.
+  assertEquals(lineOf({ phone: "+61400111222", message: "hi" }),
+    { line_label: "unknown", department: "unknown" });
+  assertEquals(lineOf({ phone: "+61489267772", message: "spoofed our line" }),
+    { line_label: "unknown", department: "unknown" });
 });
 
 // ── 2. Dedup fixtures ────────────────────────────────────────────────────────
