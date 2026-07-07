@@ -317,6 +317,16 @@ import {
   normaliseJobFamily as _normaliseDedupJobFamily,
   decideInsertConflictAction as _decideInsertConflictAction,
 } from './makesafe_intake_dedup.ts'
+// M-A2 / W2-B: two-email late WO-PDF landing. When a builder announces a WO with no
+// PDF (dirty draft) then sends the PDF in a later PO email, land the PDF on the
+// EXISTING draft instead of minting a duplicate card or stranding it. Pure decision +
+// merge; the orchestration (landLateWorkOrderPdfOntoDraft) lives below in this file.
+import {
+  selectLatePdfLandingTarget as _selectLatePdfLandingTarget,
+  mergeLateWorkOrderPdfIntoDraft as _mergeLateWorkOrderPdfIntoDraft,
+  type LatePdfCandidate as _LatePdfCandidate,
+  type LatePdfDraftRow as _LatePdfDraftRow,
+} from './makesafe_intake_late_pdf.ts'
 // A4/A5: SMS arrival texts + notify config (Telegram retired business-wide).
 import {
   loadNotifySettings as _loadNotifySettings,
@@ -13133,6 +13143,144 @@ async function _patchExistingJobExternalLinks(
   return { added }
 }
 
+// ── M-A2 / W2-B: two-email late WO-PDF landing (orchestration) ─────────────────
+// The scan calls this when a candidate carries a servable WO PDF but dedups against
+// an EXISTING same-ref+company draft. It finds the SINGLE dirty draft the PDF belongs
+// to (selectLatePdfLandingTarget — fail closed on ambiguity), lands the PDF + fills
+// the client fields the announcement lacked (mergeLateWorkOrderPdfIntoDraft), UPDATEs
+// the row IN PLACE (never an INSERT — immune to the (org_id, graph_message_id) unique
+// key), and re-runs the UNCHANGED strict gate, auto-filing only when now clean AND the
+// same env/DB/degraded brakes allow it. NEVER mints a duplicate card.
+//
+// deps.approve is injectable so the orchestration is testable without approveIntakeDraft.
+async function landLateWorkOrderPdfOntoDraft(
+  client: any,
+  params: {
+    candidate: _LatePdfCandidate
+    autoFileEnabled: boolean
+    extractionDegraded: boolean
+    subject?: string | null
+  },
+  deps?: { approve?: typeof approveIntakeDraft },
+): Promise<
+  | { outcome: 'none' }
+  | { outcome: 'ambiguous'; candidate_ids: string[] }
+  | { outcome: 'landed'; draft_id: string; status: string; auto_filed: { job_id: string | null; reason: string } | null }
+> {
+  const approve = deps?.approve || approveIntakeDraft
+
+  // Live drafts that could receive a late PDF (draft | needs_review only).
+  const liveDrafts = await _fetchAllRows<any>(
+    () => client.from('makesafe_intake_drafts')
+      .select('id, status, external_ref, requesting_company_slug, requesting_company_name, attachments_json, extraction_json, missing_fields, client_name, client_phone, site_address, site_suburb, description, safety_requirements, confidence, report_type, subject')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .in('status', ['draft', 'needs_review']),
+    'makesafe_intake_drafts (late-pdf landing) read',
+  )
+  // Normalise each row's ref/identity/family the SAME way the dedup index does, so the
+  // matcher sees the builder_claim_ref + WO/PO identity carried in extraction_json.
+  const rows: _LatePdfDraftRow[] = (liveDrafts || []).map((d: any) => {
+    const ex = parseJsonObject(d.extraction_json)
+    const fam = ex.makesafe_job_family || _classifyMakeSafeJobFamily(
+      d.subject || d.external_ref || '',
+      [d.report_type, d.description].filter(Boolean).join('\n'),
+      d.report_type || null,
+    )
+    return {
+      ...d,
+      external_ref: cleanReviewedString(ex.builder_claim_ref) || d.external_ref,
+      makesafe_job_family: fam || null,
+      builder_work_order_number: cleanReviewedString(ex.builder_work_order_number) || null,
+      builder_po_number: cleanReviewedString(ex.builder_po_number) || null,
+    }
+  })
+
+  const selection = _selectLatePdfLandingTarget(params.candidate, rows)
+  if (selection.kind === 'none') return { outcome: 'none' }
+  if (selection.kind === 'ambiguous') {
+    const ids = selection.candidates.map((c) => c.id)
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'makesafe.intake_late_pdf_ambiguous',
+        source: 'app/makesafe-intake',
+        entity_type: 'makesafe_ref',
+        entity_id: String(params.candidate.external_ref || params.candidate.graph_message_id || ''),
+        body_preview: `Late WO PDF matched ${ids.length} dirty drafts for ref ${params.candidate.external_ref || 'unknown'}; failed closed for human review (no auto-land).`,
+        payload: { external_ref: params.candidate.external_ref || null, candidate_draft_ids: ids, graph_message_id: params.candidate.graph_message_id || null },
+        metadata: { mission: 'makesafe-system/W2-B-two-email-landing', reason: 'ambiguous_multiple_dirty_drafts' },
+      })
+    } catch { /* non-blocking breadcrumb */ }
+    return { outcome: 'ambiguous', candidate_ids: ids }
+  }
+
+  // Exactly one target: merge + UPDATE in place.
+  const target = selection.target
+  const merge = _mergeLateWorkOrderPdfIntoDraft(target, params.candidate)
+  const targetExtraction = parseJsonObject(target.extraction_json)
+  const hasCompany = !!(cleanReviewedString(target.requesting_company_slug) || cleanReviewedString(target.requesting_company_name) ||
+    cleanReviewedString(targetExtraction.requesting_company_slug) || cleanReviewedString(targetExtraction.requesting_company_name))
+  const newStatus = _computeIntakeDraftStatus({
+    extractionDegraded: params.extractionDegraded,
+    isReportCapture: false,
+    hasCompany,
+    externalRef: cleanReviewedString(target.external_ref) || cleanReviewedString(merge.extraction_json.external_ref),
+    clientName: merge.client_name,
+    siteAddress: merge.site_address,
+    availableWoCount: merge.available_wo_count,
+  })
+
+  const update = {
+    attachments_json: merge.attachments_json,
+    extraction_json: merge.extraction_json,
+    missing_fields: merge.missing_fields,
+    confidence: merge.confidence,
+    client_name: merge.client_name,
+    client_phone: merge.client_phone,
+    site_address: merge.site_address,
+    site_suburb: merge.site_suburb,
+    description: merge.description,
+    safety_requirements: merge.safety_requirements,
+    status: newStatus,
+    review_notes: `Late work-order PDF landed ${new Date().toISOString()} from a follow-up email (${params.candidate.graph_message_id || 'unknown post'}); attached to the existing draft, no duplicate card minted.`,
+    updated_at: new Date().toISOString(),
+  }
+  const { data: updated, error: upErr } = await client.from('makesafe_intake_drafts')
+    .update(update).eq('id', target.id).select().single()
+  if (upErr) throw new Error('late-pdf landing update failed: ' + upErr.message)
+
+  try {
+    await logBusinessEvent(client, {
+      event_type: 'makesafe.intake_late_pdf_landed',
+      source: 'app/makesafe-intake',
+      entity_type: 'makesafe_ref',
+      entity_id: String(target.external_ref || params.candidate.external_ref || target.id),
+      body_preview: `Landed late WO PDF on draft ${target.id} (ref ${target.external_ref || 'unknown'}); status ${newStatus}; filled ${merge.filled_fields.join(', ') || 'no'} field(s).`,
+      payload: { draft_id: target.id, external_ref: target.external_ref || null, status: newStatus, filled_fields: merge.filled_fields, source_graph_message_id: params.candidate.graph_message_id || null },
+      metadata: { mission: 'makesafe-system/W2-B-two-email-landing', reason: 'late_pdf_landed' },
+    })
+  } catch { /* non-blocking breadcrumb */ }
+
+  // Re-run the UNCHANGED strict gate on the merged row; auto-file only if now clean
+  // AND the same brakes (DB kill switch + opt-in env flag + not degraded) allow it.
+  let autoFiled: { job_id: string | null; reason: string } | null = null
+  const decision = shouldAutoApproveCleanIntakeDraftRow(updated)
+  const enabled = params.autoFileEnabled && !params.extractionDegraded && autoApproveCleanIntakeEnabled()
+  if (enabled && decision.ok) {
+    try {
+      const approved = await approve(client, {
+        draft_id: target.id,
+        approved_by: 'auto-intake-late-pdf',
+        review_notes: 'Auto-filed after a late work-order PDF landed on an existing intake draft (two-email MLB sequence): high-confidence, required fields + servable WO PDF now present. Draft-only intake promotion; no invoice/send/authorise/close action.',
+      })
+      autoFiled = { job_id: approved?.job?.id || null, reason: decision.reason }
+    } catch (e) {
+      autoFiled = { job_id: null, reason: `auto_file_error:${(e as Error).message}`.slice(0, 200) }
+    }
+  }
+  return { outcome: 'landed', draft_id: target.id, status: newStatus, auto_filed: autoFiled }
+}
+export const _landLateWorkOrderPdfOntoDraftForTest = landLateWorkOrderPdfOntoDraft
+
 async function scanSesMakesafes(client: any) {
   // The group-sync projection keys ses@ mail under this mailbox (the canonical
   // value used by monitor-ses-makesafes + reconcile + the GAP reads).
@@ -14084,6 +14232,76 @@ async function scanSesMakesafes(client: any) {
       dedupIndex,
     )
     if (refDup) {
+      // M-A2 / W2-B — TWO-EMAIL LATE WO-PDF LANDING. A builder can announce a WO with
+      // no PDF (dirty draft) then send the PDF in a later PO email. That later email
+      // dedups here (same ref+company / matching WO identity). If it carries a servable
+      // WO PDF and there is exactly ONE existing dirty draft it belongs to, land the
+      // PDF on that draft instead of minting a duplicate card (the *_needs_review branch
+      // below) or stranding it (the silent-drop else branch). Skip when the email itself
+      // carries MULTIPLE work orders (#300 one-WO-one-card stands) — those stay in the
+      // existing manual-review path. Fail closed on ambiguity (two dirty drafts match).
+      const candidateMultiWo = emailCarriesMultipleWorkOrders(
+        { subject, body_preview: bodyPreview, description: extraction.description },
+        extraction,
+        attachments,
+      )
+      if (availableWoCount > 0 && !candidateMultiWo) {
+        const landing = await landLateWorkOrderPdfOntoDraft(client, {
+          candidate: {
+            external_ref: dedupExternalRef,
+            requesting_company_slug: matchedCompany?.slug || null,
+            requesting_company_name: matchedCompany?.name || null,
+            makesafe_job_family: draftJobFamily,
+            builder_work_order_number: extraction.builder_work_order_number || null,
+            builder_po_number: extraction.builder_po_number || null,
+            graph_message_id: msg.id,
+            confidence,
+            attachments,
+            extraction,
+            missingFields,
+          },
+          autoFileEnabled,
+          extractionDegraded: draftExtractionDegraded,
+          subject,
+        })
+        if (landing.outcome === 'landed') {
+          console.log('[ops-api] intake late-pdf landed on existing draft', landing.draft_id, 'ref', extractedRef, 'status', landing.status, landing.auto_filed?.job_id ? 'auto-filed job ' + landing.auto_filed.job_id : '')
+          // Register the candidate so a second copy in THIS batch dedups (its WO/PO
+          // identity now also lives on the updated draft; next scan skips on identity).
+          _registerIntakeDraft(
+            {
+              graph_message_id: msg.id,
+              internet_message_id: msg.internetMessageId || null,
+              external_ref: dedupExternalRef,
+              builder_work_order_number: extraction.builder_work_order_number || null,
+              builder_po_number: extraction.builder_po_number || null,
+              requesting_company_slug: matchedCompany?.slug || null,
+              requesting_company_name: matchedCompany?.name || null,
+              makesafe_job_family: draftJobFamily,
+              from_email: fromEmail,
+              subject,
+              received_at: msg.receivedDateTime || null,
+              body: msg.body?.content || msg.bodyPreview || null,
+            },
+            dedupIndex,
+          )
+          skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: 'late_pdf_landed' })
+          if (landing.auto_filed?.job_id) {
+            autoApproved.push({ draft_id: landing.draft_id, job_id: landing.auto_filed.job_id, external_ref: extractedRef, reason: 'late_pdf_landed_auto_filed' })
+          }
+          continue
+        }
+        if (landing.outcome === 'ambiguous') {
+          // Fail closed: more than one dirty draft could receive this PDF. Do NOT guess
+          // and do NOT mint a duplicate — leave for human review (breadcrumb written).
+          console.log('[ops-api] intake late-pdf ambiguous (multiple dirty drafts); skipped for human review:', extractedRef, landing.candidate_ids.join(','))
+          skippedDuplicates++
+          skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: 'late_pdf_ambiguous_multiple_targets' })
+          continue
+        }
+        // outcome === 'none': no dirty draft to land on — fall through to the existing
+        // dedup handling below (mint a needs_review draft or silent-drop as before).
+      }
       // REOPEN-CANDIDATE path: an email matching an existing job's external_ref is
       // NOT silently dropped — it surfaces as a reopen_candidate draft so the human
       // sees "this matches job X — reopen it?". Other dup reasons (same draft already
