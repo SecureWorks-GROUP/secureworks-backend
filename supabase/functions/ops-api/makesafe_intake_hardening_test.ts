@@ -18,10 +18,12 @@ import {
   _autoApproveCleanIntakeEnabledForTest as autoApproveEnabled,
   _combinedSplitObligationForTest as combinedSplit,
   _effectiveIntakeReportTypeForTest as effectiveReportType,
+  _emailCarriesMultipleWorkOrdersForTest as multipleWorkOrders,
   _flagCombinedIntakeObligationForTest as flagCombined,
   _hasPositiveReportOnlyEvidenceForTest as hasPositiveReportEvidence,
   _shouldAutoApproveCleanIntakeDraftRowForTest as sweepDecision,
   _shouldAutoApproveCleanIntakeForTest as gateDecision,
+  _stripBuilderTemplateBoilerplateForTest as stripBoilerplate,
 } from "./index.ts";
 
 const WO_PDF = {
@@ -178,8 +180,13 @@ Deno.test("mappedModelReportType: maps model commitments, no keyword fallback", 
 
 // ── Item 3: combined make-safe + report ─────────────────────────────────────────
 
-Deno.test("flagCombinedIntakeObligation: WO PDF + report request -> records secondary obligation + blocking field", () => {
-  const extraction: Record<string, unknown> = { report_type: "roof_report" };
+Deno.test("flagCombinedIntakeObligation: a SINGLE WO with report wording is NOT combined (retune)", () => {
+  // Pre-retune this recorded a secondary obligation; Marnin's rule: one WO = one card,
+  // so a single make-safe-and-report-worded WO must NOT flag combined.
+  const extraction: Record<string, unknown> = {
+    report_type: "roof_report",
+    builder_po_number: "PO-26010",
+  };
   const missing: string[] = [];
   const obligation = flagCombined(
     {
@@ -191,11 +198,9 @@ Deno.test("flagCombinedIntakeObligation: WO PDF + report request -> records seco
     missing,
     "roof_report",
   );
-  assert(obligation);
-  assertEquals(obligation?.type, "roof_report");
-  const secondary = extraction.secondary_obligation as { reason: string };
-  assertEquals(secondary.reason, "combined_makesafe_and_report");
-  assert(missing.includes("combined_makesafe_and_report"));
+  assertEquals(obligation, null);
+  assertEquals(missing.length, 0);
+  assertEquals(extraction.secondary_obligation, undefined);
 });
 
 Deno.test("flagCombinedIntakeObligation: a plain make-safe WO (no report obligation) is NOT combined", () => {
@@ -246,31 +251,190 @@ Deno.test("gate: a combined obligation can never auto-approve", () => {
   assertEquals(d.reason, "combined_makesafe_and_report_manual_review");
 });
 
-// ── Item 3b: auto-split combined make-safe + report into two cards ──────────────
+// ── Item 3b + RETUNE (Marnin 2026-07-07): one WO = one card; only a genuine TWO-WO
+// email splits ──────────────────────────────────────────────────────────────────
 
-// The live Joondalup draft shape (ef939f3e / MLB-26721PO-55622): high confidence,
-// complete client fields, servable WO PDF, blocked ONLY on portal_link +
-// combined_makesafe_and_report, with an UNAMBIGUOUS roof_report secondary obligation.
-const JOONDALUP_DRAFT = {
-  confidence: "high",
-  requesting_company_slug: "mlb",
-  requesting_company_name: "ML Builders",
-  external_ref: "MLB-26721PO-55622",
-  client_name: "The Owners of 189 Lakeside Drive Joondalup Strata Plan 34016",
-  client_phone: "0433 425 114",
-  site_address: "R104/ 189 Lakeside Drive",
-  report_type: "roof_report",
-  missing_fields: ["portal_link", "combined_makesafe_and_report"],
-  attachments_json: [WO_PDF],
-  extraction_json: {
-    report_type: "roof_report",
-    secondary_obligation: {
-      type: "roof_report",
-      reason: "combined_makesafe_and_report",
-      detail: "physical make-safe that ALSO requests a roof report",
-    },
-  },
+// MLB dispatch boilerplate — on EVERY MLB WO incl. pure report orders; must be treated
+// as template noise, never obligation evidence.
+const MLB_BOILERPLATE =
+  "Upon completion of works you must provide before and after photos, and your SWMS with your invoice.";
+
+// The LIVE Joondalup work order (ef939f3e / MLB-26721PO-55622): a SINGLE roof-report WO
+// — one PO number, one WO PDF. Its scope is a roof report; per the rule it is ONE
+// roof-report card and must NEVER flag a combined obligation (that produced the spurious
+// make-safe twin SWMS-26929).
+const JOONDALUP_WO_PDF = {
+  file_name: "work_order_MLB-26721PO-55622_Secureworks_Group_Pty_Ltd.pdf",
+  pdf_url: "https://example.test/wo.pdf",
+  is_work_order: true,
 };
+const JOONDALUP_EMAIL = {
+  subject:
+    "NEW WORK ORDER - MLB-26721 R104/ 189 Lakeside Drive, Joondalup, WA 6027",
+  body_preview:
+    "You've been assigned the above work order for Job MLB-26721. Three storey roof report noting cause of damage/point of water entry. " +
+    MLB_BOILERPLATE,
+  description:
+    "Three storey roof report noting cause of damage/point of water entry.",
+};
+const JOONDALUP_EXTRACTION = {
+  report_type: "roof_report",
+  builder_po_number: "PO-55622",
+  builder_work_order_number: "MLB-26721PO-55622",
+  external_ref: "MLB-26721PO-55622",
+};
+
+Deno.test("retune: the live Joondalup single WO does NOT carry multiple work orders", () => {
+  assertEquals(
+    multipleWorkOrders(JOONDALUP_EMAIL, JOONDALUP_EXTRACTION, [
+      JOONDALUP_WO_PDF,
+    ]),
+    false,
+  );
+});
+
+Deno.test("retune: the Joondalup single roof-report WO NEVER flags combined (one card)", () => {
+  const extraction: Record<string, unknown> = { ...JOONDALUP_EXTRACTION };
+  const missing: string[] = [];
+  const obligation = flagCombined(
+    JOONDALUP_EMAIL,
+    extraction,
+    [JOONDALUP_WO_PDF],
+    missing,
+    "roof_report",
+  );
+  assertEquals(obligation, null);
+  assertEquals(missing.length, 0);
+  assertEquals(extraction.secondary_obligation, undefined);
+});
+
+Deno.test("retune: the Joondalup WO is typed by its scope -> a single roof_report card", () => {
+  const rt = effectiveReportType({
+    subject: JOONDALUP_EMAIL.subject,
+    body_preview: JOONDALUP_EMAIL.body_preview,
+    report_type: "roof_report",
+    extraction_json: JOONDALUP_EXTRACTION,
+    attachments_json: [JOONDALUP_WO_PDF],
+  });
+  assertEquals(rt, "roof_report");
+});
+
+Deno.test("retune: the Joondalup single-WO draft is sweep-eligible as ONE card (no combined block)", () => {
+  const draft = {
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-26721PO-55622",
+    client_name: "The Owners of 189 Lakeside Drive Joondalup Strata Plan 34016",
+    site_address: "R104/ 189 Lakeside Drive",
+    report_type: "roof_report",
+    subject: JOONDALUP_EMAIL.subject,
+    body_preview: JOONDALUP_EMAIL.body_preview,
+    missing_fields: ["portal_link"],
+    attachments_json: [JOONDALUP_WO_PDF],
+    extraction_json: JOONDALUP_EXTRACTION, // NO secondary_obligation post-retune
+  };
+  const d = sweepDecision(draft);
+  assertEquals(d.ok, true, `expected eligible; got ${d.reason}`);
+});
+
+// A GENUINE two-work-order email: two distinct PO numbers + two WO PDFs, one of which is
+// a report. THIS must split.
+const TWO_WO_PDF_A = {
+  file_name: "work_order_MLB-30001PO-60001_Secureworks_Group_Pty_Ltd.pdf",
+  pdf_url: "https://example.test/a.pdf",
+  is_work_order: true,
+};
+const TWO_WO_PDF_B = {
+  file_name: "work_order_MLB-30001PO-60002_Secureworks_Group_Pty_Ltd.pdf",
+  pdf_url: "https://example.test/b.pdf",
+  is_work_order: true,
+};
+const TWO_WO_EMAIL = {
+  subject: "Make safe and roof report - MLB-30001 12 Test St",
+  body_preview:
+    "Attend and make safe the damaged section (PO-60001) AND complete a roof report (PO-60002). " +
+    MLB_BOILERPLATE,
+  description: "make safe plus roof report",
+};
+
+Deno.test("retune: a genuine TWO-PO / two-WO-PDF email DOES carry multiple work orders", () => {
+  assertEquals(
+    multipleWorkOrders(TWO_WO_EMAIL, {
+      report_type: "roof_report",
+      builder_po_number: "PO-60001",
+    }, [
+      TWO_WO_PDF_A,
+      TWO_WO_PDF_B,
+    ]),
+    true,
+  );
+});
+
+Deno.test("retune: a genuine two-WO email DOES flag combined (splits into two cards)", () => {
+  const extraction: Record<string, unknown> = {
+    report_type: "roof_report",
+    builder_po_number: "PO-60001",
+  };
+  const missing: string[] = [];
+  const obligation = flagCombined(
+    TWO_WO_EMAIL,
+    extraction,
+    [TWO_WO_PDF_A, TWO_WO_PDF_B],
+    missing,
+    "roof_report",
+  );
+  assert(obligation);
+  assertEquals(obligation?.type, "roof_report");
+  assert(missing.includes("combined_makesafe_and_report"));
+});
+
+// A boilerplate-only make-safe WO: the ONLY report-ish text is the MLB template line.
+const MAKESAFE_ONLY_EMAIL = {
+  subject: "NEW WORK ORDER - MLB-40001 5 Fix St, Balga",
+  body_preview:
+    "You've been assigned a work order to attend site and make safe the damaged fence. " +
+    MLB_BOILERPLATE,
+  description: "make safe the damaged fence",
+};
+
+Deno.test("retune: a boilerplate-only make-safe WO is NOT combined and types as a make-safe card", () => {
+  const extraction: Record<string, unknown> = { builder_po_number: "PO-70001" };
+  const missing: string[] = [];
+  const obligation = flagCombined(
+    MAKESAFE_ONLY_EMAIL,
+    extraction,
+    [{
+      file_name: "work_order_MLB-40001PO-70001.pdf",
+      pdf_url: "u",
+      is_work_order: true,
+    }],
+    missing,
+    null,
+  );
+  assertEquals(obligation, null);
+  // report_type null + a servable WO PDF -> make-safe card (not report-only).
+  const rt = effectiveReportType({
+    subject: MAKESAFE_ONLY_EMAIL.subject,
+    body_preview: MAKESAFE_ONLY_EMAIL.body_preview,
+    report_type: null,
+    extraction_json: extraction,
+    attachments_json: [{
+      file_name: "work_order_MLB-40001PO-70001.pdf",
+      pdf_url: "u",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(rt, null);
+});
+
+Deno.test("retune: stripBuilderTemplateBoilerplate removes the MLB dispatch line, keeps real scope", () => {
+  const stripped = stripBoilerplate(
+    "Three storey roof report noting cause of damage. " + MLB_BOILERPLATE,
+  );
+  assert(stripped.toLowerCase().includes("roof report"));
+  assert(!/swms with your invoice/i.test(stripped));
+  assert(!/before and after photos/i.test(stripped));
+});
 
 Deno.test("item3b: combinedSplitObligation returns the report type for an unambiguous obligation", () => {
   assertEquals(
@@ -343,15 +507,16 @@ Deno.test("item3b: gate still BLOCKS an ambiguous combined obligation (not split
   assertEquals(d.reason, "combined_makesafe_and_report_manual_review");
 });
 
-Deno.test("item3b: the live Joondalup draft is now sweep-eligible (auto-split)", () => {
-  const d = sweepDecision(JOONDALUP_DRAFT);
-  assertEquals(d.ok, true, `expected eligible; got ${d.reason}`);
-});
-
-Deno.test("item3b: a Joondalup-shaped draft with an AMBIGUOUS obligation stays manual", () => {
+Deno.test("item3b: a draft carrying an AMBIGUOUS (unknown_report) obligation stays manual", () => {
   const ambiguous = {
-    ...JOONDALUP_DRAFT,
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-30001",
+    client_name: "Test Client",
+    site_address: "1 Example St",
     report_type: null,
+    missing_fields: ["combined_makesafe_and_report"],
+    attachments_json: [TWO_WO_PDF_A, TWO_WO_PDF_B],
     extraction_json: {
       secondary_obligation: {
         type: "unknown_report",
@@ -410,7 +575,10 @@ Deno.test("sweep: a stored MLB-25769 cancellation twin is blocked from auto-prom
   assertEquals(d.reason, "cancelled_work_order");
 });
 
-Deno.test("sweep: a stored combined make-safe+report draft is blocked from auto-promotion", () => {
+Deno.test("sweep: a genuine two-WO combined draft with no stored obligation is blocked (retune)", () => {
+  // Two WO PDFs (two POs) + report evidence, but no scan-set secondary_obligation
+  // (a legacy row): the recompute detects the combined obligation but it isn't proven
+  // splittable, so it stays manual rather than auto-promoting a single card.
   const d = sweepDecision({
     status: "needs_review",
     confidence: "high",
@@ -419,10 +587,22 @@ Deno.test("sweep: a stored combined make-safe+report draft is blocked from auto-
     client_name: "Test Client",
     site_address: "9 Example Rd",
     subject: "New Make Safe and Report Request - BWCWA-1234",
-    body_preview: "Attend, make safe and provide an assessment report.",
+    body_preview:
+      "Attend, make safe (PO-1001) and provide an assessment report (PO-1002).",
     report_type: "assessment_report",
     extraction_json: { report_type: "assessment_report" },
-    attachments_json: [WO_PDF],
+    attachments_json: [
+      {
+        file_name: "work_order_BWCWA-1234PO-1001.pdf",
+        pdf_url: "a",
+        is_work_order: true,
+      },
+      {
+        file_name: "work_order_BWCWA-1234PO-1002.pdf",
+        pdf_url: "b",
+        is_work_order: true,
+      },
+    ],
   });
   assertEquals(d.ok, false);
   assertEquals(d.reason, "combined_makesafe_and_report_manual_review");
