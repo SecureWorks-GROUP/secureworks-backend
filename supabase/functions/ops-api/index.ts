@@ -275,6 +275,9 @@ import {
   subjectLooksLikeNewWorkOrder as _subjectLooksLikeNewWorkOrder,
   classifyReportType as _classifyReportType,
   resolveCommittedReportType as _resolveCommittedReportType,
+  mappedModelReportType as _mappedModelReportType,
+  subjectIsCancellation as _subjectIsCancellation,
+  textHasExplicitReportRequest as _textHasExplicitReportRequest,
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
@@ -10714,22 +10717,24 @@ function hasWorkOrderAttachmentEvidence(attachments: any[]): boolean {
   return available.length === 1 && !attachmentNameLooksReportOnly(available[0])
 }
 
-function effectiveIntakeReportType(draft: any): string | null {
-  const explicit = cleanReviewedString(draft?.report_type)
-  if (explicit) return explicit
+// Auto-approval of clean intake drafts is OPT-IN and default OFF: it runs ONLY when
+// MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE is explicitly set to the string 'true'. An unset /
+// empty / any-other value keeps the human review gate as the default (the documented
+// model). This is the single authoritative env brake shared by the scanner auto-file,
+// the admin re-extract auto-file, and the privileged board sweep; the DB kill switch
+// (makesafe_cron_settings.auto_file_enabled) and the degraded-extraction block remain as
+// additional, independent brakes on top of it.
+function autoApproveCleanIntakeEnabled(): boolean {
+  return Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') === 'true'
+}
 
-  const extraction = parseJsonObject(draft?.extraction_json)
-  const attachments = parseJsonArray(draft?.attachments_json)
-  // Legacy rows can have body text that mentions "roof report" while the actual
-  // attached document is a work order. Do not let fallback report classification
-  // override clear WO evidence; otherwise clean intake never auto-promotes.
-  if (hasWorkOrderAttachmentEvidence(attachments)) return null
-
-  const attachmentNames = attachments
+// The free text a draft/email carries, for report-evidence + combined-intake detection.
+function intakeReportEvidenceText(draft: any, extraction: any, attachments: any[]): string {
+  const attachmentNames = (attachments || [])
     .map((a: any) => cleanReviewedString(a?.file_name || a?.name || a?.label))
     .filter(Boolean)
     .join('\n')
-  const text = [
+  return [
     draft?.subject,
     draft?.body_preview,
     draft?.description,
@@ -10741,9 +10746,93 @@ function effectiveIntakeReportType(draft: any): string | null {
     extraction?.job_type,
     extraction?.makesafe_type,
     extraction?.report_type,
+    extraction?.builder_email_text_for_trade,
     attachmentNames,
   ].map((v) => cleanReviewedString(v)).filter(Boolean).join('\n')
+}
 
+// POSITIVE report-only evidence: is there genuine proof this email carries a
+// roof/assessment REPORT obligation (as opposed to a keyword-fallback false positive on
+// a bare "roof" token)? Any one of:
+//   (1) the model (body + PDF aware) COMMITTED a report-only type, or
+//   (2) the subject/body carries EXPLICIT report-request wording ("roof report",
+//       "make safe and report", "and provide a report"), or
+//   (3) an attachment is explicitly a report/assessment document (named as such and not
+//       named like a work order).
+// This is the pivot for BOTH the wrong-type guard (no positive evidence + a WO PDF ->
+// demote to general make-safe) and combined-intake detection (positive evidence + a WO
+// PDF -> a make-safe that ALSO owes a report).
+function hasPositiveReportOnlyEvidence(draft: any, extraction: any, attachments: any[]): boolean {
+  if (_isReportOnlyType(_mappedModelReportType(extraction?.report_type) as any)) return true
+  if (_textHasExplicitReportRequest(intakeReportEvidenceText(draft, extraction, attachments))) return true
+  const available = availableIntakeAttachments(attachments)
+  if (available.some((a: any) => attachmentNameLooksReportOnly(a) && !attachmentNameLooksLikeWorkOrder(a))) return true
+  return false
+}
+
+// COMBINED make-safe + report (intake hardening item 3 — "one email -> two cards"). The
+// engine inserts exactly ONE draft per email, so a combined "make-safe + roof report"
+// work order collapses into a single card and the OTHER obligation is silently lost.
+// When a servable WORK-ORDER PDF AND positive report-only evidence are both present, this
+// records the secondary report obligation on the draft (extraction.secondary_obligation)
+// so the human reviewer sees BOTH, and pushes a BLOCKING missing_field so the draft can
+// never auto-approve into a single card. The full auto-expansion into two live cards is a
+// gated follow-up; this stops the silent loss and keeps the second obligation visible.
+const COMBINED_OBLIGATION_MISSING_FIELD = 'combined_makesafe_and_report'
+function flagCombinedIntakeObligation(
+  draftLike: any,
+  extraction: any,
+  attachments: any[],
+  missingFields: string[],
+  draftReportType: string | null,
+): { type: string } | null {
+  if (!hasWorkOrderAttachmentEvidence(attachments)) return null
+  if (!hasPositiveReportOnlyEvidence(draftLike, extraction, attachments)) return null
+  const modelType = _mappedModelReportType(extraction?.report_type)
+  const reportType = _isReportOnlyType(modelType as any)
+    ? String(modelType)
+    : (draftReportType && _isReportOnlyType(draftReportType) ? draftReportType : 'unknown_report')
+  const obligation = {
+    type: reportType,
+    reason: COMBINED_OBLIGATION_MISSING_FIELD,
+    detail: 'This email is a physical make-safe (servable work-order PDF present) that ALSO requests a roof/assessment report. The work order is the primary card; a SEPARATE report card is owed. Do not lose the second obligation.',
+    detected_at: new Date().toISOString(),
+  }
+  if (extraction && typeof extraction === 'object') extraction.secondary_obligation = obligation
+  if (!missingFields.includes(COMBINED_OBLIGATION_MISSING_FIELD)) missingFields.push(COMBINED_OBLIGATION_MISSING_FIELD)
+  return obligation as any
+}
+
+function effectiveIntakeReportType(draft: any): string | null {
+  const extraction = parseJsonObject(draft?.extraction_json)
+  const attachments = parseJsonArray(draft?.attachments_json)
+  const explicit = cleanReviewedString(draft?.report_type)
+  if (explicit) {
+    // WRONG-TYPE GUARD (intake hardening item 1): a stored roof/assessment report_type
+    // is trusted verbatim EXCEPT when the draft ALSO carries a servable work-order PDF
+    // and there is NO positive report-only evidence. That is the keyword-fallback trap:
+    // classifyReportType fires on any "roof" substring when the model abstains, so a
+    // physical roof make-safe (real WO PDF attached) gets mis-stored as roof_report and,
+    // trusted verbatim here, is approved as a report-only card at ready_to_invoice with
+    // its WO PDF NEVER attached. Demote to null (general make-safe) so the WO attaches.
+    // With positive evidence the report type STICKS (a genuine report, possibly a
+    // combined make-safe+report which the scanner flags as a secondary obligation).
+    if (
+      _isReportOnlyType(explicit) &&
+      hasWorkOrderAttachmentEvidence(attachments) &&
+      !hasPositiveReportOnlyEvidence(draft, extraction, attachments)
+    ) {
+      return null
+    }
+    return explicit
+  }
+
+  // Legacy rows can have body text that mentions "roof report" while the actual
+  // attached document is a work order. Do not let fallback report classification
+  // override clear WO evidence; otherwise clean intake never auto-promotes.
+  if (hasWorkOrderAttachmentEvidence(attachments)) return null
+
+  const text = intakeReportEvidenceText(draft, extraction, attachments)
   const classified = _classifyReportType(draft?.subject || null, text || null)
   return _isReportOnlyType(classified) ? classified : null
 }
@@ -10805,9 +10894,10 @@ function isAnthropicAuthFailure(err: unknown): boolean {
 
 // D-d kill switch: read makesafe_cron_settings.auto_file_enabled (Captain D1 default
 // TRUE). Fail-OPEN to true on a read error/missing row so a transient DB blip does not
-// silently disable the Captain-locked day-one auto-file decision — the env override
-// (MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false) and the degraded-extraction block remain
-// as independent brakes.
+// silently flip this switch on its own — but note auto-approval is now default-OFF at the
+// env layer: it runs ONLY when MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE='true'
+// (autoApproveCleanIntakeEnabled). This DB switch and the degraded-extraction block are
+// the two additional independent brakes ON TOP of that opt-in env flag.
 async function isAutoFileEnabled(client: any): Promise<boolean> {
   try {
     const { data, error } = await client.from('makesafe_cron_settings')
@@ -10996,8 +11086,15 @@ function shouldAutoApproveCleanIntake(input: {
   clientName?: string | null
   siteAddress?: string | null
   attachments?: any[]
+  // Intake hardening: a cancellation must never auto-approve (it retracts a job, never
+  // creates one); a combined make-safe+report email carries a SECOND obligation the
+  // single-card auto-file would silently drop — both stay in the human queue.
+  cancelled?: boolean
+  combinedObligation?: boolean
 }): { ok: boolean; reason: string } {
   if (input.enabled === false) return { ok: false, reason: 'disabled' }
+  if (input.cancelled === true) return { ok: false, reason: 'cancelled_work_order' }
+  if (input.combinedObligation === true) return { ok: false, reason: 'combined_makesafe_and_report_manual_review' }
 
   const attachments = input.attachments || []
   const available = availableIntakeAttachments(attachments)
@@ -11034,8 +11131,20 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
 
+  // Defence in depth for legacy rows created before scan-time cancellation/combined
+  // flagging existed: recompute both signals directly from the stored draft so the sweep
+  // can never auto-promote a cancellation twin or a make-safe that also owes a report.
+  const cancelled = _subjectIsCancellation(draft?.subject) ||
+    /\b(?:has\s+(?:since\s+)?been\s+cancell?ed|work\s+orders?\s+(?:has|have)\s+(?:since\s+)?been\s+cancell?ed|please\s+(?:note|be\s+advised)[^.]*cancell?ed)\b/i
+      .test(String(draft?.body_preview || ''))
+  const combinedObligation = !!(extraction?.secondary_obligation) ||
+    (hasWorkOrderAttachmentEvidence(attachments) && hasPositiveReportOnlyEvidence(draft, extraction, attachments))
+
+  // NOTE: this is a PURE cleanliness check (no `enabled` passed). Whether auto-approval
+  // is switched on at all is decided by the caller — the sweep action gates the opt-in
+  // MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE flag once, so a disabled flag still yields an
+  // informative dry-run preview instead of masking every draft as 'disabled'.
   return shouldAutoApproveCleanIntake({
-    enabled: Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
     reportType: effectiveReportType,
     confidence: draft?.confidence,
     missingFields: parseJsonArray(draft?.missing_fields),
@@ -11047,11 +11156,18 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     clientName: cleanReviewedString(draft?.client_name) || cleanReviewedString(extraction.client_name),
     siteAddress: cleanReviewedString(draft?.site_address) || cleanReviewedString(extraction.site_address),
     attachments,
+    cancelled,
+    combinedObligation,
   })
 }
 
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
+// Intake hardening (items 1 + 3): exported so tests can exercise the positive-report
+// evidence pivot, the combined make-safe+report flagger, and the opt-in env flag.
+export const _hasPositiveReportOnlyEvidenceForTest = hasPositiveReportOnlyEvidence
+export const _flagCombinedIntakeObligationForTest = flagCombinedIntakeObligation
+export const _autoApproveCleanIntakeEnabledForTest = autoApproveCleanIntakeEnabled
 // H1: exported so a test can simulate the pre-migration schema (ledger columns absent)
 // and prove the M1 fail-loud banner is still written via the base-only retry.
 export const _writeIntakeHealthForTest = writeIntakeHealth
@@ -11069,7 +11185,12 @@ export const _normalizeReportExternalLinksForTest = _normalizeReportExternalLink
 async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
   const rawLimit = Number(body.limit || body.max || 60)
   const limit = Math.max(1, Math.min(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 60, 100))
-  const dryRun = body.dry_run === true || body.dryRun === true
+  const requestedDryRun = body.dry_run === true || body.dryRun === true
+  // Default-OFF opt-in flag. When auto-approval is disabled this sweep still runs as a
+  // PREVIEW (computes which drafts are eligible) but performs NO live approvals — the
+  // dashboard button becomes an informative "N eligible, enable the flag to promote".
+  const enabled = autoApproveCleanIntakeEnabled()
+  const dryRun = requestedDryRun || !enabled
   const statuses = Array.isArray(body.statuses) && body.statuses.length
     ? body.statuses.map((s: any) => String(s || '').trim()).filter(Boolean)
     : ['needs_review', 'draft']
@@ -11098,10 +11219,22 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
       continue
     }
 
+    // Evidence that made THIS draft clean — logged with every auto-approval so an
+    // unattended promotion is always auditable (mission requirement).
+    const cleanEvidence = {
+      confidence: draft?.confidence || null,
+      report_type: effectiveIntakeReportType(draft),
+      requesting_company: cleanReviewedString(draft?.requesting_company_slug) ||
+        cleanReviewedString(draft?.requesting_company_name) || null,
+      client_name_present: !!cleanReviewedString(draft?.client_name),
+      site_address_present: !!cleanReviewedString(draft?.site_address),
+      work_order_pdf: hasWorkOrderAttachmentEvidence(parseJsonArray(draft?.attachments_json)),
+    }
     eligible.push({
       draft_id: draft?.id || null,
       external_ref: draft?.external_ref || null,
       reason: decision.reason,
+      clean_evidence: cleanEvidence,
     })
     if (dryRun) continue
 
@@ -11116,6 +11249,7 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
         job_id: approved?.job?.id || null,
         external_ref: draft.external_ref || null,
         reason: decision.reason,
+        clean_evidence: cleanEvidence,
       })
     } catch (e) {
       failed.push({
@@ -11129,7 +11263,9 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
 
   return {
     ok: true,
+    enabled,
     dry_run: dryRun,
+    requested_dry_run: requestedDryRun,
     checked_count: checked.length,
     eligible_count: eligible.length,
     auto_approved: autoApproved,
@@ -12070,6 +12206,15 @@ async function _reextractExtractFields(
   extraction.makesafe_job_family = draftJobFamily
   extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
   extraction.reextracted_at = new Date().toISOString()
+  // Item 3: flag a combined make-safe + report so the reextracted draft never auto-files
+  // a single card that drops the report obligation.
+  flagCombinedIntakeObligation(
+    { subject, body_preview: bodyPreview, description: extraction.description },
+    extraction,
+    attachments,
+    missingFields,
+    draftReportType,
+  )
 
   return {
     extraction, attachments, confidence, missingFields, matchedCompany,
@@ -12176,7 +12321,7 @@ export async function reextractIntakeDraft(
   let autoFiled: any = null
   const autoFileEnabled = await isAutoFileEnabled(client)
   const autoDecision = shouldAutoApproveCleanIntake({
-    enabled: autoFileEnabled && !r.extractionDegraded && Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+    enabled: autoFileEnabled && !r.extractionDegraded && autoApproveCleanIntakeEnabled(),
     isReportCapture: r.isReportCapture,
     tagReportType: r.draftReportType != null,
     reportType: r.draftReportType,
@@ -12187,6 +12332,10 @@ export async function reextractIntakeDraft(
     clientName: r.extraction.client_name || null,
     siteAddress: r.extraction.site_address || null,
     attachments: r.attachments,
+    cancelled: _subjectIsCancellation(draft?.subject ?? null),
+    combinedObligation: !!(r.extraction?.secondary_obligation) ||
+      (hasWorkOrderAttachmentEvidence(r.attachments) &&
+        hasPositiveReportOnlyEvidence({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments)),
   })
   if (autoDecision.ok) {
     try {
@@ -12576,6 +12725,7 @@ async function scanSesMakesafes(client: any) {
   let cappedCandidates = 0
   let skippedAiOnly = 0
   let skippedNotWorkOrderGate = 0
+  let cancellationsDetected = 0
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
@@ -13157,6 +13307,28 @@ async function scanSesMakesafes(client: any) {
     // flag. Report-capture emails get kind='report'.
     const woGate = _isGenuineNewWorkOrder(subject, fromEmail, availableWoCount)
     if (!woGate.ok) {
+      // Item 2: a CANCELLATION is not a new work order and must never mint a draft.
+      // Breadcrumb the referenced ref so a human can flag / void the matching live job
+      // (MLB-25769 was the twin-draft incident). Non-destructive: no job/invoice mutation.
+      if (woGate.reason === 'cancelled_work_order') {
+        cancellationsDetected++
+        const refMatch = subject.match(/\b((?:mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+)/i)
+        const cancelledRef = refMatch?.[1] || null
+        skippedItems.push({ id: msg.id, subject, external_ref: cancelledRef, reason: woGate.reason })
+        try {
+          await logBusinessEvent(client, {
+            event_type: 'makesafe.intake_cancellation_detected',
+            source: 'app/makesafe-intake',
+            entity_type: 'makesafe_ref',
+            entity_id: cancelledRef || subject,
+            body_preview: `Cancellation email detected; no intake draft minted. Flag the matching live job: ${subject}`,
+            payload: { subject, from_email: fromEmail, external_ref: cancelledRef, graph_message_id: msg.id },
+            metadata: { mission: 'intake/auto-approve-clean-drafts', reason: 'cancelled_work_order' },
+          })
+        } catch { /* non-blocking breadcrumb */ }
+        console.log('[ops-api] intake skip (cancellation — no draft minted):', cancelledRef || subject)
+        continue
+      }
       console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
       skippedNotWorkOrderGate++
       skippedItems.push({ id: msg.id, subject, reason: woGate.reason })
@@ -13200,6 +13372,17 @@ async function scanSesMakesafes(client: any) {
     )
     extraction.makesafe_job_family = draftJobFamily
     extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+
+    // Item 3 (one email -> two cards): a make-safe WO that ALSO owes a roof/assessment
+    // report is recorded as a combined obligation (secondary_obligation + a blocking
+    // missing_field) so the single-card draft can never auto-file away the second card.
+    flagCombinedIntakeObligation(
+      { subject, body_preview: bodyPreview, description: extraction.description },
+      extraction,
+      attachments,
+      missingFields,
+      draftReportType,
+    )
 
     // BUG 1 — POST-EXTRACTION CROSS-PATH DEDUP. Now that Haiku has given us the
     // external_ref and we've matched the requesting company, re-run the dedup with
@@ -13472,15 +13655,18 @@ async function scanSesMakesafes(client: any) {
     }
 
     // D-d auto-file gate. THREE independent brakes decide `enabled`:
-    //   1. autoFileEnabled  — the DB kill switch makesafe_cron_settings.auto_file_enabled
-    //      (Captain D1 default TRUE; one UPDATE falls back to drafts-only, no redeploy),
-    //   2. !draftExtractionDegraded — a dead-key run never auto-files (belt-and-braces
-    //      with the forced-low confidence above),
-    //   3. the MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false env override.
+    //   1. autoApproveCleanIntakeEnabled() — the OPT-IN env flag, DEFAULT OFF: auto-file
+    //      runs only when MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE='true' (the human review gate
+    //      is the default; enabling is a deliberate, single-string env flip),
+    //   2. autoFileEnabled  — the DB kill switch makesafe_cron_settings.auto_file_enabled
+    //      (one UPDATE falls back to drafts-only, no redeploy),
+    //   3. !draftExtractionDegraded — a dead-key run never auto-files (belt-and-braces
+    //      with the forced-low confidence above).
     // The gate itself still requires confidence:high + the SAME required fields as the
-    // human approveIntakeDraft (company + ref + client + address + servable WO PDF).
+    // human approveIntakeDraft (company + ref + client + address + servable WO PDF), and
+    // now also rejects cancellations and combined make-safe+report obligations.
     const autoApprovalDecision = shouldAutoApproveCleanIntake({
-      enabled: autoFileEnabled && !draftExtractionDegraded && Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false',
+      enabled: autoFileEnabled && !draftExtractionDegraded && autoApproveCleanIntakeEnabled(),
       isReportCapture,
       tagReportType,
       reportType: draftReportType,
@@ -13491,6 +13677,9 @@ async function scanSesMakesafes(client: any) {
       clientName: extraction.client_name || null,
       siteAddress: extraction.site_address || null,
       attachments,
+      // Item 2/3 belt-and-braces: a cancellation never reaches here (dropped at the
+      // gate), but a combined make-safe+report must never auto-file a single card.
+      combinedObligation: !!(extraction?.secondary_obligation),
     })
 
     if (autoApprovalDecision.ok) {
@@ -13517,6 +13706,15 @@ async function scanSesMakesafes(client: any) {
                 requesting_company: matchedCompany?.slug || matchedCompany?.name || null,
                 confidence,
                 gate_reason: autoApprovalDecision.reason,
+                // Evidence that made this draft clean (auto-approval audit trail).
+                clean_evidence: {
+                  confidence,
+                  report_type: draftReportType,
+                  client_name_present: !!(extraction.client_name),
+                  site_address_present: !!(extraction.site_address),
+                  work_order_pdf: hasWorkOrderAttachmentEvidence(attachments),
+                  combined_obligation: !!(extraction?.secondary_obligation),
+                },
                 source: 'auto-intake',
               },
             })
@@ -13619,6 +13817,9 @@ async function scanSesMakesafes(client: any) {
     already_processed: skippedDuplicates,
     skipped_ai_only: skippedAiOnly,
     skipped_not_work_order_gate: skippedNotWorkOrderGate,
+    // Item 2: cancellation emails recognised and dropped (no draft minted); each is
+    // breadcrumbed as a makesafe.intake_cancellation_detected business_event.
+    cancellations_detected: cancellationsDetected,
     // Cost-leak fix observability: emails skipped because already extracted (marker
     // set), and emails freshly stamped this run. In steady state on a quiet inbox both
     // fall to ~0 new work; a re-extraction leak would show as scanned_marked climbing

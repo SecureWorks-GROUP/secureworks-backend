@@ -164,6 +164,23 @@ export function resolveCommittedReportType(
   return classifyReportType(subject, body);
 }
 
+/**
+ * Map ONLY the model's committed report_type through the alias table — no keyword
+ * fallback. Returns a ReportType, "general_makesafe", or null when the model abstained
+ * / gave an unrecognised value. Used by the wrong-type guard to tell a model-committed
+ * roof/assessment report (positive evidence) apart from a keyword-fallback guess.
+ */
+export function mappedModelReportType(
+  modelReportType: string | null | undefined,
+): ReportType | "general_makesafe" | null {
+  const raw = String(modelReportType ?? "").trim().toLowerCase().replace(
+    /[\s-]+/g,
+    "_",
+  );
+  if (!raw) return null;
+  return MODEL_REPORT_TYPE_ALIASES[raw] ?? null;
+}
+
 // ── SHARED draft-status decision ────────────────────────────────────────────────
 // A single source of truth for "does this draft go to needs_review or stay draft",
 // used by BOTH the scanner (scanSesMakesafes) and the admin reextract action so the
@@ -311,6 +328,57 @@ const NEW_WORK_ORDER_SUBJECT_PHRASES: readonly RegExp[] = [
   // "Make Safe - <…> - Job No <ref>" — the AJS/other "Job No" new-WO format.
   /make\s*safe\b.*\bjob\s*(no|number|#)/i,
 ] as const;
+
+// ── CANCELLATION — the OPPOSITE of a new work order ─────────────────────────────
+// A builder retracting an existing work order (e.g. "CANCELLED WORK ORDER - MLB-25769
+// 34 Carbine Loop, Millbridge") carries the words "work order", so it currently slips
+// through subjectLooksLikeNewWorkOrder and MINTS a brand-new intake draft — the exact
+// MLB-25769 twin-draft incident. A cancellation must NEVER become a new job: it is
+// dropped at the gate and (in the scanner) breadcrumbed against the referenced ref so a
+// human can flag/void the matching live job. Matched on the subject only (the gate's
+// pure signal); the two live twins both say "CANCELLED WORK ORDER" in the subject.
+const CANCELLATION_SUBJECT_RE =
+  /\b(cancell?ed|cancellation|cancelling|cancel\s+(?:this|the|work|wo|order|job)|void(?:ed|ing)?\s+(?:this|the|work|wo|order|job)|withdrawn|rescind(?:ed|ing)?)\b/i;
+
+/**
+ * True when the subject is a recognised CANCELLATION / retraction of an existing work
+ * order or job. Narrow by design: a lone "void" or "cancel" without a work/order/job
+ * anchor is NOT enough (guards against false drops of a genuine WO whose text merely
+ * mentions cancelling something unrelated), but "CANCELLED WORK ORDER", "cancellation",
+ * "please cancel this work order", "withdrawn" all match.
+ */
+export function subjectIsCancellation(
+  subject: string | null | undefined,
+): boolean {
+  const s = (subject || "").trim();
+  if (!s) return false;
+  return CANCELLATION_SUBJECT_RE.test(s);
+}
+
+// ── EXPLICIT REPORT-REQUEST wording ─────────────────────────────────────────────
+// A bare "roof" token (classifyReportType's fallback) is NOT proof an email is a
+// report-only obligation — "roof make safe" is a physical work order. This matches only
+// EXPLICIT report-request language, used to (a) decide whether a stored roof/assessment
+// report_type is genuinely evidenced vs a keyword-fallback false positive [wrong-type
+// guard], and (b) recognise a make-safe work order that ALSO carries a report obligation
+// [combined intake]. Deliberately requires the word "report" (or an equivalent phrase),
+// never a lone building-part noun.
+const EXPLICIT_REPORT_REQUEST_RE =
+  /\b(?:roof|assessment|condition|structural|engineer(?:s|ing)?|inspection|scope|dilapidation|defect)\s+report\b|\breport\s+(?:is\s+)?(?:required|requested|request|needed|and\s+quote|&\s+quote)\b|\b(?:make\s*safe|makesafe)\s+and\s+(?:a\s+)?report\b|\band\s+(?:provide|complete|upload|submit|attach)\s+(?:a\s+|the\s+)?(?:roof\s+|assessment\s+|inspection\s+|condition\s+)?report\b|\bprovide\s+a\s+report\b/i;
+
+/**
+ * True when the text carries EXPLICIT report-request wording (e.g. "roof report",
+ * "assessment report", "make safe AND report", "and provide a report"). Distinct from a
+ * bare "roof"/"assessment" keyword, which classifyReportType uses as a last-resort
+ * fallback and which alone is NOT positive report-only evidence.
+ */
+export function textHasExplicitReportRequest(
+  text: string | null | undefined,
+): boolean {
+  const t = (text || "").trim();
+  if (!t) return false;
+  return EXPLICIT_REPORT_REQUEST_RE.test(t);
+}
 
 // ── B4 — KNOWN-BUILDER NOISE (pricing / disregard / enquiry replies) ───────────
 // Narrow, high-confidence phrases for builder follow-ups that are NOT a work order
@@ -517,6 +585,21 @@ export function isGenuineNewWorkOrder(
     return {
       ok: false,
       reason: "excluded_non_work_order_subject",
+      kind: "work_order",
+      reportSubjectPattern: false,
+    };
+  }
+
+  // 2.5) CANCELLATION — a retraction of an existing work order ("CANCELLED WORK ORDER
+  //      - MLB-25769 ...") carries "work order" and would otherwise pass step 3 and mint
+  //      a NEW draft. Recognise it here, BEFORE the positive-WO keyword check, and drop
+  //      it. The scanner breadcrumbs the referenced ref so a human can flag/void the
+  //      matching live job instead of a phantom new job appearing. This runs after the
+  //      exclusion list so an outbound/photo/invoice cancellation is still handled there.
+  if (subjectIsCancellation(s)) {
+    return {
+      ok: false,
+      reason: "cancelled_work_order",
       kind: "work_order",
       reportSubjectPattern: false,
     };
