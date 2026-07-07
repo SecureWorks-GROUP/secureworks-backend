@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - 'supabase/functions/**'
+      # Migrations-only PRs must still trigger the required deno-check status
+      # (the job no-ops to pass when no function files changed) — otherwise
+      # branch protection waits forever and the PR can never merge.
+      - 'supabase/migrations/**'
       - 'scripts/deploy-edge-function.sh'
       - 'scripts/smoke-edge-functions.sh'
       - 'scripts/smoke-ops-api-action-surface.sh'
