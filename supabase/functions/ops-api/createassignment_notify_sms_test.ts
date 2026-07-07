@@ -242,3 +242,74 @@ Deno.test("updateAssignment (via allocateJob reassignment): completely silent �
     restore();
   }
 });
+
+// ── FIX 2 (ship review): planning-status creates must NOT text installers ────
+// Ops-calendar drags create placeholder/tentative assignments (schedule drafts).
+// The gate keys off the EXPLICIT request status (+ suppress_notifications):
+// the trade-app allocate path passes NO status (default 'tentative') and must
+// keep texting, or the DA-M3-8 feature silently dies.
+Deno.test("createAssignment: explicit placeholder/tentative or suppress_notifications -> ZERO SMS, allocation still succeeds", async () => {
+  for (const extra of [
+    { confirmationStatus: "placeholder" },
+    { confirmation_status: "placeholder" },
+    { confirmationStatus: "tentative" },
+    { suppress_notifications: true },
+  ]) {
+    const { calls, restore } = stubFetch();
+    try {
+      const store = baseStore();
+      const res = await allocateJob(makeClient(store), {
+        body: { jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-08", ...extra },
+        callerRole: "admin",
+      });
+      await flush();
+      assertEquals(res.ok, true, JSON.stringify(extra));
+      assertEquals(smsCalls(calls).length, 0, `no SMS for ${JSON.stringify(extra)}`);
+      assertEquals(telegramCalls(calls).length, 0);
+      assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1, "assignment still written");
+    } finally {
+      restore();
+    }
+  }
+});
+
+Deno.test("createAssignment: explicit confirmed -> SMS sends; no explicit status (trade allocate default) -> SMS still sends", async () => {
+  for (const extra of [{ confirmationStatus: "confirmed" }, {}]) {
+    const { calls, restore } = stubFetch();
+    try {
+      const store = baseStore();
+      const res = await allocateJob(makeClient(store), {
+        body: { jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-08", ...extra },
+        callerRole: "admin",
+      });
+      await flush();
+      assertEquals(res.ok, true);
+      assertEquals(smsCalls(calls).length, 1, `SMS expected for ${JSON.stringify(extra)}`);
+    } finally {
+      restore();
+    }
+  }
+});
+
+// ── FIX 3 (ship review): the send is handed to EdgeRuntime.waitUntil when the
+// edge runtime is present, so isolate teardown cannot kill it mid-flight.
+Deno.test("createAssignment: SMS promise is passed to EdgeRuntime.waitUntil when available", async () => {
+  const { calls, restore } = stubFetch();
+  const waited: unknown[] = [];
+  (globalThis as any).EdgeRuntime = { waitUntil: (p: unknown) => { waited.push(p); } };
+  try {
+    const store = baseStore();
+    const res = await allocateJob(makeClient(store), {
+      body: { jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-08" },
+      callerRole: "admin",
+    });
+    await flush();
+    assertEquals(res.ok, true);
+    assertEquals(smsCalls(calls).length, 1, "SMS still fired");
+    assertEquals(waited.length, 1, "send promise handed to waitUntil");
+    assert(typeof (waited[0] as any)?.then === "function", "waitUntil received a promise");
+  } finally {
+    delete (globalThis as any).EdgeRuntime;
+    restore();
+  }
+});

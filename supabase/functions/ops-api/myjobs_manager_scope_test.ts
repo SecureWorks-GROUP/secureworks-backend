@@ -348,3 +348,53 @@ Deno.test("U2b-4 (regression): a dispatcher keeps the global see-all path across
   assertEquals(primary?.eq.user_id, undefined);
   assertEquals(primary?.refOr, null);
 });
+
+// ── FIX 1 (ship review): manager's Board must keep the 180-day make-safe backstop ──
+// Pre-U2b, a make-safe manager's mode:'all' took the personal path, which RAN the
+// B2 backstop. The widened manager path skipped it, so a >30-day make-safe
+// allocation vanished from `assignments` AND the open pool re-surfaced its job as
+// a false "available" card — double-allocation risk.
+Deno.test("FIX1: make-safe manager board runs the 180-day backstop vertical-wide — old allocation shows, not a false pool card", async () => {
+  const OLD_DATE = new Date(Date.now() + 8 * 3600 * 1000 - 60 * 86400 * 1000).toISOString().slice(0, 10);
+  const fx: Fixtures = {
+    assignments: [
+      // Another crew's make-safe allocation, 60 days old (outside the 30-day window).
+      { id: "a-old-ms", user_id: "u-crew", user_name: "Crew A", status: "scheduled", scheduled_date: OLD_DATE, job_id: "job-ms-old" },
+    ],
+    jobs: [
+      { id: "job-ms-old", type: "makesafe", status: "processing", job_number: "SWMS-100" },
+      { id: "job-ms-open", type: "makesafe", status: "accepted", job_number: "SWMS-101" }, // truly open
+    ],
+  };
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const recorded: RecordedQuery[] = [];
+  const g = await myJobs(
+    makeClient(fx, recorded), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope,
+  );
+
+  // The >30-day allocation (another crew's) IS on the board…
+  assertEquals(assignedJobIds(g).includes("job-ms-old"), true, "backstop surfaces the old allocation on the manager board");
+  // …and its job is NOT emitted as a false 'available' pool card; the truly-open one is.
+  assertEquals(poolJobIds(g).includes("job-ms-old"), false, "old allocated job is not a false-available card");
+  assertEquals(poolJobIds(g).includes("job-ms-open"), true, "genuinely-open make-safe still pools");
+  // Shape: the backstop query ran VERTICAL-WIDE (no user_id) over the same
+  // make-safe jobs filter, 180d..30d window.
+  const backstop = recorded.find((q) => q.table === "job_assignments" && q.lt != null);
+  assertEquals(backstop?.eq.user_id, undefined, "manager backstop has no user_id filter");
+  assertEquals(backstop?.refOr?.str, "type.eq.makesafe,job_number.ilike.SWMS-%");
+});
+
+Deno.test("FIX1: fencing manager unaffected — no make-safe backstop query issued", async () => {
+  const recorded: RecordedQuery[] = [];
+  const managerScope = _managerBoardVerticals({ isDispatcher: HENRY.isDispatcher, mode: "all", managedVerticals: ["fencing"] });
+  const g = await myJobs(
+    makeClient(fencingFixtures(), recorded), "u-henry",
+    false, HENRY.isDispatcher, HENRY.isMakesafeManager, HENRY.poolVerticals, managerScope,
+  );
+  assertEquals(recorded.some((q) => q.table === "job_assignments" && q.lt != null), false, "no 180-day backstop query for a fencing-only manager");
+  // Board content identical to the U2b contract.
+  assertEquals(assignedJobIds(g).includes("job-f1"), true);
+  assertEquals(poolJobIds(g).includes("job-f3"), true);
+});

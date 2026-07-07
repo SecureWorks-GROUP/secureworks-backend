@@ -293,6 +293,7 @@ import {
   extractBuilderEmailLinks as _extractBuilderEmailLinks,
   mergeDeterministicAndClaudeLinks as _mergeDeterministicAndClaudeLinks,
   normalizeReportExternalLinks as _normalizeReportExternalLinks,
+  cleanUrl as _cleanBuilderLinkUrl,
 } from './makesafe_email_links.ts'
 import {
   buildIntakeDedupIndex as _buildIntakeDedupIndex,
@@ -10090,9 +10091,27 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new ApiError('job_id required', 400)
 
-  const portalUrl = String(body.portal_url || body.portalUrl || '').trim() || null
-  if (portalUrl && !/^https?:\/\//i.test(portalUrl)) {
-    throw new ApiError('portal_url must be an http(s) URL', 400)
+  // FIX 5a: same URL hygiene as builder-email link extraction (entity-decode,
+  // trailing-punctuation strip, http(s)-only) — reuse cleanUrl, no parallel regex.
+  const rawPortalUrl = String(body.portal_url || body.portalUrl || '').trim()
+  const portalUrl = rawPortalUrl ? (_cleanBuilderLinkUrl(rawPortalUrl) || null) : null
+  if (rawPortalUrl && !portalUrl) {
+    throw new ApiError('portal_url must be a valid http(s) URL', 400)
+  }
+
+  // Append-only merge of the portal link into external_links (array of
+  // {label, url, kind, source} objects — see makesafe_email_links.ts). Returns
+  // null when there is nothing to write (no URL supplied, or already present by
+  // case-insensitive URL); existing entries are always preserved.
+  const mergePortalLink = (existing: any): any[] | null => {
+    if (!portalUrl) return null
+    const links = Array.isArray(existing) ? existing : []
+    const urlKey = portalUrl.toLowerCase()
+    if (links.some((l: any) => String(l?.url || '').toLowerCase() === urlKey)) return null
+    return [
+      ...links,
+      { label: 'Builder Portal', url: portalUrl, kind: 'builder_portal', source: 'portal_done_marker' },
+    ]
   }
 
   const { data: detail, error } = await client.from('makesafe_job_details')
@@ -10130,10 +10149,21 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real report.', 409)
   }
 
-  // Idempotent repeat: already marked (or already further along) → ok, no writes.
+  // Idempotent repeat: already marked (or already further along) → ok, no
+  // state/event writes. FIX 4: a job can reach admin_to_send_report via
+  // update_makesafe_substatus BEFORE the marker delivers the portal URL — a
+  // supplied portal_url is still link-merged (link-only update: no substatus
+  // change, no report_received_at, no event).
   const currentSubstatus = normalizeMakesafeSubstatus(detail.substatus)
   if (currentSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(currentSubstatus)) {
-    return { ok: true, already_done: true, substatus: currentSubstatus }
+    const idempotentLinks = mergePortalLink(detail.external_links)
+    if (idempotentLinks) {
+      const { error: linkErr } = await client.from('makesafe_job_details')
+        .update({ external_links: idempotentLinks, updated_at: new Date().toISOString() })
+        .eq('job_id', jId)
+      if (linkErr) throw linkErr
+    }
+    return { ok: true, already_done: true, substatus: currentSubstatus, portal_link_added: !!idempotentLinks }
   }
 
   const nowIso = new Date().toISOString()
@@ -10147,20 +10177,9 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   if (healReportType) updates.report_type = healReportType
 
   // external_links JSONB MERGE, not replace (reviewer MINOR: other links must
-  // survive). The column is an array of {label, url, kind, source} link objects
-  // (see makesafe_email_links.ts); append the portal link only if its URL is not
-  // already present (case-insensitive), preserving every existing entry.
-  if (portalUrl) {
-    const existingLinks = Array.isArray(detail.external_links) ? detail.external_links : []
-    const urlKey = portalUrl.toLowerCase()
-    const alreadyLinked = existingLinks.some((l: any) => String(l?.url || '').toLowerCase() === urlKey)
-    if (!alreadyLinked) {
-      updates.external_links = [
-        ...existingLinks,
-        { label: 'Builder Portal', url: portalUrl, kind: 'builder_portal', source: 'portal_done_marker' },
-      ]
-    }
-  }
+  // survive) — shared append-only merge, same rules as the idempotent path.
+  const mergedLinks = mergePortalLink(detail.external_links)
+  if (mergedLinks) updates.external_links = mergedLinks
 
   const { data: updated, error: upErr } = await client.from('makesafe_job_details')
     .update(updates)
@@ -14022,9 +14041,9 @@ export async function assertAssignmentMutationAuthz(
 // installers from the trade app. JWT-authed by the caller (case above); gated
 // here by _resolveAllocationAuthz on the job's vertical. Wraps the SAME
 // createAssignment / updateAssignment primitives the ops dashboard uses, so the
-// installer Telegram DM, job_events, business_events, GHL push, and
-// visible_to_trades all fire identically. Idempotent against double-taps and
-// refuses archived / cancelled jobs.
+// installer allocation SMS (DA-M3-8; Telegram is retired), job_events,
+// business_events, GHL push, and visible_to_trades all fire identically.
+// Idempotent against double-taps and refuses archived / cancelled jobs.
 export async function allocateJob(client: any, args: {
   body: any
   callerRole?: string | null
@@ -14171,13 +14190,25 @@ async function createAssignment(client: any, body: any) {
   })
 
   // ── SMS to assigned installer (Telegram is RETIRED business-wide) ──
-  // Plain-text SMS via the existing ghl-proxy send_sms path. Fire-and-forget:
+  // Plain-text SMS via the existing ghl-proxy send_sms path. Non-blocking:
   // a notify failure must never fail or delay the assignment write, exactly like
   // the old Telegram DM. sendSmsViaGhl swallows its own errors and returns a
-  // boolean, so the un-awaited call can never throw or reject.
+  // boolean, so the send can never throw or reject.
+  //
+  // NOTIFY GATE (ship review FIX 2): ops-calendar planning creates assignments
+  // with an EXPLICIT confirmation_status of 'placeholder'/'tentative' — those
+  // are schedule drafts and must not text a real installer. The trade-app
+  // allocate_job path passes NO confirmation status (finalConfStatus falls back
+  // to its 'tentative' default), so the gate keys off the EXPLICIT request
+  // value, not the default — otherwise every trade allocation would silently
+  // stop texting. suppress_notifications mirrors the make-safe creation path.
+  const requestedConfStatus = String(body.confirmationStatus || body.confirmation_status || '').toLowerCase()
+  const skipAllocationSms = !!body.suppress_notifications ||
+    finalConfStatus === 'placeholder' ||
+    requestedConfStatus === 'tentative'
   try {
     const assignedUserId = userId || user_id
-    if (assignedUserId) {
+    if (assignedUserId && !skipAllocationSms) {
       const { data: assignedUser } = await client.from('users')
         .select('name, phone').eq('id', assignedUserId).single()
       if (assignedUser?.phone) {
@@ -14191,8 +14222,17 @@ async function createAssignment(client: any, body: any) {
             `Date: ${sDate}`,
             `Open in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}`,
           ].filter(Boolean).join('\n')
-          // Non-blocking — do NOT await; sendSmsViaGhl handles its own errors.
-          sendSmsViaGhl(assignedUser.phone, text)
+          // FIX 3: a bare un-awaited promise can be torn down with the isolate
+          // once the response returns. EdgeRuntime.waitUntil is the sanctioned
+          // keep-alive; outside the edge runtime (tests, local) fall back to
+          // awaiting — safe either way because sendSmsViaGhl never rejects.
+          const smsSend = sendSmsViaGhl(assignedUser.phone, text)
+          const edgeRuntime = (globalThis as any).EdgeRuntime
+          if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+            edgeRuntime.waitUntil(smsSend)
+          } else {
+            await smsSend
+          }
         }
       }
     }
@@ -18289,6 +18329,12 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
   // (PostgREST semantics — see the make-safe backstop note below). Used only by
   // the U2b manager's-Board query.
   const ASSIGNMENT_SELECT_ADMIN_INNER = ASSIGNMENT_SELECT_ADMIN.replace('jobs:job_id (', 'jobs:job_id!inner (')
+  // Guard the string-derivation: if the admin select's embed spelling ever
+  // changes, replace() silently no-ops and the manager query would stop
+  // constraining by vertical. Fail loudly instead.
+  if (ASSIGNMENT_SELECT_ADMIN_INNER === ASSIGNMENT_SELECT_ADMIN) {
+    throw new Error('ASSIGNMENT_SELECT_ADMIN_INNER inner-join derivation failed — embed spelling changed')
+  }
 
   let assignments: any[]
   let error: any
@@ -18361,16 +18407,26 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
           site_address, site_suburb, notes, job_number
         )
       `
-  // U2b: skip in the manager's-Board path (managerScope non-empty) — that path is
-  // the vertical-wide 30-day set (matching the dispatcher board, which also runs
-  // no per-user backstop). For the personal view + installers this is unchanged.
-  if (!showAll && managerScope.length === 0) {
+  // U2b + ship-review FIX 1: the personal path runs this backstop per-user; the
+  // manager's-Board path MUST run it too when the scope includes make-safe —
+  // pre-U2b a make-safe manager's mode:'all' took the personal path (backstop
+  // included), so skipping it here silently dropped >30-day make-safe
+  // assignments from `assignments` AND let the open pool below re-surface those
+  // jobs as false "available" cards (double-allocation risk). For a make-safe
+  // manager the SAME 180-day window runs VERTICAL-WIDE (no user_id filter,
+  // admin select so board lanes keep the crew user). Managers without
+  // 'makesafe' in scope (e.g. fencing) are unaffected — the backstop is
+  // make-safe-only by its jobs filter. Dispatchers (showAll) unchanged.
+  const runManagerMakesafeBackstop = managerScope.includes('makesafe')
+  if (!showAll && (managerScope.length === 0 || runManagerMakesafeBackstop)) {
     try {
       const existing30DayIds = new Set((assignments || []).map((a: any) => a.id))
-      const resMakesafe = await client
+      let backstopQuery = client
         .from('job_assignments')
-        .select(ASSIGNMENT_SELECT_USER_MAKESAFE)
-        .eq('user_id', userId)
+        .select(runManagerMakesafeBackstop ? ASSIGNMENT_SELECT_ADMIN_INNER : ASSIGNMENT_SELECT_USER_MAKESAFE)
+      // Personal path stays scoped to this user; the manager path is vertical-wide.
+      if (!runManagerMakesafeBackstop) backstopQuery = backstopQuery.eq('user_id', userId)
+      const resMakesafe = await backstopQuery
         .neq('status', 'cancelled')
         .gte('scheduled_date', makesafeSixMonthsAgo.toISOString().slice(0, 10))
         .lt('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))

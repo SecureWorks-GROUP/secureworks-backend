@@ -170,12 +170,14 @@ Deno.test("portal-done: no makesafe_job_details row -> 404, zero writes", async 
 });
 
 // ── (c) idempotent repeat: ok, no second event, no writes, no regression ────
+// (portal_url here is ALREADY in external_links, so even the FIX 4 link-merge
+// has nothing to write — the pure-idempotency zero-write contract.)
 Deno.test("portal-done: repeat on already-marked / further-advanced job -> ok, zero writes, zero events", async () => {
   const { calls, restore } = stubFetch();
   try {
     for (const sub of ["admin_to_send_report", "ready_to_invoice", "complete"]) {
       const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: sub } } };
-      const res = await _markMakesafePortalReportDone(makeClient(store), { job_id: "job-rt", portal_url: "https://portal.example/p" });
+      const res = await _markMakesafePortalReportDone(makeClient(store), { job_id: "job-rt", portal_url: "https://portal.example/existing" });
       await flush();
       assertEquals(res.ok, true, sub);
       assertEquals(res.already_done, true, sub);
@@ -370,6 +372,36 @@ Deno.test("BE-2 (c2): createMakesafeJob with a non-report family -> detail repor
     const detailInserts = store.inserts!.filter((i) => i.table === "makesafe_job_details");
     assertEquals(detailInserts.length, 1);
     assertEquals(detailInserts[0].row.report_type, null);
+  } finally {
+    restore();
+  }
+});
+
+// ── FIX 4 (ship review): idempotent path must not DISCARD a new portal_url ──
+// A job advanced to admin_to_send_report via update_makesafe_substatus BEFORE
+// the marker delivered the URL still gets the link stored — link-merge ONLY
+// (no substatus change, no report_received_at, no event).
+Deno.test("FIX4: already-marked job + NEW portal_url -> link merged, nothing else written, no event", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: "admin_to_send_report" } } };
+    const res = await _markMakesafePortalReportDone(
+      makeClient(store),
+      { job_id: "job-rt", portal_url: "https://portal.example/late-url" },
+    );
+    await flush();
+
+    assertEquals(res.ok, true);
+    assertEquals(res.already_done, true);
+    assertEquals(res.portal_link_added, true);
+    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    assertEquals(upd.length, 1, "exactly one link-merge update");
+    const keys = Object.keys(upd[0].row).sort();
+    assertEquals(keys, ["external_links", "updated_at"], "link-only update: no substatus, no report_received_at");
+    assertEquals(upd[0].row.external_links.length, 2, "existing link preserved + new one appended");
+    assertEquals(upd[0].row.external_links[1].url, "https://portal.example/late-url");
+    assertEquals(store.inserts!.length, 0, "no event on the idempotent path");
+    assertEquals(calls.length, 0);
   } finally {
     restore();
   }
