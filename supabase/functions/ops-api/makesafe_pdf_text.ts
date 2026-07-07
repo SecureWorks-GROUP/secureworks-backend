@@ -35,6 +35,15 @@ export type PdfTextMode = "text" | "none";
 export interface PdfTextResult {
   /** Extracted text-layer content (empty when mode='none'). */
   text: string;
+  /**
+   * The recovered text-layer content REGARDLESS of the model-path quality gate.
+   * `text` is emptied when `looksLikeText()` rejects the blob (so the model keeps
+   * the safe document-block path); `rawText` always carries whatever was decoded so
+   * a targeted deterministic parse (e.g. the MLB WO client-block reader in
+   * makesafe_pdf_client_fields.ts) can still run label-anchored extraction on a blob
+   * that is too noisy to hand to the model wholesale. Empty only when nothing decoded.
+   */
+  rawText: string;
   /** Number of usable characters in `text`. */
   charCount: number;
   /** 'text' when enough clean text was recovered to feed the model; else 'none'. */
@@ -263,6 +272,7 @@ export async function extractPdfText(
 ): Promise<PdfTextResult> {
   const empty: PdfTextResult = {
     text: "",
+    rawText: "",
     charCount: 0,
     mode: "none",
     streamsDecoded: 0,
@@ -346,13 +356,23 @@ export async function extractPdfText(
     if (!looksLikeText(text)) {
       return {
         text: "",
+        // Keep the decoded blob for label-anchored deterministic parses even though it
+        // is too noisy to feed the model wholesale (invariant 2 unchanged: `text` is
+        // still empty, so the model keeps the document-block path).
+        rawText: text,
         charCount: text.length,
         mode: "none",
         streamsDecoded,
         note: text.length ? "low_quality_text" : "no_text_layer",
       };
     }
-    return { text, charCount: text.length, mode: "text", streamsDecoded };
+    return {
+      text,
+      rawText: text,
+      charCount: text.length,
+      mode: "text",
+      streamsDecoded,
+    };
   } catch (e) {
     return { ...empty, note: `error:${(e as Error).message}`.slice(0, 120) };
   }

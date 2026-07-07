@@ -24,7 +24,24 @@
 //   - sync_state.mode = DEGRADED while any attachment pending/failed.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { getGraphToken } from "../_shared/graph_client.ts";
+import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
+
+// ── Graph GET with mid-scan token-expiry self-heal (intake item 12) ──────────
+// A poll/backfill captures `const token = await getGraphToken()` ONCE and then
+// loops for many minutes; a token captured into that local can expire mid-scan
+// and every later request 401s ("Lifetime validation failed, the token is
+// expired") with nothing to recover it — the 2026-07-07 outage that silently
+// paused intake ingestion. Route EVERY Graph read through graphFetch so a 401
+// expired-token response force-re-acquires a fresh token ONCE and retries; the
+// happy path is the same single fetch as before. getGraphToken caches the fresh
+// token, so subsequent requests in the same loop reuse it (one refresh heals the
+// whole run). `token` is still threaded as the first-attempt token — existing
+// call sites and their fetch-stub tests are unchanged on the 200 path.
+function graphGet(url: string, token: string): Promise<Response> {
+  return graphFetch(url, token, {
+    refresh: () => getGraphToken({ forceRefresh: true }),
+  });
+}
 import {
   parseSenderDomain,
   senderMatchesPattern,
@@ -257,9 +274,7 @@ async function graphGetAll<T>(
     let urlRetries = 0;
     // Retry loop for the CURRENT url (handles repeated 429 on the same page).
     for (;;) {
-      const resp: Response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const resp: Response = await graphGet(url, token);
       if (resp.status === 429) {
         if (urlRetries >= MAX_429_RETRIES_PER_URL || b.total <= 0) {
           throw new Error(
@@ -319,9 +334,7 @@ async function graphGetConversationsSince(
   while (url && !stop) {
     let urlRetries = 0;
     for (;;) {
-      const resp: Response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const resp: Response = await graphGet(url, token);
       if (resp.status === 429) {
         if (urlRetries >= MAX_429_RETRIES_PER_URL || b.total <= 0) {
           throw new Error(
@@ -373,9 +386,7 @@ async function resolveGroupId(token: string): Promise<string> {
   const url = `${GRAPH}/groups?$filter=` +
     encodeURIComponent(`mail eq '${SES_GROUP_MAIL}'`) +
     `&$select=id,mail,displayName`;
-  const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const resp = await graphGet(url, token);
   if (!resp.ok) {
     const err = await resp.text();
     throw new Error(`Group resolution failed ${resp.status}: ${err}`);
@@ -572,9 +583,7 @@ async function processAttachments(
       const messageId = encodeURIComponent(post.rawMessageId);
       const listUrl =
         `${GRAPH}/users/${mailbox}/messages/${messageId}/attachments`;
-      const resp = await fetch(listUrl, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const resp = await graphGet(listUrl, token);
       if (!resp.ok) {
         const body = await resp.text();
         throw new Error(
@@ -595,9 +604,7 @@ async function processAttachments(
       // the $expand path works with this app-only token.
       const expandUrl =
         `${GRAPH}/groups/${groupId}/threads/${post.conversationThreadId}/posts/${post.id}?$expand=attachments`;
-      const resp = await fetch(expandUrl, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const resp = await graphGet(expandUrl, token);
       if (!resp.ok) {
         const body = await resp.text();
         throw new Error(
@@ -1894,6 +1901,60 @@ async function runBackfillFull(
   };
 }
 
+// ── Mail-read outage visibility (intake item 12c) ────────────────────────────
+// A Graph mail read that fails (most acutely: the 2026-07-07 expired-token 401)
+// aborts the poll and pauses intake ingestion. refreshSyncState records DEGRADED,
+// but that is a make-safe-internal signal; the outage was otherwise silent (the
+// cron still returned quickly). Emit ONE business_event so the failure is visible
+// in the same audit channel the rest of the platform watches. Best-effort and
+// non-blocking — a business_events outage must never mask the underlying error.
+export function isGraphMailReadError(msg: string | null | undefined): boolean {
+  const m = (msg || "").toLowerCase();
+  return (
+    m.includes("graph get failed") ||
+    m.includes("group resolution failed") ||
+    m.includes("lifetime validation failed") ||
+    m.includes("token is expired") ||
+    m.includes("invalidauthenticationtoken") ||
+    m.includes("graph token request failed")
+  );
+}
+
+async function logMailReadFailureEvent(
+  // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client
+  sb: any,
+  msg: string,
+): Promise<void> {
+  try {
+    const tokenExpired =
+      /lifetime validation failed|token is expired|invalidauthenticationtoken/i
+        .test(msg);
+    await sb.from("business_events").insert({
+      event_type: "makesafe.intake.mail_read_failed",
+      source: "monitor-ses-makesafes",
+      entity_type: "mailbox",
+      entity_id: MAILBOX,
+      body_preview: msg.slice(0, 500),
+      safe_summary: (tokenExpired
+        ? "Graph mail read failed: token expired — intake ingestion paused"
+        : "Graph mail read failed — intake ingestion paused").slice(0, 280),
+      payload: {
+        mailbox: MAILBOX,
+        token_expired: tokenExpired,
+        error: msg.slice(0, 500),
+      },
+      metadata: { legacy_envelope_inferred: true },
+      schema_version: "1.0",
+    });
+  } catch (e) {
+    // Non-blocking (table may not exist in a test/preview DB).
+    console.log(
+      "[monitor-ses] business_events write failed (mail_read_failed):",
+      (e as Error).message,
+    );
+  }
+}
+
 // ════════════════════════════════════════════════════════════
 // Main handler
 // ════════════════════════════════════════════════════════════
@@ -2173,6 +2234,11 @@ async function handler(req: Request): Promise<Response> {
     try {
       await refreshSyncState(sb, false, msg);
     } catch (_) { /* best-effort */ }
+    // Item 12c — surface a Graph mail-read outage (esp. the expired-token 401)
+    // as a business_event so a paused intake never goes silent.
+    if (isGraphMailReadError(msg)) {
+      await logMailReadFailureEvent(sb, msg);
+    }
     return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { ...CORS, "Content-Type": "application/json" },

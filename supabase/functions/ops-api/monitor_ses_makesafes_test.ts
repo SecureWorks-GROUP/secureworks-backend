@@ -41,7 +41,9 @@ import {
   _runBackfillFull,
   _senderMatchesPattern,
   _setTestClientFactory,
+  isGraphMailReadError,
 } from "../monitor-ses-makesafes/index.ts";
+import { _resetGraphTokenCache } from "../_shared/graph_client.ts";
 import {
   combineVerifiedGate,
   normaliseReconRef as _normaliseReconRef,
@@ -1855,4 +1857,68 @@ Deno.test("auth [FIX]: the exact injected service key as Bearer is still ACCEPTE
 Deno.test("auth [FIX]: no credentials at all is REJECTED", () => {
   const bare = new Request("https://x/functions/v1/monitor-ses-makesafes", { method: "POST" });
   assertEquals(_isAuthorized(bare, FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+});
+
+// ════════════════════════════════════════════════════════════
+// Item 12 — Graph mail-token resilience (2026-07-07 expired-token outage)
+// ════════════════════════════════════════════════════════════
+
+Deno.test("item12: isGraphMailReadError recognises the outage shapes, not unrelated errors", () => {
+  assert(isGraphMailReadError("Graph GET failed 401 for https://...: Lifetime validation failed, the token is expired"));
+  assert(isGraphMailReadError("Group resolution failed 401: InvalidAuthenticationToken"));
+  assert(isGraphMailReadError("Graph token request failed: 400 invalid_client"));
+  assertEquals(isGraphMailReadError("advisory lock RPC failed: deadlock"), false);
+  assertEquals(isGraphMailReadError("sync_state upsert failed: timeout"), false);
+  assertEquals(isGraphMailReadError(null), false);
+});
+
+Deno.test("item12: graphGetAll self-heals a mid-scan expired-token 401 (force-refresh + retry)", async () => {
+  const realFetch = globalThis.fetch;
+  const realEnvGet = Deno.env.get;
+  _resetGraphTokenCache();
+  (Deno.env as any).get = (k: string) =>
+    ({
+      MICROSOFT_TENANT_ID: "tenant",
+      MICROSOFT_CLIENT_ID: "client",
+      MICROSOFT_CLIENT_SECRET: "secret",
+    } as Record<string, string>)[k] ?? realEnvGet(k);
+
+  let tokenMints = 0;
+  let graphCalls = 0;
+  (globalThis as any).fetch = (url: string, init?: RequestInit) => {
+    if (url.includes("login.microsoftonline.com")) {
+      tokenMints++;
+      return Promise.resolve(
+        new Response(JSON.stringify({ access_token: `fresh-${tokenMints}`, expires_in: 3600 }), { status: 200 }),
+      );
+    }
+    graphCalls++;
+    const auth = (init?.headers as Record<string, string>)?.Authorization ?? "";
+    // The captured (stale) token was minted before the scan; mid-scan it expires.
+    if (auth === "Bearer stale") {
+      return Promise.resolve(
+        new Response("Lifetime validation failed, the token is expired.", { status: 401 }),
+      );
+    }
+    // The retry carries the force-refreshed token → the page drains normally.
+    return Promise.resolve(
+      new Response(JSON.stringify({ value: [{ id: "post-1" }] }), { status: 200 }),
+    );
+  };
+  try {
+    const { values, pages } = await _graphGetAll<{ id: string }>(
+      "https://graph.microsoft.com/v1.0/groups/g/threads",
+      "stale",
+    );
+    // Recovered rather than thrown: the expired 401 triggered exactly one refresh
+    // and one retry, and the retried page returned the post.
+    assertEquals(values.map((v) => v.id), ["post-1"]);
+    assertEquals(pages, 1);
+    assertEquals(tokenMints, 1);
+    assertEquals(graphCalls, 2); // the 401 + the successful retry
+  } finally {
+    globalThis.fetch = realFetch;
+    (Deno.env as any).get = realEnvGet;
+    _resetGraphTokenCache();
+  }
 });
