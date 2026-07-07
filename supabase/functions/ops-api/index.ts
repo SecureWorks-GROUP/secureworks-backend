@@ -10921,13 +10921,40 @@ function pdfClientFillEnabled(): boolean {
 }
 export const _pdfClientFillEnabledForTest = pdfClientFillEnabled
 
+// Builder DISPATCH BOILERPLATE — template lines that appear on EVERY work order from a
+// builder, including pure report orders, so they are NOT evidence of any specific
+// obligation (Marnin 2026-07-07: "that text is on every MLB WO... treat it as template
+// noise, never obligation evidence"). Stripped before report/obligation evidence
+// detection so a make-safe make-safe WO can't look like a report and a report WO can't
+// look like a second make-safe. MLB is the dominant template; the phrases are generic
+// enough to also neutralise the equivalent boilerplate other builders repeat.
+const BUILDER_TEMPLATE_BOILERPLATE_RE: RegExp[] = [
+  // MLB: "Upon completion of works you must provide before and after photos, and your
+  // SWMS with your invoice." (+ close variants)
+  /upon completion of works[^.]*?(?:swms|invoice)[^.]*\.?/gi,
+  /you must provide before and after photos[^.]*\.?/gi,
+  /(?:please\s+)?provide\s+before\s+and\s+after\s+photos[^.]*?(?:swms|invoice)[^.]*\.?/gi,
+  /your\s+swms\s+with\s+your\s+invoice\.?/gi,
+  // Generic safe-work-practice boilerplate that rides on many dispatch templates.
+  /please undertake the job in a safe and professional manner[^.]*\.?/gi,
+]
+
+function stripBuilderTemplateBoilerplate(text: string | null | undefined): string {
+  let out = String(text || '')
+  for (const re of BUILDER_TEMPLATE_BOILERPLATE_RE) out = out.replace(re, ' ')
+  return out.replace(/[ \t]{2,}/g, ' ').trim()
+}
+export const _stripBuilderTemplateBoilerplateForTest = stripBuilderTemplateBoilerplate
+
 // The free text a draft/email carries, for report-evidence + combined-intake detection.
+// Builder dispatch boilerplate is stripped first so template lines never read as
+// obligation evidence.
 function intakeReportEvidenceText(draft: any, extraction: any, attachments: any[]): string {
   const attachmentNames = (attachments || [])
     .map((a: any) => cleanReviewedString(a?.file_name || a?.name || a?.label))
     .filter(Boolean)
     .join('\n')
-  return [
+  const joined = [
     draft?.subject,
     draft?.body_preview,
     draft?.description,
@@ -10942,7 +10969,54 @@ function intakeReportEvidenceText(draft: any, extraction: any, attachments: any[
     extraction?.builder_email_text_for_trade,
     attachmentNames,
   ].map((v) => cleanReviewedString(v)).filter(Boolean).join('\n')
+  return stripBuilderTemplateBoilerplate(joined)
 }
+
+// Intake SPLIT retune (Marnin 2026-07-07): a make-safe + report is TWO cards ONLY when
+// the email genuinely carries TWO work orders. "Every work order relates to ONE piece
+// of work — one WO/PO number = one card, typed by the WO's stated scope. Two pieces of
+// work at one property arrive as TWO work orders." So a single WO NEVER splits, no
+// matter the wording; the split trigger requires two distinct PO numbers and/or two
+// servable work-order PDFs.
+function distinctWorkOrderSignals(
+  text: string,
+  attachments: any[],
+): { poCount: number; woPdfCount: number } {
+  const names = (attachments || [])
+    .map((a: any) => cleanReviewedString(a?.file_name || a?.name || a?.label))
+    .filter(Boolean)
+    .join('\n')
+  const hay = `${text || ''}\n${names}`
+  // Distinct builder PO numbers (e.g. "MLB-26721PO-55622" -> 55622). Two POs = two WOs.
+  // "PO Box 2143" (a footer address) can't match: PO must be immediately followed by a
+  // separator/nothing and then the digits, never "PO <word>".
+  const poNums = new Set<string>()
+  for (const m of hay.matchAll(/PO[-#:]?\s?(\d{3,})/gi)) poNums.add(m[1])
+  // Servable attachments that are named like a work order (two WO PDFs = two WOs).
+  const woPdfCount = availableIntakeAttachments(attachments)
+    .filter((a: any) => a?.is_work_order === true || attachmentNameLooksLikeWorkOrder(a))
+    .length
+  return { poCount: poNums.size, woPdfCount }
+}
+
+function emailCarriesMultipleWorkOrders(
+  draftLike: any,
+  extraction: any,
+  attachments: any[],
+): boolean {
+  const text = [
+    draftLike?.subject,
+    draftLike?.body_preview,
+    draftLike?.description,
+    extraction?.builder_email_text_for_trade,
+    extraction?.builder_work_order_number,
+    extraction?.builder_po_number,
+    extraction?.external_ref,
+  ].map((v) => cleanReviewedString(v)).filter(Boolean).join('\n')
+  const { poCount, woPdfCount } = distinctWorkOrderSignals(text, attachments)
+  return poCount >= 2 || woPdfCount >= 2
+}
+export const _emailCarriesMultipleWorkOrdersForTest = emailCarriesMultipleWorkOrders
 
 // POSITIVE report-only evidence: is there genuine proof this email carries a
 // roof/assessment REPORT obligation (as opposed to a keyword-fallback false positive on
@@ -10963,14 +11037,14 @@ function hasPositiveReportOnlyEvidence(draft: any, extraction: any, attachments:
   return false
 }
 
-// COMBINED make-safe + report (intake hardening item 3 — "one email -> two cards"). The
-// engine inserts exactly ONE draft per email, so a combined "make-safe + roof report"
-// work order collapses into a single card and the OTHER obligation is silently lost.
-// When a servable WORK-ORDER PDF AND positive report-only evidence are both present, this
-// records the secondary report obligation on the draft (extraction.secondary_obligation)
-// so the human reviewer sees BOTH, and pushes a BLOCKING missing_field so the draft can
-// never auto-approve into a single card. The full auto-expansion into two live cards is a
-// gated follow-up; this stops the silent loss and keeps the second obligation visible.
+// COMBINED make-safe + report — TWO cards from ONE email. RETUNED (Marnin 2026-07-07):
+// this is legitimate ONLY when the email genuinely carries TWO work orders (two distinct
+// PO numbers and/or two servable WO PDFs) where a report obligation is among them. A
+// SINGLE work order is ONE card typed by its own scope, no matter the wording — a roof-
+// report WO's own PDF is the roof-report order, not a separate make-safe, so a single WO
+// must never be flagged combined (that produced the spurious make-safe twin on
+// MLB-26721PO-55622). When it does fire it records extraction.secondary_obligation + a
+// blocking missing_field; the split machinery (approveIntakeDraft) expands the two cards.
 const COMBINED_OBLIGATION_MISSING_FIELD = 'combined_makesafe_and_report'
 function flagCombinedIntakeObligation(
   draftLike: any,
@@ -10979,6 +11053,9 @@ function flagCombinedIntakeObligation(
   missingFields: string[],
   draftReportType: string | null,
 ): { type: string } | null {
+  // The trigger: genuinely TWO work orders in this one email. A single WO — even a
+  // roof-report WO with a servable PDF — is never combined.
+  if (!emailCarriesMultipleWorkOrders(draftLike, extraction, attachments)) return null
   if (!hasWorkOrderAttachmentEvidence(attachments)) return null
   if (!hasPositiveReportOnlyEvidence(draftLike, extraction, attachments)) return null
   const modelType = _mappedModelReportType(extraction?.report_type)
@@ -11357,8 +11434,13 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const cancelled = _subjectIsCancellation(draft?.subject) ||
     /\b(?:has\s+(?:since\s+)?been\s+cancell?ed|work\s+orders?\s+(?:has|have)\s+(?:since\s+)?been\s+cancell?ed|please\s+(?:note|be\s+advised)[^.]*cancell?ed)\b/i
       .test(String(draft?.body_preview || ''))
+  // RETUNE: the defence-in-depth recompute (for legacy rows without a stored
+  // secondary_obligation) now also requires genuinely TWO work orders — a single
+  // roof-report WO is not combined.
   const combinedObligation = !!(extraction?.secondary_obligation) ||
-    (hasWorkOrderAttachmentEvidence(attachments) && hasPositiveReportOnlyEvidence(draft, extraction, attachments))
+    (emailCarriesMultipleWorkOrders(draft, extraction, attachments) &&
+      hasWorkOrderAttachmentEvidence(attachments) &&
+      hasPositiveReportOnlyEvidence(draft, extraction, attachments))
   // item 3b: an unambiguous combined obligation is splittable (auto-expands into two cards).
   const combinedSplittable = combinedSplitObligation(extraction) !== null
 
@@ -12743,7 +12825,8 @@ export async function reextractIntakeDraft(
     attachments: r.attachments,
     cancelled: _subjectIsCancellation(draft?.subject ?? null),
     combinedObligation: !!(r.extraction?.secondary_obligation) ||
-      (hasWorkOrderAttachmentEvidence(r.attachments) &&
+      (emailCarriesMultipleWorkOrders({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments) &&
+        hasWorkOrderAttachmentEvidence(r.attachments) &&
         hasPositiveReportOnlyEvidence({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments)),
     combinedSplittable: combinedSplitObligation(r.extraction) !== null,
   })
