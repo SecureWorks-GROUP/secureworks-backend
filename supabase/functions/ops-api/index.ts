@@ -2771,6 +2771,20 @@ if (import.meta.main) serve(async (req: Request) => {
           managedVerticals: caller?.managed_verticals,
         }))
       }
+      // Re-attendance (M-C). Same authz posture as allocate_job: a dispatcher or a
+      // manager of the job's vertical puts an already-reported make-safe card back
+      // into `allocated` as a re-attend visit (second report on the same WO). No
+      // assignment/SMS here — the manager then taps-to-allocate as normal.
+      case 'reattend_makesafe': {
+        const tradeUser = await authTrade(req, client)
+        const { data: caller } = await client.from('users')
+          .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
+        return json(await reattendMakesafe(client, {
+          body,
+          callerRole: caller?.role,
+          managedVerticals: caller?.managed_verticals,
+        }))
+      }
       case 'update_job_status': return json(await updateJobStatus(client, body))
       case 'create_po': return json(await createPO(client, body))
       case 'update_po': return json(await updatePO(client, body))
@@ -9708,6 +9722,32 @@ function firstByJobId(rows: any[] | null | undefined): Record<string, any> {
   return map
 }
 
+// Re-attendance (M-C): pick, per job, the service report for that job's CURRENT
+// work cycle. For a re-attended job (makesafe_job_details.reattend_count > 0) a
+// prior-cycle report must NOT feed the board derivation — otherwise the stale
+// report would pin the card in report_ready and it could never return to
+// `allocated` for the re-attend visit. Legacy / reopen-only jobs (reattend_count
+// 0) keep the original first-match behaviour, so single-visit and reopened jobs
+// are byte-for-byte unchanged. Order-independent: it selects by cycle_number, not
+// by query ordering.
+function currentCycleReportMap(
+  rows: any[] | null | undefined,
+  detailsMap: Record<string, any>,
+): Record<string, any> {
+  const map: Record<string, any> = {}
+  for (const row of (rows || [])) {
+    const jobId = row?.job_id
+    if (!jobId) continue
+    const detail = detailsMap[jobId]
+    if ((detail?.reattend_count ?? 0) > 0) {
+      const currentCycle = detail?.cycle_number ?? 1
+      if ((row.cycle_number ?? 1) !== currentCycle) continue // skip a prior-cycle report
+    }
+    if (!map[jobId]) map[jobId] = row
+  }
+  return map
+}
+
 function makesafeCrew(assignments: any[] = []) {
   const names = assignments.map((a: any) => a?.users?.name).filter(Boolean)
   const uniqueNames = Array.from(new Set(names))
@@ -10004,6 +10044,13 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     requesting_company_slug: requestingCompanySlug,
     builder_company: requestingCompany,
     external_ref: detail?.external_ref || j.metadata?.external_ref || null,
+    // Re-attendance marker (M-C): reattend_count is the visit counter (0 = first
+    // attendance only). is_reattend lets the board/reporting skill flag a card
+    // that has been sent back to the trade on the SAME work order.
+    reattend_count: Number(detail?.reattend_count || 0),
+    is_reattend: Number(detail?.reattend_count || 0) > 0,
+    last_reattend_at: detail?.last_reattend_at || null,
+    cycle_number: Number(detail?.cycle_number || 1),
     assignments,
     assigned_trade: assignments.length > 0 ? assignments[0]?.users?.name || null : null,
     assigned_trade_phone: assignments.length > 0 ? assignments[0]?.users?.phone || null : null,
@@ -10276,7 +10323,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
       _fetchAllByJobIdChunked(
         client,
         'job_service_reports',
-        'job_id, status, submitted_at, created_at',
+        'job_id, status, submitted_at, created_at, cycle_number',
         jobIds,
         (q) => q.neq('status', 'draft').order('submitted_at', { ascending: false }),
       ),
@@ -10302,7 +10349,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
         jobIds,
       ),
     ])
-    reportMap = firstByJobId(reports || [])
+    reportMap = currentCycleReportMap(reports || [], detailsMap)
     invoiceMap = firstByJobId(invoices || [])
     for (const doc of (docs || [])) {
       if (!doc?.job_id) continue
@@ -10643,7 +10690,19 @@ async function submitMakesafeReport(client: any, body: any) {
   if (!jId) throw new Error('job_id required')
   await assertMakesafeJob(client, jId)
 
+  // Re-attendance (M-C): each report is scoped to the job's current work cycle.
+  // A re-attend (reattend_makesafe) increments makesafe_job_details.cycle_number,
+  // so this submit stores a NEW report row for the new cycle rather than
+  // overwriting the prior visit's report. Legacy/single-visit jobs default to
+  // cycle 1 and behave exactly as before (the existing-report lookup below is
+  // scoped to the same cycle, so a prior-cycle submitted report never blocks the
+  // second visit's submission and is never overwritten).
+  const { data: cycleDetail } = await client.from('makesafe_job_details')
+    .select('cycle_number').eq('job_id', jId).maybeSingle()
+  const currentCycle = (cycleDetail as { cycle_number?: number } | null)?.cycle_number ?? 1
+
   const reportFields: Record<string, any> = {
+    cycle_number: currentCycle,
     checklist_json: {
       arrival_time: arrival_time || '',
       damage_description: damage_description || '',
@@ -10665,9 +10724,10 @@ async function submitMakesafeReport(client: any, body: any) {
     submitted_at: (reportStatus || 'submitted') === 'submitted' ? new Date().toISOString() : null,
   }
 
-  // Check for existing report
+  // Check for an existing report FOR THIS CYCLE only (cycle-scoped so a prior
+  // visit's submitted/approved report is never treated as a duplicate here).
   const { data: existing } = await client.from('job_service_reports')
-    .select('id, status').eq('job_id', jId).limit(1).maybeSingle()
+    .select('id, status').eq('job_id', jId).eq('cycle_number', currentCycle).limit(1).maybeSingle()
 
   const submittingFinal = (reportStatus || 'submitted') === 'submitted'
   if (submittingFinal) {
@@ -10774,7 +10834,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
   // read-only enrichment queries for the map; write mutations remain untouched.
   const [detailsRes, assignsRes, reportsRes, invoicesRes] = await Promise.all([
     client.from('makesafe_job_details')
-      .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_ready_at, makesafe_companies:requesting_company_id(slug, name)')
+      .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_ready_at, reattend_count, last_reattend_at, cycle_number, makesafe_companies:requesting_company_id(slug, name)')
       .in('job_id', jobIds),
     client.from('job_assignments')
       .select('job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
@@ -10782,7 +10842,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
       .neq('status', 'cancelled')
       .order('scheduled_date', { ascending: true }),
     client.from('job_service_reports')
-      .select('job_id, status, submitted_at, created_at')
+      .select('job_id, status, submitted_at, created_at, cycle_number')
       .in('job_id', jobIds)
       .neq('status', 'draft')
       .order('submitted_at', { ascending: false }),
@@ -10801,7 +10861,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
     if (!assignMap[a.job_id]) assignMap[a.job_id] = []
     assignMap[a.job_id].push(a)
   }
-  const reportMap = firstByJobId(reportsRes.data || [])
+  const reportMap = currentCycleReportMap(reportsRes.data || [], detailsMap)
   const invoiceMap = firstByJobId(invoicesRes.data || [])
 
   const today = new Date().toISOString().slice(0, 10)
@@ -19366,7 +19426,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
       .select('id, event_type, detail_json, created_at, users:user_id(name)')
       .eq('job_id', jobId).eq('event_type', 'note').order('created_at', { ascending: false }).limit(50),
     client.from('job_service_reports')
-      .select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(1),
+      .select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
     // Work order data (scope items, instructions)
     client.from('work_orders')
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status, estimated_hours, trade_cost, crew_rates')
@@ -19429,6 +19489,10 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
     media: mediaRes.data || [],
     notes: eventsRes.data || [],
     serviceReport: (reportRes.data || [])[0] || null,
+    // Re-attendance (M-C): all reports (latest first) so a re-attended job shows
+    // every visit's report, not just the latest. serviceReport stays the latest
+    // for existing single-report callers. reattend_count lives on makesafe_details.
+    serviceReports: reportRes.data || [],
     workOrder: (woRes.data || [])[0] || null,
     crew: crewRes.data || [],
     purchaseOrders: safePOs,
@@ -20471,7 +20535,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 200)
   const SIGNED_TTL = 600 // 10 min, short-lived signed urls for any private docs
 
-  const DETAIL_SELECT = 'job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, makesafe_companies(slug, name, invoice_email, report_recipient)'
+  const DETAIL_SELECT = 'job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, reattend_count, last_reattend_at, last_reattend_reason, cycle_number, makesafe_companies(slug, name, invoice_email, report_recipient)'
 
   // 1) The report-draft-ready make-safe details. report_sent_at is loaded so the
   // shared surfacing predicate can exclude an already-sent-but-stale job (the
@@ -20550,7 +20614,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       .select('job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail, last_render_hash')
       .in('job_id', jobIds),
     client.from('job_service_reports')
-      .select('id, job_id, status, checklist_json, notes, signature_name, submitted_at, submitted_by, created_at, updated_at')
+      .select('id, job_id, status, checklist_json, notes, signature_name, submitted_at, submitted_by, created_at, updated_at, cycle_number')
       .in('job_id', jobIds)
       .order('created_at', { ascending: false }),
   ])
@@ -20578,9 +20642,23 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   for (const p of (packsRes.data || [])) {
     if ((p.pack_kind || 'main') === 'main') packByJob[p.job_id] = p
   }
+  // Re-attendance (M-C): retain EVERY report per job (not just the latest) so a
+  // re-attended job's earlier visit report is never hidden from the reporting
+  // skill. serviceReportByJob stays the latest (back-compat single-report reads);
+  // serviceReportsByJob holds all reports, oldest→newest, for the multi-report
+  // source-doc list below.
   const serviceReportByJob: Record<string, any> = {}
+  const serviceReportsByJob: Record<string, any[]> = {}
   for (const r of (serviceReportsRes.data || [])) {
-    if (r?.job_id && !serviceReportByJob[r.job_id]) serviceReportByJob[r.job_id] = r
+    if (!r?.job_id) continue
+    if (!serviceReportByJob[r.job_id]) serviceReportByJob[r.job_id] = r // query is created_at desc → first is latest
+    ;(serviceReportsByJob[r.job_id] ||= []).push(r)
+  }
+  for (const jobId of Object.keys(serviceReportsByJob)) {
+    // Oldest → newest: cycle_number asc (first attendance first), created_at asc as tiebreak.
+    serviceReportsByJob[jobId].sort((a, b) =>
+      ((a.cycle_number ?? 1) - (b.cycle_number ?? 1)) ||
+      String(a.created_at || '').localeCompare(String(b.created_at || '')))
   }
 
   // Mint a short-lived signed url for a job_documents storage path. The
@@ -20737,28 +20815,37 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     if (swmsPdfUrl) draftDocs.push({ label: 'SWMS', url: swmsPdfUrl, kind: 'pdf', ...docMeta(swmsDoc, swmsDoc?.created_at || null, 'swms') })
 
     const rawServiceReport = serviceReportByJob[d.job_id] || null
-    const rawServiceReportReceivedAt = d.report_received_at || rawServiceReport?.submitted_at || rawServiceReport?.created_at || null
+    // Re-attendance (M-C): ALL reports for this job, oldest→newest. A single-visit
+    // job keeps exactly one "Raw Trade Report" source doc (unchanged); a re-attended
+    // job surfaces one per visit so the reporting skill sees every visit's report.
+    // The renderer already iterates sourceDocs, so multi-report jobs do not break it.
+    const allReports = serviceReportsByJob[d.job_id] || (rawServiceReport ? [rawServiceReport] : [])
+    const multiVisit = allReports.length > 1
 
     const sourceDocs: MakesafeCockpitDoc[] = []
-    if (rawServiceReport) sourceDocs.push({
-      label: 'Raw Trade Report',
-      url: '',
-      kind: 'html',
-      created_at: rawServiceReport.created_at || null,
-      received_at: rawServiceReportReceivedAt,
-      source_type: 'trade_report',
-      raw_report: {
-        id: rawServiceReport.id,
-        status: rawServiceReport.status || null,
-        checklist_json: rawServiceReport.checklist_json || null,
-        notes: rawServiceReport.notes || null,
-        signature_name: rawServiceReport.signature_name || null,
-        submitted_at: rawServiceReport.submitted_at || null,
-        created_at: rawServiceReport.created_at || null,
-        updated_at: rawServiceReport.updated_at || null,
-        submitted_by: rawServiceReport.submitted_by || null,
-      },
-    })
+    for (const r of allReports) {
+      const cyc = Number(r.cycle_number || 1)
+      sourceDocs.push({
+        label: multiVisit ? `Raw Trade Report — Visit ${cyc}` : 'Raw Trade Report',
+        url: '',
+        kind: 'html',
+        created_at: r.created_at || null,
+        received_at: (r === rawServiceReport ? d.report_received_at : null) || r.submitted_at || r.created_at || null,
+        source_type: 'trade_report',
+        raw_report: {
+          id: r.id,
+          cycle_number: cyc,
+          status: r.status || null,
+          checklist_json: r.checklist_json || null,
+          notes: r.notes || null,
+          signature_name: r.signature_name || null,
+          submitted_at: r.submitted_at || null,
+          created_at: r.created_at || null,
+          updated_at: r.updated_at || null,
+          submitted_by: r.submitted_by || null,
+        },
+      })
+    }
     if (serviceReportPdfUrl) sourceDocs.push({
       label: rawServiceReport ? 'Trade Report PDF' : 'Trade Report',
       url: serviceReportPdfUrl,
@@ -20837,6 +20924,21 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       builder: builderName,
       requesting_company_name: builderName,
       external_ref: d.external_ref || null,
+      // Re-attendance (M-C): the visit marker + report count so the reporting-skill
+      // renderer (M-D) can badge a re-attend and knows there are multiple reports.
+      // raw_reports is oldest→newest; source_docs already carries each per visit.
+      reattend_count: Number(d.reattend_count || 0),
+      is_reattend: Number(d.reattend_count || 0) > 0,
+      last_reattend_at: d.last_reattend_at || null,
+      last_reattend_reason: d.last_reattend_reason || null,
+      report_count: allReports.length,
+      raw_reports: allReports.map((r: any) => ({
+        id: r.id,
+        cycle_number: Number(r.cycle_number || 1),
+        status: r.status || null,
+        submitted_at: r.submitted_at || null,
+        created_at: r.created_at || null,
+      })),
       client_name: job.client_name || null,
       client_email: job.client_email || null,
       client_phone: job.client_phone || null,
@@ -23747,6 +23849,175 @@ async function reopenMakesafe(client: any, body: any) {
   return { reopened: true, job_id: jobId, cycle_number: nextCycle, previous_status: job.status, reason }
 }
 export const _reopenMakesafeForTest = reopenMakesafe
+
+// ════════════════════════════════════════════════════════════
+// RE-ATTEND MAKESAFE (M-C) — send an already-reported card back to the trade for
+// a SECOND visit on the SAME work order (no new WO).
+//
+// A builder asks a crew to re-attend the same make-safe (e.g. temp fencing blows
+// down again). This puts the card back into `allocated` as a re-attend visit:
+//   - increments the work cycle (cycle_number) so the next submit_makesafe_report
+//     stores an ADDITIVE report — report #1 is never overwritten (see
+//     currentCycleReportMap + submitMakesafeReport cycle-scoping),
+//   - increments reattend_count (the visible visit marker) + stamps the reason,
+//   - resets the board signals (substatus -> waiting_on_trade_report,
+//     report_received_at / report_sent_at cleared) so the card derives back to
+//     `allocated`, and reactivates a completed/closed job (status -> accepted).
+//
+// It does NOT create an assignment or send any SMS. The manager then uses the
+// existing tap-to-allocate (allocate_job), which fires the SAME allocation SMS —
+// no new notification path. Out of scope (Marnin, priced per case): re-attend
+// invoicing; a card with a LIVE (non-void) invoice is refused (412) rather than
+// touching invoice state. AUTHZ mirrors allocate_job (dispatcher OR a manager of
+// the job's vertical) and the dispatch wraps it with authTrade the same way.
+// ════════════════════════════════════════════════════════════
+
+// Statuses a make-safe can never be re-attended from (terminally dead).
+const _MAKESAFE_REATTEND_DEAD_STATUSES = [
+  'cancelled', 'archived', 'lost', 'deleted', 'void', 'voided',
+  'duplicate', 'duplicated',
+]
+// Closed-but-re-attendable statuses: the job is done but a re-attend reactivates
+// it (status -> accepted) the way reopen does.
+const _MAKESAFE_REATTEND_CLOSED_STATUSES = [
+  'complete', 'completed', 'invoiced', 'paid', 'closed',
+]
+
+export async function reattendMakesafe(client: any, args: {
+  body: any
+  callerRole?: string | null
+  managedVerticals?: unknown
+}): Promise<any> {
+  const { body, callerRole, managedVerticals } = args
+  const jobId = body.job_id || body.jobId
+  const reason = String(body.reason || '').trim()
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (!reason) throw new ApiError('reason required (e.g. "temp fence blew down again")', 400)
+
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, type, job_number, status').eq('id', jobId).maybeSingle()
+  if (jobErr) throw new ApiError('reattendMakesafe: job read failed: ' + jobErr.message, 500)
+  if (!job) throw new ApiError('job not found', 404)
+  if (job.type !== 'makesafe') throw new ApiError('reattendMakesafe: job is not a make-safe job', 400)
+
+  // Capture the pre-transition status now — the reactivation update below mutates
+  // jobs.status, and we report the value the card had BEFORE the re-attend.
+  const previousStatus = job.status
+  const jobStatus = String(job.status || '').toLowerCase()
+  if (_MAKESAFE_REATTEND_DEAD_STATUSES.includes(jobStatus)) {
+    throw new ApiError(`cannot re-attend a ${jobStatus} make-safe`, 409)
+  }
+
+  // Authz: dispatcher OR a manager of this job's vertical (same gate as allocate_job).
+  const jobVertical = _jobVertical(job)
+  const decision = _resolveAllocationAuthz({ authMode: 'jwt', callerRole, managedVerticals, jobVertical })
+  if (!decision.allowed) {
+    throw new ApiError(`Not authorized to re-attend ${jobVertical || 'this'} jobs`, 403)
+  }
+
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
+    .select('job_id, substatus, report_received_at, cycle_number, reattend_count')
+    .eq('job_id', jobId).maybeSingle()
+  if (detailErr) throw new ApiError('reattendMakesafe: detail read failed: ' + detailErr.message, 500)
+  if (!detail) {
+    throw new ApiError('reattendMakesafe: no makesafe_job_details row — only applies to make-safe jobs', 404)
+  }
+
+  // Must be a REPORTED card (there is a prior visit to re-attend). Reported =
+  // report_received_at set, a report-in/complete substatus, a closed job status,
+  // or a submitted report row.
+  const normalizedSub = normalizeMakesafeSubstatus(detail.substatus)
+  const reportedSub = normalizedSub === 'admin_to_send_report' ||
+    normalizedSub === 'ready_to_invoice' || normalizedSub === 'complete'
+  let hasReport = !!detail.report_received_at || reportedSub ||
+    _MAKESAFE_REATTEND_CLOSED_STATUSES.includes(jobStatus)
+  if (!hasReport) {
+    const { data: anyReport } = await client.from('job_service_reports')
+      .select('id').eq('job_id', jobId).neq('status', 'draft').limit(1).maybeSingle()
+    hasReport = !!anyReport
+  }
+  if (!hasReport) {
+    throw new ApiError(
+      'reattendMakesafe: job has no submitted report to re-attend (allocate it normally instead)',
+      409,
+    )
+  }
+
+  // Out of scope (Marnin, per case): re-attend invoicing. Refuse a card with a
+  // LIVE (non-void) invoice rather than touching invoice state.
+  const { data: liveInvoices } = await client.from('xero_invoices')
+    .select('status, invoice_type').eq('job_id', jobId).eq('invoice_type', 'ACCREC')
+  const hasLiveInvoice = (liveInvoices || []).some(
+    (inv: any) => !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase()),
+  )
+  if (hasLiveInvoice) {
+    throw new ApiError(
+      're-attend not available: job already has a live invoice — invoiced re-attends are priced per case (out of v1 scope)',
+      412,
+    )
+  }
+
+  const nowIso = new Date().toISOString()
+  const nextCycle = (detail.cycle_number ?? 1) + 1
+  const nextReattend = (detail.reattend_count ?? 0) + 1
+
+  // Reactivate a closed job so it flows through the board again.
+  if (_MAKESAFE_REATTEND_CLOSED_STATUSES.includes(jobStatus)) {
+    const { error: jobUpdErr } = await client.from('jobs')
+      .update({ status: 'accepted', completed_at: null, archived_at: null, updated_at: nowIso })
+      .eq('id', jobId)
+    if (jobUpdErr) throw new ApiError('reattendMakesafe: job reactivation failed: ' + jobUpdErr.message, 500)
+  }
+
+  // Reset board signals + increment cycle + write the re-attend marker.
+  const { data: updatedDetail, error: upErr } = await client.from('makesafe_job_details')
+    .update({
+      substatus: 'waiting_on_trade_report',
+      report_received_at: null,
+      report_sent_at: null,
+      cycle_number: nextCycle,
+      reattend_count: nextReattend,
+      last_reattend_at: nowIso,
+      last_reattend_reason: reason,
+      updated_at: nowIso,
+    })
+    .eq('job_id', jobId)
+    .select('job_id, substatus, cycle_number, reattend_count, last_reattend_at')
+    .single()
+  if (upErr) throw new ApiError('reattendMakesafe: detail update failed: ' + upErr.message, 500)
+
+  // Audit event (non-fatal, same as reopenMakesafe — a log failure must not roll
+  // back the completed re-attend transition).
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'makesafe_reattend',
+      detail_json: {
+        reason,
+        reattend_count: nextReattend,
+        cycle_number: nextCycle,
+        previous_substatus: normalizedSub,
+        previous_status: previousStatus,
+        operator: body.operator_email || body.user_email || null,
+        changed_at: nowIso,
+      },
+    })
+  } catch (evtErr) {
+    console.log('[ops-api] reattendMakesafe: event log failed (non-fatal):', (evtErr as Error)?.message)
+  }
+
+  return {
+    ok: true,
+    reattended: true,
+    job_id: jobId,
+    reattend_count: nextReattend,
+    cycle_number: nextCycle,
+    substatus: updatedDetail?.substatus || 'waiting_on_trade_report',
+    previous_status: previousStatus,
+    reason,
+  }
+}
+export const _reattendMakesafeForTest = reattendMakesafe
 
 async function toggleDocumentVisibility(client: any, body: any) {
   const { documentId, document_id, visible_to_trades } = body
