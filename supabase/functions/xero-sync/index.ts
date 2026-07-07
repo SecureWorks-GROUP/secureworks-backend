@@ -2585,7 +2585,10 @@ async function syncBankTransactions(sb: any) {
       xero_txn_id: txnId,
       account_id: txn.BankAccount?.AccountID || '',
       account_name: txn.BankAccount?.Name || null,
-      txn_date: txn.Date ? txn.Date.split('T')[0] : now.toISOString().split('T')[0],
+      // Xero returns .NET-format dates (/Date(…)/); parse via the repo-standard
+      // parseXeroDate helper (returns ISO or null), then take the date part.
+      // Falls back to raw split for already-ISO strings, and to now for null.
+      txn_date: parseXeroDate(txn.Date)?.split('T')[0] ?? (txn.Date ? txn.Date.split('T')[0] : now.toISOString().split('T')[0]),
       txn_type: txnType,
       contact_name: txn.Contact?.Name || null,
       reference: txn.Reference || null,
