@@ -316,6 +316,28 @@ import {
   substatusAdvanceNeedsPortalVerification as _substatusAdvanceNeedsPortalVerification,
   type PortalVerificationState,
 } from './makesafe_portal_guard.ts'
+// W3-A (M-E hybrid loop) — cheap-pass story engine (backend-honest verdicts) +
+// the admin@ Sent-Items mirror that unlocks backend send-attribution. Pure logic +
+// mappers here; the DB-bound passes (makesafeStoryRecompute / makesafeSentMirror
+// wiring) live below. NEVER advances substatus / invoices / sends (item-14 law).
+import {
+  type CardEvidence as _CardEvidence,
+  type StoryVerdict as _StoryVerdict,
+  computeSignalFingerprint as _computeSignalFingerprint,
+  computeStoryVerdict as _computeStoryVerdict,
+  isCleanlyClosed as _isCleanlyClosed,
+  refNumberOf as _refNumberOf,
+  sentRowAttributesToJob as _sentRowAttributesToJob,
+  shouldRecompute as _shouldRecompute,
+  type SentRow as _SentRow,
+  ADMIN_SENT_MAILBOX as _ADMIN_SENT_MAILBOX,
+  SENT_FOLDER as _SENT_FOLDER,
+} from './makesafe_story.ts'
+import {
+  fetchAdminSentMessages as _fetchAdminSentMessages,
+  makesafeSentMirror as _makesafeSentMirror,
+} from './makesafe_sent_mirror.ts'
+import { graphFetch as _graphFetch } from '../_shared/graph_client.ts'
 import {
   buildIntakeDedupIndex as _buildIntakeDedupIndex,
   isDuplicateIntake as _isDuplicateIntake,
@@ -2555,6 +2577,30 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: makesafe_draft_heartbeat requires service/API key or admin/owner role' }, 403)
         }
         return json(await _makesafeDraftHeartbeat(client, makeReconAlertSink()))
+      }
+      // W3-A (M-E hybrid loop). sent_mirror = mirror the admin@ Sent-Items folder
+      // into emails (folder=sentitems) for backend send-attribution. story_recompute
+      // = the cheap pass: backend-honest story verdicts into makesafe_card_story +
+      // stamp cards needing an agent portal leg into the W2-C recheck queue. Both do
+      // Graph I/O and/or writes, so both require service/API key or admin/owner —
+      // same posture as the reconcile actions. MARKER/READ ONLY; never advance a
+      // substatus, draft/create an invoice, send, or SMS (item-14 guard is law).
+      case 'makesafe_sent_mirror': {
+        const smIsAdmin = authMode === 'api_key' ||
+          authUser?.role === 'admin' || authUser?.role === 'owner'
+        if (!smIsAdmin) {
+          return json({ error: 'forbidden: makesafe_sent_mirror requires service/API key or admin/owner role' }, 403)
+        }
+        return json(await makesafeSentMirrorAction(client, body))
+      }
+      case 'makesafe_story_recompute': {
+        const srIsAdmin = authMode === 'api_key' ||
+          authUser?.role === 'admin' || authUser?.role === 'owner'
+        if (!srIsAdmin) {
+          return json({ error: 'forbidden: makesafe_story_recompute requires service/API key or admin/owner role' }, 403)
+        }
+        const staleHours = Number(body?.stale_hours ?? body?.staleHours) || undefined
+        return json(await makesafeStoryRecompute(client, { staleHours }))
       }
       // A1: admin re-extract a NAMED intake draft IN PLACE (immune to the unique-key drop
       // that swallowed the supersede-then-rescan recovery). Mutates a draft (and may
@@ -11044,13 +11090,314 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     })
   }
 
+  // W3-A (M-E hybrid loop) — surface the cheap-pass story verdict + freshness on
+  // each jobs[] row, and the recheck-queue depth at the top level, so the board
+  // banner + standing fix-list can render truth-freshness. ADDITIVE ONLY: every
+  // field above is unchanged; a card with no story row reads null (no cheap-pass
+  // concern / cleanly closed). This read never writes anything.
+  const auditJobIds = jobRows.map((r: any) => r.job_id).filter(Boolean)
+  const storyRows = auditJobIds.length
+    ? await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_card_story',
+      'job_id, story_verdict, needs_agent, recheck_enqueued, evidence_gaps, blockers, computed_at',
+      auditJobIds,
+    )
+    : []
+  const storyByJob: Record<string, any> = {}
+  for (const s of (storyRows || [])) if (s?.job_id) storyByJob[s.job_id] = s
+  const verdictCounts: Record<string, number> = {}
+  let needsAgentCount = 0
+  let latestComputedAt: string | null = null
+  for (const s of (storyRows || [])) {
+    const v = String(s?.story_verdict || 'UNKNOWN')
+    verdictCounts[v] = (verdictCounts[v] || 0) + 1
+    if (s?.needs_agent) needsAgentCount++
+    if (s?.computed_at && (latestComputedAt === null || s.computed_at > latestComputedAt)) {
+      latestComputedAt = s.computed_at
+    }
+  }
+  for (const r of jobRows) {
+    const s = storyByJob[r.job_id] || null
+    r.story_verdict = s?.story_verdict ?? null
+    r.story_computed_at = s?.computed_at ?? null
+    r.story_needs_agent = s?.needs_agent === true
+    r.story_evidence_gaps = Array.isArray(s?.evidence_gaps) ? s.evidence_gaps : []
+    r.story_blockers = Array.isArray(s?.blockers) ? s.blockers : []
+  }
+
+  // Recheck-queue depth: report-type cards stamped for an agent portal re-check
+  // (portal_recheck_requested_at set) that are still UNVERIFIED (portal_verified_at
+  // null). A cheap COUNT; reflects the durable W2-C queue the hybrid loop feeds.
+  // Best-effort: this is an auxiliary freshness metric on a READ endpoint — a
+  // failure here (or a driver without count support) degrades to 0, it never
+  // fails the whole audit read.
+  let recheckQueueDepth = 0
+  try {
+    const { count, error: depthErr } = await client.from('makesafe_job_details')
+      .select('job_id', { count: 'exact', head: true })
+      .not('report_type', 'is', null)
+      .not('portal_recheck_requested_at', 'is', null)
+      .is('portal_verified_at', null)
+    if (!depthErr && typeof count === 'number') recheckQueueDepth = count
+  } catch (_e) {
+    recheckQueueDepth = 0
+  }
+
   return {
     generated_at: new Date().toISOString(),
     jobs: jobRows,
     known_refs: knownRefs,
+    // W3-A truth-freshness surface (additive).
+    recheck_queue_depth: recheckQueueDepth,
+    story: {
+      computed_at: latestComputedAt,
+      verdict_counts: verdictCounts,
+      needs_agent: needsAgentCount,
+      total: (storyRows || []).length,
+    },
   }
 }
 export const _makesafeAuditForTest = makesafeAudit
+
+// ════════════════════════════════════════════════════════════
+// W3-A (M-E hybrid loop) — the CHEAP PASS + the admin@ Sent-Items mirror.
+//
+// The cheap pass computes, for ACTIVE make-safe cards, the backend-honest story
+// verdict from the W2-D invoice partition + the admin@ Sent mirror + job markers +
+// Xero-by-job, and persists it to makesafe_card_story. Cards whose expensive legs
+// (the primeeco portal, a full live-mailbox sweep) are still needed FAIL CLOSED to
+// UNVERIFIED-needs-agent and are stamped into the EXISTING W2-C recheck queue
+// (reused columns; never a second queue). MARKER/READ ONLY — never advances a
+// substatus, drafts/creates an invoice, sends, or SMSs (item-14 guard is law).
+// ════════════════════════════════════════════════════════════
+
+// Terminal statuses that are NOT active (cancelled stays IN so a cancelled-with-
+// evidence card can raise CANCELLED-CONFLICT).
+const STORY_ACTIVE_DEAD_STATUSES = new Set([
+  'archived', 'lost', 'deleted', 'duplicate', 'duplicated', 'void', 'voided',
+])
+// Sent-mirror lookback for the send-attribution scan (bounded; make-safe sends are
+// weeks old at most, and the 90-day mirror floor bounds the store anyway).
+const STORY_SENT_LOOKBACK_DAYS = 120
+
+interface StoryRecomputeOpts {
+  staleHours?: number
+  nowIso?: string
+  sentLookbackDays?: number
+  minIntervalHours?: number // W2-C recheck rate-limit reuse (default 6, matches the cron)
+  makesafeAudit?: (client: any, params: URLSearchParams) => Promise<any>
+}
+
+async function makesafeStoryRecompute(client: any, opts: StoryRecomputeOpts = {}) {
+  const nowIso = opts.nowIso ?? new Date().toISOString()
+  const nowMs = Date.parse(nowIso)
+  const staleMs = (opts.staleHours ?? 24) * 3600_000
+  const minIntervalMs = (opts.minIntervalHours ?? 6) * 3600_000
+  const auditFn = opts.makesafeAudit ?? makesafeAudit
+
+  // 1) W2-D partition: one compact row per make-safe job (invoice by job_id, sibling
+  //    bleed split out, pack_sent marker, pipeline sent status, doc booleans).
+  const audit = await auditFn(client, new URLSearchParams())
+  const allJobs: any[] = audit?.jobs || []
+  const activeJobs = allJobs.filter(
+    (j) => !STORY_ACTIVE_DEAD_STATUSES.has(String(j.job_status || '').toLowerCase()),
+  )
+  const jobIds = activeJobs.map((j) => j.job_id).filter(Boolean)
+
+  // 2) portal / report-type state per card (report_type, cycle, links, verify, recheck).
+  const details = jobIds.length
+    ? await _fetchAllByJobIdChunked(
+      client, 'makesafe_job_details',
+      'job_id, report_type, cycle_number, external_links, portal_verified_at, ' +
+        'portal_verified_cycle, portal_recheck_requested_at, portal_recheck_count',
+      jobIds,
+    )
+    : []
+  const detailByJob: Record<string, any> = {}
+  for (const d of (details || [])) if (d?.job_id) detailByJob[d.job_id] = d
+
+  // 3) admin@ Sent mirror rows (bounded window) for backend send-attribution.
+  const sentSinceIso = new Date(
+    nowMs - (opts.sentLookbackDays ?? STORY_SENT_LOOKBACK_DAYS) * 86_400_000,
+  ).toISOString()
+  const sentRows = await _fetchAllRows(
+    () => client.from('emails')
+      .select('post_id, subject, body_preview, body_content, to_recipients, has_attachments, received_at')
+      .eq('mailbox', _ADMIN_SENT_MAILBOX).eq('folder', _SENT_FOLDER).gte('received_at', sentSinceIso),
+    'story sent-mirror read',
+  )
+
+  // 4) prior story rows (the delta rule).
+  const priorRows = jobIds.length
+    ? await _fetchAllByJobIdChunked(
+      client, 'makesafe_card_story', 'job_id, story_verdict, signal_fingerprint, computed_at', jobIds,
+    )
+    : []
+  const priorByJob: Record<string, any> = {}
+  for (const p of (priorRows || [])) if (p?.job_id) priorByJob[p.job_id] = p
+
+  let computed = 0, skipped = 0, closedCleared = 0, enqueued = 0
+  const verdictCounts: Record<string, number> = {}
+  const countVerdict = (v: string) => { verdictCounts[v] = (verdictCounts[v] || 0) + 1 }
+
+  for (const j of activeJobs) {
+    const detail = detailByJob[j.job_id] || {}
+    const sub = normalizeMakesafeSubstatus(j.substatus)
+    const jobStatusLc = String(j.job_status || '').toLowerCase()
+    const cancelled = jobStatusLc === 'cancelled' || jobStatusLc === 'canceled' ||
+      sub === 'cancelled' || sub === 'canceled'
+
+    // Xero STRICTLY by job_id (W2-D): audit.invoices are job-linked only (incl voided).
+    const jobInvoices: any[] = Array.isArray(j.invoices) ? j.invoices : []
+    const paid = jobInvoices.some((i) => !i.voided && String(i.status || '').toUpperCase() === 'PAID')
+    const invoiceBuilt = !!j.live_invoice_no
+    const siblingInvoices: any[] = Array.isArray(j.sibling_invoices) ? j.sibling_invoices : []
+    const siblingBleed = siblingInvoices.some((i) => !i.voided)
+
+    // Send attribution over the admin@ Sent mirror (ref# + job-linked invoice numbers).
+    const refNum = _refNumberOf(j.external_ref)
+    const invoiceNos = String(j.invoice_no || '').split(',').map((s: string) => s.trim()).filter(Boolean)
+    const tokens = [refNum, ...invoiceNos].filter(Boolean)
+    const sentHits = tokens.length
+      ? (sentRows as _SentRow[]).filter((row) => _sentRowAttributesToJob(row, tokens))
+      : []
+    const adminSentAttributed = sentHits.length > 0
+    let sentHitLatest: string | null = null
+    for (const h of sentHits as any[]) {
+      if (h.received_at && (sentHitLatest === null || h.received_at > sentHitLatest)) sentHitLatest = h.received_at
+    }
+
+    const isReportType = !!detail.report_type
+    const currentCycle = Number(detail.cycle_number ?? 1)
+    const portalVerifiedThisCycle = !!detail.portal_verified_at &&
+      Number(detail.portal_verified_cycle) === currentCycle
+    const hasPortalLink = _extractPortalLinks(detail.external_links).length > 0
+    const attended = ['in_progress', 'complete', 'completed', 'invoiced'].includes(jobStatusLc) ||
+      j.has_report_record === true
+
+    const ev: _CardEvidence = {
+      jobStatus: j.job_status ?? null,
+      substatus: sub,
+      cancelled,
+      adminSentAttributed,
+      packSentMarker: j.pack_sent === true,
+      pipelineVerifiedSent: String(j.pipeline_item_sent_status || '') === 'verified_sent',
+      paid,
+      invoiceBuilt,
+      siblingBleed,
+      attended,
+      hasReportDoc: j.has_report_doc === true || j.has_report_record === true,
+      hasInvoiceDoc: j.has_invoice_doc === true,
+      woReceived: j.has_wo === true,
+      isReportType,
+      portalVerifiedThisCycle,
+      hasPortalLink,
+    }
+    const prior = priorByJob[j.job_id] || null
+
+    // Cleanly-closed cards carry no fix-list row: clear any stale prior row and skip.
+    if (_isCleanlyClosed(ev)) {
+      if (prior) {
+        const { error: delErr } = await client.from('makesafe_card_story').delete().eq('job_id', j.job_id)
+        if (delErr) throw delErr
+        closedCleared++
+      }
+      continue
+    }
+
+    const positiveSend = ev.adminSentAttributed || ev.packSentMarker || ev.pipelineVerifiedSent
+    const invoiceKey = `${j.invoice_no || ''}~${j.live_invoice_status || ''}`
+    const fingerprint = _computeSignalFingerprint({
+      substatus: sub, jobStatus: j.job_status ?? null, cancelled, positiveSend,
+      paid, invoiceBuilt, siblingBleed, attended, hasReportDoc: ev.hasReportDoc,
+      woReceived: ev.woReceived, portalVerifiedThisCycle,
+      sentHitCount: sentHits.length, sentHitLatest, invoiceKey,
+    })
+
+    // Delta rule: recompute only on a changed cheap signal or > staleness.
+    if (!_shouldRecompute(prior?.signal_fingerprint, prior?.computed_at, fingerprint, nowMs, staleMs)) {
+      skipped++
+      if (prior?.story_verdict) countVerdict(prior.story_verdict)
+      continue
+    }
+
+    const result = _computeStoryVerdict(ev)
+    countVerdict(result.verdict)
+
+    // Stamp the EXISTING W2-C recheck queue for cards needing an agent PORTAL leg
+    // (reused eligibility + columns + rate-limit; marker only). Non-portal
+    // needs-agent cards surface via the verdict alone (no second queue).
+    let recheckEnqueued = false
+    if (
+      result.needs_agent &&
+      _portalRecheckEligible({
+        jobStatus: j.job_status, isReportType: true, externalLinks: detail.external_links,
+        currentCycle, verifiedAt: detail.portal_verified_at ?? null,
+        verifiedCycle: detail.portal_verified_cycle ?? null,
+      }) &&
+      _portalRecheckDue(detail.portal_recheck_requested_at, nowMs, minIntervalMs)
+    ) {
+      const { error: stampErr } = await client.from('makesafe_job_details').update({
+        portal_recheck_requested_at: nowIso,
+        portal_recheck_count: Number(detail.portal_recheck_count || 0) + 1,
+        portal_recheck_reason: 'cheap-pass: report-type card, unverified this cycle, no backend send proof',
+        updated_at: nowIso,
+      }).eq('job_id', j.job_id)
+      if (stampErr) throw stampErr
+      recheckEnqueued = true
+      enqueued++
+    }
+
+    const { error: upErr } = await client.from('makesafe_card_story').upsert({
+      job_id: j.job_id,
+      story_verdict: result.verdict,
+      evidence_gaps: result.evidence_gaps,
+      blockers: result.blockers,
+      signals: {
+        cancelled, positive_send: positiveSend, admin_sent_attributed: adminSentAttributed,
+        pack_sent_marker: ev.packSentMarker, pipeline_verified_sent: ev.pipelineVerifiedSent,
+        paid, invoice_built: invoiceBuilt, sibling_bleed: siblingBleed, attended,
+        has_report_doc: ev.hasReportDoc, wo_received: ev.woReceived,
+        is_report_type: isReportType, portal_verified_this_cycle: portalVerifiedThisCycle,
+        has_portal_link: hasPortalLink, sent_hit_count: sentHits.length, substatus: sub,
+      },
+      needs_agent: result.needs_agent,
+      recheck_enqueued: recheckEnqueued,
+      external_ref: j.external_ref ?? null,
+      signal_fingerprint: fingerprint,
+      computed_at: nowIso,
+      updated_at: nowIso,
+    }, { onConflict: 'job_id' })
+    if (upErr) throw upErr
+    computed++
+  }
+
+  return {
+    ok: true,
+    active: activeJobs.length,
+    computed,
+    skipped,
+    closed_cleared: closedCleared,
+    enqueued,
+    verdict_counts: verdictCounts,
+    computed_at: nowIso,
+  }
+}
+export const _makesafeStoryRecomputeForTest = makesafeStoryRecompute
+
+// WIRING: the admin@ Sent-Items mirror action. Builds the real Graph traversal
+// (shared app-only token + graphFetch) and hands it to the pure mirror. Read-of-
+// Graph, write-to-emails only — no send, no substatus, no invoice.
+async function makesafeSentMirrorAction(client: any, body: any) {
+  const backfillDays = Number(body?.backfill_days) || undefined
+  return await _makesafeSentMirror(client, {
+    backfillDays,
+    fetchSentMessages: (sinceIso: string) =>
+      _fetchAdminSentMessages(sinceIso, { getGraphToken: _getGraphToken, graphFetch: _graphFetch }),
+  })
+}
+export const _makesafeSentMirrorActionForTest = makesafeSentMirrorAction
 
 // ── Slice 5: make-safe completion report ──
 async function submitMakesafeReport(client: any, body: any) {
