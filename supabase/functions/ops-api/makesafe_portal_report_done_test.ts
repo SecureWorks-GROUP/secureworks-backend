@@ -113,12 +113,17 @@ Deno.test("portal-done: report-type job -> substatus + report_received_at writte
     assertEquals(upd[0].row.substatus, "admin_to_send_report");
     assert(typeof upd[0].row.report_received_at === "string" && upd[0].row.report_received_at.length > 0);
     assertEquals("external_links" in upd[0].row, false, "no portal_url -> external_links untouched");
+    // W2-C: the marker records a cycle-scoped portal-locked verification (item-14 gate input).
+    assert(typeof upd[0].row.portal_verified_at === "string" && upd[0].row.portal_verified_at.length > 0);
+    assertEquals(upd[0].row.portal_verified_cycle, 1, "verification stamped for the current cycle (default 1)");
+    assertEquals(res.verification_recorded, true);
 
     const events = store.inserts!.filter((i) => i.table === "job_events");
     assertEquals(events.length, 1);
     assertEquals(events[0].row.event_type, "makesafe_portal_report_done");
     assertEquals(events[0].row.detail_json.report_on_portal, true);
     assertEquals(events[0].row.detail_json.substatus, "admin_to_send_report");
+    assertEquals(events[0].row.detail_json.portal_verified, true);
 
     // No report/doc/invoice writes of any kind.
     assertEquals(store.inserts!.filter((i) => i.table !== "job_events").length, 0);
@@ -176,12 +181,14 @@ Deno.test("portal-done: repeat on already-marked / further-advanced job -> ok, z
   const { calls, restore } = stubFetch();
   try {
     for (const sub of ["admin_to_send_report", "ready_to_invoice", "complete"]) {
-      const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: sub } } };
+      // Already verified for the current cycle -> the repeat is a true no-op.
+      const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: sub, cycle_number: 1, portal_verified_at: "2026-07-07T00:00:00Z", portal_verified_cycle: 1 } } };
       const res = await _markMakesafePortalReportDone(makeClient(store), { job_id: "job-rt", portal_url: "https://portal.example/existing" });
       await flush();
       assertEquals(res.ok, true, sub);
       assertEquals(res.already_done, true, sub);
       assertEquals(res.substatus, sub, "never regresses an advanced job");
+      assertEquals(res.verification_recorded, false, `${sub}: already verified this cycle`);
       assertEquals(store.updates!.length, 0, `${sub}: no writes on repeat`);
       assertEquals(store.inserts!.length, 0, `${sub}: no duplicate events`);
     }
@@ -381,10 +388,11 @@ Deno.test("BE-2 (c2): createMakesafeJob with a non-report family -> detail repor
 // A job advanced to admin_to_send_report via update_makesafe_substatus BEFORE
 // the marker delivered the URL still gets the link stored — link-merge ONLY
 // (no substatus change, no report_received_at, no event).
-Deno.test("FIX4: already-marked job + NEW portal_url -> link merged, nothing else written, no event", async () => {
+Deno.test("FIX4: already-marked+verified job + NEW portal_url -> link merged, nothing else written, no event", async () => {
   const { calls, restore } = stubFetch();
   try {
-    const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: "admin_to_send_report" } } };
+    // Already verified this cycle -> a late URL is a pure link-merge, no re-stamp.
+    const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: "admin_to_send_report", cycle_number: 1, portal_verified_at: "2026-07-07T00:00:00Z", portal_verified_cycle: 1 } } };
     const res = await _markMakesafePortalReportDone(
       makeClient(store),
       { job_id: "job-rt", portal_url: "https://portal.example/late-url" },
@@ -394,13 +402,51 @@ Deno.test("FIX4: already-marked job + NEW portal_url -> link merged, nothing els
     assertEquals(res.ok, true);
     assertEquals(res.already_done, true);
     assertEquals(res.portal_link_added, true);
+    assertEquals(res.verification_recorded, false);
     const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
     assertEquals(upd.length, 1, "exactly one link-merge update");
     const keys = Object.keys(upd[0].row).sort();
-    assertEquals(keys, ["external_links", "updated_at"], "link-only update: no substatus, no report_received_at");
+    assertEquals(keys, ["external_links", "updated_at"], "link-only update: no substatus, no report_received_at, no re-stamp");
     assertEquals(upd[0].row.external_links.length, 2, "existing link preserved + new one appended");
     assertEquals(upd[0].row.external_links[1].url, "https://portal.example/late-url");
-    assertEquals(store.inserts!.length, 0, "no event on the idempotent path");
+    assertEquals(store.inserts!.length, 0, "no event on the pure link-merge path");
+    assertEquals(calls.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+// ── W2-C graf-recovery: a report card that "graf" advanced to ready_to_invoice
+// WITHOUT verification is not deadlocked. When an agent finally confirms the portal
+// is locked, the marker stamps the verification (+ merges the URL) even though the
+// card is already advanced — the only way the item-14 invoice guard can ever pass.
+Deno.test("W2-C graf-recovery: advanced-but-UNVERIFIED card + marker -> verification stamped + event, no substatus regression", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store: Store = {
+      details: { "job-graf": { ...REPORT_TYPE_DETAIL, job_id: "job-graf", substatus: "ready_to_invoice", cycle_number: 1, portal_verified_at: null, portal_verified_cycle: null } },
+    };
+    const res = await _markMakesafePortalReportDone(
+      makeClient(store),
+      { job_id: "job-graf", portal_url: "https://portal.example/late-url", portal_signal: "form locked/submitted, 30 of 33 answered" },
+    );
+    await flush();
+
+    assertEquals(res.ok, true);
+    assertEquals(res.already_done, true);
+    assertEquals(res.substatus, "ready_to_invoice", "never regresses the advanced substatus");
+    assertEquals(res.verification_recorded, true);
+    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    assertEquals(upd.length, 1);
+    assert(typeof upd[0].row.portal_verified_at === "string" && upd[0].row.portal_verified_at.length > 0);
+    assertEquals(upd[0].row.portal_verified_cycle, 1);
+    assertEquals(upd[0].row.portal_verified_signal, "form locked/submitted, 30 of 33 answered");
+    assertEquals("substatus" in upd[0].row, false, "no substatus write on the recovery path");
+    assertEquals(upd[0].row.external_links.length, 2, "late URL merged too");
+    const events = store.inserts!.filter((i) => i.table === "job_events");
+    assertEquals(events.length, 1);
+    assertEquals(events[0].row.event_type, "makesafe_portal_verified");
+    assertEquals(events[0].row.detail_json.recovery_of_pre_verified_advance, true);
     assertEquals(calls.length, 0);
   } finally {
     restore();

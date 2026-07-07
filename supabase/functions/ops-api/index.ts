@@ -305,6 +305,17 @@ import {
   normalizeReportExternalLinks as _normalizeReportExternalLinks,
   cleanUrl as _cleanBuilderLinkUrl,
 } from './makesafe_email_links.ts'
+// W2-C (M-E1) portal-truth guard + recheck-queue predicates. Pure decision logic
+// for item-14 (no automated advance/draft on a report-type card without a recorded
+// portal-locked verification) + the honest-fallback recheck queue.
+import {
+  extractPortalLinks as _extractPortalLinks,
+  portalRecheckDue as _portalRecheckDue,
+  portalRecheckEligible as _portalRecheckEligible,
+  portalVerificationSatisfied as _portalVerificationSatisfied,
+  substatusAdvanceNeedsPortalVerification as _substatusAdvanceNeedsPortalVerification,
+  type PortalVerificationState,
+} from './makesafe_portal_guard.ts'
 import {
   buildIntakeDedupIndex as _buildIntakeDedupIndex,
   isDuplicateIntake as _isDuplicateIntake,
@@ -2253,6 +2264,10 @@ if (import.meta.main) serve(async (req: Request) => {
       'makesafe_new_emails',
       'get_makesafe_email',
       'get_makesafe_attachment_url',
+      // W2-C portal-truth honest fallback: read the recheck queue + let the enqueue
+      // cron stamp rate-limited recheck markers. Marker-only — never advances/drafts/sends.
+      'makesafe_portal_recheck_queue',
+      'makesafe_portal_recheck_enqueue',
       'job_detail',
       'list_intake_drafts',
       'makesafe_intake_reconciliation',
@@ -2388,6 +2403,15 @@ if (import.meta.main) serve(async (req: Request) => {
         if (authMode === 'routine' && ROUTINE_FORBIDDEN_SUBSTATUSES.includes(String(body?.substatus || ''))) {
           return json({ error: `routine key is not permitted to set substatus='${body.substatus}'. Only a privileged caller (api_key or admin/owner jwt) may advance to sent/closed states.` }, 403)
         }
+        // W2-C (item 14): a REPORT-TYPE card cannot be advanced to a report-complete
+        // substatus (admin_to_send_report / ready_to_invoice / complete) via this
+        // external entry point without a recorded portal-locked verification — this
+        // is where "graf" stamped report cards ready with the portal unsubmitted.
+        // Applies to EVERY caller (api_key/jwt/routine), since graf may hold any key;
+        // it is a business invariant, not an authz rule. The internal send-pack close
+        // path calls updateMakesafeSubstatus directly (not this dispatch) and so is
+        // not re-gated. Throws 409 via ApiError (surfaced by the outer handler).
+        await assertMakesafePortalVerifiedForAdvance(client, body?.job_id || body?.jobId, body?.substatus)
         return json(await updateMakesafeSubstatus(client, body))
       }
       // B4 (makesafe-report-types): "Report completed on builder portal" marker.
@@ -2401,6 +2425,14 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await markMakesafePortalReportDone(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
+      // W2-C (M-E1) portal-truth honest fallback. queue = READ the report-type cards
+      // needing an agent-side portal re-check (capture_portal_evidence.py); enqueue =
+      // the cron that stamps a rate-limited recheck marker on them. Marker-only —
+      // never advances substatus, never drafts, never sends.
+      case 'makesafe_portal_recheck_queue':
+        return json(await makesafePortalRecheckQueue(client, url.searchParams))
+      case 'makesafe_portal_recheck_enqueue':
+        return json(await makesafePortalRecheckEnqueue(client, body))
       // Wave 2 — READ-ONLY feed for the report-draft cockpit (informed-approve
       // content gate). Returns report-draft-ready jobs (substatus =
       // admin_to_send_report) with invoice line items + totals, signed PDF urls
@@ -10223,7 +10255,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   }
 
   const { data: detail, error } = await client.from('makesafe_job_details')
-    .select('job_id, substatus, report_type, external_links, report_received_at')
+    .select('job_id, substatus, report_type, external_links, report_received_at, cycle_number, portal_verified_at, portal_verified_cycle')
     .eq('job_id', jId)
     .maybeSingle()
   if (error) throw error
@@ -10257,28 +10289,82 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real report.', 409)
   }
 
-  // Idempotent repeat: already marked (or already further along) → ok, no
-  // state/event writes. FIX 4: a job can reach admin_to_send_report via
-  // update_makesafe_substatus BEFORE the marker delivers the portal URL — a
-  // supplied portal_url is still link-merged (link-only update: no substatus
-  // change, no report_received_at, no event).
+  // W2-C (item 14): this marker is the SINGLE writer of a recorded portal-locked
+  // verification. Calling it means a human/agent saw the portal form locked (or an
+  // agent run captured locked=true via capture_portal_evidence.py). Stamp the
+  // verification cycle-scoped so a later reopen/re-attend (cycle bump) forces a
+  // fresh verification. The item-14 guard (substatus advance + draft invoice) then
+  // requires portal_verified_cycle == cycle_number before automation may proceed.
+  const currentCycle = Number(detail.cycle_number ?? 1)
+  const alreadyVerifiedThisCycle = !!detail.portal_verified_at &&
+    Number(detail.portal_verified_cycle) === currentCycle
+  const nowIso = new Date().toISOString()
+  const verifySignal = String(body.portal_signal || body.portalSignal || '').trim() ||
+    'operator-confirmed portal locked'
+  const verifyActor = body.operator_email || body.user_email || body.operator || 'portal_done_marker'
+  // The verification stamp, applied on both the advance path and the graf-recovery
+  // idempotent path (see below). Only written when not already verified this cycle.
+  const verificationStamp = {
+    portal_verified_at: nowIso,
+    portal_verified_cycle: currentCycle,
+    portal_verified_signal: verifySignal,
+    portal_verified_by: verifyActor,
+  }
+
+  // Idempotent repeat: already marked (or already further along) → no substatus
+  // change, no report_received_at, no event. FIX 4: a job can reach
+  // admin_to_send_report via update_makesafe_substatus BEFORE the marker delivers
+  // the portal URL — a supplied portal_url is still link-merged.
+  // W2-C graf-recovery: a report-type card that "graf" (JARVIS/GHL) advanced to
+  // admin_to_send_report / ready_to_invoice WITHOUT verification would otherwise be
+  // permanently blocked by the item-14 guard (it can never advance/invoice, and
+  // it's past the substatuses the main path writes). So the idempotent path ALSO
+  // records the verification when this cycle is not yet verified — that is exactly
+  // the "trade finally submitted; agent captured locked" recovery.
   const currentSubstatus = normalizeMakesafeSubstatus(detail.substatus)
   if (currentSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(currentSubstatus)) {
     const idempotentLinks = mergePortalLink(detail.external_links)
-    if (idempotentLinks) {
+    const idemUpdate: Record<string, any> = {}
+    if (idempotentLinks) idemUpdate.external_links = idempotentLinks
+    if (!alreadyVerifiedThisCycle) Object.assign(idemUpdate, verificationStamp)
+    if (Object.keys(idemUpdate).length > 0) {
+      idemUpdate.updated_at = nowIso
       const { error: linkErr } = await client.from('makesafe_job_details')
-        .update({ external_links: idempotentLinks, updated_at: new Date().toISOString() })
+        .update(idemUpdate)
         .eq('job_id', jId)
       if (linkErr) throw linkErr
+      if (!alreadyVerifiedThisCycle) {
+        await client.from('job_events').insert({
+          job_id: jId,
+          event_type: 'makesafe_portal_verified',
+          detail_json: {
+            substatus: currentSubstatus,
+            report_type: reportType,
+            cycle_number: currentCycle,
+            portal_verified_signal: verifySignal,
+            builder_portal_url: portalUrl,
+            recovery_of_pre_verified_advance: true,
+            changed_at: nowIso,
+            operator: verifyActor,
+          },
+        }).then(() => {}).catch(() => {})
+      }
     }
-    return { ok: true, already_done: true, substatus: currentSubstatus, portal_link_added: !!idempotentLinks }
+    return {
+      ok: true,
+      already_done: true,
+      substatus: currentSubstatus,
+      portal_link_added: !!idempotentLinks,
+      verification_recorded: !alreadyVerifiedThisCycle,
+    }
   }
 
-  const nowIso = new Date().toISOString()
   const updates: Record<string, any> = {
     substatus: 'admin_to_send_report',
     report_received_at: nowIso,
     updated_at: nowIso,
+    // W2-C: record the portal-locked verification for the current cycle.
+    ...verificationStamp,
   }
   // BE-2 self-heal: accepted via the persisted job family -> persist the
   // report_type token on the detail row in this same state update.
@@ -10307,15 +10393,219 @@ async function markMakesafePortalReportDone(client: any, body: any) {
       report_type: reportType,
       report_type_healed_from_family: !!healReportType,
       builder_portal_url: portalUrl,
+      // W2-C: the recorded portal-locked verification (cycle-scoped).
+      portal_verified: true,
+      portal_verified_cycle: currentCycle,
+      portal_verified_signal: verifySignal,
       changed_at: nowIso,
-      operator: body.operator_email || body.user_email || null,
+      operator: verifyActor,
     },
   }).then(() => {}).catch(() => {})
 
-  return { ok: true, already_done: false, details: updated }
+  return { ok: true, already_done: false, verification_recorded: true, details: updated }
 }
 // Test-only export alias (mirrors the `_`-prefixed convention above).
 export const _markMakesafePortalReportDone = markMakesafePortalReportDone
+
+// ════════════════════════════════════════════════════════════
+// W2-C (M-E1) PORTAL-TRUTH GUARD + RECHECK QUEUE — items 7 + 14.
+//
+// Item 14 ("graf"): 8+ roof-report cards carried ready_to_invoice and/or auto-cut
+// Xero DRAFT invoices while their primeeco portal form was never submitted. The
+// invariant enforced here: no AUTOMATED path advances a report-type card to a
+// report-complete substatus, or drafts its invoice, without a recorded
+// portal-locked verification (mark_makesafe_portal_report_done) for the current
+// cycle. Server-side lock detection is deliberately NOT built — the portal is a
+// client-rendered SPA behind a private share-token login (feasibility proven
+// 2026-07-07); the deterministic detector is the skill's capture_portal_evidence.py
+// run agent-side, whose result the marker records.
+// ════════════════════════════════════════════════════════════
+
+// Load the portal-verification state for a make-safe job. isReportType mirrors the
+// marker's rule (persisted report_type OR a report-family jobs.metadata), so a
+// family-detected report card is guarded even before report_type self-heals.
+async function loadMakesafePortalVerification(
+  client: any,
+  jobId: string,
+): Promise<PortalVerificationState & { reportType: string | null }> {
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('report_type, cycle_number, portal_verified_at, portal_verified_cycle')
+    .eq('job_id', jobId)
+    .maybeSingle()
+  let reportType = String(detail?.report_type || '').trim() || null
+  if (!reportType) {
+    const { data: jobRow } = await client.from('jobs')
+      .select('metadata').eq('id', jobId).maybeSingle()
+    const fam = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
+    reportType = _reportTypeForJobFamily(fam) || null
+  }
+  return {
+    isReportType: !!reportType,
+    reportType,
+    currentCycle: Number(detail?.cycle_number ?? 1),
+    verifiedAt: detail?.portal_verified_at ?? null,
+    verifiedCycle: detail?.portal_verified_cycle ?? null,
+  }
+}
+export const _loadMakesafePortalVerification = loadMakesafePortalVerification
+
+// Item-14 guard for a substatus advance. No-op unless the job is a report-type
+// card advancing to a report-complete substatus without a current-cycle
+// verification. Called from the update_makesafe_substatus DISPATCH (the external
+// entry point) — the internal advanceMakesafeSubstatusOnInvoice / send-pack
+// patches call updateMakesafeSubstatus directly and so are intentionally NOT
+// re-gated here (they only run post-send, after verification, mirroring the
+// existing ROUTINE_FORBIDDEN_SUBSTATUSES dispatch guard).
+async function assertMakesafePortalVerifiedForAdvance(
+  client: any,
+  jobId: string | null | undefined,
+  nextSubstatus: string | null | undefined,
+): Promise<void> {
+  if (!jobId) return
+  const norm = normalizeMakesafeSubstatus(nextSubstatus)
+  const state = await loadMakesafePortalVerification(client, jobId)
+  if (!_substatusAdvanceNeedsPortalVerification(norm, state.isReportType)) return
+  if (_portalVerificationSatisfied(state)) return
+  throw new ApiError(
+    `portal-truth guard (item 14): cannot advance report-type job ${jobId} to '${norm}' — ` +
+    `no portal-locked verification recorded for cycle ${state.currentCycle}. Confirm the ` +
+    `builder portal is submitted (capture_portal_evidence.py -> locked) and record it via ` +
+    `mark_makesafe_portal_report_done first.`,
+    409,
+  )
+}
+export const _assertMakesafePortalVerifiedForAdvance = assertMakesafePortalVerifiedForAdvance
+
+// Item-14 guard for a DRAFT invoice. No-op for non-report make-safes (they draft
+// normally). A report-type card must carry a current-cycle portal-locked
+// verification before any draft invoice is cut — this is the direct kill for the
+// "graf" class (DRAFT invoices minted before the portal report was submitted).
+async function assertMakesafePortalVerifiedForDraftInvoice(
+  client: any,
+  jobId: string | null | undefined,
+): Promise<void> {
+  if (!jobId) return
+  const state = await loadMakesafePortalVerification(client, jobId)
+  if (!state.isReportType) return
+  if (_portalVerificationSatisfied(state)) return
+  throw new ApiError(
+    `portal-truth guard (item 14): refusing to draft an invoice for report-type job ${jobId} — ` +
+    `no portal-locked verification recorded for cycle ${state.currentCycle}. Verify the portal ` +
+    `is submitted and record it via mark_makesafe_portal_report_done before invoicing.`,
+    409,
+  )
+}
+export const _assertMakesafePortalVerifiedForDraftInvoice = assertMakesafePortalVerifiedForDraftInvoice
+
+// ── Honest fallback: portal-recheck queue (agent-side runs consume) ──
+// Shared scan: active report-type cards with a portal link, not verified this
+// cycle. The queue read formats them for capture_portal_evidence.py; the enqueue
+// cron stamps a rate-limited recheck marker on them.
+const PORTAL_RECHECK_DETAIL_SELECT =
+  'job_id, external_ref, substatus, cycle_number, external_links, report_type, ' +
+  'portal_verified_at, portal_verified_cycle, portal_recheck_requested_at, portal_recheck_count'
+
+async function scanPortalRecheckCards(client: any): Promise<Array<{
+  detail: any; job: any; currentCycle: number; portalLinks: ReturnType<typeof _extractPortalLinks>
+}>> {
+  const { data: details, error } = await client.from('makesafe_job_details')
+    .select(PORTAL_RECHECK_DETAIL_SELECT)
+    .not('report_type', 'is', null)
+  if (error) throw error
+  const rows = (details || []).filter((d: any) => d?.job_id)
+  const jobIds = rows.map((d: any) => d.job_id)
+  const jobs = await _fetchAllByJobIdChunked(
+    client, 'jobs', 'id, job_number, status, site_address, client_name', jobIds,
+    undefined, 'id',
+  )
+  const jobsById: Record<string, any> = {}
+  for (const j of jobs) jobsById[j.id] = j
+  const out: Array<{ detail: any; job: any; currentCycle: number; portalLinks: ReturnType<typeof _extractPortalLinks> }> = []
+  for (const d of rows) {
+    const job = jobsById[d.job_id]
+    if (!job) continue
+    const currentCycle = Number(d.cycle_number ?? 1)
+    const eligible = _portalRecheckEligible({
+      jobStatus: job.status,
+      isReportType: true,
+      externalLinks: d.external_links,
+      currentCycle,
+      verifiedAt: d.portal_verified_at ?? null,
+      verifiedCycle: d.portal_verified_cycle ?? null,
+    })
+    if (!eligible) continue
+    out.push({ detail: d, job, currentCycle, portalLinks: _extractPortalLinks(d.external_links) })
+  }
+  return out
+}
+
+// READ: the portal-recheck queue an agent run consumes. capture_links is shaped
+// for capture_portal_evidence.py links.json ([{ref,url,role,label}]). No writes.
+async function makesafePortalRecheckQueue(client: any, params: URLSearchParams) {
+  const rawLimit = Number(params.get('limit') || '100')
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.floor(rawLimit))) : 100
+  const cards = await scanPortalRecheckCards(client)
+  const queue = cards.slice(0, limit).map(({ detail, job, currentCycle, portalLinks }) => {
+    const ref = detail.external_ref || job.job_number || detail.job_id
+    return {
+      job_id: detail.job_id,
+      job_number: job.job_number || null,
+      external_ref: detail.external_ref || null,
+      report_type: detail.report_type || null,
+      substatus: normalizeMakesafeSubstatus(detail.substatus),
+      cycle_number: currentCycle,
+      site_address: job.site_address || null,
+      portal_recheck_requested_at: detail.portal_recheck_requested_at || null,
+      portal_recheck_count: Number(detail.portal_recheck_count || 0),
+      portal_links: portalLinks,
+      // Ready to write straight to capture_portal_evidence.py's links.json.
+      capture_links: portalLinks.map((l) => ({ ref, url: l.url, role: l.role, label: l.label })),
+    }
+  })
+  return { ok: true, count: cards.length, returned: queue.length, queue, generated_at: new Date().toISOString() }
+}
+export const _makesafePortalRecheckQueue = makesafePortalRecheckQueue
+
+// WRITE (cron): stamp a rate-limited recheck marker on eligible cards so the queue
+// carries a durable "recheck due since / how many times" signal even between agent
+// runs. Idempotent within the cadence window (min_interval_hours, default 6).
+// Stamps markers only — never advances substatus, never drafts, never sends.
+async function makesafePortalRecheckEnqueue(client: any, body: any) {
+  const rawInterval = Number(body?.min_interval_hours ?? body?.minIntervalHours ?? 6)
+  const minIntervalHours = Number.isFinite(rawInterval) ? Math.max(0, Math.min(168, rawInterval)) : 6
+  const minIntervalMs = minIntervalHours * 3600_000
+  const rawMax = Number(body?.max_enqueue ?? body?.maxEnqueue ?? 200)
+  const maxEnqueue = Number.isFinite(rawMax) ? Math.max(1, Math.min(500, Math.floor(rawMax))) : 200
+  const now = Date.now()
+  const nowIso = new Date(now).toISOString()
+  const cards = await scanPortalRecheckCards(client)
+  let enqueued = 0
+  let skippedRecent = 0
+  for (const { detail } of cards) {
+    if (!_portalRecheckDue(detail.portal_recheck_requested_at, now, minIntervalMs)) {
+      skippedRecent++
+      continue
+    }
+    if (enqueued >= maxEnqueue) break
+    const { error: upErr } = await client.from('makesafe_job_details').update({
+      portal_recheck_requested_at: nowIso,
+      portal_recheck_count: Number(detail.portal_recheck_count || 0) + 1,
+      portal_recheck_reason: 'report-type card with portal link, not verified this cycle',
+      updated_at: nowIso,
+    }).eq('job_id', detail.job_id)
+    if (upErr) throw upErr
+    enqueued++
+  }
+  return {
+    ok: true,
+    enqueued,
+    skipped_recent: skippedRecent,
+    eligible: cards.length,
+    min_interval_hours: minIntervalHours,
+    enqueued_at: nowIso,
+  }
+}
+export const _makesafePortalRecheckEnqueue = makesafePortalRecheckEnqueue
 
 // ── Slice 3: dedicated make-safe pipeline ──
 async function makesafePipeline(client: any, params: URLSearchParams) {
@@ -21202,6 +21492,9 @@ interface CreateMakesafeDraftInvoiceDeps {
     reason?: string | null
   }) => Promise<any>
   createInvoiceFn?: (client: any, body: any) => Promise<any>
+  // W2-C item-14 portal-truth guard (default: assertMakesafePortalVerifiedForDraftInvoice).
+  // Overridable so pricing/dup-guard unit tests with a stub client can opt out.
+  assertPortalVerified?: (client: any, jobId: string | null) => Promise<void>
 }
 
 function makesafeDraftLinesForXero(lines: any[]): any[] {
@@ -21502,6 +21795,12 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
   if (!Array.isArray(lines) || lines.length === 0) throw new ApiError('line_items required', 400)
+  // W2-C (item 14): PORTAL-TRUTH GUARD FIRST, before any Xero read. A report-type
+  // card may not have a DRAFT invoice cut until a portal-locked verification is
+  // recorded for its current cycle — the direct kill for the "graf" class (DRAFT
+  // invoices minted before the builder portal report was ever submitted). No-op
+  // for normal make-safes and for job-less draft calls.
+  await (deps.assertPortalVerified || assertMakesafePortalVerifiedForDraftInvoice)(client, jobId)
   // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
   // to the make-safe reference. A VOIDED/DELETED invoice never blocks. We run
   // this before the pricing refusal so a renderer-only repair can preserve an
