@@ -460,7 +460,11 @@ serve(async (req: Request) => {
     }
 
     // ── GHL location/business profile summary (sw_get_profile) ──
-    if (action === 'get_profile') {
+    // GET only: the trade/ops apps POST action=get_profile {userId} for the USER
+    // profile handler further down — without the method guard this block shadows
+    // it and every app login degrades to the roleless fallback (prod incident
+    // 2026-07-07: Board tab hidden, calendar/jobs errored for all app users).
+    if (action === 'get_profile' && req.method !== 'POST') {
       try {
         const data = await ghl(`/locations/${GHL_LOCATION_ID}`)
         const loc = data.location || data
