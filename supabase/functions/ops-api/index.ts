@@ -222,10 +222,11 @@ import {
   _collectPosts as _monitorCollectPosts,
   _resolveGroupId as _monitorResolveGroupId,
 } from '../monitor-ses-makesafes/index.ts'
-import { getGraphToken as _getGraphToken } from '../_shared/graph_client.ts'
+import { getGraphToken as _getGraphToken, graphFetch as _graphFetch } from '../_shared/graph_client.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
+  senderMatchesWatchedFloor as _senderMatchesWatchedFloor,
 } from '../_shared/makesafe_intake_classification.ts'
 // M4 U1 (profit-trade-invoice-intelligence-2026-07-03, wiki #112) — make-safe
 // trade-invoice hours control. All branching lives in the pure module (unit-
@@ -382,6 +383,7 @@ import {
   checkExactRecipientGate,
   buildPackSentMarkerText,
   isPackSentMainEvent as _sendPackIsPackSentMainEvent,
+  isPackSentTriageEvent as _sendPackIsPackSentTriageEvent,
   LOCKABLE_STATUSES,
   MAKESAFE_ADMIN_FROM,
   MAKESAFE_CC,
@@ -436,6 +438,7 @@ import {
   AGENT_REPLY_PREFIX,
   buildAgentReplyBody,
   noteIsAddressable,
+  resolveNoteVisibility,
 } from './makesafe_draft_notes.ts'
 // Review & Send mission — Claude-backed Draft Pack / Revise Pack generator.
 // Pure helpers only; this file supplies the draft-only Supabase/Xero/storage
@@ -10003,21 +10006,12 @@ function resolveMakesafeReportRecipient(args: {
 }
 
 // The marker note the reporting skill writes on a successful make-safe pack send
-// (send_makesafe_email.py). It rides the job_events note stream as
+// (send_makesafe_email.py) rides the job_events note stream as
 // `MAKESAFE_PACK_SENT | <kind: main|photo> | ...`. The board only treats the
-// `main` pack as a verified send; the `photo` follow-up does not count.
-const MAKESAFE_PACK_SENT_MAIN_PREFIX = 'MAKESAFE_PACK_SENT | main'
-
-// True if a job_events note row carries the MAKESAFE_PACK_SENT | main marker.
-function isPackSentMainEvent(ev: any): boolean {
-  if (!ev || String(ev.event_type) !== 'note') return false
-  let dj = ev.detail_json
-  if (typeof dj === 'string') {
-    try { dj = JSON.parse(dj) } catch (_) { dj = { text: dj } }
-  }
-  const text = dj && typeof dj === 'object' ? dj.text : null
-  return typeof text === 'string' && text.trim().startsWith(MAKESAFE_PACK_SENT_MAIN_PREFIX)
-}
+// `main` pack as a verified send; the `photo` follow-up does not count. The
+// detector + writer live in makesafe_send_pack.ts (the single source of truth,
+// imported above) — this file keeps NO private copy, so the two sides can never
+// drift on the marker shape (the class of the SWMS-26832 false OUTSTANDING-TO-SEND).
 
 // ── Paginated, id-chunked .in() reader (money-safety) ────────────────────────
 // PostgREST caps a single response at 1000 rows. A make-safe job set can carry
@@ -10065,7 +10059,9 @@ async function _fetchAllByJobIdChunked(
 export const _fetchAllByJobIdChunkedForTest = _fetchAllByJobIdChunked
 
 // Build a job_id -> boolean map of which jobs carry a verified MAKESAFE_PACK_SENT
-// | main marker note. PAGINATED + id-chunked read over job_events for the
+// | main marker note (or the documented legacy bundled-coverage note — SWMS-26832
+// — via the shared triage predicate, so a bundled-covered card no longer shows a
+// false OUTSTANDING-TO-SEND). PAGINATED + id-chunked read over job_events for the
 // candidate job set (was a single unpaginated .in() that truncated at 1000 rows
 // and could drop a sent-marker beyond the cap, re-surfacing a SENT job). The
 // EXISTS-style reduction happens in JS over EVERY returned note row. Triage flag
@@ -10084,7 +10080,7 @@ async function buildPackSentMap(client: any, jobIds: string[]): Promise<Record<s
     (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
   )
   for (const ev of (events || [])) {
-    if (ev?.job_id && isPackSentMainEvent(ev)) map[ev.job_id] = true
+    if (ev?.job_id && _sendPackIsPackSentTriageEvent(ev)) map[ev.job_id] = true
   }
   return map
 }
@@ -10768,6 +10764,11 @@ export const _makesafePipelineForTest = makesafePipeline
 
 // Test-only export for the close-out doc-attach path (typed + idempotent).
 export const _attachMakesafeDocumentForTest = attachMakesafeDocument
+
+// Test-only exports for the item-11 live-Graph attachment fallback.
+export const _pickGraphAttachmentForTest = pickGraphAttachment
+export const _resolveMailboxCandidatesForTest = resolveMailboxCandidates
+export const _attachEmailAttachmentToJobForTest = attachEmailAttachmentToJob
 
 // ── sw_makesafe_audit: compact pipeline reader (jobs[] + known_refs[]) ──
 // Retires the per-job sw_job_detail loop in the intake-audit + close-out-audit
@@ -13722,9 +13723,13 @@ async function scanSesMakesafes(client: any) {
     // Match if sender matches a known pattern OR subject contains work order keywords.
     // Sender matching is shared with monitor-ses-makesafes and uses anchored domain
     // suffix logic, not substring includes(), so lookalike domains cannot drift in.
+    // The code-level watched-sender floor (item 11) adds Prime's notification
+    // channel as a first-class sender so its WOs are candidates even without a DB
+    // pattern; the isGenuineNewWorkOrder gate below still guards draft creation.
     const senderMatch = senderPatterns.some(sp => _senderMatchesPattern(fromEmail, sp.pattern))
+    const floorMatch = _senderMatchesWatchedFloor(fromEmail)
     const subjectMatch = /work\s*order|make\s*safe|emergency|storm|urgent\s*(attend|repair)/i.test(subject)
-    return senderMatch || (subjectMatch && (fromEmail.includes('.build') || fromEmail.includes('primeeco.tech')))
+    return senderMatch || floorMatch || (subjectMatch && (fromEmail.includes('.build') || fromEmail.includes('primeeco.tech')))
   })
 
   // Process a bounded number of UNPROCESSED candidates, not a blind "newest 50"
@@ -20170,7 +20175,16 @@ async function addNote(client: any, body: any, isAdmin = false) {
   // Sales cockpit notes are staff-only by default. GHL contact notes are CRM
   // notes, not customer messages; when explicitly requested, mirror there too
   // so the salesmen see the same context in LeadConnector/GHL.
-  const noteVisibility = visibility === 'internal_only' ? 'internal_only' : 'client_visible'
+  //
+  // Item 10 — a caller-stated visibility ALWAYS wins (backward compatible). When
+  // it is unspecified, a system/audit marker body (a MAKESAFE_PACK_SENT send
+  // breadcrumb, an agent-reply marker) DEFAULTS to internal_only so it never
+  // syncs to a client-facing GHL note. Before this, a marker written via
+  // sw_add_note (which passes no visibility) defaulted to client_visible +
+  // sync_to_ghl — the 2026-07-07 SWMS-26832 marker backfill hit exactly this,
+  // one GHL-linked job away from leaking an internal audit breadcrumb to a
+  // client. Ordinary notes are unchanged: unspecified => client_visible.
+  const noteVisibility = resolveNoteVisibility(visibility, text)
   const shouldSyncToGhl = sync_to_ghl === true || (sync_to_ghl !== false && noteVisibility === 'client_visible')
 
   const { data, error } = await client.from('job_events').insert({
@@ -20924,13 +20938,122 @@ async function confirmDocumentUpload(client: any, body: any) {
 // operator_email. Read of the private bytes + upload of the public copy run on
 // the admin (service-role) client; the job_documents write reuses the caller's
 // client via attachMakesafeDocument. Does NOT change job status or send.
-async function attachEmailAttachmentToJob(client: any, body: any) {
+// ── item 11: live-Graph fallback helpers (pure + testable) ───────────────────
+
+// A Graph message attachment (fileAttachment) as returned by
+// GET /users/{mailbox}/messages/{id}/attachments.
+interface GraphMessageAttachment {
+  id?: string
+  name?: string
+  contentType?: string
+  size?: number
+  contentBytes?: string // base64
+}
+
+// Choose which attachment to attach from a live Graph attachments list. Only file
+// attachments that carry inline base64 bytes are eligible (item/reference stubs
+// and empty ones are skipped). Priority: explicit graph attachment id, then exact
+// file name (case-insensitive), then the first PDF, then the first eligible file.
+// Returns null when nothing qualifies. Pure — the handler owns the Graph I/O.
+function pickGraphAttachment(
+  attachments: GraphMessageAttachment[] | null | undefined,
+  pick: { attachmentId?: string | null; fileName?: string | null } = {},
+): GraphMessageAttachment | null {
+  const eligible = (attachments || []).filter(
+    (a) => a && typeof a.contentBytes === 'string' && a.contentBytes.length > 0,
+  )
+  if (!eligible.length) return null
+  const wantId = String(pick.attachmentId || '').trim()
+  if (wantId) {
+    const byId = eligible.find((a) => a.id === wantId)
+    if (byId) return byId
+  }
+  const wantName = String(pick.fileName || '').trim().toLowerCase()
+  if (wantName) {
+    const byName = eligible.find((a) => String(a.name || '').trim().toLowerCase() === wantName)
+    if (byName) return byName
+  }
+  const isPdf = (a: GraphMessageAttachment) =>
+    String(a.contentType || '').toLowerCase().includes('pdf') ||
+    String(a.name || '').toLowerCase().endsWith('.pdf')
+  return eligible.find(isPdf) || eligible[0]
+}
+
+// The ordered, de-duplicated set of mailboxes to try a live Graph message read
+// against when the email_attachments intake table has no synced bytes. A
+// caller-supplied mailbox wins; then the mailbox the emails projection recorded
+// for this message; then the documented default set (ses@ group + admin@) — where
+// both inbound WOs and our own OUTBOUND sent packs live.
+const MAKESAFE_MAILBOX_FALLBACKS = [
+  'ses@secureworkswa.com.au',
+  'admin@secureworkswa.com.au',
+]
+function resolveMailboxCandidates(
+  bodyMailbox: string | null | undefined,
+  emailRowMailbox: string | null | undefined,
+  defaults: readonly string[] = MAKESAFE_MAILBOX_FALLBACKS,
+): string[] {
+  const out: string[] = []
+  const add = (m: string | null | undefined) => {
+    const v = String(m || '').trim().toLowerCase()
+    if (v && !out.includes(v)) out.push(v)
+  }
+  add(bodyMailbox)
+  add(emailRowMailbox)
+  for (const d of defaults) add(d)
+  return out
+}
+
+type GraphAttachmentsResult =
+  | { ok: true; attachments: GraphMessageAttachment[] }
+  | { ok: false; status: number; error: string }
+
+// Live-read a mailbox message's attachments via Graph (token self-heal on a 401
+// expired-token via the shared graphFetch refresh path — intake item 12).
+async function fetchGraphMessageAttachments(
+  mailbox: string,
+  messageId: string,
+): Promise<GraphAttachmentsResult> {
+  const token = await _getGraphToken()
+  const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments`
+  const resp = await _graphFetch(url, token, { refresh: () => _getGraphToken({ forceRefresh: true }) })
+  if (!resp.ok) {
+    const error = await resp.text().catch(() => '')
+    return { ok: false, status: resp.status, error: String(error).slice(0, 300) }
+  }
+  const data = await resp.json().catch(() => ({}))
+  return { ok: true, attachments: (data?.value || []) as GraphMessageAttachment[] }
+}
+
+// Copy a work-order (or other typed) PDF onto a live make-safe job's document list.
+//
+// PRIMARY path: resolve the synced email_attachments row (private makesafe-emails
+// bucket) and re-host it — unchanged.
+//
+// FALLBACK (item 11): when the intake table has no synced bytes, live-read the
+// mailbox message via Graph and attach the chosen attachment. This covers the two
+// real 2026-07-07 gaps that used to 500: (a) our own OUTBOUND sent packs (Admin
+// Sent Items are never in the inbound intake table) and (b) inbound WOs from
+// senders not in the intake watch set (e.g. Prime Notification Centre). The typed,
+// idempotent delegation to attachMakesafeDocument is identical on both paths.
+//
+// `deps.fetchGraphAttachments` is injectable for tests; production uses the live
+// Graph fetch above.
+async function attachEmailAttachmentToJob(
+  client: any,
+  body: any,
+  deps: {
+    fetchGraphAttachments?: (mailbox: string, messageId: string) => Promise<GraphAttachmentsResult>
+    adminClient?: any
+  } = {},
+) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
   const type = body.type || 'work_order'
 
-  // Resolve the source email_attachments row.
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  // ── PRIMARY: resolve a synced email_attachments row. A miss no longer throws —
+  //    it falls through to the live-Graph fallback below.
+  const adminClient = deps.adminClient || createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
   let att: any = null
   if (body.email_attachment_id || body.attachment_id) {
     const { data, error } = await adminClient.from('email_attachments')
@@ -20949,38 +21072,89 @@ async function attachEmailAttachmentToJob(client: any, body: any) {
     // Prefer a PDF when multiple match and no exact name was given.
     const rows = data || []
     att = rows.find((r: any) => (r.content_type || '').includes('pdf') || (r.name || '').toLowerCase().endsWith('.pdf')) || rows[0]
-  } else {
-    throw new Error('email_attachment_id (preferred) or email_id required to resolve the source PDF')
   }
 
-  if (!att) throw new Error('no matching email_attachments row found')
-  if (!att.storage_path) throw new Error(`email_attachments ${att.id} has no storage_path (status='${att.status}') — bytes not synced yet`)
+  if (att && att.storage_path) {
+    // Download the private bytes (service role) and re-host — the proven path.
+    const { data: blob, error: dlErr } = await adminClient.storage
+      .from('makesafe-emails')
+      .download(att.storage_path)
+    if (dlErr || !blob) throw new Error('private bucket download failed: ' + (dlErr?.message || 'no blob') + ` (path=${att.storage_path})`)
+    const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+    const fileName = body.file_name || body.name || att.name || `work-order-${jId}.pdf`
+    const result = await attachMakesafeDocument(client, {
+      job_id: jId,
+      type,
+      pdf_base64: bytesToBase64(fileBuffer),
+      file_name: fileName,
+      visible_to_trades: body.visible_to_trades,
+      operator_email: body.operator_email || body.uploaded_by,
+    })
+    return {
+      ...result,
+      source: 'email_attachment',
+      email_attachment_id: att.id,
+      source_storage_path: att.storage_path,
+      bytes: fileBuffer.length,
+    }
+  }
 
-  // Download the private bytes (service role).
-  const { data: blob, error: dlErr } = await adminClient.storage
-    .from('makesafe-emails')
-    .download(att.storage_path)
-  if (dlErr || !blob) throw new Error('private bucket download failed: ' + (dlErr?.message || 'no blob') + ` (path=${att.storage_path})`)
-  const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+  // ── FALLBACK (item 11): live Graph fetch for ANY mailbox message. ──
+  const messageId = String(body.message_id || body.email_id || body.graph_message_id || '').trim()
+  if (!messageId) {
+    // No synced row AND nothing to fetch live — a clear 400, not an opaque 500.
+    throw new ApiError(
+      'attach failed: no synced email_attachments bytes and no message_id/email_id to fetch the attachment live from the mailbox' +
+        (att ? ` (email_attachments ${att.id} status='${att.status}' has no storage_path)` : ''),
+      400,
+    )
+  }
+  // Best-effort mailbox hint from the emails projection (post_id == Graph msg id).
+  let emailRowMailbox: string | null = null
+  try {
+    const { data: emailRow } = await adminClient.from('emails')
+      .select('mailbox').eq('post_id', messageId).maybeSingle()
+    emailRowMailbox = emailRow?.mailbox || null
+  } catch (_) { /* projection is optional — defaults still cover it */ }
 
-  // Delegate to the shared attach path (job-documents upload + job_documents
-  // row + idempotency + ledger). file_name defaults to the source name.
-  const fileName = body.file_name || body.name || att.name || `work-order-${jId}.pdf`
+  const candidates = resolveMailboxCandidates(body.mailbox, emailRowMailbox)
+  const fetchGraph = deps.fetchGraphAttachments || fetchGraphMessageAttachments
+  const pick = {
+    attachmentId: body.graph_attachment_id || body.attachment_id || null,
+    fileName: body.file_name || body.name || null,
+  }
+  let chosen: GraphMessageAttachment | null = null
+  let lastError = ''
+  for (const mailbox of candidates) {
+    const r = await fetchGraph(mailbox, messageId)
+    if (!r.ok) { lastError = `${mailbox}: ${r.status} ${r.error}`; continue }
+    const picked = pickGraphAttachment(r.attachments, pick)
+    if (picked) { chosen = picked; break }
+    lastError = `${mailbox}: message has no eligible (inline-bytes) attachment`
+  }
+  if (!chosen) {
+    throw new ApiError(
+      `attach failed: could not resolve a mailbox attachment for message ${messageId} ` +
+        `(tried ${candidates.join(', ')}; ${lastError})`,
+      404,
+    )
+  }
+
+  const fileName = body.file_name || body.name || chosen.name || `work-order-${jId}.pdf`
   const result = await attachMakesafeDocument(client, {
     job_id: jId,
     type,
-    pdf_base64: bytesToBase64(fileBuffer),
+    pdf_base64: chosen.contentBytes,
     file_name: fileName,
     visible_to_trades: body.visible_to_trades,
     operator_email: body.operator_email || body.uploaded_by,
   })
-
   return {
     ...result,
-    source: 'email_attachment',
-    email_attachment_id: att.id,
-    source_storage_path: att.storage_path,
-    bytes: fileBuffer.length,
+    source: 'mailbox_graph',
+    message_id: messageId,
+    graph_attachment_id: chosen.id || null,
+    mailbox_tried: candidates,
   }
 }
 

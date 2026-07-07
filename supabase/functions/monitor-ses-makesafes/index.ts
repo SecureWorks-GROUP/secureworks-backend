@@ -45,6 +45,7 @@ function graphGet(url: string, token: string): Promise<Response> {
 import {
   parseSenderDomain,
   senderMatchesPattern,
+  senderMatchesWatchedFloor,
 } from "../_shared/makesafe_intake_classification.ts";
 // SINGLE SOURCE OF TRUTH for ref prefixes + normalisation, shared with the
 // reconciler (ops-api/makesafe_reconcile.ts) so the email side and the board side
@@ -491,6 +492,14 @@ function classifyPost(
       ref,
       company: matchedCompany,
     };
+  }
+
+  // Item 11 — the code-level watched-sender floor (Prime's notification channel)
+  // is watched like a company sender pattern, so its work orders + PDF attachments
+  // are synced to email_attachments instead of missing the table (the class of
+  // sw_attach_email_attachment_to_job 500s). No company binding, so company:null.
+  if (senderMatchesWatchedFloor(fromEmail)) {
+    return { include: true, reason: "sender_floor", ref, company: null };
   }
   if (subjectRefMatch) {
     return { include: true, reason: "subject_ref", ref, company: null };

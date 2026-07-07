@@ -40,6 +40,37 @@ export function rejectIfPackSentMarker(body: string): void {
   }
 }
 
+// True iff the body is a SYSTEM / AUDIT marker note — an internal breadcrumb that
+// must never surface to a client. Covers the pack-sent send marker
+// (MAKESAFE_PACK_SENT, any kind/spacing) and the agent-reply marker
+// (MAKESAFE_AGENT_REPLY). add_note (item 10) uses this to DEFAULT such bodies to
+// internal_only when the caller states no visibility, so a marker written via
+// sw_add_note (which passes none) can never sync to a client-facing GHL note —
+// the exact one-edit-away hazard the 2026-07-07 SWMS-26832 marker backfill hit
+// (it landed client_visible + sync_to_ghl, harmless only because those jobs had
+// no ghl_contact_id). An explicit visibility always overrides this default.
+export function noteIsSystemMarker(body: string | null | undefined): boolean {
+  const t = typeof body === "string" ? body : "";
+  return isPackSentMarker(t) || isAgentReplyNote(t);
+}
+
+// Resolve the effective add_note visibility (item 10). A caller-stated visibility
+// ('internal_only' | 'client_visible') ALWAYS wins — backward compatible with
+// every existing caller. When it is unspecified (or an unrecognised value), a
+// system/audit marker body defaults to internal_only (never client-facing) and
+// every other body keeps the historic client_visible default. This is the whole
+// contract of the item-10 fix, isolated as a pure function so it can be pinned
+// without a DB stub.
+export type NoteVisibility = "internal_only" | "client_visible";
+export function resolveNoteVisibility(
+  visibility: unknown,
+  body: string | null | undefined,
+): NoteVisibility {
+  if (visibility === "internal_only") return "internal_only";
+  if (visibility === "client_visible") return "client_visible";
+  return noteIsSystemMarker(body) ? "internal_only" : "client_visible";
+}
+
 // Prefix a human-readable change description with AGENT_REPLY_PREFIX so every
 // routine reply note is uniformly identifiable in the thread. Always produces a
 // string that is an agent reply note and is NEVER a pack-sent marker (the two
@@ -62,5 +93,7 @@ export function noteIsAddressable(
 export const _isAgentReplyNote = isAgentReplyNote;
 export const _isPackSentMarker = isPackSentMarker;
 export const _rejectIfPackSentMarker = rejectIfPackSentMarker;
+export const _noteIsSystemMarker = noteIsSystemMarker;
+export const _resolveNoteVisibility = resolveNoteVisibility;
 export const _buildAgentReplyBody = buildAgentReplyBody;
 export const _noteIsAddressable = noteIsAddressable;

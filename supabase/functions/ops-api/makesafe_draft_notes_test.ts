@@ -21,9 +21,45 @@ import {
   isAgentReplyNote,
   isPackSentMarker,
   noteIsAddressable,
+  noteIsSystemMarker,
   PACK_SENT_MARKER_PREFIX,
   rejectIfPackSentMarker,
+  resolveNoteVisibility,
 } from "./makesafe_draft_notes.ts";
+
+// ─────────────────────────────────────────────────────────────────
+// Item 10 — system/audit marker notes default to internal_only visibility so a
+// marker written via sw_add_note (which passes no visibility) can never sync to
+// a client-facing GHL note. Anchor: the 2026-07-07 SWMS-26832 marker backfill
+// landed client_visible + sync_to_ghl (harmless only because those jobs had no
+// ghl_contact_id). An explicit visibility always overrides the default.
+// ─────────────────────────────────────────────────────────────────
+Deno.test("noteIsSystemMarker: pack-sent + agent-reply markers are system; ordinary notes are not", () => {
+  assert(noteIsSystemMarker("MAKESAFE_PACK_SENT | main | INV-0835 | to=b@x"));
+  assert(noteIsSystemMarker("MAKESAFE_PACK_SENT | photo | INV-1"));
+  assert(noteIsSystemMarker(buildAgentReplyBody("re-ran the report")));
+  assertEquals(noteIsSystemMarker("Called the client, will attend Tuesday"), false);
+  assertEquals(noteIsSystemMarker(""), false);
+  assertEquals(noteIsSystemMarker(null), false);
+});
+
+Deno.test("resolveNoteVisibility: unspecified marker => internal_only; ordinary => client_visible", () => {
+  const marker = "MAKESAFE_PACK_SENT | main | INV-0835 | to=bunbury@mlbuilders.com.au";
+  assertEquals(resolveNoteVisibility(undefined, marker), "internal_only");
+  assertEquals(resolveNoteVisibility(null, marker), "internal_only");
+  assertEquals(resolveNoteVisibility(undefined, "spoke to the owner"), "client_visible");
+});
+
+Deno.test("resolveNoteVisibility: an explicit visibility ALWAYS wins (backward compatible)", () => {
+  const marker = "MAKESAFE_PACK_SENT | main | INV-0835";
+  // Explicit client_visible on a marker is honoured (caller's stated intent).
+  assertEquals(resolveNoteVisibility("client_visible", marker), "client_visible");
+  // Explicit internal_only on an ordinary note is honoured (prior behaviour).
+  assertEquals(resolveNoteVisibility("internal_only", "ordinary note"), "internal_only");
+  // An unrecognised value is treated as unspecified (marker => internal_only).
+  assertEquals(resolveNoteVisibility("weird", marker), "internal_only");
+  assertEquals(resolveNoteVisibility("weird", "ordinary note"), "client_visible");
+});
 
 // ─────────────────────────────────────────────────────────────────
 // 0. Prefix contract — pin the literal strings (other modules + the DB
