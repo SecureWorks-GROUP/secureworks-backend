@@ -659,6 +659,19 @@ async function syncInvoices(sb: any) {
   // ── Materials-actuals ingestion (U3) — land supplier bills on jobs or queue ──
   const materialsResult = await ingestMaterialsActuals(sb)
 
+  // ── Bank-transactions sync (M9 data substrate) — early-enabled so real
+  //    bank-feed SPEND lines accumulate for M9 receipt-pairing tolerances.
+  //    Isolated like the materials step: any failure here can NEVER break the
+  //    invoice sync. (syncBankTransactions can throw — unlike ingestMaterialsActuals
+  //    which swallows internally — so the try/catch reproduces that isolation here.)
+  let bankTxnResult: any
+  try {
+    bankTxnResult = await syncBankTransactions(sb)
+  } catch (e: any) {
+    bankTxnResult = { success: false, error: (e as Error).message }
+    console.error('[xero-sync] Bank-transactions sync error:', (e as Error).message)
+  }
+
   // ── Reconciliation: verify stale local invoices against Xero ──
   // Find local AUTHORISED/SUBMITTED invoices that haven't been synced in 24h+
   // and check if they still exist in Xero with that status
@@ -721,11 +734,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, materials: materialsResult },
+    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, materials: materialsResult, bank_txn_sync: bankTxnResult },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, reconciled, ...matchResult, materials: materialsResult }
+  return { success: true, synced: totalSynced, reconciled, ...matchResult, materials: materialsResult, bank_txn_sync: bankTxnResult }
 }
 
 
