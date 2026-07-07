@@ -13450,12 +13450,14 @@ async function _patchExistingJobExternalLinks(
   client: any,
   jobId: string,
   incoming: any[],
-): Promise<{ added: any[] }> {
-  if (!jobId || !Array.isArray(incoming) || incoming.length === 0) return { added: [] }
+): Promise<{ added: any[]; upgraded: any[] }> {
+  if (!jobId || !Array.isArray(incoming) || incoming.length === 0) return { added: [], upgraded: [] }
   const { data: detail } = await client.from('makesafe_job_details')
     .select('external_links').eq('job_id', jobId).maybeSingle()
-  const { links, added } = _mergeIntoExternalLinks(detail?.external_links, incoming)
-  if (added.length === 0) return { added: [] }
+  // W3-F: also persist an in-place type upgrade (a re-scan sharpens a stored generic
+  // builder_portal link to its specific kind) — not just a newly-added URL.
+  const { links, added, upgraded } = _mergeIntoExternalLinks(detail?.external_links, incoming)
+  if (added.length === 0 && upgraded.length === 0) return { added: [], upgraded: [] }
   const nowIso = new Date().toISOString()
   const { error: upErr } = await client.from('makesafe_job_details')
     .update({ external_links: links, updated_at: nowIso }).eq('job_id', jobId)
@@ -13467,7 +13469,7 @@ async function _patchExistingJobExternalLinks(
     md.external_links = links
     await client.from('jobs').update({ metadata: md, updated_at: nowIso }).eq('id', jobId)
   } catch (_) { /* alias is best-effort */ }
-  return { added }
+  return { added, upgraded }
 }
 
 // ── M-A2 / W2-B: two-email late WO-PDF landing (orchestration) ─────────────────
@@ -14684,10 +14686,10 @@ async function scanSesMakesafes(client: any) {
             const nudgeLinks = _normalizeReportExternalLinks(extraction)
             if (nudgeLinks.length) {
               try {
-                const { added } = await _patchExistingJobExternalLinks(client, matchedJobId, nudgeLinks)
-                if (added.length) {
-                  nudgeLinksAttached++
-                  console.log('[ops-api] intake nudge link attached to job', matchedJobId, 'ref', extractedRef, '+' + added.length)
+                const { added, upgraded } = await _patchExistingJobExternalLinks(client, matchedJobId, nudgeLinks)
+                if (added.length || upgraded.length) {
+                  if (added.length) nudgeLinksAttached++
+                  console.log('[ops-api] intake nudge link attached to job', matchedJobId, 'ref', extractedRef, '+' + added.length + ' new, ' + upgraded.length + ' retyped')
                   try {
                     await logBusinessEvent(client, {
                       event_type: 'makesafe.intake_nudge_link_attached',
@@ -14695,8 +14697,8 @@ async function scanSesMakesafes(client: any) {
                       entity_type: 'job',
                       entity_id: matchedJobId,
                       job_id: matchedJobId,
-                      body_preview: `Attached ${added.length} builder portal link(s) from a nudge email to existing job (ref ${extractedRef}); no draft minted.`,
-                      payload: { job_id: matchedJobId, external_ref: extractedRef, added_links: added, graph_message_id: msg.id },
+                      body_preview: `Attached ${added.length} + retyped ${upgraded.length} builder portal link(s) from a nudge email to existing job (ref ${extractedRef}); no draft minted.`,
+                      payload: { job_id: matchedJobId, external_ref: extractedRef, added_links: added, upgraded_links: upgraded, graph_message_id: msg.id },
                       metadata: { mission: 'intake/nudge-email-links', reason: 'nudge_link_attached' },
                     })
                   } catch { /* non-blocking breadcrumb */ }
