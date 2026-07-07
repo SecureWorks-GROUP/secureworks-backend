@@ -645,6 +645,8 @@ Deno.test("FIX 2 — matching company slug: company-scoped match STILL creates a
 
 // Stub for updateInvoice: returns a xero_invoice row with a job_id, then
 // returns makesafe_job_details with the given report_type for that job.
+// The report-job $0 gate reads via the service-role admin client (ea2f778), so
+// the stub is passed as updateInvoice's adminClientOverride test seam.
 function makeUpdateInvoiceStub(opts: { reportType: string | null }) {
   return {
     from: (table: string) => ({
@@ -679,7 +681,7 @@ Deno.test("FIX 3 — updateInvoice: report-type job with $0 line total is REJECT
     () => updateInvoice(stub, {
       xero_invoice_id: "xero-inv-1",
       line_items: [{ description: "Labour", quantity: 1, unit_price: 0 }],
-    }),
+    }, stub),
     Error,
     "report job needs a charge amount",
   )
@@ -694,7 +696,7 @@ Deno.test("FIX 3 — updateInvoice: report-type job with $0 total (multi-line su
         { description: "Credit", quantity: 1, unit_price: -50 },
         { description: "Charge", quantity: 1, unit_price: 50 },
       ],
-    }),
+    }, stub),
     Error,
     "report job needs a charge amount",
   )
@@ -707,7 +709,7 @@ Deno.test("FIX 3 — updateInvoice: normal job (no report_type) passes the gate"
     await updateInvoice(stub, {
       xero_invoice_id: "xero-inv-2",
       line_items: [{ description: "Labour", quantity: 1, unit_price: 0 }],
-    })
+    }, stub)
   } catch (e: any) {
     reportGateThrew = (e?.message || "").includes("report job needs a charge")
   }

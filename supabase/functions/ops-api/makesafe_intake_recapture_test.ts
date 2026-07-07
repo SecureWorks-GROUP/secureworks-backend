@@ -486,12 +486,11 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
   async fn() {
-    // recaptureIntakeDraft calls createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) at the
-    // top. Provide stub values so the constructor does not throw; adminClient is never called
-    // before the guard fires (storage calls are in step 4, after the guard returns).
-    Deno.env.set("SUPABASE_URL", "https://stub-supabase.invalid");
-    Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
-
+    // recaptureIntakeDraft builds a service-role adminClient from the module-level
+    // SUPABASE_URL/SERVICE_KEY consts (captured at import, so env.set here is too
+    // late). Inject the stub via the adminClientOverride seam instead. adminClient
+    // is never called before the guard fires (storage calls are step 4, after the
+    // guard returns), so the stub only needs to exist.
     const DRAFT_ID = "draft-uuid-mlb-25096";
     const GROUP_POST_ID = "AAQkADA3_ses_group_balcatta==";
     const LIVE_JOB_ID = "5520cb13-b1cc-4d07-b923-69eae05462a8"; // SWMS-26655
@@ -534,7 +533,7 @@ Deno.test({
 
     const result = await _recaptureIntakeDraftForTest(client, {
       draft_id: DRAFT_ID,
-    });
+    }, client);
 
     // Must refuse to create a new draft
     assertEquals(result.ok, true, "ok must be true");

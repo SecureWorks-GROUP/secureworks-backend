@@ -12502,11 +12502,14 @@ async function createIntakeDraft(client: any, body: any) {
 // DRAFTS ONLY. Never calls approve / createMakesafeJob / invoice / send.
 // NOT routine-callable (omitted from ROUTINE_ALLOWED_ACTIONS, default-deny fires).
 // Privilege gate is identical to approve_intake_draft: api_key OR admin/owner JWT.
-async function recaptureIntakeDraft(client: any, body: any) {
+async function recaptureIntakeDraft(client: any, body: any, adminClientOverride?: any) {
   const { draft_id } = body
   if (!draft_id) throw new Error('draft_id required')
 
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  // adminClientOverride is a test-only seam; production callers omit it and get
+  // the service-role client (SUPABASE_URL/SERVICE_KEY are module consts, so a test
+  // cannot supply them via env.set after import).
+  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
   const SES_MAILBOX = _SES_MAILBOX
 
   // 1. Load the existing draft.
@@ -17256,13 +17259,16 @@ async function syncJobInvoices(client: any, body: any) {
 }
 
 // ── Update Invoice — edit line items on an existing Xero invoice ──
-async function updateInvoice(client: any, body: any) {
+async function updateInvoice(client: any, body: any, adminClientOverride?: any) {
   const { xero_invoice_id, line_items, due_date, resend_email } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
   if (!line_items || !Array.isArray(line_items) || line_items.length === 0) {
     throw new ApiError('line_items required (array of {description, quantity, unit_price})', 400)
   }
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  // adminClientOverride is a test-only seam; production callers omit it and get
+  // the service-role client (required so the report-job gate reads xero_invoices /
+  // makesafe_job_details past RLS — see ea2f778).
+  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   // ── REPORT-JOB $0 GATE ──
   // Mirror the create_invoice / complete_and_invoice guards: a report-type make-safe
