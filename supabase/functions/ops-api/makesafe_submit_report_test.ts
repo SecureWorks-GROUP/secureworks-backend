@@ -257,6 +257,9 @@ Deno.test("submit_makesafe_report blocks duplicate submitted reports", async () 
     job_service_reports: [{
       id: "report-existing",
       job_id: "job-1",
+      // cycle_number is NOT NULL DEFAULT 1 post-migration; a first-visit report is
+      // cycle 1 and must still block a same-cycle duplicate submit.
+      cycle_number: 1,
       status: "submitted",
       submitted_at: "2026-06-16T01:00:00Z",
       checklist_json: {},
