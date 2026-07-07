@@ -16,6 +16,7 @@ import {
 } from "./makesafe_intake_gate.ts";
 import {
   _autoApproveCleanIntakeEnabledForTest as autoApproveEnabled,
+  _combinedSplitObligationForTest as combinedSplit,
   _effectiveIntakeReportTypeForTest as effectiveReportType,
   _flagCombinedIntakeObligationForTest as flagCombined,
   _hasPositiveReportOnlyEvidenceForTest as hasPositiveReportEvidence,
@@ -243,6 +244,138 @@ Deno.test("gate: a combined obligation can never auto-approve", () => {
   });
   assertEquals(d.ok, false);
   assertEquals(d.reason, "combined_makesafe_and_report_manual_review");
+});
+
+// ── Item 3b: auto-split combined make-safe + report into two cards ──────────────
+
+// The live Joondalup draft shape (ef939f3e / MLB-26721PO-55622): high confidence,
+// complete client fields, servable WO PDF, blocked ONLY on portal_link +
+// combined_makesafe_and_report, with an UNAMBIGUOUS roof_report secondary obligation.
+const JOONDALUP_DRAFT = {
+  confidence: "high",
+  requesting_company_slug: "mlb",
+  requesting_company_name: "ML Builders",
+  external_ref: "MLB-26721PO-55622",
+  client_name: "The Owners of 189 Lakeside Drive Joondalup Strata Plan 34016",
+  client_phone: "0433 425 114",
+  site_address: "R104/ 189 Lakeside Drive",
+  report_type: "roof_report",
+  missing_fields: ["portal_link", "combined_makesafe_and_report"],
+  attachments_json: [WO_PDF],
+  extraction_json: {
+    report_type: "roof_report",
+    secondary_obligation: {
+      type: "roof_report",
+      reason: "combined_makesafe_and_report",
+      detail: "physical make-safe that ALSO requests a roof report",
+    },
+  },
+};
+
+Deno.test("item3b: combinedSplitObligation returns the report type for an unambiguous obligation", () => {
+  assertEquals(
+    combinedSplit({
+      secondary_obligation: {
+        type: "roof_report",
+        reason: "combined_makesafe_and_report",
+      },
+    }),
+    { reportType: "roof_report" },
+  );
+  assertEquals(
+    combinedSplit({
+      secondary_obligation: {
+        type: "assessment_report",
+        reason: "combined_makesafe_and_report",
+      },
+    }),
+    { reportType: "assessment_report" },
+  );
+});
+
+Deno.test("item3b: an AMBIGUOUS combined obligation (unknown_report) is NOT splittable", () => {
+  assertEquals(
+    combinedSplit({
+      secondary_obligation: {
+        type: "unknown_report",
+        reason: "combined_makesafe_and_report",
+      },
+    }),
+    null,
+  );
+  assertEquals(combinedSplit({}), null);
+  assertEquals(
+    combinedSplit({
+      secondary_obligation: { type: "roof_report", reason: "something_else" },
+    }),
+    null,
+  );
+});
+
+Deno.test("item3b: gate lets an UNAMBIGUOUS combined obligation through (to be split)", () => {
+  const d = gateDecision({
+    combinedObligation: true,
+    combinedSplittable: true,
+    confidence: "high",
+    matchedCompany: { slug: "mlb" },
+    externalRef: "MLB-26721PO-55622",
+    clientName: "Test Client",
+    siteAddress: "1 Example St",
+    missingFields: ["portal_link", "combined_makesafe_and_report"],
+    attachments: [WO_PDF],
+  });
+  assertEquals(d.ok, true);
+});
+
+Deno.test("item3b: gate still BLOCKS an ambiguous combined obligation (not splittable)", () => {
+  const d = gateDecision({
+    combinedObligation: true,
+    combinedSplittable: false,
+    confidence: "high",
+    matchedCompany: { slug: "mlb" },
+    externalRef: "MLB-26010",
+    clientName: "Test Client",
+    siteAddress: "1 Example St",
+    missingFields: ["combined_makesafe_and_report"],
+    attachments: [WO_PDF],
+  });
+  assertEquals(d.ok, false);
+  assertEquals(d.reason, "combined_makesafe_and_report_manual_review");
+});
+
+Deno.test("item3b: the live Joondalup draft is now sweep-eligible (auto-split)", () => {
+  const d = sweepDecision(JOONDALUP_DRAFT);
+  assertEquals(d.ok, true, `expected eligible; got ${d.reason}`);
+});
+
+Deno.test("item3b: a Joondalup-shaped draft with an AMBIGUOUS obligation stays manual", () => {
+  const ambiguous = {
+    ...JOONDALUP_DRAFT,
+    report_type: null,
+    extraction_json: {
+      secondary_obligation: {
+        type: "unknown_report",
+        reason: "combined_makesafe_and_report",
+      },
+    },
+  };
+  const d = sweepDecision(ambiguous);
+  assertEquals(d.ok, false);
+});
+
+Deno.test("item3b: a single-obligation clean make-safe WO is unchanged (still eligible)", () => {
+  const plain = {
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-26010",
+    client_name: "Test Client",
+    site_address: "1 Example St",
+    missing_fields: [],
+    attachments_json: [WO_PDF],
+    extraction_json: {},
+  };
+  const d = sweepDecision(plain);
+  assertEquals(d.ok, true, `expected eligible; got ${d.reason}`);
 });
 
 Deno.test("gate: a cancellation can never auto-approve", () => {
