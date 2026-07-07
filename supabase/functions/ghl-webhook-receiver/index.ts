@@ -21,6 +21,13 @@ import { recordEvidence } from "../_shared/evidence/record_evidence.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
 import { resolveMatch } from "../_shared/evidence/match.ts";
 import type { Channel, Direction, MatchMethod } from "../_shared/evidence/types.ts";
+// M0.5 U1b — canonical inbound-SMS normalization (client.sms_in) + cross-path
+// dedup guard vs the ops-api backfill sync path. Interface §3.
+import {
+  findInboundDuplicate,
+  mapInboundMessage,
+  type InboundDedupClient,
+} from "./inbound_sms_normalize.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -342,7 +349,7 @@ serve(async (req) => {
 
   try {
     const body = await req.json();
-    const { type, contactId, message, phone, email, conversationId } = body;
+    const { type, contactId, phone, email, conversationId } = body;
 
     console.log(
       `[ghl-webhook-receiver] Received: type=${type || "unknown"} contactId=${contactId || "none"} keys=${Object.keys(body).join(",")}`
@@ -488,16 +495,13 @@ serve(async (req) => {
 
     switch (type) {
       case "InboundMessage": {
-        const channel = phone ? "sms" : email ? "email" : "chat";
-        eventType = "client.reply";
-        eventPayload = {
-          message_text: (message || "").slice(0, 500),
-          phone: phone || null,
-          email: email || null,
-          conversation_id: conversationId || null,
-          channel,
-          source: "ghl_webhook",
-        };
+        // U1b: SMS inbound is canonical `client.sms_in` (interface §3) — the
+        // extraction enqueuer + every M1/M2 consumer read sms_in, never
+        // client.reply. Non-SMS channels (email/chat) keep client.reply.
+        // Envelope + canonical type owned by the pure normalize module.
+        const mapped = mapInboundMessage(body);
+        eventType = mapped.eventType;
+        eventPayload = mapped.eventPayload;
         break;
       }
 
@@ -598,9 +602,27 @@ serve(async (req) => {
     eventPayload.match_candidate_count = jobMatch.candidate_count;
     eventPayload.match_candidates = jobMatch.candidates;
 
+    // ── U1b dedup guard (interface §3) ──
+    // The always-on receiver and the on-demand ops-api sync path
+    // (backfill_ghl_conversations) can both observe the same GHL message; a
+    // GHL webhook re-delivery can also re-fire this handler. Dedup on the GHL
+    // message id where present so the inbound-SMS spine is never double-written.
+    if (type === "InboundMessage") {
+      const dedup = await findInboundDuplicate(
+        supabase as unknown as InboundDedupClient,
+        (eventPayload.ghl_message_id as string | null) ?? null,
+      );
+      if (dedup.deduped) {
+        console.log(
+          `[ghl-webhook-receiver] InboundMessage dedup: ghl_message_id=${eventPayload.ghl_message_id} already mirrored (matched ${dedup.matchedId}); skipping duplicate business_event`,
+        );
+        return jsonResponse({ received: true, deduped: true, event_type: eventType });
+      }
+    }
+
     // ── Create business_event (T7 atomic cutover) ──
     // Map the GHL webhook type onto the T7 channel + direction envelope.
-    // Inbound: client.reply (SMS/email/chat). Outbound: client.sms_out / client.email_out.
+    // Inbound: client.sms_in (SMS) / client.reply (email/chat). Outbound: client.sms_out / client.email_out.
     // Call: client.call_complete. Note: ghl.note_added. Stage: ghl.stage_changed.
     // Appointment: client.appointment.
     const t7Enabled = await isFlagOn(supabase, "evidence_capture_v1", DEFAULT_ORG_ID);
