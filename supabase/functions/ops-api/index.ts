@@ -945,6 +945,52 @@ async function sendSmsViaGhl(phone: string, message: string, fromNumber?: string
   }
 }
 
+// ── M3b (D1+G1): the crew-ready set ─────────────────────────────────────────
+// jobs.status tokens that mean "this job genuinely needs crew now". Drives BOTH
+// the fencing/patio/decking open-pool INCLUDE filter (U1 — kills the fake
+// 72-available counts) and the ready-transition manager text (U2b — fires only
+// on ENTERING this set). G1: crewless 'scheduled' is deliberately included.
+export const _CREW_READY_STATUSES = ['order_confirmed', 'schedule_install', 'scheduled'] as const
+
+// ── M3b U2 (D4): vertical-manager SMS fan-out ───────────────────────────────
+// Reverse lookup (scout: no such helper existed): the managers of a vertical =
+// users whose managed_verticals contains it AND who have a phone on file AND
+// who are NOT dispatchers (admin/ops_manager) — the same non-dispatcher
+// definition of "vertical manager" U2b's board widening uses. The phone +
+// non-dispatcher gates naturally exclude Marnin/Shaun (dispatcher roles, and
+// Shaun is no-texts by choice). Plain-text SMS via sendSmsViaGhl (which never
+// rejects); handed to EdgeRuntime.waitUntil when present (M3 convention) so
+// isolate teardown cannot kill an in-flight send. Never throws.
+async function notifyVerticalManagersSms(client: any, vertical: string, text: string): Promise<void> {
+  try {
+    const { data: managers } = await client.from('users')
+      .select('id, name, phone, role, managed_verticals')
+      .contains('managed_verticals', [vertical])
+      .not('phone', 'is', null)
+    const sends: Promise<boolean>[] = []
+    for (const m of (managers || [])) {
+      const role = String(m?.role || '').toLowerCase()
+      if (role === 'admin' || role === 'ops_manager') continue // dispatchers live on the board, managers get the text
+      const phone = String(m?.phone || '').trim()
+      if (!phone) continue
+      sends.push(sendSmsViaGhl(phone, text))
+    }
+    if (!sends.length) return
+    const all = Promise.all(sends).then(() => {}).catch(() => {})
+    const edgeRuntime = (globalThis as any).EdgeRuntime
+    if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+      edgeRuntime.waitUntil(all)
+    } else {
+      await all
+    }
+  } catch (e) {
+    // Non-blocking: a notify failure must never fail the calling write.
+    console.log('[ops-api] vertical-manager SMS notify failed (non-blocking):', (e as Error)?.message)
+  }
+}
+// Test-only export alias (mirrors the `_`-prefixed convention in this file).
+export const _notifyVerticalManagersSms = notifyVerticalManagersSms
+
 // A4 — the make-safe alert channel. Telegram is RETIRED business-wide; reconcile /
 // heartbeat / extraction-health alarms now deliver by SMS to the configured
 // alarm_phones in makesafe_notify_settings (recipient is CONFIG, never hardcoded).
@@ -2769,6 +2815,10 @@ if (import.meta.main) serve(async (req: Request) => {
           body,
           callerRole: caller?.role,
           managedVerticals: caller?.managed_verticals,
+          // M3b U2c: SERVER-derived actor identity (the authed trade user), so
+          // createAssignment can skip the allocation SMS on a self-assign
+          // (allocator == assignee). Never taken from the request body.
+          actorUserId: tradeUser.id,
         }))
       }
       case 'update_job_status': return json(await updateJobStatus(client, body))
@@ -9014,23 +9064,24 @@ async function createMakesafeJob(client: any, body: any) {
     detail_json: { job_number: jobNumber, requesting_company: companyData?.name || null, external_ref },
   })
 
-  // Telegram notification to Shaun. Intake approval can suppress this so a
-  // human review tick does not unexpectedly broadcast from a draft workflow.
-  const TELEGRAM_BOT_TOKEN = body.suppress_notifications ? '' : (Deno.env.get('TELEGRAM_BOT_TOKEN') || '')
-  if (TELEGRAM_BOT_TOKEN) {
-    try {
-      const { data: shaun } = await client.from('users')
-        .select('telegram_id').ilike('email', '%shaun%')
-        .not('telegram_id', 'is', null).limit(1).maybeSingle()
-      if (shaun?.telegram_id) {
-        const msg = `New Make-Safe: ${jobNumber}\n${client_name}\n${site_address}${companyData ? '\nFrom: ' + companyData.name : ''}${external_ref ? '\nRef: ' + external_ref : ''}`
-        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: shaun.telegram_id, text: msg }),
-        })
-      }
-    } catch (_) { /* non-critical */ }
+  // M3b U2a (D4a, gate G3): text the make-safe manager(s) that a new make-safe
+  // exists. REPLACES the legacy Telegram-to-Shaun block that lived here —
+  // Telegram is retired business-wide, and Shaun (no-texts by choice, dispatcher
+  // role) is naturally excluded by the manager lookup's phone + non-dispatcher
+  // gates. This deliberately IGNORES body.suppress_notifications: that flag
+  // belonged to the old Telegram broadcast, and the DOMINANT creation path
+  // (intake approve) passes it — gating on it left every intake-created
+  // make-safe silent. Non-blocking; notifyVerticalManagersSms never throws.
+  {
+    const msSite = `${site_address || ''}${suburb ? ', ' + suburb : ''}`.trim()
+    const msText = [
+      `New make-safe: ${jobNumber} - ${client_name || 'Client'}`.trim(),
+      msSite ? `Site: ${msSite}` : '',
+      reviewedCompanyName ? `Builder: ${reviewedCompanyName}` : '',
+      external_ref ? `Ref: ${external_ref}` : '',
+      `Open in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${job.id}`,
+    ].filter(Boolean).join('\n')
+    await notifyVerticalManagersSms(client, 'makesafe', msText)
   }
 
   return { ok: true, job }
@@ -14676,8 +14727,12 @@ export async function allocateJob(client: any, args: {
   body: any
   callerRole?: string | null
   managedVerticals?: unknown
+  // M3b U2c: the authed caller's user id (server-derived at the dispatch, never
+  // from the body). Threaded into createAssignment so a self-assign (allocator
+  // == assignee) skips the allocation SMS.
+  actorUserId?: string | null
 }): Promise<any> {
-  const { body, callerRole, managedVerticals } = args
+  const { body, callerRole, managedVerticals, actorUserId } = args
   const reassignId = body.assignmentId || body.assignment_id || null
 
   // Resolve the target job — directly for a new allocation, via the existing
@@ -14750,7 +14805,9 @@ export async function allocateJob(client: any, args: {
     return { ok: true, mode: 'idempotent', deduped: true, assignment: dup[0] }
   }
 
-  const created = await createAssignment(client, { ...body, jobId, userId: targetUserId, scheduledDate: sDate })
+  // M3b U2c: overwrite any body-supplied value with the SERVER-derived actor
+  // (or null when unknown, e.g. tests calling allocateJob directly).
+  const created = await createAssignment(client, { ...body, jobId, userId: targetUserId, scheduledDate: sDate, allocated_by_user_id: actorUserId || null })
   return { ok: true, mode: 'create', ...created }
 }
 
@@ -14830,10 +14887,17 @@ async function createAssignment(client: any, body: any) {
   // to its 'tentative' default), so the gate keys off the EXPLICIT request
   // value, not the default — otherwise every trade allocation would silently
   // stop texting. suppress_notifications mirrors the make-safe creation path.
+  // M3b U2c (D4c): NEVER text on a self-assign — when the allocator IS the
+  // assignee (a manager grabbing a job for themselves) the text is noise.
+  // allocated_by_user_id is threaded in by allocate_job from the AUTHED trade
+  // user (server-derived); when absent (ops-dash api_key path) no skip applies.
   const requestedConfStatus = String(body.confirmationStatus || body.confirmation_status || '').toLowerCase()
+  const allocatorUserId = body.allocated_by_user_id || null
+  const isSelfAssign = !!allocatorUserId && String(allocatorUserId) === String(userId || user_id || '')
   const skipAllocationSms = !!body.suppress_notifications ||
     finalConfStatus === 'placeholder' ||
-    requestedConfStatus === 'tentative'
+    requestedConfStatus === 'tentative' ||
+    isSelfAssign
   try {
     const assignedUserId = userId || user_id
     if (assignedUserId && !skipAllocationSms) {
@@ -15272,6 +15336,33 @@ async function updateJobStatus(client: any, body: any) {
     metadata: { operator: body.operator_email || body.user_email || null },
   })
 
+  // ── M3b U2b (D4b): ready-transition manager text ──
+  // When a fencing/patio job TRANSITIONS INTO the crew-ready set (new status in
+  // the set, old status NOT in the set), text that vertical's managers — the
+  // job just became allocatable on their Board. Fires for every writer through
+  // this single choke point (manual ops moves AND the ghl_webhook path — though
+  // GHL never sets these tokens, so real volume = manual ops moves). Does NOT
+  // fire on a repeat save of the same status or a move WITHIN the set.
+  // Make-safe is NOT texted here (creation itself texts, U2a); decking has no
+  // manager crew flow yet — fencing/patio only per D4b.
+  try {
+    const readySet = _CREW_READY_STATUSES as readonly string[]
+    const notifyVertical = String(data?.type || jobBefore?.type || '').toLowerCase()
+    const enteredReadySet = readySet.includes(status) && !readySet.includes(oldStatus)
+    if (enteredReadySet && (notifyVertical === 'fencing' || notifyVertical === 'patio')) {
+      const readySite = `${data?.site_address || ''}${data?.site_suburb ? ', ' + data.site_suburb : ''}`.trim()
+      const readyText = [
+        `Job ready for crew: ${data?.job_number || jobBefore?.job_number || ''} - ${data?.client_name || jobBefore?.client_name || 'Client'}`.trim(),
+        readySite ? `Site: ${readySite}` : '',
+        `Stage: ${status}`,
+        `Open in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}`,
+      ].filter(Boolean).join('\n')
+      await notifyVerticalManagersSms(client, notifyVertical, readyText)
+    }
+  } catch (e) {
+    console.log('[ops-api] ready-transition manager notify failed (non-blocking):', (e as Error)?.message)
+  }
+
   // Fire-and-forget: recompute job intelligence after status change
   fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jId}`, {
     headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
@@ -15354,6 +15445,8 @@ async function updateJobStatus(client: any, body: any) {
 
   return { success: true, job_id: jId, new_status: status, job_number: data?.job_number || jobBefore?.job_number }
 }
+// Test-only export alias (mirrors the `_`-prefixed convention in this file).
+export const _updateJobStatus = updateJobStatus
 
 async function createPO(client: any, body: any) {
   const { job_id, jobId, supplier_name, supplierName, xero_contact_id,
@@ -19193,11 +19286,18 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
     const assignedJobIdsPool = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
     for (const vertical of genericPoolVerticals) {
       try {
+        // M3b U1 (D1+G1): INCLUDE filter — the fencing/patio/decking pool shows
+        // ONLY jobs at a crew-ready stage (order_confirmed / schedule_install /
+        // crewless scheduled). The old exclude-only filter surfaced the whole
+        // pipeline (quoted, awaiting_deposit, order_materials, ...) as fake
+        // "available" cards — the 72/76 counts Marnin called out. The make-safe
+        // pool above keeps its exclude filter untouched (its "New" = intake-
+        // complete jobs, already honest). Assigned-job dedupe below unchanged.
         const { data: openJobs, error: poolErr } = await client
           .from('jobs')
           .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
           .eq('type', vertical)
-          .not('status', 'in', _makesafePoolExcludedStatusFilter())
+          .in('status', _CREW_READY_STATUSES as unknown as string[])
           .order('created_at', { ascending: false })
           .limit(80)
         if (poolErr) throw poolErr

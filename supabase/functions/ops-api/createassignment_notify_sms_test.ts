@@ -313,3 +313,64 @@ Deno.test("createAssignment: SMS promise is passed to EdgeRuntime.waitUntil when
     restore();
   }
 });
+
+// ── M3b U2c (D4c): self-assign skip ──────────────────────────────────────────
+// allocate_job threads the AUTHED caller's id (server-derived, never body) into
+// createAssignment as allocated_by_user_id; when allocator == assignee the
+// allocation SMS is skipped (a manager grabbing a job for themselves needs no
+// text). Allocations to OTHER installers keep texting.
+Deno.test("U2c: self-assign (allocator == assignee) -> ZERO SMS, allocation still succeeds", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store = baseStore();
+    const res = await allocateJob(makeClient(store), {
+      body: { jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-08" },
+      callerRole: "admin",
+      actorUserId: "inst-1", // the caller allocates the job to THEMSELVES
+    });
+    await flush();
+    assertEquals(res.ok, true);
+    assertEquals(res.mode, "create");
+    assertEquals(smsCalls(calls).length, 0, "no text on self-assign");
+    assertEquals(telegramCalls(calls).length, 0);
+    assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1, "assignment still written");
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("U2c: allocation to ANOTHER installer still texts them (actor threaded, not equal)", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store = baseStore();
+    const res = await allocateJob(makeClient(store), {
+      body: { jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-08" },
+      callerRole: "admin",
+      actorUserId: "u-manager", // a manager allocating to someone else
+    });
+    await flush();
+    assertEquals(res.ok, true);
+    assertEquals(smsCalls(calls).length, 1, "other-installer allocation keeps texting");
+    assertEquals(JSON.parse(String(smsCalls(calls)[0].init?.body)).phone, "+61400111222");
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("U2c: a body-smuggled allocated_by_user_id is OVERWRITTEN by the server-derived actor", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store = baseStore();
+    // Client tries to suppress the text by claiming the assignee allocated it.
+    const res = await allocateJob(makeClient(store), {
+      body: { jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-08", allocated_by_user_id: "inst-1" },
+      callerRole: "admin",
+      actorUserId: "u-manager",
+    });
+    await flush();
+    assertEquals(res.ok, true);
+    assertEquals(smsCalls(calls).length, 1, "server actor wins; the text still goes out");
+  } finally {
+    restore();
+  }
+});
