@@ -31,11 +31,31 @@ export function sendPackAllowed(
       (authUser?.role === "admin" || authUser?.role === "owner"));
 }
 
-// ── Marker idempotency (mirrors index.ts isPackSentMainEvent) ──
+// ── Marker idempotency — THE single detector (index.ts imports these; it keeps
+//    no private copy, so the two sides can never drift). buildPackSentMarkerText
+//    below is likewise the single canonical WRITER (main pack) — no other code
+//    may emit a MAKESAFE_PACK_SENT marker in a shape of its own. ──
 export const MAKESAFE_PACK_SENT_MAIN_PREFIX = "MAKESAFE_PACK_SENT | main";
+// The canonical prefix, normalised the same way _normalizeMarkerText normalises a
+// candidate note, so the tolerant comparison below is prefix-against-prefix.
+const _MAIN_PREFIX_NORM = "makesafe_pack_sent | main";
 
-export function isPackSentMainEvent(ev: any): boolean {
-  if (!ev || String(ev.event_type) !== "note") return false;
+// Normalise a note body for tolerant marker matching: lowercase, collapse the
+// whitespace around every "|" to " | ", and any other whitespace run to a single
+// space. This makes the canonical detector tolerant to the separator / spacing /
+// case drift seen in hand-written and backfilled markers
+// ("MAKESAFE_PACK_SENT|main", "MAKESAFE_PACK_SENT |  Main | ...") WITHOUT widening
+// it to a different kind — "| photo" still never matches the "| main" prefix.
+function _normalizeMarkerText(text: string): string {
+  return String(text || "").trim().toLowerCase()
+    .replace(/\s*\|\s*/g, " | ")
+    .replace(/\s+/g, " ");
+}
+
+// Pull the note text out of a job_events row (tolerant to a JSON-string or object
+// detail_json). Returns null when the row is not a note or carries no text.
+function _eventNoteText(ev: any): string | null {
+  if (!ev || String(ev.event_type) !== "note") return null;
   let dj = ev.detail_json;
   if (typeof dj === "string") {
     try {
@@ -45,8 +65,59 @@ export function isPackSentMainEvent(ev: any): boolean {
     }
   }
   const text = dj && typeof dj === "object" ? dj.text : null;
-  return typeof text === "string" &&
-    text.trim().startsWith(MAKESAFE_PACK_SENT_MAIN_PREFIX);
+  return typeof text === "string" ? text : null;
+}
+
+// True if a note body IS (starts with) the canonical main-pack sent marker,
+// tolerant to separator/spacing/case drift. This is the STRICT predicate the
+// irreversible-action gates (send idempotency, resume-close, reset) rely on —
+// only the real send marker (in any spacing) is send-proof for a money/comms
+// action, never a freeform note.
+export function packSentMainTextMatches(text: string | null | undefined): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  return _normalizeMarkerText(text).startsWith(_MAIN_PREFIX_NORM);
+}
+
+export function isPackSentMainEvent(ev: any): boolean {
+  return packSentMainTextMatches(_eventNoteText(ev));
+}
+
+// ── Documented legacy pack-sent variant (SWMS-26832) — BOARD TRIAGE ONLY ──────
+// A genuine bundled send historically recorded the covered sibling's send as a
+// FREEFORM note with NO canonical "MAKESAFE_PACK_SENT | main" prefix. The anchor
+// case is SWMS-26832 (MLB-26393, 2026-06-30), whose real 2026-06-30 note read:
+//   "BUNDLED into SWMS-26837 temp-fence make-safe (one WO) - no separate
+//    invoice; labour+report+SWMS covered under INV-0835. Sent to bunbury@ ..."
+// The canonical detector never matched it, so the covered card showed a permanent
+// FALSE OUTSTANDING-TO-SEND until a manual marker backfill. The board-triage map
+// (buildPackSentMap) tolerates this documented shape so a bundled-covered card no
+// longer re-surfaces as unsent. It is DELIBERATELY NOT accepted by the
+// irreversible-action gates above — a freeform note is triage evidence, never
+// send-proof for authorising/emailing/closing/resetting. A match REQUIRES BOTH a
+// bundle-coverage phrase AND a Xero invoice token (INV-####), so an in-planning
+// "bundle" note with no invoice can never count.
+export const LEGACY_BUNDLED_COVERAGE_PHRASES = [
+  "bundled under inv",
+  "bundled into",
+  "covered under inv",
+  "covered by bundle",
+  "bundled with",
+] as const;
+const _INV_TOKEN = /\binv-?\d{3,}\b/i;
+
+export function isBundledCoverageSendNote(text: string | null | undefined): boolean {
+  const t = String(text || "").toLowerCase();
+  if (!t || !_INV_TOKEN.test(t)) return false;
+  return LEGACY_BUNDLED_COVERAGE_PHRASES.some((p) => t.includes(p));
+}
+
+// BOARD-TRIAGE predicate: a job counts as "pack sent" for OUTSTANDING-TO-SEND
+// purposes if it carries the canonical main marker OR the documented legacy
+// bundled-coverage note (SWMS-26832). Used ONLY by buildPackSentMap — never by an
+// irreversible-action gate.
+export function isPackSentTriageEvent(ev: any): boolean {
+  if (isPackSentMainEvent(ev)) return true;
+  return isBundledCoverageSendNote(_eventNoteText(ev));
 }
 
 // True if any note row in the set carries the verified main-pack marker.

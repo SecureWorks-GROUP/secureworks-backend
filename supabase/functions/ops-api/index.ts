@@ -382,6 +382,7 @@ import {
   checkExactRecipientGate,
   buildPackSentMarkerText,
   isPackSentMainEvent as _sendPackIsPackSentMainEvent,
+  isPackSentTriageEvent as _sendPackIsPackSentTriageEvent,
   LOCKABLE_STATUSES,
   MAKESAFE_ADMIN_FROM,
   MAKESAFE_CC,
@@ -9992,21 +9993,12 @@ function resolveMakesafeReportRecipient(args: {
 }
 
 // The marker note the reporting skill writes on a successful make-safe pack send
-// (send_makesafe_email.py). It rides the job_events note stream as
+// (send_makesafe_email.py) rides the job_events note stream as
 // `MAKESAFE_PACK_SENT | <kind: main|photo> | ...`. The board only treats the
-// `main` pack as a verified send; the `photo` follow-up does not count.
-const MAKESAFE_PACK_SENT_MAIN_PREFIX = 'MAKESAFE_PACK_SENT | main'
-
-// True if a job_events note row carries the MAKESAFE_PACK_SENT | main marker.
-function isPackSentMainEvent(ev: any): boolean {
-  if (!ev || String(ev.event_type) !== 'note') return false
-  let dj = ev.detail_json
-  if (typeof dj === 'string') {
-    try { dj = JSON.parse(dj) } catch (_) { dj = { text: dj } }
-  }
-  const text = dj && typeof dj === 'object' ? dj.text : null
-  return typeof text === 'string' && text.trim().startsWith(MAKESAFE_PACK_SENT_MAIN_PREFIX)
-}
+// `main` pack as a verified send; the `photo` follow-up does not count. The
+// detector + writer live in makesafe_send_pack.ts (the single source of truth,
+// imported above) — this file keeps NO private copy, so the two sides can never
+// drift on the marker shape (the class of the SWMS-26832 false OUTSTANDING-TO-SEND).
 
 // ── Paginated, id-chunked .in() reader (money-safety) ────────────────────────
 // PostgREST caps a single response at 1000 rows. A make-safe job set can carry
@@ -10054,7 +10046,9 @@ async function _fetchAllByJobIdChunked(
 export const _fetchAllByJobIdChunkedForTest = _fetchAllByJobIdChunked
 
 // Build a job_id -> boolean map of which jobs carry a verified MAKESAFE_PACK_SENT
-// | main marker note. PAGINATED + id-chunked read over job_events for the
+// | main marker note (or the documented legacy bundled-coverage note — SWMS-26832
+// — via the shared triage predicate, so a bundled-covered card no longer shows a
+// false OUTSTANDING-TO-SEND). PAGINATED + id-chunked read over job_events for the
 // candidate job set (was a single unpaginated .in() that truncated at 1000 rows
 // and could drop a sent-marker beyond the cap, re-surfacing a SENT job). The
 // EXISTS-style reduction happens in JS over EVERY returned note row. Triage flag
@@ -10073,7 +10067,7 @@ async function buildPackSentMap(client: any, jobIds: string[]): Promise<Record<s
     (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
   )
   for (const ev of (events || [])) {
-    if (ev?.job_id && isPackSentMainEvent(ev)) map[ev.job_id] = true
+    if (ev?.job_id && _sendPackIsPackSentTriageEvent(ev)) map[ev.job_id] = true
   }
   return map
 }
