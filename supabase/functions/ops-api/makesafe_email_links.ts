@@ -5,8 +5,32 @@ export type BuilderEmailLink = {
   label: string;
   url: string;
   kind: string;
-  source: "email_body" | "claude" | "legacy_portal_link";
+  source: "email_body" | "claude" | "legacy_portal_link" | "attachment_text";
 };
+
+// Intake item 4 — builder portal / report-share hosts (Prime Eco is the dominant
+// one for MLB/Prime roof & assessment reports). A URL on one of these hosts, or any
+// URL whose path is a share link, is the crew's report portal and MUST be captured
+// even when it sits on a line the generic footer/tracking filter would otherwise
+// drop, and even with no descriptive words around it. Recon proof (SWMS-26632):
+// primeeco.tech share links lived only in the raw email body and never reached
+// makesafe_details.external_links, so the report was invisible to everyone.
+const PORTAL_HOST_RE =
+  /(^|\.)(primeeco\.tech|primeeco\.[a-z.]+|prime-?eco\.[a-z.]+)$/i;
+const PORTAL_PATH_RE = /\/(share|report|reports|portal|s|r)\//i;
+
+export function urlIsBuilderPortalLink(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (PORTAL_HOST_RE.test(u.hostname)) return true;
+    if (/primeeco/i.test(u.hostname)) return true;
+    // A share-style path on any host (…/share/<token>) is a report portal link.
+    if (PORTAL_PATH_RE.test(u.pathname)) return true;
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
 
 type ExtractionLike = {
   portal_link?: unknown;
@@ -128,34 +152,74 @@ function classifyBuilderLink(
   return { label: "Builder portal link", kind: "builder_portal" };
 }
 
+// Positive-only kind for a KNOWN builder-portal link: unlike classifyBuilderLink it
+// never returns null (a portal link is always kept) and is not vetoed by footer words
+// that happen to sit in the same context window as the report link.
+function classifyPortalKind(context: string): { label: string; kind: string } {
+  const c = context.toLowerCase();
+  if (/roof/.test(c)) return { label: "Roof report link", kind: "roof_report" };
+  if (/assessment|assess|inspect/.test(c)) {
+    return { label: "Assessment report link", kind: "assessment_report" };
+  }
+  if (/quote|quotation|estimate/.test(c)) {
+    return { label: "Quote link", kind: "quote" };
+  }
+  if (/photo|image|evidence/.test(c)) {
+    return { label: "Photo/report portal link", kind: "photos" };
+  }
+  return { label: "Builder portal link", kind: "builder_portal" };
+}
+
 export function extractBuilderEmailLinks(
   bodyTextOrHtml: string | null | undefined,
+  // Intake item 4 — also scan recovered attachment/PDF text for portal links (a WO
+  // PDF sometimes carries the only report share link). Links found here are tagged
+  // source:"attachment_text". Empty/undefined is a no-op.
+  attachmentText?: string | null | undefined,
 ): BuilderEmailLink[] {
-  const text = stripEmailHtmlForTrade(bodyTextOrHtml, 20000);
-  if (!text) return [];
-
   const links: BuilderEmailLink[] = [];
   const seen = new Set<string>();
-  const re = /https?:\/\/[^\s<>"']+/gi;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(text)) !== null) {
-    const url = cleanUrl(match[0]);
-    if (!url) continue;
-    const key = url.toLowerCase();
-    if (seen.has(key)) continue;
-    const start = Math.max(0, match.index - 160);
-    const end = Math.min(text.length, match.index + match[0].length + 160);
-    const context = text.slice(start, end);
-    const lineStart = text.lastIndexOf("\n", match.index) + 1;
-    const nextNewline = text.indexOf("\n", match.index + match[0].length);
-    const lineEnd = nextNewline === -1 ? text.length : nextNewline;
-    const urlLineContext = text.slice(lineStart, lineEnd);
-    if (urlLooksLikeFooterOrTracking(url, urlLineContext)) continue;
-    const classified = classifyBuilderLink(urlLineContext || context);
-    if (!classified) continue;
-    seen.add(key);
-    links.push({ ...classified, url, source: "email_body" });
-  }
+
+  const scan = (
+    raw: string | null | undefined,
+    source: BuilderEmailLink["source"],
+  ) => {
+    const text = stripEmailHtmlForTrade(raw, 20000);
+    if (!text) return;
+    const re = /https?:\/\/[^\s<>"']+/gi;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const url = cleanUrl(match[0]);
+      if (!url) continue;
+      const key = url.toLowerCase();
+      if (seen.has(key)) continue;
+      const start = Math.max(0, match.index - 160);
+      const end = Math.min(text.length, match.index + match[0].length + 160);
+      const context = text.slice(start, end);
+      const lineStart = text.lastIndexOf("\n", match.index) + 1;
+      const nextNewline = text.indexOf("\n", match.index + match[0].length);
+      const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+      const urlLineContext = text.slice(lineStart, lineEnd);
+      const isPortal = urlIsBuilderPortalLink(url);
+      // A recognised builder-portal / share link is ALWAYS captured (never dropped by
+      // the footer/tracking filter) and classified by positive signals in the wider
+      // context (e.g. "complete the roof report" on the line above) or its own path.
+      // Only non-portal links are subject to the footer/tracking reject + veto-classify.
+      let classified: { label: string; kind: string } | null;
+      if (isPortal) {
+        classified = classifyPortalKind(`${context} ${url}`);
+      } else {
+        if (urlLooksLikeFooterOrTracking(url, urlLineContext)) continue;
+        classified = classifyBuilderLink(urlLineContext || context);
+        if (!classified) continue;
+      }
+      seen.add(key);
+      links.push({ ...classified, url, source });
+    }
+  };
+
+  scan(bodyTextOrHtml, "email_body");
+  scan(attachmentText, "attachment_text");
 
   const labelCounts = new Map<string, number>();
   return links.map((link) => {
@@ -225,6 +289,39 @@ export function normalizeReportExternalLinks(
   }
   add(linkFromAny(extraction?.portal_link, "legacy_portal_link"));
   return out;
+}
+
+// Intake item 4 (nudge-email pattern) — idempotently ADD incoming links to a job's
+// existing external_links WITHOUT overwriting. Used when a builder "please complete
+// the report" nudge (portal link, no new WO PDF) references a ref that already has a
+// live job: the link must land on that job, and re-scanning the same nudge must be a
+// no-op. Existing entries win (never clobber an operator edit); a URL already present
+// is not re-added. Returns the merged list plus exactly which links were newly added.
+export function mergeIntoExternalLinks(
+  current: unknown,
+  incoming: BuilderEmailLink[],
+): { links: BuilderEmailLink[]; added: BuilderEmailLink[] } {
+  const byUrl = new Map<string, BuilderEmailLink>();
+  const order: string[] = [];
+  const remember = (link: BuilderEmailLink | null) => {
+    if (!link) return false;
+    const key = link.url.toLowerCase();
+    if (byUrl.has(key)) return false;
+    byUrl.set(key, link);
+    order.push(key);
+    return true;
+  };
+  // Seed with whatever the job already carries (array of objects/strings, or a bare
+  // string), normalised through the same parser used everywhere else.
+  const currentArr = Array.isArray(current)
+    ? current
+    : (current == null ? [] : [current]);
+  for (const c of currentArr) remember(linkFromAny(c, "legacy_portal_link"));
+  const added: BuilderEmailLink[] = [];
+  for (const link of incoming || []) {
+    if (remember(link)) added.push(link);
+  }
+  return { links: order.map((k) => byUrl.get(k)!), added };
 }
 
 export function mergeDeterministicAndClaudeLinks(

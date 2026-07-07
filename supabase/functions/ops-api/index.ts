@@ -301,6 +301,7 @@ import {
   stripEmailHtmlForTrade as _stripEmailHtmlForTrade,
   extractBuilderEmailLinks as _extractBuilderEmailLinks,
   mergeDeterministicAndClaudeLinks as _mergeDeterministicAndClaudeLinks,
+  mergeIntoExternalLinks as _mergeIntoExternalLinks,
   normalizeReportExternalLinks as _normalizeReportExternalLinks,
   cleanUrl as _cleanBuilderLinkUrl,
 } from './makesafe_email_links.ts'
@@ -10995,6 +10996,21 @@ function flagCombinedIntakeObligation(
   return obligation as any
 }
 
+// Intake item 3b — AUTO-SPLIT a combined make-safe + report into two cards.
+// A combined obligation is SPLITTABLE (can auto-expand into two live cards on
+// approval) only when its report type is UNAMBIGUOUS — a known report-only type
+// (roof_report / assessment_report), not the 'unknown_report' fallback. An
+// ambiguous combined obligation still goes to human review. Returns the report
+// type to mint the second card as, or null when not splittable.
+function combinedSplitObligation(extraction: any): { reportType: string } | null {
+  const so = extraction?.secondary_obligation
+  if (!so || typeof so !== 'object') return null
+  if (cleanReviewedString(so.reason) !== COMBINED_OBLIGATION_MISSING_FIELD) return null
+  const t = cleanReviewedString(so.type)
+  if (t && _isReportOnlyType(t)) return { reportType: t }
+  return null
+}
+
 function effectiveIntakeReportType(draft: any): string | null {
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
@@ -11283,10 +11299,17 @@ function shouldAutoApproveCleanIntake(input: {
   // single-card auto-file would silently drop — both stay in the human queue.
   cancelled?: boolean
   combinedObligation?: boolean
+  // Intake item 3b: an UNAMBIGUOUS combined obligation (known report type) may
+  // auto-approve because approval now expands it into TWO cards instead of losing
+  // the second obligation. An ambiguous combined obligation leaves this false and
+  // still routes to human review.
+  combinedSplittable?: boolean
 }): { ok: boolean; reason: string } {
   if (input.enabled === false) return { ok: false, reason: 'disabled' }
   if (input.cancelled === true) return { ok: false, reason: 'cancelled_work_order' }
-  if (input.combinedObligation === true) return { ok: false, reason: 'combined_makesafe_and_report_manual_review' }
+  if (input.combinedObligation === true && !input.combinedSplittable) {
+    return { ok: false, reason: 'combined_makesafe_and_report_manual_review' }
+  }
 
   const attachments = input.attachments || []
   const available = availableIntakeAttachments(attachments)
@@ -11307,7 +11330,12 @@ function shouldAutoApproveCleanIntake(input: {
   if (confidence !== 'high') return { ok: false, reason: 'confidence_not_high' }
 
   const missing = (input.missingFields || []).map(cleanMissingFieldName).filter(Boolean)
-  const blockingMissing = missing.filter((m) => !AUTO_APPROVE_ALLOWED_MISSING_FIELDS.has(m))
+  const blockingMissing = missing.filter((m) =>
+    !AUTO_APPROVE_ALLOWED_MISSING_FIELDS.has(m) &&
+    // The combined-obligation marker is not blocking when the obligation is
+    // splittable — approval expands it into two cards (item 3b).
+    !(input.combinedSplittable === true && m === COMBINED_OBLIGATION_MISSING_FIELD)
+  )
   if (blockingMissing.length > 0) return { ok: false, reason: 'missing_fields:' + blockingMissing.join(',') }
 
   if (!input.matchedCompany?.slug && !input.matchedCompany?.name) return { ok: false, reason: 'missing_requesting_company' }
@@ -11331,6 +11359,8 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
       .test(String(draft?.body_preview || ''))
   const combinedObligation = !!(extraction?.secondary_obligation) ||
     (hasWorkOrderAttachmentEvidence(attachments) && hasPositiveReportOnlyEvidence(draft, extraction, attachments))
+  // item 3b: an unambiguous combined obligation is splittable (auto-expands into two cards).
+  const combinedSplittable = combinedSplitObligation(extraction) !== null
 
   // NOTE: this is a PURE cleanliness check (no `enabled` passed). Whether auto-approval
   // is switched on at all is decided by the caller — the sweep action gates the opt-in
@@ -11350,9 +11380,11 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     attachments,
     cancelled,
     combinedObligation,
+    combinedSplittable,
   })
 }
 
+export const _combinedSplitObligationForTest = combinedSplitObligation
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
 // Intake hardening (items 1 + 3): exported so tests can exercise the positive-report
@@ -11439,6 +11471,11 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
       autoApproved.push({
         draft_id: draft.id,
         job_id: approved?.job?.id || null,
+        // Item 3b: a combined draft splits into two live cards; log BOTH ids so an
+        // unattended split is fully auditable.
+        job_ids: approved?.job_ids || (approved?.job?.id ? [approved.job.id] : []),
+        secondary_job_id: approved?.secondary_job?.id || null,
+        split_combined: !!approved?.split_combined,
         external_ref: draft.external_ref || null,
         reason: decision.reason,
         clean_evidence: cleanEvidence,
@@ -11469,6 +11506,50 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
   }
 }
 
+// Item 3b — cross-link the two cards minted from one combined make-safe + report
+// work order: a sibling pointer in each job's metadata (so the board can pair them)
+// plus a job_events audit note on each. All writes are best-effort/non-blocking —
+// a cross-link failure must never undo the (already-created) cards.
+async function _crossLinkCombinedCards(
+  client: any,
+  primary: { id: string; number: string | null; role: string },
+  secondary: { id: string; number: string | null; role: string },
+): Promise<void> {
+  const link = async (
+    jobId: string,
+    self: { id: string; number: string | null; role: string },
+    sibling: { id: string; number: string | null; role: string },
+  ) => {
+    try {
+      const { data: row } = await client.from('jobs').select('metadata').eq('id', jobId).maybeSingle()
+      const md = parseJsonObject(row?.metadata)
+      md.combined_sibling = {
+        job_id: sibling.id,
+        job_number: sibling.number,
+        role: sibling.role,
+        self_role: self.role,
+        source: 'combined_makesafe_and_report',
+      }
+      await client.from('jobs').update({ metadata: md, updated_at: new Date().toISOString() }).eq('id', jobId)
+    } catch (_) { /* non-blocking */ }
+    try {
+      await client.from('job_events').insert({
+        job_id: jobId,
+        event_type: 'makesafe.combined_split',
+        detail_json: {
+          sibling_job_id: sibling.id,
+          sibling_job_number: sibling.number,
+          sibling_role: sibling.role,
+          self_role: self.role,
+          note: `Auto-split from one combined make-safe + report work order. Sibling card: ${sibling.number || sibling.id} (${sibling.role}).`,
+        },
+      })
+    } catch (_) { /* non-blocking */ }
+  }
+  await link(primary.id, primary, secondary)
+  await link(secondary.id, secondary, primary)
+}
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
@@ -11486,6 +11567,14 @@ async function approveIntakeDraft(client: any, body: any) {
   // make-safe WO path.
   const effectiveReportType = effectiveIntakeReportType(draft)
   const isReportOnlyDraft = _isReportOnlyType(effectiveReportType)
+  // Item 3b — combined make-safe + report AUTO-SPLIT. When the draft carries an
+  // UNAMBIGUOUS secondary report obligation, approval creates TWO cards: the PRIMARY
+  // is the physical make-safe (WO PDF attached, normal workflow) and a SEPARATE
+  // report-only card is minted below. So the primary is forced non-report-only here
+  // even if the draft's own report_type is roof/assessment — otherwise the WO would
+  // never attach and the physical make-safe would be lost.
+  const splitObligation = combinedSplitObligation(extraction)
+  const primaryIsReportOnly = splitObligation ? false : isReportOnlyDraft
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
 
@@ -11519,10 +11608,18 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!approvedFields.external_ref) missing.push('external_ref')
   if (!approvedFields.client_name) missing.push('client_name')
   if (!approvedFields.site_address) missing.push('site_address')
-  if (!isReportOnlyDraft && availableAttachments.length === 0) missing.push('work_order_pdf')
+  if (!primaryIsReportOnly && availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
-  const approvedJobFamily = extraction?.makesafe_job_family || _classifyMakeSafeJobFamily(
+  // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
+  // draft's roof/assessment family (that belongs to the secondary report card).
+  const approvedJobFamily = splitObligation
+    ? _classifyMakeSafeJobFamily(
+      draft?.subject || approvedFields.external_ref || '',
+      [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
+      null,
+    )
+    : extraction?.makesafe_job_family || _classifyMakeSafeJobFamily(
     draft?.subject || approvedFields.external_ref || '',
     [
       extraction?.builder_email_text_for_trade,
@@ -11641,8 +11738,10 @@ async function approveIntakeDraft(client: any, body: any) {
     createdJobId = jobResult?.job?.id || null
 
     // For report-only jobs: set report_type on makesafe_job_details and advance
-    // substatus to ready_to_invoice (bypasses the report-production stage).
-    if (isReportOnlyDraft && createdJobId) {
+    // substatus to ready_to_invoice (bypasses the report-production stage). A combined
+    // split's PRIMARY is a physical make-safe (primaryIsReportOnly=false), so it skips
+    // this and keeps the normal make-safe workflow; the report card is minted below.
+    if (primaryIsReportOnly && createdJobId) {
       try {
         await client.from('makesafe_job_details').update({
           report_type: effectiveReportType,
@@ -11678,8 +11777,10 @@ async function approveIntakeDraft(client: any, body: any) {
     }).eq('id', draft_id)
 
     // Attach any PDF attachments from the original email as visible work orders.
-    // Report-only jobs have no WO PDF — skip the attach loop for them.
-    if (!isReportOnlyDraft) {
+    // Report-only jobs have no WO PDF — skip the attach loop for them. A combined
+    // split attaches the WO to the physical make-safe primary here (and shares it
+    // onto the report card below).
+    if (!primaryIsReportOnly) {
       for (const att of attachments) {
         if (att.storage_url || att.pdf_url) {
           try {
@@ -11696,7 +11797,92 @@ async function approveIntakeDraft(client: any, body: any) {
       }
     }
 
-    return { ok: true, job: jobResult.job, draft_id, approved_fields: approvedFields, report_type: effectiveReportType || null }
+    // ── Item 3b: mint the SECOND card (the report obligation) ────────────────
+    // A combined make-safe + report is now expanded into TWO live cards instead of
+    // holding for human review: the physical make-safe (created above) PLUS this
+    // report-only card of the correct kind, sharing the same ref + WO PDF and
+    // cross-linked. Non-fatal: the primary already exists, so a secondary failure is
+    // logged and the primary stands (never a double-primary).
+    let secondaryJob: any = null
+    if (splitObligation && createdJobId) {
+      try {
+        const reportFamily = splitObligation.reportType === 'assessment_report'
+          ? 'assessment_report_quote'
+          : splitObligation.reportType
+        const secondaryResult = await createMakesafeJob(client, {
+          client_name: approvedFields.client_name,
+          site_address: approvedFields.site_address,
+          suburb: approvedFields.site_suburb,
+          phone: approvedFields.client_phone,
+          email: approvedFields.client_email,
+          requesting_company_slug: approvedFields.requesting_company_slug,
+          requesting_company_name: approvedFields.requesting_company_name,
+          external_ref: approvedFields.external_ref,
+          description: approvedFields.description,
+          safety_requirements: approvedFields.safety_requirements,
+          special_instructions: approvedFields.special_instructions,
+          makesafe_job_family: reportFamily,
+          makesafe_job_family_label: _makeSafeJobFamilyLabel(reportFamily),
+          suppress_notifications: true,
+          ...(sourceExternalLinks ? { external_links: sourceExternalLinks } : {}),
+          builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
+          builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
+          builder_email_received_at: extraction?.builder_email_received_at || draft?.received_at || null,
+          builder_claim_ref: extraction?.builder_claim_ref || null,
+          builder_work_order_number: extraction?.builder_work_order_number || null,
+          builder_po_number: extraction?.builder_po_number || null,
+        })
+        secondaryJob = secondaryResult?.job || null
+        if (secondaryJob?.id) {
+          // Report card carries its report_type. Do NOT auto-advance substatus — a
+          // fresh report is unsubmitted; advancing to ready_to_invoice here would be
+          // the exact unverified-advance hazard (request item 14). It starts at the
+          // default company_contact_required and moves through the report workflow.
+          try {
+            await client.from('makesafe_job_details').update({
+              report_type: splitObligation.reportType,
+              updated_at: new Date().toISOString(),
+            }).eq('job_id', secondaryJob.id)
+          } catch (_) { /* non-blocking */ }
+          // Share the WO PDF onto the report card for on-site context.
+          for (const att of attachments) {
+            if (att.storage_url || att.pdf_url) {
+              try {
+                await client.from('job_documents').insert({
+                  job_id: secondaryJob.id,
+                  type: 'work_order',
+                  file_name: att.file_name || att.name || 'work-order.pdf',
+                  storage_url: att.storage_url || att.pdf_url,
+                  pdf_url: att.pdf_url || att.storage_url,
+                  visible_to_trades: true,
+                })
+              } catch (_) { /* non-blocking */ }
+            }
+          }
+          // Cross-link the pair (metadata sibling refs + a job_events note each) so
+          // the board/trade view can see they came from one combined work order.
+          await _crossLinkCombinedCards(
+            client,
+            { id: jobResult.job.id, number: jobResult.job.job_number, role: 'make_safe' },
+            { id: secondaryJob.id, number: secondaryJob.job_number, role: splitObligation.reportType },
+          )
+        }
+      } catch (splitErr) {
+        console.error('[ops-api] approveIntakeDraft: combined split — secondary report card creation failed (primary stands):', (splitErr as Error).message)
+      }
+    }
+
+    return {
+      ok: true,
+      job: jobResult.job,
+      draft_id,
+      approved_fields: approvedFields,
+      report_type: effectiveReportType || null,
+      // Item 3b: both card ids so the auto-approval evidence event can log the split.
+      secondary_job: secondaryJob,
+      split_combined: !!secondaryJob,
+      job_ids: secondaryJob ? [jobResult.job.id, secondaryJob.id] : [jobResult.job.id],
+    }
   } catch (postClaimErr) {
     if (!createdJobId) {
       // Pre-insert failure: no live job exists, so release the claim back to the
@@ -12399,7 +12585,9 @@ async function _reextractExtractFields(
     confidence = 'low'
   }
 
-  const mergedPortalLinks = _mergeDeterministicAndClaudeLinks(deterministicPortalLinks, extraction)
+  // Item 4 — also mine portal/report links from the recovered WO PDF text (reextract parity with scan).
+  const attachmentPortalLinks = _extractBuilderEmailLinks(null, combinedPdfText || pdfRawTexts.join('\n'))
+  const mergedPortalLinks = _mergeDeterministicAndClaudeLinks([...deterministicPortalLinks, ...attachmentPortalLinks], extraction)
   if (mergedPortalLinks.length) {
     extraction.portal_links = mergedPortalLinks
     extraction.portal_link = extraction.portal_link || mergedPortalLinks[0]?.url || null
@@ -12557,6 +12745,7 @@ export async function reextractIntakeDraft(
     combinedObligation: !!(r.extraction?.secondary_obligation) ||
       (hasWorkOrderAttachmentEvidence(r.attachments) &&
         hasPositiveReportOnlyEvidence({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments)),
+    combinedSplittable: combinedSplitObligation(r.extraction) !== null,
   })
   if (autoDecision.ok) {
     try {
@@ -12714,6 +12903,40 @@ export async function _selfHealIntakeInsert(
   console.error('[ops-api] intake insert 23505 but no occupying row found (WO DROPPED):', refOrId)
   await dropBreadcrumb('unique_violation_no_row')
   return { outcome: 'dropped', row: null }
+}
+
+// Intake item 4 (nudge-email pattern) — land a nudge's portal links onto the EXISTING
+// make-safe job it references, idempotently, instead of dropping them. A builder
+// "please complete the report" nudge carries the report portal link but NO new WO PDF
+// and references a ref that already has a live job; the scan otherwise silently skips
+// it and the link is lost (recon proof SWMS-26632). Writes the canonical
+// makesafe_job_details.external_links (+ the jobs.metadata alias the trade view/board
+// read), ADD-only (never clobbers an operator edit; re-scanning the same nudge is a
+// no-op). Returns the newly-added links. Throws on the canonical write so the caller
+// can log; the caller keeps it non-blocking (a patch failure never breaks the scan).
+async function _patchExistingJobExternalLinks(
+  // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
+  client: any,
+  jobId: string,
+  incoming: any[],
+): Promise<{ added: any[] }> {
+  if (!jobId || !Array.isArray(incoming) || incoming.length === 0) return { added: [] }
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('external_links').eq('job_id', jobId).maybeSingle()
+  const { links, added } = _mergeIntoExternalLinks(detail?.external_links, incoming)
+  if (added.length === 0) return { added: [] }
+  const nowIso = new Date().toISOString()
+  const { error: upErr } = await client.from('makesafe_job_details')
+    .update({ external_links: links, updated_at: nowIso }).eq('job_id', jobId)
+  if (upErr) throw new Error(`external_links patch failed: ${upErr.message}`)
+  // Keep the jobs.metadata.external_links alias in sync (best-effort; canonical done).
+  try {
+    const { data: jobRow } = await client.from('jobs').select('metadata').eq('id', jobId).maybeSingle()
+    const md = parseJsonObject(jobRow?.metadata)
+    md.external_links = links
+    await client.from('jobs').update({ metadata: md, updated_at: nowIso }).eq('id', jobId)
+  } catch (_) { /* alias is best-effort */ }
+  return { added }
 }
 
 async function scanSesMakesafes(client: any) {
@@ -12947,6 +13170,7 @@ async function scanSesMakesafes(client: any) {
   let skippedAiOnly = 0
   let skippedNotWorkOrderGate = 0
   let cancellationsDetected = 0
+  let nudgeLinksAttached = 0 // item 4: portal links landed on an existing job from a nudge email
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
@@ -13430,7 +13654,11 @@ async function scanSesMakesafes(client: any) {
       confidence = 'low'
     }
 
-    const mergedPortalLinks = _mergeDeterministicAndClaudeLinks(deterministicPortalLinks, extraction)
+    // Item 4 — also mine portal/report links out of the recovered WO PDF text, not
+    // just the email body, so a share link that only appears in the attachment still
+    // reaches the job's external_links (and the trade view).
+    const attachmentPortalLinks = _extractBuilderEmailLinks(null, combinedPdfText || pdfRawTexts.join('\n'))
+    const mergedPortalLinks = _mergeDeterministicAndClaudeLinks([...deterministicPortalLinks, ...attachmentPortalLinks], extraction)
     if (mergedPortalLinks.length) {
       extraction.portal_links = mergedPortalLinks
       extraction.portal_link = extraction.portal_link || mergedPortalLinks[0]?.url || null
@@ -13707,6 +13935,38 @@ async function scanSesMakesafes(client: any) {
         // no company slug) — treated as a safe skip, never points at the wrong job.
         if (!REOPEN_ELIGIBLE_STATUSES.includes(matchedJobStatus ?? '')) {
           const skipReason = matchedEntry == null ? 'no company-scoped match (ambiguous ref)' : 'active job, not reopen-eligible'
+          // Item 4 (nudge-email pattern): a "please complete the report" nudge for THIS
+          // active job carries the report portal link but no new WO. Land it on the
+          // existing job's external_links (idempotent) instead of dropping it — the
+          // link is why crews couldn't find the portal (SWMS-26632). Only when the ref
+          // resolved to a DEFINITE company-scoped job (matchedJobId, not an ambiguous
+          // ref-only fallback), so a shared ref number can never patch the wrong job.
+          if (matchedJobId) {
+            const nudgeLinks = _normalizeReportExternalLinks(extraction)
+            if (nudgeLinks.length) {
+              try {
+                const { added } = await _patchExistingJobExternalLinks(client, matchedJobId, nudgeLinks)
+                if (added.length) {
+                  nudgeLinksAttached++
+                  console.log('[ops-api] intake nudge link attached to job', matchedJobId, 'ref', extractedRef, '+' + added.length)
+                  try {
+                    await logBusinessEvent(client, {
+                      event_type: 'makesafe.intake_nudge_link_attached',
+                      source: 'app/makesafe-intake',
+                      entity_type: 'job',
+                      entity_id: matchedJobId,
+                      job_id: matchedJobId,
+                      body_preview: `Attached ${added.length} builder portal link(s) from a nudge email to existing job (ref ${extractedRef}); no draft minted.`,
+                      payload: { job_id: matchedJobId, external_ref: extractedRef, added_links: added, graph_message_id: msg.id },
+                      metadata: { mission: 'intake/nudge-email-links', reason: 'nudge_link_attached' },
+                    })
+                  } catch { /* non-blocking breadcrumb */ }
+                }
+              } catch (e) {
+                console.log('[ops-api] intake nudge link patch failed (non-blocking):', (e as Error).message)
+              }
+            }
+          }
           console.log('[ops-api] intake skip (' + skipReason + '):', matchedJobStatus, '|', extractedRef, '|', matchedJobId)
           skippedDuplicates++
           skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: `job_external_ref:${skipReason}` })
@@ -13934,8 +14194,10 @@ async function scanSesMakesafes(client: any) {
       siteAddress: extraction.site_address || null,
       attachments,
       // Item 2/3 belt-and-braces: a cancellation never reaches here (dropped at the
-      // gate), but a combined make-safe+report must never auto-file a single card.
+      // gate). A combined make-safe+report no longer auto-files a single card — an
+      // UNAMBIGUOUS one auto-splits into two cards (item 3b); an ambiguous one blocks.
       combinedObligation: !!(extraction?.secondary_obligation),
+      combinedSplittable: combinedSplitObligation(extraction) !== null,
     })
 
     if (autoApprovalDecision.ok) {
@@ -14076,6 +14338,9 @@ async function scanSesMakesafes(client: any) {
     // Item 2: cancellation emails recognised and dropped (no draft minted); each is
     // breadcrumbed as a makesafe.intake_cancellation_detected business_event.
     cancellations_detected: cancellationsDetected,
+    // Item 4: nudge emails whose portal link was landed on the existing job it
+    // references (idempotent add-only), instead of dropping the link / minting.
+    nudge_links_attached: nudgeLinksAttached,
     // Cost-leak fix observability: emails skipped because already extracted (marker
     // set), and emails freshly stamped this run. In steady state on a quiet inbox both
     // fall to ~0 new work; a re-extraction leak would show as scanned_marked climbing
