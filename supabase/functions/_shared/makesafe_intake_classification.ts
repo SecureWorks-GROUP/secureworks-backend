@@ -51,3 +51,27 @@ export function findMatchingSenderCompany<T extends SenderPatternCompany>(
   }
   return null;
 }
+
+// ── Code-level watched-sender FLOOR (item 11) ─────────────────────────────────
+// Builder work orders normally arrive from a company's DB-configured
+// sender_patterns. Some builders ALSO dispatch work orders through Prime's
+// notification channel (noreply@notifications.primeeco.tech), which is not tied
+// to any single company's patterns — so its WOs (and their PDF attachments) were
+// never watched: such a WO missed the email_attachments intake table entirely and
+// later 500'd sw_attach_email_attachment_to_job. This floor is merged with the DB
+// patterns by BOTH the ses monitor (attachment sync) and the ops-api intake
+// scanner, so a first-class watched sender can never be reintroduced as a silent
+// gap. The make-safe WO gate (isGenuineNewWorkOrder) + the non-WO subject
+// exclusion still run downstream, so an ordinary Prime notification is not drafted.
+export const WATCHED_SENDER_FLOOR: readonly string[] = [
+  "notifications.primeeco.tech", // Prime Notification Centre (noreply@…)
+];
+
+// True when the sender matches any code-level watched-sender floor pattern (same
+// anchored domain/full-address semantics as a DB sender_pattern).
+export function senderMatchesWatchedFloor(
+  fromEmail: string | null | undefined,
+  floor: readonly string[] = WATCHED_SENDER_FLOOR,
+): boolean {
+  return floor.some((p) => senderMatchesPattern(fromEmail, p));
+}
