@@ -17,9 +17,24 @@ import {
   _isOpenTradeMakesafeDetailForTest,
 } from "./index.ts";
 
-// ── Mock: capture the job_assignments update chain ─────────────────────────
+// AWST date helpers — mirror index.ts getAWSTDate() so the belt boundary lines
+// up with production regardless of when the suite runs.
+const AWST_OFFSET_MS = 8 * 60 * 60 * 1000;
+function awstDate(offsetDays: number): string {
+  return new Date(Date.now() + AWST_OFFSET_MS + offsetDays * 86400000).toISOString().slice(0, 10);
+}
+const TODAY = awstDate(0);
+const PAST = awstDate(-7);
+const FUTURE = awstDate(7);
+
+// ── Mock: capture AND simulate the job_assignments update chain ─────────────
 // closeOpenAssignmentsForJob does:
-//   client.from('job_assignments').update(patch).eq('job_id', id).in('status', arr).select('id')
+//   .from('job_assignments').update(patch).eq('job_id', id).in('status', arr)
+//     [.lte('scheduled_date', today)]  // only on the 'complete' path
+//     .select('id')
+// The mock captures every predicate AND applies eq/in/lte to the seeded rows so
+// row-survival (the date belt) can be asserted, not just the query shape. Rows
+// are seeded as { id, job_id, status, scheduled_date }.
 function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
   const captured: {
     fromCalled: boolean;
@@ -29,7 +44,10 @@ function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
     eqVal: any;
     inField: string | null;
     inVals: any;
+    lteField: string | null;
+    lteVal: any;
     selectCols: string | null;
+    matchedIds: string[];
   } = {
     fromCalled: false,
     table: null,
@@ -38,13 +56,19 @@ function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
     eqVal: null,
     inField: null,
     inVals: null,
+    lteField: null,
+    lteVal: null,
     selectCols: null,
+    matchedIds: [],
   };
   const rows = opts.rows ?? [];
   const client = {
     from(table: string) {
       captured.fromCalled = true;
       captured.table = table;
+      const eqFilters: Record<string, any> = {};
+      const inFilters: Record<string, any[]> = {};
+      const lteFilters: Record<string, any> = {};
       const builder: any = {
         update(patch: any) {
           captured.update = patch;
@@ -53,22 +77,48 @@ function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
         eq(field: string, val: any) {
           captured.eqField = field;
           captured.eqVal = val;
+          eqFilters[field] = val;
           return builder;
         },
         in(field: string, vals: any) {
           captured.inField = field;
           captured.inVals = vals;
+          inFilters[field] = vals;
+          return builder;
+        },
+        lte(field: string, val: any) {
+          captured.lteField = field;
+          captured.lteVal = val;
+          lteFilters[field] = val;
           return builder;
         },
         select(cols: string) {
           captured.selectCols = cols;
-          return { data: opts.error ? null : rows, error: opts.error ?? null };
+          if (opts.error) return { data: null, error: opts.error };
+          // Simulate Postgres: a row is updated only if it satisfies every
+          // predicate. `.lte` on a NULL value is false (Postgres three-valued).
+          const matched = rows.filter((r: any) => {
+            for (const [f, v] of Object.entries(eqFilters)) if (r[f] !== v) return false;
+            for (const [f, vals] of Object.entries(inFilters)) if (!vals.includes(r[f])) return false;
+            for (const [f, v] of Object.entries(lteFilters)) {
+              if (r[f] === null || r[f] === undefined) return false;
+              if (!(r[f] <= v)) return false;
+            }
+            return true;
+          }).map((r: any) => ({ id: r.id }));
+          captured.matchedIds = matched.map((m: any) => m.id);
+          return { data: matched, error: null };
         },
       };
       return builder;
     },
   };
   return { client, captured };
+}
+
+// Convenience: seed an open assignment row.
+function asg(id: string, scheduled_date: string | null, status = "scheduled", job_id = "job-1") {
+  return { id, job_id, status, scheduled_date };
 }
 
 // ── U2b: _closeAsForJobStatus ──────────────────────────────────────────────
@@ -122,7 +172,7 @@ Deno.test("closeAsForMakesafeSubstatus: case-insensitive", () => {
 
 // ── U2a: closeOpenAssignmentsForJob ────────────────────────────────────────
 Deno.test("closeOpenAssignmentsForJob: targets only OPEN statuses, sets closeAs + updated_at", async () => {
-  const { client, captured } = makeAssignmentClient({ rows: [{ id: "a1" }, { id: "a2" }] });
+  const { client, captured } = makeAssignmentClient({ rows: [asg("a1", PAST), asg("a2", PAST)] });
   const closed = await _closeOpenAssignmentsForJobForTest(client, "job-1", "complete");
 
   assertEquals(closed, 2);
@@ -136,11 +186,20 @@ Deno.test("closeOpenAssignmentsForJob: targets only OPEN statuses, sets closeAs 
   assertEquals(typeof captured.update.updated_at, "string");
 });
 
-Deno.test("closeOpenAssignmentsForJob: closeAs 'cancelled' writes cancelled", async () => {
-  const { client, captured } = makeAssignmentClient({ rows: [{ id: "a1" }] });
+Deno.test("closeOpenAssignmentsForJob: closeAs 'cancelled' writes cancelled and applies NO date belt", async () => {
+  const { client, captured } = makeAssignmentClient({ rows: [asg("a1", PAST, "confirmed", "job-9")] });
   const closed = await _closeOpenAssignmentsForJobForTest(client, "job-9", "cancelled");
   assertEquals(closed, 1);
   assertEquals(captured.update.status, "cancelled");
+  // Dead-close never adds the scheduled_date filter.
+  assertEquals(captured.lteField, null);
+});
+
+Deno.test("closeOpenAssignmentsForJob: 'complete' applies scheduled_date <= today (AWST) belt", async () => {
+  const { client, captured } = makeAssignmentClient({ rows: [asg("a1", PAST)] });
+  await _closeOpenAssignmentsForJobForTest(client, "job-1", "complete");
+  assertEquals(captured.lteField, "scheduled_date");
+  assertEquals(captured.lteVal, TODAY);
 });
 
 Deno.test("closeOpenAssignmentsForJob: idempotent — zero open rows returns 0", async () => {
@@ -158,10 +217,40 @@ Deno.test("closeOpenAssignmentsForJob: non-blocking — a DB error returns 0, ne
 });
 
 Deno.test("closeOpenAssignmentsForJob: empty jobId short-circuits without querying", async () => {
-  const { client, captured } = makeAssignmentClient({ rows: [{ id: "a1" }] });
+  const { client, captured } = makeAssignmentClient({ rows: [asg("a1", PAST)] });
   const closed = await _closeOpenAssignmentsForJobForTest(client, "", "complete");
   assertEquals(closed, 0);
   assertEquals(captured.fromCalled, false);
+});
+
+// ── U2a date belt (FM #319 review): finished keeps future, dead removes it ──
+Deno.test("date belt: finished-close CLOSES past, KEEPS a strictly-future re-attend", async () => {
+  const { client, captured } = makeAssignmentClient({ rows: [asg("past", PAST), asg("future", FUTURE)] });
+  const closed = await _closeOpenAssignmentsForJobForTest(client, "job-1", "complete");
+  assertEquals(closed, 1);
+  assertEquals(captured.matchedIds, ["past"]); // the future re-attend survives
+});
+
+Deno.test("date belt: dead-close REMOVES a strictly-future row (cancelled job's future visits are dead)", async () => {
+  const { client } = makeAssignmentClient({ rows: [asg("future", FUTURE)] });
+  const closed = await _closeOpenAssignmentsForJobForTest(client, "job-1", "cancelled");
+  assertEquals(closed, 1);
+});
+
+Deno.test("date belt: boundary — a row dated TODAY closes on a finished-close", async () => {
+  const { client, captured } = makeAssignmentClient({ rows: [asg("today", TODAY), asg("future", FUTURE)] });
+  const closed = await _closeOpenAssignmentsForJobForTest(client, "job-1", "complete");
+  assertEquals(closed, 1);
+  assertEquals(captured.matchedIds, ["today"]);
+});
+
+Deno.test("date belt: finished-close leaves a NULL-dated row untouched; dead-close closes it", async () => {
+  // Documents the .lte-excludes-null behaviour flagged to the FM. The verified
+  // stale set has no null-dated rows, so this is an edge note, not a live gap.
+  const finished = makeAssignmentClient({ rows: [asg("nullrow", null)] });
+  assertEquals(await _closeOpenAssignmentsForJobForTest(finished.client, "job-1", "complete"), 0);
+  const dead = makeAssignmentClient({ rows: [asg("nullrow", null)] });
+  assertEquals(await _closeOpenAssignmentsForJobForTest(dead.client, "job-1", "cancelled"), 1);
 });
 
 // ── U2c: allocatable-only pool predicate + the report-access split ──────────

@@ -19808,6 +19808,19 @@ export function _closeAsForMakesafeSubstatus(substatus: string | null | undefine
 // never surface as a failed transition. Idempotent: a repeat call finds no open
 // rows and no-ops. Never texts / notifies (M3b: updates are silent). Returns the
 // number of assignments closed (0 on failure or when there was nothing to close).
+//
+// Date belt split by close mode (FM review, PR #319):
+//  - closeAs 'cancelled' (dead job — cancelled/lost/deleted/…): close ALL open
+//    rows, INCLUDING strictly-future bookings. A dead job's future visits are
+//    genuinely dead.
+//  - closeAs 'complete' (finished job — invoiced/complete/archived/…): close
+//    only rows dated today-or-earlier (AWST). A STRICTLY-FUTURE row survives, so
+//    a make-safe RE-ATTEND still booked when an earlier attendance is invoiced
+//    stays on the run sheet / calendar (the unconditional close would otherwise
+//    silently kill it). All 510 verified stale rows are past-dated, so the belt
+//    costs nothing on the existing backlog. NOTE: PostgREST `.lte` excludes NULL,
+//    so a finished-close leaves a null-dated open row untouched (dead-close still
+//    closes it); the verified stale set has no null-dated rows.
 async function closeOpenAssignmentsForJob(
   client: any,
   jobId: string,
@@ -19815,12 +19828,16 @@ async function closeOpenAssignmentsForJob(
 ): Promise<number> {
   try {
     if (!jobId) return 0
-    const { data, error } = await client
+    let query = client
       .from('job_assignments')
       .update({ status: closeAs, updated_at: new Date().toISOString() })
       .eq('job_id', jobId)
       .in('status', _OPEN_ASSIGNMENT_STATUSES as unknown as string[])
-      .select('id')
+    if (closeAs === 'complete') {
+      // Boundary: today closes; strictly-future survives.
+      query = query.lte('scheduled_date', getAWSTDate())
+    }
+    const { data, error } = await query.select('id')
     if (error) throw error
     const closed = (data || []).length
     if (closed > 0) {
