@@ -10244,6 +10244,12 @@ async function updateMakesafeSubstatus(client: any, body: any) {
     .single()
   if (error) throw error
 
+  // ── M3d U2b: advancing a make-safe INTO a finished substatus closes the job's
+  // still-open crew assignments (finished make-safe work -> assignment complete).
+  // Non-finished substatuses map to null and no-op. Non-blocking helper.
+  const _msCloseMode = _closeAsForMakesafeSubstatus(nextSubstatus)
+  if (_msCloseMode) await closeOpenAssignmentsForJob(client, jId, _msCloseMode)
+
   // Log event (fire-and-forget). A PostgREST insert builder is thenable but has no `.catch`
   // method, so `.insert(...).catch(...)` throws "catch is not a function" AFTER the update above
   // has already committed — surfacing a spurious 500 on an otherwise-successful substatus change
@@ -10443,6 +10449,12 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     .select()
     .single()
   if (upErr) throw upErr
+
+  // ── M3d U2b: the portal-done marker advances the make-safe to a finished
+  // substatus (admin_to_send_report) — close its still-open crew assignments.
+  // Only the real-advance path reaches here (the idempotent repeat returned
+  // above). Non-blocking.
+  await closeOpenAssignmentsForJob(client, jId, 'complete')
 
   // One event row, fire-and-forget with the .then().catch() idiom (same as
   // updateMakesafeSubstatus — a PostgREST insert builder has no bare .catch).
@@ -11515,6 +11527,10 @@ async function submitMakesafeReport(client: any, body: any) {
     if (!detailSync) {
       throw new ApiError('MakeSafe report saved but board sync failed: makesafe detail row missing', 500)
     }
+    // ── M3d U2b: submitting the final make-safe report advances substatus to a
+    // finished value (admin_to_send_report) — close its still-open crew
+    // assignments. Guarded by submittingFinal above. Non-blocking.
+    await closeOpenAssignmentsForJob(client, jId, 'complete')
     boardSync = {
       ok: true,
       substatus: detailSync.substatus || 'admin_to_send_report',
@@ -16269,6 +16285,12 @@ async function updateJobStatus(client: any, body: any) {
 
   if (error) throw error
 
+  // ── M3d U2b: a transition INTO a terminal jobs.status closes the job's still-
+  // open crew assignments so the trade Board stops classifying finished/dead work
+  // as live. Non-terminal statuses map to null and no-op. Non-blocking helper.
+  const _jobCloseMode = _closeAsForJobStatus(status)
+  if (_jobCloseMode) await closeOpenAssignmentsForJob(client, jId, _jobCloseMode)
+
   const source = body.source || 'ops_dashboard'
   await client.from('job_events').insert({
     job_id: jId,
@@ -17513,6 +17535,10 @@ async function createInvoice(client: any, body: any) {
       .update({ status: 'invoiced' })
       .eq('id', jId)
       .eq('status', 'complete')
+    // ── M3d U2b: invoicing a job finishes it — close its still-open crew
+    // assignments. Also covers complete_and_invoice, which reaches its terminal
+    // 'invoiced' state through this createInvoice call. Non-blocking.
+    await closeOpenAssignmentsForJob(client, jId, 'complete')
   }
 
   // Return the status Xero actually assigned (xeroInv.Status), not just what we
@@ -18182,6 +18208,10 @@ async function createGeneralInvoice(client: any, body: any) {
 
   // Update job status
   await client.from('jobs').update({ status: 'invoiced' }).eq('id', job_id)
+
+  // ── M3d U2b: general-invoice creation finishes the job — close its still-open
+  // crew assignments. Non-blocking.
+  await closeOpenAssignmentsForJob(client, job_id, 'complete')
 
   return {
     success: true,
@@ -19718,6 +19748,92 @@ function isOpenTradeMakesafeDetail(detail: any): boolean {
   return true
 }
 
+// ── M3d U2c — trade make-safe OPEN POOL = allocatable only (G2) ─────────────
+// The trade make-safe "New" column shows jobs ops has cleared for crew
+// allocation. A job still at substatus 'company_contact_required' is ops's own
+// admin queue (New = "ops still owns it"), not yet allocatable, so it drops off
+// the trade pool. This is POOL VISIBILITY ONLY: report access
+// (assertAssignedOrMakesafeAccess -> isMakesafeAccessJobForClient) is a SEPARATE
+// predicate and is deliberately left unchanged, so any trade can still open and
+// REPORT on such a job. A job with NO detail row stays visible (null ->
+// allocatable), preserving today's behaviour.
+function isAllocatableMakesafePoolDetail(detail: any): boolean {
+  if (!isOpenTradeMakesafeDetail(detail)) return false
+  const sub = String(detail?.substatus || '').toLowerCase()
+  if (sub === 'company_contact_required') return false
+  return true
+}
+export function _isAllocatableMakesafePoolDetailForTest(detail: any): boolean {
+  return isAllocatableMakesafePoolDetail(detail)
+}
+
+// ── M3d U2a/U2b — auto-close stale crew assignments on terminal transitions ──
+// The trade Board classifies a card purely from its ASSIGNMENT status, so a job
+// (or make-safe) that reaches a terminal state must close its still-open crew
+// assignments or the Board keeps showing finished/dead work as live. These
+// vocabularies were verified live 2026-07-08 and mirror the U1 reconcile script
+// (scripts/reconcile-stale-assignments.sh) exactly: dead -> assignment cancelled,
+// finished -> assignment complete.
+export const _JOB_STATUS_DEAD = [
+  'cancelled', 'canceled', 'lost', 'deleted', 'duplicate', 'duplicated', 'void', 'voided',
+] as const
+export const _JOB_STATUS_FINISHED = [
+  'complete', 'completed', 'invoiced', 'paid', 'closed', 'archived',
+] as const
+export const _MAKESAFE_SUBSTATUS_FINISHED = [
+  'complete', 'completed', 'ready_to_invoice', 'admin_to_send_report', 'invoiced',
+] as const
+// Assignment statuses treated as OPEN (eligible to be auto-closed). Mirrors the
+// board's open columns and the U1 script's OPEN set.
+export const _OPEN_ASSIGNMENT_STATUSES = ['scheduled', 'confirmed', 'draft'] as const
+
+// Map a jobs.status to the assignment close mode, or null when not terminal.
+export function _closeAsForJobStatus(status: string | null | undefined): 'complete' | 'cancelled' | null {
+  const s = String(status || '').toLowerCase()
+  if ((_JOB_STATUS_DEAD as readonly string[]).includes(s)) return 'cancelled'
+  if ((_JOB_STATUS_FINISHED as readonly string[]).includes(s)) return 'complete'
+  return null
+}
+// Map a make-safe substatus to the assignment close mode, or null when the
+// substatus is not a finished one. Finished make-safe work is always 'complete'.
+export function _closeAsForMakesafeSubstatus(substatus: string | null | undefined): 'complete' | null {
+  const s = String(substatus || '').toLowerCase()
+  if ((_MAKESAFE_SUBSTATUS_FINISHED as readonly string[]).includes(s)) return 'complete'
+  return null
+}
+
+// U2a: close every still-open crew assignment for a job when the job/make-safe
+// reaches a terminal state. NON-BLOCKING by contract — the caller has already
+// committed the real status write, so a failure here (or a missing row) must
+// never surface as a failed transition. Idempotent: a repeat call finds no open
+// rows and no-ops. Never texts / notifies (M3b: updates are silent). Returns the
+// number of assignments closed (0 on failure or when there was nothing to close).
+async function closeOpenAssignmentsForJob(
+  client: any,
+  jobId: string,
+  closeAs: 'complete' | 'cancelled',
+): Promise<number> {
+  try {
+    if (!jobId) return 0
+    const { data, error } = await client
+      .from('job_assignments')
+      .update({ status: closeAs, updated_at: new Date().toISOString() })
+      .eq('job_id', jobId)
+      .in('status', _OPEN_ASSIGNMENT_STATUSES as unknown as string[])
+      .select('id')
+    if (error) throw error
+    const closed = (data || []).length
+    if (closed > 0) {
+      console.log(`[ops-api] closeOpenAssignmentsForJob: closed ${closed} open assignment(s) on job ${jobId} as ${closeAs}`)
+    }
+    return closed
+  } catch (e) {
+    console.log('[ops-api] closeOpenAssignmentsForJob failed (non-blocking):', (e as Error)?.message)
+    return 0
+  }
+}
+export const _closeOpenAssignmentsForJobForTest = closeOpenAssignmentsForJob
+
 async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   const { data, error } = await client
     .from('jobs')
@@ -20172,10 +20288,13 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
     const detailByJobId: Record<string, any> = {}
     for (const row of (detailRows || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
     for (const id of Object.keys(openMakesafeById)) {
-      if (!isOpenTradeMakesafeDetail(detailByJobId[id])) delete openMakesafeById[id]
+      // U2c: pool = allocatable only. Excludes finished substatuses (as before)
+      // AND company_contact_required (ops's admin queue). Report access is a
+      // separate predicate and unchanged.
+      if (!isAllocatableMakesafePoolDetail(detailByJobId[id])) delete openMakesafeById[id]
     }
     const detailJobIds = Array.from(new Set<string>((detailRows || [])
-      .filter((r: any) => isOpenTradeMakesafeDetail(r))
+      .filter((r: any) => isAllocatableMakesafePoolDetail(r))
       .map((r: any) => String(r.job_id || '')).filter(Boolean)))
       .filter((id: string) => !openMakesafeById[id])
     if (detailJobIds.length > 0) {
@@ -23515,6 +23634,11 @@ async function applyMakesafeCloseOut(
     throw new ApiError('make-safe close job update affected 0 rows; pack remains close-recoverable', 409)
   }
 
+  // ── M3d U2b: the make-safe close sets substatus=complete + a finished
+  // jobs.status (invoiced/archived) — close its still-open crew assignments.
+  // Non-blocking.
+  await closeOpenAssignmentsForJob(client, jobId, 'complete')
+
   if (oldStatus !== nextStatus) {
     try {
       await client.from('job_events').insert({
@@ -26514,6 +26638,9 @@ async function completeJob(client: any, body: any) {
     .eq('id', jId)
   if (updateErr) throw updateErr
 
+  // ── M3d U2b: completing a job closes its still-open crew assignments. Non-blocking.
+  await closeOpenAssignmentsForJob(client, jId, 'complete')
+
   // Log event
   await client.from('job_events').insert({
     job_id: jId,
@@ -29070,6 +29197,9 @@ async function approveQuoteReviewTask(client: any, body: any) {
     } catch (e: any) {
       console.warn('[ops-api/approve_quote_review_task] job archive error:', e.message)
     }
+    // ── M3d U2b: archive_lost flips the job to a dead status — close any
+    // still-open crew assignments (dead -> assignment cancelled). Non-blocking.
+    if (jobUpdateApplied && action.job_id) await closeOpenAssignmentsForJob(client, action.job_id, 'cancelled')
   }
 
   // Step 3: emit business_event for the spine.
@@ -31208,6 +31338,9 @@ async function resolveAnnotation(client: any, body: any) {
             event_type: 'status_changed',
             detail_json: { new_status: 'lost', via: 'annotation_resolve', previous_status: 'quoted' },
           })
+          // ── M3d U2b: mark_lost flips the job to a dead status — close any
+          // still-open crew assignments (dead -> assignment cancelled). Non-blocking.
+          await closeOpenAssignmentsForJob(client, ann.entity_id, 'cancelled')
         }
       }
       break
@@ -32710,6 +32843,10 @@ async function resolveCallback(client: any, body: any) {
     status: 'complete',
     is_callback: false,
   }).eq('id', job_id)
+
+  // ── M3d U2b: resolving a callback returns the job to complete — close any
+  // still-open crew assignments (the callback visit). Non-blocking.
+  await closeOpenAssignmentsForJob(client, job_id, 'complete')
 
   await client.from('job_events').insert({
     job_id,
