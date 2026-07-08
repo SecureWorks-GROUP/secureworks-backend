@@ -749,6 +749,19 @@ export function isDuplicateIntake(
   ) {
     return "builder_work_order_identity";
   }
+  // W3-H (Marnin's rule, stated twice 2026-07-08): same builder ref + a NEW PO number = a new,
+  // separately invoiceable piece of work — not a duplicate to park in review. The *_needs_review
+  // returns below fire for the AMBIGUOUS case: a sibling on the same ref+company carries NO recorded
+  // WO/PO identity, so we cannot tell whether this incoming PO is the same work. When the candidate's
+  // WO/PO identity is genuinely NEW — carried by no existing draft OR job for this ref+company — the
+  // ambiguity is resolved: it is new work. Clear the concern so the normal strict gate decides (it
+  // auto-approves as its own card when everything else is clean). The exact-PO-match dedup paths
+  // (builder_work_order_identity just above, job_external_ref below) still fire first, so a PO that
+  // ALREADY exists never reaches this clear. No PO / unknown company => candidatePoIsNew is false =>
+  // needs_review stays (fail closed).
+  const candidatePoIsNew = !!candidateWorkOrderCompany &&
+    !index.workOrderCompany.has(candidateWorkOrderCompany) &&
+    !index.jobWorkOrderCompany.has(candidateWorkOrderCompany);
   if (rc) {
     if (family) {
       const rcf = refCompanyFamilyKey(
@@ -760,7 +773,10 @@ export function isDuplicateIntake(
       let skipDraftRefFamilyDuplicate = false;
       if (candidateHasWorkOrderIdentity && rcf) {
         if (index.refCompanyFamilyWithoutWorkOrderIdentity.has(rcf)) {
-          return "work_order_identity_needs_review";
+          // New PO under this ref+company+family = new work: skip the duplicate refusal (same as a
+          // known-different-WO sibling would). Otherwise the identity is ambiguous -> review.
+          if (candidatePoIsNew) skipDraftRefFamilyDuplicate = true;
+          else return "work_order_identity_needs_review";
         }
         if (index.refCompanyFamilyWithWorkOrderIdentity.has(rcf)) {
           skipDraftRefFamilyDuplicate = true;
@@ -782,7 +798,9 @@ export function isDuplicateIntake(
       let skipDraftRefDuplicate = false;
       if (candidateHasWorkOrderIdentity) {
         if (index.refCompanyWithoutWorkOrderIdentity.has(rc)) {
-          return "work_order_identity_needs_review";
+          // New PO under this ref+company = new work: skip the duplicate refusal. Ambiguous otherwise.
+          if (candidatePoIsNew) skipDraftRefDuplicate = true;
+          else return "work_order_identity_needs_review";
         }
         if (index.refCompanyWithWorkOrderIdentity.has(rc)) {
           skipDraftRefDuplicate = true;
@@ -815,7 +833,9 @@ export function isDuplicateIntake(
         let skipJobRefFamilyDuplicate = false;
         if (candidateHasWorkOrderIdentity && rcf) {
           if (index.jobRefCompanyFamilyWithoutWorkOrderIdentity.has(rcf)) {
-            return "job_work_order_identity_needs_review";
+            // New PO under this ref+company+family = new work: not a job duplicate. Ambiguous otherwise.
+            if (candidatePoIsNew) skipJobRefFamilyDuplicate = true;
+            else return "job_work_order_identity_needs_review";
           }
           if (index.jobRefCompanyFamilyWithWorkOrderIdentity.has(rcf)) {
             skipJobRefFamilyDuplicate = true;
@@ -834,7 +854,9 @@ export function isDuplicateIntake(
         let skipJobRefDuplicate = false;
         if (candidateHasWorkOrderIdentity) {
           if (index.jobRefCompanyWithoutWorkOrderIdentity.has(rc)) {
-            return "job_work_order_identity_needs_review";
+            // New PO under this ref+company = new work: not a job duplicate. Ambiguous otherwise.
+            if (candidatePoIsNew) skipJobRefDuplicate = true;
+            else return "job_work_order_identity_needs_review";
           }
           if (index.jobRefCompanyWithWorkOrderIdentity.has(rc)) {
             skipJobRefDuplicate = true;

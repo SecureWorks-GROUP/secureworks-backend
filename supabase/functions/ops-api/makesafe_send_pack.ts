@@ -169,6 +169,35 @@ export function isVoidStatus(status: unknown): boolean {
   return VOID_STATUSES.includes(String(status ?? "").toUpperCase());
 }
 
+// ── Same-ref / new-PO scoping (W3-H, Marnin's rule stated 2026-07-08) ──
+// A builder can raise MULTIPLE work orders under ONE claim ref, each with its own PO number
+// ("MLB-24732" then a follow-up "MLB-24732PO-55712"; two siblings "MLB-25898PO-55547" vs
+// "MLB-25898PO-54817"). Marnin's rule: same builder ref + a DIFFERENT PO number = a NEW, separately
+// invoiceable piece of work, so a sibling card's invoice must NOT block it. Identical full refs
+// (a true re-send) and refs where the base matches but NEITHER side carries a distinguishing PO
+// keep the strict per-ref block. Mirror of invoice_utils.py split_ref_po / _same_work_ref.
+const _PO_TOKEN_RE = /po[-\s]?(\d+)/i;
+
+export function splitRefPo(raw: unknown): { base: string; po: string | null } {
+  const s = String(raw ?? "").trim();
+  const m = s.match(_PO_TOKEN_RE);
+  if (!m || m.index === undefined) return { base: normRef(s), po: null };
+  // base = the builder-ref prefix (everything before the PO token), normalised like any ref; the
+  // PO token attaches directly to the base with no separator ("...732PO-55712"), so locate it by
+  // pattern, not by a delimiter.
+  return { base: normRef(s.slice(0, m.index)), po: m[1] };
+}
+
+// True when a reference-tier candidate is the SAME piece of work as our card (still blocks); false
+// ONLY when both refs share a base builder-ref but carry DIFFERENT PO numbers. Fail-closed: anything
+// not confidently a different-PO sibling stays a block, preserving the strict per-ref guard.
+export function sameWorkRef(ourRef: unknown, candRef: unknown): boolean {
+  const o = splitRefPo(ourRef);
+  const c = splitRefPo(candRef);
+  if (o.base && c.base && o.base === c.base && o.po !== c.po) return false;
+  return true;
+}
+
 export interface ExistingInvoiceHit {
   invoice_number: string | null;
   status: string | null;
@@ -204,7 +233,9 @@ export function resolveExistingInvoice(
     match_method: method,
   });
 
-  // Tier 1: job_id
+  // Tier 1 (job_id) is our OWN card: a live invoice already on this job always blocks — a second
+  // invoice on the same card is a true re-invoice, whatever the PO suffix. Only the reference tiers
+  // below (which reach OTHER jobs' invoices) get the same-ref-new-PO scoping via sameWorkRef.
   if (jobId) {
     const byJob = all.filter((r) => r?.job_id && r.job_id === jobId);
     const hit = liveHit(byJob);
@@ -214,18 +245,22 @@ export function resolveExistingInvoice(
   const nref = normRef(externalRef);
   if (!nref) return null;
 
-  // Tier 2: exact normalised reference
+  // Tier 2: exact normalised reference (a different-PO sibling never exact-matches; sameWorkRef is a
+  // no-op here, applied for symmetry so the reference tiers read uniformly).
   const exact = all.filter((r) =>
-    normRef(r?.reference) === nref && normRef(r?.reference) !== ""
+    normRef(r?.reference) === nref && normRef(r?.reference) !== "" &&
+    sameWorkRef(externalRef, r?.reference)
   );
   const exactHit = liveHit(exact);
   if (exactHit) return toHit(exactHit, "reference");
 
-  // Tier 3: reference substring (>= 5 chars)
+  // Tier 3: reference substring (>= 5 chars). A base ref ("MLB-24732") is a substring of a
+  // PO-suffixed sibling's reference ("MLB-24732PO-55712"); sameWorkRef scopes that sibling out so it
+  // does not block a genuinely separate piece of work.
   if (nref.length >= 5) {
     const sub = all.filter((r) => {
       const ir = normRef(r?.reference);
-      return ir !== "" && ir.includes(nref);
+      return ir !== "" && ir.includes(nref) && sameWorkRef(externalRef, r?.reference);
     });
     const subHit = liveHit(sub);
     if (subHit) return toHit(subHit, "reference_substring");

@@ -47,9 +47,11 @@ import {
   resolveExistingInvoice,
   RESUMABLE_PACK_STATUSES,
   RESUME_CLOSE_ALLOWED_STATUSES,
+  sameWorkRef,
   SENDING_STALE_SECONDS,
   SendLockCell,
   sendPackAllowed,
+  splitRefPo,
 } from "./makesafe_send_pack.ts";
 
 // ─────────────────────────────────────────────────────────────────
@@ -551,6 +553,132 @@ Deno.test("dup-guard: no match -> null (safe to create the single draft)", () =>
     },
   ];
   assertEquals(resolveExistingInvoice(rows, "job-1", "MLB-100"), null);
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 5b. W3-H — same builder ref + a NEW PO number = a NEW invoiceable card, so a
+//     sibling card's invoice must NOT block it (Marnin's rule 2026-07-08).
+// ─────────────────────────────────────────────────────────────────
+
+Deno.test("splitRefPo: base ref, PO-suffixed ref, and spaced PO", () => {
+  assertEquals(splitRefPo("MLB-24732"), { base: "mlb24732", po: null });
+  assertEquals(splitRefPo("MLB-24732PO-55712"), {
+    base: "mlb24732",
+    po: "55712",
+  });
+  assertEquals(splitRefPo("MLB-25898PO-54817"), {
+    base: "mlb25898",
+    po: "54817",
+  });
+  assertEquals(splitRefPo("MLB-24732 PO 55712"), {
+    base: "mlb24732",
+    po: "55712",
+  });
+});
+
+Deno.test("sameWorkRef: same base + different PO is different work; identical / no-PO stays same", () => {
+  assertEquals(sameWorkRef("MLB-24732PO-55712", "MLB-24732"), false); // PO vs base
+  assertEquals(sameWorkRef("MLB-24732", "MLB-24732PO-55712"), false); // base vs PO
+  assertEquals(sameWorkRef("MLB-25898PO-55547", "MLB-25898PO-54817"), false); // two POs
+  assertEquals(sameWorkRef("MLB-24732PO-55712", "MLB-24732PO-55712"), true); // identical
+  assertEquals(sameWorkRef("MLB-24732", "MLB-24732"), true); // neither has a PO
+  assertEquals(sameWorkRef("MLB-24732", "AJS-9999"), true); // unrelated base -> fail-closed block
+});
+
+Deno.test("W3-H dup-guard: SWMS-26938 (MLB-24732PO-55712) is invoiceable while sibling MLB-24732 is invoiced", () => {
+  // Live pair: SWMS-26526 (MLB-24732) is AUTHORISED on its own job; SWMS-26938 carries a new PO.
+  const rows = [
+    {
+      job_id: "job-26526",
+      status: "AUTHORISED",
+      invoice_number: "INV-0710",
+      reference: "MLB-24732",
+      xero_invoice_id: "x710",
+    },
+  ];
+  assertEquals(
+    resolveExistingInvoice(rows, "job-26938", "MLB-24732PO-55712"),
+    null,
+  );
+});
+
+Deno.test("W3-H dup-guard: a base-ref card is NOT blocked by a PO-suffixed sibling's invoice", () => {
+  // The over-block the substring tier used to cause: 'mlb24732' is a substring of
+  // 'mlb24732po55712', so the base card wrongly matched the sibling's invoice.
+  const rows = [
+    {
+      job_id: "job-sibling",
+      status: "AUTHORISED",
+      invoice_number: "INV-0711",
+      reference: "MLB-24732PO-55712",
+      xero_invoice_id: "x711",
+    },
+  ];
+  assertEquals(resolveExistingInvoice(rows, "job-base", "MLB-24732"), null);
+});
+
+Deno.test("W3-H dup-guard: two different-PO siblings never block each other", () => {
+  const rows = [
+    {
+      job_id: "job-54817",
+      status: "AUTHORISED",
+      invoice_number: "INV-0720",
+      reference: "MLB-25898PO-54817",
+      xero_invoice_id: "x720",
+    },
+  ];
+  assertEquals(
+    resolveExistingInvoice(rows, "job-55547", "MLB-25898PO-55547"),
+    null,
+  );
+});
+
+Deno.test("W3-H dup-guard: a true re-send (same full ref, different job) STILL refuses", () => {
+  const rows = [
+    {
+      job_id: "job-other",
+      status: "AUTHORISED",
+      invoice_number: "INV-0712",
+      reference: "MLB-24732PO-55712",
+      xero_invoice_id: "x712",
+    },
+  ];
+  const hit = resolveExistingInvoice(rows, "job-new", "MLB-24732PO-55712");
+  assert(hit);
+  assertEquals(hit!.match_method, "reference");
+  assertEquals(hit!.invoice_number, "INV-0712");
+});
+
+Deno.test("W3-H dup-guard: same builder ref + no PO on either side STILL refuses (strict, unchanged)", () => {
+  const rows = [
+    {
+      job_id: "job-other",
+      status: "AUTHORISED",
+      invoice_number: "INV-0713",
+      reference: "MLB-24732",
+      xero_invoice_id: "x713",
+    },
+  ];
+  const hit = resolveExistingInvoice(rows, "job-new", "MLB-24732");
+  assert(hit);
+  assertEquals(hit!.match_method, "reference");
+});
+
+Deno.test("W3-H dup-guard: own-card protection (job_id tier) still blocks regardless of PO suffix", () => {
+  // Even if the invoice reference is the base ref and our card carries a PO, a live invoice on
+  // OUR OWN job_id is a true re-invoice and must still block.
+  const rows = [
+    {
+      job_id: "job-26938",
+      status: "DRAFT",
+      invoice_number: "INV-0714",
+      reference: "MLB-24732",
+      xero_invoice_id: "x714",
+    },
+  ];
+  const hit = resolveExistingInvoice(rows, "job-26938", "MLB-24732PO-55712");
+  assert(hit);
+  assertEquals(hit!.match_method, "job_id");
 });
 
 // ─────────────────────────────────────────────────────────────────
