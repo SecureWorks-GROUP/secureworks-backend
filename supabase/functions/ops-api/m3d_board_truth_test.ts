@@ -30,9 +30,9 @@ const FUTURE = awstDate(7);
 // ── Mock: capture AND simulate the job_assignments update chain ─────────────
 // closeOpenAssignmentsForJob does:
 //   .from('job_assignments').update(patch).eq('job_id', id).in('status', arr)
-//     [.lte('scheduled_date', today)]  // only on the 'complete' path
+//     [.or('scheduled_date.is.null,scheduled_date.lte.<today>')]  // 'complete' only
 //     .select('id')
-// The mock captures every predicate AND applies eq/in/lte to the seeded rows so
+// The mock captures every predicate AND applies eq/in/or to the seeded rows so
 // row-survival (the date belt) can be asserted, not just the query shape. Rows
 // are seeded as { id, job_id, status, scheduled_date }.
 function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
@@ -44,8 +44,7 @@ function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
     eqVal: any;
     inField: string | null;
     inVals: any;
-    lteField: string | null;
-    lteVal: any;
+    orExpr: string | null;
     selectCols: string | null;
     matchedIds: string[];
   } = {
@@ -56,19 +55,28 @@ function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
     eqVal: null,
     inField: null,
     inVals: null,
-    lteField: null,
-    lteVal: null,
+    orExpr: null,
     selectCols: null,
     matchedIds: [],
   };
   const rows = opts.rows ?? [];
+  // Evaluate a single PostgREST clause "field.op.value" against a row.
+  function clauseMatches(r: any, clause: string): boolean {
+    const [field, op, ...rest] = clause.split(".");
+    const value = rest.join(".");
+    const rv = r[field];
+    if (op === "is" && value === "null") return rv === null || rv === undefined;
+    if (op === "lte") return rv !== null && rv !== undefined && rv <= value;
+    if (op === "gt") return rv !== null && rv !== undefined && rv > value;
+    return false;
+  }
   const client = {
     from(table: string) {
       captured.fromCalled = true;
       captured.table = table;
       const eqFilters: Record<string, any> = {};
       const inFilters: Record<string, any[]> = {};
-      const lteFilters: Record<string, any> = {};
+      const orGroups: string[][] = [];
       const builder: any = {
         update(patch: any) {
           captured.update = patch;
@@ -86,24 +94,20 @@ function makeAssignmentClient(opts: { rows?: any[]; error?: any } = {}) {
           inFilters[field] = vals;
           return builder;
         },
-        lte(field: string, val: any) {
-          captured.lteField = field;
-          captured.lteVal = val;
-          lteFilters[field] = val;
+        or(expr: string) {
+          captured.orExpr = expr;
+          orGroups.push(expr.split(","));
           return builder;
         },
         select(cols: string) {
           captured.selectCols = cols;
           if (opts.error) return { data: null, error: opts.error };
           // Simulate Postgres: a row is updated only if it satisfies every
-          // predicate. `.lte` on a NULL value is false (Postgres three-valued).
+          // top-level filter; an .or() group matches when ANY clause matches.
           const matched = rows.filter((r: any) => {
             for (const [f, v] of Object.entries(eqFilters)) if (r[f] !== v) return false;
             for (const [f, vals] of Object.entries(inFilters)) if (!vals.includes(r[f])) return false;
-            for (const [f, v] of Object.entries(lteFilters)) {
-              if (r[f] === null || r[f] === undefined) return false;
-              if (!(r[f] <= v)) return false;
-            }
+            for (const group of orGroups) if (!group.some((c) => clauseMatches(r, c))) return false;
             return true;
           }).map((r: any) => ({ id: r.id }));
           captured.matchedIds = matched.map((m: any) => m.id);
@@ -192,14 +196,13 @@ Deno.test("closeOpenAssignmentsForJob: closeAs 'cancelled' writes cancelled and 
   assertEquals(closed, 1);
   assertEquals(captured.update.status, "cancelled");
   // Dead-close never adds the scheduled_date filter.
-  assertEquals(captured.lteField, null);
+  assertEquals(captured.orExpr, null);
 });
 
-Deno.test("closeOpenAssignmentsForJob: 'complete' applies scheduled_date <= today (AWST) belt", async () => {
+Deno.test("closeOpenAssignmentsForJob: 'complete' applies the null-or-<=today (AWST) belt", async () => {
   const { client, captured } = makeAssignmentClient({ rows: [asg("a1", PAST)] });
   await _closeOpenAssignmentsForJobForTest(client, "job-1", "complete");
-  assertEquals(captured.lteField, "scheduled_date");
-  assertEquals(captured.lteVal, TODAY);
+  assertEquals(captured.orExpr, `scheduled_date.is.null,scheduled_date.lte.${TODAY}`);
 });
 
 Deno.test("closeOpenAssignmentsForJob: idempotent — zero open rows returns 0", async () => {
@@ -244,13 +247,23 @@ Deno.test("date belt: boundary — a row dated TODAY closes on a finished-close"
   assertEquals(captured.matchedIds, ["today"]);
 });
 
-Deno.test("date belt: finished-close leaves a NULL-dated row untouched; dead-close closes it", async () => {
-  // Documents the .lte-excludes-null behaviour flagged to the FM. The verified
-  // stale set has no null-dated rows, so this is an edge note, not a live gap.
+Deno.test("date belt: a NULL-dated open row CLOSES on both finished- and dead-close", async () => {
+  // FM ruling: an undated open assignment on finished work is stale by definition
+  // (a deliberate future booking always carries a date), so finished-close sweeps
+  // it via the `scheduled_date.is.null` clause. Dead-close closes it too.
   const finished = makeAssignmentClient({ rows: [asg("nullrow", null)] });
-  assertEquals(await _closeOpenAssignmentsForJobForTest(finished.client, "job-1", "complete"), 0);
+  assertEquals(await _closeOpenAssignmentsForJobForTest(finished.client, "job-1", "complete"), 1);
   const dead = makeAssignmentClient({ rows: [asg("nullrow", null)] });
   assertEquals(await _closeOpenAssignmentsForJobForTest(dead.client, "job-1", "cancelled"), 1);
+});
+
+Deno.test("date belt: finished-close closes null + past + today, KEEPS only strictly-future", async () => {
+  const { client, captured } = makeAssignmentClient({
+    rows: [asg("nullrow", null), asg("past", PAST), asg("today", TODAY), asg("future", FUTURE)],
+  });
+  const closed = await _closeOpenAssignmentsForJobForTest(client, "job-1", "complete");
+  assertEquals(closed, 3);
+  assertEquals(captured.matchedIds.sort(), ["nullrow", "past", "today"]);
 });
 
 // ── U2c: allocatable-only pool predicate + the report-access split ──────────

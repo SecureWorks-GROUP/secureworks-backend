@@ -19814,13 +19814,13 @@ export function _closeAsForMakesafeSubstatus(substatus: string | null | undefine
 //    rows, INCLUDING strictly-future bookings. A dead job's future visits are
 //    genuinely dead.
 //  - closeAs 'complete' (finished job — invoiced/complete/archived/…): close
-//    only rows dated today-or-earlier (AWST). A STRICTLY-FUTURE row survives, so
-//    a make-safe RE-ATTEND still booked when an earlier attendance is invoiced
-//    stays on the run sheet / calendar (the unconditional close would otherwise
-//    silently kill it). All 510 verified stale rows are past-dated, so the belt
-//    costs nothing on the existing backlog. NOTE: PostgREST `.lte` excludes NULL,
-//    so a finished-close leaves a null-dated open row untouched (dead-close still
-//    closes it); the verified stale set has no null-dated rows.
+//    every open row EXCEPT a strictly-future dated one. A STRICTLY-FUTURE row
+//    survives, so a make-safe RE-ATTEND still booked when an earlier attendance
+//    is invoiced stays on the run sheet / calendar (the unconditional close would
+//    otherwise silently kill it). A null-dated open row on a finished job IS
+//    closed — an undated open assignment on finished work is stale by definition
+//    (a deliberate future booking always carries a date). All 510 verified stale
+//    rows are past-dated, so the belt costs nothing on the existing backlog.
 async function closeOpenAssignmentsForJob(
   client: any,
   jobId: string,
@@ -19834,8 +19834,8 @@ async function closeOpenAssignmentsForJob(
       .eq('job_id', jobId)
       .in('status', _OPEN_ASSIGNMENT_STATUSES as unknown as string[])
     if (closeAs === 'complete') {
-      // Boundary: today closes; strictly-future survives.
-      query = query.lte('scheduled_date', getAWSTDate())
+      // Survive strictly-future dated rows only; null-dated + today + past close.
+      query = query.or(`scheduled_date.is.null,scheduled_date.lte.${getAWSTDate()}`)
     }
     const { data, error } = await query.select('id')
     if (error) throw error
