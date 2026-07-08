@@ -236,7 +236,12 @@ Deno.test("WORK-ORDER IDENTITY: same MLB claim/family and same PO is a duplicate
   assertEquals(reason, "builder_work_order_identity");
 });
 
-Deno.test("WORK-ORDER IDENTITY: same claim/family against legacy no-identity row routes to review", () => {
+Deno.test("W3-H: a genuinely-new PO under a legacy no-identity claim is NEW WORK, not review", () => {
+  // Pre-W3-H this routed to work_order_identity_needs_review: the only sibling on the claim
+  // carried no recorded WO/PO identity, so intake could not prove the incoming PO was the same
+  // work. Marnin's rule (stated twice 2026-07-08): same builder ref + a NEW PO number = a new,
+  // separately invoiceable card. PO-53582 is carried by no existing draft or job, so the concern
+  // clears and the strict clean gate decides -> not a duplicate.
   const index = buildIntakeDedupIndex([{
     ...BICTON_OLD,
     external_ref: "MLB-25096",
@@ -255,7 +260,81 @@ Deno.test("WORK-ORDER IDENTITY: same claim/family against legacy no-identity row
     builder_po_number: "PO-53582",
   }, index);
 
-  assertEquals(reason, "work_order_identity_needs_review");
+  assertEquals(reason, null);
+});
+
+Deno.test("W3-H: live shape MLB-24732PO-55712 clears against an invoiced base-ref sibling job", () => {
+  // The SWMS-26938 / SWMS-26526 live pair. The base claim MLB-24732 exists as a completed JOB with
+  // no recorded PO identity; the incoming WO carries a new PO (55712). New work -> not a duplicate.
+  const index = buildIntakeDedupIndex(
+    [],
+    [{
+      external_ref: "MLB-24732",
+      requesting_company_slug: "mlb",
+      requesting_company_name: "ML Builders",
+      makesafe_job_family: "general_makesafe",
+    }],
+  );
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "mlb-24732-po-55712",
+    external_ref: "MLB-24732",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-24732PO-55712",
+    builder_po_number: "PO-55712",
+  }, index);
+
+  assertEquals(reason, null);
+});
+
+Deno.test("W3-H: live shape MLB-25898PO-55547 clears against a no-identity base-ref draft", () => {
+  const index = buildIntakeDedupIndex([{
+    ...BICTON_OLD,
+    external_ref: "MLB-25898",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+  }]);
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "mlb-25898-po-55547",
+    external_ref: "MLB-25898",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-25898PO-55547",
+    builder_po_number: "PO-55547",
+  }, index);
+
+  assertEquals(reason, null);
+});
+
+Deno.test("W3-H: a same-full-ref re-send still dedups (identical PO is not new work)", () => {
+  // Fail-closed: the SAME WO/PO already lives as a draft -> the exact-identity dedup fires before
+  // any new-PO clearing, so a true re-send never mints a second card.
+  const index = buildIntakeDedupIndex([{
+    ...BICTON_OLD,
+    external_ref: "MLB-24732",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-24732PO-55712",
+    builder_po_number: "PO-55712",
+  }]);
+
+  const reason = isDuplicateIntake({
+    graph_message_id: "mlb-24732-po-55712-resend",
+    external_ref: "MLB-24732",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    makesafe_job_family: "general_makesafe",
+    builder_work_order_number: "MLB-24732PO-55712",
+    builder_po_number: "PO-55712",
+  }, index);
+
+  assertEquals(reason, "builder_work_order_identity");
 });
 
 Deno.test("WORK-ORDER IDENTITY: different draft PO still allows same live-job PO to block", () => {
