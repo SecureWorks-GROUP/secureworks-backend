@@ -319,8 +319,8 @@ Deno.test("reattend_makesafe refuses a job with no submitted report", async () =
   );
 });
 
-Deno.test("reattend_makesafe refuses a job that already has a live invoice (out of v1 scope)", async () => {
-  const { client } = makeClient(reportedRows({
+Deno.test("reattend_makesafe PROCEEDS on a job with a live invoice and flags bill-manually (billing decoupled)", async () => {
+  const { client, rows } = makeClient(reportedRows({
     xero_invoices: [{
       job_id: "job-1",
       invoice_type: "ACCREC",
@@ -328,11 +328,51 @@ Deno.test("reattend_makesafe refuses a job that already has a live invoice (out 
       invoice_number: "INV-100",
     }],
   }));
-  await assertRejects(
-    () => _reattendMakesafeForTest(client, reattendArgs()),
-    Error,
-    "priced per case",
+
+  // No longer a 412 — the re-attend is captured, with a non-fatal manual-bill flag.
+  const res: any = await _reattendMakesafeForTest(client, reattendArgs());
+  assertEquals(res.ok, true);
+  assertEquals(res.reattended, true);
+  assertEquals(res.reattend_count, 1);
+  assertEquals(res.cycle_number, 2);
+  assertEquals(res.bill_reattend_manually, true, "admin-visible flag: bill this re-attend manually");
+  assert(res.warning, "a non-fatal warning is surfaced");
+  assert(
+    String(res.warning).includes("live invoice"),
+    "warning explains the job already has a live invoice",
   );
+
+  // Field-work capture happened: detail advanced to the new visit.
+  const detail = rows.makesafe_job_details[0];
+  assertEquals(detail.substatus, "waiting_on_trade_report");
+  assertEquals(detail.cycle_number, 2);
+  assertEquals(detail.reattend_count, 1);
+
+  // No invoice state was touched — the row is exactly as seeded.
+  assertEquals(rows.xero_invoices.length, 1);
+  assertEquals(rows.xero_invoices[0].status, "AUTHORISED");
+  assertEquals(rows.xero_invoices[0].invoice_number, "INV-100");
+
+  // The flag is also stamped on the audit event for the admin card.
+  const evt = rows.job_events.find((e: any) => e.event_type === "makesafe_reattend");
+  assert(evt, "a makesafe_reattend event is recorded");
+  assertEquals(evt.detail_json.bill_reattend_manually, true);
+});
+
+Deno.test("reattend_makesafe on a job with only a VOIDED invoice does not flag bill-manually", async () => {
+  const { client } = makeClient(reportedRows({
+    xero_invoices: [{
+      job_id: "job-1",
+      invoice_type: "ACCREC",
+      status: "VOIDED",
+      invoice_number: "INV-099",
+    }],
+  }));
+
+  const res: any = await _reattendMakesafeForTest(client, reattendArgs());
+  assertEquals(res.ok, true);
+  assertEquals(res.bill_reattend_manually, false);
+  assertEquals(res.warning, undefined, "no warning when there is no live invoice");
 });
 
 Deno.test("reattend_makesafe refuses a caller who manages neither the vertical nor is a dispatcher", async () => {
