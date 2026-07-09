@@ -5,8 +5,8 @@
 // handler decisions instead of importing the edge function or calling Supabase.
 //
 // No network. No live Supabase/GHL. No migrations. No production behaviour
-// changes. Some tests are current-state evidence; tests marked CP1_XFAIL encode
-// the desired post-CP1 contract and are expected to fail on the current backend.
+// changes. CP2b/CP3 current-state tests now encode the hardened contract; older
+// CP1_XFAIL names are preserved only where a future mission still owns the seam.
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
@@ -44,21 +44,41 @@ type SaveScopeFixture = {
   expectedScopeHash?: string | null;
 };
 
+function stableFixtureJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableFixtureJson).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${stableFixtureJson(obj[key])}`).join(",")}}`;
+}
+
+function fixtureScopeHash(value: unknown): string {
+  // Deterministic pure-test fingerprint; production uses SHA-256 over the same
+  // sorted JSON shape. The exact bytes are less important here than mismatch
+  // semantics: stale iPad base hash != current server hash must reject.
+  return stableFixtureJson(value || {});
+}
+
 function currentSaveScopeOutcome(
   fixture: SaveScopeFixture,
-): { status: number; code?: string; writesScope: boolean } {
+): { status: number; code?: string; writesScope: boolean; currentScopeHash?: string } {
   if (
     currentScopeRefGuardRejects(fixture.incomingRef, fixture.targetJobNumber)
   ) {
     return { status: 409, code: "scope_ref_mismatch", writesScope: false };
   }
 
-  // Current handler snapshots previous scope size for audit only, then writes
-  // scope_json with no baseServerRevision/baseScopeHash precondition.
-  void fixture.targetScopeJson;
+  const currentScopeHash = fixtureScopeHash(fixture.targetScopeJson || {});
+  if (fixture.expectedScopeHash && fixture.expectedScopeHash !== currentScopeHash) {
+    return {
+      status: 409,
+      code: "scope_hash_conflict",
+      writesScope: false,
+      currentScopeHash,
+    };
+  }
+
   void fixture.expectedRevision;
-  void fixture.expectedScopeHash;
-  return { status: 200, writesScope: true };
+  return { status: 200, writesScope: true, currentScopeHash };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -71,27 +91,31 @@ type JobNumberStore = {
   targetJobNumber?: string | null;
 };
 
+function bumpJobNumber(value: string): string {
+  const match = value.match(/^(.*?)(\d+)$/);
+  if (!match) return `${value}-retry`;
+  const width = match[2].length;
+  const next = String(Number(match[2]) + 1).padStart(width, "0");
+  return `${match[1]}${next}`;
+}
+
 async function currentAssignJobNumber(
   store: JobNumberStore,
-): Promise<{ jobNumber: string | null; surfacedFailure: boolean }> {
+): Promise<{ jobNumber: string | null; surfacedFailure: boolean; recoveredFromDuplicate: boolean }> {
   if (store.targetJobNumber) {
-    return { jobNumber: store.targetJobNumber, surfacedFailure: false };
+    return { jobNumber: store.targetJobNumber, surfacedFailure: false, recoveredFromDuplicate: false };
   }
 
-  const jobNumber = store.nextJobNumber;
-  try {
-    if (store.occupiedNumbers.has(jobNumber)) {
-      throw new Error(
-        'duplicate key value violates unique constraint "idx_jobs_job_number"',
-      );
+  let jobNumber = store.nextJobNumber;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!store.occupiedNumbers.has(jobNumber)) {
+      store.occupiedNumbers.add(jobNumber);
+      return { jobNumber, surfacedFailure: false, recoveredFromDuplicate: attempt > 0 };
     }
-    store.occupiedNumbers.add(jobNumber);
-    return { jobNumber, surfacedFailure: false };
-  } catch {
-    // Mirrors the sign-off/link path around next_job_number: the duplicate is
-    // logged inside a catch and not returned as a typed recoverable conflict.
-    return { jobNumber: null, surfacedFailure: false };
+    jobNumber = bumpJobNumber(jobNumber);
   }
+
+  return { jobNumber: null, surfacedFailure: true, recoveredFromDuplicate: false };
 }
 
 async function desiredAssignJobNumberWithDuplicateRecovery(
@@ -103,7 +127,7 @@ async function desiredAssignJobNumberWithDuplicateRecovery(
       "expected duplicate job-number collision to be retried or surfaced as recoverable conflict",
     );
   }
-  return { jobNumber: current.jobNumber, recoveredFromDuplicate: false };
+  return { jobNumber: current.jobNumber, recoveredFromDuplicate: current.recoveredFromDuplicate };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -145,6 +169,10 @@ function currentRegisterMedia(
   if (!input.jobId || !input.storageUrl) {
     throw new Error("jobId and storageUrl required");
   }
+  const existing = rows.find((row) =>
+    row.jobId === input.jobId && row.storageUrl === input.storageUrl
+  );
+  if (existing) return existing;
   const row = {
     id: `media-${rows.length + 1}`,
     jobId: input.jobId,
@@ -207,17 +235,17 @@ function currentSendClaim(doc: QuoteDoc): { claimed: boolean } {
 // Current-state evidence: these pass today and document the pre-fix seams.
 // ────────────────────────────────────────────────────────────────────────────
 
-Deno.test("CP1_CURRENT duplicate idx_jobs_job_number collision is swallowed instead of typed/retried", async () => {
+Deno.test("CP2B_CURRENT duplicate idx_jobs_job_number collision retries to the next free number", async () => {
   const result = await currentAssignJobNumber({
     occupiedNumbers: new Set(["SWF-26001"]),
     nextJobNumber: "SWF-26001",
     targetJobNumber: null,
   });
 
-  assertEquals(result, { jobNumber: null, surfacedFailure: false });
+  assertEquals(result, { jobNumber: "SWF-26002", surfacedFailure: false, recoveredFromDuplicate: true });
 });
 
-Deno.test("CP1_CURRENT save_scope accepts stale revision/hash when scope_ref still matches", () => {
+Deno.test("CP2B_CURRENT save_scope rejects stale revision/hash when scope_ref still matches", () => {
   const result = currentSaveScopeOutcome({
     targetJobNumber: "SWF-26001",
     incomingRef: "SWF-26001",
@@ -227,7 +255,9 @@ Deno.test("CP1_CURRENT save_scope accepts stale revision/hash when scope_ref sti
     expectedScopeHash: "hash-before-server-edit",
   });
 
-  assertEquals(result, { status: 200, writesScope: true });
+  assertEquals(result.status, 409);
+  assertEquals(result.code, "scope_hash_conflict");
+  assertEquals(result.writesScope, false);
 });
 
 Deno.test("CP1_CURRENT phone-only identity is enough for draft/save but not email send readiness", () => {
@@ -237,7 +267,7 @@ Deno.test("CP1_CURRENT phone-only identity is enough for draft/save but not emai
   assertEquals(currentEmailSendReady(phoneOnly), false);
 });
 
-Deno.test("CP1_CURRENT register_media inserts duplicate rows for the same uploaded object", () => {
+Deno.test("CP3_CURRENT register_media reuses the existing row for the same uploaded object", () => {
   const rows: MediaRow[] = [];
   const upload = {
     jobId: "job-1",
@@ -249,8 +279,8 @@ Deno.test("CP1_CURRENT register_media inserts duplicate rows for the same upload
   const retry = currentRegisterMedia(rows, upload);
 
   assertEquals(first.id, "media-1");
-  assertEquals(retry.id, "media-2");
-  assertEquals(rows.length, 2);
+  assertEquals(retry.id, first.id);
+  assertEquals(rows.length, 1);
 });
 
 Deno.test("CP1_CURRENT prepare_quote reuses live unsent draft and send claim remains one-shot", () => {
@@ -269,22 +299,21 @@ Deno.test("CP1_CURRENT prepare_quote reuses live unsent draft and send claim rem
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Expected-fix evidence: CP1_XFAIL tests are intentionally RED on current behaviour.
-// CP1_CONTRACT tests are green guardrails for seams that already behave safely.
-// Run red evidence with: deno test --allow-env supabase/functions/ghl-proxy/fence_cp1_fixture_test.ts --filter CP1_XFAIL
+// Contract evidence: CP2b/CP3 hardening tests are green guardrails for the
+// save/sync seams that now behave safely.
 // ────────────────────────────────────────────────────────────────────────────
 
-Deno.test("CP1_XFAIL duplicate idx_jobs_job_number collision is retried or returned as recoverable conflict", async () => {
+Deno.test("CP2B_CONTRACT duplicate idx_jobs_job_number collision is retried or returned as recoverable conflict", async () => {
   const result = await desiredAssignJobNumberWithDuplicateRecovery({
     occupiedNumbers: new Set(["SWF-26001"]),
     nextJobNumber: "SWF-26001",
     targetJobNumber: null,
   });
 
-  assertEquals(result.recoveredFromDuplicate, true);
+  assertEquals(result, { jobNumber: "SWF-26002", recoveredFromDuplicate: true });
 });
 
-Deno.test("CP1_XFAIL save_scope rejects stale revision/hash even when scope_ref matches", () => {
+Deno.test("CP2B_CONTRACT save_scope rejects stale revision/hash even when scope_ref matches", () => {
   const result = currentSaveScopeOutcome({
     targetJobNumber: "SWF-26001",
     incomingRef: "SWF-26001",
@@ -294,14 +323,16 @@ Deno.test("CP1_XFAIL save_scope rejects stale revision/hash even when scope_ref 
     expectedScopeHash: "hash-before-server-edit",
   });
 
-  assertEquals(result, {
-    status: 409,
-    code: "scope_hash_conflict",
-    writesScope: false,
-  });
+  assertEquals(result.status, 409);
+  assertEquals(result.code, "scope_hash_conflict");
+  assertEquals(result.writesScope, false);
+  assertEquals(
+    result.currentScopeHash,
+    fixtureScopeHash({ fenceLength: 12, serverEdit: "newer" }),
+  );
 });
 
-Deno.test("CP1_XFAIL register_media is idempotent after upload succeeded but first register response failed", () => {
+Deno.test("CP3_CONTRACT register_media is idempotent after upload succeeded but first register response failed", () => {
   const rows: MediaRow[] = [];
   const upload = {
     jobId: "job-1",
