@@ -20496,6 +20496,73 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
     }
   }
 
+  // ── M-F W2-A: windowed CANCELLED make-safe feed (trade Cancelled column) ──
+  // The make-safe pool above EXCLUDES cancelled (_MAKESAFE_POOL_EXCLUDED_STATUSES)
+  // and the named-assignment feed drops it (cancel closed the assignment to
+  // 'cancelled') — so WITHOUT this a cancelled make-safe vanishes from trade
+  // entirely, leaving the (already-built) trade Cancelled column + Reopen button
+  // inert. Feed recently-cancelled make-safes (last 90 days) as synthetic cards so
+  // the trade board classifier — which keys off job.status='cancelled' — routes
+  // them into the Cancelled column, carrying the cancel_* attribution via
+  // job.makesafe_details. Manager/dispatcher-gated (same gate as the pool above).
+  // Appended in-memory AFTER the DB queries, so no .neq('status','cancelled')
+  // filter can drop them.
+  if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
+    const cancelledSinceIso = new Date(Date.now() - 90 * 86_400_000).toISOString()
+    const { data: cancelledMakesafes, error: cancelErr } = await client
+      .from('jobs')
+      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+      .eq('type', 'makesafe')
+      .eq('status', 'cancelled')
+      .gte('updated_at', cancelledSinceIso)
+      .order('updated_at', { ascending: false })
+      .limit(80)
+    if (cancelErr) throw cancelErr
+
+    const cancelledJobs = cancelledMakesafes || []
+    if (cancelledJobs.length > 0) {
+      const cancelledIds = cancelledJobs.map((j: any) => j.id).filter(Boolean)
+      const { data: cancelledDetails, error: cancelledDetailErr } = await client
+        .from('makesafe_job_details')
+        .select('*, makesafe_companies:requesting_company_id(slug, name)')
+        .in('job_id', cancelledIds)
+      if (cancelledDetailErr) throw cancelledDetailErr
+      const cancelledDetailByJobId: Record<string, any> = {}
+      for (const row of (cancelledDetails || [])) {
+        if (row?.job_id) cancelledDetailByJobId[String(row.job_id)] = row
+      }
+
+      // Dedup against the user's own named assignments (a cancelled job should not
+      // appear twice if it somehow still carries an assignment row).
+      const assignedCancelledIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+      for (const job of cancelledJobs) {
+        if (!job?.id || assignedCancelledIds.has(job.id)) continue
+        assignedCancelledIds.add(job.id)
+        if (cancelledDetailByJobId[job.id]) job.makesafe_details = cancelledDetailByJobId[job.id]
+        assignments.push({
+          id: `makesafe-cancelled-${job.id}`,
+          scheduled_date: today,
+          scheduled_end: null,
+          start_time: null,
+          status: 'cancelled',
+          role: 'makesafe_cancelled',
+          notes: null,
+          assignment_type: 'makesafe_cancelled',
+          crew_name: null,
+          started_at: null,
+          completed_at: null,
+          clocked_on_at: null,
+          clocked_off_at: null,
+          travel_started_at: null,
+          arrived_at: null,
+          break_minutes: null,
+          job_phase: null,
+          jobs: job,
+        })
+      }
+    }
+  }
+
   // ── Generic per-vertical open pool (fencing / patio / decking) ──
   // Manager View: a vertical manager sees the full open pool of every vertical
   // in their managed_verticals — active, non-archived jobs of that jobs.type —

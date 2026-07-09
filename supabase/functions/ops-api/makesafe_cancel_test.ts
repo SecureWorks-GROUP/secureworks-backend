@@ -38,6 +38,7 @@ import {
   _enrichMakesafeBoardJobForTest,
   _makesafePipelineForTest,
   _reopenMakesafeForTest,
+  myJobs,
 } from "./index.ts";
 import { computeStoryVerdict } from "./makesafe_story.ts";
 
@@ -588,4 +589,132 @@ Deno.test("reopen: the privileged path reopens a COMPLETE job and DOES bump cycl
   assertEquals(res.reopened, true);
   assertEquals(res.previous_status, "complete");
   assertEquals(rows.makesafe_job_details[0].cycle_number, 3); // bumped
+});
+
+// ── 9. W2-A: trade my_jobs windowed cancelled feed ─────────────────────────────
+// Without this, a cancelled make-safe vanishes from trade (pool excludes it, the
+// assignment feed drops it) and the trade Cancelled column + Reopen button are
+// inert. myJobs must feed recently-cancelled (<=90d) make-safes as synthetic
+// cards for a make-safe manager/dispatcher only.
+
+type MjJob = Record<string, any>;
+type MjDetail = Record<string, any>;
+
+// A faithful-enough Supabase mock for the myJobs read path: models the eq/neq/
+// gte/lt/in/not/or filters the handler issues so the 90-day window + manager gate
+// + status filter are really exercised (not assumed). Unseeded tables -> [].
+function makeMyJobsClient(fx: { jobs: MjJob[]; details: MjDetail[] }) {
+  function resolve(st: any): { data: any[]; error: null } {
+    if (st.table === "jobs") {
+      let rows = fx.jobs.slice();
+      if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
+      if (st.eq.status != null) rows = rows.filter((j) => j.status === st.eq.status);
+      if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
+      if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals.includes(j.id));
+      if (st.notIn) {
+        const ex = new Set<string>();
+        for (const m of String(st.notIn).matchAll(/"([^"]+)"/g)) ex.add(m[1]);
+        rows = rows.filter((j) => !ex.has(String(j.status)));
+      }
+      // the plain (non-referenced) or() used by the open pool query
+      if (st.refOr && st.refOr.referencedTable == null) {
+        rows = rows.filter((j) =>
+          String(st.refOr.str).split(",").some((c: string) => {
+            const [col, op, ...rest] = c.split(".");
+            const val = rest.join(".");
+            const cell = String(j[col] ?? "");
+            if (op === "eq") return cell === val;
+            if (op === "ilike") return cell.toLowerCase().startsWith(val.replace(/%$/, "").toLowerCase());
+            return false;
+          })
+        );
+      }
+      if (st.gteCol === "updated_at" && st.gteVal != null) {
+        rows = rows.filter((j) => String(j.updated_at ?? "") >= String(st.gteVal));
+      }
+      return { data: rows.map((j) => ({ ...j })), error: null };
+    }
+    if (st.table === "makesafe_job_details") {
+      let rows = fx.details.slice();
+      if (st.inCol === "job_id" && st.inVals) rows = rows.filter((d) => st.inVals.includes(d.job_id));
+      return { data: rows.map((d) => ({ ...d })), error: null };
+    }
+    // job_assignments / purchase_orders / job_contacts — none seeded here.
+    return { data: [], error: null };
+  }
+  function from(table: string) {
+    const st: any = { table, eq: {}, neq: {}, gteCol: null, gteVal: null, refOr: null, notIn: null, inCol: null, inVals: null };
+    const b: any = {
+      select: () => b,
+      eq: (k: string, v: unknown) => { st.eq[k] = v; return b; },
+      neq: (k: string, v: unknown) => { st.neq[k] = v; return b; },
+      gte: (k: string, v: string) => { st.gteCol = k; st.gteVal = v; return b; },
+      lt: () => b,
+      in: (k: string, arr: unknown[]) => { st.inCol = k; st.inVals = arr; return b; },
+      not: (k: string, op: string, v: string) => { if (k === "status" && op === "in") st.notIn = v; return b; },
+      or: (s: string, opts?: { referencedTable?: string }) => { st.refOr = { str: s, referencedTable: opts?.referencedTable ?? null }; return b; },
+      ilike: () => b,
+      order: () => b,
+      limit: () => b,
+      maybeSingle: () => Promise.resolve({ data: null, error: null }),
+      then: (res: (v: any) => any) => res(resolve(st)),
+    };
+    return b;
+  }
+  return { from };
+}
+
+function allCards(grouped: any): any[] {
+  return [
+    ...(grouped.today || []),
+    ...(grouped.thisWeek || []),
+    ...(grouped.upcoming || []),
+    ...(grouped.recent || []),
+    ...(grouped.makesafePool || []),
+  ];
+}
+
+function myJobsCancelFixtures() {
+  const now = Date.now();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  return {
+    jobs: [
+      { id: "j-recent", type: "makesafe", status: "cancelled", job_number: "SWF-70001", client_name: "Recent", updated_at: iso(now - 3 * 86_400_000) },
+      { id: "j-old", type: "makesafe", status: "cancelled", job_number: "SWF-70002", client_name: "Old", updated_at: iso(now - 200 * 86_400_000) },
+    ],
+    details: [
+      { job_id: "j-recent", cancel_reason: "builder_recalled", cancel_note: "recalled", cancelled_by: "hugo@x", cancelled_at: iso(now - 3 * 86_400_000) },
+      { job_id: "j-old", cancel_reason: "duplicate", cancelled_at: iso(now - 200 * 86_400_000) },
+    ],
+  };
+}
+
+Deno.test("W2-A: a make-safe MANAGER's my_jobs includes a recently-cancelled make-safe with cancel_* attached", async () => {
+  const client = makeMyJobsClient(myJobsCancelFixtures());
+  // showAll=false, isDispatcher=false, isMakesafeManager=true, poolVerticals=['makesafe']
+  const grouped: any = await myJobs(client as any, "hugo-id", false, false, true, ["makesafe"], []);
+  const cards = allCards(grouped);
+  const card = cards.find((c) => c.jobs?.id === "j-recent");
+  assert(!!card, "recently-cancelled make-safe present in manager my_jobs");
+  assertEquals(card.jobs.status, "cancelled");
+  assertEquals(card.assignment_type, "makesafe_cancelled");
+  assertEquals(card.role, "makesafe_cancelled");
+  // cancel_* rides through on job.makesafe_details.
+  assertEquals(card.jobs.makesafe_details.cancel_reason, "builder_recalled");
+  assertEquals(card.jobs.makesafe_details.cancelled_by, "hugo@x");
+});
+
+Deno.test("W2-A: a cancelled make-safe older than 90 days is EXCLUDED from the feed", async () => {
+  const client = makeMyJobsClient(myJobsCancelFixtures());
+  const grouped: any = await myJobs(client as any, "hugo-id", false, false, true, ["makesafe"], []);
+  const cards = allCards(grouped);
+  assert(!cards.find((c) => c.jobs?.id === "j-old"), "the >90-day cancel is not fed");
+});
+
+Deno.test("W2-A: a NON-manager (no makesafe pool visibility) does NOT get the cancelled feed", async () => {
+  const client = makeMyJobsClient(myJobsCancelFixtures());
+  // isDispatcher=false, isMakesafeManager=false, poolVerticals=[]
+  const grouped: any = await myJobs(client as any, "crew-id", false, false, false, [], []);
+  const cards = allCards(grouped);
+  assert(!cards.find((c) => c.jobs?.id === "j-recent"), "non-manager gets no cancelled make-safe cards");
 });
