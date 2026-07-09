@@ -25365,7 +25365,7 @@ async function reopenMakesafe(client: any, body: any, authz?: {
 
   // 1) Reactivate the job: status -> 'accepted', clear closed timestamps.
   const { error: jobUpdateErr } = await client.from('jobs')
-    .update({ status: 'accepted', completed_at: null, archived_at: null, updated_at: nowIso })
+    .update({ status: 'accepted', completed_at: null, updated_at: nowIso })
     .eq('id', jobId)
   if (jobUpdateErr) throw new ApiError('reopenMakesafe: jobs update failed: ' + jobUpdateErr.message, 500)
 
@@ -25703,7 +25703,7 @@ export async function reattendMakesafe(client: any, args: {
   // Reactivate a closed job so it flows through the board again.
   if (_MAKESAFE_REATTEND_CLOSED_STATUSES.includes(jobStatus)) {
     const { error: jobUpdErr } = await client.from('jobs')
-      .update({ status: 'accepted', completed_at: null, archived_at: null, updated_at: nowIso })
+      .update({ status: 'accepted', completed_at: null, updated_at: nowIso })
       .eq('id', jobId)
     if (jobUpdErr) throw new ApiError('reattendMakesafe: job reactivation failed: ' + jobUpdErr.message, 500)
   }
