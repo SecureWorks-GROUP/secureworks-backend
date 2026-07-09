@@ -2925,6 +2925,36 @@ if (import.meta.main) serve(async (req: Request) => {
           managedVerticals: caller?.managed_verticals,
         }))
       }
+      // Cancel a make-safe (M-F). Retire a card a builder recalled / reallocated /
+      // sent in error. TRADE side is genuinely per-user JWT-authed (authTrade →
+      // make-safe manager OR admin, enforced in cancelMakesafe). OPS side (api_key)
+      // inherits the pre-existing trusted-ops posture (D5): allowed, attributed via
+      // operator_email — NOT a server-enforced admin lock. Idempotent; never Xero.
+      case 'cancel_makesafe': {
+        let cancelResult: any
+        if (authMode === 'api_key') {
+          cancelResult = await cancelMakesafe(client, {
+            body,
+            authMode,
+            operatorEmail: body.operator_email || body.user_email || null,
+          })
+        } else {
+          const tradeUser = await authTrade(req, client)
+          const { data: caller } = await client.from('users')
+            .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
+          cancelResult = await cancelMakesafe(client, {
+            body,
+            authMode: 'jwt',
+            callerRole: caller?.role,
+            managedVerticals: caller?.managed_verticals,
+            operatorEmail: body.operator_email || body.user_email || tradeUser.email,
+          })
+        }
+        // The live-invoice guardrail returns a structured block (ok:false,
+        // code:'live_invoice') rather than throwing — surface it as a 409 so the
+        // UI can show the "see admin" message and machine-read the code.
+        return json(cancelResult, cancelResult?.ok === false ? 409 : 200)
+      }
       case 'update_job_status': return json(await updateJobStatus(client, body))
       case 'create_po': return json(await createPO(client, body))
       case 'update_po': return json(await updatePO(client, body))
@@ -3863,16 +3893,37 @@ if (import.meta.main) serve(async (req: Request) => {
       }
 
       // reopen_makesafe — human-triggered reactivation of a completed/archived job
-      // that has a new inbound email (reopen_candidate intake draft). PRIVILEGED-ONLY:
-      // the dashboard (SW_API_KEY, authMode='api_key') or an admin/owner JWT. The
-      // automation routine is NEVER allowed to reopen a job.
+      // that has a new inbound email (reopen_candidate intake draft), OR (M-F Wave 2)
+      // a CANCELLED make-safe put back to New. PRIVILEGED path: the dashboard
+      // (SW_API_KEY, authMode='api_key') or an admin/owner JWT — may reopen ANY
+      // eligible status. MANAGER path (finding #7): a make-safe manager JWT may
+      // reopen ONLY a CANCELLED job — complete/invoiced/archived reopen stays
+      // admin/api-key. reopenMakesafe enforces the cancelled-only scope for the
+      // non-privileged manager path. The automation routine is NEVER allowed.
       case 'reopen_makesafe': {
         const reopenIsPrivileged = authMode === 'api_key' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
-        if (!reopenIsPrivileged) {
-          return json({ error: 'forbidden: reopen_makesafe requires the privileged ops key or an admin/owner session; the automation routine cannot reopen jobs' }, 403)
+        if (reopenIsPrivileged) {
+          return json(await reopenMakesafe(client, body, {
+            privileged: true,
+            authMode,
+            operatorEmail: body.reopened_by || authUser?.email || null,
+          }))
         }
-        return json(await reopenMakesafe(client, body))
+        // Not admin/owner/api_key — the ONLY remaining allowed path is a make-safe
+        // manager reopening a CANCELLED job. authTrade to get the caller's role +
+        // managed_verticals (reattend pattern); reopenMakesafe 403s if the caller
+        // is not a manager of this job's vertical or the job is not cancelled.
+        const tradeUser = await authTrade(req, client)
+        const { data: caller } = await client.from('users')
+          .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
+        return json(await reopenMakesafe(client, body, {
+          privileged: false,
+          authMode: 'jwt',
+          callerRole: caller?.role,
+          managedVerticals: caller?.managed_verticals,
+          operatorEmail: body.reopened_by || tradeUser.email,
+        }))
       }
 
       case 'toggle_document_visibility': return json(await toggleDocumentVisibility(client, body))
@@ -9474,6 +9525,10 @@ const MAKESAFE_BOARD_STAGE_LABELS: Record<string, string> = {
   report_ready: 'Report Ready',
   completed: 'Completed This Week',
   archive: 'Archive',
+  // M-F: manually-cancelled make-safes (builder recalled / reallocated / sent in
+  // error). Fed by a SEPARATE bounded query (last 90 days) — never inflates the
+  // active board's `total`. Ops renders it as a collapsible column.
+  cancelled: 'Cancelled',
 }
 const MAKESAFE_BOARD_STAGES = Object.keys(MAKESAFE_BOARD_STAGE_LABELS)
 const MAKESAFE_VALID_SUBSTATUSES = [
@@ -9771,6 +9826,10 @@ export function _deriveMakesafeBoardStage(
 ): string {
   const normalizedSub = normalizeMakesafeSubstatus(detail?.substatus)
   const jobStatus = String(job?.status || '').toLowerCase()
+  // M-F: a cancelled make-safe always derives to the Cancelled column, regardless
+  // of any sent/report/invoice evidence it carried (report-then-cancel is allowed).
+  // EARLY return — before the `new` default and every other branch below.
+  if (jobStatus === 'cancelled' || jobStatus === 'canceled') return 'cancelled'
   const hasAssignments = assignments.length > 0
   const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
   const invoiceDone = hasActiveMakesafeInvoice(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
@@ -10196,6 +10255,11 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     is_reattend: Number(detail?.reattend_count || 0) > 0,
     last_reattend_at: detail?.last_reattend_at || null,
     cycle_number: Number(detail?.cycle_number || 1),
+    // M-F cancel attribution (null on live cards; populated on Cancelled-column cards).
+    cancel_reason: detail?.cancel_reason || null,
+    cancel_note: detail?.cancel_note || null,
+    cancelled_by: detail?.cancelled_by || null,
+    cancelled_at: detail?.cancelled_at || null,
     assignments,
     assigned_trade: assignments.length > 0 ? assignments[0]?.users?.name || null : null,
     assigned_trade_phone: assignments.length > 0 ? assignments[0]?.users?.phone || null : null,
@@ -10805,6 +10869,9 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
     report_ready: [],
     completed: [],
     archive: [],
+    // M-F: init the Cancelled bucket BEFORE any push (a missing key would throw on
+    // columns[stage].push). Fed by the separate bounded query below.
+    cancelled: [],
   }
 
   for (const j of (jobs || [])) {
@@ -10812,6 +10879,53 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
     columns[enriched.board_stage].push(enriched)
   }
 
+  // ── M-F: Cancelled column — a SEPARATE bounded query (D3 = last 90 days). ──
+  // The main jobs query above KEEPS its `.not('status','in',("cancelled",...))`
+  // exclusion, so cancelled jobs never touch `total` (which is the ACTIVE board
+  // count). We fetch recently-cancelled make-safes independently and enrich them
+  // (the derive short-circuits to `cancelled` on status, so no report/invoice/doc
+  // dependent reads are needed — only the detail row for reason/who/date). Window
+  // is bounded by jobs.updated_at (the cancel write stamps updated_at = the cancel
+  // time) and cards are ordered by cancelled_at (fallback updated_at).
+  const CANCELLED_WINDOW_DAYS = 90
+  const cancelledSinceIso = new Date(Date.now() - CANCELLED_WINDOW_DAYS * 86_400_000).toISOString()
+  const cancelledRaw: any[] = []
+  {
+    let offset = 0
+    for (let guard = 0; guard < 100; guard++) {
+      const { data, error } = await client.from('jobs')
+        .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+        .eq('type', 'makesafe')
+        .eq('status', 'cancelled')
+        .gte('updated_at', cancelledSinceIso)
+        .order('updated_at', { ascending: false })
+        .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+      if (error) throw error
+      const batch = data || []
+      cancelledRaw.push(...batch)
+      if (batch.length < MAKESAFE_PAGE_SIZE) break
+      offset += MAKESAFE_PAGE_SIZE
+    }
+  }
+  if (cancelledRaw.length > 0) {
+    const cancelledIds = cancelledRaw.map((j: any) => j.id)
+    const cancelledDetailsMap: Record<string, any> = {}
+    const cds = await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_job_details',
+      '*, makesafe_companies:requesting_company_id(slug, name)',
+      cancelledIds,
+    )
+    for (const d of (cds || [])) cancelledDetailsMap[d.job_id] = d
+    const cancelledCards = cancelledRaw.map((j: any) =>
+      enrichMakesafeBoardJob(j, cancelledDetailsMap[j.id] || null, [], undefined, undefined, undefined, undefined, null))
+    // Order by cancelled_at (fallback updated_at) — freshest cancel first.
+    cancelledCards.sort((a: any, b: any) =>
+      String(b.cancelled_at || b.updated_at || '').localeCompare(String(a.cancelled_at || a.updated_at || '')))
+    for (const card of cancelledCards) columns.cancelled.push(card)
+  }
+
+  // `total` reflects the ACTIVE board only (cancelled fed separately, above).
   return { columns, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: (jobs || []).length }
 }
 
@@ -11233,7 +11347,8 @@ async function makesafeStoryRecompute(client: any, opts: StoryRecomputeOpts = {}
     ? await _fetchAllByJobIdChunked(
       client, 'makesafe_job_details',
       'job_id, report_type, cycle_number, external_links, portal_verified_at, ' +
-        'portal_verified_cycle, portal_recheck_requested_at, portal_recheck_count',
+        'portal_verified_cycle, portal_recheck_requested_at, portal_recheck_count, ' +
+        'cancel_reason',
       jobIds,
     )
     : []
@@ -11303,6 +11418,8 @@ async function makesafeStoryRecompute(client: any, opts: StoryRecomputeOpts = {}
       jobStatus: j.job_status ?? null,
       substatus: sub,
       cancelled,
+      // M-F: a MANUAL cancel (cancel_reason set) is a clean CANCELLED, never a conflict.
+      cancelReasonSet: !!detail.cancel_reason,
       adminSentAttributed,
       packSentMarker: j.pack_sent === true,
       pipelineVerifiedSent: String(j.pipeline_item_sent_status || '') === 'verified_sent',
@@ -20379,6 +20496,73 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
     }
   }
 
+  // ── M-F W2-A: windowed CANCELLED make-safe feed (trade Cancelled column) ──
+  // The make-safe pool above EXCLUDES cancelled (_MAKESAFE_POOL_EXCLUDED_STATUSES)
+  // and the named-assignment feed drops it (cancel closed the assignment to
+  // 'cancelled') — so WITHOUT this a cancelled make-safe vanishes from trade
+  // entirely, leaving the (already-built) trade Cancelled column + Reopen button
+  // inert. Feed recently-cancelled make-safes (last 90 days) as synthetic cards so
+  // the trade board classifier — which keys off job.status='cancelled' — routes
+  // them into the Cancelled column, carrying the cancel_* attribution via
+  // job.makesafe_details. Manager/dispatcher-gated (same gate as the pool above).
+  // Appended in-memory AFTER the DB queries, so no .neq('status','cancelled')
+  // filter can drop them.
+  if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
+    const cancelledSinceIso = new Date(Date.now() - 90 * 86_400_000).toISOString()
+    const { data: cancelledMakesafes, error: cancelErr } = await client
+      .from('jobs')
+      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+      .eq('type', 'makesafe')
+      .eq('status', 'cancelled')
+      .gte('updated_at', cancelledSinceIso)
+      .order('updated_at', { ascending: false })
+      .limit(80)
+    if (cancelErr) throw cancelErr
+
+    const cancelledJobs = cancelledMakesafes || []
+    if (cancelledJobs.length > 0) {
+      const cancelledIds = cancelledJobs.map((j: any) => j.id).filter(Boolean)
+      const { data: cancelledDetails, error: cancelledDetailErr } = await client
+        .from('makesafe_job_details')
+        .select('*, makesafe_companies:requesting_company_id(slug, name)')
+        .in('job_id', cancelledIds)
+      if (cancelledDetailErr) throw cancelledDetailErr
+      const cancelledDetailByJobId: Record<string, any> = {}
+      for (const row of (cancelledDetails || [])) {
+        if (row?.job_id) cancelledDetailByJobId[String(row.job_id)] = row
+      }
+
+      // Dedup against the user's own named assignments (a cancelled job should not
+      // appear twice if it somehow still carries an assignment row).
+      const assignedCancelledIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+      for (const job of cancelledJobs) {
+        if (!job?.id || assignedCancelledIds.has(job.id)) continue
+        assignedCancelledIds.add(job.id)
+        if (cancelledDetailByJobId[job.id]) job.makesafe_details = cancelledDetailByJobId[job.id]
+        assignments.push({
+          id: `makesafe-cancelled-${job.id}`,
+          scheduled_date: today,
+          scheduled_end: null,
+          start_time: null,
+          status: 'cancelled',
+          role: 'makesafe_cancelled',
+          notes: null,
+          assignment_type: 'makesafe_cancelled',
+          crew_name: null,
+          started_at: null,
+          completed_at: null,
+          clocked_on_at: null,
+          clocked_off_at: null,
+          travel_started_at: null,
+          arrived_at: null,
+          break_minutes: null,
+          job_phase: null,
+          jobs: job,
+        })
+      }
+    }
+  }
+
   // ── Generic per-vertical open pool (fencing / patio / decking) ──
   // Manager View: a vertical manager sees the full open pool of every vertical
   // in their managed_verticals — active, non-archived jobs of that jobs.type —
@@ -25083,9 +25267,16 @@ export const _rerunDraftReportForTest = rerunDraftReport
 //   - Does NOT void or alter any existing invoice. Does NOT auto-send or auto-charge.
 //   - Returns { reopened: true, job_id, cycle_number, previous_status }.
 //
-const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived']
+// M-F Wave 2: 'cancelled' is now reopen-eligible (put a cancelled card back to New).
+const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived', 'cancelled']
 
-async function reopenMakesafe(client: any, body: any) {
+async function reopenMakesafe(client: any, body: any, authz?: {
+  privileged?: boolean
+  authMode?: 'api_key' | 'jwt' | 'routine'
+  callerRole?: string | null
+  managedVerticals?: unknown
+  operatorEmail?: string | null
+}) {
   const jobId = body.job_id || body.jobId
   const reason = (body.reason || '').trim()
   const draftId = body.draft_id || body.draftId || null
@@ -25105,6 +25296,34 @@ async function reopenMakesafe(client: any, body: any) {
       `must be one of: ${REOPEN_ELIGIBLE_STATUSES.join(', ')}`,
       409,
     )
+  }
+
+  // Capture the pre-transition status NOW — the reactivation update below mutates
+  // jobs.status, and we report the value the card had BEFORE the reopen.
+  const previousStatus = job.status
+  const wasCancelled = previousStatus === 'cancelled'
+
+  // Authz (finding #7). The privileged path (api_key or admin/owner JWT) may reopen
+  // ANY eligible status. The NON-privileged manager path may reopen ONLY a CANCELLED
+  // job, and only when the caller manages this job's vertical (clone reattend authz).
+  // complete/invoiced/archived reopen therefore stays admin/api-key ONLY.
+  if (authz && authz.privileged !== true) {
+    if (!wasCancelled) {
+      throw new ApiError(
+        `reopenMakesafe: reopening a ${job.status} make-safe requires an admin/owner or the ops key; ` +
+        'a make-safe manager may only reopen a cancelled job',
+        403,
+      )
+    }
+    const decision = _resolveAllocationAuthz({
+      authMode: authz.authMode || 'jwt',
+      callerRole: authz.callerRole,
+      managedVerticals: authz.managedVerticals,
+      jobVertical: _jobVertical(job),
+    })
+    if (!decision.allowed) {
+      throw new ApiError('Not authorized to reopen this make-safe', 403)
+    }
   }
 
   // ── DRAFT MISMATCH GUARD ──
@@ -25138,7 +25357,10 @@ async function reopenMakesafe(client: any, body: any) {
   const { data: detail } = await client.from('makesafe_job_details')
     .select('cycle_number').eq('job_id', jobId).maybeSingle()
   const currentCycle = (detail as { cycle_number?: number } | null)?.cycle_number ?? 1
-  const nextCycle = currentCycle + 1
+  // Do NOT bump cycle_number on a cancel -> reopen (protects M-C re-attend
+  // accounting — a cancel/reopen is not a new work cycle). complete/invoiced/
+  // archived reopen still bumps as before.
+  const nextCycle = wasCancelled ? currentCycle : currentCycle + 1
   const nowIso = new Date().toISOString()
 
   // 1) Reactivate the job: status -> 'accepted', clear closed timestamps.
@@ -25147,13 +25369,37 @@ async function reopenMakesafe(client: any, body: any) {
     .eq('id', jobId)
   if (jobUpdateErr) throw new ApiError('reopenMakesafe: jobs update failed: ' + jobUpdateErr.message, 500)
 
-  // 2) Update make-safe details: reopen_reason + increment cycle_number.
+  // 2) Update make-safe details: reopen_reason (+ cycle_number for the closed-job
+  //    path). For a cancel -> reopen, ALSO reset the board signals so the derived
+  //    stage becomes `new` (D1): substatus/report signals cleared, and the W1-A
+  //    cancel_* attribution cleared (the card is live again, no longer cancelled).
+  const detailUpdate: Record<string, any> = {
+    reopen_reason: reason,
+    cycle_number: nextCycle,
+    updated_at: nowIso,
+  }
+  if (wasCancelled) {
+    detailUpdate.substatus = null
+    detailUpdate.report_received_at = null
+    detailUpdate.report_sent_at = null
+    detailUpdate.cancel_reason = null
+    detailUpdate.cancel_note = null
+    detailUpdate.cancelled_by = null
+    detailUpdate.cancelled_at = null
+  }
   const { error: detailErr } = await client.from('makesafe_job_details')
-    .update({ reopen_reason: reason, cycle_number: nextCycle, updated_at: nowIso })
+    .update(detailUpdate)
     .eq('job_id', jobId)
   if (detailErr) {
     // Non-fatal: detail row may not exist for very old jobs. Log but do not roll back.
     console.log('[ops-api] reopenMakesafe: detail update failed (non-fatal):', detailErr.message)
+  }
+
+  // 2b) Cancel -> reopen: detach/close any assignments that were closed to
+  //     'cancelled' (or are still open) so the derived stage has no crew and lands
+  //     in New. Non-blocking (mirrors closeOpenAssignmentsForJob's own guard).
+  if (wasCancelled) {
+    await closeOpenAssignmentsForJob(client, jobId, 'cancelled')
   }
 
   // 3) Mark the reopen_candidate draft as approved (clears it from the intake queue).
@@ -25175,9 +25421,170 @@ async function reopenMakesafe(client: any, body: any) {
     detail_json: { note: `Job reopened: ${reason}`, cycle: nextCycle, reopened_by: body.reopened_by || 'ops_dashboard', draft_id: draftId || null },
   })
 
-  return { reopened: true, job_id: jobId, cycle_number: nextCycle, previous_status: job.status, reason }
+  return { reopened: true, job_id: jobId, cycle_number: nextCycle, previous_status: previousStatus, reason }
 }
 export const _reopenMakesafeForTest = reopenMakesafe
+
+// ════════════════════════════════════════════════════════════
+// CANCEL MAKESAFE (M-F) — retire a make-safe card a builder recalled / reallocated
+// / sent in error. ONE jobs.status='cancelled' write drives both boards; the
+// reason + who + when live on makesafe_job_details (additive cancel_* columns).
+// Reversible via reopen_makesafe. NEVER touches Xero.
+//
+// AUTHZ (D5 trusted-ops posture): the TRADE side is genuinely per-user JWT-authed
+// (authTrade → managed_verticals) and ENFORCED here (admin/dispatcher OR a
+// make-safe manager). The OPS side (api_key) inherits the pre-existing "ops URL =
+// trusted operator" posture — allowed, attributed via operator_email (NOT a
+// server-enforced admin lock). Clones reattend's _resolveAllocationAuthz gate.
+//
+// GUARDRAIL: block if a LIVE invoice exists — any ACCREC xero_invoices row whose
+// UPPER(status) ∈ {AUTHORISED, SUBMITTED, PAID}. A DRAFT invoice does NOT block
+// (it can be discarded). This is a TIGHTER predicate than hasActiveMakesafeInvoice
+// (which counts a bare non-void/deleted DRAFT row as active); mirrors the
+// invoiceAuthorised predicate. On block: a structured { ok:false, code:'live_invoice' }
+// (the dispatch surfaces it as 409), never a throw, so the UI can machine-read it.
+//
+// Idempotent: re-cancelling an already-cancelled job is a clean no-op success.
+// ════════════════════════════════════════════════════════════
+
+const _MAKESAFE_CANCEL_REASON_CODES = [
+  'builder_recalled', 'reallocated', 'sent_in_error', 'duplicate', 'other',
+] as const
+// Terminally-dead statuses a make-safe can never be cancelled FROM. 'cancelled'
+// is handled separately (idempotent no-op), so it is deliberately NOT listed here.
+const _MAKESAFE_CANCEL_DEAD_STATUSES = [
+  'archived', 'lost', 'deleted', 'void', 'voided', 'duplicate', 'duplicated',
+]
+// A LIVE (blocking) ACCREC invoice status — TIGHTER than hasActiveMakesafeInvoice
+// (which treats any non-VOIDED/DELETED row, INCLUDING a DRAFT, as active). A DRAFT
+// invoice therefore does NOT block a cancel.
+const _MAKESAFE_CANCEL_LIVE_INVOICE_STATUSES = ['AUTHORISED', 'SUBMITTED', 'PAID']
+
+export async function cancelMakesafe(client: any, args: {
+  body: any
+  authMode: 'api_key' | 'jwt' | 'routine'
+  callerRole?: string | null
+  managedVerticals?: unknown
+  operatorEmail?: string | null
+}): Promise<any> {
+  const { body, authMode, callerRole, managedVerticals } = args
+  const jobId = body.job_id || body.jobId
+  const reasonCode = String(body.reason_code || body.reasonCode || '').trim()
+  const note = String(body.note || '').trim()
+  const operator = args.operatorEmail || body.operator_email || body.user_email || null
+
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (!(_MAKESAFE_CANCEL_REASON_CODES as readonly string[]).includes(reasonCode)) {
+    throw new ApiError(
+      `reason_code required (one of: ${_MAKESAFE_CANCEL_REASON_CODES.join(', ')})`, 400)
+  }
+  if (!note) throw new ApiError('note required (a typed reason is always required)', 400)
+
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, type, job_number, status').eq('id', jobId).maybeSingle()
+  if (jobErr) throw new ApiError('cancelMakesafe: job read failed: ' + jobErr.message, 500)
+  if (!job) throw new ApiError('job not found', 404)
+  if (job.type !== 'makesafe') throw new ApiError('cancelMakesafe: job is not a make-safe job', 400)
+
+  const previousStatus = job.status
+  const jobStatusLc = String(job.status || '').toLowerCase()
+
+  // Idempotent: re-cancelling an already-cancelled job is a clean no-op success.
+  if (jobStatusLc === 'cancelled' || jobStatusLc === 'canceled') {
+    return {
+      ok: true, cancelled: true, idempotent: true, job_id: jobId,
+      previous_status: previousStatus,
+    }
+  }
+  // Any other terminally-dead status cannot be cancelled.
+  if (_MAKESAFE_CANCEL_DEAD_STATUSES.includes(jobStatusLc)) {
+    throw new ApiError(`cannot cancel a ${jobStatusLc} make-safe`, 409)
+  }
+
+  // Authz: api_key = trusted-ops (allowed, attributed via operator_email); trade
+  // JWT = admin/dispatcher OR a manager of this job's vertical (make-safe).
+  const jobVertical = _jobVertical(job)
+  const decision = _resolveAllocationAuthz({ authMode, callerRole, managedVerticals, jobVertical })
+  if (!decision.allowed) {
+    throw new ApiError(`Not authorized to cancel ${jobVertical || 'this'} jobs`, 403)
+  }
+
+  // LIVE-INVOICE BLOCK (predicate #11): DRAFT passes; AUTHORISED/SUBMITTED/PAID blocks.
+  const { data: invRows, error: invErr } = await client.from('xero_invoices')
+    .select('status, invoice_type').eq('job_id', jobId).eq('invoice_type', 'ACCREC')
+  if (invErr) throw new ApiError('cancelMakesafe: invoice read failed: ' + invErr.message, 500)
+  const hasLiveInvoice = (invRows || []).some(
+    (inv: any) => _MAKESAFE_CANCEL_LIVE_INVOICE_STATUSES.includes(String(inv?.status || '').toUpperCase()),
+  )
+  if (hasLiveInvoice) {
+    return {
+      ok: false,
+      code: 'live_invoice',
+      error: 'This job has a live invoice — see admin.',
+      job_id: jobId,
+    }
+  }
+
+  const nowIso = new Date().toISOString()
+
+  // 1) jobs.status='cancelled' (NO cancelled_at — that column does not exist).
+  const { error: jobUpdErr } = await client.from('jobs')
+    .update({ status: 'cancelled', updated_at: nowIso }).eq('id', jobId)
+  if (jobUpdErr) throw new ApiError('cancelMakesafe: jobs update failed: ' + jobUpdErr.message, 500)
+
+  // 2) Attribution on makesafe_job_details (additive cancel_* columns). Non-fatal:
+  //    the jobs.status write is the source of truth for both boards; a missing/failing
+  //    detail row must not roll back the cancel (mirrors reopen/reattend).
+  const { error: detailErr } = await client.from('makesafe_job_details')
+    .update({
+      cancel_reason: reasonCode, cancel_note: note,
+      cancelled_by: operator, cancelled_at: nowIso, updated_at: nowIso,
+    }).eq('job_id', jobId)
+  if (detailErr) {
+    console.log('[ops-api] cancelMakesafe: detail update failed (non-fatal):', detailErr.message)
+  }
+
+  // 3) Close any open crew assignments (the field-work is void).
+  const assignmentsClosed = await closeOpenAssignmentsForJob(client, jobId, 'cancelled')
+
+  // 4) Best-effort: flip a linked work_orders row to cancelled IF one exists. No
+  //    throw if none / on error — the cancel already succeeded.
+  const { error: woErr } = await client.from('work_orders')
+    .update({ status: 'cancelled', updated_at: nowIso })
+    .eq('job_id', jobId).neq('status', 'cancelled')
+  if (woErr) {
+    console.log('[ops-api] cancelMakesafe: work_orders update failed (non-fatal):', woErr.message)
+  }
+
+  // 5) Audit event (non-fatal, same posture as reattend/reopen).
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'makesafe_cancelled',
+      detail_json: {
+        reason_code: reasonCode,
+        note,
+        previous_status: previousStatus,
+        operator,
+        changed_at: nowIso,
+      },
+    })
+  } catch (evtErr) {
+    console.log('[ops-api] cancelMakesafe: event log failed (non-fatal):', (evtErr as Error)?.message)
+  }
+
+  return {
+    ok: true,
+    cancelled: true,
+    job_id: jobId,
+    reason_code: reasonCode,
+    note,
+    previous_status: previousStatus,
+    operator,
+    assignments_closed: assignmentsClosed,
+  }
+}
+export const _cancelMakesafeForTest = cancelMakesafe
 
 // ════════════════════════════════════════════════════════════
 // RE-ATTEND MAKESAFE (M-C) — send an already-reported card back to the trade for

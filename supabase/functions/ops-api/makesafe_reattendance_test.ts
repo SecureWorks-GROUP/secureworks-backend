@@ -85,6 +85,7 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
         return b;
       },
       not: () => b,
+      gte: () => b,
       in: (col: string, vals: any[]) => {
         preds.push((r) => vals.includes(r?.[col]));
         return b;

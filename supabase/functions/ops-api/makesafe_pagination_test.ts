@@ -35,6 +35,7 @@ function makePagingClient(rowsByTable: Record<string, any[]>) {
       eq: (col: string, val: any) => { preds.push((r) => r?.[col] === val); return b; },
       neq: (col: string, val: any) => { preds.push((r) => r?.[col] !== val); return b; },
       not: () => b,
+      gte: () => b,
       in: (col: string, vals: any[]) => { preds.push((r) => vals.includes(r?.[col])); return b; },
       order: () => b,
       range: async (from: number, to: number) => {
@@ -126,6 +127,7 @@ function makePipelineClient(rowsByTable: Record<string, any[]>) {
       eq: (col: string, val: any) => { preds.push((r) => r?.[col] === val); return b; },
       neq: (col: string, val: any) => { preds.push((r) => r?.[col] !== val); return b; },
       not: () => b,
+      gte: () => b,
       in: (col: string, vals: any[]) => { preds.push((r) => vals.includes(r?.[col])); return b; },
       order: () => b,
       limit: () => b,
