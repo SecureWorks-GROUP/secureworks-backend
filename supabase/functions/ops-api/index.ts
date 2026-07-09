@@ -25195,10 +25195,13 @@ export const _reopenMakesafeForTest = reopenMakesafe
 //
 // It does NOT create an assignment or send any SMS. The manager then uses the
 // existing tap-to-allocate (allocate_job), which fires the SAME allocation SMS —
-// no new notification path. Out of scope (Marnin, priced per case): re-attend
-// invoicing; a card with a LIVE (non-void) invoice is refused (412) rather than
-// touching invoice state. AUTHZ mirrors allocate_job (dispatcher OR a manager of
-// the job's vertical) and the dispatch wraps it with authTrade the same way.
+// no new notification path. Capturing the field visit is DECOUPLED from billing
+// (Marnin, 2026-07-09, SWMS-26888 incident): a card with a LIVE (non-void) invoice
+// is NO LONGER refused — the re-attend proceeds and we surface a non-fatal
+// `bill_reattend_manually` flag + warning so admin bills the re-attend manually /
+// combines invoices. We never read further into or mutate invoice state here.
+// AUTHZ mirrors allocate_job (dispatcher OR a manager of the job's vertical) and
+// the dispatch wraps it with authTrade the same way.
 // ════════════════════════════════════════════════════════════
 
 // Statuses a make-safe can never be re-attended from (terminally dead).
@@ -25272,19 +25275,19 @@ export async function reattendMakesafe(client: any, args: {
     )
   }
 
-  // Out of scope (Marnin, per case): re-attend invoicing. Refuse a card with a
-  // LIVE (non-void) invoice rather than touching invoice state.
+  // Billing is decoupled from field-work capture (Marnin, 2026-07-09, SWMS-26888):
+  // recording that a trade re-attended must NEVER be blocked. If the job already
+  // carries a LIVE (non-VOIDED/DELETED) ACCREC invoice we still PROCEED, but raise
+  // a non-fatal flag so admin bills the re-attend manually / combines invoices.
+  // This is a read only — we never mutate or auto-create any invoice here.
   const { data: liveInvoices } = await client.from('xero_invoices')
     .select('status, invoice_type').eq('job_id', jobId).eq('invoice_type', 'ACCREC')
-  const hasLiveInvoice = (liveInvoices || []).some(
+  const billReattendManually = (liveInvoices || []).some(
     (inv: any) => !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase()),
   )
-  if (hasLiveInvoice) {
-    throw new ApiError(
-      're-attend not available: job already has a live invoice — invoiced re-attends are priced per case (out of v1 scope)',
-      412,
-    )
-  }
+  const reattendWarning = billReattendManually
+    ? 'This job already has a live invoice — bill this re-attend manually or combine it into one invoice.'
+    : null
 
   const nowIso = new Date().toISOString()
   const nextCycle = (detail.cycle_number ?? 1) + 1
@@ -25327,6 +25330,7 @@ export async function reattendMakesafe(client: any, args: {
         cycle_number: nextCycle,
         previous_substatus: normalizedSub,
         previous_status: previousStatus,
+        bill_reattend_manually: billReattendManually,
         operator: body.operator_email || body.user_email || null,
         changed_at: nowIso,
       },
@@ -25344,6 +25348,8 @@ export async function reattendMakesafe(client: any, args: {
     substatus: updatedDetail?.substatus || 'waiting_on_trade_report',
     previous_status: previousStatus,
     reason,
+    bill_reattend_manually: billReattendManually,
+    ...(reattendWarning ? { warning: reattendWarning } : {}),
   }
 }
 export const _reattendMakesafeForTest = reattendMakesafe
