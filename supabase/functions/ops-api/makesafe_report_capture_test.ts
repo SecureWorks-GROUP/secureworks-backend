@@ -686,3 +686,27 @@ Deno.test("job family: temporary fence wins over report wording", () => {
     "temp_fence_makesafe",
   );
 });
+
+Deno.test("job family: Prime assessment links and later temp-fence WO split under same MLB ref", () => {
+  assertEquals(
+    classifyMakeSafeJobFamily(
+      "NEW WORK ORDER - MLB-25911 10 Travellers Well St, Broadwater, WA 6280",
+      [
+        "Report ShareLink: https://primeeco.tech/share/report",
+        "Photo Schedule ShareLink: https://primeeco.tech/share/photos",
+        "Quote ShareLink: https://primeeco.tech/share/quote",
+        "Assessment Report & Quote",
+      ].join("\n"),
+      null,
+    ),
+    "assessment_report_quote",
+  );
+  assertEquals(
+    classifyMakeSafeJobFamily(
+      "NEW WORK ORDER - MLB-25911 10 Travellers Well St, Broadwater, WA 6280",
+      "Temporary Fencing MAKE SAFE TEMP FENCE: Please attend to remove temporary fencing.",
+      null,
+    ),
+    "temp_fence_makesafe",
+  );
+});

@@ -60,6 +60,13 @@ export interface IntakeDedupRow {
   external_ref?: string | null;
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
+  /**
+   * Practical MakeSafe job family. When present, same builder ref + company is
+   * only a duplicate within the same family. This lets MLB send an assessment /
+   * quote and a later temp-fence MakeSafe under the same MLB ref without the
+   * second work order being silently dropped.
+   */
+  makesafe_job_family?: string | null;
   status?: string | null;
   /** ISO timestamp of when the email was received — used by suppressed_rejected date check. */
   received_at?: string | null;
@@ -72,6 +79,7 @@ export interface IntakeDedupCandidate {
   external_ref?: string | null;
   requesting_company_slug?: string | null;
   requesting_company_name?: string | null;
+  makesafe_job_family?: string | null;
   /**
    * When true, bypasses the suppressed_rejected check so a targeted recapture
    * action can create a fresh draft for a previously-rejected email. It does NOT
@@ -93,8 +101,16 @@ export interface DedupIndex {
   internetIds: Set<string>;
   /** normalised `${ref}|${company}` for existing drafts */
   refCompany: Set<string>;
+  /** normalised `${ref}|${company}|${family}` for existing drafts with a known family */
+  refCompanyFamily: Set<string>;
+  /** normalised `${ref}|${company}` for existing drafts where the family is unknown */
+  refCompanyUnknownFamily: Set<string>;
   /** normalised ref for existing JOBS (a live job already covers this ref) */
   jobRefs: Set<string>;
+  /** normalised `${ref}|${family}` for existing jobs with a known family */
+  jobRefFamily: Set<string>;
+  /** normalised refs for existing jobs where the family is unknown */
+  jobUnknownFamilyRefs: Set<string>;
   /**
    * normalised `${ref}|${company}` -> latest rejected received_at (ISO string).
    * Maps each rejected/superseded ref+company key to the MAX received_at among
@@ -153,6 +169,11 @@ export function normaliseCompany(
   return String(name ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+/** Normalise a MakeSafe job-family token for dedupe keys. */
+export function normaliseJobFamily(family: string | null | undefined): string {
+  return String(family ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+}
+
 /**
  * Build the composite `${ref}|${company}` key. Returns "" (a key that NEVER matches)
  * unless BOTH a non-empty ref AND a non-empty company are present. Requiring the
@@ -175,6 +196,29 @@ export function refCompanyKey(
   return `${r}|${c}`;
 }
 
+export function refCompanyFamilyKey(
+  ref: string | null | undefined,
+  slug: string | null | undefined,
+  name: string | null | undefined,
+  family: string | null | undefined,
+): string {
+  const rc = refCompanyKey(ref, slug, name);
+  if (!rc) return "";
+  const f = normaliseJobFamily(family);
+  if (!f) return "";
+  return `${rc}|${f}`;
+}
+
+export function refFamilyKey(
+  ref: string | null | undefined,
+  family: string | null | undefined,
+): string {
+  const r = normaliseRef(ref);
+  const f = normaliseJobFamily(family);
+  if (!r || !f) return "";
+  return `${r}|${f}`;
+}
+
 /**
  * Build a dedup index from the existing drafts (in any LIVE state) and, optionally,
  * existing jobs' external refs, and previously-rejected/superseded drafts.
@@ -187,27 +231,56 @@ export function refCompanyKey(
  */
 export function buildIntakeDedupIndex(
   existingDrafts: IntakeDedupRow[],
-  existingJobRefs: Array<string | null | undefined> = [],
+  existingJobRefs: Array<string | IntakeDedupRow | null | undefined> = [],
   rejectedDrafts: IntakeDedupRow[] = [],
 ): DedupIndex {
   const graphIds = new Set<string>();
   const internetIds = new Set<string>();
   const refCompany = new Set<string>();
+  const refCompanyFamily = new Set<string>();
+  const refCompanyUnknownFamily = new Set<string>();
   const jobRefs = new Set<string>();
+  const jobRefFamily = new Set<string>();
+  const jobUnknownFamilyRefs = new Set<string>();
   const rejectedRefCompany = new Map<string, string>();
 
   for (const d of existingDrafts || []) {
     if (d.graph_message_id) graphIds.add(d.graph_message_id);
     if (d.internet_message_id) internetIds.add(d.internet_message_id);
-    const rc = refCompanyKey(d.external_ref, d.requesting_company_slug, d.requesting_company_name);
-    if (rc) refCompany.add(rc);
+    const rc = refCompanyKey(
+      d.external_ref,
+      d.requesting_company_slug,
+      d.requesting_company_name,
+    );
+    if (rc) {
+      refCompany.add(rc);
+      const rcf = refCompanyFamilyKey(
+        d.external_ref,
+        d.requesting_company_slug,
+        d.requesting_company_name,
+        d.makesafe_job_family,
+      );
+      if (rcf) refCompanyFamily.add(rcf);
+      else refCompanyUnknownFamily.add(rc);
+    }
   }
-  for (const r of existingJobRefs || []) {
-    const nr = normaliseRef(r);
-    if (nr) jobRefs.add(nr);
+  for (const row of existingJobRefs || []) {
+    const ref = typeof row === "string" ? row : row?.external_ref;
+    const family = typeof row === "string" ? null : row?.makesafe_job_family;
+    const nr = normaliseRef(ref);
+    if (nr) {
+      jobRefs.add(nr);
+      const rf = refFamilyKey(ref, family);
+      if (rf) jobRefFamily.add(rf);
+      else jobUnknownFamilyRefs.add(nr);
+    }
   }
   for (const d of rejectedDrafts || []) {
-    const rc = refCompanyKey(d.external_ref, d.requesting_company_slug, d.requesting_company_name);
+    const rc = refCompanyKey(
+      d.external_ref,
+      d.requesting_company_slug,
+      d.requesting_company_name,
+    );
     // Only add when BOTH ref AND company are known — same safety invariant as the
     // live-state check (no false suppression of unknown-company candidates).
     if (!rc) continue;
@@ -215,13 +288,23 @@ export function buildIntakeDedupIndex(
     // candidates with the same or older received_at are the already-rejected email;
     // candidates with a NEWER received_at are corrected resends (must NOT suppress).
     const existing = rejectedRefCompany.get(rc);
-    const ts = d.received_at || '';
+    const ts = d.received_at || "";
     if (!existing || ts > existing) {
       rejectedRefCompany.set(rc, ts);
     }
   }
 
-  return { graphIds, internetIds, refCompany, jobRefs, rejectedRefCompany };
+  return {
+    graphIds,
+    internetIds,
+    refCompany,
+    refCompanyFamily,
+    refCompanyUnknownFamily,
+    jobRefs,
+    jobRefFamily,
+    jobUnknownFamilyRefs,
+    rejectedRefCompany,
+  };
 }
 
 /**
@@ -241,10 +324,15 @@ export function isDuplicateIntake(
   index: DedupIndex,
 ): string | null {
   // Live-state checks — these fire even for force_recapture (cannot duplicate LIVE).
-  if (candidate.graph_message_id && index.graphIds.has(candidate.graph_message_id)) {
+  if (
+    candidate.graph_message_id && index.graphIds.has(candidate.graph_message_id)
+  ) {
     return "graph_message_id";
   }
-  if (candidate.internet_message_id && index.internetIds.has(candidate.internet_message_id)) {
+  if (
+    candidate.internet_message_id &&
+    index.internetIds.has(candidate.internet_message_id)
+  ) {
     return "internet_message_id";
   }
   const rc = refCompanyKey(
@@ -252,12 +340,40 @@ export function isDuplicateIntake(
     candidate.requesting_company_slug,
     candidate.requesting_company_name,
   );
-  if (rc && index.refCompany.has(rc)) {
-    return "external_ref+company";
+  const family = normaliseJobFamily(candidate.makesafe_job_family);
+  if (rc) {
+    if (family) {
+      const rcf = refCompanyFamilyKey(
+        candidate.external_ref,
+        candidate.requesting_company_slug,
+        candidate.requesting_company_name,
+        family,
+      );
+      // Same ref/company/family is a duplicate. Unknown-family existing drafts
+      // are treated conservatively as duplicates because we cannot prove they
+      // are a different job family.
+      if (
+        (rcf && index.refCompanyFamily.has(rcf)) ||
+        index.refCompanyUnknownFamily.has(rc)
+      ) {
+        return "external_ref+company";
+      }
+    } else if (index.refCompany.has(rc)) {
+      return "external_ref+company";
+    }
   }
   const nr = normaliseRef(candidate.external_ref);
-  if (nr && index.jobRefs.has(nr)) {
-    return "job_external_ref";
+  if (nr) {
+    if (family) {
+      const rf = refFamilyKey(candidate.external_ref, family);
+      if (
+        (rf && index.jobRefFamily.has(rf)) || index.jobUnknownFamilyRefs.has(nr)
+      ) {
+        return "job_external_ref";
+      }
+    } else if (index.jobRefs.has(nr)) {
+      return "job_external_ref";
+    }
   }
 
   // Suppressed-rejected guard (F1 + Codex F3): if the candidate's ref+company matches a
@@ -290,13 +406,28 @@ export function isDuplicateIntake(
  * SAME scan pass (e.g. two copies of the same email within one batch) is also
  * deduped. Call right after a successful insert.
  */
-export function registerIntakeDraft(candidate: IntakeDedupCandidate, index: DedupIndex): void {
-  if (candidate.graph_message_id) index.graphIds.add(candidate.graph_message_id);
-  if (candidate.internet_message_id) index.internetIds.add(candidate.internet_message_id);
+export function registerIntakeDraft(
+  candidate: IntakeDedupCandidate,
+  index: DedupIndex,
+): void {
+  if (candidate.graph_message_id) {
+    index.graphIds.add(candidate.graph_message_id);
+  }
+  if (candidate.internet_message_id) {
+    index.internetIds.add(candidate.internet_message_id);
+  }
   const rc = refCompanyKey(
     candidate.external_ref,
     candidate.requesting_company_slug,
     candidate.requesting_company_name,
   );
   if (rc) index.refCompany.add(rc);
+  const rcf = refCompanyFamilyKey(
+    candidate.external_ref,
+    candidate.requesting_company_slug,
+    candidate.requesting_company_name,
+    candidate.makesafe_job_family,
+  );
+  if (rcf) index.refCompanyFamily.add(rcf);
+  else if (rc) index.refCompanyUnknownFamily.add(rc);
 }

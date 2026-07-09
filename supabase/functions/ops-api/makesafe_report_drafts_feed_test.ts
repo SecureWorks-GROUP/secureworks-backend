@@ -11,7 +11,10 @@
 // Run: deno test --no-check --allow-env --allow-net=127.0.0.1 \
 //        supabase/functions/ops-api/makesafe_report_drafts_feed_test.ts
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _makesafeReportDraftsForTest } from "./index.ts";
+import {
+  _canonicalMakesafeInvoiceContactNameForTest,
+  _makesafeReportDraftsForTest,
+} from "./index.ts";
 import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
 // Fake client: table reads with .eq/.in/.limit/.order (predicate-applying) plus a
@@ -76,18 +79,20 @@ function ferndaleSeed() {
     jobs: [{
       id: "job-ferndale", job_number: "SWMS-25248", client_name: "Jane Homeowner",
       client_email: "jane@x.com", site_address: "12 Smith St", site_suburb: "Ferndale", status: "invoiced", type: "makesafe",
+      created_at: "2026-06-15T23:55:00Z",
     }],
     xero_invoices: [{
       xero_invoice_id: "xi-1", invoice_number: "INV-1234", status: "DRAFT", reference: "MLB-25248",
       sub_total: 1000, total: 1100, total_tax: 100, line_items: [], job_id: "job-ferndale", invoice_date: "2026-06-16",
     }],
     job_documents: [
-      { id: "d-rep", job_id: "job-ferndale", type: "makesafe_report", file_name: "Make Safe Report MLB-25248.pdf", storage_url: "https://docs.test/report.pdf", pdf_url: null, version: 1 },
-      { id: "d-inv", job_id: "job-ferndale", type: "invoice", file_name: "Tax Invoice INV-1234.pdf", storage_url: "https://docs.test/invoice.pdf", pdf_url: null, version: 1 },
-      { id: "d-wo", job_id: "job-ferndale", type: "work_order", file_name: "Work Order.pdf", storage_url: "https://docs.test/wo.pdf", pdf_url: null, version: 1 },
+      { id: "d-rep", job_id: "job-ferndale", type: "makesafe_report", file_name: "Make Safe Report MLB-25248.pdf", storage_url: "https://docs.test/report.pdf", pdf_url: null, version: 1, created_at: "2026-06-16T03:00:00Z" },
+      { id: "d-inv", job_id: "job-ferndale", type: "invoice", file_name: "Tax Invoice INV-1234.pdf", storage_url: "https://docs.test/invoice.pdf", pdf_url: null, version: 1, created_at: "2026-06-16T03:05:00Z" },
+      { id: "d-trade", job_id: "job-ferndale", type: "service_report", file_name: "Trade Report.pdf", storage_url: "https://docs.test/trade.pdf", pdf_url: null, version: 1, created_at: "2026-06-16T00:45:00Z" },
+      { id: "d-wo", job_id: "job-ferndale", type: "work_order", file_name: "Work Order.pdf", storage_url: "https://docs.test/wo.pdf", pdf_url: null, version: 1, created_at: "2026-06-15T23:55:00Z" },
     ],
     job_media: [
-      { id: "m1", job_id: "job-ferndale", phase: "completion", type: "photo", storage_url: "https://media.test/p1.jpg", thumbnail_url: "https://media.test/p1t.jpg", label: "Front" },
+      { id: "m1", job_id: "job-ferndale", phase: "completion", type: "photo", storage_url: "https://media.test/p1.jpg", thumbnail_url: "https://media.test/p1t.jpg", label: "Front", taken_at: "2026-06-16T00:30:00Z", created_at: "2026-06-16T00:40:00Z" },
     ],
     makesafe_report_packs: [{ job_id: "job-ferndale", pack_kind: "main", status: "drafted", report_doc_id: "d-rep", sent_at: null }],
   };
@@ -169,9 +174,23 @@ Deno.test("D3 feed: draft_docs[] + source_docs[] are returned with kinds, existi
   assert(!draftLabels.includes("SWMS"), "no SWMS attached -> none surfaced");
   // source_docs has the work order + the photo (image kind).
   const srcLabels = row.source_docs.map((d: any) => d.label);
+  assert(srcLabels.includes("Trade Report"), "source_docs has the raw trade report");
   assert(srcLabels.includes("Work Order"), "source_docs has the work order");
   assert(row.source_docs.some((d: any) => d.kind === "image"), "source_docs includes a photo image");
   assert(row.draft_docs.every((d: any) => d.kind === "pdf"), "draft_docs are pdf kind");
+  const tradeReport = row.source_docs.find((d: any) => d.label === "Trade Report");
+  assertEquals(tradeReport.received_at, "2026-06-16T01:00:00Z", "trade report uses report_received_at as the operator-facing received timestamp");
+  assertEquals(tradeReport.created_at, "2026-06-16T00:45:00Z", "trade report preserves stored document created_at");
+  const workOrder = row.source_docs.find((d: any) => d.label === "Work Order");
+  assertEquals(workOrder.received_at, "2026-06-15T23:55:00Z", "work order exposes received/created timestamp");
+  const photo = row.source_docs.find((d: any) => d.kind === "image");
+  assertEquals(photo.received_at, "2026-06-16T00:30:00Z", "photo received timestamp prefers taken_at");
+});
+
+Deno.test("MLB Xero contact: draft/sync contact names canonicalise to Major Loss Builders", () => {
+  assertEquals(_canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "ML Builders"), "Major Loss Builders");
+  assertEquals(_canonicalMakesafeInvoiceContactNameForTest("MLB-26003", "Major Loss Builder"), "Major Loss Builders");
+  assertEquals(_canonicalMakesafeInvoiceContactNameForTest("AJS-123", "AJS Group"), "AJS Group");
 });
 
 Deno.test("D3 feed: an attached SWMS is surfaced in draft_docs", async () => {

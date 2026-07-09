@@ -214,6 +214,7 @@ import {
   SUPPRESSED_DRAFT_STATES as _SUPPRESSED_DRAFT_STATES,
   normaliseRef as _normaliseDedupRef,
   normaliseCompany as _normaliseDedupCompany,
+  normaliseJobFamily as _normaliseDedupJobFamily,
 } from './makesafe_intake_dedup.ts'
 // GAP-A (WO selection + unique per-attachment key).
 // Mission: makesafe-wo-capture-recovery-2026-06-17.
@@ -3021,6 +3022,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'upload_document': return json(await uploadDocument(client, body))
       case 'confirm_document_upload': return json(await confirmDocumentUpload(client, body))
       case 'attach_makesafe_document': return json(await attachMakesafeDocument(client, body))
+      case 'attach_email_attachment_to_job': return json(await attachEmailAttachmentToJob(client, body))
 
       // ── MakeSafe Reporting Autopilot (Wave 2) ──
       // create_makesafe_draft_invoice + makesafe_render_report are routine-safe
@@ -7164,7 +7166,7 @@ async function searchJobs(client: any, params: URLSearchParams) {
   const term = `%${q}%`
 
   // Search across jobs, invoices, quotes, contacts in parallel
-  const [jobRes, invoiceRes, contactRes, quoteRes] = await Promise.all([
+  const [jobRes, invoiceRes, contactRes, quoteRes, makesafeRefRes] = await Promise.all([
     // Direct job fields: client name, job number, address, suburb, email, phone
     client.from('jobs')
       .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, type, status')
@@ -7191,6 +7193,13 @@ async function searchJobs(client: any, params: URLSearchParams) {
       .select('job_id, quote_number')
       .ilike('quote_number', term)
       .limit(10),
+    // MakeSafe builder refs live in makesafe_job_details, not jobs.job_number.
+    // Without this, global search misses refs like MLB-25911 / AJBR-67996 even
+    // though the live job exists and is visible by address.
+    client.from('makesafe_job_details')
+      .select('job_id, external_ref, requesting_company_name')
+      .ilike('external_ref', term)
+      .limit(20),
   ])
 
   // Collect all matched job IDs from secondary tables
@@ -7213,6 +7222,12 @@ async function searchJobs(client: any, params: URLSearchParams) {
     if (qr.job_id) {
       secondaryJobIds.add(qr.job_id)
       matchContext[qr.job_id] = `Quote: ${qr.quote_number}`
+    }
+  }
+  for (const ms of (makesafeRefRes.data || [])) {
+    if (ms.job_id) {
+      secondaryJobIds.add(ms.job_id)
+      matchContext[ms.job_id] = `Builder ref: ${ms.external_ref || ''}`
     }
   }
 
@@ -9485,6 +9500,13 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!isReportOnlyDraft && availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
+  const approvedJobFamily = extraction?.makesafe_job_family || _classifyMakeSafeJobFamily(
+    draft?.subject || approvedFields.external_ref || '',
+    [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
+    draft?.report_type || null,
+  )
+  const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
+
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
   // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
   // so "AJBR 67200", "AJBR-67200" and "AJBR67200" all collapse to one canonical key
@@ -9497,12 +9519,26 @@ async function approveIntakeDraft(client: any, body: any) {
       // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
       // the refs already on live jobs is cheap and lets us match on normalised form.
       const { data: candidates } = await client.from('makesafe_job_details')
-        .select('job_id, external_ref, jobs(job_number, client_name, site_address, status)')
+        .select('job_id, external_ref, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
         .not('external_ref', 'is', null)
-      const dup = (candidates || []).find((row: any) => normaliseRef(row.external_ref, prefixes) === normTarget)
+      const dup = (candidates || []).find((row: any) => {
+        if (normaliseRef(row.external_ref, prefixes) !== normTarget) return false
+        const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs
+        const existingMetadata = parseJsonObject(existingJob?.metadata)
+        const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
+          row.external_ref || '',
+          [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),
+          row.report_type || null,
+        )
+        const existingFamilyKey = _normaliseDedupJobFamily(existingFamily)
+        // Block true duplicates (same family) and unknown-family legacy jobs.
+        // Allow distinct operational families under the same builder ref:
+        // assessment/quote, roof report, temp-fence MakeSafe, general MakeSafe.
+        return !existingFamilyKey || existingFamilyKey === approvedJobFamilyKey
+      })
       if (dup?.job_id) {
         const existingJob = Array.isArray(dup.jobs) ? dup.jobs[0] : dup.jobs
-        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id))
+        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same MakeSafe job family')
       }
     }
   }
@@ -9545,11 +9581,6 @@ async function approveIntakeDraft(client: any, body: any) {
     // set substatus=ready_to_invoice immediately (skips the report-production stage).
     const portalLinks = _normalizeReportExternalLinks(extraction)
     const reportJobExternalLinks = isReportOnlyDraft && portalLinks.length ? portalLinks : null
-    const approvedJobFamily = extraction?.makesafe_job_family || _classifyMakeSafeJobFamily(
-      draft?.subject || approvedFields.external_ref || '',
-      [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
-      draft?.report_type || null,
-    )
     const jobResult = await createMakesafeJob(client, {
       client_name: approvedFields.client_name,
       site_address: approvedFields.site_address,
@@ -10180,7 +10211,7 @@ async function scanSesMakesafes(client: any) {
   // so (ref + company) is the workhorse cross-path key. See makesafe_intake_dedup.ts.
   const existingDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
-      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status')
+      .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, report_type, subject, body_preview, description, extraction_json')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _LIVE_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (dedup index) read',
@@ -10203,25 +10234,44 @@ async function scanSesMakesafes(client: any) {
   //       collisions (two builders can share a ref number like "67998"; without the
   //       company scope the map would overwrite one builder's job with the other's).
   const { data: existingJobs } = await client.from('makesafe_job_details')
-    .select('job_id, external_ref, requesting_company_slug, jobs(status)')
+    .select('job_id, external_ref, requesting_company_slug, report_type, jobs(status, metadata, notes)')
     .not('external_ref', 'is', null)
   // Build a (normalised-ref|company-slug) -> { jobId, status } lookup.
-  const refToJobId = new Map<string, { jobId: string; status: string | null }>()
-  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; requesting_company_slug: string | null; jobs: { status: string } | { status: string }[] | null }>) {
+  const refToJobId = new Map<string, { jobId: string; status: string | null; family: string | null }>()
+  const existingJobDedupRows: Array<{ external_ref: string | null; makesafe_job_family: string | null }> = []
+  for (const j of (existingJobs || []) as Array<{ job_id: string; external_ref: string; requesting_company_slug: string | null; report_type?: string | null; jobs: { status: string; metadata?: any; notes?: string | null } | { status: string; metadata?: any; notes?: string | null }[] | null }>) {
     const nr = _normaliseDedupRef(j.external_ref)
     if (nr && j.job_id) {
       const jobsData = Array.isArray(j.jobs) ? j.jobs[0] : j.jobs
+      const jobMetadata = parseJsonObject(jobsData?.metadata)
+      const jobFamily = jobMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
+        j.external_ref || '',
+        [j.report_type, jobsData?.notes].filter(Boolean).join('\n'),
+        j.report_type || null,
+      )
+      const familyKey = _normaliseDedupJobFamily(jobFamily)
+      existingJobDedupRows.push({ external_ref: j.external_ref, makesafe_job_family: familyKey || null })
       const companyKey = (j.requesting_company_slug || '').toLowerCase()
       // Primary key: ref|company so two builders' jobs with the same ref never collide.
-      refToJobId.set(`${nr}|${companyKey}`, { jobId: j.job_id, status: jobsData?.status ?? null })
+      refToJobId.set(`${nr}|${companyKey}|${familyKey}`, { jobId: j.job_id, status: jobsData?.status ?? null, family: familyKey || null })
+      if (!familyKey) refToJobId.set(`${nr}|${companyKey}|`, { jobId: j.job_id, status: jobsData?.status ?? null, family: null })
       // Fallback key: ref alone, so a match still occurs when company slug is missing.
       // The company-scoped key always wins if present (map is set in order above).
-      if (!refToJobId.has(nr)) refToJobId.set(nr, { jobId: j.job_id, status: jobsData?.status ?? null })
+      if (!refToJobId.has(nr)) refToJobId.set(nr, { jobId: j.job_id, status: jobsData?.status ?? null, family: familyKey || null })
     }
   }
+  const existingDraftDedupRows = (existingDrafts || []).map((d: any) => {
+    const extractionJson = parseJsonObject(d.extraction_json)
+    const draftFamily = extractionJson.makesafe_job_family || _classifyMakeSafeJobFamily(
+      d.subject || d.external_ref || '',
+      [extractionJson.builder_email_text_for_trade, d.body_preview, d.description].filter(Boolean).join('\n'),
+      d.report_type || null,
+    )
+    return { ...d, makesafe_job_family: draftFamily || null }
+  })
   const dedupIndex = _buildIntakeDedupIndex(
-    existingDrafts || [],
-    (existingJobs || []).map((j: any) => j.external_ref),
+    existingDraftDedupRows,
+    existingJobDedupRows,
     rejectedDrafts || [],
   )
 
@@ -10527,11 +10577,28 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
       }
     }
 
+    // Classify BEFORE ref+company/job dedupe. MLB can send multiple distinct
+    // operational work orders under one builder ref (assessment/quote first,
+    // then temp-fence or general MakeSafe later). The dedupe must suppress only
+    // same-family repeats, not every future email on that ref.
+    let draftReportType: string | null = null
+    if (tagReportType) {
+      draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
+    }
+    const draftJobFamily = _classifyMakeSafeJobFamily(
+      subject,
+      [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
+      draftReportType,
+    )
+    extraction.makesafe_job_family = draftJobFamily
+    extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+
     // BUG 1 — POST-EXTRACTION CROSS-PATH DEDUP. Now that Haiku has given us the
     // external_ref and we've matched the requesting company, re-run the dedup with
     // those keys. This is what catches the OLD-path draft of the SAME work order
     // whose graph_message_id differs from this group-sync candidate (the BICTON
-    // 67998 case): same (normalised ref + company), or a live job already on the ref.
+    // 67998 case): same (normalised ref + company + job family), or a live job
+    // already on the same ref + family.
     const extractedRef = extraction.external_ref || null
     const refDup = _isDuplicateIntake(
       {
@@ -10540,6 +10607,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         external_ref: extractedRef,
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
+        makesafe_job_family: draftJobFamily,
         received_at: msg.receivedDateTime || null,
       },
       dedupIndex,
@@ -10561,7 +10629,9 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         // fallback slot would point at the wrong job. Fall through to skippedDuplicates
         // instead (safer: treat it like any other duplicate).
         const companyScopedEntry = normRef && companyKey
-          ? refToJobId.get(`${normRef}|${companyKey}`) ?? null
+          ? refToJobId.get(`${normRef}|${companyKey}|${_normaliseDedupJobFamily(draftJobFamily)}`) ??
+            refToJobId.get(`${normRef}|${companyKey}|`) ??
+            null
           : null
         const matchedEntry = companyScopedEntry
         const matchedJobId = matchedEntry?.jobId ?? null
@@ -10622,6 +10692,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
               external_ref: extractedRef,
               requesting_company_slug: matchedCompany?.slug || null,
               requesting_company_name: matchedCompany?.name || null,
+              makesafe_job_family: draftJobFamily,
             },
             dedupIndex,
           )
@@ -10639,17 +10710,6 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
     // Codex issue 1: report_type is set whenever the subject matched a report
     // pattern (tagReportType), even for a kind='work_order' make-safe-and-report.
     let draftStatus: string
-    let draftReportType: string | null = null
-    if (tagReportType) {
-      draftReportType = _classifyReportType(subject, builderEmailTextForTrade || bodyPreview)
-    }
-    const draftJobFamily = _classifyMakeSafeJobFamily(
-      subject,
-      [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
-      draftReportType,
-    )
-    extraction.makesafe_job_family = draftJobFamily
-    extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
     if (isReportCapture) {
       draftStatus = 'needs_review'
     } else {
@@ -10717,6 +10777,7 @@ If the email is NOT a make-safe work order, set confidence to "low" and missing_
         external_ref: extractedRef,
         requesting_company_slug: matchedCompany?.slug || null,
         requesting_company_name: matchedCompany?.name || null,
+        makesafe_job_family: draftJobFamily,
       },
       dedupIndex,
     )
@@ -12411,111 +12472,92 @@ async function syncJobInvoices(client: any, body: any) {
 
   const { data: job, error: jobErr } = await client
     .from('jobs')
-    .select('id, job_number, client_name, xero_contact_id')
+    .select('id, job_number, client_name, xero_contact_id, metadata')
     .eq('id', jId)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
+
+  const { data: msDetail } = await client.from('makesafe_job_details')
+    .select('external_ref')
+    .eq('job_id', jId)
+    .maybeSingle()
+
+  const refTokens = Array.from(new Set([
+    job.job_number,
+    msDetail?.external_ref,
+    job.metadata?.external_ref,
+    body.external_ref || body.externalRef,
+  ].filter(Boolean).map((x: any) => String(x).trim()).filter(Boolean)))
+
+  if (refTokens.length === 0) {
+    return { success: true, synced: 0, job_number: job.job_number, invoices: [], note: 'no job/reference token available; skipped Xero sync to avoid broad contact linking' }
+  }
 
   const { accessToken, tenantId } = await getToken(client)
 
   let synced = 0
   const syncedInvoices: any[] = []
-
-  // Strategy 1: Search by Xero contact ID
-  if (job.xero_contact_id) {
-    try {
-      const result = await xeroGet('/Invoices', accessToken, tenantId, {
-        where: `Contact.ContactID=guid("${job.xero_contact_id}") AND Type=="ACCREC"`,
-        Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
-      })
-      const invoices = result?.Invoices || []
-      for (const inv of invoices) {
-        const record: any = {
-          org_id: DEFAULT_ORG_ID,
-          xero_invoice_id: inv.InvoiceID,
-          xero_contact_id: inv.Contact?.ContactID || null,
-          contact_name: inv.Contact?.Name || null,
-          invoice_number: inv.InvoiceNumber || null,
-          invoice_type: inv.Type,
-          status: inv.Status,
-          reference: inv.Reference || null,
-          sub_total: inv.SubTotal || 0,
-          total_tax: inv.TotalTax || 0,
-          total: inv.Total || 0,
-          amount_due: inv.AmountDue || 0,
-          amount_paid: inv.AmountPaid || 0,
-          invoice_date: inv.DateString || null,
-          due_date: inv.DueDateString || null,
-          line_items: inv.LineItems || [],
-          raw_json: inv,
-          job_id: job.id,
-          synced_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }
-        const { error } = await client.from('xero_invoices').upsert(record, {
-          onConflict: 'org_id,xero_invoice_id',
-        })
-        if (!error) {
-          synced++
-          syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status })
-        }
-      }
-    } catch (e: any) {
-      console.log('[sync_job_invoices] Xero contact search failed:', e.message)
+  const seenInvoiceIds = new Set<string>()
+  const tokenKeys = refTokens.map((t) => _makesafeNormRef(t)).filter(Boolean)
+  const invoiceMatchesThisJob = (inv: any): boolean => {
+    const ref = _makesafeNormRef(inv?.Reference || '')
+    if (!ref) return false
+    return tokenKeys.some((tok) => tok && (ref === tok || ref.includes(tok)))
+  }
+  const upsertInvoice = async (inv: any, matchMethod: string) => {
+    if (!inv?.InvoiceID || seenInvoiceIds.has(inv.InvoiceID)) return
+    if (!invoiceMatchesThisJob(inv)) return
+    seenInvoiceIds.add(inv.InvoiceID)
+    const record: any = {
+      org_id: DEFAULT_ORG_ID,
+      xero_invoice_id: inv.InvoiceID,
+      xero_contact_id: inv.Contact?.ContactID || null,
+      contact_name: canonicalMakesafeInvoiceContactName(inv.Reference || refTokens[0], inv.Contact?.Name || null),
+      invoice_number: inv.InvoiceNumber || null,
+      invoice_type: inv.Type,
+      status: inv.Status,
+      reference: inv.Reference || null,
+      sub_total: inv.SubTotal || 0,
+      total_tax: inv.TotalTax || 0,
+      total: inv.Total || 0,
+      amount_due: inv.AmountDue || 0,
+      amount_paid: inv.AmountPaid || 0,
+      invoice_date: inv.DateString || null,
+      due_date: inv.DueDateString || null,
+      line_items: inv.LineItems || [],
+      raw_json: inv,
+      job_id: job.id,
+      synced_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    const { error } = await client.from('xero_invoices').upsert(record, {
+      onConflict: 'org_id,xero_invoice_id',
+    })
+    if (!error) {
+      synced++
+      syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status, reference: inv.Reference || null, match_method: matchMethod })
     }
   }
 
-  // Strategy 2: Search by reference containing job number
-  if (job.job_number) {
+  // Money-safety: never sync by broad Xero contact. MLB/Major Loss Builders can
+  // have dozens of active invoices on the same contact; linking all of them to one
+  // MakeSafe job makes the send pack ambiguous. Search only by job/external refs.
+  for (const token of refTokens) {
+    const safeToken = token.replace(/"/g, '')
     try {
       const result = await xeroGet('/Invoices', accessToken, tenantId, {
-        where: `Reference.Contains("${job.job_number}") AND Type=="ACCREC"`,
+        where: `Reference.Contains("${safeToken}") AND Type=="ACCREC"`,
         Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
       })
       const invoices = result?.Invoices || []
-      for (const inv of invoices) {
-        // Skip if already synced from Strategy 1
-        const alreadySynced = syncedInvoices.some(s => s.invoice_number === inv.InvoiceNumber)
-        if (alreadySynced) continue
-
-        const record: any = {
-          org_id: DEFAULT_ORG_ID,
-          xero_invoice_id: inv.InvoiceID,
-          xero_contact_id: inv.Contact?.ContactID || null,
-          contact_name: inv.Contact?.Name || null,
-          invoice_number: inv.InvoiceNumber || null,
-          invoice_type: inv.Type,
-          status: inv.Status,
-          reference: inv.Reference || null,
-          sub_total: inv.SubTotal || 0,
-          total_tax: inv.TotalTax || 0,
-          total: inv.Total || 0,
-          amount_due: inv.AmountDue || 0,
-          amount_paid: inv.AmountPaid || 0,
-          invoice_date: inv.DateString || null,
-          due_date: inv.DueDateString || null,
-          line_items: inv.LineItems || [],
-          raw_json: inv,
-          job_id: job.id,
-          synced_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }
-        const { error } = await client.from('xero_invoices').upsert(record, {
-          onConflict: 'org_id,xero_invoice_id',
-        })
-        if (!error) {
-          synced++
-          syncedInvoices.push({ invoice_number: inv.InvoiceNumber, total: inv.Total, status: inv.Status })
-        }
-      }
+      for (const inv of invoices) await upsertInvoice(inv, token === job.job_number ? 'job_number_reference' : 'external_reference')
     } catch (e: any) {
-      console.log('[sync_job_invoices] Xero reference search failed:', e.message)
+      console.log('[sync_job_invoices] Xero reference search failed:', safeToken, e.message)
     }
   }
 
-  return { success: true, synced, job_number: job.job_number, invoices: syncedInvoices }
+  return { success: true, synced, job_number: job.job_number, reference_tokens: refTokens, invoices: syncedInvoices }
 }
-
 // ── Update Invoice — edit line items on an existing Xero invoice ──
 async function updateInvoice(client: any, body: any) {
   const { xero_invoice_id, line_items, due_date, resend_email } = body
@@ -15764,6 +15806,88 @@ async function confirmDocumentUpload(client: any, body: any) {
 
 // ── Make-Safe close-out doc attach (typed + idempotent) ──
 // Closes the gap the close-out contract requires: the completion report,
+// ── attach_email_attachment_to_job ──────────────────────────────────────────
+// Copy a work-order PDF that already lives in the PRIVATE `makesafe-emails`
+// bucket (referenced by an `email_attachments` row) onto a live make-safe job's
+// document list in the PUBLIC `job-documents` bucket, so the WO PDF renders on
+// the board card.
+//
+// WHY THIS EXISTS: the email sync drops the builder WO PDF into the private
+// `makesafe-emails` bucket and records it in `email_attachments` (status
+// 'uploaded'). The board reads documents from the public `job-documents`
+// bucket. The manual terminal intake skill can READ the PDF (ms365) but cannot
+// fetch the private bucket bytes to re-host them — that needs the service-role
+// key, which the terminal must not hold. This action does the byte-copy
+// SERVER-SIDE with the service key, then delegates to attachMakesafeDocument so
+// the job_documents row, idempotency, visibility and ledger logic are identical
+// to every other typed attach.
+//
+// Accepts: job_id, and EITHER email_attachment_id (preferred) OR
+// (email_id [+ optional sha256 / file_name]) to resolve the row. Optional:
+// type (default 'work_order'), file_name override, visible_to_trades,
+// operator_email. Read of the private bytes + upload of the public copy run on
+// the admin (service-role) client; the job_documents write reuses the caller's
+// client via attachMakesafeDocument. Does NOT change job status or send.
+async function attachEmailAttachmentToJob(client: any, body: any) {
+  const jId = body.job_id || body.jobId
+  if (!jId) throw new Error('job_id required')
+  const type = body.type || 'work_order'
+
+  // Resolve the source email_attachments row.
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  let att: any = null
+  if (body.email_attachment_id || body.attachment_id) {
+    const { data, error } = await adminClient.from('email_attachments')
+      .select('id, name, content_type, storage_path, status, sha256, size_bytes')
+      .eq('id', body.email_attachment_id || body.attachment_id).maybeSingle()
+    if (error) throw new Error('email_attachments lookup failed: ' + error.message)
+    att = data
+  } else if (body.email_id) {
+    let q = adminClient.from('email_attachments')
+      .select('id, name, content_type, storage_path, status, sha256, size_bytes')
+      .eq('email_id', body.email_id).eq('status', 'uploaded')
+    if (body.sha256) q = q.eq('sha256', body.sha256)
+    if (body.file_name || body.name) q = q.eq('name', body.file_name || body.name)
+    const { data, error } = await q.order('created_at', { ascending: true })
+    if (error) throw new Error('email_attachments lookup failed: ' + error.message)
+    // Prefer a PDF when multiple match and no exact name was given.
+    const rows = data || []
+    att = rows.find((r: any) => (r.content_type || '').includes('pdf') || (r.name || '').toLowerCase().endsWith('.pdf')) || rows[0]
+  } else {
+    throw new Error('email_attachment_id (preferred) or email_id required to resolve the source PDF')
+  }
+
+  if (!att) throw new Error('no matching email_attachments row found')
+  if (!att.storage_path) throw new Error(`email_attachments ${att.id} has no storage_path (status='${att.status}') — bytes not synced yet`)
+
+  // Download the private bytes (service role).
+  const { data: blob, error: dlErr } = await adminClient.storage
+    .from('makesafe-emails')
+    .download(att.storage_path)
+  if (dlErr || !blob) throw new Error('private bucket download failed: ' + (dlErr?.message || 'no blob') + ` (path=${att.storage_path})`)
+  const fileBuffer = new Uint8Array(await blob.arrayBuffer())
+
+  // Delegate to the shared attach path (job-documents upload + job_documents
+  // row + idempotency + ledger). file_name defaults to the source name.
+  const fileName = body.file_name || body.name || att.name || `work-order-${jId}.pdf`
+  const result = await attachMakesafeDocument(client, {
+    job_id: jId,
+    type,
+    pdf_base64: bytesToBase64(fileBuffer),
+    file_name: fileName,
+    visible_to_trades: body.visible_to_trades,
+    operator_email: body.operator_email || body.uploaded_by,
+  })
+
+  return {
+    ...result,
+    source: 'email_attachment',
+    email_attachment_id: att.id,
+    source_storage_path: att.storage_path,
+    bytes: fileBuffer.length,
+  }
+}
+
 // authorised invoice and SWMS are emailed by the wiki Python skill but no
 // job_documents row is ever created, so the Ops Dash MakeSafe card only ever
 // shows the work order. This action writes the typed job_documents row so the
@@ -15982,19 +16106,19 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const jobIds: string[] = detailRows.map((d: any) => d.job_id).filter(Boolean)
 
   // 2) Bulk-load the related rows for those jobs (each a single .in() read).
-  const [jobsRes, invoicesRes, docsRes, mediaRes, packsRes] = await Promise.all([
+  const [jobsRes, invoicesRes, docsRes, mediaRes, packsRes, serviceReportsRes] = await Promise.all([
     client.from('jobs')
-      .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, status, type')
+      .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, status, type, created_at')
       .in('id', jobIds),
     client.from('xero_invoices')
       .select('xero_invoice_id, invoice_number, status, reference, sub_total, total, total_tax, line_items, job_id, invoice_date')
       .in('job_id', jobIds)
       .order('invoice_date', { ascending: false }),
     client.from('job_documents')
-      .select('id, job_id, type, file_name, storage_url, pdf_url, version')
+      .select('id, job_id, type, file_name, storage_url, pdf_url, version, created_at')
       .in('job_id', jobIds),
     client.from('job_media')
-      .select('id, job_id, phase, type, storage_url, thumbnail_url, label')
+      .select('id, job_id, phase, type, storage_url, thumbnail_url, label, taken_at, created_at')
       .in('job_id', jobIds)
       .eq('phase', 'completion'),
     client.from('makesafe_report_packs')
@@ -16003,6 +16127,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       // cache-bust never appends, leaving the stale-doc fix inert.
       .select('job_id, pack_kind, status, report_doc_id, xero_invoice_id, invoice_status, sent_at, send_started_at, failed_step, error_detail, last_render_hash')
       .in('job_id', jobIds),
+    client.from('job_service_reports')
+      .select('id, job_id, status, checklist_json, notes, signature_name, submitted_at, submitted_by, created_at, updated_at')
+      .in('job_id', jobIds)
+      .order('created_at', { ascending: false }),
   ])
 
   // T3 (adversarial review #1) — load the MAKESAFE_PACK_SENT | main marker map so
@@ -16027,6 +16155,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const packByJob: Record<string, any> = {}
   for (const p of (packsRes.data || [])) {
     if ((p.pack_kind || 'main') === 'main') packByJob[p.job_id] = p
+  }
+  const serviceReportByJob: Record<string, any> = {}
+  for (const r of (serviceReportsRes.data || [])) {
+    if (r?.job_id && !serviceReportByJob[r.job_id]) serviceReportByJob[r.job_id] = r
   }
 
   // Mint a short-lived signed url for a job_documents storage path. The
@@ -16141,23 +16273,81 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       url: m.storage_url || null,
       thumbnail_url: m.thumbnail_url || m.storage_url || null,
       label: m.label || null,
+      taken_at: m.taken_at || null,
+      created_at: m.created_at || null,
+      received_at: m.taken_at || m.created_at || null,
     })).filter((p: any) => p.url)
 
     // D3 — carousel doc arrays. draft_docs: the artifacts WE produced for this
     // close-out (rendered report PDF, draft invoice PDF, attached SWMS if any).
     // source_docs: the inputs (original trade/service report, work order, photos).
-    // Each {label, url, kind}. SWMS is surfaced ONLY when one is attached (we do
-    // NOT generate one). Reuses the same signed-url mechanism as report/invoice.
-    const draftDocs: Array<{ label: string; url: string; kind: 'pdf' | 'image' }> = []
-    if (reportPdfUrl) draftDocs.push({ label: 'Make Safe Report', url: reportPdfUrl, kind: 'pdf' })
-    if (invoicePdfUrl) draftDocs.push({ label: 'Draft Invoice', url: invoicePdfUrl, kind: 'pdf' })
-    if (swmsPdfUrl) draftDocs.push({ label: 'SWMS', url: swmsPdfUrl, kind: 'pdf' })
+    // Each object keeps the legacy {label,url,kind} contract and adds optional
+    // timestamp metadata so the cockpit can prove WHEN each source/draft arrived.
+    // SWMS is surfaced ONLY when one is attached (we do NOT generate one). Reuses
+    // the same signed-url mechanism as report/invoice.
+    type MakesafeCockpitDoc = {
+      label: string
+      url: string
+      kind: 'pdf' | 'image' | 'html'
+      created_at?: string | null
+      received_at?: string | null
+      source_type?: string | null
+      raw_report?: any
+    }
+    const docMeta = (doc: any, receivedAt?: string | null, sourceType?: string | null) => ({
+      created_at: doc?.created_at || null,
+      received_at: receivedAt || doc?.created_at || null,
+      source_type: sourceType || doc?.type || null,
+    })
+    const draftDocs: MakesafeCockpitDoc[] = []
+    if (reportPdfUrl) draftDocs.push({ label: 'Make Safe Report', url: reportPdfUrl, kind: 'pdf', ...docMeta(reportDoc, reportDoc?.created_at || null, 'makesafe_report') })
+    if (invoicePdfUrl) draftDocs.push({ label: 'Draft Invoice', url: invoicePdfUrl, kind: 'pdf', ...docMeta(invoiceDoc, invoiceDoc?.created_at || null, 'invoice') })
+    if (swmsPdfUrl) draftDocs.push({ label: 'SWMS', url: swmsPdfUrl, kind: 'pdf', ...docMeta(swmsDoc, swmsDoc?.created_at || null, 'swms') })
 
-    const sourceDocs: Array<{ label: string; url: string; kind: 'pdf' | 'image' }> = []
-    if (serviceReportPdfUrl) sourceDocs.push({ label: 'Trade Report', url: serviceReportPdfUrl, kind: 'pdf' })
-    if (workOrderPdfUrl) sourceDocs.push({ label: 'Work Order', url: workOrderPdfUrl, kind: 'pdf' })
+    const rawServiceReport = serviceReportByJob[d.job_id] || null
+    const rawServiceReportReceivedAt = d.report_received_at || rawServiceReport?.submitted_at || rawServiceReport?.created_at || null
+
+    const sourceDocs: MakesafeCockpitDoc[] = []
+    if (rawServiceReport) sourceDocs.push({
+      label: 'Raw Trade Report',
+      url: '',
+      kind: 'html',
+      created_at: rawServiceReport.created_at || null,
+      received_at: rawServiceReportReceivedAt,
+      source_type: 'trade_report',
+      raw_report: {
+        id: rawServiceReport.id,
+        status: rawServiceReport.status || null,
+        checklist_json: rawServiceReport.checklist_json || null,
+        notes: rawServiceReport.notes || null,
+        signature_name: rawServiceReport.signature_name || null,
+        submitted_at: rawServiceReport.submitted_at || null,
+        created_at: rawServiceReport.created_at || null,
+        updated_at: rawServiceReport.updated_at || null,
+        submitted_by: rawServiceReport.submitted_by || null,
+      },
+    })
+    if (serviceReportPdfUrl) sourceDocs.push({
+      label: rawServiceReport ? 'Trade Report PDF' : 'Trade Report',
+      url: serviceReportPdfUrl,
+      kind: 'pdf',
+      ...docMeta(serviceReportDoc, d.report_received_at || serviceReportDoc?.created_at || null, 'trade_report'),
+    })
+    if (workOrderPdfUrl) sourceDocs.push({
+      label: 'Work Order',
+      url: workOrderPdfUrl,
+      kind: 'pdf',
+      ...docMeta(workOrderDoc, workOrderDoc?.created_at || job.created_at || null, 'work_order'),
+    })
     for (const p of photos) {
-      if (p.url) sourceDocs.push({ label: p.label || 'Site Photo', url: p.url, kind: 'image' })
+      if (p.url) sourceDocs.push({
+        label: p.label || 'Site Photo',
+        url: p.url,
+        kind: 'image',
+        created_at: p.created_at || null,
+        received_at: p.received_at || p.taken_at || p.created_at || null,
+        source_type: 'photo',
+      })
     }
 
     // BLOCKER C — the To is the builder's WORK-ORDERS inbox (report_recipient),
@@ -16313,6 +16503,20 @@ export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, r
   return `msafe-draft-${jobId || 'nojob'}-${_makesafeNormRef(reference)}`.slice(0, 120)
 }
 
+// MLB/Prime jobs must bill through the canonical Xero contact. Intake/board labels
+// may say "ML Builders", but Xero should use "Major Loss Builders" so draft
+// invoices do not create/use the wrong duplicate contact.
+function canonicalMakesafeInvoiceContactName(reference: any, contact: any): string {
+  const raw = String(contact || '').trim()
+  const ref = String(reference || '').trim().toUpperCase()
+  const norm = raw.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  if (ref.startsWith('MLB') || norm === 'mlbuilders' || norm === 'mlbuilder' || norm === 'majorlossbuilder' || norm === 'majorlossbuilders') {
+    return 'Major Loss Builders'
+  }
+  return raw
+}
+export const _canonicalMakesafeInvoiceContactNameForTest = canonicalMakesafeInvoiceContactName
+
 // (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
 // full-ACCREC-scan 3-tier dup guard FIRST; if a live invoice already maps to the
 // job, returns {skipped:true, existing_invoice} and creates nothing. Routine-safe
@@ -16320,7 +16524,7 @@ export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, r
 async function createMakesafeDraftInvoice(client: any, body: any) {
   const jobId = body.job_id || body.jobId || null
   const reference = body.reference
-  const contact = body.contact_name || body.contactName
+  const contact = canonicalMakesafeInvoiceContactName(reference, body.contact_name || body.contactName)
   const lines = body.line_items || body.lineItems || body.lines
   if (!reference) throw new ApiError('reference required', 400)
   if (!contact) throw new ApiError('contact_name required', 400)
