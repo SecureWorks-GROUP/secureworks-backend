@@ -11244,6 +11244,17 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // Voided/replaced numbers (and any baked sent-marker text) never win — this is
     // the one downstream should read as "the invoice we actually sent".
     const liveInvoice = _resolveLiveMakesafeInvoice(invoices)
+    // M-G FIX 5 — pack_effectively_sent: retire the stale "outstanding-to-send" false
+    // positive on a job that is already PAID with its docs filed (AJBR-67205 class), WITHOUT
+    // overwriting pack_sent (the close-out doc-gate relies on the raw marker). A PAID invoice
+    // is reachable without our pack ever being emailed (Xero collects on any authorised
+    // invoice; deposits rank PAID), so the skill treats this as a DISTINCT "paid-filed —
+    // confirm sent" verdict, never a silent "sent". Report side uses the audit's dual
+    // definition (typed makesafe_report doc OR a job_service_reports row).
+    const packEffectivelySent = (packSentMap[j.id] === true) ||
+      (String(liveInvoice?.status || '').toUpperCase() === 'PAID' &&
+        (docFlags.has_report_doc || hasReportDocTyped || reportSet.has(j.id)) &&
+        docFlags.has_invoice_doc)
     return {
       job_id: j.id,
       job_number: j.job_number,
@@ -11265,6 +11276,10 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       live_invoice_status: liveInvoice?.status ?? null,
       // GAP-4 — notes-based pack-sent marker (triage) + the sync-system verdict.
       pack_sent: packSentMap[j.id] === true,
+      // M-G FIX 5 — pack_sent OR (PAID + report doc + invoice doc). Consumed by the
+      // skill's outstanding verdict() to retire a stale "outstanding" on a paid+filed job
+      // as a DISTINCT "paid-filed — confirm sent" state (not folded into "sent").
+      pack_effectively_sent: packEffectivelySent,
       pipeline_item_sent_status: pipelineSentStatusMap[j.id] ?? null,
       // Per-row mapped invoice list — JOB-LINKED only (incl. voided/deleted for
       // void-history, item 2.4). Ref-matched-but-not-job-linked rows are moved to
