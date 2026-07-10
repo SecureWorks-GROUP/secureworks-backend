@@ -314,8 +314,11 @@ import {
   portalRecheckDue as _portalRecheckDue,
   portalRecheckEligible as _portalRecheckEligible,
   portalVerificationSatisfied as _portalVerificationSatisfied,
+  reportInSatisfied as _reportInSatisfied,
   substatusAdvanceNeedsPortalVerification as _substatusAdvanceNeedsPortalVerification,
+  substatusAdvanceNeedsReportIn as _substatusAdvanceNeedsReportIn,
   type PortalVerificationState,
+  type ReportInState,
 } from './makesafe_portal_guard.ts'
 // W3-A (M-E hybrid loop) — cheap-pass story engine (backend-honest verdicts) +
 // the admin@ Sent-Items mirror that unlocks backend send-attribution. Pure logic +
@@ -349,6 +352,7 @@ import {
   normaliseCompany as _normaliseDedupCompany,
   normaliseJobFamily as _normaliseDedupJobFamily,
   decideInsertConflictAction as _decideInsertConflictAction,
+  workOrderCompanyKey as _workOrderCompanyKey,
 } from './makesafe_intake_dedup.ts'
 // M-A2 / W2-B: two-email late WO-PDF landing. When a builder announces a WO with no
 // PDF (dirty draft) then sends the PDF in a later PO email, land the PDF on the
@@ -2446,6 +2450,11 @@ if (import.meta.main) serve(async (req: Request) => {
         // path calls updateMakesafeSubstatus directly (not this dispatch) and so is
         // not re-gated. Throws 409 via ApiError (surfaced by the outer handler).
         await assertMakesafePortalVerifiedForAdvance(client, body?.job_id || body?.jobId, body?.substatus)
+        // M-G FIX 1 — physical twin of item-14: a NON-report make-safe cannot be
+        // advanced to a report-complete substatus without OUR trade report filed
+        // (job_service_reports submitted/approved this cycle, or a typed makesafe_report
+        // doc). No-op for report-type cards (portal guard above) and non-make-safe jobs.
+        await assertMakesafeReportInForAdvance(client, body?.job_id || body?.jobId, body?.substatus)
         return json(await updateMakesafeSubstatus(client, body))
       }
       // B4 (makesafe-report-types): "Report completed on builder portal" marker.
@@ -10635,6 +10644,98 @@ async function assertMakesafePortalVerifiedForDraftInvoice(
 }
 export const _assertMakesafePortalVerifiedForDraftInvoice = assertMakesafePortalVerifiedForDraftInvoice
 
+// ════════════════════════════════════════════════════════════
+// M-G FIX 1 — physical make-safe REPORT-IN guard
+// ────────────────────────────────────────────────────────────
+// The portal guard above owns report-type cards. Its physical twin: a NON-report
+// make-safe must have OUR trade report filed in our system before it can advance
+// to a report-complete substatus or have its invoice cut. Proof = a submitted/
+// approved job_service_reports row for the CURRENT cycle OR a typed job_documents
+// 'makesafe_report' row (the dual definition makesafeAudit uses at :11072/:10032).
+// isReportType mirrors loadMakesafePortalVerification (report_type OR report-family
+// metadata); isMakesafe = a makesafe_job_details row exists, so the guard no-ops
+// for ordinary patio/fence invoicing.
+async function loadMakesafeReportIn(
+  client: any,
+  jobId: string,
+): Promise<ReportInState> {
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('report_type, cycle_number')
+    .eq('job_id', jobId)
+    .maybeSingle()
+  const isMakesafe = !!detail
+  let reportType = String(detail?.report_type || '').trim() || null
+  if (isMakesafe && !reportType) {
+    const { data: jobRow } = await client.from('jobs')
+      .select('metadata').eq('id', jobId).maybeSingle()
+    const fam = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
+    reportType = _reportTypeForJobFamily(fam) || null
+  }
+  const currentCycle = Number(detail?.cycle_number ?? 1)
+  let hasCurrentCycleReport = false
+  let hasReportDoc = false
+  // Only physical make-safes need the report-in proof computed.
+  if (isMakesafe && !reportType) {
+    const { data: reports } = await client.from('job_service_reports')
+      .select('status, cycle_number').eq('job_id', jobId)
+    hasCurrentCycleReport = (reports || []).some((r: any) =>
+      ['submitted', 'approved'].includes(String(r?.status || '').toLowerCase()) &&
+      Number(r?.cycle_number ?? 1) === currentCycle)
+    if (!hasCurrentCycleReport) {
+      const { data: docs } = await client.from('job_documents')
+        .select('type').eq('job_id', jobId)
+      hasReportDoc = (docs || []).some(
+        (d: any) => String(d?.type || '').toLowerCase() === 'makesafe_report')
+    }
+  }
+  return { isMakesafe, isReportType: !!reportType, currentCycle, hasCurrentCycleReport, hasReportDoc }
+}
+export const _loadMakesafeReportIn = loadMakesafeReportIn
+
+// Report-in guard for a substatus advance on a PHYSICAL make-safe. No-op for
+// non-make-safe jobs, report-type cards (portal guard owns them), and pre-report
+// substatuses. Called from the update_makesafe_substatus DISPATCH beside the
+// item-14 portal guard.
+async function assertMakesafeReportInForAdvance(
+  client: any,
+  jobId: string | null | undefined,
+  nextSubstatus: string | null | undefined,
+): Promise<void> {
+  if (!jobId) return
+  const norm = normalizeMakesafeSubstatus(nextSubstatus)
+  const state = await loadMakesafeReportIn(client, jobId)
+  if (!_substatusAdvanceNeedsReportIn(norm, state)) return
+  if (_reportInSatisfied(state)) return
+  throw new ApiError(
+    `report-in guard (M-G FIX 1): cannot advance physical make-safe job ${jobId} to '${norm}' — ` +
+    `no submitted/approved trade report for cycle ${state.currentCycle} and no typed makesafe_report ` +
+    `document filed. File the crew report (submit_makesafe_report) before advancing.`,
+    409,
+  )
+}
+export const _assertMakesafeReportInForAdvance = assertMakesafeReportInForAdvance
+
+// Report-in guard for INVOICE creation on a PHYSICAL make-safe, wired into
+// createInvoice() (the reachable choke point every skill invoice passes through).
+// No-op for non-make-safe jobs (ordinary invoicing) and report-type cards (the
+// portal-verified guard covers those, also wired at createInvoice).
+async function assertMakesafeReportInForInvoice(
+  client: any,
+  jobId: string | null | undefined,
+): Promise<void> {
+  if (!jobId) return
+  const state = await loadMakesafeReportIn(client, jobId)
+  if (!state.isMakesafe || state.isReportType) return
+  if (_reportInSatisfied(state)) return
+  throw new ApiError(
+    `report-in guard (M-G FIX 1): refusing to invoice physical make-safe job ${jobId} — ` +
+    `no submitted/approved trade report for cycle ${state.currentCycle} and no typed makesafe_report ` +
+    `document filed. File the crew report (submit_makesafe_report) before invoicing.`,
+    409,
+  )
+}
+export const _assertMakesafeReportInForInvoice = assertMakesafeReportInForInvoice
+
 // ── Honest fallback: portal-recheck queue (agent-side runs consume) ──
 // Shared scan: active report-type cards with a portal link, not verified this
 // cycle. The queue read formats them for capture_portal_evidence.py; the enqueue
@@ -11144,6 +11245,19 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // Voided/replaced numbers (and any baked sent-marker text) never win — this is
     // the one downstream should read as "the invoice we actually sent".
     const liveInvoice = _resolveLiveMakesafeInvoice(invoices)
+    // M-G FIX 5 — pack_effectively_sent: retire the stale "outstanding-to-send" false
+    // positive on a job that is already PAID with its docs filed (AJBR-67205 class), WITHOUT
+    // overwriting pack_sent (the close-out doc-gate relies on the raw marker). A PAID invoice
+    // is reachable without our pack ever being emailed (Xero collects on any authorised
+    // invoice; deposits rank PAID), so the skill treats this as a DISTINCT "paid-filed —
+    // confirm sent" verdict, never a silent "sent". Report side uses the audit's dual
+    // definition (typed makesafe_report doc OR a job_service_reports row). Deposit invoices
+    // (ACCRECDEPOSIT) cannot false-trigger this: the invoice query above is ACCREC-only, so a
+    // paid deposit never enters `invoices` and can never resolve as the live PAID invoice here.
+    const packEffectivelySent = (packSentMap[j.id] === true) ||
+      (String(liveInvoice?.status || '').toUpperCase() === 'PAID' &&
+        (docFlags.has_report_doc || hasReportDocTyped || reportSet.has(j.id)) &&
+        docFlags.has_invoice_doc)
     return {
       job_id: j.id,
       job_number: j.job_number,
@@ -11165,6 +11279,10 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       live_invoice_status: liveInvoice?.status ?? null,
       // GAP-4 — notes-based pack-sent marker (triage) + the sync-system verdict.
       pack_sent: packSentMap[j.id] === true,
+      // M-G FIX 5 — pack_sent OR (PAID + report doc + invoice doc). Consumed by the
+      // skill's outstanding verdict() to retire a stale "outstanding" on a paid+filed job
+      // as a DISTINCT "paid-filed — confirm sent" state (not folded into "sent").
+      pack_effectively_sent: packEffectivelySent,
       pipeline_item_sent_status: pipelineSentStatusMap[j.id] ?? null,
       // Per-row mapped invoice list — JOB-LINKED only (incl. voided/deleted for
       // void-history, item 2.4). Ref-matched-but-not-job-linked rows are moved to
@@ -14329,6 +14447,7 @@ async function scanSesMakesafes(client: any) {
   let skippedNotWorkOrderGate = 0
   let cancellationsDetected = 0
   let nudgeLinksAttached = 0 // item 4: portal links landed on an existing job from a nudge email
+  let secondDeliverableDrafts = 0 // M-G D-3: distinct second WO for an active job, surfaced not dropped
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
@@ -15162,6 +15281,113 @@ async function scanSesMakesafes(client: any) {
         // A null matchedEntry means no company-scoped match was found (ambiguous ref,
         // no company slug) — treated as a safe skip, never points at the wrong job.
         if (!REOPEN_ELIGIBLE_STATUSES.includes(matchedJobStatus ?? '')) {
+          // ── M-G WORKSTREAM D-3 — the DROPPED-SECOND-WORK-ORDER fix ──
+          // A property whose first deliverable's job is still ACTIVE frequently gets a
+          // SECOND separate work order (e.g. a roof report alongside a make-safe). Today
+          // that second WO is silently dropped here on the assumption it is "a re-scan of
+          // the original WO or a duplicate for an in-flight job" — Marnin's named bug ("we
+          // aren't making the second WO"). Before the silent skip, decide if this is a
+          // genuinely DISTINCT deliverable rather than a re-scan:
+          //   • it carries its OWN servable WO PDF (availableWoCount > 0) that did NOT land
+          //     on an existing dirty draft above (the late-pdf block already returned if it
+          //     did) — a real second work order, not a nudge/no-WO email; OR
+          //   • the matched job(s) under this ref+company are a DIFFERENT family than this
+          //     candidate (a family-specific miss but a family-agnostic hit on refToJobId).
+          // If DISTINCT, surface it as its OWN needs_review draft (a card a human clears)
+          // instead of a silent skip — never a blind live-insert, per the contract. A true
+          // re-scan (byte-identical resend) is already caught upstream by the graph-id /
+          // internet-id / content-fingerprint dedup, so reaching here is not a byte twin.
+          // Nudge / no-WO emails (availableWoCount == 0, same family) keep the silent skip.
+          const familySpecificEntry = (normRef && companyKey)
+            ? refToJobId.get(`${normRef}|${companyKey}|${familyKey}`) ?? null
+            : null
+          // Same WO/PO identity as an existing job under this company = a re-send of the
+          // SAME work order (not a distinct second deliverable). Keyed on the real WO/PO
+          // number only (no external_ref fallback), so a NEW/unparsed WO number never matches.
+          const candidateWoKey = _workOrderCompanyKey(
+            extraction.builder_work_order_number,
+            extraction.builder_po_number,
+            matchedCompany?.slug || null,
+            matchedCompany?.name || null,
+          )
+          const sameWoAsActiveJob = !!candidateWoKey && dedupIndex.jobWorkOrderCompany.has(candidateWoKey)
+          const distinctSecondDeliverable = isDistinctSecondDeliverable({
+            matchedJobId,
+            availableWoCount,
+            sameWoAsActiveJob,
+            candidateFamily: familyKey,
+            hasFamilySpecificSibling: familySpecificEntry != null,
+            hasFamilyAgnosticSibling: matchedEntry != null,
+          })
+          if (distinctSecondDeliverable) {
+            if (!missingFields.includes('second_deliverable_review')) {
+              missingFields.push('second_deliverable_review')
+            }
+            extraction.dedup_review_reason = 'second_deliverable_review'
+            extraction.classification_reason = extraction.classification_reason ||
+              `A second work order arrived for property ref ${extractedRef} whose job ${matchedJobId} is still active; surfaced as its own deliverable for review rather than dropped (M-G D-3).`
+            const secondDeliverableDraft = {
+              org_id: DEFAULT_ORG_ID,
+              mailbox: SES_MAILBOX,
+              graph_message_id: msg.id,
+              internet_message_id: msg.internetMessageId || null,
+              conversation_id: msg.conversationId || null,
+              received_at: msg.receivedDateTime || null,
+              from_email: fromEmail,
+              from_name: fromName,
+              subject,
+              body_preview: bodyPreview,
+              requesting_company_slug: matchedCompany?.slug || null,
+              requesting_company_name: matchedCompany?.name || null,
+              external_ref: extractedRef,
+              client_name: extraction.client_name || null,
+              client_phone: extraction.client_phone || null,
+              client_email: null,
+              site_address: extraction.site_address || null,
+              site_suburb: extraction.site_suburb || null,
+              description: extraction.description || null,
+              safety_requirements: extraction.safety_requirements || null,
+              special_instructions: null,
+              confidence,
+              missing_fields: missingFields,
+              extraction_json: extraction,
+              attachments_json: attachments,
+              report_type: draftReportType,
+              // Human-review item (its own card), never auto-approved. Not a reopen (the
+              // sibling job is active, not closed) so reopen_job_id stays null.
+              status: 'needs_review',
+            }
+            const { error: sdErr } = await client.from('makesafe_intake_drafts')
+              .insert(secondDeliverableDraft)
+            if (sdErr) {
+              // Fail LOUD, not silent: if the review draft can't be written, do NOT fall
+              // through to the silent skip (that would re-drop the second WO). Surface it.
+              console.error('[ops-api] intake second_deliverable_review insert failed — NOT dropping:', extractedRef, sdErr.message)
+              skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: `second_deliverable_review_insert_failed:${sdErr.message}` })
+            } else {
+              console.log('[ops-api] intake second_deliverable_review created for ref', extractedRef, '(sibling active job', matchedJobId + ')')
+              _registerIntakeDraft(
+                {
+                  graph_message_id: msg.id,
+                  internet_message_id: msg.internetMessageId || null,
+                  external_ref: dedupExternalRef,
+                  builder_work_order_number: extraction.builder_work_order_number || null,
+                  builder_po_number: extraction.builder_po_number || null,
+                  requesting_company_slug: matchedCompany?.slug || null,
+                  requesting_company_name: matchedCompany?.name || null,
+                  makesafe_job_family: draftJobFamily,
+                  from_email: fromEmail,
+                  subject,
+                  received_at: msg.receivedDateTime || null,
+                  body: msg.body?.content || msg.bodyPreview || null,
+                },
+                dedupIndex,
+              )
+              secondDeliverableDrafts++
+              newDrafts.push({ ...secondDeliverableDraft, _is_second_deliverable: true })
+            }
+            continue
+          }
           const skipReason = matchedEntry == null ? 'no company-scoped match (ambiguous ref)' : 'active job, not reopen-eligible'
           // Item 4 (nudge-email pattern): a "please complete the report" nudge for THIS
           // active job carries the report portal link but no new WO. Land it on the
@@ -15569,6 +15795,9 @@ async function scanSesMakesafes(client: any) {
     // Item 4: nudge emails whose portal link was landed on the existing job it
     // references (idempotent add-only), instead of dropping the link / minting.
     nudge_links_attached: nudgeLinksAttached,
+    // M-G D-3: distinct second work orders for a property with an active job that were
+    // surfaced as needs_review drafts (their own card) instead of being silently dropped.
+    second_deliverable_drafts: secondDeliverableDrafts,
     // Cost-leak fix observability: emails skipped because already extracted (marker
     // set), and emails freshly stamped this run. In steady state on a quiet inbox both
     // fall to ~0 new work; a re-extraction leak would show as scanned_marked climbing
@@ -17405,6 +17634,22 @@ async function createInvoice(client: any, body: any) {
         throw new Error('report job needs a charge amount before invoicing: supply line_items with the trade/WO charge')
       }
     }
+  }
+
+  // ── M-G FIX 1 — REPORT-IN GATE (make-safe premature-invoice kill) ──
+  // createInvoice is the reachable choke point (the skill posts create_invoice;
+  // completeAndInvoice / createGeneralInvoice / createUnifiedInvoice / createDepositInvoice
+  // all delegate here). The portal guard's own invoice chokepoint lives inside
+  // createMakesafeDraftInvoice (:22912) which the skill never reaches, so BOTH make-safe
+  // types must be gated here:
+  //   • report-type card  → a current-cycle portal-locked verification (item-14 twin,
+  //     closes the MLB-26183 / MLB-25625 premature-roof-draft class on the skill path).
+  //   • physical make-safe → OUR trade report filed in our system this cycle.
+  // Both assertions no-op for non-make-safe jobs, so ordinary patio/fence invoicing is
+  // untouched. Idempotent when reached via createMakesafeDraftInvoice (which re-checks portal).
+  if (jIdForGate) {
+    await assertMakesafePortalVerifiedForDraftInvoice(client, jIdForGate)
+    await assertMakesafeReportInForInvoice(client, jIdForGate)
   }
 
   // Loop 1B-a-apply preflight gate. Block creation when required dimensions are
@@ -25274,6 +25519,35 @@ export const _rerunDraftReportForTest = rerunDraftReport
 //
 // M-F Wave 2: 'cancelled' is now reopen-eligible (put a cancelled card back to New).
 const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived', 'cancelled']
+
+// M-G WORKSTREAM D-3 — is a same-ref candidate for a property whose first job is still
+// ACTIVE a genuinely DISTINCT second deliverable (surface as its own needs_review draft)
+// vs a re-scan of the in-flight WO (silent skip)? Pure so the decision is unit-tested
+// directly (the scanSesMakesafes disposition wires the DB-derived signals in).
+//   • availableWoCount > 0 — the candidate carries its OWN servable WO PDF (a real second
+//     work order, not a nudge / no-WO email); the late-PDF-landing block already returned
+//     if that PDF belonged to an existing dirty draft, so reaching here it is genuinely new.
+//   • different-family sibling — the matched job(s) under this ref+company are a DIFFERENT
+//     family than this candidate (a family-specific miss but a family-agnostic hit).
+// A byte-identical resend is caught upstream by the id / content-fingerprint dedup; and a
+// builder RE-SENDING the SAME work order (same WO/PO identity as the active sibling job, but
+// a new subject/time so not a byte twin) is excluded via `sameWoAsActiveJob` so it does not
+// mint a duplicate review card. A second WO with a NEW or unparsed WO number is NOT that
+// identity, so it still surfaces (the intended win). matchedJobId null → never distinct.
+export function isDistinctSecondDeliverable(input: {
+  matchedJobId: string | null
+  availableWoCount: number
+  sameWoAsActiveJob: boolean
+  candidateFamily: string | null | undefined
+  hasFamilySpecificSibling: boolean
+  hasFamilyAgnosticSibling: boolean
+}): boolean {
+  if (input.matchedJobId == null) return false
+  const differentFamilySibling = !!input.candidateFamily &&
+    !input.hasFamilySpecificSibling && input.hasFamilyAgnosticSibling
+  const carriesDistinctWo = input.availableWoCount > 0 && !input.sameWoAsActiveJob
+  return carriesDistinctWo || differentFamilySibling
+}
 
 async function reopenMakesafe(client: any, body: any, authz?: {
   privileged?: boolean

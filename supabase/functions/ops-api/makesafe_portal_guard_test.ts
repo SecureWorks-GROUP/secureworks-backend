@@ -13,7 +13,9 @@ import {
   portalRecheckDue,
   portalRecheckEligible,
   portalVerificationSatisfied,
+  reportInSatisfied,
   substatusAdvanceNeedsPortalVerification,
+  substatusAdvanceNeedsReportIn,
 } from "./makesafe_portal_guard.ts";
 
 // ── portalVerificationSatisfied: cycle-scoped ──────────────────────────────
@@ -244,5 +246,90 @@ Deno.test("queue: never-enqueued card is due; re-enqueue only after the cadence 
   assert(
     portalRecheckDue("garbage-timestamp", now, sixHours),
     "unparseable -> treat as due (fail open on the marker only)",
+  );
+});
+
+// ── M-G FIX 1: reportInSatisfied (physical make-safe report-in) ─────────────
+Deno.test("reportIn: non-make-safe job is always satisfied (guard no-ops)", () => {
+  assert(
+    reportInSatisfied({
+      isMakesafe: false,
+      isReportType: false,
+      currentCycle: 1,
+      hasCurrentCycleReport: false,
+      hasReportDoc: false,
+    }),
+    "no makesafe detail row -> never gated (ordinary patio/fence invoice)",
+  );
+});
+
+Deno.test("reportIn: report-type card is satisfied here (portal guard owns it)", () => {
+  assert(
+    reportInSatisfied({
+      isMakesafe: true,
+      isReportType: true,
+      currentCycle: 1,
+      hasCurrentCycleReport: false,
+      hasReportDoc: false,
+    }),
+  );
+});
+
+Deno.test("reportIn: physical make-safe with NO report is NOT satisfied", () => {
+  assertEquals(
+    reportInSatisfied({
+      isMakesafe: true,
+      isReportType: false,
+      currentCycle: 2,
+      hasCurrentCycleReport: false,
+      hasReportDoc: false,
+    }),
+    false,
+  );
+});
+
+Deno.test("reportIn: physical make-safe satisfied by a current-cycle service report", () => {
+  assert(
+    reportInSatisfied({
+      isMakesafe: true,
+      isReportType: false,
+      currentCycle: 2,
+      hasCurrentCycleReport: true,
+      hasReportDoc: false,
+    }),
+  );
+});
+
+Deno.test("reportIn: physical make-safe satisfied by a typed makesafe_report doc", () => {
+  assert(
+    reportInSatisfied({
+      isMakesafe: true,
+      isReportType: false,
+      currentCycle: 1,
+      hasCurrentCycleReport: false,
+      hasReportDoc: true,
+    }),
+    "the skill files the report as a typed doc, not a service-report row",
+  );
+});
+
+// ── M-G FIX 1: substatusAdvanceNeedsReportIn ────────────────────────────────
+Deno.test("reportIn: only PHYSICAL make-safe advances to a report-complete substatus are gated", () => {
+  const physical = { isMakesafe: true, isReportType: false };
+  for (const s of PORTAL_GUARDED_ADVANCE_SUBSTATUSES) {
+    assert(substatusAdvanceNeedsReportIn(s, physical), `${s} on a physical card is gated`);
+  }
+  // pre-report substatuses are free
+  assertEquals(substatusAdvanceNeedsReportIn("waiting_on_trade_report", physical), false);
+  assertEquals(substatusAdvanceNeedsReportIn("company_contact_done", physical), false);
+  // report-type cards are owned by the portal guard, not this one
+  assertEquals(
+    substatusAdvanceNeedsReportIn("ready_to_invoice", { isMakesafe: true, isReportType: true }),
+    false,
+  );
+  // non-make-safe jobs are never gated
+  assertEquals(
+    substatusAdvanceNeedsReportIn("ready_to_invoice", { isMakesafe: false, isReportType: false }),
+    false,
   );
 });
