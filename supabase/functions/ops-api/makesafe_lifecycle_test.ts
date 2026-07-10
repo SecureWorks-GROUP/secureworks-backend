@@ -31,6 +31,7 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
       eq: () => b,
       neq: () => b,
       not: () => b,
+      gte: () => b,
       in: () => b,
       order: () => b,
       limit: () => b,

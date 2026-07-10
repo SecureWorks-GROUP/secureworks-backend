@@ -63,6 +63,12 @@ export interface CardEvidence {
   jobStatus: string | null;
   substatus: string | null; // normalised
   cancelled: boolean;
+  // M-F: a MANUAL cancel — makesafe_job_details.cancel_reason is set (the make-safe
+  // manager / admin cancelled it on purpose, with a reason + note). A manual cancel
+  // is a clean CANCELLED even with sent/paid/report evidence (report-then-cancel is
+  // allowed) — it must NOT spam the fix-list as CANCELLED-CONFLICT. Only a cancelled
+  // job WITHOUT a cancel_reason (legacy / unexplained) keeps the conflict cross-check.
+  cancelReasonSet?: boolean;
   // ── send attribution (each an ATTRIBUTION leg) ──
   adminSentAttributed: boolean; // a real pack send in the admin@ Sent mirror, attributed to THIS job
   packSentMarker: boolean; // MAKESAFE_PACK_SENT|main on the job notes (audit.pack_sent)
@@ -152,9 +158,12 @@ export function computeStoryVerdict(ev: CardEvidence): StoryResult {
     return { verdict: "DECISION_NEEDED", needs_agent: false, blockers, evidence_gaps };
   }
 
-  // 2) cancelled on the board — decisive with a conflict cross-check.
+  // 2) cancelled on the board — decisive with a conflict cross-check. A MANUAL
+  //    cancel (cancel_reason set) is ALWAYS a clean CANCELLED, even with
+  //    sent/paid/invoice/attended evidence (report-then-cancel is an allowed flow).
+  //    Only a cancel WITHOUT a reason (legacy / unexplained) keeps the conflict.
   if (ev.cancelled) {
-    if (sent || ev.paid || ev.invoiceBuilt || ev.attended) {
+    if (!ev.cancelReasonSet && (sent || ev.paid || ev.invoiceBuilt || ev.attended)) {
       blockers.push(
         "cancelled on the board but the evidence proves work/send/invoice happened — " +
           "reconcile the record before acting.",
