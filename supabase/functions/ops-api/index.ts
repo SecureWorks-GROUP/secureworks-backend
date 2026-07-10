@@ -11250,7 +11250,9 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // is reachable without our pack ever being emailed (Xero collects on any authorised
     // invoice; deposits rank PAID), so the skill treats this as a DISTINCT "paid-filed —
     // confirm sent" verdict, never a silent "sent". Report side uses the audit's dual
-    // definition (typed makesafe_report doc OR a job_service_reports row).
+    // definition (typed makesafe_report doc OR a job_service_reports row). Deposit invoices
+    // (ACCRECDEPOSIT) cannot false-trigger this: the invoice query above is ACCREC-only, so a
+    // paid deposit never enters `invoices` and can never resolve as the live PAID invoice here.
     const packEffectivelySent = (packSentMap[j.id] === true) ||
       (String(liveInvoice?.status || '').toUpperCase() === 'PAID' &&
         (docFlags.has_report_doc || hasReportDocTyped || reportSet.has(j.id)) &&

@@ -243,14 +243,25 @@ export function makeSafeJobFamilyLabel(
  * A physical roof make-safe must remain general_makesafe unless the text says
  * roof REPORT / external reporting-system work.
  */
-// M-G FIX 2 — negation guard for the temp-fence TEXT signal. "no temp fencing needed",
-// "temp fence not required", "no fencing" etc. must NOT classify as temp_fence (the flat
-// classifier's core miss: MLB-25777 / MLB-25206 were inspection/assessment jobs whose WO
-// literally said "no temp fencing needed" yet matched the bare `temp fenc` token). The
-// EXPLICIT typed signal (reportType === "temp_fence") still wins - negation only suppresses
-// a text inference, never an explicit type.
+// M-G FIX 2 — temp-fence text signals. The bare `temp fenc` token alone is ambiguous:
+// "no temp fencing needed" (an inspection/assessment job - MLB-25777/25206) mentions it
+// only to say it is NOT wanted. So:
+//   • TEMP_FENCE_TEXT_RE  — any temp-fence mention (the pre-fix signal).
+//   • AFFIRM_TEMP_FENCE_RE — an affirmative supply/install/collect/retrieve of temp fencing.
+//     This ALWAYS wins: a WO that describes the site ("no fencing on the boundary") and
+//     then asks to "supply and install temp fencing" is a real temp-fence job.
+//   • NEG_TEMP_FENCE_RE — a negation bound TIGHTLY to the temp-fence token ("no temp fenc",
+//     "temp fence not required", "no fencing"). A stray "not" elsewhere in the WO does NOT
+//     fire it.
+// Classify temp_fence when the text mentions it AND (there is an affirmative request OR
+// there is no tight negation). The EXPLICIT typed signal (reportType === "temp_fence")
+// still wins outright.
+const TEMP_FENCE_TEXT_RE =
+  /(temp(?:orary)?\s*fenc|fenc(?:e|ing)\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i;
+const AFFIRM_TEMP_FENCE_RE =
+  /(supply|install|erect|provide|deliver|hire|set\s*up|put\s*up|collect|pick\s*up|pickup|retriev)\w*[^.]{0,60}?(temp(?:orary)?\s*fenc|fence\s*panel|fenc(?:e|ing))|(temp(?:orary)?\s*fenc|fence\s*panel)[^.]{0,60}?(supply|install|erect|provide|deliver|hire|set\s*up|put\s*up|collect|pick\s*up|pickup|retriev)/i;
 const NEG_TEMP_FENCE_RE =
-  /\bno\s+(?:temp(?:orary)?\s*)?fenc|\bno\s+fencing\b|(?:temp(?:orary)?\s*)?fenc\w*\s+(?:is\s+)?(?:not|n['’]?t|no\s+longer)\s+(?:require|need|necessary)|(?:not|n['’]?t)\s+(?:require|need)\w*\s+[^.]*?fenc/i;
+  /\bno\s+(?:temp(?:orary)?\s*)?fenc\w*|\bno\s+fencing\b|(?:temp(?:orary)?\s*fenc\w*|fencing)\s+(?:is\s+|are\s+|will\s+be\s+)?(?:not|n['’]?t|no\s+longer)\s+(?:require|need|necessary)/i;
 
 export function classifyMakeSafeJobFamily(
   subject: string | null | undefined,
@@ -262,9 +273,8 @@ export function classifyMakeSafeJobFamily(
 
   if (
     rt === "temp_fence" ||
-    (!NEG_TEMP_FENCE_RE.test(text) &&
-      /(temp(?:orary)?\s*fenc|fenc(?:e|ing)\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i
-        .test(text))
+    (TEMP_FENCE_TEXT_RE.test(text) &&
+      (AFFIRM_TEMP_FENCE_RE.test(text) || !NEG_TEMP_FENCE_RE.test(text)))
   ) {
     return "temp_fence_makesafe";
   }

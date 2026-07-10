@@ -76,3 +76,19 @@ Deno.test("taxonomy: classifyMakeSafeTaxonomy runs the negation-aware classifier
   assertEquals(t.job_type, "roof");
   assertEquals(t.makesafe_subtype, null);
 });
+
+Deno.test("classifier (BLOCKER fix): affirmative supply survives an incidental site-state negation", () => {
+  const cases = [
+    "Property has no fencing to the front boundary following storm damage. Supply and install temporary fencing.",
+    "There is no temporary fencing currently on site; supply and install temp fencing.",
+    "Temp fencing required. Client does not need permanent fence.",
+    "make safe roof, no fencing to be installed but supply temp fencing panels",
+  ];
+  for (const body of cases) {
+    assertEquals(
+      classifyMakeSafeJobFamily("WO", body),
+      "temp_fence_makesafe",
+      `should stay temp_fence: ${body}`,
+    );
+  }
+});
