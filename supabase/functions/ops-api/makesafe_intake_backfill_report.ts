@@ -66,7 +66,10 @@ export interface BackfillReportItem {
   state:
     | "backfill_candidate"
     | "review_required"
-    | "unknown_family_suppression_risk";
+    | "unknown_family_suppression_risk"
+    // M-G FIX 2 — the stored family disagrees with the negation-aware classifier re-run
+    // over the WO text. Flag-only: a human retypes via the existing gated path; never mutated.
+    | "family_mismatch_review";
   reason: string;
   id: string | null;
   external_ref: string | null;
@@ -87,6 +90,7 @@ export interface BackfillReportSummary {
     backfill_candidates: number;
     review_required: number;
     unknown_family_suppression_risks: number;
+    family_mismatch_reviews: number;
   };
   items: BackfillReportItem[];
 }
@@ -168,6 +172,25 @@ function inferSafeFamily(input: {
   return { family: null, confidence: "none" };
 }
 
+// M-G FIX 2 drift signal — the NEGATION-AWARE classifier over the freshest WO TEXT ONLY
+// (subject/body), never the co-set makesafe_type / report_type (those are set from the same
+// body at intake and so agree with a wrong stored family - the v1 no-op). Returns a family
+// only at `text` confidence (a non-general classification, or general with a real make-safe
+// signal); null when the text has no usable signal. Comparing this to the stored family is
+// the drift the flag surfaces.
+function textInferredFamily(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+): MakeSafeJobFamily | null {
+  const text = `${subject || ""}\n${body || ""}`;
+  if (!text.trim()) return null;
+  const classified = classifyMakeSafeJobFamily(subject || null, body || null, null);
+  if (classified !== "general_makesafe" || hasGeneralMakeSafeSignal(text)) {
+    return classified;
+  }
+  return null;
+}
+
 function refCompanyKey(
   ref: string | null | undefined,
   slug: string | null | undefined,
@@ -227,6 +250,7 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
   let backfillCandidates = 0;
   let reviewRequired = 0;
   let suppressionRisks = 0;
+  let familyMismatchReviews = 0;
 
   for (const d of input.drafts || []) {
     const extraction = parseObj(d.extraction_json);
@@ -313,6 +337,34 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
         status: d.status || null,
       });
     }
+
+    // M-G FIX 2 — DRIFT FLAG: a family IS set but the negation-aware classifier over the
+    // WO text disagrees. Flag-only for a human to retype; never mutated here.
+    if (current) {
+      const drift = textInferredFamily(
+        d.subject || d.external_ref || null,
+        [d.body_preview, d.description, extraction.description].filter(Boolean)
+          .join("\n"),
+      );
+      if (drift && drift !== current) {
+        familyMismatchReviews++;
+        items.push({
+          kind: "draft",
+          state: "family_mismatch_review",
+          reason: "stored_family_disagrees_with_negation_aware_classifier_over_wo_text",
+          id: d.id || null,
+          external_ref: d.external_ref || null,
+          requesting_company: companyLabel(
+            d.requesting_company_slug,
+            d.requesting_company_name,
+          ),
+          current_family: current,
+          inferred_family: drift,
+          confidence: "text",
+          status: d.status || null,
+        });
+      }
+    }
   }
 
   for (const j of input.jobs || []) {
@@ -363,6 +415,31 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
         inferred_family: null,
         confidence: "none",
       });
+    } else if (current) {
+      // M-G FIX 2 — DRIFT FLAG on a live job: stored family disagrees with the
+      // negation-aware classifier over the job's WO text. Flag-only (human retypes).
+      const drift = textInferredFamily(
+        j.external_ref || null,
+        [metadata.description, metadata.builder_email_body_text, row?.notes]
+          .filter(Boolean).join("\n"),
+      );
+      if (drift && drift !== current) {
+        familyMismatchReviews++;
+        items.push({
+          kind: "job",
+          state: "family_mismatch_review",
+          reason: "stored_family_disagrees_with_negation_aware_classifier_over_wo_text",
+          id: j.job_id || null,
+          external_ref: j.external_ref || null,
+          requesting_company: companyLabel(
+            j.requesting_company_slug,
+            j.requesting_company_name,
+          ),
+          current_family: current,
+          inferred_family: drift,
+          confidence: "text",
+        });
+      }
     }
   }
 
@@ -376,6 +453,7 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
       backfill_candidates: backfillCandidates,
       review_required: reviewRequired,
       unknown_family_suppression_risks: suppressionRisks,
+      family_mismatch_reviews: familyMismatchReviews,
     },
     items: items.slice(0, limitItems),
   };

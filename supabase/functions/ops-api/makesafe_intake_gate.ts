@@ -243,6 +243,15 @@ export function makeSafeJobFamilyLabel(
  * A physical roof make-safe must remain general_makesafe unless the text says
  * roof REPORT / external reporting-system work.
  */
+// M-G FIX 2 — negation guard for the temp-fence TEXT signal. "no temp fencing needed",
+// "temp fence not required", "no fencing" etc. must NOT classify as temp_fence (the flat
+// classifier's core miss: MLB-25777 / MLB-25206 were inspection/assessment jobs whose WO
+// literally said "no temp fencing needed" yet matched the bare `temp fenc` token). The
+// EXPLICIT typed signal (reportType === "temp_fence") still wins - negation only suppresses
+// a text inference, never an explicit type.
+const NEG_TEMP_FENCE_RE =
+  /\bno\s+(?:temp(?:orary)?\s*)?fenc|\bno\s+fencing\b|(?:temp(?:orary)?\s*)?fenc\w*\s+(?:is\s+)?(?:not|n['’]?t|no\s+longer)\s+(?:require|need|necessary)|(?:not|n['’]?t)\s+(?:require|need)\w*\s+[^.]*?fenc/i;
+
 export function classifyMakeSafeJobFamily(
   subject: string | null | undefined,
   body: string | null | undefined,
@@ -253,8 +262,9 @@ export function classifyMakeSafeJobFamily(
 
   if (
     rt === "temp_fence" ||
-    /(temp(?:orary)?\s*fenc|fenc(?:e|ing)\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i
-      .test(text)
+    (!NEG_TEMP_FENCE_RE.test(text) &&
+      /(temp(?:orary)?\s*fenc|fenc(?:e|ing)\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i
+        .test(text))
   ) {
     return "temp_fence_makesafe";
   }
@@ -276,6 +286,42 @@ export function classifyMakeSafeJobFamily(
   }
 
   return "general_makesafe";
+}
+
+// ── M-G FIX 2 — top-down taxonomy (Marnin's Emergency-Insurance-Work model) ────
+// job_type ∈ {assessment, roof, makesafe}; makesafe alone has subtype ∈ {general, temp}.
+// Derived from the (now negation-aware) flat family so there is ONE classification path
+// and the flat `makesafe_job_family` stays the back-compat source every reader already uses.
+// The pair is stored alongside the flat family on jobs.metadata (no enum/migration - family
+// is JSONB), and re-running this over the freshest text is the drift signal FIX 2's backfill
+// walk flags on (never the co-set makesafe_type/report_type fields, which agree wrongly).
+export type MakeSafeJobType = "assessment" | "roof" | "makesafe";
+export type MakeSafeSubtype = "general" | "temp" | null;
+export interface MakeSafeTaxonomy {
+  job_type: MakeSafeJobType;
+  makesafe_subtype: MakeSafeSubtype;
+  family: MakeSafeJobFamily;
+}
+
+export function taxonomyFromFamily(family: MakeSafeJobFamily | string): MakeSafeTaxonomy {
+  switch (family) {
+    case "assessment_report_quote":
+      return { job_type: "assessment", makesafe_subtype: null, family: "assessment_report_quote" };
+    case "roof_report":
+      return { job_type: "roof", makesafe_subtype: null, family: "roof_report" };
+    case "temp_fence_makesafe":
+      return { job_type: "makesafe", makesafe_subtype: "temp", family: "temp_fence_makesafe" };
+    default:
+      return { job_type: "makesafe", makesafe_subtype: "general", family: "general_makesafe" };
+  }
+}
+
+export function classifyMakeSafeTaxonomy(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+  reportType?: string | null,
+): MakeSafeTaxonomy {
+  return taxonomyFromFamily(classifyMakeSafeJobFamily(subject, body, reportType));
 }
 
 // ── REPORT-CAPTURE: map ref prefix -> canonical company slug ──────────────────
