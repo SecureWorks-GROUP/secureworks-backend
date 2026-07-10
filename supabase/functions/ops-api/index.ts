@@ -352,6 +352,7 @@ import {
   normaliseCompany as _normaliseDedupCompany,
   normaliseJobFamily as _normaliseDedupJobFamily,
   decideInsertConflictAction as _decideInsertConflictAction,
+  workOrderCompanyKey as _workOrderCompanyKey,
 } from './makesafe_intake_dedup.ts'
 // M-A2 / W2-B: two-email late WO-PDF landing. When a builder announces a WO with no
 // PDF (dirty draft) then sends the PDF in a later PO email, land the PDF on the
@@ -15300,9 +15301,20 @@ async function scanSesMakesafes(client: any) {
           const familySpecificEntry = (normRef && companyKey)
             ? refToJobId.get(`${normRef}|${companyKey}|${familyKey}`) ?? null
             : null
+          // Same WO/PO identity as an existing job under this company = a re-send of the
+          // SAME work order (not a distinct second deliverable). Keyed on the real WO/PO
+          // number only (no external_ref fallback), so a NEW/unparsed WO number never matches.
+          const candidateWoKey = _workOrderCompanyKey(
+            extraction.builder_work_order_number,
+            extraction.builder_po_number,
+            matchedCompany?.slug || null,
+            matchedCompany?.name || null,
+          )
+          const sameWoAsActiveJob = !!candidateWoKey && dedupIndex.jobWorkOrderCompany.has(candidateWoKey)
           const distinctSecondDeliverable = isDistinctSecondDeliverable({
             matchedJobId,
             availableWoCount,
+            sameWoAsActiveJob,
             candidateFamily: familyKey,
             hasFamilySpecificSibling: familySpecificEntry != null,
             hasFamilyAgnosticSibling: matchedEntry != null,
@@ -25517,11 +25529,15 @@ const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived', 'cancelled
 //     if that PDF belonged to an existing dirty draft, so reaching here it is genuinely new.
 //   • different-family sibling — the matched job(s) under this ref+company are a DIFFERENT
 //     family than this candidate (a family-specific miss but a family-agnostic hit).
-// A byte-identical resend is caught upstream by the id / content-fingerprint dedup, so this
-// never fires on a true twin. matchedJobId null (ambiguous ref, no company) → never distinct.
+// A byte-identical resend is caught upstream by the id / content-fingerprint dedup; and a
+// builder RE-SENDING the SAME work order (same WO/PO identity as the active sibling job, but
+// a new subject/time so not a byte twin) is excluded via `sameWoAsActiveJob` so it does not
+// mint a duplicate review card. A second WO with a NEW or unparsed WO number is NOT that
+// identity, so it still surfaces (the intended win). matchedJobId null → never distinct.
 export function isDistinctSecondDeliverable(input: {
   matchedJobId: string | null
   availableWoCount: number
+  sameWoAsActiveJob: boolean
   candidateFamily: string | null | undefined
   hasFamilySpecificSibling: boolean
   hasFamilyAgnosticSibling: boolean
@@ -25529,7 +25545,8 @@ export function isDistinctSecondDeliverable(input: {
   if (input.matchedJobId == null) return false
   const differentFamilySibling = !!input.candidateFamily &&
     !input.hasFamilySpecificSibling && input.hasFamilyAgnosticSibling
-  return input.availableWoCount > 0 || differentFamilySibling
+  const carriesDistinctWo = input.availableWoCount > 0 && !input.sameWoAsActiveJob
+  return carriesDistinctWo || differentFamilySibling
 }
 
 async function reopenMakesafe(client: any, body: any, authz?: {
