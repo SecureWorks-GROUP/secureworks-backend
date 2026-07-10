@@ -59,6 +59,48 @@ export function substatusAdvanceNeedsPortalVerification(
   );
 }
 
+// ── Report-in guard (M-G FIX 1) ─────────────────────────────────────────────
+// The portal guard above owns REPORT-type cards (roof/assessment: the report
+// lives in the builder's portal). Its physical twin: a NON-report make-safe must
+// have OUR OWN trade report filed in our system before it can advance to a
+// report-complete substatus or have its invoice cut. Same guarded substatuses,
+// same current-cycle rule. Proof (the dual definition makesafeAudit already uses):
+// a job_service_reports row status in (submitted, approved) for the current cycle
+// OR a typed job_documents row of type 'makesafe_report' filed on the job.
+export type ReportInState = {
+  // Is this a make-safe job at all (a makesafe_job_details row exists)? The guard
+  // no-ops for non-make-safe jobs so ordinary patio/fence invoicing is untouched.
+  isMakesafe: boolean;
+  // Report-type card (portal report) vs physical make-safe (our crew report).
+  isReportType: boolean;
+  currentCycle: number;
+  // A submitted/approved job_service_reports row for the current cycle.
+  hasCurrentCycleReport: boolean;
+  // A typed job_documents 'makesafe_report' row on the job.
+  hasReportDoc: boolean;
+};
+
+// A physical make-safe is "report-in" when our report is filed for the current
+// cycle (service report) or a typed report doc exists. Non-make-safe jobs and
+// report-type cards are not this guard's concern -> always satisfied here.
+export function reportInSatisfied(state: ReportInState): boolean {
+  if (!state.isMakesafe) return true;
+  if (state.isReportType) return true;
+  return state.hasCurrentCycleReport || state.hasReportDoc;
+}
+
+// Does advancing to `nextSubstatus` on a PHYSICAL make-safe require report-in
+// first? Only non-report make-safe cards moving to a report-complete substatus.
+export function substatusAdvanceNeedsReportIn(
+  nextSubstatus: string | null | undefined,
+  state: Pick<ReportInState, "isMakesafe" | "isReportType">,
+): boolean {
+  if (!state.isMakesafe || state.isReportType) return false;
+  return (PORTAL_GUARDED_ADVANCE_SUBSTATUSES as readonly string[]).includes(
+    String(nextSubstatus || ""),
+  );
+}
+
 export type ExternalLinkLike =
   | string
   | {

@@ -314,8 +314,11 @@ import {
   portalRecheckDue as _portalRecheckDue,
   portalRecheckEligible as _portalRecheckEligible,
   portalVerificationSatisfied as _portalVerificationSatisfied,
+  reportInSatisfied as _reportInSatisfied,
   substatusAdvanceNeedsPortalVerification as _substatusAdvanceNeedsPortalVerification,
+  substatusAdvanceNeedsReportIn as _substatusAdvanceNeedsReportIn,
   type PortalVerificationState,
+  type ReportInState,
 } from './makesafe_portal_guard.ts'
 // W3-A (M-E hybrid loop) — cheap-pass story engine (backend-honest verdicts) +
 // the admin@ Sent-Items mirror that unlocks backend send-attribution. Pure logic +
@@ -2446,6 +2449,11 @@ if (import.meta.main) serve(async (req: Request) => {
         // path calls updateMakesafeSubstatus directly (not this dispatch) and so is
         // not re-gated. Throws 409 via ApiError (surfaced by the outer handler).
         await assertMakesafePortalVerifiedForAdvance(client, body?.job_id || body?.jobId, body?.substatus)
+        // M-G FIX 1 — physical twin of item-14: a NON-report make-safe cannot be
+        // advanced to a report-complete substatus without OUR trade report filed
+        // (job_service_reports submitted/approved this cycle, or a typed makesafe_report
+        // doc). No-op for report-type cards (portal guard above) and non-make-safe jobs.
+        await assertMakesafeReportInForAdvance(client, body?.job_id || body?.jobId, body?.substatus)
         return json(await updateMakesafeSubstatus(client, body))
       }
       // B4 (makesafe-report-types): "Report completed on builder portal" marker.
@@ -10635,6 +10643,98 @@ async function assertMakesafePortalVerifiedForDraftInvoice(
 }
 export const _assertMakesafePortalVerifiedForDraftInvoice = assertMakesafePortalVerifiedForDraftInvoice
 
+// ════════════════════════════════════════════════════════════
+// M-G FIX 1 — physical make-safe REPORT-IN guard
+// ────────────────────────────────────────────────────────────
+// The portal guard above owns report-type cards. Its physical twin: a NON-report
+// make-safe must have OUR trade report filed in our system before it can advance
+// to a report-complete substatus or have its invoice cut. Proof = a submitted/
+// approved job_service_reports row for the CURRENT cycle OR a typed job_documents
+// 'makesafe_report' row (the dual definition makesafeAudit uses at :11072/:10032).
+// isReportType mirrors loadMakesafePortalVerification (report_type OR report-family
+// metadata); isMakesafe = a makesafe_job_details row exists, so the guard no-ops
+// for ordinary patio/fence invoicing.
+async function loadMakesafeReportIn(
+  client: any,
+  jobId: string,
+): Promise<ReportInState> {
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('report_type, cycle_number')
+    .eq('job_id', jobId)
+    .maybeSingle()
+  const isMakesafe = !!detail
+  let reportType = String(detail?.report_type || '').trim() || null
+  if (isMakesafe && !reportType) {
+    const { data: jobRow } = await client.from('jobs')
+      .select('metadata').eq('id', jobId).maybeSingle()
+    const fam = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
+    reportType = _reportTypeForJobFamily(fam) || null
+  }
+  const currentCycle = Number(detail?.cycle_number ?? 1)
+  let hasCurrentCycleReport = false
+  let hasReportDoc = false
+  // Only physical make-safes need the report-in proof computed.
+  if (isMakesafe && !reportType) {
+    const { data: reports } = await client.from('job_service_reports')
+      .select('status, cycle_number').eq('job_id', jobId)
+    hasCurrentCycleReport = (reports || []).some((r: any) =>
+      ['submitted', 'approved'].includes(String(r?.status || '').toLowerCase()) &&
+      Number(r?.cycle_number ?? 1) === currentCycle)
+    if (!hasCurrentCycleReport) {
+      const { data: docs } = await client.from('job_documents')
+        .select('type').eq('job_id', jobId)
+      hasReportDoc = (docs || []).some(
+        (d: any) => String(d?.type || '').toLowerCase() === 'makesafe_report')
+    }
+  }
+  return { isMakesafe, isReportType: !!reportType, currentCycle, hasCurrentCycleReport, hasReportDoc }
+}
+export const _loadMakesafeReportIn = loadMakesafeReportIn
+
+// Report-in guard for a substatus advance on a PHYSICAL make-safe. No-op for
+// non-make-safe jobs, report-type cards (portal guard owns them), and pre-report
+// substatuses. Called from the update_makesafe_substatus DISPATCH beside the
+// item-14 portal guard.
+async function assertMakesafeReportInForAdvance(
+  client: any,
+  jobId: string | null | undefined,
+  nextSubstatus: string | null | undefined,
+): Promise<void> {
+  if (!jobId) return
+  const norm = normalizeMakesafeSubstatus(nextSubstatus)
+  const state = await loadMakesafeReportIn(client, jobId)
+  if (!_substatusAdvanceNeedsReportIn(norm, state)) return
+  if (_reportInSatisfied(state)) return
+  throw new ApiError(
+    `report-in guard (M-G FIX 1): cannot advance physical make-safe job ${jobId} to '${norm}' — ` +
+    `no submitted/approved trade report for cycle ${state.currentCycle} and no typed makesafe_report ` +
+    `document filed. File the crew report (submit_makesafe_report) before advancing.`,
+    409,
+  )
+}
+export const _assertMakesafeReportInForAdvance = assertMakesafeReportInForAdvance
+
+// Report-in guard for INVOICE creation on a PHYSICAL make-safe, wired into
+// createInvoice() (the reachable choke point every skill invoice passes through).
+// No-op for non-make-safe jobs (ordinary invoicing) and report-type cards (the
+// portal-verified guard covers those, also wired at createInvoice).
+async function assertMakesafeReportInForInvoice(
+  client: any,
+  jobId: string | null | undefined,
+): Promise<void> {
+  if (!jobId) return
+  const state = await loadMakesafeReportIn(client, jobId)
+  if (!state.isMakesafe || state.isReportType) return
+  if (_reportInSatisfied(state)) return
+  throw new ApiError(
+    `report-in guard (M-G FIX 1): refusing to invoice physical make-safe job ${jobId} — ` +
+    `no submitted/approved trade report for cycle ${state.currentCycle} and no typed makesafe_report ` +
+    `document filed. File the crew report (submit_makesafe_report) before invoicing.`,
+    409,
+  )
+}
+export const _assertMakesafeReportInForInvoice = assertMakesafeReportInForInvoice
+
 // ── Honest fallback: portal-recheck queue (agent-side runs consume) ──
 // Shared scan: active report-type cards with a portal link, not verified this
 // cycle. The queue read formats them for capture_portal_evidence.py; the enqueue
@@ -17405,6 +17505,22 @@ async function createInvoice(client: any, body: any) {
         throw new Error('report job needs a charge amount before invoicing: supply line_items with the trade/WO charge')
       }
     }
+  }
+
+  // ── M-G FIX 1 — REPORT-IN GATE (make-safe premature-invoice kill) ──
+  // createInvoice is the reachable choke point (the skill posts create_invoice;
+  // completeAndInvoice / createGeneralInvoice / createUnifiedInvoice / createDepositInvoice
+  // all delegate here). The portal guard's own invoice chokepoint lives inside
+  // createMakesafeDraftInvoice (:22912) which the skill never reaches, so BOTH make-safe
+  // types must be gated here:
+  //   • report-type card  → a current-cycle portal-locked verification (item-14 twin,
+  //     closes the MLB-26183 / MLB-25625 premature-roof-draft class on the skill path).
+  //   • physical make-safe → OUR trade report filed in our system this cycle.
+  // Both assertions no-op for non-make-safe jobs, so ordinary patio/fence invoicing is
+  // untouched. Idempotent when reached via createMakesafeDraftInvoice (which re-checks portal).
+  if (jIdForGate) {
+    await assertMakesafePortalVerifiedForDraftInvoice(client, jIdForGate)
+    await assertMakesafeReportInForInvoice(client, jIdForGate)
   }
 
   // Loop 1B-a-apply preflight gate. Block creation when required dimensions are
