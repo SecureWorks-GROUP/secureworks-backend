@@ -21551,7 +21551,12 @@ async function confirmDocumentUpload(client: any, body: any) {
     file_name: fileName || path,
     visible_to_trades: isVisible,
     version: 1,
-    uploaded_by: uploaded_by || body.operator_email || null,
+    // uploaded_by is a UUID column (FK to users). opsPost injects operator_email
+    // on every dashboard call, so this value is usually an email, not a UUID.
+    // Coerce any non-UUID value to NULL so the insert never throws "invalid input
+    // syntax for type uuid". The operator identity is still preserved in the
+    // job_events / business_events rows below for the audit trail.
+    uploaded_by: ((v: any) => (typeof v === 'string' && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v) ? v : null))(uploaded_by || body.operator_email),
   }
 
   // Set pdf_url for PDF files so existing code can find them
@@ -21568,7 +21573,7 @@ async function confirmDocumentUpload(client: any, body: any) {
   await client.from('job_events').insert({
     job_id: jId,
     event_type: 'document_uploaded',
-    detail_json: { document_id: doc?.id, type: docType, file_name: fileName, visible_to_trades: isVisible, uploaded_by: insertData.uploaded_by },
+    detail_json: { document_id: doc?.id, type: docType, file_name: fileName, visible_to_trades: isVisible, uploaded_by: uploaded_by || body.operator_email || null },
   })
 
   // Dual-write to business_events
