@@ -41,6 +41,25 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import type { MatchMethod } from '../_shared/evidence/types.ts'
+import {
+  assignJobNumberWithNullCas,
+  classifyScopeCasReread,
+  cleanIdentity,
+  classifyAuthCredential,
+  contactDisplayIdentity,
+  deterministicMediaId,
+  deterministicMediaStorageKey,
+  isRealJobRef,
+  isSameOrg,
+  isProfileRequestBoundToJwt,
+  normalizeIdentity,
+  requestedBaseScopeHash,
+  requiresBaseScopeCursor,
+  rejectSharedKeyForBrowserAction,
+  scopeJsonHash,
+  stalePreparedContactIds,
+  verifiedJobStorageOrgId,
+} from './hardening_helpers.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -160,17 +179,6 @@ function normalizeAUPhone(phone: string): string {
   return clean
 }
 
-function cleanIdentity(value: unknown): string | null {
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  return trimmed.length ? trimmed : null
-}
-
-function normalizeIdentity(value: unknown): string {
-  if (typeof value !== 'string') return ''
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
-}
-
 // A "real" job ref is an assigned, type-prefixed job number (SWP-25001, SWF-26002,
 // and tolerant variants like SW-3100 / SWP3100). Draft/local/blank refs the tool
 // uses before a job number is assigned (e.g. "draft-abc123", "local", "", a bare
@@ -178,11 +186,6 @@ function normalizeIdentity(value: unknown): string {
 // when a scope carrying one REAL job number is being saved onto a DIFFERENT real
 // job — never on the normal first-save flow where the scope still carries its
 // draft/local ref. Pattern matches the next_job_number output (see ~line 970).
-function isRealJobRef(value: unknown): boolean {
-  if (typeof value !== 'string') return false
-  return /^SW[PF]?-?\d/i.test(value.trim())
-}
-
 function extractScopeIdentity(scopeJson: any, meta: any = {}) {
   const job = scopeJson?.job || {}
   const client = scopeJson?.client || {}
@@ -196,29 +199,6 @@ function extractScopeIdentity(scopeJson: any, meta: any = {}) {
     phone: cleanIdentity(job.phone ?? client.phone ?? meta?.client_phone),
     address: cleanIdentity(job.address ?? client.address ?? meta?.site_address),
   }
-}
-
-function stableJsonStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value)
-  if (Array.isArray(value)) return '[' + value.map((v) => stableJsonStringify(v)).join(',') + ']'
-  const obj = value as Record<string, unknown>
-  return '{' + Object.keys(obj).sort().map((key) => JSON.stringify(key) + ':' + stableJsonStringify(obj[key])).join(',') + '}'
-}
-
-async function scopeJsonHash(value: unknown): Promise<string> {
-  const bytes = new TextEncoder().encode(stableJsonStringify(value || {}))
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-function requestedBaseScopeHash(meta: any = {}): string | null {
-  return cleanIdentity(meta?.expectedScopeHash ?? meta?.baseScopeHash ?? meta?.base_scope_hash ?? meta?.scope_hash)
-}
-
-function isDuplicateJobNumberError(error: unknown): boolean {
-  const anyErr = error as { code?: string; message?: string; details?: string }
-  const msg = String(anyErr?.message || anyErr?.details || error || '')
-  return anyErr?.code === '23505' || /idx_jobs_job_number|duplicate key value|job_number/i.test(msg)
 }
 
 // ── Stage name cache (all pipelines loaded at once) ──
@@ -444,6 +424,8 @@ function generatePhoneticVariants(query: string): string[] {
 // ════════════════════════════════════════════════════════════
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
+  const url = new URL(req.url)
+  const action = url.searchParams.get('action')
 
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
@@ -452,29 +434,66 @@ serve(async (req: Request) => {
   const authHeader = req.headers.get('authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
-  let isAuthed = false
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
-    isAuthed = true // Server-to-server via x-api-key
-  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) {
-    isAuthed = true // Server-to-server via Bearer
-  } else if (bearerToken) {
-    // Validate as user JWT (browser request)
+  const credential = classifyAuthCredential({ xApiKey, bearerToken, validKey, serviceKey })
+  if (!credential.ok) return json({ error: credential.error, code: credential.code }, credential.status)
+  // Staged compatibility gate. Existing patio/decking browser clients still use
+  // SW_API_KEY today, while the fence client has moved to a Supabase user JWT.
+  // Enable only after every browser client has migrated and SW_API_KEY rotation
+  // is coordinated; default false prevents a backend-first rollout outage.
+  const requireUserJwtForBrowserActions = /^(1|true|yes)$/i.test(
+    Deno.env.get('GHL_PROXY_REQUIRE_USER_JWT_FOR_BROWSER_ACTIONS') || '',
+  )
+  const sharedKeyRejection = rejectSharedKeyForBrowserAction(
+    action,
+    req.method,
+    credential.mode,
+    requireUserJwtForBrowserActions,
+  )
+  if (sharedKeyRejection && !sharedKeyRejection.ok) {
+    return json({ error: sharedKeyRejection.error, code: sharedKeyRejection.code }, sharedKeyRejection.status)
+  }
+
+  let authUserId: string | null = null
+  let authProfile: any = null
+  if (credential.mode === 'user_jwt') {
+    if (!credential.bearerToken) return json({ error: 'Supabase user JWT required', code: 'user_jwt_required' }, 401)
     try {
       const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const { data: { user }, error } = await authClient.auth.getUser(bearerToken)
-      if (!error && user) isAuthed = true
-    } catch (_) { /* invalid token */ }
-  }
-  if (!isAuthed) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-      status: 401, headers: { ...CORS, 'Content-Type': 'application/json' }
-    })
+      const { data: { user }, error } = await authClient.auth.getUser(credential.bearerToken)
+      if (error || !user) return json({ error: 'Invalid Supabase user JWT', code: 'invalid_user_jwt' }, 401)
+      authUserId = user.id
+
+      const { data: profile, error: profileError } = await authClient.from('users')
+        .select('id, org_id, role, email, name')
+        .eq('id', user.id)
+        .single()
+      if (profileError || !profile) {
+        if (action === 'get_profile' && req.method === 'POST') {
+          authProfile = null
+        } else {
+          return json({ error: 'User profile not found', code: 'user_profile_not_found' }, 403)
+        }
+      } else {
+        authProfile = profile
+      }
+    } catch (_) {
+      return json({ error: 'Invalid Supabase user JWT', code: 'invalid_user_jwt' }, 401)
+    }
   }
 
   try {
-    const url = new URL(req.url)
-    const action = url.searchParams.get('action')
     console.log(`[ghl-proxy] action=${action} method=${req.method}`)
+    const requireSameOrgJob = async (sb: any, jobId: string) => {
+      if (!jobId) return { ok: false as const, response: json({ error: 'jobId required', code: 'job_id_required' }, 400) }
+      const { data: job, error } = await sb.from('jobs').select('id, org_id, job_number, pricing_json').eq('id', jobId).single()
+      if (error || !job) {
+        return { ok: false as const, response: json({ error: error?.message || 'Job not found', code: 'job_not_found' }, 404) }
+      }
+      if (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, job.org_id)) {
+        return { ok: false as const, response: json({ error: 'Job belongs to a different organisation', code: 'org_mismatch' }, 403) }
+      }
+      return { ok: true as const, job }
+    }
 
     // ── List all pipelines (for discovering pipeline IDs) ──
     if (action === 'pipelines') {
@@ -633,11 +652,12 @@ serve(async (req: Request) => {
         const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
         // Strategy 1: exact .or() match
-        const { data: jobRows } = await sb
+        let exactJobQuery = sb
           .from('jobs')
           .select('client_name, client_phone, client_email, ghl_contact_id, job_number, site_suburb')
           .or(`client_name.ilike.%${q}%,client_phone.ilike.%${q}%,site_suburb.ilike.%${q}%,client_email.ilike.%${q}%`)
-          .limit(20)
+        if (credential.mode === 'user_jwt') exactJobQuery = exactJobQuery.eq('org_id', authProfile.org_id)
+        const { data: jobRows } = await exactJobQuery.limit(20)
 
         // Strategy 2: if multi-word query returned 0, try each word as AND filter on client_name
         // e.g. "Rachael Torre" -> client_name ilike %Rachael% AND client_name ilike %Torre%
@@ -648,6 +668,7 @@ serve(async (req: Request) => {
             let wordQuery = sb
               .from('jobs')
               .select('client_name, client_phone, client_email, ghl_contact_id, job_number, site_suburb')
+            if (credential.mode === 'user_jwt') wordQuery = wordQuery.eq('org_id', authProfile.org_id)
             for (const word of words) {
               wordQuery = wordQuery.ilike('client_name', `%${word}%`)
             }
@@ -683,6 +704,7 @@ serve(async (req: Request) => {
             let query = sb
               .from('jobs')
               .select('client_name, client_phone, client_email, ghl_contact_id, job_number, site_suburb')
+            if (credential.mode === 'user_jwt') query = query.eq('org_id', authProfile.org_id)
             // Chain ilike filters for each significant word (AND logic)
             for (const word of words) {
               if (word.length >= 3) { // Skip short words like "O"
@@ -733,9 +755,11 @@ serve(async (req: Request) => {
       if (oppIds.length > 0) {
         try {
           const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-          const { data: jobs } = await sb.from('jobs')
+          let jobCrossRefQuery = sb.from('jobs')
             .select('id, ghl_opportunity_id, scope_json')
             .in('ghl_opportunity_id', oppIds)
+          if (credential.mode === 'user_jwt') jobCrossRefQuery = jobCrossRefQuery.eq('org_id', authProfile.org_id)
+          const { data: jobs } = await jobCrossRefQuery
           const jobMap: Record<string, { id: string, hasScope: boolean }> = {}
           ;(jobs || []).forEach((j: any) => {
             jobMap[j.ghl_opportunity_id] = { id: j.id, hasScope: !!(j.scope_json && Object.keys(j.scope_json).length > 0) }
@@ -754,12 +778,13 @@ serve(async (req: Request) => {
       if (opps.length === 0 && q) {
         try {
           const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-          const { data: jobMatches } = await sb.from('jobs')
+          let fallbackQuery = sb.from('jobs')
             .select('id, job_number, client_name, client_phone, client_email, status, site_suburb, site_address, pricing_json, ghl_opportunity_id')
             .or(`client_name.ilike.%${q}%,client_phone.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`)
             .not('status', 'in', '("cancelled","lost")')
             .order('created_at', { ascending: false })
-            .limit(10)
+          if (credential.mode === 'user_jwt') fallbackQuery = fallbackQuery.eq('org_id', authProfile.org_id)
+          const { data: jobMatches } = await fallbackQuery.limit(10)
           if (jobMatches && jobMatches.length > 0) {
             // Return as opportunities-shaped objects so the agent can use them
             const fallbackOpps = jobMatches.map((j: any) => ({
@@ -822,6 +847,51 @@ serve(async (req: Request) => {
         fencing: 'https://secureworks-group.github.io/fence-designer/',
       }
       const scopeUrl = `${toolUrls[tool] || toolUrls.patio}?jobId=${jobId}`
+      const sbLink = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const jobAccess = await requireSameOrgJob(sbLink, jobId)
+      if (!jobAccess.ok) return jobAccess.response
+
+      // ── Generate/reuse type-prefixed job number BEFORE irreversible GHL side effects ──
+      let jobNumber: string | null = null
+      let isFirstTimeSignoff = false
+      let recoveredJobNumberCollisions = 0
+      let jobNumberStatus: string | null = null
+      try {
+        const assignment = await assignJobNumberWithNullCas({
+          sb: sbLink,
+          jobId,
+          jobType: tool || 'patio',
+          logPrefix: 'ghl-proxy/link',
+        })
+        jobNumber = assignment.jobNumber
+        jobNumberStatus = assignment.status
+        isFirstTimeSignoff = assignment.assigned
+        recoveredJobNumberCollisions = assignment.collisionCount
+
+        if (!jobNumber) {
+          if (assignment.collisionCount > 0) {
+            return json({
+              error: 'Could not assign a unique job number after retrying; GHL was not changed.',
+              code: 'job_number_collision',
+              recovered: false,
+              partial_state: { ghl_stage_moved: false, ghl_note_added: false },
+            }, 409)
+          }
+          if (assignment.error) throw assignment.error
+          return json({
+            error: 'Job number assignment did not complete; GHL was not changed.',
+            code: 'job_number_assignment_incomplete',
+            partial_state: { ghl_stage_moved: false, ghl_note_added: false },
+          }, 409)
+        }
+      } catch (e) {
+        console.log('[ghl-proxy] Job number generation failed before GHL side effects:', (e as Error).message)
+        return json({
+          error: (e as Error).message || 'Job number assignment failed',
+          code: 'job_number_assignment_failed',
+          partial_state: { ghl_stage_moved: false, ghl_note_added: false },
+        }, 500)
+      }
 
       // Move opportunity to "Scope Complete" stage in the pipeline
       let stageMoved = false
@@ -967,7 +1037,6 @@ serve(async (req: Request) => {
       }
 
       // Update Supabase job with GHL opportunity ID + contact ID
-      const sbLink = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       await sbLink.from('jobs').update({
         ghl_opportunity_id: opportunityId,
         ghl_contact_id: contactId || null,
@@ -1009,68 +1078,6 @@ serve(async (req: Request) => {
         }
       }
 
-      // ── Generate type-prefixed job number (SWP-25001, SWF-25002, etc.) ──
-      let jobNumber: string | null = null
-      let isFirstTimeSignoff = false
-      let recoveredJobNumberCollisions = 0
-      try {
-        // Check if job already has a number (re-save scenario)
-        const { data: existingJob } = await sbLink.from('jobs')
-          .select('job_number, status')
-          .eq('id', jobId)
-          .single()
-
-        if (existingJob?.job_number) {
-          // Job already posted — reuse existing number, just update scope data
-          jobNumber = existingJob.job_number
-          console.log(`[ghl-proxy] Job already has number: ${jobNumber}, reusing (re-save)`)
-        } else {
-          // First time — assign new job number. Duplicate collisions on the DB
-          // unique index must retry or return a typed failure; they must never
-          // look like a successful post with a null/unknown job number.
-          isFirstTimeSignoff = true
-          const jobType = tool || 'patio'
-          let lastJobNumberError: unknown = null
-          for (let attempt = 0; attempt < 3; attempt++) {
-            const { data: jnData, error: jnError } = await sbLink.rpc('next_job_number', { job_type: jobType })
-            if (jnError) {
-              lastJobNumberError = jnError
-              break
-            }
-            if (!jnData) break
-
-            // Per ADR 2026-04-27: job-number assignment does NOT release the quote.
-            // Status stays 'draft' until /send-quote/send confirms client delivery.
-            const { error: updateError } = await sbLink.from('jobs').update({ job_number: jnData }).eq('id', jobId)
-            if (!updateError) {
-              jobNumber = jnData
-              console.log(`[ghl-proxy] Job number assigned: ${jobNumber} (status unchanged — release happens at quote send)`)
-              break
-            }
-
-            lastJobNumberError = updateError
-            if (isDuplicateJobNumberError(updateError)) {
-              recoveredJobNumberCollisions++
-              console.log('[ghl-proxy] link job-number collision, retrying:', jnData, updateError.message)
-              continue
-            }
-            throw updateError
-          }
-
-          if (!jobNumber && recoveredJobNumberCollisions > 0) {
-            return json({
-              error: 'Could not assign a unique job number after retrying; reload the job and retry.',
-              code: 'job_number_collision',
-              recovered: false,
-            }, 409)
-          }
-          if (!jobNumber && lastJobNumberError) throw lastJobNumberError
-        }
-      } catch (e) {
-        console.log('[ghl-proxy] Job number generation failed:', (e as Error).message)
-        return json({ error: (e as Error).message || 'Job number assignment failed', code: 'job_number_assignment_failed' }, 500)
-      }
-
       // 2026-04-24 Phase 4b fix (rev 3): ALWAYS write business_events for scope sign-off
       // (first-time + re-save) BUT only when a valid jobNumber exists (transition actually
       // succeeded). Read actual status from DB instead of assuming, so the emitted event
@@ -1078,8 +1085,7 @@ serve(async (req: Request) => {
       if (jobNumber) {
         let actualStatus: string | null = null
         try {
-          const { data: postJob } = await sbLink.from('jobs').select('status').eq('id', jobId).single()
-          actualStatus = postJob?.status || null
+          actualStatus = jobNumberStatus || null
         } catch { /* leave actualStatus null so event carries "unknown" rather than lying */ }
 
         try {
@@ -1431,6 +1437,7 @@ serve(async (req: Request) => {
         .select('id, type, status, client_name, scope_json, pricing_json, ghl_opportunity_id, job_number, updated_at, site_address, site_suburb')
         .eq('ghl_opportunity_id', opportunityId)
 
+      if (credential.mode === 'user_jwt') query = query.eq('org_id', authProfile.org_id)
       // Filter by type if provided — allows multiple jobs per opportunity (one per division)
       if (jobType) {
         query = query.eq('type', jobType)
@@ -1466,6 +1473,7 @@ serve(async (req: Request) => {
         .order('updated_at', { ascending: false })
         .limit(limit)
 
+      if (credential.mode === 'user_jwt') query = query.eq('org_id', authProfile.org_id)
       if (jobType) query = query.eq('type', jobType)
       if (hasScope) query = query.not('scope_json', 'is', null)
 
@@ -1553,8 +1561,8 @@ serve(async (req: Request) => {
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-      // Default org
-      const orgId = '00000000-0000-0000-0000-000000000001'
+      // Default org for service callers; browser callers inherit the verified profile org.
+      const orgId = credential.mode === 'user_jwt' ? authProfile.org_id : '00000000-0000-0000-0000-000000000001'
 
       const resolvedType = toolType || 'patio'
       const insertData: Record<string, unknown> = {
@@ -1578,6 +1586,7 @@ serve(async (req: Request) => {
         const { data: existing } = await sb.from('jobs')
           .select()
           .eq('ghl_opportunity_id', opportunityId)
+          .eq('org_id', orgId)
           .eq('type', resolvedType)
           .order('created_at', { ascending: true })
           .limit(1)
@@ -1703,7 +1712,14 @@ serve(async (req: Request) => {
       if (!skipOpportunity) {
         const pipelineId = PIPELINES[toolType] || PIPELINES.patio
         try {
-          const oppName = [resolvedFirst, resolvedLast].filter(Boolean).join(' ') + ' — ' + (toolType === 'fencing' ? 'Fencing' : 'Patio')
+          const contactLabel = contactDisplayIdentity({
+            firstName: resolvedFirst,
+            lastName: resolvedLast,
+            phone,
+            email,
+            address,
+          })
+          const oppName = contactLabel + ' — ' + (toolType === 'fencing' ? 'Fencing' : 'Patio')
           const oppRes = await ghl('/opportunities/', {
             method: 'POST',
             body: JSON.stringify({
@@ -1737,7 +1753,7 @@ serve(async (req: Request) => {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       const { data: targetJob, error: targetError } = await sb.from('jobs')
-        .select('id, job_number, client_name, client_phone, client_email, site_address, scope_json, updated_at')
+        .select('id, org_id, job_number, client_name, client_phone, client_email, site_address, scope_json, updated_at')
         .eq('id', jobId)
         .single()
 
@@ -1745,12 +1761,49 @@ serve(async (req: Request) => {
         console.log('[ghl-proxy] save_scope target lookup error:', targetError)
         return json({ error: targetError?.message || 'Job not found' }, 404)
       }
+      if (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, targetJob.org_id)) {
+        return json({ error: 'Job belongs to a different organisation', code: 'org_mismatch' }, 403)
+      }
 
       const incomingIdentity = extractScopeIdentity(scopeJson || {}, meta || {})
       const targetJobNumber = cleanIdentity(targetJob.job_number)
       const incomingScopeSize = JSON.stringify(scopeJson || {}).length
       const currentScopeHash = await scopeJsonHash(targetJob.scope_json || {})
       const expectedScopeHash = requestedBaseScopeHash(meta || {})
+      // Fence now supplies a real server cursor through its user JWT path. Legacy
+      // patio/decking clients still use the shared key and do not all supply one,
+      // so their strict cursor requirement is a separate default-off rollout gate.
+      const requireScopeCursorForSharedKey = /^(1|true|yes)$/i.test(
+        Deno.env.get('GHL_PROXY_REQUIRE_SCOPE_CURSOR_FOR_SHARED_KEY') || '',
+      )
+
+      if (requiresBaseScopeCursor(
+        targetJob.scope_json || {},
+        expectedScopeHash,
+        credential.mode,
+        requireScopeCursorForSharedKey,
+      )) {
+        await sb.from('job_events').insert({
+          job_id: jobId,
+          event_type: 'scope_save_rejected',
+          detail_json: {
+            source: 'tool',
+            reason: 'missing_scope_cursor',
+            current_scope_hash: currentScopeHash,
+            target_job_number: targetJobNumber,
+            incoming_ref: incomingIdentity.ref,
+            incoming_scope_size: incomingScopeSize,
+          }
+        })
+
+        return json({
+          error: 'This job already has scope data; reload it before saving so the base cursor is known.',
+          code: 'missing_scope_cursor',
+          current_scope_hash: currentScopeHash,
+          current_updated_at: targetJob.updated_at || null,
+          current_scope_updated_at: targetJob.updated_at || null,
+        }, 409)
+      }
 
       if (expectedScopeHash && expectedScopeHash !== currentScopeHash) {
         await sb.from('job_events').insert({
@@ -1858,15 +1911,75 @@ serve(async (req: Request) => {
         if (meta.notes) update.notes = meta.notes
       }
 
+      const incomingScopeHash = await scopeJsonHash(scopeJson || {})
       const { data, error } = await sb.from('jobs')
         .update(update)
         .eq('id', jobId)
+        .eq('updated_at', targetJob.updated_at)
         .select()
-        .single()
+        .maybeSingle()
 
       if (error) {
         console.log('[ghl-proxy] save_scope error:', error)
         return json({ error: error.message }, 500)
+      }
+      if (!data) {
+        const { data: current, error: currentError } = await sb.from('jobs')
+          .select('scope_json, updated_at')
+          .eq('id', jobId)
+          .single()
+        if (currentError) return json({ error: currentError.message, code: 'scope_cas_reread_failed' }, 500)
+        const rereadHash = await scopeJsonHash(current?.scope_json || {})
+        const code = classifyScopeCasReread(incomingScopeHash, rereadHash)
+        if (code === 'scope_concurrent_same_hash') {
+          await sb.from('job_events').insert({
+            job_id: jobId,
+            event_type: 'scope_save_idempotent',
+            detail_json: {
+              source: 'tool',
+              reason: code,
+              expected_scope_hash: expectedScopeHash,
+              current_scope_hash: rereadHash,
+              current_updated_at: current?.updated_at || null,
+              target_job_number: targetJobNumber,
+            }
+          })
+          return json({
+            job: {
+              id: jobId,
+              updated_at: current?.updated_at || null,
+              current_scope_hash: rereadHash,
+              current_scope_updated_at: current?.updated_at || null,
+            },
+            reused: true,
+            concurrent_same_hash: true,
+          })
+        }
+        await sb.from('job_events').insert({
+          job_id: jobId,
+          event_type: 'scope_save_rejected',
+          detail_json: {
+            source: 'tool',
+            reason: code,
+            expected_scope_hash: expectedScopeHash,
+            previous_scope_hash: currentScopeHash,
+            current_scope_hash: rereadHash,
+            incoming_scope_hash: incomingScopeHash,
+            current_updated_at: current?.updated_at || null,
+            target_job_number: targetJobNumber,
+            incoming_ref: incomingIdentity.ref,
+            incoming_scope_size: incomingScopeSize,
+          }
+        })
+        return json({
+          error: 'Scope changed in Supabase while this save was in flight; local draft was not overwritten.',
+          code,
+          expected_scope_hash: expectedScopeHash,
+          previous_scope_hash: currentScopeHash,
+          current_scope_hash: rereadHash,
+          current_updated_at: current?.updated_at || null,
+          current_scope_updated_at: current?.updated_at || null,
+        }, 409)
       }
 
       // Log event with previous scope size for change detection
@@ -1896,6 +2009,8 @@ serve(async (req: Request) => {
       if (!jobId) return json({ error: 'jobId required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
 
       // Select specific columns instead of * to avoid pulling unnecessary data
       // and reduce transfer size for large scope_json payloads
@@ -1933,6 +2048,8 @@ serve(async (req: Request) => {
       if (!jobId) return json({ error: 'jobId required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
       const { data, error } = await sb.from('job_media')
         .select('id, type, storage_url, thumbnail_url, label, notes, created_at')
         .eq('job_id', jobId)
@@ -1966,13 +2083,19 @@ serve(async (req: Request) => {
     // ── Get a signed upload URL for large files (videos) ──
     if (action === 'get_upload_url' && req.method === 'POST') {
       const body = await req.json()
-      const { jobId, fileName, contentType } = body
+      const { jobId, fileName, contentType, clientMediaId } = body
       if (!jobId || !fileName) return json({ error: 'jobId and fileName required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const orgId = '00000000-0000-0000-0000-000000000001'
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
+      const orgId = verifiedJobStorageOrgId(jobAccess.job)
+      if (!orgId) return json({ error: 'Job org_id is required for upload path', code: 'job_org_missing' }, 500)
       const bucket = contentType?.startsWith('video/') ? 'job-videos' : 'job-photos'
-      const path = `${orgId}/${jobId}/media/${crypto.randomUUID()}_${fileName}`
+      const storageKey = clientMediaId
+        ? await deterministicMediaStorageKey(String(clientMediaId), String(fileName))
+        : `${crypto.randomUUID()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`
+      const path = `${orgId}/${jobId}/media/${storageKey}`
 
       // Ensure bucket exists
       try {
@@ -1983,7 +2106,7 @@ serve(async (req: Request) => {
 
       const { data, error } = await sb.storage
         .from(bucket)
-        .createSignedUploadUrl(path)
+        .createSignedUploadUrl(path, { upsert: !!clientMediaId })
 
       if (error) {
         console.log('[ghl-proxy] Signed URL error:', error)
@@ -2009,7 +2132,10 @@ serve(async (req: Request) => {
       if (!jobId || !storageUrl) return json({ error: 'jobId and storageUrl required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
       const insertRow: Record<string, unknown> = {
+        id: await deterministicMediaId(jobId, storageUrl),
         job_id: jobId,
         type: type || 'photo',
         storage_url: storageUrl,
@@ -2020,12 +2146,13 @@ serve(async (req: Request) => {
       // column stays null and the UI falls back to storage_url (existing behaviour).
       if (thumbnailUrl) insertRow.thumbnail_url = thumbnailUrl
 
-      const { data: existingMedia } = await sb.from('job_media')
+      const { data: existingMediaRows } = await sb.from('job_media')
         .select('id, thumbnail_url')
         .eq('job_id', jobId)
         .eq('storage_url', storageUrl)
-        .maybeSingle()
+        .limit(1)
 
+      const existingMedia = existingMediaRows?.[0]
       if (existingMedia?.id) {
         if (thumbnailUrl && !existingMedia.thumbnail_url) {
           await sb.from('job_media')
@@ -2043,6 +2170,25 @@ serve(async (req: Request) => {
       const { data, error } = await sb.from('job_media').insert(insertRow).select().single()
 
       if (error) {
+        if ((error as any).code === '23505') {
+          const { data: winner, error: winnerError } = await sb.from('job_media')
+            .select('id, thumbnail_url')
+            .eq('id', insertRow.id)
+            .single()
+          if (!winnerError && winner?.id) {
+            if (thumbnailUrl && !winner.thumbnail_url) {
+              await sb.from('job_media')
+                .update({ thumbnail_url: thumbnailUrl })
+                .eq('id', winner.id)
+            }
+            return json({
+              id: winner.id,
+              url: storageUrl,
+              thumbnail_url: thumbnailUrl || winner.thumbnail_url || null,
+              reused: true,
+            })
+          }
+        }
         console.log('[ghl-proxy] register_media error:', error)
         return json({ error: error.message }, 500)
       }
@@ -2057,7 +2203,10 @@ serve(async (req: Request) => {
       if (!jobId || !dataUrl) return json({ error: 'jobId and dataUrl required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const orgId = '00000000-0000-0000-0000-000000000001'
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
+      const orgId = verifiedJobStorageOrgId(jobAccess.job)
+      if (!orgId) return json({ error: 'Job org_id is required for upload path', code: 'job_org_missing' }, 500)
 
       // Decode base64 dataUrl to binary
       const base64 = dataUrl.split(',')[1]
@@ -2141,6 +2290,9 @@ serve(async (req: Request) => {
       const body = await req.json()
       const { userId, email } = body
       if (!userId) return json({ error: 'userId required' }, 400)
+      if (!isProfileRequestBoundToJwt(credential.mode, userId, authUserId)) {
+        return json({ error: 'Profile userId must match the authenticated JWT user', code: 'profile_user_mismatch' }, 403)
+      }
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const { data, error } = await sb.from('users')
@@ -2149,10 +2301,12 @@ serve(async (req: Request) => {
         .single()
 
       if (error && error.code === 'PGRST116') {
-        // User exists in auth but not in users table — auto-create
+        // Browser bootstrap policy: a valid Supabase JWT may create only its own
+        // profile in the default SecureWorks org. The request body cannot choose
+        // another user id or org id.
         const { data: newUser, error: insertErr } = await sb.from('users').insert({
           id: userId,
-          org_id: '00000000-0000-0000-0000-000000000001',
+          org_id: DEFAULT_ORG_ID,
           name: (email || '').split('@')[0],
           email: email || '',
           role: 'estimator'
@@ -2175,7 +2329,18 @@ serve(async (req: Request) => {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       // Get storage URLs before deleting records
-      const { data: records } = await sb.from('job_media').select('id, storage_url').in('id', ids)
+      const { data: records } = await sb.from('job_media').select('id, job_id, storage_url').in('id', ids)
+      if (credential.mode === 'user_jwt') {
+        const jobIds = [...new Set((records || []).map((r: any) => r.job_id).filter(Boolean))]
+        if (jobIds.length === 0 || (records || []).length !== ids.length) {
+          return json({ error: 'One or more media records were not found', code: 'media_not_found' }, 404)
+        }
+        const { data: jobs, error: jobsError } = await sb.from('jobs').select('id, org_id').in('id', jobIds)
+        if (jobsError) return json({ error: jobsError.message, code: 'media_org_check_failed' }, 500)
+        const orgByJob = new Map((jobs || []).map((j: any) => [j.id, j.org_id]))
+        const mismatch = (records || []).some((r: any) => !isSameOrg(authProfile?.org_id, orgByJob.get(r.job_id)))
+        if (mismatch) return json({ error: 'Media belongs to a different organisation', code: 'org_mismatch' }, 403)
+      }
 
       // Delete storage files
       if (records) {
@@ -2205,7 +2370,10 @@ serve(async (req: Request) => {
       if (!jobId) return json({ error: 'jobId required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const orgId = '00000000-0000-0000-0000-000000000001'
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
+      const orgId = verifiedJobStorageOrgId(jobAccess.job)
+      if (!orgId) return json({ error: 'Job org_id is required for quote path', code: 'job_org_missing' }, 500)
 
       // ── Idempotent reuse-or-create ──
       // Before creating a new draft row, check for an existing live-unsent
@@ -2483,14 +2651,11 @@ serve(async (req: Request) => {
       }
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-      // Get the job to validate it exists
-      const { data: job, error: jobErr } = await sb
-        .from('jobs')
-        .select('id, job_number, pricing_json')
-        .eq('id', jobId)
-        .single()
-      if (jobErr || !job) return json({ error: 'Job not found' }, 404)
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
+      const job = jobAccess.job
+      const orgId = verifiedJobStorageOrgId(job)
+      if (!orgId) return json({ error: 'Job org_id is required for quote path', code: 'job_org_missing' }, 500)
 
       const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
       const totalExGST = pricing.totalExGST || 0
@@ -2498,10 +2663,17 @@ serve(async (req: Request) => {
       // Detect per-run method: if any contact has portion_ex_gst, use it directly
       const usePerRunMethod = contacts.some((c: any) => c.portion_ex_gst != null)
 
-      // Clear existing job_contacts for this job (fresh set each time)
-      await sb.from('job_contacts').delete().eq('job_id', jobId)
+      // Preserve the previous contact set until every replacement contact and
+      // quote draft is ready. A failed retry must never erase the last usable set.
+      const { data: previousContacts, error: previousContactsError } = await sb.from('job_contacts')
+        .select('id, contact_label')
+        .eq('job_id', jobId)
+      if (previousContactsError) {
+        return json({ error: previousContactsError.message, code: 'neighbour_contact_snapshot_failed' }, 500)
+      }
 
       const results: any[] = []
+      const preparedContactIds: string[] = []
       const labels = ['A', 'B', 'C', 'D']
 
       for (let i = 0; i < contacts.length; i++) {
@@ -2543,19 +2715,43 @@ serve(async (req: Request) => {
           .select('id').eq('job_id', jobId).eq('contact_label', label).maybeSingle()
 
         if (existingJc) {
-          const { data: updated } = await sb.from('job_contacts')
+          const { data: updated, error: updateError } = await sb.from('job_contacts')
             .update(jcInsert).eq('id', existingJc.id).select().maybeSingle()
+          if (updateError) {
+            return json({
+              error: updateError.message,
+              code: 'neighbour_contact_prepare_failed',
+              success: false,
+              partial: results.length > 0,
+              prepared_contacts: results,
+            }, 500)
+          }
           jc = updated
         } else {
           const { data: inserted, error: jcErr } = await sb.from('job_contacts')
             .insert(jcInsert).select().maybeSingle()
           if (jcErr) {
             console.log(`[ghl-proxy] job_contact insert error for ${label}:`, jcErr)
-            continue
+            return json({
+              error: jcErr.message,
+              code: 'neighbour_contact_prepare_failed',
+              success: false,
+              partial: results.length > 0,
+              prepared_contacts: results,
+            }, 500)
           }
           jc = inserted
         }
-        if (!jc) continue
+        if (!jc) {
+          return json({
+            error: `No job_contact returned for ${label}`,
+            code: 'neighbour_contact_prepare_failed',
+            success: false,
+            partial: results.length > 0,
+            prepared_contacts: results,
+          }, 500)
+        }
+        preparedContactIds.push(jc.id)
 
         // Get latest version for this doc type
         let version = 1
@@ -2575,10 +2771,19 @@ serve(async (req: Request) => {
         const quoteNumber = qnData || null
 
         const safeName = (fileName || 'quote').replace(/[^a-zA-Z0-9._-]/g, '_')
-        const path = `00000000-0000-0000-0000-000000000001/${jobId}/quote_v${version}_${label}_${safeName}`
+        const path = `${orgId}/${jobId}/quote_v${version}_${label}_${safeName}`
 
         try { await sb.storage.createBucket('job-pdfs', { public: true }) } catch (_e) { /* exists */ }
-        const { data: uploadData } = await sb.storage.from('job-pdfs').createSignedUploadUrl(path)
+        const { data: uploadData, error: uploadError } = await sb.storage.from('job-pdfs').createSignedUploadUrl(path)
+        if (uploadError || !uploadData?.signedUrl) {
+          return json({
+            error: uploadError?.message || `No signed upload URL returned for ${label}`,
+            code: 'neighbour_quote_upload_prepare_failed',
+            success: false,
+            partial: results.length > 0,
+            prepared_contacts: results,
+          }, 500)
+        }
         const { data: urlData } = sb.storage.from('job-pdfs').getPublicUrl(path)
 
         const docInsert: Record<string, unknown> = {
@@ -2601,6 +2806,13 @@ serve(async (req: Request) => {
 
         if (docErr) {
           console.log(`[ghl-proxy] job_documents insert error for ${label}:`, docErr)
+          return json({
+            error: docErr.message,
+            code: 'neighbour_quote_document_prepare_failed',
+            success: false,
+            partial: results.length > 0,
+            prepared_contacts: results,
+          }, 500)
         }
 
         results.push({
@@ -2616,6 +2828,25 @@ serve(async (req: Request) => {
           upload_url: uploadData?.signedUrl || null,
           public_url: urlData?.publicUrl || '',
         })
+      }
+
+      // Only after the complete replacement set is prepared do we remove old
+      // contacts that are no longer represented by the submitted split.
+      const staleContactIds = stalePreparedContactIds(
+        (previousContacts || []).map((c: any) => c.id),
+        preparedContactIds,
+      )
+      if (staleContactIds.length > 0) {
+        const { error: staleDeleteError } = await sb.from('job_contacts').delete().in('id', staleContactIds)
+        if (staleDeleteError) {
+          return json({
+            error: staleDeleteError.message,
+            code: 'neighbour_contact_cleanup_failed',
+            success: false,
+            partial: true,
+            prepared_contacts: results,
+          }, 500)
+        }
       }
 
       console.log(`[ghl-proxy] Neighbour quotes prepared: job=${jobId}, contacts=${results.length}`)
@@ -3507,6 +3738,8 @@ serve(async (req: Request) => {
       if (!job_id) return json({ error: 'job_id required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const jobAccess = await requireSameOrgJob(sb, job_id)
+      if (!jobAccess.ok) return jobAccess.response
 
       // Get current version
       const { data: job, error: fetchErr } = await sb.from('jobs')
@@ -3542,10 +3775,17 @@ serve(async (req: Request) => {
       if (!jobId) return json({ error: 'jobId required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const jobAccess = await requireSameOrgJob(sb, jobId)
+      if (!jobAccess.ok) return jobAccess.response
 
-      // Check if job already has a number
-      const { data: existing } = await sb.from('jobs').select('job_number, status').eq('id', jobId).single()
-      if (existing?.job_number) {
+      const jType = toolType === 'fencing' ? 'fencing' : 'patio'
+      const assignment = await assignJobNumberWithNullCas({
+        sb,
+        jobId,
+        jobType: jType,
+        logPrefix: 'ghl-proxy/assign_job_number',
+      })
+      if (assignment.jobNumber && assignment.reused) {
         // 2026-04-24 fix (rev 3): walk-up re-saves must also emit scope.completed so
         // Jarvis/downstream sees every walk-up sign-off, not just first-time ones.
         try {
@@ -3557,10 +3797,10 @@ serve(async (req: Request) => {
             correlation_id: jobId,
             job_id: jobId,
             payload: {
-              tool_type: toolType === 'fencing' ? 'fencing' : 'patio',
-              job_number: existing.job_number,
+              tool_type: jType,
+              job_number: assignment.jobNumber,
               is_first_time: false,
-              resulting_status: existing.status || 'unknown',
+              resulting_status: assignment.status || 'unknown',
               walkup: true,
             },
             metadata: { handler: 'ghl-proxy/assign_job_number (re-save)' },
@@ -3568,48 +3808,12 @@ serve(async (req: Request) => {
         } catch (e) {
           console.log('[ghl-proxy] walkup re-save business_events write failed (non-blocking):', (e as Error).message)
         }
-        return json({ jobNumber: existing.job_number, reused: true })
+        return json({ jobNumber: assignment.jobNumber, reused: true })
       }
 
-      // Assign new number. CP2b: duplicate job-number collisions are bounded-retried
-      // or surfaced as typed conflicts; they must never look like successful saves.
-      const jType = toolType === 'fencing' ? 'fencing' : 'patio'
-      let assignedJobNumber: string | null = null
-      let collisionCount = 0
-      let lastAssignError: unknown = null
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const { data: jnData, error: jnError } = await sb.rpc('next_job_number', { job_type: jType })
-        if (jnError) {
-          lastAssignError = jnError
-          break
-        }
-        if (!jnData) break
-
-        // Per ADR 2026-04-27: job-number assignment does NOT release the quote.
-        // Status stays 'draft' until /send-quote/send confirms client delivery.
-        const { error: updateError } = await sb.from('jobs').update({ job_number: jnData }).eq('id', jobId)
-        if (!updateError) {
-          assignedJobNumber = jnData
-          break
-        }
-        lastAssignError = updateError
-        if (isDuplicateJobNumberError(updateError)) {
-          collisionCount++
-          console.log('[ghl-proxy] assign_job_number collision, retrying:', jnData, updateError.message)
-          continue
-        }
-        return json({ error: updateError.message, code: 'job_number_assignment_failed' }, 500)
-      }
-
-      if (assignedJobNumber) {
+      if (assignment.jobNumber) {
         // 2026-04-24 Phase 4b: write business_events on first-time walk-up.
         // Read actual status from DB rather than assuming, so false state cannot be emitted.
-        let walkupStatus: string | null = null
-        try {
-          const { data: postJob } = await sb.from('jobs').select('status').eq('id', jobId).single()
-          walkupStatus = postJob?.status || null
-        } catch { /* leave null */ }
-
         try {
           await sb.from('business_events').insert({
             event_type: 'scope.completed',
@@ -3620,28 +3824,28 @@ serve(async (req: Request) => {
             job_id: jobId,
             payload: {
               tool_type: jType,
-              job_number: assignedJobNumber,
+              job_number: assignment.jobNumber,
               is_first_time: true,
-              resulting_status: walkupStatus || 'unknown',
+              resulting_status: assignment.status || 'unknown',
               walkup: true,
-              recovered_job_number_collisions: collisionCount,
+              recovered_job_number_collisions: assignment.collisionCount,
             },
             metadata: { handler: 'ghl-proxy/assign_job_number (first-time)' },
           })
         } catch (e) {
           console.log('[ghl-proxy] walkup business_events write failed (non-blocking):', (e as Error).message)
         }
-      } else if (collisionCount > 0) {
+      } else if (assignment.collisionCount > 0) {
         return json({
           error: 'Could not assign a unique job number after retrying; reload the job and retry.',
           code: 'job_number_collision',
           recovered: false,
         }, 409)
-      } else if (lastAssignError) {
-        return json({ error: (lastAssignError as Error).message || 'Job number assignment failed', code: 'job_number_assignment_failed' }, 500)
+      } else if (assignment.error) {
+        return json({ error: (assignment.error as Error).message || 'Job number assignment failed', code: 'job_number_assignment_failed' }, 500)
       }
 
-      return json({ jobNumber: assignedJobNumber || null, recovered_job_number_collisions: collisionCount })
+      return json({ jobNumber: assignment.jobNumber || null, recovered_job_number_collisions: assignment.collisionCount })
     }
 
     return json({ error: 'Unknown action' }, 400)
