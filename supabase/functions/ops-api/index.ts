@@ -14446,6 +14446,7 @@ async function scanSesMakesafes(client: any) {
   let skippedNotWorkOrderGate = 0
   let cancellationsDetected = 0
   let nudgeLinksAttached = 0 // item 4: portal links landed on an existing job from a nudge email
+  let secondDeliverableDrafts = 0 // M-G D-3: distinct second WO for an active job, surfaced not dropped
   const skippedItems: any[] = []
   const autoApproved: any[] = []
   const autoApproveFailed: any[] = []
@@ -15279,6 +15280,102 @@ async function scanSesMakesafes(client: any) {
         // A null matchedEntry means no company-scoped match was found (ambiguous ref,
         // no company slug) — treated as a safe skip, never points at the wrong job.
         if (!REOPEN_ELIGIBLE_STATUSES.includes(matchedJobStatus ?? '')) {
+          // ── M-G WORKSTREAM D-3 — the DROPPED-SECOND-WORK-ORDER fix ──
+          // A property whose first deliverable's job is still ACTIVE frequently gets a
+          // SECOND separate work order (e.g. a roof report alongside a make-safe). Today
+          // that second WO is silently dropped here on the assumption it is "a re-scan of
+          // the original WO or a duplicate for an in-flight job" — Marnin's named bug ("we
+          // aren't making the second WO"). Before the silent skip, decide if this is a
+          // genuinely DISTINCT deliverable rather than a re-scan:
+          //   • it carries its OWN servable WO PDF (availableWoCount > 0) that did NOT land
+          //     on an existing dirty draft above (the late-pdf block already returned if it
+          //     did) — a real second work order, not a nudge/no-WO email; OR
+          //   • the matched job(s) under this ref+company are a DIFFERENT family than this
+          //     candidate (a family-specific miss but a family-agnostic hit on refToJobId).
+          // If DISTINCT, surface it as its OWN needs_review draft (a card a human clears)
+          // instead of a silent skip — never a blind live-insert, per the contract. A true
+          // re-scan (byte-identical resend) is already caught upstream by the graph-id /
+          // internet-id / content-fingerprint dedup, so reaching here is not a byte twin.
+          // Nudge / no-WO emails (availableWoCount == 0, same family) keep the silent skip.
+          const familySpecificEntry = (normRef && companyKey)
+            ? refToJobId.get(`${normRef}|${companyKey}|${familyKey}`) ?? null
+            : null
+          const distinctSecondDeliverable = isDistinctSecondDeliverable({
+            matchedJobId,
+            availableWoCount,
+            candidateFamily: familyKey,
+            hasFamilySpecificSibling: familySpecificEntry != null,
+            hasFamilyAgnosticSibling: matchedEntry != null,
+          })
+          if (distinctSecondDeliverable) {
+            if (!missingFields.includes('second_deliverable_review')) {
+              missingFields.push('second_deliverable_review')
+            }
+            extraction.dedup_review_reason = 'second_deliverable_review'
+            extraction.classification_reason = extraction.classification_reason ||
+              `A second work order arrived for property ref ${extractedRef} whose job ${matchedJobId} is still active; surfaced as its own deliverable for review rather than dropped (M-G D-3).`
+            const secondDeliverableDraft = {
+              org_id: DEFAULT_ORG_ID,
+              mailbox: SES_MAILBOX,
+              graph_message_id: msg.id,
+              internet_message_id: msg.internetMessageId || null,
+              conversation_id: msg.conversationId || null,
+              received_at: msg.receivedDateTime || null,
+              from_email: fromEmail,
+              from_name: fromName,
+              subject,
+              body_preview: bodyPreview,
+              requesting_company_slug: matchedCompany?.slug || null,
+              requesting_company_name: matchedCompany?.name || null,
+              external_ref: extractedRef,
+              client_name: extraction.client_name || null,
+              client_phone: extraction.client_phone || null,
+              client_email: null,
+              site_address: extraction.site_address || null,
+              site_suburb: extraction.site_suburb || null,
+              description: extraction.description || null,
+              safety_requirements: extraction.safety_requirements || null,
+              special_instructions: null,
+              confidence,
+              missing_fields: missingFields,
+              extraction_json: extraction,
+              attachments_json: attachments,
+              report_type: draftReportType,
+              // Human-review item (its own card), never auto-approved. Not a reopen (the
+              // sibling job is active, not closed) so reopen_job_id stays null.
+              status: 'needs_review',
+            }
+            const { error: sdErr } = await client.from('makesafe_intake_drafts')
+              .insert(secondDeliverableDraft)
+            if (sdErr) {
+              // Fail LOUD, not silent: if the review draft can't be written, do NOT fall
+              // through to the silent skip (that would re-drop the second WO). Surface it.
+              console.error('[ops-api] intake second_deliverable_review insert failed — NOT dropping:', extractedRef, sdErr.message)
+              skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: `second_deliverable_review_insert_failed:${sdErr.message}` })
+            } else {
+              console.log('[ops-api] intake second_deliverable_review created for ref', extractedRef, '(sibling active job', matchedJobId + ')')
+              _registerIntakeDraft(
+                {
+                  graph_message_id: msg.id,
+                  internet_message_id: msg.internetMessageId || null,
+                  external_ref: dedupExternalRef,
+                  builder_work_order_number: extraction.builder_work_order_number || null,
+                  builder_po_number: extraction.builder_po_number || null,
+                  requesting_company_slug: matchedCompany?.slug || null,
+                  requesting_company_name: matchedCompany?.name || null,
+                  makesafe_job_family: draftJobFamily,
+                  from_email: fromEmail,
+                  subject,
+                  received_at: msg.receivedDateTime || null,
+                  body: msg.body?.content || msg.bodyPreview || null,
+                },
+                dedupIndex,
+              )
+              secondDeliverableDrafts++
+              newDrafts.push({ ...secondDeliverableDraft, _is_second_deliverable: true })
+            }
+            continue
+          }
           const skipReason = matchedEntry == null ? 'no company-scoped match (ambiguous ref)' : 'active job, not reopen-eligible'
           // Item 4 (nudge-email pattern): a "please complete the report" nudge for THIS
           // active job carries the report portal link but no new WO. Land it on the
@@ -15686,6 +15783,9 @@ async function scanSesMakesafes(client: any) {
     // Item 4: nudge emails whose portal link was landed on the existing job it
     // references (idempotent add-only), instead of dropping the link / minting.
     nudge_links_attached: nudgeLinksAttached,
+    // M-G D-3: distinct second work orders for a property with an active job that were
+    // surfaced as needs_review drafts (their own card) instead of being silently dropped.
+    second_deliverable_drafts: secondDeliverableDrafts,
     // Cost-leak fix observability: emails skipped because already extracted (marker
     // set), and emails freshly stamped this run. In steady state on a quiet inbox both
     // fall to ~0 new work; a re-extraction leak would show as scanned_marked climbing
@@ -25407,6 +25507,30 @@ export const _rerunDraftReportForTest = rerunDraftReport
 //
 // M-F Wave 2: 'cancelled' is now reopen-eligible (put a cancelled card back to New).
 const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived', 'cancelled']
+
+// M-G WORKSTREAM D-3 — is a same-ref candidate for a property whose first job is still
+// ACTIVE a genuinely DISTINCT second deliverable (surface as its own needs_review draft)
+// vs a re-scan of the in-flight WO (silent skip)? Pure so the decision is unit-tested
+// directly (the scanSesMakesafes disposition wires the DB-derived signals in).
+//   • availableWoCount > 0 — the candidate carries its OWN servable WO PDF (a real second
+//     work order, not a nudge / no-WO email); the late-PDF-landing block already returned
+//     if that PDF belonged to an existing dirty draft, so reaching here it is genuinely new.
+//   • different-family sibling — the matched job(s) under this ref+company are a DIFFERENT
+//     family than this candidate (a family-specific miss but a family-agnostic hit).
+// A byte-identical resend is caught upstream by the id / content-fingerprint dedup, so this
+// never fires on a true twin. matchedJobId null (ambiguous ref, no company) → never distinct.
+export function isDistinctSecondDeliverable(input: {
+  matchedJobId: string | null
+  availableWoCount: number
+  candidateFamily: string | null | undefined
+  hasFamilySpecificSibling: boolean
+  hasFamilyAgnosticSibling: boolean
+}): boolean {
+  if (input.matchedJobId == null) return false
+  const differentFamilySibling = !!input.candidateFamily &&
+    !input.hasFamilySpecificSibling && input.hasFamilyAgnosticSibling
+  return input.availableWoCount > 0 || differentFamilySibling
+}
 
 async function reopenMakesafe(client: any, body: any, authz?: {
   privileged?: boolean
