@@ -243,6 +243,26 @@ export function makeSafeJobFamilyLabel(
  * A physical roof make-safe must remain general_makesafe unless the text says
  * roof REPORT / external reporting-system work.
  */
+// M-G FIX 2 — temp-fence text signals. The bare `temp fenc` token alone is ambiguous:
+// "no temp fencing needed" (an inspection/assessment job - MLB-25777/25206) mentions it
+// only to say it is NOT wanted. So:
+//   • TEMP_FENCE_TEXT_RE  — any temp-fence mention (the pre-fix signal).
+//   • AFFIRM_TEMP_FENCE_RE — an affirmative supply/install/collect/retrieve of temp fencing.
+//     This ALWAYS wins: a WO that describes the site ("no fencing on the boundary") and
+//     then asks to "supply and install temp fencing" is a real temp-fence job.
+//   • NEG_TEMP_FENCE_RE — a negation bound TIGHTLY to the temp-fence token ("no temp fenc",
+//     "temp fence not required", "no fencing"). A stray "not" elsewhere in the WO does NOT
+//     fire it.
+// Classify temp_fence when the text mentions it AND (there is an affirmative request OR
+// there is no tight negation). The EXPLICIT typed signal (reportType === "temp_fence")
+// still wins outright.
+const TEMP_FENCE_TEXT_RE =
+  /(temp(?:orary)?\s*fenc|fenc(?:e|ing)\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i;
+const AFFIRM_TEMP_FENCE_RE =
+  /(supply|install|erect|provide|deliver|hire|set\s*up|put\s*up|collect|pick\s*up|pickup|retriev)\w*[^.]{0,60}?(temp(?:orary)?\s*fenc|fence\s*panel|fenc(?:e|ing))|(temp(?:orary)?\s*fenc|fence\s*panel)[^.]{0,60}?(supply|install|erect|provide|deliver|hire|set\s*up|put\s*up|collect|pick\s*up|pickup|retriev)/i;
+const NEG_TEMP_FENCE_RE =
+  /\bno\s+(?:temp(?:orary)?\s*)?fenc\w*|\bno\s+fencing\b|(?:temp(?:orary)?\s*fenc\w*|fencing)\s+(?:is\s+|are\s+|will\s+be\s+)?(?:not|n['’]?t|no\s+longer)\s+(?:require|need|necessary)/i;
+
 export function classifyMakeSafeJobFamily(
   subject: string | null | undefined,
   body: string | null | undefined,
@@ -253,8 +273,8 @@ export function classifyMakeSafeJobFamily(
 
   if (
     rt === "temp_fence" ||
-    /(temp(?:orary)?\s*fenc|fenc(?:e|ing)\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i
-      .test(text)
+    (TEMP_FENCE_TEXT_RE.test(text) &&
+      (AFFIRM_TEMP_FENCE_RE.test(text) || !NEG_TEMP_FENCE_RE.test(text)))
   ) {
     return "temp_fence_makesafe";
   }
@@ -276,6 +296,42 @@ export function classifyMakeSafeJobFamily(
   }
 
   return "general_makesafe";
+}
+
+// ── M-G FIX 2 — top-down taxonomy (Marnin's Emergency-Insurance-Work model) ────
+// job_type ∈ {assessment, roof, makesafe}; makesafe alone has subtype ∈ {general, temp}.
+// Derived from the (now negation-aware) flat family so there is ONE classification path
+// and the flat `makesafe_job_family` stays the back-compat source every reader already uses.
+// The pair is stored alongside the flat family on jobs.metadata (no enum/migration - family
+// is JSONB), and re-running this over the freshest text is the drift signal FIX 2's backfill
+// walk flags on (never the co-set makesafe_type/report_type fields, which agree wrongly).
+export type MakeSafeJobType = "assessment" | "roof" | "makesafe";
+export type MakeSafeSubtype = "general" | "temp" | null;
+export interface MakeSafeTaxonomy {
+  job_type: MakeSafeJobType;
+  makesafe_subtype: MakeSafeSubtype;
+  family: MakeSafeJobFamily;
+}
+
+export function taxonomyFromFamily(family: MakeSafeJobFamily | string): MakeSafeTaxonomy {
+  switch (family) {
+    case "assessment_report_quote":
+      return { job_type: "assessment", makesafe_subtype: null, family: "assessment_report_quote" };
+    case "roof_report":
+      return { job_type: "roof", makesafe_subtype: null, family: "roof_report" };
+    case "temp_fence_makesafe":
+      return { job_type: "makesafe", makesafe_subtype: "temp", family: "temp_fence_makesafe" };
+    default:
+      return { job_type: "makesafe", makesafe_subtype: "general", family: "general_makesafe" };
+  }
+}
+
+export function classifyMakeSafeTaxonomy(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+  reportType?: string | null,
+): MakeSafeTaxonomy {
+  return taxonomyFromFamily(classifyMakeSafeJobFamily(subject, body, reportType));
 }
 
 // ── REPORT-CAPTURE: map ref prefix -> canonical company slug ──────────────────
