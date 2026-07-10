@@ -15,28 +15,17 @@
 //
 // Mission: secureworks-wiki scope-save-login-fixes-2026-06-11.
 //
-// Convention: helpers are mirrored inline rather than imported (matches
-// salesperson_assign_test.ts / expense_draft_test.ts). Drift between the mirror
-// and the real definition in index.ts is caught at PR review.
+// Imports production helper code instead of mirroring the guard logic.
 //
 // No network. No live Supabase.
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts"
+import { isRealJobRef, normalizeIdentity } from './hardening_helpers.ts'
 
 // ────────────────────────────────────────────────────────────────────────────
-// Mirror of normalizeIdentity + isRealJobRef from ghl-proxy/index.ts, plus the
+// Production normalizeIdentity + isRealJobRef from ghl-proxy, plus the
 // guard's reject condition expressed as a pure helper.
 // ────────────────────────────────────────────────────────────────────────────
-function normalizeIdentity(value: unknown): string {
-  if (typeof value !== 'string') return ''
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
-}
-
-function isRealJobRef(value: unknown): boolean {
-  if (typeof value !== 'string') return false
-  return /^SW[PF]?-?\d/i.test(value.trim())
-}
-
 // Mirror of the save_scope guard's reject condition (index.ts ~line 1604).
 function shouldRejectSave(incomingRef: unknown, targetJobNumber: unknown): boolean {
   return (
