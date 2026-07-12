@@ -464,6 +464,7 @@ import {
   buildAgentReplyBody,
   noteIsAddressable,
   resolveNoteVisibility,
+  noteIsSystemMarker,
 } from './makesafe_draft_notes.ts'
 // Review & Send mission — Claude-backed Draft Pack / Revise Pack generator.
 // Pure helpers only; this file supplies the draft-only Supabase/Xero/storage
@@ -7023,9 +7024,10 @@ async function pipeline(client: any, params: URLSearchParams) {
   let assignRes: any = { data: [] }, poRes: any = { data: [] }, woRes: any = { data: [] }
   let councilRes: any = { data: [] }, emailRes: any = { data: [] }, invoiceRes: any = { data: [] }
   let opsNotesRes: any = { data: [] }, neighbourContactRes: any = { data: [] }
+  let commsNotesRes: any = { data: [] }
 
   if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes] = await Promise.all([
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes] = await Promise.all([
       client.from('job_assignments').select('job_id, scheduled_date').in('job_id', jobIds).neq('status', 'cancelled'),
       client.from('purchase_orders').select('job_id').in('job_id', jobIds).neq('status', 'deleted'),
       client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
@@ -7034,6 +7036,9 @@ async function pipeline(client: any, params: URLSearchParams) {
       client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
       client.from('ops_notes').select('job_id').in('job_id', jobIds),
       client.from('job_contacts').select('job_id').in('job_id', jobIds).eq('status', 'active').eq('is_primary', false),
+      // Trade<->ops comms thread notes (job_events). detail_json needed so system
+      // markers can be excluded from the count (they must never light the badge).
+      client.from('job_events').select('job_id, detail_json').in('job_id', jobIds).in('event_type', ['note', 'note_added', 'site_note']),
     ])
   }
 
@@ -7054,6 +7059,14 @@ async function pipeline(client: any, params: URLSearchParams) {
   const woMap = countMap(woRes.data || [])
   const opsNotesMap = countMap(opsNotesRes.data || [])
   const neighbourContactMap = countMap(neighbourContactRes.data || [])
+  // Comms-thread count per job = human notes only (exclude MAKESAFE_PACK_SENT /
+  // MAKESAFE_AGENT_REPLY system markers). Lights the kanban comms indicator.
+  const commsNotesMap: Record<string, number> = {}
+  for (const ev of (commsNotesRes.data || [])) {
+    const body = ev?.detail_json?.text ?? ev?.detail_json?.note ?? ''
+    if (noteIsSystemMarker(body)) continue
+    commsNotesMap[ev.job_id] = (commsNotesMap[ev.job_id] || 0) + 1
+  }
 
   // Council: count + best status + step info per job
   const councilMap: Record<string, number> = {}
@@ -7124,6 +7137,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       po_count: poMap[j.id] || 0,
       wo_count: woMap[j.id] || 0,
       ops_notes_count: opsNotesMap[j.id] || 0,
+      comms_notes_count: commsNotesMap[j.id] || 0,
       council_count: councilMap[j.id] || 0,
       council_status: councilInfo?.status || null,
       council_step: councilInfo?.step || null,
@@ -21062,7 +21076,10 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
     job: tradeSafeJob,
     documents: docsRes.data || [],
     media: mediaRes.data || [],
-    notes: eventsRes.data || [],
+    // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
+    // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
+    // notes thread. The markers stay in job_events untouched.
+    notes: (eventsRes.data || []).filter((n: any) => !noteIsSystemMarker(n?.detail_json?.text ?? n?.detail_json?.note ?? '')),
     serviceReport: (reportRes.data || [])[0] || null,
     // Re-attendance (M-C): all reports (latest first) so a re-attended job shows
     // every visit's report, not just the latest. serviceReport stays the latest
@@ -21076,7 +21093,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
 }
 
 async function addNote(client: any, body: any, isAdmin = false) {
-  const { jobId, job_id, userId, user_id, text, sync_to_ghl, visibility } = body
+  const { jobId, job_id, userId, user_id, text, sync_to_ghl, visibility, from_ops } = body
   const jId = jobId || job_id
   const uId = userId || user_id
   if (!jId || !text) throw new Error('jobId and text required')
@@ -21100,11 +21117,17 @@ async function addNote(client: any, body: any, isAdmin = false) {
   const noteVisibility = resolveNoteVisibility(visibility, text)
   const shouldSyncToGhl = sync_to_ghl === true || (sync_to_ghl !== false && noteVisibility === 'client_visible')
 
+  // from_ops flags a note authored by the office/ops side of the trade<->ops
+  // comms thread so both UIs can label it "Office" vs a trade's own note. Only
+  // persisted when explicitly true; ordinary notes are unchanged.
+  const noteDetail: Record<string, any> = { text, visibility: noteVisibility, sync_to_ghl: shouldSyncToGhl }
+  if (from_ops === true) noteDetail.from_ops = true
+
   const { data, error } = await client.from('job_events').insert({
     job_id: jId,
     user_id: userId || user_id || null,
     event_type: 'note',
-    detail_json: { text, visibility: noteVisibility, sync_to_ghl: shouldSyncToGhl },
+    detail_json: noteDetail,
   }).select().single()
 
   if (error) throw error
