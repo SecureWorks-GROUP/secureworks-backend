@@ -42,10 +42,16 @@ All in `supabase/functions/`. Deploy with:
 ### send-quote
 - **Purpose**: PDF quote distribution + client portal + GHL monetary value push
 - **Deploy**: `--no-verify-jwt` REQUIRED. This function has mixed routes:
-  internal send routes use in-handler `x-api-key` auth, while public quote
-  links (`/view`, `/accept`, `/decline`) are protected by share tokens. If the
-  Supabase gateway JWT gate is on, quote links and fencing `/send-runs` calls
-  fail before the function code runs.
+  internal send routes (`/send`, `/send-invoice`, `/send-runs`) accept either
+  the master `SW_API_KEY`/service-role key (via `x-api-key` or
+  `Authorization: Bearer`, server-to-server) **or** a logged-in Supabase user
+  JWT — the bearer is verified with `auth.getUser` and any authenticated user is
+  allowed (role is captured for attribution logging but not gated). This mirrors
+  ops-api's api_key/jwt pattern and unblocks the scoping tools, which send the
+  user's session JWT as the bearer. Public quote links (`/view`, `/accept`,
+  `/decline`) are protected by share tokens. If the Supabase gateway JWT gate is
+  on, quote links and fencing `/send-runs` calls fail before the function code
+  runs.
 
 ### google-ads-ingest
 - **Purpose**: Receives daily Google Ads metrics from Apps Script
