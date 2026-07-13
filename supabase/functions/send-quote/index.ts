@@ -612,16 +612,69 @@ serve(async (req: Request) => {
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   try {
-    // ── API Key Auth (only for send/send-invoice — view/accept/decline are public client endpoints) ──
+    // ── Auth (only for send/send-invoice/send-runs — view/accept/decline are public client endpoints) ──
+    // Two caller classes are accepted (mirrors ops-api/index.ts:2218-2274):
+    //   api_key — the master SW_API_KEY (ops dashboard, patio tool, agents) or the
+    //             service-role key, presented via x-api-key OR Authorization: Bearer.
+    //             This path is byte-for-byte the historical behaviour and MUST stay.
+    //   jwt     — a logged-in Supabase user (the scoping tools). Since fence commit
+    //             8c39ca2 the fence client sends the user's JWT as the bearer whenever
+    //             a session exists, so a healthy login always presented a non-key
+    //             bearer and got 401. We now verify that bearer as a Supabase user JWT
+    //             (getUser is validated against Supabase's signing key server-side, so
+    //             a forged/expired token cannot pass) and allow authenticated users.
+    // Role note (R1): we capture the caller's role for attribution/logging but do NOT
+    // gate on it. ops-api restricts privileged actions to admin/owner, but the scoping
+    // senders we are unblocking are estimators — an admin/owner-only gate would re-break
+    // the exact login this hotfix fixes. Any valid authenticated Supabase user may send.
+    // FLAGGED for the adversarial reviewer.
+    let sendAuthMode: 'api_key' | 'jwt' = 'api_key'
+    let sendAuthUser: { id: string; email: string; role: string } | null = null
     if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
-      const apiKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
       const validKey = Deno.env.get('SW_API_KEY')
       const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-      if (!apiKey || (apiKey !== validKey && apiKey !== serviceKey)) {
+      const xApiKey = req.headers.get('x-api-key')
+      const authHeader = req.headers.get('authorization')
+      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
+
+      if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
+        sendAuthMode = 'api_key' // server-to-server via x-api-key header (unchanged)
+      } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) {
+        sendAuthMode = 'api_key' // server-to-server via Authorization header (unchanged)
+      } else if (bearerToken) {
+        // Verify as a Supabase user JWT (browser request from a scoping tool).
+        try {
+          const { data: { user }, error } = await sb.auth.getUser(bearerToken)
+          if (error || !user) {
+            return new Response(JSON.stringify({ error: 'Session expired — please log in again' }), {
+              status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            })
+          }
+          const { data: profile } = await sb.from('users')
+            .select('role')
+            .eq('id', user.id)
+            .maybeSingle()
+          sendAuthMode = 'jwt'
+          sendAuthUser = { id: user.id, email: user.email || '', role: profile?.role || 'unknown' }
+        } catch (_e) {
+          return new Response(JSON.stringify({ error: 'Authentication failed' }), {
+            status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          })
+        }
+      } else {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         })
       }
+
+      // Attribution ledger: who sent what, under which auth mode.
+      console.log('[send-quote] auth', JSON.stringify({
+        path,
+        authMode: sendAuthMode,
+        userId: sendAuthUser?.id ?? null,
+        userEmail: sendAuthUser?.email ?? null,
+        userRole: sendAuthUser?.role ?? null,
+      }))
     }
 
     // ── SEND QUOTE EMAIL ──
