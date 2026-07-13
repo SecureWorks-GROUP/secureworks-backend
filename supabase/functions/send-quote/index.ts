@@ -9,7 +9,8 @@
 //   (CI deploys automatically on push to main via .github/workflows/deploy-edge-functions.yml)
 //   (Laptop deploys must use scripts/deploy-edge.sh with SECUREWORKS_LAPTOP_DEPLOY_OVERRIDE=1)
 //
-// JWT flag: --no-verify-jwt (public quote-view links + scoping-tool x-api-key calls;
+// JWT flag: --no-verify-jwt (public quote-view links + internal send routes that
+//   authenticate in-handler via SW_API_KEY/service key OR a Supabase user JWT;
 //   the platform-level JWT gate must stay off. See edge-functions.md for history.)
 //
 // Endpoints:
