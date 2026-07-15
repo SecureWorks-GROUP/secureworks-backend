@@ -17,6 +17,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _CAL_SCOPE_ALIASES_FOR_TEST,
   _CAL_SCOPE_PROJECTION_FOR_TEST,
   _computeReadinessForTest,
   _scopeFromProjectionForTest,
@@ -323,10 +324,11 @@ Deno.test("response shape unchanged — rd_* aliases and scope_json/org_id are s
     "truncated",
   ]);
   const ev = res.events[0];
-  for (const k of Object.keys(ev)) {
+  assert(_CAL_SCOPE_ALIASES_FOR_TEST.size > 0, "alias set must be non-empty");
+  for (const alias of _CAL_SCOPE_ALIASES_FOR_TEST) {
     assert(
-      !k.startsWith("rd_"),
-      `projection alias '${k}' leaked into the response`,
+      !(alias in ev),
+      `projection alias '${alias}' leaked into the response`,
     );
   }
   assert(

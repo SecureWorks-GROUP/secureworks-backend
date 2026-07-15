@@ -46,10 +46,23 @@ Rules:
 - `calendarEvents` uses `CAL_SCOPE_PROJECTION` for this. Readiness reads scope in
   exactly two places (`evaluateCondition`): `attachment_is_fascia`
   (`scope.attachmentMethod` / `.attachment`) and `scope_mentions_asbestos`
-  (the token anywhere in `JSON.stringify(scope)`). The projection is a strict
+  (the token anywhere in `JSON.stringify(scope)`). Only the asbestos one is live —
+  see the `attachment_is_fascia` note below. The projection is a strict
   subset of the blob, so the substring test can never gain a false positive; it
   loses none either — verified across all 2253 live `scope_json` rows, the
   projected slice reproduces the full-blob answer for 69/69 asbestos jobs.
+- `attachment_is_fascia` is INERT in production, like the `job_intelligence`
+  badges below. It reads top-level `scope.attachmentMethod` / `.attachment`, and
+  ZERO of the 2253 live `jobs.scope_json` rows carry either key at any level — the
+  real attachment data sits under `scope_json->config` (99 rows contain the
+  `fascia` token; 13 more under `scope_json->patios`). So the `engineering_doc`
+  badge never fires. This is a PRE-EXISTING bug, not a regression from the
+  projection: the old full-blob path and the projection both read `undefined`,
+  identically. Rewiring it to `scope_json->config` would make 99 rows start firing
+  a badge they don't today — a readiness-output change, so a separate product
+  decision, not an incidental fix. `rd_attach_method` / `rd_attach` are retained
+  in `CAL_SCOPE_PROJECTION` despite being inert: absent keys project `null` at ~0
+  bytes, and they keep the intended semantics if the scoping tools ever emit them.
 - If the fencing/patio scoping tools add a new FREE-TEXT key, add it to
   `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it. Never add
   an alias containing the token `asbestos` — the rebuilt object is stringified,

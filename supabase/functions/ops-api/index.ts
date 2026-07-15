@@ -6913,6 +6913,11 @@ const CAL_SCOPE_PROJECTION = [
 ]
 export const _CAL_SCOPE_PROJECTION_FOR_TEST = CAL_SCOPE_PROJECTION
 
+// The alias half of each projection entry, derived rather than restated: adding a
+// key to CAL_SCOPE_PROJECTION must never leak the alias into the response shape.
+const CAL_SCOPE_ALIASES = new Set(CAL_SCOPE_PROJECTION.map((p) => p.slice(0, p.indexOf(':'))))
+export const _CAL_SCOPE_ALIASES_FOR_TEST = CAL_SCOPE_ALIASES
+
 // Rebuild the readiness-relevant slice of scope_json from the projected aliases,
 // under the original key names computeReadiness/evaluateCondition expect.
 // Returns null when nothing projected — matching the old `ev?.scope_json || null`
@@ -7070,12 +7075,8 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
   // Strip the readiness-only fields (used above, not part of the response shape).
   // scope_json itself is no longer selected; the rd_* aliases replace it.
   const lightEvents = (events || []).map((e: any) => {
-    const {
-      scope_json, org_id,
-      rd_attach_method, rd_attach, rd_removal, rd_quote, rd_site_notes, rd_supplier_notes,
-      rd_notes, rd_scope,
-      ...rest
-    } = e
+    const { scope_json, org_id, ...rest } = e
+    for (const alias of CAL_SCOPE_ALIASES) delete rest[alias]
     return rest
   })
 
