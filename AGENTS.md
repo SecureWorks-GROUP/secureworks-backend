@@ -76,8 +76,18 @@ Rules:
   44 — `label`, `visible_to_trades` and `recurrence_group_id` exist in production
   but in no migration here. `CAL_FINANCIAL_COLUMNS` is correct against live and
   includes all three. A maintainer who reconciles it against the migration instead
-  would silently drop them from the `include_financials` response. (Closing the
-  migration/view drift itself is a separate task.)
+  would silently drop them from the `include_financials` response. Note the
+  tradeoff cuts BOTH ways, and the reverse is the sharper one: `select('*')` was
+  drift-proof in both directions, enumeration only in one. Because those three
+  columns exist live but in no migration here, any database provisioned from these
+  migrations — a fresh `supabase start`, a Supabase preview branch, a CI
+  integration env — gets a PostgREST 400 (`column calendar_events.label does not
+  exist`) on `include_financials=true` rather than a response. Production is
+  unaffected (the columns exist there) and no in-repo code calls
+  `include_financials`, which is why this is a documented follow-up and not a
+  blocker. The real fix is closing the migration/view drift — a migration that
+  recreates `calendar_events` with all 44 columns so the migrations match prod —
+  and that is a separate task.
 
 ## `job_intelligence` Has No Readiness Columns
 

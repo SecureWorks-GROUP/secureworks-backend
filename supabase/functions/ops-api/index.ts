@@ -7064,7 +7064,7 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
       const intel = intelMap[jobId] || {}
       // Find scope + pricing_json from the event data. The scope arrives as the
       // projected readiness slice (see CAL_SCOPE_PROJECTION), never the full blob.
-      const ev = events.find((e: any) => e.job_id === jobId)
+      const ev = eventsByJob[jobId]?.[0]
       const scopeJson = scopeFromProjection(ev)
       const pricingJson = typeof ev?.pricing_json === 'string' ? JSON.parse(ev.pricing_json || '{}') : (ev?.pricing_json || {})
       const jobType = intel.job_type || ev?.job_type || 'patio'
