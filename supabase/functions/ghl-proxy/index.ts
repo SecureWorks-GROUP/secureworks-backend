@@ -49,6 +49,7 @@ import {
   classifyAuthCredential,
   contactDisplayIdentity,
   createOpportunityForExistingContact,
+  hasNonEmptyScope,
   leadOppRow,
   deterministicMediaId,
   deterministicMediaStorageKey,
@@ -61,6 +62,7 @@ import {
   requestedBaseScopeHash,
   requiresBaseScopeCursor,
   rejectSharedKeyForBrowserAction,
+  scopeLeadJobQuery,
   scopeJsonHash,
   stalePreparedContactIds,
   verifiedJobStorageOrgId,
@@ -341,12 +343,9 @@ async function leadSearchJobsFallback(args: {
   const { sb, q, pipeline, orgScoped, orgId, limit } = args
   const COLUMNS = 'id, client_name, client_phone, client_email, site_suburb, ghl_contact_id, job_number, scope_json, created_at'
 
-  const scoped = () => {
-    let qy = sb.from('jobs').select(COLUMNS)
-    if (orgScoped) qy = qy.eq('org_id', orgId)
-    if (pipeline) qy = qy.eq('type', pipeline)
-    return qy.order('created_at', { ascending: false })
-  }
+  const scoped = () =>
+    scopeLeadJobQuery(sb.from('jobs').select(COLUMNS), { orgScoped, orgId, pipeline })
+      .order('created_at', { ascending: false })
 
   try {
     const { data: exact } = await scoped()
@@ -890,7 +889,6 @@ serve(async (req: Request) => {
       const maxContacts = Math.min(Math.max(Number(url.searchParams.get('max_contacts')) || 8, 1), 10)
       const orgScoped = credential.mode === 'user_jwt'
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const hasScopeOf = (scope: any) => !!(scope && typeof scope === 'object' && Object.keys(scope).length > 0)
 
       if (q) {
         // ── contact-search mode ──
@@ -979,7 +977,7 @@ serve(async (req: Request) => {
             if (orgScoped) qy = qy.eq('org_id', authProfile.org_id)
             const { data: jobs } = await qy
             ;(jobs || []).forEach((j: any) => {
-              jobByOppId[j.ghl_opportunity_id] = { id: j.id, hasScope: hasScopeOf(j.scope_json), jobNumber: j.job_number || null }
+              jobByOppId[j.ghl_opportunity_id] = { id: j.id, hasScope: hasNonEmptyScope(j.scope_json), jobNumber: j.job_number || null }
             })
           } catch (e) {
             console.log('[ghl-proxy] lead_search opp cross-ref failed (non-blocking):', e)
@@ -991,16 +989,17 @@ serve(async (req: Request) => {
         const jobByContactId: Record<string, { id: string; hasScope: boolean; jobNumber: string | null }> = {}
         if (contactIds.length > 0) {
           try {
-            let qy = sb.from('jobs')
-              .select('id, ghl_contact_id, scope_json, job_number, created_at')
-              .in('ghl_contact_id', contactIds)
-              .eq('type', pipeline)
-              .order('created_at', { ascending: false })
-            if (orgScoped) qy = qy.eq('org_id', authProfile.org_id)
+            const qy = scopeLeadJobQuery(
+              sb.from('jobs')
+                .select('id, ghl_contact_id, scope_json, job_number, created_at')
+                .in('ghl_contact_id', contactIds)
+                .order('created_at', { ascending: false }),
+              { orgScoped, orgId: authProfile?.org_id, pipeline },
+            )
             const { data: jobs } = await qy
             ;(jobs || []).forEach((j: any) => {
               if (!jobByContactId[j.ghl_contact_id]) {
-                jobByContactId[j.ghl_contact_id] = { id: j.id, hasScope: hasScopeOf(j.scope_json), jobNumber: j.job_number || null }
+                jobByContactId[j.ghl_contact_id] = { id: j.id, hasScope: hasNonEmptyScope(j.scope_json), jobNumber: j.job_number || null }
               }
             })
           } catch (e) {
@@ -1043,7 +1042,7 @@ serve(async (req: Request) => {
           if (orgScoped) qy = qy.eq('org_id', authProfile.org_id)
           const { data: jobs } = await qy
           ;(jobs || []).forEach((j: any) => {
-            browseJobByOppId[j.ghl_opportunity_id] = { id: j.id, hasScope: hasScopeOf(j.scope_json), jobNumber: j.job_number || null }
+            browseJobByOppId[j.ghl_opportunity_id] = { id: j.id, hasScope: hasNonEmptyScope(j.scope_json), jobNumber: j.job_number || null }
           })
         } catch (e) {
           console.log('[ghl-proxy] lead_search browse cross-ref failed (non-blocking):', e)

@@ -434,6 +434,18 @@ export function matchesFirstWordRetry(
     String(contact.firstName || '').toLowerCase() === first.toLowerCase()
 }
 
+// Org/pipeline scoping for every lead_search jobs query. `pipeline` is optional —
+// the caller may omit it, and a blank type filter would match no jobs at all.
+export function scopeLeadJobQuery<T>(
+  query: T,
+  args: { orgScoped?: boolean; orgId?: unknown; pipeline?: unknown },
+): T {
+  let scoped = query as any
+  if (args.orgScoped) scoped = scoped.eq('org_id', args.orgId)
+  if (args.pipeline) scoped = scoped.eq('type', args.pipeline)
+  return scoped as T
+}
+
 // A jobs-table row used by the lead_search Supabase fallback.
 export type LeadJobFallbackRow = {
   id?: unknown
@@ -476,7 +488,7 @@ export function leadJobFallbackRows(jobs: LeadJobFallbackRow[]): LeadRow[] {
       hasScope: hasNonEmptyScope(job?.scope_json),
       jobNumber: job?.job_number ? String(job.job_number) : null,
       isContactOnly: true,
-      lookupFailed: false,
+      lookupFailed: !contactId,
     })
   }
 

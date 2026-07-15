@@ -11,6 +11,7 @@ import {
   leadJobFallbackRows,
   leadOppNameForContact,
   matchesFirstWordRetry,
+  scopeLeadJobQuery,
   type LeadContact,
   type LeadLookup,
   type LeadMappedOpp,
@@ -438,4 +439,58 @@ Deno.test("leadJobFallbackRows: jobs rows → contact-only lead Rows, deduped by
   assertEquals(rows[1].supabaseJobId, "job-2");
   assertEquals(rows[1].hasScope, false);
   assertEquals(rows[1].isContactOnly, true);
+});
+
+Deno.test("leadJobFallbackRows: row without a ghl contact id is marked lookupFailed", () => {
+  const rows = leadJobFallbackRows([
+    { id: "job-1", client_name: "Has Contact", ghl_contact_id: "ct-1", job_number: null, scope_json: null },
+    { id: "job-2", client_name: "No Contact", ghl_contact_id: null, job_number: null, scope_json: null },
+    { id: "job-3", client_name: "Blank Contact", ghl_contact_id: "", job_number: null, scope_json: null },
+  ]);
+
+  assertEquals(rows.map((r) => r.lookupFailed), [false, true, true]);
+  assertEquals(rows.map((r) => r.contactId), ["ct-1", "", ""]);
+});
+
+function recordingQuery() {
+  const calls: Array<[string, unknown]> = [];
+  const query = {
+    calls,
+    eq(column: string, value: unknown) {
+      calls.push([column, value]);
+      return query;
+    },
+  };
+  return query;
+}
+
+Deno.test("scopeLeadJobQuery: blank pipeline is not filtered on (would match no jobs)", () => {
+  assertEquals(scopeLeadJobQuery(recordingQuery(), { orgScoped: true, orgId: "org-1", pipeline: "" }).calls, [
+    ["org_id", "org-1"],
+  ]);
+  assertEquals(scopeLeadJobQuery(recordingQuery(), { orgScoped: true, orgId: "org-1", pipeline: undefined }).calls, [
+    ["org_id", "org-1"],
+  ]);
+});
+
+Deno.test("scopeLeadJobQuery: applies org and pipeline filters when both present", () => {
+  assertEquals(scopeLeadJobQuery(recordingQuery(), { orgScoped: true, orgId: "org-1", pipeline: "fencing" }).calls, [
+    ["org_id", "org-1"],
+    ["type", "fencing"],
+  ]);
+});
+
+Deno.test("scopeLeadJobQuery: shared-key callers are not org-filtered", () => {
+  assertEquals(scopeLeadJobQuery(recordingQuery(), { orgScoped: false, orgId: "org-1", pipeline: "fencing" }).calls, [
+    ["type", "fencing"],
+  ]);
+});
+
+Deno.test("leadJobFallbackRows: array scope_json is not a scope (matches hasNonEmptyScope)", () => {
+  const rows = leadJobFallbackRows([
+    { id: "job-1", client_name: "Array Scope", ghl_contact_id: "ct-1", job_number: null, scope_json: [{ runs: 1 }] },
+    { id: "job-2", client_name: "Object Scope", ghl_contact_id: "ct-2", job_number: null, scope_json: { runs: [1] } },
+  ]);
+
+  assertEquals(rows.map((r) => r.hasScope), [false, true]);
 });
