@@ -14,8 +14,28 @@ All in `supabase/functions/`. Deploy with:
 
 ### ghl-proxy `--no-verify-jwt`
 - **Purpose**: Secure proxy to GHL API + job sync + scope complete flow
-- **Key actions**: `opportunities`, `search`, `contact`, `find_job`, `create_job`, `save_scope`, `load_job`, `link`, `list_media`, `get_upload_url`, `register_media`, `upload_photo`, `delete_media`, `get_profile`
+- **Key actions**: `opportunities`, `search`, `lead_search`, `contact`, `find_job`, `create_job`, `save_scope`, `load_job`, `link`, `list_media`, `get_upload_url`, `register_media`, `upload_photo`, `delete_media`, `get_profile`, `create_contact_and_opportunity` (POST)
 - **`link` action** (scope complete): moves GHL stage → adds note → generates job number → creates Xero contact → pushes $ to GHL
+- **`lead_search` action** (GET, used by the fencing tool): contact-first lead
+  lookup. Params: `q` (query), `pipeline` (`fencing` or `patio`),
+  `max_contacts` (default 8, clamped 1-10). With `q`: searches GHL contacts,
+  then looks up each contact's opportunities in parallel, filters to the
+  requested pipeline, and cross-references Supabase jobs (org-scoped when called
+  with a user JWT); if GHL knows nothing about the query it falls back to an
+  org-scoped `jobs` search. Without `q`: browses the pipeline's recent
+  opportunities (capped at 2 GHL pages). Returns
+  `{ opportunities: Row[], _mode: 'contact_search' | 'recent_browse' }`. Every
+  GHL call carries an AbortSignal timeout — a timeout returns 504 with code
+  `ghl_timeout`, other GHL failures return 502 (`ghl_contacts_search_failed` /
+  `ghl_browse_failed`). Kept separate from `search`, which patio + the agents
+  rely on and is unchanged.
+- **`create_contact_and_opportunity` action** (POST): creates/dedups a GHL
+  contact and opens an opportunity in the pipeline for `body.toolType`. Pass
+  optional `body.contactId` for the repeat-client path — dedup and contact
+  creation are skipped, the contact is fetched to verify it exists (404 →
+  `contact_not_found`), and a NEW opportunity is created with a name built from
+  the fetched contact's identity. `body.skipOpportunity` suppresses opportunity
+  creation on either path.
 
 ### xero-sync
 - **Purpose**: All Xero API interactions

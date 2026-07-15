@@ -251,3 +251,331 @@ export async function assignJobNumberWithNullCas(args: {
 
   return { jobNumber: null, status: null, reused: false, assigned: false, collisionCount, error: lastAssignError }
 }
+
+// ── lead_search helpers (fence repeat-client mission) ──────────────────────
+//
+// Pure, network-free shaping for the `lead_search` action. index.ts does the
+// GHL/Supabase IO and maps opps through mapOpp; these helpers merge the pieces
+// into the Row[] contract the fence client depends on. The Row shape is a hard
+// contract — do not rename fields.
+
+// A GHL opportunity already run through mapOpp, with pipelineId carried through
+// so the merge can pipeline-filter and contact-verify (AM-I) without the raw opp.
+export type LeadMappedOpp = {
+  id: string
+  name?: string
+  contactName?: string
+  contactEmail?: string
+  contactPhone?: string
+  contactAddress?: string
+  contactCity?: string
+  stageName?: string
+  updatedAt?: string | null
+  contactId?: string
+  pipelineId?: string
+  [key: string]: unknown
+}
+
+export type LeadContact = {
+  id: string
+  name?: string | null
+  email?: string | null
+  phone?: string | null
+  address?: string | null
+  city?: string | null
+}
+
+// Supabase cross-ref for a job row (by opp id or by contact id).
+export type LeadJobRef = { id: string; hasScope: boolean; jobNumber: string | null }
+
+// Result of the per-contact opportunity lookup. `failed:true` means the lookup
+// timed out / errored / returned an unexpected shape and the contact degrades to
+// a non-selectable lookupFailed row (AM-C, AM-I).
+export type LeadLookup = { opps: LeadMappedOpp[]; failed: boolean }
+
+export type LeadRow = {
+  id: string | null
+  contactId: string
+  name: string
+  contactName: string
+  contactEmail: string
+  contactPhone: string
+  contactAddress: string
+  contactCity: string
+  stageName: string
+  updatedAt: string | null
+  supabaseJobId: string | null
+  hasScope: boolean
+  jobNumber: string | null
+  isContactOnly: boolean
+  lookupFailed: boolean
+  [key: string]: unknown
+}
+
+// Build a Row for an opportunity: reuse the mapOpp output spread + the extra
+// cross-ref/mode fields. pipelineId is an internal carry field and is dropped.
+export function leadOppRow(mapped: LeadMappedOpp, job: LeadJobRef | undefined | null): LeadRow {
+  const { pipelineId: _pipelineId, ...rest } = mapped
+  return {
+    ...rest,
+    id: mapped.id ?? null,
+    contactId: mapped.contactId || '',
+    name: (mapped.name as string) || (mapped.contactName as string) || '',
+    contactName: mapped.contactName || '',
+    contactEmail: mapped.contactEmail || '',
+    contactPhone: mapped.contactPhone || '',
+    contactAddress: mapped.contactAddress || '',
+    contactCity: mapped.contactCity || '',
+    stageName: mapped.stageName || '',
+    updatedAt: mapped.updatedAt ?? null,
+    supabaseJobId: job?.id ?? null,
+    hasScope: job?.hasScope ?? false,
+    jobNumber: job?.jobNumber ?? null,
+    isContactOnly: false,
+    lookupFailed: false,
+  }
+}
+
+// Build a contact-only Row (no opportunity in this pipeline, or the lookup
+// degraded). Cross-ref is by ghl_contact_id.
+export function leadContactOnlyRow(
+  contact: LeadContact,
+  job: LeadJobRef | undefined | null,
+  lookupFailed: boolean,
+): LeadRow {
+  const name = (contact.name || '').trim()
+  return {
+    id: null,
+    contactId: contact.id || '',
+    name,
+    contactName: name,
+    contactEmail: contact.email || '',
+    contactPhone: contact.phone || '',
+    contactAddress: contact.address || '',
+    contactCity: contact.city || '',
+    stageName: '',
+    updatedAt: null,
+    supabaseJobId: job?.id ?? null,
+    hasScope: job?.hasScope ?? false,
+    jobNumber: job?.jobNumber ?? null,
+    isContactOnly: true,
+    lookupFailed,
+  }
+}
+
+// Merge contacts (in search order) + their per-contact opp lookups + Supabase
+// cross-ref maps into the Row[] the fence client renders.
+//   - opps kept only when opp.pipelineId === pipelineId AND the opp's contact id
+//     matches the contact we looked up (AM-I: an ignored contact_id filter cannot
+//     leak another client's opps).
+//   - a failed lookup → single lookupFailed contact-only row (never fails the set).
+//   - a contact with zero valid opps → contact-only row (isContactOnly, cross-ref
+//     by contact id; supabaseJobId may still be populated — AM: keep isContactOnly).
+//   - sort (AM-E): opp rows by updatedAt desc first, then contact-only rows in the
+//     original contacts-search order.
+export function buildLeadSearchRows(args: {
+  contacts: LeadContact[]
+  lookups: Record<string, LeadLookup>
+  pipelineId: string
+  jobByOppId: Record<string, LeadJobRef>
+  jobByContactId: Record<string, LeadJobRef>
+}): LeadRow[] {
+  const { contacts, lookups, pipelineId, jobByOppId, jobByContactId } = args
+  const oppRows: LeadRow[] = []
+  const contactOnlyRows: LeadRow[] = []
+
+  for (const contact of contacts || []) {
+    const contactId = contact?.id || ''
+    const lookup = lookups[contactId] || { opps: [], failed: false }
+
+    if (lookup.failed) {
+      contactOnlyRows.push(leadContactOnlyRow(contact, jobByContactId[contactId], true))
+      continue
+    }
+
+    const validOpps = (lookup.opps || []).filter((o) => {
+      if (!o || typeof o.id !== 'string') return false
+      if (pipelineId && o.pipelineId !== pipelineId) return false
+      const oppContactId = o.contactId || ''
+      return oppContactId === contactId
+    })
+
+    if (validOpps.length === 0) {
+      contactOnlyRows.push(leadContactOnlyRow(contact, jobByContactId[contactId], false))
+      continue
+    }
+
+    for (const opp of validOpps) {
+      oppRows.push(leadOppRow(opp, jobByOppId[opp.id]))
+    }
+  }
+
+  oppRows.sort((a, b) => {
+    const at = a.updatedAt ? new Date(a.updatedAt).getTime() : 0
+    const bt = b.updatedAt ? new Date(b.updatedAt).getTime() : 0
+    return bt - at
+  })
+
+  return [...oppRows, ...contactOnlyRows]
+}
+
+// DEV-36 first-word retry filter: when a multi-word query returns 0 contacts,
+// index.ts re-queries GHL with the first word only (GHL misses "Louisa Webb"
+// when the contact's lastName is empty). This narrows that broader result set
+// back to the caller's intent: full name contains the query, or firstName is
+// exactly the first word.
+export function matchesFirstWordRetry(
+  contact: { firstName?: unknown; lastName?: unknown },
+  q: string,
+): boolean {
+  const first = q.trim().split(/\s+/)[0] || ''
+  const fullName = `${contact.firstName || ''} ${contact.lastName || ''}`.trim().toLowerCase()
+  return fullName.includes(q.trim().toLowerCase()) ||
+    String(contact.firstName || '').toLowerCase() === first.toLowerCase()
+}
+
+// Org/pipeline scoping for every lead_search jobs query. `pipeline` is optional —
+// the caller may omit it, and a blank type filter would match no jobs at all.
+export function scopeLeadJobQuery<T>(
+  query: T,
+  args: { orgScoped?: boolean; orgId?: unknown; pipeline?: unknown },
+): T {
+  let scoped = query as any
+  if (args.orgScoped) scoped = scoped.eq('org_id', args.orgId)
+  if (args.pipeline) scoped = scoped.eq('type', args.pipeline)
+  return scoped as T
+}
+
+// A jobs-table row used by the lead_search Supabase fallback.
+export type LeadJobFallbackRow = {
+  id?: unknown
+  client_name?: unknown
+  client_email?: unknown
+  client_phone?: unknown
+  site_suburb?: unknown
+  ghl_contact_id?: unknown
+  job_number?: unknown
+  scope_json?: unknown
+}
+
+// Map jobs-table rows into the lead Row contract when GHL contacts search found
+// nothing. These carry no verified opportunity, so they are always contact-only
+// rows (id null). Deduped by contact id — first row wins, so callers should pass
+// rows already ordered newest-first.
+export function leadJobFallbackRows(jobs: LeadJobFallbackRow[]): LeadRow[] {
+  const rows: LeadRow[] = []
+  const seen = new Set<string>()
+
+  for (const job of jobs || []) {
+    const contactId = typeof job?.ghl_contact_id === 'string' ? job.ghl_contact_id : ''
+    const dedupKey = contactId || `job:${String(job?.id ?? '')}`
+    if (seen.has(dedupKey)) continue
+    seen.add(dedupKey)
+
+    const name = String(job?.client_name || '').trim() || 'Unknown'
+    rows.push({
+      id: null,
+      contactId,
+      name,
+      contactName: name,
+      contactEmail: String(job?.client_email || ''),
+      contactPhone: String(job?.client_phone || ''),
+      contactAddress: '',
+      contactCity: String(job?.site_suburb || ''),
+      stageName: '',
+      updatedAt: null,
+      supabaseJobId: job?.id ? String(job.id) : null,
+      hasScope: hasNonEmptyScope(job?.scope_json),
+      jobNumber: job?.job_number ? String(job.job_number) : null,
+      isContactOnly: true,
+      lookupFailed: !contactId,
+    })
+  }
+
+  return rows
+}
+
+// Opportunity name for a contact whose identity was fetched from GHL (B2/AM-B).
+// Built from the FETCHED contact fields, never from the empty request body.
+export function leadOppNameForContact(
+  contact: { firstName?: unknown; lastName?: unknown; phone?: unknown; email?: unknown; address1?: unknown; address?: unknown },
+  toolType: unknown,
+): string {
+  const label = contactDisplayIdentity({
+    firstName: contact.firstName,
+    lastName: contact.lastName,
+    phone: contact.phone,
+    email: contact.email,
+    address: contact.address1 ?? contact.address,
+  })
+  return label + ' — ' + (toolType === 'fencing' ? 'Fencing' : 'Patio')
+}
+
+// Orchestrates the create_contact_and_opportunity contactId branch (B2/AM-B):
+// verify an existing contact, then create a NEW opportunity in the pipeline.
+// The GHL client is injected so this is unit-testable without network:
+//   - GET /contacts/{id} 404 / not-found → { status:404, code:'contact_not_found' }
+//     and NO opportunity creation is attempted.
+//   - other fetch failure → { status:502, code:'contact_fetch_failed' }.
+//   - skipOpportunity → contact is still verified, but NO opportunity is created:
+//     { status:200, body:{ contactId, opportunityId:null, contactExisted:true } }.
+//   - success → { status:200, body:{ contactId, opportunityId, contactExisted:true } }
+//     with oppName built from the FETCHED contact identity.
+//   - opportunity creation failure → { status:500 } echoing the resolved contactId.
+export async function createOpportunityForExistingContact(args: {
+  contactId: string
+  toolType: unknown
+  locationId: string
+  pipelines: Record<string, string>
+  skipOpportunity?: unknown
+  ghl: (path: string, init?: Record<string, unknown>) => Promise<any>
+}): Promise<{ status: number; body: Record<string, unknown> }> {
+  const { contactId, toolType, locationId, pipelines, skipOpportunity, ghl } = args
+
+  let fetchedContact: any
+  try {
+    const data = await ghl(`/contacts/${contactId}`)
+    fetchedContact = data?.contact || data
+  } catch (e) {
+    const msg = (e as Error)?.message || ''
+    if (/^GHL 404/.test(msg) || (/^GHL 4\d\d/.test(msg) && /not found/i.test(msg))) {
+      return { status: 404, body: { error: 'Contact not found', code: 'contact_not_found' } }
+    }
+    return { status: 502, body: { error: 'Failed to fetch contact: ' + msg, code: 'contact_fetch_failed' } }
+  }
+  if (!fetchedContact || !fetchedContact.id) {
+    return { status: 404, body: { error: 'Contact not found', code: 'contact_not_found' } }
+  }
+
+  if (skipOpportunity) {
+    return { status: 200, body: { contactId: fetchedContact.id, opportunityId: null, contactExisted: true } }
+  }
+
+  const pipelineId = pipelines[toolType as string] || pipelines.patio
+  try {
+    const oppName = leadOppNameForContact(fetchedContact, toolType)
+    const oppRes = await ghl('/opportunities/', {
+      method: 'POST',
+      body: JSON.stringify({
+        pipelineId,
+        locationId,
+        contactId: fetchedContact.id,
+        name: oppName,
+        status: 'open',
+        pipelineStageId: undefined,
+      }),
+    })
+    const opportunityId = oppRes?.opportunity?.id || null
+    return { status: 200, body: { contactId: fetchedContact.id, opportunityId, contactExisted: true } }
+  } catch (e) {
+    return {
+      status: 500,
+      body: {
+        contactId: fetchedContact.id,
+        opportunityId: null,
+        contactExisted: true,
+        error: 'Opportunity creation failed: ' + ((e as Error)?.message || ''),
+      },
+    }
+  }
+}

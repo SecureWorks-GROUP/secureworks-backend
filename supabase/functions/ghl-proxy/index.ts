@@ -43,19 +43,26 @@ import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import type { MatchMethod } from '../_shared/evidence/types.ts'
 import {
   assignJobNumberWithNullCas,
+  buildLeadSearchRows,
   classifyScopeCasReread,
   cleanIdentity,
   classifyAuthCredential,
   contactDisplayIdentity,
+  createOpportunityForExistingContact,
+  hasNonEmptyScope,
+  leadOppRow,
   deterministicMediaId,
   deterministicMediaStorageKey,
   isRealJobRef,
   isSameOrg,
   isProfileRequestBoundToJwt,
+  leadJobFallbackRows,
+  matchesFirstWordRetry,
   normalizeIdentity,
   requestedBaseScopeHash,
   requiresBaseScopeCursor,
   rejectSharedKeyForBrowserAction,
+  scopeLeadJobQuery,
   scopeJsonHash,
   stalePreparedContactIds,
   verifiedJobStorageOrgId,
@@ -167,6 +174,16 @@ async function ghl(path: string, init: RequestInit = {}) {
   return JSON.parse(text)
 }
 
+// AbortSignal.timeout() rejects with a DOMException named 'TimeoutError';
+// a manual controller.abort() surfaces as 'AbortError'. Detect both so
+// lead_search can degrade a row or return a 504 instead of a 500. Name-based
+// only: a ghl() rejection message embeds the upstream response body, so a text
+// match would classify a GHL error whose body says "aborted" as a timeout.
+function isTimeoutError(e: unknown): boolean {
+  const name = (e as { name?: string } | null)?.name
+  return name === 'TimeoutError' || name === 'AbortError'
+}
+
 // Normalize Australian phone number for dedup
 function normalizeAUPhone(phone: string): string {
   if (!phone) return ''
@@ -205,10 +222,10 @@ function extractScopeIdentity(scopeJson: any, meta: any = {}) {
 let stageCache: Record<string, Record<string, string>> = {}
 let stageCacheLoaded = false
 
-async function resolveStages(pipelineId: string) {
+async function resolveStages(pipelineId: string, signal?: AbortSignal) {
   if (!stageCacheLoaded) {
     try {
-      const data = await ghl(`/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`)
+      const data = await ghl(`/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`, signal ? { signal } : {})
       for (const p of (data.pipelines || [])) {
         const map: Record<string, string> = {}
         for (const s of (p.stages || [])) {
@@ -257,6 +274,7 @@ async function fetchOpportunityPages(args: {
   q?: string
   limit?: number
   maxPages?: number
+  perPageTimeoutMs?: number
 }) {
   const limit = Math.min(args.limit || 100, 100)
   const maxPages = Math.min(args.maxPages || 20, 50)
@@ -277,7 +295,10 @@ async function fetchOpportunityPages(args: {
     if (startAfter != null) params.set('startAfter', String(startAfter))
     if (startAfterId) params.set('startAfterId', startAfterId)
 
-    const data = await ghl(`/opportunities/search?${params.toString()}`)
+    const data = await ghl(
+      `/opportunities/search?${params.toString()}`,
+      args.perPageTimeoutMs ? { signal: AbortSignal.timeout(args.perPageTimeoutMs) } : {},
+    )
     const rows = data.opportunities || []
     const meta = data.meta || {}
     pagesScanned++
@@ -304,6 +325,49 @@ async function fetchOpportunityPages(args: {
   }
 
   return { opportunities, pagesScanned, total }
+}
+
+// lead_search's last resort when GHL contacts search (incl. the first-word retry)
+// finds nothing: the same org-scoped jobs ilike search the `search_contacts`
+// action uses, shaped into the lead Row contract. Pipeline-typed so supabaseJobId
+// stays loadable by the tool that asked. Non-blocking — a Supabase failure yields
+// no rows, never an error response.
+async function leadSearchJobsFallback(args: {
+  sb: any
+  q: string
+  pipeline: string
+  orgScoped: boolean
+  orgId?: string
+  limit: number
+}): Promise<any[]> {
+  const { sb, q, pipeline, orgScoped, orgId, limit } = args
+  const COLUMNS = 'id, client_name, client_phone, client_email, site_suburb, ghl_contact_id, job_number, scope_json, created_at'
+
+  const scoped = () =>
+    scopeLeadJobQuery(sb.from('jobs').select(COLUMNS), { orgScoped, orgId, pipeline })
+      .order('created_at', { ascending: false })
+
+  try {
+    const { data: exact } = await scoped()
+      .or(`client_name.ilike.%${q}%,client_phone.ilike.%${q}%,site_suburb.ilike.%${q}%,client_email.ilike.%${q}%`)
+      .limit(20)
+
+    let rows = exact || []
+    if (rows.length === 0 && q.includes(' ')) {
+      const words = q.split(/\s+/).filter((w: string) => w.length >= 2)
+      if (words.length >= 2) {
+        let wordQuery = scoped()
+        for (const word of words) wordQuery = wordQuery.ilike('client_name', `%${word}%`)
+        const { data: wordRows } = await wordQuery.limit(20)
+        rows = wordRows || []
+      }
+    }
+
+    return leadJobFallbackRows(rows).slice(0, limit)
+  } catch (e) {
+    console.log('[ghl-proxy] lead_search jobs fallback failed (non-blocking):', e)
+    return []
+  }
 }
 
 // ── Phonetic/fuzzy name variant generator (DEV-CONTACT-FUZZY-SEARCH) ──
@@ -810,6 +874,183 @@ serve(async (req: Request) => {
       }
 
       return json({ opportunities: opps })
+    }
+
+    // ── Lead search (fence repeat-client): contact-first search + recent browse ──
+    // NEW action — the `search` action above is unchanged (patio + agents rely on
+    // it). q present: GHL contacts search → per-contact opp lookups in parallel,
+    // pipeline-filtered + contact-verified, cross-referenced with Supabase jobs.
+    // q empty: recent browse of the pipeline (capped at 2 GHL pages). Returns the
+    // Row[] contract the fence client renders (see buildLeadSearchRows).
+    if (action === 'lead_search') {
+      const q = (url.searchParams.get('q') || '').trim()
+      const pipeline = url.searchParams.get('pipeline') || ''
+      const pipelineId = pipeline ? (PIPELINES[pipeline] || '') : ''
+      const maxContacts = Math.min(Math.max(Number(url.searchParams.get('max_contacts')) || 8, 1), 10)
+      const orgScoped = credential.mode === 'user_jwt'
+      const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+      if (q) {
+        // ── contact-search mode ──
+        let contactsRaw: any[] = []
+        try {
+          const searchUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=20`
+          const result = await ghl(searchUrl, { signal: AbortSignal.timeout(10000) })
+          contactsRaw = result.contacts || []
+        } catch (e) {
+          if (isTimeoutError(e)) {
+            console.log('[ghl-proxy] lead_search contacts search timed out')
+            return json({ error: 'ghl_timeout', code: 'ghl_timeout' }, 504)
+          }
+          console.error('[ghl-proxy] lead_search contacts search failed:', (e as Error).message)
+          return json({ error: 'ghl_contacts_search_failed', code: 'ghl_contacts_search_failed' }, 502)
+        }
+
+        // DEV-36: GHL misses "Louisa Webb" when the contact's lastName is empty.
+        // Retry the first word only and filter client-side. Zero-result path only,
+        // so the ~1-3s fast path is unaffected; a retry failure degrades to the
+        // Supabase fallback below rather than failing the request.
+        if (contactsRaw.length === 0 && q.includes(' ')) {
+          const firstWord = q.split(/\s+/)[0]
+          try {
+            const retryUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(firstWord)}&limit=20`
+            const retryResult = await ghl(retryUrl, { signal: AbortSignal.timeout(10000) })
+            contactsRaw = (retryResult.contacts || []).filter((c: any) => matchesFirstWordRetry(c, q))
+          } catch (e) {
+            console.log('[ghl-proxy] lead_search first-word retry failed:', isTimeoutError(e) ? '(timeout)' : (e as Error).message)
+          }
+        }
+
+        const contacts = contactsRaw
+          .map((c: any) => ({
+            id: c.id,
+            name: `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.name || c.email || 'Unknown',
+            email: c.email || null,
+            phone: c.phone || null,
+            address: c.address1 || c.address || null,
+            city: c.city || null,
+          }))
+          .filter((c: any) => c.id)
+          .slice(0, maxContacts)
+
+        // GHL knows nothing about this query — fall back to the org-scoped jobs
+        // table so a client whose GHL contact is missing/renamed is still findable.
+        // These rows carry no verified opportunity, so they stay contact-only.
+        if (contacts.length === 0) {
+          const rows = await leadSearchJobsFallback({ sb, q, pipeline, orgScoped, orgId: authProfile?.org_id, limit: maxContacts })
+          return json({ opportunities: rows, _mode: 'contact_search' })
+        }
+
+        // Stage names (8s; resolveStages swallows abort → blank stage names, never fails)
+        const stages = await resolveStages(pipelineId, AbortSignal.timeout(8000))
+
+        // Per-contact opportunity lookups in parallel, each with its own 8s timeout.
+        const lookups: Record<string, { opps: any[]; failed: boolean }> = {}
+        await Promise.all(contacts.map(async (c: any) => {
+          try {
+            const params = new URLSearchParams({ location_id: GHL_LOCATION_ID, contact_id: c.id, limit: '20' })
+            const data = await ghl(`/opportunities/search?${params.toString()}`, { signal: AbortSignal.timeout(8000) })
+            const opps = (data.opportunities || []).map((o: any) => {
+              const m: any = mapOpp(o, stages)
+              m.pipelineId = o.pipelineId || o.pipeline_id || ''
+              m.contactId = m.contactId || o.contactId || o.contact?.id || ''
+              return m
+            })
+            lookups[c.id] = { opps, failed: false }
+          } catch (e) {
+            console.log('[ghl-proxy] lead_search per-contact lookup failed for', c.id, isTimeoutError(e) ? '(timeout)' : (e as Error).message)
+            lookups[c.id] = { opps: [], failed: true }
+          }
+        }))
+
+        // Supabase cross-ref by opportunity id (only pipeline-matching opps).
+        const oppIds: string[] = []
+        for (const c of contacts) {
+          for (const o of (lookups[c.id]?.opps || [])) {
+            if (o?.id && (!pipelineId || o.pipelineId === pipelineId)) oppIds.push(o.id)
+          }
+        }
+        const jobByOppId: Record<string, { id: string; hasScope: boolean; jobNumber: string | null }> = {}
+        if (oppIds.length > 0) {
+          try {
+            let qy = sb.from('jobs').select('id, ghl_opportunity_id, scope_json, job_number').in('ghl_opportunity_id', oppIds)
+            if (orgScoped) qy = qy.eq('org_id', authProfile.org_id)
+            const { data: jobs } = await qy
+            ;(jobs || []).forEach((j: any) => {
+              jobByOppId[j.ghl_opportunity_id] = { id: j.id, hasScope: hasNonEmptyScope(j.scope_json), jobNumber: j.job_number || null }
+            })
+          } catch (e) {
+            console.log('[ghl-proxy] lead_search opp cross-ref failed (non-blocking):', e)
+          }
+        }
+
+        // Supabase cross-ref by contact id (for contact-only rows), pipeline-typed.
+        const contactIds = contacts.map((c: any) => c.id).filter(Boolean)
+        const jobByContactId: Record<string, { id: string; hasScope: boolean; jobNumber: string | null }> = {}
+        if (contactIds.length > 0) {
+          try {
+            const qy = scopeLeadJobQuery(
+              sb.from('jobs')
+                .select('id, ghl_contact_id, scope_json, job_number, created_at')
+                .in('ghl_contact_id', contactIds)
+                .order('created_at', { ascending: false }),
+              { orgScoped, orgId: authProfile?.org_id, pipeline },
+            )
+            const { data: jobs } = await qy
+            ;(jobs || []).forEach((j: any) => {
+              if (!jobByContactId[j.ghl_contact_id]) {
+                jobByContactId[j.ghl_contact_id] = { id: j.id, hasScope: hasNonEmptyScope(j.scope_json), jobNumber: j.job_number || null }
+              }
+            })
+          } catch (e) {
+            console.log('[ghl-proxy] lead_search contact cross-ref failed (non-blocking):', e)
+          }
+        }
+
+        const rows = buildLeadSearchRows({ contacts, lookups, pipelineId, jobByOppId, jobByContactId })
+        return json({ opportunities: rows, _mode: 'contact_search' })
+      }
+
+      // ── recent browse mode (no query) ──
+      if (!pipelineId) return json({ opportunities: [], _mode: 'recent_browse' })
+
+      const stages = await resolveStages(pipelineId, AbortSignal.timeout(8000))
+      let paged: { opportunities: any[] }
+      try {
+        paged = await fetchOpportunityPages({ pipelineId, limit: 100, maxPages: 2, perPageTimeoutMs: 10000 })
+      } catch (e) {
+        if (isTimeoutError(e)) {
+          console.log('[ghl-proxy] lead_search browse fetch timed out')
+          return json({ error: 'ghl_timeout', code: 'ghl_timeout' }, 504)
+        }
+        console.error('[ghl-proxy] lead_search browse fetch failed:', (e as Error).message)
+        return json({ error: 'ghl_browse_failed', code: 'ghl_browse_failed' }, 502)
+      }
+
+      const opps = (paged.opportunities || []).map((o: any) => {
+        const m: any = mapOpp(o, stages)
+        m.pipelineId = o.pipelineId || o.pipeline_id || ''
+        m.contactId = m.contactId || o.contactId || o.contact?.id || ''
+        return m
+      })
+
+      const browseOppIds = opps.map((o: any) => o.id).filter(Boolean)
+      const browseJobByOppId: Record<string, { id: string; hasScope: boolean; jobNumber: string | null }> = {}
+      if (browseOppIds.length > 0) {
+        try {
+          let qy = sb.from('jobs').select('id, ghl_opportunity_id, scope_json, job_number').in('ghl_opportunity_id', browseOppIds)
+          if (orgScoped) qy = qy.eq('org_id', authProfile.org_id)
+          const { data: jobs } = await qy
+          ;(jobs || []).forEach((j: any) => {
+            browseJobByOppId[j.ghl_opportunity_id] = { id: j.id, hasScope: hasNonEmptyScope(j.scope_json), jobNumber: j.job_number || null }
+          })
+        } catch (e) {
+          console.log('[ghl-proxy] lead_search browse cross-ref failed (non-blocking):', e)
+        }
+      }
+
+      const rows = opps.map((m: any) => leadOppRow(m, browseJobByOppId[m.id]))
+      return json({ opportunities: rows, _mode: 'recent_browse' })
     }
 
     // ── Get full contact details ──
@@ -1617,6 +1858,25 @@ serve(async (req: Request) => {
     if (action === 'create_contact_and_opportunity' && req.method === 'POST') {
       const body = await req.json()
       const { firstName, lastName, email, phone, address, suburb, toolType, skipOpportunity, name } = body
+
+      // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
+      // dedup + contact creation entirely; verify the contact exists, then create
+      // a NEW opportunity in the pipeline. oppName is built from the FETCHED
+      // contact identity, never from the (empty) request body. skipOpportunity
+      // still suppresses opportunity creation, as on the no-contactId path.
+      const providedContactId = typeof body.contactId === 'string' ? body.contactId.trim() : ''
+      if (providedContactId) {
+        const result = await createOpportunityForExistingContact({
+          contactId: providedContactId,
+          toolType,
+          locationId: GHL_LOCATION_ID,
+          pipelines: PIPELINES,
+          skipOpportunity,
+          ghl,
+        })
+        console.log('[ghl-proxy] create_contact_and_opportunity: provided contact', providedContactId, '→', result.status, result.body.code || result.body.opportunityId || '')
+        return json(result.body, result.status)
+      }
 
       // Resolve first/last name — send-quote sends `name` as full string
       let resolvedFirst = firstName || ''

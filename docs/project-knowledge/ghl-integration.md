@@ -16,6 +16,8 @@
 
 ## Edge Function Endpoints
 - `opportunities`, `search`, `contact`, `update_contact` — GHL API
+- `lead_search` — fencing tool lead lookup: GHL contacts search + per-contact opportunity lookups (pipeline-filtered, cross-referenced with Supabase jobs), or a recent-pipeline browse when no query is given. Separate from `search`, which patio + the agents use.
+- `create_contact_and_opportunity` — creates a GHL contact + opportunity. Pass `contactId` to skip dedup/creation and open a NEW opportunity for an existing client (repeat jobs).
 - `find_job`, `create_job`, `save_scope`, `load_job` — Supabase jobs (bypass RLS)
 - `list_media`, `get_upload_url`, `register_media`, `upload_photo`, `delete_media` — media
 - `link` — moves GHL opportunity to Scope Complete + adds rich note to contact
