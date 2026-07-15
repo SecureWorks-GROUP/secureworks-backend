@@ -48,7 +48,7 @@ import {
   cleanIdentity,
   classifyAuthCredential,
   contactDisplayIdentity,
-  leadOppNameForContact,
+  createOpportunityForExistingContact,
   leadOppRow,
   deterministicMediaId,
   deterministicMediaStorageKey,
@@ -1796,43 +1796,15 @@ serve(async (req: Request) => {
       // contact identity, never from the (empty) request body.
       const providedContactId = typeof body.contactId === 'string' ? body.contactId.trim() : ''
       if (providedContactId) {
-        let fetchedContact: any
-        try {
-          const data = await ghl(`/contacts/${providedContactId}`)
-          fetchedContact = data.contact || data
-        } catch (e) {
-          const msg = (e as Error).message || ''
-          if (/^GHL 404/.test(msg) || /not found/i.test(msg)) {
-            return json({ error: 'Contact not found', code: 'contact_not_found' }, 404)
-          }
-          console.log('[ghl-proxy] create_contact_and_opportunity: contact fetch failed:', msg)
-          return json({ error: 'Failed to fetch contact: ' + msg, code: 'contact_fetch_failed' }, 502)
-        }
-        if (!fetchedContact || !fetchedContact.id) {
-          return json({ error: 'Contact not found', code: 'contact_not_found' }, 404)
-        }
-
-        const pipelineId = PIPELINES[toolType] || PIPELINES.patio
-        try {
-          const oppName = leadOppNameForContact(fetchedContact, toolType)
-          const oppRes = await ghl('/opportunities/', {
-            method: 'POST',
-            body: JSON.stringify({
-              pipelineId,
-              locationId: GHL_LOCATION_ID,
-              contactId: fetchedContact.id,
-              name: oppName,
-              status: 'open',
-              pipelineStageId: undefined,
-            }),
-          })
-          const opportunityId = oppRes.opportunity?.id || null
-          console.log('[ghl-proxy] create_contact_and_opportunity: reused contact', fetchedContact.id, 'new opp', opportunityId)
-          return json({ contactId: fetchedContact.id, opportunityId, contactExisted: true })
-        } catch (e) {
-          console.log('[ghl-proxy] Failed to create GHL opportunity (provided contact):', e)
-          return json({ contactId: fetchedContact.id, opportunityId: null, contactExisted: true, error: 'Opportunity creation failed: ' + (e as Error).message }, 500)
-        }
+        const result = await createOpportunityForExistingContact({
+          contactId: providedContactId,
+          toolType,
+          locationId: GHL_LOCATION_ID,
+          pipelines: PIPELINES,
+          ghl,
+        })
+        console.log('[ghl-proxy] create_contact_and_opportunity: provided contact', providedContactId, '→', result.status, result.body.code || result.body.opportunityId || '')
+        return json(result.body, result.status)
       }
 
       // Resolve first/last name — send-quote sends `name` as full string

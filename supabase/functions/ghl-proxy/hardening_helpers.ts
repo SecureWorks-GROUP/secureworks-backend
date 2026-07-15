@@ -434,3 +434,65 @@ export function leadOppNameForContact(
   })
   return label + ' — ' + (toolType === 'fencing' ? 'Fencing' : 'Patio')
 }
+
+// Orchestrates the create_contact_and_opportunity contactId branch (B2/AM-B):
+// verify an existing contact, then create a NEW opportunity in the pipeline.
+// The GHL client is injected so this is unit-testable without network:
+//   - GET /contacts/{id} 404 / not-found → { status:404, code:'contact_not_found' }
+//     and NO opportunity creation is attempted.
+//   - other fetch failure → { status:502, code:'contact_fetch_failed' }.
+//   - success → { status:200, body:{ contactId, opportunityId, contactExisted:true } }
+//     with oppName built from the FETCHED contact identity.
+//   - opportunity creation failure → { status:500 } echoing the resolved contactId.
+export async function createOpportunityForExistingContact(args: {
+  contactId: string
+  toolType: unknown
+  locationId: string
+  pipelines: Record<string, string>
+  ghl: (path: string, init?: Record<string, unknown>) => Promise<any>
+}): Promise<{ status: number; body: Record<string, unknown> }> {
+  const { contactId, toolType, locationId, pipelines, ghl } = args
+
+  let fetchedContact: any
+  try {
+    const data = await ghl(`/contacts/${contactId}`)
+    fetchedContact = data?.contact || data
+  } catch (e) {
+    const msg = (e as Error)?.message || ''
+    if (/^GHL 404/.test(msg) || /not found/i.test(msg)) {
+      return { status: 404, body: { error: 'Contact not found', code: 'contact_not_found' } }
+    }
+    return { status: 502, body: { error: 'Failed to fetch contact: ' + msg, code: 'contact_fetch_failed' } }
+  }
+  if (!fetchedContact || !fetchedContact.id) {
+    return { status: 404, body: { error: 'Contact not found', code: 'contact_not_found' } }
+  }
+
+  const pipelineId = pipelines[toolType as string] || pipelines.patio
+  try {
+    const oppName = leadOppNameForContact(fetchedContact, toolType)
+    const oppRes = await ghl('/opportunities/', {
+      method: 'POST',
+      body: JSON.stringify({
+        pipelineId,
+        locationId,
+        contactId: fetchedContact.id,
+        name: oppName,
+        status: 'open',
+        pipelineStageId: undefined,
+      }),
+    })
+    const opportunityId = oppRes?.opportunity?.id || null
+    return { status: 200, body: { contactId: fetchedContact.id, opportunityId, contactExisted: true } }
+  } catch (e) {
+    return {
+      status: 500,
+      body: {
+        contactId: fetchedContact.id,
+        opportunityId: null,
+        contactExisted: true,
+        error: 'Opportunity creation failed: ' + ((e as Error)?.message || ''),
+      },
+    }
+  }
+}

@@ -7,6 +7,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildLeadSearchRows,
+  createOpportunityForExistingContact,
   leadOppNameForContact,
   type LeadContact,
   type LeadLookup,
@@ -15,6 +16,7 @@ import {
 
 const FENCING = "I9t8njpuR0Dm7B2NDcvI";
 const PATIO = "OGZLpPPVWVarN94HL6af";
+const PIPELINES = { fencing: FENCING, patio: PATIO };
 
 function mappedOpp(overrides: Partial<LeadMappedOpp> & { id: string }): LeadMappedOpp {
   return {
@@ -195,4 +197,122 @@ Deno.test("leadOppNameForContact: name built from FETCHED contact, not empty bod
 Deno.test("leadOppNameForContact: falls back to phone identity when name absent", () => {
   const fetched = { firstName: "", lastName: "", phone: "0400111222", email: "", address1: "" };
   assertEquals(leadOppNameForContact(fetched, "fencing"), "Phone lead 0400111222 — Fencing");
+});
+
+// ── create_contact_and_opportunity contactId branch (B2/AM-B) — mocked ghl ──
+
+// Records every ghl() call so tests can assert what was / was not attempted.
+function makeGhlMock(handlers: {
+  contact?: (path: string) => any;
+  opp?: (init: Record<string, unknown>) => any;
+}) {
+  const calls: { path: string; init?: Record<string, unknown> }[] = [];
+  const ghl = (path: string, init?: Record<string, unknown>) => {
+    calls.push({ path, init });
+    if (path.startsWith("/contacts/")) {
+      if (!handlers.contact) throw new Error("unexpected contact fetch");
+      return Promise.resolve(handlers.contact(path));
+    }
+    if (path === "/opportunities/") {
+      if (!handlers.opp) throw new Error("unexpected opportunity create");
+      return Promise.resolve(handlers.opp(init || {}));
+    }
+    throw new Error(`unexpected ghl path ${path}`);
+  };
+  return { ghl, calls };
+}
+
+Deno.test("createOpportunityForExistingContact: contactId present → dedup/creation skipped, contact fetched, opp created with fetched-contact name", async () => {
+  const { ghl, calls } = makeGhlMock({
+    contact: () => ({ contact: { id: "ct-1", firstName: "Priya", lastName: "Nadar", phone: "0400111222", email: "p@x.com", address1: "9 Reef Rd" } }),
+    opp: () => ({ opportunity: { id: "opp-new" } }),
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-1",
+    toolType: "fencing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 200);
+  assertEquals(result.body, { contactId: "ct-1", opportunityId: "opp-new", contactExisted: true });
+
+  // exactly two calls: contact fetch then opportunity create — NO dedup search calls
+  assertEquals(calls.length, 2);
+  assertEquals(calls[0].path, "/contacts/ct-1");
+  assertEquals(calls[1].path, "/opportunities/");
+
+  // opp lands in the fencing pipeline, named from the FETCHED contact (not the body)
+  const oppBody = JSON.parse(String(calls[1].init?.body));
+  assertEquals(oppBody.pipelineId, FENCING);
+  assertEquals(oppBody.contactId, "ct-1");
+  assertEquals(oppBody.name, "Priya Nadar — Fencing");
+});
+
+Deno.test("createOpportunityForExistingContact: contact fetch 404 → contact_not_found 404 and NO opportunity creation attempted", async () => {
+  const { ghl, calls } = makeGhlMock({
+    contact: () => {
+      throw new Error("GHL 404: {\"message\":\"Contact not found\"}");
+    },
+    // opp handler omitted → any /opportunities/ call would throw "unexpected opportunity create"
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "missing",
+    toolType: "fencing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 404);
+  assertEquals(result.body, { error: "Contact not found", code: "contact_not_found" });
+
+  // only the contact fetch was attempted — no opportunity creation
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].path, "/contacts/missing");
+});
+
+Deno.test("createOpportunityForExistingContact: non-404 fetch failure → contact_fetch_failed 502, no opp attempted", async () => {
+  const { ghl, calls } = makeGhlMock({
+    contact: () => {
+      throw new Error("GHL 500: upstream boom");
+    },
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-err",
+    toolType: "patio",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 502);
+  assertEquals((result.body as { code: string }).code, "contact_fetch_failed");
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("createOpportunityForExistingContact: opp creation failure → 500 echoing resolved contactId", async () => {
+  const { ghl } = makeGhlMock({
+    contact: () => ({ contact: { id: "ct-2", firstName: "Sam", lastName: "Lee" } }),
+    opp: () => {
+      throw new Error("GHL 422: bad pipeline");
+    },
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-2",
+    toolType: "fencing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 500);
+  assertEquals(result.body.contactId, "ct-2");
+  assertEquals(result.body.opportunityId, null);
+  assertEquals(result.body.contactExisted, true);
 });
