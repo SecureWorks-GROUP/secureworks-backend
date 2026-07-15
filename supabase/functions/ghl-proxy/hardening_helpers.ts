@@ -419,6 +419,70 @@ export function buildLeadSearchRows(args: {
   return [...oppRows, ...contactOnlyRows]
 }
 
+// DEV-36 first-word retry filter: when a multi-word query returns 0 contacts,
+// index.ts re-queries GHL with the first word only (GHL misses "Louisa Webb"
+// when the contact's lastName is empty). This narrows that broader result set
+// back to the caller's intent: full name contains the query, or firstName is
+// exactly the first word.
+export function matchesFirstWordRetry(
+  contact: { firstName?: unknown; lastName?: unknown },
+  q: string,
+): boolean {
+  const first = q.trim().split(/\s+/)[0] || ''
+  const fullName = `${contact.firstName || ''} ${contact.lastName || ''}`.trim().toLowerCase()
+  return fullName.includes(q.trim().toLowerCase()) ||
+    String(contact.firstName || '').toLowerCase() === first.toLowerCase()
+}
+
+// A jobs-table row used by the lead_search Supabase fallback.
+export type LeadJobFallbackRow = {
+  id?: unknown
+  client_name?: unknown
+  client_email?: unknown
+  client_phone?: unknown
+  site_suburb?: unknown
+  ghl_contact_id?: unknown
+  job_number?: unknown
+  scope_json?: unknown
+}
+
+// Map jobs-table rows into the lead Row contract when GHL contacts search found
+// nothing. These carry no verified opportunity, so they are always contact-only
+// rows (id null). Deduped by contact id — first row wins, so callers should pass
+// rows already ordered newest-first.
+export function leadJobFallbackRows(jobs: LeadJobFallbackRow[]): LeadRow[] {
+  const rows: LeadRow[] = []
+  const seen = new Set<string>()
+
+  for (const job of jobs || []) {
+    const contactId = typeof job?.ghl_contact_id === 'string' ? job.ghl_contact_id : ''
+    const dedupKey = contactId || `job:${String(job?.id ?? '')}`
+    if (seen.has(dedupKey)) continue
+    seen.add(dedupKey)
+
+    const name = String(job?.client_name || '').trim() || 'Unknown'
+    rows.push({
+      id: null,
+      contactId,
+      name,
+      contactName: name,
+      contactEmail: String(job?.client_email || ''),
+      contactPhone: String(job?.client_phone || ''),
+      contactAddress: '',
+      contactCity: String(job?.site_suburb || ''),
+      stageName: '',
+      updatedAt: null,
+      supabaseJobId: job?.id ? String(job.id) : null,
+      hasScope: hasNonEmptyScope(job?.scope_json),
+      jobNumber: job?.job_number ? String(job.job_number) : null,
+      isContactOnly: true,
+      lookupFailed: false,
+    })
+  }
+
+  return rows
+}
+
 // Opportunity name for a contact whose identity was fetched from GHL (B2/AM-B).
 // Built from the FETCHED contact fields, never from the empty request body.
 export function leadOppNameForContact(
@@ -441,6 +505,8 @@ export function leadOppNameForContact(
 //   - GET /contacts/{id} 404 / not-found → { status:404, code:'contact_not_found' }
 //     and NO opportunity creation is attempted.
 //   - other fetch failure → { status:502, code:'contact_fetch_failed' }.
+//   - skipOpportunity → contact is still verified, but NO opportunity is created:
+//     { status:200, body:{ contactId, opportunityId:null, contactExisted:true } }.
 //   - success → { status:200, body:{ contactId, opportunityId, contactExisted:true } }
 //     with oppName built from the FETCHED contact identity.
 //   - opportunity creation failure → { status:500 } echoing the resolved contactId.
@@ -449,9 +515,10 @@ export async function createOpportunityForExistingContact(args: {
   toolType: unknown
   locationId: string
   pipelines: Record<string, string>
+  skipOpportunity?: unknown
   ghl: (path: string, init?: Record<string, unknown>) => Promise<any>
 }): Promise<{ status: number; body: Record<string, unknown> }> {
-  const { contactId, toolType, locationId, pipelines, ghl } = args
+  const { contactId, toolType, locationId, pipelines, skipOpportunity, ghl } = args
 
   let fetchedContact: any
   try {
@@ -459,13 +526,17 @@ export async function createOpportunityForExistingContact(args: {
     fetchedContact = data?.contact || data
   } catch (e) {
     const msg = (e as Error)?.message || ''
-    if (/^GHL 404/.test(msg) || /not found/i.test(msg)) {
+    if (/^GHL 404/.test(msg) || (/^GHL 4\d\d/.test(msg) && /not found/i.test(msg))) {
       return { status: 404, body: { error: 'Contact not found', code: 'contact_not_found' } }
     }
     return { status: 502, body: { error: 'Failed to fetch contact: ' + msg, code: 'contact_fetch_failed' } }
   }
   if (!fetchedContact || !fetchedContact.id) {
     return { status: 404, body: { error: 'Contact not found', code: 'contact_not_found' } }
+  }
+
+  if (skipOpportunity) {
+    return { status: 200, body: { contactId: fetchedContact.id, opportunityId: null, contactExisted: true } }
   }
 
   const pipelineId = pipelines[toolType as string] || pipelines.patio

@@ -8,7 +8,9 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildLeadSearchRows,
   createOpportunityForExistingContact,
+  leadJobFallbackRows,
   leadOppNameForContact,
+  matchesFirstWordRetry,
   type LeadContact,
   type LeadLookup,
   type LeadMappedOpp,
@@ -315,4 +317,125 @@ Deno.test("createOpportunityForExistingContact: opp creation failure → 500 ech
   assertEquals(result.body.contactId, "ct-2");
   assertEquals(result.body.opportunityId, null);
   assertEquals(result.body.contactExisted, true);
+});
+
+Deno.test("createOpportunityForExistingContact: skipOpportunity → contact verified, no opp created", async () => {
+  const { ghl, calls } = makeGhlMock({
+    contact: () => ({ contact: { id: "ct-3", firstName: "Dana", lastName: "Ruiz" } }),
+    // opp handler omitted → any /opportunities/ call would throw "unexpected opportunity create"
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-3",
+    toolType: "fencing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    skipOpportunity: true,
+    ghl,
+  });
+
+  assertEquals(result.status, 200);
+  assertEquals(result.body, { contactId: "ct-3", opportunityId: null, contactExisted: true });
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].path, "/contacts/ct-3");
+});
+
+Deno.test("createOpportunityForExistingContact: skipOpportunity falsy → opportunity still created", async () => {
+  const { ghl } = makeGhlMock({
+    contact: () => ({ contact: { id: "ct-4", firstName: "Owen", lastName: "Pike" } }),
+    opp: () => ({ opportunity: { id: "opp-4" } }),
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-4",
+    toolType: "fencing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    skipOpportunity: false,
+    ghl,
+  });
+
+  assertEquals(result.status, 200);
+  assertEquals(result.body.opportunityId, "opp-4");
+});
+
+Deno.test("createOpportunityForExistingContact: 500 whose body says 'not found' → 502, not contact_not_found", async () => {
+  const { ghl } = makeGhlMock({
+    contact: () => {
+      throw new Error('GHL 500: {"message":"Pipeline not found"}');
+    },
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-5",
+    toolType: "fencing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 502);
+  assertEquals((result.body as { code: string }).code, "contact_fetch_failed");
+});
+
+Deno.test("createOpportunityForExistingContact: 4xx whose body says 'not found' → contact_not_found 404", async () => {
+  const { ghl } = makeGhlMock({
+    contact: () => {
+      throw new Error('GHL 422: {"message":"Contact not found"}');
+    },
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-6",
+    toolType: "fencing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 404);
+  assertEquals((result.body as { code: string }).code, "contact_not_found");
+});
+
+Deno.test("matchesFirstWordRetry: keeps empty-lastName contact DEV-36 targets, drops unrelated same-first-name matches", () => {
+  // "Louisa Webb" in GHL with an empty lastName — the miss DEV-36 exists to fix.
+  assertEquals(matchesFirstWordRetry({ firstName: "Louisa", lastName: "" }, "Louisa Webb"), true);
+  // full name contains the query
+  assertEquals(matchesFirstWordRetry({ firstName: "Louisa", lastName: "Webb" }, "louisa webb"), true);
+  // a different Louisa: firstName equals the first word → still kept (DEV-36 parity)
+  assertEquals(matchesFirstWordRetry({ firstName: "Louisa", lastName: "Chen" }, "Louisa Webb"), true);
+  // unrelated contact swept in by the broad first-word query → dropped
+  assertEquals(matchesFirstWordRetry({ firstName: "Marco", lastName: "Louisano" }, "Louisa Webb"), false);
+});
+
+Deno.test("leadJobFallbackRows: jobs rows → contact-only lead Rows, deduped by contact id", () => {
+  const rows = leadJobFallbackRows([
+    { id: "job-1", client_name: "Louisa Webb", client_phone: "0400111222", client_email: "l@x.com", site_suburb: "Joondalup", ghl_contact_id: "ct-1", job_number: "SWF-26001", scope_json: { runs: [1] } },
+    { id: "job-0", client_name: "Louisa Webb", ghl_contact_id: "ct-1", job_number: "SWF-25009", scope_json: {} },
+    { id: "job-2", client_name: "Louisa Webber", ghl_contact_id: null, job_number: null, scope_json: null },
+  ]);
+
+  assertEquals(rows.length, 2);
+  assertEquals(rows[0], {
+    id: null,
+    contactId: "ct-1",
+    name: "Louisa Webb",
+    contactName: "Louisa Webb",
+    contactEmail: "l@x.com",
+    contactPhone: "0400111222",
+    contactAddress: "",
+    contactCity: "Joondalup",
+    stageName: "",
+    updatedAt: null,
+    supabaseJobId: "job-1",
+    hasScope: true,
+    jobNumber: "SWF-26001",
+    isContactOnly: true,
+    lookupFailed: false,
+  });
+  // no ghl contact id → still a contact-only row, contactId blank
+  assertEquals(rows[1].contactId, "");
+  assertEquals(rows[1].supabaseJobId, "job-2");
+  assertEquals(rows[1].hasScope, false);
+  assertEquals(rows[1].isContactOnly, true);
 });

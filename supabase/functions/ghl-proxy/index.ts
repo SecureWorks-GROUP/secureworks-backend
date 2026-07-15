@@ -55,6 +55,8 @@ import {
   isRealJobRef,
   isSameOrg,
   isProfileRequestBoundToJwt,
+  leadJobFallbackRows,
+  matchesFirstWordRetry,
   normalizeIdentity,
   requestedBaseScopeHash,
   requiresBaseScopeCursor,
@@ -172,11 +174,12 @@ async function ghl(path: string, init: RequestInit = {}) {
 
 // AbortSignal.timeout() rejects with a DOMException named 'TimeoutError';
 // a manual controller.abort() surfaces as 'AbortError'. Detect both so
-// lead_search can degrade a row or return a 504 instead of a 500.
+// lead_search can degrade a row or return a 504 instead of a 500. Name-based
+// only: a ghl() rejection message embeds the upstream response body, so a text
+// match would classify a GHL error whose body says "aborted" as a timeout.
 function isTimeoutError(e: unknown): boolean {
   const name = (e as { name?: string } | null)?.name
-  if (name === 'TimeoutError' || name === 'AbortError') return true
-  return /\b(timed out|aborted|signal timed out|the operation was aborted)\b/i.test(String((e as Error)?.message || ''))
+  return name === 'TimeoutError' || name === 'AbortError'
 }
 
 // Normalize Australian phone number for dedup
@@ -320,6 +323,52 @@ async function fetchOpportunityPages(args: {
   }
 
   return { opportunities, pagesScanned, total }
+}
+
+// lead_search's last resort when GHL contacts search (incl. the first-word retry)
+// finds nothing: the same org-scoped jobs ilike search the `search_contacts`
+// action uses, shaped into the lead Row contract. Pipeline-typed so supabaseJobId
+// stays loadable by the tool that asked. Non-blocking — a Supabase failure yields
+// no rows, never an error response.
+async function leadSearchJobsFallback(args: {
+  sb: any
+  q: string
+  pipeline: string
+  orgScoped: boolean
+  orgId?: string
+  limit: number
+}): Promise<any[]> {
+  const { sb, q, pipeline, orgScoped, orgId, limit } = args
+  const COLUMNS = 'id, client_name, client_phone, client_email, site_suburb, ghl_contact_id, job_number, scope_json, created_at'
+
+  const scoped = () => {
+    let qy = sb.from('jobs').select(COLUMNS)
+    if (orgScoped) qy = qy.eq('org_id', orgId)
+    if (pipeline) qy = qy.eq('type', pipeline)
+    return qy.order('created_at', { ascending: false })
+  }
+
+  try {
+    const { data: exact } = await scoped()
+      .or(`client_name.ilike.%${q}%,client_phone.ilike.%${q}%,site_suburb.ilike.%${q}%,client_email.ilike.%${q}%`)
+      .limit(20)
+
+    let rows = exact || []
+    if (rows.length === 0 && q.includes(' ')) {
+      const words = q.split(/\s+/).filter((w: string) => w.length >= 2)
+      if (words.length >= 2) {
+        let wordQuery = scoped()
+        for (const word of words) wordQuery = wordQuery.ilike('client_name', `%${word}%`)
+        const { data: wordRows } = await wordQuery.limit(20)
+        rows = wordRows || []
+      }
+    }
+
+    return leadJobFallbackRows(rows).slice(0, limit)
+  } catch (e) {
+    console.log('[ghl-proxy] lead_search jobs fallback failed (non-blocking):', e)
+    return []
+  }
 }
 
 // ── Phonetic/fuzzy name variant generator (DEV-CONTACT-FUZZY-SEARCH) ──
@@ -859,6 +908,21 @@ serve(async (req: Request) => {
           return json({ error: 'ghl_contacts_search_failed', code: 'ghl_contacts_search_failed' }, 502)
         }
 
+        // DEV-36: GHL misses "Louisa Webb" when the contact's lastName is empty.
+        // Retry the first word only and filter client-side. Zero-result path only,
+        // so the ~1-3s fast path is unaffected; a retry failure degrades to the
+        // Supabase fallback below rather than failing the request.
+        if (contactsRaw.length === 0 && q.includes(' ')) {
+          const firstWord = q.split(/\s+/)[0]
+          try {
+            const retryUrl = `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(firstWord)}&limit=20`
+            const retryResult = await ghl(retryUrl, { signal: AbortSignal.timeout(10000) })
+            contactsRaw = (retryResult.contacts || []).filter((c: any) => matchesFirstWordRetry(c, q))
+          } catch (e) {
+            console.log('[ghl-proxy] lead_search first-word retry failed:', isTimeoutError(e) ? '(timeout)' : (e as Error).message)
+          }
+        }
+
         const contacts = contactsRaw
           .map((c: any) => ({
             id: c.id,
@@ -871,7 +935,13 @@ serve(async (req: Request) => {
           .filter((c: any) => c.id)
           .slice(0, maxContacts)
 
-        if (contacts.length === 0) return json({ opportunities: [], _mode: 'contact_search' })
+        // GHL knows nothing about this query — fall back to the org-scoped jobs
+        // table so a client whose GHL contact is missing/renamed is still findable.
+        // These rows carry no verified opportunity, so they stay contact-only.
+        if (contacts.length === 0) {
+          const rows = await leadSearchJobsFallback({ sb, q, pipeline, orgScoped, orgId: authProfile?.org_id, limit: maxContacts })
+          return json({ opportunities: rows, _mode: 'contact_search' })
+        }
 
         // Stage names (8s; resolveStages swallows abort → blank stage names, never fails)
         const stages = await resolveStages(pipelineId, AbortSignal.timeout(8000))
@@ -1793,7 +1863,8 @@ serve(async (req: Request) => {
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
       // a NEW opportunity in the pipeline. oppName is built from the FETCHED
-      // contact identity, never from the (empty) request body.
+      // contact identity, never from the (empty) request body. skipOpportunity
+      // still suppresses opportunity creation, as on the no-contactId path.
       const providedContactId = typeof body.contactId === 'string' ? body.contactId.trim() : ''
       if (providedContactId) {
         const result = await createOpportunityForExistingContact({
@@ -1801,6 +1872,7 @@ serve(async (req: Request) => {
           toolType,
           locationId: GHL_LOCATION_ID,
           pipelines: PIPELINES,
+          skipOpportunity,
           ghl,
         })
         console.log('[ghl-proxy] create_contact_and_opportunity: provided contact', providedContactId, '→', result.status, result.body.code || result.body.opportunityId || '')
