@@ -66,10 +66,18 @@ serve(async (req) => {
     // is nothing to alert on.
 
     // Check 2: Unresolved old alerts (older than 48h)
+    // "Unresolved" means neither dismissed NOR resolved. This counted only
+    // dismissed_at, so an alert that had been resolved still counted as stale.
+    // That matters now that resolve_stale_ai_alerts() (migration 20260715000002)
+    // is what auto-clears alerts older than 7 days: it sets resolved_at and
+    // deliberately leaves dismissed_at alone, so without the resolved_at filter
+    // the reaper's work was invisible here and this check would still climb to
+    // 'critical' and Telegram-spam the admin every 30 minutes.
     const { count: staleAlerts } = await client
       .from('ai_alerts')
       .select('id', { count: 'exact', head: true })
       .is('dismissed_at', null)
+      .is('resolved_at', null)
       .lt('created_at', new Date(Date.now() - 48 * 3600000).toISOString())
 
     checks.stale_alerts = {

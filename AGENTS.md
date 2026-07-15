@@ -20,11 +20,63 @@ Invariants (do not regress):
   `acceptance_invoice_authorise_failed` job_event, and a `{ success:false }` return
   that the accept flow handles gracefully (acceptance is still confirmed to the
   client, just without a payment link).
-- The debt-followup chase cron (`daily-digest` "Unpaid Deposit Chasers") only acts
-  on `AUTHORISED` deposits (positive filter) — any non-AUTHORISED status means an
-  unpayable link, never chase. Likewise `sendPaymentLink` (ops-api
-  `send_payment_link`) throws a 409 for any non-AUTHORISED invoice, and the cron
-  only records "reminder sent" when the send actually succeeded.
+- Only `AUTHORISED` deposits have a payable link — any non-AUTHORISED status means
+  an unpayable link, so never chase or send one. `sendPaymentLink` (ops-api
+  `send_payment_link`) enforces this with a 409 for any non-AUTHORISED invoice.
+  (The `daily-digest` "Unpaid Deposit Chasers" cron that shared this invariant no
+  longer runs — see "daily-digest is OFF" below.)
+
+## daily-digest is OFF
+
+Its 6 cron jobs (`daily-digest`, `intraday-nudge-check`, `stale-followup`,
+`eod-followup-5pm`, `eod-escalation-7pm`, `shaun-morning-brief`) were unscheduled
+in migration `20260715000001`. The morning brief, nudges, stale/EOD follow-ups,
+deposit chasers, weekly pulse and CEO brief no longer run.
+
+Nothing was deleted — the function still serves on-demand calls and
+`trigger_daily_digest()` still exists — so this is reversible by re-running the
+original `cron.schedule()` statements. Do not re-add cron callers without a
+decision.
+
+The digest's default path was a kitchen sink carrying work unrelated to digests.
+When touching any of this, know:
+
+- **`ai_alerts` is NOT daily-digest-owned.** It has live writers (ops-api trade
+  issues, variation approvals, low satisfaction, scoper price updates;
+  telegram-bot keyword alerts) and readers (ops-api dismiss/resolve, ops-ai +
+  agent-runner `get_ai_alerts`, system-health). Never drop it.
+- **Two things together stop system-health Telegram-spamming the admin**, and
+  breaking either brings the spam back:
+  1. The digest's 7-day auto-resolver was re-homed to `resolve_stale_ai_alerts()`
+     on the `ai-alerts-stale-reaper` cron (`20260715000002`). It sets
+     `resolved_at` and leaves `dismissed_at` alone (parity with the digest, so
+     auto-resolved stays distinguishable from human-resolved).
+  2. system-health's stale-alerts count filters `resolved_at IS NULL` as well as
+     `dismissed_at IS NULL`. It previously counted only `dismissed_at`, so the
+     reaper's work was invisible to it and the check still climbed to `critical`
+     at ≥30 alerts >48h, firing an unthrottled Telegram alert every 30 min.
+- **`weekly_reports` is orphaned** — the digest was its only writer. system-health's
+  "digest not run" check was removed with the digest, since it would alarm forever.
+- **The AI graduation-downgrade safety net (`checkGraduationDowngrades()`) is off**
+  by decision, and was deliberately not re-homed.
+- **Completion packs are not being sent, and were not before either.** The digest's
+  sweep (`index.ts:2749`) was the only automated caller of `completion-pack`, and it
+  is dormant now the crons are off — but it never worked anyway (see below). Repair
+  is deferred to its own task. Anything reviving it must handle: deposit invoices are
+  `ACCREC` with `${job_number}-DEP${pct}` references, so a paid *deposit* satisfies a
+  naive "final invoice is paid" test; no job carries a `job.completion_pack_sent`
+  dedup event, so an unguarded first run would backfill all of history.
+
+## xero_invoices column names
+
+The real columns are `invoice_date`, `invoice_type` and `fully_paid_on` (see
+`20250301000003_reporting_schema.sql`). `date`, `type` and `fully_paid_on_date`
+have never existed. PostgREST 400s on an unknown column, and callers that ignore
+the error read `data` as null — which is how daily-digest's completion-pack sweep
+looked healthy while sending nothing for its entire life. `daily-digest/index.ts`
+still contains those bogus names; harmless while it is off, but they must be fixed
+before it is ever re-enabled. If a `xero_invoices` query mysteriously returns
+nothing, check the column names first.
 
 ## Production Edge Deploy Rule
 
