@@ -56,25 +56,16 @@ serve(async (req) => {
     }
     if (xeroAge >= 180) alerts.push(`Xero sync stale: ${xeroAge} minutes since last update`)
 
-    // Check 2: Daily digest last run
-    const { data: latestDigest } = await client
-      .from('weekly_reports')
-      .select('created_at')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    // The "daily digest last run" check was removed when daily-digest was
+    // retired (migration 20260715000001 unschedules its cron jobs). It read the
+    // newest weekly_reports row and warned at >= 26h; daily-digest was the only
+    // writer of weekly_reports, so with the digest off that row goes permanently
+    // stale and the check would report degraded forever — Telegram-alerting
+    // ADMIN_CHAT_ID every 30 minutes, unthrottled, about a subsystem we turned
+    // off on purpose. The digest not running is now the intended state, so there
+    // is nothing to alert on.
 
-    const digestAge = latestDigest
-      ? Math.round((Date.now() - new Date(latestDigest.created_at).getTime()) / 3600000)
-      : 9999
-    checks.daily_digest = {
-      status: digestAge < 26 ? 'ok' : 'warning',
-      last_run: latestDigest?.created_at || null,
-      age_hours: digestAge,
-    }
-    if (digestAge >= 26) alerts.push(`Daily digest not run in ${digestAge} hours`)
-
-    // Check 3: Unresolved old alerts (older than 48h)
+    // Check 2: Unresolved old alerts (older than 48h)
     const { count: staleAlerts } = await client
       .from('ai_alerts')
       .select('id', { count: 'exact', head: true })
@@ -87,7 +78,7 @@ serve(async (req) => {
     }
     if ((staleAlerts || 0) >= 30) alerts.push(`${staleAlerts} unresolved alerts older than 48 hours`)
 
-    // Check 4: Active annotations count
+    // Check 3: Active annotations count
     const { count: activeAnnotations } = await client
       .from('ai_annotations')
       .select('id', { count: 'exact', head: true })
@@ -98,7 +89,7 @@ serve(async (req) => {
       active_count: activeAnnotations || 0,
     }
 
-    // Check 5: Recent business events (system is generating events)
+    // Check 4: Recent business events (system is generating events)
     const { count: recentEvents } = await client
       .from('business_events')
       .select('id', { count: 'exact', head: true })
