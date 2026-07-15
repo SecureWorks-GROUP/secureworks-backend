@@ -6898,9 +6898,6 @@ async function opsSummary(client: any) {
 // a superset of the blob can only raise fidelity, never flip an answer wrongly.
 // Projected payload is < ~2 kB/row
 // (worst-case observed key sizes: removal 516 B, quote 1.1 kB, siteNotes 437 B).
-//
-// INVARIANT: no alias below may contain the 'asbestos' token — the rebuilt object
-// is stringified, so a matching alias name would match on itself.
 const CAL_SCOPE_PROJECTION = [
   'rd_attach_method:scope_json->attachmentMethod',
   'rd_attach:scope_json->attachment',

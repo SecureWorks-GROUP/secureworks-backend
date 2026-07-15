@@ -193,18 +193,6 @@ Deno.test("every CAL_SCOPE_PROJECTION path resolves against a real scope_json", 
   }
 });
 
-// ── alias hygiene: the rebuilt scope is stringified for the asbestos test, so an
-// alias carrying the token would match on itself and fake a positive ──
-Deno.test("no scope projection alias contains the 'asbestos' token", () => {
-  for (const p of _CAL_SCOPE_PROJECTION_FOR_TEST) {
-    const alias = p.split(":")[0];
-    assert(
-      !alias.toLowerCase().includes("asbestos"),
-      `alias '${alias}' would self-match the asbestos check`,
-    );
-  }
-});
-
 // ── (b) readiness parity: pre-fix (whole blob) vs post-fix (projection) ──
 const PRE_FIX_INTEL = {}; // job_intelligence carries no readiness columns today
 

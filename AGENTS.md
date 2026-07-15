@@ -64,9 +64,7 @@ Rules:
   in `CAL_SCOPE_PROJECTION` despite being inert: absent keys project `null` at ~0
   bytes, and they keep the intended semantics if the scoping tools ever emit them.
 - If the fencing/patio scoping tools add a new FREE-TEXT key, add it to
-  `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it. Never add
-  an alias containing the token `asbestos` — the rebuilt object is stringified,
-  so the alias would match itself.
+  `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it.
 - `calendar_events` `include_financials=true` enumerates columns
   (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
   in sync with the LIVE `calendar_events` view — check
