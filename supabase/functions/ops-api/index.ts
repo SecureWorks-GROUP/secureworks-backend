@@ -6890,9 +6890,13 @@ async function opsSummary(client: any) {
 // so we project only the small free-text-bearing keys and rebuild an object with
 // the ORIGINAL key names before handing it to computeReadiness. The projection is
 // a strict SUBSET of the blob, so the substring test can never gain a false
-// positive; and it loses none in practice — checked against all 465 live
-// scope_json rows, {job.removal, job.quote, job.siteNotes} covers 69/69 of the
-// jobs whose full blob mentions asbestos. Projected payload is < ~2 kB/row
+// positive; and it loses none in practice — replayed over all 2253 live
+// scope_json rows, the projected slice reproduces the full-blob answer for 69/69
+// of the jobs whose blob mentions asbestos (0 lost, 0 gained). {job.removal,
+// job.quote, job.siteNotes} alone account for those hits; job.supplierNotes and
+// the top-level notes/scope keys are projected on top for drift-tolerance, since
+// a superset of the blob can only raise fidelity, never flip an answer wrongly.
+// Projected payload is < ~2 kB/row
 // (worst-case observed key sizes: removal 516 B, quote 1.1 kB, siteNotes 437 B).
 //
 // INVARIANT: no alias below may contain the 'asbestos' token — the rebuilt object
@@ -6935,7 +6939,8 @@ export const _scopeFromProjectionForTest = scopeFromProjection
 // The full calendar_events column list minus scope_json. include_financials used
 // to `select('*')`, which carried the same blob (and the same OOM). Enumerating
 // keeps that branch's response byte-identical while leaving the blob on the DB.
-// Keep in sync with the calendar_events view (see supabase/migrations/*calendar*).
+// Source of truth is the LIVE calendar_events view (information_schema.columns),
+// NOT the migrations — the view has drifted ahead of them. See AGENTS.md.
 const CAL_FINANCIAL_COLUMNS = [
   'assignment_id', 'job_id', 'user_id', 'scheduled_date', 'scheduled_end', 'start_time', 'end_time',
   'assignment_type', 'assignment_status', 'confirmation_status', 'confirmed_at', 'crew_name',

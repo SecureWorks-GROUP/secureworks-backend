@@ -62,6 +62,10 @@ function fatScopeJson() {
   return {
     version: 3,
     tool: "fencing-scoper",
+    attachmentMethod: "Freestanding posts",
+    attachment: "Post and rail",
+    notes: "Gate swings inward",
+    scope: { summary: "Replace 12m boundary fence" },
     job: {
       ref: "SWF-1234",
       client: "Steve Taylor",
@@ -88,26 +92,41 @@ function fatScopeJson() {
   };
 }
 
-// The projected row PostgREST returns for that job under CAL_SCOPE_PROJECTION —
-// each alias is the jsonb path it names, resolved against the blob above.
+// The projected row PostgREST returns for that job, derived from the SHIPPED
+// CAL_SCOPE_PROJECTION rather than from a hand-written copy of it: each entry is
+// parsed as `alias:scope_json->a->b` and that path is walked against the blob,
+// exactly as PostgREST would. So a path that drifts (renamed key, wrong case,
+// wrong nesting) resolves to null here and fails the parity tests, instead of
+// passing green while production silently loses the badge.
+function resolveProjection(entry: string, scope: any): unknown {
+  const segments = entry.slice(entry.indexOf(":") + 1).split("->");
+  assertEquals(
+    segments[0],
+    "scope_json",
+    `projection '${entry}' must read from scope_json`,
+  );
+  let cursor: any = scope;
+  for (const key of segments.slice(1)) {
+    cursor = cursor == null ? undefined : cursor[key];
+  }
+  return cursor ?? null;
+}
+function aliasOf(entry: string) {
+  return entry.slice(0, entry.indexOf(":"));
+}
 function projectedRow(scope: any, over: Record<string, unknown> = {}) {
-  return {
+  const row: Record<string, unknown> = {
     assignment_id: "asg-1",
     job_id: "job-1",
     job_type: "fencing",
     scheduled_date: "2026-07-08",
     assignment_status: "confirmed",
     org_id: "org-1",
-    rd_attach_method: scope?.attachmentMethod ?? null,
-    rd_attach: scope?.attachment ?? null,
-    rd_removal: scope?.job?.removal ?? null,
-    rd_quote: scope?.job?.quote ?? null,
-    rd_site_notes: scope?.job?.siteNotes ?? null,
-    rd_supplier_notes: scope?.job?.supplierNotes ?? null,
-    rd_notes: scope?.notes ?? null,
-    rd_scope: scope?.scope ?? null,
-    ...over,
   };
+  for (const entry of _CAL_SCOPE_PROJECTION_FOR_TEST) {
+    row[aliasOf(entry)] = resolveProjection(entry, scope);
+  }
+  return { ...row, ...over };
 }
 
 // ── (a) the blob must not be selected ──
@@ -120,10 +139,12 @@ Deno.test("calendar query never selects the scope_json blob — light path proje
     !/(^|[\s,])scope_json([\s,]|$)/.test(sel),
     `bare scope_json must not be selected; saw: ${sel}`,
   );
-  assert(
-    sel.includes("rd_removal:scope_json->job->removal"),
-    "readiness keys are projected instead",
-  );
+  for (const entry of _CAL_SCOPE_PROJECTION_FOR_TEST) {
+    assert(
+      sel.includes(entry),
+      `readiness key '${entry}' is projected instead`,
+    );
+  }
   assert(
     !sel.includes("sitePlanImage") && !sel.includes("checklist"),
     "the base64 media keys are never fetched",
@@ -153,6 +174,22 @@ Deno.test("job_intelligence is no longer select('*')", async () => {
   const { client, captured } = calClient([projectedRow(fatScopeJson())]);
   await calendarEvents(client, params());
   assertEquals(captured.selects["job_intelligence"], "job_id");
+});
+
+// ── every projected path must actually resolve. Parity below only exercises the
+// two paths readiness reads, so drift on the other six (projected for
+// drift-tolerance) would otherwise pass unnoticed. The fixture carries every key
+// the projection names, so a null here means the path is wrong. ──
+Deno.test("every CAL_SCOPE_PROJECTION path resolves against a real scope_json", () => {
+  const scope = fatScopeJson();
+  const row: any = projectedRow(scope);
+  for (const entry of _CAL_SCOPE_PROJECTION_FOR_TEST) {
+    const alias = aliasOf(entry);
+    assert(
+      row[alias] != null,
+      `projection '${entry}' resolved to nothing — the fixture carries that key, so the path has drifted`,
+    );
+  }
 });
 
 // ── alias hygiene: the rebuilt scope is stringified for the asbestos test, so an

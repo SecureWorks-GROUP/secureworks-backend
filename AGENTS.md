@@ -56,7 +56,15 @@ Rules:
   so the alias would match itself.
 - `calendar_events` `include_financials=true` enumerates columns
   (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
-  in sync with the view definition in `supabase/migrations/*calendar*`.
+  in sync with the LIVE `calendar_events` view — check
+  `information_schema.columns`, NOT the migrations. The view has drifted ahead of
+  this repo: the newest migration defining it
+  (`20260330000001_calendar_clock_fields.sql`) declares 41 columns, while live has
+  44 — `label`, `visible_to_trades` and `recurrence_group_id` exist in production
+  but in no migration here. `CAL_FINANCIAL_COLUMNS` is correct against live and
+  includes all three. A maintainer who reconciles it against the migration instead
+  would silently drop them from the `include_financials` response. (Closing the
+  migration/view drift itself is a separate task.)
 
 ## `job_intelligence` Has No Readiness Columns
 
