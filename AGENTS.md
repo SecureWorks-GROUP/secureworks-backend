@@ -26,6 +26,54 @@ Invariants (do not regress):
   `send_payment_link`) throws a 409 for any non-AUTHORISED invoice, and the cron
   only records "reminder sent" when the send actually succeeded.
 
+## Never Select `scope_json` In A List/Feed Query
+
+`jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small
+config blob: it averages ~100 kB per row and peaks at 2.6 MB. The bulk is base64
+media parked under `scope_json.job.sitePlanImage` and `scope_json.job.checklist`
+by the scoping tools. Everything else in the blob totals ~1.6 kB on average.
+
+Selecting it across a range is what killed the ops calendar (`ops-api`
+`?action=calendar` → HTTP 546, edge worker OOM): a 9-month window carried 115 MB
+of `scope_json` for 157 kB of actually-used keys.
+
+Rules:
+
+- Single-job reads (`job_detail`, invoicing, PO extraction) may select the blob.
+- Any query returning MANY rows must project only the keys it needs
+  (`select=alias:scope_json->job->someKey`). PostgREST cannot strip keys, and
+  `::text` casts are NOT honoured in filters — only projection bounds the payload.
+- `calendarEvents` uses `CAL_SCOPE_PROJECTION` for this. Readiness reads scope in
+  exactly two places (`evaluateCondition`): `attachment_is_fascia`
+  (`scope.attachmentMethod` / `.attachment`) and `scope_mentions_asbestos`
+  (the token anywhere in `JSON.stringify(scope)`). The projection is a strict
+  subset of the blob, so the substring test can never gain a false positive; it
+  loses none either — verified across all 2253 live `scope_json` rows, the
+  projected slice reproduces the full-blob answer for 69/69 asbestos jobs.
+- If the fencing/patio scoping tools add a new FREE-TEXT key, add it to
+  `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it. Never add
+  an alias containing the token `asbestos` — the rebuilt object is stringified,
+  so the alias would match itself.
+- `calendar_events` `include_financials=true` enumerates columns
+  (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
+  in sync with the view definition in `supabase/migrations/*calendar*`.
+
+## `job_intelligence` Has No Readiness Columns
+
+`computeReadiness` reads `assignment_count`, `po_count`, `wo_count`,
+`deposit_paid`, `all_pos_delivery_confirmed`, `doc_types`, `quoted_amount` and
+`job_type` off `job_intelligence`. Those columns do NOT exist: migration
+`20260319000002_readiness_engine.sql` put them on a materialized view, and
+`20260407000001_job_intelligence.sql` later replaced that MV with a TABLE of
+AI-intelligence fields (`risk_level`, `ai_summary`, `financials`, …) that has none
+of them. PostgREST 400s if you select them by name.
+
+So today every one of those readiness inputs reads `undefined`: only
+`crew_assigned` is real (M4 derives it from the live `assignments[]`), and
+`job_type` falls back to the event row. The PO / work-order / deposit / document
+badges are inert. This is a known open bug, not something to "fix" incidentally —
+restoring it means restoring the columns, and readiness output changes when you do.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one
