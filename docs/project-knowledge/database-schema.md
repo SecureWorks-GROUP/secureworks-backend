@@ -35,7 +35,7 @@
 - **webhook_log** — audit trail for all sync operations
 
 ## Key Views
-- **calendar_events** — joins assignments + jobs + users for calendar rendering
+- **calendar_events** — joins assignments + jobs + users for calendar rendering. Carries `jobs.scope_json` through, so never `select('*')` or select `scope_json` from it across a date range — that OOM-kills the edge worker (see `gotchas.md`). The live view has also drifted ahead of the migrations here (live has 44 columns, the newest migration declares 41); check `information_schema.columns`, not the migrations, before enumerating its columns.
 - **jobs_needing_scheduling** — accepted/quoted jobs with no future assignments
 
 ## Key Functions
