@@ -87,21 +87,26 @@ Rules:
   recreates `calendar_events` with all 44 columns so the migrations match prod —
   and that is a separate task.
 
-## `job_intelligence` Has No Readiness Columns
+## `job_intelligence` Shape Differs Between Live and Migrations
 
 `computeReadiness` reads `assignment_count`, `po_count`, `wo_count`,
 `deposit_paid`, `all_pos_delivery_confirmed`, `doc_types`, `quoted_amount` and
-`job_type` off `job_intelligence`. Those columns do NOT exist: migration
-`20260319000002_readiness_engine.sql` put them on a materialized view, and
-`20260407000001_job_intelligence.sql` later replaced that MV with a TABLE of
-AI-intelligence fields (`risk_level`, `ai_summary`, `financials`, …) that has none
-of them. PostgREST 400s if you select them by name.
+`job_type` off `job_intelligence`. Whether it finds them depends on the database:
 
-So today every one of those readiness inputs reads `undefined`: only
-`crew_assigned` is real (M4 derives it from the live `assignments[]`), and
-`job_type` falls back to the event row. The PO / work-order / deposit / document
-badges are inert. This is a known open bug, not something to "fix" incidentally —
-restoring it means restoring the columns, and readiness output changes when you do.
+- **Migration-provisioned** (fresh `supabase start`, preview branch, CI):
+  `job_intelligence` is the MATERIALIZED VIEW from
+  `20260319000002_readiness_engine.sql`, and it carries all eight. No migration
+  drops it — `20260407000001_job_intelligence.sql` is `CREATE TABLE IF NOT
+  EXISTS`, which silently no-ops against the existing MV since an MV and a table
+  share the relation namespace.
+- **Live production**: a TABLE of AI-intelligence fields (`risk_level`,
+  `ai_summary`, `financials`, …) without those eight. It did not get that way from
+  these migrations.
+
+The two environments genuinely disagree, so code reading `job_intelligence` must
+not hardcode either shape — the calendar uses a plain `select('*')`, which is
+drift-proof in both directions and keeps readiness output identical on each.
+Closing the drift is a separate task.
 
 ## Production Edge Deploy Rule
 

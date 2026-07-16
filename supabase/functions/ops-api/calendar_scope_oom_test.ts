@@ -171,10 +171,14 @@ Deno.test("include_financials=true keeps pricing_json but also drops the scope_j
   assert(sel.includes("xero_invoiced"), "financial columns still selected");
 });
 
-Deno.test("job_intelligence is no longer select('*')", async () => {
+// job_intelligence is the readiness-column MATERIALIZED VIEW on a
+// migration-provisioned DB and a table without those columns on live prod, so
+// select('*') is the only shape that keeps readiness identical on both. Trimming
+// it to an enumeration would silently drop real readiness inputs on the former.
+Deno.test("job_intelligence stays select('*')", async () => {
   const { client, captured } = calClient([projectedRow(fatScopeJson())]);
   await calendarEvents(client, params());
-  assertEquals(captured.selects["job_intelligence"], "job_id");
+  assertEquals(captured.selects["job_intelligence"], "*");
 });
 
 // ── every projected path must actually resolve. Parity below only exercises the

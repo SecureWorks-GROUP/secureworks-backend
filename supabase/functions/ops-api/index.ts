@@ -6915,24 +6915,34 @@ export const _CAL_SCOPE_PROJECTION_FOR_TEST = CAL_SCOPE_PROJECTION
 const CAL_SCOPE_ALIASES = new Set(CAL_SCOPE_PROJECTION.map((p) => p.slice(0, p.indexOf(':'))))
 export const _CAL_SCOPE_ALIASES_FOR_TEST = CAL_SCOPE_ALIASES
 
+// The original scope_json key path each alias came from, derived rather than
+// restated: 'rd_removal:scope_json->job->removal' → ['rd_removal', ['job', 'removal']].
+// Adding an entry to CAL_SCOPE_PROJECTION is therefore sufficient on its own — the
+// fetch, the response-strip list and the rebuild below all follow from it.
+const CAL_SCOPE_PATHS: Array<[string, string[]]> = CAL_SCOPE_PROJECTION.map((p) => {
+  const sep = p.indexOf(':')
+  const segments = p.slice(sep + 1).split('->')
+  return [p.slice(0, sep), segments.slice(1)]
+})
+
 // Rebuild the readiness-relevant slice of scope_json from the projected aliases,
 // under the original key names computeReadiness/evaluateCondition expect.
 // Returns null when nothing projected — matching the old `ev?.scope_json || null`
 // for a job with no scope (evaluateCondition coerces null and {} identically).
 function scopeFromProjection(ev: any): any {
   if (!ev) return null
-  const job: Record<string, any> = {}
-  if (ev.rd_removal != null) job.removal = ev.rd_removal
-  if (ev.rd_quote != null) job.quote = ev.rd_quote
-  if (ev.rd_site_notes != null) job.siteNotes = ev.rd_site_notes
-  if (ev.rd_supplier_notes != null) job.supplierNotes = ev.rd_supplier_notes
-
   const scope: Record<string, any> = {}
-  if (ev.rd_attach_method != null) scope.attachmentMethod = ev.rd_attach_method
-  if (ev.rd_attach != null) scope.attachment = ev.rd_attach
-  if (ev.rd_notes != null) scope.notes = ev.rd_notes
-  if (ev.rd_scope != null) scope.scope = ev.rd_scope
-  if (Object.keys(job).length > 0) scope.job = job
+
+  for (const [alias, path] of CAL_SCOPE_PATHS) {
+    const value = ev[alias]
+    if (value == null || path.length === 0) continue
+    let node = scope
+    for (const key of path.slice(0, -1)) {
+      if (node[key] == null) node[key] = {}
+      node = node[key]
+    }
+    node[path[path.length - 1]] = value
+  }
 
   return Object.keys(scope).length > 0 ? scope : null
 }
@@ -7013,19 +7023,11 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
     client.from('purchase_orders').select(poSelect)
       .eq('org_id', DEFAULT_ORG_ID).gte('confirmed_delivery_date', from).lte('confirmed_delivery_date', to)
       .in('status', ['draft', 'submitted', 'authorised']),
-    // Only the columns computeReadiness reads — it was select('*'), which pulled
-    // ~1.5 kB of AI-intelligence blobs (ai_summary, financials, next_actions, …)
-    // per job in range, none of which readiness touches.
-    // NB: the readiness inputs computeReadiness looks for on this relation
-    // (assignment_count, po_count, wo_count, deposit_paid,
-    // all_pos_delivery_confirmed, doc_types, quoted_amount, job_type) do NOT
-    // exist on it today — migration 20260407000001 replaced the job_intelligence
-    // materialized view (which had them) with a table that does not. So they read
-    // undefined either way, and selecting them here would 400 the query. Hence
-    // job_id alone; crew_assigned already derives from the live assignments[] and
-    // job_type falls back to the event row. See AGENTS.md.
+    // select('*') deliberately: the shape of job_intelligence differs between live
+    // production and a migration-provisioned database, so enumerating columns here
+    // would change readiness output on one of them. See AGENTS.md.
     uniqueJobIds.length > 0
-      ? client.from('job_intelligence').select('job_id').in('job_id', uniqueJobIds)
+      ? client.from('job_intelligence').select('*').in('job_id', uniqueJobIds)
       : Promise.resolve({ data: [] }),
   ])
 
