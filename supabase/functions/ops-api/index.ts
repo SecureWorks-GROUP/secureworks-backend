@@ -6876,6 +6876,101 @@ async function opsSummary(client: any) {
   }
 }
 
+// ── Calendar scope projection (edge-worker OOM fix) ─────────────────────────
+// calendar_events.scope_json averages ~100 kB per row and peaks at 2.6 MB — the
+// bulk is base64 media parked under scope_json.job.sitePlanImage / .checklist.
+// The calendar used to select the whole blob, pull tens of MB into the worker on
+// a wide window, and get killed (HTTP 546) — even though the blob was only ever
+// read to derive the readiness badges and was then stripped from the response.
+//
+// computeReadiness touches scope_json in exactly two places, both in
+// evaluateCondition():
+//   • attachment_is_fascia    → scope.attachmentMethod ?? scope.attachment
+//   • scope_mentions_asbestos → the 'asbestos' token anywhere in JSON.stringify(scope)
+// so we project only the small free-text-bearing keys and rebuild an object with
+// the ORIGINAL key names before handing it to computeReadiness. The projection is
+// a strict SUBSET of the blob, so the substring test can never gain a false
+// positive; and it loses none in practice — replayed over all 2253 live
+// scope_json rows, the projected slice reproduces the full-blob answer for 69/69
+// of the jobs whose blob mentions asbestos (0 lost, 0 gained). {job.removal,
+// job.quote, job.siteNotes} alone account for those hits; job.supplierNotes and
+// the top-level notes/scope keys are projected on top for drift-tolerance, since
+// a superset of the blob can only raise fidelity, never flip an answer wrongly.
+// Projected payload is < ~2 kB/row
+// (worst-case observed key sizes: removal 516 B, quote 1.1 kB, siteNotes 437 B).
+const CAL_SCOPE_PROJECTION = [
+  'rd_attach_method:scope_json->attachmentMethod',
+  'rd_attach:scope_json->attachment',
+  'rd_removal:scope_json->job->removal',
+  'rd_quote:scope_json->job->quote',
+  'rd_site_notes:scope_json->job->siteNotes',
+  'rd_supplier_notes:scope_json->job->supplierNotes',
+  'rd_notes:scope_json->notes',
+  'rd_scope:scope_json->scope',
+]
+export const _CAL_SCOPE_PROJECTION_FOR_TEST = CAL_SCOPE_PROJECTION
+
+// The alias half of each projection entry, derived rather than restated: adding a
+// key to CAL_SCOPE_PROJECTION must never leak the alias into the response shape.
+const CAL_SCOPE_ALIASES = new Set(CAL_SCOPE_PROJECTION.map((p) => p.slice(0, p.indexOf(':'))))
+export const _CAL_SCOPE_ALIASES_FOR_TEST = CAL_SCOPE_ALIASES
+
+// The original scope_json key path each alias came from, derived rather than
+// restated: 'rd_removal:scope_json->job->removal' → ['rd_removal', ['job', 'removal']].
+// Adding an entry to CAL_SCOPE_PROJECTION is therefore sufficient on its own — the
+// fetch, the response-strip list and the rebuild below all follow from it.
+const CAL_SCOPE_PATHS: Array<[string, string[]]> = CAL_SCOPE_PROJECTION.map((p) => {
+  const sep = p.indexOf(':')
+  const segments = p.slice(sep + 1).split('->')
+  return [p.slice(0, sep), segments.slice(1)]
+})
+
+// Rebuild the readiness-relevant slice of scope_json from the projected aliases,
+// under the original key names computeReadiness/evaluateCondition expect.
+// Returns null when nothing projected — matching the old `ev?.scope_json || null`
+// for a job with no scope (evaluateCondition coerces null and {} identically).
+function scopeFromProjection(ev: any): any {
+  if (!ev) return null
+  const scope: Record<string, any> = {}
+
+  for (const [alias, path] of CAL_SCOPE_PATHS) {
+    const value = ev[alias]
+    if (value == null || path.length === 0) continue
+    let node = scope
+    for (const key of path.slice(0, -1)) {
+      if (node[key] == null) node[key] = {}
+      node = node[key]
+    }
+    node[path[path.length - 1]] = value
+  }
+
+  return Object.keys(scope).length > 0 ? scope : null
+}
+export const _scopeFromProjectionForTest = scopeFromProjection
+
+// The full calendar_events column list minus scope_json. include_financials used
+// to `select('*')`, which carried the same blob (and the same OOM). Enumerating
+// keeps that branch's response byte-identical while leaving the blob on the DB.
+// Source of truth is the LIVE calendar_events view (information_schema.columns),
+// NOT the migrations — the view has drifted ahead of them. See AGENTS.md.
+const CAL_FINANCIAL_COLUMNS = [
+  'assignment_id', 'job_id', 'user_id', 'scheduled_date', 'scheduled_end', 'start_time', 'end_time',
+  'assignment_type', 'assignment_status', 'confirmation_status', 'confirmed_at', 'crew_name',
+  'assignment_notes', 'started_at', 'completed_at', 'job_phase', 'last_phase_changed_at',
+  'duration_days', 'clocked_on_at', 'clocked_off_at', 'travel_started_at', 'arrived_at',
+  'break_minutes', 'hours_worked', 'job_type', 'job_number', 'client_name', 'client_phone',
+  'site_address', 'site_suburb', 'job_status', 'org_id', 'ghl_contact_id', 'pricing_json',
+  'legacy', 'assigned_to', 'assigned_phone', 'xero_project_name', 'xero_invoiced', 'xero_expenses',
+  'label', 'visible_to_trades', 'recurrence_group_id',
+]
+
+const CAL_LIGHT_COLUMNS = [
+  'assignment_id', 'job_id', 'user_id', 'job_number', 'client_name', 'site_address', 'site_suburb',
+  'scheduled_date', 'scheduled_end', 'start_time', 'end_time', 'crew_name', 'assigned_to',
+  'assignment_type', 'assignment_status', 'confirmation_status', 'job_type', 'job_status',
+  'ghl_contact_id', 'org_id',
+]
+
 export async function calendarEvents(client: any, params: URLSearchParams) {
   const from = params.get('from') || params.get('start_date') || new Date().toISOString().slice(0, 10)
   const to = params.get('to') || params.get('end_date') || (() => {
@@ -6884,9 +6979,11 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
   const jobType = params.get('type')
   const includeFinancials = params.get('include_financials') === 'true'
 
-  const calSelect = includeFinancials
-    ? '*'
-    : 'assignment_id, job_id, user_id, job_number, client_name, site_address, site_suburb, scheduled_date, scheduled_end, start_time, end_time, crew_name, assigned_to, assignment_type, assignment_status, confirmation_status, job_type, job_status, scope_json, ghl_contact_id, org_id'
+  // scope_json is never selected: readiness reads it via CAL_SCOPE_PROJECTION.
+  const calSelect = [
+    ...(includeFinancials ? CAL_FINANCIAL_COLUMNS : CAL_LIGHT_COLUMNS),
+    ...CAL_SCOPE_PROJECTION,
+  ].join(', ')
 
   // U-O3(a) M3c: window OVERLAP, not start-date containment. A multi-day job
   // whose scheduled_date falls BEFORE `from` but which is still on site inside
@@ -6926,6 +7023,9 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
     client.from('purchase_orders').select(poSelect)
       .eq('org_id', DEFAULT_ORG_ID).gte('confirmed_delivery_date', from).lte('confirmed_delivery_date', to)
       .in('status', ['draft', 'submitted', 'authorised']),
+    // select('*') deliberately: the shape of job_intelligence differs between live
+    // production and a migration-provisioned database, so enumerating columns here
+    // would change readiness output on one of them. See AGENTS.md.
     uniqueJobIds.length > 0
       ? client.from('job_intelligence').select('*').in('job_id', uniqueJobIds)
       : Promise.resolve({ data: [] }),
@@ -6961,18 +7061,21 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
     // Get scope_json for conditional rules (from events data — already have it)
     for (const jobId of uniqueJobIds) {
       const intel = intelMap[jobId] || {}
-      // Find scope_json + pricing_json from the event data (calendar_events view now includes them)
-      const ev = events.find((e: any) => e.job_id === jobId)
-      const scopeJson = ev?.scope_json || null
+      // Find scope + pricing_json from the event data. The scope arrives as the
+      // projected readiness slice (see CAL_SCOPE_PROJECTION), never the full blob.
+      const ev = eventsByJob[jobId]?.[0]
+      const scopeJson = scopeFromProjection(ev)
       const pricingJson = typeof ev?.pricing_json === 'string' ? JSON.parse(ev.pricing_json || '{}') : (ev?.pricing_json || {})
       const jobType = intel.job_type || ev?.job_type || 'patio'
       readiness[jobId] = computeReadiness(jobType, intel, scopeJson, pricingJson, eventsByJob[jobId] || [])
     }
   }
 
-  // Strip heavy fields (scope_json used above for readiness but not needed in response)
+  // Strip the readiness-only fields (used above, not part of the response shape).
+  // scope_json itself is no longer selected; the rd_* aliases replace it.
   const lightEvents = (events || []).map((e: any) => {
     const { scope_json, org_id, ...rest } = e
+    for (const alias of CAL_SCOPE_ALIASES) delete rest[alias]
     return rest
   })
 

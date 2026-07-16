@@ -26,6 +26,88 @@ Invariants (do not regress):
   `send_payment_link`) throws a 409 for any non-AUTHORISED invoice, and the cron
   only records "reminder sent" when the send actually succeeded.
 
+## Never Select `scope_json` In A List/Feed Query
+
+`jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small
+config blob: it averages ~100 kB per row and peaks at 2.6 MB. The bulk is base64
+media parked under `scope_json.job.sitePlanImage` and `scope_json.job.checklist`
+by the scoping tools. Everything else in the blob totals ~1.6 kB on average.
+
+Selecting it across a range is what killed the ops calendar (`ops-api`
+`?action=calendar` → HTTP 546, edge worker OOM): a 9-month window carried 115 MB
+of `scope_json` for 157 kB of actually-used keys.
+
+Rules:
+
+- Single-job reads (`job_detail`, invoicing, PO extraction) may select the blob.
+- Any query returning MANY rows must project only the keys it needs
+  (`select=alias:scope_json->job->someKey`). PostgREST cannot strip keys, and
+  `::text` casts are NOT honoured in filters — only projection bounds the payload.
+- `calendarEvents` uses `CAL_SCOPE_PROJECTION` for this. Readiness reads scope in
+  exactly two places (`evaluateCondition`): `attachment_is_fascia`
+  (`scope.attachmentMethod` / `.attachment`) and `scope_mentions_asbestos`
+  (the token anywhere in `JSON.stringify(scope)`). Only the asbestos one is live —
+  see the `attachment_is_fascia` note below. The projection is a strict
+  subset of the blob, so the substring test can never gain a false positive; it
+  loses none either — verified across all 2253 live `scope_json` rows, the
+  projected slice reproduces the full-blob answer for 69/69 asbestos jobs.
+- `attachment_is_fascia` is INERT in production, like the `job_intelligence`
+  badges below. It reads top-level `scope.attachmentMethod` / `.attachment`, and
+  ZERO of the 2253 live `jobs.scope_json` rows carry either key at any level — the
+  real attachment data sits under `scope_json->config` (99 rows contain the
+  `fascia` token; 13 more under `scope_json->patios`). So the `engineering_doc`
+  badge never fires. This is a PRE-EXISTING bug, not a regression from the
+  projection: the old full-blob path and the projection both read `undefined`,
+  identically. Rewiring it to `scope_json->config` would make 99 rows start firing
+  a badge they don't today — a readiness-output change, so a separate product
+  decision, not an incidental fix. `rd_attach_method` / `rd_attach` are retained
+  in `CAL_SCOPE_PROJECTION` despite being inert: absent keys project `null` at ~0
+  bytes, and they keep the intended semantics if the scoping tools ever emit them.
+- If the fencing/patio scoping tools add a new FREE-TEXT key, add it to
+  `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it.
+- `calendar_events` `include_financials=true` enumerates columns
+  (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
+  in sync with the LIVE `calendar_events` view — check
+  `information_schema.columns`, NOT the migrations. The view has drifted ahead of
+  this repo: the newest migration defining it
+  (`20260330000001_calendar_clock_fields.sql`) declares 41 columns, while live has
+  44 — `label`, `visible_to_trades` and `recurrence_group_id` exist in production
+  but in no migration here. `CAL_FINANCIAL_COLUMNS` is correct against live and
+  includes all three. A maintainer who reconciles it against the migration instead
+  would silently drop them from the `include_financials` response. Note the
+  tradeoff cuts BOTH ways, and the reverse is the sharper one: `select('*')` was
+  drift-proof in both directions, enumeration only in one. Because those three
+  columns exist live but in no migration here, any database provisioned from these
+  migrations — a fresh `supabase start`, a Supabase preview branch, a CI
+  integration env — gets a PostgREST 400 (`column calendar_events.label does not
+  exist`) on `include_financials=true` rather than a response. Production is
+  unaffected (the columns exist there) and no in-repo code calls
+  `include_financials`, which is why this is a documented follow-up and not a
+  blocker. The real fix is closing the migration/view drift — a migration that
+  recreates `calendar_events` with all 44 columns so the migrations match prod —
+  and that is a separate task.
+
+## `job_intelligence` Shape Differs Between Live and Migrations
+
+`computeReadiness` reads `assignment_count`, `po_count`, `wo_count`,
+`deposit_paid`, `all_pos_delivery_confirmed`, `doc_types`, `quoted_amount` and
+`job_type` off `job_intelligence`. Whether it finds them depends on the database:
+
+- **Migration-provisioned** (fresh `supabase start`, preview branch, CI):
+  `job_intelligence` is the MATERIALIZED VIEW from
+  `20260319000002_readiness_engine.sql`, and it carries all eight. No migration
+  drops it — `20260407000001_job_intelligence.sql` is `CREATE TABLE IF NOT
+  EXISTS`, which silently no-ops against the existing MV since an MV and a table
+  share the relation namespace.
+- **Live production**: a TABLE of AI-intelligence fields (`risk_level`,
+  `ai_summary`, `financials`, …) without those eight. It did not get that way from
+  these migrations.
+
+The two environments genuinely disagree, so code reading `job_intelligence` must
+not hardcode either shape — the calendar uses a plain `select('*')`, which is
+drift-proof in both directions and keeps readiness output identical on each.
+Closing the drift is a separate task.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one

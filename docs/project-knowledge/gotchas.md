@@ -32,6 +32,13 @@ Custom Connection OAuth. pg_cron refreshes every 20 min. If you make manual Xero
 ### Edge Function WORKER_LIMIT
 Supabase Edge Functions have compute limits. Heavy operations (backfills, bulk Xero API calls) MUST be batched. Use `?limit=10` pattern and call repeatedly.
 
+### Never select scope_json in a query that returns many rows
+`jobs.scope_json` (and therefore the `calendar_events` view) is NOT a small config blob — it averages ~100 kB per row and peaks at 2.6 MB, because the scoping tools park base64 media under `scope_json.job.sitePlanImage` and `.checklist`.
+
+This killed the Ops calendar: `ops-api?action=calendar` selected the whole blob just to derive the readiness badges, then stripped it from the response. A 9-month window pulled 115 MB into the worker for 157 kB of actually-used keys, and the worker was OOM-killed — surfacing as **HTTP 546**. Narrow windows returned 200, which is why it looked like an infra problem.
+
+**Fix pattern**: single-job reads (`job_detail`, invoicing, scope-to-PO) may select the blob. Any query returning many rows must project only the keys it needs via PostgREST jsonb projection (`select=alias:scope_json->job->someKey`). PostgREST cannot strip keys, and `::text` casts are not honoured in filters — only projection bounds the payload. `calendarEvents()` does this with `CAL_SCOPE_PROJECTION`. Full rules, including the `include_financials` column-enumeration tradeoff, are in `AGENTS.md`.
+
 ### Supabase CLI path
 `/Users/marninstobbe/.local/bin/supabase` — NOT available via `npx` or global PATH.
 
