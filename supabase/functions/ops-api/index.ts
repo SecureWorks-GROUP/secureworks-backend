@@ -579,7 +579,7 @@ async function fetchMakesafeAllowanceInputs(
   // ops_set: latest non-cancelled work order's estimated_hours per job.
   try {
     const { data: wos } = await client.from('work_orders')
-      .select('job_id, estimated_hours, created_at, status')
+      .select('job_id, created_at, status')
       .in('job_id', ids)
       .neq('status', 'cancelled')
       .order('created_at', { ascending: false })
@@ -7349,7 +7349,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
         .select('*')
         .eq('org_id', DEFAULT_ORG_ID)
         .ilike('contact_name', `%${clientName.replace(/'/g, "''")}%`)
-        .order('date', { ascending: false })
+        .order('invoice_date', { ascending: false })
         .limit(20)
       invoices = data || []
     }
@@ -8457,6 +8457,12 @@ async function searchJobs(client: any, params: URLSearchParams) {
       .or(`client_name.ilike.${term},client_email.ilike.${term},client_phone.ilike.${term}`)
       .limit(10),
     // Quote revisions: quote number
+    // BROKEN — left unchanged deliberately, needs a product decision.
+    // quote_revisions has no quote_number column (verified against live schema), so this
+    // query 400s and quote-number search has never returned a row. Dropping the .ilike
+    // would be worse than dead: it would match the first 10 revisions for ANY search term.
+    // The real fix is to route via quote_revisions.job_document_id → job_documents.quote_number
+    // (that column does exist), which is a join rewrite and out of scope for this pass.
     client.from('quote_revisions')
       .select('job_id, quote_number')
       .ilike('quote_number', term)
@@ -17624,11 +17630,16 @@ async function preflightInvoiceCreation(client: any, body: any): Promise<{
   let quoteRevisionId: string | null = null
   let scopeRevisionId: string | null = null
   try {
+    // NEEDS A DECISION: quote_revisions has no superseded_at column (verified against live
+    // schema), so this .is() filter still 400s the query and quoteRevisionId stays null.
+    // There is no equivalent column — supersession may be implicit in `version`/`staged_at`
+    // (highest version = current), but that is a guess, so the filter is left as-is pending
+    // a product call. Ordering below was corrected created_at → staged_at.
     const { data: qr } = await client.from('quote_revisions')
       .select('id')
       .eq('job_id', jobId)
       .is('superseded_at', null)
-      .order('created_at', { ascending: false })
+      .order('staged_at', { ascending: false })
       .limit(1)
       .maybeSingle()
     quoteRevisionId = qr?.id || null
@@ -20992,7 +21003,7 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
   let poMap: Record<string, any> = {}
   if (jobIds.length > 0) {
     const { data: pos } = await client.from('purchase_orders')
-      .select('job_id, delivery_date, delivery_address, notes, status')
+      .select('job_id, delivery_date, notes, status')
       .in('job_id', jobIds)
       .neq('status', 'deleted')
       .order('created_at', { ascending: false })
@@ -21121,7 +21132,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
       .select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
     // Work order data (scope items, instructions)
     client.from('work_orders')
-      .select('id, wo_number, scope_items, special_instructions, scheduled_date, status, estimated_hours, trade_cost, crew_rates')
+      .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
       .eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }).limit(1),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
@@ -26889,9 +26900,9 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   // Check if already submitted
   const { data: existingInvoice } = await client
     .from('trade_invoices')
-    .select('id, xero_bill_number, status')
+    .select('id, xero_bill_number:xero_bill_id, status')
     .eq('user_id', userId)
-    .eq('week_ending', weekEnding)
+    .eq('week_end', weekEnding)
     .maybeSingle()
 
   const subtotal = Math.round(totalHours * rate * 100) / 100
@@ -27328,8 +27339,8 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
   // Get trade invoices that reference this job
   const jobNumber = job?.job_number || ''
   const { data: invoices } = await client.from('trade_invoices')
-    .select('id, user_id, week_ending, subtotal, total, line_items, status, xero_bill_number, users:user_id(name)')
-    .order('week_ending', { ascending: false })
+    .select('id, user_id, week_ending:week_end, subtotal:subtotal_ex, total:total_inc, status, xero_bill_number:xero_bill_id, users:user_id(name)')
+    .order('week_end', { ascending: false })
 
   // Filter to invoices that contain this job's hours
   const jobInvoices = (invoices || []).filter((inv: any) => {
@@ -28534,7 +28545,7 @@ async function createTradeAlert(client: any, userId: string, body: any) {
 
   // Look up job for context
   const { data: job } = await client.from('jobs')
-    .select('id, job_number, client_name, suburb')
+    .select('id, job_number, client_name, suburb:site_suburb')
     .eq('id', jId)
     .single()
 

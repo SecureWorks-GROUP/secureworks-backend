@@ -176,7 +176,7 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
 
       // 1 + 5. Lead response time + pipeline velocity (last 30d)
       sb.from('jobs')
-        .select('id, job_number, client_name, status, created_at, quoted_at, accepted_at, scheduled_start, completed_at, created_by, quoted_value')
+        .select('id, job_number, client_name, status, created_at, quoted_at, accepted_at, scheduled_start:scheduled_at, completed_at, created_by, quoted_value')
         .gte('created_at', thirtyDaysAgo),
 
       // 3. Crew utilization (last 14 days)
@@ -192,21 +192,21 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
 
       // 6. Cash collection speed
       sb.from('xero_invoices')
-        .select('invoice_number, contact_name, total, amount_due, date, due_date, fully_paid_on_date, status, type')
-        .eq('type', 'ACCREC'),
+        .select('invoice_number, contact_name, total, amount_due, date:invoice_date, due_date, fully_paid_on_date:fully_paid_on, status, type:invoice_type')
+        .eq('invoice_type', 'ACCREC'),
 
       // 7. Margin trends — completed jobs with costs
       // Cap 1A fix: 'completed' typo → 'complete'. Canonical status is 'complete'; the prior
       // 'completed' literal silently returned zero rows for ~18 months. Verified via
       // `cio/evidence/cap1-stage-engine-audit-2026-05-01/hardcoded-list-inventory.md` §11.
       sb.from('jobs')
-        .select('id, job_number, job_type, quoted_value, status, completed_at')
+        .select('id, job_number, job_type:type, quoted_value, status, completed_at')
         .eq('status', 'complete')
         .gte('completed_at', new Date(now.getTime() - 180 * 86400000).toISOString().slice(0, 10)),
 
       // 8. Supplier cost trends
       sb.from('purchase_orders')
-        .select('supplier_name, total_amount, created_at')
+        .select('supplier_name, total_amount:total, created_at')
         .gte('created_at', ninetyDaysAgo),
     ])
 
@@ -379,14 +379,14 @@ async function generateObservationReport(sb: any): Promise<string> {
   try {
     const [eventsResult, shadowsResult, feedbackResult] = await Promise.all([
       sb.from('business_events')
-        .select('event_type, payload, metadata, created_at')
-        .gte('created_at', weekAgo)
+        .select('event_type, payload, metadata, created_at:occurred_at')
+        .gte('occurred_at', weekAgo)
         .in('event_type', ['po.created', 'assignment.created', 'job.status_changed', 'invoice.created'])
         .limit(200),
       sb.from('business_events')
-        .select('payload, metadata, created_at')
+        .select('payload, metadata, created_at:occurred_at')
         .eq('event_type', 'ai.shadow_decision')
-        .gte('created_at', weekAgo)
+        .gte('occurred_at', weekAgo)
         .limit(100),
       sb.from('ai_feedback_outcomes')
         .select('feedback_category, human_action, human_modification, created_at')
@@ -468,9 +468,9 @@ async function generateShadowReport(sb: any): Promise<string> {
   try {
     const [shadowsResult, feedbackResult] = await Promise.all([
       sb.from('business_events')
-        .select('payload, created_at')
+        .select('payload, created_at:occurred_at')
         .eq('event_type', 'ai.shadow_decision')
-        .gte('created_at', weekAgo)
+        .gte('occurred_at', weekAgo)
         .limit(100),
       sb.from('ai_feedback_outcomes')
         .select('feedback_category, human_action, human_modification')
@@ -594,9 +594,9 @@ async function runCanaryChecks(sb: any): Promise<{ passed: number; failed: numbe
   const { data: prevCanary } = await sb.from('business_events')
     .select('payload')
     .eq('event_type', 'ai.canary_result')
-    .gte('created_at', lastWeek)
-    .lt('created_at', now.toISOString().slice(0, 10))
-    .order('created_at', { ascending: false })
+    .gte('occurred_at', lastWeek)
+    .lt('occurred_at', now.toISOString().slice(0, 10))
+    .order('occurred_at', { ascending: false })
     .limit(1)
     .maybeSingle()
 
@@ -644,10 +644,10 @@ async function generateLearningDigest(sb: any): Promise<string> {
   try {
     // Get last week's business events for pattern detection
     const { data: events } = await sb.from('business_events')
-      .select('event_type, payload, created_at')
+      .select('event_type, payload, created_at:occurred_at')
       .in('event_type', ['po.created', 'assignment.created', 'job.status_changed'])
-      .gte('created_at', weekAgo)
-      .order('created_at', { ascending: false })
+      .gte('occurred_at', weekAgo)
+      .order('occurred_at', { ascending: false })
       .limit(500)
 
     if (!events || events.length === 0) return ''
@@ -1092,7 +1092,7 @@ async function sendMorningBrief(sb: any, digest: any): Promise<boolean> {
     let jobMap: Record<string, any> = {}
     if (jobIds.length > 0) {
       const { data: jobs } = await sb.from('jobs')
-        .select('id, job_number, client_name, address, suburb, status')
+        .select('id, job_number, client_name, address:site_address, suburb:site_suburb, status')
         .in('id', jobIds)
       for (const j of (jobs || [])) jobMap[j.id] = j
     }
@@ -1695,7 +1695,7 @@ async function generateFinancialSnapshot(sb: any) {
   ] = await Promise.all([
     sb.from('jobs').select('id, job_number, client_name, pricing_json, completed_at, status')
       .eq('org_id', DEFAULT_ORG_ID).eq('status', 'complete').eq('legacy', false),
-    sb.from('xero_invoices').select('id, job_id, contact_name, total, amount_paid, amount_due, status, type, date, due_date')
+    sb.from('xero_invoices').select('id, job_id, contact_name, total, amount_paid, amount_due, status, type:invoice_type, date:invoice_date, due_date')
       .eq('org_id', DEFAULT_ORG_ID),
     sb.from('xero_bank_balances').select('account_name, balance, synced_at')
       .eq('org_id', DEFAULT_ORG_ID).order('synced_at', { ascending: false }).limit(10),
@@ -2082,7 +2082,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       const { data: recentNudge } = await sb.from('business_events')
         .select('id')
         .eq('event_type', 'ai.nudge_sent')
-        .gte('created_at', fourHoursAgo)
+        .gte('occurred_at', fourHoursAgo)
         .limit(1)
 
       if (recentNudge && recentNudge.length > 0) {
@@ -2725,10 +2725,10 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       for (const job of (completedPaid || [])) {
         // Check if final invoice is paid
         const { data: paidInvoice } = await sb.from('xero_invoices')
-          .select('id, fully_paid_on_date')
+          .select('id, fully_paid_on_date:fully_paid_on')
           .ilike('reference', `%${job.job_number}%`)
           .eq('status', 'PAID')
-          .not('fully_paid_on_date', 'is', null)
+          .not('fully_paid_on', 'is', null)
           .maybeSingle()
 
         if (!paidInvoice) continue

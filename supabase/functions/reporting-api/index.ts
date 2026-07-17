@@ -4084,7 +4084,7 @@ async function computeJobIntelligence(sb: any, jobId: string) {
       .eq('job_id', jobId),
     // PO communications
     sb.from('po_communications')
-      .select('id, direction, channel, created_at')
+      .select('id, direction, channel:communication_type, created_at')
       .eq('job_id', jobId)
       .order('created_at', { ascending: false }).limit(20),
     // Inbox events
@@ -4094,8 +4094,9 @@ async function computeJobIntelligence(sb: any, jobId: string) {
       .order('received_at', { ascending: false }).limit(10),
     // AI annotations
     sb.from('ai_annotations')
-      .select('id, annotation_type, severity, content, created_at')
-      .eq('job_id', jobId),
+      .select('id, annotation_type, severity, content:body, created_at')
+      .eq('entity_type', 'job')
+      .eq('entity_id', jobId),
   ])
 
   const job = jobRes.data
