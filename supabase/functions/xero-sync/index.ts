@@ -804,14 +804,21 @@ async function matchUnlinkedInvoices(client: any) {
 
       // Strategy 2: Contact name matches a job client_name exactly
       if (contactName) {
-        const { data: jobs } = await client.from('jobs')
-          .select('id, job_number, client_name, quoted_value, pricing_json')
+        const { data: jobs, error: jobsErr } = await client.from('jobs')
+          .select('id, job_number, client_name, pricing_json')
           .eq('org_id', '00000000-0000-0000-0000-000000000001')
           .eq('legacy', false)
           .ilike('client_name', contactName)
           .not('status', 'in', '("cancelled","lost")')
           .order('created_at', { ascending: false })
           .limit(5)
+
+        // A failed lookup must not read as "no candidate jobs" — that is
+        // indistinguishable from a genuine miss and silently skips the link.
+        if (jobsErr) {
+          console.error(`[xero-sync] Strategy 2 job lookup failed for invoice ${inv.invoice_number} (contact "${contactName}"):`, jobsErr.message)
+          continue
+        }
 
         if (jobs && jobs.length === 1) {
           // Exact single match — high confidence, auto-link
