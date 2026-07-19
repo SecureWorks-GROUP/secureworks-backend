@@ -23,6 +23,11 @@ export interface ScanMarkState {
    * Quarantine is a visible state, NOT a completed scan: the marker stays unset so the
    * item is retried automatically once provider health recovers. */
   terminalQuarantined?: boolean;
+  /** An ITEM-LOCAL permanent failure (a malformed request that no provider recovery can
+   * fix) whose durable visible record — a draft carrying the source evidence and the
+   * typed failure reason — has already been persisted. Only then may it be marked, so it
+   * stops hitting the provider every cycle while remaining manually requeueable. */
+  itemLocalTerminalRecorded?: boolean;
   /** The key is dead/absent, so the model was not called for this email. */
   keyDegradedOrAbsent: boolean;
 }
@@ -30,11 +35,15 @@ export interface ScanMarkState {
 /**
  * The extract-at-most-once rule: mark an email scanned ONLY when it received a usable
  * classification (a valid model result OR a deterministic template parse). EVERY failure
- * mode leaves the marker unset, including a terminal quarantine and a dead/absent key,
- * so no unprocessed source item is ever permanently stamped as scanned. The retry storm
- * is bounded by stopping the provider lane for the cycle, not by consuming the item.
+ * mode leaves the marker unset, including a provider-lane terminal quarantine and a
+ * dead/absent key, so no recoverable source item is ever permanently stamped as scanned.
+ * That retry storm is bounded by stopping the provider lane for the cycle. The single
+ * exception is an item-local permanent failure whose durable visible record already
+ * exists: a rescan can only reproduce the same failure, so it is marked once that record
+ * proves nothing was lost.
  */
 export function scanMarkEligible(s: ScanMarkState): boolean {
+  if (s.itemLocalTerminalRecorded) return true;
   if (s.terminalQuarantined) return false;
   if (s.authFailed || s.transientFailed || s.keyDegradedOrAbsent) return false;
   return s.templateParsed || s.modelValidResult;

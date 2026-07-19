@@ -167,3 +167,33 @@ Deno.test("markEmailsScanned: a chunk error is tolerated (no throw, retries next
   assertEquals(r.marked, 0); // nothing counted as marked on error
   assert(r.errorChunks >= 1); // both chunks errored, but the scan never crashed
 });
+
+// Bounded-retry recovery: a provider outage must stay automatically retryable, while a
+// permanently malformed item stops hitting the provider once its draft is durable.
+Deno.test("scanMarkEligible: provider-lane quarantine stays unscanned and retryable", () => {
+  assertEquals(
+    scanMarkEligible({
+      templateParsed: false,
+      modelValidResult: false,
+      authFailed: true,
+      transientFailed: false,
+      terminalQuarantined: true,
+      itemLocalTerminalRecorded: false,
+      keyDegradedOrAbsent: true,
+    }),
+    false,
+  );
+});
+
+Deno.test("scanMarkEligible: item-local terminal is marked only after its durable record exists", () => {
+  const base = {
+    templateParsed: false,
+    modelValidResult: false,
+    authFailed: false,
+    transientFailed: false,
+    terminalQuarantined: true,
+    keyDegradedOrAbsent: false,
+  };
+  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: false }), false);
+  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: true }), true);
+});

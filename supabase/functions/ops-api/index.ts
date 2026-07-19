@@ -14602,6 +14602,7 @@ async function scanSesMakesafes(client: any) {
   const extractionFailureReasons: ExtractionFailureReason[] = []
   let providerTerminalClassification: ExtractionFailureClassification | null = null
   let quarantinedItems = 0
+  let itemLocalQuarantinedItems = 0
   const quarantinedEmailIds: string[] = []
   // Per-draft auto-file truth. A global "auto_file_enabled:false" hides that some drafts
   // were created and eligible before a later failure, so report the actual split.
@@ -14839,6 +14840,9 @@ async function scanSesMakesafes(client: any) {
     let emailAuthFailed = false
     let emailTransientFailed = false
     let emailTerminalFailed = false
+    // An item-local permanent failure (malformed request). No provider recovery fixes it,
+    // so it is bounded after ONE attempt — but only once its durable draft exists.
+    let emailItemLocalTerminal = false
     let emailFailureClassification: ExtractionFailureClassification | null = null
     const templateSlug = (matchedCompany?.slug || '').toLowerCase()
 
@@ -14972,6 +14976,8 @@ async function scanSesMakesafes(client: any) {
             keyDegraded = true
             keyDegradedReason = failure.reason
             providerTerminalClassification = failure
+          } else {
+            emailItemLocalTerminal = true
           }
           console.error(`[ops-api] make-safe extraction TERMINAL ${failure.reason}; quarantining source item:`, em)
         } else {
@@ -15078,24 +15084,28 @@ async function scanSesMakesafes(client: any) {
     // scanned — WHETHER OR NOT it becomes a draft below. This is the key fix: a
     // non-work-order email that the gate drops (no draft) is still marked here, so it is
     // never re-extracted. Placed BEFORE the gate-drop `continue`s. scanMarkEligible
-    // returns false on ANY failure — auth, transient, terminal quarantine or a dead/absent
-    // key — so those emails stay unmarked and retry when the provider recovers (fail-loud
-    // backfill preserved). Cost is bounded by stopping the lane, not by consuming items.
+    // returns false on every recoverable failure — auth, transient, provider-lane
+    // quarantine or a dead/absent key — so those emails stay unmarked and retry when the
+    // provider recovers (fail-loud backfill preserved). Cost is bounded by stopping the
+    // lane, not by consuming items. An item-local permanent failure is the exception: it
+    // is marked further down, only AFTER its durable draft exists.
     const thisEmailExtractionOk = _scanMarkEligible({
       templateParsed: emailTemplateParsed,
       modelValidResult: emailModelValidResult,
       authFailed: emailAuthFailed,
       transientFailed: emailTransientFailed,
       terminalQuarantined: emailTerminalFailed,
+      itemLocalTerminalRecorded: false,
       keyDegradedOrAbsent: keyDegraded || !ANTHROPIC_API_KEY,
     })
     if (thisEmailExtractionOk && msg._post_id) {
       scannedEmailIds.push(msg._post_id)
     }
-    // Quarantine is visible but NOT scanned: the source item stays pending so the next
-    // scan supplies recovery proof automatically once the provider lane is healthy again.
+    // Provider-lane quarantine is visible but NOT scanned: the source item stays pending
+    // so the next scan supplies recovery proof automatically once the lane is healthy.
     if (emailTerminalFailed) {
       quarantinedItems++
+      if (emailItemLocalTerminal) itemLocalQuarantinedItems++
       if (msg._post_id) quarantinedEmailIds.push(msg._post_id)
     }
 
@@ -15754,6 +15764,24 @@ async function scanSesMakesafes(client: any) {
       }
     }
 
+    // The durable visible record now exists: this draft carries the source evidence and
+    // the typed request_invalid reason. Only now may an item-local permanent failure be
+    // marked scanned, so it stops hitting the provider every two minutes while staying
+    // manually requeueable through reextract_intake_draft. Nothing is discarded.
+    if (
+      emailItemLocalTerminal && msg._post_id && _scanMarkEligible({
+        templateParsed: emailTemplateParsed,
+        modelValidResult: emailModelValidResult,
+        authFailed: emailAuthFailed,
+        transientFailed: emailTransientFailed,
+        terminalQuarantined: emailTerminalFailed,
+        itemLocalTerminalRecorded: true,
+        keyDegradedOrAbsent: keyDegraded || !ANTHROPIC_API_KEY,
+      }) && !scannedEmailIds.includes(msg._post_id)
+    ) {
+      scannedEmailIds.push(msg._post_id)
+    }
+
     // BUG 1 — register the new draft in the in-memory index so a SECOND copy of the
     // same email later in THIS batch (same ref+company) is also skipped.
     _registerIntakeDraft(
@@ -15982,13 +16010,17 @@ async function scanSesMakesafes(client: any) {
       terminal_failures: terminalExtractionFailures,
       retryable_failures: retryableExtractionFailures,
       quarantined: quarantinedItems,
-      quarantine_scan_marker_set: false,
+      // Provider-lane quarantine leaves the marker unset and recovers on the next scan.
+      // Item-local permanent failures are marked once their draft is durable and recover
+      // through an explicit requeue.
+      item_local_quarantined: itemLocalQuarantinedItems,
       quarantine_recovery_action: 'automatic_rescan',
+      item_local_recovery_action: 'reextract_intake_draft',
       quarantined_source_ids: quarantinedEmailIds.slice(0, 100),
     },
-    // D-d: the DB kill-switch state. Suppression is per draft, so report the actual
-    // split rather than a single global claim that contradicts what the run did.
-    auto_file_enabled: autoFileEnabled,
+    // D-d: whether auto-file was permitted this run (DB kill switch AND not degraded),
+    // unchanged. Suppression is per draft, so the actual split is reported alongside it.
+    auto_file_enabled: autoFileEnabled && !extractionDegraded,
     auto_file_eligible_drafts: autoFileEligibleDrafts,
     auto_file_suppressed_drafts: autoFileSuppressedDrafts,
     makesafe_candidates: processedCandidates,
@@ -16063,7 +16095,7 @@ async function intakeHealth(client: any) {
     .select('last_successful_sync_at, last_attempt_at, mode, pending_attachments, last_error')
     .eq('mailbox', _SES_MAILBOX).maybeSingle()
   const { data: alarmSettings, error: alarmSettingsError } = await client.from('makesafe_notify_settings')
-    .select('alarm_enabled, alarm_phones').eq('org_id', DEFAULT_ORG_ID).maybeSingle()
+    .select('alarm_enabled, alarm_phones').eq('id', true).maybeSingle()
   // The observed edge-gateway 401 lives in request logs, not a durable application row.
   // Do not turn absence of that evidence into "ready": authentication remains explicitly
   // unverified until a read-side gateway-status source is wired or a supervised drill is

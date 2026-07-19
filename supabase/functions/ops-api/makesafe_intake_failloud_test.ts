@@ -199,3 +199,67 @@ Deno.test("regression: a wholesale retryable cycle degrades health so nothing cl
     { status: "degraded", reason: "wholesale_rate_limited" },
   );
 });
+
+Deno.test("regression: a text-only 401 with no status property is still a dead key", () => {
+  const failure = classifyFailure(
+    new Error("Request failed with status 401"),
+  );
+  assertEquals(failure.reason, "auth_failed");
+  assertEquals(failure.stopProviderLane, true);
+  assert(isAuthFailure(new Error("Request failed with status 403")));
+});
+
+Deno.test("regression: one isolated retryable failure is retrying, not degraded", () => {
+  assertEquals(
+    cycleHealth({
+      attempts: 1,
+      successes: 0,
+      terminalFailures: 0,
+      retryableFailures: 1,
+      reasons: ["rate_limited"],
+      providerLaneTerminalReason: null,
+    }),
+    { status: "ok", reason: null },
+  );
+  // Two failed attempts with zero successes is corroborating wholesale evidence.
+  assertEquals(
+    cycleHealth({
+      attempts: 2,
+      successes: 0,
+      terminalFailures: 0,
+      retryableFailures: 2,
+      reasons: ["rate_limited", "rate_limited"],
+      providerLaneTerminalReason: null,
+    }).status,
+    "degraded",
+  );
+});
+
+Deno.test("regression: a single item-local request_invalid does not degrade the cycle", () => {
+  assertEquals(
+    cycleHealth({
+      attempts: 1,
+      successes: 0,
+      terminalFailures: 1,
+      retryableFailures: 0,
+      reasons: ["request_invalid"],
+      providerLaneTerminalReason: null,
+    }),
+    { status: "ok", reason: null },
+  );
+});
+
+Deno.test("regression: item-local request_invalid recovers by requeue, provider outages by rescan", () => {
+  const itemLocal = failureState(
+    classifyFailure({ status: 400, message: "invalid_request_error" }),
+    "malformed",
+  );
+  assertEquals(itemLocal.reason, "request_invalid");
+  assertEquals(itemLocal.recovery_action, "manual_requeue");
+  assertEquals(itemLocal.manual_recovery_action, "reextract_intake_draft");
+  const providerWide = failureState(
+    classifyFailure({ status: 400, message: "exceed your specified API usage limits" }),
+    "cap",
+  );
+  assertEquals(providerWide.recovery_action, "automatic_rescan");
+});

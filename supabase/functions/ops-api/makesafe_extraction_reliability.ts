@@ -53,7 +53,10 @@ export function classifyExtractionFailure(
   }
   if (
     status === 401 || status === 403 ||
-    /authentication|permission_error|invalid x-api-key|invalid api key|invalid_api_key|unauthorized/
+    // The bare 401/403 alternatives matter: a fetch-layer wrapper may surface the status
+    // only as text ("Request failed with status 401") with no status property, and that
+    // must still fail loud as a dead key rather than silently re-spraying the provider.
+    /authentication|permission_error|invalid x-api-key|invalid api key|invalid_api_key|unauthorized|401|403/
       .test(hay)
   ) {
     return {
@@ -142,8 +145,13 @@ export interface ExtractionCycleOutcome {
   providerLaneTerminalReason?: ExtractionFailureReason | null;
 }
 
-/** Health is degraded for a terminal provider-lane failure, or when every actual
- * extraction attempt in the cycle failed. A partial success remains healthy. */
+/** A single isolated retryable failure is RETRYING, not systemic degradation: it stays
+ * unscanned, cannot auto-file, and the next scan retries it. Wholesale degradation needs
+ * corroborating evidence — at least this many failed attempts with zero successes. */
+export const WHOLESALE_FAILURE_MIN_ATTEMPTS = 2;
+
+/** Health is degraded immediately for a terminal provider-lane failure, or when a
+ * wholesale run of attempts all failed. A partial success remains healthy. */
 export function extractionCycleHealth(outcome: ExtractionCycleOutcome): {
   status: "ok" | "degraded";
   reason: string | null;
@@ -152,7 +160,7 @@ export function extractionCycleHealth(outcome: ExtractionCycleOutcome): {
     return { status: "degraded", reason: outcome.providerLaneTerminalReason };
   }
   if (
-    outcome.attempts > 0 && outcome.successes === 0 &&
+    outcome.attempts >= WHOLESALE_FAILURE_MIN_ATTEMPTS && outcome.successes === 0 &&
     outcome.terminalFailures + outcome.retryableFailures >= outcome.attempts
   ) {
     const unique = [...new Set(outcome.reasons)];
@@ -176,9 +184,13 @@ export function extractionFailureState(
     retry_state: classification.quarantine ? "quarantined" : "retryable",
     automatic_attempts: 1,
     recoverable: true,
-    // Quarantine is visible, not consumed: the source item's scan marker stays unset, so
-    // recovery is automatic on the next scan. reextract_intake_draft only accelerates it.
-    recovery_action: "automatic_rescan",
+    // Provider-lane quarantine is visible, not consumed: the source item's scan marker
+    // stays unset, so recovery is automatic once provider health returns. An ITEM-LOCAL
+    // permanent failure cannot heal on a rescan, so it is bounded after one attempt and
+    // recovers through an explicit requeue instead of hitting the provider forever.
+    recovery_action: !classification.quarantine || classification.stopProviderLane
+      ? "automatic_rescan"
+      : "manual_requeue",
     manual_recovery_action: classification.quarantine
       ? "reextract_intake_draft"
       : null,
