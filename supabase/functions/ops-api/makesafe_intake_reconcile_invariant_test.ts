@@ -271,10 +271,56 @@ Deno.test("invariant hostile near-collision: distinct PO deliverables sharing a 
   assertEquals(inv.unaccounted[0].canonical_po_ref, "PO-56397");
 });
 
-Deno.test("invariant: bare 'Job No <NNNNN>' archetype is accounted by a live job", () => {
+Deno.test("invariant: bare 'Job No <NNNNN>' archetype is accounted by a same-sender draft", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "mailbox-sanitized-jobno-68592",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-68592",
+      graph_message_id: "AAMk-sanitized-jobno-68592",
+      external_ref: "68592",
+      from_email: "WorkOrders@AJS.build",
+      subject: "Make Safe - Balga - Job No 68592",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-68592" });
+  assertEquals(inv.items[0].raw_reference, "Job No 68592");
+});
+
+Deno.test("invariant hostile near-collision: a bare job number never matches an unrelated builder's draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68592-ajs",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-mlb-68592",
+      graph_message_id: "AAMk-sanitized-mlb-68592",
+      external_ref: "68592",
+      from_email: "jobs@mlbuilders.com.au",
+      subject: "Make Safe - Kelmscott - Job No 68592",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build", "mlbuilders.com.au"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: a bare job number never matches a global job row", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68592-nojob",
       subject: "Make Safe - Balga - Job No 68592",
       from_email: "workorders@ajs.build",
     }],
@@ -283,10 +329,52 @@ Deno.test("invariant: bare 'Job No <NNNNN>' archetype is accounted by a live job
     senderPatterns: ["ajs.build"],
   });
 
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: 'Our Ref' shared across builders stays separate", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-ourref-41288",
+      subject: "Make Safe - Our Ref: 41288 - Yokine",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-mlb-ourref-41288",
+      graph_message_id: "AAMk-sanitized-mlb-ourref-41288",
+      external_ref: "41288",
+      from_email: "jobs@mlbuilders.com.au",
+      subject: "Make Safe - Our Ref: 41288 - Gosnells",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build", "mlbuilders.com.au"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant: a short labelled work order ref still matches its same-sender draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-wo-1234",
+      subject: "Make Safe - Work Order: 1234 - Dianella",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-wo-1234",
+      graph_message_id: "AAMk-sanitized-wo-1234",
+      external_ref: "1234",
+      from_email: "workorders@ajs.build",
+      subject: "Make Safe - Work Order: 1234 - Dianella",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
   assertEquals(inv.counts.unaccounted, 0);
-  assertEquals(inv.items[0].classification, "accounted_alias_revision");
-  assertEquals(inv.items[0].evidence, { kind: "job", id: "job-68592" });
-  assertEquals(inv.items[0].raw_reference, "Job No 68592");
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-wo-1234" });
 });
 
 Deno.test("invariant: known ref outside the builder claim vocabulary is accounted by a draft", () => {

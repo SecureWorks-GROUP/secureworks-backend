@@ -654,7 +654,7 @@ function fallbackIdentityKeys(
 ): string[] {
   const keys = new Set<string>();
   const ref = normaliseRef(externalRef);
-  if (ref.length >= 5 && !isAddressLikeToken(ref)) keys.add(`REF:${ref}`);
+  if (/\d{3,}/.test(ref) && !isAddressLikeToken(ref)) keys.add(`REF:${ref}`);
   if (/^\d{3,7}$/.test(ref)) keys.add(`JOB:${ref}`);
   const text = String(subject || "");
   const jobNo = subjectJobNumber(text);
@@ -716,11 +716,24 @@ function identityRelation(
 interface CapturedIdentity<T> {
   entry: T;
   identity: ReconcileIdentity;
+  /**
+   * Normalised sender the capture came from. A bare job/reference number is only
+   * unique inside one builder's numbering, so the token fallback is scoped to it.
+   */
+  scope: string;
 }
 
 interface CapturedIndex<T> {
   byClaim: Map<string, CapturedIdentity<T>[]>;
   byKey: Map<string, CapturedIdentity<T>>;
+}
+
+function normaliseSenderScope(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function scopedKey(scope: string, key: string): string {
+  return `${scope} ${key}`;
 }
 
 function indexCapturedIdentities<T>(
@@ -734,8 +747,11 @@ function indexCapturedIdentities<T>(
       if (arr) arr.push(c);
       else byClaim.set(c.identity.claim, [c]);
     }
+    // No sender evidence means no same-builder proof, so the row is claim-only.
+    if (!c.scope) continue;
     for (const key of c.identity.keys) {
-      if (!byKey.has(key)) byKey.set(key, c);
+      const k = scopedKey(c.scope, key);
+      if (!byKey.has(k)) byKey.set(k, c);
     }
   }
   return { byClaim, byKey };
@@ -744,6 +760,7 @@ function indexCapturedIdentities<T>(
 function findCapturedIdentity<T>(
   source: ReconcileIdentity,
   index: CapturedIndex<T>,
+  sourceScope: string,
 ): { entry: T; relation: "exact" | "claim_po_alias" } | null {
   // A canonical claim is the strongest identity we have: resolve it exclusively so
   // the weaker token fallback can never route around explicit PO separation.
@@ -754,8 +771,12 @@ function findCapturedIdentity<T>(
     }
     return null;
   }
+  // A bare number carries no builder namespace, so it may only resolve against a
+  // capture from the exact same sender. Fail open across builders: reporting work
+  // as genuinely unaccounted is recoverable, collapsing two builders' jobs is not.
+  if (!sourceScope) return null;
   for (const key of source.keys) {
-    const c = index.byKey.get(key);
+    const c = index.byKey.get(scopedKey(sourceScope, key));
     if (!c) continue;
     if (source.po && source.po !== c.identity.po) continue;
     return { entry: c.entry, relation: "exact" };
@@ -794,7 +815,11 @@ export function summarizeIntakeReconcileInvariant(input: {
       body: d.body_preview,
       extraction: d.extraction_json,
     });
-    draftIdentities.push({ entry: d, identity });
+    draftIdentities.push({
+      entry: d,
+      identity,
+      scope: normaliseSenderScope(d.from_email),
+    });
     const fingerprint = contentFingerprint(
       d.from_email,
       d.subject,
@@ -804,9 +829,12 @@ export function summarizeIntakeReconcileInvariant(input: {
     );
     if (fingerprint) draftFingerprints.set(fingerprint, d);
   }
+  // Jobs carry no sender, so they resolve on canonical prefixed claim/PO identity
+  // only. A bare number on a job row is not proof of which builder issued it.
   const jobIdentities: CapturedIdentity<IntakeReconJob>[] = jobs.map((job) => ({
     entry: job,
     identity: reconcileIdentity({ externalRef: job.external_ref }),
+    scope: "",
   }));
   const draftIndex = indexCapturedIdentities(draftIdentities);
   const jobIndex = indexCapturedIdentities(jobIdentities);
@@ -941,7 +969,11 @@ export function summarizeIntakeReconcileInvariant(input: {
     // Re-send/revision lineage may be represented by a draft or live job. Compare
     // claim and PO independently: claim-only <-> PO-suffixed is an alias; two
     // explicit different POs are never equivalent.
-    const draftIdentityHit = findCapturedIdentity(identity, draftIndex);
+    const draftIdentityHit = findCapturedIdentity(
+      identity,
+      draftIndex,
+      normaliseSenderScope(fromEmail),
+    );
     if (draftIdentityHit) {
       record(
         e,
@@ -958,7 +990,7 @@ export function summarizeIntakeReconcileInvariant(input: {
       );
       continue;
     }
-    const jobIdentityHit = findCapturedIdentity(identity, jobIndex);
+    const jobIdentityHit = findCapturedIdentity(identity, jobIndex, "");
     if (jobIdentityHit) {
       record(
         e,
