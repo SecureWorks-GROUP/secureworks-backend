@@ -54,7 +54,9 @@ Those runtime sunsets are later units. None is edited or activated in this PR.
 ## Case grain and source accounting
 
 A case is one source instruction. `instruction_key` is deterministic instruction
-content plus a stable deliverable discriminator. Its unique key is:
+content plus a stable deliverable discriminator plus the case cycle, so a reopen
+whose content and deliverable match the original still gets its own row. Its
+unique key is:
 
 `(org_id, instruction_key)`
 
@@ -92,8 +94,19 @@ The S13-safe live unique key is:
 
 It applies only to confirmed/blocked cases with known company and WO/PO identity.
 Claim ref is deliberately absent. Different builders and separate POs do not
-collide. Claim-only family ambiguity receives no constraint decision and stays a
-server classification decision.
+collide. `wo_po_identity_key` is not free text: a DB check requires it to be
+exactly the WO/PO precedence composition of the canonical columns, so a
+mis-stamped key cannot silently split or collapse live identity.
+
+The live identity floor also admits a claim-ref-only live case, which carries no
+`wo_po_identity_key`. Those cases fall back to:
+
+`(org_id, company_key, external_ref_canonical, coalesce(deliverable_ref_canonical, ''), cycle)`
+
+so claim-only live work still cannot duplicate, while separate deliverables and
+reopens under one claim stay separate. Claim-only family ambiguity across
+builders still receives no constraint decision and stays a server classification
+decision.
 
 ## Lineage and reopen cycle
 

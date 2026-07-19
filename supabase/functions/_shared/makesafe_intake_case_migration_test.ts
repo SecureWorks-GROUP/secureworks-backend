@@ -101,6 +101,51 @@ Deno.test("B4: live identity uses builder WO/PO plus case-defined cycle", () => 
   assert(!/UNIQUE\s*\([^)]*external_ref_raw/.test(migration));
 });
 
+Deno.test("B4a: wo_po_identity_key is derived from the canonical columns", () => {
+  assert(
+    migration.includes("makesafe_intake_cases_wo_po_identity_key_check"),
+  );
+  assert(
+    migration.includes(
+      "THEN 'wo:' || builder_wo_canonical || '/po:' || builder_po_canonical",
+    ),
+  );
+  assert(migration.includes("THEN 'po:' || builder_po_canonical"));
+  assert(migration.includes("THEN 'wo:' || builder_wo_canonical"));
+  // Every fixture key must be reachable from its canonical columns.
+  assert(!sqlContract.includes("'wo:CLAIM-1/po:"));
+});
+
+Deno.test("B4b: claim-ref-only live cases still cannot duplicate", () => {
+  assertMatch(
+    migration,
+    /uq_makesafe_intake_cases_live_claim_identity/,
+  );
+  assertMatch(
+    migration,
+    /external_ref_canonical,\s*COALESCE\(deliverable_ref_canonical, ''\),\s*cycle/,
+  );
+  assert(migration.includes("AND wo_po_identity_key IS NULL"));
+});
+
+Deno.test("M7a: a null-org company cannot be linked from any org", () => {
+  assert(
+    migration.includes("company_org_id IS DISTINCT FROM NEW.org_id"),
+  );
+  assert(!migration.includes("company_org_id IS NOT NULL AND company_org_id"));
+});
+
+Deno.test("accounting view carries org from the source, not a pinned literal", () => {
+  assert(
+    !/LEFT JOIN public\.makesafe_intake_case_sources source\s*\n\s*ON source\.org_id =/
+      .test(migration),
+  );
+  assertMatch(
+    migration,
+    /COALESCE\(\s*source\.org_id,\s*'00000000-0000-0000-0000-000000000001'::uuid\s*\) AS org_id/,
+  );
+});
+
 Deno.test("B5: rollback is staged and prod-schema clone harness blocks production", () => {
   assert(rollback.includes("refusing post-cutover DROP"));
   assert(rollback.includes("WHERE is_authoritative"));

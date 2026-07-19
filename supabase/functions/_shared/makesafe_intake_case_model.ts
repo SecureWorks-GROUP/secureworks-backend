@@ -80,7 +80,7 @@ export function normaliseMakesafeIdentity(
 ): MakesafeCanonicalIdentity {
   const prefixes = input.prefixes ?? REF_PREFIX_FLOOR;
   const externalRefCanonical = normaliseRef(input.externalRefRaw, prefixes);
-  const builderWoCanonical = normaliseRef(input.builderWoRaw, prefixes);
+  const builderWoCanonical = normaliseBuilderWo(input.builderWoRaw, prefixes);
   const builderPoCanonical = normaliseOpaqueIdentity(input.builderPoRaw);
   const deliverableRefCanonical = normaliseOpaqueIdentity(
     input.deliverableRefRaw,
@@ -100,6 +100,26 @@ export function normaliseMakesafeIdentity(
     woPoIdentityKey,
     normaliserVersion: MAKESAFE_NORMALISER_VERSION,
   };
+}
+
+// A builder WO is recognised as a claim-ref family only when a known prefix
+// actually matches. Without that, it stays an opaque builder identity:
+// normaliseRef's bare-numeric salvage would otherwise reduce both "WO 12345"
+// and "REF 12345" to "12345" and collapse two distinct WOs onto one
+// wo_po_identity_key within a single builder.
+function normaliseBuilderWo(
+  raw: string | null,
+  prefixes: readonly string[],
+): string | null {
+  if (raw === null) return null;
+  const prefixed = normaliseRef(raw, prefixes);
+  if (prefixed !== null && /^[A-Z0-9]+-\d+$/.test(prefixed)) {
+    const family = prefixed.slice(0, prefixed.lastIndexOf("-"));
+    if (prefixes.some((prefix) => prefix.toUpperCase() === family)) {
+      return prefixed;
+    }
+  }
+  return normaliseOpaqueIdentity(raw);
 }
 
 function normaliseOpaqueIdentity(raw: string | null): string | null {
@@ -213,10 +233,18 @@ function requiredOpaquePart(label: string, value: string): string {
   return encodeURIComponent(trimmed);
 }
 
+// The cycle component is load-bearing: (org_id, instruction_key) is UNIQUE and a
+// reopen creates a new row, so a reopen whose deterministic content and
+// deliverable match the original would otherwise be unable to insert.
 export function buildInstructionKey(input: {
   instructionFingerprint: string;
   deliverableDiscriminator: string;
+  cycle?: number;
 }): string {
+  const cycle = input.cycle ?? 1;
+  if (!Number.isInteger(cycle) || cycle < 1) {
+    throw new Error("cycle must be a positive integer");
+  }
   return `fingerprint:${
     requiredOpaquePart("instructionFingerprint", input.instructionFingerprint)
   }` +
@@ -225,7 +253,8 @@ export function buildInstructionKey(input: {
         "deliverableDiscriminator",
         input.deliverableDiscriminator,
       )
-    }`;
+    }` +
+    `/cycle:${cycle}`;
 }
 
 export function buildReplayKey(input: {

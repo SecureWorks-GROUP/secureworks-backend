@@ -177,6 +177,55 @@ Deno.test("one versioned normaliser preserves dashed refs and WO/PO precedence",
   assertEquals(claimOnly.woPoIdentityKey, null);
 });
 
+Deno.test("unprefixed builder WOs stay distinct instead of collapsing to digits", () => {
+  const woForm = normaliseMakesafeIdentity({
+    externalRefRaw: null,
+    builderWoRaw: "WO 12345",
+    builderPoRaw: null,
+    deliverableRefRaw: null,
+  });
+  const refForm = normaliseMakesafeIdentity({
+    externalRefRaw: null,
+    builderWoRaw: "REF 12345",
+    builderPoRaw: null,
+    deliverableRefRaw: null,
+  });
+  assertEquals(woForm.builderWoCanonical, "WO-12345");
+  assertEquals(refForm.builderWoCanonical, "REF-12345");
+  assertNotEquals(woForm.woPoIdentityKey, refForm.woPoIdentityKey);
+});
+
+Deno.test("reopen instruction keys differ from the cycle they reopen", () => {
+  const original = buildInstructionKey({
+    instructionFingerprint: "fingerprint-mlb-27037",
+    deliverableDiscriminator: "po:PO-A",
+  });
+  const reopen = buildInstructionKey({
+    instructionFingerprint: "fingerprint-mlb-27037",
+    deliverableDiscriminator: "po:PO-A",
+    cycle: 2,
+  });
+  assertNotEquals(original, reopen);
+  assertEquals(
+    original,
+    buildInstructionKey({
+      instructionFingerprint: "fingerprint-mlb-27037",
+      deliverableDiscriminator: "po:PO-A",
+      cycle: 1,
+    }),
+  );
+  assertThrows(
+    () =>
+      buildInstructionKey({
+        instructionFingerprint: "f",
+        deliverableDiscriminator: "d",
+        cycle: 0,
+      }),
+    Error,
+    "cycle must be a positive integer",
+  );
+});
+
 Deno.test("raw builder, ref, WO, PO and deliverable survive canonical refinement", () => {
   const original: MakesafeIdentity = {
     companySlugRaw: "  MASTER BUILDERS - Perth ",

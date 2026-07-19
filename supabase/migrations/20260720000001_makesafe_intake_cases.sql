@@ -231,6 +231,21 @@ CREATE TABLE IF NOT EXISTS public.makesafe_intake_cases (
       OR field_provenance <> '{}'::jsonb
     )
   ),
+  -- wo_po_identity_key is the sole discriminator of the S13 live-uniqueness
+  -- index, so it is not free text: it must be exactly the WO/PO precedence
+  -- composition of the canonical columns. A mis-stamped key that would silently
+  -- split or collapse live identity is rejected by the database.
+  CONSTRAINT makesafe_intake_cases_wo_po_identity_key_check CHECK (
+    wo_po_identity_key IS NOT DISTINCT FROM CASE
+      WHEN builder_wo_canonical IS NOT NULL AND builder_po_canonical IS NOT NULL
+        THEN 'wo:' || builder_wo_canonical || '/po:' || builder_po_canonical
+      WHEN builder_po_canonical IS NOT NULL
+        THEN 'po:' || builder_po_canonical
+      WHEN builder_wo_canonical IS NOT NULL
+        THEN 'wo:' || builder_wo_canonical
+      ELSE NULL
+    END
+  ),
   CONSTRAINT makesafe_intake_cases_field_names_check CHECK (
     public.makesafe_intake_field_names_valid(missing_fields)
     AND public.makesafe_intake_field_names_valid(blocked_reasons)
@@ -298,6 +313,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_makesafe_intake_cases_live_identity
   WHERE state IN ('confirmed_live_job', 'blocked_live_job')
     AND company_key IS NOT NULL
     AND wo_po_identity_key IS NOT NULL;
+
+-- The live identity floor also admits a claim-ref-only live case, which carries
+-- no wo_po_identity_key and so escapes the index above entirely. Those cases get
+-- their own fallback uniqueness on the canonical claim ref, still discriminated
+-- by deliverable and cycle so separate deliverables and reopens stay separate.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_makesafe_intake_cases_live_claim_identity
+  ON public.makesafe_intake_cases (
+    org_id,
+    company_key,
+    external_ref_canonical,
+    COALESCE(deliverable_ref_canonical, ''),
+    cycle
+  )
+  WHERE state IN ('confirmed_live_job', 'blocked_live_job')
+    AND company_key IS NOT NULL
+    AND wo_po_identity_key IS NULL
+    AND external_ref_canonical IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_makesafe_intake_cases_job
   ON public.makesafe_intake_cases (org_id, job_id)
@@ -581,7 +613,7 @@ BEGIN
     SELECT company.org_id INTO company_org_id
     FROM public.makesafe_companies company
     WHERE company.id = NEW.company_id;
-    IF NOT FOUND OR (company_org_id IS NOT NULL AND company_org_id <> NEW.org_id) THEN
+    IF NOT FOUND OR company_org_id IS DISTINCT FROM NEW.org_id THEN
       RAISE EXCEPTION 'company_id must reference the same org';
     END IF;
     IF NEW.company_key IS NULL OR NEW.company_key <> 'company:' || NEW.company_id::text THEN
@@ -847,7 +879,10 @@ LEFT JOIN public.jobs job
 -- consume this instead of capped ref/subject heuristics.
 CREATE OR REPLACE VIEW public.makesafe_intake_email_accounting AS
 SELECT
-  '00000000-0000-0000-0000-000000000001'::uuid AS org_id,
+  COALESCE(
+    source.org_id,
+    '00000000-0000-0000-0000-000000000001'::uuid
+  ) AS org_id,
   email.post_id,
   email.mailbox,
   email.received_at,
@@ -861,8 +896,7 @@ SELECT
   END AS accounting_status
 FROM public.emails email
 LEFT JOIN public.makesafe_intake_case_sources source
-  ON source.org_id = '00000000-0000-0000-0000-000000000001'::uuid
- AND source.post_id = email.post_id
+  ON source.post_id = email.post_id
 LEFT JOIN public.makesafe_intake_cases intake_case
   ON intake_case.org_id = source.org_id
  AND intake_case.id = source.case_id
