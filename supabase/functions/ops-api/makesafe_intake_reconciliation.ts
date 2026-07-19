@@ -734,9 +734,13 @@ function canonicalIdentityTokens(input: {
  *
  * Body text still matters, but only as doubt: any PO-shaped label in it, parseable
  * or not, means a PO may be in play that the authoritative fields do not show. That
- * raises poUnparsed, which blocks claim/PO aliasing entirely. Such a row can still
- * be accounted by durable evidence (post id, internet message id, content
- * fingerprint); it simply may not be collapsed on identity inference alone.
+ * raises poContextAmbiguous, which withholds claim/token identity inference unless
+ * both sides carry a reliably parsed explicit PO and those POs are equal. When either
+ * side lacks an explicit PO, or its subject PO label could not be parsed at all
+ * (poUnparsed, which stays scoped to this row's subject), the doubt stands and no
+ * inference is made. Such a row can still be accounted by durable evidence (post id,
+ * internet message id, content fingerprint); it simply may not be collapsed on
+ * identity inference alone.
  */
 function reconcileIdentity(input: {
   externalRef?: string | null;
