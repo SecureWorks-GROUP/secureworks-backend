@@ -10,9 +10,14 @@ import {
   _INTAKE_EXTRACTION_DOWN_MARKER,
   _isAnthropicAuthFailureForTest as isAuthFailure,
   _itemLocalQuarantineEventForTest as itemLocalQuarantineEvent,
+  _writeIntakeHealthForTest as writeIntakeHealth,
 } from "./index.ts";
 import { scanMarkEligible } from "./makesafe_intake_scan_marker.ts";
-import { flushItemLocalQuarantines } from "./makesafe_extraction_reliability.ts";
+import {
+  degradedReasonIsPersistenceOnly,
+  flushItemLocalQuarantines,
+  QUARANTINE_PERSISTENCE_REASON,
+} from "./makesafe_extraction_reliability.ts";
 
 // D-a: a DEAD/absent key (auth failure) must be distinguished from a transient blip.
 // Auth failure degrades the whole scan loud; a transient failure only flags one email.
@@ -459,5 +464,82 @@ Deno.test("regression: a failed durable write leaves the source unscanned and fa
     // Never marked without evidence -> the item retries next cycle, and the non-zero
     // failure count is what degrades intake health rather than retrying silently.
     assertEquals(res.markable, []);
+  }
+});
+
+// --- Quarantine persistence: reason truthfulness + its own recovery proof ---------
+
+function healthClient(prevBase: any) {
+  const upserts: any[] = [];
+  return {
+    upserts,
+    from: (_t: string) => ({
+      select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: prevBase, error: null }) }) }),
+      upsert: (row: any) => {
+        upserts.push(row);
+        return Promise.resolve({ error: null });
+      },
+    }),
+  };
+}
+
+Deno.test("regression: a provider reason never masks quarantine_persistence_failed", () => {
+  assertEquals(
+    degradedReasonIsPersistenceOnly(QUARANTINE_PERSISTENCE_REASON),
+    true,
+  );
+  // The composite the scan writes when both are true keeps BOTH facts visible.
+  const composite = `wholesale_rate_limited+${QUARANTINE_PERSISTENCE_REASON}`;
+  assert(composite.includes(QUARANTINE_PERSISTENCE_REASON));
+  assert(composite.includes("wholesale_rate_limited"));
+  // ...and a composite is NOT persistence-only, so it still needs extraction proof.
+  assertEquals(degradedReasonIsPersistenceOnly(composite), false);
+});
+
+Deno.test("regression: persistence-only degradation clears on a confirmed durable quarantine write", async () => {
+  const client = healthClient({
+    extraction_status: "degraded",
+    degraded_reason: QUARANTINE_PERSISTENCE_REASON,
+    degraded_since: "2026-07-20T00:00:00Z",
+    last_successful_extraction_at: null,
+  });
+  await writeIntakeHealth(client as any, {
+    extractionStatus: "ok",
+    degradedReason: null,
+    anyExtractionSucceeded: false,
+    quarantinePersistenceProven: true,
+    draftsCreated: 0,
+    autoFiled: 0,
+  });
+  const row = client.upserts[client.upserts.length - 1];
+  assertEquals(row.extraction_status, "ok");
+  assertEquals(row.degraded_reason, null);
+  assertEquals(row.degraded_since, null);
+});
+
+Deno.test("regression: a provider degradation is NOT cleared by quarantine persistence proof", async () => {
+  for (
+    const priorReason of [
+      "auth_failed",
+      `auth_failed+${QUARANTINE_PERSISTENCE_REASON}`,
+    ]
+  ) {
+    const client = healthClient({
+      extraction_status: "degraded",
+      degraded_reason: priorReason,
+      degraded_since: "2026-07-20T00:00:00Z",
+      last_successful_extraction_at: null,
+    });
+    await writeIntakeHealth(client as any, {
+      extractionStatus: "ok",
+      degradedReason: null,
+      anyExtractionSucceeded: false,
+      quarantinePersistenceProven: true,
+      draftsCreated: 0,
+      autoFiled: 0,
+    });
+    const row = client.upserts[client.upserts.length - 1];
+    assertEquals(row.extraction_status, "degraded");
+    assertEquals(row.degraded_reason, priorReason);
   }
 });

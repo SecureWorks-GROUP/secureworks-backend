@@ -215,6 +215,8 @@ import {
   extractionFailureState as _extractionFailureState,
   flushItemLocalQuarantines as _flushItemLocalQuarantines,
   itemLocalQuarantineEvent as _itemLocalQuarantineEvent,
+  degradedReasonIsPersistenceOnly as _degradedReasonIsPersistenceOnly,
+  QUARANTINE_PERSISTENCE_REASON as INTAKE_QUARANTINE_PERSISTENCE_REASON,
   type ExtractionFailureClassification,
   type ExtractionFailureReason,
 } from './makesafe_extraction_reliability.ts'
@@ -12373,6 +12375,9 @@ async function writeIntakeHealth(client: any, input: {
   extractionStatus: 'ok' | 'degraded'
   degradedReason: string | null
   anyExtractionSucceeded: boolean
+  // A confirmed durable item-local quarantine write this run. It is recovery proof for a
+  // prior quarantine_persistence_failed degradation ONLY — never for a provider outage.
+  quarantinePersistenceProven?: boolean
   draftsCreated: number
   autoFiled: number
   // M1.5 cost ledger for this scan (optional so callers that don't extract, e.g. the
@@ -12436,8 +12441,13 @@ async function writeIntakeHealth(client: any, input: {
     // Degradation clears ONLY on observed successful extraction. A quiet scan is not
     // evidence a provider outage recovered; because failed/skipped source items stay
     // unmarked, the next scan supplies that proof without waiting for unrelated mail.
+    // The one exception: a degradation caused ONLY by quarantine persistence has its own
+    // recovery proof, because the permanently-request_invalid sources behind it can never
+    // supply an extraction success. A confirmed durable quarantine write clears it.
+    const persistenceRecoveryProven = !!input.quarantinePersistenceProven &&
+      _degradedReasonIsPersistenceOnly(prevBase?.degraded_reason)
     const preservePriorDegraded = wasDegraded && !input.anyExtractionSucceeded &&
-      input.extractionStatus === 'ok'
+      !persistenceRecoveryProven && input.extractionStatus === 'ok'
     const effectiveStatus: 'ok' | 'degraded' = preservePriorDegraded ? 'degraded' : input.extractionStatus
     const effectiveReason = preservePriorDegraded
       ? (String(prevBase?.degraded_reason || '') || 'extraction_recovery_unproven')
@@ -15153,6 +15163,16 @@ async function scanSesMakesafes(client: any) {
       const pending = pendingItemLocalTerminals.get(msg.id)
       if (pending) pending.dropReason = dropReason
     }
+    // Some exits DO write durable evidence (a draft minted or a late PDF landed on an
+    // existing draft) and then continue before the common exit. That draft is the
+    // durable record, so the item must leave the pending set — otherwise the post-loop
+    // flush would emit a quarantine event asserting "no draft minted" for an email that
+    // has one — while still being marked scanned so it stops re-hitting the provider.
+    const resolveItemLocalTerminalWithDurableDraft = () => {
+      if (!emailItemLocalTerminal) return
+      if (!pendingItemLocalTerminals.delete(msg.id)) return
+      if (msg._post_id && !scannedEmailIds.includes(msg._post_id)) scannedEmailIds.push(msg._post_id)
+    }
 
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
     // needs_review docket with an explicit marker, never a silent empty draft — and,
@@ -15465,7 +15485,7 @@ async function scanSesMakesafes(client: any) {
             dedupIndex,
           )
           skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: 'late_pdf_landed' })
-          recordItemLocalTerminalDrop('late_pdf_landed')
+          resolveItemLocalTerminalWithDurableDraft()
           if (landing.auto_filed?.job_id) {
             autoApproved.push({ draft_id: landing.draft_id, job_id: landing.auto_filed.job_id, external_ref: extractedRef, reason: 'late_pdf_landed_auto_filed' })
           }
@@ -15632,6 +15652,7 @@ async function scanSesMakesafes(client: any) {
               )
               secondDeliverableDrafts++
               newDrafts.push({ ...secondDeliverableDraft, _is_second_deliverable: true })
+              resolveItemLocalTerminalWithDurableDraft()
             }
             continue
           }
@@ -15707,6 +15728,7 @@ async function scanSesMakesafes(client: any) {
         const { error: rcErr } = await client.from('makesafe_intake_drafts').insert(reopenDraft)
         if (rcErr) {
           console.log('[ops-api] intake reopen_candidate insert failed:', rcErr.message)
+          recordItemLocalTerminalDrop('reopen_candidate_insert_failed')
         } else {
           console.log('[ops-api] intake reopen_candidate created for ref', extractedRef, 'job', matchedJobId)
           // Register in the in-memory index so a second copy of the same email in
@@ -15731,6 +15753,7 @@ async function scanSesMakesafes(client: any) {
             dedupIndex,
           )
           newDrafts.push({ ...reopenDraft, _is_reopen_candidate: true })
+          resolveItemLocalTerminalWithDurableDraft()
         }
         continue
       } else {
@@ -16043,11 +16066,21 @@ async function scanSesMakesafes(client: any) {
   // than retrying silently forever.
   const quarantinePersistenceDegraded = itemLocalQuarantinePersistFailures > 0
   const extractionDegraded = cycleHealth.status === 'degraded' || quarantinePersistenceDegraded
+  // A provider reason must never MASK broken quarantine persistence: that is exactly the
+  // case where those sources retry the provider unbounded, so both surface together in a
+  // stable typed composite that still starts with the provider reason.
+  const degradedReason = quarantinePersistenceDegraded
+    ? (cycleHealth.reason ? `${cycleHealth.reason}+${INTAKE_QUARANTINE_PERSISTENCE_REASON}` : INTAKE_QUARANTINE_PERSISTENCE_REASON)
+    : cycleHealth.reason
+  // Persistence health has its own recovery proof: a confirmed durable quarantine write.
+  // Provider degradation still clears only on a successful extraction.
+  const quarantinePersistenceProven = !quarantinePersistenceDegraded &&
+    (quarantineFlush.recorded + quarantineFlush.alreadyRecorded) > 0
   await writeIntakeHealth(client, {
     extractionStatus: extractionDegraded ? 'degraded' : cycleHealth.status,
-    degradedReason: cycleHealth.reason ||
-      (quarantinePersistenceDegraded ? 'quarantine_persistence_failed' : null),
+    degradedReason,
     anyExtractionSucceeded,
+    quarantinePersistenceProven,
     draftsCreated: newDrafts.length,
     autoFiled: autoApproved.length,
     // M1.5 cost ledger: this scan's model-call/skip split + token totals.
@@ -16075,8 +16108,7 @@ async function scanSesMakesafes(client: any) {
     // draft made while degraded carries the extraction_down_key_dead marker and is a
     // needs_review docket; nothing is silently empty and nothing is auto-filed.
     extraction_degraded: extractionDegraded,
-    extraction_degraded_reason: cycleHealth.reason ||
-      (quarantinePersistenceDegraded ? 'quarantine_persistence_failed' : null),
+    extraction_degraded_reason: degradedReason,
     extraction_cycle: {
       attempts: extractionAttempts,
       successes: extractionSuccesses,

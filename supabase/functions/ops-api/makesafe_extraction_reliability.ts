@@ -163,6 +163,22 @@ export interface ExtractionCycleOutcome {
  * corroborating evidence — at least this many failed attempts with zero successes. */
 export const WHOLESALE_FAILURE_MIN_ATTEMPTS = 2;
 
+/**
+ * Typed reason for "the durable item-local quarantine record could not be written".
+ * Composed onto a provider reason as `<provider>+quarantine_persistence_failed` so a
+ * concurrent provider outage can never hide broken persistence.
+ */
+export const QUARANTINE_PERSISTENCE_REASON = "quarantine_persistence_failed";
+
+/**
+ * True when the recorded degradation is attributable ONLY to quarantine persistence.
+ * A confirmed durable quarantine write is sufficient recovery proof for that state;
+ * any composite that also carries a provider reason still needs an extraction success.
+ */
+export function degradedReasonIsPersistenceOnly(reason: string | null | undefined): boolean {
+  return String(reason || "") === QUARANTINE_PERSISTENCE_REASON;
+}
+
 /** Health is degraded immediately for a terminal provider-lane failure, or when a
  * wholesale run of attempts all failed. A partial success remains healthy. */
 export function extractionCycleHealth(outcome: ExtractionCycleOutcome): {
