@@ -83,7 +83,10 @@ SELECT cron.schedule('makesafe-ses-poll', '*/2 * * * *',
 ## Go-live steps (First Mate)
 
 1. **Merge** the backend PR on green CI (import-resolution is the hard gate; `deno check` is
-   advisory and unchanged at the pre-existing 17 errors — none in M1 code).
+   advisory). Baselines: 17 pre-existing errors at the M1 merge gate; 19 pre-existing errors as of
+   2026-07-20, the count to validate against today. Neither number is a permanent allowlist — a
+   change must introduce **zero new** type-check errors, and future runs compare against the
+   baseline evidence captured for that run, not against a figure hardcoded here.
 2. **Deploy** `ops-api` + `monitor-ses-makesafes` via the guarded path
    (`scripts/deploy-edge-function.sh`, `--no-verify-jwt` on ops-api).
 3. **Apply migrations** (db push or Management-API), then verify the live cron cadence (above).
