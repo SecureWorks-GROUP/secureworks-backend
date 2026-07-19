@@ -2,7 +2,10 @@
 // Tests for the extract-at-most-once marker helpers (makesafe_intake_scan_marker.ts) —
 // the cost-leak fix. Covers the mark-eligibility rule and the batched/idempotent/
 // pre-migration-safe DB write.
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   markEmailsScanned,
   partitionForMark,
@@ -27,10 +30,24 @@ Deno.test("scanMarkEligible: a deterministic template parse marks the email", ()
   assertEquals(scanMarkEligible({ ...BASE, templateParsed: true }), true);
 });
 
-Deno.test("scanMarkEligible: an AUTH failure does NOT mark (retries when key recovers)", () => {
+Deno.test("scanMarkEligible: a terminal failure is quarantined after one automatic attempt", () => {
+  assertEquals(
+    scanMarkEligible({ ...BASE, authFailed: true, terminalQuarantined: true }),
+    true,
+  );
+  // Without an explicit quarantine state, the legacy auth signal alone cannot mark.
   assertEquals(scanMarkEligible({ ...BASE, authFailed: true }), false);
-  // even if a result somehow also flagged, auth failure wins (never mark a dead-key email)
-  assertEquals(scanMarkEligible({ ...BASE, modelValidResult: true, authFailed: true }), false);
+});
+
+Deno.test("scanMarkEligible: quarantine wins over degraded provider state and is idempotently markable", () => {
+  assertEquals(
+    scanMarkEligible({
+      ...BASE,
+      terminalQuarantined: true,
+      keyDegradedOrAbsent: true,
+    }),
+    true,
+  );
 });
 
 Deno.test("scanMarkEligible: a TRANSIENT failure does NOT mark (retries next cycle)", () => {
@@ -46,14 +63,20 @@ Deno.test("scanMarkEligible: nothing happened -> not marked", () => {
 });
 
 Deno.test("partitionForMark chunks correctly", () => {
-  assertEquals(partitionForMark([1, 2, 3, 4, 5, 6, 7], 3), [[1, 2, 3], [4, 5, 6], [7]]);
+  assertEquals(partitionForMark([1, 2, 3, 4, 5, 6, 7], 3), [[1, 2, 3], [
+    4,
+    5,
+    6,
+  ], [7]]);
   assertEquals(partitionForMark([], 3), []);
   assertEquals(partitionForMark([1, 2], 10), [[1, 2]]);
 });
 
 // ── markEmailsScanned: mock client capturing the update chain ──
 function makeClient(opts: { failAll?: boolean } = {}) {
-  const updates: Array<{ set: any; inList: string[]; isCol: string; isVal: any }> = [];
+  const updates: Array<
+    { set: any; inList: string[]; isCol: string; isVal: any }
+  > = [];
   const from = (_t: string) => ({
     update: (set: any) => {
       const rec: any = { set };
@@ -66,7 +89,9 @@ function makeClient(opts: { failAll?: boolean } = {}) {
           rec.isCol = col;
           rec.isVal = val;
           updates.push(rec);
-          return Promise.resolve(opts.failAll ? { error: { message: "boom" } } : { error: null });
+          return Promise.resolve(
+            opts.failAll ? { error: { message: "boom" } } : { error: null },
+          );
         },
       };
       return chain;
@@ -78,7 +103,11 @@ function makeClient(opts: { failAll?: boolean } = {}) {
 Deno.test("markEmailsScanned: marks all ids in chunks, idempotently (WHERE scanned_at IS NULL)", async () => {
   const client = makeClient();
   const ids = Array.from({ length: 65 }, (_v, i) => `post_${i}`);
-  const r = await markEmailsScanned(client as any, ids, { columnAvailable: true, chunkSize: 30, nowIso: "2026-07-04T00:00:00Z" });
+  const r = await markEmailsScanned(client as any, ids, {
+    columnAvailable: true,
+    chunkSize: 30,
+    nowIso: "2026-07-04T00:00:00Z",
+  });
   assertEquals(r.attempted, true);
   assertEquals(r.marked, 65);
   assertEquals(r.errorChunks, 0);
@@ -92,7 +121,9 @@ Deno.test("markEmailsScanned: marks all ids in chunks, idempotently (WHERE scann
 
 Deno.test("markEmailsScanned: PRE-MIGRATION (column absent) does NOTHING", async () => {
   const client = makeClient();
-  const r = await markEmailsScanned(client as any, ["post_1"], { columnAvailable: false });
+  const r = await markEmailsScanned(client as any, ["post_1"], {
+    columnAvailable: false,
+  });
   assertEquals(r.attempted, false);
   assertEquals(r.marked, 0);
   assertEquals(client.updates.length, 0);
@@ -100,7 +131,9 @@ Deno.test("markEmailsScanned: PRE-MIGRATION (column absent) does NOTHING", async
 
 Deno.test("markEmailsScanned: empty id list is a no-op", async () => {
   const client = makeClient();
-  const r = await markEmailsScanned(client as any, [], { columnAvailable: true });
+  const r = await markEmailsScanned(client as any, [], {
+    columnAvailable: true,
+  });
   assertEquals(r.attempted, false);
   assertEquals(client.updates.length, 0);
 });
@@ -108,7 +141,10 @@ Deno.test("markEmailsScanned: empty id list is a no-op", async () => {
 Deno.test("markEmailsScanned: a chunk error is tolerated (no throw, retries next run)", async () => {
   const client = makeClient({ failAll: true });
   const ids = Array.from({ length: 40 }, (_v, i) => `post_${i}`);
-  const r = await markEmailsScanned(client as any, ids, { columnAvailable: true, chunkSize: 30 });
+  const r = await markEmailsScanned(client as any, ids, {
+    columnAvailable: true,
+    chunkSize: 30,
+  });
   assertEquals(r.attempted, true);
   assertEquals(r.marked, 0); // nothing counted as marked on error
   assert(r.errorChunks >= 1); // both chunks errored, but the scan never crashed

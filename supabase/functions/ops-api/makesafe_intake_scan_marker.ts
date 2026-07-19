@@ -19,17 +19,21 @@ export interface ScanMarkState {
   authFailed: boolean;
   /** The classifier call failed transiently (network / 5xx / bad JSON). */
   transientFailed: boolean;
+  /** A terminal failure was recorded and this source item is quarantined. */
+  terminalQuarantined?: boolean;
   /** The key is dead/absent, so the model was not called for this email. */
   keyDegradedOrAbsent: boolean;
 }
 
 /**
  * The extract-at-most-once rule: mark an email scanned ONLY when it received a usable
- * classification (a valid model result OR a deterministic template parse). NEVER mark on
- * an auth/transient failure or a dead/absent key — those must retry when the key
- * recovers, preserving the fail-loud backfill path and the dead-key health behaviour.
+ * classification (a valid model result OR a deterministic template parse), or when a
+ * terminal failure has been preserved as a visible quarantine. Retryable failures stay
+ * unmarked. Quarantine is recoverable through the privileged in-place
+ * reextract_intake_draft action and prevents a terminal two-minute retry storm.
  */
 export function scanMarkEligible(s: ScanMarkState): boolean {
+  if (s.terminalQuarantined) return true;
   if (s.authFailed || s.transientFailed || s.keyDegradedOrAbsent) return false;
   return s.templateParsed || s.modelValidResult;
 }
@@ -39,7 +43,9 @@ export function scanMarkEligible(s: ScanMarkState): boolean {
 export function partitionForMark<T>(items: T[], chunkSize: number): T[][] {
   const size = Math.max(1, chunkSize);
   const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
   return out;
 }
 
@@ -77,13 +83,19 @@ export async function markEmailsScanned(
         .is("makesafe_scanned_at", null);
       if (error) {
         errorChunks++;
-        console.warn("[ops-api] intake scanned-marker update failed (chunk retries next run):", error.message);
+        console.warn(
+          "[ops-api] intake scanned-marker update failed (chunk retries next run):",
+          error.message,
+        );
       } else {
         marked += chunk.length;
       }
     } catch (e) {
       errorChunks++;
-      console.warn("[ops-api] intake scanned-marker update threw (non-fatal):", (e as Error).message);
+      console.warn(
+        "[ops-api] intake scanned-marker update threw (non-fatal):",
+        (e as Error).message,
+      );
     }
   }
   return { marked, attempted: true, errorChunks };

@@ -208,6 +208,14 @@ import {
   scanMarkEligible as _scanMarkEligible,
   markEmailsScanned as _markEmailsScanned,
 } from './makesafe_intake_scan_marker.ts'
+import { alarmReadinessFacts as _alarmReadinessFacts } from './makesafe_alarm_readiness.ts'
+import {
+  classifyExtractionFailure as _classifyExtractionFailure,
+  extractionCycleHealth as _extractionCycleHealth,
+  extractionFailureState as _extractionFailureState,
+  type ExtractionFailureClassification,
+  type ExtractionFailureReason,
+} from './makesafe_extraction_reliability.ts'
 import {
   readUsage as _readUsage,
   emailCostRecord as _emailCostRecord,
@@ -12327,17 +12335,11 @@ function availableIntakeAttachments(attachments: any[]): any[] {
 // forced to needs_review, and a visible makesafe_intake_health banner is written.
 const INTAKE_EXTRACTION_DOWN_MARKER = 'extraction_down_key_dead'
 
-// True when an Anthropic SDK/HTTP error indicates the KEY is dead (unset/revoked/
-// invalid), as opposed to a transient network/5xx blip. A dead key degrades the whole
-// scan; a transient failure only flags the one email and retries next cycle.
+// Compatibility seam retained for the original dead-key tests. The complete policy is
+// classifyExtractionFailure: usage-cap/config/request failures are terminal too, while
+// rate-limit/network/5xx failures remain retryable.
 function isAnthropicAuthFailure(err: unknown): boolean {
-  const anyErr = err as any
-  const status = Number(anyErr?.status ?? anyErr?.statusCode ?? anyErr?.response?.status)
-  if (status === 401 || status === 403) return true
-  const hay = `${anyErr?.name || ''} ${anyErr?.type || ''} ${anyErr?.error?.type || ''} ${anyErr?.message || String(err)}`.toLowerCase()
-  // 'authentication' (bare) matches both the SDK error TYPE 'authentication_error' and
-  // the error CLASS name 'AuthenticationError'; the rest cover revoked/absent-key text.
-  return /authentication|permission_error|invalid x-api-key|invalid api key|invalid_api_key|unauthorized|401|403/.test(hay)
+  return _classifyExtractionFailure(err).reason === 'auth_failed'
 }
 
 // D-d kill switch: read makesafe_cron_settings.auto_file_enabled (Captain D1 default
@@ -12369,6 +12371,9 @@ async function writeIntakeHealth(client: any, input: {
   extractionStatus: 'ok' | 'degraded'
   degradedReason: string | null
   anyExtractionSucceeded: boolean
+  // Terminal/wholesale degradation clears only after a proven extraction succeeds.
+  // A quiet scan is not evidence that a provider outage recovered.
+  preserveDegradedUntilSuccess?: boolean
   draftsCreated: number
   autoFiled: number
   // M1.5 cost ledger for this scan (optional so callers that don't extract, e.g. the
@@ -12411,7 +12416,7 @@ async function writeIntakeHealth(client: any, input: {
     // ok<->degraded transition is tracked even if the M1.5 ledger columns don't exist
     // yet. The cost totals are a SEPARATE best-effort read (may 400 pre-migration).
     const { data: prevBase } = await client.from('makesafe_intake_health')
-      .select('extraction_status, degraded_since, last_successful_extraction_at')
+      .select('extraction_status, degraded_reason, degraded_since, last_successful_extraction_at')
       .eq('id', true).maybeSingle()
     let prevCost: any = null
     if (input.cost) {
@@ -12429,7 +12434,13 @@ async function writeIntakeHealth(client: any, input: {
       prevBreadcrumb = data || null
     }
     const wasDegraded = String(prevBase?.extraction_status || '') === 'degraded'
-    const isDegraded = input.extractionStatus === 'degraded'
+    const preservePriorDegraded = input.preserveDegradedUntilSuccess === true &&
+      wasDegraded && !input.anyExtractionSucceeded && input.extractionStatus === 'ok'
+    const effectiveStatus: 'ok' | 'degraded' = preservePriorDegraded ? 'degraded' : input.extractionStatus
+    const effectiveReason = preservePriorDegraded
+      ? (String(prevBase?.degraded_reason || '') || 'extraction_recovery_unproven')
+      : input.degradedReason
+    const isDegraded = effectiveStatus === 'degraded'
     // degraded_since: keep the existing start if still degraded; stamp now on a fresh
     // ok->degraded transition; clear when recovered.
     const degradedSince = isDegraded
@@ -12441,8 +12452,8 @@ async function writeIntakeHealth(client: any, input: {
     // The M1 fail-loud banner — must be written on EVERY run, migration or not.
     const baseRow: any = {
       id: true,
-      extraction_status: input.extractionStatus,
-      degraded_reason: isDegraded ? (input.degradedReason || 'key_unset') : null,
+      extraction_status: effectiveStatus,
+      degraded_reason: isDegraded ? (effectiveReason || 'key_unset') : null,
       degraded_since: degradedSince,
       last_scan_at: nowIso,
       last_successful_extraction_at: lastSuccess,
@@ -12644,6 +12655,9 @@ export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCle
 // D-a fail-loud: exported so a test can prove auth-failure (dead key) is distinguished
 // from a transient failure, and the extraction-down marker is a stable constant.
 export const _isAnthropicAuthFailureForTest = isAnthropicAuthFailure
+export const _classifyExtractionFailureForTest = _classifyExtractionFailure
+export const _extractionCycleHealthForTest = _extractionCycleHealth
+export const _extractionFailureStateForTest = _extractionFailureState
 export const _INTAKE_EXTRACTION_DOWN_MARKER = INTAKE_EXTRACTION_DOWN_MARKER
 export const _stripEmailHtmlForTradeForTest = _stripEmailHtmlForTrade
 export const _extractBuilderEmailLinksForTest = _extractBuilderEmailLinks
@@ -14578,6 +14592,17 @@ async function scanSesMakesafes(client: any) {
   let arrivalTextsSent = 0
   // M1.5 cost ledger: per-scan running totals of model calls / template skips / tokens.
   let scanCostTotals = _emptyScanTotals()
+  // Reliability slice: typed cycle outcome. Health may read OK after a partial success,
+  // but never when every actual provider attempt failed. Terminal items are quarantined
+  // after one automatic attempt and stay recoverable through reextract_intake_draft.
+  let extractionAttempts = 0
+  let extractionSuccesses = 0
+  let terminalExtractionFailures = 0
+  let retryableExtractionFailures = 0
+  const extractionFailureReasons: ExtractionFailureReason[] = []
+  let providerTerminalClassification: ExtractionFailureClassification | null = null
+  let quarantinedItems = 0
+  const quarantinedEmailIds: string[] = []
   // Cost-leak fix: emails skipped because they were already extracted (marker set), and
   // the post_ids to STAMP as scanned this run (successful extraction/classification —
   // draft or not). Batch-marked at the end so each email is extracted at most once.
@@ -14605,6 +14630,11 @@ async function scanSesMakesafes(client: any) {
   let keyDegraded = !ANTHROPIC_API_KEY
   let keyDegradedReason: string | null = ANTHROPIC_API_KEY ? null : 'key_unset'
   let anyExtractionSucceeded = false
+  if (!ANTHROPIC_API_KEY) {
+    providerTerminalClassification = {
+      failureClass: 'terminal', reason: 'key_unset', quarantine: true, stopProviderLane: true,
+    }
+  }
 
   for (const msg of fairMatchedMessages) {
     // Cost-leak fix: EXTRACT-AT-MOST-ONCE. If this email was already scanned in a prior
@@ -14804,6 +14834,8 @@ async function scanSesMakesafes(client: any) {
     let emailModelValidResult = false
     let emailAuthFailed = false
     let emailTransientFailed = false
+    let emailTerminalFailed = false
+    let emailFailureClassification: ExtractionFailureClassification | null = null
     const templateSlug = (matchedCompany?.slug || '').toLowerCase()
 
     // M1.5 LEVER 1 — local PDF text extraction. Pull the text layer out of each
@@ -14897,6 +14929,7 @@ async function scanSesMakesafes(client: any) {
         // Mark the call as made BEFORE awaiting so a transient throw is still counted
         // as a model call (not miscounted as a template skip) in the cost ledger.
         modelCalled = true
+        extractionAttempts++
         const resp = await anthropic.messages.create({
           model: MAKESAFE_EXTRACTION_MODEL,
           max_tokens: MAKESAFE_EXTRACTION_MAX_TOKENS,
@@ -14915,26 +14948,46 @@ async function scanSesMakesafes(client: any) {
           confidence = extraction.confidence || 'low'
           missingFields = extraction.missing_fields || []
           anyExtractionSucceeded = true
+          extractionSuccesses++
           emailModelValidResult = true
+        } else {
+          throw new Error('response parse failed: Anthropic returned no JSON object')
         }
       } catch (e) {
         const em = (e as Error).message || String(e)
-        if (isAnthropicAuthFailure(e)) {
-          // KEY IS DEAD. Degrade the whole scan loud (this + every later draft is tagged
-          // + forced to needs_review below, and the health banner is written after the
-          // loop). This is the exact failure that went silent for weeks in v1.
-          keyDegraded = true
-          keyDegradedReason = 'auth_failed'
-          emailAuthFailed = true
-          console.error('[ops-api] make-safe extraction AUTH FAILURE — ANTHROPIC_API_KEY dead; degrading intake:', em)
+        const failure = _classifyExtractionFailure(e)
+        emailFailureClassification = failure
+        extractionFailureReasons.push(failure.reason)
+        extraction._extraction_error = em.slice(0, 200)
+        extraction.extraction_failure = _extractionFailureState(failure, em)
+        if (failure.failureClass === 'terminal') {
+          terminalExtractionFailures++
+          emailTerminalFailed = true
+          emailAuthFailed = failure.reason === 'auth_failed'
+          if (failure.stopProviderLane) {
+            keyDegraded = true
+            keyDegradedReason = failure.reason
+            providerTerminalClassification = failure
+          }
+          console.error(`[ops-api] make-safe extraction TERMINAL ${failure.reason}; quarantining source item:`, em)
         } else {
-          // Transient (network / 5xx / bad JSON). Flag THIS draft and keep scanning; the
-          // 2-minute cron retries it next cycle. Not a system-wide degradation.
-          extraction._extraction_error = em.slice(0, 200)
+          retryableExtractionFailures++
           emailTransientFailed = true
-          console.error('[ops-api] make-safe extraction failed (transient, kept for review):', em)
+          console.error(`[ops-api] make-safe extraction RETRYABLE ${failure.reason}; kept for retry:`, em)
         }
       }
+    }
+
+    // Once a provider-wide terminal failure is known, later source items do not call the
+    // provider. They receive the same visible quarantine state and are bounded too.
+    if (!emailTemplateParsed && !emailModelValidResult && !emailFailureClassification && providerTerminalClassification) {
+      emailFailureClassification = providerTerminalClassification
+      emailTerminalFailed = true
+      const em = keyDegradedReason === 'key_unset'
+        ? 'ANTHROPIC_API_KEY is not configured'
+        : `provider lane stopped after terminal ${providerTerminalClassification.reason}`
+      extraction._extraction_error = em
+      extraction.extraction_failure = _extractionFailureState(providerTerminalClassification, em)
     }
 
     // M1.5 cost ledger: stamp which path this email used + its token cost onto the
@@ -15028,20 +15081,25 @@ async function scanSesMakesafes(client: any) {
       modelValidResult: emailModelValidResult,
       authFailed: emailAuthFailed,
       transientFailed: emailTransientFailed,
-      keyDegradedOrAbsent: keyDegraded || !ANTHROPIC_API_KEY,
+      terminalQuarantined: emailTerminalFailed,
+      keyDegradedOrAbsent: (keyDegraded || !ANTHROPIC_API_KEY) && !emailTerminalFailed,
     })
     if (thisEmailExtractionOk && msg._post_id) {
       scannedEmailIds.push(msg._post_id)
+      if (emailTerminalFailed) {
+        quarantinedItems++
+        quarantinedEmailIds.push(msg._post_id)
+      }
     }
 
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
     // needs_review docket with an explicit marker, never a silent empty draft — and,
     // because the marker is a blocking missing field + confidence is forced low, it can
     // never be auto-filed.
-    const draftExtractionDegraded = keyDegraded || !ANTHROPIC_API_KEY
+    const draftExtractionDegraded = keyDegraded || !ANTHROPIC_API_KEY || emailTerminalFailed
     if (draftExtractionDegraded) {
       extraction.extraction_degraded = true
-      extraction.extraction_degraded_reason = keyDegradedReason || 'key_unset'
+      extraction.extraction_degraded_reason = emailFailureClassification?.reason || keyDegradedReason || 'key_unset'
       if (!missingFields.includes(INTAKE_EXTRACTION_DOWN_MARKER)) {
         missingFields.push(INTAKE_EXTRACTION_DOWN_MARKER)
       }
@@ -15861,12 +15919,23 @@ async function scanSesMakesafes(client: any) {
   // timestamps). Pure + deterministic; excludes rows missing a timestamp.
   const scanSla = _computeLatencySla(newDrafts as any[])
 
-  // D-a: write the fail-loud health banner every run so a dead key is visible in
-  // intake_health + the morning report, and auto-file stays suppressed until it recovers.
+  // Health truth: a provider-wide terminal class degrades immediately. Otherwise a
+  // cycle is degraded when every provider attempt failed, including retryable 429,
+  // network and 5xx failures. Partial success remains healthy.
+  const cycleHealth = _extractionCycleHealth({
+    attempts: extractionAttempts,
+    successes: extractionSuccesses,
+    terminalFailures: terminalExtractionFailures,
+    retryableFailures: retryableExtractionFailures,
+    reasons: extractionFailureReasons,
+    providerLaneTerminalReason: providerTerminalClassification?.reason || null,
+  })
+  const extractionDegraded = cycleHealth.status === 'degraded'
   await writeIntakeHealth(client, {
-    extractionStatus: keyDegraded ? 'degraded' : 'ok',
-    degradedReason: keyDegraded ? (keyDegradedReason || 'key_unset') : null,
+    extractionStatus: cycleHealth.status,
+    degradedReason: cycleHealth.reason,
     anyExtractionSucceeded,
+    preserveDegradedUntilSuccess: true,
     draftsCreated: newDrafts.length,
     autoFiled: autoApproved.length,
     // M1.5 cost ledger: this scan's model-call/skip split + token totals.
@@ -15893,10 +15962,19 @@ async function scanSesMakesafes(client: any) {
     // D-a fail-loud state: true when the classifier key is dead/unset this run. Every
     // draft made while degraded carries the extraction_down_key_dead marker and is a
     // needs_review docket; nothing is silently empty and nothing is auto-filed.
-    extraction_degraded: keyDegraded,
-    extraction_degraded_reason: keyDegraded ? (keyDegradedReason || 'key_unset') : null,
+    extraction_degraded: extractionDegraded,
+    extraction_degraded_reason: cycleHealth.reason,
+    extraction_cycle: {
+      attempts: extractionAttempts,
+      successes: extractionSuccesses,
+      terminal_failures: terminalExtractionFailures,
+      retryable_failures: retryableExtractionFailures,
+      quarantined: quarantinedItems,
+      quarantine_recovery_action: 'reextract_intake_draft',
+      quarantined_source_ids: quarantinedEmailIds.slice(0, 100),
+    },
     // D-d: whether auto-file was permitted this run (DB kill switch AND not degraded).
-    auto_file_enabled: autoFileEnabled && !keyDegraded,
+    auto_file_enabled: autoFileEnabled && !extractionDegraded,
     makesafe_candidates: processedCandidates,
     matched_candidates: matchedMessages.length,
     processed_candidates: processedCandidates,
@@ -15968,6 +16046,20 @@ async function intakeHealth(client: any) {
   const { data: sync } = await client.from('sync_state')
     .select('last_successful_sync_at, last_attempt_at, mode, pending_attachments, last_error')
     .eq('mailbox', _SES_MAILBOX).maybeSingle()
+  const { data: alarmSettings, error: alarmSettingsError } = await client.from('makesafe_notify_settings')
+    .select('alarm_enabled, alarm_phones').eq('org_id', DEFAULT_ORG_ID).maybeSingle()
+  // The observed edge-gateway 401 lives in request logs, not a durable application row.
+  // Do not turn absence of that evidence into "ready": authentication remains explicitly
+  // unverified until a read-side gateway-status source is wired or a supervised drill is
+  // filed. Recipient/switch facts are still useful and truthful now.
+  const alarmReadiness = _alarmReadinessFacts({
+    alarmEnabled: alarmSettingsError ? null : (alarmSettings?.alarm_enabled ?? null),
+    recipientCount: alarmSettingsError
+      ? null
+      : (Array.isArray(alarmSettings?.alarm_phones) ? alarmSettings.alarm_phones.filter(Boolean).length : 0),
+    latestHttpStatus: null,
+    settingsReadError: alarmSettingsError?.message || null,
+  })
 
   const { count: drafts24h } = await client.from('makesafe_intake_drafts')
     .select('id', { count: 'exact', head: true })
@@ -16045,6 +16137,7 @@ async function intakeHealth(client: any) {
       enabled_at: settings?.enabled_at || null,
       enabled_by: settings?.enabled_by || null,
     },
+    alarm_readiness: alarmReadiness,
     last_poll: {
       mailbox: _SES_MAILBOX,
       last_successful_sync_at: sync?.last_successful_sync_at || null,
