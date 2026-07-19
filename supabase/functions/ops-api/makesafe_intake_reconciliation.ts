@@ -16,6 +16,7 @@ import {
   normaliseCompany,
   normaliseJobFamily,
   normaliseRef,
+  subjectJobNumber,
 } from "./makesafe_intake_dedup.ts";
 import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
 import {
@@ -580,13 +581,48 @@ interface ReconcileIdentity {
   po: string;
   workOrder: string;
   raw: string | null;
+  /**
+   * Durable exact identity tokens used only when no canonical builder claim is
+   * parseable — known refs whose prefix is outside the builder claim vocabulary and
+   * the bare "Job No <NNNNN>" archetype. Namespaced so a job number can never
+   * collide with a reference whose digits happen to match.
+   */
+  keys: string[];
 }
 
+const PREFIXED_REF_RE =
+  /\b(?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,}(?:\s*P\s*O\s*[-\s#]*\d{3,})?/i;
+const GENERIC_REF_TOKEN_RE = /(?<![A-Z0-9])[A-Z]{2,8}[-\s#]?\d{3,}(?![A-Z0-9])/gi;
+const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
+
 function rawReferenceFromText(value: string | null | undefined): string | null {
-  const match = String(value || "").match(
-    /\b(?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,}(?:\s*P\s*O\s*[-\s#]*\d{3,})?/i,
-  );
-  return match?.[0] || null;
+  const text = String(value || "");
+  return text.match(PREFIXED_REF_RE)?.[0] ||
+    text.match(JOB_NUMBER_TEXT_RE)?.[0] ||
+    text.match(GENERIC_REF_TOKEN_RE)?.[0] || null;
+}
+
+/**
+ * Fallback identity tokens for sources/captures with no canonical claim. Exact
+ * token equality only — never substring containment — so a near-collision between
+ * two distinct deliverables cannot silently collapse.
+ */
+function fallbackIdentityKeys(
+  externalRef: string | null | undefined,
+  subject: string | null | undefined,
+): string[] {
+  const keys = new Set<string>();
+  const ref = normaliseRef(externalRef);
+  if (ref.length >= 5) keys.add(`REF:${ref}`);
+  if (/^\d{3,7}$/.test(ref)) keys.add(`JOB:${ref}`);
+  const text = String(subject || "");
+  const jobNo = subjectJobNumber(text);
+  if (jobNo) keys.add(`JOB:${jobNo}`);
+  for (const match of text.matchAll(GENERIC_REF_TOKEN_RE)) {
+    const token = normaliseRef(match[0]);
+    if (token.length >= 5) keys.add(`REF:${token}`);
+  }
+  return [...keys];
 }
 
 function reconcileIdentity(input: {
@@ -616,6 +652,7 @@ function reconcileIdentity(input: {
     workOrder,
     raw: input.externalRef || rawReferenceFromText(input.subject) ||
       parsed.builder_work_order_number || parsed.builder_claim_ref || null,
+    keys: fallbackIdentityKeys(input.externalRef, input.subject),
   };
 }
 
@@ -636,6 +673,56 @@ function identityRelation(
   // is deliberately unsafe: an explicit new source PO against a legacy claim-only
   // job can be genuinely new work and must remain visible.
   return !source.po && !!captured.po ? "claim_po_alias" : null;
+}
+
+interface CapturedIdentity<T> {
+  entry: T;
+  identity: ReconcileIdentity;
+}
+
+interface CapturedIndex<T> {
+  byClaim: Map<string, CapturedIdentity<T>[]>;
+  byKey: Map<string, CapturedIdentity<T>>;
+}
+
+function indexCapturedIdentities<T>(
+  captured: CapturedIdentity<T>[],
+): CapturedIndex<T> {
+  const byClaim = new Map<string, CapturedIdentity<T>[]>();
+  const byKey = new Map<string, CapturedIdentity<T>>();
+  for (const c of captured) {
+    if (c.identity.claim) {
+      const arr = byClaim.get(c.identity.claim);
+      if (arr) arr.push(c);
+      else byClaim.set(c.identity.claim, [c]);
+    }
+    for (const key of c.identity.keys) {
+      if (!byKey.has(key)) byKey.set(key, c);
+    }
+  }
+  return { byClaim, byKey };
+}
+
+function findCapturedIdentity<T>(
+  source: ReconcileIdentity,
+  index: CapturedIndex<T>,
+): { entry: T; relation: "exact" | "claim_po_alias" } | null {
+  // A canonical claim is the strongest identity we have: resolve it exclusively so
+  // the weaker token fallback can never route around explicit PO separation.
+  if (source.claim) {
+    for (const c of index.byClaim.get(source.claim) || []) {
+      const relation = identityRelation(source, c.identity);
+      if (relation) return { entry: c.entry, relation };
+    }
+    return null;
+  }
+  for (const key of source.keys) {
+    const c = index.byKey.get(key);
+    if (!c) continue;
+    if (source.po && source.po !== c.identity.po) continue;
+    return { entry: c.entry, relation: "exact" };
+  }
+  return null;
 }
 
 export function summarizeIntakeReconcileInvariant(input: {
@@ -659,7 +746,7 @@ export function summarizeIntakeReconcileInvariant(input: {
   const draftsByPostId = new Map<string, IntakeReconDraft>();
   const draftsByInternetId = new Map<string, IntakeReconDraft>();
   const draftFingerprints = new Map<string, IntakeReconDraft>();
-  const draftIdentities = new Map<IntakeReconDraft, ReconcileIdentity>();
+  const draftIdentities: CapturedIdentity<IntakeReconDraft>[] = [];
   for (const d of drafts) {
     if (d.graph_message_id) draftsByPostId.set(d.graph_message_id, d);
     if (d.internet_message_id) draftsByInternetId.set(d.internet_message_id, d);
@@ -669,7 +756,7 @@ export function summarizeIntakeReconcileInvariant(input: {
       body: d.body_preview,
       extraction: d.extraction_json,
     });
-    draftIdentities.set(d, identity);
+    draftIdentities.push({ entry: d, identity });
     const fingerprint = contentFingerprint(
       d.from_email,
       d.subject,
@@ -679,13 +766,15 @@ export function summarizeIntakeReconcileInvariant(input: {
     );
     if (fingerprint) draftFingerprints.set(fingerprint, d);
   }
-  const jobIdentities = jobs.map((job) => ({
-    job,
+  const jobIdentities: CapturedIdentity<IntakeReconJob>[] = jobs.map((job) => ({
+    entry: job,
     identity: reconcileIdentity({
       externalRef: job.external_ref,
       extraction: parseObj(jobRow(job)?.metadata),
     }),
   }));
+  const draftIndex = indexCapturedIdentities(draftIdentities);
+  const jobIndex = indexCapturedIdentities(jobIdentities);
 
   const items: IntakeReconcileInvariantItem[] = [];
   const unaccounted: IntakeReconcileInvariantItem[] = [];
@@ -817,12 +906,7 @@ export function summarizeIntakeReconcileInvariant(input: {
     // Re-send/revision lineage may be represented by a draft or live job. Compare
     // claim and PO independently: claim-only <-> PO-suffixed is an alias; two
     // explicit different POs are never equivalent.
-    const draftIdentityHit = [...draftIdentities.entries()]
-      .map(([draft, captured]) => ({
-        draft,
-        relation: identityRelation(identity, captured),
-      }))
-      .find((hit) => hit.relation);
+    const draftIdentityHit = findCapturedIdentity(identity, draftIndex);
     if (draftIdentityHit) {
       record(
         e,
@@ -832,17 +916,14 @@ export function summarizeIntakeReconcileInvariant(input: {
           : "resend_or_revision_matches_draft_identity",
         {
           kind: "draft",
-          id: draftIdentityHit.draft.id ||
-            draftIdentityHit.draft.graph_message_id || "draft",
+          id: draftIdentityHit.entry.id ||
+            draftIdentityHit.entry.graph_message_id || "draft",
         },
         identity,
       );
       continue;
     }
-    const jobIdentityHit = jobIdentities.map(({ job, identity: captured }) => ({
-      job,
-      relation: identityRelation(identity, captured),
-    })).find((hit) => hit.relation);
+    const jobIdentityHit = findCapturedIdentity(identity, jobIndex);
     if (jobIdentityHit) {
       record(
         e,
@@ -852,7 +933,7 @@ export function summarizeIntakeReconcileInvariant(input: {
           : "resend_or_revision_matches_live_job_identity",
         {
           kind: "job",
-          id: jobIdentityHit.job.job_id || jobIdentityHit.job.external_ref ||
+          id: jobIdentityHit.entry.job_id || jobIdentityHit.entry.external_ref ||
             "job",
         },
         identity,
@@ -919,7 +1000,7 @@ export async function makesafeIntakeReconcileInvariant(
       .gte("received_at", sinceIso)
       .limit(1000),
     client.from("makesafe_job_details")
-      .select("job_id, external_ref, jobs(metadata)")
+      .select("job_id, external_ref")
       .not("external_ref", "is", null)
       .limit(2000),
     client.from("makesafe_companies")

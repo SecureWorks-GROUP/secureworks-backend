@@ -270,3 +270,95 @@ Deno.test("invariant hostile near-collision: distinct PO deliverables sharing a 
   );
   assertEquals(inv.unaccounted[0].canonical_po_ref, "PO-56397");
 });
+
+Deno.test("invariant: bare 'Job No <NNNNN>' archetype is accounted by a live job", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68592",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-68592", external_ref: "68592" }],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].evidence, { kind: "job", id: "job-68592" });
+  assertEquals(inv.items[0].raw_reference, "Job No 68592");
+});
+
+Deno.test("invariant: known ref outside the builder claim vocabulary is accounted by a draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-srj-41288",
+      subject: "NEW WORK ORDER SRJ-41288 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-srj-41288",
+      graph_message_id: "AAMk-sanitized-srj-41288",
+      external_ref: "SRJ-41288",
+      subject: "NEW WORK ORDER SRJ-41288 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-srj-41288" });
+  assertEquals(inv.items[0].canonical_claim_ref, null);
+});
+
+Deno.test("invariant hostile near-collision: neighbouring non-prefix refs stay separate", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-srj-41289",
+      subject: "NEW WORK ORDER SRJ-41289 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-srj-41288", external_ref: "SRJ-41288" }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: distinct job numbers are never collapsed", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68593",
+      subject: "Make Safe - Balga - Job No 68593",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-68592", external_ref: "68592" }],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: non-prefix ref with an explicit new PO stays visible", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-srj-41288-po",
+      subject: "NEW WORK ORDER SRJ-41288 PO 55601 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-srj-41288", external_ref: "SRJ-41288" }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].canonical_po_ref, "PO-55601");
+});
