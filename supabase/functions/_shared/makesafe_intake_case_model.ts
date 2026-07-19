@@ -129,6 +129,10 @@ function normaliseBuilderWo(
 // WO ("WO.12345" is the same work order as "WO-12345") but significant inside a
 // builder PO, where "PO-1.2" and "PO-1-2" must stay two identities, so the
 // separator class is per field rather than shared.
+// Accepted risk on the WO side: separator style is folded, so "WO-1234.1" and
+// "WO-1234-1" are one identity. Distinct suffix values ("WO-1234.1" vs
+// "WO-1234.2") still stay distinct, so revision/stage numbering survives; only
+// the punctuation used to attach a suffix is treated as noise.
 const OPAQUE_SEPARATORS = /[\s#:/\\-]+/g;
 const WO_SEPARATORS = /[\s#:/\\._-]+/g;
 

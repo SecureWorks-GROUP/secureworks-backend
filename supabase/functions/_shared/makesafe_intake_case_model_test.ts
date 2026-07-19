@@ -215,6 +215,18 @@ Deno.test("punctuation variants of one builder WO stay one identity", () => {
   assertEquals(keys[0], "wo:WO-12345");
 });
 
+Deno.test("suffixed builder WOs stay distinct across separator styles", () => {
+  const keys = ["WO-1234.1", "WO-1234.2", "WO-1234_3", "WO-1234"].map((raw) =>
+    normaliseMakesafeIdentity({
+      externalRefRaw: null,
+      builderWoRaw: raw,
+      builderPoRaw: null,
+      deliverableRefRaw: null,
+    }).woPoIdentityKey
+  );
+  assertEquals(new Set(keys).size, 4);
+});
+
 Deno.test("dot and underscore stay significant inside builder POs", () => {
   const keys = ["PO-1.2", "PO_1_2", "PO-1-2"].map((raw) =>
     normaliseMakesafeIdentity({
