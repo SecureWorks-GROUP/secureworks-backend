@@ -180,7 +180,8 @@ Deno.test("invariant hostile near-collision: ref-less production-shaped bodies n
       .repeat(12)
   }<p>Site contact differs per work order.</p></body></html>`;
   const mailboxPreview = html.replace(/<[^>]+>/g, " ").slice(0, 500);
-  const draftPreview = html.replace(/<[^>]+>/g, "\n").replace(/\s+/g, " ").trim()
+  const draftPreview = html.replace(/<[^>]+>/g, "\n").replace(/\s+/g, " ")
+    .trim()
     .slice(0, 2000);
   assertEquals(mailboxPreview === draftPreview, false);
 
