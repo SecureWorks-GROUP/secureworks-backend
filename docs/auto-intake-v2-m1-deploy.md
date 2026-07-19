@@ -122,7 +122,9 @@ SELECT cron.schedule('makesafe-ses-poll', '*/2 * * * *',
    carries the raw source reference (`raw_reference`) beside the separately canonicalised
    `canonical_claim_ref` and `canonical_po_ref`. Only `genuinely_unaccounted` items are real emails
    with no draft/job — intake them by hand (manual fallback path in the intake skill). Two explicit
-   different POs are never collapsed, so a new PO against a legacy claim-only job stays visible.
+   different POs are never collapsed, so a new PO against a legacy claim-only job stays visible. A
+   bare `Order No <digits>` is read as the sender's own work-order reference, not a PO, so those
+   rows show a null `canonical_po_ref` — that is expected, not a parse miss.
 
 ## Rollback / brakes
 
