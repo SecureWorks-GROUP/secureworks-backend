@@ -903,7 +903,7 @@ function normaliseSenderScope(value: string | null | undefined): string {
 }
 
 function scopedKey(scope: string, key: string): string {
-  return `${scope} ${key}`;
+  return `${scope}\u0000${key}`;
 }
 
 function indexCapturedIdentities<T>(
