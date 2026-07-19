@@ -1210,9 +1210,11 @@ Deno.test("invariant: a parseable explicit PO matches its own captured deliverab
   assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
 });
 
-// A quoted thread or footer names some other instruction's order. Reading it would
-// declare this row's PO unknown and strand plainly captured work as unaccounted.
-Deno.test("invariant: an order label quoted in the body does not strand a clean subject", () => {
+// Body text is never adopted as identity, so a quoted PO cannot become this row's
+// PO. It is still doubt: some PO is in play that the authoritative fields do not
+// show, so identity inference is withheld and the row surfaces for review rather
+// than being aliased onto a lineage the evidence cannot name.
+Deno.test("invariant: an order label quoted in the body withholds identity aliasing", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "mailbox-quoted-order-label",
@@ -1232,24 +1234,21 @@ Deno.test("invariant: an order label quoted in the body does not strand a clean 
     senderPatterns: SENDER_PATTERNS,
   });
 
-  assertEquals(inv.counts.unaccounted, 0);
-  assertEquals(inv.items[0].evidence, {
-    kind: "draft",
-    id: "draft-quoted-order-label",
-  });
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].canonical_po_ref, null);
 });
 
-// Identity reads authoritative evidence only, so a PO quoted in a prior thread is
-// not this row's PO. Reading it would declare the PO unknown and strand plainly
-// captured work as unaccounted.
-Deno.test("invariant: a dotted PO quoted in the body does not strand a clean subject", () => {
+// The same doubt, in a spelling the canonical grammar cannot read at all.
+Deno.test("invariant: a dotted PO quoted in the body withholds identity aliasing", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "mailbox-body-dotted-po",
       subject: "NEW WO - MLB 25096",
       from_email: "jobs@mlbuilders.com.au",
       received_at: "2026-05-06T05:30:00.000Z",
-      body_preview: "Please attend.\n> From an earlier thread: P.O. 4477 was raised.",
+      body_preview:
+        "Please attend.\n> From an earlier thread: P.O. 4477 was raised.",
     }],
     drafts: [{
       id: "draft-body-dotted-po",
@@ -1261,16 +1260,44 @@ Deno.test("invariant: a dotted PO quoted in the body does not strand a clean sub
     senderPatterns: SENDER_PATTERNS,
   });
 
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// Withholding identity inference must not withhold durable evidence: the twin here
+// is proven by the internet message id, which reasons about no PO at all.
+Deno.test("invariant: a quoted body PO still accounts on durable message-id evidence", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-po-with-message-id",
+      internet_message_id: "<sanitized-body-po-twin@mlbuilders.com.au>",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: P.O. 4477 was raised.",
+    }],
+    drafts: [{
+      id: "draft-body-po-with-message-id",
+      graph_message_id: "AAMk-sanitized-body-po-twin",
+      internet_message_id: "<sanitized-body-po-twin@mlbuilders.com.au>",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
   assertEquals(inv.counts.unaccounted, 0);
   assertEquals(inv.items[0].evidence, {
     kind: "draft",
-    id: "draft-body-dotted-po",
+    id: "draft-body-po-with-message-id",
   });
 });
 
-// Production capture parses the PO out of the body, so reconciliation must too:
-// a body-borne PO the canonical grammar CAN read is this row's explicit PO, and a
-// different PO on the capture is separate work, not the same lineage.
+// A body PO the canonical grammar CAN read is not adopted either — a quoted "PO
+// 9999" reads identically to an instruction's own. It blocks aliasing onto the
+// capture's PO-4477 lineage, and canonical_po_ref stays empty because no
+// authoritative field named a PO.
 Deno.test("invariant hostile near-collision: a parseable body PO does not alias a different captured PO", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
@@ -1296,5 +1323,32 @@ Deno.test("invariant hostile near-collision: a parseable body PO does not alias 
     kind: "classification",
     id: "no_durable_capture_evidence",
   });
-  assertEquals(inv.items[0].canonical_po_ref, "PO-9999");
+  assertEquals(inv.items[0].canonical_po_ref, null);
+});
+
+// A subject-borne PO the canonical grammar cannot read can no longer be masked by
+// body text: the subject's own doubt stands on its own, so the row may not alias
+// the capture's explicit PO-9999.
+Deno.test("invariant hostile near-collision: a subject P.O. is not masked by a quoted body PO", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-subject-dotted-po-body-po",
+      subject: "NEW WO - MLB 25096 - P.O. 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: PO 9999 raised.",
+    }],
+    drafts: [{
+      id: "draft-subject-dotted-po-body-po",
+      graph_message_id: "AAMk-sanitized-subject-dotted-po",
+      external_ref: "MLB-25096-PO-9999",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].canonical_po_ref, null);
 });

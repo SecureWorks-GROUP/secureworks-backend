@@ -20,6 +20,7 @@ import {
 } from "./makesafe_intake_dedup.ts";
 import {
   extractBuilderWorkOrderIdentity,
+  hasAnyPoLabel,
   hasUnparseablePoLabel,
   matchBuilderRefText,
   PO_LABEL_PATTERN,
@@ -604,11 +605,19 @@ interface ReconcileIdentity {
    */
   keys: string[];
   /**
-   * The text carries a PO label the canonical extractor cannot parse, so this row
+   * The subject carries a PO label the canonical extractor cannot parse, so this row
    * may name a PO we cannot see. Treated as "PO unknown", never as "no PO": a
    * claim-only alias would collapse it onto another PO's lineage.
    */
   poUnparsed: boolean;
+  /**
+   * poUnparsed, or the body names a PO in any spelling. A quoted or footer PO is not
+   * adopted as identity, but it does mean the authoritative fields may not show the
+   * whole picture, so identity inference (claim and token matching) is withheld.
+   * Durable evidence — post id, internet message id, content fingerprint — is
+   * unaffected, since none of it reasons about the PO.
+   */
+  poContextAmbiguous: boolean;
 }
 
 const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
@@ -716,15 +725,17 @@ function canonicalIdentityTokens(input: {
 }
 
 /**
- * Canonical identity is parsed from the same inputs production capture reads —
- * external_ref, subject and body — so a source row and the draft it produced
- * resolve the same claim and PO. In particular a body-borne "PO 9999" must reach
- * identity.po, or the explicit-PO separation guard goes blind on exactly the rows
- * it exists to keep apart.
+ * Canonical identity comes only from evidence that belongs to THIS row: its
+ * external_ref, its stored extraction fields and its current subject. body_preview
+ * is never parsed for identity — it carries quoted threads and footers as often as
+ * it carries this instruction's own reference, and adopting a quoted "PO 4477" as
+ * this row's PO names the wrong lineage.
  *
- * The unknown-PO signal is the one thing scoped to the subject: it fires on labels
- * nothing can parse, so a quoted thread or footer naming some other instruction's
- * PO would strand plainly captured work as unaccounted rather than protect it.
+ * Body text still matters, but only as doubt: any PO-shaped label in it, parseable
+ * or not, means a PO may be in play that the authoritative fields do not show. That
+ * raises poUnparsed, which blocks claim/PO aliasing entirely. Such a row can still
+ * be accounted by durable evidence (post id, internet message id, content
+ * fingerprint); it simply may not be collapsed on identity inference alone.
  */
 function reconcileIdentity(input: {
   externalRef?: string | null;
@@ -735,7 +746,6 @@ function reconcileIdentity(input: {
   const parsed = extractBuilderWorkOrderIdentity({
     externalRef: input.externalRef,
     subject: input.subject,
-    bodyText: input.bodyText,
   });
   const extraction = parseObj(input.extraction);
   const claim = normaliseRef(
@@ -762,10 +772,13 @@ function reconcileIdentity(input: {
       externalRef: input.externalRef,
     }),
     keys,
-    // A PO label the canonical grammar cannot read means "PO unknown", never "no
-    // PO". Subject only: quoted body text belongs to some other instruction as
-    // often as this one, and a false "unknown" strands captured work.
+    // A subject PO label the canonical grammar cannot read means "PO unknown",
+    // never "no PO".
     poUnparsed: !po && hasUnparseablePoLabel(input.subject || ""),
+    // Body text raises the same doubt whatever the spelling, because we never adopt
+    // its number: seeing a PO discussed at all is enough to stop identity aliasing.
+    poContextAmbiguous: (!po && hasUnparseablePoLabel(input.subject || "")) ||
+      hasAnyPoLabel(input.bodyText || ""),
   };
 }
 
@@ -791,7 +804,7 @@ function identityRelation(
   // would either alias a different PO's capture or read as "no PO on either side",
   // both of which hide a possibly-new deliverable. Only an aligned work order,
   // which carries the PO in its own token, survives.
-  if (source.poUnparsed || captured.poUnparsed) {
+  if (source.poContextAmbiguous || captured.poContextAmbiguous) {
     return source.workOrder && source.workOrder === captured.workOrder
       ? "exact"
       : null;
@@ -944,8 +957,8 @@ function findCapturedIdentity<T>(
     // names a lineage, so fail open rather than account against whichever was
     // indexed first.
     const compatible = candidates.filter((c) =>
-      !c.identity.poUnparsed &&
-      (source.po ? source.po === c.identity.po : !source.poUnparsed)
+      !c.identity.poContextAmbiguous &&
+      (source.po ? source.po === c.identity.po : !source.poContextAmbiguous)
     );
     if (!compatible.length) continue;
     const exact = compatible.filter((c) => c.identity.po === source.po);

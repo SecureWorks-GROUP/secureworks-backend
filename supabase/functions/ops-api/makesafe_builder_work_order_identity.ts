@@ -58,6 +58,15 @@ export function hasUnparseablePoLabel(text: string): boolean {
   return LOOSE_PO_RE.test(text);
 }
 
+/**
+ * True when the text names a PO at all, in any spelling either grammar recognises.
+ * Callers reading text that may quote another instruction use this to know a PO is
+ * being discussed without adopting its number as their own identity.
+ */
+export function hasAnyPoLabel(text: string): boolean {
+  return PO_RE.test(text) || LOOSE_PO_RE.test(text);
+}
+
 function canonicalClaim(prefix: string, digits: string): string {
   return `${prefix.toUpperCase()}-${digits}`;
 }
