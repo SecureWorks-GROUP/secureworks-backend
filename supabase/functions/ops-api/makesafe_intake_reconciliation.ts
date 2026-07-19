@@ -11,10 +11,13 @@
 // mutation.
 
 import {
+  contentFingerprint,
+  contentFingerprintChecks,
   normaliseCompany,
   normaliseJobFamily,
   normaliseRef,
 } from "./makesafe_intake_dedup.ts";
+import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
 import {
   isPureAckNoAction,
   subjectIsExcludedNonWorkOrder,
@@ -26,8 +29,10 @@ import { senderMatchesPattern } from "../_shared/makesafe_intake_classification.
 
 export interface IntakeReconEmail {
   post_id?: string | null;
+  internet_message_id?: string | null;
   subject?: string | null;
   from_email?: string | null;
+  body_preview?: string | null;
   received_at?: string | null;
   has_attachments?: boolean | null;
 }
@@ -42,6 +47,8 @@ export interface IntakeReconDraft {
   status?: string | null;
   report_type?: string | null;
   subject?: string | null;
+  from_email?: string | null;
+  body_preview?: string | null;
   received_at?: string | null;
   created_at?: string | null;
   confidence?: string | null;
@@ -518,8 +525,21 @@ export async function makesafeIntakeReconciliation(
 // its ref (dedup would skip it), OR a deterministic non-work-order classification
 // with a reason (own outbound, excluded subject, pure ack, or not a make-safe
 // candidate at all). Anything left is a genuine inbound make-safe candidate with no
-// draft and no job. ZERO unaccounted = the board is live and true. This reuses the
-// SAME gate helpers the scan uses, so the accounting matches what the scan would do.
+// draft and no job. ZERO unaccounted = the board is live and true. Every source row
+// is returned as matched, accounted alias/revision, or genuinely unaccounted with an
+// evidence pointer. Raw refs remain intact beside separately canonicalised claim/PO
+// identity. This reuses the SAME gate helpers the scan uses, so accounting matches
+// what the scan would do.
+
+export type IntakeReconcileClassification =
+  | "matched"
+  | "accounted_alias_revision"
+  | "genuinely_unaccounted";
+
+export interface IntakeReconcileEvidencePointer {
+  kind: "draft" | "job" | "classification";
+  id: string;
+}
 
 export interface IntakeReconcileInvariantItem {
   post_id: string | null;
@@ -528,7 +548,13 @@ export interface IntakeReconcileInvariantItem {
   received_at: string | null;
   age_minutes: number | null;
   state: "accounted" | "unaccounted";
+  classification: IntakeReconcileClassification;
   reason: string;
+  evidence: IntakeReconcileEvidencePointer;
+  /** Raw source representation retained for operator audit. */
+  raw_reference: string | null;
+  canonical_claim_ref: string | null;
+  canonical_po_ref: string | null;
 }
 
 export interface IntakeReconcileInvariant {
@@ -538,10 +564,78 @@ export interface IntakeReconcileInvariant {
   live_and_true: boolean;
   counts: {
     source_emails: number;
+    matched: number;
+    accounted_alias_revision: number;
     accounted: number;
+    genuinely_unaccounted: number;
     unaccounted: number;
   };
+  /** One explicit classification per source row. */
+  items: IntakeReconcileInvariantItem[];
   unaccounted: IntakeReconcileInvariantItem[];
+}
+
+interface ReconcileIdentity {
+  claim: string;
+  po: string;
+  workOrder: string;
+  raw: string | null;
+}
+
+function rawReferenceFromText(value: string | null | undefined): string | null {
+  const match = String(value || "").match(
+    /\b(?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,}(?:\s*P\s*O\s*[-\s#]*\d{3,})?/i,
+  );
+  return match?.[0] || null;
+}
+
+function reconcileIdentity(input: {
+  externalRef?: string | null;
+  subject?: string | null;
+  body?: string | null;
+  extraction?: any;
+}): ReconcileIdentity {
+  const parsed = extractBuilderWorkOrderIdentity({
+    externalRef: input.externalRef,
+    subject: input.subject,
+    bodyText: input.body,
+  });
+  const extraction = parseObj(input.extraction);
+  const claim = normaliseRef(
+    extraction.builder_claim_ref || parsed.builder_claim_ref,
+  );
+  const po = normaliseRef(
+    extraction.builder_po_number || parsed.builder_po_number,
+  ).replace(/^PO/, "");
+  const workOrder = normaliseRef(
+    extraction.builder_work_order_number || parsed.builder_work_order_number,
+  );
+  return {
+    claim,
+    po,
+    workOrder,
+    raw: input.externalRef || rawReferenceFromText(input.subject) ||
+      parsed.builder_work_order_number || parsed.builder_claim_ref || null,
+  };
+}
+
+function identityRelation(
+  source: ReconcileIdentity,
+  captured: ReconcileIdentity,
+): "exact" | "claim_po_alias" | null {
+  if (!source.claim || source.claim !== captured.claim) return null;
+  // Two explicit, different POs are two deliverables. Never collapse them merely
+  // because the property/claim is shared.
+  if (source.po && captured.po && source.po !== captured.po) return null;
+  if (
+    (source.workOrder && source.workOrder === captured.workOrder) ||
+    (source.po && source.po === captured.po) ||
+    (!source.po && !captured.po)
+  ) return "exact";
+  // A claim-only SOURCE may alias a richer PO-suffixed captured identity. The reverse
+  // is deliberately unsafe: an explicit new source PO against a legacy claim-only
+  // job can be genuinely new work and must remain visible.
+  return !source.po && !!captured.po ? "claim_po_alias" : null;
 }
 
 export function summarizeIntakeReconcileInvariant(input: {
@@ -560,49 +654,148 @@ export function summarizeIntakeReconcileInvariant(input: {
     .map((p) => String(p || "").toLowerCase())
     .filter(Boolean);
 
-  // Linkage: a draft's graph_message_id equals the source email post_id.
-  const draftedPostIds = new Set<string>();
-  for (const d of input.drafts || []) {
-    if (d.graph_message_id) draftedPostIds.add(d.graph_message_id);
+  const drafts = input.drafts || [];
+  const jobs = input.jobs || [];
+  const draftsByPostId = new Map<string, IntakeReconDraft>();
+  const draftsByInternetId = new Map<string, IntakeReconDraft>();
+  const draftFingerprints = new Map<string, IntakeReconDraft>();
+  const draftIdentities = new Map<IntakeReconDraft, ReconcileIdentity>();
+  for (const d of drafts) {
+    if (d.graph_message_id) draftsByPostId.set(d.graph_message_id, d);
+    if (d.internet_message_id) draftsByInternetId.set(d.internet_message_id, d);
+    const identity = reconcileIdentity({
+      externalRef: d.external_ref,
+      subject: d.subject,
+      body: d.body_preview,
+      extraction: d.extraction_json,
+    });
+    draftIdentities.set(d, identity);
+    const fingerprint = contentFingerprint(
+      d.from_email,
+      d.subject,
+      d.received_at || d.created_at,
+      d.external_ref,
+      d.body_preview,
+    );
+    if (fingerprint) draftFingerprints.set(fingerprint, d);
   }
-  const jobRefs: string[] = [];
-  for (const j of input.jobs || []) {
-    const nr = normaliseRef(j.external_ref);
-    if (nr.length >= 5) jobRefs.push(nr);
-  }
+  const jobIdentities = jobs.map((job) => ({
+    job,
+    identity: reconcileIdentity({
+      externalRef: job.external_ref,
+      extraction: parseObj(jobRow(job)?.metadata),
+    }),
+  }));
 
+  const items: IntakeReconcileInvariantItem[] = [];
   const unaccounted: IntakeReconcileInvariantItem[] = [];
-  let accounted = 0;
+  let matched = 0;
+  let aliasRevision = 0;
+
+  function record(
+    e: IntakeReconEmail,
+    classification: IntakeReconcileClassification,
+    reason: string,
+    evidence: IntakeReconcileEvidencePointer,
+    identity: ReconcileIdentity,
+  ): void {
+    const item: IntakeReconcileInvariantItem = {
+      post_id: e.post_id || null,
+      subject: e.subject || null,
+      from_email: e.from_email || null,
+      received_at: e.received_at || null,
+      age_minutes: minutesOld(e.received_at, nowMs),
+      state: classification === "genuinely_unaccounted"
+        ? "unaccounted"
+        : "accounted",
+      classification,
+      reason,
+      evidence,
+      raw_reference: identity.raw,
+      canonical_claim_ref: identity.claim || null,
+      canonical_po_ref: identity.po ? `PO-${identity.po}` : null,
+    };
+    items.push(item);
+    if (classification === "matched") matched++;
+    else if (classification === "accounted_alias_revision") aliasRevision++;
+    else unaccounted.push(item);
+  }
 
   for (const e of input.emails || []) {
     const postId = e.post_id || null;
     const subject = e.subject || "";
     const fromEmail = e.from_email || "";
+    const identity = reconcileIdentity({
+      subject,
+      body: e.body_preview,
+    });
 
-    // 1) linked draft (any status)
-    if (postId && draftedPostIds.has(postId)) {
-      accounted++;
+    // Exact source evidence linkage remains authoritative and preserves the raw id.
+    const directDraft = postId ? draftsByPostId.get(postId) : undefined;
+    if (directDraft) {
+      record(e, "matched", "source_post_id_matches_draft", {
+        kind: "draft",
+        id: directDraft.id || directDraft.graph_message_id || postId!,
+      }, identity);
       continue;
     }
-    // 2) our own outbound copy — never an inbound intake candidate
+
+    // Graph exposes one instruction through group-post and mailbox projections. Only
+    // collapse when a durable message id or the existing fail-open content fingerprint
+    // proves equivalence. Missing fingerprint inputs never alias.
+    const internetTwin = e.internet_message_id
+      ? draftsByInternetId.get(e.internet_message_id)
+      : undefined;
+    const fingerprintTwin = internetTwin || contentFingerprintChecks(
+      e.from_email,
+      e.subject,
+      e.received_at,
+      identity.raw,
+      e.body_preview,
+    ).map((fp) => draftFingerprints.get(fp)).find(Boolean);
+    if (fingerprintTwin) {
+      record(
+        e,
+        "accounted_alias_revision",
+        internetTwin
+          ? "twin_graph_post_same_internet_message_id"
+          : "twin_graph_post_content_fingerprint",
+        {
+          kind: "draft",
+          id: fingerprintTwin.id || fingerprintTwin.graph_message_id || "draft",
+        },
+        identity,
+      );
+      continue;
+    }
+
+    // Deterministic non-work classifications are explicit matched rows, not omitted
+    // bookkeeping. Their evidence pointer names the exact gate decision.
     const at = fromEmail.lastIndexOf("@");
-    const domain = at >= 0 ? fromEmail.slice(at + 1).trim().toLowerCase() : null;
+    const domain = at >= 0
+      ? fromEmail.slice(at + 1).trim().toLowerCase()
+      : null;
     if (isOwnDomain(domain)) {
-      accounted++;
+      record(e, "matched", "own_outbound_non_candidate", {
+        kind: "classification",
+        id: "isOwnDomain",
+      }, identity);
       continue;
     }
-    // 3) gate-excluded non-work-order subject (photo evidence / report / invoice / …)
     if (subjectIsExcludedNonWorkOrder(subject)) {
-      accounted++;
+      record(e, "matched", "excluded_non_work_order_subject", {
+        kind: "classification",
+        id: "subjectIsExcludedNonWorkOrder",
+      }, identity);
       continue;
     }
-    // 4) pure acknowledgement (thanks/noted, no action, no attachment)
     if (isPureAckNoAction(subject, !!e.has_attachments)) {
-      accounted++;
+      record(e, "matched", "pure_ack_no_action", {
+        kind: "classification",
+        id: "isPureAckNoAction",
+      }, identity);
       continue;
     }
-    // 5) not a make-safe candidate at all — the scan's matchedMessages filter would
-    //    never draft it (unknown sender AND no WO/report subject on a builder-ish domain).
     const senderMatch = senderPatterns.some((p) =>
       senderMatchesPattern(fromEmail, p)
     );
@@ -614,27 +807,74 @@ export function summarizeIntakeReconcileInvariant(input: {
     const builderish = fromEmail.includes(".build") ||
       fromEmail.includes("primeeco.tech");
     if (!(senderMatch || (woSubject && builderish))) {
-      accounted++;
+      record(e, "matched", "not_make_safe_candidate", {
+        kind: "classification",
+        id: "sender_and_subject_floor",
+      }, identity);
       continue;
     }
-    // 6) candidate with no draft: is a live job already on a ref named in the subject?
-    const normSubject = normaliseRef(subject);
-    if (jobRefs.some((r) => normSubject.includes(r))) {
-      accounted++;
+
+    // Re-send/revision lineage may be represented by a draft or live job. Compare
+    // claim and PO independently: claim-only <-> PO-suffixed is an alias; two
+    // explicit different POs are never equivalent.
+    const draftIdentityHit = [...draftIdentities.entries()]
+      .map(([draft, captured]) => ({
+        draft,
+        relation: identityRelation(identity, captured),
+      }))
+      .find((hit) => hit.relation);
+    if (draftIdentityHit) {
+      record(
+        e,
+        "accounted_alias_revision",
+        draftIdentityHit.relation === "claim_po_alias"
+          ? "claim_reference_alias_of_po_captured_draft"
+          : "resend_or_revision_matches_draft_identity",
+        {
+          kind: "draft",
+          id: draftIdentityHit.draft.id ||
+            draftIdentityHit.draft.graph_message_id || "draft",
+        },
+        identity,
+      );
       continue;
     }
-    // 7) a real inbound make-safe candidate with NO draft and NO job — UNACCOUNTED.
-    unaccounted.push({
-      post_id: postId,
-      subject: e.subject || null,
-      from_email: e.from_email || null,
-      received_at: e.received_at || null,
-      age_minutes: minutesOld(e.received_at, nowMs),
-      state: "unaccounted",
-      reason: "make_safe_candidate_no_draft_no_job",
-    });
+    const jobIdentityHit = jobIdentities.map(({ job, identity: captured }) => ({
+      job,
+      relation: identityRelation(identity, captured),
+    })).find((hit) => hit.relation);
+    if (jobIdentityHit) {
+      record(
+        e,
+        "accounted_alias_revision",
+        jobIdentityHit.relation === "claim_po_alias"
+          ? "claim_reference_alias_of_po_captured_job"
+          : "resend_or_revision_matches_live_job_identity",
+        {
+          kind: "job",
+          id: jobIdentityHit.job.job_id || jobIdentityHit.job.external_ref ||
+            "job",
+        },
+        identity,
+      );
+      continue;
+    }
+
+    record(
+      e,
+      "genuinely_unaccounted",
+      identity.claim && identity.po
+        ? "distinct_claim_po_has_no_draft_or_job"
+        : "make_safe_candidate_no_draft_no_job",
+      {
+        kind: "classification",
+        id: "no_durable_capture_evidence",
+      },
+      identity,
+    );
   }
 
+  const accounted = matched + aliasRevision;
   return {
     ok: true,
     window_days: windowDays,
@@ -642,16 +882,21 @@ export function summarizeIntakeReconcileInvariant(input: {
     live_and_true: unaccounted.length === 0,
     counts: {
       source_emails: (input.emails || []).length,
+      matched,
+      accounted_alias_revision: aliasRevision,
       accounted,
+      genuinely_unaccounted: unaccounted.length,
       unaccounted: unaccounted.length,
     },
+    items,
     unaccounted: unaccounted.slice(0, limit),
   };
 }
 
 export async function makesafeIntakeReconcileInvariant(
   client: any,
-  opts: { nowIso?: string; windowDays?: number; limitUnaccounted?: number } = {},
+  opts: { nowIso?: string; windowDays?: number; limitUnaccounted?: number } =
+    {},
 ): Promise<IntakeReconcileInvariant> {
   const windowDays = opts.windowDays ?? 7;
   const nowMs = opts.nowIso ? Date.parse(opts.nowIso) : Date.now();
@@ -659,18 +904,22 @@ export async function makesafeIntakeReconcileInvariant(
 
   const [emailsRes, draftsRes, jobsRes, companiesRes] = await Promise.all([
     client.from("emails")
-      .select("post_id, subject, from_email, received_at, has_attachments")
+      .select(
+        "post_id, internet_message_id, subject, from_email, body_preview, received_at, has_attachments",
+      )
       .eq("mailbox", "ses@secureworkswa.com.au")
       .is("pii_purged_at", null)
       .gte("received_at", sinceIso)
       .order("received_at", { ascending: false })
       .limit(1000),
     client.from("makesafe_intake_drafts")
-      .select("graph_message_id, status, received_at, created_at")
+      .select(
+        "id, graph_message_id, internet_message_id, external_ref, subject, from_email, body_preview, status, received_at, created_at, extraction_json",
+      )
       .gte("received_at", sinceIso)
       .limit(1000),
     client.from("makesafe_job_details")
-      .select("external_ref")
+      .select("job_id, external_ref, jobs(metadata)")
       .not("external_ref", "is", null)
       .limit(2000),
     client.from("makesafe_companies")
@@ -685,7 +934,9 @@ export async function makesafeIntakeReconcileInvariant(
   }
   if (draftsRes.error) {
     throw new Error(
-      `intake drafts read failed: ${draftsRes.error.message ?? draftsRes.error}`,
+      `intake drafts read failed: ${
+        draftsRes.error.message ?? draftsRes.error
+      }`,
     );
   }
   if (jobsRes.error) {
