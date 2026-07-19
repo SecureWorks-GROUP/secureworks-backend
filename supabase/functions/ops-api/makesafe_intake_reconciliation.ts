@@ -763,6 +763,7 @@ function reconcileIdentity(input: {
     extraction.builder_work_order_number || parsed.builder_work_order_number,
   );
   const keys = fallbackIdentityKeys(input.externalRef, input.subject);
+  const poUnparsed = !po && hasUnparseablePoLabel(input.subject || "");
   return {
     claim,
     po,
@@ -779,11 +780,10 @@ function reconcileIdentity(input: {
     keys,
     // A subject PO label the canonical grammar cannot read means "PO unknown",
     // never "no PO".
-    poUnparsed: !po && hasUnparseablePoLabel(input.subject || ""),
+    poUnparsed,
     // Body text raises the same doubt whatever the spelling, because we never adopt
     // its number: seeing a PO discussed at all is enough to stop identity aliasing.
-    poContextAmbiguous: (!po && hasUnparseablePoLabel(input.subject || "")) ||
-      hasAnyPoLabel(input.bodyText || ""),
+    poContextAmbiguous: poUnparsed || hasAnyPoLabel(input.bodyText || ""),
   };
 }
 
