@@ -115,6 +115,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { markJobNudgesActedFromProposed } from './nudge_acted.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -29734,6 +29735,9 @@ async function sendProposedSms(client: any, body: any) {
       },
     })
   }
+
+  // U4b: reflect this follow-up in nudge compliance (flag-gated, best-effort).
+  await markJobNudgesActedFromProposed(client, action.job_id)
 
   return { success: true, action_id }
 }
