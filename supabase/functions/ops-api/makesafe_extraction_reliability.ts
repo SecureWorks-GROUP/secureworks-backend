@@ -251,3 +251,84 @@ export function extractionFailureState(
     message: message.slice(0, 200),
   };
 }
+
+export interface PendingItemLocalQuarantine {
+  graphMessageId: string;
+  postId: string | null;
+  subject: string | null;
+  fromEmail: string | null;
+  receivedAt: string | null;
+  dropReason: string;
+  reason: ExtractionFailureReason;
+  message: string;
+}
+
+export interface ItemLocalQuarantineFlushResult {
+  /** post_ids the caller may now mark scanned — each has a confirmed durable record. */
+  markable: string[];
+  recorded: number;
+  alreadyRecorded: number;
+  failed: number;
+}
+
+/**
+ * Persist the durable visible record for every item-local permanent failure whose email
+ * was dropped before a draft could carry its evidence, then report which sources that
+ * licenses marking scanned.
+ *
+ * Two invariants make this the bound on the retry storm without losing anything:
+ *  - IDEMPOTENT: an existing record for the same (source id, typed reason) is not
+ *    duplicated, so a failed scanned-marker write cannot append an event every cycle.
+ *  - FAIL LOUD: a failed write yields no markable id and increments `failed`, so the
+ *    source stays unscanned and the caller degrades health instead of retrying silently.
+ */
+export async function flushItemLocalQuarantines(
+  client: any,
+  pending: Iterable<PendingItemLocalQuarantine>,
+): Promise<ItemLocalQuarantineFlushResult> {
+  const out: ItemLocalQuarantineFlushResult = {
+    markable: [],
+    recorded: 0,
+    alreadyRecorded: 0,
+    failed: 0,
+  };
+  for (const item of pending) {
+    const ev = itemLocalQuarantineEvent(item);
+    try {
+      const { data: existing, error: readErr } = await client
+        .from("business_events")
+        .select("id")
+        .eq("event_type", ev.event_type)
+        .eq("entity_id", ev.entity_id)
+        .eq("payload->>failure_reason", item.reason)
+        .limit(1);
+      if (readErr) throw new Error(readErr.message);
+      if (existing && existing.length > 0) {
+        out.alreadyRecorded++;
+      } else {
+        const { error } = await client.from("business_events").insert({
+          event_type: ev.event_type,
+          source: ev.source,
+          entity_type: ev.entity_type,
+          entity_id: ev.entity_id,
+          body_preview: ev.body_preview,
+          safe_summary: ev.body_preview.slice(0, 280),
+          payload: ev.payload,
+          metadata: ev.metadata,
+          schema_version: "1.0",
+        });
+        if (error) throw new Error(error.message);
+        out.recorded++;
+      }
+    } catch (e) {
+      out.failed++;
+      console.warn(
+        "[ops-api] intake item-local quarantine record FAILED (source left unscanned, retries next run):",
+        (e as Error).message,
+      );
+      continue;
+    }
+    if (item.postId) out.markable.push(item.postId);
+  }
+  return out;
+}

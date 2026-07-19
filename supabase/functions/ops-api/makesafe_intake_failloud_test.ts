@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 import {
   assert,
   assertEquals,
@@ -11,6 +12,7 @@ import {
   _itemLocalQuarantineEventForTest as itemLocalQuarantineEvent,
 } from "./index.ts";
 import { scanMarkEligible } from "./makesafe_intake_scan_marker.ts";
+import { flushItemLocalQuarantines } from "./makesafe_extraction_reliability.ts";
 
 // D-a: a DEAD/absent key (auth failure) must be distinguished from a transient blip.
 // Auth failure degrades the whole scan loud; a transient failure only flags one email.
@@ -349,4 +351,113 @@ Deno.test("regression: a gate-dropped item-local terminal is bounded only once i
     scanMarkEligible({ ...base, authFailed: true, itemLocalTerminalRecorded: true }),
     false,
   );
+});
+
+// ── Item-local quarantine flush: bounded on EVERY exit, idempotent, fail-loud ──
+// The scan registers an item-local permanent failure at classification time and flushes
+// whatever is still pending after the loop, so the bound does not depend on which
+// gate-drop / dedup / insert-failure `continue` the email happened to take.
+
+function fakeEventsClient(opts: {
+  existing?: boolean;
+  readError?: string;
+  insertError?: string;
+} = {}) {
+  const inserts: any[] = [];
+  const client = {
+    from(_table: string) {
+      const q: any = {
+        inserts,
+        insert(row: any) {
+          if (opts.insertError) return Promise.resolve({ error: { message: opts.insertError } });
+          inserts.push(row);
+          return Promise.resolve({ error: null });
+        },
+        select() { return q; },
+        eq() { return q; },
+        limit() {
+          if (opts.readError) return Promise.resolve({ data: null, error: { message: opts.readError } });
+          return Promise.resolve({ data: opts.existing ? [{ id: "existing" }] : [], error: null });
+        },
+      };
+      return q;
+    },
+    inserts,
+  };
+  return client;
+}
+
+const pendingItem = (dropReason: string) => ({
+  graphMessageId: "graph-1",
+  postId: "post-1",
+  subject: "NEW WORK ORDER - MLB-26499",
+  fromEmail: "builder@example.com",
+  receivedAt: "2026-07-20T01:00:00Z",
+  dropReason,
+  reason: "request_invalid" as const,
+  message: "body too large",
+});
+
+// Table-driven: every post-extraction `continue` path in the scan loop.
+const DROP_PATHS = [
+  "ai_not_a_work_order_no_deterministic_evidence",
+  "not_a_work_order",
+  "cancellation_detected",
+  "late_pdf_landed",
+  "late_pdf_ambiguous_multiple_targets",
+  "second_deliverable_review_insert_failed",
+  "job_external_ref:active job, not reopen-eligible",
+  "duplicate_graph_message_id",
+];
+
+for (const dropReason of DROP_PATHS) {
+  Deno.test(`regression: item-local terminal dropped at "${dropReason}" is recorded then bounded`, async () => {
+    const client = fakeEventsClient();
+    const res = await flushItemLocalQuarantines(client, [pendingItem(dropReason)]);
+    assertEquals(res.recorded, 1);
+    assertEquals(res.failed, 0);
+    // A confirmed durable record is what licenses marking the source scanned.
+    assertEquals(res.markable, ["post-1"]);
+    assertEquals(client.inserts.length, 1);
+    assertEquals(client.inserts[0].payload.drop_reason, dropReason);
+    assertEquals(client.inserts[0].payload.failure_reason, "request_invalid");
+    assertEquals(client.inserts[0].payload.post_id, "post-1");
+    assertEquals(client.inserts[0].metadata.review_only, true);
+    assert(
+      scanMarkEligible({
+        templateParsed: false,
+        modelValidResult: false,
+        authFailed: false,
+        transientFailed: false,
+        terminalQuarantined: true,
+        itemLocalTerminalRecorded: true,
+        keyDegradedOrAbsent: false,
+      }),
+      "a durably recorded item-local terminal may be marked scanned",
+    );
+  });
+}
+
+Deno.test("regression: a re-run after a failed scanned-marker write does not duplicate the record", async () => {
+  const client = fakeEventsClient({ existing: true });
+  const res = await flushItemLocalQuarantines(client, [pendingItem("job_external_ref:active job")]);
+  assertEquals(res.recorded, 0);
+  assertEquals(res.alreadyRecorded, 1);
+  assertEquals(client.inserts.length, 0);
+  // Still markable: the durable evidence exists, which is the whole precondition.
+  assertEquals(res.markable, ["post-1"]);
+});
+
+Deno.test("regression: a failed durable write leaves the source unscanned and fails loud", async () => {
+  for (const client of [
+    fakeEventsClient({ insertError: "permission denied for table business_events" }),
+    fakeEventsClient({ readError: "column does not exist" }),
+  ]) {
+    const res = await flushItemLocalQuarantines(client, [pendingItem("not_a_work_order")]);
+    assertEquals(res.failed, 1);
+    assertEquals(res.recorded, 0);
+    // Never marked without evidence -> the item retries next cycle, and the non-zero
+    // failure count is what degrades intake health rather than retrying silently.
+    assertEquals(res.markable, []);
+  }
 });

@@ -213,6 +213,7 @@ import {
   classifyExtractionFailure as _classifyExtractionFailure,
   extractionCycleHealth as _extractionCycleHealth,
   extractionFailureState as _extractionFailureState,
+  flushItemLocalQuarantines as _flushItemLocalQuarantines,
   itemLocalQuarantineEvent as _itemLocalQuarantineEvent,
   type ExtractionFailureClassification,
   type ExtractionFailureReason,
@@ -14606,6 +14607,23 @@ async function scanSesMakesafes(client: any) {
   let quarantinedItems = 0
   let itemLocalQuarantinedItems = 0
   const quarantinedEmailIds: string[] = []
+  // An ITEM-LOCAL permanent failure must be bounded no matter WHICH exit its email takes
+  // out of the loop — the work-order gate, any dedup/late-PDF skip, an insert failure or
+  // a clean draft insert. Registering it here at classification time (rather than at each
+  // `continue`) makes that structural: anything still pending after the loop never got a
+  // durable draft, so it is flushed to a durable visible quarantine record and only then
+  // marked scanned. Entries are dropped once a draft carries the evidence instead.
+  const pendingItemLocalTerminals = new Map<string, {
+    graphMessageId: string
+    postId: string | null
+    subject: string | null
+    fromEmail: string | null
+    receivedAt: string | null
+    dropReason: string
+    reason: ExtractionFailureReason
+    message: string
+  }>()
+  let itemLocalQuarantinePersistFailures = 0
   // Per-draft auto-file truth. A global "auto_file_enabled:false" hides that some drafts
   // were created and eligible before a later failure, so report the actual split.
   let autoFileEligibleDrafts = 0
@@ -15112,51 +15130,28 @@ async function scanSesMakesafes(client: any) {
     }
 
     // An ITEM-LOCAL permanent failure that an intake gate then DROPS never reaches the
-    // draft insert, so nothing below would ever bound it and the provider would be hit
-    // again every two minutes forever. Persist the durable visible exception carrying the
-    // source evidence and typed reason FIRST; only a confirmed write licenses marking the
-    // source scanned. If the write fails, the item stays unscanned and fails loud.
-    const recordItemLocalTerminalDrop = async (dropReason: string) => {
-      if (!emailItemLocalTerminal) return
-      const ev = _itemLocalQuarantineEvent({
+    // draft insert, so without this it would hit the provider again every two minutes
+    // forever. Register it the moment it is classified — every exit path below is then
+    // covered by the post-loop flush, which persists the durable visible record first and
+    // only marks the source scanned on a confirmed write.
+    if (emailItemLocalTerminal) {
+      pendingItemLocalTerminals.set(msg.id, {
         graphMessageId: msg.id,
         postId: msg._post_id || null,
         subject,
         fromEmail,
         receivedAt: msg.receivedDateTime || null,
-        dropReason,
+        dropReason: 'gate_dropped_after_item_local_failure',
         reason: emailFailureClassification?.reason || 'request_invalid',
         message: String(extraction._extraction_error || ''),
       })
-      try {
-        const { error } = await client.from('business_events').insert({
-          event_type: ev.event_type,
-          source: ev.source,
-          entity_type: ev.entity_type,
-          entity_id: ev.entity_id,
-          body_preview: ev.body_preview,
-          safe_summary: ev.body_preview.slice(0, 280),
-          payload: ev.payload,
-          metadata: ev.metadata,
-          schema_version: '1.0',
-        })
-        if (error) {
-          console.warn(
-            '[ops-api] intake item-local quarantine record FAILED (source left unscanned, retries next run):',
-            error.message,
-          )
-          return
-        }
-      } catch (e) {
-        console.warn(
-          '[ops-api] intake item-local quarantine record THREW (source left unscanned, retries next run):',
-          (e as Error).message,
-        )
-        return
-      }
-      if (msg._post_id && !scannedEmailIds.includes(msg._post_id)) {
-        scannedEmailIds.push(msg._post_id)
-      }
+    }
+    // Names the gate that dropped it, so the durable record carries the real reason
+    // rather than the generic fallback. Purely descriptive: registration above is what
+    // bounds the item.
+    const recordItemLocalTerminalDrop = (dropReason: string) => {
+      const pending = pendingItemLocalTerminals.get(msg.id)
+      if (pending) pending.dropReason = dropReason
     }
 
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
@@ -15238,7 +15233,7 @@ async function scanSesMakesafes(client: any) {
         subject,
         reason: 'ai_not_a_work_order_no_deterministic_evidence',
       })
-      await recordItemLocalTerminalDrop('ai_not_a_work_order_no_deterministic_evidence')
+      recordItemLocalTerminalDrop('ai_not_a_work_order_no_deterministic_evidence')
       continue
     }
     if (aiNotWorkOrder) {
@@ -15335,13 +15330,13 @@ async function scanSesMakesafes(client: any) {
           })
         } catch { /* non-blocking breadcrumb */ }
         console.log('[ops-api] intake skip (cancellation — no draft minted):', cancelledRef || subject)
-        await recordItemLocalTerminalDrop(woGate.reason)
+        recordItemLocalTerminalDrop(woGate.reason)
         continue
       }
       console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
       skippedNotWorkOrderGate++
       skippedItems.push({ id: msg.id, subject, reason: woGate.reason })
-      await recordItemLocalTerminalDrop(woGate.reason)
+      recordItemLocalTerminalDrop(woGate.reason)
       continue
     }
 
@@ -15470,6 +15465,7 @@ async function scanSesMakesafes(client: any) {
             dedupIndex,
           )
           skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: 'late_pdf_landed' })
+          recordItemLocalTerminalDrop('late_pdf_landed')
           if (landing.auto_filed?.job_id) {
             autoApproved.push({ draft_id: landing.draft_id, job_id: landing.auto_filed.job_id, external_ref: extractedRef, reason: 'late_pdf_landed_auto_filed' })
           }
@@ -15481,6 +15477,7 @@ async function scanSesMakesafes(client: any) {
           console.log('[ops-api] intake late-pdf ambiguous (multiple dirty drafts); skipped for human review:', extractedRef, landing.candidate_ids.join(','))
           skippedDuplicates++
           skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: 'late_pdf_ambiguous_multiple_targets' })
+          recordItemLocalTerminalDrop('late_pdf_ambiguous_multiple_targets')
           continue
         }
         // outcome === 'none': no dirty draft to land on — fall through to the existing
@@ -15613,6 +15610,7 @@ async function scanSesMakesafes(client: any) {
               // through to the silent skip (that would re-drop the second WO). Surface it.
               console.error('[ops-api] intake second_deliverable_review insert failed — NOT dropping:', extractedRef, sdErr.message)
               skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: `second_deliverable_review_insert_failed:${sdErr.message}` })
+              recordItemLocalTerminalDrop('second_deliverable_review_insert_failed')
             } else {
               console.log('[ops-api] intake second_deliverable_review created for ref', extractedRef, '(sibling active job', matchedJobId + ')')
               _registerIntakeDraft(
@@ -15673,6 +15671,7 @@ async function scanSesMakesafes(client: any) {
           console.log('[ops-api] intake skip (' + skipReason + '):', matchedJobStatus, '|', extractedRef, '|', matchedJobId)
           skippedDuplicates++
           skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: `job_external_ref:${skipReason}` })
+          recordItemLocalTerminalDrop(`job_external_ref:${skipReason}`)
           continue
         }
         const reopenDraft = {
@@ -15738,6 +15737,7 @@ async function scanSesMakesafes(client: any) {
         console.log('[ops-api] intake skip (duplicate across paths):', refDup, '|', extractedRef, '|', subject)
         skippedDuplicates++
         skippedItems.push({ id: msg.id, subject, external_ref: extractedRef, reason: refDup })
+        recordItemLocalTerminalDrop(refDup)
         continue
       }
     }
@@ -15834,6 +15834,8 @@ async function scanSesMakesafes(client: any) {
     ) {
       scannedEmailIds.push(msg._post_id)
     }
+    // The draft IS the durable record, so no separate quarantine event is needed.
+    if (emailItemLocalTerminal) pendingItemLocalTerminals.delete(msg.id)
 
     // BUG 1 — register the new draft in the in-memory index so a SECOND copy of the
     // same email later in THIS batch (same ref+company) is also skipped.
@@ -16000,6 +16002,18 @@ async function scanSesMakesafes(client: any) {
     }
   }
 
+  // Every item-local permanent failure still pending here took a gate-drop or
+  // insert-failure exit, so no draft carries its evidence. Persist the durable visible
+  // record FIRST — idempotently, so a failed scanned-marker write cannot append a
+  // duplicate event on the next cycle — and only a confirmed record licenses marking the
+  // source scanned. A failed write leaves the source unscanned and is counted, so
+  // persistence drift degrades health loudly instead of becoming a silent retry storm.
+  const quarantineFlush = await _flushItemLocalQuarantines(client, pendingItemLocalTerminals.values())
+  itemLocalQuarantinePersistFailures = quarantineFlush.failed
+  for (const postId of quarantineFlush.markable) {
+    if (!scannedEmailIds.includes(postId)) scannedEmailIds.push(postId)
+  }
+
   // Cost-leak fix: STAMP makesafe_scanned_at on every email that got a valid extraction
   // this run (draft or not), so it is never re-extracted. Batched + chunked + idempotent
   // + error-checked + pre-migration-safe — see markEmailsScanned.
@@ -16024,10 +16038,15 @@ async function scanSesMakesafes(client: any) {
     reasons: extractionFailureReasons,
     providerLaneTerminalReason: providerTerminalClassification?.reason || null,
   })
-  const extractionDegraded = cycleHealth.status === 'degraded'
+  // Quarantine persistence drift (RLS change, schema drift) means item-local failures
+  // cannot be bounded at all, so it degrades health with its own typed reason rather
+  // than retrying silently forever.
+  const quarantinePersistenceDegraded = itemLocalQuarantinePersistFailures > 0
+  const extractionDegraded = cycleHealth.status === 'degraded' || quarantinePersistenceDegraded
   await writeIntakeHealth(client, {
-    extractionStatus: cycleHealth.status,
-    degradedReason: cycleHealth.reason,
+    extractionStatus: extractionDegraded ? 'degraded' : cycleHealth.status,
+    degradedReason: cycleHealth.reason ||
+      (quarantinePersistenceDegraded ? 'quarantine_persistence_failed' : null),
     anyExtractionSucceeded,
     draftsCreated: newDrafts.length,
     autoFiled: autoApproved.length,
@@ -16056,7 +16075,8 @@ async function scanSesMakesafes(client: any) {
     // draft made while degraded carries the extraction_down_key_dead marker and is a
     // needs_review docket; nothing is silently empty and nothing is auto-filed.
     extraction_degraded: extractionDegraded,
-    extraction_degraded_reason: cycleHealth.reason,
+    extraction_degraded_reason: cycleHealth.reason ||
+      (quarantinePersistenceDegraded ? 'quarantine_persistence_failed' : null),
     extraction_cycle: {
       attempts: extractionAttempts,
       successes: extractionSuccesses,
@@ -16067,6 +16087,9 @@ async function scanSesMakesafes(client: any) {
       // Item-local permanent failures are marked once their draft is durable and recover
       // through an explicit requeue.
       item_local_quarantined: itemLocalQuarantinedItems,
+      // Durable-record writes that failed: those sources stay unscanned and retry, and
+      // a non-zero count degrades intake health rather than failing quiet.
+      item_local_quarantine_record_failures: itemLocalQuarantinePersistFailures,
       quarantine_recovery_action: 'automatic_rescan',
       item_local_recovery_action: 'reextract_intake_draft',
       quarantined_source_ids: quarantinedEmailIds.slice(0, 100),
