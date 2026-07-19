@@ -1053,6 +1053,60 @@ Deno.test("invariant hostile near-collision: null-derived fingerprint probe resp
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
 });
 
+// A builder writing "Order No <digits>" means its own work-order reference, not a
+// purchase order. Read as PO doubt it would be permanently unaccountable — doubt with
+// no token to match on — so the whole archetype would hold the morning report red.
+Deno.test("invariant: a bare Order No reference accounts against its capture", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-order-no",
+      subject: "Make Safe - Order No 68592 - Balga",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-09T03:20:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-order-no-68592",
+      graph_message_id: "AAMk-sanitized-order-no",
+      external_ref: "68592",
+      from_email: "workorders@ajs.build",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-order-no-68592",
+  });
+});
+
+// The same token from a DIFFERENT builder is a different numbering space. The bare
+// reference fallback is sender-scoped, so it must not reach across senders.
+Deno.test("invariant hostile near-collision: a bare Order No never crosses senders", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-order-no-cross",
+      subject: "Make Safe - Order No 68592 - Balga",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-09T03:20:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-order-no-other-builder",
+      graph_message_id: "AAMk-sanitized-order-no-other",
+      external_ref: "68592",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
 // The production capture extractor does not read "P.O." or "purchaseorder", and this
 // slice must not widen it. Reconciliation therefore cannot see the PO either, so such
 // a source must fail open rather than read as claim-only and alias a captured job
@@ -1210,11 +1264,10 @@ Deno.test("invariant: a parseable explicit PO matches its own captured deliverab
   assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
 });
 
-// Body text is never adopted as identity, so a quoted PO cannot become this row's
-// PO. It is still doubt: some PO is in play that the authoritative fields do not
-// show, so identity inference is withheld and the row surfaces for review rather
-// than being aliased onto a lineage the evidence cannot name.
-Deno.test("invariant: an order label quoted in the body withholds identity aliasing", () => {
+// A bare "Order No" is a generic work-order reference, not a purchase order, so
+// quoting one in the body raises no PO doubt: both sides remain claim-only with no PO
+// in play and the source matches its capture instead of reporting as new work.
+Deno.test("invariant: a bare order label quoted in the body is not PO doubt", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "mailbox-quoted-order-label",
@@ -1234,8 +1287,8 @@ Deno.test("invariant: an order label quoted in the body withholds identity alias
     senderPatterns: SENDER_PATTERNS,
   });
 
-  assertEquals(inv.counts.unaccounted, 1);
-  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
   assertEquals(inv.items[0].canonical_po_ref, null);
 });
 

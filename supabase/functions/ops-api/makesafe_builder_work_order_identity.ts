@@ -30,14 +30,15 @@ export const PO_LABEL_PATTERN = "(?:P\\s*O|purchase\\s+order)";
  */
 const LOOSE_PO_LABEL_PATTERN = "(?:p\\s*[./]?\\s*o\\s*\\.?|purchase\\s*order)";
 /**
- * A bare "order" reads as a PO only when it is explicitly numbered, so prose like
- * "in order to lay 250 metres" stays out. "work order" is excluded: it names the
- * builder's own work-order reference, not a purchase order. The exclusion tolerates
- * any spacing or hyphenation, matching the `work\s*order` grammar the labelled
- * identity path reads, so no spelling is a reference to one grammar and a PO to
- * the other.
+ * A bare, explicitly numbered "Order No <digits>" label. It is NOT a purchase order:
+ * builders use it for their own work-order reference as often as for a PO, so reading
+ * it as PO doubt would strand the whole archetype as permanently unaccountable — it
+ * would carry poUnparsed forever while yielding no identity token to match on. It is
+ * instead read downstream as a generic, sender-scoped work-order reference, alongside
+ * the "work order" spelling. The explicit number requirement keeps prose like "in
+ * order to lay 250 metres" out.
  */
-const ORDER_LABEL_PATTERN = "(?<!work[\\s-]*)order\\s*(?:number|no\\.?|#)";
+export const ORDER_LABEL_PATTERN = "order\\s*(?:number|no\\.?|#)";
 const PO_TAIL_PATTERN = "(?:\\s*(?:number|no\\.?))?\\s*[:#-]?\\s*";
 
 const PO_RE = new RegExp(
@@ -45,7 +46,7 @@ const PO_RE = new RegExp(
   "i",
 );
 const LOOSE_PO_RE = new RegExp(
-  `\\b(?:${LOOSE_PO_LABEL_PATTERN}|${ORDER_LABEL_PATTERN})${PO_TAIL_PATTERN}\\d{3,}\\b`,
+  `\\b(?:${LOOSE_PO_LABEL_PATTERN})${PO_TAIL_PATTERN}\\d{3,}\\b`,
   "i",
 );
 /**

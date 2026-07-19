@@ -72,9 +72,6 @@ Deno.test("builder identity: PO label grammar is unchanged", () => {
       "NEW WO - MLB 25096 - P O. 4477",
       "NEW WO - MLB 25096 - P/O 4477",
       "NEW WO - MLB 25096 - P / O 4477",
-      "NEW WO - MLB 25096 - Order No 4477",
-      "NEW WO - MLB 25096 - Order Number 4477",
-      "NEW WO - MLB 25096 - Order #4477",
     ]
   ) {
     const identity = extractBuilderWorkOrderIdentity({ subject });
@@ -98,9 +95,11 @@ Deno.test("builder identity: a readable or absent PO label is not reported unpar
   assertEquals(hasUnparseablePoLabel("Reply to P.O. Box 1234, Balga"), false);
 });
 
-// The bare "order" alternative must not fire on prose or on a builder work-order
-// reference, which is an identity the labelled path already reads, not a PO.
-Deno.test("builder identity: prose and work-order labels are not unknown POs", () => {
+// A bare "Order No" names no system: builders use it for their own work-order
+// reference as often as for a purchase order. Reading it as an unknown PO would leave
+// the row carrying permanent PO doubt with no identity token to match on, so it can
+// never be accounted. It is a generic reference instead, and never a PO.
+Deno.test("builder identity: prose, work-order and bare order labels are not unknown POs", () => {
   assertEquals(
     hasUnparseablePoLabel("Crew to attend in order to make safe 250 metres"),
     false,
@@ -112,6 +111,20 @@ Deno.test("builder identity: prose and work-order labels are not unknown POs", (
   assertEquals(hasUnparseablePoLabel("Work  Order No 68592 - Balga"), false);
   assertEquals(hasUnparseablePoLabel("Work-Order No: 68592"), false);
   assertEquals(hasUnparseablePoLabel("WorkOrder No 68592"), false);
+
+  for (
+    const subject of [
+      "NEW WO - MLB 25096 - Order No 4477",
+      "NEW WO - MLB 25096 - Order Number 4477",
+      "NEW WO - MLB 25096 - Order #4477",
+    ]
+  ) {
+    assertEquals(hasUnparseablePoLabel(subject), false);
+    const identity = extractBuilderWorkOrderIdentity({ subject });
+    assertEquals(identity.builder_claim_ref, "MLB-25096");
+    assertEquals(identity.builder_po_number, null);
+    assertEquals(identity.builder_work_order_number, null);
+  }
 });
 
 // A postal address is not a purchase order.

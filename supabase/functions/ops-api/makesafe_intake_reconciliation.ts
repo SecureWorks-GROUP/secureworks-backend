@@ -23,6 +23,7 @@ import {
   hasAnyPoLabel,
   hasUnparseablePoLabel,
   matchBuilderRefText,
+  ORDER_LABEL_PATTERN,
   PO_LABEL_PATTERN,
 } from "./makesafe_builder_work_order_identity.ts";
 import {
@@ -640,9 +641,14 @@ const AU_STATE_POSTCODE_RE = /^(?:WA|SA|NSW|VIC|QLD|TAS|NT|ACT)\d{4}$/;
  * canonical extractor reads, so it cannot drift into a spelling that produces a PO
  * token while identity.po stays empty and the PO-separation guards stay blind.
  * Spellings outside it yield no key and the row fails open instead.
+ *
+ * A bare "Order No <digits>" is read here, as a sender-scoped generic reference, and
+ * deliberately NOT as a PO: it names no system, and treating it as an unknown PO
+ * would give the row permanent PO doubt with no token to match on, making the whole
+ * archetype structurally unaccountable.
  */
 const LABELLED_IDENTITY_RE = new RegExp(
-  `\\b(?:(job)\\s*(?:no\\.?|number|#)|${PO_LABEL_PATTERN}\\s*(?:no\\.?|number|#)?|(?:work\\s*order|w\\/o|our\\s*ref(?:erence)?|ref(?:erence)?|claim)\\s*(?:no\\.?|number|#)?)\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\b`,
+  `\\b(?:(job)\\s*(?:no\\.?|number|#)|${PO_LABEL_PATTERN}\\s*(?:no\\.?|number|#)?|(?:work\\s*order|w\\/o|our\\s*ref(?:erence)?|ref(?:erence)?|claim)\\s*(?:no\\.?|number|#)?|(${ORDER_LABEL_PATTERN}))\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\b`,
   "gi",
 );
 const PO_LABEL_PREFIX_RE = new RegExp(`^${PO_LABEL_PATTERN}`, "i");
@@ -659,13 +665,18 @@ function labelledIdentityKeys(subject: string | null | undefined): string[] {
   const keys: string[] = [];
   for (const match of String(subject || "").matchAll(LABELLED_IDENTITY_RE)) {
     const label = String(match[0]).toLowerCase();
-    const token = normaliseRef(match[2]);
+    const token = normaliseRef(match[3]);
     if (!/\d{3,}/.test(token) || isAddressLikeToken(token)) continue;
     const ns = match[1] ? "JOB" : PO_LABEL_PREFIX_RE.test(label) ? "PO" : "REF";
     // A PO key must be a PO the canonical extractor can also parse (bare digits),
     // otherwise the token would participate in matching while identity.po stays
     // empty and the PO-separation guards could never fire for it.
     if (ns === "PO" && !/^\d{3,}$/.test(token)) continue;
+    // A bare "Order No" is the weakest label here: it names no system, so it is only
+    // trusted as a plain reference number. Anything else after it is more likely
+    // address or prose fragment than a work-order reference, and REF keys are only
+    // sender-scoped, so an over-broad token would collide across builders.
+    if (match[2] && !/^\d{3,9}$/.test(token)) continue;
     keys.push(`${ns}:${token}`);
   }
   return keys;
@@ -675,8 +686,8 @@ function rawReferenceFromText(value: string | null | undefined): string | null {
   const text = String(value || "");
   return text.match(JOB_NUMBER_TEXT_RE)?.[0] ||
     [...text.matchAll(LABELLED_IDENTITY_RE)].find((m) =>
-      /\d{3,}/.test(normaliseRef(m[2])) &&
-      !isAddressLikeToken(normaliseRef(m[2]))
+      /\d{3,}/.test(normaliseRef(m[3])) &&
+      !isAddressLikeToken(normaliseRef(m[3]))
     )?.[0] || null;
 }
 
@@ -831,7 +842,17 @@ function identityRelation(
   // A claim-only SOURCE may alias a richer PO-suffixed captured identity. The reverse
   // is deliberately unsafe: an explicit new source PO against a legacy claim-only
   // job can be genuinely new work and must remain visible.
-  return !source.po && !!captured.po ? "claim_po_alias" : null;
+  //
+  // "Claim-only" means the source offers nothing beyond the claim. A source naming a
+  // reference the capture does not carry — a bare "Order No 4477" against a capture
+  // whose only reference is PO-9999 — is describing something the capture cannot be
+  // shown to cover, so it stays visible instead of being folded into that lineage.
+  if (source.po || !captured.po) return null;
+  const capturedTokens = new Set(captured.canonicalRefs);
+  const unmatchedRef = source.keys.some((k) =>
+    k.startsWith("REF:") && !capturedTokens.has(k.slice(4))
+  );
+  return unmatchedRef ? null : "claim_po_alias";
 }
 
 /**
@@ -1293,9 +1314,10 @@ export async function makesafeIntakeReconcileInvariant(
       .limit(1000),
     client.from("makesafe_intake_drafts")
       .select(
-        "id, graph_message_id, internet_message_id, external_ref, subject, from_email, body_preview, status, received_at, created_at, extraction_json",
+        "id, graph_message_id, internet_message_id, external_ref, subject, from_email, body_preview, status, received_at, created_at, builder_claim_ref:extraction_json->>builder_claim_ref, builder_po_number:extraction_json->>builder_po_number, builder_work_order_number:extraction_json->>builder_work_order_number",
       )
       .gte("received_at", sinceIso)
+      .order("received_at", { ascending: false })
       .limit(1000),
     client.from("makesafe_job_details")
       .select("job_id, external_ref")
@@ -1331,9 +1353,29 @@ export async function makesafeIntakeReconcileInvariant(
     }
   }
 
+  // extraction_json is an unbounded jsonb blob, so only the three identity keys
+  // reconcileIdentity actually reads are projected. They are re-nested here so the
+  // draft shape stays the one summarize/reconcileIdentity expect.
+  const drafts: IntakeReconDraft[] = (draftsRes.data || []).map((row: any) => {
+    const {
+      builder_claim_ref,
+      builder_po_number,
+      builder_work_order_number,
+      ...rest
+    } = row;
+    return {
+      ...rest,
+      extraction_json: {
+        builder_claim_ref,
+        builder_po_number,
+        builder_work_order_number,
+      },
+    };
+  });
+
   return summarizeIntakeReconcileInvariant({
     emails: emailsRes.data || [],
-    drafts: draftsRes.data || [],
+    drafts,
     jobs: jobsRes.data || [],
     senderPatterns,
     nowIso: opts.nowIso,
