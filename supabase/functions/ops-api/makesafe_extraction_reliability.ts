@@ -31,6 +31,15 @@ function errorHaystack(err: unknown): string {
   } ${body}`.toLowerCase();
 }
 
+/** Name/type/message only — deliberately EXCLUDES the serialised error body, whose
+ * request ids and nested fields would otherwise let an incidental "401"/"403" promote a
+ * transient failure into a lane-stopping auth terminal. */
+function errorMessageText(err: unknown): string {
+  const e = err as any;
+  return `${e?.name || ""} ${e?.type || ""} ${e?.message || String(err)}`
+    .toLowerCase();
+}
+
 export function classifyExtractionFailure(
   err: unknown,
 ): ExtractionFailureClassification {
@@ -51,12 +60,16 @@ export function classifyExtractionFailure(
       stopProviderLane: true,
     };
   }
+  // A fetch-layer wrapper may surface the status only as text ("Request failed with
+  // status 401") with no status property, and that must still fail loud as a dead key.
+  // The bare-status match is anchored to actual status wording in the message text so an
+  // incidental 401/403 inside a serialised body or request id cannot stop the lane.
+  const textOnlyAuthStatus =
+    /\b(?:status|statuscode|status code|code|http|failed with)\W{0,12}\b40[13]\b/
+      .test(errorMessageText(err));
   if (
-    status === 401 || status === 403 ||
-    // The bare 401/403 alternatives matter: a fetch-layer wrapper may surface the status
-    // only as text ("Request failed with status 401") with no status property, and that
-    // must still fail loud as a dead key rather than silently re-spraying the provider.
-    /authentication|permission_error|invalid x-api-key|invalid api key|invalid_api_key|unauthorized|401|403/
+    status === 401 || status === 403 || textOnlyAuthStatus ||
+    /authentication|permission_error|invalid x-api-key|invalid api key|invalid_api_key|unauthorized/
       .test(hay)
   ) {
     return {
@@ -172,6 +185,47 @@ export function extractionCycleHealth(outcome: ExtractionCycleOutcome): {
     };
   }
   return { status: "ok", reason: null };
+}
+
+/** The durable visible record for an ITEM-LOCAL permanent failure whose email is then
+ * dropped by an intake gate, so no draft carries its evidence. It preserves the source
+ * identity, the typed failure reason and the gate that dropped it, and is what licenses
+ * marking the source scanned — without it the item stays unscanned and keeps retrying. */
+export function itemLocalQuarantineEvent(s: {
+  graphMessageId: string;
+  postId: string | null;
+  subject: string | null;
+  fromEmail: string | null;
+  receivedAt: string | null;
+  dropReason: string;
+  reason: ExtractionFailureReason;
+  message: string;
+}) {
+  return {
+    event_type: "makesafe.intake_item_quarantined",
+    source: "app/makesafe-intake",
+    entity_type: "makesafe_intake_source",
+    entity_id: s.postId || s.graphMessageId,
+    body_preview:
+      `Intake extraction permanently failed (${s.reason}) and the email was dropped at the ${s.dropReason} gate; source captured for review, no draft minted: ${
+        s.subject || s.graphMessageId
+      }`.slice(0, 500),
+    payload: {
+      graph_message_id: s.graphMessageId,
+      post_id: s.postId,
+      subject: s.subject,
+      from_email: s.fromEmail,
+      received_at: s.receivedAt,
+      drop_reason: s.dropReason,
+      failure_reason: s.reason,
+      failure_message: String(s.message || "").slice(0, 200),
+    },
+    metadata: {
+      mission: "makesafe/intake-extraction-reliability",
+      review_only: true,
+      recovery_action: "manual_requeue",
+    },
+  };
 }
 
 export function extractionFailureState(

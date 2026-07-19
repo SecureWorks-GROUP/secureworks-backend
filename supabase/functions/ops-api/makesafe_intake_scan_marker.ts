@@ -43,9 +43,9 @@ export interface ScanMarkState {
  * proves nothing was lost.
  */
 export function scanMarkEligible(s: ScanMarkState): boolean {
+  if (s.authFailed || s.transientFailed || s.keyDegradedOrAbsent) return false;
   if (s.itemLocalTerminalRecorded) return true;
   if (s.terminalQuarantined) return false;
-  if (s.authFailed || s.transientFailed || s.keyDegradedOrAbsent) return false;
   return s.templateParsed || s.modelValidResult;
 }
 

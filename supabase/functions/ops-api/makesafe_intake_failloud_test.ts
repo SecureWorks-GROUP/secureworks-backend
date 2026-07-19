@@ -8,7 +8,9 @@ import {
   _extractionFailureStateForTest as failureState,
   _INTAKE_EXTRACTION_DOWN_MARKER,
   _isAnthropicAuthFailureForTest as isAuthFailure,
+  _itemLocalQuarantineEventForTest as itemLocalQuarantineEvent,
 } from "./index.ts";
+import { scanMarkEligible } from "./makesafe_intake_scan_marker.ts";
 
 // D-a: a DEAD/absent key (auth failure) must be distinguished from a transient blip.
 // Auth failure degrades the whole scan loud; a transient failure only flags one email.
@@ -262,4 +264,89 @@ Deno.test("regression: item-local request_invalid recovers by requeue, provider 
     "cap",
   );
   assertEquals(providerWide.recovery_action, "automatic_rescan");
+});
+
+// An incidental "401"/"403" inside a serialised error body or request id must NOT be read
+// as a dead key: that would stop the provider lane and degrade health on a transient blip.
+Deno.test("regression: an incidental 401/403 in a serialised body does not stop the lane", () => {
+  const overloadedWithRequestId = classifyFailure({
+    status: 429,
+    message: "overloaded_error",
+    error: {
+      type: "rate_limit_error",
+      request_id: "req_014036_401_403",
+      message: "Number of requests has exceeded your rate limit",
+    },
+  });
+  assertEquals(overloadedWithRequestId.reason, "rate_limited");
+  assertEquals(overloadedWithRequestId.failureClass, "retryable");
+  assertEquals(overloadedWithRequestId.stopProviderLane, false);
+
+  const fiveHundredWithDigits = classifyFailure({
+    status: 503,
+    message: "upstream unavailable",
+    error: { trace: "shard-403 node-401" },
+  });
+  assertEquals(fiveHundredWithDigits.reason, "upstream_5xx");
+  assertEquals(fiveHundredWithDigits.stopProviderLane, false);
+
+  // The genuine text-only status wording still fails loud as a dead key.
+  assert(isAuthFailure(new Error("Request failed with status 401")));
+  assert(isAuthFailure(new Error("HTTP 403 returned by the gateway")));
+});
+
+// A gate-dropped item-local terminal never reaches a draft, so the durable exception is
+// the ONLY record of it. It must carry the source evidence and the typed reason, and it is
+// what licenses marking the source scanned — otherwise the item retries the provider
+// every two minutes forever.
+Deno.test("regression: a gate-dropped item-local terminal gets a durable evidence record", () => {
+  const ev = itemLocalQuarantineEvent({
+    graphMessageId: "graph-1",
+    postId: "post-1",
+    subject: "Make safe request",
+    fromEmail: "builder@example.com",
+    receivedAt: "2026-07-20T01:00:00Z",
+    dropReason: "not_a_new_work_order",
+    reason: "request_invalid",
+    message: "invalid_request_error: body too large",
+  });
+  assertEquals(ev.entity_type, "makesafe_intake_source");
+  assertEquals(ev.entity_id, "post-1");
+  assertEquals(ev.payload.graph_message_id, "graph-1");
+  assertEquals(ev.payload.subject, "Make safe request");
+  assertEquals(ev.payload.from_email, "builder@example.com");
+  assertEquals(ev.payload.drop_reason, "not_a_new_work_order");
+  assertEquals(ev.payload.failure_reason, "request_invalid");
+  assertEquals(ev.metadata.review_only, true);
+  assertEquals(ev.metadata.recovery_action, "manual_requeue");
+  assert(ev.body_preview.includes("request_invalid"));
+});
+
+Deno.test("regression: a gate-dropped item-local terminal is bounded only once its record is durable", () => {
+  const base = {
+    templateParsed: false,
+    modelValidResult: false,
+    authFailed: false,
+    transientFailed: false,
+    terminalQuarantined: true,
+    keyDegradedOrAbsent: false,
+  };
+  // Durable write failed -> stays unscanned and retries.
+  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: false }), false);
+  // Durable write confirmed -> bounded.
+  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: true }), true);
+  // A provider outage is NOT bounded this way even if a record exists: it never got a
+  // real attempt, so it must stay automatically retryable.
+  assertEquals(
+    scanMarkEligible({
+      ...base,
+      keyDegradedOrAbsent: true,
+      itemLocalTerminalRecorded: true,
+    }),
+    false,
+  );
+  assertEquals(
+    scanMarkEligible({ ...base, authFailed: true, itemLocalTerminalRecorded: true }),
+    false,
+  );
 });

@@ -213,6 +213,7 @@ import {
   classifyExtractionFailure as _classifyExtractionFailure,
   extractionCycleHealth as _extractionCycleHealth,
   extractionFailureState as _extractionFailureState,
+  itemLocalQuarantineEvent as _itemLocalQuarantineEvent,
   type ExtractionFailureClassification,
   type ExtractionFailureReason,
 } from './makesafe_extraction_reliability.ts'
@@ -12658,6 +12659,7 @@ export const _isAnthropicAuthFailureForTest = isAnthropicAuthFailure
 export const _classifyExtractionFailureForTest = _classifyExtractionFailure
 export const _extractionCycleHealthForTest = _extractionCycleHealth
 export const _extractionFailureStateForTest = _extractionFailureState
+export const _itemLocalQuarantineEventForTest = _itemLocalQuarantineEvent
 export const _INTAKE_EXTRACTION_DOWN_MARKER = INTAKE_EXTRACTION_DOWN_MARKER
 export const _stripEmailHtmlForTradeForTest = _stripEmailHtmlForTrade
 export const _extractBuilderEmailLinksForTest = _extractBuilderEmailLinks
@@ -15109,6 +15111,54 @@ async function scanSesMakesafes(client: any) {
       if (msg._post_id) quarantinedEmailIds.push(msg._post_id)
     }
 
+    // An ITEM-LOCAL permanent failure that an intake gate then DROPS never reaches the
+    // draft insert, so nothing below would ever bound it and the provider would be hit
+    // again every two minutes forever. Persist the durable visible exception carrying the
+    // source evidence and typed reason FIRST; only a confirmed write licenses marking the
+    // source scanned. If the write fails, the item stays unscanned and fails loud.
+    const recordItemLocalTerminalDrop = async (dropReason: string) => {
+      if (!emailItemLocalTerminal) return
+      const ev = _itemLocalQuarantineEvent({
+        graphMessageId: msg.id,
+        postId: msg._post_id || null,
+        subject,
+        fromEmail,
+        receivedAt: msg.receivedDateTime || null,
+        dropReason,
+        reason: emailFailureClassification?.reason || 'request_invalid',
+        message: String(extraction._extraction_error || ''),
+      })
+      try {
+        const { error } = await client.from('business_events').insert({
+          event_type: ev.event_type,
+          source: ev.source,
+          entity_type: ev.entity_type,
+          entity_id: ev.entity_id,
+          body_preview: ev.body_preview,
+          safe_summary: ev.body_preview.slice(0, 280),
+          payload: ev.payload,
+          metadata: ev.metadata,
+          schema_version: '1.0',
+        })
+        if (error) {
+          console.warn(
+            '[ops-api] intake item-local quarantine record FAILED (source left unscanned, retries next run):',
+            error.message,
+          )
+          return
+        }
+      } catch (e) {
+        console.warn(
+          '[ops-api] intake item-local quarantine record THREW (source left unscanned, retries next run):',
+          (e as Error).message,
+        )
+        return
+      }
+      if (msg._post_id && !scannedEmailIds.includes(msg._post_id)) {
+        scannedEmailIds.push(msg._post_id)
+      }
+    }
+
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
     // needs_review docket with an explicit marker, never a silent empty draft — and,
     // because the marker is a blocking missing field + confidence is forced low, it can
@@ -15188,6 +15238,7 @@ async function scanSesMakesafes(client: any) {
         subject,
         reason: 'ai_not_a_work_order_no_deterministic_evidence',
       })
+      await recordItemLocalTerminalDrop('ai_not_a_work_order_no_deterministic_evidence')
       continue
     }
     if (aiNotWorkOrder) {
@@ -15284,11 +15335,13 @@ async function scanSesMakesafes(client: any) {
           })
         } catch { /* non-blocking breadcrumb */ }
         console.log('[ops-api] intake skip (cancellation — no draft minted):', cancelledRef || subject)
+        await recordItemLocalTerminalDrop(woGate.reason)
         continue
       }
       console.log('[ops-api] intake skip (not a new work order):', woGate.reason, '|', subject)
       skippedNotWorkOrderGate++
       skippedItems.push({ id: msg.id, subject, reason: woGate.reason })
+      await recordItemLocalTerminalDrop(woGate.reason)
       continue
     }
 
