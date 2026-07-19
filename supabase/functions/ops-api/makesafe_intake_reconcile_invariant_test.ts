@@ -568,3 +568,118 @@ Deno.test("invariant: an explicitly labelled non-prefix reference is still accou
   assertEquals(inv.counts.unaccounted, 0);
   assertEquals(inv.items[0].raw_reference, "Our Ref: SRJ-41290");
 });
+
+// The twin arrives with no post id and no internet message id, so only the content
+// fingerprint can collapse it. The source carries the label text ("Job No 68592")
+// while the draft carries the stored ref ("68592"): both sides must reduce to the
+// same canonical token or the twin is reported as new work every morning.
+Deno.test("invariant: a bare 'Job No' twin collapses despite label-vs-stored-ref wording", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-jobno-twin",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-jobno-twin",
+      graph_message_id: "AAMk-sanitized-jobno-twin",
+      external_ref: "68592",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+      created_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].reason, "twin_graph_post_content_fingerprint");
+});
+
+// Same contract for the labelled "Our Ref" archetype.
+Deno.test("invariant: an 'Our Ref' twin collapses against the stored bare ref", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-ourref-twin",
+      subject: "Make Safe Request - Our Ref: 41288",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T03:20:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-ourref-twin",
+      graph_message_id: "AAMk-sanitized-ourref-twin",
+      external_ref: "41288",
+      subject: "Make Safe Request - Our Ref: 41288",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T03:20:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+});
+
+// Two genuinely different work orders from one sender in the same minute with the
+// same generic subject must never collapse: the canonical discriminator stays
+// job-unique.
+Deno.test("invariant hostile near-collision: distinct job numbers never share a fingerprint", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-jobno-distinct",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-jobno-other",
+      graph_message_id: "AAMk-sanitized-jobno-other",
+      external_ref: "68593",
+      subject: "Make Safe - Balga - Job No 68593",
+      from_email: "workorders@ajs.build",
+      created_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// The builder prefix vocabulary lives in extractBuilderWorkOrderIdentity. Deriving
+// the display reference from the parse keeps a newly added prefix from silently
+// leaving raw_reference blank here.
+Deno.test("invariant: a prefixed builder reference is displayed from the canonical parse", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-prefix-display",
+      subject: "NEW WORK ORDER - MLB 25096 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-prefix-display",
+      graph_message_id: "AAMk-sanitized-prefix-display",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].raw_reference, "MLB-25096");
+  assertEquals(inv.items[0].canonical_claim_ref, "MLB25096");
+});

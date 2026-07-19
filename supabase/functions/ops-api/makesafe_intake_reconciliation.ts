@@ -582,6 +582,13 @@ interface ReconcileIdentity {
   workOrder: string;
   raw: string | null;
   /**
+   * Normalised job-unique token both capture paths derive identically, used as the
+   * content-fingerprint discriminator. `raw` is label text ("Job No 12345") and is
+   * for operator display only — feeding it to the fingerprint would make a source
+   * resolve to r:JOBNO12345 while the stored draft resolves to r:12345.
+   */
+  canonicalRef: string | null;
+  /**
    * Durable exact identity tokens used only when no canonical builder claim is
    * parseable — known refs whose prefix is outside the builder claim vocabulary and
    * the bare "Job No <NNNNN>" archetype. Namespaced so a job number can never
@@ -590,8 +597,6 @@ interface ReconcileIdentity {
   keys: string[];
 }
 
-const PREFIXED_REF_RE =
-  /\b(?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,}(?:\s*P\s*O\s*[-\s#]*\d{3,})?/i;
 const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
 /**
  * Australian state abbreviation followed by a four digit postcode. Address text
@@ -636,8 +641,7 @@ function labelledIdentityKeys(subject: string | null | undefined): string[] {
 
 function rawReferenceFromText(value: string | null | undefined): string | null {
   const text = String(value || "");
-  return text.match(PREFIXED_REF_RE)?.[0] ||
-    text.match(JOB_NUMBER_TEXT_RE)?.[0] ||
+  return text.match(JOB_NUMBER_TEXT_RE)?.[0] ||
     [...text.matchAll(LABELLED_IDENTITY_RE)].find((m) =>
       /\d{3,}/.test(normaliseRef(m[2])) && !isAddressLikeToken(normaliseRef(m[2]))
     )?.[0] || null;
@@ -663,6 +667,27 @@ function fallbackIdentityKeys(
   return [...keys];
 }
 
+/**
+ * The job-unique token a fingerprint may be discriminated by. Both capture paths must
+ * derive it the same way, so it is always a normalised parsed value — never the raw
+ * label text a subject happened to use. Job/reference tokens are preferred over a PO
+ * number so a source carrying both still lines up with a ref-keyed capture.
+ */
+function canonicalIdentityToken(input: {
+  claim: string;
+  workOrder: string;
+  keys: string[];
+  externalRef?: string | null;
+}): string | null {
+  if (input.workOrder) return input.workOrder;
+  if (input.claim) return input.claim;
+  for (const ns of ["JOB:", "REF:", "PO:"]) {
+    const key = input.keys.find((k) => k.startsWith(ns));
+    if (key) return key.slice(ns.length);
+  }
+  return normaliseRef(input.externalRef) || null;
+}
+
 function reconcileIdentity(input: {
   externalRef?: string | null;
   subject?: string | null;
@@ -684,13 +709,20 @@ function reconcileIdentity(input: {
   const workOrder = normaliseRef(
     extraction.builder_work_order_number || parsed.builder_work_order_number,
   );
+  const keys = fallbackIdentityKeys(input.externalRef, input.subject);
   return {
     claim,
     po,
     workOrder,
-    raw: input.externalRef || rawReferenceFromText(input.subject) ||
-      parsed.builder_work_order_number || parsed.builder_claim_ref || null,
-    keys: fallbackIdentityKeys(input.externalRef, input.subject),
+    raw: input.externalRef || parsed.builder_work_order_number ||
+      parsed.builder_claim_ref || rawReferenceFromText(input.subject) || null,
+    canonicalRef: canonicalIdentityToken({
+      claim,
+      workOrder,
+      keys,
+      externalRef: input.externalRef,
+    }),
+    keys,
   };
 }
 
@@ -824,7 +856,7 @@ export function summarizeIntakeReconcileInvariant(input: {
       d.from_email,
       d.subject,
       d.received_at || d.created_at,
-      d.external_ref,
+      identity.canonicalRef,
       d.body_preview,
     );
     if (fingerprint) draftFingerprints.set(fingerprint, d);
@@ -902,7 +934,7 @@ export function summarizeIntakeReconcileInvariant(input: {
       e.from_email,
       e.subject,
       e.received_at,
-      identity.raw,
+      identity.canonicalRef,
       e.body_preview,
     ).map((fp) => draftFingerprints.get(fp)).find(Boolean);
     if (fingerprintTwin) {
