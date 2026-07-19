@@ -194,6 +194,12 @@ Deno.test("scanMarkEligible: item-local terminal is marked only after its durabl
     terminalQuarantined: true,
     keyDegradedOrAbsent: false,
   };
-  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: false }), false);
-  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: true }), true);
+  assertEquals(
+    scanMarkEligible({ ...base, itemLocalTerminalRecorded: false }),
+    false,
+  );
+  assertEquals(
+    scanMarkEligible({ ...base, itemLocalTerminalRecorded: true }),
+    true,
+  );
 });

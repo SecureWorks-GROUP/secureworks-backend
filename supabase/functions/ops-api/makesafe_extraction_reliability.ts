@@ -175,7 +175,9 @@ export const QUARANTINE_PERSISTENCE_REASON = "quarantine_persistence_failed";
  * A confirmed durable quarantine write is sufficient recovery proof for that state;
  * any composite that also carries a provider reason still needs an extraction success.
  */
-export function degradedReasonIsPersistenceOnly(reason: string | null | undefined): boolean {
+export function degradedReasonIsPersistenceOnly(
+  reason: string | null | undefined,
+): boolean {
   return String(reason || "") === QUARANTINE_PERSISTENCE_REASON;
 }
 
@@ -189,7 +191,8 @@ export function extractionCycleHealth(outcome: ExtractionCycleOutcome): {
     return { status: "degraded", reason: outcome.providerLaneTerminalReason };
   }
   if (
-    outcome.attempts >= WHOLESALE_FAILURE_MIN_ATTEMPTS && outcome.successes === 0 &&
+    outcome.attempts >= WHOLESALE_FAILURE_MIN_ATTEMPTS &&
+    outcome.successes === 0 &&
     outcome.terminalFailures + outcome.retryableFailures >= outcome.attempts
   ) {
     const unique = [...new Set(outcome.reasons)];
@@ -258,9 +261,10 @@ export function extractionFailureState(
     // stays unset, so recovery is automatic once provider health returns. An ITEM-LOCAL
     // permanent failure cannot heal on a rescan, so it is bounded after one attempt and
     // recovers through an explicit requeue instead of hitting the provider forever.
-    recovery_action: !classification.quarantine || classification.stopProviderLane
-      ? "automatic_rescan"
-      : "manual_requeue",
+    recovery_action:
+      !classification.quarantine || classification.stopProviderLane
+        ? "automatic_rescan"
+        : "manual_requeue",
     manual_recovery_action: classification.quarantine
       ? "reextract_intake_draft"
       : null,

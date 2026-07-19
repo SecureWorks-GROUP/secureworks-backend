@@ -267,7 +267,10 @@ Deno.test("regression: item-local request_invalid recovers by requeue, provider 
   assertEquals(itemLocal.recovery_action, "manual_requeue");
   assertEquals(itemLocal.manual_recovery_action, "reextract_intake_draft");
   const providerWide = failureState(
-    classifyFailure({ status: 400, message: "exceed your specified API usage limits" }),
+    classifyFailure({
+      status: 400,
+      message: "exceed your specified API usage limits",
+    }),
     "cap",
   );
   assertEquals(providerWide.recovery_action, "automatic_rescan");
@@ -339,9 +342,15 @@ Deno.test("regression: a gate-dropped item-local terminal is bounded only once i
     keyDegradedOrAbsent: false,
   };
   // Durable write failed -> stays unscanned and retries.
-  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: false }), false);
+  assertEquals(
+    scanMarkEligible({ ...base, itemLocalTerminalRecorded: false }),
+    false,
+  );
   // Durable write confirmed -> bounded.
-  assertEquals(scanMarkEligible({ ...base, itemLocalTerminalRecorded: true }), true);
+  assertEquals(
+    scanMarkEligible({ ...base, itemLocalTerminalRecorded: true }),
+    true,
+  );
   // A provider outage is NOT bounded this way even if a record exists: it never got a
   // real attempt, so it must stay automatically retryable.
   assertEquals(
@@ -353,7 +362,11 @@ Deno.test("regression: a gate-dropped item-local terminal is bounded only once i
     false,
   );
   assertEquals(
-    scanMarkEligible({ ...base, authFailed: true, itemLocalTerminalRecorded: true }),
+    scanMarkEligible({
+      ...base,
+      authFailed: true,
+      itemLocalTerminalRecorded: true,
+    }),
     false,
   );
 });
@@ -374,15 +387,29 @@ function fakeEventsClient(opts: {
       const q: any = {
         inserts,
         insert(row: any) {
-          if (opts.insertError) return Promise.resolve({ error: { message: opts.insertError } });
+          if (opts.insertError) {
+            return Promise.resolve({ error: { message: opts.insertError } });
+          }
           inserts.push(row);
           return Promise.resolve({ error: null });
         },
-        select() { return q; },
-        eq() { return q; },
+        select() {
+          return q;
+        },
+        eq() {
+          return q;
+        },
         limit() {
-          if (opts.readError) return Promise.resolve({ data: null, error: { message: opts.readError } });
-          return Promise.resolve({ data: opts.existing ? [{ id: "existing" }] : [], error: null });
+          if (opts.readError) {
+            return Promise.resolve({
+              data: null,
+              error: { message: opts.readError },
+            });
+          }
+          return Promise.resolve({
+            data: opts.existing ? [{ id: "existing" }] : [],
+            error: null,
+          });
         },
       };
       return q;
@@ -418,7 +445,9 @@ const DROP_PATHS = [
 for (const dropReason of DROP_PATHS) {
   Deno.test(`regression: item-local terminal dropped at "${dropReason}" is recorded then bounded`, async () => {
     const client = fakeEventsClient();
-    const res = await flushItemLocalQuarantines(client, [pendingItem(dropReason)]);
+    const res = await flushItemLocalQuarantines(client, [
+      pendingItem(dropReason),
+    ]);
     assertEquals(res.recorded, 1);
     assertEquals(res.failed, 0);
     // A confirmed durable record is what licenses marking the source scanned.
@@ -445,7 +474,9 @@ for (const dropReason of DROP_PATHS) {
 
 Deno.test("regression: a re-run after a failed scanned-marker write does not duplicate the record", async () => {
   const client = fakeEventsClient({ existing: true });
-  const res = await flushItemLocalQuarantines(client, [pendingItem("job_external_ref:active job")]);
+  const res = await flushItemLocalQuarantines(client, [
+    pendingItem("job_external_ref:active job"),
+  ]);
   assertEquals(res.recorded, 0);
   assertEquals(res.alreadyRecorded, 1);
   assertEquals(client.inserts.length, 0);
@@ -454,11 +485,17 @@ Deno.test("regression: a re-run after a failed scanned-marker write does not dup
 });
 
 Deno.test("regression: a failed durable write leaves the source unscanned and fails loud", async () => {
-  for (const client of [
-    fakeEventsClient({ insertError: "permission denied for table business_events" }),
-    fakeEventsClient({ readError: "column does not exist" }),
-  ]) {
-    const res = await flushItemLocalQuarantines(client, [pendingItem("not_a_work_order")]);
+  for (
+    const client of [
+      fakeEventsClient({
+        insertError: "permission denied for table business_events",
+      }),
+      fakeEventsClient({ readError: "column does not exist" }),
+    ]
+  ) {
+    const res = await flushItemLocalQuarantines(client, [
+      pendingItem("not_a_work_order"),
+    ]);
     assertEquals(res.failed, 1);
     assertEquals(res.recorded, 0);
     // Never marked without evidence -> the item retries next cycle, and the non-zero
@@ -474,7 +511,11 @@ function healthClient(prevBase: any) {
   return {
     upserts,
     from: (_t: string) => ({
-      select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: prevBase, error: null }) }) }),
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () => Promise.resolve({ data: prevBase, error: null }),
+        }),
+      }),
       upsert: (row: any) => {
         upserts.push(row);
         return Promise.resolve({ error: null });
