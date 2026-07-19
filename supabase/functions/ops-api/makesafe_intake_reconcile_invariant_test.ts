@@ -1352,3 +1352,54 @@ Deno.test("invariant hostile near-collision: a subject P.O. is not masked by a q
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
   assertEquals(inv.items[0].canonical_po_ref, null);
 });
+
+// Body doubt only stands while a PO is unknown. Builder make-safes routinely name
+// the PO in the body as well, so an explicit subject PO that equals the capture's
+// must still account — otherwise the common shape reports as unaccounted noise.
+Deno.test("invariant: an explicit PO named in both subject and body still accounts", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-echoes-subject-po",
+      subject: "NEW WO - MLB 25096 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: P.O. 4477 raised.",
+    }],
+    drafts: [{
+      id: "draft-body-echoes-subject-po",
+      graph_message_id: "AAMk-sanitized-body-echoes-subject-po",
+      external_ref: "MLB-25096-PO-4477",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence.id, "draft-body-echoes-subject-po");
+});
+
+// The same shape with a differing explicit PO stays separate: the bypass may never
+// collapse two deliverables.
+Deno.test("invariant hostile near-collision: explicit differing POs never collapse under body doubt", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-explicit-po-differs",
+      subject: "NEW WO - MLB 25096 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: PO 9999 raised.",
+    }],
+    drafts: [{
+      id: "draft-explicit-po-differs",
+      graph_message_id: "AAMk-sanitized-explicit-po-differs",
+      external_ref: "MLB-25096-PO-9999",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});

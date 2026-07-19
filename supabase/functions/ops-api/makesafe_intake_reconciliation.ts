@@ -613,7 +613,8 @@ interface ReconcileIdentity {
   /**
    * poUnparsed, or the body names a PO in any spelling. A quoted or footer PO is not
    * adopted as identity, but it does mean the authoritative fields may not show the
-   * whole picture, so identity inference (claim and token matching) is withheld.
+   * whole picture, so identity inference (claim and token matching) is withheld
+   * unless both sides already name an explicit PO, which pins the deliverable.
    * Durable evidence — post id, internet message id, content fingerprint — is
    * unaffected, since none of it reasons about the PO.
    */
@@ -805,6 +806,12 @@ function identityRelation(
   // both of which hide a possibly-new deliverable. Only an aligned work order,
   // which carries the PO in its own token, survives.
   if (source.poContextAmbiguous || captured.poContextAmbiguous) {
+    // Body doubt only matters while a PO is unknown. When both sides name an
+    // explicit PO from authoritative fields the deliverable is already pinned, so
+    // equal POs are the same work and different POs are different work.
+    if (source.po && captured.po) {
+      return source.po === captured.po ? "exact" : null;
+    }
     return source.workOrder && source.workOrder === captured.workOrder
       ? "exact"
       : null;
@@ -956,9 +963,12 @@ function findCapturedIdentity<T>(
     // And when the survivors still describe more than one deliverable no evidence
     // names a lineage, so fail open rather than account against whichever was
     // indexed first.
+    // Explicit equal POs on both sides pin the deliverable, so body doubt cannot
+    // change what the row is.
     const compatible = candidates.filter((c) =>
-      !c.identity.poContextAmbiguous &&
-      (source.po ? source.po === c.identity.po : !source.poContextAmbiguous)
+      (!!source.po && source.po === c.identity.po) ||
+      (!source.po && !source.poContextAmbiguous &&
+        !c.identity.poContextAmbiguous)
     );
     if (!compatible.length) continue;
     const exact = compatible.filter((c) => c.identity.po === source.po);
