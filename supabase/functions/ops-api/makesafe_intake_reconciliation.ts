@@ -753,6 +753,37 @@ function identityRelation(
   return !source.po && !!captured.po ? "claim_po_alias" : null;
 }
 
+/**
+ * Choose which of the drafts sharing a content fingerprint the source is a twin of.
+ * PO separation is enforced first, then the surviving candidates must describe ONE
+ * deliverable: differing captured identities under one fingerprint mean the evidence
+ * cannot say which draft the source belongs to, so we fail open and let the row report
+ * as unaccounted rather than name the wrong draft.
+ */
+function resolveFingerprintTwin(
+  candidates:
+    | { draft: IntakeReconDraft; identity: ReconcileIdentity }[]
+    | undefined,
+  source: ReconcileIdentity,
+): IntakeReconDraft | undefined {
+  // Two explicit, different POs are two deliverables, whatever else aligns. An
+  // explicit source PO against a PO-less capture is potentially new work too, so the
+  // widened token set may never route around PO separation.
+  const compatible = (candidates || []).filter((c) =>
+    !source.po || source.po === c.identity.po
+  );
+  if (!compatible.length) return undefined;
+  const exact = compatible.filter((c) => c.identity.po === source.po);
+  const pool = exact.length ? exact : compatible;
+  const first = pool[0];
+  const distinct = pool.some((c) =>
+    c.identity.claim !== first.identity.claim ||
+    c.identity.po !== first.identity.po ||
+    c.identity.workOrder !== first.identity.workOrder
+  );
+  return distinct ? undefined : first.draft;
+}
+
 interface CapturedIdentity<T> {
   entry: T;
   identity: ReconcileIdentity;
@@ -844,9 +875,13 @@ export function summarizeIntakeReconcileInvariant(input: {
   const jobs = input.jobs || [];
   const draftsByPostId = new Map<string, IntakeReconDraft>();
   const draftsByInternetId = new Map<string, IntakeReconDraft>();
+  // Every draft that lands on a fingerprint, not just the first. A draft publishes its
+  // broad claim token as well as its rich work-order token, so two distinct
+  // deliverables sharing a claim, sender, subject and minute collide here. Keeping all
+  // of them lets the lookup pick on identity instead of insertion order.
   const draftFingerprints = new Map<
     string,
-    { draft: IntakeReconDraft; identity: ReconcileIdentity }
+    { draft: IntakeReconDraft; identity: ReconcileIdentity }[]
   >();
   const draftIdentities: CapturedIdentity<IntakeReconDraft>[] = [];
   for (const d of drafts) {
@@ -875,9 +910,10 @@ export function summarizeIntakeReconcileInvariant(input: {
         token,
         d.body_preview,
       );
-      if (fingerprint && !draftFingerprints.has(fingerprint)) {
-        draftFingerprints.set(fingerprint, { draft: d, identity });
-      }
+      if (!fingerprint) continue;
+      const slot = draftFingerprints.get(fingerprint);
+      if (slot) slot.push({ draft: d, identity });
+      else draftFingerprints.set(fingerprint, [{ draft: d, identity }]);
     }
   }
   // Jobs carry no sender, so they resolve on canonical prefixed claim/PO identity
@@ -963,13 +999,11 @@ export function summarizeIntakeReconcileInvariant(input: {
             e.body_preview,
           )
         ) {
-          const hit = draftFingerprints.get(fp);
-          if (!hit) continue;
-          // Two explicit, different POs are two deliverables, whatever else aligns.
-          // An explicit source PO against a PO-less capture is potentially new work
-          // too, so the widened token set may never route around PO separation.
-          if (identity.po && identity.po !== hit.identity.po) continue;
-          return hit.draft;
+          const hit = resolveFingerprintTwin(
+            draftFingerprints.get(fp),
+            identity,
+          );
+          if (hit) return hit;
         }
       }
       return undefined;

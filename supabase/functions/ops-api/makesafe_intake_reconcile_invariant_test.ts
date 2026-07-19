@@ -756,3 +756,108 @@ Deno.test("invariant: a prefixed builder reference is displayed from the canonic
   assertEquals(inv.items[0].raw_reference, "MLB-25096");
   assertEquals(inv.items[0].canonical_claim_ref, "MLB25096");
 });
+
+// Two drafts under one claim but with DIFFERENT POs share sender, subject, minute and
+// body, so both land on the same claim-token fingerprint. Fingerprint evidence cannot
+// say which of the two a PO-less source belongs to, so the twin path must decline and
+// let the deterministic claim relation classify the row instead of naming whichever
+// draft happened to occupy the slot first.
+Deno.test("invariant hostile near-collision: ambiguous same-claim two-PO drafts never twin on fingerprint", () => {
+  const shared = {
+    subject: "NEW WORK ORDER - MLB 25096 - Balga",
+    from_email: "jobs@mlbuilders.com.au",
+    created_at: "2026-05-06T05:30:00.000Z",
+    body_preview: "Attend site and make safe.",
+    status: "approved",
+  };
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-two-po-ambiguous",
+      subject: shared.subject,
+      from_email: shared.from_email,
+      received_at: shared.created_at,
+      body_preview: shared.body_preview,
+    }],
+    drafts: [
+      {
+        ...shared,
+        id: "draft-two-po-4477",
+        graph_message_id: "AAMk-sanitized-two-po-4477",
+        external_ref: "MLB-25096-PO-4477",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-4477",
+          builder_work_order_number: "MLB-25096-PO-4477",
+        },
+      },
+      {
+        ...shared,
+        id: "draft-two-po-9999",
+        graph_message_id: "AAMk-sanitized-two-po-9999",
+        external_ref: "MLB-25096-PO-9999",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-9999",
+          builder_work_order_number: "MLB-25096-PO-9999",
+        },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(
+    inv.items[0].reason,
+    "claim_reference_alias_of_po_captured_draft",
+  );
+});
+
+// The same shadowing shape, but the source names its PO explicitly: PO separation
+// resolves the ambiguity and the twin collapses against the RIGHT draft.
+Deno.test("invariant: an explicit source PO picks its own draft out of a shadowed fingerprint", () => {
+  const shared = {
+    subject: "NEW WORK ORDER - MLB 25096 - Balga",
+    from_email: "jobs@mlbuilders.com.au",
+    created_at: "2026-05-06T05:30:00.000Z",
+    body_preview: "Attend site and make safe.",
+    status: "approved",
+  };
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-two-po-explicit",
+      subject: "NEW WORK ORDER - MLB 25096 - PO 9999 - Balga",
+      from_email: shared.from_email,
+      received_at: shared.created_at,
+      body_preview: shared.body_preview,
+    }],
+    drafts: [
+      {
+        ...shared,
+        id: "draft-shadow-4477",
+        graph_message_id: "AAMk-sanitized-shadow-4477",
+        external_ref: "MLB-25096-PO-4477",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-4477",
+          builder_work_order_number: "MLB-25096-PO-4477",
+        },
+      },
+      {
+        ...shared,
+        id: "draft-shadow-9999",
+        graph_message_id: "AAMk-sanitized-shadow-9999",
+        external_ref: "MLB-25096-PO-9999",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-9999",
+          builder_work_order_number: "MLB-25096-PO-9999",
+        },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence.id, "draft-shadow-9999");
+});
