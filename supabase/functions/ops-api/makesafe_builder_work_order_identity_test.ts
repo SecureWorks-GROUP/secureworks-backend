@@ -1,6 +1,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   extractBuilderWorkOrderIdentity,
+  hasUnparseablePoLabel,
   mergeBuilderWorkOrderIdentity,
 } from "./makesafe_builder_work_order_identity.ts";
 
@@ -68,13 +69,28 @@ Deno.test("builder identity: PO label grammar is unchanged", () => {
       "NEW WO - MLB 25096 - P.O. 4477",
       "NEW WO - MLB 25096 - P.O.#4477",
       "NEW WO - MLB 25096 - purchaseorder 4477",
+      "NEW WO - MLB 25096 - P O. 4477",
     ]
   ) {
     const identity = extractBuilderWorkOrderIdentity({ subject });
     assertEquals(identity.builder_claim_ref, "MLB-25096");
     assertEquals(identity.builder_po_number, null);
     assertEquals(identity.builder_work_order_number, null);
+    // Unreadable to the canonical grammar, but never invisible: the PO is known to
+    // be present so downstream matching can refuse to treat the row as PO-less.
+    assertEquals(hasUnparseablePoLabel(subject), true);
   }
+});
+
+Deno.test("builder identity: a readable or absent PO label is not reported unparseable", () => {
+  assertEquals(hasUnparseablePoLabel("NEW WO - MLB 25096 - PO 4477"), false);
+  assertEquals(hasUnparseablePoLabel("NEW WO - MLB 25096 - P O 4477"), false);
+  assertEquals(
+    hasUnparseablePoLabel("NEW WO - MLB 25096 - purchase order 4477"),
+    false,
+  );
+  assertEquals(hasUnparseablePoLabel("Make Safe - 12 Smith St, Balga"), false);
+  assertEquals(hasUnparseablePoLabel("Reply to P.O. Box 1234, Balga"), false);
 });
 
 // A postal address is not a purchase order.

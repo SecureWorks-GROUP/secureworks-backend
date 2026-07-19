@@ -16,8 +16,38 @@ const BUILDER_REF_WITH_PO_RE =
   /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
 const BUILDER_REF_RE =
   /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
-const PO_RE =
-  /\b(?:P\s*O|purchase\s+order)(?:\s*(?:number|no\.?))?\s*[:#-]?\s*(\d{3,})\b/i;
+/**
+ * The PO label this module can read, as a source pattern. Exported so downstream
+ * identity matching derives the SAME grammar instead of keeping a second copy:
+ * a downstream regex that reads a spelling this one cannot would produce a PO
+ * token while the canonical PO stays null, leaving PO-separation guards blind.
+ */
+export const PO_LABEL_PATTERN = "(?:P\\s*O|purchase\\s+order)";
+/**
+ * Every PO-shaped label, including the dotted and unspaced spellings PO_RE cannot
+ * read. Strictly a superset of PO_LABEL_PATTERN, so the two together partition
+ * PO-labelled text into "parseable" and "present but unknown".
+ */
+const LOOSE_PO_LABEL_PATTERN = "(?:p\\s*\\.?\\s*o\\s*\\.?|purchase\\s*order)";
+const PO_TAIL_PATTERN = "(?:\\s*(?:number|no\\.?))?\\s*[:#-]?\\s*";
+
+const PO_RE = new RegExp(
+  `\\b${PO_LABEL_PATTERN}${PO_TAIL_PATTERN}(\\d{3,})\\b`,
+  "i",
+);
+const LOOSE_PO_RE = new RegExp(
+  `\\b${LOOSE_PO_LABEL_PATTERN}${PO_TAIL_PATTERN}\\d{3,}\\b`,
+  "i",
+);
+
+/**
+ * True when the text names a PO in a spelling the canonical grammar cannot parse,
+ * so the PO is unknown rather than absent. "P.O. Box 1234" does not qualify: the
+ * number does not follow the label directly.
+ */
+export function hasUnparseablePoLabel(text: string): boolean {
+  return !PO_RE.test(text) && LOOSE_PO_RE.test(text);
+}
 
 function canonicalClaim(prefix: string, digits: string): string {
   return `${prefix.toUpperCase()}-${digits}`;

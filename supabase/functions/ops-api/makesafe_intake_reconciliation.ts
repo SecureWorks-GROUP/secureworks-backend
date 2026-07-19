@@ -20,7 +20,9 @@ import {
 } from "./makesafe_intake_dedup.ts";
 import {
   extractBuilderWorkOrderIdentity,
+  hasUnparseablePoLabel,
   matchBuilderRefText,
+  PO_LABEL_PATTERN,
 } from "./makesafe_builder_work_order_identity.ts";
 import {
   isPureAckNoAction,
@@ -609,14 +611,6 @@ interface ReconcileIdentity {
   poUnparsed: boolean;
 }
 
-/**
- * A PO-shaped label followed by a PO-shaped number in a spelling PO_RE
- * (makesafe_builder_work_order_identity.ts) does not read. "P.O. Box 1234" is
- * excluded because no number follows the label.
- */
-const UNPARSED_PO_LABEL_RE =
-  /\b(?:p\s*\.\s*o\s*\.?|purchase\s*order)(?:\s*(?:number|no\.?))?\s*[:#-]?\s*\d{3,}\b/i;
-
 const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
 /**
  * Australian state abbreviation followed by a four digit postcode. Address text
@@ -632,14 +626,16 @@ const AU_STATE_POSTCODE_RE = /^(?:WA|SA|NSW|VIC|QLD|TAS|NT|ACT)\d{4}$/;
  * Under-matching costs a genuinely_unaccounted report, over-matching silently
  * loses work.
  *
- * The PO label alternative mirrors PO_RE in makesafe_builder_work_order_identity.ts
- * exactly. A spelling this regex reads but that one cannot ("P.O. 4477",
- * "purchaseorder 4477") would produce a PO token while identity.po stays empty,
- * leaving the PO-separation guards blind to it; such spellings yield no key and the
- * row fails open instead.
+ * The PO label alternative is derived from PO_LABEL_PATTERN, the grammar the
+ * canonical extractor reads, so it cannot drift into a spelling that produces a PO
+ * token while identity.po stays empty and the PO-separation guards stay blind.
+ * Spellings outside it yield no key and the row fails open instead.
  */
-const LABELLED_IDENTITY_RE =
-  /\b(?:(job)\s*(?:no\.?|number|#)|(?:purchase\s+order|p\s*o)\s*(?:no\.?|number|#)?|(?:work\s*order|w\/o|our\s*ref(?:erence)?|ref(?:erence)?|claim)\s*(?:no\.?|number|#)?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\b/gi;
+const LABELLED_IDENTITY_RE = new RegExp(
+  `\\b(?:(job)\\s*(?:no\\.?|number|#)|${PO_LABEL_PATTERN}\\s*(?:no\\.?|number|#)?|(?:work\\s*order|w\\/o|our\\s*ref(?:erence)?|ref(?:erence)?|claim)\\s*(?:no\\.?|number|#)?)\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\b`,
+  "gi",
+);
+const PO_LABEL_PREFIX_RE = new RegExp(`^${PO_LABEL_PATTERN}`, "i");
 
 function isAddressLikeToken(normalised: string): boolean {
   return AU_STATE_POSTCODE_RE.test(normalised);
@@ -655,11 +651,7 @@ function labelledIdentityKeys(subject: string | null | undefined): string[] {
     const label = String(match[0]).toLowerCase();
     const token = normaliseRef(match[2]);
     if (!/\d{3,}/.test(token) || isAddressLikeToken(token)) continue;
-    const ns = match[1]
-      ? "JOB"
-      : /^(?:purchase|p\s*o)/.test(label)
-      ? "PO"
-      : "REF";
+    const ns = match[1] ? "JOB" : PO_LABEL_PREFIX_RE.test(label) ? "PO" : "REF";
     // A PO key must be a PO the canonical extractor can also parse (bare digits),
     // otherwise the token would participate in matching while identity.po stays
     // empty and the PO-separation guards could never fire for it.
@@ -760,7 +752,7 @@ function reconcileIdentity(input: {
     }),
     keys,
     poUnparsed: !po &&
-      UNPARSED_PO_LABEL_RE.test(`${input.subject || ""}\n${input.body || ""}`),
+      hasUnparseablePoLabel(`${input.subject || ""}\n${input.body || ""}`),
   };
 }
 
@@ -933,11 +925,14 @@ function findCapturedIdentity<T>(
   if (!sourceScope) return null;
   for (const key of source.keys) {
     const candidates = index.byKey.get(scopedKey(sourceScope, key)) || [];
-    // Same token, different explicit POs are different deliverables; and when the
-    // survivors still describe more than one deliverable no evidence names a lineage,
-    // so fail open rather than account against whichever was indexed first.
+    // Same token, different explicit POs are different deliverables; a PO neither
+    // side can parse is an unknown PO, not an absent one, so it may not alias either.
+    // And when the survivors still describe more than one deliverable no evidence
+    // names a lineage, so fail open rather than account against whichever was
+    // indexed first.
     const compatible = candidates.filter((c) =>
-      !source.po || source.po === c.identity.po
+      !c.identity.poUnparsed &&
+      (source.po ? source.po === c.identity.po : !source.poUnparsed)
     );
     if (!compatible.length) continue;
     const exact = compatible.filter((c) => c.identity.po === source.po);

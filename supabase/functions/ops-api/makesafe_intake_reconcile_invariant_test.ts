@@ -1063,6 +1063,7 @@ Deno.test("invariant hostile near-collision: an unparseable PO label never alias
       ["mailbox-dotted-po", "NEW WO - MLB 25096 - P.O. 4477"],
       ["mailbox-dotted-hash-po", "NEW WO - MLB 25096 - P.O.#4477"],
       ["mailbox-typo-po", "NEW WO - MLB 25096 - purchaseorder 4477"],
+      ["mailbox-spaced-dotted-po", "NEW WO - MLB 25096 - P O. 4477"],
     ]
   ) {
     const inv = summarizeIntakeReconcileInvariant({
@@ -1116,6 +1117,66 @@ Deno.test("invariant: an unparseable PO label does not settle on a claim-only ca
 
   assertEquals(inv.counts.unaccounted, 1);
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// The scoped token fallback is the weakest matching path, so it must honour the
+// unknown-PO rule too: a claim-less labelled ref carrying a PO we cannot read may
+// not be accounted against a same-sender capture bearing a different PO.
+Deno.test("invariant hostile near-collision: an unparseable PO never accounts through the token fallback", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-token-fallback-dotted-po",
+      subject: "Make Safe - Work Order: 68592 - P.O. 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-token-fallback-po-9999",
+      graph_message_id: "AAMk-sanitized-token-fallback-po",
+      external_ref: "68592",
+      subject: "Make Safe - Work Order: 68592 - PO 9999",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:10:00.000Z",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// The same token fallback must still account a labelled ref whose PO both sides
+// can read: the unknown-PO guard fails open, it does not close the path.
+Deno.test("invariant: a readable PO still accounts through the token fallback", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-token-fallback-readable-po",
+      subject: "Make Safe - Work Order: 68592 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-token-fallback-po-4477",
+      graph_message_id: "AAMk-sanitized-token-fallback-readable",
+      external_ref: "68592",
+      subject: "Make Safe - Work Order: 68592 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:10:00.000Z",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].evidence.id, "draft-token-fallback-po-4477");
 });
 
 // The spelling the production extractor DOES read still accounts exactly, so failing
