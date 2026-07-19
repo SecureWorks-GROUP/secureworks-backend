@@ -716,22 +716,26 @@ function canonicalIdentityTokens(input: {
 }
 
 /**
- * Identity comes from authoritative evidence only: the stored external_ref, the
- * stored extraction, and the current subject. body_preview is deliberately out of
- * scope — it routinely carries a quoted thread or a footer naming some other
- * instruction's reference or PO, which would either alias the wrong lineage or,
- * via the unknown-PO signal, strand plainly captured work as unaccounted. The body
- * still feeds the content fingerprint, where a quoted thread is shared by both
- * representations of the same message rather than mistaken for identity.
+ * Canonical identity is parsed from the same inputs production capture reads —
+ * external_ref, subject and body — so a source row and the draft it produced
+ * resolve the same claim and PO. In particular a body-borne "PO 9999" must reach
+ * identity.po, or the explicit-PO separation guard goes blind on exactly the rows
+ * it exists to keep apart.
+ *
+ * The unknown-PO signal is the one thing scoped to the subject: it fires on labels
+ * nothing can parse, so a quoted thread or footer naming some other instruction's
+ * PO would strand plainly captured work as unaccounted rather than protect it.
  */
 function reconcileIdentity(input: {
   externalRef?: string | null;
   subject?: string | null;
+  bodyText?: string | null;
   extraction?: any;
 }): ReconcileIdentity {
   const parsed = extractBuilderWorkOrderIdentity({
     externalRef: input.externalRef,
     subject: input.subject,
+    bodyText: input.bodyText,
   });
   const extraction = parseObj(input.extraction);
   const claim = normaliseRef(
@@ -758,9 +762,9 @@ function reconcileIdentity(input: {
       externalRef: input.externalRef,
     }),
     keys,
-    // The unknown-PO signal reads exactly the text identity.po is parsed from, so
-    // the two stay complements: a PO label the canonical grammar cannot read means
-    // "PO unknown", never "no PO".
+    // A PO label the canonical grammar cannot read means "PO unknown", never "no
+    // PO". Subject only: quoted body text belongs to some other instruction as
+    // often as this one, and a false "unknown" strands captured work.
     poUnparsed: !po && hasUnparseablePoLabel(input.subject || ""),
   };
 }
@@ -987,6 +991,7 @@ export function summarizeIntakeReconcileInvariant(input: {
     const identity = reconcileIdentity({
       externalRef: d.external_ref,
       subject: d.subject,
+      bodyText: d.body_preview,
       extraction: d.extraction_json,
     });
     draftIdentities.push({
@@ -1060,7 +1065,7 @@ export function summarizeIntakeReconcileInvariant(input: {
     const postId = e.post_id || null;
     const subject = e.subject || "";
     const fromEmail = e.from_email || "";
-    const identity = reconcileIdentity({ subject });
+    const identity = reconcileIdentity({ subject, bodyText: e.body_preview });
 
     // Exact source evidence linkage remains authoritative and preserves the raw id.
     const directDraft = postId ? draftsByPostId.get(postId) : undefined;

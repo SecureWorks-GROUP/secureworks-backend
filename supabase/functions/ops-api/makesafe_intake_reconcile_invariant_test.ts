@@ -1267,3 +1267,34 @@ Deno.test("invariant: a dotted PO quoted in the body does not strand a clean sub
     id: "draft-body-dotted-po",
   });
 });
+
+// Production capture parses the PO out of the body, so reconciliation must too:
+// a body-borne PO the canonical grammar CAN read is this row's explicit PO, and a
+// different PO on the capture is separate work, not the same lineage.
+Deno.test("invariant hostile near-collision: a parseable body PO does not alias a different captured PO", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-parseable-po",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend. PO 9999 applies to this instruction.",
+    }],
+    drafts: [{
+      id: "draft-body-parseable-po",
+      graph_message_id: "AAMk-sanitized-body-parseable-po",
+      external_ref: "MLB-25096-PO-4477",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+  assertEquals(inv.items[0].canonical_po_ref, "PO-9999");
+});
