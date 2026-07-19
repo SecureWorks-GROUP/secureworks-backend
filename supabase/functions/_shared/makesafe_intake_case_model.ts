@@ -1,8 +1,10 @@
 // Isolated deterministic make-safe intake case contract.
 //
-// This module is intentionally not imported by any current runtime path. It is
-// the typed seam for later adapters, job creation and read-model units after the
-// structural migration is separately approved and applied.
+// This module is intentionally not imported by any runtime path. It mirrors the
+// inert U1 schema for later deterministic adapters, lineage commands, job
+// creation and read models after separately gated migration/cutover work.
+
+import { normaliseRef, REF_PREFIX_FLOOR } from "./makesafe_refs.ts";
 
 export const MAKESAFE_CASE_STATES = [
   "confirmed_live_job",
@@ -10,10 +12,9 @@ export const MAKESAFE_CASE_STATES = [
   "exception",
   "accounted_non_wo",
 ] as const;
-
 export type MakesafeCaseState = typeof MAKESAFE_CASE_STATES[number];
 
-export const MAKESAFE_EXCEPTION_REASONS = [
+export const MAKESAFE_REASON_CODES = [
   "cancellation",
   "duplicate",
   "revision",
@@ -24,27 +25,88 @@ export const MAKESAFE_EXCEPTION_REASONS = [
   "adapter_parse_failure",
   "conflicting_fields",
 ] as const;
+export type MakesafeReasonCode = typeof MAKESAFE_REASON_CODES[number];
 
-export type MakesafeExceptionReason = typeof MAKESAFE_EXCEPTION_REASONS[number];
-
-export const MAKESAFE_LINEAGE_RELATIONS = [
+export const MAKESAFE_PARENT_RELATIONS = [
   "revision_of",
   "duplicate_of",
   "cancellation_of",
   "sibling_of",
   "reopen_of",
 ] as const;
+export type MakesafeParentRelation = typeof MAKESAFE_PARENT_RELATIONS[number];
 
-export type MakesafeLineageRelation = typeof MAKESAFE_LINEAGE_RELATIONS[number];
-export type MakesafeDecisionProvenance = "deterministic" | "ai" | "human";
+export const MAKESAFE_SOURCE_ROLES = [
+  "original",
+  "twin",
+  "resend",
+  "revision_notice",
+  "cancellation_notice",
+  "late_pdf",
+] as const;
+export type MakesafeSourceRole = typeof MAKESAFE_SOURCE_ROLES[number];
 
-export interface MakesafeCaseStateShape {
-  currentState: MakesafeCaseState;
-  resultJobId: string | null;
-  relatedJobId: string | null;
-  blockingReasons: readonly string[];
-  exceptionReasonCode: MakesafeExceptionReason | null;
-  accountedNonWoReason: string | null;
+export type MakesafeDecisionProvenance =
+  | "deterministic"
+  | "ai"
+  | "human"
+  | "maverick"
+  | "backfill";
+
+export const MAKESAFE_NORMALISER_VERSION =
+  "makesafe_refs.normaliseRef+wo_po_precedence@v1";
+
+export interface MakesafeIdentityNormaliserInput {
+  externalRefRaw: string | null;
+  builderWoRaw: string | null;
+  builderPoRaw: string | null;
+  deliverableRefRaw: string | null;
+  prefixes?: readonly string[];
+}
+
+export interface MakesafeCanonicalIdentity {
+  externalRefCanonical: string | null;
+  builderWoCanonical: string | null;
+  builderPoCanonical: string | null;
+  deliverableRefCanonical: string | null;
+  woPoIdentityKey: string | null;
+  normaliserVersion: string;
+}
+
+// Canonical precedence is explicit: builder WO + PO, then PO, then WO.
+// Claim/external ref is display/matching context and never a live identity key.
+export function normaliseMakesafeIdentity(
+  input: MakesafeIdentityNormaliserInput,
+): MakesafeCanonicalIdentity {
+  const prefixes = input.prefixes ?? REF_PREFIX_FLOOR;
+  const externalRefCanonical = normaliseRef(input.externalRefRaw, prefixes);
+  const builderWoCanonical = normaliseRef(input.builderWoRaw, prefixes);
+  const builderPoCanonical = normaliseOpaqueIdentity(input.builderPoRaw);
+  const deliverableRefCanonical = normaliseOpaqueIdentity(
+    input.deliverableRefRaw,
+  );
+  const woPoIdentityKey = builderWoCanonical && builderPoCanonical
+    ? `wo:${builderWoCanonical}/po:${builderPoCanonical}`
+    : builderPoCanonical
+    ? `po:${builderPoCanonical}`
+    : builderWoCanonical
+    ? `wo:${builderWoCanonical}`
+    : null;
+  return {
+    externalRefCanonical,
+    builderWoCanonical,
+    builderPoCanonical,
+    deliverableRefCanonical,
+    woPoIdentityKey,
+    normaliserVersion: MAKESAFE_NORMALISER_VERSION,
+  };
+}
+
+function normaliseOpaqueIdentity(raw: string | null): string | null {
+  if (raw === null) return null;
+  const canonical = raw.trim().toUpperCase().replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
+  return canonical || null;
 }
 
 const TRANSITIONS: Readonly<
@@ -67,61 +129,82 @@ export function isMakesafeCaseTransitionAllowed(
   return TRANSITIONS[from].includes(to);
 }
 
+export interface MakesafeCaseStateShape {
+  state: MakesafeCaseState;
+  reasonCode: MakesafeReasonCode | null;
+  blockedReasons: readonly string[];
+  jobId: string | null;
+  companyId: string | null;
+  canonicalIdentity: string | null;
+  clientName: string | null;
+  siteAddress: string | null;
+}
+
 export function validateMakesafeCaseState(
   value: MakesafeCaseStateShape,
 ): readonly string[] {
   const errors: string[] = [];
-  const hasResultJob = value.resultJobId !== null;
-  const hasBlockingReasons = value.blockingReasons.length > 0;
-  const hasExceptionReason = value.exceptionReasonCode !== null;
-  const hasNonWoReason = (value.accountedNonWoReason ?? "").trim().length > 0;
+  const live = value.state === "confirmed_live_job" ||
+    value.state === "blocked_live_job";
 
-  switch (value.currentState) {
+  if (live) {
+    if (value.jobId === null) errors.push(`${value.state} requires jobId`);
+    if (value.reasonCode !== null) {
+      errors.push(`${value.state} cannot carry reasonCode`);
+    }
+    if (value.companyId === null) {
+      errors.push(`${value.state} requires companyId`);
+    }
+    if (value.canonicalIdentity === null) {
+      errors.push(
+        `${value.state} requires canonical builder WO/PO/ref identity`,
+      );
+    }
+    if (value.clientName === null) {
+      errors.push(`${value.state} requires clientName`);
+    }
+    if (value.siteAddress === null) {
+      errors.push(`${value.state} requires siteAddress`);
+    }
+  }
+
+  switch (value.state) {
     case "confirmed_live_job":
-      if (!hasResultJob) errors.push("confirmed_live_job requires resultJobId");
-      if (hasBlockingReasons) {
-        errors.push("confirmed_live_job cannot have blockingReasons");
-      }
-      if (hasExceptionReason || hasNonWoReason) {
-        errors.push("confirmed_live_job cannot carry exception/non-WO reasons");
+      if (value.blockedReasons.length > 0) {
+        errors.push("confirmed_live_job cannot have blockedReasons");
       }
       break;
     case "blocked_live_job":
-      if (!hasResultJob) errors.push("blocked_live_job requires resultJobId");
-      if (!hasBlockingReasons) {
-        errors.push("blocked_live_job requires named blockingReasons");
-      }
-      if (hasExceptionReason || hasNonWoReason) {
-        errors.push("blocked_live_job cannot carry exception/non-WO reasons");
+      if (value.blockedReasons.length === 0) {
+        errors.push("blocked_live_job requires named blockedReasons");
       }
       break;
     case "exception":
-      if (hasResultJob) errors.push("exception cannot own a resultJobId");
-      if (hasBlockingReasons) {
-        errors.push("exception cannot have blockingReasons");
+      if (value.jobId !== null) errors.push("exception cannot own a jobId");
+      if (value.reasonCode === null) {
+        errors.push("exception requires reasonCode");
       }
-      if (!hasExceptionReason) errors.push("exception requires a reason code");
-      if (hasNonWoReason) errors.push("exception cannot carry a non-WO reason");
+      if (value.blockedReasons.length > 0) {
+        errors.push("exception cannot have blockedReasons");
+      }
       break;
     case "accounted_non_wo":
-      if (hasResultJob || value.relatedJobId !== null) {
-        errors.push("accounted_non_wo cannot reference a job");
+      if (value.jobId !== null) {
+        errors.push("accounted_non_wo cannot own a jobId");
       }
-      if (hasBlockingReasons || hasExceptionReason) {
-        errors.push("accounted_non_wo cannot carry block/exception reasons");
+      if (value.reasonCode === null) {
+        errors.push("accounted_non_wo requires reasonCode");
       }
-      if (!hasNonWoReason) {
-        errors.push("accounted_non_wo requires an accounting reason");
+      if (value.blockedReasons.length > 0) {
+        errors.push("accounted_non_wo cannot have blockedReasons");
       }
       break;
   }
 
+  if (value.reasonCode === "cancellation" && value.jobId !== null) {
+    errors.push("cancellation cannot own a jobId");
+  }
   return errors;
-}
-
-export interface SourceInstructionIdentity {
-  sourceMessageId: string;
-  deliverableDiscriminator?: string;
 }
 
 function requiredOpaquePart(label: string, value: string): string {
@@ -130,62 +213,155 @@ function requiredOpaquePart(label: string, value: string): string {
   return encodeURIComponent(trimmed);
 }
 
-export function buildSourceInstructionKey(
-  identity: SourceInstructionIdentity,
-): string {
-  const message = requiredOpaquePart(
-    "sourceMessageId",
-    identity.sourceMessageId,
-  );
-  const deliverable = requiredOpaquePart(
-    "deliverableDiscriminator",
-    identity.deliverableDiscriminator ?? "instruction:0",
-  );
-  return `message:${message}/deliverable:${deliverable}`;
+export function buildInstructionKey(input: {
+  instructionFingerprint: string;
+  deliverableDiscriminator: string;
+}): string {
+  return `fingerprint:${
+    requiredOpaquePart("instructionFingerprint", input.instructionFingerprint)
+  }` +
+    `/deliverable:${
+      requiredOpaquePart(
+        "deliverableDiscriminator",
+        input.deliverableDiscriminator,
+      )
+    }`;
 }
 
 export function buildReplayKey(input: {
   orgId: string;
-  sourceSystem: string;
-  sourceMailbox: string;
-  sourceInstructionKey: string;
+  instructionKey: string;
 }): string {
+  return `${requiredOpaquePart("orgId", input.orgId)}|${
+    requiredOpaquePart("instructionKey", input.instructionKey)
+  }`;
+}
+
+export function companyKeyFromId(companyId: string): string {
+  return `company:${requiredOpaquePart("companyId", companyId)}`;
+}
+
+export function buildLiveIdentityKey(input: {
+  orgId: string;
+  companyKey: string | null;
+  woPoIdentityKey: string | null;
+  cycle: number;
+}): string | null {
+  if (input.companyKey === null || input.woPoIdentityKey === null) return null;
+  if (!Number.isInteger(input.cycle) || input.cycle < 1) {
+    throw new Error("cycle must be a positive integer");
+  }
   return [
     requiredOpaquePart("orgId", input.orgId),
-    requiredOpaquePart("sourceSystem", input.sourceSystem),
-    requiredOpaquePart("sourceMailbox", input.sourceMailbox),
-    requiredOpaquePart("sourceInstructionKey", input.sourceInstructionKey),
+    requiredOpaquePart("companyKey", input.companyKey),
+    requiredOpaquePart("woPoIdentityKey", input.woPoIdentityKey),
+    String(input.cycle),
   ].join("|");
+}
+
+export interface MakesafeLineageSnapshot {
+  id: string;
+  orgId: string;
+  lineageId: string;
+  parentCaseId: string | null;
+  parentRelation: MakesafeParentRelation | null;
+  cycle: number;
+  reasonCode: MakesafeReasonCode | null;
+}
+
+export function placeCaseInLineage(input: {
+  newCaseId: string;
+  orgId: string;
+  parent: MakesafeLineageSnapshot | null;
+  relation: MakesafeParentRelation | null;
+}): MakesafeLineageSnapshot {
+  if ((input.parent === null) !== (input.relation === null)) {
+    throw new Error("parent and relation must be set together");
+  }
+  if (input.parent === null) {
+    return {
+      id: input.newCaseId,
+      orgId: input.orgId,
+      lineageId: input.newCaseId,
+      parentCaseId: null,
+      parentRelation: null,
+      cycle: 1,
+      reasonCode: null,
+    };
+  }
+  if (input.parent.id === input.newCaseId) {
+    throw new Error("lineage cannot link a case to itself");
+  }
+  assertSameOrg(input.orgId, input.parent.orgId);
+  if (
+    input.relation === "duplicate_of" &&
+    (input.parent.id !== input.parent.lineageId ||
+      input.parent.reasonCode === "duplicate")
+  ) {
+    throw new Error(
+      "duplicate_of must point directly to a non-duplicate lineage root",
+    );
+  }
+  return {
+    id: input.newCaseId,
+    orgId: input.orgId,
+    lineageId: input.parent.lineageId,
+    parentCaseId: input.parent.id,
+    parentRelation: input.relation,
+    cycle: input.relation === "reopen_of"
+      ? input.parent.cycle + 1
+      : input.parent.cycle,
+    reasonCode: null,
+  };
+}
+
+export function assertLineageImmutable(
+  before: MakesafeLineageSnapshot,
+  after: MakesafeLineageSnapshot,
+): void {
+  if (
+    before.orgId !== after.orgId || before.lineageId !== after.lineageId ||
+    before.parentCaseId !== after.parentCaseId ||
+    before.parentRelation !== after.parentRelation ||
+    before.cycle !== after.cycle
+  ) {
+    throw new Error("case lineage identity is immutable");
+  }
 }
 
 export interface MakesafeIdentityFieldProvenance {
   method: MakesafeDecisionProvenance;
-  sourceMessageId?: string;
+  sourcePostId?: string;
   rule?: string;
   observedAt?: string;
 }
 
 export interface MakesafeIdentity {
-  readonly rawBuilderName: string | null;
-  readonly rawExternalRef: string | null;
-  readonly rawPoNumber: string | null;
-  readonly rawDeliverableRef: string | null;
-  canonicalBuilderSlug: string | null;
-  canonicalExternalRef: string | null;
-  canonicalPoNumber: string | null;
-  canonicalDeliverableRef: string | null;
-  identityProvenance: Readonly<
-    Record<string, MakesafeIdentityFieldProvenance>
-  >;
+  readonly companySlugRaw: string | null;
+  readonly externalRefRaw: string | null;
+  readonly builderWoRaw: string | null;
+  readonly builderPoRaw: string | null;
+  readonly deliverableRefRaw: string | null;
+  companyKey: string | null;
+  externalRefCanonical: string | null;
+  builderWoCanonical: string | null;
+  builderPoCanonical: string | null;
+  deliverableRefCanonical: string | null;
+  woPoIdentityKey: string | null;
+  normaliserVersion: string;
+  fieldProvenance: Readonly<Record<string, MakesafeIdentityFieldProvenance>>;
 }
 
 export type CanonicalIdentityUpdate = Partial<
   Pick<
     MakesafeIdentity,
-    | "canonicalBuilderSlug"
-    | "canonicalExternalRef"
-    | "canonicalPoNumber"
-    | "canonicalDeliverableRef"
+    | "companyKey"
+    | "externalRefCanonical"
+    | "builderWoCanonical"
+    | "builderPoCanonical"
+    | "deliverableRefCanonical"
+    | "woPoIdentityKey"
+    | "normaliserVersion"
   >
 >;
 
@@ -203,24 +379,25 @@ export function applyCanonicalIdentityUpdate(
     throw new Error("canonical identity changes require field provenance");
   }
   for (const [key, value] of Object.entries(provenanceAdditions)) {
-    const prior = existing.identityProvenance[key];
+    const prior = existing.fieldProvenance[key];
     if (
       prior !== undefined && JSON.stringify(prior) !== JSON.stringify(value)
     ) {
-      throw new Error("identity provenance is append-only");
+      throw new Error("field provenance is append-only");
     }
   }
   return {
     ...existing,
     ...update,
-    identityProvenance: {
-      ...existing.identityProvenance,
+    companySlugRaw: existing.companySlugRaw,
+    externalRefRaw: existing.externalRefRaw,
+    builderWoRaw: existing.builderWoRaw,
+    builderPoRaw: existing.builderPoRaw,
+    deliverableRefRaw: existing.deliverableRefRaw,
+    fieldProvenance: {
+      ...existing.fieldProvenance,
       ...provenanceAdditions,
     },
-    rawBuilderName: existing.rawBuilderName,
-    rawExternalRef: existing.rawExternalRef,
-    rawPoNumber: existing.rawPoNumber,
-    rawDeliverableRef: existing.rawDeliverableRef,
   };
 }
 
@@ -233,86 +410,60 @@ export function assertSameOrg(
   }
 }
 
-export interface MakesafeLineageEdge {
+export interface MakesafeSourceAccountingRow {
   orgId: string;
-  fromCaseId: string;
-  relationType: MakesafeLineageRelation;
-  toCaseId: string;
+  caseId: string;
+  postId: string;
+  role: MakesafeSourceRole;
 }
 
-export function canonicalSiblingEdge(
-  orgId: string,
-  firstCaseId: string,
-  secondCaseId: string,
-): MakesafeLineageEdge {
-  if (firstCaseId === secondCaseId) {
-    throw new Error("lineage cannot link a case to itself");
+export function attachSourceOnce(
+  existing: readonly MakesafeSourceAccountingRow[],
+  candidate: MakesafeSourceAccountingRow,
+): { rows: readonly MakesafeSourceAccountingRow[]; inserted: boolean } {
+  const accounted = existing.find((row) =>
+    row.orgId === candidate.orgId && row.postId === candidate.postId
+  );
+  if (accounted !== undefined) {
+    if (accounted.caseId !== candidate.caseId) {
+      throw new Error("source post is already accounted to another case");
+    }
+    return { rows: existing, inserted: false };
   }
-  const [fromCaseId, toCaseId] = [firstCaseId, secondCaseId].sort();
-  return { orgId, fromCaseId, relationType: "sibling_of", toCaseId };
+  return { rows: [...existing, candidate], inserted: true };
 }
 
-export function validateLineageEdge(
-  existingEdges: readonly MakesafeLineageEdge[],
-  candidate: MakesafeLineageEdge,
-): readonly string[] {
-  const errors: string[] = [];
-  if (candidate.fromCaseId === candidate.toCaseId) {
-    errors.push("lineage cannot link a case to itself");
-  }
-  if (
-    candidate.relationType === "sibling_of" &&
-    candidate.fromCaseId >= candidate.toCaseId
-  ) {
-    errors.push("sibling edge must be stored once in canonical order");
-  }
-  if (
-    candidate.relationType === "duplicate_of" &&
-    existingEdges.some((edge) =>
-      edge.orgId === candidate.orgId &&
-      edge.fromCaseId === candidate.fromCaseId &&
-      edge.relationType === "duplicate_of"
-    )
-  ) {
-    errors.push("duplicate case already has a canonical parent");
-  }
-  if (
-    existingEdges.some((edge) =>
-      edge.orgId === candidate.orgId &&
-      edge.fromCaseId === candidate.fromCaseId &&
-      edge.toCaseId === candidate.toCaseId &&
-      edge.relationType === candidate.relationType
-    )
-  ) {
-    errors.push("lineage edge already exists");
-  }
+export interface CaseUpsertPlan {
+  caseWrites: number;
+  sourceWrites: number;
+  eventWrites: number;
+  notificationWrites: number;
+  domainEventWrites: number;
+}
 
-  if (candidate.relationType !== "sibling_of") {
-    const adjacency = new Map<string, string[]>();
-    for (const edge of existingEdges) {
-      if (
-        edge.orgId !== candidate.orgId || edge.relationType === "sibling_of"
-      ) {
-        continue;
-      }
-      adjacency.set(edge.fromCaseId, [
-        ...(adjacency.get(edge.fromCaseId) ?? []),
-        edge.toCaseId,
-      ]);
-    }
-    const pending = [candidate.toCaseId];
-    const visited = new Set<string>();
-    while (pending.length > 0) {
-      const current = pending.pop()!;
-      if (current === candidate.fromCaseId) {
-        errors.push("lineage edge would create a cycle");
-        break;
-      }
-      if (visited.has(current)) continue;
-      visited.add(current);
-      pending.push(...(adjacency.get(current) ?? []));
-    }
+export function planBackfillInstruction(input: {
+  replayKeys: ReadonlySet<string>;
+  replayKey: string;
+  sourceAlreadyAttached: boolean;
+  sideEffectsSuppressed: boolean;
+}): CaseUpsertPlan {
+  if (!input.sideEffectsSuppressed) {
+    throw new Error("backfill must suppress notification and domain effects");
   }
-
-  return errors;
+  if (input.replayKeys.has(input.replayKey)) {
+    return {
+      caseWrites: 0,
+      sourceWrites: input.sourceAlreadyAttached ? 0 : 1,
+      eventWrites: 0,
+      notificationWrites: 0,
+      domainEventWrites: 0,
+    };
+  }
+  return {
+    caseWrites: 1,
+    sourceWrites: input.sourceAlreadyAttached ? 0 : 1,
+    eventWrites: 1,
+    notificationWrites: 0,
+    domainEventWrites: 0,
+  };
 }

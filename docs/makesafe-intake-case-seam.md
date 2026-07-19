@@ -1,140 +1,239 @@
 # Deterministic make-safe intake case seam
 
-## Status
+## Status and authority
 
 This is the inert U1 structural slice for the approved deterministic make-safe
 intake mission. The migration is drafted but has not been applied. No current
-adapter, scan, auto-file, job creation, board read, message path or AI path uses
-these files.
+adapter, scan, draft, approval, auto-file, job creation, board, notification or
+AI path imports or writes this model.
 
 Up migration:
 
 `supabase/migrations/20260720000001_makesafe_intake_cases.sql`
 
-Manual down migration:
+Manual pre-cutover down migration:
 
 `supabase/rollbacks/20260720000001_makesafe_intake_cases_down.sql`
 
-Production apply and rollback both remain Captain-gated under G4.
+Apply and rollback remain Captain-gated under G4.
 
-## Data grain and idempotency
+During parallel observe, `makesafe_intake_drafts.status` stays authoritative and
+case rows are shadow records. The service-role-only
+`makesafe_intake_case_divergence` view compares case state, draft state and job
+existence per attached source post. At a later gated cutover, cases become the
+classification and lineage authority, drafts become extraction artifacts, and a
+subordinate draft-to-case link is added. The runtime authority switch must be a
+DB single-row flag following `makesafe_cron_settings`, not an environment flag.
+This U1 migration does not add or flip that runtime switch.
 
-`makesafe_intake_cases` stores one row per source instruction. A later adapter
-must derive `source_instruction_key` from the stable source message id and a
-stable deliverable discriminator. If one message contains two separately
-servable POs or deliverables, it must produce two instruction keys and two
-cases. Replaying the same instruction uses the same key and conflicts on:
+## Ownership boundaries
 
-`(org_id, source_system, source_mailbox, source_instruction_key)`
+- `emails`, `email_attachments` and `email_events_raw` remain the capture and
+  immutable evidence estate. Intake decisions never mutate them.
+- `makesafe_intake_cases` is the future sole classification, canonical identity,
+  lineage and decision authority.
+- `makesafe_intake_drafts` remains the current extraction/approval artifact until
+  cutover. Its current schema and runtime behavior are untouched here.
+- `jobs` remains execution state. A case points directly to one job, independent
+  of whether best-effort `makesafe_job_details` creation succeeded. No new case
+  identity is copied to `jobs.metadata`.
 
-Twin Graph posts and re-sends have different source message ids. They remain
-separate cases and are related with `duplicate_of` or another evidenced lineage
-edge. Canonical external reference, PO and deliverable columns are indexed for
-candidate matching but are intentionally not unique. Therefore matching cannot
-silently collapse genuine separate work.
+After cutover this seam explicitly subsumes these current truth surfaces:
 
-Raw builder, external reference, PO and deliverable values are separate from
-canonical values. Once a raw value exists, the database trigger refuses to
-replace or clear it. Canonical changes require updated field provenance.
+1. `buildIntakeDedupIndex` and `isDuplicateIntake` become advisory classifiers;
+   database instruction/source/live-identity keys become identity authority.
+2. Capped heuristic reconcile counters are replaced by the uncapped structural
+   `makesafe_intake_email_accounting` view. The existing 500/1,000-row truncation
+   hazard is explicitly routed to U7; U1 does not edit that active reader.
+3. Ref/message-grain `makesafe_notify_log.dedup_key` is replaced by Mission 2's
+   lineage-grain notification ledger.
+4. Board `known_refs` draft joins are replaced by case-to-job/source joins.
 
-## Tables
+Those runtime sunsets are later units. None is edited or activated in this PR.
 
-- `makesafe_intake_cases`: source identity, raw and canonical identity, current
-  outcome, named missing/conflicting fields, related jobs and latest decision.
-- `makesafe_intake_case_transitions`: append-only initial classifications and
-  valid state transitions with deterministic, AI or human provenance.
-- `makesafe_intake_case_sources`: append-only source message evidence, including
-  Graph and internet message ids, conversation/thread ids and received time.
-- `makesafe_intake_case_attachments`: append-only attachment evidence snapshots,
-  linked to the current private email attachment store when available.
-- `makesafe_intake_case_lineage`: append-only revision, duplicate, cancellation,
-  sibling and reopen edges.
+## Case grain and source accounting
 
-Composite foreign keys keep child evidence in the case org. Triggers also reject
-job and legacy intake-draft links from another org. All five tables use the
-existing backend-owned make-safe posture: RLS is enabled, anon/authenticated
-have no grants or policies, and service role has the only policy.
+A case is one source instruction. `instruction_key` is deterministic instruction
+content plus a stable deliverable discriminator. Its unique key is:
 
-## State and lineage rules
+`(org_id, instruction_key)`
+
+Twin Graph posts, dual-capture `AAMk...`/`mailbox_<hash>` rows, re-sends and late
+PDFs resolve the same instruction key and attach as N source rows to one case.
+The source junction structurally accounts each email once per tenant with:
+
+`UNIQUE (org_id, post_id)`
+
+A source FK to `emails(post_id)` is `ON DELETE RESTRICT`. Email PII can still be
+tombstoned by the existing retention flow, while case identity and the source
+link survive. Source rows preserve Graph/internet/conversation/thread ids,
+received and observed time, raw evidence, provenance and attachment references.
+They store no bytes, public URLs or signed URLs.
+
+Separate POs and deliverables produce separate instruction keys. Claim/external
+reference is never unique. Candidate identity indexes are non-unique.
+
+## Identity and live uniqueness
+
+Raw builder, external reference, builder WO, builder PO and deliverable values
+are separate from canonical values. Once present, raw values cannot be replaced
+or cleared. Canonical changes require append-only per-field provenance.
+Provenance supports `deterministic`, `ai`, `human`, `maverick` and `backfill`.
+
+Known builders use `company_id` as the stable profile identity. `company_key` is
+derived from that UUID, so live slug drift such as `aj`/`ajs`/`ajbr` does not
+split the key. `normaliser_version` records the one normaliser version used for
+all canonical identity fields. Later adapters must import the shared normaliser
+rather than reproduce ref rules.
+
+The S13-safe live unique key is:
+
+`(org_id, company_key, wo_po_identity_key, cycle)`
+
+It applies only to confirmed/blocked cases with known company and WO/PO identity.
+Claim ref is deliberately absent. Different builders and separate POs do not
+collide. Claim-only family ambiguity receives no constraint decision and stays a
+server classification decision.
+
+## Lineage and reopen cycle
+
+A root case has `lineage_id = id`. Every non-root case has exactly one typed
+`parent_case_id` plus `parent_relation`:
+
+- `revision_of`
+- `duplicate_of`
+- `cancellation_of`
+- `sibling_of`
+- `reopen_of`
+
+Parent and relation are both set or both null. The parent must already exist in
+the same org. The child inherits its lineage and lineage fields are immutable.
+This forms a forest and prevents cycles without a recursive edge table.
+`duplicate_of` must point directly to a non-duplicate lineage root, preventing
+ambiguous duplicate chains.
+
+U1 defines reopen cycle itself: every `reopen_of` child is
+`parent.cycle + 1`, regardless of the current path-dependent legacy behavior for
+reattend versus cancel/reopen. Cycle is in the live unique key. Earlier portal
+or job-cycle invalidation is later U5/U4 wiring and is not hidden in a trigger.
+
+## State and audit
 
 The four outcomes are:
 
 1. `confirmed_live_job`
-2. `blocked_live_job` with named `blocking_reasons`
-3. `exception` with one approved closed-set `exception_reason_code`
-4. `accounted_non_wo` with a non-empty accounting reason
+2. `blocked_live_job` with named `blocked_reasons`
+3. `exception` with one approved reason code
+4. `accounted_non_wo` with one approved reason code
 
-The database validates each state's required job and reason shape. It records
-initial classification and each valid transition automatically. Transition,
-source, attachment and lineage rows reject update/delete.
+Database checks enforce live job/identity floor, named blocked reasons,
+reason-coded exception/non-WO outcomes, and no job on cancellation or any
+exception/non-WO case. A partial unique index permits one case to own a job.
+Job and company triggers enforce org scope; a linked job must be `type=makesafe`.
 
-Hierarchical lineage edges reject self-links and cycles. An org-scoped advisory
-lock closes the practical concurrent-insert race around the recursive cycle
-check. A partial unique index allows only one `duplicate_of` parent per duplicate
-case. Sibling edges are stored once in UUID order.
+`makesafe_intake_case_events` is trigger-fed in the same transaction for initial
+classification, state transitions, authority promotion and canonical identity
+updates. Events and source rows reject UPDATE/DELETE. Cases reject DELETE and
+lineage re-parenting. Transition legality is structural; actor authority remains
+with later route-gated server commands.
+
+Backfill decisions require `provenance='backfill'` and
+`side_effects_suppressed=true`. Natural-key `ON CONFLICT DO NOTHING` means a
+second run writes no case, source or event rows. U1 has no notification/domain
+emitter, and the helper contract proves zero effect writes.
 
 ## Later consumers
 
 ### Deterministic adapters
 
-A later unit can parse source messages and insert or upsert cases using only the
-source-instruction uniqueness key. It must add source and attachment evidence in
-the same transaction. Deterministic parse results write per-field provenance.
-Optional AI can only add attributed secondary evidence; it cannot determine
-whether the source is accounted.
+A later adapter computes the shared versioned canonical identity and instruction
+key, upserts one case by `(org_id, instruction_key)`, then attaches every source
+post by `(org_id, post_id)`. Exact DB conflicts are authority; fingerprints and
+family/revision judgment remain server classifiers. Optional AI can append
+attributed secondary evidence only.
 
-### Job creation
+### Job creation and lineage commands
 
-A later unit can resolve an exception or create a blocked/confirmed make-safe job
-through the existing shared approval gate. It then transitions the case and sets
-`result_job_id` in one transaction. Exceptions that concern an existing job use
-`related_job_id`; the exception case itself does not own a newly created job.
-This migration does not bypass or modify the existing approval boundary.
+A later unit resolves blocked/confirmed cases through the existing shared
+approval gate, sets `case.job_id` and adds the future details backlink/view in
+one transaction. Cancellation, revision and reopen commands create the typed
+case/parent shape, append case events, and explicitly flag the target job at the
+server boundary. No cross-table U1 trigger performs those visible mutations.
 
-### Read models and board views
+### Read models
 
-A later read-model unit can project current cases plus append-only transition and
-lineage history. It should query by `(org_id, current_state, source_received_at)`
-and use lineage to group revisions/re-sends without treating shared PO/reference
-values as proof of sameness. No board view is created here.
+Later board/card reads join case to job, sources and events. They query
+`(org_id, state, received_at)`, use `lineage_id` for grouping and notification
+grain, and never infer sameness from claim ref alone.
 
-## Apply and rollback procedure
+## Test kit and hostile fixtures
 
-### Up
+Focused pure and migration-contract tests cover the inert U1 part of Fable's
+hostile set:
 
-1. Obtain the Captain's named G4 approval for the exact reviewed migration.
-2. Use the approved release migration process from the canonical release branch.
-3. Verify only schema objects, policies, constraints and indexes were created.
-4. Confirm all five tables are empty and no runtime path references them.
-5. File the apply evidence. Do not enable adapters or backfill under G4.
+- MLB-26567 twin post ids and dual capture converge to one instruction case with
+  two source rows.
+- MLB-26118 resend x4 creates no cases or notifications and four source links.
+- MLB-27037 PO variants share lineage but retain separate live keys.
+- Same numeric ref across builders does not collide.
+- Claim-only different-family work is not constraint-collapsed.
+- Ref-less mail is accounted as `exception(below_identity_floor)`.
+- Self-parent, contradictory parent shape, duplicate chain and re-parent fail.
+- Cancellation with a job fails; cancellation and late revision attach to the
+  existing lineage without resurrecting work.
+- Reattend and cancel/reopen inputs both use the same case-defined next cycle.
+- A details-less job remains directly reachable through `case.job_id`.
+- Same-post/concurrent replay is idempotent and cross-case accounting is loud.
+- Backfill run two performs zero case/source/event/effect writes.
+- Raw/canonical retention, provenance, org scope and slug drift are covered.
 
-This PR does not perform any of those steps.
+The disposable clone SQL additionally exercises actual constraints, trigger-fed
+append-only events, N:1 sources, PO siblings, cycle-in-key reopen and run-twice
+backfill. U4/U5 later own hostile fixtures requiring actual approval races, live
+job flag mutation, portal invalidation or notification emitters. U8/U10 own the
+60-day replay, runtime RLS probes and full current-pipeline byte-parity test.
+Their fixture names remain listed in the Fable review; U1 does not fake those
+runtime proofs.
 
-### Down
+Adjacent findings are routed, not silently repaired here: the ignored
+`suppress_notifications` input and manager SMS belong to the later notification
+seam; SWMS fallback job-number concurrency belongs to job creation hardening; the
+residual dropped-after-extraction path belongs to health/reconcile; and the
+best-effort `reopen_candidate` draft insert belongs to reopen wiring.
 
-1. Stop before rollback if any later adapter has written data.
-2. Export all five tables and obtain the Captain's named approval.
-3. Run the manual down script as one transaction.
-4. Verify existing `jobs`, `makesafe_intake_drafts`, `emails`,
-   `email_attachments` and event records remain unchanged.
-5. File rollback evidence.
-
-The down script is destructive only to this new isolated seam. Once runtime
-adapters exist, code rollback should normally leave these audit tables in place;
-dropping them is an emergency schema rollback with an export first.
-
-## Tests
-
-Run the isolated model and migration contract tests:
+Run local isolated tests:
 
 ```bash
-deno test --allow-read \
+~/.deno/bin/deno test --allow-read \
   supabase/functions/_shared/makesafe_intake_case_model_test.ts \
   supabase/functions/_shared/makesafe_intake_case_migration_test.ts
 ```
 
-The tests cover valid and invalid transitions, all state shapes, lineage cycles
-and duplicate parentage, raw/canonical retention, org scoping, replay
-idempotency and separate-deliverable keys. The migration contract test also
-checks RLS, append-only triggers and rollback isolation without applying the
-migration.
+Before G4, run apply/re-apply and SQL contract checks against a disposable clone
+of the current production schema:
+
+```bash
+MAKESAFE_PROD_SCHEMA_CLONE_URL='postgres://...' \
+MAKESAFE_PROD_SCHEMA_CLONE_ACK=I-confirm-this-is-a-disposable-prod-schema-clone \
+  scripts/test-makesafe-intake-case-migration.sh
+```
+
+The harness refuses the live project reference. It is not run by this PR without
+a supplied disposable clone.
+
+## Staged rollback
+
+### Before cutover
+
+1. Obtain Captain G4 approval.
+2. Confirm no case has `is_authoritative=true`.
+3. Optionally export shadow rows.
+4. Run the manual down script. It drops only the new views, three tables and
+   helper functions. Capture, drafts, jobs and existing events remain untouched.
+
+### After cutover
+
+Do not run the down script. It refuses when authoritative case evidence exists.
+Rollback is the later G5/G6 DB single-row flag flip back to the old pipeline.
+The case ledger remains inert for audit. Physical removal is a separately
+approved archive/rename operation after evidence retention review, never DROP.
