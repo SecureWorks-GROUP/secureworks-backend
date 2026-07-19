@@ -863,3 +863,132 @@ Deno.test("invariant: an explicit source PO picks its own draft out of a shadowe
   assertEquals(inv.counts.unaccounted, 0);
   assertEquals(inv.items[0].evidence.id, "draft-shadow-9999");
 });
+
+// The SAME deliverable captured twice: once with the PO folded into external_ref and
+// once as the legacy claim-only ref with the PO carried in extraction_json. The derived
+// work-order token differs between the two rows, but claim and PO agree, so the pool
+// describes one deliverable and a PO-less source must still be accounted.
+Deno.test("invariant: enriched and legacy captures of one PO deliverable are not ambiguous", () => {
+  const shared = {
+    from_email: "jobs@mlbuilders.com.au",
+    created_at: "2026-05-07T02:15:00.000Z",
+    body_preview: "Attend site and make safe.",
+    status: "approved",
+  };
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-enriched-vs-legacy",
+      subject: "NEW WORK ORDER - MLB 25188 - Balga",
+      from_email: shared.from_email,
+      received_at: "2026-05-07T06:40:00.000Z",
+      body_preview: shared.body_preview,
+    }],
+    drafts: [
+      {
+        ...shared,
+        id: "draft-enriched-po-4477",
+        graph_message_id: "AAMk-sanitized-enriched-4477",
+        subject: "NEW WORK ORDER - MLB 25188 - PO 4477 - Balga",
+        external_ref: "MLB-25188-PO-4477",
+        extraction_json: {
+          builder_claim_ref: "MLB-25188",
+          builder_po_number: "PO-4477",
+          builder_work_order_number: "MLB-25188-PO-4477",
+        },
+      },
+      {
+        ...shared,
+        id: "draft-legacy-po-4477",
+        graph_message_id: "AAMk-sanitized-legacy-4477",
+        subject: "NEW WORK ORDER - MLB 25188 - Balga",
+        external_ref: "MLB-25188",
+        extraction_json: {
+          builder_claim_ref: "MLB-25188",
+          builder_po_number: "PO-4477",
+        },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(
+    inv.items[0].reason,
+    "claim_reference_alias_of_po_captured_draft",
+  );
+});
+
+// Two captures from ONE sender sharing a labelled reference token but carrying
+// DIFFERENT explicit POs. Neither has a parseable builder claim, so the scoped token
+// fallback is the only path — and it must apply the same fail-open ambiguity rule as
+// the claim path rather than naming whichever capture was indexed first.
+Deno.test("invariant hostile near-collision: ambiguous same-token distinct PO captures never account", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-ambiguous-token",
+      subject: "Make Safe - Our Ref: 41288 - Yokine",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-08T01:00:00.000Z",
+    }],
+    drafts: [
+      {
+        id: "draft-token-po-4477",
+        graph_message_id: "AAMk-sanitized-token-4477",
+        external_ref: "41288",
+        from_email: "workorders@ajs.build",
+        subject: "Make Safe - Our Ref: 41288 - Yokine - PO 4477",
+        created_at: "2026-05-07T09:00:00.000Z",
+        extraction_json: { builder_po_number: "PO-4477" },
+      },
+      {
+        id: "draft-token-po-9999",
+        graph_message_id: "AAMk-sanitized-token-9999",
+        external_ref: "41288",
+        from_email: "workorders@ajs.build",
+        subject: "Make Safe - Our Ref: 41288 - Yokine - PO 9999",
+        created_at: "2026-05-07T10:00:00.000Z",
+        extraction_json: { builder_po_number: "PO-9999" },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// A source that HAS a canonical token also probes the null-derived fingerprint form, so
+// a token-less draft of the same instruction stays reachable. The widening must not
+// collapse a token-less draft whose body differs: that is a different work order.
+Deno.test("invariant hostile near-collision: null-derived fingerprint probe respects the body discriminator", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-null-probe",
+      subject: "Make Safe Request - Balga",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-09T03:20:00.000Z",
+      body_preview: "Job No 68592 - attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-null-probe-other",
+      graph_message_id: "AAMk-sanitized-null-probe-other",
+      external_ref: null,
+      from_email: "workorders@ajs.build",
+      subject: "Make Safe Request - Balga",
+      created_at: "2026-05-09T03:20:00.000Z",
+      body_preview: "Job No 68593 - attend site and make safe.",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});

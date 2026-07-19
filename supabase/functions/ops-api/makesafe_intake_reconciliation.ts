@@ -760,6 +760,11 @@ function identityRelation(
  * ONE deliverable: differing captured identities mean the evidence cannot say which
  * capture the source belongs to, so we fail open and let the row report as unaccounted
  * rather than name the wrong lineage.
+ *
+ * A deliverable is claim + PO. workOrder is derived enrichment — the same instruction
+ * stored as "MLB-25096-PO-4477" and as "MLB-25096" with an extracted PO resolves to
+ * two different workOrder tokens while describing one job — so it is not a
+ * distinctness signal.
  */
 function soleCompatibleCandidate<T extends { identity: ReconcileIdentity }>(
   pool: T[],
@@ -768,8 +773,7 @@ function soleCompatibleCandidate<T extends { identity: ReconcileIdentity }>(
   if (!first) return undefined;
   const distinct = pool.some((c) =>
     c.identity.claim !== first.identity.claim ||
-    c.identity.po !== first.identity.po ||
-    c.identity.workOrder !== first.identity.workOrder
+    c.identity.po !== first.identity.po
   );
   return distinct ? undefined : first;
 }
@@ -811,7 +815,7 @@ interface CapturedIdentity<T> {
 
 interface CapturedIndex<T> {
   byClaim: Map<string, CapturedIdentity<T>[]>;
-  byKey: Map<string, CapturedIdentity<T>>;
+  byKey: Map<string, CapturedIdentity<T>[]>;
 }
 
 function normaliseSenderScope(value: string | null | undefined): string {
@@ -826,7 +830,7 @@ function indexCapturedIdentities<T>(
   captured: CapturedIdentity<T>[],
 ): CapturedIndex<T> {
   const byClaim = new Map<string, CapturedIdentity<T>[]>();
-  const byKey = new Map<string, CapturedIdentity<T>>();
+  const byKey = new Map<string, CapturedIdentity<T>[]>();
   for (const c of captured) {
     if (c.identity.claim) {
       const arr = byClaim.get(c.identity.claim);
@@ -837,7 +841,9 @@ function indexCapturedIdentities<T>(
     if (!c.scope) continue;
     for (const key of c.identity.keys) {
       const k = scopedKey(c.scope, key);
-      if (!byKey.has(k)) byKey.set(k, c);
+      const arr = byKey.get(k);
+      if (arr) arr.push(c);
+      else byKey.set(k, [c]);
     }
   }
   return { byClaim, byKey };
@@ -875,9 +881,17 @@ function findCapturedIdentity<T>(
   // as genuinely unaccounted is recoverable, collapsing two builders' jobs is not.
   if (!sourceScope) return null;
   for (const key of source.keys) {
-    const c = index.byKey.get(scopedKey(sourceScope, key));
+    const candidates = index.byKey.get(scopedKey(sourceScope, key)) || [];
+    // Same token, different explicit POs are different deliverables; and when the
+    // survivors still describe more than one deliverable no evidence names a lineage,
+    // so fail open rather than account against whichever was indexed first.
+    const compatible = candidates.filter((c) =>
+      !source.po || source.po === c.identity.po
+    );
+    if (!compatible.length) continue;
+    const exact = compatible.filter((c) => c.identity.po === source.po);
+    const c = soleCompatibleCandidate(exact.length ? exact : compatible);
     if (!c) continue;
-    if (source.po && source.po !== c.identity.po) continue;
     return { entry: c.entry, relation: "exact" };
   }
   return null;
@@ -1014,9 +1028,11 @@ export function summarizeIntakeReconcileInvariant(input: {
       ? draftsByInternetId.get(e.internet_message_id)
       : undefined;
     const fingerprintTwin = internetTwin || (() => {
-      const tokens = identity.canonicalRefs.length
-        ? identity.canonicalRefs
-        : [null];
+      // A draft with no parseable ref publishes its fingerprint under the null
+      // discriminator, which contentFingerprint then derives from the subject job
+      // number or a body hash. A source carrying "Job No 12345" must still probe that
+      // form or the bare job-number archetype can never meet its own capture.
+      const tokens: (string | null)[] = [...identity.canonicalRefs, null];
       for (const token of tokens) {
         for (
           const fp of contentFingerprintChecks(
