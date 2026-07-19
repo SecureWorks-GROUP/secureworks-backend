@@ -30,24 +30,42 @@ Deno.test("scanMarkEligible: a deterministic template parse marks the email", ()
   assertEquals(scanMarkEligible({ ...BASE, templateParsed: true }), true);
 });
 
-Deno.test("scanMarkEligible: a terminal failure is quarantined after one automatic attempt", () => {
+Deno.test("scanMarkEligible: RECOVERY — a terminal quarantine does NOT mark, so the item is retried automatically", () => {
   assertEquals(
     scanMarkEligible({ ...BASE, authFailed: true, terminalQuarantined: true }),
-    true,
+    false,
   );
-  // Without an explicit quarantine state, the legacy auth signal alone cannot mark.
   assertEquals(scanMarkEligible({ ...BASE, authFailed: true }), false);
 });
 
-Deno.test("scanMarkEligible: quarantine wins over degraded provider state and is idempotently markable", () => {
+Deno.test("scanMarkEligible: RECOVERY — an item skipped after the provider lane stopped stays unscanned", () => {
   assertEquals(
     scanMarkEligible({
       ...BASE,
       terminalQuarantined: true,
       keyDegradedOrAbsent: true,
     }),
-    true,
+    false,
   );
+  // The missing-key case is the one that previously lost the backfill outright.
+  assertEquals(
+    scanMarkEligible({ ...BASE, keyDegradedOrAbsent: true }),
+    false,
+  );
+});
+
+Deno.test("scanMarkEligible: only a real classification marks — every failure mode stays retryable", () => {
+  assertEquals(scanMarkEligible({ ...BASE, modelValidResult: true }), true);
+  for (
+    const failure of [
+      { authFailed: true },
+      { transientFailed: true },
+      { keyDegradedOrAbsent: true },
+      { terminalQuarantined: true },
+    ]
+  ) {
+    assertEquals(scanMarkEligible({ ...BASE, ...failure }), false);
+  }
 });
 
 Deno.test("scanMarkEligible: a TRANSIENT failure does NOT mark (retries next cycle)", () => {

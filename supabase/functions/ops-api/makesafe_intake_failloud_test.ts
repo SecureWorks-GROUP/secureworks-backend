@@ -150,3 +150,52 @@ Deno.test("extraction-down marker is the stable blocking-field constant", () => 
   // presence blocks auto-file. (The value is asserted so a rename is a visible diff.)
   assertEquals(_INTAKE_EXTRACTION_DOWN_MARKER, "extraction_down_key_dead");
 });
+
+// ── Recovery semantics regressions (decision: intake-quarantine-recovery) ──────
+
+Deno.test("regression: a BARE 404 does not stop the provider lane without model/config evidence", () => {
+  const bare = classifyFailure({ status: 404, message: "Not Found" });
+  assertEquals(bare.failureClass, "retryable");
+  assertEquals(bare.stopProviderLane, false);
+  assertEquals(bare.quarantine, false);
+
+  // Corroborated model/configuration evidence IS lane-terminal.
+  const proven = classifyFailure({
+    status: 404,
+    message: "model claude-nope-1 does not exist",
+  });
+  assertEquals(proven.failureClass, "terminal");
+  assertEquals(proven.reason, "configuration_failed");
+  assertEquals(proven.stopProviderLane, true);
+});
+
+Deno.test("regression: every failure state stays automatically recoverable", () => {
+  for (
+    const err of [
+      { status: 400, message: "exceed your specified API usage limits" },
+      { status: 401, message: "invalid x-api-key" },
+      { status: 404, message: "unsupported model" },
+      { status: 429, message: "rate limit" },
+      new Error("fetch failed"),
+    ]
+  ) {
+    const state = failureState(classifyFailure(err), "boom");
+    assertEquals(state.recoverable, true);
+    // Recovery never requires a human: the source item's scan marker stays unset.
+    assertEquals(state.recovery_action, "automatic_rescan");
+  }
+});
+
+Deno.test("regression: a wholesale retryable cycle degrades health so nothing claims a false OK", () => {
+  assertEquals(
+    cycleHealth({
+      attempts: 4,
+      successes: 0,
+      terminalFailures: 0,
+      retryableFailures: 4,
+      reasons: ["rate_limited", "rate_limited", "rate_limited", "rate_limited"],
+      providerLaneTerminalReason: null,
+    }),
+    { status: "degraded", reason: "wholesale_rate_limited" },
+  );
+});

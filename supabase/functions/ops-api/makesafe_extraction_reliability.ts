@@ -64,11 +64,12 @@ export function classifyExtractionFailure(
     };
   }
   // Proven provider/model configuration failures cannot heal on a two-minute retry.
-  if (
-    status === 404 ||
-    /model.{0,30}(not found|does not exist|invalid|unavailable)|unsupported model/
-      .test(hay)
-  ) {
+  // A BARE 404 is not proof: an intervening proxy/gateway or a routing blip returns 404
+  // too. Require corroborating model/configuration evidence before stopping the lane.
+  const modelConfigEvidence =
+    /model.{0,30}(not found|does not exist|invalid|unavailable)|unsupported model|not_found_error/
+      .test(hay);
+  if (modelConfigEvidence) {
     return {
       failureClass: "terminal",
       reason: "configuration_failed",
@@ -175,9 +176,12 @@ export function extractionFailureState(
     retry_state: classification.quarantine ? "quarantined" : "retryable",
     automatic_attempts: 1,
     recoverable: true,
-    recovery_action: classification.quarantine
+    // Quarantine is visible, not consumed: the source item's scan marker stays unset, so
+    // recovery is automatic on the next scan. reextract_intake_draft only accelerates it.
+    recovery_action: "automatic_rescan",
+    manual_recovery_action: classification.quarantine
       ? "reextract_intake_draft"
-      : "automatic_rescan",
+      : null,
     message: message.slice(0, 200),
   };
 }

@@ -12371,9 +12371,6 @@ async function writeIntakeHealth(client: any, input: {
   extractionStatus: 'ok' | 'degraded'
   degradedReason: string | null
   anyExtractionSucceeded: boolean
-  // Terminal/wholesale degradation clears only after a proven extraction succeeds.
-  // A quiet scan is not evidence that a provider outage recovered.
-  preserveDegradedUntilSuccess?: boolean
   draftsCreated: number
   autoFiled: number
   // M1.5 cost ledger for this scan (optional so callers that don't extract, e.g. the
@@ -12434,8 +12431,11 @@ async function writeIntakeHealth(client: any, input: {
       prevBreadcrumb = data || null
     }
     const wasDegraded = String(prevBase?.extraction_status || '') === 'degraded'
-    const preservePriorDegraded = input.preserveDegradedUntilSuccess === true &&
-      wasDegraded && !input.anyExtractionSucceeded && input.extractionStatus === 'ok'
+    // Degradation clears ONLY on observed successful extraction. A quiet scan is not
+    // evidence a provider outage recovered; because failed/skipped source items stay
+    // unmarked, the next scan supplies that proof without waiting for unrelated mail.
+    const preservePriorDegraded = wasDegraded && !input.anyExtractionSucceeded &&
+      input.extractionStatus === 'ok'
     const effectiveStatus: 'ok' | 'degraded' = preservePriorDegraded ? 'degraded' : input.extractionStatus
     const effectiveReason = preservePriorDegraded
       ? (String(prevBase?.degraded_reason || '') || 'extraction_recovery_unproven')
@@ -14603,6 +14603,10 @@ async function scanSesMakesafes(client: any) {
   let providerTerminalClassification: ExtractionFailureClassification | null = null
   let quarantinedItems = 0
   const quarantinedEmailIds: string[] = []
+  // Per-draft auto-file truth. A global "auto_file_enabled:false" hides that some drafts
+  // were created and eligible before a later failure, so report the actual split.
+  let autoFileEligibleDrafts = 0
+  let autoFileSuppressedDrafts = 0
   // Cost-leak fix: emails skipped because they were already extracted (marker set), and
   // the post_ids to STAMP as scanned this run (successful extraction/classification —
   // draft or not). Batch-marked at the end so each email is extracted at most once.
@@ -15074,29 +15078,36 @@ async function scanSesMakesafes(client: any) {
     // scanned — WHETHER OR NOT it becomes a draft below. This is the key fix: a
     // non-work-order email that the gate drops (no draft) is still marked here, so it is
     // never re-extracted. Placed BEFORE the gate-drop `continue`s. scanMarkEligible
-    // returns false on an auth/transient failure or a dead/absent key, so those emails
-    // stay unmarked and retry when the key recovers (fail-loud backfill preserved).
+    // returns false on ANY failure — auth, transient, terminal quarantine or a dead/absent
+    // key — so those emails stay unmarked and retry when the provider recovers (fail-loud
+    // backfill preserved). Cost is bounded by stopping the lane, not by consuming items.
     const thisEmailExtractionOk = _scanMarkEligible({
       templateParsed: emailTemplateParsed,
       modelValidResult: emailModelValidResult,
       authFailed: emailAuthFailed,
       transientFailed: emailTransientFailed,
       terminalQuarantined: emailTerminalFailed,
-      keyDegradedOrAbsent: (keyDegraded || !ANTHROPIC_API_KEY) && !emailTerminalFailed,
+      keyDegradedOrAbsent: keyDegraded || !ANTHROPIC_API_KEY,
     })
     if (thisEmailExtractionOk && msg._post_id) {
       scannedEmailIds.push(msg._post_id)
-      if (emailTerminalFailed) {
-        quarantinedItems++
-        quarantinedEmailIds.push(msg._post_id)
-      }
+    }
+    // Quarantine is visible but NOT scanned: the source item stays pending so the next
+    // scan supplies recovery proof automatically once the provider lane is healthy again.
+    if (emailTerminalFailed) {
+      quarantinedItems++
+      if (msg._post_id) quarantinedEmailIds.push(msg._post_id)
     }
 
     // D-a: tag EVERY draft made while the key is dead/unset so it is a loud
     // needs_review docket with an explicit marker, never a silent empty draft — and,
     // because the marker is a blocking missing field + confidence is forced low, it can
     // never be auto-filed.
-    const draftExtractionDegraded = keyDegraded || !ANTHROPIC_API_KEY || emailTerminalFailed
+    // Auto-file eligibility is PER DRAFT. Any draft whose enrichment failed or was
+    // skipped after the lane degraded is review-only — including a retryable failure,
+    // whose draft is just as unenriched as a terminal one.
+    const draftExtractionDegraded = keyDegraded || !ANTHROPIC_API_KEY ||
+      emailTerminalFailed || emailTransientFailed
     if (draftExtractionDegraded) {
       extraction.extraction_degraded = true
       extraction.extraction_degraded_reason = emailFailureClassification?.reason || keyDegradedReason || 'key_unset'
@@ -15810,6 +15821,8 @@ async function scanSesMakesafes(client: any) {
     // The gate itself still requires confidence:high + the SAME required fields as the
     // human approveIntakeDraft (company + ref + client + address + servable WO PDF), and
     // now also rejects cancellations and combined make-safe+report obligations.
+    if (draftExtractionDegraded) autoFileSuppressedDrafts++
+    else autoFileEligibleDrafts++
     const autoApprovalDecision = shouldAutoApproveCleanIntake({
       enabled: autoFileEnabled && !draftExtractionDegraded && autoApproveCleanIntakeEnabled(),
       isReportCapture,
@@ -15935,7 +15948,6 @@ async function scanSesMakesafes(client: any) {
     extractionStatus: cycleHealth.status,
     degradedReason: cycleHealth.reason,
     anyExtractionSucceeded,
-    preserveDegradedUntilSuccess: true,
     draftsCreated: newDrafts.length,
     autoFiled: autoApproved.length,
     // M1.5 cost ledger: this scan's model-call/skip split + token totals.
@@ -15970,11 +15982,15 @@ async function scanSesMakesafes(client: any) {
       terminal_failures: terminalExtractionFailures,
       retryable_failures: retryableExtractionFailures,
       quarantined: quarantinedItems,
-      quarantine_recovery_action: 'reextract_intake_draft',
+      quarantine_scan_marker_set: false,
+      quarantine_recovery_action: 'automatic_rescan',
       quarantined_source_ids: quarantinedEmailIds.slice(0, 100),
     },
-    // D-d: whether auto-file was permitted this run (DB kill switch AND not degraded).
-    auto_file_enabled: autoFileEnabled && !extractionDegraded,
+    // D-d: the DB kill-switch state. Suppression is per draft, so report the actual
+    // split rather than a single global claim that contradicts what the run did.
+    auto_file_enabled: autoFileEnabled,
+    auto_file_eligible_drafts: autoFileEligibleDrafts,
+    auto_file_suppressed_drafts: autoFileSuppressedDrafts,
     makesafe_candidates: processedCandidates,
     matched_candidates: matchedMessages.length,
     processed_candidates: processedCandidates,

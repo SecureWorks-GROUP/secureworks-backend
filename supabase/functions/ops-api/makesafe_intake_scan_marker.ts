@@ -19,7 +19,9 @@ export interface ScanMarkState {
   authFailed: boolean;
   /** The classifier call failed transiently (network / 5xx / bad JSON). */
   transientFailed: boolean;
-  /** A terminal failure was recorded and this source item is quarantined. */
+  /** A terminal failure was recorded and this source item is visibly quarantined.
+   * Quarantine is a visible state, NOT a completed scan: the marker stays unset so the
+   * item is retried automatically once provider health recovers. */
   terminalQuarantined?: boolean;
   /** The key is dead/absent, so the model was not called for this email. */
   keyDegradedOrAbsent: boolean;
@@ -27,13 +29,13 @@ export interface ScanMarkState {
 
 /**
  * The extract-at-most-once rule: mark an email scanned ONLY when it received a usable
- * classification (a valid model result OR a deterministic template parse), or when a
- * terminal failure has been preserved as a visible quarantine. Retryable failures stay
- * unmarked. Quarantine is recoverable through the privileged in-place
- * reextract_intake_draft action and prevents a terminal two-minute retry storm.
+ * classification (a valid model result OR a deterministic template parse). EVERY failure
+ * mode leaves the marker unset, including a terminal quarantine and a dead/absent key,
+ * so no unprocessed source item is ever permanently stamped as scanned. The retry storm
+ * is bounded by stopping the provider lane for the cycle, not by consuming the item.
  */
 export function scanMarkEligible(s: ScanMarkState): boolean {
-  if (s.terminalQuarantined) return true;
+  if (s.terminalQuarantined) return false;
   if (s.authFailed || s.transientFailed || s.keyDegradedOrAbsent) return false;
   return s.templateParsed || s.modelValidResult;
 }

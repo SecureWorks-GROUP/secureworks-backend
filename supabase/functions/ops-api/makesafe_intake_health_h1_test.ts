@@ -156,7 +156,6 @@ Deno.test("health stays degraded on a quiet scan until recovery is proven", asyn
     extractionStatus: "ok",
     degradedReason: null,
     anyExtractionSucceeded: false,
-    preserveDegradedUntilSuccess: true,
     draftsCreated: 0,
     autoFiled: 0,
   });
@@ -178,7 +177,6 @@ Deno.test("a proven successful extraction clears prior degradation", async () =>
     extractionStatus: "ok",
     degradedReason: null,
     anyExtractionSucceeded: true,
-    preserveDegradedUntilSuccess: true,
     draftsCreated: 1,
     autoFiled: 0,
   });
