@@ -125,11 +125,13 @@ function normaliseBuilderWo(
 // Separators are folded to a single hyphen so "WO#12345", "WO 12345" and
 // "WO-12345" are one builder identity rather than three. Folding '/' and ':' also
 // keeps them out of canonical components, which is what makes the
-// wo:<wo>/po:<po> composition injective.
+// wo:<wo>/po:<po> composition injective. '.' and '_' are deliberately NOT folded:
+// they are significant inside builder POs, so "PO-1.2" and "PO-1-2" must stay
+// two identities rather than collapse onto one live case.
 function normaliseOpaqueIdentity(raw: string | null): string | null {
   if (raw === null) return null;
   const canonical = raw.toUpperCase()
-    .replace(/[\s#:._/\\-]+/g, "-")
+    .replace(/[\s#:/\\-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return canonical || null;
 }

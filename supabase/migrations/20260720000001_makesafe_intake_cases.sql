@@ -48,13 +48,13 @@
 -- Cases require every linked builder profile to carry the same org. Legacy
 -- makesafe_companies rows predate org scoping and were left null, which would
 -- make them permanently unlinkable once that check is strict. They belong to the
--- single existing tenant, so they are backfilled and the column is closed.
+-- single existing tenant, so they are backfilled and the column is closed. No
+-- column DEFAULT is added: an insert that omits org_id must fail loudly rather
+-- than silently land in a hardcoded tenant.
 UPDATE public.makesafe_companies
 SET org_id = '00000000-0000-0000-0000-000000000001'
 WHERE org_id IS NULL;
 
-ALTER TABLE public.makesafe_companies
-  ALTER COLUMN org_id SET DEFAULT '00000000-0000-0000-0000-000000000001';
 ALTER TABLE public.makesafe_companies
   ALTER COLUMN org_id SET NOT NULL;
 

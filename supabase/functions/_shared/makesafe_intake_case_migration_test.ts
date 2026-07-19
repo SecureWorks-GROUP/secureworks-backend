@@ -307,6 +307,7 @@ Deno.test("migration is re-apply safe and alters no existing runtime table", () 
     !/ALTER TABLE public\.(jobs|makesafe_intake_drafts|emails|email_attachments)/
       .test(migration),
   );
+  assert(!/SET DEFAULT/.test(migration));
   assert(migration.includes("DROP TRIGGER IF EXISTS"));
   assert(migration.includes("DROP POLICY IF EXISTS"));
 });

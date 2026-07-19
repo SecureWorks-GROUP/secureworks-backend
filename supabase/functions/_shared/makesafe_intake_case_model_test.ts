@@ -196,7 +196,7 @@ Deno.test("unprefixed builder WOs stay distinct instead of collapsing to digits"
 });
 
 Deno.test("punctuation variants of one builder WO stay one identity", () => {
-  const keys = ["WO#12345", "WO #12345", "WO-12345", "wo.12345"].map((raw) =>
+  const keys = ["WO#12345", "WO #12345", "WO-12345", "WO/12345"].map((raw) =>
     normaliseMakesafeIdentity({
       externalRefRaw: null,
       builderWoRaw: raw,
@@ -206,6 +206,18 @@ Deno.test("punctuation variants of one builder WO stay one identity", () => {
   );
   assertEquals(new Set(keys).size, 1);
   assertEquals(keys[0], "wo:WO-12345");
+});
+
+Deno.test("dot and underscore stay significant inside builder POs", () => {
+  const keys = ["PO-1.2", "PO_1_2", "PO-1-2"].map((raw) =>
+    normaliseMakesafeIdentity({
+      externalRefRaw: null,
+      builderWoRaw: null,
+      builderPoRaw: raw,
+      deliverableRefRaw: null,
+    }).woPoIdentityKey
+  );
+  assertEquals(new Set(keys).size, 3);
 });
 
 Deno.test("canonical WO/PO cannot smuggle the identity key separators", () => {
