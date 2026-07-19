@@ -384,3 +384,99 @@ Deno.test("invariant hostile near-collision: shared suburb postcode is not a wor
   assertEquals(inv.counts.unaccounted, 1);
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
 });
+
+Deno.test("invariant hostile near-collision: shared lot number is not a work identity", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-lot-b",
+      subject: "Make Safe - Lot 245 Jones Rd, Ellenbrook",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-lot-a",
+      graph_message_id: "AAMk-sanitized-lot-a",
+      subject: "Make Safe - Lot 245 Smith Rd, Byford",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].raw_reference, null);
+});
+
+Deno.test("invariant hostile near-collision: shared unit number is not a work identity", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-unit-b",
+      subject: "Make Safe - Unit 1203 Hay St, Perth",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-unit-a",
+      graph_message_id: "AAMk-sanitized-unit-a",
+      subject: "Make Safe - Unit 1203 Beaufort St, Mount Lawley",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].raw_reference, null);
+});
+
+Deno.test("invariant: address text never becomes a raw reference or fingerprint discriminator", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-addr-disc",
+      subject: "Make Safe Required - 12 Smith St, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-04T01:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-addr-disc",
+      graph_message_id: "AAMk-sanitized-addr-disc",
+      subject: "Make Safe Required - 88 Jones Rd, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-04T01:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.items[0].raw_reference, null);
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant: an explicitly labelled non-prefix reference is still accounted", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-ourref",
+      subject: "Make Safe - Our Ref: SRJ-41290 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-ourref",
+      graph_message_id: "AAMk-sanitized-ourref",
+      external_ref: "SRJ-41290",
+      subject: "Make Safe - Our Ref: SRJ-41290 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].raw_reference, "Our Ref: SRJ-41290");
+});

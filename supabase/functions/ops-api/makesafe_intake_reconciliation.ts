@@ -592,7 +592,6 @@ interface ReconcileIdentity {
 
 const PREFIXED_REF_RE =
   /\b(?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,}(?:\s*P\s*O\s*[-\s#]*\d{3,})?/i;
-const GENERIC_REF_TOKEN_RE = /(?<![A-Z0-9])[A-Z]{2,8}[-\s#]?\d{3,}(?![A-Z0-9])/gi;
 const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
 /**
  * Australian state abbreviation followed by a four digit postcode. Address text
@@ -602,23 +601,46 @@ const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
 const AU_STATE_POSTCODE_RE = /^(?:WA|SA|NSW|VIC|QLD|TAS|NT|ACT)\d{4}$/;
 
 /**
- * Subject-derived identity tokens are bounded harder than display references: a
- * three letter minimum prefix keeps loose two letter address noise out of the
- * accounting path. Under-matching only costs a genuinely_unaccounted report,
- * over-matching silently collapses distinct work.
+ * Unlabelled tokens are never identity. "Lot 245", "Unit 1203" and "WA 6021" all
+ * read as references but describe a property, so two unrelated make-safes would
+ * collapse into one. Only an explicit durable label earns an identity key.
+ * Under-matching costs a genuinely_unaccounted report, over-matching silently
+ * loses work.
  */
-const SUBJECT_IDENTITY_TOKEN_RE =
-  /(?<![A-Z0-9])[A-Z]{3,8}[-\s#]?\d{3,}(?![A-Z0-9])/gi;
+const LABELLED_IDENTITY_RE =
+  /\b(?:(job)\s*(?:no\.?|number|#)|(?:purchase\s*order|p\.?\s?o\.?)\s*(?:no\.?|number|#)?|(?:work\s*order|w\/o|our\s*ref(?:erence)?|ref(?:erence)?|claim)\s*(?:no\.?|number|#)?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\b/gi;
 
 function isAddressLikeToken(normalised: string): boolean {
   return AU_STATE_POSTCODE_RE.test(normalised);
+}
+
+/**
+ * Namespaced identity keys from explicitly labelled references only. A PO number
+ * and a job number that share digits stay distinct.
+ */
+function labelledIdentityKeys(subject: string | null | undefined): string[] {
+  const keys: string[] = [];
+  for (const match of String(subject || "").matchAll(LABELLED_IDENTITY_RE)) {
+    const label = String(match[0]).toLowerCase();
+    const token = normaliseRef(match[2]);
+    if (!/\d{3,}/.test(token) || isAddressLikeToken(token)) continue;
+    const ns = match[1]
+      ? "JOB"
+      : /^(?:purchase|p\s*\.?\s*o)/.test(label)
+      ? "PO"
+      : "REF";
+    keys.push(`${ns}:${token}`);
+  }
+  return keys;
 }
 
 function rawReferenceFromText(value: string | null | undefined): string | null {
   const text = String(value || "");
   return text.match(PREFIXED_REF_RE)?.[0] ||
     text.match(JOB_NUMBER_TEXT_RE)?.[0] ||
-    text.match(GENERIC_REF_TOKEN_RE)?.[0] || null;
+    [...text.matchAll(LABELLED_IDENTITY_RE)].find((m) =>
+      /\d{3,}/.test(normaliseRef(m[2])) && !isAddressLikeToken(normaliseRef(m[2]))
+    )?.[0] || null;
 }
 
 /**
@@ -637,10 +659,7 @@ function fallbackIdentityKeys(
   const text = String(subject || "");
   const jobNo = subjectJobNumber(text);
   if (jobNo) keys.add(`JOB:${jobNo}`);
-  for (const match of text.matchAll(SUBJECT_IDENTITY_TOKEN_RE)) {
-    const token = normaliseRef(match[0]);
-    if (token.length >= 5 && !isAddressLikeToken(token)) keys.add(`REF:${token}`);
-  }
+  for (const key of labelledIdentityKeys(text)) keys.add(key);
   return [...keys];
 }
 
