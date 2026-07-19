@@ -40,6 +40,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // floor → match_status='unresolved', job_id NOT leaked through).
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { propagateJobFirstContactAndLeadSource } from '../_shared/evidence/first_contact.ts'
 import type { MatchMethod } from '../_shared/evidence/types.ts'
 import {
   assignJobNumberWithNullCas,
@@ -1850,6 +1851,17 @@ serve(async (req: Request) => {
         event_type: 'job_created',
         detail_json: { source: opportunityId ? 'ghl_picker' : 'scoping_tool', opportunity_id: opportunityId || null }
       })
+
+      // M0/U2 — stamp the episode first-contact + lead_source onto the new job
+      // from the contact's pre-job touch stream. Behind the kill-switch flag;
+      // non-fatal so job creation never breaks on a stamping error.
+      try {
+        if (await isFlagOn(sb, 'first_contact_stamp_v1', orgId)) {
+          await propagateJobFirstContactAndLeadSource(sb, { jobId: data.id })
+        }
+      } catch (e) {
+        console.error('[ghl-proxy] create_job first-contact propagation failed (non-fatal):', (e as Error)?.message)
+      }
 
       return json({ job: data })
     }

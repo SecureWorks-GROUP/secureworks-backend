@@ -115,6 +115,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { propagateJobFirstContactAndLeadSource } from '../_shared/evidence/first_contact.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -19180,6 +19181,16 @@ async function createMiscJob(client: any, body: any) {
       job_type_label: job_type_label || 'Miscellaneous',
     },
   })
+
+  // M0/U2 — stamp episode first-contact + lead_source from the contact's
+  // pre-job touch stream. Behind the kill-switch flag; non-fatal.
+  try {
+    if (await isFlagOn(client, 'first_contact_stamp_v1', DEFAULT_ORG_ID)) {
+      await propagateJobFirstContactAndLeadSource(client, { jobId: job.id })
+    }
+  } catch (e) {
+    console.error('[ops-api] quick_quote first-contact propagation failed (non-fatal):', (e as Error)?.message)
+  }
 
   return {
     success: true,
