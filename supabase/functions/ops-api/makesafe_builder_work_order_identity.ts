@@ -28,7 +28,13 @@ export const PO_LABEL_PATTERN = "(?:P\\s*O|purchase\\s+order)";
  * read. Strictly a superset of PO_LABEL_PATTERN, so the two together partition
  * PO-labelled text into "parseable" and "present but unknown".
  */
-const LOOSE_PO_LABEL_PATTERN = "(?:p\\s*\\.?\\s*o\\s*\\.?|purchase\\s*order)";
+const LOOSE_PO_LABEL_PATTERN = "(?:p\\s*[./]?\\s*o\\s*\\.?|purchase\\s*order)";
+/**
+ * A bare "order" reads as a PO only when it is explicitly numbered, so prose like
+ * "in order to lay 250 metres" stays out. "work order" is excluded: it names the
+ * builder's own work-order reference, not a purchase order.
+ */
+const ORDER_LABEL_PATTERN = "(?<!work\\s)(?<!work)order\\s*(?:number|no\\.?|#)";
 const PO_TAIL_PATTERN = "(?:\\s*(?:number|no\\.?))?\\s*[:#-]?\\s*";
 
 const PO_RE = new RegExp(
@@ -36,7 +42,7 @@ const PO_RE = new RegExp(
   "i",
 );
 const LOOSE_PO_RE = new RegExp(
-  `\\b${LOOSE_PO_LABEL_PATTERN}${PO_TAIL_PATTERN}\\d{3,}\\b`,
+  `\\b(?:${LOOSE_PO_LABEL_PATTERN}|${ORDER_LABEL_PATTERN})${PO_TAIL_PATTERN}\\d{3,}\\b`,
   "i",
 );
 

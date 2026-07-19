@@ -1064,6 +1064,9 @@ Deno.test("invariant hostile near-collision: an unparseable PO label never alias
       ["mailbox-dotted-hash-po", "NEW WO - MLB 25096 - P.O.#4477"],
       ["mailbox-typo-po", "NEW WO - MLB 25096 - purchaseorder 4477"],
       ["mailbox-spaced-dotted-po", "NEW WO - MLB 25096 - P O. 4477"],
+      ["mailbox-slashed-po", "NEW WO - MLB 25096 - P/O 4477"],
+      ["mailbox-order-no", "NEW WO - MLB 25096 - Order No 4477"],
+      ["mailbox-order-number", "NEW WO - MLB 25096 - Order Number 4477"],
     ]
   ) {
     const inv = summarizeIntakeReconcileInvariant({

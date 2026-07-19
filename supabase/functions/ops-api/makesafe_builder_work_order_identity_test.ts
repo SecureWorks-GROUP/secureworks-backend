@@ -70,6 +70,11 @@ Deno.test("builder identity: PO label grammar is unchanged", () => {
       "NEW WO - MLB 25096 - P.O.#4477",
       "NEW WO - MLB 25096 - purchaseorder 4477",
       "NEW WO - MLB 25096 - P O. 4477",
+      "NEW WO - MLB 25096 - P/O 4477",
+      "NEW WO - MLB 25096 - P / O 4477",
+      "NEW WO - MLB 25096 - Order No 4477",
+      "NEW WO - MLB 25096 - Order Number 4477",
+      "NEW WO - MLB 25096 - Order #4477",
     ]
   ) {
     const identity = extractBuilderWorkOrderIdentity({ subject });
@@ -91,6 +96,17 @@ Deno.test("builder identity: a readable or absent PO label is not reported unpar
   );
   assertEquals(hasUnparseablePoLabel("Make Safe - 12 Smith St, Balga"), false);
   assertEquals(hasUnparseablePoLabel("Reply to P.O. Box 1234, Balga"), false);
+});
+
+// The bare "order" alternative must not fire on prose or on a builder work-order
+// reference, which is an identity the labelled path already reads, not a PO.
+Deno.test("builder identity: prose and work-order labels are not unknown POs", () => {
+  assertEquals(
+    hasUnparseablePoLabel("Crew to attend in order to make safe 250 metres"),
+    false,
+  );
+  assertEquals(hasUnparseablePoLabel("Work Order No 68592 - Balga"), false);
+  assertEquals(hasUnparseablePoLabel("Work Order: 68592"), false);
 });
 
 // A postal address is not a purchase order.
