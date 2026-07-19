@@ -50,21 +50,30 @@ Deno.test("builder identity: body labels can supply PO when subject supplies cla
   assertEquals(identity.builder_work_order_number, "MLB-26072PO-55443");
 });
 
-// "P.O." and "P.O.#" are the same label as "PO" everywhere else in the intake
-// grammar. If the canonical extractor cannot read them, the PO never reaches
-// builder_po_number and the PO-separation guards go blind to a real deliverable.
-Deno.test("builder identity: dotted PO spellings parse as a PO", () => {
+// This extractor feeds the production capture path: its output becomes external_ref.
+// Widening the PO label would change the stored ref for subjects already captured
+// under the narrower grammar, so the spellings it reads are pinned here. Spaced
+// "P O" is read; dotted forms are not, and stay PO-less rather than capturing a
+// deliverable under a ref no existing row shares.
+Deno.test("builder identity: PO label grammar is unchanged", () => {
+  const spaced = extractBuilderWorkOrderIdentity({
+    subject: "NEW WO - MLB 25096 - P O 4477",
+  });
+  assertEquals(spaced.builder_claim_ref, "MLB-25096");
+  assertEquals(spaced.builder_po_number, "PO-4477");
+  assertEquals(spaced.builder_work_order_number, "MLB-25096PO-4477");
+
   for (
     const subject of [
       "NEW WO - MLB 25096 - P.O. 4477",
       "NEW WO - MLB 25096 - P.O.#4477",
-      "NEW WO - MLB 25096 - P O 4477",
+      "NEW WO - MLB 25096 - purchaseorder 4477",
     ]
   ) {
     const identity = extractBuilderWorkOrderIdentity({ subject });
     assertEquals(identity.builder_claim_ref, "MLB-25096");
-    assertEquals(identity.builder_po_number, "PO-4477");
-    assertEquals(identity.builder_work_order_number, "MLB-25096PO-4477");
+    assertEquals(identity.builder_po_number, null);
+    assertEquals(identity.builder_work_order_number, null);
   }
 });
 

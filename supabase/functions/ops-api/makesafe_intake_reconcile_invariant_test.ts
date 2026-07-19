@@ -1053,21 +1053,61 @@ Deno.test("invariant hostile near-collision: null-derived fingerprint probe resp
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
 });
 
-// "P.O. 4477" is the same explicit PO as "PO 4477". If it fails to reach identity.po
-// the source reads as claim-only and aliases a captured job carrying a DIFFERENT PO,
-// silently accounting a genuinely new deliverable against the wrong lineage.
-Deno.test("invariant hostile near-collision: a dotted explicit PO never aliases a different PO", () => {
+// The production capture extractor does not read "P.O." or "purchaseorder", and this
+// slice must not widen it. Reconciliation therefore cannot see the PO either, so such
+// a source must fail open rather than read as claim-only and alias a captured job
+// carrying a DIFFERENT PO.
+Deno.test("invariant hostile near-collision: an unparseable PO label never aliases a different PO", () => {
+  for (
+    const [post, subject] of [
+      ["mailbox-dotted-po", "NEW WO - MLB 25096 - P.O. 4477"],
+      ["mailbox-dotted-hash-po", "NEW WO - MLB 25096 - P.O.#4477"],
+      ["mailbox-typo-po", "NEW WO - MLB 25096 - purchaseorder 4477"],
+    ]
+  ) {
+    const inv = summarizeIntakeReconcileInvariant({
+      emails: [{
+        post_id: post,
+        subject,
+        from_email: "jobs@mlbuilders.com.au",
+        received_at: "2026-05-06T05:30:00.000Z",
+      }],
+      drafts: [{
+        id: "draft-dotted-po-9999",
+        graph_message_id: "AAMk-sanitized-dotted-po",
+        external_ref: "MLB-25096PO-9999",
+        status: "approved",
+      }],
+      jobs: [],
+      senderPatterns: SENDER_PATTERNS,
+    });
+
+    assertEquals(inv.counts.unaccounted, 1);
+    assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+    assertEquals(inv.items[0].canonical_claim_ref, "MLB-25096");
+    assertEquals(inv.items[0].canonical_po_ref, null);
+    assertEquals(inv.items[0].evidence, {
+      kind: "classification",
+      id: "no_durable_capture_evidence",
+    });
+  }
+});
+
+// An unparseable PO label is an UNKNOWN PO, not an absent one, so it may not settle
+// onto a claim-only capture either: that is the "explicit new PO against a legacy
+// claim-only job stays visible" invariant.
+Deno.test("invariant: an unparseable PO label does not settle on a claim-only capture", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
-      post_id: "mailbox-dotted-po",
+      post_id: "mailbox-dotted-po-vs-legacy",
       subject: "NEW WO - MLB 25096 - P.O. 4477",
       from_email: "jobs@mlbuilders.com.au",
       received_at: "2026-05-06T05:30:00.000Z",
     }],
     drafts: [{
-      id: "draft-dotted-po-9999",
-      graph_message_id: "AAMk-sanitized-dotted-po",
-      external_ref: "MLB-25096PO-9999",
+      id: "draft-legacy-claim-only",
+      graph_message_id: "AAMk-sanitized-legacy-claim-only",
+      external_ref: "MLB-25096",
       status: "approved",
     }],
     jobs: [],
@@ -1076,27 +1116,21 @@ Deno.test("invariant hostile near-collision: a dotted explicit PO never aliases 
 
   assertEquals(inv.counts.unaccounted, 1);
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
-  assertEquals(inv.items[0].canonical_claim_ref, "MLB-25096");
-  assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
-  assertEquals(inv.items[0].evidence, {
-    kind: "classification",
-    id: "no_durable_capture_evidence",
-  });
 });
 
-// The same dotted PO against its OWN capture still accounts: unifying the grammar
-// must not close the legitimate exact match.
-Deno.test("invariant: a dotted explicit PO matches its own captured deliverable", () => {
+// The spelling the production extractor DOES read still accounts exactly, so failing
+// open on dotted forms costs no legitimate match.
+Deno.test("invariant: a parseable explicit PO matches its own captured deliverable", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
-      post_id: "mailbox-dotted-po-exact",
-      subject: "NEW WO - MLB 25096 - P.O.#4477",
+      post_id: "mailbox-spaced-po-exact",
+      subject: "NEW WO - MLB 25096 - P O 4477",
       from_email: "jobs@mlbuilders.com.au",
       received_at: "2026-05-06T05:30:00.000Z",
     }],
     drafts: [{
-      id: "draft-dotted-po-4477",
-      graph_message_id: "AAMk-sanitized-dotted-po-exact",
+      id: "draft-spaced-po-4477",
+      graph_message_id: "AAMk-sanitized-spaced-po-exact",
       external_ref: "MLB-25096PO-4477",
       status: "approved",
     }],
@@ -1107,7 +1141,7 @@ Deno.test("invariant: a dotted explicit PO matches its own captured deliverable"
   assertEquals(inv.counts.unaccounted, 0);
   assertEquals(inv.items[0].evidence, {
     kind: "draft",
-    id: "draft-dotted-po-4477",
+    id: "draft-spaced-po-4477",
   });
   assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
 });

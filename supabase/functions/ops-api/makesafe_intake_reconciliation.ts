@@ -601,7 +601,21 @@ interface ReconcileIdentity {
    * collide with a reference whose digits happen to match.
    */
   keys: string[];
+  /**
+   * The text carries a PO label the canonical extractor cannot parse, so this row
+   * may name a PO we cannot see. Treated as "PO unknown", never as "no PO": a
+   * claim-only alias would collapse it onto another PO's lineage.
+   */
+  poUnparsed: boolean;
 }
+
+/**
+ * A PO-shaped label followed by a PO-shaped number in a spelling PO_RE
+ * (makesafe_builder_work_order_identity.ts) does not read. "P.O. Box 1234" is
+ * excluded because no number follows the label.
+ */
+const UNPARSED_PO_LABEL_RE =
+  /\b(?:p\s*\.\s*o\s*\.?|purchase\s*order)(?:\s*(?:number|no\.?))?\s*[:#-]?\s*\d{3,}\b/i;
 
 const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
 /**
@@ -617,9 +631,15 @@ const AU_STATE_POSTCODE_RE = /^(?:WA|SA|NSW|VIC|QLD|TAS|NT|ACT)\d{4}$/;
  * collapse into one. Only an explicit durable label earns an identity key.
  * Under-matching costs a genuinely_unaccounted report, over-matching silently
  * loses work.
+ *
+ * The PO label alternative mirrors PO_RE in makesafe_builder_work_order_identity.ts
+ * exactly. A spelling this regex reads but that one cannot ("P.O. 4477",
+ * "purchaseorder 4477") would produce a PO token while identity.po stays empty,
+ * leaving the PO-separation guards blind to it; such spellings yield no key and the
+ * row fails open instead.
  */
 const LABELLED_IDENTITY_RE =
-  /\b(?:(job)\s*(?:no\.?|number|#)|(?:purchase\s*order|p\.?\s?o\.?)\s*(?:no\.?|number|#)?|(?:work\s*order|w\/o|our\s*ref(?:erence)?|ref(?:erence)?|claim)\s*(?:no\.?|number|#)?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\b/gi;
+  /\b(?:(job)\s*(?:no\.?|number|#)|(?:purchase\s+order|p\s*o)\s*(?:no\.?|number|#)?|(?:work\s*order|w\/o|our\s*ref(?:erence)?|ref(?:erence)?|claim)\s*(?:no\.?|number|#)?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\b/gi;
 
 function isAddressLikeToken(normalised: string): boolean {
   return AU_STATE_POSTCODE_RE.test(normalised);
@@ -637,7 +657,7 @@ function labelledIdentityKeys(subject: string | null | undefined): string[] {
     if (!/\d{3,}/.test(token) || isAddressLikeToken(token)) continue;
     const ns = match[1]
       ? "JOB"
-      : /^(?:purchase|p\s*\.?\s*o)/.test(label)
+      : /^(?:purchase|p\s*o)/.test(label)
       ? "PO"
       : "REF";
     // A PO key must be a PO the canonical extractor can also parse (bare digits),
@@ -739,6 +759,8 @@ function reconcileIdentity(input: {
       externalRef: input.externalRef,
     }),
     keys,
+    poUnparsed: !po &&
+      UNPARSED_PO_LABEL_RE.test(`${input.subject || ""}\n${input.body || ""}`),
   };
 }
 
@@ -760,6 +782,15 @@ function identityRelation(
   captured: ReconcileIdentity,
 ): Relation | null {
   if (!source.claim || source.claim !== captured.claim) return null;
+  // A PO we can see but cannot parse is an unknown PO. Relating on the claim alone
+  // would either alias a different PO's capture or read as "no PO on either side",
+  // both of which hide a possibly-new deliverable. Only an aligned work order,
+  // which carries the PO in its own token, survives.
+  if (source.poUnparsed || captured.poUnparsed) {
+    return source.workOrder && source.workOrder === captured.workOrder
+      ? "exact"
+      : null;
+  }
   // Two explicit, different POs are two deliverables. Never collapse them merely
   // because the property/claim is shared.
   if (source.po && captured.po && source.po !== captured.po) return null;
@@ -814,7 +845,8 @@ function resolveFingerprintTwin(
   // explicit source PO against a PO-less capture is potentially new work too, so the
   // widened token set may never route around PO separation.
   const compatible = (candidates || []).filter((c) =>
-    !source.po || source.po === c.identity.po
+    !c.identity.poUnparsed &&
+    (source.po ? source.po === c.identity.po : !source.poUnparsed)
   );
   if (!compatible.length) return undefined;
   const exact = compatible.filter((c) => c.identity.po === source.po);
