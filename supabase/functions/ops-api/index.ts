@@ -115,6 +115,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { planCommsCaptureFromLog } from '../_shared/evidence/comms_event_map.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -6253,6 +6254,53 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'log_business_event': {
         const { event_type, entity_type, entity_id, job_id, payload } = body
         if (!event_type) return json({ error: 'event_type required' }, 400)
+
+        // M0/U9 — comms events (client.sms_out/in, client.email_out/in) used to
+        // land here as NULL-channel/direction, no-body shells (248 sms_out rows
+        // in ~90d). Route them through the capture choke point so they carry the
+        // full T7 envelope (channel + direction + source_table + body_preview +
+        // match). Everything else keeps the unchanged generic insert below.
+        const commsCapture = planCommsCaptureFromLog({ event_type, entity_type, entity_id, job_id, payload })
+        if (commsCapture) {
+          try {
+            // bypass_feature_flag preserves the pre-fix unconditional-insert
+            // behaviour (this path never gated on evidence_capture_v1) while now
+            // writing a complete envelope instead of a shell.
+            const ref = await recordEvidence(client, commsCapture, {
+              org_id: DEFAULT_ORG_ID,
+              storage_client: client.storage,
+              bypass_feature_flag: true,
+            })
+            return json({ ok: true, event_type, spine_event_id: ref.spine_event_id, envelope: 'full' })
+          } catch (e) {
+            // Non-fatal fallback: still land the event, but WITH the envelope so
+            // a recordEvidence failure can never regress to a NULL shell.
+            const bodyPreview = commsCapture.body_preview ?? null
+            const { error } = await client.from('business_events').insert({
+              event_type,
+              source: 'mcp_agent',
+              entity_type: commsCapture.entity_type || 'contact',
+              entity_id: commsCapture.entity_id || null,
+              job_id: job_id || null,
+              channel: commsCapture.channel,
+              direction: commsCapture.direction,
+              source_table: commsCapture.source_table,
+              source_id: commsCapture.source_id,
+              contact_id: commsCapture.contact_id || null,
+              body_preview: bodyPreview,
+              safe_summary: bodyPreview ? String(bodyPreview).slice(0, 280) : null,
+              privacy_classification: 'staff_only',
+              retention_class: '7y_audit',
+              payload: payload || {},
+              occurred_at: new Date().toISOString(),
+              schema_version: '1.0',
+            })
+            if (error) return json({ error: error.message }, 500)
+            console.error('[ops-api] log_business_event comms recordEvidence failed; wrote full-envelope fallback:', (e as Error)?.message)
+            return json({ ok: true, event_type, envelope: 'fallback' })
+          }
+        }
+
         const { error } = await client.from('business_events').insert({
           event_type,
           source: 'mcp_agent',
