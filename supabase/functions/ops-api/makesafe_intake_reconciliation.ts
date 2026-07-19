@@ -18,7 +18,10 @@ import {
   normaliseRef,
   subjectJobNumber,
 } from "./makesafe_intake_dedup.ts";
-import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
+import {
+  extractBuilderWorkOrderIdentity,
+  matchBuilderRefText,
+} from "./makesafe_builder_work_order_identity.ts";
 import {
   isPureAckNoAction,
   subjectIsExcludedNonWorkOrder,
@@ -637,6 +640,10 @@ function labelledIdentityKeys(subject: string | null | undefined): string[] {
       : /^(?:purchase|p\s*\.?\s*o)/.test(label)
       ? "PO"
       : "REF";
+    // A PO key must be a PO the canonical extractor can also parse (bare digits),
+    // otherwise the token would participate in matching while identity.po stays
+    // empty and the PO-separation guards could never fire for it.
+    if (ns === "PO" && !/^\d{3,}$/.test(token)) continue;
     keys.push(`${ns}:${token}`);
   }
   return keys;
@@ -722,8 +729,9 @@ function reconcileIdentity(input: {
     claim,
     po,
     workOrder,
-    raw: input.externalRef || parsed.builder_work_order_number ||
-      parsed.builder_claim_ref || rawReferenceFromText(input.subject) || null,
+    raw: matchBuilderRefText(input.subject) ||
+      rawReferenceFromText(input.subject) || input.externalRef ||
+      parsed.builder_work_order_number || parsed.builder_claim_ref || null,
     canonicalRefs: canonicalIdentityTokens({
       claim,
       workOrder,

@@ -732,10 +732,10 @@ Deno.test("invariant hostile near-collision: a different explicit PO never twins
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
 });
 
-// The builder prefix vocabulary lives in extractBuilderWorkOrderIdentity. Deriving
-// the display reference from the parse keeps a newly added prefix from silently
-// leaving raw_reference blank here.
-Deno.test("invariant: a prefixed builder reference is displayed from the canonical parse", () => {
+// The builder prefix vocabulary lives in extractBuilderWorkOrderIdentity, so the
+// display reference is matched with that same vocabulary. It keeps the literal text
+// the source wrote ("MLB 25096"), while the canonical fields stay normalised.
+Deno.test("invariant: a prefixed builder reference is displayed as the source wrote it", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "mailbox-sanitized-prefix-display",
@@ -753,8 +753,68 @@ Deno.test("invariant: a prefixed builder reference is displayed from the canonic
   });
 
   assertEquals(inv.counts.unaccounted, 0);
-  assertEquals(inv.items[0].raw_reference, "MLB-25096");
+  assertEquals(inv.items[0].raw_reference, "MLB 25096");
   assertEquals(inv.items[0].canonical_claim_ref, "MLB25096");
+});
+
+// "PO: ABC-1234" is not a PO the canonical extractor can parse, so identity.po stays
+// empty and the PO-separation guards can never fire for it. A token that participates
+// in matching while its PO is invisible to the guard is unsafe, so an alphanumeric PO
+// earns no identity key at all: two make-safes at different properties quoting the same
+// alphanumeric PO must fail open rather than collapse onto one lineage.
+Deno.test("invariant hostile near-collision: an alphanumeric PO never becomes an identity token", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-alphanumeric-po",
+      subject: "MAKE SAFE REQUEST - 12 Smith St Balga - PO: ABC-1234",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-alphanumeric-po",
+      graph_message_id: "AAMk-sanitized-alphanumeric-po",
+      subject: "MAKE SAFE REQUEST - 7 Jones Rd Kingsley - PO: ABC-1234",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T05:30:00.000Z",
+      external_ref: null,
+      status: "needs_review",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// A bare-digit PO stays inside the grammar the canonical extractor parses, so it keeps
+// its identity key and the PO guard stays able to separate deliverables.
+Deno.test("invariant: a bare-digit labelled PO still yields a durable identity key", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-digit-po",
+      subject: "MAKE SAFE REQUEST - Balga - PO: 55291",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-digit-po",
+      graph_message_id: "AAMk-sanitized-digit-po",
+      subject: "MAKE SAFE REQUEST - Balga - PO: 55291",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T05:30:00.000Z",
+      external_ref: null,
+      status: "needs_review",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-digit-po" });
 });
 
 // Two drafts under one claim but with DIFFERENT POs share sender, subject, minute and

@@ -83,6 +83,19 @@ function scanText(
   }
 }
 
+/**
+ * The literal builder reference substring as the source wrote it, before any
+ * canonicalisation. Shares the builder prefix vocabulary with the extractor so a
+ * new prefix cannot be recognised by one and missed by the other.
+ */
+export function matchBuilderRefText(
+  value: string | null | undefined,
+): string | null {
+  const text = String(value || "");
+  return text.match(BUILDER_REF_WITH_PO_RE)?.[0] ||
+    text.match(BUILDER_REF_RE)?.[0] || null;
+}
+
 export function extractBuilderWorkOrderIdentity(
   input: BuilderWorkOrderIdentityInput,
 ): BuilderWorkOrderIdentity {
