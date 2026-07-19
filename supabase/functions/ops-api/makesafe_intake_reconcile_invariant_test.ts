@@ -1209,3 +1209,32 @@ Deno.test("invariant: a parseable explicit PO matches its own captured deliverab
   });
   assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
 });
+
+// A quoted thread or footer names some other instruction's order. Reading it would
+// declare this row's PO unknown and strand plainly captured work as unaccounted.
+Deno.test("invariant: an order label quoted in the body does not strand a clean subject", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-quoted-order-label",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview:
+        "Please attend.\n> From an earlier thread: Order No 4477 was raised.",
+    }],
+    drafts: [{
+      id: "draft-quoted-order-label",
+      graph_message_id: "AAMk-sanitized-quoted-order-label",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-quoted-order-label",
+  });
+});

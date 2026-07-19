@@ -751,8 +751,10 @@ function reconcileIdentity(input: {
       externalRef: input.externalRef,
     }),
     keys,
-    poUnparsed: !po &&
-      hasUnparseablePoLabel(`${input.subject || ""}\n${input.body || ""}`),
+    // Subject only: a quoted thread or a footer in the body routinely names some
+    // other instruction's order, and reading it would declare this row's PO
+    // unknown and disable every matching path for work that is plainly captured.
+    poUnparsed: !po && hasUnparseablePoLabel(input.subject || ""),
   };
 }
 

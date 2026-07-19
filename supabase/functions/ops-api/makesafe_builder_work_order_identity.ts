@@ -32,9 +32,12 @@ const LOOSE_PO_LABEL_PATTERN = "(?:p\\s*[./]?\\s*o\\s*\\.?|purchase\\s*order)";
 /**
  * A bare "order" reads as a PO only when it is explicitly numbered, so prose like
  * "in order to lay 250 metres" stays out. "work order" is excluded: it names the
- * builder's own work-order reference, not a purchase order.
+ * builder's own work-order reference, not a purchase order. The exclusion tolerates
+ * any spacing or hyphenation, matching the `work\s*order` grammar the labelled
+ * identity path reads, so no spelling is a reference to one grammar and a PO to
+ * the other.
  */
-const ORDER_LABEL_PATTERN = "(?<!work\\s)(?<!work)order\\s*(?:number|no\\.?|#)";
+const ORDER_LABEL_PATTERN = "(?<!work[\\s-]*)order\\s*(?:number|no\\.?|#)";
 const PO_TAIL_PATTERN = "(?:\\s*(?:number|no\\.?))?\\s*[:#-]?\\s*";
 
 const PO_RE = new RegExp(

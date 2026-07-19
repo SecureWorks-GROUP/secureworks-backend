@@ -107,6 +107,11 @@ Deno.test("builder identity: prose and work-order labels are not unknown POs", (
   );
   assertEquals(hasUnparseablePoLabel("Work Order No 68592 - Balga"), false);
   assertEquals(hasUnparseablePoLabel("Work Order: 68592"), false);
+  // Same label, spelled with the spacing and hyphenation the labelled identity
+  // grammar (work\s*order) also reads.
+  assertEquals(hasUnparseablePoLabel("Work  Order No 68592 - Balga"), false);
+  assertEquals(hasUnparseablePoLabel("Work-Order No: 68592"), false);
+  assertEquals(hasUnparseablePoLabel("WorkOrder No 68592"), false);
 });
 
 // A postal address is not a purchase order.
