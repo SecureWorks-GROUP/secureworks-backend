@@ -594,6 +594,25 @@ const PREFIXED_REF_RE =
   /\b(?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,}(?:\s*P\s*O\s*[-\s#]*\d{3,})?/i;
 const GENERIC_REF_TOKEN_RE = /(?<![A-Z0-9])[A-Z]{2,8}[-\s#]?\d{3,}(?![A-Z0-9])/gi;
 const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
+/**
+ * Australian state abbreviation followed by a four digit postcode. Address text
+ * shaped exactly like a reference token, so it must never become an identity key:
+ * two unrelated make-safes in the same suburb would collapse into one.
+ */
+const AU_STATE_POSTCODE_RE = /^(?:WA|SA|NSW|VIC|QLD|TAS|NT|ACT)\d{4}$/;
+
+/**
+ * Subject-derived identity tokens are bounded harder than display references: a
+ * three letter minimum prefix keeps loose two letter address noise out of the
+ * accounting path. Under-matching only costs a genuinely_unaccounted report,
+ * over-matching silently collapses distinct work.
+ */
+const SUBJECT_IDENTITY_TOKEN_RE =
+  /(?<![A-Z0-9])[A-Z]{3,8}[-\s#]?\d{3,}(?![A-Z0-9])/gi;
+
+function isAddressLikeToken(normalised: string): boolean {
+  return AU_STATE_POSTCODE_RE.test(normalised);
+}
 
 function rawReferenceFromText(value: string | null | undefined): string | null {
   const text = String(value || "");
@@ -613,14 +632,14 @@ function fallbackIdentityKeys(
 ): string[] {
   const keys = new Set<string>();
   const ref = normaliseRef(externalRef);
-  if (ref.length >= 5) keys.add(`REF:${ref}`);
+  if (ref.length >= 5 && !isAddressLikeToken(ref)) keys.add(`REF:${ref}`);
   if (/^\d{3,7}$/.test(ref)) keys.add(`JOB:${ref}`);
   const text = String(subject || "");
   const jobNo = subjectJobNumber(text);
   if (jobNo) keys.add(`JOB:${jobNo}`);
-  for (const match of text.matchAll(GENERIC_REF_TOKEN_RE)) {
+  for (const match of text.matchAll(SUBJECT_IDENTITY_TOKEN_RE)) {
     const token = normaliseRef(match[0]);
-    if (token.length >= 5) keys.add(`REF:${token}`);
+    if (token.length >= 5 && !isAddressLikeToken(token)) keys.add(`REF:${token}`);
   }
   return [...keys];
 }
@@ -768,10 +787,7 @@ export function summarizeIntakeReconcileInvariant(input: {
   }
   const jobIdentities: CapturedIdentity<IntakeReconJob>[] = jobs.map((job) => ({
     entry: job,
-    identity: reconcileIdentity({
-      externalRef: job.external_ref,
-      extraction: parseObj(jobRow(job)?.metadata),
-    }),
+    identity: reconcileIdentity({ externalRef: job.external_ref }),
   }));
   const draftIndex = indexCapturedIdentities(draftIdentities);
   const jobIndex = indexCapturedIdentities(jobIdentities);

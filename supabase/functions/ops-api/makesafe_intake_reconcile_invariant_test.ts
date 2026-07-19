@@ -362,3 +362,25 @@ Deno.test("invariant hostile near-collision: non-prefix ref with an explicit new
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
   assertEquals(inv.items[0].canonical_po_ref, "PO-55601");
 });
+
+Deno.test("invariant hostile near-collision: shared suburb postcode is not a work identity", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-postcode-b",
+      subject: "Make Safe - 88 Jones Rd, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-postcode-a",
+      graph_message_id: "AAMk-sanitized-postcode-a",
+      subject: "Make Safe - 12 Smith St, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
