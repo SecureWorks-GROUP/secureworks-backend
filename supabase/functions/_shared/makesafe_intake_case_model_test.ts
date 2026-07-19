@@ -196,7 +196,14 @@ Deno.test("unprefixed builder WOs stay distinct instead of collapsing to digits"
 });
 
 Deno.test("punctuation variants of one builder WO stay one identity", () => {
-  const keys = ["WO#12345", "WO #12345", "WO-12345", "WO/12345"].map((raw) =>
+  const keys = [
+    "WO#12345",
+    "WO #12345",
+    "WO-12345",
+    "WO/12345",
+    "WO.12345",
+    "WO_12345",
+  ].map((raw) =>
     normaliseMakesafeIdentity({
       externalRefRaw: null,
       builderWoRaw: raw,
