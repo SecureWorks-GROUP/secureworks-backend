@@ -19,18 +19,33 @@ export interface ScanMarkState {
   authFailed: boolean;
   /** The classifier call failed transiently (network / 5xx / bad JSON). */
   transientFailed: boolean;
+  /** A terminal failure was recorded and this source item is visibly quarantined.
+   * Quarantine is a visible state, NOT a completed scan: the marker stays unset so the
+   * item is retried automatically once provider health recovers. */
+  terminalQuarantined?: boolean;
+  /** An ITEM-LOCAL permanent failure (a malformed request that no provider recovery can
+   * fix) whose durable visible record — a draft carrying the source evidence and the
+   * typed failure reason — has already been persisted. Only then may it be marked, so it
+   * stops hitting the provider every cycle while remaining manually requeueable. */
+  itemLocalTerminalRecorded?: boolean;
   /** The key is dead/absent, so the model was not called for this email. */
   keyDegradedOrAbsent: boolean;
 }
 
 /**
  * The extract-at-most-once rule: mark an email scanned ONLY when it received a usable
- * classification (a valid model result OR a deterministic template parse). NEVER mark on
- * an auth/transient failure or a dead/absent key — those must retry when the key
- * recovers, preserving the fail-loud backfill path and the dead-key health behaviour.
+ * classification (a valid model result OR a deterministic template parse). EVERY failure
+ * mode leaves the marker unset, including a provider-lane terminal quarantine and a
+ * dead/absent key, so no recoverable source item is ever permanently stamped as scanned.
+ * That retry storm is bounded by stopping the provider lane for the cycle. The single
+ * exception is an item-local permanent failure whose durable visible record already
+ * exists: a rescan can only reproduce the same failure, so it is marked once that record
+ * proves nothing was lost.
  */
 export function scanMarkEligible(s: ScanMarkState): boolean {
   if (s.authFailed || s.transientFailed || s.keyDegradedOrAbsent) return false;
+  if (s.itemLocalTerminalRecorded) return true;
+  if (s.terminalQuarantined) return false;
   return s.templateParsed || s.modelValidResult;
 }
 
@@ -39,7 +54,9 @@ export function scanMarkEligible(s: ScanMarkState): boolean {
 export function partitionForMark<T>(items: T[], chunkSize: number): T[][] {
   const size = Math.max(1, chunkSize);
   const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
   return out;
 }
 
@@ -77,13 +94,19 @@ export async function markEmailsScanned(
         .is("makesafe_scanned_at", null);
       if (error) {
         errorChunks++;
-        console.warn("[ops-api] intake scanned-marker update failed (chunk retries next run):", error.message);
+        console.warn(
+          "[ops-api] intake scanned-marker update failed (chunk retries next run):",
+          error.message,
+        );
       } else {
         marked += chunk.length;
       }
     } catch (e) {
       errorChunks++;
-      console.warn("[ops-api] intake scanned-marker update threw (non-fatal):", (e as Error).message);
+      console.warn(
+        "[ops-api] intake scanned-marker update threw (non-fatal):",
+        (e as Error).message,
+      );
     }
   }
   return { marked, attempted: true, errorChunks };
