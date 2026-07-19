@@ -632,11 +632,15 @@ Deno.test("invariant: an 'Our Ref' twin collapses against the stored bare ref", 
 // Two genuinely different work orders from one sender in the same minute with the
 // same generic subject must never collapse: the canonical discriminator stays
 // job-unique.
+// Sender, subject, minute and body are IDENTICAL, so only the canonical discriminator
+// can keep the two apart: the draft carries a job number the source does not. A
+// ref-bearing capture must never fall back to the body hash, or two different work
+// orders behind one generic subject would silently collapse.
 Deno.test("invariant hostile near-collision: distinct job numbers never share a fingerprint", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "group-post-jobno-distinct",
-      subject: "Make Safe - Balga - Job No 68592",
+      subject: "Make Safe Request - Balga",
       from_email: "workorders@ajs.build",
       received_at: "2026-05-06T02:10:00.000Z",
       body_preview: "Attend site and make safe.",
@@ -645,7 +649,7 @@ Deno.test("invariant hostile near-collision: distinct job numbers never share a 
       id: "draft-jobno-other",
       graph_message_id: "AAMk-sanitized-jobno-other",
       external_ref: "68593",
-      subject: "Make Safe - Balga - Job No 68593",
+      subject: "Make Safe Request - Balga",
       from_email: "workorders@ajs.build",
       created_at: "2026-05-06T02:10:00.000Z",
       body_preview: "Attend site and make safe.",
@@ -653,6 +657,75 @@ Deno.test("invariant hostile near-collision: distinct job numbers never share a 
     }],
     jobs: [],
     senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// A draft enriched by its stored extraction resolves to a RICHER token than the same
+// instruction's subject-only source row. Both sides publish every token they can
+// derive, so the twin still collapses instead of reporting phantom unaccounted work.
+Deno.test("invariant: an extraction-enriched draft still twins with its subject-only source", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-enriched-twin",
+      subject: "NEW WORK ORDER - MLB 25096 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-enriched-twin",
+      graph_message_id: "AAMk-sanitized-enriched-twin",
+      external_ref: "MLB-25096",
+      subject: "NEW WORK ORDER - MLB 25096 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+      extraction_json: {
+        builder_claim_ref: "MLB-25096",
+        builder_po_number: "PO-4477",
+        builder_work_order_number: "MLB-25096-PO-4477",
+      },
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+});
+
+// PO separation survives the widened token set: an explicit, DIFFERENT source PO must
+// not collapse into the enriched draft merely because the shared claim token aligns.
+Deno.test("invariant hostile near-collision: a different explicit PO never twins on the shared claim", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-distinct-po",
+      subject: "NEW WORK ORDER - MLB 25096 - PO 9911 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-distinct-po",
+      graph_message_id: "AAMk-sanitized-distinct-po",
+      external_ref: "MLB-25096-PO-4477",
+      subject: "NEW WORK ORDER - MLB 25096 - PO 9911 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+      extraction_json: {
+        builder_claim_ref: "MLB-25096",
+        builder_po_number: "PO-4477",
+        builder_work_order_number: "MLB-25096-PO-4477",
+      },
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
   });
 
   assertEquals(inv.counts.unaccounted, 1);

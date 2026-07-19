@@ -582,12 +582,15 @@ interface ReconcileIdentity {
   workOrder: string;
   raw: string | null;
   /**
-   * Normalised job-unique token both capture paths derive identically, used as the
-   * content-fingerprint discriminator. `raw` is label text ("Job No 12345") and is
-   * for operator display only — feeding it to the fingerprint would make a source
-   * resolve to r:JOBNO12345 while the stored draft resolves to r:12345.
+   * Every normalised job-unique token this row can offer as a content-fingerprint
+   * discriminator, richest first. A stored draft is enriched by its extraction_json
+   * while a source only has its subject, so neither side can be relied on to produce
+   * the SAME single token; both publish all of theirs and a twin needs one to align.
+   * `raw` is label text ("Job No 12345") and is for operator display only — feeding it
+   * to the fingerprint would make a source resolve to r:JOBNO12345 while the stored
+   * draft resolves to r:12345.
    */
-  canonicalRef: string | null;
+  canonicalRefs: string[];
   /**
    * Durable exact identity tokens used only when no canonical builder claim is
    * parseable — known refs whose prefix is outside the builder claim vocabulary and
@@ -643,7 +646,8 @@ function rawReferenceFromText(value: string | null | undefined): string | null {
   const text = String(value || "");
   return text.match(JOB_NUMBER_TEXT_RE)?.[0] ||
     [...text.matchAll(LABELLED_IDENTITY_RE)].find((m) =>
-      /\d{3,}/.test(normaliseRef(m[2])) && !isAddressLikeToken(normaliseRef(m[2]))
+      /\d{3,}/.test(normaliseRef(m[2])) &&
+      !isAddressLikeToken(normaliseRef(m[2]))
     )?.[0] || null;
 }
 
@@ -668,24 +672,28 @@ function fallbackIdentityKeys(
 }
 
 /**
- * The job-unique token a fingerprint may be discriminated by. Both capture paths must
- * derive it the same way, so it is always a normalised parsed value — never the raw
- * label text a subject happened to use. Job/reference tokens are preferred over a PO
- * number so a source carrying both still lines up with a ref-keyed capture.
+ * The job-unique tokens a fingerprint may be discriminated by, richest first. Always
+ * normalised parsed values — never the raw label text a subject happened to use. Both
+ * the enriched (extraction-bearing) and the bare (subject-only) representation of the
+ * same instruction are emitted so the two capture paths can meet on one of them.
  */
-function canonicalIdentityToken(input: {
+function canonicalIdentityTokens(input: {
   claim: string;
   workOrder: string;
   keys: string[];
   externalRef?: string | null;
-}): string | null {
-  if (input.workOrder) return input.workOrder;
-  if (input.claim) return input.claim;
+}): string[] {
+  const out = new Set<string>();
+  if (input.workOrder) out.add(input.workOrder);
+  if (input.claim) out.add(input.claim);
   for (const ns of ["JOB:", "REF:", "PO:"]) {
-    const key = input.keys.find((k) => k.startsWith(ns));
-    if (key) return key.slice(ns.length);
+    for (const key of input.keys.filter((k) => k.startsWith(ns))) {
+      out.add(key.slice(ns.length));
+    }
   }
-  return normaliseRef(input.externalRef) || null;
+  const ref = normaliseRef(input.externalRef);
+  if (ref) out.add(ref);
+  return [...out];
 }
 
 function reconcileIdentity(input: {
@@ -716,7 +724,7 @@ function reconcileIdentity(input: {
     workOrder,
     raw: input.externalRef || parsed.builder_work_order_number ||
       parsed.builder_claim_ref || rawReferenceFromText(input.subject) || null,
-    canonicalRef: canonicalIdentityToken({
+    canonicalRefs: canonicalIdentityTokens({
       claim,
       workOrder,
       keys,
@@ -836,7 +844,10 @@ export function summarizeIntakeReconcileInvariant(input: {
   const jobs = input.jobs || [];
   const draftsByPostId = new Map<string, IntakeReconDraft>();
   const draftsByInternetId = new Map<string, IntakeReconDraft>();
-  const draftFingerprints = new Map<string, IntakeReconDraft>();
+  const draftFingerprints = new Map<
+    string,
+    { draft: IntakeReconDraft; identity: ReconcileIdentity }
+  >();
   const draftIdentities: CapturedIdentity<IntakeReconDraft>[] = [];
   for (const d of drafts) {
     if (d.graph_message_id) draftsByPostId.set(d.graph_message_id, d);
@@ -852,14 +863,22 @@ export function summarizeIntakeReconcileInvariant(input: {
       identity,
       scope: normaliseSenderScope(d.from_email),
     });
-    const fingerprint = contentFingerprint(
-      d.from_email,
-      d.subject,
-      d.received_at || d.created_at,
-      identity.canonicalRef,
-      d.body_preview,
-    );
-    if (fingerprint) draftFingerprints.set(fingerprint, d);
+    for (
+      const token of identity.canonicalRefs.length
+        ? identity.canonicalRefs
+        : [null]
+    ) {
+      const fingerprint = contentFingerprint(
+        d.from_email,
+        d.subject,
+        d.received_at || d.created_at,
+        token,
+        d.body_preview,
+      );
+      if (fingerprint && !draftFingerprints.has(fingerprint)) {
+        draftFingerprints.set(fingerprint, { draft: d, identity });
+      }
+    }
   }
   // Jobs carry no sender, so they resolve on canonical prefixed claim/PO identity
   // only. A bare number on a job row is not proof of which builder issued it.
@@ -930,13 +949,31 @@ export function summarizeIntakeReconcileInvariant(input: {
     const internetTwin = e.internet_message_id
       ? draftsByInternetId.get(e.internet_message_id)
       : undefined;
-    const fingerprintTwin = internetTwin || contentFingerprintChecks(
-      e.from_email,
-      e.subject,
-      e.received_at,
-      identity.canonicalRef,
-      e.body_preview,
-    ).map((fp) => draftFingerprints.get(fp)).find(Boolean);
+    const fingerprintTwin = internetTwin || (() => {
+      const tokens = identity.canonicalRefs.length
+        ? identity.canonicalRefs
+        : [null];
+      for (const token of tokens) {
+        for (
+          const fp of contentFingerprintChecks(
+            e.from_email,
+            e.subject,
+            e.received_at,
+            token,
+            e.body_preview,
+          )
+        ) {
+          const hit = draftFingerprints.get(fp);
+          if (!hit) continue;
+          // Two explicit, different POs are two deliverables, whatever else aligns.
+          // An explicit source PO against a PO-less capture is potentially new work
+          // too, so the widened token set may never route around PO separation.
+          if (identity.po && identity.po !== hit.identity.po) continue;
+          return hit.draft;
+        }
+      }
+      return undefined;
+    })();
     if (fingerprintTwin) {
       record(
         e,
@@ -1032,7 +1069,8 @@ export function summarizeIntakeReconcileInvariant(input: {
           : "resend_or_revision_matches_live_job_identity",
         {
           kind: "job",
-          id: jobIdentityHit.entry.job_id || jobIdentityHit.entry.external_ref ||
+          id: jobIdentityHit.entry.job_id ||
+            jobIdentityHit.entry.external_ref ||
             "job",
         },
         identity,
