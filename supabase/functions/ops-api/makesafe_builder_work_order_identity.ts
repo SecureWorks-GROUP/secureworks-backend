@@ -12,12 +12,24 @@ export interface BuilderWorkOrderIdentity {
   evidence_sources: string[];
 }
 
-const BUILDER_REF_WITH_PO_RE =
-  /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
+/**
+ * Every accepted spelling of a PO label. Dotted and spaced forms ("P.O.", "P O",
+ * "P.O.#") are one grammar shared by both PO extraction paths: a spelling that is
+ * readable as a PO anywhere must populate builder_po_number, otherwise the token
+ * would take part in identity matching while the PO-separation guards stay blind
+ * to it and two distinct deliverables could collapse.
+ */
+const PO_LABEL = String.raw`P\.?\s*O\.?`;
+const BUILDER_REF_WITH_PO_RE = new RegExp(
+  String.raw`(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?${PO_LABEL}\s*[-_\s#]*(\d{3,})(?![A-Z0-9])`,
+  "i",
+);
 const BUILDER_REF_RE =
   /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
-const PO_RE =
-  /\b(?:P\s*O|purchase\s+order)(?:\s*(?:number|no\.?))?\s*[:#-]?\s*(\d{3,})\b/i;
+const PO_RE = new RegExp(
+  String.raw`\b(?:${PO_LABEL}|purchase\s+order)(?:\s*(?:number|no\.?))?\s*[:#-]?\s*(\d{3,})\b`,
+  "i",
+);
 
 function canonicalClaim(prefix: string, digits: string): string {
   return `${prefix.toUpperCase()}-${digits}`;

@@ -49,3 +49,31 @@ Deno.test("builder identity: body labels can supply PO when subject supplies cla
   assertEquals(identity.builder_po_number, "PO-55443");
   assertEquals(identity.builder_work_order_number, "MLB-26072PO-55443");
 });
+
+// "P.O." and "P.O.#" are the same label as "PO" everywhere else in the intake
+// grammar. If the canonical extractor cannot read them, the PO never reaches
+// builder_po_number and the PO-separation guards go blind to a real deliverable.
+Deno.test("builder identity: dotted PO spellings parse as a PO", () => {
+  for (
+    const subject of [
+      "NEW WO - MLB 25096 - P.O. 4477",
+      "NEW WO - MLB 25096 - P.O.#4477",
+      "NEW WO - MLB 25096 - P O 4477",
+    ]
+  ) {
+    const identity = extractBuilderWorkOrderIdentity({ subject });
+    assertEquals(identity.builder_claim_ref, "MLB-25096");
+    assertEquals(identity.builder_po_number, "PO-4477");
+    assertEquals(identity.builder_work_order_number, "MLB-25096PO-4477");
+  }
+});
+
+// A postal address is not a purchase order.
+Deno.test("builder identity: a PO Box address is not a purchase order", () => {
+  const identity = extractBuilderWorkOrderIdentity({
+    subject: "Make Safe MLB-26072",
+    bodyText: "Reply to P.O. Box 1234, Balga WA 6021",
+  });
+
+  assertEquals(identity.builder_po_number, null);
+});

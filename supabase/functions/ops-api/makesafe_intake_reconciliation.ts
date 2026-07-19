@@ -742,6 +742,17 @@ function reconcileIdentity(input: {
   };
 }
 
+/**
+ * Matching keys are normalised ("MLB25096") but jobs and drafts store the hyphenated
+ * canonical form, so the operator-facing field is re-hyphenated to the shape an
+ * external_ref search actually accepts, matching canonical_po_ref.
+ */
+function displayClaimRef(claim: string): string | null {
+  if (!claim) return null;
+  const parts = claim.match(/^([A-Z]+)(\d+)$/);
+  return parts ? `${parts[1]}-${parts[2]}` : claim;
+}
+
 type Relation = "exact" | "claim_po_alias";
 
 function identityRelation(
@@ -1001,7 +1012,7 @@ export function summarizeIntakeReconcileInvariant(input: {
       reason,
       evidence,
       raw_reference: identity.raw,
-      canonical_claim_ref: identity.claim || null,
+      canonical_claim_ref: displayClaimRef(identity.claim),
       canonical_po_ref: identity.po ? `PO-${identity.po}` : null,
     };
     items.push(item);

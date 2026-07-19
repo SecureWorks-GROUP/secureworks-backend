@@ -185,7 +185,7 @@ Deno.test("invariant regression: z2 claim-only source matches a PO-suffixed capt
   assertEquals(inv.items[0].classification, "accounted_alias_revision");
   assertEquals(inv.items[0].reason, "claim_reference_alias_of_po_captured_job");
   assertEquals(inv.items[0].raw_reference, "MLB-24659");
-  assertEquals(inv.items[0].canonical_claim_ref, "MLB24659");
+  assertEquals(inv.items[0].canonical_claim_ref, "MLB-24659");
   assertEquals(inv.items[0].canonical_po_ref, null);
   assertEquals(inv.items[0].evidence, { kind: "job", id: "job-24659" });
 });
@@ -754,7 +754,7 @@ Deno.test("invariant: a prefixed builder reference is displayed as the source wr
 
   assertEquals(inv.counts.unaccounted, 0);
   assertEquals(inv.items[0].raw_reference, "MLB 25096");
-  assertEquals(inv.items[0].canonical_claim_ref, "MLB25096");
+  assertEquals(inv.items[0].canonical_claim_ref, "MLB-25096");
 });
 
 // "PO: ABC-1234" is not a PO the canonical extractor can parse, so identity.po stays
@@ -1051,4 +1051,63 @@ Deno.test("invariant hostile near-collision: null-derived fingerprint probe resp
 
   assertEquals(inv.counts.unaccounted, 1);
   assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// "P.O. 4477" is the same explicit PO as "PO 4477". If it fails to reach identity.po
+// the source reads as claim-only and aliases a captured job carrying a DIFFERENT PO,
+// silently accounting a genuinely new deliverable against the wrong lineage.
+Deno.test("invariant hostile near-collision: a dotted explicit PO never aliases a different PO", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-dotted-po",
+      subject: "NEW WO - MLB 25096 - P.O. 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-dotted-po-9999",
+      graph_message_id: "AAMk-sanitized-dotted-po",
+      external_ref: "MLB-25096PO-9999",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].canonical_claim_ref, "MLB-25096");
+  assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// The same dotted PO against its OWN capture still accounts: unifying the grammar
+// must not close the legitimate exact match.
+Deno.test("invariant: a dotted explicit PO matches its own captured deliverable", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-dotted-po-exact",
+      subject: "NEW WO - MLB 25096 - P.O.#4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-dotted-po-4477",
+      graph_message_id: "AAMk-sanitized-dotted-po-exact",
+      external_ref: "MLB-25096PO-4477",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-dotted-po-4477",
+  });
+  assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
 });
