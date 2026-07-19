@@ -1239,29 +1239,31 @@ Deno.test("invariant: an order label quoted in the body does not strand a clean 
   });
 });
 
-// identity.po is parsed from the body too, so an unreadable PO spelling there must
-// still register as an unknown PO rather than reading as a claim-only source that
-// may alias a different PO's deliverable.
-Deno.test("invariant: an unparseable PO in the body does not alias another PO", () => {
+// Identity reads authoritative evidence only, so a PO quoted in a prior thread is
+// not this row's PO. Reading it would declare the PO unknown and strand plainly
+// captured work as unaccounted.
+Deno.test("invariant: a dotted PO quoted in the body does not strand a clean subject", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "mailbox-body-dotted-po",
       subject: "NEW WO - MLB 25096",
       from_email: "jobs@mlbuilders.com.au",
       received_at: "2026-05-06T05:30:00.000Z",
-      body_preview: "Please attend. P.O. 4477 applies to this instruction.",
+      body_preview: "Please attend.\n> From an earlier thread: P.O. 4477 was raised.",
     }],
     drafts: [{
-      id: "draft-body-dotted-po-9999",
+      id: "draft-body-dotted-po",
       graph_message_id: "AAMk-sanitized-body-dotted-po",
-      external_ref: "MLB-25096PO-9999",
+      external_ref: "MLB-25096",
       status: "approved",
     }],
     jobs: [],
     senderPatterns: SENDER_PATTERNS,
   });
 
-  assertEquals(inv.counts.unaccounted, 1);
-  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
-  assertEquals(inv.items[0].evidence.kind, "classification");
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-body-dotted-po",
+  });
 });

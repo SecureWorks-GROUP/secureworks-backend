@@ -715,16 +715,23 @@ function canonicalIdentityTokens(input: {
   return [...out];
 }
 
+/**
+ * Identity comes from authoritative evidence only: the stored external_ref, the
+ * stored extraction, and the current subject. body_preview is deliberately out of
+ * scope — it routinely carries a quoted thread or a footer naming some other
+ * instruction's reference or PO, which would either alias the wrong lineage or,
+ * via the unknown-PO signal, strand plainly captured work as unaccounted. The body
+ * still feeds the content fingerprint, where a quoted thread is shared by both
+ * representations of the same message rather than mistaken for identity.
+ */
 function reconcileIdentity(input: {
   externalRef?: string | null;
   subject?: string | null;
-  body?: string | null;
   extraction?: any;
 }): ReconcileIdentity {
   const parsed = extractBuilderWorkOrderIdentity({
     externalRef: input.externalRef,
     subject: input.subject,
-    bodyText: input.body,
   });
   const extraction = parseObj(input.extraction);
   const claim = normaliseRef(
@@ -751,14 +758,10 @@ function reconcileIdentity(input: {
       externalRef: input.externalRef,
     }),
     keys,
-    // identity.po is parsed from subject AND body, so the unknown-PO signal has to
-    // cover the same text or a body-borne PO in an unreadable spelling reads as
-    // "no PO" and aliases onto another PO's lineage. Only the ambiguous bare
-    // "Order No" is held to the subject: a quoted thread or a footer routinely
-    // names some other instruction's order.
-    poUnparsed: !po &&
-      (hasUnparseablePoLabel(input.subject || "") ||
-        hasUnparseablePoLabel(input.body || "", { strongLabelsOnly: true })),
+    // The unknown-PO signal reads exactly the text identity.po is parsed from, so
+    // the two stay complements: a PO label the canonical grammar cannot read means
+    // "PO unknown", never "no PO".
+    poUnparsed: !po && hasUnparseablePoLabel(input.subject || ""),
   };
 }
 
@@ -984,7 +987,6 @@ export function summarizeIntakeReconcileInvariant(input: {
     const identity = reconcileIdentity({
       externalRef: d.external_ref,
       subject: d.subject,
-      body: d.body_preview,
       extraction: d.extraction_json,
     });
     draftIdentities.push({
@@ -1058,10 +1060,7 @@ export function summarizeIntakeReconcileInvariant(input: {
     const postId = e.post_id || null;
     const subject = e.subject || "";
     const fromEmail = e.from_email || "";
-    const identity = reconcileIdentity({
-      subject,
-      body: e.body_preview,
-    });
+    const identity = reconcileIdentity({ subject });
 
     // Exact source evidence linkage remains authoritative and preserves the raw id.
     const directDraft = postId ? draftsByPostId.get(postId) : undefined;
