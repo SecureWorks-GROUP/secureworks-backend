@@ -758,10 +758,10 @@ Deno.test("invariant: a prefixed builder reference is displayed from the canonic
 });
 
 // Two drafts under one claim but with DIFFERENT POs share sender, subject, minute and
-// body, so both land on the same claim-token fingerprint. Fingerprint evidence cannot
-// say which of the two a PO-less source belongs to, so the twin path must decline and
-// let the deterministic claim relation classify the row instead of naming whichever
-// draft happened to occupy the slot first.
+// body, so both land on the same claim-token fingerprint. Neither the fingerprint nor
+// the claim relation can say which of the two genuinely different deliverables a PO-less
+// source belongs to, so both paths must decline and the row reports unaccounted rather
+// than naming whichever draft happened to occupy the slot first.
 Deno.test("invariant hostile near-collision: ambiguous same-claim two-PO drafts never twin on fingerprint", () => {
   const shared = {
     subject: "NEW WORK ORDER - MLB 25096 - Balga",
@@ -806,10 +806,12 @@ Deno.test("invariant hostile near-collision: ambiguous same-claim two-PO drafts 
     senderPatterns: SENDER_PATTERNS,
   });
 
-  assertEquals(
-    inv.items[0].reason,
-    "claim_reference_alias_of_po_captured_draft",
-  );
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].reason, "make_safe_candidate_no_draft_no_job");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
 });
 
 // The same shadowing shape, but the source names its PO explicitly: PO separation

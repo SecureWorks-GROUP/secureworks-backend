@@ -734,10 +734,12 @@ function reconcileIdentity(input: {
   };
 }
 
+type Relation = "exact" | "claim_po_alias";
+
 function identityRelation(
   source: ReconcileIdentity,
   captured: ReconcileIdentity,
-): "exact" | "claim_po_alias" | null {
+): Relation | null {
   if (!source.claim || source.claim !== captured.claim) return null;
   // Two explicit, different POs are two deliverables. Never collapse them merely
   // because the property/claim is shared.
@@ -751,6 +753,25 @@ function identityRelation(
   // is deliberately unsafe: an explicit new source PO against a legacy claim-only
   // job can be genuinely new work and must remain visible.
   return !source.po && !!captured.po ? "claim_po_alias" : null;
+}
+
+/**
+ * Pick the single candidate a source may be accounted against. The pool must describe
+ * ONE deliverable: differing captured identities mean the evidence cannot say which
+ * capture the source belongs to, so we fail open and let the row report as unaccounted
+ * rather than name the wrong lineage.
+ */
+function soleCompatibleCandidate<T extends { identity: ReconcileIdentity }>(
+  pool: T[],
+): T | undefined {
+  const first = pool[0];
+  if (!first) return undefined;
+  const distinct = pool.some((c) =>
+    c.identity.claim !== first.identity.claim ||
+    c.identity.po !== first.identity.po ||
+    c.identity.workOrder !== first.identity.workOrder
+  );
+  return distinct ? undefined : first;
 }
 
 /**
@@ -775,13 +796,7 @@ function resolveFingerprintTwin(
   if (!compatible.length) return undefined;
   const exact = compatible.filter((c) => c.identity.po === source.po);
   const pool = exact.length ? exact : compatible;
-  const first = pool[0];
-  const distinct = pool.some((c) =>
-    c.identity.claim !== first.identity.claim ||
-    c.identity.po !== first.identity.po ||
-    c.identity.workOrder !== first.identity.workOrder
-  );
-  return distinct ? undefined : first.draft;
+  return soleCompatibleCandidate(pool)?.draft;
 }
 
 interface CapturedIdentity<T> {
@@ -832,15 +847,28 @@ function findCapturedIdentity<T>(
   source: ReconcileIdentity,
   index: CapturedIndex<T>,
   sourceScope: string,
-): { entry: T; relation: "exact" | "claim_po_alias" } | null {
+): { entry: T; relation: Relation } | null {
   // A canonical claim is the strongest identity we have: resolve it exclusively so
   // the weaker token fallback can never route around explicit PO separation.
   if (source.claim) {
+    const hits: {
+      entry: T;
+      identity: ReconcileIdentity;
+      relation: Relation;
+    }[] = [];
     for (const c of index.byClaim.get(source.claim) || []) {
       const relation = identityRelation(source, c.identity);
-      if (relation) return { entry: c.entry, relation };
+      if (relation) {
+        hits.push({ entry: c.entry, identity: c.identity, relation });
+      }
     }
-    return null;
+    if (!hits.length) return null;
+    // A claim-only source may alias exactly one PO capture. When the claim carries
+    // several distinct PO deliverables the evidence cannot name a lineage, so fail
+    // open to genuinely unaccounted instead of pointing at an arbitrary draft.
+    const exact = hits.filter((h) => h.relation === "exact");
+    const hit = soleCompatibleCandidate(exact.length ? exact : hits);
+    return hit ? { entry: hit.entry, relation: hit.relation } : null;
   }
   // A bare number carries no builder namespace, so it may only resolve against a
   // capture from the exact same sender. Fail open across builders: reporting work
