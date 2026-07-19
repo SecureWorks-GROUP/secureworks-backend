@@ -1238,3 +1238,30 @@ Deno.test("invariant: an order label quoted in the body does not strand a clean 
     id: "draft-quoted-order-label",
   });
 });
+
+// identity.po is parsed from the body too, so an unreadable PO spelling there must
+// still register as an unknown PO rather than reading as a claim-only source that
+// may alias a different PO's deliverable.
+Deno.test("invariant: an unparseable PO in the body does not alias another PO", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-dotted-po",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend. P.O. 4477 applies to this instruction.",
+    }],
+    drafts: [{
+      id: "draft-body-dotted-po-9999",
+      graph_message_id: "AAMk-sanitized-body-dotted-po",
+      external_ref: "MLB-25096PO-9999",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence.kind, "classification");
+});

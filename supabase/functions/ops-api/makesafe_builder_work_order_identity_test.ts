@@ -114,6 +114,19 @@ Deno.test("builder identity: prose and work-order labels are not unknown POs", (
   assertEquals(hasUnparseablePoLabel("WorkOrder No 68592"), false);
 });
 
+// Body text carries quoted threads and footers, so only the unambiguous PO
+// spellings are read there; a bare "Order No" is held to the subject.
+Deno.test("builder identity: strong-only mode keeps bare order labels out", () => {
+  const opts = { strongLabelsOnly: true };
+  assertEquals(hasUnparseablePoLabel("Order No 4477", opts), false);
+  assertEquals(hasUnparseablePoLabel("Order Number 4477", opts), false);
+  assertEquals(hasUnparseablePoLabel("P.O. 4477", opts), true);
+  assertEquals(hasUnparseablePoLabel("P/O 4477", opts), true);
+  assertEquals(hasUnparseablePoLabel("purchaseorder 4477", opts), true);
+  assertEquals(hasUnparseablePoLabel("PO 4477", opts), false);
+  assertEquals(hasUnparseablePoLabel("Attend site and make safe.", opts), false);
+});
+
 // A postal address is not a purchase order.
 Deno.test("builder identity: a PO Box address is not a purchase order", () => {
   const identity = extractBuilderWorkOrderIdentity({

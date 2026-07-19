@@ -751,10 +751,14 @@ function reconcileIdentity(input: {
       externalRef: input.externalRef,
     }),
     keys,
-    // Subject only: a quoted thread or a footer in the body routinely names some
-    // other instruction's order, and reading it would declare this row's PO
-    // unknown and disable every matching path for work that is plainly captured.
-    poUnparsed: !po && hasUnparseablePoLabel(input.subject || ""),
+    // identity.po is parsed from subject AND body, so the unknown-PO signal has to
+    // cover the same text or a body-borne PO in an unreadable spelling reads as
+    // "no PO" and aliases onto another PO's lineage. Only the ambiguous bare
+    // "Order No" is held to the subject: a quoted thread or a footer routinely
+    // names some other instruction's order.
+    poUnparsed: !po &&
+      (hasUnparseablePoLabel(input.subject || "") ||
+        hasUnparseablePoLabel(input.body || "", { strongLabelsOnly: true })),
   };
 }
 

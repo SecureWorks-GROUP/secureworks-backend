@@ -48,14 +48,28 @@ const LOOSE_PO_RE = new RegExp(
   `\\b(?:${LOOSE_PO_LABEL_PATTERN}|${ORDER_LABEL_PATTERN})${PO_TAIL_PATTERN}\\d{3,}\\b`,
   "i",
 );
+const STRONG_PO_RE = new RegExp(
+  `\\b(?:${LOOSE_PO_LABEL_PATTERN})${PO_TAIL_PATTERN}\\d{3,}\\b`,
+  "i",
+);
 
 /**
  * True when the text names a PO in a spelling the canonical grammar cannot parse,
  * so the PO is unknown rather than absent. "P.O. Box 1234" does not qualify: the
  * number does not follow the label directly.
+ *
+ * A bare "Order No" is only PO-shaped by convention, so callers reading text that
+ * may carry a quoted thread or a footer pass `strongLabelsOnly` to keep some other
+ * instruction's order out of this row's PO signal. The unambiguous spellings
+ * (P.O., P/O, purchase order) stay in scope everywhere, because identity.po is
+ * parsed from that same text and the two must remain complements.
  */
-export function hasUnparseablePoLabel(text: string): boolean {
-  return !PO_RE.test(text) && LOOSE_PO_RE.test(text);
+export function hasUnparseablePoLabel(
+  text: string,
+  opts?: { strongLabelsOnly?: boolean },
+): boolean {
+  if (PO_RE.test(text)) return false;
+  return opts?.strongLabelsOnly ? STRONG_PO_RE.test(text) : LOOSE_PO_RE.test(text);
 }
 
 function canonicalClaim(prefix: string, digits: string): string {
