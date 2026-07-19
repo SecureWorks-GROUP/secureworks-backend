@@ -169,6 +169,76 @@ Deno.test("invariant regression: z2 twin Graph post ids account against one dura
   assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-26567" });
 });
 
+// emails.body_preview and makesafe_intake_drafts.body_preview are produced by different
+// strippers and truncations (a naive tag strip at 500 chars vs the trade stripper at
+// 2000), so a body hash is never durable twin proof. Two genuinely separate ref-less
+// work orders from one sender in one minute must therefore stay unaccounted rather than
+// alias onto each other on body text alone.
+Deno.test("invariant hostile near-collision: ref-less production-shaped bodies never twin", () => {
+  const html = `<html><body><p>Attend the insured property and make safe.</p>${
+    "<p>Scope note line describing the same generic make safe attendance.</p>"
+      .repeat(12)
+  }<p>Site contact differs per work order.</p></body></html>`;
+  const mailboxPreview = html.replace(/<[^>]+>/g, " ").slice(0, 500);
+  const draftPreview = html.replace(/<[^>]+>/g, "\n").replace(/\s+/g, " ").trim()
+    .slice(0, 2000);
+  assertEquals(mailboxPreview === draftPreview, false);
+
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-refless-body-only",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:10:20.000Z",
+      body_preview: mailboxPreview,
+    }],
+    drafts: [{
+      id: "draft-refless-body-only",
+      graph_message_id: "AAMk-sanitized-refless-other",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:10:21.000Z",
+      body_preview: draftPreview,
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// The same fixture with byte-identical previews must also decline: body text carries no
+// twin authority at all, so a test that happened to share a preview string cannot mask
+// the divergence above.
+Deno.test("invariant hostile near-collision: identical ref-less bodies still never twin", () => {
+  const body = "Attend the insured property and make safe. Generic scope.";
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-refless-identical-body",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:20:20.000Z",
+      body_preview: body,
+    }],
+    drafts: [{
+      id: "draft-refless-identical-body",
+      graph_message_id: "AAMk-sanitized-refless-identical",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:20:21.000Z",
+      body_preview: body,
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
 Deno.test("invariant regression: z2 claim-only source matches a PO-suffixed captured reference", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
@@ -1027,7 +1097,7 @@ Deno.test("invariant hostile near-collision: ambiguous same-token distinct PO ca
 // A source that HAS a canonical token also probes the null-derived fingerprint form, so
 // a token-less draft of the same instruction stays reachable. The widening must not
 // collapse a token-less draft whose body differs: that is a different work order.
-Deno.test("invariant hostile near-collision: null-derived fingerprint probe respects the body discriminator", () => {
+Deno.test("invariant hostile near-collision: null-derived fingerprint probe never twins two ref-less bodies", () => {
   const inv = summarizeIntakeReconcileInvariant({
     emails: [{
       post_id: "group-post-null-probe",

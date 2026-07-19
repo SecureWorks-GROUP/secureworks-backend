@@ -1057,7 +1057,7 @@ export function summarizeIntakeReconcileInvariant(input: {
         d.subject,
         d.received_at || d.created_at,
         token,
-        d.body_preview,
+        null,
       );
       if (!fingerprint) continue;
       const slot = draftFingerprints.get(fingerprint);
@@ -1134,8 +1134,12 @@ export function summarizeIntakeReconcileInvariant(input: {
     const fingerprintTwin = internetTwin || (() => {
       // A draft with no parseable ref publishes its fingerprint under the null
       // discriminator, which contentFingerprint then derives from the subject job
-      // number or a body hash. A source carrying "Job No 12345" must still probe that
-      // form or the bare job-number archetype can never meet its own capture.
+      // number. A source carrying "Job No 12345" must still probe that form or the
+      // bare job-number archetype can never meet its own capture. Body text is NOT
+      // offered as a discriminator here: emails.body_preview and the draft preview
+      // are produced by different strippers and truncations, so a body hash is not
+      // durable twin proof across the two tables. Without a ref or job number the
+      // fingerprint is empty and the row fails open to unaccounted.
       const tokens: (string | null)[] = [...identity.canonicalRefs, null];
       for (const token of tokens) {
         for (
@@ -1144,7 +1148,7 @@ export function summarizeIntakeReconcileInvariant(input: {
             e.subject,
             e.received_at,
             token,
-            e.body_preview,
+            null,
           )
         ) {
           const hit = resolveFingerprintTwin(
