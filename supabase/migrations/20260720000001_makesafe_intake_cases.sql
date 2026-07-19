@@ -1,10 +1,13 @@
 -- Deterministic make-safe intake, U1 canonical case spine.
 --
 -- INERTNESS
--- This migration creates only new tables, views, functions, triggers and indexes.
--- It alters no existing table and wires no scan, draft, approval, job, board,
--- notification, AI, backfill or production path. Applying it remains Captain
--- gated. No trigger in this migration is attached to an existing table.
+-- This migration creates only new tables, views, functions, triggers and indexes,
+-- with one exception: makesafe_companies.org_id is backfilled and closed to NOT
+-- NULL so the case org-scoping invariant is satisfiable. No row's org changes and
+-- no behavior of that table changes. Beyond that it wires no scan, draft,
+-- approval, job, board, notification, AI, backfill or production path. Applying
+-- it remains Captain gated. No trigger in this migration is attached to an
+-- existing table.
 --
 -- GRAIN AND AUTHORITY
 -- A case is one source instruction. N source emails can attach to that case via
@@ -41,6 +44,19 @@
 -- Backfill decisions must use provenance='backfill' and side_effects_suppressed.
 -- Natural-key upserts use (org_id, instruction_key); a second run performs no
 -- case/source/event writes and cannot emit notification/domain effects here.
+
+-- Cases require every linked builder profile to carry the same org. Legacy
+-- makesafe_companies rows predate org scoping and were left null, which would
+-- make them permanently unlinkable once that check is strict. They belong to the
+-- single existing tenant, so they are backfilled and the column is closed.
+UPDATE public.makesafe_companies
+SET org_id = '00000000-0000-0000-0000-000000000001'
+WHERE org_id IS NULL;
+
+ALTER TABLE public.makesafe_companies
+  ALTER COLUMN org_id SET DEFAULT '00000000-0000-0000-0000-000000000001';
+ALTER TABLE public.makesafe_companies
+  ALTER COLUMN org_id SET NOT NULL;
 
 CREATE OR REPLACE FUNCTION public.makesafe_intake_field_names_valid(p_values text[])
 RETURNS boolean
@@ -246,6 +262,22 @@ CREATE TABLE IF NOT EXISTS public.makesafe_intake_cases (
       ELSE NULL
     END
   ),
+  -- The instruction key carries its own cycle so a reopen whose deterministic
+  -- content matches the original can still insert under UNIQUE(org_id,
+  -- instruction_key). The cycle column is assigned by the write trigger, so the
+  -- key's cycle component must agree with it or the caller has guessed a cycle
+  -- and silently reintroduced the collision the component exists to prevent.
+  CONSTRAINT makesafe_intake_cases_instruction_key_cycle_check CHECK (
+    right(instruction_key, length('/cycle:' || cycle::text))
+      = '/cycle:' || cycle::text
+  ),
+  -- wo_po_identity_key is composed by concatenating the canonical WO and PO
+  -- around a '/po:' separator. Keeping those separator characters out of the
+  -- canonical components is what makes that composition injective.
+  CONSTRAINT makesafe_intake_cases_canonical_separator_check CHECK (
+    (builder_wo_canonical IS NULL OR builder_wo_canonical !~ '[/:]')
+    AND (builder_po_canonical IS NULL OR builder_po_canonical !~ '[/:]')
+  ),
   CONSTRAINT makesafe_intake_cases_field_names_check CHECK (
     public.makesafe_intake_field_names_valid(missing_fields)
     AND public.makesafe_intake_field_names_valid(blocked_reasons)
@@ -304,11 +336,17 @@ CREATE TABLE IF NOT EXISTS public.makesafe_intake_cases (
 );
 
 -- S13-safe live identity. Claim/external ref is deliberately absent. A WO/PO
--- identity is unique only within builder and case-model cycle. Separate POs and
--- reopened cycles do not collide. Unknown identity remains a visible exception.
+-- identity is unique only within builder, deliverable and case-model cycle, the
+-- same discriminators the claim-ref fallback index below uses. Separate POs,
+-- separate deliverables and reopened cycles do not collide. Unknown identity
+-- remains a visible exception.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_makesafe_intake_cases_live_identity
   ON public.makesafe_intake_cases (
-    org_id, company_key, wo_po_identity_key, cycle
+    org_id,
+    company_key,
+    wo_po_identity_key,
+    COALESCE(deliverable_ref_canonical, ''),
+    cycle
   )
   WHERE state IN ('confirmed_live_job', 'blocked_live_job')
     AND company_key IS NOT NULL
@@ -877,31 +915,52 @@ LEFT JOIN public.jobs job
 
 -- Structural reconcile, one uncapped row per captured email. Later U7 readers
 -- consume this instead of capped ref/subject heuristics.
-CREATE OR REPLACE VIEW public.makesafe_intake_email_accounting AS
-SELECT
-  COALESCE(
-    source.org_id,
-    '00000000-0000-0000-0000-000000000001'::uuid
-  ) AS org_id,
-  email.post_id,
-  email.mailbox,
-  email.received_at,
-  source.case_id,
-  intake_case.state AS case_state,
-  exclusion.exclusion_reason,
-  CASE
-    WHEN source.case_id IS NOT NULL THEN 'case_accounted'
-    WHEN exclusion.post_id IS NOT NULL THEN 'classifier_excluded'
-    ELSE 'unaccounted'
-  END AS accounting_status
-FROM public.emails email
-LEFT JOIN public.makesafe_intake_case_sources source
-  ON source.post_id = email.post_id
-LEFT JOIN public.makesafe_intake_cases intake_case
-  ON intake_case.org_id = source.org_id
- AND intake_case.id = source.case_id
-LEFT JOIN public.email_classifier_exclusions exclusion
-  ON exclusion.post_id = email.post_id;
+--
+-- public.emails carries no org column, so accounting is only answerable for a
+-- named tenant: the same post_id may legitimately be accounted by a case in more
+-- than one org. This is a function rather than a view so the caller states the
+-- org, the row grain stays exactly one row per captured email, and unaccounted
+-- emails are attributed to the org that asked instead of a pinned literal.
+DROP VIEW IF EXISTS public.makesafe_intake_email_accounting;
+
+CREATE OR REPLACE FUNCTION public.makesafe_intake_email_accounting(p_org_id uuid)
+RETURNS TABLE (
+  org_id uuid,
+  post_id text,
+  mailbox text,
+  received_at timestamptz,
+  case_id uuid,
+  case_state text,
+  exclusion_reason text,
+  accounting_status text
+)
+LANGUAGE sql
+STABLE
+SET search_path = public, pg_temp
+AS $$
+  SELECT
+    p_org_id AS org_id,
+    email.post_id,
+    email.mailbox,
+    email.received_at,
+    source.case_id,
+    intake_case.state AS case_state,
+    exclusion.exclusion_reason,
+    CASE
+      WHEN source.case_id IS NOT NULL THEN 'case_accounted'
+      WHEN exclusion.post_id IS NOT NULL THEN 'classifier_excluded'
+      ELSE 'unaccounted'
+    END AS accounting_status
+  FROM public.emails email
+  LEFT JOIN public.makesafe_intake_case_sources source
+    ON source.post_id = email.post_id
+   AND source.org_id = p_org_id
+  LEFT JOIN public.makesafe_intake_cases intake_case
+    ON intake_case.org_id = source.org_id
+   AND intake_case.id = source.case_id
+  LEFT JOIN public.email_classifier_exclusions exclusion
+    ON exclusion.post_id = email.post_id;
+$$;
 
 DO $$
 DECLARE
@@ -930,9 +989,10 @@ BEGIN
 END $$;
 
 REVOKE ALL ON public.makesafe_intake_case_divergence FROM anon, authenticated;
-REVOKE ALL ON public.makesafe_intake_email_accounting FROM anon, authenticated;
 GRANT SELECT ON public.makesafe_intake_case_divergence TO service_role;
-GRANT SELECT ON public.makesafe_intake_email_accounting TO service_role;
+REVOKE ALL ON FUNCTION public.makesafe_intake_email_accounting(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.makesafe_intake_email_accounting(uuid)
+  TO service_role, postgres;
 
 COMMENT ON TABLE public.makesafe_intake_cases IS
   'Canonical deterministic make-safe instruction case and sole future classification/lineage authority. Shadow-only until a later gated cutover.';
@@ -942,8 +1002,8 @@ COMMENT ON TABLE public.makesafe_intake_case_events IS
   'Trigger-fed append-only case decision ledger with deterministic, AI, human, Maverick and backfill provenance.';
 COMMENT ON VIEW public.makesafe_intake_case_divergence IS
   'Parallel-observe canary comparison of case state, draft state and job existence per source post.';
-COMMENT ON VIEW public.makesafe_intake_email_accounting IS
-  'Uncapped structural accounting of captured make-safe emails as case-accounted, classifier-excluded or unaccounted.';
+COMMENT ON FUNCTION public.makesafe_intake_email_accounting(uuid) IS
+  'Uncapped structural accounting of captured make-safe emails as case-accounted, classifier-excluded or unaccounted, for one named org.';
 
 -- DOWN / ROLLBACK
 -- supabase/rollbacks/20260720000001_makesafe_intake_cases_down.sql is physical

@@ -54,7 +54,7 @@ export type MakesafeDecisionProvenance =
   | "backfill";
 
 export const MAKESAFE_NORMALISER_VERSION =
-  "makesafe_refs.normaliseRef+wo_po_precedence@v1";
+  "makesafe_refs.normaliseRef+wo_po_precedence@v2";
 
 export interface MakesafeIdentityNormaliserInput {
   externalRefRaw: string | null;
@@ -122,10 +122,15 @@ function normaliseBuilderWo(
   return normaliseOpaqueIdentity(raw);
 }
 
+// Separators are folded to a single hyphen so "WO#12345", "WO 12345" and
+// "WO-12345" are one builder identity rather than three. Folding '/' and ':' also
+// keeps them out of canonical components, which is what makes the
+// wo:<wo>/po:<po> composition injective.
 function normaliseOpaqueIdentity(raw: string | null): string | null {
   if (raw === null) return null;
-  const canonical = raw.trim().toUpperCase().replace(/\s+/g, "-")
-    .replace(/-+/g, "-");
+  const canonical = raw.toUpperCase()
+    .replace(/[\s#:._/\\-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
   return canonical || null;
 }
 

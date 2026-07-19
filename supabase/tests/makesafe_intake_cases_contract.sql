@@ -61,7 +61,7 @@ INSERT INTO public.makesafe_intake_cases (
 ) VALUES (
   'ffffffff-ffff-ffff-ffff-fffffffff201',
   'ffffffff-ffff-ffff-ffff-fffffffffff1',
-  'fixture:po-a',
+  'fixture:po-a/cycle:1',
   'ffffffff-ffff-ffff-ffff-fffffffff201',
   'ffffffff-ffff-ffff-ffff-fffffffffff2',
   'u1 raw builder',
@@ -71,7 +71,7 @@ INSERT INTO public.makesafe_intake_cases (
   'PO A',
   'PO-A',
   'po:PO-A',
-  'makesafe_refs.normaliseRef+wo_po_precedence@v1',
+  'makesafe_refs.normaliseRef+wo_po_precedence@v2',
   '{"identity_v1":{"method":"deterministic"}}',
   'U1 A',
   '1 Test St',
@@ -122,7 +122,7 @@ INSERT INTO public.makesafe_intake_cases (
 ) VALUES (
   'ffffffff-ffff-ffff-ffff-fffffffff202',
   'ffffffff-ffff-ffff-ffff-fffffffffff1',
-  'fixture:po-b',
+  'fixture:po-b/cycle:1',
   'ffffffff-ffff-ffff-ffff-fffffffff201',
   'ffffffff-ffff-ffff-ffff-fffffffff201',
   'sibling_of',
@@ -134,7 +134,7 @@ INSERT INTO public.makesafe_intake_cases (
   'PO B',
   'PO-B',
   'po:PO-B',
-  'makesafe_refs.normaliseRef+wo_po_precedence@v1',
+  'makesafe_refs.normaliseRef+wo_po_precedence@v2',
   '{"identity_v1":{"method":"deterministic"}}',
   'U1 B',
   '1 Test St',
@@ -157,7 +157,7 @@ INSERT INTO public.makesafe_intake_cases (
 ) VALUES (
   'ffffffff-ffff-ffff-ffff-fffffffff203',
   'ffffffff-ffff-ffff-ffff-fffffffffff1',
-  'fixture:po-a:reopen',
+  'fixture:po-a/cycle:2',
   'ffffffff-ffff-ffff-ffff-fffffffff201',
   'ffffffff-ffff-ffff-ffff-fffffffff201',
   'reopen_of',
@@ -169,7 +169,7 @@ INSERT INTO public.makesafe_intake_cases (
   'PO A',
   'PO-A',
   'po:PO-A',
-  'makesafe_refs.normaliseRef+wo_po_precedence@v1',
+  'makesafe_refs.normaliseRef+wo_po_precedence@v2',
   '{"identity_v1":{"method":"deterministic"}}',
   'U1 C',
   '1 Test St',
@@ -189,6 +189,71 @@ BEGIN
   WHERE id = 'ffffffff-ffff-ffff-ffff-fffffffff203';
   IF actual_cycle <> 2 THEN
     RAISE EXCEPTION 'expected reopen cycle 2, got %', actual_cycle;
+  END IF;
+END;
+$$;
+
+-- A caller that guesses the cycle wrong cannot silently reuse a cycle-1 key.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.makesafe_intake_cases (
+      id, org_id, instruction_key, lineage_id, parent_case_id, parent_relation,
+      state, reason_code, normaliser_version, last_decision_provenance,
+      last_decision_actor, last_decision_reason, received_at
+    ) VALUES (
+      'ffffffff-ffff-ffff-ffff-fffffffff206',
+      'ffffffff-ffff-ffff-ffff-fffffffffff1',
+      'fixture:cycle-mismatch/cycle:1',
+      'ffffffff-ffff-ffff-ffff-fffffffff201',
+      'ffffffff-ffff-ffff-ffff-fffffffff201',
+      'reopen_of',
+      'exception',
+      'below_identity_floor',
+      'makesafe_refs.normaliseRef+wo_po_precedence@v2',
+      'deterministic',
+      'clone_test',
+      'must fail',
+      now()
+    );
+    RAISE EXCEPTION 'expected instruction key cycle mismatch failure';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END;
+$$;
+
+-- Accounting is org-parameterised and stays one row per captured email.
+DO $$
+DECLARE row_count integer;
+DECLARE email_count integer;
+DECLARE accounted integer;
+BEGIN
+  SELECT count(*) INTO email_count FROM public.emails;
+  SELECT count(*) INTO row_count
+  FROM public.makesafe_intake_email_accounting(
+    'ffffffff-ffff-ffff-ffff-fffffffffff1'
+  );
+  IF row_count <> email_count THEN
+    RAISE EXCEPTION 'accounting fanned out: % rows for % emails',
+      row_count, email_count;
+  END IF;
+
+  SELECT count(*) INTO accounted
+  FROM public.makesafe_intake_email_accounting(
+    'ffffffff-ffff-ffff-ffff-fffffffffff1'
+  )
+  WHERE accounting_status = 'case_accounted';
+  IF accounted <> 4 THEN
+    RAISE EXCEPTION 'expected 4 case-accounted emails, got %', accounted;
+  END IF;
+
+  SELECT count(*) INTO accounted
+  FROM public.makesafe_intake_email_accounting(
+    '00000000-0000-0000-0000-000000000001'
+  )
+  WHERE accounting_status = 'case_accounted';
+  IF accounted <> 0 THEN
+    RAISE EXCEPTION 'another org saw % case-accounted emails', accounted;
   END IF;
 END;
 $$;
@@ -213,12 +278,12 @@ BEGIN
     ) VALUES (
       'ffffffff-ffff-ffff-ffff-fffffffff204',
       'ffffffff-ffff-ffff-ffff-fffffffffff1',
-      'fixture:cancellation-with-job',
+      'fixture:cancellation-with-job/cycle:1',
       'ffffffff-ffff-ffff-ffff-fffffffff204',
       'exception',
       'cancellation',
       'ffffffff-ffff-ffff-ffff-fffffffff101',
-      'makesafe_refs.normaliseRef+wo_po_precedence@v1',
+      'makesafe_refs.normaliseRef+wo_po_precedence@v2',
       'deterministic',
       'clone_test',
       'must fail',
@@ -245,12 +310,12 @@ WITH inserted AS (
   ) VALUES (
     'ffffffff-ffff-ffff-ffff-fffffffff205',
     'ffffffff-ffff-ffff-ffff-fffffffffff1',
-    'fixture:backfill',
+    'fixture:backfill/cycle:1',
     'ffffffff-ffff-ffff-ffff-fffffffff205',
     'exception',
     'below_identity_floor',
     true,
-    'makesafe_refs.normaliseRef+wo_po_precedence@v1',
+    'makesafe_refs.normaliseRef+wo_po_precedence@v2',
     'backfill',
     'clone_backfill',
     'first run',
@@ -289,12 +354,12 @@ BEGIN
     ) VALUES (
       'ffffffff-ffff-ffff-ffff-fffffffff205',
       'ffffffff-ffff-ffff-ffff-fffffffffff1',
-      'fixture:backfill',
+      'fixture:backfill/cycle:1',
       'ffffffff-ffff-ffff-ffff-fffffffff205',
       'exception',
       'below_identity_floor',
       true,
-      'makesafe_refs.normaliseRef+wo_po_precedence@v1',
+      'makesafe_refs.normaliseRef+wo_po_precedence@v2',
       'backfill',
       'clone_backfill',
       'second run',

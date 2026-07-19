@@ -7,6 +7,10 @@
 -- a separately approved archive/rename operation.
 --
 -- Existing jobs, drafts, captured emails, attachments and events are untouched.
+--
+-- The migration's makesafe_companies.org_id backfill and NOT NULL are
+-- deliberately not reverted: every row already carries the single tenant org and
+-- reopening the null-org hole would be a regression, not a rollback.
 
 BEGIN;
 
@@ -25,7 +29,7 @@ BEGIN
 END;
 $$;
 
-DROP VIEW IF EXISTS public.makesafe_intake_email_accounting;
+DROP FUNCTION IF EXISTS public.makesafe_intake_email_accounting(uuid);
 DROP VIEW IF EXISTS public.makesafe_intake_case_divergence;
 DROP TABLE IF EXISTS public.makesafe_intake_case_events;
 DROP TABLE IF EXISTS public.makesafe_intake_case_sources;

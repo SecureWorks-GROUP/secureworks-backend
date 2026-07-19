@@ -43,7 +43,9 @@ After cutover this seam explicitly subsumes these current truth surfaces:
 1. `buildIntakeDedupIndex` and `isDuplicateIntake` become advisory classifiers;
    database instruction/source/live-identity keys become identity authority.
 2. Capped heuristic reconcile counters are replaced by the uncapped structural
-   `makesafe_intake_email_accounting` view. The existing 500/1,000-row truncation
+   `makesafe_intake_email_accounting(org_id)` function. `emails` carries no org,
+   so accounting is answerable only for a named tenant and is parameterised
+   rather than exposed as an org-pinned view. The existing 500/1,000-row truncation
    hazard is explicitly routed to U7; U1 does not edit that active reader.
 3. Ref/message-grain `makesafe_notify_log.dedup_key` is replaced by Mission 2's
    lineage-grain notification ledger.

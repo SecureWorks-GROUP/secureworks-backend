@@ -90,7 +90,7 @@ Deno.test("B3: authority phases, divergence and sunset declaration are explicit"
 Deno.test("B4: live identity uses builder WO/PO plus case-defined cycle", () => {
   assertMatch(
     migration,
-    /ON public\.makesafe_intake_cases \(\s*org_id, company_key, wo_po_identity_key, cycle\s*\)/,
+    /ON public\.makesafe_intake_cases \(\s*org_id,\s*company_key,\s*wo_po_identity_key,\s*COALESCE\(deliverable_ref_canonical, ''\),\s*cycle\s*\)/,
   );
   assert(
     migration.includes(
@@ -135,14 +135,50 @@ Deno.test("M7a: a null-org company cannot be linked from any org", () => {
   assert(!migration.includes("company_org_id IS NOT NULL AND company_org_id"));
 });
 
-Deno.test("accounting view carries org from the source, not a pinned literal", () => {
+Deno.test("accounting is org-parameterised and cannot fan out or pin an org", () => {
   assert(
-    !/LEFT JOIN public\.makesafe_intake_case_sources source\s*\n\s*ON source\.org_id =/
+    migration.includes(
+      "CREATE OR REPLACE FUNCTION public.makesafe_intake_email_accounting(p_org_id uuid)",
+    ),
+  );
+  assert(migration.includes("p_org_id AS org_id"));
+  assert(migration.includes("AND source.org_id = p_org_id"));
+  assert(
+    !/AS org_id[\s\S]{0,400}'00000000-0000-0000-0000-000000000001'::uuid/
       .test(migration),
   );
-  assertMatch(
-    migration,
-    /COALESCE\(\s*source\.org_id,\s*'00000000-0000-0000-0000-000000000001'::uuid\s*\) AS org_id/,
+});
+
+Deno.test("the instruction key's cycle must match the trigger-assigned cycle", () => {
+  assert(
+    migration.includes("makesafe_intake_cases_instruction_key_cycle_check"),
+  );
+  assert(
+    migration.includes(
+      "right(instruction_key, length('/cycle:' || cycle::text))",
+    ),
+  );
+  assert(sqlContract.includes("expected instruction key cycle mismatch"));
+});
+
+Deno.test("canonical WO/PO cannot carry the identity key separators", () => {
+  assert(
+    migration.includes("makesafe_intake_cases_canonical_separator_check"),
+  );
+  assert(migration.includes("builder_wo_canonical !~ '[/:]'"));
+  assert(migration.includes("builder_po_canonical !~ '[/:]'"));
+});
+
+Deno.test("null-org companies are backfilled before the strict org check", () => {
+  assert(migration.includes("UPDATE public.makesafe_companies"));
+  assert(
+    migration.includes(
+      "ALTER TABLE public.makesafe_companies\n  ALTER COLUMN org_id SET NOT NULL",
+    ),
+  );
+  assert(
+    migration.indexOf("ALTER COLUMN org_id SET NOT NULL") <
+      migration.indexOf("company_org_id IS DISTINCT FROM NEW.org_id"),
   );
 });
 
@@ -288,7 +324,12 @@ Deno.test("RLS is service-role only for tables and views", () => {
   );
   assert(
     migration.includes(
-      "GRANT SELECT ON public.makesafe_intake_email_accounting TO service_role",
+      "REVOKE ALL ON FUNCTION public.makesafe_intake_email_accounting(uuid) FROM PUBLIC",
+    ),
+  );
+  assert(
+    migration.includes(
+      "GRANT EXECUTE ON FUNCTION public.makesafe_intake_email_accounting(uuid)",
     ),
   );
 });

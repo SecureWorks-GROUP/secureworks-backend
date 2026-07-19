@@ -195,6 +195,37 @@ Deno.test("unprefixed builder WOs stay distinct instead of collapsing to digits"
   assertNotEquals(woForm.woPoIdentityKey, refForm.woPoIdentityKey);
 });
 
+Deno.test("punctuation variants of one builder WO stay one identity", () => {
+  const keys = ["WO#12345", "WO #12345", "WO-12345", "wo.12345"].map((raw) =>
+    normaliseMakesafeIdentity({
+      externalRefRaw: null,
+      builderWoRaw: raw,
+      builderPoRaw: null,
+      deliverableRefRaw: null,
+    }).woPoIdentityKey
+  );
+  assertEquals(new Set(keys).size, 1);
+  assertEquals(keys[0], "wo:WO-12345");
+});
+
+Deno.test("canonical WO/PO cannot smuggle the identity key separators", () => {
+  const smuggled = normaliseMakesafeIdentity({
+    externalRefRaw: null,
+    builderWoRaw: "A/po:B",
+    builderPoRaw: "C",
+    deliverableRefRaw: null,
+  });
+  const plain = normaliseMakesafeIdentity({
+    externalRefRaw: null,
+    builderWoRaw: "A",
+    builderPoRaw: "B/po:C",
+    deliverableRefRaw: null,
+  });
+  assertEquals(smuggled.builderWoCanonical, "A-PO-B");
+  assertEquals(plain.builderPoCanonical, "B-PO-C");
+  assertNotEquals(smuggled.woPoIdentityKey, plain.woPoIdentityKey);
+});
+
 Deno.test("reopen instruction keys differ from the cycle they reopen", () => {
   const original = buildInstructionKey({
     instructionFingerprint: "fingerprint-mlb-27037",
