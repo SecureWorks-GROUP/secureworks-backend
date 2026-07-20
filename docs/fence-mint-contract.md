@@ -2,6 +2,14 @@
 
 Status: implementation contract for the guarded `fence-entry-funnel-load-paths-e2` branch. Not deployed. Migration not applied.
 
+## Rulings requiring Marnin review
+
+Three conservative rulings trade availability for the guarantee that this command never creates a duplicate GHL opportunity or a duplicate job. Reproduce this section verbatim in the pull request body.
+
+- **(a) Ambiguous recovery fails closed.** When a retry cannot prove whether a prior attempt already created a stamped opportunity, the mint returns `mint_reconciliation_unproven`, or `mint_contact_scope_unsupported` when GHL ignored the contact scope filter, and never creates. Tradeoff: if `/opportunities/search` does not honour `contact_id`, the scan widens to the whole fencing pipeline, and for an organisation with more than about 1000 fencing opportunities the bounded scan can never prove completeness, so that `requestId` becomes unmintable in-product until an operator reconciles. Production proof that GHL v2 `/opportunities/search` honours `contact_id` removes this scenario entirely and is a prerequisite for the deploy step.
+- **(b) Historical ambiguity is a permanent blocker.** A fencing job with no verified GHL contact mapping that matches on email, phone digits, or address blocks the mint even when it is `complete` or `invoiced`, and `DELIBERATE_REPEAT` does not exempt it. There is deliberately no client-supplied bypass; resolution is an operator data-repair action.
+- **(c) `completed_opportunity_reused` never mints new work.** Re-entering an opportunity a prior mint already completed against returns that prior canonical job as a replay. Genuinely new work on a completed opportunity requires a separate explicit flow and is out of scope here.
+
 ## Command
 
 `POST /functions/v1/ghl-proxy?action=mint_fence_job`

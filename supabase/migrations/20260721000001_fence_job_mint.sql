@@ -764,8 +764,11 @@ $$;
 -- A caller may only stamp a row it owns, or the owner row it is currently
 -- executing against as a takeover executor. Without this, submitting another
 -- tenant's requestId would repeatedly expire that live mint's lease.
--- Reports whether the stamp applied, so a silently dropped failure write is
--- observable at the edge instead of reading as success.
+-- Reports why the stamp did or did not apply, so a silently dropped failure
+-- write is observable at the edge instead of reading as success. The outcome
+-- separates benign races (the row completed concurrently, or this delegate's
+-- election was legitimately superseded) from a genuinely rejected executor
+-- write, which is the only case that should page an operator.
 DROP FUNCTION IF EXISTS public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid);
 CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(
   p_request_id uuid,
@@ -774,12 +777,15 @@ CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(
   p_org_id uuid,
   p_actor_id uuid,
   p_executing_request_id uuid DEFAULT NULL
-) RETURNS boolean
-LANGUAGE sql
+) RETURNS text
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
-  WITH stamped AS (
+DECLARE
+  v_stamped uuid;
+  v_row record;
+BEGIN
   UPDATE public.fence_job_mint_requests r
   SET last_error_code = left(p_code, 120), last_error_message = left(p_message, 1000),
       state = CASE WHEN p_code IN (
@@ -818,9 +824,27 @@ AS $$
         )
       )
     )
-  RETURNING 1
-  )
-  SELECT EXISTS (SELECT 1 FROM stamped)
+  RETURNING r.request_id INTO v_stamped;
+  IF v_stamped IS NOT NULL THEN
+    RETURN 'applied';
+  END IF;
+
+  SELECT state, requested_by, lease_holder_request_id INTO v_row
+    FROM public.fence_job_mint_requests
+    WHERE request_id = p_request_id AND org_id = p_org_id;
+  IF NOT FOUND THEN
+    RETURN 'no_row';
+  END IF;
+  IF v_row.state = 'complete' THEN
+    RETURN 'already_complete';
+  END IF;
+  IF v_row.requested_by <> p_actor_id
+     AND p_executing_request_id IS NOT NULL
+     AND v_row.lease_holder_request_id IS DISTINCT FROM p_executing_request_id THEN
+    RETURN 'lease_revoked';
+  END IF;
+  RETURN 'denied';
+END;
 $$;
 
 REVOKE ALL ON TABLE public.fence_job_mint_requests FROM PUBLIC, anon, authenticated;

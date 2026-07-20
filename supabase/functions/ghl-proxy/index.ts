@@ -2141,20 +2141,24 @@ serve(async (req: Request) => {
                 p_executing_request_id: executingRequestId ?? null,
               })
               if (error) throw error
-              // The RPC reports whether the stamp landed. A dropped write only
-              // matters when this caller was the elected executor: no joiner
-              // will then ever see the real typed conflict. A non-executor is
-              // routinely denied (no ledger row yet, or the row belongs to
-              // another org/actor), so that case is informational, not an error.
-              if (data === false) {
+              // The RPC reports why the stamp did or did not land. Only a
+              // rejected write from the elected executor strands joiners on
+              // mint_in_progress, so only 'denied' with executing is an error.
+              // 'already_complete' (the root finished concurrently) and
+              // 'lease_revoked' (another takeover was legitimately elected)
+              // are expected races, and 'no_row' is routine when reserve threw
+              // before any ledger row existed.
+              const outcome = typeof data === 'string' ? data : 'denied'
+              if (outcome !== 'applied') {
                 const line = JSON.stringify({
                   event: 'fence_mint_failure_write_dropped',
                   request_id: requestId,
                   executing_request_id: executingRequestId ?? null,
                   executing: executing === true,
+                  outcome,
                   code,
                 })
-                if (executing) console.error(line)
+                if (executing && outcome === 'denied') console.error(line)
                 else console.log(line)
               }
             },

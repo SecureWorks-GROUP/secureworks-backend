@@ -974,7 +974,10 @@ Deno.test("a dropped failure write is error-level only for an elected executor",
   assertEquals(seen[1].executing === true, false);
 
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assertStringIncludes(source, "if (executing) console.error(line)");
+  assertStringIncludes(
+    source,
+    "if (executing && outcome === 'denied') console.error(line)",
+  );
   assertStringIncludes(source, "else console.log(line)");
 });
 
@@ -1254,10 +1257,37 @@ Deno.test("a dropped failure write is reported rather than read as success", asy
   const fn = sql.slice(
     sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
   );
-  assertStringIncludes(fn, ") RETURNS boolean");
-  assertStringIncludes(fn, "SELECT EXISTS (SELECT 1 FROM stamped)");
+  assertStringIncludes(fn, ") RETURNS text");
+  assertStringIncludes(fn, "RETURN 'applied';");
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
   assertStringIncludes(source, "fence_mint_failure_write_dropped");
+});
+
+Deno.test("benign failure-write races are not reported as operator errors", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const fn = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
+  );
+  // A boolean conflated a stranded executor with two expected races: the root
+  // completing concurrently (the outer UPDATE excludes state 'complete'), and a
+  // competing takeover that legitimately overwrote lease_holder_request_id.
+  assertStringIncludes(fn, "RETURN 'already_complete';");
+  assertStringIncludes(fn, "RETURN 'lease_revoked';");
+  assertStringIncludes(fn, "RETURN 'no_row';");
+  assertStringIncludes(fn, "RETURN 'denied';");
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  // Only a rejected write from the elected executor strands joiners, so that is
+  // the sole error-level case.
+  assertStringIncludes(
+    source,
+    "if (executing && outcome === 'denied') console.error(line)",
+  );
+  assertEquals(source.includes("if (executing) console.error(line)"), false);
 });
 
 Deno.test("the recovery scan is bounded by wall clock inside the mint lease", async () => {
