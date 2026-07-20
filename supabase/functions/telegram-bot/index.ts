@@ -702,7 +702,7 @@ async function sendRichApprovalCard(chatId: number, card: any, pendingId: string
 
 async function findJobByRef(client: any, ref: string) {
   const { data } = await client.from('jobs')
-    .select('id, job_number, client_name, address, suburb, status, job_type')
+    .select('id, job_number, client_name, address:site_address, suburb:site_suburb, status, job_type:type')
     .eq('job_number', ref.toUpperCase())
     .single()
   return data || null
@@ -1056,15 +1056,15 @@ async function sendContextCaptureDM(client: any, event: any, user: any) {
     .select('id', { count: 'exact', head: true })
     .eq('event_type', 'ai.context_capture_sent')
     .eq('payload->>to_user', user.id)
-    .gte('created_at', todayStart)
+    .gte('occurred_at', todayStart)
 
   if ((count || 0) >= 2) return // Max 2 per day
 
   const { data: recent } = await client.from('business_events')
-    .select('created_at')
+    .select('created_at:occurred_at')
     .eq('event_type', 'ai.context_capture_sent')
     .eq('payload->>to_user', user.id)
-    .gte('created_at', fourHoursAgo)
+    .gte('occurred_at', fourHoursAgo)
     .limit(1)
 
   if (recent && recent.length > 0) return // 4hr cooldown
@@ -2036,7 +2036,7 @@ serve(async (req: Request) => {
             const { data: bank } = await client.from('xero_bank_balances')
               .select('account_name, balance').order('synced_at', { ascending: false }).limit(5)
             const { data: recv } = await client.from('xero_invoices')
-              .select('amount_due').eq('type', 'ACCREC').in('status', ['AUTHORISED', 'SUBMITTED']).gt('amount_due', 0)
+              .select('amount_due').eq('invoice_type', 'ACCREC').in('status', ['AUTHORISED', 'SUBMITTED']).gt('amount_due', 0)
             const totalBank = (bank || []).reduce((s: number, b: any) => s + Number(b.balance || 0), 0)
             const totalRecv = (recv || []).reduce((s: number, i: any) => s + Number(i.amount_due || 0), 0)
             const bankLines = (bank || []).map((b: any) => `• ${b.account_name}: $${Number(b.balance).toLocaleString()}`)
@@ -2054,7 +2054,7 @@ serve(async (req: Request) => {
             const { data: completed } = await client.from('jobs')
               .select('id').eq('legacy', false).eq('status', 'complete').gte('completed_at', weekAgo)
             const { data: invoiced } = await client.from('xero_invoices')
-              .select('total').eq('type', 'ACCREC').gte('date', weekAgo)
+              .select('total').eq('invoice_type', 'ACCREC').gte('invoice_date', weekAgo)
             const { data: quoted } = await client.from('jobs')
               .select('id').eq('legacy', false).in('status', ['quoted']).gte('created_at', weekAgo)
             const totalInvoiced = (invoiced || []).reduce((s: number, i: any) => s + Number(i.total || 0), 0)

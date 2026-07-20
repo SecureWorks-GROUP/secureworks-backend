@@ -1392,10 +1392,10 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
     case 'cash_flow_status': {
       const sb = sbClient()
       const [invoicesRes, posRes, receivablesRes] = await Promise.all([
-        sb.from('xero_invoices').select('id, contact_name, total, amount_paid, amount_due, status, date, due_date, type, job_id')
+        sb.from('xero_invoices').select('id, contact_name, total, amount_paid, amount_due, status, date:invoice_date, due_date, type:invoice_type, job_id')
           .eq('org_id', DEFAULT_ORG_ID)
           .in('status', ['AUTHORISED', 'SUBMITTED'])
-          .eq('type', 'ACCREC'),
+          .eq('invoice_type', 'ACCREC'),
         sb.from('purchase_orders').select('id, supplier_name, total, status, job_id')
           .eq('org_id', DEFAULT_ORG_ID)
           .in('status', ['draft', 'submitted', 'authorised', 'sent', 'confirmed']),
@@ -1708,11 +1708,11 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
 
       // Get invoices sent this month
       const { data: monthInvoices } = await sb.from('xero_invoices')
-        .select('id, contact_name, total, amount_paid, status, date, job_id')
+        .select('id, contact_name, total, amount_paid, status, date:invoice_date, job_id')
         .eq('org_id', DEFAULT_ORG_ID)
-        .eq('type', 'ACCREC')
-        .gte('date', monthStart)
-        .lte('date', monthEnd)
+        .eq('invoice_type', 'ACCREC')
+        .gte('invoice_date', monthStart)
+        .lte('invoice_date', monthEnd)
 
       // Get bank balance if available
       const { data: bankBal } = await sb.from('xero_bank_balances')
@@ -1763,7 +1763,7 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       const { data: receivables } = await sb.from('xero_invoices')
         .select('contact_name, total, amount_due, amount_paid, due_date, status, job_id')
         .eq('org_id', DEFAULT_ORG_ID)
-        .eq('type', 'ACCREC')
+        .eq('invoice_type', 'ACCREC')
         .in('status', ['AUTHORISED', 'SUBMITTED'])
 
       // Outstanding payables (money going out)
@@ -1853,7 +1853,7 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
         const { data: invoices } = await sb.from('xero_invoices')
           .select('job_id')
           .in('job_id', jobIds)
-          .eq('type', 'ACCREC')
+          .eq('invoice_type', 'ACCREC')
         invoicedJobIds = new Set((invoices || []).map(i => i.job_id))
       }
 

@@ -142,3 +142,36 @@ export function poDeliveryInstruction(ref: string, existing?: string | null): st
   const note = String(existing ?? "").trim();
   return note ? `${note}\n${ask}` : ask;
 }
+
+// ── PO delivery address encoding ─────────────────────────────────────────────
+// purchase_orders has NO delivery_address column: the address is encoded into
+// the free-text `notes` field as a leading 'Deliver to: <address>' line. The
+// writer (createPO) and every reader (trade app pickup/delivery badge) MUST use
+// the pair below, so the prefix can never drift between the two sides — a drift
+// silently reads every PO as a pickup.
+
+const DELIVER_TO_PREFIX = "Deliver to: ";
+
+/** Encode an optional delivery address + free notes into the stored notes field. */
+export function formatPoDeliveryNotes(
+  deliveryAddress: string | null | undefined,
+  notes: string | null | undefined,
+): string | null {
+  const addr = String(deliveryAddress ?? "").trim();
+  const rest = String(notes ?? "").trim();
+  if (!addr) return rest || null;
+  return rest ? `${DELIVER_TO_PREFIX}${addr}\n${rest}` : `${DELIVER_TO_PREFIX}${addr}`;
+}
+
+/** Recover the delivery address from stored notes. Null when it is a pickup. */
+export function parsePoDeliveryAddress(notes: string | null | undefined): string | null {
+  const match = String(notes ?? "").match(/^[ \t]*Deliver to:[ \t]*(.+)$/im);
+  const addr = match?.[1]?.trim();
+  return addr ? addr : null;
+}
+
+/** True when the PO is collected rather than delivered. */
+export function isPoPickup(notes: string | null | undefined): boolean {
+  const raw = String(notes ?? "");
+  return raw.toUpperCase().includes("PICKUP") || !parsePoDeliveryAddress(raw);
+}

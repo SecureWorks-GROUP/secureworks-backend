@@ -102,7 +102,7 @@ serve(async (req) => {
     const { count: recentEvents } = await client
       .from('business_events')
       .select('id', { count: 'exact', head: true })
-      .gte('created_at', new Date(Date.now() - 24 * 3600000).toISOString())
+      .gte('occurred_at', new Date(Date.now() - 24 * 3600000).toISOString())
 
     checks.business_events = {
       status: (recentEvents || 0) > 0 ? 'ok' : 'warning',

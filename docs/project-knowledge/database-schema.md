@@ -21,15 +21,18 @@
 | 016+ | **PLANNED** | System upgrade — see `SYSTEM-UPGRADE-PLAN.md` for full SQL. Adds: `job_stage_history`, `scorecard_history`, `ids_issues`, `audit_log` tables. Adds `xero_project_id`, `materials_status`, `cross_sell_json` columns to `jobs`. Adds `material_categories` to `suppliers`. |
 
 ## Key Tables
-- **jobs** — central entity. Has: client_name, site_address, status, type, scope_json, pricing_json, job_number, xero_contact_id, ghl_opportunity_id, ghl_contact_id
+- **jobs** — central entity. Has: client_name, site_address, site_suburb, status, type, scope_json, pricing_json, job_number, xero_contact_id, ghl_opportunity_id, ghl_contact_id. Note the live names: `site_address`/`site_suburb`/`type`, NOT `address`/`suburb`/`job_type`.
+  - **quoted_value** (added `20260717000001`) — `numeric`, `GENERATED ALWAYS AS ... STORED` over `pricing_json` (`totalIncGST`, falling back to `totalIncGst` / `total_inc_gst`). Read-only: Postgres maintains it, so any INSERT/UPDATE naming it is rejected — write `pricing_json` instead. Null where the blob carries no total key. Apply the migration before deploying any function that selects it.
 - **job_assignments** — scheduling. Links jobs to users with dates, times, crew, status, started_at, completed_at
 - **job_service_reports** — trade sign-off. checklist_json, notes, signature_data (base64 PNG), signature_name, share_token, status (draft/submitted/approved)
 - **job_media** — photos/videos. phase: scope/in_progress/completion/receipt. po_id (nullable FK) for receipt photos linked to POs
-- **xero_invoices** — synced from Xero. Has: invoice_type (ACCREC/ACCPAY), contact_name, xero_contact_id, reference, job_id, amounts
+- **xero_invoices** — synced from Xero. Has: invoice_type (ACCREC/ACCPAY), invoice_date, fully_paid_on, contact_name, xero_contact_id, reference, job_id, amounts. There is no `type`, `date` or `fully_paid_on_date` column — selecting those 400s the whole request (see `gotchas.md`).
 - **xero_projects** — per-project P&L from Xero Projects API
 - **contact_matches** — links GHL contacts to Xero contacts. Has: ghl_contact_id, xero_contact_id, email, phone, client_name, lead_source, gclid
-- **purchase_orders** — POs linked to jobs
-- **work_orders** — WOs with share tokens for external trades
+- **purchase_orders** — POs linked to jobs. **No `delivery_address` column**: the address is encoded into the free-text `notes` field as a leading `Deliver to: <address>` line. Never hand-roll that prefix — `_shared/po_reference.ts` owns both sides (`formatPoDeliveryNotes` to write, `parsePoDeliveryAddress` / `isPoPickup` to read), because a drift between writer and reader silently renders every PO as a pickup. Also no `supplier_email` (email lives on **suppliers**).
+- **work_orders** — WOs with share tokens for external trades. No `estimated_hours`, `trade_cost` or `crew_rates` columns; the makesafe hours-flag `ops_set` source is therefore unwired and permanently null until an ops-set expected-hours field lands.
+- **business_events** — append-only event log. Timestamp column is **occurred_at**, not `created_at`. Filter and order on `occurred_at`.
+- **trade_invoices** / **trade_invoice_lines** — weekly trade billing, rebuilt in `20260325000003_timer_invoice_system`. Live columns are `week_end`, `subtotal_ex`, `total_inc`, `xero_bill_id` (not `week_ending` / `subtotal` / `total` / `xero_bill_number`). Per-job hours and amounts live relationally on `trade_invoice_lines` (job_id, job_number, total_hours, hourly_rate, line_total_ex, days_worked, assignment_ids) — not in a `line_items` JSON blob. Per-metre lines record cost with zero hours, so reconciliation never reads metres as hours.
 - **suppliers** — cached Xero supplier contacts
 - **org_config** — key-value config (targets, settings)
 - **webhook_log** — audit trail for all sync operations

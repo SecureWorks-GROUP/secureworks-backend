@@ -108,6 +108,45 @@ not hardcode either shape — the calendar uses a plain `select('*')`, which is
 drift-proof in both directions and keeps readiness output identical on each.
 Closing the drift is a separate task.
 
+## A Wrong Column Name Reads As "No Data", Not As An Error
+
+PostgREST rejects a select naming a column that does not exist with a 400
+(`42703`), returning `data: null` and `error` set. Almost every call site here
+destructures `{ data }` only, so the query degrades to zero rows: a $0 pipeline
+figure, an empty digest, or an unmatched invoice looks exactly like a quiet week.
+These bugs survive for months because nothing throws.
+
+Two rules follow:
+
+- Verify column names against the live schema (`information_schema.columns`),
+  not against the migrations or what the surrounding code assumes. Live names
+  that commonly surprise: `xero_invoices.invoice_date` / `.invoice_type` /
+  `.fully_paid_on` (not `date` / `type` / `fully_paid_on_date`),
+  `business_events.occurred_at` (not `created_at`), `jobs.site_address` /
+  `.site_suburb` / `.type`, `trade_invoices.week_end` / `.subtotal_ex` /
+  `.total_inc` / `.xero_bill_id`. Rename in the select with a PostgREST alias
+  (`date:invoice_date`) so the response shape callers expect stays intact — but
+  remember filters and `.order()` must use the REAL column name.
+- On any batched read whose emptiness is business-meaningful, check `error`.
+  `_shared/pgrest.ts` exports `logQueryErrors()` for labelling a
+  `Promise.all` batch; single reads that must not silently skip work should
+  `console.error` and bail (see xero-sync Strategy 2).
+
+Two known-broken queries are deliberately left 400ing with a `NEEDS A DECISION`
+comment rather than papered over, because dropping the filter would match the
+wrong rows: quote-number search in `ops-api` (`quote_revisions.quote_number`)
+and the inbox-to-PO domain matcher in `monitor-inbox`
+(`purchase_orders.supplier_email`). Both need a join rewrite, not a rename.
+
+## Migrations Apply Before Edge Deploys
+
+Migrations and edge deploys are separate manual steps in this repo, so ordering
+is not automatic. When a function selects a newly added column, apply the
+migration FIRST — otherwise the query 400s and, per the entry above, silently
+reports zero. `jobs.quoted_value`
+(`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
+`daily-digest`, `ops-api` and `reporting-api` all read it.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one

@@ -155,6 +155,9 @@ import {
 import {
   canonicalJobRef as _canonicalJobRef,
   poDeliveryInstruction as _poDeliveryInstruction,
+  formatPoDeliveryNotes,
+  parsePoDeliveryAddress,
+  isPoPickup,
 } from '../_shared/po_reference.ts'
 
 // Mission makesafe-live-truth-2026-06-14 (Phase 2) — reconciliation D1-D4.
@@ -570,8 +573,11 @@ export const _refMatchesExternalRefForTest = refMatchesExternalRef
 // makesafe_hours_flag.ts. Read-only; builder/client invoice amounts are never
 // read here (they must never raise the trade allowance — 2026-06-19 ruling).
 //
-//   • ops_set  ← work_orders.estimated_hours (office-set expectation; the only
-//                ops-set expected-hours field in the data model today).
+//   • ops_set  ← NO LIVE SOURCE. The M4 design named work_orders.estimated_hours,
+//                but that column does not exist in the schema and nothing writes
+//                it, so this source is permanently null and the resolver falls
+//                through to `report` / the 2hr rule default. Repoint it here once
+//                an ops-set expected-hours field actually lands (CP1).
 //   • report   ← job_service_reports.checklist_json (trade_count × labour_hours;
 //                the trade's OWN report — wired but UNTRUSTED by default until
 //                CP1 verifies reliability + the exact per-trade/total formula).
@@ -588,23 +594,8 @@ async function fetchMakesafeAllowanceInputs(
   if (ids.length === 0) return out
   for (const id of ids) out[id] = { ops_set: null, report: null }
 
-  // ops_set: latest non-cancelled work order's estimated_hours per job.
-  try {
-    const { data: wos } = await client.from('work_orders')
-      .select('job_id, estimated_hours, created_at, status')
-      .in('job_id', ids)
-      .neq('status', 'cancelled')
-      .order('created_at', { ascending: false })
-    const seen = new Set<string>()
-    for (const wo of (wos || [])) {
-      if (!wo?.job_id || seen.has(wo.job_id)) continue
-      const h = Number(wo.estimated_hours)
-      if (Number.isFinite(h) && h > 0) {
-        out[wo.job_id].ops_set = h
-        seen.add(wo.job_id)
-      }
-    }
-  } catch (e) { console.log('[ops-api] hours-flag ops_set read failed (non-blocking):', (e as Error).message) }
+  // ops_set stays null: no ops-set expected-hours column exists to read from.
+  console.log(`[ops-api] hours-flag ops_set unavailable (no live source) for ${ids.length} job(s)`)
 
   // report: latest service report per job → trade_count × labour_hours.
   // NOTE: labour_hours may be per-trade OR total in production data — this
@@ -7361,7 +7352,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
         .select('*')
         .eq('org_id', DEFAULT_ORG_ID)
         .ilike('contact_name', `%${clientName.replace(/'/g, "''")}%`)
-        .order('date', { ascending: false })
+        .order('invoice_date', { ascending: false })
         .limit(20)
       invoices = data || []
     }
@@ -8469,6 +8460,12 @@ async function searchJobs(client: any, params: URLSearchParams) {
       .or(`client_name.ilike.${term},client_email.ilike.${term},client_phone.ilike.${term}`)
       .limit(10),
     // Quote revisions: quote number
+    // BROKEN — left unchanged deliberately, needs a product decision.
+    // quote_revisions has no quote_number column (verified against live schema), so this
+    // query 400s and quote-number search has never returned a row. Dropping the .ilike
+    // would be worse than dead: it would match the first 10 revisions for ANY search term.
+    // The real fix is to route via quote_revisions.job_document_id → job_documents.quote_number
+    // (that column does exist), which is a join rewrite and out of scope for this pass.
     client.from('quote_revisions')
       .select('job_id, quote_number')
       .ilike('quote_number', term)
@@ -17176,7 +17173,7 @@ async function createPO(client: any, body: any) {
       subtotal, tax, total,
       delivery_date: delivery_date || deliveryDate || null,
       reference: reference || null,
-      notes: (delivery_address ? 'Deliver to: ' + delivery_address + (notes ? '\n' + notes : '') : notes) || null,
+      notes: formatPoDeliveryNotes(delivery_address, notes),
       status: body.status || 'draft',
       created_by: body.operator_email || body.user_email || null,
     })
@@ -17873,11 +17870,16 @@ async function preflightInvoiceCreation(client: any, body: any): Promise<{
   let quoteRevisionId: string | null = null
   let scopeRevisionId: string | null = null
   try {
+    // NEEDS A DECISION: quote_revisions has no superseded_at column (verified against live
+    // schema), so this .is() filter still 400s the query and quoteRevisionId stays null.
+    // There is no equivalent column — supersession may be implicit in `version`/`staged_at`
+    // (highest version = current), but that is a guess, so the filter is left as-is pending
+    // a product call. Ordering below was corrected created_at → staged_at.
     const { data: qr } = await client.from('quote_revisions')
       .select('id')
       .eq('job_id', jobId)
       .is('superseded_at', null)
-      .order('created_at', { ascending: false })
+      .order('staged_at', { ascending: false })
       .limit(1)
       .maybeSingle()
     quoteRevisionId = qr?.id || null
@@ -21241,20 +21243,21 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
   let poMap: Record<string, any> = {}
   if (jobIds.length > 0) {
     const { data: pos } = await client.from('purchase_orders')
-      .select('job_id, delivery_date, delivery_address, notes, status')
+      .select('job_id, delivery_date, notes, status')
       .in('job_id', jobIds)
       .neq('status', 'deleted')
       .order('created_at', { ascending: false })
     for (const po of (pos || [])) {
       if (!poMap[po.job_id]) {
-        // Determine pickup vs delivery from notes or delivery_address
-        const notes = (po.notes || '').toUpperCase()
-        const isPickup = notes.includes('PICKUP') || !po.delivery_address
+        // purchase_orders has no delivery_address column — the address is encoded
+        // into notes at PO creation; _shared/po_reference.ts owns both sides.
+        const deliverTo = parsePoDeliveryAddress(po.notes)
+        const isPickup = isPoPickup(po.notes)
         poMap[po.job_id] = {
           delivery_method: isPickup ? 'pickup' : 'delivery',
           delivery_date: po.delivery_date,
-          delivery_address: po.delivery_address,
-          pickup_location: isPickup ? (po.delivery_address || 'R&R Wangara') : null,
+          delivery_address: deliverTo,
+          pickup_location: isPickup ? (deliverTo || 'R&R Wangara') : null,
           po_status: po.status,
           materials_confirmed: ['confirmed', 'delivered', 'billed', 'authorised'].includes(po.status),
         }
@@ -21370,7 +21373,7 @@ async function tradeJobDetail(client: any, params: URLSearchParams, userId: stri
       .select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
     // Work order data (scope items, instructions)
     client.from('work_orders')
-      .select('id, wo_number, scope_items, special_instructions, scheduled_date, status, estimated_hours, trade_cost, crew_rates')
+      .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
       .eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }).limit(1),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
@@ -27138,9 +27141,9 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   // Check if already submitted
   const { data: existingInvoice } = await client
     .from('trade_invoices')
-    .select('id, xero_bill_number, status')
+    .select('id, xero_bill_number:xero_bill_id, status')
     .eq('user_id', userId)
-    .eq('week_ending', weekEnding)
+    .eq('week_end', weekEnding)
     .maybeSingle()
 
   const subtotal = Math.round(totalHours * rate * 100) / 100
@@ -27179,33 +27182,45 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const isPerMetre = invoice_type === 'per_metre'
 
   // Prevent double-submit
+  // week_end is the live column (trade_invoices was rebuilt in
+  // 20260325000003_timer_invoice_system); week_ending does not exist.
   const { data: existing } = await client
     .from('trade_invoices')
     .select('id')
     .eq('user_id', userId)
-    .eq('week_ending', week_ending)
+    .eq('week_end', week_ending)
     .maybeSingle()
   if (existing) throw new Error(`You already submitted an invoice for week ending ${week_ending}. Contact the office if it needs changing.`)
 
-  // Re-query assignments server-side (prevents tampering)
-  const { data: assignments, error } = await client
+  // Re-query assignments server-side (prevents tampering). Every assignment the
+  // trade holds for the week is fetched: hourly billing uses the completed
+  // subset, per-metre billing scopes against the full set because metres are
+  // billable regardless of whether the assignment has been closed out.
+  const { data: weekAssignments, error } = await client
     .from('job_assignments')
     .select(`
-      id, scheduled_date, started_at, completed_at, role, assignment_type,
+      id, scheduled_date, started_at, completed_at, role, assignment_type, status,
       jobs:job_id (
         id, type, job_number, client_name, site_address, site_suburb, metadata
       )
     `)
     .eq('user_id', userId)
-    .eq('status', 'complete')
     .gte('scheduled_date', weekStart)
     .lte('scheduled_date', week_ending)
-    .not('started_at', 'is', null)
-    .not('completed_at', 'is', null)
     .order('scheduled_date', { ascending: true })
 
   if (error) throw error
-  if (!assignments || assignments.length === 0) throw new Error('No completed hours found for this week')
+  const assignments = (weekAssignments || []).filter((a: any) =>
+    a.status === 'complete' && a.started_at && a.completed_at)
+  // Per-metre scope: every assignment the trade still holds for the week,
+  // minus cancelled ones (a cancelled assignment is not work they can bill).
+  const billableAssignments = (weekAssignments || []).filter((a: any) => a.status !== 'cancelled')
+
+  if (isPerMetre) {
+    if (billableAssignments.length === 0) throw new Error('No jobs assigned to you for this week')
+  } else if (assignments.length === 0) {
+    throw new Error('No completed hours found for this week')
+  }
 
   // Get trade user info
   const { data: tradeUser } = await client
@@ -27238,6 +27253,39 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
   const lineItems: any[] = []
+  // Per-job aggregation for the relational trade_invoice_lines write below.
+  const jobLines: Record<string, {
+    job_id: string
+    job_number: string
+    client_name: string | null
+    total_hours: number
+    hourly_rate: number
+    line_total_ex: number
+    assignment_ids: string[]
+    days: Set<string>
+  }> = {}
+  let billedHours = 0
+  const addJobLine = (jobId: string, job: any, hours: number, lineRate: number, amount: number, assignmentId?: string, day?: string) => {
+    billedHours += hours
+    if (!jobId) {
+      console.error('Trade invoice line has no job attribution — hours billed to Xero but omitted from trade_invoice_lines:', { userId, week_ending, hours, amount, assignmentId })
+      return
+    }
+    const l = jobLines[jobId] ||= {
+      job_id: jobId,
+      job_number: job?.job_number || '',
+      client_name: job?.client_name || null,
+      total_hours: 0,
+      hourly_rate: lineRate,
+      line_total_ex: 0,
+      assignment_ids: [],
+      days: new Set<string>(),
+    }
+    l.total_hours += hours
+    l.line_total_ex += amount
+    if (assignmentId) l.assignment_ids.push(assignmentId)
+    if (day) l.days.add(day)
+  }
   let subtotal = 0
 
   if (isPerMetre) {
@@ -27245,9 +27293,8 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Enter the metres installed on at least one job before submitting.')
     const pmRate = Number(rate_per_metre) || 35
 
-    // Build a job lookup from server-side assignments for descriptions
     const jobMap: Record<string, any> = {}
-    for (const a of assignments) {
+    for (const a of billableAssignments) {
       const job = a.jobs as any
       if (job?.id) jobMap[job.id] = job
     }
@@ -27255,10 +27302,12 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     for (const item of items) {
       const metres = Number(item.metres) || 0
       if (metres <= 0) continue
+      const job = jobMap[item.job_id]
+      if (!job) throw new Error(`Job ${item.job_number || item.job_id} is not assigned to you for the week ending ${week_ending}, so it cannot be invoiced. Ask the office to add the assignment, then remove that job and submit the rest.`)
+
       const amount = Math.round(metres * pmRate * 100) / 100
       subtotal += amount
 
-      const job = jobMap[item.job_id] || {}
       // Change 4: include builder ref in Xero description when present
       const pmBuilderRef = job?.metadata?.external_ref
       const desc = [
@@ -27276,6 +27325,9 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         TaxType: stTaxType,
         Tracking: xeroTracking(job.job_number || ''),
       })
+      // Per-metre work has no hours — record the cost and job attribution only,
+      // so reconciliation never reads metres as if they were hours.
+      addJobLine(item.job_id, job, 0, 0, amount)
     }
 
     if (lineItems.length === 0) throw new Error('All metre amounts are zero. Enter the metres you installed on each job.')
@@ -27323,6 +27375,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         TaxType: stTaxType,
         Tracking: xeroTracking(job?.job_number || ''),
       })
+      addJobLine(job?.id, job, hours, rate, amount, a.id, a.scheduled_date)
     }
   }
 
@@ -27345,7 +27398,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     Invoices: [{
       Type: 'ACCPAY',
       Contact: { ContactID: stXeroContactId },
-      Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(assignments.map((a: any) => (a.jobs as any)?.job_number).filter(Boolean))].join(', ')}`,
+      Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(Object.values(jobLines).map((l) => l.job_number).filter(Boolean))].join(', ')}`,
       DueDate: dueDate,
       Status: 'DRAFT',
       LineAmountTypes: stGstRegistered ? 'Exclusive' : 'NoTax',
@@ -27387,28 +27440,45 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     }
   }
 
-  // Insert local trade_invoices record
+  // Insert local trade_invoices record against the LIVE schema
+  // (20260325000003_timer_invoice_system): week_start/week_end, subtotal_ex,
+  // total_inc, xero_bill_id. The legacy week_ending/line_items/subtotal/total/
+  // xero_bill_number/xero_invoice_id names 400 the insert. Per-job detail is
+  // written relationally to trade_invoice_lines below.
+  const totalHours = billedHours
   const invoiceRecord = {
     org_id: DEFAULT_ORG_ID,
     user_id: userId,
-    week_ending,
-    line_items: lineItems.map((li, i) => ({
-      description: li.Description,
-      hours: li.Quantity,
-      rate: li.UnitAmount,
-      amount: Math.round(li.Quantity * li.UnitAmount * 100) / 100,
-      job_number: (assignments[i]?.jobs as any)?.job_number || '',
-    })),
-    subtotal,
+    week_start: weekStart,
+    week_end: week_ending,
+    total_hours: Math.round(totalHours * 100) / 100,
+    subtotal_ex: subtotal,
     gst,
-    total,
+    total_inc: total,
     notes: notes || null,
-    xero_invoice_id: xeroInvId || null,
-    xero_bill_number: billNumber || null,
+    xero_bill_id: billNumber || null,
     status: xeroInvId ? 'pushed_to_xero' : 'draft',
   }
 
-  await client.from('trade_invoices').insert(invoiceRecord)
+  const { data: insertedInvoice, error: invInsertErr } = await client
+    .from('trade_invoices').insert(invoiceRecord).select('id').single()
+  if (invInsertErr) throw invInsertErr
+
+  const lineRows = Object.values(jobLines).map((l) => ({
+    trade_invoice_id: insertedInvoice.id,
+    job_id: l.job_id,
+    job_number: l.job_number,
+    client_name: l.client_name,
+    total_hours: Math.round(l.total_hours * 100) / 100,
+    hourly_rate: l.hourly_rate,
+    line_total_ex: Math.round(l.line_total_ex * 100) / 100,
+    days_worked: l.days.size || null,
+    assignment_ids: l.assignment_ids.length ? l.assignment_ids : null,
+  }))
+  if (lineRows.length > 0) {
+    const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
+    if (lineErr) console.error('Non-blocking: failed to write trade invoice lines:', lineErr.message)
+  }
 
   return { success: true, xero_bill_number: billNumber, total }
 }
@@ -27576,22 +27646,22 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
 
   // Get trade invoices that reference this job
   const jobNumber = job?.job_number || ''
-  const { data: invoices } = await client.from('trade_invoices')
-    .select('id, user_id, week_ending, subtotal, total, line_items, status, xero_bill_number, users:user_id(name)')
-    .order('week_ending', { ascending: false })
+  // Per-job detail lives on trade_invoice_lines (relational), not on a JSON blob.
+  const { data: invoices, error: invErr } = await client.from('trade_invoices')
+    .select('id, user_id, week_ending:week_end, subtotal:subtotal_ex, total:total_inc, status, xero_bill_number:xero_bill_id, users:user_id(name), trade_invoice_lines!inner(job_id, job_number, total_hours, line_total_ex)')
+    .eq('trade_invoice_lines.job_id', jobId)
+    .order('week_end', { ascending: false })
+  if (invErr) throw invErr
 
-  // Filter to invoices that contain this job's hours
-  const jobInvoices = (invoices || []).filter((inv: any) => {
-    const items = inv.line_items || []
-    return items.some((li: any) => (li.job_number || '') === jobNumber)
-  }).map((inv: any) => {
-    const items = (inv.line_items || []).filter((li: any) => (li.job_number || '') === jobNumber)
-    const jobHours = items.reduce((s: number, li: any) => s + (li.hours || 0), 0)
-    const jobAmount = items.reduce((s: number, li: any) => s + (li.amount || 0), 0)
+  const jobInvoices = (invoices || []).map((inv: any) => {
+    const items = inv.trade_invoice_lines || []
+    const jobHours = items.reduce((s: number, li: any) => s + (Number(li.total_hours) || 0), 0)
+    const jobAmount = items.reduce((s: number, li: any) => s + (Number(li.line_total_ex) || 0), 0)
+    const { trade_invoice_lines: _lines, ...rest } = inv
     return {
-      ...inv,
-      job_hours: jobHours,
-      job_amount: jobAmount,
+      ...rest,
+      job_hours: Math.round(jobHours * 100) / 100,
+      job_amount: Math.round(jobAmount * 100) / 100,
     }
   })
 
@@ -28783,7 +28853,7 @@ async function createTradeAlert(client: any, userId: string, body: any) {
 
   // Look up job for context
   const { data: job } = await client.from('jobs')
-    .select('id, job_number, client_name, suburb')
+    .select('id, job_number, client_name, suburb:site_suburb')
     .eq('id', jId)
     .single()
 

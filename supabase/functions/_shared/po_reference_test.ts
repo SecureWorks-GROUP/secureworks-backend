@@ -15,6 +15,9 @@ import {
   poDeliveryInstruction,
   poEmailReferenceBanner,
   quoteBackInstruction,
+  formatPoDeliveryNotes,
+  parsePoDeliveryAddress,
+  isPoPickup,
 } from "./po_reference.ts";
 
 const SYNC_REGEX = /SWMS-\d{4,5}|SW[A-Z]?-?\d{3,5}/i; // xero-sync :486
@@ -128,4 +131,47 @@ Deno.test("EVIDENCE: sample outbound artifacts (patio + fence)", () => {
     console.log(`Resend email footer Ref line          : Ref: ${canonicalJobRef(ref)}`);
   }
   assert(true);
+});
+
+// ── PO delivery address encoding (notes round-trip) ──────────────────────────
+// The trade app's pickup/delivery badge reads the address back out of `notes`
+// because purchase_orders has no delivery_address column. If the writer and the
+// reader ever disagree, EVERY job silently renders as a pickup — so the
+// round-trip is proven here rather than assumed.
+
+Deno.test("PO notes: delivery address round-trips through the notes field", () => {
+  const addr = "12 Wanneroo Rd, Landsdale WA 6065";
+  const notes = formatPoDeliveryNotes(addr, "Call on arrival");
+  assertEquals(parsePoDeliveryAddress(notes), addr);
+  assertEquals(isPoPickup(notes), false);
+  assert(notes!.includes("Call on arrival"));
+});
+
+Deno.test("PO notes: address with no extra notes still round-trips", () => {
+  const addr = "5 Prindiville Dr, Wangara WA 6065";
+  assertEquals(parsePoDeliveryAddress(formatPoDeliveryNotes(addr, null)), addr);
+});
+
+Deno.test("PO notes: no address means pickup", () => {
+  assertEquals(formatPoDeliveryNotes(null, null), null);
+  assertEquals(parsePoDeliveryAddress(null), null);
+  assertEquals(isPoPickup(null), true);
+  assertEquals(isPoPickup("Ready Thursday"), true);
+});
+
+Deno.test("PO notes: explicit PICKUP wins over a delivery address", () => {
+  const notes = formatPoDeliveryNotes("12 Wanneroo Rd", "PICKUP from branch");
+  assertEquals(isPoPickup(notes), true);
+});
+
+Deno.test("PO notes: blank/whitespace address is not a delivery", () => {
+  assertEquals(parsePoDeliveryAddress("Deliver to:   "), null);
+  assertEquals(isPoPickup(formatPoDeliveryNotes("   ", "on site")), true);
+});
+
+Deno.test("PO notes: address on a later line is still found", () => {
+  assertEquals(
+    parsePoDeliveryAddress("Urgent order\nDeliver to: 9 Berriman Dr, Wangara"),
+    "9 Berriman Dr, Wangara",
+  );
 });

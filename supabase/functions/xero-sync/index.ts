@@ -18,6 +18,8 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+// serve is only started when this module is the process entrypoint so unit
+// tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
   buildMaterialsFactRow,
@@ -72,7 +74,7 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-serve(async (req: Request) => {
+if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   const url = new URL(req.url)
@@ -753,7 +755,8 @@ async function syncInvoices(sb: any) {
 // Strategy 3: Multiple client_name matches → flag for manual review
 // ════════════════════════════════════════════════════════════
 
-async function matchUnlinkedInvoices(client: any) {
+/** Exported for regression tests (M1 Strategy 2 / silent-400 guard). */
+export async function matchUnlinkedInvoices(client: any) {
   try {
     // Get invoices with no job_id
     const { data: unlinked } = await client.from('xero_invoices')
@@ -804,14 +807,21 @@ async function matchUnlinkedInvoices(client: any) {
 
       // Strategy 2: Contact name matches a job client_name exactly
       if (contactName) {
-        const { data: jobs } = await client.from('jobs')
-          .select('id, job_number, client_name, quoted_value, pricing_json')
+        const { data: jobs, error: jobsErr } = await client.from('jobs')
+          .select('id, job_number, client_name, pricing_json')
           .eq('org_id', '00000000-0000-0000-0000-000000000001')
           .eq('legacy', false)
           .ilike('client_name', contactName)
           .not('status', 'in', '("cancelled","lost")')
           .order('created_at', { ascending: false })
           .limit(5)
+
+        // A failed lookup must not read as "no candidate jobs" — that is
+        // indistinguishable from a genuine miss and silently skips the link.
+        if (jobsErr) {
+          console.error(`[xero-sync] Strategy 2 job lookup failed for invoice ${inv.invoice_number} (contact "${contactName}"):`, jobsErr.message)
+          continue
+        }
 
         if (jobs && jobs.length === 1) {
           // Exact single match — high confidence, auto-link
