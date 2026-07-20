@@ -68,6 +68,9 @@ export type FenceMintProgress = {
   ownerRequestId: string;
   state: "reserved" | "contact_resolved" | "opportunity_created" | "complete";
   joined: boolean;
+  // True only when this requestId re-entered a lead a prior mint already
+  // completed against. Distinct from a concurrent join, which is a live race.
+  completedReentry?: boolean;
   executor: boolean;
   contactId: string | null;
   opportunityId: string | null;
@@ -418,6 +421,7 @@ function canonicalResponse(
     requestId: string;
     replayed: boolean;
     joined: boolean;
+    completedReentry?: boolean;
     timingMs: Record<string, number>;
   },
 ) {
@@ -429,7 +433,9 @@ function canonicalResponse(
     contactId: canonical.contactId,
     opportunityId: canonical.opportunityId,
     mapping: {
-      outcome: args.replayed
+      outcome: args.completedReentry
+        ? "completed_opportunity_reused"
+        : args.replayed
         ? "idempotent_replay"
         : args.joined
         ? "concurrent_request_reused"
@@ -486,6 +492,7 @@ export async function executeFenceJobMint(args: {
         replayed: progress.ownerRequestId === input.requestId &&
           progress.state === "complete",
         joined: progress.joined,
+        completedReentry: progress.completedReentry,
         timingMs,
       });
     }

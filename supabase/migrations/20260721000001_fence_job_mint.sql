@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS public.fence_job_mint_requests (
   last_error_code text,
   last_error_message text,
   lease_expires_at timestamptz,
+  -- The request currently elected to execute against this row. Identity, not
+  -- expiry, is what authorises a delegated write: a legitimate execution can
+  -- outlive the lease, while a stale delegate loses the grant the moment another
+  -- request is elected.
+  lease_holder_request_id uuid,
   completed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -51,6 +56,9 @@ CREATE TABLE IF NOT EXISTS public.fence_job_mint_requests (
   CHECK (intent <> 'DELIBERATE_REPEAT' OR length(trim(repeat_reason)) >= 3),
   CHECK (state <> 'complete' OR (job_id IS NOT NULL AND contact_id IS NOT NULL AND opportunity_id IS NOT NULL))
 );
+
+ALTER TABLE public.fence_job_mint_requests
+  ADD COLUMN IF NOT EXISTS lease_holder_request_id uuid;
 
 CREATE INDEX IF NOT EXISTS idx_fence_mint_requests_identity
   ON public.fence_job_mint_requests (org_id, type, identity_key, created_at DESC);
@@ -297,7 +305,8 @@ BEGIN
     IF v_existing.state IN ('reserved', 'contact_resolved', 'opportunity_created')
       AND (v_existing.lease_expires_at IS NULL OR v_existing.lease_expires_at <= now()) THEN
       UPDATE public.fence_job_mint_requests
-        SET attempt_count = attempt_count + 1, lease_expires_at = now() + interval '90 seconds', updated_at = now()
+        SET attempt_count = attempt_count + 1, lease_expires_at = now() + interval '90 seconds',
+            lease_holder_request_id = p_request_id, updated_at = now()
         WHERE request_id = p_request_id;
       v_executor := true;
     ELSIF v_existing.state = 'joined' THEN
@@ -313,7 +322,8 @@ BEGIN
         IF FOUND AND v_root.state IN ('reserved', 'contact_resolved', 'opportunity_created')
           AND (v_root.lease_expires_at IS NULL OR v_root.lease_expires_at <= now()) THEN
           UPDATE public.fence_job_mint_requests
-            SET lease_expires_at = now() + interval '90 seconds', attempt_count = attempt_count + 1, updated_at = now()
+            SET lease_expires_at = now() + interval '90 seconds', attempt_count = attempt_count + 1,
+                lease_holder_request_id = p_request_id, updated_at = now()
             WHERE request_id = v_root.request_id;
           v_executor := true;
         END IF;
@@ -349,7 +359,8 @@ BEGIN
   IF v_has_owner AND v_owner.state IN ('reserved', 'contact_resolved', 'opportunity_created') THEN
     IF v_owner.lease_expires_at IS NULL OR v_owner.lease_expires_at <= now() THEN
       UPDATE public.fence_job_mint_requests
-        SET lease_expires_at = now() + interval '90 seconds', attempt_count = attempt_count + 1, updated_at = now()
+        SET lease_expires_at = now() + interval '90 seconds', attempt_count = attempt_count + 1,
+            lease_holder_request_id = p_request_id, updated_at = now()
         WHERE request_id = v_owner.request_id;
       v_executor := true;
     END IF;
@@ -371,12 +382,12 @@ BEGIN
     request_id, org_id, requested_by, intent, identity_key, input_fingerprint,
     state, contact_id, opportunity_id, expected_existing_job_ids, repeat_reason,
     first_name, last_name, client_email, client_phone, site_address, site_suburb,
-    attempt_count, lease_expires_at
+    attempt_count, lease_expires_at, lease_holder_request_id
   ) VALUES (
     p_request_id, p_org_id, p_actor_id, p_intent, p_identity_key, p_input_fingerprint,
     'reserved', p_contact_id, p_opportunity_id, COALESCE(p_expected_existing_job_ids, '{}'), p_repeat_reason,
     p_first_name, p_last_name, p_client_email, p_client_phone, p_site_address, p_site_suburb,
-    1, now() + interval '90 seconds'
+    1, now() + interval '90 seconds', p_request_id
   );
 
   UPDATE public.fence_job_mint_locks
@@ -404,7 +415,11 @@ EXCEPTION WHEN unique_violation THEN
       LIMIT 1;
     IF FOUND AND v_reserved.state = 'complete'
       AND (p_contact_id IS NULL OR v_reserved.contact_id IS NULL OR v_reserved.contact_id = p_contact_id) THEN
-      RETURN public._fence_mint_progress(v_reserved.request_id, true, false);
+      -- Flagged explicitly: nothing here was concurrent. A caller must be able to
+      -- tell re-entering a long-completed lead from a two-device race, so this
+      -- branch never reports as concurrent_request_reused.
+      RETURN public._fence_mint_progress(v_reserved.request_id, true, false)
+        || jsonb_build_object('completedReentry', true);
     END IF;
   END IF;
   RETURN jsonb_build_object('decision', 'conflict', 'code', 'opportunity_mapping_conflict', 'message', 'Opportunity is reserved by another mint request');
@@ -696,7 +711,7 @@ BEGIN
         v_request.org_id, v_request.requested_by, 'draft', 'fencing',
         trim(concat_ws(' ', v_request.first_name, v_request.last_name)), v_request.client_phone, v_request.client_email,
         v_request.site_address, v_request.site_suburb, v_request.contact_id, v_request.opportunity_id, v_job_number,
-        '{}'::jsonb, 1, now()
+        '{}'::jsonb, 1, NULL
       ) RETURNING id, org_id, status, ghl_contact_id, ghl_opportunity_id, job_number, scope_version, updated_at INTO v_job;
       v_outcome := CASE WHEN v_request.intent = 'DELIBERATE_REPEAT' THEN 'deliberate_repeat_created' ELSE 'created' END;
     END IF;
@@ -749,6 +764,9 @@ $$;
 -- A caller may only stamp a row it owns, or the owner row it is currently
 -- executing against as a takeover executor. Without this, submitting another
 -- tenant's requestId would repeatedly expire that live mint's lease.
+-- Reports whether the stamp applied, so a silently dropped failure write is
+-- observable at the edge instead of reading as success.
+DROP FUNCTION IF EXISTS public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid);
 CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(
   p_request_id uuid,
   p_code text,
@@ -756,11 +774,12 @@ CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(
   p_org_id uuid,
   p_actor_id uuid,
   p_executing_request_id uuid DEFAULT NULL
-) RETURNS void
+) RETURNS boolean
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public
 AS $$
+  WITH stamped AS (
   UPDATE public.fence_job_mint_requests r
   SET last_error_code = left(p_code, 120), last_error_message = left(p_message, 1000),
       state = CASE WHEN p_code IN (
@@ -778,22 +797,27 @@ AS $$
     AND (
       r.requested_by = p_actor_id
       -- A takeover executor may stamp the owner row it is actually executing on.
-      -- The grant is bound to the exact request the caller names as its own and
-      -- to that row still holding a live lease on this owner. Inferring it from
-      -- a state alone does not expire: 'joined' is terminal, so any same-org user
-      -- who once joined this request would otherwise keep the ability to expire
-      -- its lease and overwrite its error indefinitely.
+      -- The grant is bound to that owner still recording this exact request as
+      -- its elected lease holder, not to the lease still being unexpired: a
+      -- legitimate execution (contact create, opportunity create, an ambiguous
+      -- retry's reconciliation scan) can outlive the 90s lease, and keying on
+      -- expiry silently dropped the write so the real typed conflict never
+      -- surfaced. Election identity still expires the grant for a stale
+      -- delegate, because electing any other executor overwrites the holder.
       OR (
         p_executing_request_id IS NOT NULL
+        AND r.lease_holder_request_id = p_executing_request_id
         AND EXISTS (
           SELECT 1 FROM public.fence_job_mint_requests c
           WHERE c.request_id = p_executing_request_id
             AND c.owner_request_id = r.request_id
             AND c.org_id = p_org_id AND c.requested_by = p_actor_id
-            AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at > now()
         )
       )
     )
+  RETURNING 1
+  )
+  SELECT EXISTS (SELECT 1 FROM stamped)
 $$;
 
 REVOKE ALL ON TABLE public.fence_job_mint_requests FROM PUBLIC, anon, authenticated;

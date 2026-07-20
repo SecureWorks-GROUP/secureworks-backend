@@ -884,12 +884,20 @@ Deno.test("delegated failure writes are bounded to a still-active child attempt"
     sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
   );
   // 'joined' is terminal, so a state-only bound never expires. The grant must
-  // name the exact executing request and require a live lease on the owner.
+  // name the exact executing request and require the owner to still record it as
+  // the elected lease holder.
   assertStringIncludes(fn, "WHERE c.request_id = p_executing_request_id");
   assertStringIncludes(fn, "AND c.owner_request_id = r.request_id");
   assertStringIncludes(
     fn,
-    "AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at > now()",
+    "AND r.lease_holder_request_id = p_executing_request_id",
+  );
+  // Keying the grant on an unexpired lease silently dropped the write whenever a
+  // legitimate execution outran the 90s lease, so the real typed conflict never
+  // reached joiners. Election identity, not expiry, bounds the grant.
+  assertEquals(
+    fn.includes("AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at > now()"),
+    false,
   );
   assertEquals(
     fn.includes("AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')"),
@@ -1012,8 +1020,11 @@ Deno.test("a completed opportunity re-entry replays the canonical job instead of
   );
   assertStringIncludes(
     reserve,
-    "RETURN public._fence_mint_progress(v_reserved.request_id, true, false);",
+    "RETURN public._fence_mint_progress(v_reserved.request_id, true, false)",
   );
+  // Nothing here was concurrent, so the branch is flagged explicitly rather than
+  // presenting as a live two-device race.
+  assertStringIncludes(reserve, "jsonb_build_object('completedReentry', true)");
   // An identity mismatch remains a real conflict.
   assertStringIncludes(reserve, "'code', 'opportunity_mapping_conflict'");
 });
@@ -1060,4 +1071,131 @@ Deno.test("a saved scope makes a replay require a load rather than a blank curso
   // that lets a client resume from an empty scope.
   assertEquals(replayed.revision.scopeHash, null);
   assertEquals(replayed.revision.requiresLoad, true);
+});
+
+Deno.test("a newly created job is not stamped as having saved scope", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const complete = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.complete_fence_job_mint("),
+  );
+  // The mint's own INSERT must leave scope_updated_at NULL. Stamping it at
+  // creation contradicts the freshness predicate in the same transaction, so
+  // every brand-new mint would return requiresLoad:true and a null scopeHash -
+  // the inverse of the contract - and would also destroy the column's value as
+  // a "scope has been saved" signal.
+  assertStringIncludes(complete, "scope_json, scope_version, scope_updated_at");
+  assertStringIncludes(complete, "'{}'::jsonb, 1, NULL");
+  assertEquals(complete.includes("'{}'::jsonb, 1, now()"), false);
+});
+
+Deno.test("a freshly created job returns the empty-scope cursor without a load", async () => {
+  const created = canonical("created");
+  const result = await executeFenceJobMint({
+    input: input(),
+    actorId: "user-1",
+    deps: deps({ complete: async () => created }),
+  });
+  assertEquals(result.mapping.outcome, "created");
+  assertEquals(
+    result.revision.scopeHash,
+    "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  );
+  assertEquals(result.revision.requiresLoad, false);
+});
+
+Deno.test("completed re-entry is reported distinctly from a concurrent race", async () => {
+  const reused = await executeFenceJobMint({
+    input: input(REQUEST_B),
+    actorId: "user-1",
+    deps: deps({
+      reserve: async () =>
+        progress({
+          ownerRequestId: REQUEST_A,
+          state: "complete",
+          joined: true,
+          completedReentry: true,
+          executor: false,
+          canonical: canonical("existing_opportunity_reused"),
+        }),
+    }),
+  });
+  // Re-entering a long-completed lead must never read as a live two-device race.
+  assertEquals(reused.mapping.outcome, "completed_opportunity_reused");
+  assertEquals(reused.mapping.canonicalOutcome, "existing_opportunity_reused");
+
+  const raced = await executeFenceJobMint({
+    input: input(REQUEST_B),
+    actorId: "user-1",
+    deps: deps({
+      reserve: async () =>
+        progress({
+          ownerRequestId: REQUEST_A,
+          state: "complete",
+          joined: true,
+          executor: false,
+          canonical: canonical("existing_opportunity_reused"),
+        }),
+    }),
+  });
+  assertEquals(raced.mapping.outcome, "concurrent_request_reused");
+});
+
+Deno.test("every lease election records the elected holder", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const reserve = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("),
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress("),
+  );
+  // The delegated-write grant is keyed on election identity, so an election that
+  // forgets to record its holder would silently strip a real executor's grant.
+  const elections = reserve.split("v_executor := true;").length - 1;
+  assertEquals(elections, 3);
+  const holderWrites =
+    reserve.split("lease_holder_request_id = p_request_id").length - 1;
+  assertEquals(holderWrites, 3);
+  // The first reserved row elects itself at insert time.
+  assertStringIncludes(reserve, "attempt_count, lease_expires_at, lease_holder_request_id");
+  assertStringIncludes(reserve, "1, now() + interval '90 seconds', p_request_id");
+});
+
+Deno.test("a dropped failure write is reported rather than read as success", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  // The RPC must report whether the stamp landed, and the old void signature has
+  // to be dropped before the return type can change.
+  assertStringIncludes(
+    sql,
+    "DROP FUNCTION IF EXISTS public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid);",
+  );
+  const fn = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
+  );
+  assertStringIncludes(fn, ") RETURNS boolean");
+  assertStringIncludes(fn, "SELECT EXISTS (SELECT 1 FROM stamped)");
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertStringIncludes(source, "fence_mint_failure_write_dropped");
+});
+
+Deno.test("the recovery scan is bounded by wall clock inside the mint lease", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  // Page count alone does not bound elapsed time. A scan that outruns the 90s
+  // lease lets a second executor be elected while this one still reconciles.
+  assertStringIncludes(source, "if (Date.now() - startedAt >= budgetMs) break");
+  assertStringIncludes(source, "budgetMs: 30000,");
+  // Budget exhaustion must leave the absence unproven, never authorise a create.
+  assertStringIncludes(source, "if (!exact.length && !paged.exhausted)");
 });

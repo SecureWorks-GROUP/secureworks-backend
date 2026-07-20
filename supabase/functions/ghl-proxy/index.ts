@@ -289,9 +289,15 @@ async function fetchOpportunityPages(args: {
   limit?: number
   maxPages?: number
   perPageTimeoutMs?: number
+  budgetMs?: number
 }) {
   const limit = Math.min(args.limit || 100, 100)
   const maxPages = Math.min(args.maxPages || 20, 50)
+  // Wall-clock ceiling for the whole scan. Page count alone does not bound
+  // elapsed time, and a scan that outruns the caller's mint lease lets a second
+  // executor be elected for the same identity while this one still reconciles.
+  const startedAt = Date.now()
+  const budgetMs = args.budgetMs ?? Infinity
   const opportunities: any[] = []
   const seenIds = new Set<string>()
   let startAfter: string | number | null = null
@@ -308,6 +314,9 @@ async function fetchOpportunityPages(args: {
   let contactFilterHonoured = true
 
   for (let page = 1; page <= maxPages; page++) {
+    // Stop before spending another page's timeout past the budget. exhausted
+    // stays false, so callers that must not act on an absence fail closed.
+    if (Date.now() - startedAt >= budgetMs) break
     const params = new URLSearchParams({
       location_id: GHL_LOCATION_ID,
       limit: String(limit),
@@ -1922,6 +1931,7 @@ serve(async (req: Request) => {
             ownerRequestId: String(data.ownerRequestId || input.requestId),
             state: String(data.state || 'reserved') as FenceMintProgress['state'],
             joined: !!data.joined,
+            completedReentry: !!data.completedReentry,
             executor: !!data.executor,
             contactId: data.contactId ? String(data.contactId) : null,
             opportunityId: data.opportunityId ? String(data.opportunityId) : null,
@@ -2063,6 +2073,10 @@ serve(async (req: Request) => {
                 limit: 100,
                 maxPages: 10,
                 perPageTimeoutMs: 8000,
+                // Held well inside the 90s mint lease so reconciliation cannot
+                // outlive the lease and admit a second executor. An exhausted
+                // budget leaves the absence unproven, never authorising a create.
+                budgetMs: 30000,
               })
               const exact = paged.opportunities
                 .map(opportunityShape)
@@ -2118,7 +2132,7 @@ serve(async (req: Request) => {
               signal: AbortSignal.timeout(10000),
             })),
             recordFailure: async ({ requestId, code, message, executingRequestId }) => {
-              const { error } = await sb.rpc('record_fence_job_mint_failure', {
+              const { data, error } = await sb.rpc('record_fence_job_mint_failure', {
                 p_request_id: requestId,
                 p_code: code,
                 p_message: message,
@@ -2127,6 +2141,17 @@ serve(async (req: Request) => {
                 p_executing_request_id: executingRequestId ?? null,
               })
               if (error) throw error
+              // The RPC reports whether the stamp landed. A silent no-op means no
+              // joiner will ever see the real typed conflict, so it must be
+              // visible rather than reading as a successful record.
+              if (data === false) {
+                console.error(JSON.stringify({
+                  event: 'fence_mint_failure_write_dropped',
+                  request_id: requestId,
+                  executing_request_id: executingRequestId ?? null,
+                  code,
+                }))
+              }
             },
           },
         })
