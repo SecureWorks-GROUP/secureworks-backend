@@ -27212,9 +27212,12 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   if (error) throw error
   const assignments = (weekAssignments || []).filter((a: any) =>
     a.status === 'complete' && a.started_at && a.completed_at)
+  // Per-metre scope: every assignment the trade still holds for the week,
+  // minus cancelled ones (a cancelled assignment is not work they can bill).
+  const billableAssignments = (weekAssignments || []).filter((a: any) => a.status !== 'cancelled')
 
   if (isPerMetre) {
-    if (!weekAssignments || weekAssignments.length === 0) throw new Error('No jobs assigned to you for this week')
+    if (billableAssignments.length === 0) throw new Error('No jobs assigned to you for this week')
   } else if (assignments.length === 0) {
     throw new Error('No completed hours found for this week')
   }
@@ -27291,7 +27294,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     const pmRate = Number(rate_per_metre) || 35
 
     const jobMap: Record<string, any> = {}
-    for (const a of (weekAssignments || [])) {
+    for (const a of billableAssignments) {
       const job = a.jobs as any
       if (job?.id) jobMap[job.id] = job
     }
