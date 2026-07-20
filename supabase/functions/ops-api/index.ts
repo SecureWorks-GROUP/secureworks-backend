@@ -188,7 +188,7 @@ import {
   makesafeIntakeGoldenReplay as _makesafeIntakeGoldenReplay,
 } from './makesafe_intake_golden_replay.ts'
 import {
-  loadDeterministicIntakeMode as _loadDeterministicIntakeMode,
+  loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
   runDeterministicIntake as _runDeterministicIntake,
 } from './makesafe_deterministic_intake_runtime.ts'
 // M1.5 cost hardening — local PDF text extraction, per-builder template parsers, and
@@ -2229,8 +2229,9 @@ if (import.meta.main) serve(async (req: Request) => {
   //              PRIVILEGED: may approve / create live jobs / authorise.
   //   jwt      — a logged-in Supabase user (role admin/owner = privileged).
   //   routine  — the LESSER MAKESAFE_ROUTINE_KEY held by the make-safe automation.
-  //              May create/read DRAFTS only; rejected by approve/authorise and
-  //              forced-to-draft on live-job creation. NEVER privileged.
+  //              May read/create drafts and trigger the DB-allowlisted deterministic
+  //              scanner; rejected by direct approve/authorise and cannot set or widen
+  //              rollout authority. Forced-to-draft on direct live-job creation.
   // The routine key is a DISTINCT secret from SW_API_KEY; the routine env carries the
   // routine key ONLY, never SW_API_KEY (morning provisioning discipline). The env var
   // may be UNSET until provisioned, so we only ever match it when it is non-empty;
@@ -2328,6 +2329,11 @@ if (import.meta.main) serve(async (req: Request) => {
       // Golden-set and deterministic cutover replays are read-only, key-less, no writes.
       'intake_golden_replay',
       'makesafe_deterministic_intake_replay',
+      // Ruling 5 terminal-skill hook: exact allowlist in, sanitized case proposal
+      // out. It carries no source ids/content in its response and creates no case,
+      // draft, job, storage object or health state; its only write is its own
+      // observe sweep position, which is what makes observation cover the window.
+      'makesafe_deterministic_intake_dark_observe',
       'list_makesafe_companies',
       // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
       // normal work-order drafts through the internal auto-approval gate; it never
@@ -2576,6 +2582,10 @@ if (import.meta.main) serve(async (req: Request) => {
         // a PDF attachment + threaded reply within SLA; alert if absent/incomplete.
         // Also runs D5 draft-creation heartbeat on every canary invocation (same
         // every-15-min cadence, no extra cron needed).
+        // Reaching this line proves the request passed the route's API/admin auth.
+        // Persist that fact before running the alarm checks; health expires it after
+        // one cadence interval and never infers readiness from cron existence.
+        const alarmAuthRecorded = await recordMakesafeAlarmAuthentication(client)
         const canaryResult = await _makesafeEmailCanary(client, makeReconAlertSink())
         const heartbeatResult = await _makesafeDraftHeartbeat(client, makeReconAlertSink())
         // B1: extraction-health alarm on the SAME 15-min canary cron. Fires the same
@@ -2585,7 +2595,7 @@ if (import.meta.main) serve(async (req: Request) => {
           // Empty-feed threshold in Perth business hours (config default 6; env override).
           emptyFeedStaleHours: Number(Deno.env.get('MAKESAFE_EMPTY_FEED_STALE_HOURS') || '') || undefined,
         })
-        return json({ ...canaryResult, heartbeat: heartbeatResult, extraction_health: extractionHealthResult })
+        return json({ ...canaryResult, heartbeat: heartbeatResult, extraction_health: extractionHealthResult, alarm_auth_recorded: alarmAuthRecorded })
       }
       // D5 draft-creation heartbeat — standalone action for manual invocation and
       // future dedicated scheduling. Detects "builder emails arriving but 0 new
@@ -2675,8 +2685,9 @@ if (import.meta.main) serve(async (req: Request) => {
           maxPdfExtractions: Number(url.searchParams.get('max_pdf') || '') || undefined,
         }))
       }
-      // Complete deterministic adapter replay. Read-only by construction: no
-      // storage writes, cases, drafts, jobs, approvals, sends or model calls.
+      // Complete deterministic adapter replay. No storage writes, cases, drafts,
+      // jobs, approvals, sends or model calls; its only write is the observe sweep
+      // position, which is what lets repeated replays cover a whole large window.
       // The response contains aggregate counts only, never message bodies or PII.
       case 'makesafe_deterministic_intake_replay': {
         return json(await _runDeterministicIntake(client, {
@@ -2687,6 +2698,48 @@ if (import.meta.main) serve(async (req: Request) => {
           ),
           onlyUnscanned: url.searchParams.get('only_unscanned') === 'true' ||
             body?.only_unscanned === true,
+        }))
+      }
+      // True dark observation: exact named sources/instruction keys, sanitized
+      // case-level proposals, no storage mutation, approval, model call, and no DB
+      // write other than its own observe sweep position.
+      // Routine/privileged callers may use it for the N=1 human old/new
+      // comparison; ordinary JWT users remain denied.
+      case 'makesafe_deterministic_intake_dark_observe': {
+        const darkObserveAllowed = authMode === 'api_key' || authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!darkObserveAllowed) {
+          return json({ error: 'forbidden: makesafe_deterministic_intake_dark_observe requires the routine/privileged ops key or an admin/owner session' }, 403)
+        }
+        const sourceIds = Array.isArray(body?.source_ids)
+          ? body.source_ids
+          : url.searchParams.getAll('source_id')
+        const instructionKeys = Array.isArray(body?.instruction_keys)
+          ? body.instruction_keys
+          : url.searchParams.getAll('instruction_key')
+        const exact = (values: any[], label: string) => {
+          if (values.length > 50 || values.some((value) => typeof value !== 'string' || !value || value !== value.trim())) {
+            throw new ApiError(`${label} must contain at most 50 non-empty exact strings`, 400)
+          }
+          if (new Set(values).size !== values.length) {
+            throw new ApiError(`${label} must not contain duplicates`, 400)
+          }
+          return values as string[]
+        }
+        const allowedSources = exact(sourceIds, 'source_ids')
+        const allowedInstructions = exact(instructionKeys, 'instruction_keys')
+        if (!allowedSources.length && !allowedInstructions.length) {
+          throw new ApiError('source_ids or instruction_keys exact allowlist required', 400)
+        }
+        return json(await _runDeterministicIntake(client, {
+          dryRun: true,
+          days: Math.min(Number(url.searchParams.get('days') || body?.days || '') || 60, 60),
+          onlyUnscanned: url.searchParams.get('only_unscanned') === 'true' ||
+            body?.only_unscanned === true,
+          allowSourcePostIds: allowedSources,
+          allowInstructionKeys: allowedInstructions,
+          includeSanitizedCases: true,
+          requireAllAllowlistMatches: true,
         }))
       }
       case 'makesafe_intake_backfill_report': {
@@ -14254,12 +14307,23 @@ async function scanSesMakesafes(client: any) {
   // One DB-backed authority switch. Deterministic mode has no code path to the
   // legacy model extraction below and therefore cannot silently fall back to AI.
   // Rollback changes this one row back to legacy for the next scan.
-  const intakeMode = await _loadDeterministicIntakeMode(client)
-  if (intakeMode === 'deterministic') {
+  const rollout = await _loadDeterministicRolloutControls(client)
+  if (rollout.mode === 'deterministic') {
     return await _runDeterministicIntake(client, {
       dryRun: false,
       days: 60,
-      onlyUnscanned: true,
+      // Exact allowlists make the read narrow at case selection time. Include
+      // already-scanned sources so a configured key can be proved on every run;
+      // settled cases then replay with zero new business writes rather than a
+      // missing key being mistaken for a successful empty scan. The window read
+      // is capped per run and split oldest-unscanned/newest, and allowlisted
+      // sources are read by id, so scan cost stays flat as the mailbox grows
+      // without any in-window source being starved. One stale entry only shows up
+      // as an unmatched count instead of poisoning every later scan.
+      onlyUnscanned: false,
+      maxCases: rollout.maxCases,
+      allowSourcePostIds: rollout.sourcePostIds,
+      allowInstructionKeys: rollout.instructionKeys,
       approveDraft: approveIntakeDraft,
     })
   }
@@ -16093,6 +16157,20 @@ async function scanSesMakesafes(client: any) {
   }
 }
 
+async function recordMakesafeAlarmAuthentication(client: any, nowIso = new Date().toISOString()) {
+  const { error } = await client.from('makesafe_intake_health').upsert({
+    id: true,
+    alarm_auth_verified_at: nowIso,
+    alarm_auth_action: 'makesafe_email_canary',
+    updated_at: nowIso,
+  }, { onConflict: 'id' })
+  if (error) {
+    console.error('[ops-api] authenticated alarm readiness proof could not be persisted:', error.message || error)
+    return false
+  }
+  return true
+}
+
 // ── D-a: intake_health — the one-call health check ───────────────────────────
 // Read-only. The single call the terminal skill and the morning report make first:
 // is the classifier key alive? is the cron on? is auto-file on? how many drafts /
@@ -16104,24 +16182,26 @@ async function intakeHealth(client: any) {
 
   const { data: health } = await client.from('makesafe_intake_health')
     .select('*').eq('id', true).maybeSingle()
-  const { data: settings } = await client.from('makesafe_cron_settings')
-    .select('cron_enabled, auto_file_enabled, enabled_at, enabled_by, updated_at')
+  const { data: settings, error: settingsError } = await client.from('makesafe_cron_settings')
+    .select('cron_enabled, auto_file_enabled, enabled_at, enabled_by, updated_at, intake_mode, deterministic_max_cases_per_run, deterministic_source_allowlist, deterministic_instruction_allowlist')
     .eq('id', true).maybeSingle()
   const { data: sync } = await client.from('sync_state')
     .select('last_successful_sync_at, last_attempt_at, mode, pending_attachments, last_error')
     .eq('mailbox', _SES_MAILBOX).maybeSingle()
   const { data: alarmSettings, error: alarmSettingsError } = await client.from('makesafe_notify_settings')
     .select('alarm_enabled, alarm_phones').eq('id', true).maybeSingle()
-  // The observed edge-gateway 401 lives in request logs, not a durable application row.
-  // Do not turn absence of that evidence into "ready": authentication remains explicitly
-  // unverified until a read-side gateway-status source is wired or a supervised drill is
-  // filed. Recipient/switch facts are still useful and truthful now.
+  // Authentication is proved only by a fresh timestamp written after the protected
+  // canary route passed auth. Cron existence and configured recipients cannot make
+  // this ready by themselves.
   const alarmReadiness = _alarmReadinessFacts({
     alarmEnabled: alarmSettingsError ? null : (alarmSettings?.alarm_enabled ?? null),
     recipientCount: alarmSettingsError
       ? null
       : (Array.isArray(alarmSettings?.alarm_phones) ? alarmSettings.alarm_phones.filter(Boolean).length : 0),
-    latestHttpStatus: null,
+    latestAuthenticatedAt: health?.alarm_auth_action === 'makesafe_email_canary'
+      ? health?.alarm_auth_verified_at || null
+      : null,
+    nowIso,
     settingsReadError: alarmSettingsError?.message || null,
   })
 
@@ -16180,12 +16260,19 @@ async function intakeHealth(client: any) {
   }
 
   const status = String(health?.extraction_status || 'unknown')
+  const intakeMode = settingsError
+    ? 'unknown'
+    : settings?.intake_mode === 'legacy' || settings?.intake_mode === 'deterministic'
+    ? settings.intake_mode
+    : 'unknown'
   return {
     ok: true,
     generated_at: nowIso,
-    // healthy = classifier extracting AND nothing unaccounted. This is the single
-    // boolean the morning report keys off.
-    healthy: status === 'ok' && (unaccounted?.count === 0),
+    intake_mode: intakeMode,
+    // No false-ready state: extraction, source accounting, effective authority and
+    // fresh authenticated alarm delivery readiness must all be proved.
+    healthy: status === 'ok' && (unaccounted?.count === 0) &&
+      intakeMode !== 'unknown' && alarmReadiness.ready,
     extraction: {
       status,
       degraded_reason: health?.degraded_reason || null,
@@ -16200,6 +16287,20 @@ async function intakeHealth(client: any) {
       auto_file_enabled: settings?.auto_file_enabled ?? null,
       enabled_at: settings?.enabled_at || null,
       enabled_by: settings?.enabled_by || null,
+      settings_read_error: settingsError?.message || null,
+    },
+    deterministic_rollout: {
+      max_cases_per_run: settings?.deterministic_max_cases_per_run ?? null,
+      source_allowlist_count: Array.isArray(settings?.deterministic_source_allowlist)
+        ? settings.deterministic_source_allowlist.length
+        : null,
+      instruction_allowlist_count: Array.isArray(settings?.deterministic_instruction_allowlist)
+        ? settings.deterministic_instruction_allowlist.length
+        : null,
+      exact_allowlist_configured: Array.isArray(settings?.deterministic_source_allowlist) &&
+          settings.deterministic_source_allowlist.length > 0 ||
+        Array.isArray(settings?.deterministic_instruction_allowlist) &&
+          settings.deterministic_instruction_allowlist.length > 0,
     },
     alarm_readiness: alarmReadiness,
     last_poll: {

@@ -17,6 +17,19 @@
 > expected to reproduce exactly against the current runtime. Re-run the replay
 > and file fresh evidence before quoting these counts as current.
 
+Current code now exposes two sanitized evidence surfaces for that required rerun:
+
+- `makesafe_deterministic_intake_replay` returns aggregate totals plus a
+  case-grain `identity_floor` denominator, numerator, percentage and per-builder
+  breakdown, sufficient to calculate the known-builder threshold without filing PII.
+- `makesafe_deterministic_intake_dark_observe` requires exact source ids or
+  instruction keys and returns hashed case handles, proposed outcomes, reasons and
+  identity-evidence booleans. It returns none of the supplied ids/keys, names,
+  addresses, refs, message content, attachment names or URLs.
+
+No current production figures are claimed here. Merge is not deploy, and collecting
+new production evidence remains separately approved read-only operator work.
+
 The replay used the production `emails`, `email_attachments`, and active
 `makesafe_companies` evidence through the local deterministic runtime with
 `dryRun=true`. It returned aggregates only. No message body, source identifier,

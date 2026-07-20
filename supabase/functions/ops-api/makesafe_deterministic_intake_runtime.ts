@@ -1,9 +1,16 @@
 // DB-bound deterministic make-safe intake runtime.
 // deno-lint-ignore-file no-explicit-any
 //
-// Reads the complete bounded source window before planning. Dry-run performs no
-// writes or storage mutations. Live mode is reachable only through the DB-backed
-// cutover switch and never falls back to AI.
+// Reads a capped source window (a sweep half driven by a persisted received_at
+// cursor plus a newest half) together with every allowlisted source by id before
+// planning, so per-run cost is a constant while every in-window source is still
+// eventually read. Live and dry-run runs each advance their own sweep cursor, so
+// that guarantee holds separately in both modes: a live run never moves the
+// dark-observe position and vice versa. Dry-run's only write is that observe
+// cursor - it creates no case, draft, job, storage object or health state, and
+// cutover evidence therefore comes from observation that covers the whole window.
+// Live mode is reachable only through the DB-backed cutover switch and never
+// falls back to AI.
 
 import {
   buildDeterministicIntakePlan,
@@ -25,19 +32,45 @@ export interface DeterministicRuntimeOptions {
   onlyUnscanned?: boolean;
   nowIso?: string;
   maxCases?: number;
+  allowSourcePostIds?: readonly string[];
+  allowInstructionKeys?: readonly string[];
+  includeSanitizedCases?: boolean;
+  requireAllAllowlistMatches?: boolean;
+  maxSources?: number;
   approveDraft?: (client: any, body: any) => Promise<any>;
 }
 
-// An edge invocation has a hard wall clock. Each run commits a bounded slice of
-// cases and stamps them as it goes, so a timeout never discards accounting for
-// drafts and jobs that already exist.
-const DEFAULT_MAX_CASES_PER_RUN = 25;
+export interface DeterministicRolloutControls {
+  mode: "legacy" | "deterministic";
+  maxCases: number;
+  sourcePostIds: readonly string[];
+  instructionKeys: readonly string[];
+}
+
+// There is deliberately no backlog-sized runtime default. The DB starts at one,
+// and both DB and runtime reject caps outside this explicit canary/batch bound.
+const DEFAULT_MAX_CASES_PER_RUN = 1;
+const MAX_CASES_PER_RUN = 10;
+const MAX_ALLOWLIST_ITEMS = 50;
 // Repeat failures must not spend the commit budget, but they still cost time, so
 // one run stops after this many attempts regardless of how many committed.
 const MAX_ATTEMPT_MULTIPLIER = 4;
 // PostgREST caps an unranged response at 1000 rows, so batched source reads page
 // below that cap rather than silently truncating.
 const SOURCE_PAGE_SIZE = 500;
+// A scheduled run reads at most this many window rows regardless of how large the
+// mailbox has grown. Allowlisted sources are read separately by id, so a named
+// source is still proved on every run even once it has aged out of the newest
+// rows, and already-scanned rows inside the bound are still revisited.
+const DEFAULT_MAX_SOURCES_PER_RUN = 500;
+const MAX_SOURCES_PER_RUN = 2000;
+// The bounded read is split sweep-first / newest-last. Newest-only truncation
+// would bound cost but starve anything that ever falls behind the cap. The sweep
+// half walks the window in received_at order from a cursor persisted across runs
+// and restarts once it reaches the end, so progress never depends on a row being
+// stamped: the vast majority of SES mail never settles a case and would otherwise
+// hold the same oldest rows in front of the read forever.
+const BACKLOG_READ_SHARE = 0.5;
 
 export interface DeterministicRuntimeReport {
   ok: true;
@@ -62,6 +95,80 @@ export interface DeterministicRuntimeReport {
   // True when the run spent its attempt ceiling without committing a single case.
   // Repeat failures crowding out advanceable work is then visible, not silent.
   attempt_cap_reached_without_commit: boolean;
+  selection: {
+    source_allowlist_count: number;
+    instruction_allowlist_count: number;
+    selected_cases: number;
+    selected_sources: number;
+    // Entries that genuinely did not resolve: every source id is read by id, and
+    // every instruction key counted here either had its sources seeded by id or
+    // came from an uncapped run that saw the whole window.
+    unmatched_source_allowlist: number;
+    unmatched_instruction_allowlist: number;
+    // Instruction keys that a capped run could not have proved either way. These
+    // are never reported as stale and never fail a run closed.
+    cap_exposed_instruction_allowlist: number;
+  };
+  // Per-run read bound. cap_reached means older rows in the window were not read
+  // this run; allowlisted sources are read by id and are never dropped by it.
+  source_read: {
+    cap: number;
+    backlog_cap: number;
+    backlog_rows: number;
+    recent_rows: number;
+    window_rows: number;
+    seed_rows: number;
+    cap_reached: boolean;
+    // Sweep position this run started from and the one the next run starts from.
+    // null means the sweep reached the end of the window and restarts at its
+    // oldest row, which is what makes the cap a rotation rather than a truncation.
+    cursor_at: string | null;
+    cursor_post_id: string | null;
+    next_cursor_at: string | null;
+    next_cursor_post_id: string | null;
+  };
+  // Evidence gates read this, not totals.unaccounted on its own. A capped run
+  // only accounts for the rows it read, so its zero-unaccounted result is not a
+  // statement about the window and must not count as clean dark-observe or
+  // cutover evidence.
+  evidence: {
+    source_accounting_complete: boolean;
+    zero_unaccounted_proved: boolean;
+    caveats: string[];
+  };
+  identity_floor: {
+    unit: "canonical_case";
+    known_builder_work_candidates: number;
+    reached: number;
+    shortfall: number;
+    percentage: number | null;
+    formula: "reached / known_builder_work_candidates * 100";
+    by_builder: Record<
+      string,
+      { candidates: number; reached: number; shortfall: number }
+    >;
+  };
+  proposed_cases?: Array<{
+    case_key_sha256: string;
+    outcome: DeterministicCasePlan["state"];
+    reason_code: DeterministicCasePlan["reasonCode"];
+    builder: string;
+    job_family: string | null;
+    source_count: number;
+    blocked_reasons: readonly string[];
+    missing_fields: readonly string[];
+    conflicting_field_names: string[];
+    parent_relation: DeterministicCasePlan["parentRelation"];
+    identity_evidence: {
+      known_company: boolean;
+      external_reference: boolean;
+      builder_work_order: boolean;
+      builder_purchase_order: boolean;
+      client_name: boolean;
+      site_address: boolean;
+      designated_pdf: boolean;
+    };
+  }>;
   by_builder_and_outcome: Record<string, Record<string, number>>;
   by_builder_and_reason: Record<string, Record<string, number>>;
   // Non-PII failure classification. Keys are message classes, never source content.
@@ -118,13 +225,93 @@ export async function loadDeterministicIntakeMode(
   return selectIntakeMode(data?.intake_mode);
 }
 
-async function fetchAll(
+function exactAllowlist(values: unknown, label: string): string[] {
+  if (!Array.isArray(values) || values.length > MAX_ALLOWLIST_ITEMS) {
+    throw new Error(
+      `${label} must be an array of at most ${MAX_ALLOWLIST_ITEMS} exact values`,
+    );
+  }
+  const result = values.map((value) => String(value));
+  if (result.some((value) => !value.trim() || value !== value.trim())) {
+    throw new Error(`${label} contains an empty or non-canonical value`);
+  }
+  if (new Set(result).size !== result.length) {
+    throw new Error(`${label} contains duplicate values`);
+  }
+  return result;
+}
+
+/** Reads rollout authority from the single DB settings row. An old schema may
+ * continue in legacy mode, but deterministic mode is never allowed to run when
+ * the cap/allowlist columns cannot be proved. */
+export async function loadDeterministicRolloutControls(
+  client: any,
+): Promise<DeterministicRolloutControls> {
+  const columns = [
+    "intake_mode",
+    "deterministic_max_cases_per_run",
+    "deterministic_source_allowlist",
+    "deterministic_instruction_allowlist",
+  ].join(",");
+  const { data, error } = await client.from("makesafe_cron_settings")
+    .select(columns)
+    .eq("id", true)
+    .maybeSingle();
+  if (error) {
+    const missingControls = String(error.code || "") === "42703" ||
+      /deterministic_(?:max_cases_per_run|source_allowlist|instruction_allowlist).*(?:does not exist|schema cache|column)/i
+        .test(error.message || "");
+    if (!missingControls) {
+      throw new Error(
+        `deterministic rollout controls read failed: ${error.message || error}`,
+      );
+    }
+    const mode = await loadDeterministicIntakeMode(client);
+    if (mode === "deterministic") {
+      throw new Error(
+        "deterministic mode is set but DB rollout controls are unavailable",
+      );
+    }
+    return {
+      mode: "legacy",
+      maxCases: 1,
+      sourcePostIds: [],
+      instructionKeys: [],
+    };
+  }
+  const mode = selectIntakeMode(data?.intake_mode);
+  const maxCases = Number(data?.deterministic_max_cases_per_run);
+  if (
+    !Number.isInteger(maxCases) || maxCases < 1 || maxCases > MAX_CASES_PER_RUN
+  ) {
+    throw new Error(
+      `deterministic rollout cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
+    );
+  }
+  return {
+    mode,
+    maxCases,
+    sourcePostIds: exactAllowlist(
+      data?.deterministic_source_allowlist,
+      "deterministic source allowlist",
+    ),
+    instructionKeys: exactAllowlist(
+      data?.deterministic_instruction_allowlist,
+      "deterministic instruction allowlist",
+    ),
+  };
+}
+
+// Pages like fetchAll but never reads more than `cap` rows, so a caller's read
+// cost is a constant it chose rather than a function of how much history matches.
+async function fetchCapped(
+  cap: number,
   queryFactory: (from: number, to: number) => Promise<any>,
 ): Promise<any[]> {
   const rows: any[] = [];
-  const size = 500;
-  for (let from = 0;; from += size) {
-    const result = await queryFactory(from, from + size - 1);
+  while (rows.length < cap) {
+    const size = Math.min(SOURCE_PAGE_SIZE, cap - rows.length);
+    const result = await queryFactory(rows.length, rows.length + size - 1);
     if (result.error) {
       throw new Error(result.error.message || String(result.error));
     }
@@ -132,7 +319,7 @@ async function fetchAll(
     rows.push(...page);
     if (page.length < size) break;
   }
-  return rows;
+  return rows.slice(0, cap);
 }
 
 // Graph post ids are long. Keep PostgREST .in() URLs comfortably below gateway
@@ -156,15 +343,134 @@ function linksFromBody(
   return [...found].map((url) => ({ url, label: null, sourcePostId: postId }));
 }
 
+// Resolves allowlisted instruction keys to the source ids their persisted case
+// already accounts for, before the bounded window read. Those ids then seed the
+// read by id exactly like the source allowlist, so an instruction key that has a
+// case is cap-proof and a cap-induced miss can never be reported as a stale key.
+// Keys with no persisted case (or a pre-migration DB) simply stay unresolved:
+// they are then treated as cap-exposed rather than stale on a capped run.
+async function resolveInstructionKeySeeds(
+  client: any,
+  instructionKeys: readonly string[],
+): Promise<{ postIds: string[]; capProofKeys: Set<string> }> {
+  const postIds: string[] = [];
+  const capProofKeys = new Set<string>();
+  if (!instructionKeys.length) return { postIds, capProofKeys };
+  const keyByCaseId = new Map<string, string>();
+  try {
+    for (const keys of chunk(instructionKeys)) {
+      const { data, error } = await client.from("makesafe_intake_cases")
+        .select("id,instruction_key")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("instruction_key", keys);
+      if (error) return { postIds: [], capProofKeys: new Set() };
+      for (const row of (data || [])) {
+        if (row?.id && row?.instruction_key) {
+          keyByCaseId.set(row.id, row.instruction_key);
+        }
+      }
+    }
+    for (const ids of chunk([...keyByCaseId.keys()])) {
+      const { data, error } = await client.from("makesafe_intake_case_sources")
+        .select("post_id,case_id")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("case_id", ids);
+      if (error) return { postIds: [], capProofKeys: new Set() };
+      for (const row of (data || [])) {
+        if (!row?.post_id) continue;
+        postIds.push(row.post_id);
+        const key = keyByCaseId.get(row.case_id);
+        if (key) capProofKeys.add(key);
+      }
+    }
+  } catch {
+    return { postIds: [], capProofKeys: new Set() };
+  }
+  return { postIds, capProofKeys };
+}
+
+// Live scanning and dark observation sweep the same window independently, so each
+// owns its own position. Sharing one column would make a live run skip rows an
+// observe run had already passed, and would make pre-cutover observation depend on
+// live runs that do not exist yet.
+const LIVE_CURSOR_COLUMNS: CursorColumns = {
+  at: "deterministic_scan_cursor_at",
+  postId: "deterministic_scan_cursor_post_id",
+};
+const OBSERVE_CURSOR_COLUMNS: CursorColumns = {
+  at: "deterministic_observe_cursor_at",
+  postId: "deterministic_observe_cursor_post_id",
+};
+
+// The sweep position is a (received_at, post_id) tuple, not a bare timestamp. A
+// bare timestamp cursor advanced with `.gt(received_at)` skips every row sharing
+// the boundary timestamp, so more rows at one received_at than the read cap could
+// permanently strand the overflow. Pairing the tie-breaker post_id makes the
+// completeness guarantee hold for any timestamp collision, not just probabilistically.
+type CursorColumns = { at: string; postId: string };
+type SweepCursor = { receivedAt: string; postId: string };
+
+// The sweep cursor is deliberately tolerant on both ends. A pre-migration DB, or
+// a health row that has never been written, simply sweeps from the oldest row
+// every run; that is the old behaviour, not a new failure. Losing the cursor
+// costs coverage, so the run says so through a caveat rather than throwing.
+async function readScanCursor(
+  client: any,
+  columns: CursorColumns,
+): Promise<SweepCursor | null> {
+  try {
+    const { data, error } = await client.from("makesafe_intake_health")
+      .select(`${columns.at},${columns.postId}`)
+      .eq("id", true)
+      .maybeSingle();
+    if (error) return null;
+    const receivedAt = data?.[columns.at] ?? null;
+    if (receivedAt == null) return null;
+    // A legacy row that stored only the timestamp resolves to an empty post_id,
+    // which the tuple filter treats as "the start of this timestamp" and re-reads
+    // the boundary rows rather than skipping them - safe, and self-corrects on the
+    // next persist.
+    return {
+      receivedAt: String(receivedAt),
+      postId: String(data?.[columns.postId] ?? ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function persistScanCursor(
+  client: any,
+  columns: CursorColumns,
+  cursor: SweepCursor | null,
+): Promise<boolean> {
+  try {
+    const { error } = await client.from("makesafe_intake_health").upsert({
+      id: true,
+      [columns.at]: cursor?.receivedAt ?? null,
+      [columns.postId]: cursor?.postId ?? null,
+    }, { onConflict: "id" });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 async function readInputs(
   client: any,
-  options: Required<
-    Pick<DeterministicRuntimeOptions, "days" | "onlyUnscanned" | "nowIso">
-  >,
+  options:
+    & Required<
+      Pick<
+        DeterministicRuntimeOptions,
+        "days" | "onlyUnscanned" | "nowIso" | "maxSources"
+      >
+    >
+    & { seedPostIds: readonly string[]; cursor: SweepCursor | null },
 ): Promise<
   {
     sources: DeterministicSourceItem[];
     profiles: DeterministicCompanyProfile[];
+    read: DeterministicRuntimeReport["source_read"];
   }
 > {
   const since = new Date(Date.parse(options.nowIso) - options.days * 86_400_000)
@@ -182,16 +488,80 @@ async function readInputs(
     "received_at",
     "makesafe_scanned_at",
   ].join(",");
-  const emails = await fetchAll(async (from, to) => {
-    let query = client.from("emails").select(columns)
+  // Two-part, hard-capped read. One run's cost is the cap, not the size of the
+  // mailbox history inside the window, and the cursor-driven sweep half gives the
+  // bound a progress guarantee: every in-window source is eventually planned,
+  // whether or not anything ever stamps it as scanned.
+  const backlogCap = Math.max(
+    1,
+    Math.floor(options.maxSources * BACKLOG_READ_SHARE),
+  );
+  const backlogRows = await fetchCapped(
+    backlogCap,
+    async (from, to) => {
+      let query = client.from("emails").select(columns)
+        .eq("mailbox", SES_MAILBOX)
+        .is("pii_purged_at", null)
+        .gte("received_at", since);
+      if (options.cursor) {
+        const { receivedAt, postId } = options.cursor;
+        // Keyset resume on the (received_at, post_id) tuple: strictly after the
+        // cursor row, which keeps rows that merely share the boundary received_at.
+        query = query
+          .gte("received_at", receivedAt)
+          .or(
+            `received_at.gt."${receivedAt}",and(received_at.eq."${receivedAt}",post_id.gt."${postId}")`,
+          );
+      }
+      return await query
+        .order("received_at", { ascending: true })
+        .order("post_id", { ascending: true })
+        .range(from, to);
+    },
+  );
+  const recentCap = Math.max(0, options.maxSources - backlogRows.length);
+  const recentRows = recentCap === 0 ? [] : await fetchCapped(
+    recentCap,
+    async (from, to) => {
+      let query = client.from("emails").select(columns)
+        .eq("mailbox", SES_MAILBOX)
+        .is("pii_purged_at", null)
+        .gte("received_at", since)
+        .order("received_at", { ascending: false })
+        .range(from, to);
+      if (options.onlyUnscanned) query = query.is("makesafe_scanned_at", null);
+      return await query;
+    },
+  );
+  const byPostId = new Map<string, any>();
+  for (const row of [...backlogRows, ...recentRows]) {
+    if (row?.post_id) byPostId.set(row.post_id, row);
+  }
+  const windowRows = byPostId.size;
+  const missingSeeds = [...new Set(options.seedPostIds)].filter((postId) =>
+    !byPostId.has(postId)
+  );
+  let seedRows = 0;
+  for (const ids of chunk(missingSeeds)) {
+    const { data, error } = await client.from("emails").select(columns)
       .eq("mailbox", SES_MAILBOX)
       .is("pii_purged_at", null)
-      .gte("received_at", since)
-      .order("received_at", { ascending: true })
-      .range(from, to);
-    if (options.onlyUnscanned) query = query.is("makesafe_scanned_at", null);
-    return await query;
-  });
+      .in("post_id", ids);
+    if (error) {
+      throw new Error(
+        `emails allowlist read failed: ${error.message || error}`,
+      );
+    }
+    for (const row of (data || [])) {
+      if (row?.post_id && !byPostId.has(row.post_id)) {
+        byPostId.set(row.post_id, row);
+        seedRows++;
+      }
+    }
+  }
+  const emails = [...byPostId.values()].sort((a, b) =>
+    String(a.received_at).localeCompare(String(b.received_at))
+  );
   const postIds = emails.map((row) => row.post_id).filter(Boolean);
   const attachmentRows: any[] = [];
   for (const ids of chunk(postIds)) {
@@ -256,8 +626,37 @@ async function readInputs(
       links: linksFromBody(row.post_id, body),
     };
   });
-  return { sources, profiles };
+  return {
+    sources,
+    profiles,
+    read: {
+      cap: options.maxSources,
+      backlog_cap: backlogCap,
+      backlog_rows: backlogRows.length,
+      recent_rows: recentRows.length,
+      window_rows: windowRows,
+      seed_rows: seedRows,
+      // Conservative: a run that spent its whole budget cannot prove it saw the
+      // whole window, so it reports as capped even in the boundary case where it
+      // happened to.
+      cap_reached: backlogRows.length + recentRows.length >= options.maxSources,
+      cursor_at: options.cursor?.receivedAt ?? null,
+      cursor_post_id: options.cursor?.postId ?? null,
+      // A short sweep page means the cursor reached the end of the window, so the
+      // next run restarts at its oldest row. A full page leaves the cursor on the
+      // last row read, which is what stops the same rows being re-read forever.
+      // The tuple pins both the received_at and its tie-breaker post_id.
+      next_cursor_at: backlogRows.length >= backlogCap
+        ? String(backlogRows[backlogRows.length - 1].received_at)
+        : null,
+      next_cursor_post_id: backlogRows.length >= backlogCap
+        ? String(backlogRows[backlogRows.length - 1].post_id)
+        : null,
+    },
+  };
 }
+
+export const _readInputsForTest = readInputs;
 
 function byBuilderOutcome(
   plan: DeterministicIntakePlan,
@@ -291,6 +690,132 @@ function byBuilderReason(
       intakeCase.sourcePostIds.length;
   }
   return result;
+}
+
+function selectedPlan(
+  fullPlan: DeterministicIntakePlan,
+  sourcePostIds: readonly string[],
+  instructionKeys: readonly string[],
+): DeterministicIntakePlan {
+  const sourceSet = new Set(sourcePostIds);
+  const instructionSet = new Set(instructionKeys);
+  const cases = fullPlan.cases.filter((intakeCase) =>
+    instructionSet.has(intakeCase.instructionKey) ||
+    intakeCase.sourcePostIds.some((postId) => sourceSet.has(postId))
+  );
+  const sourceClassifications = cases.flatMap((intakeCase) =>
+    intakeCase.sourceClassifications
+  );
+  const uniqueSources = new Set(
+    sourceClassifications.map((item) => item.postId),
+  );
+  return {
+    ...fullPlan,
+    cases,
+    sourceClassifications,
+    totals: {
+      sources: uniqueSources.size,
+      cases: cases.length,
+      confirmed:
+        sourceClassifications.filter((item) =>
+          item.outcome === "confirmed_canonical_input"
+        ).length,
+      blocked:
+        sourceClassifications.filter((item) =>
+          item.outcome === "visible_blocked_with_recovery"
+        ).length,
+      exceptions:
+        sourceClassifications.filter((item) =>
+          item.outcome === "reason_coded_exception"
+        ).length,
+      nonWork:
+        sourceClassifications.filter((item) =>
+          item.outcome === "accounted_non_work"
+        ).length,
+      unaccounted: uniqueSources.size -
+        new Set(sourceClassifications.map((item) => item.postId)).size,
+    },
+  };
+}
+
+function identityFloorFacts(
+  plan: DeterministicIntakePlan,
+): DeterministicRuntimeReport["identity_floor"] {
+  const excludedReasons = new Set([
+    "cancellation",
+    "duplicate",
+    "revision",
+    "non_makesafe",
+  ]);
+  const candidates = plan.cases.filter((intakeCase) =>
+    Boolean(intakeCase.identity.companyId) &&
+    intakeCase.state !== "accounted_non_wo" &&
+    !excludedReasons.has(String(intakeCase.reasonCode || ""))
+  );
+  const byBuilder: DeterministicRuntimeReport["identity_floor"]["by_builder"] =
+    {};
+  let reached = 0;
+  for (const intakeCase of candidates) {
+    const builder = intakeCase.identity.builderSlug || "known";
+    byBuilder[builder] ||= { candidates: 0, reached: 0, shortfall: 0 };
+    byBuilder[builder].candidates++;
+    const reaches = intakeCase.state === "confirmed_live_job" ||
+      intakeCase.state === "blocked_live_job";
+    if (reaches) {
+      reached++;
+      byBuilder[builder].reached++;
+    } else byBuilder[builder].shortfall++;
+  }
+  return {
+    unit: "canonical_case",
+    known_builder_work_candidates: candidates.length,
+    reached,
+    shortfall: candidates.length - reached,
+    percentage: candidates.length === 0
+      ? null
+      : Math.round((reached / candidates.length) * 10_000) / 100,
+    formula: "reached / known_builder_work_candidates * 100",
+    by_builder: byBuilder,
+  };
+}
+
+async function sha256Hex(value: string | Uint8Array): Promise<string> {
+  const bytes = typeof value === "string"
+    ? new TextEncoder().encode(value)
+    : value;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    bytes as unknown as BufferSource,
+  );
+  return [...new Uint8Array(digest)].map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+async function sanitizedCases(
+  plan: DeterministicIntakePlan,
+): Promise<NonNullable<DeterministicRuntimeReport["proposed_cases"]>> {
+  return await Promise.all(plan.cases.map(async (intakeCase) => ({
+    case_key_sha256: await sha256Hex(intakeCase.instructionKey),
+    outcome: intakeCase.state,
+    reason_code: intakeCase.reasonCode,
+    builder: intakeCase.identity.builderSlug || "unknown",
+    job_family: intakeCase.identity.jobFamily || null,
+    source_count: intakeCase.sourcePostIds.length,
+    blocked_reasons: intakeCase.blockedReasons,
+    missing_fields: intakeCase.missingFields,
+    conflicting_field_names: Object.keys(intakeCase.conflictingFields).sort(),
+    parent_relation: intakeCase.parentRelation,
+    identity_evidence: {
+      known_company: Boolean(intakeCase.identity.companyId),
+      external_reference: Boolean(intakeCase.identity.externalRefCanonical),
+      builder_work_order: Boolean(intakeCase.identity.builderWoCanonical),
+      builder_purchase_order: Boolean(intakeCase.identity.builderPoCanonical),
+      client_name: Boolean(intakeCase.identity.clientName),
+      site_address: Boolean(intakeCase.identity.siteAddress),
+      designated_pdf: intakeCase.recoveryCursor.sideEffectKeys.pdfs.length > 0,
+    },
+  })));
 }
 
 function sourceRole(plan: DeterministicCasePlan, postId: string): string {
@@ -410,11 +935,12 @@ function casePayload(
 
 async function stageAttachments(
   client: any,
+  caseId: string,
   plan: DeterministicCasePlan,
   sources: Map<string, DeterministicSourceItem>,
   onStorageBlocker: (blocker: string) => void,
 ): Promise<any[]> {
-  const result: any[] = [];
+  const result = new Map<string, any>();
   const attachments = plan.sourcePostIds.flatMap((id) =>
     sources.get(id)?.attachments || []
   )
@@ -423,13 +949,6 @@ async function stageAttachments(
       (/pdf/i.test(a.contentType || "") || /\.pdf$/i.test(a.name || ""))
     );
   for (const attachment of attachments) {
-    const safeName = (attachment.name || "work-order.pdf").replace(
-      /[^a-zA-Z0-9._-]/g,
-      "_",
-    ).slice(-80);
-    const path = `makesafe-deterministic/${
-      encodeURIComponent(plan.instructionFingerprint)
-    }/${encodeURIComponent(attachment.id)}/${safeName}`;
     const { data: blob, error: downloadError } = await client.storage.from(
       "makesafe-emails",
     ).download(attachment.storagePath!);
@@ -438,27 +957,98 @@ async function stageAttachments(
       continue;
     }
     const bytes = new Uint8Array(await blob.arrayBuffer());
-    const { error: uploadError } = await client.storage.from("job-documents")
-      .upload(path, bytes, {
-        contentType: "application/pdf",
-        upsert: true,
+    const contentSha256 = await sha256Hex(bytes);
+    const artifactKey = `pdf:${plan.instructionKey}:sha256:${contentSha256}`;
+    if (result.has(artifactKey)) continue;
+
+    const { data: existing, error: existingError } = await client.from(
+      "makesafe_intake_artifacts",
+    )
+      .select("case_id,artifact_key,status,storage_locator")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .eq("artifact_key", artifactKey)
+      .maybeSingle();
+    if (existingError) {
+      throw new Error(
+        `artifact ledger read failed: ${
+          existingError.message || existingError
+        }`,
+      );
+    }
+    let path = existing?.status === "completed"
+      ? existing.storage_locator
+      : null;
+    if (existing && existing.case_id !== caseId) {
+      throw new Error("artifact ledger case mismatch");
+    }
+    if (!path) {
+      path = `makesafe-deterministic/${
+        encodeURIComponent(plan.instructionFingerprint)
+      }/sha256-${contentSha256}.pdf`;
+      const { error: uploadError } = await client.storage.from("job-documents")
+        .upload(path, bytes, {
+          contentType: "application/pdf",
+          upsert: true,
+        });
+      if (uploadError) {
+        onStorageBlocker("job-documents_upload_failed");
+        continue;
+      }
+      const { error: ledgerError } = await client.from(
+        "makesafe_intake_artifacts",
+      ).insert({
+        org_id: DEFAULT_ORG_ID,
+        case_id: caseId,
+        artifact_key: artifactKey,
+        artifact_kind: "pdf",
+        status: "completed",
+        storage_locator: path,
+        evidence: {
+          content_sha256: contentSha256,
+          size_bytes: bytes.byteLength,
+        },
+        recovery_cursor: { version: DETERMINISTIC_INTAKE_VERSION },
+        completed_at: new Date().toISOString(),
       });
-    if (uploadError) {
-      onStorageBlocker("job-documents_upload_failed");
-      continue;
+      if (ledgerError && String(ledgerError.code) !== "23505") {
+        throw new Error(
+          `artifact ledger insert failed: ${
+            ledgerError.message || ledgerError
+          }`,
+        );
+      }
+      if (ledgerError) {
+        const { data: raced, error: racedError } = await client.from(
+          "makesafe_intake_artifacts",
+        )
+          .select("case_id,artifact_key,status,storage_locator")
+          .eq("org_id", DEFAULT_ORG_ID)
+          .eq("artifact_key", artifactKey)
+          .maybeSingle();
+        if (
+          racedError || raced?.case_id !== caseId ||
+          raced?.status !== "completed"
+        ) {
+          throw new Error(
+            "artifact ledger race did not resolve to the approved case",
+          );
+        }
+        path = raced.storage_locator;
+      }
     }
     const { data: publicUrl } = client.storage.from("job-documents")
       .getPublicUrl(path);
-    result.push({
+    result.set(artifactKey, {
       name: attachment.name,
       file_name: attachment.name,
       storage_url: path,
       pdf_url: publicUrl?.publicUrl || null,
       is_work_order: true,
-      deterministic_artifact_key: `pdf:${plan.instructionKey}:${attachment.id}`,
+      deterministic_artifact_key: artifactKey,
+      content_sha256: contentSha256,
     });
   }
-  return result;
+  return [...result.values()];
 }
 
 async function findCase(
@@ -572,6 +1162,7 @@ async function findDraft(
 
 async function ensureDraftAndJob(
   client: any,
+  caseId: string,
   plan: DeterministicCasePlan,
   sourceMap: Map<string, DeterministicSourceItem>,
   approveDraft: (client: any, body: any) => Promise<any>,
@@ -591,6 +1182,7 @@ async function ensureDraftAndJob(
     const primary = sourceMap.get(plan.primarySourcePostId)!;
     const attachments = await stageAttachments(
       client,
+      caseId,
       plan,
       sourceMap,
       onStorageBlocker,
@@ -814,20 +1406,28 @@ async function insertCaseAndSources(
   };
 }
 
+// A run that filed nothing because its configuration sat outside the read cap is
+// not a successful extraction. It must degrade the durable health row too, or the
+// alarm and morning-report surfaces keep reading a fresh success while the scan
+// response is the only place the caveat exists.
 async function writeHealth(
   client: any,
   nowIso: string,
   writeFailures: number,
   draftsCreated: number,
   jobsCreated: number,
+  degradedReason?: string,
 ): Promise<void> {
+  const reason = writeFailures > 0
+    ? "deterministic_write_failure"
+    : (degradedReason ?? null);
   const { error } = await client.from("makesafe_intake_health").upsert({
     id: true,
-    extraction_status: writeFailures > 0 ? "degraded" : "ok",
-    degraded_reason: writeFailures > 0 ? "deterministic_write_failure" : null,
-    degraded_since: writeFailures > 0 ? nowIso : null,
+    extraction_status: reason ? "degraded" : "ok",
+    degraded_reason: reason,
+    degraded_since: reason ? nowIso : null,
     last_scan_at: nowIso,
-    ...(writeFailures === 0 ? { last_successful_extraction_at: nowIso } : {}),
+    ...(reason ? {} : { last_successful_extraction_at: nowIso }),
     last_scan_drafts_created: draftsCreated,
     last_scan_auto_filed: jobsCreated,
     intake_mode: "deterministic",
@@ -849,8 +1449,120 @@ export async function runDeterministicIntake(
   const days = Math.max(1, Math.min(options.days ?? 60, 180));
   const nowIso = options.nowIso || new Date().toISOString();
   const onlyUnscanned = options.onlyUnscanned === true;
-  const input = await readInputs(client, { days, onlyUnscanned, nowIso });
-  const plan = buildDeterministicIntakePlan(input.sources, input.profiles);
+  const allowSourcePostIds = exactAllowlist(
+    options.allowSourcePostIds ?? [],
+    "source allowlist",
+  );
+  const allowInstructionKeys = exactAllowlist(
+    options.allowInstructionKeys ?? [],
+    "instruction allowlist",
+  );
+  const hasAllowlist = allowSourcePostIds.length > 0 ||
+    allowInstructionKeys.length > 0;
+  if (!dryRun && !hasAllowlist) {
+    throw new Error(
+      "deterministic live mode requires a non-empty exact DB allowlist",
+    );
+  }
+  if (options.includeSanitizedCases && !hasAllowlist) {
+    throw new Error(
+      "case-level dark observe requires a non-empty exact allowlist",
+    );
+  }
+  const maxSources = Number(options.maxSources ?? DEFAULT_MAX_SOURCES_PER_RUN);
+  if (
+    !Number.isInteger(maxSources) || maxSources < 1 ||
+    maxSources > MAX_SOURCES_PER_RUN
+  ) {
+    throw new Error(
+      `deterministic source read cap must be an integer between 1 and ${MAX_SOURCES_PER_RUN}`,
+    );
+  }
+  const instructionSeeds = await resolveInstructionKeySeeds(
+    client,
+    allowInstructionKeys,
+  );
+  const cursorColumns = dryRun ? OBSERVE_CURSOR_COLUMNS : LIVE_CURSOR_COLUMNS;
+  const cursor = await readScanCursor(client, cursorColumns);
+  const input = await readInputs(client, {
+    days,
+    onlyUnscanned,
+    nowIso,
+    maxSources,
+    cursor,
+    seedPostIds: [...allowSourcePostIds, ...instructionSeeds.postIds],
+  });
+  // Advanced immediately after the read, before any planning or business write can
+  // throw. A run that fails on a stale allowlist still moves the sweep on, so no
+  // configuration fault can pin the window read to the same rows indefinitely.
+  // Dry-run advances its own observe-only position for the same reason: cutover
+  // evidence has to come from observation that eventually covers the whole window,
+  // which a cursor pinned at null could never do.
+  const nextCursor: SweepCursor | null = input.read.next_cursor_at == null
+    ? null
+    : {
+      receivedAt: input.read.next_cursor_at,
+      postId: input.read.next_cursor_post_id ?? "",
+    };
+  const cursorPersisted = await persistScanCursor(
+    client,
+    cursorColumns,
+    nextCursor,
+  );
+  const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
+  const requireAllAllowlistMatches =
+    options.requireAllAllowlistMatches === true ||
+    options.includeSanitizedCases === true;
+  const plan = hasAllowlist
+    ? selectedPlan(fullPlan, allowSourcePostIds, allowInstructionKeys)
+    : fullPlan;
+  const matchedCaseSources = new Set(
+    plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
+  );
+  const matchedCaseKeys = new Set(
+    plan.cases.map((intakeCase) => intakeCase.instructionKey),
+  );
+  // Source ids are always read by id, so an unmatched one is always genuinely
+  // stale. An instruction key is only a fair test when its sources were seeded by
+  // id or the run read the whole window; otherwise the cap, not the key, is the
+  // reason it missed.
+  const unmatchedSourceAllowlist = allowSourcePostIds.filter((postId) =>
+    !matchedCaseSources.has(postId)
+  );
+  const unresolvedInstructionKeys = allowInstructionKeys.filter((key) =>
+    !matchedCaseKeys.has(key)
+  );
+  const capExposedInstructionKeys = input.read.cap_reached
+    ? unresolvedInstructionKeys.filter((key) =>
+      !instructionSeeds.capProofKeys.has(key)
+    )
+    : [];
+  const capExposedSet = new Set(capExposedInstructionKeys);
+  const unmatchedInstructionAllowlist = unresolvedInstructionKeys.filter((
+    key,
+  ) => !capExposedSet.has(key));
+  if (
+    requireAllAllowlistMatches &&
+    (unmatchedSourceAllowlist.length || unmatchedInstructionAllowlist.length)
+  ) {
+    throw new Error(
+      `exact deterministic allowlist did not resolve (${unmatchedSourceAllowlist.length} source ids, ${unmatchedInstructionAllowlist.length} instruction keys)`,
+    );
+  }
+  const caveats: string[] = [];
+  if (input.read.cap_reached) caveats.push("source_read_capped");
+  if (capExposedInstructionKeys.length) {
+    caveats.push("instruction_allowlist_cap_exposed");
+  }
+  if (!cursorPersisted) caveats.push("scan_cursor_unavailable");
+  // Nothing this run could act on was inside the cap, and every unresolved
+  // allowlist entry was cap-exposed rather than stale. That is a no-op the sweep
+  // will resolve on a later run, so it is reported loudly instead of throwing.
+  const capExposedNoOp = !plan.cases.length &&
+    capExposedInstructionKeys.length > 0 &&
+    !unmatchedSourceAllowlist.length &&
+    !unmatchedInstructionAllowlist.length;
+  if (capExposedNoOp) caveats.push("no_cases_readable_within_cap");
   const report: DeterministicRuntimeReport = {
     ok: true,
     mode: "deterministic",
@@ -873,12 +1585,55 @@ export async function runDeterministicIntake(
       job_creation_deferred: 0,
     },
     attempt_cap_reached_without_commit: false,
+    selection: {
+      source_allowlist_count: allowSourcePostIds.length,
+      instruction_allowlist_count: allowInstructionKeys.length,
+      selected_cases: plan.cases.length,
+      selected_sources: plan.totals.sources,
+      unmatched_source_allowlist: unmatchedSourceAllowlist.length,
+      unmatched_instruction_allowlist: unmatchedInstructionAllowlist.length,
+      cap_exposed_instruction_allowlist: capExposedInstructionKeys.length,
+    },
+    source_read: input.read,
+    evidence: {
+      source_accounting_complete: !input.read.cap_reached,
+      zero_unaccounted_proved: !input.read.cap_reached &&
+        plan.totals.unaccounted === 0,
+      caveats,
+    },
+    identity_floor: identityFloorFacts(plan),
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),
     write_failure_reasons: {},
     storage_blockers: [],
   };
+  if (options.includeSanitizedCases) {
+    report.proposed_cases = await sanitizedCases(plan);
+  }
   if (dryRun) return report;
+  // A stale entry (aged out, deleted, or no longer grouping into a case) is
+  // reported through selection.unmatched_* and the run continues on whatever the
+  // allowlist did resolve. Only a fully unresolved allowlist fails closed, so a
+  // missing key is never mistaken for a successful empty scan.
+  // Volume meeting configuration must never poison the cron. When the only reason
+  // nothing resolved is that the sources sit outside this run's cap, the run ends
+  // as a reported no-op and the sweep brings them inside the cap on a later run.
+  if (capExposedNoOp) {
+    await writeHealth(
+      client,
+      nowIso,
+      0,
+      0,
+      0,
+      "deterministic_no_cases_readable_within_cap",
+    );
+    return report;
+  }
+  if (!plan.cases.length) {
+    throw new Error(
+      `exact deterministic allowlist resolved no cases (${report.selection.unmatched_source_allowlist} source ids, ${report.selection.unmatched_instruction_allowlist} instruction keys unmatched, ${report.selection.cap_exposed_instruction_allowlist} instruction keys unread inside the per-run cap)`,
+    );
+  }
   if (!options.approveDraft) {
     throw new Error(
       "deterministic live mode requires the guarded approval callback",
@@ -892,7 +1647,14 @@ export async function runDeterministicIntake(
       report.storage_blockers.push(blocker);
     }
   };
-  const maxCases = Math.max(1, options.maxCases ?? DEFAULT_MAX_CASES_PER_RUN);
+  const maxCases = Number(options.maxCases ?? DEFAULT_MAX_CASES_PER_RUN);
+  if (
+    !Number.isInteger(maxCases) || maxCases < 1 || maxCases > MAX_CASES_PER_RUN
+  ) {
+    throw new Error(
+      `deterministic runtime cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
+    );
+  }
   // A case can only advance if it is new, if it carries evidence the case row has
   // not accounted yet, or if its persisted state no longer matches what this plan
   // would write for the job it already has. Everything else is stuck until more
@@ -936,7 +1698,6 @@ export async function runDeterministicIntake(
     ...jobRetries.slice(0, retryHead),
     ...fresh,
     ...jobRetries.slice(retryHead),
-    ...plan.cases.filter((c) => ranked.get(c) === "stuck"),
   ];
   // The budget counts cases that actually committed, so a failure never spends a
   // commit slot. Attempts still carry their own ceiling so one run stays bounded.
@@ -981,6 +1742,7 @@ export async function runDeterministicIntake(
       if (wantsJob && transitionAllowed) {
         const live = await ensureDraftAndJob(
           client,
+          saved.caseRow.id,
           casePlan,
           sourceMap,
           options.approveDraft,

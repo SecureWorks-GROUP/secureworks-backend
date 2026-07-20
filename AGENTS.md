@@ -145,7 +145,13 @@ is not automatic. When a function selects a newly added column, apply the
 migration FIRST — otherwise the query 400s and, per the entry above, silently
 reports zero. `jobs.quoted_value`
 (`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
-`daily-digest`, `ops-api` and `reporting-api` all read it.
+`daily-digest`, `ops-api` and `reporting-api` all read it. Deterministic make-safe
+intake also requires `20260721000001_makesafe_intake_production_controls.sql`
+before its matching `ops-api`: health and scan read those rollout/auth columns.
+The migration is inert (`intake_mode` stays `legacy`); do not deploy code first.
+Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual
+intake checks all use the deterministic contract in
+`docs/makesafe-intake-terminal-hook.md`.
 
 ## Fencing Job Mint Invariant
 

@@ -58,13 +58,20 @@ Layered on top of D-a. The dead-key preflight is now one case in a typed failure
   `retryable_failures`, `quarantined`, `item_local_quarantined`,
   `item_local_quarantine_record_failures`, `quarantined_source_ids`).
 - **Alarm readiness facts (read-side, `intake_health` → `alarm_readiness`).** Never infers
-  that the make-safe alarm authenticated just because the cron exists.
-  `authentication.status` is `verified` only on an observed 2xx, `failed` on an observed
-  401/403 (`reason: alarm_invocation_unauthorised`), otherwise `unverified`
-  (`edge_http_status_not_persisted_in_intake_health`). `ready` requires verified auth AND
-  `alarm_enabled` AND at least one recipient. Because the observed gateway status is not
-  yet persisted in a durable row, this currently reads `unverified` — that is deliberate,
-  not a bug. No credentials, recipients, schedules or sending behaviour were changed.
+  that the make-safe alarm authenticated just because the cron exists or a recipient is
+  configured. Authentication is proved only by a fresh timestamp
+  (`makesafe_intake_health.alarm_auth_verified_at`, added by
+  `20260721000001_makesafe_intake_production_controls.sql`) that the protected
+  `makesafe_email_canary` route writes only after passing auth. `authentication.status` is
+  `verified` when that proof is at most `authentication_max_age_minutes` old (one 15-minute
+  canary cadence), `stale` when the proof exists but has expired
+  (`reason: alarm_authentication_proof_stale`), `failed` on an observed 401/403
+  (`reason: alarm_invocation_unauthorised`), otherwise `unverified`
+  (`reason: authenticated_canary_not_observed`). `ready` requires `verified` auth AND
+  `alarm_enabled` AND at least one recipient AND no settings read error. Until a canary has
+  run inside the window this reads `unverified`; after each authenticated canary it reads
+  `verified` and expires one cadence later. No credentials, recipients, schedules or sending
+  behaviour were changed.
 
 ## Migrations
 
@@ -106,7 +113,10 @@ SELECT cron.schedule('makesafe-ses-poll', '*/2 * * * *',
    clears on the next observed successful extraction.
 5. **Confirm switches:** `makesafe_cron_settings.cron_enabled = true` (the master poll gate — a
    bare db push never starts polling) and `auto_file_enabled = true` (Captain D1).
-6. **Health:** `intake_health` → `healthy: true` (classifier ok AND unaccounted = 0).
+6. **Health:** `intake_health` → `healthy: true` (classifier ok AND unaccounted = 0 AND a
+   known `intake_mode` AND `alarm_readiness.ready`). The response also carries `intake_mode`
+   and a `deterministic_rollout` block (`max_cases_per_run`, source/instruction allowlist
+   counts, `exact_allowlist_configured`).
 7. **Proof (Captain's D1 rider — joint accuracy-testing window):** `intake_golden_replay` — read
    each email's replay verdict vs the draft/job actually created; investigate any
    `agreement.draft_presence_match: false` or `family_match: false`. This is the artifact to walk

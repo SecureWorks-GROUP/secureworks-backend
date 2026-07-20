@@ -10,6 +10,12 @@ const migration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const controlsMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260721000001_makesafe_intake_production_controls.sql",
+    import.meta.url,
+  ),
+);
 const rollback = await Deno.readTextFile(
   new URL(
     "../../rollbacks/20260720000002_makesafe_deterministic_intake_mode_rollback.sql",
@@ -23,6 +29,9 @@ const core = await Deno.readTextFile(
   new URL("./makesafe_deterministic_intake.ts", import.meta.url),
 );
 const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+const terminalHook = await Deno.readTextFile(
+  new URL("../../../docs/makesafe-intake-terminal-hook.md", import.meta.url),
+);
 
 Deno.test("cutover migration defaults to legacy and exposes one deterministic switch", () => {
   assertStringIncludes(
@@ -91,7 +100,7 @@ Deno.test("deterministic normal path has no model import or silent fallback", ()
     assert(!core.includes(token), `core must not contain ${token}`);
     assert(!runtime.includes(token), `runtime must not contain ${token}`);
   }
-  assertStringIncludes(index, "if (intakeMode === 'deterministic')");
+  assertStringIncludes(index, "if (rollout.mode === 'deterministic')");
   assertStringIncludes(index, "approveDraft: approveIntakeDraft");
   assertStringIncludes(index, "suppress_manager_notification");
   assertStringIncludes(index, "approvedWorkOrderIdentity");
@@ -99,8 +108,84 @@ Deno.test("deterministic normal path has no model import or silent fallback", ()
   assertStringIncludes(runtime, "ai_calls: 0");
 });
 
-Deno.test("dry-run replay returns aggregate-only output and takes no write branch", () => {
+Deno.test("dry-run replay and exact dark observe take no write branch", () => {
   assertStringIncludes(runtime, "if (dryRun) return report;");
   assertStringIncludes(runtime, "by_builder_and_outcome");
+  assertStringIncludes(runtime, "includeSanitizedCases");
+  assertStringIncludes(
+    index,
+    "case 'makesafe_deterministic_intake_dark_observe'",
+  );
   assert(!runtime.match(/console\.(?:log|error|warn)\s*\(/));
+});
+
+Deno.test("production controls default to N=1, exact empty allowlists and bounded later caps", () => {
+  assertStringIncludes(
+    controlsMigration,
+    "deterministic_max_cases_per_run smallint NOT NULL DEFAULT 1",
+  );
+  assertStringIncludes(controlsMigration, "BETWEEN 1 AND 10");
+  assertStringIncludes(controlsMigration, "deterministic_source_allowlist");
+  assertStringIncludes(
+    controlsMigration,
+    "deterministic_instruction_allowlist",
+  );
+  assertStringIncludes(runtime, "loadDeterministicRolloutControls");
+  assertStringIncludes(runtime, "requires a non-empty exact DB allowlist");
+  assertStringIncludes(index, "requireAllAllowlistMatches: true");
+});
+
+Deno.test("attachment staging uses a content hash and append-only artifact ledger", () => {
+  assertStringIncludes(runtime, "contentSha256");
+  assertStringIncludes(runtime, '"makesafe_intake_artifacts"');
+  assertStringIncludes(runtime, 'artifact_kind: "pdf"');
+  assertStringIncludes(runtime, 'status: "completed"');
+});
+
+Deno.test("deterministic runtime has no assignment, work-order, invoice or communication writer", () => {
+  for (
+    const forbidden of [
+      'from("job_assignments")',
+      'from("work_orders")',
+      'from("xero_invoices")',
+      'from("outbound_messages")',
+      "send_sms",
+      "notifyVerticalManagersSms",
+    ]
+  ) {
+    assert(
+      !runtime.includes(forbidden),
+      `runtime contains forbidden writer ${forbidden}`,
+    );
+  }
+});
+
+Deno.test("ruling 5 terminal skill hook stays deterministic and non-privileged", () => {
+  const routineAllowlist = index.slice(
+    index.indexOf("const ROUTINE_ALLOWED_ACTIONS"),
+    index.indexOf("if (authMode === 'routine'"),
+  );
+  assertStringIncludes(
+    routineAllowlist,
+    "'makesafe_deterministic_intake_dark_observe'",
+  );
+  assertStringIncludes(terminalHook, "Automatic code");
+  assertStringIncludes(terminalHook, "Terminal make-safe skill");
+  assertStringIncludes(terminalHook, "Manual operator");
+  assertStringIncludes(terminalHook, "paid AI extraction API stays off");
+  assertStringIncludes(terminalHook, "may not call\n`approve_intake_draft`");
+});
+
+Deno.test("health exposes effective mode and fresh authenticated alarm proof", () => {
+  assertStringIncludes(controlsMigration, "alarm_auth_verified_at");
+  assertStringIncludes(index, "intake_mode: intakeMode");
+  assertStringIncludes(
+    index,
+    "latestAuthenticatedAt: health?.alarm_auth_action === 'makesafe_email_canary'",
+  );
+  assertStringIncludes(
+    index,
+    "intakeMode !== 'unknown' && alarmReadiness.ready",
+  );
+  assertStringIncludes(index, "recordMakesafeAlarmAuthentication");
 });

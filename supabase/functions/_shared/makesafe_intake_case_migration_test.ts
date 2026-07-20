@@ -193,6 +193,15 @@ Deno.test("B5: rollback is staged and prod-schema clone harness blocks productio
   assert(cloneHarness.includes("MAKESAFE_PROD_SCHEMA_CLONE_URL"));
   assert(cloneHarness.includes("kevgrhcjxspbxgovpmfl"));
   assert(cloneHarness.includes("refusing production"));
+  for (
+    const ordered of [
+      "20260717000001_jobs_quoted_value_generated.sql",
+      "20260720000001_makesafe_intake_cases.sql",
+      "20260720000002_makesafe_deterministic_intake_cutover.sql",
+      "20260721000001_makesafe_intake_production_controls.sql",
+    ]
+  ) assert(cloneHarness.includes(ordered), `clone harness missing ${ordered}`);
+  assert(cloneHarness.includes("for pass in apply reapply"));
 });
 
 Deno.test("M1: impossible state-field combinations are DB checks", () => {
