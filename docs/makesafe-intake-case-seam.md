@@ -34,6 +34,13 @@ This U1 migration does not add or flip that runtime switch.
   lineage and decision authority.
 - `makesafe_intake_drafts` remains the current extraction/approval artifact until
   cutover. Its current schema and runtime behavior are untouched here.
+- `makesafe_companies` is the only existing table this migration alters. Legacy
+  rows predate org scoping and carry a null `org_id`, which would make them
+  permanently unlinkable once the case org check is strict, so they are
+  backfilled to the single existing tenant and the column is closed with NOT
+  NULL. No column DEFAULT is added: an insert that omits `org_id` must fail
+  loudly rather than silently land in a hardcoded tenant. Callers that already
+  supply `org_id` are unaffected.
 - `jobs` remains execution state. A case points directly to one job, independent
   of whether best-effort `makesafe_job_details` creation succeeded. No new case
   identity is copied to `jobs.metadata`.
@@ -89,6 +96,19 @@ derived from that UUID, so live slug drift such as `aj`/`ajs`/`ajbr` does not
 split the key. `normaliser_version` records the one normaliser version used for
 all canonical identity fields. Later adapters must import the shared normaliser
 rather than reproduce ref rules.
+
+The normaliser folds separators to a single hyphen so `WO#12345`, `WO 12345` and
+`WO-12345` are one builder identity. Folding `/` and `:` also keeps them out of
+canonical components, which is what makes the `wo:<wo>/po:<po>` composition
+injective. The separator class is per field, not shared: `.` and `_` are
+separators inside a builder WO (`WO.12345` equals `WO-12345`), but significant
+inside a builder PO, so `PO-1.2` and `PO-1-2` stay two identities. The accepted
+consequence on the WO side is that suffix punctuation is noise (`WO-1234.1`
+equals `WO-1234-1`) while distinct suffix values (`WO-1234.1` versus
+`WO-1234.2`) stay distinct, so revision/stage numbering survives. A builder WO is
+treated as a claim-ref family only when a known prefix actually matches;
+otherwise it stays an opaque builder identity, so `WO 12345` and `REF 12345` are
+never salvaged down to the same bare number.
 
 The S13-safe live unique key is:
 
@@ -201,6 +221,8 @@ hostile set:
 - Same-post/concurrent replay is idempotent and cross-case accounting is loud.
 - Backfill run two performs zero case/source/event/effect writes.
 - Raw/canonical retention, provenance, org scope and slug drift are covered.
+- Per-field separator folding holds: WO separator style folds while distinct WO
+  suffix values stay distinct, and PO dot/underscore stays significant.
 
 The disposable clone SQL additionally exercises actual constraints, trigger-fed
 append-only events, N:1 sources, PO siblings, cycle-in-key reopen and run-twice
@@ -245,6 +267,9 @@ a supplied disposable clone.
 3. Optionally export shadow rows.
 4. Run the manual down script. It drops only the new views, three tables and
    helper functions. Capture, drafts, jobs and existing events remain untouched.
+   The `makesafe_companies.org_id` backfill and NOT NULL are deliberately not
+   reverted: every row already carries the single tenant org, and reopening the
+   null-org hole would be a regression rather than a rollback.
 
 ### After cutover
 
