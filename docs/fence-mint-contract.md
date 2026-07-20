@@ -84,7 +84,7 @@ Rules:
 
 For a brand-new job whose scope is still genuinely empty, `scopeHash` is the known empty-scope cursor and `requiresLoad` is false. Both are derived from the job's current scope emptiness, not from the stored mint outcome and not from `scope_version` alone (the normal `save_scope` path writes `scope_json` without bumping `scope_version`, so version is not a freshness signal). A replay of the same request after scope has been saved therefore returns `requiresLoad: true` and a null `scopeHash` rather than a stale empty-scope cursor. Emptiness is tested server side; `jobs.scope_json` is never read into or transferred through the mint response. The entry funnel can hydrate its existing local draft onto the canonical identity without a redundant `find_job`, `load_job`, or job-number request. For an existing cloud job, `scopeHash` is null and `requiresLoad` is true: checkpoint the local draft, then use the existing authenticated `load_job` path before any cloud write. The mint response never reads or transfers `jobs.scope_json`.
 
-The response also exposes a `Server-Timing` header and `Timing-Allow-Origin: *`. Stage timings contain no client identity.
+The response also exposes a `Server-Timing` header, `Timing-Allow-Origin: *`, and `Access-Control-Expose-Headers: Server-Timing` so the browser can read the stage timings cross-origin. Stage timings contain no client identity.
 
 ## Typed failures
 
@@ -92,17 +92,23 @@ All failures return `{ "error": "...", "code": "...", "details": ... }` and no q
 
 | HTTP | Code | Entry behaviour |
 |---|---|---|
-| 400 | `invalid_request_id`, `invalid_mint_intent`, `contact_identity_required`, `repeat_reason_required` | Keep local draft open. Correct local identity/input. |
+| 400 | `invalid_request`, `invalid_request_id`, `organisation_required`, `invalid_mint_intent`, `contact_required_for_opportunity`, `contact_identity_required`, `invalid_existing_job_evidence`, `repeat_reason_required` | Keep local draft open. Correct local identity/input. |
+| 400 | `mint_payload_not_allowed` | The body carried scope/pricing/quote/PDF/message fields. Send them on their existing guarded paths only. |
+| 400 | `invalid_mint_request` | Reservation input was rejected by the ledger. Fix the input; retrying unchanged never resolves. |
 | 401 | `user_jwt_required`, `invalid_user_jwt` | Keep local/unlinked. Re-authenticate. Do not use the shared key. |
 | 403 | `org_mismatch`, `role_not_allowed`, `caller_identity_mismatch` | Hard identity stop. Never retry under another tenant. |
 | 409 | `mint_in_progress` | Retry the same `requestId`. Do not create a replacement request. |
 | 409 | `idempotency_key_reused` | Hard stop: the same request ID was reused with different evidence. |
-| 409 | `contact_identity_conflict`, `opportunity_contact_conflict`, `opportunity_pipeline_conflict`, `contact_opportunity_job_conflict`, `multiple_active_jobs`, `mapping_uniqueness_conflict` | Surface the conflict. No automatic mutation or mint. |
+| 409 | `contact_identity_conflict`, `opportunity_contact_conflict`, `opportunity_pipeline_conflict`, `opportunity_mapping_conflict`, `contact_opportunity_job_conflict`, `multiple_active_jobs`, `mapping_uniqueness_conflict` | Surface the conflict. No automatic mutation or mint. |
 | 409 | `ambiguous_historical_mapping` | Ask for identity resolution. Historical NULL mappings are never treated as proof that no job exists. |
 | 409 | `stale_existing_job_evidence` | Refresh the client's job list and ask again before a deliberate repeat. |
-| 400 | `invalid_mint_request` | Reservation input was rejected by the ledger. Fix the input; retrying unchanged never resolves. |
-| 500 | `mint_request_not_found`, `mint_owner_not_found`, `canonical_job_missing` | Ledger integrity failure, not a caller conflict. Escalate rather than loop. |
-| 503 | `mint_reconciliation_unproven` | The contact-scoped stamp scan could not be completed, so a create was refused. Retry the same request ID. |
+| 409 | `duplicate_stamped_opportunities` | Two GHL opportunities carry the same mint stamp. Operator reconciliation, never an automatic replacement create. |
+| 413 | `mint_payload_too_large` | The request exceeded the 32 KB cap. Shrink the body; the mint takes identity fields only. |
+| 500 | `mint_request_not_found`, `mint_owner_not_found`, `mint_owner_chain_corrupt`, `canonical_job_missing`, `bound_job_missing` | Ledger integrity failure, not a caller conflict. Escalate rather than loop. |
+| 500/503 | `fence_mint_failed` | Untyped command failure. Retain the local draft and retry the same request ID. |
+| 502 | `ghl_contact_missing`, `ghl_opportunity_missing`, `ghl_request_failed` | GHL was unreachable or returned an unusable identity. Retain the local draft and retry the same request ID. |
+| 503 | `mint_reconciliation_unproven`, `mint_contact_scope_unsupported` | The contact-scoped stamp scan could not be completed, so a create was refused. Retry the same request ID. |
+| 503 | `mint_persistence_failed`, `mint_persistence_invalid`, `mint_completion_incomplete`, `canonical_mapping_incomplete` | Retain the local draft and retry the same request ID. No GHL create occurs before reservation. |
 
 ## Lost-response reconciliation
 
@@ -116,8 +122,6 @@ In those states the scan lists opportunities scoped to the resolved contact and 
 ## Re-entering a completed opportunity
 
 A completed mint keeps its `opportunityId` reserved in the ledger. A later `requestId` supplying that same opportunity, with consistent tenant and contact identity, resolves to the completed canonical job and returns it as a replay. It is never a duplicate mint and never an unresolvable conflict. An identity mismatch on the same opportunity is still `opportunity_mapping_conflict`. Genuinely new work against a completed opportunity requires a separate explicit flow and is out of scope here.
-| 503 | `mint_persistence_failed` | Retain the local draft and retry the same request ID. No GHL create occurs before reservation. |
-| 5xx | GHL/command typed failure | Retain the local draft and retry the same request ID. A stamped GHL opportunity is reconciled before replacement creation. |
 
 ## Idempotency and partial-failure model
 
