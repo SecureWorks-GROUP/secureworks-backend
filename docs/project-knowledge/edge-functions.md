@@ -80,6 +80,12 @@ All in `supabase/functions/`. Deploy with:
 ### daily-digest
 - **Purpose**: Exception-based daily business health summary
 - **Deploy**: NO --no-verify-jwt (called by pg_cron)
+- **Actions**: no `action` param (full digest), `weekly_pulse`, `ceo_financial_brief`,
+  `financial_snapshot`, `stale_followup`
+- **Retired actions**: `nudge_check`, `eod_followup`, `shaun_brief` were message-delivery
+  handlers, removed 2026-07-20. They now return 410 with `{ error: "Retired action: ..." }`,
+  and their pg_cron schedules were unscheduled by
+  `20260720000003_remove_retired_messaging_crons.sql`. Do not re-add callers.
 
 ### ops-api `--no-verify-jwt`
 - **Purpose**: Ops dashboard CRUD — scheduling, POs, WOs, pipeline, job detail, Xero push
