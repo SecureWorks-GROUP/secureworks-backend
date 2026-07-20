@@ -130,6 +130,8 @@ DECLARE
   v_request record;
   v_owner record;
   v_job record;
+  v_owner_id uuid;
+  v_seen uuid[];
 BEGIN
   SELECT request_id, org_id, requested_by, type, intent, identity_key, input_fingerprint,
     state, owner_request_id, contact_id, opportunity_id, job_id,
@@ -140,21 +142,32 @@ BEGIN
     RETURN jsonb_build_object('decision', 'conflict', 'code', 'mint_request_not_found', 'message', 'Mint request was not found');
   END IF;
 
-  IF v_request.owner_request_id IS NOT NULL THEN
+  -- Ownership is reassignable more than once: a reserve-time join points at an
+  -- owner that a later bind-time join can itself repoint at a third request. One
+  -- hop stops on an intermediate 'joined' row that never completes, stranding the
+  -- caller on 'continue' forever. The chain is followed to its root instead,
+  -- bounded and cycle guarded; a chain that does not terminate is ledger
+  -- corruption rather than work still in flight.
+  v_owner_id := v_request.request_id;
+  v_seen := ARRAY[]::uuid[];
+  FOR v_hop IN 1..8 LOOP
+    IF v_owner_id = ANY(v_seen) THEN
+      RETURN jsonb_build_object('decision', 'conflict', 'code', 'mint_owner_chain_corrupt', 'message', 'Mint ownership chain contains a cycle');
+    END IF;
+    v_seen := v_seen || v_owner_id;
     SELECT request_id, org_id, requested_by, type, intent, identity_key, input_fingerprint,
       state, owner_request_id, contact_id, opportunity_id, job_id,
       expected_existing_job_ids, repeat_reason, mapping_outcome,
       last_error_code, last_error_message, created_at, updated_at
-    INTO v_owner FROM public.fence_job_mint_requests WHERE request_id = v_request.owner_request_id;
+    INTO v_owner FROM public.fence_job_mint_requests WHERE request_id = v_owner_id;
     IF NOT FOUND THEN
       RETURN jsonb_build_object('decision', 'conflict', 'code', 'mint_owner_not_found', 'message', 'Canonical mint owner was not found');
     END IF;
-  ELSE
-    SELECT request_id, org_id, requested_by, type, intent, identity_key, input_fingerprint,
-      state, owner_request_id, contact_id, opportunity_id, job_id,
-      expected_existing_job_ids, repeat_reason, mapping_outcome,
-      last_error_code, last_error_message, created_at, updated_at
-    INTO v_owner FROM public.fence_job_mint_requests WHERE request_id = v_request.request_id;
+    EXIT WHEN v_owner.owner_request_id IS NULL;
+    v_owner_id := v_owner.owner_request_id;
+  END LOOP;
+  IF v_owner.owner_request_id IS NOT NULL THEN
+    RETURN jsonb_build_object('decision', 'conflict', 'code', 'mint_owner_chain_corrupt', 'message', 'Mint ownership chain exceeded the maximum resolvable depth');
   END IF;
 
   IF v_owner.state = 'complete' AND v_owner.job_id IS NOT NULL THEN
@@ -684,10 +697,15 @@ AS $$
     AND r.org_id = p_org_id
     AND (
       r.requested_by = p_actor_id
+      -- A takeover executor may stamp the owner row it is actually executing on,
+      -- but only while its own attempt is still live. Without the state bound any
+      -- same-org user who once joined this request could expire its lease and
+      -- overwrite its error long after their attempt ended.
       OR EXISTS (
         SELECT 1 FROM public.fence_job_mint_requests c
         WHERE c.owner_request_id = r.request_id
           AND c.org_id = p_org_id AND c.requested_by = p_actor_id
+          AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')
       )
     )
 $$;

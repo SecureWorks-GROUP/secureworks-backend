@@ -788,3 +788,86 @@ Deno.test("migration contract has narrow projections, uniqueness and no outbound
   assertStringIncludes(sql, "'communication_sent', false");
   assertEquals(/send_quote|send_sms|send_email/i.test(sql), false);
 });
+
+Deno.test("an unproven stamp scan fails closed without creating a duplicate opportunity", async () => {
+  let creates = 0;
+  let recordedFailure: string | null = null;
+  const failure = await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A),
+        actorId: "user-1",
+        deps: deps({
+          findStampedOpportunity: () => {
+            throw new FenceMintError(
+              503,
+              "mint_contact_scope_unsupported",
+              "GHL ignored the contact scope filter",
+            );
+          },
+          createStampedOpportunity: async () => {
+            creates++;
+            return {
+              id: "opp-dupe",
+              contactId: "contact-1",
+              pipelineId: FENCE_PIPELINE_ID,
+              name: fenceMintStamp(REQUEST_A),
+            };
+          },
+          recordFailure: async ({ code }) => {
+            recordedFailure = code;
+          },
+        }),
+      }),
+    FenceMintError,
+  );
+  // An absence that was never proven must never authorise a create.
+  assertEquals(creates, 0);
+  assertEquals(failure.status, 503);
+  assertEquals(failure.code, "mint_contact_scope_unsupported");
+  assertEquals(recordedFailure, "mint_contact_scope_unsupported");
+});
+
+Deno.test("progress resolves multi-hop ownership chains with cycle and depth guards", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const progressFn = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public._fence_mint_progress("),
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("),
+  );
+  // A bind-time join can repoint an owner that other requests already point at,
+  // so ownership must be followed to its root rather than exactly one hop.
+  assertStringIncludes(progressFn, "FOR v_hop IN 1..8 LOOP");
+  assertStringIncludes(progressFn, "EXIT WHEN v_owner.owner_request_id IS NULL");
+  assertStringIncludes(progressFn, "v_owner_id := v_owner.owner_request_id");
+  // A cycle or an over-deep chain is ledger corruption, never "still in progress".
+  assertStringIncludes(progressFn, "IF v_owner_id = ANY(v_seen) THEN");
+  assertStringIncludes(progressFn, "'code', 'mint_owner_chain_corrupt'");
+  assertEquals(
+    progressFn.includes("WHERE request_id = v_request.owner_request_id"),
+    false,
+  );
+});
+
+Deno.test("delegated failure writes are bounded to a still-active child attempt", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const fn = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
+  );
+  // Without the state bound, any same-org user who once joined this request could
+  // expire its lease and overwrite its error long after their attempt ended.
+  assertStringIncludes(
+    fn,
+    "AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')",
+  );
+  assertStringIncludes(fn, "AND r.org_id = p_org_id");
+});

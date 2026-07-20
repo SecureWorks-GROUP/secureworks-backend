@@ -301,6 +301,11 @@ async function fetchOpportunityPages(args: {
   // True only when the scan reached the real end of the result set. Callers that
   // must not act on an absence (lost-response reconciliation) fail closed on false.
   let exhausted = false
+  // GHL is not documented to honour contact_id on /opportunities/search and no
+  // other call site proves it does, so the filter is never assumed. Any row for a
+  // different contact means the server ignored it and the scan silently widened to
+  // the whole pipeline.
+  let contactFilterHonoured = true
 
   for (let page = 1; page <= maxPages; page++) {
     const params = new URLSearchParams({
@@ -325,6 +330,9 @@ async function fetchOpportunityPages(args: {
 
     let newRows = 0
     for (const opp of rows) {
+      if (args.contactId && (opp?.contact?.id || opp?.contactId || '') !== args.contactId) {
+        contactFilterHonoured = false
+      }
       if (opp?.id && seenIds.has(opp.id)) continue
       if (opp?.id) seenIds.add(opp.id)
       opportunities.push(opp)
@@ -348,7 +356,7 @@ async function fetchOpportunityPages(args: {
     startAfterId = String(nextStartAfterId)
   }
 
-  return { opportunities, pagesScanned, total, exhausted }
+  return { opportunities, pagesScanned, total, exhausted, contactFilterHonoured }
 }
 
 // lead_search's last resort when GHL contacts search (incl. the first-word retry)
@@ -1828,6 +1836,7 @@ serve(async (req: Request) => {
         invalid_mint_request: 400,
         mint_request_not_found: 500,
         mint_owner_not_found: 500,
+        mint_owner_chain_corrupt: 500,
         canonical_job_missing: 500,
         bound_job_missing: 500,
       }
@@ -2058,15 +2067,34 @@ serve(async (req: Request) => {
               if (exact.length > 1) {
                 throw new FenceMintError(409, 'duplicate_stamped_opportunities', 'Multiple GHL opportunities carry the same mint request stamp')
               }
+              if (!paged.contactFilterHonoured) {
+                // Rows for other contacts came back, so GHL ignored contact_id and
+                // the scan degraded to the whole fencing pipeline. An exhausted
+                // scan of that superset still proves presence or absence for this
+                // contact, so recovery stays sound; only the cost changes.
+                console.error(JSON.stringify({
+                  event: 'fence_mint_stamp_scan_contact_filter_dropped',
+                  request_id: ownerRequestId,
+                  contact_id: contactId,
+                  pages_scanned: paged.pagesScanned,
+                  exhausted: paged.exhausted,
+                }))
+              }
               if (!exact.length && !paged.exhausted) {
                 // An absence that was never proven must not authorise a create.
+                const unprovenCode = paged.contactFilterHonoured
+                  ? 'mint_reconciliation_unproven'
+                  : 'mint_contact_scope_unsupported'
                 console.error(JSON.stringify({
                   event: 'fence_mint_stamp_scan_truncated',
                   request_id: ownerRequestId,
+                  code: unprovenCode,
                   pages_scanned: paged.pagesScanned,
                   total: paged.total,
                 }))
-                throw new FenceMintError(503, 'mint_reconciliation_unproven', 'Could not prove whether a stamped opportunity already exists; retry with the same requestId')
+                throw new FenceMintError(503, unprovenCode, paged.contactFilterHonoured
+                  ? 'Could not prove whether a stamped opportunity already exists; retry with the same requestId'
+                  : 'GHL ignored the contact scope filter and the widened scan could not be completed; retry with the same requestId')
               }
               return exact[0] || null
             },
