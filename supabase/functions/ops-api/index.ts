@@ -27192,25 +27192,32 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     .maybeSingle()
   if (existing) throw new Error(`You already submitted an invoice for week ending ${week_ending}. Contact the office if it needs changing.`)
 
-  // Re-query assignments server-side (prevents tampering)
-  const { data: assignments, error } = await client
+  // Re-query assignments server-side (prevents tampering). Every assignment the
+  // trade holds for the week is fetched: hourly billing uses the completed
+  // subset, per-metre billing scopes against the full set because metres are
+  // billable regardless of whether the assignment has been closed out.
+  const { data: weekAssignments, error } = await client
     .from('job_assignments')
     .select(`
-      id, scheduled_date, started_at, completed_at, role, assignment_type,
+      id, scheduled_date, started_at, completed_at, role, assignment_type, status,
       jobs:job_id (
         id, type, job_number, client_name, site_address, site_suburb, metadata
       )
     `)
     .eq('user_id', userId)
-    .eq('status', 'complete')
     .gte('scheduled_date', weekStart)
     .lte('scheduled_date', week_ending)
-    .not('started_at', 'is', null)
-    .not('completed_at', 'is', null)
     .order('scheduled_date', { ascending: true })
 
   if (error) throw error
-  if (!assignments || assignments.length === 0) throw new Error('No completed hours found for this week')
+  const assignments = (weekAssignments || []).filter((a: any) =>
+    a.status === 'complete' && a.started_at && a.completed_at)
+
+  if (isPerMetre) {
+    if (!weekAssignments || weekAssignments.length === 0) throw new Error('No jobs assigned to you for this week')
+  } else if (assignments.length === 0) {
+    throw new Error('No completed hours found for this week')
+  }
 
   // Get trade user info
   const { data: tradeUser } = await client
@@ -27283,19 +27290,8 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Enter the metres installed on at least one job before submitting.')
     const pmRate = Number(rate_per_metre) || 35
 
-    // Build a job lookup from every assignment this trade holds for the week —
-    // metres are billable regardless of whether the assignment has been closed
-    // out, so scoping must not inherit the completed-hours filter above.
-    const { data: pmAssignments, error: pmAssignErr } = await client
-      .from('job_assignments')
-      .select(`jobs:job_id ( id, type, job_number, client_name, site_address, site_suburb, metadata )`)
-      .eq('user_id', userId)
-      .gte('scheduled_date', weekStart)
-      .lte('scheduled_date', week_ending)
-    if (pmAssignErr) throw pmAssignErr
-
     const jobMap: Record<string, any> = {}
-    for (const a of (pmAssignments || [])) {
+    for (const a of (weekAssignments || [])) {
       const job = a.jobs as any
       if (job?.id) jobMap[job.id] = job
     }
@@ -27399,7 +27395,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     Invoices: [{
       Type: 'ACCPAY',
       Contact: { ContactID: stXeroContactId },
-      Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(assignments.map((a: any) => (a.jobs as any)?.job_number).filter(Boolean))].join(', ')}`,
+      Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(Object.values(jobLines).map((l) => l.job_number).filter(Boolean))].join(', ')}`,
       DueDate: dueDate,
       Status: 'DRAFT',
       LineAmountTypes: stGstRegistered ? 'Exclusive' : 'NoTax',
