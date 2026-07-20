@@ -65,6 +65,16 @@ Rules:
   bytes, and they keep the intended semantics if the scoping tools ever emit them.
 - If the fencing/patio scoping tools add a new FREE-TEXT key, add it to
   `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it.
+- `ops_summary`'s `today_schedule` reads `calendar_events` through
+  `OPS_SUMMARY_SCHEDULE_COLUMNS` (13 columns) rather than `select('*')`, so the
+  view's `scope_json` and `pricing_json` never enter the worker. That list is
+  exactly the keys `toOpsSummaryScheduleEvent` emits — change the two together.
+  It deliberately does NOT reuse `CAL_LIGHT_COLUMNS` (a superset maintained for
+  the calendar's own consumers). The same live-view caveat as
+  `CAL_FINANCIAL_COLUMNS` applies: verify names against
+  `information_schema.columns`, not the migrations. `ops_summary` also enumerates
+  `jobs_needing_scheduling` (`OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS`) and its
+  active-jobs count read (`OPS_SUMMARY_ACTIVE_JOB_COLUMNS`).
 - `calendar_events` `include_financials=true` enumerates columns
   (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
   in sync with the LIVE `calendar_events` view — check
@@ -86,6 +96,36 @@ Rules:
   blocker. The real fix is closing the migration/view drift — a migration that
   recreates `calendar_events` with all 44 columns so the migrations match prod —
   and that is a separate task.
+
+## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
+
+`jobs.pricing_json` is a full quote blob and the same list/feed rule applies.
+`ops-api` `pipeline` reads it for every active job (~hundreds of rows) only to
+derive `value` and the fencing neighbour badge, so it projects four JSON paths
+(`PIPELINE_PRICING_PROJECTION`) instead of the column. Two constraints that are
+easy to break:
+
+- Use `->`, not `->>`. `->>` coerces to text, so a numeric total would come back
+  as a string and change the response's runtime value types.
+- The aliases sit exactly where `pricing_json` used to sit in the select list,
+  and `stripPipelinePricingAliases` removes them before the response — that
+  preserves the previous JSON key order byte for byte. Adding a projection key
+  means adding it to `PIPELINE_PRICING_PROJECTION` only; the alias list and the
+  null-path list are derived from it, never restated.
+
+A row whose `pricing_json` is a JSON-encoded STRING makes all four paths return
+SQL NULL. A second server-side probe (same filters, blob non-null, all four paths
+null) re-reads just those rows and recovers the neighbour array, reproducing the
+old `JSON.parse(string)` branch. It recovers neighbours ONLY — the old `value`
+chain read properties off the raw column, so a string blob yielded 0 there, and
+"fixing" it would be a behaviour change. A read-only comparison over all 938
+active rows on 2026-07-20 found zero such rows; the probe exists so a future bad
+write degrades to the old behaviour rather than to wrong numbers, and it logs and
+degrades rather than failing the board if it errors.
+
+Related pre-existing behaviour, deliberately unchanged: `ops_summary`'s
+`today_schedule` omits `job_number`. Adding it would be an API change, not a
+performance change.
 
 ## `job_intelligence` Shape Differs Between Live and Migrations
 
@@ -145,8 +185,13 @@ is not automatic. When a function selects a newly added column, apply the
 migration FIRST — otherwise the query 400s and, per the entry above, silently
 reports zero. `jobs.quoted_value`
 (`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
-`daily-digest`, `ops-api` and `reporting-api` all read it. Deterministic make-safe
-intake also requires `20260721000001_makesafe_intake_production_controls.sql`
+`daily-digest` selects it, and as of 2026-07-20 the migration is still NOT
+applied in production (a read-only check returned `42703`). `ops-api` and
+`reporting-api` do not select it — `reporting-api`'s `quoted_value` is a response
+key derived from `pricing_json`, and `ops-api` `pipeline` deliberately projects
+`pricing_json` paths instead so the read is not coupled to migration order.
+Deterministic make-safe intake also requires
+`20260721000001_makesafe_intake_production_controls.sql`
 before its matching `ops-api`: health and scan read those rollout/auth columns.
 The migration is inert (`intake_mode` stays `legacy`); do not deploy code first.
 Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual

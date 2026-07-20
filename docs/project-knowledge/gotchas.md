@@ -45,7 +45,9 @@ Supabase Edge Functions have compute limits. Heavy operations (backfills, bulk X
 
 This killed the Ops calendar: `ops-api?action=calendar` selected the whole blob just to derive the readiness badges, then stripped it from the response. A 9-month window pulled 115 MB into the worker for 157 kB of actually-used keys, and the worker was OOM-killed — surfacing as **HTTP 546**. Narrow windows returned 200, which is why it looked like an infra problem.
 
-**Fix pattern**: single-job reads (`job_detail`, invoicing, scope-to-PO) may select the blob. Any query returning many rows must project only the keys it needs via PostgREST jsonb projection (`select=alias:scope_json->job->someKey`). PostgREST cannot strip keys, and `::text` casts are not honoured in filters — only projection bounds the payload. `calendarEvents()` does this with `CAL_SCOPE_PROJECTION`. Full rules, including the `include_financials` column-enumeration tradeoff, are in `AGENTS.md`.
+**Fix pattern**: single-job reads (`job_detail`, invoicing, scope-to-PO) may select the blob. Any query returning many rows must project only the keys it needs via PostgREST jsonb projection (`select=alias:scope_json->job->someKey`). PostgREST cannot strip keys, and `::text` casts are not honoured in filters — only projection bounds the payload. `calendarEvents()` does this with `CAL_SCOPE_PROJECTION`. `ops_summary`'s `today_schedule` enumerates the 13 `calendar_events` columns it emits (`OPS_SUMMARY_SCHEDULE_COLUMNS`) for the same reason. Full rules, including the `include_financials` column-enumeration tradeoff, are in `AGENTS.md`.
+
+The same applies to `jobs.pricing_json`: `ops-api?action=pipeline` projects the four JSON paths it needs (`PIPELINE_PRICING_PROJECTION`) instead of pulling the quote blob for every active job. Use `->` not `->>` there — `->>` returns text and would turn numeric totals into strings. See `AGENTS.md` for the malformed-blob fallback probe that covers double-encoded `pricing_json` rows.
 
 ### Supabase CLI path
 `/Users/marninstobbe/.local/bin/supabase` — NOT available via `npx` or global PATH.
