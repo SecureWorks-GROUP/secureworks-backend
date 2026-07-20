@@ -51,6 +51,7 @@ Deno.test('legacy shared-key browser callers remain compatible while the rollout
 Deno.test('JWT rollout gate covers every mutating fence browser action', () => {
   for (const action of [
     'create_contact_and_opportunity',
+    'mint_fence_job',
     'prepare_quote',
     'prepare_neighbour_quotes',
   ]) {

@@ -1,0 +1,471 @@
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  authorizeFenceMintCaller,
+  executeFenceJobMint,
+  type FenceMintCanonical,
+  type FenceMintDeps,
+  FenceMintError,
+  type FenceMintInput,
+  type FenceMintOpportunity,
+  type FenceMintProgress,
+  fenceMintStamp,
+  validateFenceMintInput,
+} from "./fence_mint.ts";
+
+const REQUEST_A = "11111111-1111-4111-8111-111111111111";
+const REQUEST_B = "22222222-2222-4222-8222-222222222222";
+const ORG = "00000000-0000-0000-0000-000000000001";
+
+function input(
+  requestId = REQUEST_A,
+  patch: Record<string, unknown> = {},
+): FenceMintInput {
+  return validateFenceMintInput({
+    requestId,
+    organisationId: ORG,
+    intent: "RESOLVED_NO_JOB",
+    contactId: "contact-1",
+    firstName: "Test",
+    lastName: "Client",
+    email: "test@example.com",
+    phone: "0400000000",
+    address: "1 Test Street",
+    suburb: "Perth",
+    ...patch,
+  });
+}
+
+function canonical(outcome = "created"): FenceMintCanonical {
+  return {
+    jobId: "job-1",
+    jobNumber: "SWF-26001",
+    contactId: "contact-1",
+    opportunityId: "opp-1",
+    mappingOutcome: outcome,
+    scopeVersion: 1,
+    updatedAt: "2026-07-21T00:00:00Z",
+    scopeHash: outcome === "created"
+      ? "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      : null,
+    requiresLoad: outcome !== "created",
+  };
+}
+
+function progress(patch: Partial<FenceMintProgress> = {}): FenceMintProgress {
+  return {
+    ownerRequestId: REQUEST_A,
+    state: "reserved",
+    joined: false,
+    executor: true,
+    contactId: null,
+    opportunityId: null,
+    canonical: null,
+    ...patch,
+  };
+}
+
+function deps(overrides: Partial<FenceMintDeps> = {}): FenceMintDeps {
+  return {
+    reserve: async () => progress(),
+    bindIdentity: async ({ ownerRequestId, contact, opportunity }) =>
+      progress({
+        ownerRequestId,
+        state: "contact_resolved",
+        contactId: contact.id,
+        opportunityId: opportunity?.id || null,
+      }),
+    recordOpportunity: async ({ ownerRequestId, opportunity }) =>
+      progress({
+        ownerRequestId,
+        state: "opportunity_created",
+        contactId: opportunity.contactId,
+        opportunityId: opportunity.id,
+      }),
+    complete: async () => canonical(),
+    awaitCanonical: async () => null,
+    getContact: async (id) => ({ id, firstName: "Test", lastName: "Client" }),
+    findContacts: async () => [],
+    createContact: async () => ({ id: "contact-1" }),
+    getOpportunity: async (id) => ({
+      id,
+      contactId: "contact-1",
+      pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+    }),
+    findStampedOpportunity: async () => null,
+    createStampedOpportunity: async (
+      { ownerRequestId, contact, cleanName },
+    ) => ({
+      id: "opp-1",
+      contactId: contact.id,
+      pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+      name: `${cleanName} ${fenceMintStamp(ownerRequestId)}`,
+    }),
+    ...overrides,
+  };
+}
+
+Deno.test("mint requires user JWT, allowed role and exact organisation", async () => {
+  authorizeFenceMintCaller({
+    mode: "user_jwt",
+    authUserId: "user-1",
+    profile: { id: "user-1", org_id: ORG, role: "sales" },
+    organisationId: ORG,
+  });
+
+  await assertRejects(
+    async () =>
+      authorizeFenceMintCaller({
+        mode: "user_jwt",
+        authUserId: "user-1",
+        profile: { id: "user-1", org_id: "other-org", role: "sales" },
+        organisationId: ORG,
+      }),
+    FenceMintError,
+    "different organisation",
+  );
+  await assertRejects(
+    async () =>
+      authorizeFenceMintCaller({
+        mode: "user_jwt",
+        authUserId: "user-1",
+        profile: { id: "user-1", org_id: ORG, role: "installer" },
+        organisationId: ORG,
+      }),
+    FenceMintError,
+    "cannot mint",
+  );
+  await assertRejects(
+    async () =>
+      authorizeFenceMintCaller({
+        mode: "shared_key",
+        authUserId: null,
+        profile: null,
+        organisationId: ORG,
+      }),
+    FenceMintError,
+    "authenticated Supabase user",
+  );
+});
+
+Deno.test("mint rejects scope/pricing payloads and unbounded existing-job evidence", async () => {
+  const scopeError = await assertRejects(
+    async () => input(REQUEST_A, { scopeJson: { huge: true } }),
+    FenceMintError,
+  );
+  assertEquals(scopeError.code, "mint_payload_not_allowed");
+
+  const evidenceError = await assertRejects(
+    async () =>
+      input(REQUEST_A, {
+        expectedExistingJobIds: Array.from(
+          { length: 101 },
+          (_, i) => `job-${i}`,
+        ),
+      }),
+    FenceMintError,
+  );
+  assertEquals(evidenceError.code, "invalid_existing_job_evidence");
+});
+
+Deno.test("two devices with distinct request IDs serialize to one canonical job and one GHL create", async () => {
+  let owner: string | null = null;
+  let result: FenceMintCanonical | null = null;
+  let creates = 0;
+  const shared = deps({
+    reserve: async ({ input: request }) => {
+      if (!owner) {
+        owner = request.requestId;
+        return progress({ ownerRequestId: owner, executor: true });
+      }
+      return progress({ ownerRequestId: owner, joined: true, executor: false });
+    },
+    createStampedOpportunity: async ({ ownerRequestId, contact }) => {
+      creates++;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        id: "opp-1",
+        contactId: contact.id,
+        pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+        name: fenceMintStamp(ownerRequestId),
+      };
+    },
+    complete: async () => {
+      result = canonical();
+      return result;
+    },
+    awaitCanonical: async () => {
+      for (let i = 0; i < 20 && !result; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return result;
+    },
+  });
+
+  const [first, second] = await Promise.all([
+    executeFenceJobMint({
+      input: input(REQUEST_A),
+      actorId: "user-1",
+      deps: shared,
+    }),
+    executeFenceJobMint({
+      input: input(REQUEST_B),
+      actorId: "user-1",
+      deps: shared,
+    }),
+  ]);
+
+  assertEquals(first.jobId, "job-1");
+  assertEquals(second.jobId, "job-1");
+  assertEquals(second.mapping.outcome, "concurrent_request_reused");
+  assertEquals(creates, 1);
+});
+
+Deno.test("same completed request and lost HTTP response replay return the canonical job without GHL IO", async () => {
+  let ghlCalls = 0;
+  const replayDeps = deps({
+    reserve: async () =>
+      progress({ state: "complete", canonical: canonical(), executor: false }),
+    getContact: async () => {
+      ghlCalls++;
+      return { id: "contact-1" };
+    },
+    createStampedOpportunity: async () => {
+      ghlCalls++;
+      return {} as FenceMintOpportunity;
+    },
+  });
+
+  const replay = await executeFenceJobMint({
+    input: input(),
+    actorId: "user-1",
+    deps: replayDeps,
+  });
+  assertEquals(replay.jobId, "job-1");
+  assertEquals(replay.mapping.outcome, "idempotent_replay");
+  assertEquals(ghlCalls, 0);
+});
+
+Deno.test("lost GHL create response reconciles the stamped opportunity before replacement create", async () => {
+  let creates = 0;
+  let searches = 0;
+  let committed: FenceMintOpportunity | null = null;
+  const lostResponseDeps = deps({
+    findStampedOpportunity: async () => {
+      searches++;
+      return committed;
+    },
+    createStampedOpportunity: async ({ ownerRequestId }) => {
+      creates++;
+      committed = {
+        id: "opp-lost-response",
+        contactId: "contact-1",
+        pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+        name: fenceMintStamp(ownerRequestId),
+      };
+      throw new Error("connection reset after upstream commit");
+    },
+    recordOpportunity: async ({ opportunity }) => {
+      assertEquals(opportunity.id, "opp-lost-response");
+      return progress({
+        state: "opportunity_created",
+        contactId: "contact-1",
+        opportunityId: opportunity.id,
+      });
+    },
+  });
+
+  const minted = await executeFenceJobMint({
+    input: input(),
+    actorId: "user-1",
+    deps: lostResponseDeps,
+  });
+  assertEquals(minted.jobId, "job-1");
+  assertEquals(creates, 1);
+  assertEquals(searches, 2);
+});
+
+Deno.test("stale opportunity contact mapping stops before bind or mutation", async () => {
+  let binds = 0;
+  const staleDeps = deps({
+    getOpportunity: async (id) => ({
+      id,
+      contactId: "other-contact",
+      pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+    }),
+    bindIdentity: async () => {
+      binds++;
+      return progress();
+    },
+  });
+  const error = await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A, { opportunityId: "opp-stale" }),
+        actorId: "user-1",
+        deps: staleDeps,
+      }),
+    FenceMintError,
+  );
+  assertEquals(error.code, "opportunity_contact_conflict");
+  assertEquals(binds, 0);
+});
+
+Deno.test("conflicting database mappings remain typed and create no opportunity", async () => {
+  let creates = 0;
+  const conflictDeps = deps({
+    bindIdentity: async () => {
+      throw new FenceMintError(
+        409,
+        "contact_opportunity_job_conflict",
+        "conflicting mapping",
+      );
+    },
+    createStampedOpportunity: async () => {
+      creates++;
+      return {} as FenceMintOpportunity;
+    },
+  });
+  const error = await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(),
+        actorId: "user-1",
+        deps: conflictDeps,
+      }),
+    FenceMintError,
+  );
+  assertEquals(error.code, "contact_opportunity_job_conflict");
+  assertEquals(creates, 0);
+});
+
+Deno.test("Supabase reservation failure produces no GHL side effect", async () => {
+  let ghlCalls = 0;
+  const failedDeps = deps({
+    reserve: async () => {
+      throw new FenceMintError(
+        503,
+        "mint_persistence_failed",
+        "reserve failed",
+      );
+    },
+    getContact: async () => {
+      ghlCalls++;
+      return { id: "contact-1" };
+    },
+  });
+  const error = await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(),
+        actorId: "user-1",
+        deps: failedDeps,
+      }),
+    FenceMintError,
+  );
+  assertEquals(error.code, "mint_persistence_failed");
+  assertEquals(ghlCalls, 0);
+});
+
+Deno.test("GHL failure leaves the reserved ledger retryable and creates no job", async () => {
+  let completes = 0;
+  const failedDeps = deps({
+    createStampedOpportunity: async () => {
+      throw new FenceMintError(
+        502,
+        "ghl_opportunity_create_failed",
+        "GHL unavailable",
+      );
+    },
+    findStampedOpportunity: async () => null,
+    complete: async () => {
+      completes++;
+      return canonical();
+    },
+  });
+  const error = await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(),
+        actorId: "user-1",
+        deps: failedDeps,
+      }),
+    FenceMintError,
+  );
+  assertEquals(error.code, "ghl_opportunity_create_failed");
+  assertEquals(completes, 0);
+});
+
+Deno.test("partial retry with recorded opportunity skips contact and GHL round trips", async () => {
+  let ghlCalls = 0;
+  const partialDeps = deps({
+    reserve: async () =>
+      progress({
+        state: "opportunity_created",
+        executor: true,
+        contactId: "contact-1",
+        opportunityId: "opp-1",
+      }),
+    bindIdentity: async () =>
+      progress({
+        state: "opportunity_created",
+        executor: false,
+        contactId: "contact-1",
+        opportunityId: "opp-1",
+      }),
+    getContact: async () => {
+      ghlCalls++;
+      return { id: "contact-1" };
+    },
+    findStampedOpportunity: async () => {
+      ghlCalls++;
+      return null;
+    },
+    createStampedOpportunity: async () => {
+      ghlCalls++;
+      return {} as FenceMintOpportunity;
+    },
+  });
+  const minted = await executeFenceJobMint({
+    input: input(),
+    actorId: "user-1",
+    deps: partialDeps,
+  });
+  assertEquals(minted.jobNumber, "SWF-26001");
+  assertEquals(ghlCalls, 0);
+});
+
+Deno.test("existing cloud job reuse returns revision token and does not transfer scope_json", async () => {
+  const existing = canonical("existing_contact_job_reused");
+  const existingDeps = deps({
+    bindIdentity: async () =>
+      progress({ state: "complete", canonical: existing, executor: false }),
+  });
+  const reused = await executeFenceJobMint({
+    input: input(),
+    actorId: "user-1",
+    deps: existingDeps,
+  });
+  assertEquals(reused.jobId, "job-1");
+  assertEquals(reused.revision.requiresLoad, true);
+  assertEquals(reused.revision.scopeHash, null);
+  assertEquals("scopeJson" in reused, false);
+});
+
+Deno.test("migration contract has narrow projections, uniqueness and no outbound communication", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  assertEquals(/SELECT\s+\*/i.test(sql), false);
+  assertEquals(/RETURNING\s+\*/i.test(sql), false);
+  assertStringIncludes(sql, "uq_jobs_org_type_ghl_opportunity");
+  assertStringIncludes(sql, "fence_job_mint_locks");
+  assertStringIncludes(sql, "'communication_sent', false");
+  assertEquals(/send_quote|send_sms|send_email/i.test(sql), false);
+});

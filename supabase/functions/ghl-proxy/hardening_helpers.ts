@@ -14,6 +14,7 @@ export const BROWSER_USER_ACTIONS = new Set([
   'search_jobs',
   'create_job',
   'create_contact_and_opportunity',
+  'mint_fence_job',
   'save_scope',
   'load_job',
   'list_media',

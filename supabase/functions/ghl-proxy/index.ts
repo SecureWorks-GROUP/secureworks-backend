@@ -12,6 +12,7 @@
 //   GET  ?action=find_job&opportunityId=xxx  — find Supabase job by GHL opp ID
 //   POST ?action=create_job  { opportunityId, toolType, clientName, ... }
 //   POST ?action=create_contact_and_opportunity  { firstName, lastName, email, phone, address, suburb, toolType }
+//   POST ?action=mint_fence_job  { requestId, organisationId, intent, contactId?, opportunityId?, ... }
 //   POST ?action=save_scope  { jobId, scopeJson, meta }
 //   POST ?action=update_contact  { contactId, name, email, phone, address, suburb }
 //   GET  ?action=get_conversation&contactId=xxx  — GHL conversation thread (last 30 msgs)
@@ -67,6 +68,19 @@ import {
   stalePreparedContactIds,
   verifiedJobStorageOrgId,
 } from './hardening_helpers.ts'
+import {
+  authorizeFenceMintCaller,
+  executeFenceJobMint,
+  fenceMintStamp,
+  opportunityHasFenceMintStamp,
+  stampedFenceOpportunityName,
+  validateFenceMintInput,
+  FenceMintError,
+  type FenceMintCanonical,
+  type FenceMintContact,
+  type FenceMintOpportunity,
+  type FenceMintProgress,
+} from './fence_mint.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -1793,6 +1807,260 @@ serve(async (req: Request) => {
       })
 
       return json({ jobs: trimmed })
+    }
+
+    // ── Authenticated, idempotent fencing job mint ──
+    // One narrow command replaces the browser's fence-only create-contact/opp,
+    // create-job and assign-number chain. It never sends a quote or message.
+    if (action === 'mint_fence_job' && req.method === 'POST') {
+      const requestStarted = performance.now()
+      try {
+        const contentLength = Number(req.headers.get('content-length') || 0)
+        if (contentLength > 32768) {
+          throw new FenceMintError(413, 'mint_payload_too_large', 'Fence mint request exceeds 32 KB')
+        }
+        const input = validateFenceMintInput(await req.json())
+        authorizeFenceMintCaller({
+          mode: credential.mode,
+          authUserId,
+          profile: authProfile,
+          organisationId: input.organisationId,
+        })
+
+        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const progressFromRpc = (raw: any): FenceMintProgress => {
+          const data = Array.isArray(raw) ? raw[0] : raw
+          if (!data || typeof data !== 'object') {
+            throw new FenceMintError(503, 'mint_persistence_invalid', 'Mint persistence returned an invalid response')
+          }
+          if (data.decision === 'conflict') {
+            throw new FenceMintError(409, String(data.code || 'mint_conflict'), String(data.message || 'Mint identity evidence conflicts'), {
+              jobIds: data.jobIds,
+              candidateCount: data.candidateCount,
+            })
+          }
+          const canonical = data.canonical
+            ? {
+              jobId: String(data.canonical.jobId || ''),
+              jobNumber: String(data.canonical.jobNumber || ''),
+              contactId: String(data.canonical.contactId || ''),
+              opportunityId: String(data.canonical.opportunityId || ''),
+              mappingOutcome: String(data.canonical.mappingOutcome || 'reused'),
+              scopeVersion: Number(data.canonical.scopeVersion || 1),
+              updatedAt: String(data.canonical.updatedAt || ''),
+              scopeHash: data.canonical.scopeHash ? String(data.canonical.scopeHash) : null,
+              requiresLoad: data.canonical.requiresLoad !== false,
+            } as FenceMintCanonical
+            : null
+          if (canonical && (!canonical.jobId || !canonical.jobNumber || !canonical.contactId || !canonical.opportunityId)) {
+            throw new FenceMintError(503, 'canonical_mapping_incomplete', 'Canonical mint result is missing permanent identity fields')
+          }
+          return {
+            ownerRequestId: String(data.ownerRequestId || input.requestId),
+            state: String(data.state || 'reserved') as FenceMintProgress['state'],
+            joined: !!data.joined,
+            executor: !!data.executor,
+            contactId: data.contactId ? String(data.contactId) : null,
+            opportunityId: data.opportunityId ? String(data.opportunityId) : null,
+            canonical,
+          }
+        }
+        const rpcProgress = async (name: string, params: Record<string, unknown>) => {
+          const { data, error } = await sb.rpc(name, params)
+          if (error) {
+            console.error(`[ghl-proxy/mint] rpc=${name} code=${error.code || 'unknown'}`)
+            throw new FenceMintError(503, 'mint_persistence_failed', `Fence mint persistence failed at ${name}`)
+          }
+          return progressFromRpc(data)
+        }
+        const opportunityShape = (raw: any): FenceMintOpportunity => {
+          const opportunity = raw?.opportunity || raw
+          return {
+            id: String(opportunity?.id || ''),
+            contactId: String(opportunity?.contactId || opportunity?.contact?.id || ''),
+            pipelineId: String(opportunity?.pipelineId || ''),
+            name: opportunity?.name || null,
+          }
+        }
+        const contactShape = (raw: any): FenceMintContact => {
+          const contact = raw?.contact || raw
+          return {
+            id: String(contact?.id || ''),
+            firstName: contact?.firstName || null,
+            lastName: contact?.lastName || null,
+            email: contact?.email || null,
+            phone: contact?.phone || null,
+            address1: contact?.address1 || contact?.address || null,
+            city: contact?.city || null,
+          }
+        }
+
+        const result = await executeFenceJobMint({
+          input,
+          actorId: authUserId!,
+          deps: {
+            reserve: ({ input: reserved, actorId, fingerprint, identityKey }) => rpcProgress('reserve_fence_job_mint', {
+              p_request_id: reserved.requestId,
+              p_org_id: reserved.organisationId,
+              p_actor_id: actorId,
+              p_identity_key: identityKey,
+              p_input_fingerprint: fingerprint,
+              p_intent: reserved.intent,
+              p_contact_id: reserved.contactId,
+              p_opportunity_id: reserved.opportunityId,
+              p_expected_existing_job_ids: reserved.expectedExistingJobIds,
+              p_repeat_reason: reserved.repeatReason,
+              p_first_name: reserved.firstName,
+              p_last_name: reserved.lastName,
+              p_client_email: reserved.email,
+              p_client_phone: reserved.phone,
+              p_site_address: reserved.address,
+              p_site_suburb: reserved.suburb,
+            }),
+            bindIdentity: ({ ownerRequestId, contact, opportunity }) => rpcProgress('bind_fence_job_mint_identity', {
+              p_request_id: ownerRequestId,
+              p_contact_id: contact.id,
+              p_opportunity_id: opportunity?.id || null,
+            }),
+            recordOpportunity: ({ ownerRequestId, opportunity }) => rpcProgress('record_fence_job_mint_opportunity', {
+              p_request_id: ownerRequestId,
+              p_opportunity_id: opportunity.id,
+              p_contact_id: opportunity.contactId,
+            }),
+            complete: async ({ ownerRequestId }) => {
+              const completed = await rpcProgress('complete_fence_job_mint', { p_request_id: ownerRequestId })
+              if (!completed.canonical) throw new FenceMintError(503, 'mint_completion_incomplete', 'Fence mint did not reach a canonical result')
+              return completed.canonical
+            },
+            awaitCanonical: async ({ ownerRequestId }) => {
+              // Race-only path: seven bounded reads over ~7.8s. Normal mints do
+              // not poll, and no read selects jobs.scope_json.
+              for (const delayMs of [0, 100, 250, 500, 1000, 2000, 4000]) {
+                if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs))
+                const progress = await rpcProgress('get_fence_job_mint_progress', { p_request_id: ownerRequestId })
+                if (progress.canonical) return progress.canonical
+              }
+              return null
+            },
+            getContact: async (contactId) => contactShape(await ghl(`/contacts/${encodeURIComponent(contactId)}`)),
+            findContacts: async (candidate) => {
+              const lookups: Promise<any>[] = []
+              if (candidate.email) {
+                lookups.push(ghl('/contacts/search/duplicate', {
+                  method: 'POST',
+                  body: JSON.stringify({ locationId: GHL_LOCATION_ID, email: candidate.email }),
+                  signal: AbortSignal.timeout(8000),
+                }))
+              }
+              if (candidate.phone) {
+                lookups.push(ghl('/contacts/search/duplicate', {
+                  method: 'POST',
+                  body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizeAUPhone(candidate.phone) }),
+                  signal: AbortSignal.timeout(8000),
+                }))
+              }
+              // At most two independent identity reads, in one bounded batch.
+              const matches = await Promise.all(lookups)
+              return matches.map(contactShape).filter((contact) => contact.id)
+            },
+            createContact: async (candidate) => {
+              try {
+                return contactShape(await ghl('/contacts/', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    firstName: candidate.firstName,
+                    lastName: candidate.lastName,
+                    email: candidate.email || undefined,
+                    phone: candidate.phone || undefined,
+                    address1: candidate.address,
+                    city: candidate.suburb,
+                    locationId: GHL_LOCATION_ID,
+                  }),
+                  signal: AbortSignal.timeout(10000),
+                }))
+              } catch (error) {
+                const duplicateId = ((error as Error)?.message || '').match(/"contactId"\s*:\s*"([^"]+)"/)?.[1]
+                if (duplicateId) return contactShape(await ghl(`/contacts/${encodeURIComponent(duplicateId)}`))
+                throw error
+              }
+            },
+            getOpportunity: async (opportunityId) => opportunityShape(await ghl(`/opportunities/${encodeURIComponent(opportunityId)}`, {
+              signal: AbortSignal.timeout(8000),
+            })),
+            findStampedOpportunity: async ({ ownerRequestId, contactId }) => {
+              const paged = await fetchOpportunityPages({
+                pipelineId: PIPELINES.fencing,
+                q: fenceMintStamp(ownerRequestId),
+                limit: 20,
+                maxPages: 2,
+                perPageTimeoutMs: 8000,
+              })
+              const exact = paged.opportunities
+                .map(opportunityShape)
+                .filter((opportunity) => opportunity.contactId === contactId &&
+                  opportunity.pipelineId === PIPELINES.fencing &&
+                  opportunityHasFenceMintStamp(opportunity, ownerRequestId))
+              if (exact.length > 1) {
+                throw new FenceMintError(409, 'duplicate_stamped_opportunities', 'Multiple GHL opportunities carry the same mint request stamp')
+              }
+              return exact[0] || null
+            },
+            createStampedOpportunity: async ({ ownerRequestId, contact, cleanName }) => opportunityShape(await ghl('/opportunities/', {
+              method: 'POST',
+              body: JSON.stringify({
+                pipelineId: PIPELINES.fencing,
+                locationId: GHL_LOCATION_ID,
+                contactId: contact.id,
+                name: stampedFenceOpportunityName(cleanName, ownerRequestId),
+                status: 'open',
+              }),
+              signal: AbortSignal.timeout(10000),
+            })),
+            recordFailure: async ({ ownerRequestId, code, message }) => {
+              const { error } = await sb.rpc('record_fence_job_mint_failure', {
+                p_request_id: ownerRequestId,
+                p_code: code,
+                p_message: message,
+              })
+              if (error) throw error
+            },
+          },
+        })
+
+        const serverTiming = Object.entries(result.timingMs)
+          .map(([name, duration]) => `${name.replace(/[^a-z0-9_]/gi, '_')};dur=${Number(duration).toFixed(1)}`)
+          .join(', ')
+        console.log(JSON.stringify({
+          event: 'fence_mint_complete',
+          request_id: input.requestId,
+          job_id: result.jobId,
+          mapping_outcome: result.mapping.outcome,
+          timing_ms: result.timingMs,
+          communication_sent: false,
+        }))
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            ...CORS,
+            'Server-Timing': serverTiming,
+            'Timing-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Server-Timing',
+          },
+        })
+      } catch (error) {
+        const typed = error instanceof FenceMintError
+          ? error
+          : new FenceMintError(500, 'fence_mint_failed', (error as Error)?.message || 'Fence mint failed')
+        console.error(JSON.stringify({
+          event: 'fence_mint_failed',
+          code: typed.code,
+          status: typed.status,
+          total_ms: Math.round((performance.now() - requestStarted) * 10) / 10,
+          communication_sent: false,
+        }))
+        return json({ error: typed.message, code: typed.code, details: typed.details || null }, typed.status)
+      }
     }
 
     // ── Create a Supabase job linked to a GHL opportunity ──
