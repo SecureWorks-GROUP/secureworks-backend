@@ -390,7 +390,8 @@ Deno.test("stuck exceptions cannot consume the whole per-run budget", async () =
         post_id: `stuck-${i}`,
         received_at: `2026-07-19T0${i}:00:00.000Z`,
         subject: `NEW WORK ORDER MLB-5900${i} Work Order: WO-5900${i}`,
-        body_content: `Client: Stuck Client ${i}\nAddress: ${i} Stuck Way, Perth`,
+        body_content:
+          `Client: Stuck Client ${i}\nAddress: ${i} Stuck Way, Perth`,
       }),
     );
   }
