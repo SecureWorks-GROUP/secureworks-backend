@@ -82,9 +82,17 @@ COMMENT ON COLUMN public.makesafe_intake_health.alarm_auth_verified_at IS
 ALTER TABLE public.makesafe_intake_health
   ADD COLUMN IF NOT EXISTS deterministic_scan_cursor_at timestamptz;
 ALTER TABLE public.makesafe_intake_health
+  ADD COLUMN IF NOT EXISTS deterministic_scan_cursor_post_id text;
+ALTER TABLE public.makesafe_intake_health
   ADD COLUMN IF NOT EXISTS deterministic_observe_cursor_at timestamptz;
+ALTER TABLE public.makesafe_intake_health
+  ADD COLUMN IF NOT EXISTS deterministic_observe_cursor_post_id text;
 
 COMMENT ON COLUMN public.makesafe_intake_health.deterministic_scan_cursor_at IS
   'Advancing received_at position of the bounded deterministic source sweep for live scans. NULL restarts the sweep at the oldest row inside the window.';
+COMMENT ON COLUMN public.makesafe_intake_health.deterministic_scan_cursor_post_id IS
+  'post_id tie-breaker paired with deterministic_scan_cursor_at so rows sharing one received_at cannot be skipped across the read cap boundary.';
 COMMENT ON COLUMN public.makesafe_intake_health.deterministic_observe_cursor_at IS
   'Advancing received_at position of the bounded deterministic source sweep for dry-run dark observation. Kept apart from the live cursor so neither mode consumes the other''s coverage.';
+COMMENT ON COLUMN public.makesafe_intake_health.deterministic_observe_cursor_post_id IS
+  'post_id tie-breaker paired with deterministic_observe_cursor_at so identical observe-sweep timestamps cannot skip unread rows at the cap boundary.';

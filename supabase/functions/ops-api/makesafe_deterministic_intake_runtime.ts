@@ -123,7 +123,9 @@ export interface DeterministicRuntimeReport {
     // null means the sweep reached the end of the window and restarts at its
     // oldest row, which is what makes the cap a rotation rather than a truncation.
     cursor_at: string | null;
+    cursor_post_id: string | null;
     next_cursor_at: string | null;
+    next_cursor_post_id: string | null;
   };
   // Evidence gates read this, not totals.unaccounted on its own. A capped run
   // only accounts for the rows it read, so its zero-unaccounted result is not a
@@ -391,8 +393,22 @@ async function resolveInstructionKeySeeds(
 // owns its own position. Sharing one column would make a live run skip rows an
 // observe run had already passed, and would make pre-cutover observation depend on
 // live runs that do not exist yet.
-const LIVE_CURSOR_COLUMN = "deterministic_scan_cursor_at";
-const OBSERVE_CURSOR_COLUMN = "deterministic_observe_cursor_at";
+const LIVE_CURSOR_COLUMNS: CursorColumns = {
+  at: "deterministic_scan_cursor_at",
+  postId: "deterministic_scan_cursor_post_id",
+};
+const OBSERVE_CURSOR_COLUMNS: CursorColumns = {
+  at: "deterministic_observe_cursor_at",
+  postId: "deterministic_observe_cursor_post_id",
+};
+
+// The sweep position is a (received_at, post_id) tuple, not a bare timestamp. A
+// bare timestamp cursor advanced with `.gt(received_at)` skips every row sharing
+// the boundary timestamp, so more rows at one received_at than the read cap could
+// permanently strand the overflow. Pairing the tie-breaker post_id makes the
+// completeness guarantee hold for any timestamp collision, not just probabilistically.
+type CursorColumns = { at: string; postId: string };
+type SweepCursor = { receivedAt: string; postId: string };
 
 // The sweep cursor is deliberately tolerant on both ends. A pre-migration DB, or
 // a health row that has never been written, simply sweeps from the oldest row
@@ -400,15 +416,24 @@ const OBSERVE_CURSOR_COLUMN = "deterministic_observe_cursor_at";
 // costs coverage, so the run says so through a caveat rather than throwing.
 async function readScanCursor(
   client: any,
-  column: string,
-): Promise<string | null> {
+  columns: CursorColumns,
+): Promise<SweepCursor | null> {
   try {
     const { data, error } = await client.from("makesafe_intake_health")
-      .select(column)
+      .select(`${columns.at},${columns.postId}`)
       .eq("id", true)
       .maybeSingle();
     if (error) return null;
-    return data?.[column] ?? null;
+    const receivedAt = data?.[columns.at] ?? null;
+    if (receivedAt == null) return null;
+    // A legacy row that stored only the timestamp resolves to an empty post_id,
+    // which the tuple filter treats as "the start of this timestamp" and re-reads
+    // the boundary rows rather than skipping them - safe, and self-corrects on the
+    // next persist.
+    return {
+      receivedAt: String(receivedAt),
+      postId: String(data?.[columns.postId] ?? ""),
+    };
   } catch {
     return null;
   }
@@ -416,13 +441,14 @@ async function readScanCursor(
 
 async function persistScanCursor(
   client: any,
-  column: string,
-  cursorAt: string | null,
+  columns: CursorColumns,
+  cursor: SweepCursor | null,
 ): Promise<boolean> {
   try {
     const { error } = await client.from("makesafe_intake_health").upsert({
       id: true,
-      [column]: cursorAt,
+      [columns.at]: cursor?.receivedAt ?? null,
+      [columns.postId]: cursor?.postId ?? null,
     }, { onConflict: "id" });
     return !error;
   } catch {
@@ -439,7 +465,7 @@ async function readInputs(
         "days" | "onlyUnscanned" | "nowIso" | "maxSources"
       >
     >
-    & { seedPostIds: readonly string[]; cursorAt: string | null },
+    & { seedPostIds: readonly string[]; cursor: SweepCursor | null },
 ): Promise<
   {
     sources: DeterministicSourceItem[];
@@ -477,9 +503,19 @@ async function readInputs(
         .eq("mailbox", SES_MAILBOX)
         .is("pii_purged_at", null)
         .gte("received_at", since);
-      if (options.cursorAt) query = query.gt("received_at", options.cursorAt);
+      if (options.cursor) {
+        const { receivedAt, postId } = options.cursor;
+        // Keyset resume on the (received_at, post_id) tuple: strictly after the
+        // cursor row, which keeps rows that merely share the boundary received_at.
+        query = query
+          .gte("received_at", receivedAt)
+          .or(
+            `received_at.gt."${receivedAt}",and(received_at.eq."${receivedAt}",post_id.gt."${postId}")`,
+          );
+      }
       return await query
         .order("received_at", { ascending: true })
+        .order("post_id", { ascending: true })
         .range(from, to);
     },
   );
@@ -604,12 +640,17 @@ async function readInputs(
       // whole window, so it reports as capped even in the boundary case where it
       // happened to.
       cap_reached: backlogRows.length + recentRows.length >= options.maxSources,
-      cursor_at: options.cursorAt,
+      cursor_at: options.cursor?.receivedAt ?? null,
+      cursor_post_id: options.cursor?.postId ?? null,
       // A short sweep page means the cursor reached the end of the window, so the
       // next run restarts at its oldest row. A full page leaves the cursor on the
       // last row read, which is what stops the same rows being re-read forever.
+      // The tuple pins both the received_at and its tie-breaker post_id.
       next_cursor_at: backlogRows.length >= backlogCap
         ? String(backlogRows[backlogRows.length - 1].received_at)
+        : null,
+      next_cursor_post_id: backlogRows.length >= backlogCap
+        ? String(backlogRows[backlogRows.length - 1].post_id)
         : null,
     },
   };
@@ -1441,14 +1482,14 @@ export async function runDeterministicIntake(
     client,
     allowInstructionKeys,
   );
-  const cursorColumn = dryRun ? OBSERVE_CURSOR_COLUMN : LIVE_CURSOR_COLUMN;
-  const cursorAt = await readScanCursor(client, cursorColumn);
+  const cursorColumns = dryRun ? OBSERVE_CURSOR_COLUMNS : LIVE_CURSOR_COLUMNS;
+  const cursor = await readScanCursor(client, cursorColumns);
   const input = await readInputs(client, {
     days,
     onlyUnscanned,
     nowIso,
     maxSources,
-    cursorAt,
+    cursor,
     seedPostIds: [...allowSourcePostIds, ...instructionSeeds.postIds],
   });
   // Advanced immediately after the read, before any planning or business write can
@@ -1457,10 +1498,16 @@ export async function runDeterministicIntake(
   // Dry-run advances its own observe-only position for the same reason: cutover
   // evidence has to come from observation that eventually covers the whole window,
   // which a cursor pinned at null could never do.
+  const nextCursor: SweepCursor | null = input.read.next_cursor_at == null
+    ? null
+    : {
+      receivedAt: input.read.next_cursor_at,
+      postId: input.read.next_cursor_post_id ?? "",
+    };
   const cursorPersisted = await persistScanCursor(
     client,
-    cursorColumn,
-    input.read.next_cursor_at,
+    cursorColumns,
+    nextCursor,
   );
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
   const requireAllAllowlistMatches =

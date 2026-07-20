@@ -17,11 +17,65 @@ interface Store {
   [table: string]: any[];
 }
 
+// Evaluate a single PostgREST leaf condition ("col.op.value") against a row,
+// mirroring the String-comparison semantics the other filters use.
+function evalPostgrestLeaf(row: any, token: string): boolean {
+  const first = token.indexOf(".");
+  const second = token.indexOf(".", first + 1);
+  const column = token.slice(0, first);
+  const op = token.slice(first + 1, second);
+  let value = token.slice(second + 1);
+  if (value.startsWith('"') && value.endsWith('"')) {
+    value = value.slice(1, -1);
+  }
+  const left = String(row[column] ?? "");
+  const right = String(value);
+  if (op === "eq") return left === right;
+  if (op === "gt") return left > right;
+  if (op === "gte") return left >= right;
+  if (op === "lt") return left < right;
+  if (op === "lte") return left <= right;
+  throw new Error(`fake .or() does not support op ${op}`);
+}
+
+// Split a PostgREST boolean expression on commas that sit at the top level, so
+// nested and(...) / or(...) groups stay intact.
+function splitTopLevel(expr: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < expr.length; i++) {
+    const ch = expr[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "," && depth === 0) {
+      parts.push(expr.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(expr.slice(start));
+  return parts;
+}
+
+function evalPostgrestExpr(row: any, expr: string): boolean {
+  if (expr.startsWith("and(") && expr.endsWith(")")) {
+    return splitTopLevel(expr.slice(4, -1)).every((clause) =>
+      evalPostgrestExpr(row, clause)
+    );
+  }
+  if (expr.startsWith("or(") && expr.endsWith(")")) {
+    return splitTopLevel(expr.slice(3, -1)).some((clause) =>
+      evalPostgrestExpr(row, clause)
+    );
+  }
+  return evalPostgrestLeaf(row, expr);
+}
+
 class FakeQuery {
   private filters: Array<(row: any) => boolean> = [];
   private sliceRange: [number, number] | null = null;
   private limitTo: number | null = null;
-  private sortBy: { column: string; ascending: boolean } | null = null;
+  private sortKeys: Array<{ column: string; ascending: boolean }> = [];
   selectedColumns: string | null = null;
 
   constructor(
@@ -63,10 +117,17 @@ class FakeQuery {
     this.filters.push((row) => values.includes(row[column]));
     return this;
   }
+  or(expr: string) {
+    this.filters.push((row) =>
+      splitTopLevel(expr).some((clause) => evalPostgrestExpr(row, clause))
+    );
+    return this;
+  }
   // The bounded two-part read depends on real ordering, so the double sorts
-  // rather than returning insertion order.
+  // rather than returning insertion order. Chained order() calls compose into a
+  // tuple sort, matching PostgREST's secondary-order semantics.
   order(column: string, opts?: { ascending?: boolean }) {
-    this.sortBy = { column, ascending: opts?.ascending !== false };
+    this.sortKeys.push({ column, ascending: opts?.ascending !== false });
     return this;
   }
   limit(n: number) {
@@ -124,16 +185,18 @@ class FakeQuery {
       return { data: matched, error: null };
     }
     let data = this.rows();
-    if (this.sortBy) {
-      const { column, ascending } = this.sortBy;
+    if (this.sortKeys.length) {
       data = data
         .map((row, index) => ({ row, index }))
         .sort((a, b) => {
-          const left = String(a.row[column] ?? "");
-          const right = String(b.row[column] ?? "");
-          const cmp = left.localeCompare(right);
-          if (cmp !== 0) return ascending ? cmp : -cmp;
-          return ascending ? a.index - b.index : b.index - a.index;
+          for (const { column, ascending } of this.sortKeys) {
+            const left = String(a.row[column] ?? "");
+            const right = String(b.row[column] ?? "");
+            const cmp = left.localeCompare(right);
+            if (cmp !== 0) return ascending ? cmp : -cmp;
+          }
+          const primaryAscending = this.sortKeys[0].ascending;
+          return primaryAscending ? a.index - b.index : b.index - a.index;
         })
         .map((entry) => entry.row);
     }
@@ -814,10 +877,12 @@ Deno.test("dark observe is case-level, sanitized, exact, zero-AI and writes only
 
   const { makesafe_intake_health: healthAfter, ...businessAfter } = store as any;
   assertEquals(JSON.stringify(businessAfter), before);
-  // The one permitted dry-run write is the observe sweep position. It must not
-  // claim a successful extraction or touch the live scan cursor.
+  // The one permitted dry-run write is the observe sweep position (its tuple of
+  // received_at plus tie-breaker post_id). It must not claim a successful
+  // extraction or touch the live scan cursor.
   assertEquals(Object.keys(healthAfter[0] ?? {}).sort(), [
     "deterministic_observe_cursor_at",
+    "deterministic_observe_cursor_post_id",
     "id",
   ]);
   assertEquals(report.ai_calls, 0);
@@ -1173,6 +1238,65 @@ Deno.test("the scan sweep advances across runs and restarts at the window head",
   );
 });
 
+// The completeness guarantee has to hold unconditionally, not just when received_at
+// happens to be unique. A bare-timestamp cursor advanced with `.gt(received_at)`
+// skips every row sharing the boundary timestamp once more of them land in one
+// window than a single run's cap can read, stranding the overflow forever. The
+// (received_at, post_id) tuple cursor keeps walking those ties until all are read.
+Deno.test("the sweep covers a timestamp collision larger than the read cap", async () => {
+  const store = baseStore();
+  const shared = "2026-07-10T01:00:00.000Z";
+  const total = 7;
+  for (let index = 0; index < total; index++) {
+    store.emails.push(email({
+      post_id: `tie-${index}`,
+      received_at: shared,
+      subject: `Re: chatter ${index}`,
+      body_content: "Thanks, noted.",
+    }));
+  }
+  const client = fakeClient(store);
+  const readIds = new Set<string>();
+  const baseFrom = client.from.bind(client);
+  client.from = (table: string) => {
+    const api = baseFrom(table);
+    if (table !== "emails") return api;
+    const baseSelect = api.select;
+    api.select = (columns: string) => {
+      const query = baseSelect(columns);
+      const baseThen = query.then.bind(query);
+      query.then = (resolve: (value: any) => void) =>
+        baseThen((result: any) => {
+          for (const row of result.data || []) {
+            if (row?.post_id) readIds.add(row.post_id);
+          }
+          resolve(result);
+        });
+      return query;
+    };
+    return api;
+  };
+
+  // maxSources 4 => backlog cap 2, so the collision (7 rows) far exceeds one run's
+  // sweep page and cannot be read in a single pass.
+  let runs = 0;
+  while (runs < 25 && readIds.size < total) {
+    runs++;
+    const report = await runDeterministicIntake(client, {
+      dryRun: true,
+      days: 60,
+      nowIso: "2026-08-01T00:00:00.000Z",
+      maxSources: 4,
+    });
+    assert(report.source_read.backlog_rows <= report.source_read.backlog_cap);
+  }
+
+  for (let index = 0; index < total; index++) {
+    assert(readIds.has(`tie-${index}`), `sweep never read tie-${index}`);
+  }
+  assert(runs < 25, `expected convergence inside the run budget, got ${runs}`);
+});
+
 // Cutover evidence is gathered before any live run exists, so dark observe cannot
 // borrow the live sweep's progress. It has to reach the middle of a window larger
 // than one run's cap entirely on its own.
@@ -1444,12 +1568,25 @@ Deno.test("a cap-induced instruction-key miss is never reported as stale", async
 Deno.test("an allowlisted source outside the capped window is still read by id", async () => {
   const store = baseStore();
   store.emails.push(
-    email({ post_id: "noise-1", subject: "Re: chatter", body_content: "ok" }),
-    email({ post_id: "noise-2", subject: "Re: chatter", body_content: "ok" }),
+    email({
+      post_id: "noise-1",
+      subject: "Re: chatter",
+      body_content: "ok",
+      received_at: "2026-07-01T01:00:00.000Z",
+    }),
+    email({
+      post_id: "noise-2",
+      subject: "Re: chatter",
+      body_content: "ok",
+      received_at: "2026-07-02T01:00:00.000Z",
+    }),
+    // Newer than the noise, so the oldest-first sweep spends its single-row cap on
+    // the backlog and only the by-id seed can pull this work order in.
     email({
       post_id: "aged-1",
       subject: "NEW WORK ORDER MLB-61000 Work Order: WO-61000",
       body_content: "Client: Aged Client\nAddress: 15 Aged Avenue, Perth",
+      received_at: "2026-07-19T01:00:00.000Z",
     }),
   );
   store.email_attachments.push({
