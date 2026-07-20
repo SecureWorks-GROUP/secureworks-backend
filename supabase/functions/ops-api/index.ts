@@ -120,8 +120,8 @@ import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
-  projectOpsMakesafeBoard,
   projectTradeMakesafeBoard,
+  resolveMakesafeTradeViewer,
 } from './makesafe_board_read_model.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
@@ -2411,22 +2411,33 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'ops projection requires ops access' }, 403)
         }
 
-        const canonicalRows = await loadCanonicalMakesafeBoard(client)
-        const parity = checkMakesafeBoardParity(canonicalRows)
-        if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
-
         if (projection === 'trade') {
           const { data: profile, error: profileErr } = await client.from('users')
             .select('id, name, role, managed_verticals')
             .eq('id', authUser!.id)
             .maybeSingle()
           if (profileErr || !profile) throw new ApiError('Trade profile not found', 403)
-          const board = projectTradeMakesafeBoard(canonicalRows, {
+          const viewer = {
             userId: profile.id,
             name: profile.name,
             role: profile.role,
             managedVerticals: profile.managed_verticals,
-          })
+          }
+          // Server-scope the load BEFORE building the canonical model: allocated-only
+          // trades never load or receive full make-safe history — only the (already
+          // server-authorised) jobs assigned to them. Full-history rows are built
+          // solely for all-makesafe viewers (Hugo/admins) and the Ops projection.
+          const permissions = resolveMakesafeTradeViewer(viewer)
+          const restrictToJobIds = permissions.sees_all_makesafes
+            ? undefined
+            : await loadMakesafeAssignedJobIds(client, profile.id)
+          const canonicalRows = await loadCanonicalMakesafeBoard(
+            client,
+            restrictToJobIds ? { restrictToJobIds } : undefined,
+          )
+          const parity = checkMakesafeBoardParity(canonicalRows)
+          if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
+          const board = projectTradeMakesafeBoard(canonicalRows, viewer)
           return json({
             contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
             projection: 'trade',
@@ -2436,11 +2447,14 @@ if (import.meta.main) serve(async (req: Request) => {
           })
         }
 
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
+        if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
         return json({
           contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
           projection: 'ops',
           generated_at: new Date().toISOString(),
-          ...projectOpsMakesafeBoard(canonicalRows),
+          ...ops,
           parity,
         })
       }
@@ -10922,11 +10936,18 @@ async function makesafePortalRecheckEnqueue(client: any, body: any) {
 export const _makesafePortalRecheckEnqueue = makesafePortalRecheckEnqueue
 
 // ── Slice 3: dedicated make-safe pipeline ──
-async function makesafePipeline(client: any, params: URLSearchParams) {
+async function makesafePipeline(client: any, params: URLSearchParams, restrictJobIds?: string[]) {
   // The canonical board endpoint requests history=all so archived/cancelled
   // cards remain searchable. The legacy makesafe_pipeline response preserves its
   // existing active + 90-day-cancelled window until its consumer migrates.
   const allHistory = params.get('history') === 'all'
+  // Optional server-authorised scope: when present, BOTH the active and cancelled
+  // job queries are constrained to this id set so an allocated-only caller never
+  // loads make-safes it can't see. A caller passing an empty set gets nothing.
+  const restrict = Array.isArray(restrictJobIds) ? restrictJobIds : null
+  if (restrict && restrict.length === 0) {
+    return { columns: { new: [], allocated: [], trade_report_in: [], report_ready: [], completed: [], archive: [], cancelled: [] }, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: 0 }
+  }
   // T4 — full-history load. The old `.limit(200)` hid older completed/archived
   // make-safes from the archive column. Paginate the jobs query so the board
   // shows the COMPLETE history; T1's row-paginated dependent reads keep this
@@ -10935,10 +10956,12 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   {
     let offset = 0
     for (let guard = 0; guard < 1000; guard++) {
-      const { data, error } = await client.from('jobs')
+      let activeQuery = client.from('jobs')
         .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
         .eq('type', 'makesafe')
         .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
+      if (restrict) activeQuery = activeQuery.in('id', restrict)
+      const { data, error } = await activeQuery
         .order('created_at', { ascending: false })
         .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
       if (error) throw error
@@ -11077,6 +11100,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
         .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
         .eq('type', 'makesafe')
         .eq('status', 'cancelled')
+      if (restrict) cancelledQuery = cancelledQuery.in('id', restrict)
       if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
       const { data, error } = await cancelledQuery
         .order('updated_at', { ascending: false })
@@ -11110,12 +11134,41 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   return { columns, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: (jobs || []).length }
 }
 
+// Server-owned scope for allocated-only trades: the job ids they are assigned to.
+// Returned ids feed the canonical loader so the full make-safe history is never
+// loaded for a caller who can only see their own jobs. Row-paginated for the cap.
+async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<string[]> {
+  const ids = new Set<string>()
+  let offset = 0
+  for (let guard = 0; guard < 100; guard++) {
+    const { data, error } = await client.from('job_assignments')
+      .select('job_id')
+      .eq('user_id', userId)
+      .neq('status', 'cancelled')
+      .order('job_id', { ascending: true })
+      .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+    if (error) throw error
+    const batch = data || []
+    for (const a of batch) if (a?.job_id) ids.add(a.job_id)
+    if (batch.length < MAKESAFE_PAGE_SIZE) break
+    offset += MAKESAFE_PAGE_SIZE
+  }
+  return Array.from(ids)
+}
+
 // One audience-independent read. makesafePipeline remains the stage authority;
 // this loader adds only presentation facts (contacts/actions, report photo count,
 // notes and intake lineage) using cap-safe reads. Ops and trade projections are
 // generated from the returned rows, never from separate queries or client logic.
-async function loadCanonicalMakesafeBoard(client: any): Promise<any[]> {
-  const pipeline = await makesafePipeline(client, new URLSearchParams('history=all'))
+async function loadCanonicalMakesafeBoard(
+  client: any,
+  opts?: { restrictToJobIds?: string[] },
+): Promise<any[]> {
+  const restrictToJobIds = opts?.restrictToJobIds
+  // Allocated-only callers pass an explicit, already-authorised id set. An empty
+  // set means "no visible make-safes" — return without loading any history.
+  if (restrictToJobIds && restrictToJobIds.length === 0) return []
+  const pipeline = await makesafePipeline(client, new URLSearchParams('history=all'), restrictToJobIds)
   const baseRows: any[] = []
   const seen = new Set<string>()
   for (const stage of MAKESAFE_BOARD_STAGES) {

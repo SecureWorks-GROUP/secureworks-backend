@@ -370,22 +370,33 @@ export function projectOpsMakesafeBoard(rows: any[]) {
   };
 }
 
+// Visibility is server-owned: it derives ONLY from role and managed_verticals,
+// never from a display name. A caller whose profile name happens to be "hugo"
+// or "jan" gets nothing extra — the authority lives in the record, not the label.
+//   - Full make-safe managers (Hugo via managed_verticals "makesafe", plus
+//     platform admins/owners/ops managers): see every make-safe AND may allocate.
+//   - View-only make-safe capability (e.g. Jan): sees every make-safe but is
+//     action-gated — can_allocate is always false. Provision via a
+//     "makesafe_view" / "makesafe_readonly" managed vertical (flagged for Marnin
+//     in the PR to flip to full "makesafe" if allocate rights are ever wanted).
+//   - Fencing leads (e.g. Khairo, managed_verticals "fencing"): make-safe
+//     view-only, no allocate, and no all-makesafe visibility.
 export function resolveMakesafeTradeViewer(viewer: MakesafeBoardViewer) {
   const role = String(viewer?.role || "").toLowerCase();
-  const name = String(viewer?.name || "").trim().toLowerCase();
   const managed = Array.isArray(viewer?.managedVerticals)
     ? viewer.managedVerticals.map((v) => String(v || "").trim().toLowerCase())
     : [];
   const privileged = ["admin", "owner", "ops_manager"].includes(role);
-  const hugo = name === "hugo" || name.startsWith("hugo ");
-  const khairo = name === "khairo" || name.startsWith("khairo ");
-  const jan = name === "jan" || name.startsWith("jan ");
-  const all = privileged || jan || hugo || managed.includes("makesafe");
+  const makesafeManager = privileged || managed.includes("makesafe");
+  const makesafeViewer = managed.includes("makesafe_view") ||
+    managed.includes("makesafe_readonly");
+  const fencingViewOnly = managed.includes("fencing") && !makesafeManager;
+  const seesAll = makesafeManager || makesafeViewer;
   return {
-    visibility: all ? "all_makesafes" : "allocated_only",
-    sees_all_makesafes: all,
-    fencing_view_only: khairo,
-    can_allocate: all && !khairo,
+    visibility: seesAll ? "all_makesafes" : "allocated_only",
+    sees_all_makesafes: seesAll,
+    fencing_view_only: fencingViewOnly,
+    can_allocate: makesafeManager && !fencingViewOnly,
   };
 }
 
@@ -452,40 +463,55 @@ export function projectTradeMakesafeBoard(
 }
 
 export function checkMakesafeBoardParity(rows: any[]) {
-  const ops = projectOpsMakesafeBoard(rows || []);
-  const trade = projectTradeMakesafeBoard(rows || [], {
+  const canonical = rows || [];
+  // Project each board exactly once. Callers reuse the returned `ops` projection
+  // instead of re-projecting for the response (see the ops-api handler).
+  const ops = projectOpsMakesafeBoard(canonical);
+  const trade = projectTradeMakesafeBoard(canonical, {
     userId: "parity-checker",
-    name: "Hugo",
-    role: "installer",
+    role: "ops_manager",
     managedVerticals: ["makesafe"],
   });
+  // Index the projections once so the per-row checks below are O(N), not O(N^2).
+  const opsCountById = new Map<string, number>();
+  for (const r of ops.rows) {
+    if (r?.id) opsCountById.set(r.id, (opsCountById.get(r.id) || 0) + 1);
+  }
+  const tradeCountById = new Map<string, number>();
+  const tradeRowById = new Map<string, any>();
+  for (const r of trade.rows) {
+    if (!r?.id) continue;
+    tradeCountById.set(r.id, (tradeCountById.get(r.id) || 0) + 1);
+    if (!tradeRowById.has(r.id)) tradeRowById.set(r.id, r);
+  }
   const errors: string[] = [];
-  for (const row of rows || []) {
+  for (const row of canonical) {
     if (!row?.id) {
       errors.push("canonical row missing id");
       continue;
     }
-    const opsRows = ops.rows.filter((r: any) => r.id === row.id);
-    const tradeRows = trade.rows.filter((r: any) => r.id === row.id);
-    if (opsRows.length !== 1) {
-      errors.push(`${row.id}: ops projection count ${opsRows.length}`);
+    const opsCount = opsCountById.get(row.id) || 0;
+    const tradeCount = tradeCountById.get(row.id) || 0;
+    if (opsCount !== 1) {
+      errors.push(`${row.id}: ops projection count ${opsCount}`);
     }
-    if (tradeRows.length !== 1) {
-      errors.push(`${row.id}: trade projection count ${tradeRows.length}`);
+    if (tradeCount !== 1) {
+      errors.push(`${row.id}: trade projection count ${tradeCount}`);
     }
+    const tradeRow = tradeRowById.get(row.id);
     const expected = mapOpsStageToTradeColumn(row.canonical_stage).column;
-    if (tradeRows[0]?.column !== expected) {
+    if (tradeRow?.column !== expected) {
       errors.push(
-        `${row.id}: expected trade ${expected}, got ${tradeRows[0]?.column}`,
+        `${row.id}: expected trade ${expected}, got ${tradeRow?.column}`,
       );
     }
-    if (tradeRows[0]?.canonical_stage !== row.canonical_stage) {
+    if (tradeRow?.canonical_stage !== row.canonical_stage) {
       errors.push(`${row.id}: canonical stage changed in projection`);
     }
   }
   return {
     ok: errors.length === 0,
-    checked: (rows || []).length,
+    checked: canonical.length,
     errors,
     unmapped_stage_job_ids: Array.from(
       new Set([
@@ -493,5 +519,6 @@ export function checkMakesafeBoardParity(rows: any[]) {
         ...trade.unmapped_stage_job_ids,
       ]),
     ),
+    ops,
   };
 }
