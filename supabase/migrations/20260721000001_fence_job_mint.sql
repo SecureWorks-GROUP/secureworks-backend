@@ -89,10 +89,16 @@ AS $$
     'mappingOutcome', p_outcome,
     'scopeVersion', COALESCE(j.scope_version, 1),
     'updatedAt', j.updated_at,
-    -- Never read or transfer scope_json through mint. Brand-new rows can use
-    -- the known empty-scope cursor; reused cloud jobs load through load_job.
-    'scopeHash', CASE WHEN p_outcome IN ('created', 'deliberate_repeat_created') THEN '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a' ELSE NULL END,
-    'requiresLoad', p_outcome NOT IN ('created', 'deliberate_repeat_created')
+    -- Never read or transfer scope_json through mint. Only a job that this mint
+    -- created AND that still sits at its untouched initial revision may use the
+    -- known empty-scope cursor. Any later replay of the same request sees the
+    -- job's current scope_version and is told to load, so a stale client can
+    -- never start from a blank scope and overwrite saved work.
+    'scopeHash', CASE
+      WHEN p_outcome IN ('created', 'deliberate_repeat_created') AND COALESCE(j.scope_version, 1) = 1
+      THEN '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
+      ELSE NULL END,
+    'requiresLoad', NOT (p_outcome IN ('created', 'deliberate_repeat_created') AND COALESCE(j.scope_version, 1) = 1)
   )
   FROM public.jobs j
   WHERE j.id = p_job_id
@@ -421,9 +427,13 @@ BEGIN
     END IF;
     -- Keep the existing job candidate on the ledger while the command creates
     -- and records its missing opportunity. The complete RPC binds that mapping.
+    -- Returning here keeps this the only outcome of the branch: no later guard
+    -- may leave the ledger carrying a job_id behind a conflict decision, and a
+    -- resolved existing job is by definition not a historically ambiguous one.
     UPDATE public.fence_job_mint_requests SET state = 'contact_resolved', contact_id = p_contact_id,
       job_id = v_job.id, mapping_outcome = 'existing_contact_job_reused', completed_at = NULL,
       updated_at = now() WHERE request_id = v_request.request_id;
+    RETURN public._fence_mint_progress(v_request.request_id, false);
   END IF;
 
   IF v_request.intent = 'DELIBERATE_REPEAT' AND v_jobs <> public._fence_mint_sorted_uuids(v_request.expected_existing_job_ids) THEN

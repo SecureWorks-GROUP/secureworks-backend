@@ -475,6 +475,155 @@ Deno.test("existing cloud job reuse returns revision token and does not transfer
   assertEquals("scopeJson" in reused, false);
 });
 
+Deno.test("bind-time convergence stops execution and replays the canonical owner", async () => {
+  let creates = 0;
+  let records = 0;
+  let completes = 0;
+  let polled: string | null = null;
+  const convergedDeps = deps({
+    // Both devices reserved under different identity keys, so both are told to
+    // execute. Only the contact lock taken at bind time converges them.
+    reserve: async ({ input: request }) =>
+      progress({ ownerRequestId: request.requestId, executor: true }),
+    bindIdentity: async () =>
+      progress({
+        ownerRequestId: REQUEST_B,
+        state: "contact_resolved",
+        joined: true,
+        executor: false,
+        contactId: "contact-1",
+      }),
+    awaitCanonical: async ({ ownerRequestId }) => {
+      polled = ownerRequestId;
+      return canonical();
+    },
+    createStampedOpportunity: async () => {
+      creates++;
+      return {} as FenceMintOpportunity;
+    },
+    recordOpportunity: async () => {
+      records++;
+      return progress();
+    },
+    complete: async () => {
+      completes++;
+      return canonical();
+    },
+  });
+
+  const minted = await executeFenceJobMint({
+    input: input(REQUEST_A),
+    actorId: "user-1",
+    deps: convergedDeps,
+  });
+
+  assertEquals(minted.jobId, "job-1");
+  assertEquals(minted.mapping.outcome, "concurrent_request_reused");
+  assertEquals(polled, REQUEST_B);
+  assertEquals(creates, 0);
+  assertEquals(records, 0);
+  assertEquals(completes, 0);
+});
+
+Deno.test("bind-time convergence with an unfinished owner fails retryably, never as a second executor", async () => {
+  let creates = 0;
+  const stillRunningDeps = deps({
+    bindIdentity: async () =>
+      progress({
+        ownerRequestId: REQUEST_B,
+        state: "reserved",
+        joined: true,
+        executor: false,
+        contactId: "contact-1",
+      }),
+    awaitCanonical: async () => null,
+    createStampedOpportunity: async () => {
+      creates++;
+      return {} as FenceMintOpportunity;
+    },
+  });
+
+  const error = await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A),
+        actorId: "user-1",
+        deps: stillRunningDeps,
+      }),
+    FenceMintError,
+  );
+  assertEquals(error.code, "mint_in_progress");
+  assertEquals(creates, 0);
+});
+
+Deno.test("replay of a job whose scope moved on requires a load and carries no empty-scope cursor", async () => {
+  const replayed = deps({
+    reserve: async () =>
+      progress({
+        state: "complete",
+        executor: false,
+        canonical: {
+          ...canonical("created"),
+          scopeVersion: 5,
+          scopeHash: null,
+          requiresLoad: true,
+        },
+      }),
+  });
+  const result = await executeFenceJobMint({
+    input: input(),
+    actorId: "user-1",
+    deps: replayed,
+  });
+  assertEquals(result.revision.requiresLoad, true);
+  assertEquals(result.revision.scopeHash, null);
+  assertEquals(result.revision.scopeVersion, 5);
+});
+
+Deno.test("migration derives replay freshness from the job, not the stored outcome", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  // The empty-scope cursor is only legal for a job still at its initial revision.
+  assertStringIncludes(
+    sql,
+    "p_outcome IN ('created', 'deliberate_repeat_created') AND COALESCE(j.scope_version, 1) = 1",
+  );
+  assertEquals(
+    /'requiresLoad', p_outcome NOT IN \('created', 'deliberate_repeat_created'\)/
+      .test(sql),
+    false,
+  );
+  // The existing-job reuse branch must return before any later guard can leave
+  // a conflict decision on a ledger row that already carries a job_id.
+  assertStringIncludes(
+    sql,
+    "updated_at = now() WHERE request_id = v_request.request_id;\n    RETURN public._fence_mint_progress(v_request.request_id, false);",
+  );
+});
+
+Deno.test("edge stamp recovery is contact scoped, fails closed and classes non-conflict codes correctly", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const recovery = source.slice(
+    source.indexOf("findStampedOpportunity: async"),
+    source.indexOf("createStampedOpportunity: async"),
+  );
+  // Recovery must not depend on GHL free-text search matching the stamp.
+  assertEquals(/\bq:\s*fenceMintStamp/.test(recovery), false);
+  assertStringIncludes(recovery, "contactId,");
+  assertStringIncludes(recovery, "!paged.exhausted");
+  assertStringIncludes(recovery, "mint_reconciliation_unproven");
+  // Input and ledger-integrity failures must not be flattened into 409.
+  assertStringIncludes(source, "invalid_mint_request: 400");
+  assertStringIncludes(source, "mint_request_not_found: 500");
+  assertStringIncludes(source, "mint_owner_not_found: 500");
+  assertStringIncludes(source, "canonical_job_missing: 500");
+  assertStringIncludes(source, "MINT_CONFLICT_STATUS[conflictCode] ?? 409");
+});
+
 Deno.test("migration contract has narrow projections, uniqueness and no outbound communication", async () => {
   const sql = await Deno.readTextFile(
     new URL(

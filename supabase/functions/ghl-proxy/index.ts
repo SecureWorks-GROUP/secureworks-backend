@@ -71,7 +71,6 @@ import {
 import {
   authorizeFenceMintCaller,
   executeFenceJobMint,
-  fenceMintStamp,
   opportunityHasFenceMintStamp,
   stampedFenceOpportunityName,
   validateFenceMintInput,
@@ -285,6 +284,7 @@ function mapOpp(opp: any, stages: Record<string, string>) {
 
 async function fetchOpportunityPages(args: {
   pipelineId?: string
+  contactId?: string
   q?: string
   limit?: number
   maxPages?: number
@@ -298,6 +298,9 @@ async function fetchOpportunityPages(args: {
   let startAfterId: string | null = null
   let pagesScanned = 0
   let total: number | null = null
+  // True only when the scan reached the real end of the result set. Callers that
+  // must not act on an absence (lost-response reconciliation) fail closed on false.
+  let exhausted = false
 
   for (let page = 1; page <= maxPages; page++) {
     const params = new URLSearchParams({
@@ -305,6 +308,7 @@ async function fetchOpportunityPages(args: {
       limit: String(limit),
     })
     if (args.pipelineId) params.set('pipeline_id', args.pipelineId)
+    if (args.contactId) params.set('contact_id', args.contactId)
     if (args.q) params.set('q', args.q)
     if (startAfter != null) params.set('startAfter', String(startAfter))
     if (startAfterId) params.set('startAfterId', startAfterId)
@@ -317,7 +321,7 @@ async function fetchOpportunityPages(args: {
     const meta = data.meta || {}
     pagesScanned++
     if (typeof meta.total === 'number') total = meta.total
-    if (!rows.length) break
+    if (!rows.length) { exhausted = true; break }
 
     let newRows = 0
     for (const opp of rows) {
@@ -333,12 +337,12 @@ async function fetchOpportunityPages(args: {
       rows[rows.length - 1]?.sort?.[1] ??
       rows[rows.length - 1]?.contactId ??
       null
-    if (newRows === 0 || !nextStartAfter || !nextStartAfterId || rows.length < limit) break
+    if (newRows === 0 || !nextStartAfter || !nextStartAfterId || rows.length < limit) { exhausted = true; break }
     startAfter = nextStartAfter
     startAfterId = String(nextStartAfterId)
   }
 
-  return { opportunities, pagesScanned, total }
+  return { opportunities, pagesScanned, total, exhausted }
 }
 
 // lead_search's last resort when GHL contacts search (incl. the first-word retry)
@@ -1814,6 +1818,12 @@ serve(async (req: Request) => {
     // create-job and assign-number chain. It never sends a quote or message.
     if (action === 'mint_fence_job' && req.method === 'POST') {
       const requestStarted = performance.now()
+      const MINT_CONFLICT_STATUS: Record<string, number> = {
+        invalid_mint_request: 400,
+        mint_request_not_found: 500,
+        mint_owner_not_found: 500,
+        canonical_job_missing: 500,
+      }
       try {
         const MINT_BODY_LIMIT = 32768
         if (Number(req.headers.get('content-length') || 0) > MINT_BODY_LIMIT) {
@@ -1862,7 +1872,12 @@ serve(async (req: Request) => {
             throw new FenceMintError(503, 'mint_persistence_invalid', 'Mint persistence returned an invalid response')
           }
           if (data.decision === 'conflict') {
-            throw new FenceMintError(409, String(data.code || 'mint_conflict'), String(data.message || 'Mint identity evidence conflicts'), {
+            const conflictCode = String(data.code || 'mint_conflict')
+            // Not every SQL conflict is a caller-resolvable 409. Bad input stays
+            // 400 and ledger integrity failures stay 5xx so clients that retry
+            // on 409 cannot loop on a condition that will never resolve.
+            const conflictStatus = MINT_CONFLICT_STATUS[conflictCode] ?? 409
+            throw new FenceMintError(conflictStatus, conflictCode, String(data.message || 'Mint identity evidence conflicts'), {
               jobIds: data.jobIds,
               candidateCount: data.candidateCount,
             })
@@ -2017,11 +2032,15 @@ serve(async (req: Request) => {
               signal: AbortSignal.timeout(8000),
             })),
             findStampedOpportunity: async ({ ownerRequestId, contactId }) => {
+              // Never trust GHL's free-text `q` to match a bracketed stamp. The
+              // scan is scoped to the resolved contact's fencing opportunities
+              // and the stamp is matched client side, so recovery depends only
+              // on the listing being complete.
               const paged = await fetchOpportunityPages({
                 pipelineId: PIPELINES.fencing,
-                q: fenceMintStamp(ownerRequestId),
-                limit: 20,
-                maxPages: 2,
+                contactId,
+                limit: 100,
+                maxPages: 10,
                 perPageTimeoutMs: 8000,
               })
               const exact = paged.opportunities
@@ -2031,6 +2050,16 @@ serve(async (req: Request) => {
                   opportunityHasFenceMintStamp(opportunity, ownerRequestId))
               if (exact.length > 1) {
                 throw new FenceMintError(409, 'duplicate_stamped_opportunities', 'Multiple GHL opportunities carry the same mint request stamp')
+              }
+              if (!exact.length && !paged.exhausted) {
+                // An absence that was never proven must not authorise a create.
+                console.error(JSON.stringify({
+                  event: 'fence_mint_stamp_scan_truncated',
+                  request_id: ownerRequestId,
+                  pages_scanned: paged.pagesScanned,
+                  total: paged.total,
+                }))
+                throw new FenceMintError(503, 'mint_reconciliation_unproven', 'Could not prove whether a stamped opportunity already exists; retry with the same requestId')
               }
               return exact[0] || null
             },

@@ -548,6 +548,7 @@ export async function executeFenceJobMint(args: {
     }
     mark("opportunity_verify");
 
+    const preBindOwnerRequestId = ownerRequestId;
     const bound = await deps.bindIdentity({
       ownerRequestId,
       contact,
@@ -561,6 +562,27 @@ export async function executeFenceJobMint(args: {
         requestId: input.requestId,
         replayed: false,
         joined: progress.joined,
+        timingMs,
+      });
+    }
+    if (bound.ownerRequestId !== preBindOwnerRequestId) {
+      // Callers that reserved under different identity keys (email vs phone)
+      // only converge on the contact lock at bind time. The caller that loses
+      // ownership stops executing and replays the canonical owner's result.
+      const canonical = await deps.awaitCanonical({ ownerRequestId });
+      mark("await_owner");
+      if (!canonical) {
+        throw new FenceMintError(
+          409,
+          "mint_in_progress",
+          "The canonical fence mint is still in progress; retry with the same requestId",
+        );
+      }
+      timingMs.total = Math.max(0, Math.round((now() - started) * 10) / 10);
+      return canonicalResponse(canonical, {
+        requestId: input.requestId,
+        replayed: false,
+        joined: true,
         timingMs,
       });
     }

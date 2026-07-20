@@ -72,7 +72,7 @@ Rules:
 
 `mapping.outcome` is one of `created`, `deliberate_repeat_created`, `existing_opportunity_reused`, `existing_contact_job_reused`, `concurrent_request_reused`, or `idempotent_replay`. `canonicalOutcome` preserves the ledger's original outcome when the current transport is a replay/race join.
 
-For a brand-new job, `scopeHash` is the known empty-scope cursor and `requiresLoad` is false. The entry funnel can hydrate its existing local draft onto the canonical identity without a redundant `find_job`, `load_job`, or job-number request. For an existing cloud job, `scopeHash` is null and `requiresLoad` is true: checkpoint the local draft, then use the existing authenticated `load_job` path before any cloud write. The mint response never reads or transfers `jobs.scope_json`.
+For a brand-new job that is still at its initial revision, `scopeHash` is the known empty-scope cursor and `requiresLoad` is false. Both are derived from the job's current `scope_version`, not from the stored mint outcome, so a replay of the same request after scope has been saved returns `requiresLoad: true` and a null `scopeHash` rather than a stale empty-scope cursor. The entry funnel can hydrate its existing local draft onto the canonical identity without a redundant `find_job`, `load_job`, or job-number request. For an existing cloud job, `scopeHash` is null and `requiresLoad` is true: checkpoint the local draft, then use the existing authenticated `load_job` path before any cloud write. The mint response never reads or transfers `jobs.scope_json`.
 
 The response also exposes a `Server-Timing` header and `Timing-Allow-Origin: *`. Stage timings contain no client identity.
 
@@ -90,15 +90,18 @@ All failures return `{ "error": "...", "code": "...", "details": ... }` and no q
 | 409 | `contact_identity_conflict`, `opportunity_contact_conflict`, `opportunity_pipeline_conflict`, `contact_opportunity_job_conflict`, `multiple_active_jobs`, `mapping_uniqueness_conflict` | Surface the conflict. No automatic mutation or mint. |
 | 409 | `ambiguous_historical_mapping` | Ask for identity resolution. Historical NULL mappings are never treated as proof that no job exists. |
 | 409 | `stale_existing_job_evidence` | Refresh the client's job list and ask again before a deliberate repeat. |
+| 400 | `invalid_mint_request` | Reservation input was rejected by the ledger. Fix the input; retrying unchanged never resolves. |
+| 500 | `mint_request_not_found`, `mint_owner_not_found`, `canonical_job_missing` | Ledger integrity failure, not a caller conflict. Escalate rather than loop. |
+| 503 | `mint_reconciliation_unproven` | The contact-scoped stamp scan could not be completed, so a create was refused. Retry the same request ID. |
 | 503 | `mint_persistence_failed` | Retain the local draft and retry the same request ID. No GHL create occurs before reservation. |
 | 5xx | GHL/command typed failure | Retain the local draft and retry the same request ID. A stamped GHL opportunity is reconciled before replacement creation. |
 
 ## Idempotency and partial-failure model
 
 1. `reserve_fence_job_mint` writes the request ledger before GHL IO.
-2. A database lock row serializes `{org, fencing, contact identity}`. A second request joins the current owner and performs no external create. Seven bounded status reads wait about 7.8 seconds for the canonical result; if still running, `mint_in_progress` tells the client to retry the same key.
-3. The opportunity name carries `[SW-MINT:<owner-request-uuid>]`. A retry searches at most two bounded GHL pages and adopts the exact same-contact, fencing-pipeline stamped opportunity before any replacement create. This closes the lost-response/crash window without a browser-side mint.
-4. Contact binding and historical ambiguity checks run before opportunity creation.
+2. A database lock row serializes `{org, fencing, contact identity}`. A second request joins the current owner and performs no external create. Callers that reserved under different identity keys (one by email, one by phone) converge only when the contact lock is taken at bind time; the caller that loses ownership there stops executing and polls the canonical owner exactly like a reserve-time joiner. Seven bounded status reads wait about 7.8 seconds for the canonical result; if still running, `mint_in_progress` tells the client to retry the same key.
+3. The opportunity name carries `[SW-MINT:<owner-request-uuid>]`. Recovery never relies on GHL free-text `q` matching a bracketed stamp: it lists the resolved contact's fencing-pipeline opportunities and matches the stamp client side. The scan is bounded (10 pages of 100) and fails closed - if it could not reach the end of the listing, the command returns `mint_reconciliation_unproven` rather than creating a possible duplicate. This closes the lost-response/crash window without a browser-side mint.
+4. Contact binding and historical ambiguity checks run before opportunity creation. `ambiguous_historical_mapping` is a deliberate hard blocker with no bypass parameter: a fencing job with no verified GHL contact mapping that matches on email, phone digits, or address blocks the mint even when it is `complete` or `invoiced`, and `DELIBERATE_REPEAT` does not exempt it. Resolution is an operator data-repair action (map the legacy job to its GHL contact), not a client-supplied acknowledgement.
 5. `complete_fence_job_mint` atomically inserts/reuses the job, assigns `SWF-` number, binds contact/opportunity, completes the ledger, and logs a non-communication job event.
 6. Existing `(org, type, opportunity)` mapping uniqueness and existing job-number uniqueness are database constraints.
 
@@ -115,7 +118,7 @@ A caught failure releases the execution lease for immediate same-key retry. A ha
 
 ## Performance boundaries and existing PRs
 
-The command uses explicit scalar projections. It has no `select('*')`, `RETURNING *`, list/feed `scope_json`, or quote/PDF body. Normal creation uses one reserve RPC, one bind RPC, one record-opportunity RPC, and one atomic complete RPC. Email/phone lookups are a maximum batch of two. GHL request-stamp reconciliation is capped at two pages of 20 opportunities with per-page timeout. Race polling is capped at seven reads.
+The command uses explicit scalar projections. It has no `select('*')`, `RETURNING *`, list/feed `scope_json`, or quote/PDF body. Normal creation uses one reserve RPC, one bind RPC, one record-opportunity RPC, and one atomic complete RPC. Email/phone lookups are a maximum batch of two. GHL request-stamp reconciliation is contact scoped and capped at ten pages of 100 opportunities with per-page timeout; truncation is logged and fails closed. Race polling is capped at seven reads.
 
 This work identifies and does not duplicate the open system-speed PRs:
 
