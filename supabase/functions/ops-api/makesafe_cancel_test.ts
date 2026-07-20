@@ -41,6 +41,7 @@ import {
   myJobs,
 } from "./index.ts";
 import { computeStoryVerdict } from "./makesafe_story.ts";
+import { projectTradeMakesafeBoard } from "./makesafe_board_read_model.ts";
 
 type TableRows = Record<string, any[]>;
 
@@ -448,6 +449,51 @@ Deno.test("board feed: cancelled job in `cancelled` column, 90-day window respec
 
   // stage_labels advertises the Cancelled column.
   assertEquals(pipeline.stage_labels.cancelled, "Cancelled");
+});
+
+Deno.test("board feed: a cancelled card retains its (now-cancelled) assignment ownership so an allocated-only trade keeps its own worked-then-cancelled make-safe", async () => {
+  const now = Date.now();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const recentCancel = iso(now - 5 * 86_400_000);
+
+  const { client } = makeClient({
+    jobs: [
+      { id: "job-mine", job_number: "M", type: "makesafe", status: "cancelled", created_at: iso(now - 6 * 86_400_000), updated_at: recentCancel },
+      { id: "job-other", job_number: "T", type: "makesafe", status: "cancelled", created_at: iso(now - 6 * 86_400_000), updated_at: recentCancel },
+    ],
+    makesafe_job_details: [
+      { job_id: "job-mine", cancel_reason: "duplicate", cancelled_at: recentCancel },
+      { job_id: "job-other", cancel_reason: "duplicate", cancelled_at: recentCancel },
+    ],
+    job_service_reports: [],
+    xero_invoices: [],
+    job_documents: [],
+    makesafe_report_packs: [],
+    // Job cancellation closed these open assignments to 'cancelled'. The cancelled
+    // read must retain every status (not .neq('status','cancelled')) or the trade's
+    // ownership evidence is lost and its own Archive card silently vanishes.
+    job_assignments: [
+      { id: "as-mine", job_id: "job-mine", user_id: "trade-mine", status: "cancelled", users: { id: "trade-mine", name: "Mine" } },
+      { id: "as-other", job_id: "job-other", user_id: "trade-other", status: "cancelled", users: { id: "trade-other", name: "Other" } },
+    ],
+    job_events: [],
+  });
+
+  const pipeline: any = await _makesafePipelineForTest(client, new URLSearchParams());
+
+  const mine = pipeline.columns.cancelled.find((j: any) => j.id === "job-mine");
+  assert(!!mine, "own cancelled card fed");
+  assertEquals((mine.assignments || []).map((a: any) => a.user_id), ["trade-mine"]);
+
+  // The allocated-only projection filter keys off assignment membership; with the
+  // ownership retained, the trade keeps its own card and never sees another's.
+  const board = projectTradeMakesafeBoard(pipeline.columns.cancelled, {
+    userId: "trade-mine",
+    name: "Mine",
+    role: "installer",
+    managedVerticals: [],
+  });
+  assertEquals(board.rows.map((r: any) => r.id), ["job-mine"]);
 });
 
 // ── 7. story-reconciler exemption ──────────────────────────────────────────────

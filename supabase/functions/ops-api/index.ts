@@ -11122,8 +11122,27 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       cancelledIds,
     )
     for (const d of (cds || [])) cancelledDetailsMap[d.job_id] = d
+    // Retain assignment ownership on cancelled cards so the trade projection can
+    // keep an allocated-only trade's OWN worked-then-cancelled make-safes in their
+    // Archive. Cancelling a make-safe closes its open assignments to 'cancelled',
+    // so we deliberately load every status here (not .neq('status','cancelled')).
+    // tradeSafe still filters the per-card payload to the viewer's own assignment,
+    // so another trade's allocation is never exposed.
+    const cancelledAssignMap: Record<string, any[]> = {}
+    const cancelledAssigns = await _fetchAllByJobIdChunked(
+      client,
+      'job_assignments',
+      'id, job_id, user_id, scheduled_date, start_time, status, role, crew_name, travel_started_at, arrived_at, started_at, clocked_on_at, completed_at, users:user_id(id, name, phone)',
+      cancelledIds,
+      (q) => q.order('scheduled_date', { ascending: true }),
+    )
+    for (const a of (cancelledAssigns || [])) {
+      if (!a?.job_id) continue
+      if (!cancelledAssignMap[a.job_id]) cancelledAssignMap[a.job_id] = []
+      cancelledAssignMap[a.job_id].push(a)
+    }
     const cancelledCards = cancelledRaw.map((j: any) =>
-      enrichMakesafeBoardJob(j, cancelledDetailsMap[j.id] || null, [], undefined, undefined, undefined, undefined, null))
+      enrichMakesafeBoardJob(j, cancelledDetailsMap[j.id] || null, cancelledAssignMap[j.id] || [], undefined, undefined, undefined, undefined, null))
     // Order by cancelled_at (fallback updated_at) — freshest cancel first.
     cancelledCards.sort((a: any, b: any) =>
       String(b.cancelled_at || b.updated_at || '').localeCompare(String(a.cancelled_at || a.updated_at || '')))
@@ -11134,17 +11153,23 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   return { columns, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: (jobs || []).length }
 }
 
-// Server-owned scope for allocated-only trades: the job ids they are assigned to.
-// Returned ids feed the canonical loader so the full make-safe history is never
-// loaded for a caller who can only see their own jobs. Row-paginated for the cap.
+// Server-owned scope for allocated-only trades: the make-safe job ids they are
+// assigned to. Scoped to type='makesafe' at the source (inner join) so patio /
+// fencing / other-type assignments never bloat the restrict IN-list passed into
+// the canonical loader. Cancelled-status assignments are retained on purpose:
+// cancelling a make-safe job closes its open assignments to 'cancelled', so a
+// trade's own worked-then-cancelled make-safes would otherwise never load into
+// their Archive. Returned ids feed the canonical loader so the full make-safe
+// history is never loaded for a caller who can only see their own jobs.
+// Row-paginated for the cap.
 async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<string[]> {
   const ids = new Set<string>()
   let offset = 0
   for (let guard = 0; guard < 100; guard++) {
     const { data, error } = await client.from('job_assignments')
-      .select('job_id')
+      .select('job_id, jobs:job_id!inner(type)')
       .eq('user_id', userId)
-      .neq('status', 'cancelled')
+      .eq('jobs.type', 'makesafe')
       .order('job_id', { ascending: true })
       .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
     if (error) throw error
