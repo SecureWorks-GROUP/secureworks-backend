@@ -15,11 +15,9 @@ WHERE jobname IN (
   'shaun-morning-brief'
 );
 
--- 2. Drop the columns and index only the retired integration read or wrote.
-DROP INDEX IF EXISTS idx_users_telegram;
-ALTER TABLE users DROP COLUMN IF EXISTS telegram_username;
-ALTER TABLE users DROP COLUMN IF EXISTS telegram_id;
-ALTER TABLE inbox_events DROP COLUMN IF EXISTS telegram_notified;
+-- 2. Columns the retired integration read or wrote on users and inbox_events
+--    are left in place as inert historical data. No code reads them any more,
+--    and dropping them would destroy the staff mapping irreversibly.
 
 -- 3. Drop the action permissions seeded for the removed send action.
 DELETE FROM action_permissions WHERE action_type = 'send_telegram';

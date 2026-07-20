@@ -1637,6 +1637,10 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
     }
   }
 
+  if (action) {
+    return json({ error: `Unknown or retired action: ${action}`, action }, 410)
+  }
+
   try {
     // Auto-resolve stale alerts (>7 days, not dismissed, not resolved)
     try {
