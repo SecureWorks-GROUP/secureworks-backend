@@ -1,0 +1,22 @@
+[
+  {
+    "check_name": "switch_present",
+    "ok": true,
+    "detail": "makesafe_cron_settings.intake_mode exists"
+  },
+  {
+    "check_name": "mode_is_legacy",
+    "ok": true,
+    "detail": "preflight must run before the direct cutover"
+  },
+  {
+    "check_name": "duplicate_source_accounting",
+    "ok": true,
+    "detail": "each source post must account to at most one canonical case"
+  },
+  {
+    "check_name": "live_case_without_job",
+    "ok": true,
+    "detail": "every live canonical case must retain its guarded job link"
+  }
+]
