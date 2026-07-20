@@ -75,10 +75,16 @@ COMMENT ON COLUMN public.makesafe_intake_health.alarm_auth_verified_at IS
 
 -- Bounded scans need a progress guarantee that does not depend on any row ever
 -- being stamped as scanned. The deterministic sweep half of each read starts
--- after this received_at position and moves it forward every live run, restarting
--- at the oldest in-window row once the sweep reaches the end.
+-- after this received_at position and moves it forward every run, restarting at
+-- the oldest in-window row once the sweep reaches the end. Live scanning and dark
+-- observation hold separate positions: pre-cutover observation has to cover the
+-- whole window on its own, and neither mode may consume the other's progress.
 ALTER TABLE public.makesafe_intake_health
   ADD COLUMN IF NOT EXISTS deterministic_scan_cursor_at timestamptz;
+ALTER TABLE public.makesafe_intake_health
+  ADD COLUMN IF NOT EXISTS deterministic_observe_cursor_at timestamptz;
 
 COMMENT ON COLUMN public.makesafe_intake_health.deterministic_scan_cursor_at IS
-  'Advancing received_at position of the bounded deterministic source sweep. NULL restarts the sweep at the oldest row inside the window.';
+  'Advancing received_at position of the bounded deterministic source sweep for live scans. NULL restarts the sweep at the oldest row inside the window.';
+COMMENT ON COLUMN public.makesafe_intake_health.deterministic_observe_cursor_at IS
+  'Advancing received_at position of the bounded deterministic source sweep for dry-run dark observation. Kept apart from the live cursor so neither mode consumes the other''s coverage.';

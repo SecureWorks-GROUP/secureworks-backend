@@ -2330,7 +2330,9 @@ if (import.meta.main) serve(async (req: Request) => {
       'intake_golden_replay',
       'makesafe_deterministic_intake_replay',
       // Ruling 5 terminal-skill hook: exact allowlist in, sanitized case proposal
-      // out. It is zero-write and carries no source ids/content in its response.
+      // out. It carries no source ids/content in its response and creates no case,
+      // draft, job, storage object or health state; its only write is its own
+      // observe sweep position, which is what makes observation cover the window.
       'makesafe_deterministic_intake_dark_observe',
       'list_makesafe_companies',
       // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
@@ -2683,8 +2685,9 @@ if (import.meta.main) serve(async (req: Request) => {
           maxPdfExtractions: Number(url.searchParams.get('max_pdf') || '') || undefined,
         }))
       }
-      // Complete deterministic adapter replay. Read-only by construction: no
-      // storage writes, cases, drafts, jobs, approvals, sends or model calls.
+      // Complete deterministic adapter replay. No storage writes, cases, drafts,
+      // jobs, approvals, sends or model calls; its only write is the observe sweep
+      // position, which is what lets repeated replays cover a whole large window.
       // The response contains aggregate counts only, never message bodies or PII.
       case 'makesafe_deterministic_intake_replay': {
         return json(await _runDeterministicIntake(client, {
@@ -2698,7 +2701,8 @@ if (import.meta.main) serve(async (req: Request) => {
         }))
       }
       // True dark observation: exact named sources/instruction keys, sanitized
-      // case-level proposals, no storage mutation, approval, model call or DB write.
+      // case-level proposals, no storage mutation, approval, model call, and no DB
+      // write other than its own observe sweep position.
       // Routine/privileged callers may use it for the N=1 human old/new
       // comparison; ordinary JWT users remain denied.
       case 'makesafe_deterministic_intake_dark_observe': {

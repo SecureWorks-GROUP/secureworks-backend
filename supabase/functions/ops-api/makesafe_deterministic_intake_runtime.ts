@@ -4,8 +4,13 @@
 // Reads a capped source window (a sweep half driven by a persisted received_at
 // cursor plus a newest half) together with every allowlisted source by id before
 // planning, so per-run cost is a constant while every in-window source is still
-// eventually planned. Dry-run performs no writes or storage mutations. Live mode
-// is reachable only through the DB-backed cutover switch and never falls back to AI.
+// eventually read. Live and dry-run runs each advance their own sweep cursor, so
+// that guarantee holds separately in both modes: a live run never moves the
+// dark-observe position and vice versa. Dry-run's only write is that observe
+// cursor - it creates no case, draft, job, storage object or health state, and
+// cutover evidence therefore comes from observation that covers the whole window.
+// Live mode is reachable only through the DB-backed cutover switch and never
+// falls back to AI.
 
 import {
   buildDeterministicIntakePlan,
@@ -382,36 +387,42 @@ async function resolveInstructionKeySeeds(
   return { postIds, capProofKeys };
 }
 
+// Live scanning and dark observation sweep the same window independently, so each
+// owns its own position. Sharing one column would make a live run skip rows an
+// observe run had already passed, and would make pre-cutover observation depend on
+// live runs that do not exist yet.
+const LIVE_CURSOR_COLUMN = "deterministic_scan_cursor_at";
+const OBSERVE_CURSOR_COLUMN = "deterministic_observe_cursor_at";
+
 // The sweep cursor is deliberately tolerant on both ends. A pre-migration DB, or
 // a health row that has never been written, simply sweeps from the oldest row
 // every run; that is the old behaviour, not a new failure. Losing the cursor
 // costs coverage, so the run says so through a caveat rather than throwing.
 async function readScanCursor(
   client: any,
-): Promise<{ cursorAt: string | null; available: boolean }> {
+  column: string,
+): Promise<string | null> {
   try {
     const { data, error } = await client.from("makesafe_intake_health")
-      .select("deterministic_scan_cursor_at")
+      .select(column)
       .eq("id", true)
       .maybeSingle();
-    if (error) return { cursorAt: null, available: false };
-    return {
-      cursorAt: data?.deterministic_scan_cursor_at ?? null,
-      available: true,
-    };
+    if (error) return null;
+    return data?.[column] ?? null;
   } catch {
-    return { cursorAt: null, available: false };
+    return null;
   }
 }
 
 async function persistScanCursor(
   client: any,
+  column: string,
   cursorAt: string | null,
 ): Promise<boolean> {
   try {
     const { error } = await client.from("makesafe_intake_health").upsert({
       id: true,
-      deterministic_scan_cursor_at: cursorAt,
+      [column]: cursorAt,
     }, { onConflict: "id" });
     return !error;
   } catch {
@@ -1354,20 +1365,28 @@ async function insertCaseAndSources(
   };
 }
 
+// A run that filed nothing because its configuration sat outside the read cap is
+// not a successful extraction. It must degrade the durable health row too, or the
+// alarm and morning-report surfaces keep reading a fresh success while the scan
+// response is the only place the caveat exists.
 async function writeHealth(
   client: any,
   nowIso: string,
   writeFailures: number,
   draftsCreated: number,
   jobsCreated: number,
+  degradedReason?: string,
 ): Promise<void> {
+  const reason = writeFailures > 0
+    ? "deterministic_write_failure"
+    : (degradedReason ?? null);
   const { error } = await client.from("makesafe_intake_health").upsert({
     id: true,
-    extraction_status: writeFailures > 0 ? "degraded" : "ok",
-    degraded_reason: writeFailures > 0 ? "deterministic_write_failure" : null,
-    degraded_since: writeFailures > 0 ? nowIso : null,
+    extraction_status: reason ? "degraded" : "ok",
+    degraded_reason: reason,
+    degraded_since: reason ? nowIso : null,
     last_scan_at: nowIso,
-    ...(writeFailures === 0 ? { last_successful_extraction_at: nowIso } : {}),
+    ...(reason ? {} : { last_successful_extraction_at: nowIso }),
     last_scan_drafts_created: draftsCreated,
     last_scan_auto_filed: jobsCreated,
     intake_mode: "deterministic",
@@ -1422,22 +1441,27 @@ export async function runDeterministicIntake(
     client,
     allowInstructionKeys,
   );
-  const cursor = await readScanCursor(client);
+  const cursorColumn = dryRun ? OBSERVE_CURSOR_COLUMN : LIVE_CURSOR_COLUMN;
+  const cursorAt = await readScanCursor(client, cursorColumn);
   const input = await readInputs(client, {
     days,
     onlyUnscanned,
     nowIso,
     maxSources,
-    cursorAt: cursor.cursorAt,
+    cursorAt,
     seedPostIds: [...allowSourcePostIds, ...instructionSeeds.postIds],
   });
   // Advanced immediately after the read, before any planning or business write can
   // throw. A run that fails on a stale allowlist still moves the sweep on, so no
   // configuration fault can pin the window read to the same rows indefinitely.
-  // Dry-run keeps its zero-write contract and only observes the live position.
-  const cursorPersisted = dryRun
-    ? cursor.available
-    : await persistScanCursor(client, input.read.next_cursor_at);
+  // Dry-run advances its own observe-only position for the same reason: cutover
+  // evidence has to come from observation that eventually covers the whole window,
+  // which a cursor pinned at null could never do.
+  const cursorPersisted = await persistScanCursor(
+    client,
+    cursorColumn,
+    input.read.next_cursor_at,
+  );
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
@@ -1548,7 +1572,14 @@ export async function runDeterministicIntake(
   // nothing resolved is that the sources sit outside this run's cap, the run ends
   // as a reported no-op and the sweep brings them inside the cap on a later run.
   if (capExposedNoOp) {
-    await writeHealth(client, nowIso, 0, 0, 0);
+    await writeHealth(
+      client,
+      nowIso,
+      0,
+      0,
+      0,
+      "deterministic_no_cases_readable_within_cap",
+    );
     return report;
   }
   if (!plan.cases.length) {

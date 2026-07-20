@@ -30,8 +30,9 @@ run:
 2. Call `makesafe_new_emails` to discover candidate source post ids already held in the
    capture estate. Do not file source ids or source PII in skill logs.
 3. For each approved check set, POST exact ids to
-   `makesafe_deterministic_intake_dark_observe`. The response is sanitized and
-   zero-write.
+   `makesafe_deterministic_intake_dark_observe`. The response is sanitized, and the
+   call creates no case, draft, job, storage object or health state; its only write
+   is its own observe sweep position, kept separate from the live scan cursor.
 4. If a named DB rollout allowlist has separately been approved and configured, the
    routine may call `scan_ses_makesafes`. The routine cannot set or widen that DB
    allowlist. The scanner processes only those exact cases through deterministic code.

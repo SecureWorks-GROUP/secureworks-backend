@@ -16,15 +16,23 @@
    head once it reaches the end (`source_read.cursor_at` /
    `source_read.next_cursor_at`). Progress does not depend on anything being
    stamped `makesafe_scanned_at`, so ordinary non-actionable SES mail, which no
-   run ever stamps, cannot hold the read in place. Dry-run and dark-observe keep
-   their zero-write contract: they read the position and never move it. If the
-   cursor column is unreadable or unwritable the run still completes and reports
-   `scan_cursor_unavailable` in `evidence.caveats`.
+   run ever stamps, cannot hold the read in place. Dry-run and dark-observe get
+   the same guarantee from their own separate position,
+   `deterministic_observe_cursor_at`: observation has to cover the whole window
+   before cutover, when no live run exists to advance anything, so the sweep
+   position is the one thing a dry run writes. It still creates no case, draft,
+   job, storage object or health state, and it never moves the live cursor. If
+   the cursor column is unreadable or unwritable the run still completes and
+   reports `scan_cursor_unavailable` in `evidence.caveats`.
 4. Volume meeting configuration can no longer poison the cron. When a run resolves
    no case and every unresolved allowlist entry was merely outside this run's cap,
    the run ends as a reported no-op carrying `no_cases_readable_within_cap` rather
    than throwing; the sweep brings those sources inside the cap on a later run. A
-   genuinely stale allowlist that resolves nothing still fails closed.
+   genuinely stale allowlist that resolves nothing still fails closed. That no-op
+   is not a success: it writes `extraction_status = 'degraded'` with
+   `degraded_reason = 'deterministic_no_cases_readable_within_cap'` and does not
+   refresh `last_successful_extraction_at`, so the alarm and morning-report
+   surfaces see the degradation, not just the scan response.
 
 ## Authority and scope
 

@@ -786,7 +786,7 @@ Deno.test("write failures are classified without retaining source content", asyn
   assert(!serialised.includes("12 Fail Way"));
 });
 
-Deno.test("dark observe is case-level, sanitized, exact, zero-write and zero-AI", async () => {
+Deno.test("dark observe is case-level, sanitized, exact, zero-AI and writes only its own sweep position", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "dark-secret-source",
@@ -802,7 +802,8 @@ Deno.test("dark observe is case-level, sanitized, exact, zero-write and zero-AI"
     status: "uploaded",
     size_bytes: 1024,
   });
-  const before = JSON.stringify(store);
+  const { makesafe_intake_health: _health, ...businessTables } = store as any;
+  const before = JSON.stringify(businessTables);
   const report = await runDeterministicIntake(fakeClient(store), {
     dryRun: true,
     days: 30,
@@ -811,7 +812,14 @@ Deno.test("dark observe is case-level, sanitized, exact, zero-write and zero-AI"
     includeSanitizedCases: true,
   });
 
-  assertEquals(JSON.stringify(store), before);
+  const { makesafe_intake_health: healthAfter, ...businessAfter } = store as any;
+  assertEquals(JSON.stringify(businessAfter), before);
+  // The one permitted dry-run write is the observe sweep position. It must not
+  // claim a successful extraction or touch the live scan cursor.
+  assertEquals(Object.keys(healthAfter[0] ?? {}).sort(), [
+    "deterministic_observe_cursor_at",
+    "id",
+  ]);
   assertEquals(report.ai_calls, 0);
   assertEquals(report.dry_run, true);
   assertEquals(report.selection.selected_cases, 1);
@@ -1165,6 +1173,71 @@ Deno.test("the scan sweep advances across runs and restarts at the window head",
   );
 });
 
+// Cutover evidence is gathered before any live run exists, so dark observe cannot
+// borrow the live sweep's progress. It has to reach the middle of a window larger
+// than one run's cap entirely on its own.
+Deno.test("dark observe sweeps the whole window on its own cursor", async () => {
+  const store = baseStore();
+  const total = 30;
+  for (let index = 0; index < total; index++) {
+    store.emails.push(email({
+      post_id: `o-${index}`,
+      received_at: `2026-07-${
+        String(index + 1).padStart(2, "0")
+      }T01:00:00.000Z`,
+      subject: `Re: chatter ${index}`,
+      body_content: "Thanks, noted.",
+    }));
+  }
+  const client = fakeClient(store);
+  const readIds = new Set<string>();
+  const baseFrom = client.from.bind(client);
+  client.from = (table: string) => {
+    const api = baseFrom(table);
+    if (table !== "emails") return api;
+    const baseSelect = api.select;
+    api.select = (columns: string) => {
+      const query = baseSelect(columns);
+      const baseThen = query.then.bind(query);
+      query.then = (resolve: (value: any) => void) =>
+        baseThen((result: any) => {
+          for (const row of result.data || []) {
+            if (row?.post_id) readIds.add(row.post_id);
+          }
+          resolve(result);
+        });
+      return query;
+    };
+    return api;
+  };
+
+  let runs = 0;
+  while (runs < 25 && readIds.size < total) {
+    runs++;
+    const report = await runDeterministicIntake(client, {
+      dryRun: true,
+      days: 60,
+      nowIso: "2026-08-01T00:00:00.000Z",
+      maxSources: 6,
+    });
+    assert(report.source_read.window_rows <= 6);
+  }
+
+  for (let index = 0; index < total; index++) {
+    assert(readIds.has(`o-${index}`), `observe never read o-${index}`);
+  }
+  // The live sweep is untouched, so cutover starts from the window head rather
+  // than from wherever observation happened to stop.
+  assertEquals(
+    store.makesafe_intake_health[0].deterministic_scan_cursor_at ?? null,
+    null,
+  );
+  assertEquals(
+    store.makesafe_intake_health[0].last_successful_extraction_at ?? null,
+    null,
+  );
+});
+
 Deno.test("an all-cap-exposed run is a reported no-op, never a poisoned cron", async () => {
   const store = baseStore();
   for (let index = 0; index < 30; index++) {
@@ -1204,6 +1277,16 @@ Deno.test("an all-cap-exposed run is a reported no-op, never a poisoned cron", a
   assertEquals(report.totals.write_failures, 0);
   // The cron still made progress, so the configuration is not pinned out of reach.
   assert(store.makesafe_intake_health[0].deterministic_scan_cursor_at !== null);
+  // Filing nothing is not a successful extraction. The alarm and morning-report
+  // surfaces read the health row, so the caveat has to live there too.
+  const health = store.makesafe_intake_health[0];
+  assertEquals(health.extraction_status, "degraded");
+  assertEquals(
+    health.degraded_reason,
+    "deterministic_no_cases_readable_within_cap",
+  );
+  assertEquals(health.last_successful_extraction_at ?? null, null);
+  assertEquals(health.last_scan_at, "2026-08-01T00:00:00.000Z");
 });
 
 Deno.test("a genuinely stale allowlist still fails closed", async () => {
