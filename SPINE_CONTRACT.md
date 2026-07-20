@@ -259,7 +259,7 @@ Fallback on classifier failure: Sonnet (fail safe to smart model).
 }
 ```
 
-If degraded/critical → sends Telegram alert to admin.
+If degraded or critical, the response includes the alert details.
 
 ---
 

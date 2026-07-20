@@ -1647,7 +1647,7 @@ serve(async (req: Request) => {
         if (allAccepted) {
           // ── RUN FULLY ACCEPTED — create deposit invoices for both parties ──
 
-          // Telegram notification
+          // Acceptance notification event
           const clientName = job?.client_name || 'Client'
           const neighbourName = run?.neighbour_name || 'Neighbour'
           await sb.from('business_events').insert({
@@ -2184,7 +2184,7 @@ serve(async (req: Request) => {
         }, { handler: 'send-quote/decline', job_id: doc.job_id })
       }
 
-      // ── Notify scoper via business_event (telegram-bot reacts to this) ──
+      // ── Record scoper notification via business_event ──
       if (doc.job_id) {
         const reasonLabel = body.reason_label || body.reason || 'No reason given'
         const clientName = doc.jobs?.job_number ? `${doc.jobs.job_number}` : 'Unknown'

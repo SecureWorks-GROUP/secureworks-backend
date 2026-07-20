@@ -9,19 +9,19 @@
 
 Before reading the plan, here's what changed from v1 and why:
 
-1. **ops-ai stays independent.** v1 said agent-orchestrator replaces ops-ai as the entry point. Wrong — ops-ai is called by daily-digest, dashboard, telegram-bot, and has 3,290 lines of deeply integrated logic. agent-orchestrator is a PARALLEL system that calls ops-ai when it needs decisions, not a replacement.
+1. **ops-ai stays independent.** v1 said agent-orchestrator replaces ops-ai as the entry point. Wrong — ops-ai is called by daily-digest, the dashboard, and other edge functions, and has 3,290 lines of deeply integrated logic. agent-orchestrator is a PARALLEL system that calls ops-ai when it needs decisions, not a replacement.
 
 2. **Use `action_permissions` table for thresholds.** v1 hardcoded confidence > 0.95. Your existing `action_permissions` table (from 20260316000005_intelligence_layer.sql) already has `auto_threshold` set to 0.870. Use the table, not hardcoded values.
 
 3. **Use `staff_personas` database table, not hardcoded TypeScript map.** v1 had a `STAFF_AGENTS` constant with 7 bot tokens as env vars. Your existing code uses dynamic `resolveRole()`. Staff config belongs in the database.
 
-4. **Don't rebuild existing cron jobs.** stale-followup (9am), eod-followup-5pm, eod-escalation-7pm, and shaun-morning-brief already exist in 20260322000012_phase2_cron_jobs.sql. Orchestrate them, don't duplicate.
+4. **Don't rebuild existing cron jobs.** stale-followup (9am) already exists in 20260322000012_phase2_cron_jobs.sql. Orchestrate it, don't duplicate. (RETIRED 2026-07-20: eod-followup-5pm, eod-escalation-7pm and shaun-morning-brief were unscheduled and their handlers deleted when the message-delivery architecture was retired. Do not plan around them.)
 
 5. **Reuse existing tables.** `ai_reasoning_traces`, `ai_proposed_actions`, `ai_feedback_outcomes`, `action_permissions`, `business_events` already exist. Extend them with workflow context columns instead of creating parallel tables.
 
 6. **Use Agent SDK native features.** The SDK has built-in session persistence, error handling, retries, human-in-the-loop hooks, subagents, and context compaction. ~40% of v1's custom code is unnecessary.
 
-7. **Use existing Telegram approval card pattern.** telegram-bot.ts already has `inline_keyboard` with confirm/reject callbacks. Reuse that UI pattern.
+7. **Define one approval card pattern.** Approvals are delivered as an approve/reject card over the surviving notification channels — SMS via `ghl-proxy?action=send_sms`, email, or the dashboard UI. The card format and callback contract still need defining; there is no prior implementation to copy.
 
 ---
 
@@ -46,9 +46,9 @@ SecureSuite is the highway. The Claude Agent SDK sits alongside ops-ai as the pe
 │           │                              │                      │
 │  ┌────────┴──────┐  ┌───────────────┐  ┌──────────────────┐   │
 │  │ daily-digest   │  │  personal-    │  │  MCP Server      │   │
-│  │ telegram-bot   │  │  agent        │  │  (external       │   │
-│  │ send-quote     │  │  (Telegram    │  │   agents)        │   │
-│  │ (ALL EXISTING) │  │   DM bots)   │  │                  │   │
+│  │ ghl-proxy      │  │  agent        │  │  (external       │   │
+│  │ send-quote     │  │  (SMS +       │  │   agents)        │   │
+│  │ (ALL EXISTING) │  │   dashboard) │  │                  │   │
 │  └───────────────┘  └───────────────┘  └──────────────────┘   │
 │                                                                │
 │  ┌──────────────────────────────────────────────────────────┐ │
@@ -61,7 +61,7 @@ SecureSuite is the highway. The Claude Agent SDK sits alongside ops-ai as the pe
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Key difference from v1: ops-ai and agent-orchestrator are peers. ops-ai handles single-turn queries (dashboard, Telegram group, direct questions). agent-orchestrator handles multi-step workflows (debt chase sequences, quote follow-up chains, completion pack pipelines). The orchestrator calls ops-ai as one of its tools.
+Key difference from v1: ops-ai and agent-orchestrator are peers. ops-ai handles single-turn queries (dashboard, inbound SMS, direct questions). agent-orchestrator handles multi-step workflows (debt chase sequences, quote follow-up chains, completion pack pipelines). The orchestrator calls ops-ai as one of its tools.
 
 ---
 
@@ -77,14 +77,14 @@ Stand up the Claude Agent SDK as a parallel orchestration layer that can run per
 //
 // ARCHITECTURE RULES:
 // - This function is a PEER of ops-ai, not a replacement
-// - ops-ai continues handling: dashboard queries, Telegram group, direct questions
+// - ops-ai continues handling: dashboard queries, inbound SMS, direct questions
 // - agent-orchestrator handles: multi-step workflows, cron-triggered sequences, proactive outreach
 // - Both share the same database and can read each other's outputs
 //
 // USES AGENT SDK NATIVE FEATURES:
 // - Session persistence (SDK built-in, not custom table)
 // - Error handling + retries (SDK built-in)
-// - Human-in-the-loop (SDK PermissionRequest hooks → wired to Telegram)
+// - Human-in-the-loop (SDK PermissionRequest hooks → wired to the approval channel)
 // - Subagents for personal staff agents (SDK built-in)
 // - Context compaction for long conversations (SDK built-in)
 
@@ -171,10 +171,10 @@ const AGENT_TOOLS = [
     }
   },
 
-  // APPROVAL VIA TELEGRAM (reuses existing inline_keyboard pattern)
+  // APPROVAL CARD (generic approve/reject card — transport per staff notify_channel)
   {
     name: "request_approval",
-    description: "Send an approval card to a staff member via Telegram DM using existing inline_keyboard UI",
+    description: "Send an approve/reject approval card to a staff member over their configured notification channel (SMS via ghl-proxy, email, or the dashboard)",
     input_schema: {
       type: "object",
       properties: {
@@ -217,16 +217,16 @@ const AGENT_TOOLS = [
     }
   },
 
-  // SEND TELEGRAM MESSAGE (to any staff member's personal bot)
+  // SEND STAFF MESSAGE (over the staff member's configured notification channel)
   {
     name: "send_staff_message",
-    description: "Send a proactive message to a staff member via their personal Telegram bot",
+    description: "Send a proactive message to a staff member over their configured notification channel (SMS via ghl-proxy, email, or the dashboard)",
     input_schema: {
       type: "object",
       properties: {
         staff_id: { type: "string" },
         message: { type: "string" },
-        parse_mode: { type: "string", enum: ["HTML", "Markdown"], default: "HTML" }
+        channel: { type: "string", enum: ["sms", "email", "dashboard"], default: "sms" }
       },
       required: ["staff_id", "message"]
     }
@@ -319,8 +319,8 @@ CREATE TABLE staff_personas (
   staff_id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
   email TEXT,
-  telegram_user_id TEXT,                     -- their personal Telegram user ID
-  telegram_bot_token TEXT,                   -- encrypted, their personal bot token
+  notify_channel TEXT DEFAULT 'sms' CHECK (notify_channel IN ('sms', 'email', 'dashboard')),
+  notify_address TEXT,                       -- mobile number or email, per notify_channel
   role TEXT NOT NULL CHECK (role IN ('crew', 'lead_installer', 'division_ops', 'sales', 'admin')),
   tools_allowed TEXT[] DEFAULT '{}',         -- which agent tools they can access
   persona_prompt TEXT,                       -- personality/tone for their personal agent
@@ -375,7 +375,7 @@ CREATE INDEX idx_agent_memory_scope ON agent_memory(staff_scope) WHERE staff_sco
 
 **IMPORTANT: These orchestrate existing cron jobs and edge functions. They do NOT replace them.**
 
-#### Workflow 1: Debt Chase (orchestrates existing eod-followup cron)
+#### Workflow 1: Debt Chase (orchestrates existing stale-followup cron)
 ```
 Trigger: Hooks into existing 'stale-followup' cron (9:00 AM AWST) via new action parameter
          OR agent-orchestrator detects overdue invoice during any query
@@ -389,7 +389,7 @@ Steps:
      d. Check action_permissions table for 'send_debt_reminder' autonomy level
      e. Draft message matching escalation stage (uses existing debt-escalation.md SOP)
      f. shouldAutoExecute() → true? Send via existing ops-ai send_sms/send_email tool
-     g. shouldAutoExecute() → false? request_approval to Shaun via Telegram inline_keyboard
+     g. shouldAutoExecute() → false? request_approval to Shaun as an approve/reject card
   3. Log to ai_reasoning_traces WITH workflow_id (extended column)
   4. Store payment behaviour observation in agent_memory
   5. Schedule follow-up via pg_cron or workflow_update with next check date
@@ -407,7 +407,7 @@ Steps:
      b. memory_recall('client', client_id, 'purchase intent signals')
      c. Identify assigned salesperson from quote data
      d. Look up salesperson in staff_personas table
-     e. Send personalised recommendation to their personal bot via send_staff_message
+     e. Send personalised recommendation via send_staff_message on their notify_channel
   3. If quote viewed 3+ times → flag as high intent, send with urgency
   4. memory_store: conversion pattern observation (what follow-up timing works)
 ```
@@ -415,12 +415,12 @@ Steps:
 #### Workflow 3: Completion Pack (orchestrates existing completion-pack edge function)
 ```
 Trigger: Job status changed to 'completed' (business_events webhook)
-         OR install lead messages in Telegram "job done" (existing telegram-bot detection)
+         OR install lead replies "job done" by SMS (inbound message detection)
 
 Steps:
   1. call_edge_function('completion-pack', { action: 'check_readiness', job_id })
   2. If missing data → send_staff_message to install lead asking for photos/sign-off
-  3. Wait for response (workflow_update status: 'paused', resume on Telegram callback)
+  3. Wait for response (workflow_update status: 'paused', resume on approval callback)
   4. call_edge_function('completion-pack', { action: 'generate', job_id })
   5. Draft client thank-you message
   6. Check action_permissions for 'send_completion_pack' → auto or approve
@@ -435,9 +435,9 @@ Steps:
 ```sql
 -- EXISTING (keep as-is):
 -- stale-followup: daily 9am AWST → daily-digest?action=stale_followup
--- eod-followup-5pm: weekdays 5pm AWST → daily-digest?action=eod_followup
--- eod-escalation-7pm: weekdays 7pm AWST → daily-digest?action=eod_followup
--- shaun-morning-brief: daily 7:30am AWST → daily-digest?action=shaun_brief
+-- RETIRED 2026-07-20: eod-followup-5pm, eod-escalation-7pm and shaun-morning-brief
+-- were unscheduled and their daily-digest handlers deleted. stale-followup is the
+-- only surviving schedule of this group.
 
 -- NEW (add these):
 SELECT cron.schedule(
@@ -483,7 +483,7 @@ The agent observes patterns, generates SOPs, proposes code changes, and continuo
 Triggered by weekly cron (Sunday 2pm AWST). The agent analyses:
 - `ai_feedback_outcomes` — what worked, what didn't (EXISTING, currently unpopulated)
 - `ai_reasoning_traces` — decision patterns (EXISTING, extended with workflow_id)
-- `business_events` — operational patterns from Telegram, webhooks (EXISTING)
+- `business_events` — operational patterns from SMS conversations, webhooks (EXISTING)
 - Xero sync data — financial patterns (EXISTING via xero-sync)
 - `jobs` / `quotes` — conversion and completion patterns (EXISTING)
 
@@ -530,7 +530,7 @@ CREATE TABLE sop_compliance_log (
   compliant BOOLEAN NOT NULL,
   deviation_details TEXT,
   coaching_sent BOOLEAN DEFAULT false,
-  coaching_channel TEXT,             -- telegram_dm, dashboard
+  coaching_channel TEXT,             -- sms, email, dashboard
   staff_id TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
@@ -546,7 +546,7 @@ CREATE TABLE code_modifications (
   evidence_pattern_id UUID REFERENCES pattern_observations(id),
   change_spec TEXT NOT NULL,          -- what to change, in plain English (sent to Claude Code)
   diff_content TEXT,                  -- the actual diff (returned by Claude Code)
-  plain_english_summary TEXT,         -- what Marnin sees in Telegram
+  plain_english_summary TEXT,         -- what Marnin sees on the approval card
   expected_improvement TEXT,
   status TEXT DEFAULT 'drafting' CHECK (status IN ('drafting', 'pending_review', 'approved', 'testing', 'deployed', 'rolled_back', 'rejected')),
   reviewed_by TEXT,
@@ -574,7 +574,7 @@ CREATE TABLE code_modifications (
 ## Phase 3: Personal Staff Agents (Weeks 9–12)
 
 ### Goal
-Individual Telegram bots per staff member. All configured via `staff_personas` database table (not hardcoded).
+An individual agent persona per staff member, reachable on their own notification channel (SMS via `ghl-proxy?action=send_sms`, email, or the dashboard). All configured via `staff_personas` database table (not hardcoded).
 
 ### 3.1 — New Edge Function: `personal-agent/index.ts`
 
@@ -583,19 +583,19 @@ Single edge function handles ALL personal agent messages. Reads config from `sta
 ```typescript
 // supabase/functions/personal-agent/index.ts
 //
-// Entry point for all personal Telegram bot messages.
-// Each bot token is registered as a separate webhook URL pointing here.
-// The bot token in the request identifies which staff member.
+// Entry point for all personal agent messages.
+// Inbound SMS (via the GHL webhook) and dashboard messages both route here.
+// The sender's address (mobile number or email) identifies which staff member.
 
-// 1. Extract bot token from webhook
-// 2. Look up staff_personas WHERE telegram_bot_token = token
+// 1. Extract the sender address and channel from the inbound payload
+// 2. Look up staff_personas WHERE notify_address = sender AND notify_channel = channel
 // 3. Load their role, tools_allowed, persona_prompt, model_preference
 // 4. Initialise Agent SDK session scoped to this staff member
 // 5. Process message with role-appropriate tools
 // 6. Persist session for next interaction
 
-// For approval callbacks (inline_keyboard responses):
-// 1. Parse callback_data (format: "approve:{workflow_id}" or "reject:{workflow_id}")
+// For approval callbacks (approve/reject card responses):
+// 1. Parse the callback payload (format: "approve:{workflow_id}" or "reject:{workflow_id}")
 // 2. Update agent_workflows.status accordingly
 // 3. Resume the paused workflow in agent-orchestrator
 ```
@@ -617,7 +617,7 @@ async function routeProactiveEvent(supabase: any, eventType: string, eventData: 
   for (const person of staff) {
     // Generate personalised message using their persona
     const message = await generateProactiveMessage(person, eventType, eventData);
-    await sendTelegramDM(person.telegram_bot_token, person.telegram_user_id, message);
+    await sendStaffMessage(person.notify_channel, person.notify_address, message);
   }
 }
 ```
@@ -632,7 +632,7 @@ Triggered by `agent-personal-briefs` cron (6:30 AM AWST). For each staff member,
 - **Henry/Isaac (lead_installer):** Today's job details, material status, weather, previous suburb/client notes from memory
 - **Jan (admin):** Cash flow summary, compliance deadlines, flags only
 
-The existing `shaun-morning-brief` cron continues working. The new personal briefs supplement it — Shaun gets both (existing group brief + personal DM brief).
+RETIRED 2026-07-20: the `shaun-morning-brief` cron and its `shaun_brief` handler no longer exist, so there is no group brief to supplement. Personal briefs would need to stand alone.
 
 ---
 
@@ -741,7 +741,7 @@ Then:
    - Wire call_edge_function as a generic edge function caller
    - Wire memory_recall and memory_store to read/write agent_memory table
    - Wire workflow_update to read/write agent_workflows table
-   - Wire request_approval to send Telegram messages using the EXISTING inline_keyboard pattern from telegram-bot.ts
+   - Wire request_approval to send an approve/reject card over the staff member's notify_channel (SMS via ghl-proxy?action=send_sms, email, or the dashboard) — define the card format and callback contract as part of this work
    - Use action_permissions table for auto-execution decisions (NOT hardcoded thresholds)
    - Log every decision to ai_reasoning_traces with workflow context
 
@@ -755,19 +755,19 @@ Acceptance criteria:
 
 **Prompt 2 for Claude Code:**
 ```
-Wire the agent-orchestrator to handle Telegram approval callbacks.
+Wire the agent-orchestrator to handle approval callbacks.
 
 Read:
-- supabase/functions/telegram-bot/index.ts (find the inline_keyboard and callback_query handling pattern)
+- supabase/functions/ghl-proxy/index.ts (the send_sms action — this is the SMS delivery path)
 - supabase/functions/agent-orchestrator/index.ts (what you just built)
 
 Add:
-1. A callback handler in agent-orchestrator that receives approval/rejection from Telegram
+1. A callback handler in agent-orchestrator that receives approval/rejection (inbound SMS reply or a dashboard action)
 2. When approved: resume the paused workflow (update agent_workflows.status = 'running')
 3. When rejected: cancel the workflow, log reason
 4. Send confirmation message back to the staff member
 
-Use the SAME inline_keyboard button format as telegram-bot.ts already uses.
+Define one approve/reject card format and reuse it everywhere — there is no prior implementation to copy.
 ```
 
 ### Sprint 2 (Week 3–4): Autonomous Workflows
@@ -778,7 +778,7 @@ Read:
 - AUTONOMOUS-AGENT-BUILD-PLAN.md (the workflow definitions in Phase 1.3)
 - supabase/functions/agent-orchestrator/index.ts
 - supabase/functions/reporting-api/index.ts (find the aged receivables and job profitability endpoints)
-- supabase/functions/daily-digest/index.ts (find the stale_followup and eod_followup action handlers)
+- supabase/functions/daily-digest/index.ts (find the stale_followup action handler; the eod_followup handler was retired 2026-07-20)
 - docs/project-knowledge/edge-functions.md (API reference)
 
 Implement the debt_chase workflow in agent-orchestrator:
@@ -797,7 +797,7 @@ Add the agent-workflow-trigger cron job (9:05 AM AWST, 5 min after existing stal
 
 Acceptance criteria:
 - Workflow runs end-to-end on test data
-- Approval cards appear in Telegram with correct inline_keyboard
+- Approval cards are delivered on the correct notify_channel with working approve/reject actions
 - All steps logged with workflow_id
 - Memories stored for client payment patterns
 ```
@@ -810,12 +810,12 @@ Read the workflow definitions in AUTONOMOUS-AGENT-BUILD-PLAN.md Phase 1.3.
 
 For quote_followup:
 - Hook into GHL webhook events (check ghl-webhook/index.ts for quote_viewed events)
-- Route recommendations to the assigned salesperson's future personal bot (for now, use existing Telegram group)
+- Route recommendations to the assigned salesperson's future personal agent (for now, send via SMS on ghl-proxy)
 
 For completion_pack:
 - Trigger on job status change to 'completed'
 - Call existing completion-pack edge function
-- Handle the "missing data" pause → resume flow via Telegram callbacks
+- Handle the "missing data" pause → resume flow via approval callbacks
 ```
 
 ### Sprint 3 (Week 5–6): Memory + Patterns
@@ -856,11 +856,11 @@ Read:
 2. Extend agent-orchestrator with:
    - SOP generation: when pattern_observations.status = 'observed' and confidence > 0.8, generate SOP using ops-ai's existing generate_sop tool, store in sop_registry
    - SOP enforcement: sop_check tool validates actions against active SOPs before execution
-   - Non-compliance coaching: send private Telegram message to staff member (not public)
+   - Non-compliance coaching: send a private message to the staff member on their notify_channel (not to a group)
 3. Implement propose_code_change tool:
    - Generates a change specification from pattern evidence
    - Stores in code_modifications with status 'pending_review'
-   - Sends Marnin a Telegram message with: what changed, why, evidence, [Approve] [Reject] buttons
+   - Sends Marnin an approval card with: what changed, why, evidence, [Approve] [Reject] actions
    - If rejected, stores rejection_reason for future learning
 4. Rate limit: max 3 code modification proposals per day
 
@@ -874,37 +874,37 @@ For now, the propose_code_change tool creates the spec and notifies Marnin. Actu
 ```
 Read:
 - AUTONOMOUS-AGENT-BUILD-PLAN.md (Phase 3)
-- supabase/functions/telegram-bot/index.ts (existing Telegram patterns)
+- supabase/functions/ghl-proxy/index.ts (the send_sms action — the SMS delivery path)
 - The staff_personas table schema and seed data
 
 1. Create edge function: supabase/functions/personal-agent/index.ts
-   - Single function handles ALL personal agent Telegram webhooks
-   - Identifies staff member from bot token in webhook
+   - Single function handles ALL personal agent inbound messages (SMS webhook + dashboard)
+   - Identifies staff member from the sender address on the inbound payload
    - Reads staff_personas for role, tools_allowed, persona_prompt, model_preference
    - Initialises Agent SDK session scoped to this person
    - Processes message with role-appropriate tools only
-   - Handles inline_keyboard callbacks for approval flows
+   - Handles approve/reject card callbacks for approval flows
 2. Implement personalised morning briefs:
    - agent-personal-briefs cron triggers agent-orchestrator
    - For each staff member in staff_personas with morning_brief_time:
      - Generate role-specific brief content
-     - Send via their personal bot
+     - Send on their notify_channel
 3. Wire proactive outreach:
    - When business_events match a staff member's proactive_triggers, notify them
 
 Start with Marnin + Shaun only. Other staff in Sprint 6.
 
 Acceptance criteria:
-- Marnin DMs his bot, gets CEO-level response with full tool access
-- Shaun DMs his bot, gets ops-scoped response
+- Marnin messages his personal agent, gets CEO-level response with full tool access
+- Shaun messages his personal agent, gets ops-scoped response
 - Both get personalised morning briefs at configured times
 - Proactive messages sent when matching events occur
 ```
 
 ### Sprint 6 (Week 11–12): Personal Agents Phase 2
 ```
-Create Telegram bots for Nathan, Khairo, Henry, Isaac, Jan via BotFather.
-Update staff_personas with their bot tokens and Telegram user IDs.
+Onboard personal agents for Nathan, Khairo, Henry, Isaac, Jan.
+Update staff_personas with their notify_channel and notify_address.
 Test each agent end-to-end.
 Monitor token usage and optimise model selection.
 ```

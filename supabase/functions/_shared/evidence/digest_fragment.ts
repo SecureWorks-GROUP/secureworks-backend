@@ -2,7 +2,7 @@
 //
 // Roadmap: cio/operations/2026-05-02-t7-evidence-capture-spine-roadmap.md (Section 9)
 //
-// Produces a short Telegram-safe text fragment for daily-digest to append
+// Produces a short plain-text fragment for daily-digest to append
 // when one or more channels that historically have traffic stopped firing
 // in the last 24 hours. Pure read; uses v_evidence_health_stale.
 //

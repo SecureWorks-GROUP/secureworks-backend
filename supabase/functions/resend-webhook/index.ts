@@ -2,15 +2,14 @@
 // SecureWorks — Resend Webhook Edge Function
 //
 // Receives ALL Resend webhook events and updates the email_events table.
-// Creates AI annotations on bounced emails and sends Telegram alerts
-// on spam complaints.
+// Creates AI annotations on bounced emails and records spam complaints.
 //
 // Deploy:
 //   /Users/marninstobbe/.local/bin/supabase functions deploy resend-webhook --no-verify-jwt --project-ref kevgrhcjxspbxgovpmfl
 //
 // Secrets needed:
 //   supabase secrets set RESEND_WEBHOOK_SECRET=whsec_...
-//   (Also requires: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+//   (Also requires: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 //
 // Resend webhook setup:
 //   1. Go to Resend dashboard → Webhooks
@@ -27,8 +26,6 @@ import { Webhook } from 'https://esm.sh/svix@1.15.0'
 const RESEND_WEBHOOK_SECRET = Deno.env.get('RESEND_WEBHOOK_SECRET') || ''
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
-const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-const TELEGRAM_CHAT_ID = Deno.env.get('TELEGRAM_CHAT_ID') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // ── CORS (webhook endpoint — allow all origins) ──
@@ -55,27 +52,6 @@ function verifyWebhook(body: string, headers: Headers): unknown {
   }
   // Throws on invalid signature
   return wh.verify(body, svixHeaders)
-}
-
-// ── Telegram alert helper ──
-async function sendTelegramAlert(message: string) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn('Telegram not configured — skipping alert')
-    return
-  }
-  try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: 'HTML',
-      }),
-    })
-  } catch (err) {
-    console.error('Telegram alert failed:', err)
-  }
 }
 
 // ── Main handler ──
@@ -243,16 +219,6 @@ serve(async (req: Request) => {
         status: 'complained',
       }
 
-      // ── Send Telegram alert ──
-      const recipient = emailEvent.recipient || eventData?.to?.[0] || 'unknown'
-      const subject = emailEvent.subject || eventData?.subject || '(no subject)'
-
-      await sendTelegramAlert(
-        `⚠️ <b>SPAM COMPLAINT</b>\n\n` +
-        `<b>Recipient:</b> ${recipient}\n` +
-        `<b>Subject:</b> ${subject}\n\n` +
-        `This recipient marked the email as spam. Review email practices and consider removing them from future sends.`
-      )
       break
     }
 

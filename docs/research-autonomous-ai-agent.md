@@ -11,7 +11,7 @@ You don't need a multi-agent framework or an autonomous AI loop. You need a **wo
 
 The architecture is simpler than you think, the costs are trivial (~$50-200/month API), and the breakeven against a human ops hire is essentially instant at <1% of salary cost.
 
-**The one recommendation:** Build an Evaluator-Optimizer workflow pattern on your existing Supabase + Claude API + Telegram stack. Don't adopt a framework. Don't build multi-agent. Don't go autonomous yet.
+**The one recommendation:** Build an Evaluator-Optimizer workflow pattern on your existing Supabase + Claude API + SMS/dashboard stack. Don't adopt a framework. Don't build multi-agent. Don't go autonomous yet.
 
 ---
 
@@ -24,7 +24,7 @@ The field has settled on a clear hierarchy, best articulated by Anthropic's own 
 | Pattern | Description | When to Use | Your Use Case |
 |---------|-------------|-------------|---------------|
 | **Prompt Chaining** | Fixed sequence: output of step 1 → input of step 2 | Simple, predictable tasks | Invoice generation, status updates |
-| **Routing** | Classifier sends input to the right handler | Multiple task types from one channel | Telegram message → schedule/quote/chase/report |
+| **Routing** | Classifier sends input to the right handler | Multiple task types from one channel | Inbound message → schedule/quote/chase/report |
 | **Parallelisation** | Multiple LLM calls at once, results aggregated | Independent subtasks | Morning briefing: check schedule + check materials + check weather |
 | **Orchestrator-Workers** | Central LLM plans, delegates to specialist workers | Complex multi-step tasks | "Reschedule job X" → check crew availability + notify client + update GHL |
 | **Evaluator-Optimizer** | One LLM proposes, another validates against rules | High-stakes decisions needing guardrails | **YOUR PRIMARY PATTERN** — quote approvals, PO creation, schedule changes |
@@ -50,7 +50,7 @@ Observe → Think → Act → Observe → Think → Act → ...
 In your context:
 - **Observe:** Read Supabase event (new job, schedule conflict, material delay)
 - **Think:** Claude reasons about what to do, checking rules and precedent
-- **Act:** Execute via tool (send Telegram, update Supabase, create PO)
+- **Act:** Execute via tool (send SMS via `ghl-proxy?action=send_sms`, update Supabase, create PO)
 - **Observe:** Check result, handle errors, log outcome
 
 **4. Don't use a framework — use direct API calls.**
@@ -61,13 +61,13 @@ Your Supabase edge functions + Claude API already replicate what LangGraph provi
 ### Recommendation for Your Stack
 
 ```
-Telegram message
+Inbound message (SMS / dashboard / cron)
   → Edge function: classify intent (Haiku — cheap, fast)
   → Route to appropriate workflow
   → Workflow: propose action (Sonnet — capable)
   → Evaluator: validate against business rules (Haiku — cheap)
   → If confidence > threshold: execute automatically
-  → If confidence < threshold: send to Telegram for approval
+  → If confidence < threshold: raise an approval message on the dashboard
   → Log everything to business_events table
 ```
 
@@ -113,8 +113,8 @@ Confidence Score = weighted average of:
 **Thresholds:**
 - **> 95%:** Auto-execute, log only
 - **85-95%:** Auto-execute, flag for weekly review
-- **70-85%:** Execute but notify human via Telegram
-- **< 70%:** Pause and request human approval via Telegram
+- **70-85%:** Execute but notify human via the notification channel (SMS or dashboard)
+- **< 70%:** Pause and request human approval via the dashboard
 
 Track accuracy over time. When a workflow consistently scores >95% for 30+ consecutive decisions, promote it to the next autonomy level.
 
@@ -148,7 +148,7 @@ Anthropic's "Agentic Misalignment" research tested frontier models and found the
 
 4. **Drift detection.** Weekly automated check: compare this week's decisions against the baseline from when the workflow was approved. If distribution shifts >10%, alert.
 
-5. **Kill switch.** One Telegram command (`/pause`) stops all autonomous actions instantly. Everything reverts to L1 (human approval required).
+5. **Kill switch.** One `/pause` command (dashboard control or SMS keyword) stops all autonomous actions instantly. Everything reverts to L1 (human approval required).
 
 ### Sources
 - [Agentic Misalignment — Anthropic](https://www.anthropic.com/research/agentic-misalignment) ⭐
@@ -318,14 +318,14 @@ Tool: [Fiddler AI](https://www.fiddler.ai/) for drift monitoring, or build simpl
 ### Architecture: One Brain, Multiple Interfaces
 
 Your AI agent needs to be accessible from:
-- **Telegram** (real-time chat — crew and ops)
+- **SMS** (real-time messaging via `ghl-proxy?action=send_sms` — crew and ops)
 - **Web dashboard** (structured views — CEO and office)
 - **API** (automated triggers — edge functions, cron jobs)
 
 The pattern: **Supabase is the single source of truth. All channels read/write through the same edge functions.**
 
 ```
-Telegram Bot ──→ Edge Function (classify + route) ──→ AI Core (Claude)
+SMS (ghl-proxy) ─→ Edge Function (classify + route) ──→ AI Core (Claude)
 Web Dashboard ──→ Edge Function (structured query) ──→ AI Core (Claude)
 Cron Job ──────→ Edge Function (scheduled check)  ──→ AI Core (Claude)
                                                           ↓
@@ -347,35 +347,26 @@ Cron Job ──────→ Edge Function (scheduled check)  ──→ AI Cor
 
 ### Role-Based Access
 
-| Role | Telegram Access | Dashboard Access | AI Capabilities |
-|------|----------------|------------------|-----------------|
-| **CEO (Marnin)** | Full — all commands, all data | Full — CEO dashboard | Full autonomy view, override any AI decision |
-| **Sales (Nithin, Khairo)** | Sales pipeline, quotes, lead status | Sale dashboard | Quote generation, lead status, pricing queries |
-| **Ops** | Schedule, crews, materials, job status | Ops dashboard | Schedule management, PO creation, crew dispatch |
-| **Installers** | Job details, site photos, check-in/out | Trade dashboard | Job-specific info only, photo upload, time tracking |
+| Role | Dashboard Access | AI Capabilities |
+|------|------------------|-----------------|
+| **CEO (Marnin)** | Full — CEO dashboard | Full autonomy view, override any AI decision |
+| **Sales (Nithin, Khairo)** | Sale dashboard | Quote generation, lead status, pricing queries |
+| **Ops** | Ops dashboard | Schedule management, PO creation, crew dispatch |
+| **Installers** | Trade dashboard | Job-specific info only, photo upload, time tracking |
+
+> The per-role chat-channel access column was removed 2026-07-20 with the retired delivery architecture. Those capabilities were researched for that channel only and have not been re-researched for any surviving channel.
 
 **Implementation:** Pass `caller_role` and `caller_id` to every AI edge function. The system prompt changes based on role. Data queries are filtered by permission level.
 
-### Telegram-Specific Patterns
+### Channel-Specific Patterns
 
-- **grammY** (TypeScript) — has official Supabase Edge Functions docs at `grammy.dev/hosting/supabase`
-- Supabase has an **official Telegram bot guide** using Deno edge functions + webhook (not polling)
-- Use **Telegram WebApp** for structured forms (not just chat)
-- **Inline keyboards** for approval buttons (not free-text replies)
-- **Group vs DM:** Group messages = team coordination. DM = personal tasks and sensitive data.
-- Real projects already exist: **Claudegram** (github.com/NachoSEO/claudegram) bridges Telegram → Claude Code with tool access and session memory
-
-**Your architecture:**
-```
-Telegram webhook → Supabase Edge Function (Deno/grammY) → Claude API (Haiku) → Supabase DB → response back to Telegram
-```
+> Removed 2026-07-20. This section recorded research into a chat-platform delivery architecture that was retired from the backend. The findings and their citations no longer apply and have not been replaced — no equivalent research was carried out for the surviving delivery path.
 
 ### Sources
 - [How Slack Built Slack AI — Slack Engineering](https://slack.engineering/how-we-built-slack-ai-to-be-secure-and-private/) ⭐
 - [Notion AI Architecture](https://www.notion.com/blog/speed-structure-and-smarts-the-notion-ai-way) ⭐
 - [RBAC for AI Agents — NeuralTrust](https://neuraltrust.ai/blog/rbac-ai-agents) ⭐
 - [Slack AI Developer Docs](https://docs.slack.dev/ai/developing-ai-apps/)
-- [Telegram Bot + Dashboard Reference](https://github.com/coslynx/ai-telegram-bot-dashboard)
 
 ---
 
@@ -518,7 +509,6 @@ Perth ops coordinator salary data (verified March 2026):
 | Batch API | ✅ Production-ready | Use for reports, overnight processing |
 | MCP protocol | ✅ Production-ready | Use for Supabase integration |
 | Langfuse observability | ⚠️ V3 needs ClickHouse+Redis+S3 | Use Langfuse Cloud free tier, or build simple custom logging to Supabase |
-| Telegram bot (grammY) | ✅ Production-ready | Mature framework, good TypeScript support |
 | Evaluator-Optimizer pattern | ✅ Production-ready | Anthropic-recommended for high-stakes decisions |
 | Reflexion/self-improvement | ⚠️ Emerging | Implement after 3+ months of observation data |
 | DSPy prompt optimisation | ⚠️ Emerging | Evaluate at month 3-4 when you have enough data |
@@ -534,11 +524,11 @@ Perth ops coordinator salary data (verified March 2026):
 1. Enable `supa_audit` on jobs, quotes, schedules tables
 2. Create `business_events` table with the schema above
 3. Set up LLM observability (Langfuse Cloud free tier, or custom tracing table in Supabase)
-4. Build Telegram bot with Haiku classifier → route to edge functions
+4. Build the message intake path with a Haiku classifier → route to edge functions
 5. Implement first 3 workflows: morning briefing, job status queries, schedule lookup
 
 ### Month 2-3: Observer Mode (L1)
-6. AI drafts actions, humans approve everything via Telegram
+6. AI drafts actions, humans approve everything via the dashboard
 7. Log every decision + outcome to business_events
 8. Track acceptance rate, correction rate, override rate
 9. Run first pm4py analysis on accumulated event logs
@@ -588,7 +578,7 @@ Perth ops coordinator salary data (verified March 2026):
 
 1. **Physical reality gap.** All the AI research is about digital operations. Your business happens in the physical world. The AI can schedule a crew, but it can't verify they actually showed up or that the concrete was poured correctly. You need a human bridge between AI decisions and physical verification.
 
-2. **Unstructured field data.** Installers will send blurry photos, voice notes, and half-sentences via Telegram. The AI needs to handle messy, real-world input — not just clean structured data. Budget for a "normalisation layer" that cleans input before AI processing.
+2. **Unstructured field data.** Installers will send blurry photos, voice notes, and half-sentences from the field. The AI needs to handle messy, real-world input — not just clean structured data. Budget for a "normalisation layer" that cleans input before AI processing.
 
 3. **Small sample sizes.** 45 jobs/month means 45 data points/month. For some niche decisions (e.g., "what to do when a supplier is 2 weeks late on gable materials"), you may only see 2-3 examples per year. The AI will struggle with rare events. Keep humans in the loop for anything the AI has seen fewer than 20 times.
 

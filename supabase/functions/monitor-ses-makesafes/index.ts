@@ -752,7 +752,7 @@ async function processAttachments(
         );
       }
       unresolved++;
-      // TODO(Phase 2): emit Telegram needs_review alert for this attachment.
+      // TODO(Phase 2): emit a needs_review alert for this attachment.
       continue;
     }
 

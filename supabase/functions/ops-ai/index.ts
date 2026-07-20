@@ -63,7 +63,7 @@ interface CallerContext {
   user_name: string
   user_email: string
   user_role: 'crew' | 'lead_installer' | 'division_ops' | 'sales' | 'admin'
-  channel: 'dashboard' | 'telegram_group' | 'telegram_dm' | 'ceo_dashboard' | 'canary_test'
+  channel: 'dashboard' | 'ceo_dashboard' | 'canary_test'
   org_id: string
   recent_messages?: string[]
 }
@@ -644,19 +644,7 @@ const EXECUTE_TOOLS = [
       required: ['po_id'],
     },
   },
-  {
-    name: 'execute_send_telegram',
-    description: 'Send a Telegram message to a team member. REQUIRES USER CONFIRMATION.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        user_email: { type: 'string', description: 'Team member email (to look up their Telegram ID)' },
-        user_name: { type: 'string', description: 'Team member name (alternative to email for lookup)' },
-        message: { type: 'string', description: 'Message text to send' },
-      },
-      required: ['message'],
-    },
-  },
+
   {
     name: 'rough_estimate',
     description: 'Generate a rough price estimate for a job described verbally (e.g. "30m Colorbond fence in Joondalup"). Uses historical job data to estimate. NOT a formal quote.',
@@ -953,7 +941,6 @@ async function checkSafetyRules(
     execute_push_po_to_xero: 'push_po_to_xero',
     execute_add_ghl_note: 'add_ghl_note',
     execute_email_supplier_po: 'email_supplier_po',
-    execute_send_telegram: 'send_telegram',
     execute_reconcile_payment: 'reconcile_payment',
   }
   const permAction = executeActions[toolName]
@@ -983,7 +970,7 @@ const CONFIRM_ACTIONS = new Set([
   'execute_create_invoice', 'execute_send_sms', 'execute_update_status',
   'execute_create_po', 'execute_assign_crew',
   'execute_send_email', 'execute_send_quote', 'execute_push_po_to_xero',
-  'execute_add_ghl_note', 'execute_email_supplier_po', 'execute_send_telegram',
+  'execute_add_ghl_note', 'execute_email_supplier_po',
   'execute_reconcile_payment',
 ])
 
@@ -2219,15 +2206,6 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
         needs_confirm: true,
       }
 
-    case 'execute_send_telegram':
-      return {
-        result: {
-          action: 'send_telegram',
-          params: { user_email: input.user_email, user_name: input.user_name, message: input.message },
-          message: `Send Telegram message to ${input.user_name || input.user_email || 'team member'}: "${input.message.slice(0, 80)}${input.message.length > 80 ? '...' : ''}"?`,
-        },
-        needs_confirm: true,
-      }
 
     case 'rough_estimate': {
       // Query historical jobs of same type for pricing data
@@ -2472,7 +2450,7 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       const hours = input.hours || 24
       const since = new Date(Date.now() - hours * 3600000).toISOString()
       let query = sb.from('inbox_events')
-        .select('id, mailbox, from_email, from_name, subject, classification, priority, action_needed, job_id, received_at, telegram_notified')
+        .select('id, mailbox, from_email, from_name, subject, classification, priority, action_needed, job_id, received_at')
         .eq('org_id', DEFAULT_ORG_ID)
         .gte('received_at', since)
         .order('received_at', { ascending: false })
@@ -2553,9 +2531,6 @@ function logChat(opts: {
 // ════════════════════════════════════════════════════════════
 
 function resolveMemoryUserId(caller: CallerContext): string {
-  if (caller.channel?.startsWith('telegram') && caller.user_id) {
-    return `telegram:${caller.user_id}`
-  }
   return caller.user_email || `unknown:${caller.user_name}`
 }
 
@@ -2898,8 +2873,6 @@ function buildCoachingPersona(caller: CallerContext): string {
   const name = caller.user_name || 'there'
 
   const channelFormat: Record<string, string> = {
-    telegram_group: 'TELEGRAM MODE: Maximum 4 sentences. Plain text only. No markdown tables, no bullet points, no headers. Numbers inline. If a table is needed, say "Check the ops dashboard for the full breakdown" and give a 2-sentence summary. Always end with a clear next action if one exists: "Want me to chase Metroll?" or "Should I create the invoice?"',
-    telegram_dm: 'TELEGRAM MODE: Maximum 8 sentences. Plain text preferred. One short list OK (3 items max). No tables. Numbers inline. Always end with a clear next action if one exists: "Want me to chase Metroll?" or "Should I create the invoice?"',
     dashboard: 'Full detail with markdown formatting, tables, and bullet points.',
     ceo_dashboard: 'Full detail with markdown formatting, tables, and bullet points.',
   }
@@ -3195,7 +3168,7 @@ LOOKUP: search_jobs, get_job_detail, get_job_context, get_schedule, search_conta
 DATA: list_variations, list_council_submissions, list_expenses, list_purchase_orders, list_work_orders
 FINANCIAL: explain_pnl, cash_flow_forecast, cash_flow_status, cash_waterfall, cash_leak_detection, unbilled_revenue, division_comparison, cost_trend_analysis, check_supplier_pricing, performance_benchmarks, get_portfolio_summary
 ANALYSIS: analyse_profitability, revenue_forecast, supplier_analysis, sales_performance, job_duration_analysis, estimate_accuracy_report, generate_pricing_recommendation, get_job_intelligence
-ACTIONS (need confirmation): execute_send_sms, execute_send_email, execute_send_quote, create_assignment, update_job_status, execute_create_po, execute_create_work_order, execute_push_po_to_xero, execute_add_ghl_note, execute_email_supplier_po, execute_send_telegram, execute_create_invoice, complete_and_invoice, execute_reconcile_payment, execute_send_review_request
+ACTIONS (need confirmation): execute_send_sms, execute_send_email, execute_send_quote, create_assignment, update_job_status, execute_create_po, execute_create_work_order, execute_push_po_to_xero, execute_add_ghl_note, execute_email_supplier_po, execute_create_invoice, complete_and_invoice, execute_reconcile_payment, execute_send_review_request
 NEVER say "I don't have that capability" or "I don't have access" — check your tools first.
 `
 
@@ -3375,7 +3348,7 @@ serve(async (req: Request) => {
 
     // ── Conversation memory: resolve session + fetch history ──
     const memoryUserId = resolveMemoryUserId(callerContext)
-    const memoryChannel = callerContext.channel?.startsWith('telegram') ? 'telegram' : 'dashboard'
+    const memoryChannel = 'dashboard'
     let sessionId: string | null = null
     let historyMessages: Array<{ role: string; content: string }> = []
 
@@ -3460,46 +3433,6 @@ serve(async (req: Request) => {
         case 'email_supplier_po':
           result = await postOpsApi('email_po', { id: params.po_id })
           break
-        case 'send_telegram': {
-          // Look up user's Telegram ID
-          const sb = sbClient()
-          let telegramId: number | null = null
-          if (params.user_email) {
-            const { data: usr } = await sb.from('users')
-              .select('telegram_id')
-              .ilike('email', `%${params.user_email}%`)
-              .limit(1)
-              .maybeSingle()
-            telegramId = usr?.telegram_id
-          } else if (params.user_name) {
-            const { data: usr } = await sb.from('users')
-              .select('telegram_id')
-              .ilike('full_name', `%${params.user_name}%`)
-              .limit(1)
-              .maybeSingle()
-            telegramId = usr?.telegram_id
-          }
-          if (!telegramId) {
-            result = { error: 'Could not find Telegram ID for this user' }
-            break
-          }
-          const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-          if (!botToken) {
-            result = { error: 'Telegram bot token not configured' }
-            break
-          }
-          const tgResp = await fetchWithTimeout(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: telegramId,
-              text: params.message,
-              parse_mode: 'HTML',
-            }),
-          }, 15000)
-          result = await tgResp.json()
-          break
-        }
         case 'reconcile_payment':
           result = await postOpsApi('reconcile_payment', params)
           break

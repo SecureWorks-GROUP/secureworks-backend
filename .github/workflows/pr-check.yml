@@ -41,9 +41,11 @@ jobs:
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-          # Get the list of changed function index.ts files in the PR
-          CHANGED=$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" -- 'supabase/functions/*/index.ts' | sort -u)
-          SHARED=$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" -- 'supabase/functions/_shared/*.ts' 'supabase/functions/_shared/**/*.ts' | sort -u)
+          # Get the list of changed function index.ts files in the PR.
+          # --diff-filter=d excludes deletions: a removed function has no file
+          # left to check, and passing its path to deno would fail the job.
+          CHANGED=$(git diff --name-only --diff-filter=d "${BASE_SHA}" "${HEAD_SHA}" -- 'supabase/functions/*/index.ts' | sort -u)
+          SHARED=$(git diff --name-only --diff-filter=d "${BASE_SHA}" "${HEAD_SHA}" -- 'supabase/functions/_shared/*.ts' 'supabase/functions/_shared/**/*.ts' | sort -u)
 
           if [ -z "$CHANGED" ] && [ -z "$SHARED" ]; then
             echo "No edge function files changed"

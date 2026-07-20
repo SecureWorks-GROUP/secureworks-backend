@@ -124,7 +124,6 @@ Deno.test("quoted_value type guard: number keys populate; string/object/null sta
 Deno.test("xero_invoices: fixed sites use invoice_date / invoice_type / fully_paid_on", async () => {
   const daily = await readRepo("functions/daily-digest/index.ts");
   const opsAi = await readRepo("functions/ops-ai/index.ts");
-  const telegram = await readRepo("functions/telegram-bot/index.ts");
 
   // Aliased selects keep downstream property names stable
   assert(
@@ -153,20 +152,11 @@ Deno.test("xero_invoices: fixed sites use invoice_date / invoice_type / fully_pa
     "ops-ai must filter on invoice_type",
   );
 
-  assert(
-    telegram.includes(".eq('invoice_type', 'ACCREC')"),
-    "telegram-bot must filter on invoice_type",
-  );
-  assert(
-    telegram.includes(".gte('invoice_date', weekAgo)"),
-    "telegram-bot must filter on invoice_date",
-  );
 });
 
 Deno.test("business_events: fixed sites filter/order on occurred_at", async () => {
   const daily = await readRepo("functions/daily-digest/index.ts");
   const health = await readRepo("functions/system-health/index.ts");
-  const telegram = await readRepo("functions/telegram-bot/index.ts");
 
   assert(
     daily.includes("created_at:occurred_at") ||
@@ -183,18 +173,12 @@ Deno.test("business_events: fixed sites filter/order on occurred_at", async () =
     health.includes(".gte('occurred_at'"),
     "system-health must count recent events on occurred_at",
   );
-  assert(
-    telegram.includes(".gte('occurred_at', todayStart)") &&
-      telegram.includes(".gte('occurred_at', fourHoursAgo)"),
-    "telegram-bot context-capture cooldown must use occurred_at",
-  );
 });
 
 Deno.test("jobs / PO / trade_invoices / annotations renames stay correct", async () => {
   const daily = await readRepo("functions/daily-digest/index.ts");
   const ops = await readRepo("functions/ops-api/index.ts");
   const reporting = await readRepo("functions/reporting-api/index.ts");
-  const telegram = await readRepo("functions/telegram-bot/index.ts");
 
   assert(
     daily.includes("scheduled_start:scheduled_at"),
@@ -209,19 +193,6 @@ Deno.test("jobs / PO / trade_invoices / annotations renames stay correct", async
       daily.includes("from('purchase_orders')"),
     "daily-digest: purchase_orders total_amount must alias total",
   );
-  assert(
-    daily.includes("address:site_address") &&
-      daily.includes("suburb:site_suburb"),
-    "daily-digest: jobs address/suburb must alias site_*",
-  );
-
-  assert(
-    telegram.includes("address:site_address") &&
-      telegram.includes("suburb:site_suburb") &&
-      telegram.includes("job_type:type"),
-    "telegram-bot findJobByRef must alias site_* / type",
-  );
-
   assert(
     ops.includes("xero_bill_number:xero_bill_id") &&
       ops.includes("week_ending:week_end") &&

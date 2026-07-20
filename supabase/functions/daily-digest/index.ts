@@ -20,39 +20,10 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
-const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`
 
 // AWST = UTC+8
 const AWST_OFFSET_MS = 8 * 60 * 60 * 1000
 function awstNow(): Date { return new Date(Date.now() + AWST_OFFSET_MS) }
-
-// ── Telegram Helper ──
-async function sendTelegramMessage(chatId: number | string, text: string): Promise<boolean> {
-  if (!TELEGRAM_BOT_TOKEN) return false
-  try {
-    const res = await fetchWithTimeout(`${TELEGRAM_API}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-      }),
-    }, 15000)
-    if (!res?.ok) return false
-    // Telegram returns HTTP 200 even on failures — check JSON body
-    try {
-      const body = await res.json()
-      return body?.ok === true
-    } catch {
-      return false
-    }
-  } catch (e) {
-    console.log('[daily-digest] Telegram send failed:', (e as Error).message)
-    return false
-  }
-}
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -790,60 +761,6 @@ async function generateLearningDigest(sb: any): Promise<string> {
   }
 }
 
-// ── Learning Digest DMs (Mondays only) ────────────────────
-
-async function sendLearningDigestDMs(sb: any) {
-  const now = awstNow()
-  if (now.getDay() !== 1) return // Monday only
-  if (!TELEGRAM_BOT_TOKEN) return
-
-  try {
-    // Get draft rules needing review
-    const { data: draftRules } = await sb.from('learned_rules')
-      .select('id, rule_type, pattern_key, description, confidence, evidence_count')
-      .eq('status', 'draft')
-      .eq('org_id', DEFAULT_ORG_ID)
-      .order('evidence_count', { ascending: false })
-      .limit(5)
-
-    if (!draftRules || draftRules.length === 0) return
-
-    // Get admin Telegram IDs (Shaun + Marnin)
-    const { data: admins } = await sb.from('users')
-      .select('id, full_name, email, telegram_id')
-      .or('email.ilike.%shaun%,email.ilike.%marnin%')
-
-    if (!admins || admins.length === 0) return
-
-    for (const rule of draftRules) {
-      const text = `🧠 <b>New Pattern Detected</b>\n\n${rule.description}\n\n<i>Seen ${rule.evidence_count} times (confidence: ${Math.round(rule.confidence * 100)}%)</i>\n\nIs this a real business rule?`
-
-      for (const admin of admins) {
-        if (!admin.telegram_id) continue
-
-        await fetchWithTimeout(`${TELEGRAM_API}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: admin.telegram_id,
-            text,
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [[
-                { text: '✅ Correct', callback_data: `learn_confirm:${rule.id}` },
-                { text: '✏️ Edit', callback_data: `learn_edit:${rule.id}` },
-                { text: '💬 It depends', callback_data: `learn_depends:${rule.id}` },
-              ]],
-            },
-          }),
-        }, 15000)
-      }
-    }
-  } catch (e) {
-    console.log('[daily-digest] learning DMs failed:', e)
-  }
-}
-
 // ── Graduation Evaluation (Mondays only) ──────────────────
 
 async function evaluateGraduation(sb: any, orgId: string): Promise<any[]> {
@@ -907,36 +824,6 @@ async function evaluateGraduation(sb: any, orgId: string): Promise<any[]> {
           context: { action_type: perm.action_type, total: totalCount, approval_rate: approvalRate },
         })
       } catch { /* non-blocking */ }
-    }
-
-    // Send graduation DMs to admins
-    if (candidates.length > 0 && TELEGRAM_BOT_TOKEN) {
-      const { data: admins } = await sb.from('users')
-        .select('telegram_id')
-        .or('email.ilike.%shaun%,email.ilike.%marnin%')
-
-      for (const candidate of candidates) {
-        const text = `🎓 <b>Graduation Candidate</b>\n\n<b>${candidate.action_type}</b> has ${candidate.total_decisions} decisions with ${candidate.approval_rate}% approval rate and no recent rejections.\n\nReady to let the AI handle this automatically?`
-
-        for (const admin of (admins || [])) {
-          if (!admin.telegram_id) continue
-          await fetchWithTimeout(`${TELEGRAM_API}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: admin.telegram_id,
-              text,
-              parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [[
-                  { text: '🎓 Graduate', callback_data: `grad_approve:${candidate.action_type}` },
-                  { text: '👎 Not yet', callback_data: `grad_reject:${candidate.action_type}` },
-                ]],
-              },
-            }),
-          }, 15000)
-        }
-      }
     }
 
     return candidates
@@ -1050,465 +937,12 @@ Sign off as "Your AI Operations Partner".`,
         console.log('[daily-digest] weekly_reports upsert failed:', (e as Error).message)
       }
 
-      // DM Marnin via Telegram
-      try {
-        const { data: marnin } = await sb.from('users')
-          .select('telegram_id')
-          .ilike('email', '%marnin%')
-          .maybeSingle()
-
-        if (marnin?.telegram_id) {
-          await sendTelegramMessage(marnin.telegram_id, `📊 <b>Weekly Strategic Letter</b>\n\n${letter}`)
-        }
-      } catch (e) {
-        console.log('[daily-digest] Telegram DM to Marnin failed:', (e as Error).message)
-      }
     }
 
     return letter
   } catch (e) {
     console.log('[daily-digest] weekly letter failed:', e)
     return ''
-  }
-}
-
-// ── Telegram Morning Brief ───────────────────────────────
-
-async function sendMorningBrief(sb: any, digest: any): Promise<boolean> {
-  if (!TELEGRAM_BOT_TOKEN) return false
-
-  try {
-    // Get group chat_id from org settings
-    const { data: org } = await sb.from('organisations')
-      .select('settings_json')
-      .eq('id', DEFAULT_ORG_ID)
-      .maybeSingle()
-
-    const groupChatId = org?.settings_json?.telegram_group_chat_id
-    if (!groupChatId) {
-      console.log('[daily-digest] No telegram_group_chat_id stored yet — skipping morning brief')
-      return false
-    }
-
-    const today = awstNow().toISOString().slice(0, 10)
-
-    // Get today's schedule
-    const { data: todayAssignments } = await sb.from('job_assignments')
-      .select('job_id, scheduled_date, start_time, assignment_type, crew_name, notes')
-      .gte('scheduled_date', today)
-      .lte('scheduled_date', today)
-
-    // Get job details for assignments
-    const jobIds = [...new Set((todayAssignments || []).map((a: any) => a.job_id).filter(Boolean))]
-    let jobMap: Record<string, any> = {}
-    if (jobIds.length > 0) {
-      const { data: jobs } = await sb.from('jobs')
-        .select('id, job_number, client_name, address:site_address, suburb:site_suburb, status')
-        .in('id', jobIds)
-      for (const j of (jobs || [])) jobMap[j.id] = j
-    }
-
-    // Build coaching team brief via Claude
-    const scheduleData = (todayAssignments || []).map((a: any) => {
-      const job = jobMap[a.job_id]
-      return {
-        crew: a.crew_name || 'Unassigned',
-        job: job ? `${job.job_number} ${job.client_name}` : 'Unknown',
-        location: job ? (job.address || job.suburb || '') : '',
-        time: a.start_time || '',
-        type: a.assignment_type || '',
-      }
-    })
-
-    // Materials delivery reminders — POs arriving today
-    try {
-      const { data: todayDeliveries } = await sb.from('purchase_orders')
-        .select('id, po_number, supplier_name, job_id, confirmed_delivery_date')
-        .eq('confirmed_delivery_date', today)
-
-      if (todayDeliveries && todayDeliveries.length > 0) {
-        const { data: allUsers } = await sb.from('users')
-          .select('id, full_name, telegram_id')
-          .not('telegram_id', 'is', null)
-
-        for (const po of todayDeliveries) {
-          const job = jobMap[po.job_id]
-          if (!job) continue
-
-          // Find assigned trade for this job
-          const { data: assignment } = await sb.from('job_assignments')
-            .select('crew_name')
-            .eq('job_id', po.job_id)
-            .eq('scheduled_date', today)
-            .limit(1)
-            .maybeSingle()
-
-          if (!assignment?.crew_name) continue
-
-          const tradeUser = (allUsers || []).find((u: any) =>
-            (u.full_name || '').toLowerCase().includes(assignment.crew_name.split(' ')[0].toLowerCase()))
-
-          if (tradeUser?.telegram_id) {
-            await sendTelegramMessage(tradeUser.telegram_id,
-              `Heads up — materials from ${po.supplier_name || 'supplier'} for ${job.job_number} at ${job.address || job.suburb || 'the site'} are being delivered today. Make sure someone's there to receive.`)
-          }
-        }
-      }
-    } catch (e) { console.log('[daily-digest] delivery reminder error:', e) }
-
-    const criticalAlerts = (digest.alerts || []).filter((a: any) => a.severity === 'critical')
-    const coachingInsights = digest.coaching_insights || {}
-
-    // Duration monitoring — check for overdue jobs
-    let overdueJobs: any[] = []
-    try {
-      const OPS_API = SUPABASE_URL + '/functions/v1/ops-api'
-      const durResp = await fetch(OPS_API + '?action=check_job_durations', {
-        headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-      })
-      if (durResp.ok) {
-        const durData = await durResp.json()
-        overdueJobs = durData.overdue_jobs || []
-      }
-    } catch (e) { console.log('[daily-digest] duration check failed:', e) }
-
-    // Add overdue jobs to critical alerts for the brief
-    if (overdueJobs.length > 0) {
-      for (const oj of overdueJobs.slice(0, 3)) {
-        criticalAlerts.push({
-          severity: 'critical',
-          title: `${oj.job_number || 'Job'} overdue by ${oj.days_overdue || '?'} days at ${oj.current_stage || 'unknown stage'}`,
-        })
-      }
-    }
-
-    if (ANTHROPIC_API_KEY) {
-      try {
-        const briefResp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 500,
-            system: `You are the morning standup coach for SecureWorks Group construction crew. Write a team message for Telegram. Rules: (1) Address people by first name with their tasks. (2) Flag risks by name: "Shaun, materials for Thursday's fence job aren't confirmed — chase R&R." (3) Give salespeople a specific action: "Nathan, 3 leads over 48hrs — call them today." (4) Acknowledge yesterday's wins if any jobs completed. (5) Keep it under 12 lines. (6) End with the single most important thing for today. (7) No pleasantries. Be direct. Use names, job numbers. (8) Use plain text — no markdown, no bullet symbols, just line breaks. (9) NO financial data, no revenue, no margins, no pipeline figures, no dollar amounts. Schedule and crew assignments ONLY. Flag any weather warnings or material delivery issues.`,
-            messages: [{
-              role: 'user',
-              content: `Generate today's team coaching brief.\n\nSchedule: ${JSON.stringify(scheduleData)}\n\nCritical alerts: ${JSON.stringify(criticalAlerts.filter((a: any) => !(a.title || '').toLowerCase().match(/revenue|margin|pipeline|overdue.*invoice|receivable|cash/)).slice(0, 5).map((a: any) => a.title))}\n\nCoaching insights: ${JSON.stringify(coachingInsights)}`,
-            }],
-          }),
-        }, 60000)
-
-        if (briefResp.ok) {
-          const briefResult = await briefResp.json()
-          const coachingBrief = briefResult.content?.[0]?.text || ''
-          if (coachingBrief) {
-            await sendTelegramMessage(groupChatId, coachingBrief)
-            return
-          }
-        }
-      } catch (e) {
-        console.log('[daily-digest] coaching brief generation failed, falling back to static:', e)
-      }
-    }
-
-    // Fallback: static format if Claude call fails
-    const lines: string[] = ['Good morning team.\n']
-
-    if (todayAssignments && todayAssignments.length > 0) {
-      lines.push("<b>TODAY'S SCHEDULE:</b>")
-      for (const a of todayAssignments) {
-        const job = jobMap[a.job_id]
-        const jobRef = job ? `${job.job_number} ${job.client_name}` : 'Unknown job'
-        const location = job ? (job.address || job.suburb || '') : ''
-        const crew = a.crew_name || ''
-        const time = a.start_time ? ` at ${a.start_time}` : ''
-        lines.push(`${crew} — ${jobRef}${time}${location ? ', ' + location : ''}`)
-      }
-    } else {
-      lines.push('No jobs scheduled for today.')
-    }
-
-    if (criticalAlerts.length > 0) {
-      lines.push('')
-      lines.push('<b>HEADS UP:</b>')
-      for (const alert of criticalAlerts.slice(0, 3)) {
-        lines.push(`⚠️ ${alert.title}`)
-      }
-    }
-
-    lines.push('')
-    return await sendTelegramMessage(groupChatId, lines.join('\n'))
-  } catch (e) {
-    console.log('[daily-digest] morning brief failed:', (e as Error).message)
-    return false
-  }
-}
-
-async function sendRoleSpecificDMs(sb: any, digest: any, coachingInsights: any) {
-  if (!TELEGRAM_BOT_TOKEN || !coachingInsights) return
-
-  try {
-    // Get all users with telegram_id
-    const { data: users } = await sb.from('users')
-      .select('id, full_name, email, telegram_id')
-      .not('telegram_id', 'is', null)
-
-    if (!users || users.length === 0) return
-
-    const snapshot = digest.snapshot || {}
-
-    for (const user of users) {
-      const e = (user.email || '').toLowerCase()
-      const name = (user.full_name || '').split(' ')[0]
-
-      try {
-        // Marnin — CEO brief
-        if (e.includes('marnin')) {
-          const revMtd = snapshot.revenue_mtd || 0
-          const target = 180000
-          const now = awstNow()
-          const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
-          const dayOfMonth = now.getDate()
-          const daysLeft = daysInMonth - dayOfMonth
-          const pipeline = snapshot.weighted_pipeline || snapshot.pipeline_value || 0
-          const overdue = snapshot.outstanding_receivables || 0
-          const overdueCount = snapshot.overdue_invoice_count || 0
-          const cashOnHand = snapshot.cash_on_hand || snapshot.bank_balance || 0
-
-          // Pipeline breakdown from diagnostics
-          const salesConversion = digest.diagnostics?.sales_conversion || {}
-          const quotedCount = salesConversion.quoted_count || snapshot.quoted_count || 0
-          const quotedValue = salesConversion.quoted_value || snapshot.quoted_value || 0
-          const acceptedCount = salesConversion.accepted_count || snapshot.accepted_count || 0
-          const acceptedValue = salesConversion.accepted_value || snapshot.accepted_value || 0
-          const installingCount = snapshot.installing_count || 0
-
-          // Crew utilization for team summary
-          const crewUtil = digest.diagnostics?.crew_utilization || {}
-
-          // Build team performance summary
-          let teamLines: string[] = []
-          const teamInsights = coachingInsights.sales || {}
-          for (const [key, directives] of Object.entries(teamInsights)) {
-            const firstName = key.charAt(0).toUpperCase() + key.slice(1)
-            const topDirective = (directives as string[])?.[0]
-            if (topDirective) teamLines.push(`${firstName}: ${topDirective}`)
-          }
-          // Add crew info
-          for (const [crewName, crewData] of Object.entries(crewUtil)) {
-            const util = (crewData as any)?.utilization_pct
-            const completed = (crewData as any)?.completed_count
-            if (completed) teamLines.push(`${crewName}: completed ${completed} job${completed > 1 ? 's' : ''} last week`)
-          }
-
-          // Find top risk from critical alerts
-          const critAlerts = (digest.alerts || []).filter((a: any) => a.severity === 'critical')
-          const topRisk = critAlerts[0]
-
-          let dm = `Morning. Revenue MTD: $${Math.round(revMtd / 1000)}K against $${Math.round(target / 1000)}K target. ${daysLeft} days left.\n\n`
-          dm += `Pipeline: ${quotedCount} quoted ($${Math.round(quotedValue / 1000)}K)`
-          if (acceptedCount > 0) dm += `, ${acceptedCount} accepted ($${Math.round(acceptedValue / 1000)}K waiting on deposits)`
-          if (installingCount > 0) dm += `, ${installingCount} installing`
-          dm += `\n`
-          dm += `Cash: $${Math.round(cashOnHand / 1000)}K across accounts. AR: $${Math.round(overdue / 1000)}K`
-          if (overdueCount > 0) dm += ` (${overdueCount} invoices 60+ days — this is your biggest risk)`
-          dm += `\n`
-
-          // Payment chase summary
-          const ceoChaseAlert = (digest.alerts || []).find((a: any) => a.category === 'Payments')
-          if (ceoChaseAlert) {
-            const pr = ceoChaseAlert.data?.payments_received || 0
-            const fu = ceoChaseAlert.data?.follow_ups || 0
-            const parts = []
-            if (pr > 0) parts.push(`${pr} payment${pr > 1 ? 's' : ''} received overnight`)
-            if (fu > 0) parts.push(`${fu} follow-up${fu > 1 ? 's' : ''} due today`)
-            if (parts.length > 0) dm += `Payments: ${parts.join('. ')}.\n`
-          }
-
-          if (teamLines.length > 0) {
-            dm += `\nTeam: ${teamLines.slice(0, 3).join('. ')}.\n`
-          }
-
-          if (topRisk) {
-            dm += `\nToday's risk: ${topRisk.title}`
-          }
-
-          await sendTelegramMessage(user.telegram_id, dm)
-          continue
-        }
-
-        // Shaun — Ops coaching brief
-        if (e.includes('shaun')) {
-          // Build Shaun's numbered priority list via Claude Haiku
-          const opsDirectives = (coachingInsights.ops || []).slice(0, 5)
-          const critAlerts = (digest.alerts || []).filter((a: any) => a.severity === 'critical' || a.severity === 'warning')
-          const staleQuotes = (digest.diagnostics?.stale_quotes || []).slice(0, 3)
-          const utilization = digest.diagnostics?.crew_utilization || {}
-
-          // Gather raw priority items
-          const priorityItems: string[] = []
-
-          // Payment chase follow-ups
-          const chaseAlert = (digest.alerts || []).find((a: any) => a.category === 'Payments' && a.data?.follow_ups > 0)
-          if (chaseAlert) {
-            const fu = chaseAlert.data.follow_ups || 0
-            const no = chaseAlert.data.new_overdue || 0
-            const parts = []
-            if (fu > 0) parts.push(`${fu} follow-up${fu > 1 ? 's' : ''} due`)
-            if (no > 0) parts.push(`${no} newly overdue`)
-            priorityItems.push(`Payment chase: ${parts.join(', ')} — open Clear Debt`)
-          }
-
-          // Overdue invoicing
-          const unbilledCount = digest.snapshot?.unbilled_count || 0
-          if (unbilledCount > 0) {
-            const unbilledRev = digest.snapshot?.unbilled_revenue || 0
-            priorityItems.push(`${unbilledCount} completed jobs not yet invoiced ($${Math.round(unbilledRev).toLocaleString()} outstanding)`)
-          }
-
-          // Stale POs / materials
-          for (const alert of critAlerts.slice(0, 4)) {
-            if ((alert.title || '').toLowerCase().includes('material') || (alert.title || '').toLowerCase().includes('po') || (alert.title || '').toLowerCase().includes('delivery')) {
-              priorityItems.push(alert.title)
-            }
-          }
-
-          // Pending expenses
-          const pendingExpenses = digest.diagnostics?.pending_expenses || 0
-          if (pendingExpenses > 0) {
-            priorityItems.push(`${pendingExpenses} expense receipt${pendingExpenses > 1 ? 's' : ''} pending your approval`)
-          }
-
-          // Scheduling gaps
-          for (const alert of critAlerts) {
-            if ((alert.title || '').toLowerCase().includes('schedule') || (alert.title || '').toLowerCase().includes('gap') || (alert.title || '').toLowerCase().includes('unassigned')) {
-              priorityItems.push(alert.title)
-            }
-          }
-
-          // Add ops directives as fallback
-          for (const d of opsDirectives) {
-            if (priorityItems.length < 7) priorityItems.push(d)
-          }
-
-          // Generate via Claude Haiku for natural language
-          let dm = ''
-          if (ANTHROPIC_API_KEY && priorityItems.length > 0) {
-            try {
-              const haikuResp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': ANTHROPIC_API_KEY,
-                  'anthropic-version': '2023-06-01',
-                },
-                body: JSON.stringify({
-                  model: 'claude-3-5-haiku-20241022',
-                  max_tokens: 400,
-                  system: `You are Shaun's ops assistant at SecureWorks Group (construction). Write a morning Telegram message. Rules: (1) Start with "Morning, Shaun. Here's your day:" (2) Number each priority 1-7 max. (3) Be specific — use job numbers, dollar amounts, supplier names. (4) End with a "Heads up:" line about the biggest risk today, then a 2-sentence coaching note about what will make the day successful. (5) Plain text only — no markdown, no bold, no bullet symbols. Just numbers and line breaks.`,
-                  messages: [{
-                    role: 'user',
-                    content: `Generate Shaun's ops priority list from these items:\n\n${JSON.stringify(priorityItems.slice(0, 7))}\n\nCritical alerts: ${JSON.stringify(critAlerts.slice(0, 3).map((a: any) => a.title))}\n\nCrew utilization: ${JSON.stringify(utilization)}`,
-                  }],
-                }),
-              }, 30000)
-              if (haikuResp.ok) {
-                const haikuResult = await haikuResp.json()
-                dm = haikuResult.content?.[0]?.text || ''
-              }
-            } catch (haikuErr) {
-              console.log('[daily-digest] Shaun Haiku brief failed, falling back to static:', haikuErr)
-            }
-          }
-
-          // Fallback: static format
-          if (!dm) {
-            dm = `Morning, Shaun. Here's your day:\n\n`
-            priorityItems.slice(0, 7).forEach((item, i) => { dm += `${i + 1}. ${item}\n` })
-            if (critAlerts.length > 0) {
-              dm += `\nHeads up: ${critAlerts[0].title}`
-            }
-          }
-
-          await sendTelegramMessage(user.telegram_id, dm)
-          continue
-        }
-
-        // Nathan / Khairo — Sales coaching brief
-        if (e.includes('nathan') || e.includes('khairo')) {
-          const salesKey = e.includes('nathan') ? 'nathan' : 'khairo'
-          const salesDirectives = (coachingInsights.sales?.[salesKey] || []).slice(0, 2)
-          const staleQuotes = (digest.diagnostics?.stale_quotes || [])
-            .filter((q: any) => (q.salesperson || '').toLowerCase().includes(salesKey))
-            .slice(0, 3)
-
-          const conversion = digest.diagnostics?.sales_conversion || {}
-          const myStats = Object.entries(conversion).find(([k]) => k.toLowerCase().includes(salesKey))
-
-          let dm = `<b>Sales Coaching Brief</b>\n\n`
-
-          if (staleQuotes.length > 0) {
-            dm += `<b>YOUR CALL LIST (priority order):</b>\n`
-
-            // Generate talking points via Claude if available
-            if (ANTHROPIC_API_KEY) {
-              try {
-                const tpResp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-                  body: JSON.stringify({
-                    model: 'claude-sonnet-4-20250514',
-                    max_tokens: 300,
-                    messages: [{
-                      role: 'user',
-                      content: `Generate a 1-line follow-up talking point for each stale quote. Be specific about the project type and value. Just output numbered lines.\n\n${staleQuotes.map((q: any, i: number) => `${i + 1}. ${q.client} — $${q.value} ${q.job} (${q.days_since_quote} days old)`).join('\n')}`,
-                    }],
-                  }),
-                }, 60000)
-                if (tpResp.ok) {
-                  const tpResult = await tpResp.json()
-                  dm += (tpResult.content?.[0]?.text || staleQuotes.map((q: any, i: number) => `${i + 1}. ${q.client} — $${q.value?.toLocaleString()} quote, ${q.days_since_quote} days old`).join('\n')) + '\n'
-                } else {
-                  for (const q of staleQuotes) {
-                    dm += `${q.client} — $${q.value?.toLocaleString()} quote, ${q.days_since_quote} days old\n`
-                  }
-                }
-              } catch {
-                for (const q of staleQuotes) {
-                  dm += `${q.client} — $${q.value?.toLocaleString()} quote, ${q.days_since_quote} days old\n`
-                }
-              }
-            } else {
-              for (const q of staleQuotes) {
-                dm += `${q.client} — $${q.value?.toLocaleString()} quote, ${q.days_since_quote} days old\n`
-              }
-            }
-            dm += '\n'
-          }
-
-          if (myStats) {
-            const [, stats] = myStats as [string, any]
-            dm += `<b>YOUR NUMBERS (90 days):</b>\n`
-            dm += `Close rate: ${stats.close_rate}% | Avg deal: $${stats.avg_deal?.toLocaleString()} | Pipeline: ${stats.leads} leads\n\n`
-          }
-
-          if (salesDirectives.length > 0) {
-            salesDirectives.forEach((d: string) => { dm += `${d}\n` })
-          }
-
-          await sendTelegramMessage(user.telegram_id, dm)
-          continue
-        }
-      } catch (e) {
-        console.log(`[daily-digest] DM to ${user.email} failed:`, (e as Error).message)
-      }
-    }
-  } catch (e) {
-    console.log('[daily-digest] role-specific DMs failed:', (e as Error).message)
   }
 }
 
@@ -1866,99 +1300,6 @@ async function generateFinancialSnapshot(sb: any) {
   return snapshot
 }
 
-// ── Smart Nudge System ────────────────────────────────────
-// Generates intelligent, actionable nudges per person
-
-async function generateSmartNudges(sb: any, digest: any, diagnostics: any): Promise<void> {
-  if (!TELEGRAM_BOT_TOKEN) return
-
-  try {
-    const { data: users } = await sb.from('users')
-      .select('id, full_name, email, telegram_id')
-      .not('telegram_id', 'is', null)
-
-    if (!users || users.length === 0) return
-
-    const nudges: { telegram_id: number; message: string; priority: number }[] = []
-    const staleQuotes = diagnostics?.stale_quotes || []
-    const crewUtil = diagnostics?.crew_utilization || {}
-
-    // Collect nudge-worthy conditions
-    // 1. Uninvoiced completed jobs → nudge Shaun
-    const uninvoiced = (digest.snapshot?.unbilled_revenue && digest.snapshot.unbilled_revenue > 0)
-      ? { amount: digest.snapshot.unbilled_revenue, count: digest.snapshot.unbilled_count || 0 }
-      : null
-
-    // 2. Overdue invoices → nudge Marnin
-    const overdue = digest.snapshot?.outstanding_receivables || 0
-
-    for (const user of users) {
-      const e = (user.email || '').toLowerCase()
-      const userNudges: string[] = []
-
-      // Shaun — ops nudges
-      if (e.includes('shaun')) {
-        if (uninvoiced && uninvoiced.amount > 0) {
-          userNudges.push(`${uninvoiced.count} completed jobs worth $${Math.round(uninvoiced.amount).toLocaleString()} need invoicing. Want me to create them now?`)
-        }
-      }
-
-      // Marnin — CEO nudges
-      if (e.includes('marnin')) {
-        if (overdue > 10000) {
-          userNudges.push(`$${Math.round(overdue).toLocaleString()} in overdue receivables. Shall I draft follow-up messages?`)
-        }
-      }
-
-      // Nathan/Khairo — sales nudges
-      if (e.includes('nathan') || e.includes('khairo')) {
-        const salesKey = e.includes('nathan') ? 'nathan' : 'khairo'
-        const myStaleQuotes = staleQuotes
-          .filter((q: any) => (q.salesperson || '').toLowerCase().includes(salesKey))
-          .slice(0, 3)
-
-        if (myStaleQuotes.length > 0) {
-          const total = myStaleQuotes.reduce((s: number, q: any) => s + (q.value || 0), 0)
-          userNudges.push(`${myStaleQuotes.length} quotes worth $${Math.round(total).toLocaleString()} going cold. ${myStaleQuotes[0].client} is ${myStaleQuotes[0].days_since_quote} days old — call them first.`)
-        }
-      }
-
-      // Generate intelligent message via Haiku (max 3 per person)
-      if (userNudges.length > 0 && ANTHROPIC_API_KEY) {
-        const nudgeText = userNudges.slice(0, 3).join('\n')
-        try {
-          const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': ANTHROPIC_API_KEY,
-              'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify({
-              model: 'claude-haiku-4-5-20251001',
-              max_tokens: 200,
-              system: `You are a helpful operations nudge bot for SecureWorks Group. Rewrite these nudge items into a single friendly but direct Telegram message. Address the person by first name (${user.full_name.split(' ')[0]}). Be specific with numbers and names. No markdown, plain text only. Max 4 lines.`,
-              messages: [{ role: 'user', content: nudgeText }],
-            }),
-          }, 30000)
-
-          if (resp.ok) {
-            const result = await resp.json()
-            const msg = result.content?.[0]?.text
-            if (msg) {
-              await sendTelegramMessage(user.telegram_id, msg)
-            }
-          }
-        } catch (e) {
-          console.log(`[daily-digest] nudge generation for ${user.email} failed:`, e)
-        }
-      }
-    }
-  } catch (e) {
-    console.log('[daily-digest] smart nudges failed:', (e as Error).message)
-  }
-}
-
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
@@ -2004,7 +1345,7 @@ serve(async (req: Request) => {
 
   if (action === 'ceo_financial_brief') {
     try {
-      // Weekly CEO Financial Brief — calls reporting-api tools and sends to Telegram
+      // Weekly CEO Financial Brief — calls reporting-api tools
       const [waterfall, leaks, benchmarks] = await Promise.all([
         fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=cash_waterfall`, {
           headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
@@ -2033,7 +1374,7 @@ serve(async (req: Request) => {
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 1200,
-          system: `You are JARVIS, the AI operations intelligence for SecureWorks Group. Write a weekly financial brief for Marnin (CEO). Telegram format. Address him as "sir". No emojis except one at the start. Max 2000 chars.
+          system: `You are JARVIS, the AI operations intelligence for SecureWorks Group. Write a weekly financial brief for Marnin (CEO). Address him as "sir". No emojis except one at the start. Max 2000 chars.
 
 Structure EXACTLY like this:
 
@@ -2056,19 +1397,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       const aiResult = await aiResp.json()
       const briefText = aiResult.content?.[0]?.text || 'Weekly financial brief could not be generated.'
 
-      // Send to admin Telegram users
-      const { data: admins } = await sb.from('users')
-        .select('telegram_id')
-        .eq('org_id', DEFAULT_ORG_ID)
-        .in('role', ['admin', 'owner'])
-        .not('telegram_id', 'is', null)
-      for (const admin of (admins || [])) {
-        if (admin.telegram_id) {
-          await sendTelegramMessage(admin.telegram_id, briefText)
-        }
-      }
-
-      return json({ success: true, sent_to: (admins || []).length })
+      return json({ success: true, brief: briefText, sent_to: 0 })
     } catch (err) {
       console.error('[daily-digest] CEO financial brief error:', err)
       return json({ error: (err as Error).message }, 500)
@@ -2081,185 +1410,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       return json(snapshot)
     } catch (err) {
       console.error('Financial snapshot error:', err)
-      return json({ error: (err as Error).message }, 500)
-    }
-  }
-
-  // ── Intraday Nudge Check (pg_cron at 11am, 3pm, 7pm AWST) ──
-  if (action === 'nudge_check') {
-    try {
-      // Dedup: skip if a nudge was sent in the last 4 hours
-      const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString()
-      const { data: recentNudge } = await sb.from('business_events')
-        .select('id')
-        .eq('event_type', 'ai.nudge_sent')
-        .gte('occurred_at', fourHoursAgo)
-        .limit(1)
-
-      if (recentNudge && recentNudge.length > 0) {
-        return json({ skipped: true, reason: 'nudge_sent_recently' })
-      }
-
-      // Lightweight data fetch — diagnostics + financial snapshot only
-      const [diagnostics, snapshot] = await Promise.all([
-        generateDeepDiagnostics(sb),
-        generateFinancialSnapshot(sb),
-      ])
-
-      // Build mini-digest with just the fields generateSmartNudges needs
-      const miniDigest = {
-        snapshot: {
-          unbilled_revenue: snapshot?.unbilled_revenue || 0,
-          unbilled_count: snapshot?.unbilled_count || 0,
-          outstanding_receivables: snapshot?.outstanding_receivables || 0,
-        },
-      }
-
-      await generateSmartNudges(sb, miniDigest, diagnostics)
-
-      // Process event-driven triggers (payment claimed, etc.)
-      await processEventTriggers(sb)
-
-      // Ghost PO detection — flag POs with no supplier response after 48h
-      await detectGhostPOs(sb)
-
-      // Completion follow-up — jobs completed 24h ago with no sign-off
-      try {
-        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-        const twentySixHoursAgo = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString()
-
-        const { data: recentlyCompleted } = await sb.from('jobs')
-          .select('id, job_number, client_name')
-          .eq('status', 'complete')
-          .eq('org_id', DEFAULT_ORG_ID)
-          .gte('completed_at', twentySixHoursAgo)
-          .lte('completed_at', twentyFourHoursAgo)
-
-        for (const job of (recentlyCompleted || [])) {
-          // Check if sign-off exists
-          const { data: signoff } = await sb.from('job_service_reports')
-            .select('id')
-            .eq('job_id', job.id)
-            .limit(1)
-
-          if (signoff && signoff.length > 0) continue // Already signed off
-
-          // Find the assigned trade lead
-          const { data: assignment } = await sb.from('job_assignments')
-            .select('crew_name')
-            .eq('job_id', job.id)
-            .order('scheduled_date', { ascending: false })
-            .limit(1)
-            .maybeSingle()
-
-          if (!assignment?.crew_name) continue
-
-          const { data: tradeUser } = await sb.from('users')
-            .select('telegram_id, full_name')
-            .ilike('full_name', `%${assignment.crew_name.split(' ')[0]}%`)
-            .not('telegram_id', 'is', null)
-            .limit(1)
-            .maybeSingle()
-
-          if (tradeUser?.telegram_id) {
-            await sendTelegramMessage(tradeUser.telegram_id,
-              `Hey ${tradeUser.full_name?.split(' ')[0]}, ${job.job_number} was marked complete yesterday but we don't have a client sign-off yet. Can you get that sorted?`)
-          }
-        }
-      } catch (e) { console.log('[daily-digest] completion followup error:', e) }
-
-      // Log nudge event for dedup
-      try {
-        await sb.from('business_events').insert({
-          event_type: 'ai.nudge_sent',
-          source: 'daily-digest/nudge_check',
-          entity_type: 'nudge',
-          entity_id: crypto.randomUUID(),
-          payload: { trigger: 'intraday_cron' },
-        })
-      } catch { /* non-blocking */ }
-
-      return json({ success: true })
-    } catch (err) {
-      console.error('Nudge check error:', err)
-      return json({ error: (err as Error).message }, 500)
-    }
-  }
-
-  // ── Shaun's Morning Brief (7:30am AWST, separate from main digest) ──
-  if (action === 'shaun_brief') {
-    try {
-      // Re-generate digest data (lightweight — reuses cached daily_digests if available)
-      const todayStr = awstNow().toISOString().slice(0, 10)
-      const { data: cachedDigest } = await sb.from('daily_digests')
-        .select('digest_json')
-        .eq('org_id', DEFAULT_ORG_ID)
-        .eq('digest_date', todayStr)
-        .maybeSingle()
-
-      if (!cachedDigest?.digest_json) {
-        console.log('[daily-digest] No cached digest for today — Shaun brief skipped')
-        return json({ skipped: true, reason: 'no_digest_today' })
-      }
-
-      const digest = cachedDigest.digest_json
-      const coachingInsights = digest.coaching_insights || {}
-
-      // Find Shaun
-      const { data: users } = await sb.from('users')
-        .select('id, name, email, telegram_id')
-        .ilike('email', '%shaun%')
-        .not('telegram_id', 'is', null)
-        .limit(1)
-
-      if (!users || users.length === 0) {
-        return json({ skipped: true, reason: 'shaun_not_registered' })
-      }
-
-      const shaun = users[0]
-      // Reuse the Shaun brief generation logic from sendRoleSpecificDMs
-      const opsDirectives = (coachingInsights.ops || []).slice(0, 5)
-      const critAlerts = (digest.alerts || []).filter((a: any) => a.severity === 'critical' || a.severity === 'warning')
-      const utilization = digest.diagnostics?.crew_utilization || {}
-      const avgUtil = Object.values(utilization).length > 0
-        ? Math.round(Object.values(utilization).reduce((sum: number, c: any) => sum + (c.utilization_pct || 0), 0) / Object.values(utilization).length)
-        : null
-
-      let dm = `<b>Morning, Shaun. Here's your day:</b>\n\n`
-
-      // Build numbered priority items from alerts + directives
-      const priorities: string[] = []
-      for (const alert of critAlerts.slice(0, 5)) {
-        priorities.push(alert.action || alert.title || '')
-      }
-      for (const d of opsDirectives) {
-        if (priorities.length < 7) priorities.push(d)
-      }
-
-      if (priorities.length > 0) {
-        priorities.slice(0, 7).forEach((p: string, i: number) => {
-          dm += `${i + 1}. ${p}\n`
-        })
-      } else {
-        dm += 'No urgent items today.\n'
-      }
-
-      if (avgUtil !== null) {
-        dm += `\nCrew utilization: ${avgUtil}% (14-day avg).`
-        if (avgUtil < 75) dm += ' Spare capacity available.'
-        dm += '\n'
-      }
-
-      // Coaching note (last 2 sentences from ops directives)
-      const coachingNote = opsDirectives.slice(-1)[0]
-      if (coachingNote) {
-        dm += `\nHeads up: ${coachingNote}`
-      }
-
-      await sendTelegramMessage(shaun.telegram_id, dm)
-      return json({ success: true, sent_to: 'shaun' })
-    } catch (err) {
-      console.error('Shaun brief error:', err)
       return json({ error: (err as Error).message }, 500)
     }
   }
@@ -2388,41 +1538,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
         }
       }
 
-      // Phantom buyer check: quote opened 3+ times in 2 hours
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
-      const { data: hotOpens } = await sb.from('email_events')
-        .select('job_id, metadata')
-        .eq('event_type', 'opened')
-        .gte('created_at', twoHoursAgo)
-
-      if (hotOpens && hotOpens.length > 0) {
-        const opensByJob: Record<string, number> = {}
-        for (const e of hotOpens) {
-          if (e.job_id) opensByJob[e.job_id] = (opensByJob[e.job_id] || 0) + 1
-        }
-        for (const [jobId, count] of Object.entries(opensByJob)) {
-          if (count >= 3) {
-            // Get job + scoper details
-            const { data: job } = await sb.from('jobs')
-              .select('job_number, client_name, created_by')
-              .eq('id', jobId)
-              .maybeSingle()
-            if (!job) continue
-
-            // Find scoper's telegram_id
-            const { data: scoper } = await sb.from('users')
-              .select('telegram_id, full_name')
-              .eq('id', job.created_by)
-              .maybeSingle()
-
-            if (scoper?.telegram_id) {
-              await sendTelegramMessage(scoper.telegram_id,
-                `${job.client_name} just opened the quote for ${job.job_number} ${count} times in the last 2 hours. They're interested — call them NOW.`)
-            }
-          }
-        }
-      }
-
       // ── House plans follow-up for patio council process ──
       let plansFollowups = 0
       try {
@@ -2448,7 +1563,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
           const address = cs.jobs?.site_address || ''
 
           if (daysSinceCreation >= 14) {
-            // Day 14+: Red annotation + Telegram to Shaun
+            // Day 14+: Red annotation for operations
             const sourceRef = `plans-overdue:${cs.job_id}:14d`
             const { count: existing } = await sb.from('ai_annotations')
               .select('id', { count: 'exact', head: true })
@@ -2522,71 +1637,8 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
     }
   }
 
-  // ── EOD Follow-up — chase open clock-ons at 5pm/7pm ──
-  if (action === 'eod_followup') {
-    try {
-      const today = awstNow().toISOString().slice(0, 10)
-      const now = awstNow()
-      const currentHour = now.getHours()
-
-      // Query assignments today where clocked on but not off
-      const { data: openAssignments } = await sb.from('job_assignments')
-        .select('id, job_id, crew_name, scheduled_date, clocked_on, clocked_off')
-        .eq('scheduled_date', today)
-        .not('clocked_on', 'is', null)
-        .is('clocked_off', null)
-
-      if (!openAssignments || openAssignments.length === 0) {
-        return json({ success: true, message: 'No open assignments' })
-      }
-
-      // Get job details
-      const jobIds = [...new Set(openAssignments.map((a: any) => a.job_id).filter(Boolean))]
-      let jobMap: Record<string, any> = {}
-      if (jobIds.length > 0) {
-        const { data: jobs } = await sb.from('jobs')
-          .select('id, job_number, client_name')
-          .in('id', jobIds)
-        for (const j of (jobs || [])) jobMap[j.id] = j
-      }
-
-      // Get all users with telegram_id for crew lookup
-      const { data: users } = await sb.from('users')
-        .select('id, full_name, email, telegram_id')
-        .not('telegram_id', 'is', null)
-      const userMap = new Map((users || []).map((u: any) => [u.full_name?.toLowerCase(), u]))
-
-      for (const assignment of openAssignments) {
-        const job = jobMap[assignment.job_id]
-        const jobRef = job ? `${job.job_number} ${job.client_name}` : 'your job'
-
-        // Find the trade's telegram_id by crew_name
-        const crewName = (assignment.crew_name || '').toLowerCase()
-        const tradeUser = userMap.get(crewName) ||
-          [...userMap.values()].find((u: any) => crewName.includes(u.full_name?.split(' ')[0]?.toLowerCase() || ''))
-
-        if (currentHour >= 17 && currentHour < 19) {
-          // 5pm: DM the trade
-          if (tradeUser?.telegram_id) {
-            await sendTelegramMessage(tradeUser.telegram_id,
-              `Hey ${tradeUser.full_name?.split(' ')[0]}, looks like you haven't clocked off for ${jobRef} today. Quick update when you get a chance.`)
-          }
-        } else if (currentHour >= 19) {
-          // 7pm: flag to Shaun
-          const shaun = [...userMap.values()].find((u: any) => (u.email || '').toLowerCase().includes('shaun'))
-          if (shaun?.telegram_id) {
-            const tradeName = tradeUser?.full_name?.split(' ')[0] || assignment.crew_name || 'A trade'
-            await sendTelegramMessage(shaun.telegram_id,
-              `${tradeName} hasn't clocked off ${jobRef} — might want to check in.`)
-          }
-        }
-      }
-
-      return json({ success: true, open_assignments: openAssignments.length })
-    } catch (err) {
-      console.error('EOD followup error:', err)
-      return json({ error: (err as Error).message }, 500)
-    }
+  if (action === 'nudge_check' || action === 'eod_followup' || action === 'shaun_brief') {
+    return json({ error: `Retired action: ${action}`, action }, 410)
   }
 
   try {
@@ -2637,13 +1689,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       console.log('[daily-digest] annotation creation failed:', (e as Error).message)
     }
 
-    // ── Process Event Triggers (payment claimed, etc.) ──
-    try {
-      await processEventTriggers(sb)
-    } catch (e) {
-      console.log('[daily-digest] event triggers failed:', (e as Error).message)
-    }
-
     // Generate AI narrative
     const narrative = await generateNarrative(digest)
     if (narrative) digest.ai_narrative = narrative
@@ -2689,7 +1734,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
     try {
       canaryResults = await runCanaryChecks(sb)
       learningDigest = await generateLearningDigest(sb)
-      if (learningDigest) await sendLearningDigestDMs(sb)
       graduationCandidates = await evaluateGraduation(sb, DEFAULT_ORG_ID)
     } catch (e) {
       console.log('[daily-digest] Monday analysis error:', e)
@@ -2816,33 +1860,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       } catch (webhookErr) {
         console.error('Webhook delivery failed:', webhookErr)
       }
-    }
-
-    // Morning brief to Telegram — daily (non-blocking)
-    // Only send Telegram messages for POST requests (pg_cron triggers)
-    // GET requests from dashboards should only return data, not spam Telegram
-    const shouldSendTelegram = req.method === 'POST' || url.searchParams.get('send_telegram') === 'true'
-    if (shouldSendTelegram) {
-      // Await morning brief (primary delivery) — returns true only if Telegram API confirmed ok
-      const briefSent = await sendMorningBrief(sb, digest)
-
-      // Role-specific coaching DMs (non-blocking)
-      sendRoleSpecificDMs(sb, digest, coachingInsights).catch(e =>
-        console.log('[daily-digest] coaching DMs error:', e))
-
-      // Smart nudges (non-blocking)
-      generateSmartNudges(sb, digest, digest.diagnostics).catch(e =>
-        console.log('[daily-digest] smart nudges error:', e))
-
-      // Mark digest as delivered only after morning brief succeeds
-      if (briefSent) {
-        await sb.from('daily_digests')
-          .update({ delivered: true, delivered_at: new Date().toISOString() })
-          .eq('org_id', DEFAULT_ORG_ID)
-          .eq('digest_date', new Date().toISOString().split('T')[0])
-      }
-    } else {
-      console.log('[daily-digest] GET request - skipping Telegram sends')
     }
 
     return json(digest)
@@ -3717,49 +2734,6 @@ async function generateDigest(sb: any) {
 // ════════════════════════════════════════════════════════════
 
 async function createDailyAnnotations(sb: any, digest: any) {
-  let learningQuestionsSent = 0
-  const MAX_LEARNING_QUESTIONS = 2
-
-  async function maybeSendLearningQuestion(sourceRef: string, pattern: string) {
-    if (learningQuestionsSent >= MAX_LEARNING_QUESTIONS) return
-    if (Math.random() > 0.2) return // 20% chance
-
-    // Find Shaun's telegram_id (primary ops person for learning)
-    const { data: shaun } = await sb.from('users')
-      .select('telegram_id')
-      .ilike('email', '%shaun%')
-      .not('telegram_id', 'is', null)
-      .limit(1)
-      .maybeSingle()
-
-    if (!shaun?.telegram_id) return
-
-    const TELEGRAM_BOT_TOKEN_LOCAL = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-    if (!TELEGRAM_BOT_TOKEN_LOCAL) return
-
-    // Generate a learning question about the pattern
-    const questionText = `I noticed: ${pattern}\n\nIs this intentional? Understanding why helps me get smarter.`
-
-    try {
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_LOCAL}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: shaun.telegram_id,
-          text: questionText,
-          reply_markup: {
-            inline_keyboard: [[
-              { text: 'Yes, on purpose', callback_data: `learn_confirm:${sourceRef}` },
-              { text: 'No, fix it', callback_data: `learn_edit:${sourceRef}` },
-              { text: 'It depends', callback_data: `learn_depends:${sourceRef}` },
-            ]],
-          },
-        }),
-      })
-      learningQuestionsSent++
-    } catch (e) { console.log('[daily-digest] learning question send failed:', e) }
-  }
-
   const now = new Date()
   const today = now.toISOString().split('T')[0]
   const fiveDaysOut = new Date(now.getTime() + 5 * 86400000).toISOString().split('T')[0]
@@ -3891,8 +2865,6 @@ async function createDailyAnnotations(sb: any, digest: any) {
       escalates_at: daysUntil <= 2 ? null : new Date(now.getTime() + 2 * 86400000).toISOString(),
       confidence: 0.85,
     })
-    await maybeSendLearningQuestion(`materials_not_confirmed_${job.id}`,
-      `${job.client_name} (${job.job_number}) is building in ${daysUntil} days with no confirmed PO. Is this a materials-on-hand situation or should we be chasing suppliers?`)
   }
 
   // ── 3. Completed Not Invoiced ──
@@ -3927,8 +2899,6 @@ async function createDailyAnnotations(sb: any, digest: any) {
       source_ref: `digest:completed_not_invoiced:${job.id}`,
       confidence: 0.9,
     })
-    await maybeSendLearningQuestion(`completed_not_invoiced_${job.id}`,
-      `${job.client_name} (${job.job_number}) was completed ${daysSince} days ago but hasn't been invoiced. Is there a reason invoicing is delayed on this one?`)
   }
 
   // ── 3b. Job accepted, no PO after 3 days ──
@@ -4314,80 +3284,13 @@ async function createDailyAnnotations(sb: any, digest: any) {
     console.log('[daily-digest] price drift annotation failed:', (e as Error).message)
   }
 
+  // ── Ghost PO Detection ──
+  await detectGhostPOs(sb)
+
   // ── Auto-Resolution Cleanup ──
   await cleanupResolvedAnnotations(sb)
 
   console.log(`[daily-digest] Created/refreshed ${created} annotations`)
-}
-
-// ── Event-Driven Triggers ──────────────────────────────────
-// Picks up unprocessed business_events and routes notifications.
-// Runs at nudge_check times (11am/3pm/7pm) AND during morning digest.
-
-async function processEventTriggers(sb: any) {
-  try {
-    // 1. Payment claimed — client says they've paid
-    const { data: paymentEvents } = await sb.from('business_events')
-      .select('id, entity_id, payload, occurred_at')
-      .eq('event_type', 'payment.claimed')
-      .order('occurred_at', { ascending: false })
-      .limit(50)
-
-    if (!paymentEvents || paymentEvents.length === 0) return { processed: 0 }
-
-    // Check which have already been processed
-    const eventIds = paymentEvents.map((e: any) => e.id)
-    const { data: alreadyProcessed } = await sb.from('processed_events')
-      .select('event_id')
-      .in('event_id', eventIds)
-    const processedSet = new Set((alreadyProcessed || []).map((p: any) => p.event_id))
-
-    let processed = 0
-    for (const evt of paymentEvents) {
-      if (processedSet.has(evt.id)) continue
-
-      const jobId = evt.entity_id || evt.payload?.job_id
-      let clientName = evt.payload?.client_name || 'Client'
-      let jobNumber = evt.payload?.job_number || ''
-
-      // Enrich from jobs table if needed
-      if (jobId && (!jobNumber || clientName === 'Client')) {
-        const { data: job } = await sb.from('jobs')
-          .select('client_name, job_number')
-          .eq('id', jobId)
-          .maybeSingle()
-        if (job) {
-          clientName = job.client_name || clientName
-          jobNumber = job.job_number || jobNumber
-        }
-      }
-
-      // Send Telegram to ops group
-      const OPS_GROUP_CHAT_ID = Deno.env.get('TELEGRAM_OPS_GROUP_ID') || ''
-      if (OPS_GROUP_CHAT_ID) {
-        const msg = `${clientName} says they've paid for ${jobNumber || 'a job'}. Check Xero.`
-        await sendTelegramMessage(OPS_GROUP_CHAT_ID, msg)
-      }
-
-      // Mark as processed
-      try {
-        await sb.from('processed_events').insert({
-          event_id: evt.id,
-          event_type: 'payment.claimed',
-          processor: 'daily-digest',
-          result: { telegram_sent: !!OPS_GROUP_CHAT_ID, client: clientName, job: jobNumber },
-        })
-      } catch { /* dedup conflict — ignore */ }
-
-      processed++
-    }
-
-    console.log(`[daily-digest] Processed ${processed} event triggers`)
-    return { processed }
-  } catch (e) {
-    console.log('[daily-digest] event trigger processing failed:', (e as Error).message)
-    return { processed: 0, error: (e as Error).message }
-  }
 }
 
 // ── Ghost PO Detection ───────────────────────────────────

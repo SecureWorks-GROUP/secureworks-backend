@@ -11,7 +11,7 @@
 -- only for write, no public read).
 --
 -- Buckets created here:
---   evidence-bodies      : full email bodies, full notes, SMS/Telegram text overflow
+--   evidence-bodies      : full email bodies, full notes, SMS text overflow
 --   evidence-attachments : email attachments where no job match yet (orphan/)
 --   evidence-audio       : call recordings (Loop 7 + ADR before any live writes)
 --   evidence-transcripts : WhisperFlow transcripts (Loop 7 + ADR)

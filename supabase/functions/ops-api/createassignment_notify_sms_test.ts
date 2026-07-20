@@ -1,10 +1,10 @@
-// DA-M3-8 — installer allocation notify is SMS, not Telegram.
-// Marnin: "dont do any telegram stuff should be text".
+// DA-M3-8 — installer allocation notifications use SMS.
+// Installer notifications must use text messaging.
 //
 // createAssignment's notify block must:
 //   1. send a plain-text SMS to the assigned installer's users.phone via the
 //      existing ghl-proxy send_sms path (sendSmsViaGhl), and NEVER hit
-//      api.telegram.org;
+//      any unrelated external service;
 //   2. be fire-and-forget — an SMS failure must not fail or delay the
 //      assignment write;
 //   3. leave updateAssignment (the reassignment path) completely SILENT —
@@ -103,8 +103,16 @@ async function flush() {
 }
 
 const smsCalls = (calls: FetchCall[]) => calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
-const telegramCalls = (calls: FetchCall[]) =>
-  calls.filter((c) => c.url.includes("api.telegram.org") || c.url.includes("sendMessage"));
+
+// Durable invariant: installer notification is SMS-via-GHL only. Every outbound
+// call stays on our own edge functions, and the only send path is ghl-proxy
+// send_sms — never a direct third-party HTTP send.
+const assertNoThirdPartySend = (calls: FetchCall[], msg: string) =>
+  assertEquals(
+    calls.filter((c) => !c.url.includes("/functions/v1/")).map((c) => c.url),
+    [],
+    msg,
+  );
 
 const JOB = {
   id: "job-1",
@@ -122,8 +130,8 @@ function baseStore(): Store {
   return { jobs: { "job-1": { ...JOB } }, users: { "inst-1": { ...INSTALLER } }, dup: [] };
 }
 
-// ── 1. New allocation sends SMS to the installer's phone, never Telegram ────
-Deno.test("createAssignment (via allocateJob): new allocation sends plain-text SMS to installer phone, not Telegram", async () => {
+// ── 1. New allocation sends SMS to the installer's phone via GHL ──────
+Deno.test("createAssignment (via allocateJob): new allocation sends plain-text SMS to installer phone via GHL", async () => {
   const { calls, restore } = stubFetch();
   try {
     const store = baseStore();
@@ -152,7 +160,7 @@ Deno.test("createAssignment (via allocateJob): new allocation sends plain-text S
     );
     assert(!body.message.includes("<b>") && !body.message.includes("</b>"), "SMS body is plain text, no HTML");
 
-    assertEquals(telegramCalls(calls).length, 0, "no Telegram traffic on allocation");
+    assertNoThirdPartySend(calls, "allocation makes no third-party outbound call");
   } finally {
     restore();
   }
@@ -173,7 +181,7 @@ Deno.test("createAssignment (via allocateJob): installer without a phone gets no
     assertEquals(res.ok, true);
     assertEquals(res.mode, "create");
     assertEquals(smsCalls(calls).length, 0);
-    assertEquals(telegramCalls(calls).length, 0);
+    assertNoThirdPartySend(calls, "phone-less installer triggers no outbound call at all");
     assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1);
   } finally {
     restore();
@@ -206,7 +214,7 @@ Deno.test("createAssignment (via allocateJob): SMS send failure does not fail th
 // ── 3. Reassignment (updateAssignment) fires NO notify at all ───────────────
 // The M3 CP3 first-live-write test is a SILENT reassignment round-trip; texting
 // a real installer during that watched write would be a live incident.
-Deno.test("updateAssignment (via allocateJob reassignment): completely silent — no SMS, no Telegram, no fetch at all", async () => {
+Deno.test("updateAssignment (via allocateJob reassignment): completely silent — no SMS and no fetch at all", async () => {
   const { calls, restore } = stubFetch();
   try {
     const store = baseStore();
@@ -236,7 +244,6 @@ Deno.test("updateAssignment (via allocateJob reassignment): completely silent �
     assertEquals(upd[0].row.user_id, "inst-2");
     // …and stayed silent.
     assertEquals(smsCalls(calls).length, 0, "reassignment must not SMS");
-    assertEquals(telegramCalls(calls).length, 0, "reassignment must not Telegram");
     assertEquals(calls.length, 0, `reassignment makes no outbound calls at all today, saw: ${calls.map((c) => c.url).join(" | ")}`);
   } finally {
     restore();
@@ -265,7 +272,7 @@ Deno.test("createAssignment: explicit placeholder/tentative or suppress_notifica
       await flush();
       assertEquals(res.ok, true, JSON.stringify(extra));
       assertEquals(smsCalls(calls).length, 0, `no SMS for ${JSON.stringify(extra)}`);
-      assertEquals(telegramCalls(calls).length, 0);
+      assertNoThirdPartySend(calls, `suppressed notify makes no outbound call for ${JSON.stringify(extra)}`);
       assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1, "assignment still written");
     } finally {
       restore();
@@ -332,7 +339,7 @@ Deno.test("U2c: self-assign (allocator == assignee) -> ZERO SMS, allocation stil
     assertEquals(res.ok, true);
     assertEquals(res.mode, "create");
     assertEquals(smsCalls(calls).length, 0, "no text on self-assign");
-    assertEquals(telegramCalls(calls).length, 0);
+    assertNoThirdPartySend(calls, "self-assign makes no outbound call at all");
     assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1, "assignment still written");
   } finally {
     restore();

@@ -290,17 +290,17 @@ Deno.test("canary: present but missing PDF/threaded reply -> WARN incomplete", (
 // DB-bound action wiring (recording stubs; no network)
 // ════════════════════════════════════════════════════════════
 
-// A recording AlertSink — captures business_events + Telegram calls.
+// A recording AlertSink — captures business_events + SMS calls.
 function makeSink() {
   const events: any[] = [];
-  const telegrams: string[] = [];
+  const smsMessages: string[] = [];
   return {
     sink: {
       logBusinessEvent: async (_c: any, e: any) => { events.push(e); },
-      notifySms: async (t: string) => { telegrams.push(t); },
+      notifySms: async (t: string) => { smsMessages.push(t); },
     },
     events,
-    telegrams,
+    smsMessages,
   };
 }
 

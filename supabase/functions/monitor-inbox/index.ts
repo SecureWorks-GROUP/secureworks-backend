@@ -4,7 +4,7 @@
 //
 // Triggered via pg_cron every 5 minutes.
 // Polls unread emails from monitored mailboxes via Microsoft Graph,
-// classifies with Haiku, stores in inbox_events, sends Telegram alerts.
+// classifies with Haiku and stores in inbox_events.
 //
 // Auth: SW_API_KEY header or Supabase service role
 // Graph: client_credentials flow (same as send-outlook-email)
@@ -23,7 +23,6 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_KEY')!
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')!
-const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Monitored mailboxes
@@ -39,17 +38,6 @@ const MONITORED_MAILBOXES = [
   'fencing@secureworkswa.com.au',   // Group mailbox — fencing enquiries
   // 'khairo@secureworkswa.com.au', // NOT provisioned in MS365 — needs admin to create/verify
 ]
-
-// Admin Telegram chat IDs — resolved from users table at runtime
-async function getAdminTelegramIds(sb: any): Promise<number[]> {
-  const { data } = await sb.from('users')
-    .select('telegram_id')
-    .eq('org_id', DEFAULT_ORG_ID)
-    .in('role', ['admin', 'owner'])
-    .not('telegram_id', 'is', null)
-    .limit(5)
-  return (data || []).map((u: any) => u.telegram_id).filter((id: number) => id > 0)
-}
 
 // Graph token cache
 let _cachedToken: { token: string; expires: number } | null = null
@@ -297,33 +285,13 @@ async function resolveJobId(
   return { jobId: null, matchedVia: null, confidence: 'none' }
 }
 
-// ── Send Telegram notification ──
-async function sendTelegram(chatId: number, html: string) {
-  if (!TELEGRAM_BOT_TOKEN || !chatId) return
-  try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: html,
-        parse_mode: 'HTML',
-      }),
-    })
-  } catch (e) {
-    console.log('[monitor-inbox] Telegram send failed:', (e as Error).message)
-  }
-}
-
 // ── Process a single mailbox ──
 async function processMailbox(
   sb: any,
   token: string,
   mailbox: string,
-  adminTelegramIds: number[],
-): Promise<{ processed: number; notified: number }> {
+): Promise<{ processed: number }> {
   let processed = 0
-  let notified = 0
 
   // Fetch unread messages from last 15 mins (overlap to catch any missed)
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60000).toISOString()
@@ -340,14 +308,14 @@ async function processMailbox(
   if (!resp.ok) {
     const err = await resp.text()
     console.log(`[monitor-inbox] Graph fetch failed for ${mailbox}: ${resp.status} ${err}`)
-    return { processed: 0, notified: 0 }
+    return { processed: 0 }
   }
 
   const data = await resp.json()
   const messages = data.value || []
 
   if (messages.length === 0) {
-    return { processed: 0, notified: 0 }
+    return { processed: 0 }
   }
 
   // Get existing graph_message_ids to dedup
@@ -406,7 +374,6 @@ async function processMailbox(
       action_needed: classification.action_needed,
       job_id: jobId,
       ghl_contact_id: ghlContactId,
-      telegram_notified: false,
       metadata: {
         has_attachments: msg.hasAttachments || false,
         job_ref: classification.job_ref,
@@ -674,36 +641,9 @@ async function processMailbox(
       }
     }
 
-    // Telegram notification for high priority
-    if (classification.priority === 'high') {
-      const emoji = classification.classification === 'complaint' ? '🚨'
-        : classification.classification === 'urgent' ? '⚡'
-        : classification.classification === 'council' ? '🏛️'
-        : '📧'
-
-      const telegramMsg = [
-        `${emoji} <b>New email</b> (${classification.classification})`,
-        `<b>From:</b> ${fromName || fromEmail}`,
-        `<b>Subject:</b> ${subject}`,
-        bodyPreview.length > 200 ? bodyPreview.slice(0, 200) + '...' : bodyPreview,
-        classification.action_needed ? `\n<b>Suggested:</b> ${classification.action_needed}` : '',
-        classification.job_ref ? `\n<b>Job:</b> ${classification.job_ref}` : '',
-      ].filter(Boolean).join('\n')
-
-      for (const chatId of adminTelegramIds) {
-        await sendTelegram(chatId, telegramMsg)
-      }
-
-      // Mark as telegram_notified
-      await sb.from('inbox_events')
-        .update({ telegram_notified: true })
-        .eq('graph_message_id', msg.id)
-
-      notified++
-    }
   }
 
-  return { processed, notified }
+  return { processed }
 }
 
 // ── Main handler ──
@@ -731,10 +671,7 @@ Deno.serve(async (req) => {
   try {
     const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     const token = await getGraphToken()
-    const adminTelegramIds = await getAdminTelegramIds(sb)
-
     let totalProcessed = 0
-    let totalNotified = 0
 
     // T7 Loop 8 — mailbox list as data, not code.
     // When monitored_mailboxes table is present and has enabled rows,
@@ -762,9 +699,8 @@ Deno.serve(async (req) => {
     }
 
     for (const mailbox of activeMailboxes) {
-      const { processed, notified } = await processMailbox(sb, token, mailbox, adminTelegramIds)
+      const { processed } = await processMailbox(sb, token, mailbox)
       totalProcessed += processed
-      totalNotified += notified
       // Per-mailbox cursor update (only when monitored_mailboxes is live).
       const cfg = configRows.find((r) => r.email === mailbox)
       if (cfg) {
@@ -779,13 +715,13 @@ Deno.serve(async (req) => {
     const result = {
       success: true,
       processed: totalProcessed,
-      notified: totalNotified,
+      notified: 0,
       mailboxes: activeMailboxes.length,
       mailbox_source: configRows.length > 0 ? 'monitored_mailboxes' : 'hard_coded',
       timestamp: new Date().toISOString(),
     }
 
-    console.log(`[monitor-inbox] ${totalProcessed} emails processed, ${totalNotified} Telegram alerts sent`)
+    console.log(`[monitor-inbox] ${totalProcessed} emails processed`)
 
     return new Response(JSON.stringify(result), {
       headers: { ...CORS, 'Content-Type': 'application/json' },

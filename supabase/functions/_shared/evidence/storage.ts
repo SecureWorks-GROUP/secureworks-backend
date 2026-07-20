@@ -56,7 +56,6 @@ export const BUCKET_FOR_CHANNEL: Partial<Record<Channel, string>> = {
   email: "evidence-bodies",
   note: "evidence-bodies",
   sms: "evidence-bodies",                   // rarely used; SMS fits inline
-  telegram: "evidence-bodies",
   call: "evidence-audio",                   // audio path
   document: "job-photos",                   // existing bucket
 };

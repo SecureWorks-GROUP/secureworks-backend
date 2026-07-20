@@ -444,37 +444,6 @@ serve(async (req: Request) => {
         console.log(`[receive-po-email] analyseSupplierQuote error: ${(e as Error).message}`)
       }
 
-      // ── Telegram notification for high-priority classifications ──
-      if (analysisResult && analysisResult.classification) {
-        const cls = analysisResult.classification
-        const conf = analysisResult.confidence || 0
-        const isHighPriority = cls === 'invoice' || cls === 'issue' || (cls === 'confirmation' && conf < 0.8)
-        if (isHighPriority) {
-          const TBOT = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-          if (TBOT) {
-            // Query admin users with telegram_id (same pattern as daily-digest)
-            const { data: admins } = await sb.from('users')
-              .select('telegram_id')
-              .or('email.ilike.%marnin%,email.ilike.%shaun%')
-              .not('telegram_id', 'is', null)
-            if (admins && admins.length > 0) {
-              const emoji = cls === 'invoice' ? '🧾' : cls === 'issue' ? '⚠️' : '❓'
-              const preview = (body_text || '').split('\n')[0]?.substring(0, 60) || ''
-              const tgMsg = `${emoji} <b>Supplier Email — ${cls}</b>\n${poNumber || 'Unknown PO'} from ${from_email}\n<i>${preview}</i>`
-              for (const admin of admins) {
-                try {
-                  await fetch(`https://api.telegram.org/bot${TBOT}/sendMessage`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ chat_id: admin.telegram_id, text: tgMsg, parse_mode: 'HTML' }),
-                  })
-                } catch (e) { /* non-blocking */ }
-              }
-            }
-          }
-        }
-      }
-
       // ── Urgency detection — scan for keywords that need immediate attention ──
       const bodyLower = (body_text || '').toLowerCase() + ' ' + (subject || '').toLowerCase()
       const urgencyKeywords = [
