@@ -1637,8 +1637,8 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
     }
   }
 
-  if (action) {
-    return json({ error: `Unknown or retired action: ${action}`, action }, 410)
+  if (action === 'nudge_check' || action === 'eod_followup' || action === 'shaun_brief') {
+    return json({ error: `Retired action: ${action}`, action }, 410)
   }
 
   try {

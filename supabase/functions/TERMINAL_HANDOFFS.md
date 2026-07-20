@@ -60,8 +60,8 @@ WHERE id = $job_id;
 - `business_events` row: type `payment.claimed`
 
 **Terminal D action:**
-- Surface an operations alert: "{Client} says they've paid for {JobNumber}. Check Xero."
-- Pick up from `business_events WHERE event_type = 'payment.claimed' AND processed_at IS NULL`
+- Unbuilt. The previous event processor was retired with the messaging integration, so nothing consumes `business_events` rows of type `payment.claimed` or marks them processed.
+- Any future non-messaging workflow here (for example an operations alert "{Client} says they've paid for {JobNumber}. Check Xero.") needs a separately owned implementation.
 
 ---
 
