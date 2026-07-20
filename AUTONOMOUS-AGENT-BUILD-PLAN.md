@@ -15,7 +15,7 @@ Before reading the plan, here's what changed from v1 and why:
 
 3. **Use `staff_personas` database table, not hardcoded TypeScript map.** v1 had a `STAFF_AGENTS` constant with 7 bot tokens as env vars. Your existing code uses dynamic `resolveRole()`. Staff config belongs in the database.
 
-4. **Don't rebuild existing cron jobs.** stale-followup (9am), eod-followup-5pm, eod-escalation-7pm, and shaun-morning-brief already exist in 20260322000012_phase2_cron_jobs.sql. Orchestrate them, don't duplicate.
+4. **Don't rebuild existing cron jobs.** stale-followup (9am) already exists in 20260322000012_phase2_cron_jobs.sql. Orchestrate it, don't duplicate. (RETIRED 2026-07-20: eod-followup-5pm, eod-escalation-7pm and shaun-morning-brief were unscheduled and their handlers deleted when the message-delivery architecture was retired. Do not plan around them.)
 
 5. **Reuse existing tables.** `ai_reasoning_traces`, `ai_proposed_actions`, `ai_feedback_outcomes`, `action_permissions`, `business_events` already exist. Extend them with workflow context columns instead of creating parallel tables.
 
@@ -375,7 +375,7 @@ CREATE INDEX idx_agent_memory_scope ON agent_memory(staff_scope) WHERE staff_sco
 
 **IMPORTANT: These orchestrate existing cron jobs and edge functions. They do NOT replace them.**
 
-#### Workflow 1: Debt Chase (orchestrates existing eod-followup cron)
+#### Workflow 1: Debt Chase (orchestrates existing stale-followup cron)
 ```
 Trigger: Hooks into existing 'stale-followup' cron (9:00 AM AWST) via new action parameter
          OR agent-orchestrator detects overdue invoice during any query
@@ -435,9 +435,9 @@ Steps:
 ```sql
 -- EXISTING (keep as-is):
 -- stale-followup: daily 9am AWST → daily-digest?action=stale_followup
--- eod-followup-5pm: weekdays 5pm AWST → daily-digest?action=eod_followup
--- eod-escalation-7pm: weekdays 7pm AWST → daily-digest?action=eod_followup
--- shaun-morning-brief: daily 7:30am AWST → daily-digest?action=shaun_brief
+-- RETIRED 2026-07-20: eod-followup-5pm, eod-escalation-7pm and shaun-morning-brief
+-- were unscheduled and their daily-digest handlers deleted. stale-followup is the
+-- only surviving schedule of this group.
 
 -- NEW (add these):
 SELECT cron.schedule(
@@ -632,7 +632,7 @@ Triggered by `agent-personal-briefs` cron (6:30 AM AWST). For each staff member,
 - **Henry/Isaac (lead_installer):** Today's job details, material status, weather, previous suburb/client notes from memory
 - **Jan (admin):** Cash flow summary, compliance deadlines, flags only
 
-The existing `shaun-morning-brief` cron continues working. The new personal briefs supplement it — Shaun gets both (existing group brief + personal brief on his notify_channel).
+RETIRED 2026-07-20: the `shaun-morning-brief` cron and its `shaun_brief` handler no longer exist, so there is no group brief to supplement. Personal briefs would need to stand alone.
 
 ---
 
@@ -778,7 +778,7 @@ Read:
 - AUTONOMOUS-AGENT-BUILD-PLAN.md (the workflow definitions in Phase 1.3)
 - supabase/functions/agent-orchestrator/index.ts
 - supabase/functions/reporting-api/index.ts (find the aged receivables and job profitability endpoints)
-- supabase/functions/daily-digest/index.ts (find the stale_followup and eod_followup action handlers)
+- supabase/functions/daily-digest/index.ts (find the stale_followup action handler; the eod_followup handler was retired 2026-07-20)
 - docs/project-knowledge/edge-functions.md (API reference)
 
 Implement the debt_chase workflow in agent-orchestrator:

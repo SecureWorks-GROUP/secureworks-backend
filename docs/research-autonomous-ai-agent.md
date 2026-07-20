@@ -356,17 +356,9 @@ Cron Job ──────→ Edge Function (scheduled check)  ──→ AI Cor
 
 **Implementation:** Pass `caller_role` and `caller_id` to every AI edge function. The system prompt changes based on role. Data queries are filtered by permission level.
 
-### Messaging-Channel Patterns
+### Channel-Specific Patterns
 
-- Webhook-driven intake beats polling — the inbound message hits an edge function directly
-- Keep structured input structured: use dashboard forms for anything with more than two fields, not free-text chat
-- Use explicit choice prompts for approvals (numbered options in an SMS reply, buttons on the dashboard) rather than free-text replies
-- **Broadcast vs direct:** broadcast messages = team coordination. Direct messages = personal tasks and sensitive data.
-
-**Your architecture:**
-```
-Inbound SMS webhook → Supabase Edge Function (Deno) → Claude API (Haiku) → Supabase DB → reply via ghl-proxy?action=send_sms
-```
+> Removed 2026-07-20. This section recorded research into a chat-platform delivery architecture that was retired from the backend. The findings and their citations no longer apply and have not been replaced — no equivalent research was carried out for the surviving delivery path.
 
 ### Sources
 - [How Slack Built Slack AI — Slack Engineering](https://slack.engineering/how-we-built-slack-ai-to-be-secure-and-private/) ⭐
