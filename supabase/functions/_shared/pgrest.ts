@@ -6,15 +6,6 @@
 
 export type PgrestResult<T = any> = { data: T[] | null; error: any }
 
-/** Log (do not throw) when a query failed. Returns the rows, or [] on failure. */
-export function rowsOrLog<T = any>(result: PgrestResult<T> | null | undefined, context: string): T[] {
-  if (result?.error) {
-    console.error(`[pgrest] ${context} query failed — returning no rows:`, result.error.message || result.error)
-    return []
-  }
-  return result?.data || []
-}
-
 /** Log any failures across a labelled batch of results (e.g. from Promise.all). */
 export function logQueryErrors(entries: Array<[string, PgrestResult | null | undefined]>): void {
   for (const [context, result] of entries) {

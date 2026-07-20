@@ -27254,8 +27254,13 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     assignment_ids: string[]
     days: Set<string>
   }> = {}
+  let billedHours = 0
   const addJobLine = (jobId: string, job: any, hours: number, lineRate: number, amount: number, assignmentId?: string, day?: string) => {
-    if (!jobId) return
+    billedHours += hours
+    if (!jobId) {
+      console.error('Trade invoice line has no job attribution — hours billed to Xero but omitted from trade_invoice_lines:', { userId, week_ending, hours, amount, assignmentId })
+      return
+    }
     const l = jobLines[jobId] ||= {
       job_id: jobId,
       job_number: job?.job_number || '',
@@ -27429,7 +27434,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   // total_inc, xero_bill_id. The legacy week_ending/line_items/subtotal/total/
   // xero_bill_number/xero_invoice_id names 400 the insert. Per-job detail is
   // written relationally to trade_invoice_lines below.
-  const totalHours = Object.values(jobLines).reduce((s, l) => s + l.total_hours, 0)
+  const totalHours = billedHours
   const invoiceRecord = {
     org_id: DEFAULT_ORG_ID,
     user_id: userId,
