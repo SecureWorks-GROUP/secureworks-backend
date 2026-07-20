@@ -114,14 +114,16 @@ easy to break:
   null-path list are derived from it, never restated.
 
 A row whose `pricing_json` is a JSON-encoded STRING makes all four paths return
-SQL NULL. A second server-side probe (same filters, blob non-null, all four paths
-null) re-reads just those rows and recovers the neighbour array, reproducing the
-old `JSON.parse(string)` branch. It recovers neighbours ONLY — the old `value`
-chain read properties off the raw column, so a string blob yielded 0 there, and
-"fixing" it would be a behaviour change. A read-only comparison over all 938
-active rows on 2026-07-20 found zero such rows; the probe exists so a future bad
-write degrades to the old behaviour rather than to wrong numbers, and it logs and
-degrades rather than failing the board if it errors.
+SQL NULL. A second server-side probe is restricted to fencing rows with a
+non-null, non-empty blob and all four paths null; it re-reads only those
+candidates and recovers the neighbour array, reproducing the old
+`JSON.parse(string)` branch. The empty-object exclusion is load-bearing: without
+it, 56 live fencing rows match but all 56 blobs are `{}` (112 bytes total) and
+cannot be used. With it, a read-only check on 2026-07-20 returned zero candidates.
+The fallback recovers neighbours ONLY — the old `value` chain read properties off
+the raw column, so a string blob yielded 0 there, and "fixing" it would be a
+behaviour change. The probe logs and degrades rather than failing the board if it
+errors.
 
 Related pre-existing behaviour, deliberately unchanged: `ops_summary`'s
 `today_schedule` omits `job_number`. Adding it would be an API change, not a

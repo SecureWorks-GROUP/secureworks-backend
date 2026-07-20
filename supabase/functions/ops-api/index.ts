@@ -94,6 +94,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { logQueryErrors } from '../_shared/pgrest.ts'
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
@@ -6603,6 +6604,14 @@ async function opsSummary(client: any) {
       .lte('scheduled_date', new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)),
   ])
 
+  // Explicit projections turn schema drift into PostgREST 400s. Keep the legacy
+  // partial-response behaviour, but never let those failures look like a quiet day.
+  logQueryErrors([
+    ['ops_summary.today_schedule', todaySchedule],
+    ['ops_summary.needs_scheduling', needsScheduling],
+    ['ops_summary.active_jobs', allActiveJobs],
+  ])
+
   // ── Stat Cards ──
   const weekJobCount = (weekAssignments.data || []).length
   const awaitingMaterials = (activePOs.data || []).filter((po: any) =>
@@ -7074,8 +7083,19 @@ export const PIPELINE_PRICING_PROJECTION = [
 ]
 
 // The alias half of each entry, derived rather than restated: adding a projection
-// key must never leak the alias into the response shape.
-export const PIPELINE_PRICING_ALIASES = PIPELINE_PRICING_PROJECTION.map((p) => p.slice(0, p.indexOf(':')))
+// key must never leak the alias into the response shape. Fail at module load if a
+// future entry omits its alias rather than silently leaking a truncated key.
+function pipelinePricingProjectionParts(projection: string) {
+  const separator = projection.indexOf(':')
+  if (separator <= 0 || separator === projection.length - 1) {
+    throw new Error(`Invalid pipeline pricing projection: ${projection}`)
+  }
+  return [projection.slice(0, separator), projection.slice(separator + 1)] as const
+}
+
+export const PIPELINE_PRICING_ALIASES = PIPELINE_PRICING_PROJECTION.map(
+  (projection) => pipelinePricingProjectionParts(projection)[0],
+)
 
 export function pipelinePricingProjectionValues(row: any) {
   return {
@@ -7097,12 +7117,15 @@ export function pipelinePricingProjectionValues(row: any) {
 // to return nothing; it exists so a future bad write degrades to the old behaviour
 // instead of to wrong numbers.
 //
-// Detection is server-side: the same base filters as the main read plus "blob is
-// present but all four projected paths are NULL". That keeps the main query lean
-// (no pricing_json) and bounds the blob re-read to the handful of rows that
-// actually need it, with no id list to blow the PostgREST URL limit.
+// Detection is server-side: the same base filters as the main read, fencing only,
+// a non-null/non-empty blob, and all four projected paths NULL. The empty-object
+// exclusion is load-bearing: 56 live fencing rows match the null-path predicates,
+// but every blob is `{}` (112 bytes total) and cannot contain neighbours. Excluding
+// them left zero candidates in the read-only 2026-07-20 check. A returned non-empty
+// candidate is fetched because parsing it is necessary to distinguish a malformed
+// string from an unusual object and recover any neighbour list.
 export const PIPELINE_PRICING_NULL_PATHS = PIPELINE_PRICING_PROJECTION.map(
-  (p) => p.slice(p.indexOf(':') + 1),
+  (projection) => pipelinePricingProjectionParts(projection)[1],
 )
 
 export function pipelinePricingFallbackNeighbours(blob: any) {
@@ -7161,14 +7184,20 @@ async function pipeline(client: any, params: URLSearchParams) {
     .order('updated_at', { ascending: false })
 
   let malformedPricingQuery = applyJobFilters(client.from('jobs').select('id, pricing_json'))
+    .eq('type', 'fencing')
     .not('pricing_json', 'is', null)
+    .not('pricing_json', 'eq', '{}')
   for (const path of PIPELINE_PRICING_NULL_PATHS) {
     malformedPricingQuery = malformedPricingQuery.is(path, null)
   }
+  malformedPricingQuery = malformedPricingQuery.order('updated_at', { ascending: false })
 
   const [{ data: jobs, error }, malformedPricingRes] = await Promise.all([
     query,
-    malformedPricingQuery,
+    // A non-fencing endpoint filter can skip the defensive query entirely.
+    typeFilter && typeFilter !== 'fencing'
+      ? Promise.resolve({ data: [], error: null })
+      : malformedPricingQuery,
   ])
   if (error) throw error
 

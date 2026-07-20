@@ -2,6 +2,7 @@ import {
   assertEquals,
   assertFalse,
   assertStrictEquals,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   OPS_SUMMARY_ACTIVE_JOB_COLUMNS,
@@ -165,7 +166,7 @@ Deno.test("pipeline JSON paths preserve pricing values and their runtime types",
   }
 });
 
-Deno.test("malformed pricing_json probe targets exactly the projected paths", () => {
+Deno.test("malformed pricing_json probe targets exactly the projected paths", async () => {
   assertEquals(PIPELINE_PRICING_NULL_PATHS, [
     "pricing_json->totalIncGST",
     "pricing_json->total",
@@ -175,6 +176,22 @@ Deno.test("malformed pricing_json probe targets exactly the projected paths", ()
   assertEquals(
     PIPELINE_PRICING_NULL_PATHS.length,
     PIPELINE_PRICING_PROJECTION.length,
+  );
+
+  // Source contract for the load-bearing bounds around the only list query that
+  // may fetch a full pricing_json. Without either predicate the fallback can
+  // regress into re-fetching every ordinary `{}` draft blob.
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const probeStart = source.indexOf("let malformedPricingQuery");
+  const probeEnd = source.indexOf("const [{ data: jobs, error }", probeStart);
+  const probe = source.slice(probeStart, probeEnd);
+  assertStringIncludes(probe, ".eq('type', 'fencing')");
+  assertStringIncludes(probe, ".not('pricing_json', 'eq', '{}')");
+  assertStringIncludes(
+    probe,
+    "malformedPricingQuery.is(path, null)",
   );
 });
 
