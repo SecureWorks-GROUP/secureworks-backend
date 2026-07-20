@@ -442,6 +442,74 @@ Deno.test("stuck exceptions cannot consume the whole per-run budget", async () =
   );
 });
 
+Deno.test("repeatedly failing cases do not consume the commit budget", async () => {
+  const store = baseStore();
+  for (let i = 1; i <= 2; i++) {
+    store.emails.push(
+      email({
+        post_id: `fail-${i}`,
+        received_at: `2026-07-19T0${i}:00:00.000Z`,
+        subject: `NEW WORK ORDER MLB-5910${i} Work Order: WO-5910${i}`,
+        body_content: `Client: Fail Client ${i}\nAddress: ${i} Fail Way, Perth`,
+      }),
+    );
+    store.email_attachments.push({
+      id: `att-fail-${i}`,
+      email_id: `fail-${i}`,
+      name: "wo.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/fail-${i}.pdf`,
+      status: "uploaded",
+      size_bytes: 1024,
+    });
+  }
+  store.emails.push(
+    email({
+      post_id: "good-1",
+      received_at: "2026-07-20T02:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-59103 Work Order: WO-59103",
+      body_content: "Client: Good Client\nAddress: 3 Good Road, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-good",
+    email_id: "good-1",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/good.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  // The two older cases fail on every run and are never persisted, so they keep
+  // sorting into the priority head. A budget spent on them would starve the rest.
+  const flakyApprove = (_client: any, body: any) => {
+    const draft = store.makesafe_intake_drafts.find((d: any) =>
+      d.id === body.draft_id
+    );
+    if (/WO-5910[12]/.test(String(draft?.deterministic_key || ""))) {
+      return Promise.resolve({});
+    }
+    return Promise.resolve({ job: { id: "job-good" } });
+  };
+
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxCases: 1,
+    approveDraft: flakyApprove,
+  });
+
+  assertEquals(report.write_failure_reasons.approval_no_job, 2);
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(
+    store.emails.find((e) => e.post_id === "good-1")?.makesafe_scanned_at,
+    NOW,
+  );
+});
+
 Deno.test("a disallowed state transition never creates an orphan job", async () => {
   const store = baseStore();
   store.emails.push(
@@ -488,9 +556,17 @@ Deno.test("a disallowed state transition never creates an orphan job", async () 
 
   assertEquals(report.totals.jobs_created, 0);
   assertEquals(report.write_failure_reasons.case_transition_not_allowed, 1);
-  assertEquals(store.makesafe_intake_cases[0].state, "accounted_non_wo");
+  // No orphan job, and the case is routed through the one edge the state machine
+  // permits rather than being abandoned mid-run.
+  assertEquals(store.makesafe_intake_cases[0].state, "exception");
   assertEquals(store.makesafe_intake_cases[0].job_id, null);
-  // The failed case is not stamped away; it stays visible for the next run.
+  // Sources are still accounted, so nothing is left outside the invariant.
+  assert(
+    store.makesafe_intake_case_sources.some((s: any) =>
+      s.post_id === "orphan-1"
+    ),
+  );
+  // The unresolved case is not stamped away; it stays visible for the next run.
   assertEquals(store.emails[0].makesafe_scanned_at, null);
 });
 

@@ -32,6 +32,9 @@ export interface DeterministicRuntimeOptions {
 // cases and stamps them as it goes, so a timeout never discards accounting for
 // drafts and jobs that already exist.
 const DEFAULT_MAX_CASES_PER_RUN = 25;
+// Repeat failures must not spend the commit budget, but they still cost time, so
+// one run stops after this many attempts regardless of how many committed.
+const MAX_ATTEMPT_MULTIPLIER = 4;
 
 export interface DeterministicRuntimeReport {
   ok: true;
@@ -303,16 +306,20 @@ function inferredParentRelation(
   return null;
 }
 
+function resolvedState(plan: DeterministicCasePlan, jobId: string | null) {
+  return jobId
+    ? plan.state
+    : plan.state === "accounted_non_wo"
+    ? "accounted_non_wo"
+    : "exception";
+}
+
 function casePayload(
   plan: DeterministicCasePlan,
   jobId: string | null,
   parent: { id: string; lineage_id: string; cycle: number } | null,
 ): Record<string, any> {
-  const state = jobId
-    ? plan.state
-    : plan.state === "accounted_non_wo"
-    ? "accounted_non_wo"
-    : "exception";
+  const state = resolvedState(plan, jobId);
   const reason = jobId
     ? plan.reasonCode
     : plan.reasonCode || (plan.state === "accounted_non_wo"
@@ -454,19 +461,26 @@ async function findCase(
   return data || null;
 }
 
-async function readPersistedStates(
+async function readPersistedCases(
   client: any,
   cases: readonly DeterministicCasePlan[],
-): Promise<Map<string, string>> {
-  const states = new Map<string, string>();
+): Promise<Map<string, any>> {
+  const rows = new Map<string, any>();
   for (const keys of chunk(cases.map((c) => c.instructionKey), 200)) {
-    const { data } = await client.from("makesafe_intake_cases")
-      .select("instruction_key,state")
+    const { data, error } = await client.from("makesafe_intake_cases")
+      .select("id,instruction_key,lineage_id,cycle,state,job_id")
       .eq("org_id", DEFAULT_ORG_ID)
       .in("instruction_key", keys);
-    for (const row of data || []) states.set(row.instruction_key, row.state);
+    // Failing open would silently degrade the run ordering back to a plain
+    // head-of-list slice, so a partial read aborts instead.
+    if (error) {
+      throw new Error(
+        `deterministic case state read failed: ${error.message || error}`,
+      );
+    }
+    for (const row of data || []) rows.set(row.instruction_key, row);
   }
-  return states;
+  return rows;
 }
 
 async function findIdentityParent(
@@ -824,32 +838,43 @@ export async function runDeterministicIntake(
   // progress without new evidence. They are the oldest unstamped sources, so a
   // head-of-list slice would let them occupy the whole budget forever. Order the
   // run so every case that can actually advance is attempted first.
-  const persisted = await readPersistedStates(client, plan.cases);
-  const slice = [
-    ...plan.cases.filter((c) => persisted.get(c.instructionKey) !== c.state),
-    ...plan.cases.filter((c) => persisted.get(c.instructionKey) === c.state),
-  ].slice(0, maxCases);
-  report.totals.cases_attempted = slice.length;
-  report.totals.cases_deferred = plan.cases.length - slice.length;
-  for (const casePlan of slice) {
+  const persisted = await readPersistedCases(client, plan.cases);
+  const ordered = [
+    ...plan.cases.filter((c) =>
+      persisted.get(c.instructionKey)?.state !== c.state
+    ),
+    ...plan.cases.filter((c) =>
+      persisted.get(c.instructionKey)?.state === c.state
+    ),
+  ];
+  // The budget counts cases that actually committed. A case that throws is never
+  // persisted and so keeps sorting into the priority head; if failures spent the
+  // budget, enough of them would starve every advanceable case forever. Attempts
+  // still carry their own ceiling so one run stays bounded.
+  const maxAttempts = maxCases * MAX_ATTEMPT_MULTIPLIER;
+  let attempted = 0;
+  let committed = 0;
+  for (const casePlan of ordered) {
+    if (committed >= maxCases || attempted >= maxAttempts) break;
+    attempted++;
     try {
       let resumedCase = false;
-      const existing = await findCase(client, casePlan.instructionKey);
+      const existing = persisted.get(casePlan.instructionKey) || null;
       let jobId: string | null = existing?.job_id || null;
-      // Never create a guarded job the case row cannot then be moved to. Without
-      // this the job would exist with no case linkage once the update is skipped.
-      if (
-        existing && casePlan.state !== existing.state &&
+      // Never create a guarded job the case row cannot then be moved to: the
+      // update would be skipped and the job left with no case linkage. The case
+      // still records its sources so nothing goes unaccounted.
+      const transitionBlocked = Boolean(existing) &&
+        casePlan.state !== existing.state &&
         !(ALLOWED_TRANSITIONS[existing.state as string] || []).includes(
           casePlan.state,
-        )
-      ) {
-        throw new Error(
-          "deterministic case transition is not allowed by the state machine",
         );
+      if (transitionBlocked) {
+        report.write_failure_reasons.case_transition_not_allowed =
+          (report.write_failure_reasons.case_transition_not_allowed || 0) + 1;
       }
       if (
-        !jobId &&
+        !transitionBlocked && !jobId &&
         (casePlan.state === "confirmed_live_job" ||
           casePlan.state === "blocked_live_job")
       ) {
@@ -872,6 +897,7 @@ export async function runDeterministicIntake(
         sourceMap,
         existing,
       );
+      committed++;
       if (saved.caseCreated) report.totals.case_rows_created++;
       report.totals.source_rows_created += saved.sourceCreated;
       // One case counts once, however many of its artefacts already existed.
@@ -883,9 +909,10 @@ export async function runDeterministicIntake(
       // be able to re-read the original instruction alongside the late work order in
       // order to promote the case. A case that already produced a live job is not
       // awaiting anything, so it settles even when downgraded to an exception.
-      const state = saved.caseUpgraded
-        ? casePlan.state
-        : (existing?.state || casePlan.state);
+      const written = resolvedState(casePlan, jobId);
+      const state = saved.caseCreated || saved.caseUpgraded
+        ? written
+        : (existing?.state || written);
       const settled = state !== "exception" || Boolean(jobId);
       if (!settled) continue;
       for (const ids of chunk(casePlan.sourcePostIds)) {
@@ -904,6 +931,8 @@ export async function runDeterministicIntake(
       report.totals.write_failures++;
     }
   }
+  report.totals.cases_attempted = attempted;
+  report.totals.cases_deferred = plan.cases.length - attempted;
   await writeHealth(
     client,
     nowIso,
