@@ -8,7 +8,9 @@ import {
   OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS,
   OPS_SUMMARY_SCHEDULE_COLUMNS,
   PIPELINE_PRICING_ALIASES,
+  PIPELINE_PRICING_NULL_PATHS,
   PIPELINE_PRICING_PROJECTION,
+  pipelinePricingFallbackValues,
   pipelinePricingProjectionValues,
   stripPipelinePricingAliases,
   toOpsSummaryScheduleEvent,
@@ -147,6 +149,69 @@ Deno.test("pipeline JSON paths preserve pricing values and their runtime types",
       assertEquals(actual.neighbours, expected.neighbours, String(oldRow.id));
     }
   }
+});
+
+Deno.test("malformed pricing_json probe targets exactly the projected paths", () => {
+  assertEquals(PIPELINE_PRICING_NULL_PATHS, [
+    "pricing_json->totalIncGST",
+    "pricing_json->total",
+    "pricing_json->neighbour_splits->neighbours",
+    "pricing_json->job->neighbours",
+  ]);
+  assertEquals(
+    PIPELINE_PRICING_NULL_PATHS.length,
+    PIPELINE_PRICING_PROJECTION.length,
+  );
+});
+
+Deno.test("double-encoded pricing_json recovers the pre-projection values", () => {
+  const blob = {
+    totalIncGST: 4321.5,
+    neighbour_splits: { neighbours: [{ id: 1 }, { id: 2 }] },
+  };
+  const doubleEncoded = JSON.stringify(blob);
+
+  // The projection alone sees nothing for such a row: every path is SQL NULL.
+  const projectedOnly = pipelinePricingProjectionValues({
+    pj_total_inc: null,
+    pj_total: null,
+    pj_split_neighbours: null,
+    pj_job_neighbours: null,
+  });
+  assertEquals(projectedOnly.value, 0);
+  assertFalse(Array.isArray(projectedOnly.neighbours));
+
+  const recovered = pipelinePricingFallbackValues(doubleEncoded);
+  const expected = oldPipelineValues({ pricing_json: blob });
+  assertEquals(recovered?.value, expected.value);
+  assertStrictEquals(typeof recovered?.value, typeof expected.value);
+  assertEquals(recovered?.neighbours, expected.neighbours);
+});
+
+Deno.test("malformed-blob fallback matches the old chain and never throws", () => {
+  assertEquals(pipelinePricingFallbackValues("not json at all"), null);
+  assertEquals(pipelinePricingFallbackValues(null), null);
+  assertEquals(pipelinePricingFallbackValues(undefined), null);
+  assertEquals(pipelinePricingFallbackValues('"a bare json string"'), null);
+  assertEquals(pipelinePricingFallbackValues("42"), null);
+
+  const jobNeighbours = { job: { neighbours: ["one", "two", "three"] } };
+  assertEquals(
+    pipelinePricingFallbackValues(JSON.stringify(jobNeighbours)),
+    oldPipelineValues({ pricing_json: jobNeighbours }),
+  );
+
+  const zeroFallsBack = { totalIncGST: 0, total: 999 };
+  assertEquals(
+    pipelinePricingFallbackValues(JSON.stringify(zeroFallsBack))?.value,
+    oldPipelineValues({ pricing_json: zeroFallsBack }).value,
+  );
+
+  // Already-decoded jsonb objects flow through unchanged.
+  assertEquals(
+    pipelinePricingFallbackValues(zeroFallsBack),
+    oldPipelineValues({ pricing_json: zeroFallsBack }),
+  );
 });
 
 Deno.test("pipeline aliases are exact, lean, and stripped without changing key order", () => {

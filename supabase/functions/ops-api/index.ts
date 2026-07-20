@@ -7084,6 +7084,40 @@ export function pipelinePricingProjectionValues(row: any) {
   }
 }
 
+// ── Malformed-blob fallback ─────────────────────────────────────────────────
+// A row whose pricing_json is a JSON-encoded STRING (double-encoded write, or a
+// text-typed value) makes every path above return SQL NULL, so the projection
+// alone would silently zero its value and drop its fencing neighbour badge — the
+// case the old `typeof pricing_json === 'string' ? JSON.parse(...)` branch caught.
+// A read-only comparison over all 938 active rows on 2026-07-20 found zero such
+// rows (zero value, value-type, and neighbour mismatches), so this path is expected
+// to return nothing; it exists so a future bad write degrades to the old behaviour
+// instead of to wrong numbers.
+//
+// Detection is server-side: the same base filters as the main read plus "blob is
+// present but all four projected paths are NULL". That keeps the main query lean
+// (no pricing_json) and bounds the blob re-read to the handful of rows that
+// actually need it, with no id list to blow the PostgREST URL limit.
+export const PIPELINE_PRICING_NULL_PATHS = PIPELINE_PRICING_PROJECTION.map(
+  (p) => p.slice(p.indexOf(':') + 1),
+)
+
+export function pipelinePricingFallbackValues(blob: any) {
+  let pj = blob
+  if (typeof pj === 'string') {
+    try {
+      pj = JSON.parse(pj)
+    } catch (_) {
+      return null
+    }
+  }
+  if (!pj || typeof pj !== 'object') return null
+  return {
+    value: pj.totalIncGST || pj.total || 0,
+    neighbours: pj.neighbour_splits?.neighbours || pj.job?.neighbours,
+  }
+}
+
 export function stripPipelinePricingAliases(row: any) {
   const leanRow: Record<string, any> = { ...row }
   for (const alias of PIPELINE_PRICING_ALIASES) delete leanRow[alias]
@@ -7095,32 +7129,59 @@ async function pipeline(client: any, params: URLSearchParams) {
   const statusFilter = params.get('status')
   const search = params.get('search') || ''
 
+  // Single source of truth for the row set, shared with the malformed-blob probe
+  // below so the two reads can never drift apart.
+  const applyJobFilters = (q: any) => {
+    let scoped = q
+      .eq('org_id', DEFAULT_ORG_ID)
+      .or('legacy.is.null,legacy.eq.false')
+      .or('job_number.not.is.null,status.eq.draft')
+    if (statusFilter) {
+      scoped = scoped.eq('status', statusFilter)
+    } else {
+      // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
+      scoped = scoped.in('status', [
+        'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
+        'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
+        'schedule_install', 'scheduled', 'in_progress', 'rectification',
+        'complete', 'final_payment', 'invoiced', 'get_review', 'archived'
+      ])
+    }
+    if (typeFilter) scoped = scoped.eq('type', typeFilter)
+    return scoped
+  }
+
   // The projection sits exactly where `pricing_json` used to, so that stripping the
   // aliases below restores the previous key order — the response stays byte-identical.
-  let query = client.from('jobs')
+  const query = applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
-      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required')
-    .eq('org_id', DEFAULT_ORG_ID)
-    .or('legacy.is.null,legacy.eq.false')
-    .or('job_number.not.is.null,status.eq.draft')
+      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required'))
     .order('updated_at', { ascending: false })
 
-  if (statusFilter) {
-    query = query.eq('status', statusFilter)
-  } else {
-    // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
-    query = query.in('status', [
-      'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
-      'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
-      'schedule_install', 'scheduled', 'in_progress', 'rectification',
-      'complete', 'final_payment', 'invoiced', 'get_review', 'archived'
-    ])
+  let malformedPricingQuery = applyJobFilters(client.from('jobs').select('id, pricing_json'))
+    .not('pricing_json', 'is', null)
+  for (const path of PIPELINE_PRICING_NULL_PATHS) {
+    malformedPricingQuery = malformedPricingQuery.is(path, null)
   }
-  if (typeFilter) query = query.eq('type', typeFilter)
 
-  const { data: jobs, error } = await query
+  const [{ data: jobs, error }, malformedPricingRes] = await Promise.all([
+    query,
+    malformedPricingQuery,
+  ])
   if (error) throw error
+
+  // Degrade to the projection (current behaviour) rather than 500 the whole board
+  // if this purely defensive probe fails.
+  const malformedPricingMap: Record<string, { value: any; neighbours: any }> = {}
+  if (malformedPricingRes?.error) {
+    console.error('[pipeline] malformed pricing_json probe failed:', malformedPricingRes.error)
+  } else {
+    for (const row of (malformedPricingRes?.data || [])) {
+      const recovered = pipelinePricingFallbackValues(row.pricing_json)
+      if (recovered) malformedPricingMap[row.id] = recovered
+    }
+  }
 
   if (!jobs || jobs.length === 0) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
@@ -7213,10 +7274,10 @@ async function pipeline(client: any, params: URLSearchParams) {
   }
 
   const enriched = jobs.map((j: any) => {
-    const { value, neighbours } = pipelinePricingProjectionValues(j)
-    // Neighbour count for fencing shared fence badge.
-    // The old JSON.parse(string) branch is gone with the blob: pricing_json is jsonb,
-    // so a projected path always deserialises to a value, never to a raw string.
+    const { value, neighbours } = malformedPricingMap[j.id] || pipelinePricingProjectionValues(j)
+    // Neighbour count for fencing shared fence badge. Rows whose blob is a
+    // double-encoded string are recovered above via the malformed-blob probe, which
+    // reproduces the old JSON.parse(string) branch for exactly those rows.
     let neighbourCount = 0
     if (j.type === 'fencing') {
       if (Array.isArray(neighbours)) neighbourCount = neighbours.length
