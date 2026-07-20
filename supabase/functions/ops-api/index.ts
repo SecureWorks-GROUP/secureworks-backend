@@ -7086,9 +7086,12 @@ export function pipelinePricingProjectionValues(row: any) {
 
 // ── Malformed-blob fallback ─────────────────────────────────────────────────
 // A row whose pricing_json is a JSON-encoded STRING (double-encoded write, or a
-// text-typed value) makes every path above return SQL NULL, so the projection
-// alone would silently zero its value and drop its fencing neighbour badge — the
-// case the old `typeof pricing_json === 'string' ? JSON.parse(...)` branch caught.
+// text-typed value) makes every path above return SQL NULL, dropping its fencing
+// neighbour badge — the case the old `typeof pricing_json === 'string' ?
+// JSON.parse(...)` branch caught. That branch fed the fencing neighbour count ONLY;
+// the old `value` chain read properties straight off the raw column, so a string
+// blob yielded 0 there. This fallback therefore recovers neighbours and nothing
+// else — correcting `value` would be a behaviour change, not a perf change.
 // A read-only comparison over all 938 active rows on 2026-07-20 found zero such
 // rows (zero value, value-type, and neighbour mismatches), so this path is expected
 // to return nothing; it exists so a future bad write degrades to the old behaviour
@@ -7102,7 +7105,7 @@ export const PIPELINE_PRICING_NULL_PATHS = PIPELINE_PRICING_PROJECTION.map(
   (p) => p.slice(p.indexOf(':') + 1),
 )
 
-export function pipelinePricingFallbackValues(blob: any) {
+export function pipelinePricingFallbackNeighbours(blob: any) {
   let pj = blob
   if (typeof pj === 'string') {
     try {
@@ -7112,10 +7115,8 @@ export function pipelinePricingFallbackValues(blob: any) {
     }
   }
   if (!pj || typeof pj !== 'object') return null
-  return {
-    value: pj.totalIncGST || pj.total || 0,
-    neighbours: pj.neighbour_splits?.neighbours || pj.job?.neighbours,
-  }
+  const ns = pj.neighbour_splits?.neighbours || pj.job?.neighbours
+  return Array.isArray(ns) ? ns : null
 }
 
 export function stripPipelinePricingAliases(row: any) {
@@ -7173,13 +7174,13 @@ async function pipeline(client: any, params: URLSearchParams) {
 
   // Degrade to the projection (current behaviour) rather than 500 the whole board
   // if this purely defensive probe fails.
-  const malformedPricingMap: Record<string, { value: any; neighbours: any }> = {}
+  const malformedNeighbourMap: Record<string, any[]> = {}
   if (malformedPricingRes?.error) {
     console.error('[pipeline] malformed pricing_json probe failed:', malformedPricingRes.error)
   } else {
     for (const row of (malformedPricingRes?.data || [])) {
-      const recovered = pipelinePricingFallbackValues(row.pricing_json)
-      if (recovered) malformedPricingMap[row.id] = recovered
+      const recovered = pipelinePricingFallbackNeighbours(row.pricing_json)
+      if (recovered) malformedNeighbourMap[row.id] = recovered
     }
   }
 
@@ -7274,13 +7275,15 @@ async function pipeline(client: any, params: URLSearchParams) {
   }
 
   const enriched = jobs.map((j: any) => {
-    const { value, neighbours } = malformedPricingMap[j.id] || pipelinePricingProjectionValues(j)
+    const { value, neighbours } = pipelinePricingProjectionValues(j)
     // Neighbour count for fencing shared fence badge. Rows whose blob is a
     // double-encoded string are recovered above via the malformed-blob probe, which
-    // reproduces the old JSON.parse(string) branch for exactly those rows.
+    // reproduces the old JSON.parse(string) branch for exactly those rows. `value`
+    // stays on the projection: the old chain never used that parsed blob.
     let neighbourCount = 0
     if (j.type === 'fencing') {
-      if (Array.isArray(neighbours)) neighbourCount = neighbours.length
+      const fencingNeighbours = malformedNeighbourMap[j.id] || neighbours
+      if (Array.isArray(fencingNeighbours)) neighbourCount = fencingNeighbours.length
       if (neighbourCount === 0) neighbourCount = neighbourContactMap[j.id] || 0
     }
     const stageStart = j.status === 'accepted' ? j.accepted_at

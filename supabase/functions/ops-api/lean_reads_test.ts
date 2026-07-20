@@ -10,7 +10,7 @@ import {
   PIPELINE_PRICING_ALIASES,
   PIPELINE_PRICING_NULL_PATHS,
   PIPELINE_PRICING_PROJECTION,
-  pipelinePricingFallbackValues,
+  pipelinePricingFallbackNeighbours,
   pipelinePricingProjectionValues,
   stripPipelinePricingAliases,
   toOpsSummaryScheduleEvent,
@@ -61,14 +61,28 @@ Deno.test("ops_summary supporting job reads contain only consumed values", () =>
   assertFalse(OPS_SUMMARY_ACTIVE_JOB_COLUMNS.includes("pricing_json"));
 });
 
+// Models the base-commit chain exactly: `value` read properties off the RAW
+// column (so a double-encoded string yielded 0), while the JSON.parse branch fed
+// the fencing neighbour count only.
 function oldPipelineValues(row: Record<string, unknown>) {
-  const pricing = row.pricing_json as Record<string, unknown> | null;
+  const raw = row.pricing_json as Record<string, unknown> | string | null;
+  const pricing = raw as Record<string, unknown> | null;
+  let parsed: Record<string, unknown> | null = null;
+  if (raw) {
+    try {
+      parsed = typeof raw === "string"
+        ? JSON.parse(raw)
+        : raw as Record<string, unknown>;
+    } catch (_) {
+      parsed = null;
+    }
+  }
   return {
     value: pricing?.totalIncGST || pricing?.total || 0,
     neighbours:
-      (pricing?.neighbour_splits as Record<string, unknown> | undefined)
+      (parsed?.neighbour_splits as Record<string, unknown> | undefined)
         ?.neighbours ||
-      (pricing?.job as Record<string, unknown> | undefined)?.neighbours,
+      (parsed?.job as Record<string, unknown> | undefined)?.neighbours,
   };
 }
 
@@ -164,12 +178,17 @@ Deno.test("malformed pricing_json probe targets exactly the projected paths", ()
   );
 });
 
-Deno.test("double-encoded pricing_json recovers the pre-projection values", () => {
+Deno.test("double-encoded pricing_json recovers neighbours but leaves value at the legacy 0", () => {
   const blob = {
     totalIncGST: 4321.5,
     neighbour_splits: { neighbours: [{ id: 1 }, { id: 2 }] },
   };
   const doubleEncoded = JSON.stringify(blob);
+
+  // The RAW double-encoded string is what the base commit actually saw.
+  const legacy = oldPipelineValues({ pricing_json: doubleEncoded });
+  assertStrictEquals(legacy.value, 0);
+  assertEquals(legacy.neighbours, blob.neighbour_splits.neighbours);
 
   // The projection alone sees nothing for such a row: every path is SQL NULL.
   const projectedOnly = pipelinePricingProjectionValues({
@@ -178,39 +197,37 @@ Deno.test("double-encoded pricing_json recovers the pre-projection values", () =
     pj_split_neighbours: null,
     pj_job_neighbours: null,
   });
-  assertEquals(projectedOnly.value, 0);
+  assertStrictEquals(projectedOnly.value, legacy.value);
+  assertStrictEquals(typeof projectedOnly.value, typeof legacy.value);
   assertFalse(Array.isArray(projectedOnly.neighbours));
 
-  const recovered = pipelinePricingFallbackValues(doubleEncoded);
-  const expected = oldPipelineValues({ pricing_json: blob });
-  assertEquals(recovered?.value, expected.value);
-  assertStrictEquals(typeof recovered?.value, typeof expected.value);
-  assertEquals(recovered?.neighbours, expected.neighbours);
+  // The fallback restores only the fencing neighbour list.
+  assertEquals(pipelinePricingFallbackNeighbours(doubleEncoded), legacy.neighbours);
 });
 
-Deno.test("malformed-blob fallback matches the old chain and never throws", () => {
-  assertEquals(pipelinePricingFallbackValues("not json at all"), null);
-  assertEquals(pipelinePricingFallbackValues(null), null);
-  assertEquals(pipelinePricingFallbackValues(undefined), null);
-  assertEquals(pipelinePricingFallbackValues('"a bare json string"'), null);
-  assertEquals(pipelinePricingFallbackValues("42"), null);
+Deno.test("malformed-blob fallback matches the old neighbour chain and never throws", () => {
+  assertEquals(pipelinePricingFallbackNeighbours("not json at all"), null);
+  assertEquals(pipelinePricingFallbackNeighbours(null), null);
+  assertEquals(pipelinePricingFallbackNeighbours(undefined), null);
+  assertEquals(pipelinePricingFallbackNeighbours('"a bare json string"'), null);
+  assertEquals(pipelinePricingFallbackNeighbours("42"), null);
+
+  // No neighbour list at all: nothing to recover, so the projection stands.
+  assertEquals(
+    pipelinePricingFallbackNeighbours(JSON.stringify({ totalIncGST: 0, total: 999 })),
+    null,
+  );
 
   const jobNeighbours = { job: { neighbours: ["one", "two", "three"] } };
   assertEquals(
-    pipelinePricingFallbackValues(JSON.stringify(jobNeighbours)),
-    oldPipelineValues({ pricing_json: jobNeighbours }),
-  );
-
-  const zeroFallsBack = { totalIncGST: 0, total: 999 };
-  assertEquals(
-    pipelinePricingFallbackValues(JSON.stringify(zeroFallsBack))?.value,
-    oldPipelineValues({ pricing_json: zeroFallsBack }).value,
+    pipelinePricingFallbackNeighbours(JSON.stringify(jobNeighbours)),
+    oldPipelineValues({ pricing_json: JSON.stringify(jobNeighbours) }).neighbours,
   );
 
   // Already-decoded jsonb objects flow through unchanged.
   assertEquals(
-    pipelinePricingFallbackValues(zeroFallsBack),
-    oldPipelineValues({ pricing_json: zeroFallsBack }),
+    pipelinePricingFallbackNeighbours(jobNeighbours),
+    oldPipelineValues({ pricing_json: jobNeighbours }).neighbours,
   );
 });
 
