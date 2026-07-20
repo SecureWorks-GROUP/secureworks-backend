@@ -2,9 +2,9 @@
 //
 // (a) createMakesafeJob texts the make-safe manager(s) on EVERY creation path,
 //     IGNORING suppress_notifications (gate G3 — that flag belonged to the
-//     legacy Telegram-to-Shaun block, now DELETED; the dominant intake-approve
+//     legacy manager direct-message block, now deleted; the dominant intake-approve
 //     path passes it and previously left new make-safes silent). Dispatchers
-//     (admin/ops_manager) and phone-less users are never texted. ZERO Telegram.
+//     (admin/ops_manager) and phone-less users are never texted.
 // (b) updateJobStatus texts a vertical's managers ONLY when a fencing/patio job
 //     TRANSITIONS INTO the crew-ready set — never on repeat saves, moves within
 //     the set, non-ready transitions, or make-safe/decking types.
@@ -110,8 +110,6 @@ async function flush() {
 }
 const smsCalls = (calls: FetchCall[]) => calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
 const smsPhones = (calls: FetchCall[]) => smsCalls(calls).map((c) => JSON.parse(c.body).phone);
-const telegramCalls = (calls: FetchCall[]) =>
-  calls.filter((c) => c.url.includes("api.telegram.org") || c.url.includes("sendMessage"));
 
 // The full crew per D4: Hugo (make-safe), Henry (fencing), Nithin + Jan (patio).
 // Marnin (admin) and Shaun (ops_manager, no phone) must never be texted.
@@ -125,7 +123,7 @@ const USERS = [
 ];
 
 // ── U2a: make-safe creation texts the make-safe manager ─────────────────────
-Deno.test("U2a: direct createMakesafeJob texts Hugo ONLY (no dispatchers, no phone-less, zero Telegram)", async () => {
+Deno.test("U2a: direct createMakesafeJob texts Hugo only (no dispatchers or phone-less users)", async () => {
   const { calls, restore } = stubFetch();
   try {
     const store: Store = { users: USERS.map((u) => ({ ...u })) };
@@ -145,13 +143,12 @@ Deno.test("U2a: direct createMakesafeJob texts Hugo ONLY (no dispatchers, no pho
     assert(body.message.includes("12 Example St, Padbury"), "carries the site");
     assert(body.message.includes("MLB Insurance Building"), "carries the builder");
     assert(body.message.includes("Open in Trade:"), "carries the trade link");
-    assertEquals(telegramCalls(calls).length, 0, "the legacy Telegram-to-Shaun block is GONE");
   } finally {
     restore();
   }
 });
 
-Deno.test("U2a (G3): suppress_notifications:true (the intake-approve path) STILL texts Hugo, still zero Telegram", async () => {
+Deno.test("U2a (G3): suppress_notifications:true (the intake-approve path) still texts Hugo", async () => {
   const { calls, restore } = stubFetch();
   try {
     const store: Store = { users: USERS.map((u) => ({ ...u })) };
@@ -164,7 +161,6 @@ Deno.test("U2a (G3): suppress_notifications:true (the intake-approve path) STILL
     await flush();
     assertEquals(res.ok, true);
     assertEquals(smsPhones(calls), ["+61400000001"], "intake-created make-safes are no longer silent");
-    assertEquals(telegramCalls(calls).length, 0);
   } finally {
     restore();
   }
@@ -211,7 +207,6 @@ Deno.test("U2b: fencing quoted -> order_confirmed texts Henry only", async () =>
     assert(body.message.includes("Job ready for crew"), "ready wording");
     assert(body.message.includes("SWF-100"));
     assert(body.message.includes("order_confirmed"));
-    assertEquals(telegramCalls(calls).length, 0);
   } finally {
     restore();
   }

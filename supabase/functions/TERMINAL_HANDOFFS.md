@@ -1,6 +1,6 @@
 # Terminal D Handoffs — Triggers from Terminal A
 
-> Terminal A writes the detection logic and data. Terminal D routes notifications via ops-ai/Telegram.
+> Terminal A writes the detection logic and data. Terminal D routes notifications through the operations dashboard.
 
 ---
 
@@ -21,7 +21,7 @@ GROUP BY ee.job_id, ee.recipient, j.client_name, j.job_number, j.assigned_to
 HAVING COUNT(*) >= 3;
 ```
 
-**Telegram message (Terminal D routes):**
+**Operations alert (Terminal D routes):**
 > "{Client} is looking at their quote right now — opened it {X} times today. Call them now."
 
 **Target:** Assigned scoper (from `jobs.assigned_to`).
@@ -60,7 +60,7 @@ WHERE id = $job_id;
 - `business_events` row: type `payment.claimed`
 
 **Terminal D action:**
-- Send Telegram notification to ops group: "{Client} says they've paid for {JobNumber}. Check Xero."
+- Surface an operations alert: "{Client} says they've paid for {JobNumber}. Check Xero."
 - Pick up from `business_events WHERE event_type = 'payment.claimed' AND processed_at IS NULL`
 
 ---
@@ -204,7 +204,7 @@ Supplier replies to PO email
 |---------|--------------------------|----------------------|
 | Phantom Buyer | Query ready, email_events populating after Batch 1 deploy | NOT BUILT — needs ops-ai detection cron |
 | Deposit Velocity | Schema defined, needs xero-sync payment hook | NOT BUILT — needs daily-digest integration |
-| "I've Paid" | LIVE — job_events + business_events written on button click | **BUILT** — daily-digest processEventTriggers() routes via Telegram |
+| "I've Paid" | LIVE — job_events + business_events written on button click | Event remains available to operations reporting |
 | Auto-Extract PO Pricing | extractPOPricing() exists in ops-api | **NEEDS WIRING** — call after createPO() |
 | Feedback on Annotation | resolveAnnotation() exists in ops-api | **NEEDS WIRING** — insert ai_feedback_outcomes |
 | Price Drift Resolution | scope_tool_defaults table (49 rows: patio + fencing) | **NEEDS WIRING** — update default on resolution (now includes scope_tool) |

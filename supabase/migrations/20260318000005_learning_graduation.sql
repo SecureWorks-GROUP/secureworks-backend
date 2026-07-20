@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS learned_rules (
   confidence numeric(4,3) NOT NULL DEFAULT 0.500,
   evidence_count int NOT NULL DEFAULT 1,
   status text NOT NULL DEFAULT 'draft',  -- draft, confirmed, corrected, rejected
-  confirmed_by text,                 -- who confirmed (telegram user name)
+  confirmed_by text,                 -- who confirmed the decision
   confirmed_at timestamptz,
   correction_text text,              -- what the human corrected it to
   last_seen_at timestamptz DEFAULT now(),
@@ -57,7 +57,6 @@ VALUES
   ('00000000-0000-0000-0000-000000000001', 'push_po_to_xero', 'approve'),
   ('00000000-0000-0000-0000-000000000001', 'add_ghl_note', 'approve'),
   ('00000000-0000-0000-0000-000000000001', 'email_supplier_po', 'approve'),
-  ('00000000-0000-0000-0000-000000000001', 'send_telegram', 'approve'),
   ('00000000-0000-0000-0000-000000000001', 'reconcile_payment', 'approve')
 ON CONFLICT (org_id, action_type) DO NOTHING;
 

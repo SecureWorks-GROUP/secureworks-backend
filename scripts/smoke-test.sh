@@ -37,7 +37,7 @@ check "ops-api (ops_summary)" "$BASE/ops-api?action=ops_summary"
 check "ops-ai (ping)" "$BASE/ops-ai" "POST" '{"messages":[{"role":"user","content":"ping"}],"view":"ops"}'
 check "reporting-api (dashboard_summary)" "$BASE/reporting-api?action=dashboard_summary"
 check "ghl-proxy (search)" "$BASE/ghl-proxy?action=search&q=test"
-check "daily-digest (nudge_check)" "$BASE/daily-digest?action=nudge_check"
+check "daily-digest" "$BASE/daily-digest"
 check "system-health" "$BASE/system-health" "POST" '{}'
 
 echo ""

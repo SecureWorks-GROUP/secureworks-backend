@@ -190,19 +190,3 @@ SELECT cron.schedule(
   );
   $job$
 );
-
--- ── Intraday Nudge Check (11am, 3pm, 7pm AWST) ──
-SELECT cron.schedule(
-  'intraday-nudge-check',
-  '0 3,7,11 * * *',
-  $job$
-  SELECT net.http_post(
-    url := 'https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/daily-digest?action=nudge_check',
-    headers := jsonb_build_object(
-      'Authorization', 'Bearer ' || current_setting('app.settings.service_role_key'),
-      'Content-Type', 'application/json'
-    ),
-    body := '{}'::jsonb
-  );
-  $job$
-);

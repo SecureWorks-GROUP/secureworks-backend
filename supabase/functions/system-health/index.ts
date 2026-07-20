@@ -4,8 +4,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const SW_API_KEY = Deno.env.get('SW_API_KEY')!
-const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-const ADMIN_CHAT_ID = Deno.env.get('ADMIN_TELEGRAM_CHAT_ID') || ''
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -114,24 +112,6 @@ serve(async (req) => {
     const hasWarning = Object.values(checks).some((c: any) => c.status === 'warning')
     const hasCritical = Object.values(checks).some((c: any) => c.status === 'critical')
     const overallStatus = hasCritical ? 'critical' : hasWarning ? 'degraded' : 'healthy'
-
-    // If degraded or critical, send Telegram alert
-    if ((overallStatus === 'degraded' || overallStatus === 'critical') && TELEGRAM_BOT_TOKEN && ADMIN_CHAT_ID) {
-      try {
-        const alertText = `⚠️ <b>System Health: ${overallStatus.toUpperCase()}</b>\n\n${alerts.join('\n')}`
-        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: ADMIN_CHAT_ID,
-            text: alertText,
-            parse_mode: 'HTML',
-          }),
-        })
-      } catch (e) {
-        console.log('[system-health] Telegram alert failed:', (e as Error).message)
-      }
-    }
 
     return json({
       status: overallStatus,

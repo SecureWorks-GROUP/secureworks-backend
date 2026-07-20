@@ -60,6 +60,5 @@ VALUES
   ('push_po_to_xero', 'medium', 'approve', 'Must be human-approved', '00000000-0000-0000-0000-000000000001'),
   ('add_ghl_note', 'low', 'approve', 'Must be human-approved', '00000000-0000-0000-0000-000000000001'),
   ('email_supplier_po', 'medium', 'approve', 'Must be human-approved', '00000000-0000-0000-0000-000000000001'),
-  ('send_telegram', 'low', 'approve', 'Must be human-approved', '00000000-0000-0000-0000-000000000001'),
   ('reconcile_payment', 'high', 'approve', 'Must be human-approved', '00000000-0000-0000-0000-000000000001')
 ON CONFLICT (action_type) DO NOTHING;

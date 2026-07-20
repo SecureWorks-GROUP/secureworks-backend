@@ -5,7 +5,7 @@
 // InboundMessage, OutboundMessage, CallCompleted,
 // AppointmentCreated, NoteAdded, ContactStageChanged.
 // Creates business_events for the event-listener to react to
-// (Telegram notifications, nudge cancellation, job timeline).
+// (nudge cancellation and job timeline).
 //
 // Deploy: supabase functions deploy ghl-webhook-receiver --no-verify-jwt
 // GHL Setup: Settings > Integrations > Webhooks > all 6 event types

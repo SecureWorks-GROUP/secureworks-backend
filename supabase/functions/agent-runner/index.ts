@@ -106,7 +106,7 @@ interface CallerContext {
   user_name: string
   user_email: string
   user_role: 'crew' | 'lead_installer' | 'division_ops' | 'sales' | 'admin'
-  channel: 'dashboard' | 'telegram_group' | 'telegram_dm' | 'ceo_dashboard' | 'scheduled'
+  channel: 'dashboard' | 'ceo_dashboard' | 'scheduled'
   org_id: string
 }
 
@@ -420,19 +420,7 @@ const ALL_TOOLS = [
       required: ['contact_id', 'note_body'],
     },
   },
-  {
-    name: 'send_telegram',
-    description: 'Send Telegram message to a team member.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        user_email: { type: 'string', description: 'Team member email' },
-        user_name: { type: 'string', description: 'Team member name (alt lookup)' },
-        message: { type: 'string', description: 'Message text' },
-      },
-      required: ['message'],
-    },
-  },
+
 
   // ── THINK: Internal reasoning step ──
   {
@@ -452,7 +440,7 @@ const ALL_TOOLS = [
 const WRITE_ACTIONS = new Set([
   'send_sms', 'send_email', 'create_assignment', 'update_job_status',
   'complete_and_invoice', 'create_invoice', 'create_po', 'send_quote',
-  'push_po_to_xero', 'email_supplier_po', 'add_ghl_note', 'send_telegram',
+  'push_po_to_xero', 'email_supplier_po', 'add_ghl_note',
 ])
 
 // ════════════════════════════════════════════════════════════
@@ -551,7 +539,6 @@ function buildConfirmationCard(action: string, params: any): any {
     push_po_to_xero: `Push PO to Xero as ${params.status || 'DRAFT'}`,
     email_supplier_po: `Email PO to supplier`,
     add_ghl_note: `Add note to contact record`,
-    send_telegram: `Send Telegram to ${params.user_name || params.user_email || 'team member'}`,
   }
 
   return {
@@ -756,26 +743,6 @@ async function executeConfirmedAction(action: string, params: any): Promise<any>
       return await postOpsApi('email_po', { id: params.po_id })
     case 'add_ghl_note':
       return await callGhlProxy('add_note', params)
-    case 'send_telegram': {
-      const sb = sbClient()
-      let telegramId: number | null = null
-      if (params.user_email) {
-        const { data } = await sb.from('users').select('telegram_id').ilike('email', `%${params.user_email}%`).limit(1).maybeSingle()
-        telegramId = data?.telegram_id
-      } else if (params.user_name) {
-        const { data } = await sb.from('users').select('telegram_id').ilike('full_name', `%${params.user_name}%`).limit(1).maybeSingle()
-        telegramId = data?.telegram_id
-      }
-      if (!telegramId) return { error: 'Could not find Telegram ID for this user' }
-      const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-      if (!botToken) return { error: 'Telegram bot token not configured' }
-      const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: telegramId, text: params.message, parse_mode: 'HTML' }),
-      })
-      return await resp.json()
-    }
     default:
       return { error: `Unknown action: ${action}` }
   }

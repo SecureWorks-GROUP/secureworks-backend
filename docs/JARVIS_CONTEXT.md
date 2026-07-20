@@ -10,40 +10,31 @@ Any AI agent working on SecureWorks reads this FIRST before writing code.
 ## Architecture Overview
 
 ```
-                    Telegram
-                       |
-                 telegram-bot (2214 lines)
-                  /          \
-          Railway Agent    Supabase ops-ai (3970 lines)
-          (97 MCP tools)      |
-                |         [Claude API + tool loop]
-                |              |
-            ops-api ──────── reporting-api ──── daily-digest
-           (12,176 lines)   (3,548 lines)    (4,568 lines)
-                |              |                  |
-           Supabase DB    xero-sync          pg_cron jobs
-                |          (2,367 lines)
-            ghl-proxy
-           (2,316 lines)
+Dashboard ──→ Supabase ops-ai ──→ Claude API + tool loop
+                         │
+                         ├──→ ops-api ──→ Supabase DB
+                         └──→ reporting-api
+
+Scheduled jobs ──→ daily-digest / xero-sync
+Railway Agent ──→ ops-api / reporting-api
 ```
 
-### Edge Functions (19 total, 39,038 lines)
+### Edge Functions
 
 | Function | Lines | What It Does | External APIs |
 |----------|-------|-------------|---------------|
 | **ops-api** | 12,176 | Job CRUD, pipeline, scheduling, invoicing, POs, WOs, council, variations | Supabase |
-| **daily-digest** | 4,568 | Morning brief, financial snapshots, nudges, weekly letter | Claude API, Telegram |
+| **daily-digest** | 4,568 | Digest generation, financial snapshots, diagnostics, weekly report | Claude API |
 | **ops-ai** | 3,983 | AI chat with 60+ tools, multi-round tool loop, confirmation flow, conversation memory | Claude API (Anthropic) |
 | **reporting-api** | 3,548 | Financial reports, debt followup, CEO report, sales summary, profitability, team_activity | Supabase, Xero data |
 | **send-quote** | 3,147 | Quote PDF generation, email delivery, acceptance tracking | Resend API, GHL |
 | **xero-sync** | 2,367 | Invoice sync, bank balance, aged payables from Xero | Xero API |
-| **telegram-bot** | 2,312 | Telegram message handling, classification, tone rewrite, action cards | Claude API, Telegram API |
 | **ghl-proxy** | 2,316 | GoHighLevel CRM proxy — contacts, opportunities, pipelines, SMS, email | GHL API |
 | **agent-runner** | 1,025 | Railway agent runner for MCP tools | Railway, Claude API |
 | **completion-pack** | 836 | Branded HTML completion report generator | GHL |
 | **ghl-webhook** | 611 | GHL opportunity sync on stage changes | GHL webhook |
 | **receive-po-email** | 549 | Inbound PO email processing, supplier quote analysis | Resend webhook |
-| **monitor-inbox** | 329 | Graph inbox polling, Haiku classification, Telegram alerts | Microsoft Graph, Claude API |
+| **monitor-inbox** | 329 | Graph inbox polling and Haiku classification | Microsoft Graph, Claude API |
 | **send-po-email** | 301 | PO email via Resend with thread tracking | Resend API |
 | **resend-webhook** | 287 | Email delivery tracking (sent, opened, bounced) | Resend webhook |
 | **send-outlook-email** | 245 | Microsoft Graph email sending with signature, CC, attachments | Microsoft Graph |
@@ -75,8 +66,8 @@ Any AI agent working on SecureWorks reads this FIRST before writing code.
 | **conversation_sessions** | NEW: 30-min session tracking | user_id, channel, last_activity_at |
 | **conversation_history** | NEW: Full message persistence | session_id, role, content, tool_calls |
 | **inbox_events** | NEW: Email inbox monitoring | graph_message_id, classification, priority |
-| **users** | Team members | name, email, telegram_id, role |
-| **pending_confirmations** | Telegram action approval queue | action_type, action_payload, status |
+| **users** | Team members | name, email, role |
+| **pending_confirmations** | Action approval queue | action_type, action_payload, status |
 | **financial_snapshots** | Daily pre-computed financials | snapshot_date, revenue_mtd, outstanding |
 | **material_price_ledger** | Supplier price tracking | supplier_name, material_code, unit_price |
 | **org_config** | Business targets/settings | config_key, config_value |
@@ -90,7 +81,6 @@ Any AI agent working on SecureWorks reads this FIRST before writing code.
 |---------|-------------|
 | Supabase | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — Supabase edge function env |
 | Anthropic (Claude) | `ANTHROPIC_API_KEY` — Supabase secrets |
-| Telegram | `TELEGRAM_BOT_TOKEN` — Supabase secrets |
 | GoHighLevel | GHL API key in ghl-proxy env, `GHL_LOCATION_ID` |
 | Xero | OAuth tokens in `xero_tokens` table, refreshed by xero-sync |
 | Microsoft Graph | `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` — Supabase secrets |
@@ -100,16 +90,13 @@ Any AI agent working on SecureWorks reads this FIRST before writing code.
 ### Routing Architecture
 
 ```
-Telegram message arrives
-  → telegram-bot classifies (Haiku)
-  → Business? → askOpsAi() → RAILWAY_AGENT_URL (if set) or Supabase ops-ai
-  → Banter? → freestylePersonality() (Sonnet, no tools)
-  → Response → rewriteTone() (Sonnet) → send to Telegram
+Dashboard request
+  → ops-ai selects tools and applies confirmation gates
+  → ops-api / reporting-api execute reads and approved writes
+  → Response returns to the dashboard
 ```
 
 **Database:** 92 migrations applied (2025-03-01 to 2026-04-06).
-
-**CRITICAL:** `RAILWAY_AGENT_URL` IS SET. Telegram business messages go to Railway, not Supabase ops-ai. Conversation memory was built in ops-ai but only works because telegram-bot now injects chat_logs history into the messages array before sending to Railway.
 
 ---
 
@@ -132,7 +119,6 @@ Telegram message arrives
 - conversation_sessions + conversation_history tables
 - 30-min session timeout, 5 most recent messages
 - History injected as proper Claude message pairs (not system prompt text)
-- telegram-bot saves Q&A to chat_logs + passes history to agent
 - Pronoun resolution works: "What's his email?" after discussing someone resolves correctly
 
 ### JARVIS Persona (deployed)
@@ -160,8 +146,6 @@ Telegram message arrives
 |-------|----------|------|-------|
 | Proposed actions queue always empty | P1 | ops-api | sw_list_proposed_actions returns nothing — no generation engine |
 | Resend email blocked | P1 | send-po-email | DNS controlled by marketing agency, can't add MX records |
-| Railway agent has no conversation memory | P2 | Railway | Memory only works because telegram-bot injects history |
-| monitor-inbox MARNIN_TELEGRAM_ID | P3 | monitor-inbox | Uses users table lookup, needs role column verification |
 | Xero bank transactions sync | P3 | xero-sync | Column mismatch, non-critical |
 | Google Ads UTM tracking | P2 | blocked | Marketing team needs to configure GHL forms |
 | financial_snapshots raw JSON | P3 | daily-digest | executive_summary has markdown fences from Claude output |
@@ -182,7 +166,6 @@ Telegram message arrives
 | Schedule | Job | Function |
 |----------|-----|----------|
 | `0 23 * * *` (7am AWST) | Daily digest | trigger_daily_digest() |
-| `0 3,7,11 * * *` | Nudge check | 11am/3pm/7pm AWST |
 | `*/5 * * * *` | Inbox monitor | trigger_monitor_inbox() |
 | `0 19 * * *` (3am AWST) | Cleanup conv history | DELETE older than 14 days |
 | `0 19 * * 0` (3am Sun AWST) | Cleanup conv sessions | DELETE older than 90 days |
@@ -199,10 +182,10 @@ Telegram message arrives
 | mcp-server.ts | 1,468 | 97 sw_* tool definitions |
 | agent.ts | 536 | Multi-turn autonomous agent |
 | orchestrator/ | 1,387 | Decision routing, safety rules |
-| monitoring/ | 2,614 | Email/GHL/Telegram watchers, audit rules |
+| monitoring/ | 2,614 | Email/GHL watchers and audit rules |
 | memory/ | 1,159 | Prompt cache, retrieval, scoring |
 | jobs/ | 1,183 | Job state machine, scope validator |
-| channels/ | 1,002 | Telegram, Email, Graph clients |
+| channels/ | 1,002 | Email and Graph clients |
 | automation/ | 725 | Cron scheduler, brief aggregator |
 | sop/ | 766 | Standard Operating Procedures |
 | personas/ | 369 | Personality configs per user |
@@ -211,7 +194,7 @@ Telegram message arrives
 | triage/ | 142 | Email classifier |
 | subagents/ | 108 | Ops/Sales/Finance delegations |
 
-**CRITICAL:** This agent and ops-ai are PEERS. Both have tool loops, both call Claude. Telegram routes to Railway (via RAILWAY_AGENT_URL). Dashboard routes to Supabase ops-ai. Changes to one don't affect the other unless explicitly synced.
+**CRITICAL:** This agent and ops-ai are peers. Both have tool loops and call Claude. Dashboard requests route to Supabase ops-ai. Changes to the external Railway agent must be handled in its own repository.
 
 ---
 
@@ -221,10 +204,8 @@ Telegram message arrives
 |----------|------|--------|
 | AI Implementation Roadmap | `docs/ai-implementation-roadmap.md` | Current (7-phase build spec) |
 | Data Architecture Spec | `docs/data-architecture-spec.md` | Definitive (6-layer, CloudEvents) |
-| Autonomous Agent Research | `docs/research-autonomous-ai-agent.md` | Current (600+ lines, L0-L4 autonomy) |
 | System Upgrade Plan | `docs/strategy/SYSTEM-UPGRADE-PLAN.md` | Active (3 flywheels, 90-day plan) |
 | Business Context | `docs/strategy/SECUREWORKS-BUSINESS-CONTEXT.md` | Current ($5.5M target) |
-| Autonomous Agent Build Plan | `AUTONOMOUS-AGENT-BUILD-PLAN.md` | v2 corrected (agent SDK strategy) |
 | Phase 2 Handoffs | `PHASE2_HANDOFFS.md` | Build spec (terminal handoffs) |
 | Design Brief | `SECUREWORKS-DESIGN-BRIEF.md` | Current (Architectural Assurance) |
 | Project Knowledge Base | `docs/project-knowledge/*.md` | 7 subdocs (architecture, schema, GHL, gotchas) |

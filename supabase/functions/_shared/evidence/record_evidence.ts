@@ -395,7 +395,6 @@ function entityTypeForChannel(channel: Channel): string {
     case "email":
     case "sms":
     case "call":
-    case "telegram":
     case "chat":
       return "message";
     case "note":

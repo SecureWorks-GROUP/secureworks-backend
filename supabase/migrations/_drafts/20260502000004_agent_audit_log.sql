@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS public.agent_audit_log (
   -- Caller identity
   caller              text,                             -- 'jarvis' | 'human' | 'cron' | 'system'
   caller_user_id      uuid,
-  caller_chat_id      text,                             -- Telegram chat id when applicable
+  caller_chat_id      text,                             -- external chat id when applicable
   -- Job/context linkage
   job_id              text,                             -- text to match business_events.job_id
   contact_id          text,

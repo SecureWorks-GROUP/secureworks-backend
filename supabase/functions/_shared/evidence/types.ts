@@ -17,7 +17,6 @@ export type Channel =
   | "email"
   | "sms"
   | "call"
-  | "telegram"
   | "note"
   | "document"
   | "xero"

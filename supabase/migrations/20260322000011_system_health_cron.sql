@@ -3,7 +3,7 @@
 --
 -- Calls the system-health edge function to verify Xero sync
 -- freshness, digest runs, stale alerts, and event generation.
--- Sends Telegram alert if anything is degraded or critical.
+-- Reports whether anything is degraded or critical.
 -- Uses hardcoded service role key (same pattern as 000004).
 -- ════════════════════════════════════════════════════════════
 

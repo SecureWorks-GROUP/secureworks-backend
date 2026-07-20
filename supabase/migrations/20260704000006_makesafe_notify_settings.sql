@@ -3,13 +3,13 @@
 -- Mission: fix/makesafe-reextract-and-notify-2026-07-04 (zero-mistakes wave 2C)
 -- ════════════════════════════════════════════════════════════
 --
--- Telegram is retired business-wide. The make-safe estate now notifies by SMS:
+-- The make-safe estate notifies by SMS:
 --   * ARRIVAL TEXTS (A5): when a genuine NEW work order first lands, text the owner
 --     crew. general / temp-fence / assessment make-safes -> Hugo. roof reports ->
 --     Hugo AND Nithin. Fired ONCE per work order (see makesafe_notify_log) — never
 --     for re-sends / twins / re-extractions / reopens.
 --   * EXTRACTION-HEALTH ALARM (A4): the #273 dead-key / scan-stall / dropped-WO alarm
---     now delivers by SMS to alarm_phones instead of Telegram.
+--     delivers by SMS to alarm_phones.
 --
 -- Recipients + the kill switch live in this single-row config so the owner can change
 -- them without a code change. Phones are E.164. alarm_phones is SEEDED EMPTY on

@@ -190,10 +190,10 @@ Deno.test("DB-bound: emails present, no drafts -> alert emitted, state upserted"
   const client = makeStubClient({ emailCount: 4, draftCount: 0, lastAlertAt: null });
 
   const capturedAlerts: any[] = [];
-  const capturedTelegrams: string[] = [];
+  const capturedSms: string[] = [];
   const sink = {
     logBusinessEvent: async (_client: any, event: any) => { capturedAlerts.push(event); },
-    notifySms: async (text: string) => { capturedTelegrams.push(text); },
+    notifySms: async (text: string) => { capturedSms.push(text); },
   };
 
   const result = await makesafeDraftHeartbeat(client, sink, { nowIso: NOW });
@@ -204,9 +204,9 @@ Deno.test("DB-bound: emails present, no drafts -> alert emitted, state upserted"
   // Alert was sent to business_events.
   assertEquals(capturedAlerts.length, 1);
   assertStringIncludes(capturedAlerts[0].event_type, "makesafe.reconcile");
-  // Telegram notification was sent.
-  assertEquals(capturedTelegrams.length, 1);
-  assertStringIncludes(capturedTelegrams[0], "D5-heartbeat");
+  // SMS notification was sent.
+  assertEquals(capturedSms.length, 1);
+  assertStringIncludes(capturedSms[0], "D5-heartbeat");
   // State was upserted.
   const stateWrite = client._upsertCalls.find((c: any) => c.table === "makesafe_heartbeat_state");
   assertEquals(stateWrite !== undefined, true);

@@ -84,7 +84,7 @@ ALTER TABLE public.business_events
       CHECK (direction IN ('inbound','outbound','internal','system','unknown') OR direction IS NULL),
   ADD COLUMN IF NOT EXISTS channel                 text
       CHECK (channel IN (
-        'email','sms','call','telegram','note','document',
+        'email','sms','call','note','document',
         'xero','po','wo','assignment','status','quote','invoice','payment',
         'scope','chat','audit','system'
       ) OR channel IS NULL),

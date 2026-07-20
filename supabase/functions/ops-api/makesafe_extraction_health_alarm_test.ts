@@ -157,18 +157,18 @@ Deno.test("B1 DB-bound: degraded -> alert emitted + state upserted under extract
     lastAlertAt: null,
   });
   const alerts: any[] = [];
-  const telegrams: string[] = [];
+  const smsMessages: string[] = [];
   const sink = {
     logBusinessEvent: async (_c: any, e: any) => { alerts.push(e); },
-    notifySms: async (t: string) => { telegrams.push(t); },
+    notifySms: async (t: string) => { smsMessages.push(t); },
   };
   const r = await makesafeExtractionHealthAlarm(client, sink, { nowIso: NOW });
   assertEquals(r.alarm, true);
   assertEquals(r.alerted, true);
   assertEquals(alerts.length, 1);
   assertStringIncludes(alerts[0].event_type, "makesafe.reconcile.extraction_degraded");
-  assertEquals(telegrams.length, 1);
-  assertStringIncludes(telegrams[0], "B1-extraction-health");
+  assertEquals(smsMessages.length, 1);
+  assertStringIncludes(smsMessages[0], "B1-extraction-health");
   const stateWrite = client._upsertCalls.find((c: any) => c.table === "makesafe_heartbeat_state");
   assertEquals(stateWrite?.row.key, EXTRACTION_HEALTH_STATE_KEY);
   assertEquals(stateWrite?.row.last_alert_at, NOW);

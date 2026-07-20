@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS inbox_events (
   action_needed TEXT,                   -- what JARVIS recommends
   job_id UUID REFERENCES jobs(id),
   ghl_contact_id TEXT,
-  telegram_notified BOOLEAN DEFAULT FALSE,
   metadata JSONB DEFAULT '{}'
 );
 

@@ -154,7 +154,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-COMMENT ON FUNCTION trigger_daily_digest IS 'Fire daily digest + Telegram morning brief. Usage: SELECT trigger_daily_digest();';
+COMMENT ON FUNCTION trigger_daily_digest IS 'Fire daily digest. Usage: SELECT trigger_daily_digest();';
 
 -- ════════════════════════════════════════
 -- 4. QUEUE PROCESSOR (pg_cron, every 1 min)

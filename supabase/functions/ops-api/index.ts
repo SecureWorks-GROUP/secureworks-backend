@@ -384,7 +384,7 @@ import {
   type LatePdfCandidate as _LatePdfCandidate,
   type LatePdfDraftRow as _LatePdfDraftRow,
 } from './makesafe_intake_late_pdf.ts'
-// A4/A5: SMS arrival texts + notify config (Telegram retired business-wide).
+// A4/A5: SMS arrival texts + notify config.
 import {
   loadNotifySettings as _loadNotifySettings,
   sendMakesafeArrivalTexts as _sendMakesafeArrivalTexts,
@@ -1049,7 +1049,7 @@ async function notifyVerticalManagersSms(client: any, vertical: string, text: st
 // Test-only export alias (mirrors the `_`-prefixed convention in this file).
 export const _notifyVerticalManagersSms = notifyVerticalManagersSms
 
-// A4 — the make-safe alert channel. Telegram is RETIRED business-wide; reconcile /
+// A4 — the make-safe alert channel. Reconcile /
 // heartbeat / extraction-health alarms now deliver by SMS to the configured
 // alarm_phones in makesafe_notify_settings (recipient is CONFIG, never hardcoded).
 // If no alarm number is configured yet the alert still writes its business_event (the
@@ -1073,7 +1073,7 @@ async function notifyBusinessEventsSms(text: string): Promise<void> {
 }
 
 // Build the AlertSink the make-safe reconciliation actions consume — wires their
-// alerts into the EXISTING business_events channel + SMS (Telegram retired).
+// alerts into the EXISTING business_events channel + SMS.
 function makeReconAlertSink() {
   return {
     logBusinessEvent,
@@ -2579,7 +2579,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const canaryResult = await _makesafeEmailCanary(client, makeReconAlertSink())
         const heartbeatResult = await _makesafeDraftHeartbeat(client, makeReconAlertSink())
         // B1: extraction-health alarm on the SAME 15-min canary cron. Fires the same
-        // Telegram + business_events ERROR path when the classifier is degraded OR the
+        // SMS + business_events ERROR path when the classifier is degraded OR the
         // scan has stalled (last_scan_at stale) — the watcher the health row lacked.
         const extractionHealthResult = await _makesafeExtractionHealthAlarm(client, makeReconAlertSink(), {
           // Empty-feed threshold in Perth business hours (config default 6; env override).
@@ -4067,11 +4067,8 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!raJob) throw new ApiError('Job not found', 404)
 
         // Verify requested trade exists
-        const { data: raTrade } = await client.from('users').select('id, name, telegram_id').eq('id', requested_trade_id).maybeSingle()
+        const { data: raTrade } = await client.from('users').select('id').eq('id', requested_trade_id).maybeSingle()
         if (!raTrade) throw new ApiError('Requested trade not found', 404)
-
-        // Get requesting user name
-        const { data: raRequester } = await client.from('users').select('name').eq('id', requestedBy).maybeSingle()
 
         // Insert request
         const { data: raReq, error: raErr } = await client.from('assignment_requests').insert({
@@ -4083,33 +4080,6 @@ if (import.meta.main) serve(async (req: Request) => {
         }).select('id').single()
 
         if (raErr) throw new Error(raErr.message)
-
-        // Notify Shaun via Telegram
-        const RA_TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-        if (RA_TELEGRAM_BOT_TOKEN) {
-          const { data: raShaun } = await client.from('users').select('telegram_id').ilike('email', '%shaun%').not('telegram_id', 'is', null).limit(1).maybeSingle()
-          if (raShaun?.telegram_id) {
-            const raDateStr = requested_dates.map((d: string) => new Date(d).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })).join(', ')
-            const raMsg = `${raRequester?.name || 'A lead'} is requesting ${raTrade.name} to help on ${raJob.job_number} (${raJob.client_name}) on ${raDateStr}.${note ? '\nNote: ' + note : ''}`
-
-            try {
-              await fetch(`https://api.telegram.org/bot${RA_TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: raShaun.telegram_id,
-                  text: raMsg,
-                  reply_markup: {
-                    inline_keyboard: [[
-                      { text: 'Approve', callback_data: 'assist_approve:' + raReq.id },
-                      { text: 'Decline', callback_data: 'assist_decline:' + raReq.id },
-                    ]],
-                  },
-                }),
-              })
-            } catch (e) { console.log('[ops-api] Telegram notify failed:', e) }
-          }
-        }
 
         return json({ success: true, request_id: raReq.id })
       }
@@ -4138,7 +4108,7 @@ if (import.meta.main) serve(async (req: Request) => {
 
         // Get the request
         const { data: aarReq } = await client.from('assignment_requests')
-          .select('*, trade:requested_trade(name, telegram_id), requester:requested_by(name, telegram_id), job:job_id(job_number, client_name, site_address, type)')
+          .select('*, trade:requested_trade(name), requester:requested_by(name), job:job_id(job_number, client_name, site_address, type)')
           .eq('id', aarReqId)
           .maybeSingle()
 
@@ -4155,8 +4125,6 @@ if (import.meta.main) serve(async (req: Request) => {
           resolved_at: new Date().toISOString(),
         }).eq('id', aarReqId)
 
-        const AAR_TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-
         if (aarNewStatus === 'approved') {
           // Auto-create job_assignments for each requested date
           const aarAssignmentRows = aarReq.requested_dates.map((date: string) => ({
@@ -4170,52 +4138,6 @@ if (import.meta.main) serve(async (req: Request) => {
 
           await client.from('job_assignments').insert(aarAssignmentRows)
 
-          // Notify both trades via Telegram
-          if (AAR_TELEGRAM_BOT_TOKEN) {
-            const aarDateStr = aarReq.requested_dates.map((d: string) => new Date(d).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })).join(', ')
-
-            // Notify requesting lead
-            if (aarReq.requester?.telegram_id) {
-              try {
-                await fetch(`https://api.telegram.org/bot${AAR_TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    chat_id: aarReq.requester.telegram_id,
-                    text: `${aarReq.trade?.name} confirmed for ${aarReq.job?.job_number} on ${aarDateStr}.`,
-                  }),
-                })
-              } catch (e) { console.log('[ops-api] Telegram notify failed:', e) }
-            }
-
-            // Notify assigned trade
-            if (aarReq.trade?.telegram_id) {
-              try {
-                await fetch(`https://api.telegram.org/bot${AAR_TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    chat_id: aarReq.trade.telegram_id,
-                    text: `You've been assigned to help on ${aarReq.job?.job_number} (${aarReq.job?.client_name}) at ${aarReq.job?.site_address || ''} on ${aarDateStr}.`,
-                  }),
-                })
-              } catch (e) { console.log('[ops-api] Telegram notify failed:', e) }
-            }
-          }
-        } else {
-          // Declined — notify requesting lead
-          if (AAR_TELEGRAM_BOT_TOKEN && aarReq.requester?.telegram_id) {
-            try {
-              await fetch(`https://api.telegram.org/bot${AAR_TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: aarReq.requester.telegram_id,
-                  text: `Request for ${aarReq.trade?.name} on ${aarReq.job?.job_number} was declined.${aarDeclineReason ? ' Reason: ' + aarDeclineReason : ''}`,
-                }),
-              })
-            } catch (e) { console.log('[ops-api] Telegram notify failed:', e) }
-          }
         }
 
         return json({ success: true, status: aarNewStatus })
@@ -5656,24 +5578,6 @@ if (import.meta.main) serve(async (req: Request) => {
               })
             } catch (e) { /* non-blocking */ }
 
-            // Notify Shaun via Telegram
-            const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-            if (TELEGRAM_BOT_TOKEN) {
-              try {
-                const { data: shaun } = await client.from('users').select('telegram_id').ilike('email', '%shaun%').not('telegram_id', 'is', null).limit(1).maybeSingle()
-                if (shaun?.telegram_id) {
-                  await fetch('https://api.telegram.org/bot' + TELEGRAM_BOT_TOKEN + '/sendMessage', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      chat_id: shaun.telegram_id,
-                      text: (userProfile?.name || 'A trade') + ' submitted invoice for week of ' + week_start + ' — ' + Math.round(totalHours * 100) / 100 + 'h, $' + totalInc.toLocaleString(),
-                    }),
-                  })
-                }
-              } catch (e) { console.log('[ops-api] Telegram notify failed:', e) }
-            }
-
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
             // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
             // invoice that passed the hard guards goes straight to a Xero DRAFT bill.
@@ -5959,8 +5863,6 @@ if (import.meta.main) serve(async (req: Request) => {
               .eq('id', line_id)
               .maybeSingle()
 
-            const ACK_TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-
             if (line) {
               const { data: allLines } = await client.from('trade_invoice_lines')
                 .select('acknowledgment_status')
@@ -5972,51 +5874,8 @@ if (import.meta.main) serve(async (req: Request) => {
                   .update({ status: 'acknowledged', acknowledged_at: new Date().toISOString() })
                   .eq('id', line.trade_invoice_id)
 
-                // Notify the trade that invoice is fully acknowledged
-                const { data: tradeInv } = await client.from('trade_invoices')
-                  .select('user_id, week_start, total_inc, user:user_id(name, telegram_id)')
-                  .eq('id', line.trade_invoice_id)
-                  .maybeSingle()
-
-                if (tradeInv?.user?.telegram_id && ACK_TELEGRAM_BOT_TOKEN) {
-                  try {
-                    await fetch('https://api.telegram.org/bot' + ACK_TELEGRAM_BOT_TOKEN + '/sendMessage', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        chat_id: tradeInv.user.telegram_id,
-                        text: 'Your invoice for week of ' + tradeInv.week_start + ' has been acknowledged — $' + Number(tradeInv.total_inc).toLocaleString() + ' pushing to Xero.',
-                      }),
-                    })
-                  } catch (e) { /* non-blocking */ }
-                }
               }
 
-              // Notify trade about query
-              if (acknowledged === false) {
-                const { data: tradeInv } = await client.from('trade_invoices')
-                  .select('user_id, week_start, user:user_id(telegram_id)')
-                  .eq('id', line.trade_invoice_id)
-                  .maybeSingle()
-
-                const { data: queriedLine } = await client.from('trade_invoice_lines')
-                  .select('job_number')
-                  .eq('id', line_id)
-                  .maybeSingle()
-
-                if (tradeInv?.user?.telegram_id && ACK_TELEGRAM_BOT_TOKEN) {
-                  try {
-                    await fetch('https://api.telegram.org/bot' + ACK_TELEGRAM_BOT_TOKEN + '/sendMessage', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        chat_id: tradeInv.user.telegram_id,
-                        text: 'Query on your invoice — ' + (queriedLine?.job_number || '') + ': ' + (ackNote || 'Please review'),
-                      }),
-                    })
-                  } catch (e) { /* non-blocking */ }
-                }
-              }
             }
 
             return json({ success: true })
@@ -8151,7 +8010,7 @@ async function getJobConversation(client: any, body: any) {
 //   - SELECT-only. NO INSERT / UPDATE / DELETE / UPSERT.
 //   - NO fact extraction (job_context is read, never written here).
 //   - NO proposed-action creation (ai_proposed_actions is read).
-//   - NO GHL / Xero / Telegram / customer-facing calls.
+//   - NO GHL / Xero / customer-facing calls.
 //   - NO transcript storage / Whisper.
 //   - NO mutation of jobs.status or any operational truth field.
 //
@@ -9387,8 +9246,7 @@ async function createMakesafeJob(client: any, body: any) {
   })
 
   // M3b U2a (D4a, gate G3): text the make-safe manager(s) that a new make-safe
-  // exists. REPLACES the legacy Telegram-to-Shaun block that lived here —
-  // Telegram is retired business-wide, and Shaun (no-texts by choice, dispatcher
+  // exists. Shaun is no-texts by choice, and dispatcher
   // role) is naturally excluded by the manager lookup's phone + non-dispatcher
   // gates. The legacy suppress_notifications flag remains intentionally ignored.
   // Deterministic intake has its own narrow suppress_manager_notification input
@@ -16459,7 +16317,7 @@ export async function assertAssignmentMutationAuthz(
 // installers from the trade app. JWT-authed by the caller (case above); gated
 // here by _resolveAllocationAuthz on the job's vertical. Wraps the SAME
 // createAssignment / updateAssignment primitives the ops dashboard uses, so the
-// installer allocation SMS (DA-M3-8; Telegram is retired), job_events,
+// installer allocation SMS (DA-M3-8), job_events,
 // business_events, GHL push, and visible_to_trades all fire identically.
 // Idempotent against double-taps and refuses archived / cancelled jobs.
 export async function allocateJob(client: any, args: {
@@ -16613,10 +16471,10 @@ async function createAssignment(client: any, body: any) {
     detail_json: { assignment_id: data.id, date: sDate, operator: body.operator_email || body.user_email || null },
   })
 
-  // ── SMS to assigned installer (Telegram is RETIRED business-wide) ──
+  // ── SMS to assigned installer ──
   // Plain-text SMS via the existing ghl-proxy send_sms path. Non-blocking:
   // a notify failure must never fail or delay the assignment write, exactly like
-  // the old Telegram DM. sendSmsViaGhl swallows its own errors and returns a
+  // direct message. sendSmsViaGhl swallows its own errors and returns a
   // boolean, so the send can never throw or reject.
   //
   // NOTIFY GATE (ship review FIX 2): ops-calendar planning creates assignments
@@ -28955,26 +28813,6 @@ async function createTradeAlert(client: any, userId: string, body: any) {
     },
   })
 
-  // Telegram notification to Shaun (non-blocking)
-  if (body.notify_telegram) {
-    const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-    if (TELEGRAM_BOT_TOKEN) {
-      const { data: shaun } = await client.from('users').select('telegram_id').ilike('email', '%shaun%').not('telegram_id', 'is', null).limit(1).maybeSingle()
-      if (shaun?.telegram_id) {
-        try {
-          await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: shaun.telegram_id,
-              text: `\u26A0 Materials issue on ${jobLabel}\n${reporterName}: ${detail || iType}`,
-            }),
-          })
-        } catch (e) { console.log('[ops-api] Telegram materials notify failed:', e) }
-      }
-    }
-  }
-
   return { success: true, alert_id: alert?.id }
 }
 
@@ -30015,7 +29853,6 @@ async function sendQuoteFollowupSms(client: any, body: any) {
 // Env vars required at deploy time:
 //   * RAILWAY_AGENT_URL  — https://secureworks-agent-production.up.railway.app
 //   * SW_API_KEY         — Bearer token the Railway agent's requireAgentAuth accepts
-// (Same env pair telegram-bot/index.ts already uses for /api/chat.)
 //
 // Dry-run vs commit:
 //   * Body MAY include commit:true to actually fire the side effects.

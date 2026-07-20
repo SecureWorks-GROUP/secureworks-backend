@@ -141,7 +141,6 @@ const ROUTINE_MUST_DENY = [
   "send_chase_sms",
   "send_review_request",
   "send_invoice_email",
-  "send_telegram_message",
   "send_acceptance_invoice",
   "send_payment_link",
   "send_variation",

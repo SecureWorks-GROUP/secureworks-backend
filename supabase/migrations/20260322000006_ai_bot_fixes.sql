@@ -1,4 +1,4 @@
--- Fix AI & Telegram Bot Quality Issues (2026-03-22)
+-- Fix AI quality and chat schema issues (2026-03-22)
 -- 1. Add missing columns to chat_logs (ops-ai inserts channel + caller_tier but they don't exist)
 -- 2. Add Henry to users table (via auth.users first, then public.users)
 -- 3. Dismiss stale alerts older than 7 days

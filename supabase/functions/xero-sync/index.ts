@@ -623,25 +623,6 @@ async function syncInvoices(sb: any) {
               if (tradeInv && tradeInv.status !== 'paid') {
                 await sb.from('trade_invoices').update({ status: 'paid' }).eq('id', tradeInv.id)
 
-                // Notify trade via Telegram
-                const { data: tradeUser } = await sb.from('users')
-                  .select('telegram_id, name')
-                  .eq('id', tradeInv.user_id)
-                  .maybeSingle()
-
-                const TBOT = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
-                if (TBOT && tradeUser?.telegram_id) {
-                  try {
-                    await fetchWithTimeout('https://api.telegram.org/bot' + TBOT + '/sendMessage', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        chat_id: tradeUser.telegram_id,
-                        text: 'Invoice for week of ' + tradeInv.week_start + ' paid — $' + Number(tradeInv.total_inc).toLocaleString() + ' ✓',
-                      }),
-                    }, 15000)
-                  } catch (e: any) { console.log('[xero-sync] Trade payment telegram failed:', e) }
-                }
                 console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' marked as paid')
               }
             } catch (e: any) { console.log('[xero-sync] Trade payment check failed:', e) }

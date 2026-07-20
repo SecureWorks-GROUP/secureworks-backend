@@ -31,8 +31,8 @@
 //        is SEEDED as a gated/manual step (NOT sent live from here) — see
 //        seedCanaryExpectation below.
 //
-// Alerts route through the EXISTING business_events / Telegram path (injected
-// `logBusinessEvent` + `notifyTelegram`); no new alerting system is invented.
+// Alerts route through the existing business_events and SMS path (injected
+// `logBusinessEvent` + `notifySms`); no new alerting system is invented.
 // Unresolved D1/D2 drift is the "verified" gate signal: summarizeDrift() returns
 // `verified: false` while any unexplained drop / missing post / unresolved
 // attachment remains, which the board + skills surface as DEGRADED.
@@ -850,15 +850,15 @@ export interface AlertSink {
   // Reuse ops-api logBusinessEvent (business_events) + SMS path. Injected so tests can
   // capture without writing.
   logBusinessEvent: (client: SB, event: any) => Promise<void>;
-  // Optional SMS fan-out for ERROR/WARN (Telegram retired business-wide). No-op if not
+  // Optional SMS fan-out for ERROR/WARN. No-op if not
   // supplied. Recipient is resolved by the injected sender from config, never here.
   notifySms?: (text: string) => Promise<void>;
 }
 
 const SES_MAILBOX = "ses@secureworkswa.com.au";
 
-// Emit one business_event per alert + a Telegram summary. business_events is the
-// canonical alert channel (Telegram business_events channel per MISSION.md).
+// Emit one business_event per alert plus an SMS summary. business_events is the
+// canonical alert channel.
 async function emitAlerts(
   client: SB,
   sink: AlertSink,
@@ -1517,9 +1517,9 @@ export async function seedCanaryExpectation(
 // NON-SPAMMY: the alert is only raised on TRANSITION into stalled, not every run.
 // A lightweight `makesafe_heartbeat_state` table tracks the last time we sent a
 // draft-stall alert; we skip sending if the last alert was < RESEND_HOURS ago.
-// This means Telegram fires once per stall episode, not once per 15-min canary run.
+// This means SMS fires once per stall episode, not once per 15-min canary run.
 //
-// ALERT PATH: identical to D1-D4 — emitAlerts -> logBusinessEvent + Telegram.
+// ALERT PATH: identical to D1-D4: emitAlerts -> logBusinessEvent + SMS.
 // No new system invented.
 //
 // RESEND THRESHOLD: 4 hours. If a stall persists beyond 4 hours a fresh alert
@@ -1566,7 +1566,7 @@ export async function seedCanaryExpectation(
 export const HEARTBEAT_STALL_HOURS = 2;
 
 // Resend threshold: even if stalled, don't fire again until this many hours after
-// the last alert. Keeps Telegram quiet for a single prolonged stall.
+// the last alert. Avoids repeated SMS for a single prolonged stall.
 export const HEARTBEAT_RESEND_HOURS = 4;
 
 export interface HeartbeatInput {
@@ -1682,7 +1682,7 @@ export async function makesafeDraftHeartbeat(
   });
 
   if (shouldAlert) {
-    // Emit via the standard alert path (business_events + Telegram).
+    // Emit via the standard alert path (business_events + SMS).
     const alert: ReconAlert = {
       direction: "email_no_job",
       severity: "ERROR",
@@ -1725,7 +1725,7 @@ export async function makesafeDraftHeartbeat(
 // makesafe_intake_health row (extraction_status=degraded on a dead key), but NOTHING
 // watches it — the D5 draft heartbeat stays quiet because degraded runs still create
 // (needs_review) drafts (recentDraftCount>0). This alarm is the missing watcher: it
-// reads that health row on the SAME 15-min canary cron and fires the SAME Telegram +
+// reads that health row on the SAME 15-min canary cron and fires the SAME SMS +
 // business_events ERROR path when the classifier is degraded OR the scan has stalled
 // (last_scan_at older than the freshness budget — e.g. the tail-call is 500ing so
 // writeIntakeHealth never runs). No new cron, table, or channel — one coherent seam.
