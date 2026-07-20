@@ -98,6 +98,18 @@ AS $$
   WHERE j.id = p_job_id
 $$;
 
+-- Existing-job evidence is compared as a set. Client-supplied order is never
+-- load bearing, so both sides are normalised to sorted distinct arrays.
+CREATE OR REPLACE FUNCTION public._fence_mint_sorted_uuids(p_ids uuid[])
+RETURNS uuid[]
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public
+AS $$
+  SELECT COALESCE(array_agg(DISTINCT id ORDER BY id), '{}'::uuid[])
+  FROM unnest(COALESCE(p_ids, '{}'::uuid[])) AS id
+$$;
+
 CREATE OR REPLACE FUNCTION public._fence_mint_progress(
   p_request_id uuid,
   p_joined boolean DEFAULT false,
@@ -204,6 +216,7 @@ DECLARE
   v_existing record;
   v_lock record;
   v_owner record;
+  v_has_owner boolean := false;
   v_executor boolean := false;
 BEGIN
   IF p_intent NOT IN ('RESOLVED_NO_JOB', 'DELIBERATE_REPEAT') OR p_identity_key IS NULL OR trim(p_identity_key) = '' THEN
@@ -247,9 +260,10 @@ BEGIN
       state, owner_request_id, contact_id, opportunity_id, job_id,
       expected_existing_job_ids, repeat_reason, mapping_outcome, lease_expires_at, created_at, updated_at
     INTO v_owner FROM public.fence_job_mint_requests WHERE request_id = v_lock.owner_request_id;
+    v_has_owner := FOUND;
   END IF;
 
-  IF v_owner.request_id IS NOT NULL AND v_owner.state IN ('reserved', 'contact_resolved', 'opportunity_created') THEN
+  IF v_has_owner AND v_owner.state IN ('reserved', 'contact_resolved', 'opportunity_created') THEN
     IF v_owner.lease_expires_at IS NULL OR v_owner.lease_expires_at <= now() THEN
       UPDATE public.fence_job_mint_requests
         SET lease_expires_at = now() + interval '90 seconds', attempt_count = attempt_count + 1, updated_at = now()
@@ -287,6 +301,10 @@ BEGIN
     WHERE org_id = p_org_id AND type = 'fencing' AND identity_key = p_identity_key;
 
   RETURN public._fence_mint_progress(p_request_id, false, true);
+EXCEPTION WHEN unique_violation THEN
+  -- Two simultaneous retries carrying the same requestId can both reach an
+  -- INSERT. The loser replays the canonical ledger instead of failing opaquely.
+  RETURN public._fence_mint_progress(p_request_id, false, false);
 END;
 $$;
 
@@ -380,7 +398,10 @@ BEGIN
   WHERE org_id = v_request.org_id AND type = 'fencing' AND ghl_contact_id = p_contact_id
     AND status::text NOT IN ('complete', 'cancelled', 'invoiced', 'lost');
 
-  IF cardinality(v_jobs) > 1 THEN
+  -- DELIBERATE_REPEAT is governed by its expected-evidence check below, which is
+  -- the stronger guard. Blocking it here would make repeat intent unreachable for
+  -- any contact that already has two or more active fencing jobs.
+  IF cardinality(v_jobs) > 1 AND v_request.intent <> 'DELIBERATE_REPEAT' THEN
     RETURN jsonb_build_object('decision', 'conflict', 'code', 'multiple_active_jobs', 'message', 'Contact maps to multiple active fencing jobs', 'jobIds', to_jsonb(v_jobs));
   END IF;
 
@@ -405,7 +426,7 @@ BEGIN
       updated_at = now() WHERE request_id = v_request.request_id;
   END IF;
 
-  IF v_request.intent = 'DELIBERATE_REPEAT' AND v_jobs <> COALESCE(v_request.expected_existing_job_ids, '{}') THEN
+  IF v_request.intent = 'DELIBERATE_REPEAT' AND v_jobs <> public._fence_mint_sorted_uuids(v_request.expected_existing_job_ids) THEN
     SELECT ARRAY(SELECT unnest(v_jobs) EXCEPT SELECT unnest(COALESCE(v_request.expected_existing_job_ids, '{}'))) INTO v_added;
     IF cardinality(v_added) = 1 AND EXISTS (
       SELECT 1 FROM public.fence_job_mint_requests m
@@ -438,6 +459,8 @@ BEGIN
     opportunity_id = COALESCE(p_opportunity_id, opportunity_id), updated_at = now()
   WHERE request_id = v_request.request_id;
   RETURN public._fence_mint_progress(v_request.request_id, false);
+EXCEPTION WHEN unique_violation THEN
+  RETURN jsonb_build_object('decision', 'conflict', 'code', 'opportunity_mapping_conflict', 'message', 'Opportunity is reserved by another mint request');
 END;
 $$;
 
@@ -535,7 +558,7 @@ BEGIN
       v_outcome := 'existing_contact_job_reused';
     ELSIF v_request.intent = 'RESOLVED_NO_JOB' AND cardinality(v_jobs) > 1 THEN
       RETURN jsonb_build_object('decision', 'conflict', 'code', 'multiple_active_jobs', 'message', 'Contact gained multiple active jobs during mint');
-    ELSIF v_request.intent = 'DELIBERATE_REPEAT' AND v_jobs <> COALESCE(v_request.expected_existing_job_ids, '{}') THEN
+    ELSIF v_request.intent = 'DELIBERATE_REPEAT' AND v_jobs <> public._fence_mint_sorted_uuids(v_request.expected_existing_job_ids) THEN
       RETURN jsonb_build_object('decision', 'conflict', 'code', 'stale_existing_job_evidence', 'message', 'Existing-job evidence changed during mint');
     ELSE
       SELECT public.next_job_number('fencing') INTO v_job_number;
@@ -622,6 +645,7 @@ $$;
 REVOKE ALL ON TABLE public.fence_job_mint_requests FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON TABLE public.fence_job_mint_locks FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public._fence_mint_job_json(uuid, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public._fence_mint_sorted_uuids(uuid[]) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public._fence_mint_progress(uuid, boolean, boolean) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.get_fence_job_mint_progress(uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.reserve_fence_job_mint(uuid, uuid, uuid, text, text, text, text, text, uuid[], text, text, text, text, text, text, text) FROM PUBLIC, anon, authenticated;

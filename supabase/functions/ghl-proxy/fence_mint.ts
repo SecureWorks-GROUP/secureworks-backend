@@ -75,6 +75,7 @@ export type FenceMintProgress = {
 };
 
 export type FenceMintDeps = {
+  fencePipelineId: string;
   reserve: (
     args: {
       input: FenceMintInput;
@@ -112,7 +113,7 @@ export type FenceMintDeps = {
     },
   ) => Promise<FenceMintOpportunity>;
   recordFailure?: (
-    args: { ownerRequestId: string; code: string; message: string },
+    args: { requestId: string; code: string; message: string },
   ) => Promise<void>;
   now?: () => number;
 };
@@ -261,8 +262,19 @@ export function validateFenceMintInput(rawBody: unknown): FenceMintInput {
     );
   }
   const expectedExistingJobIds = [
-    ...new Set(rawExpected.map((id: string) => id.trim())),
+    ...new Set(rawExpected.map((id: string) => id.trim().toLowerCase())),
   ].sort();
+  if (
+    expectedExistingJobIds.some((id) =>
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)
+    )
+  ) {
+    throw new FenceMintError(
+      400,
+      "invalid_existing_job_evidence",
+      "expectedExistingJobIds must be job UUIDs",
+    );
+  }
   const repeatReason = optionalId(
     body.repeatReason ?? body.repeat_reason,
     "repeatReason",
@@ -526,7 +538,7 @@ export async function executeFenceJobMint(args: {
           "Opportunity belongs to a different GHL contact",
         );
       }
-      if (suppliedOpportunity.pipelineId !== "I9t8njpuR0Dm7B2NDcvI") {
+      if (suppliedOpportunity.pipelineId !== deps.fencePipelineId) {
         throw new FenceMintError(
           409,
           "opportunity_pipeline_conflict",
@@ -558,7 +570,7 @@ export async function executeFenceJobMint(args: {
       opportunity = {
         id: bound.opportunityId,
         contactId: contact.id,
-        pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+        pipelineId: deps.fencePipelineId,
       };
     } else if (suppliedOpportunity) {
       opportunity = suppliedOpportunity;
@@ -647,8 +659,10 @@ export async function executeFenceJobMint(args: {
     );
     try {
       if (typed.code !== "mint_in_progress") {
+        // Only ever stamp the caller's own ledger row. Recording against a
+        // joined owner would expire that still-active owner's lease.
         await deps.recordFailure?.({
-          ownerRequestId,
+          requestId: input.requestId,
           code: typed.code,
           message: typed.message,
         });

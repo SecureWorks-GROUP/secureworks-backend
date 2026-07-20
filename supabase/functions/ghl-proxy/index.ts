@@ -1815,11 +1815,39 @@ serve(async (req: Request) => {
     if (action === 'mint_fence_job' && req.method === 'POST') {
       const requestStarted = performance.now()
       try {
-        const contentLength = Number(req.headers.get('content-length') || 0)
-        if (contentLength > 32768) {
+        const MINT_BODY_LIMIT = 32768
+        if (Number(req.headers.get('content-length') || 0) > MINT_BODY_LIMIT) {
           throw new FenceMintError(413, 'mint_payload_too_large', 'Fence mint request exceeds 32 KB')
         }
-        const input = validateFenceMintInput(await req.json())
+        // Chunked or header-less requests bypass the content-length check, so the
+        // read itself is bounded rather than trusting the declared size.
+        const chunks: Uint8Array[] = []
+        let bodyBytes = 0
+        const reader = req.body?.getReader()
+        while (reader) {
+          const { done, value } = await reader.read()
+          if (done) break
+          bodyBytes += value.byteLength
+          if (bodyBytes > MINT_BODY_LIMIT) {
+            await reader.cancel()
+            throw new FenceMintError(413, 'mint_payload_too_large', 'Fence mint request exceeds 32 KB')
+          }
+          chunks.push(value)
+        }
+        const joined = new Uint8Array(bodyBytes)
+        let offset = 0
+        for (const chunk of chunks) {
+          joined.set(chunk, offset)
+          offset += chunk.byteLength
+        }
+        const bodyText = new TextDecoder().decode(joined)
+        let parsedBody: unknown
+        try {
+          parsedBody = JSON.parse(bodyText)
+        } catch {
+          throw new FenceMintError(400, 'invalid_request', 'JSON object body required')
+        }
+        const input = validateFenceMintInput(parsedBody)
         authorizeFenceMintCaller({
           mode: credential.mode,
           authUserId,
@@ -1899,6 +1927,7 @@ serve(async (req: Request) => {
           input,
           actorId: authUserId!,
           deps: {
+            fencePipelineId: PIPELINES.fencing,
             reserve: ({ input: reserved, actorId, fingerprint, identityKey }) => rpcProgress('reserve_fence_job_mint', {
               p_request_id: reserved.requestId,
               p_org_id: reserved.organisationId,
@@ -2016,9 +2045,9 @@ serve(async (req: Request) => {
               }),
               signal: AbortSignal.timeout(10000),
             })),
-            recordFailure: async ({ ownerRequestId, code, message }) => {
+            recordFailure: async ({ requestId, code, message }) => {
               const { error } = await sb.rpc('record_fence_job_mint_failure', {
-                p_request_id: ownerRequestId,
+                p_request_id: requestId,
                 p_code: code,
                 p_message: message,
               })

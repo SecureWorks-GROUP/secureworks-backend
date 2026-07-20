@@ -16,6 +16,7 @@ import {
   validateFenceMintInput,
 } from "./fence_mint.ts";
 
+const FENCE_PIPELINE_ID = "I9t8njpuR0Dm7B2NDcvI";
 const REQUEST_A = "11111111-1111-4111-8111-111111111111";
 const REQUEST_B = "22222222-2222-4222-8222-222222222222";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -70,6 +71,7 @@ function progress(patch: Partial<FenceMintProgress> = {}): FenceMintProgress {
 
 function deps(overrides: Partial<FenceMintDeps> = {}): FenceMintDeps {
   return {
+    fencePipelineId: FENCE_PIPELINE_ID,
     reserve: async () => progress(),
     bindIdentity: async ({ ownerRequestId, contact, opportunity }) =>
       progress({
@@ -93,7 +95,7 @@ function deps(overrides: Partial<FenceMintDeps> = {}): FenceMintDeps {
     getOpportunity: async (id) => ({
       id,
       contactId: "contact-1",
-      pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+      pipelineId: FENCE_PIPELINE_ID,
     }),
     findStampedOpportunity: async () => null,
     createStampedOpportunity: async (
@@ -101,7 +103,7 @@ function deps(overrides: Partial<FenceMintDeps> = {}): FenceMintDeps {
     ) => ({
       id: "opp-1",
       contactId: contact.id,
-      pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+      pipelineId: FENCE_PIPELINE_ID,
       name: `${cleanName} ${fenceMintStamp(ownerRequestId)}`,
     }),
     ...overrides,
@@ -169,6 +171,24 @@ Deno.test("mint rejects scope/pricing payloads and unbounded existing-job eviden
     FenceMintError,
   );
   assertEquals(evidenceError.code, "invalid_existing_job_evidence");
+
+  const nonUuidError = await assertRejects(
+    async () => input(REQUEST_A, { expectedExistingJobIds: ["not-a-job-uuid"] }),
+    FenceMintError,
+  );
+  assertEquals(nonUuidError.code, "invalid_existing_job_evidence");
+
+  const normalised = input(REQUEST_A, {
+    expectedExistingJobIds: [
+      "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    ],
+  });
+  assertEquals(normalised.expectedExistingJobIds, [
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  ]);
 });
 
 Deno.test("two devices with distinct request IDs serialize to one canonical job and one GHL create", async () => {
@@ -189,7 +209,7 @@ Deno.test("two devices with distinct request IDs serialize to one canonical job 
       return {
         id: "opp-1",
         contactId: contact.id,
-        pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+        pipelineId: FENCE_PIPELINE_ID,
         name: fenceMintStamp(ownerRequestId),
       };
     },
@@ -263,7 +283,7 @@ Deno.test("lost GHL create response reconciles the stamped opportunity before re
       committed = {
         id: "opp-lost-response",
         contactId: "contact-1",
-        pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+        pipelineId: FENCE_PIPELINE_ID,
         name: fenceMintStamp(ownerRequestId),
       };
       throw new Error("connection reset after upstream commit");
@@ -294,7 +314,7 @@ Deno.test("stale opportunity contact mapping stops before bind or mutation", asy
     getOpportunity: async (id) => ({
       id,
       contactId: "other-contact",
-      pipelineId: "I9t8njpuR0Dm7B2NDcvI",
+      pipelineId: FENCE_PIPELINE_ID,
     }),
     bindIdentity: async () => {
       binds++;
