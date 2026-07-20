@@ -2131,7 +2131,7 @@ serve(async (req: Request) => {
               }),
               signal: AbortSignal.timeout(10000),
             })),
-            recordFailure: async ({ requestId, code, message, executingRequestId }) => {
+            recordFailure: async ({ requestId, code, message, executingRequestId, executing }) => {
               const { data, error } = await sb.rpc('record_fence_job_mint_failure', {
                 p_request_id: requestId,
                 p_code: code,
@@ -2141,16 +2141,21 @@ serve(async (req: Request) => {
                 p_executing_request_id: executingRequestId ?? null,
               })
               if (error) throw error
-              // The RPC reports whether the stamp landed. A silent no-op means no
-              // joiner will ever see the real typed conflict, so it must be
-              // visible rather than reading as a successful record.
+              // The RPC reports whether the stamp landed. A dropped write only
+              // matters when this caller was the elected executor: no joiner
+              // will then ever see the real typed conflict. A non-executor is
+              // routinely denied (no ledger row yet, or the row belongs to
+              // another org/actor), so that case is informational, not an error.
               if (data === false) {
-                console.error(JSON.stringify({
+                const line = JSON.stringify({
                   event: 'fence_mint_failure_write_dropped',
                   request_id: requestId,
                   executing_request_id: executingRequestId ?? null,
+                  executing: executing === true,
                   code,
-                }))
+                })
+                if (executing) console.error(line)
+                else console.log(line)
               }
             },
           },

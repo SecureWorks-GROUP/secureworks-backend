@@ -124,6 +124,7 @@ export type FenceMintDeps = {
       code: string;
       message: string;
       executingRequestId?: string;
+      executing?: boolean;
     },
   ) => Promise<void>;
   now?: () => number;
@@ -717,6 +718,7 @@ export async function executeFenceJobMint(args: {
           code: typed.code,
           message: typed.message,
           executingRequestId: input.requestId,
+          executing,
         });
       }
     } catch (_) {

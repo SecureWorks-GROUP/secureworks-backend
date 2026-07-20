@@ -804,13 +804,16 @@ AS $$
       -- expiry silently dropped the write so the real typed conflict never
       -- surfaced. Election identity still expires the grant for a stale
       -- delegate, because electing any other executor overwrites the holder.
+      -- Ownership is matched against the resolved root of the executing row's
+      -- chain, not its direct parent: bind can repoint an intermediate owner, so
+      -- a two hop chain executes on a root that is not its owner_request_id.
       OR (
         p_executing_request_id IS NOT NULL
         AND r.lease_holder_request_id = p_executing_request_id
         AND EXISTS (
           SELECT 1 FROM public.fence_job_mint_requests c
           WHERE c.request_id = p_executing_request_id
-            AND c.owner_request_id = r.request_id
+            AND public._fence_mint_root_owner(c.request_id) = r.request_id
             AND c.org_id = p_org_id AND c.requested_by = p_actor_id
         )
       )

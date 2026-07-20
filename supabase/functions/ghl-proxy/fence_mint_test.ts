@@ -728,7 +728,10 @@ Deno.test("failure telemetry is scoped to the owning tenant and an entitled call
   // Another tenant's requestId must not be able to expire a live lease.
   assertStringIncludes(sql, "AND r.org_id = p_org_id");
   assertStringIncludes(sql, "r.requested_by = p_actor_id");
-  assertStringIncludes(sql, "AND c.owner_request_id = r.request_id");
+  assertStringIncludes(
+    sql,
+    "AND public._fence_mint_root_owner(c.request_id) = r.request_id",
+  );
   assertStringIncludes(
     sql,
     "record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid) TO service_role",
@@ -887,7 +890,14 @@ Deno.test("delegated failure writes are bounded to a still-active child attempt"
   // name the exact executing request and require the owner to still record it as
   // the elected lease holder.
   assertStringIncludes(fn, "WHERE c.request_id = p_executing_request_id");
-  assertStringIncludes(fn, "AND c.owner_request_id = r.request_id");
+  // Ownership must be matched against the resolved chain root: bind can repoint
+  // an intermediate owner, so a two hop takeover executes on a root that is not
+  // the executing row's direct owner_request_id.
+  assertStringIncludes(
+    fn,
+    "AND public._fence_mint_root_owner(c.request_id) = r.request_id",
+  );
+  assertEquals(fn.includes("AND c.owner_request_id = r.request_id"), false);
   assertStringIncludes(
     fn,
     "AND r.lease_holder_request_id = p_executing_request_id",
@@ -906,6 +916,66 @@ Deno.test("delegated failure writes are bounded to a still-active child attempt"
   assertStringIncludes(fn, "AND r.org_id = p_org_id");
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
   assertStringIncludes(source, "p_executing_request_id: executingRequestId ?? null,");
+});
+
+Deno.test("a dropped failure write is error-level only for an elected executor", async () => {
+  const seen: Array<{ requestId: string; executing?: boolean }> = [];
+  const record = async (
+    args: { requestId: string; executing?: boolean },
+  ) => {
+    seen.push({ requestId: args.requestId, executing: args.executing });
+  };
+
+  await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A),
+        actorId: "user-1",
+        deps: deps({
+          reserve: async () =>
+            progress({ ownerRequestId: REQUEST_B, joined: true, executor: true }),
+          bindIdentity: async ({ ownerRequestId, contact }) =>
+            progress({
+              ownerRequestId,
+              state: "contact_resolved",
+              contactId: contact.id,
+            }),
+          createStampedOpportunity: () => {
+            throw new FenceMintError(502, "ghl_request_failed", "GHL exploded");
+          },
+          recordFailure: record,
+        }),
+      }),
+    FenceMintError,
+  );
+
+  await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A),
+        actorId: "user-1",
+        deps: deps({
+          reserve: () => {
+            throw new FenceMintError(
+              409,
+              "idempotency_key_reused",
+              "requestId belongs to another caller",
+            );
+          },
+          recordFailure: record,
+        }),
+      }),
+    FenceMintError,
+  );
+
+  // The executor's dropped stamp is a real signal; a caller that never owned or
+  // executed the row is routinely denied and must not be logged as an error.
+  assertEquals(seen[0].executing, true);
+  assertEquals(seen[1].executing === true, false);
+
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertStringIncludes(source, "if (executing) console.error(line)");
+  assertStringIncludes(source, "else console.log(line)");
 });
 
 Deno.test("first execution never scans, an ambiguous retry recovers the committed stamp", async () => {
