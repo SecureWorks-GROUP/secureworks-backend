@@ -18,6 +18,7 @@
 //   ops_summary         — Today tab: stat cards, schedule, attention items
 //   calendar            — Calendar events for date range (?from=&to=)
 //   pipeline            — Jobs by status for kanban view
+//   makesafe_board      — Canonical make-safe rows projected for Ops or Trade
 //   job_detail          — Full job + assignments + POs + WOs + invoices
 //   list_invoices       — Xero invoices with filters
 //   job_financials      — Job P&L list (makesafe-scoped view; M3 panel)
@@ -115,6 +116,13 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import {
+  MAKESAFE_BOARD_CONTRACT_VERSION,
+  buildCanonicalMakesafeRows,
+  checkMakesafeBoardParity,
+  projectTradeMakesafeBoard,
+  resolveMakesafeTradeViewer,
+} from './makesafe_board_read_model.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -2396,6 +2404,66 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'ops_summary': return json(await opsSummary(client))
       case 'calendar': return json(await calendarEvents(client, url.searchParams))
       case 'pipeline': return json(await pipeline(client, url.searchParams))
+      case 'makesafe_board': {
+        const projection = String(url.searchParams.get('projection') || 'ops').toLowerCase()
+        if (!['ops', 'trade'].includes(projection)) {
+          return json({ error: "projection must be 'ops' or 'trade'" }, 400)
+        }
+        if (projection === 'trade' && authMode !== 'jwt') {
+          return json({ error: 'trade projection requires an authenticated trade session' }, 403)
+        }
+        if (projection === 'ops' && authMode === 'jwt' &&
+          !['admin', 'owner', 'ops_manager'].includes(String(authUser?.role || '').toLowerCase())) {
+          return json({ error: 'ops projection requires ops access' }, 403)
+        }
+
+        if (projection === 'trade') {
+          const { data: profile, error: profileErr } = await client.from('users')
+            .select('id, name, role, managed_verticals')
+            .eq('id', authUser!.id)
+            .maybeSingle()
+          if (profileErr || !profile) throw new ApiError('Trade profile not found', 403)
+          const viewer = {
+            userId: profile.id,
+            name: profile.name,
+            role: profile.role,
+            managedVerticals: profile.managed_verticals,
+          }
+          // Server-scope the load BEFORE building the canonical model: allocated-only
+          // trades never load or receive full make-safe history — only the (already
+          // server-authorised) jobs assigned to them. Full-history rows are built
+          // solely for all-makesafe viewers (Hugo/admins) and the Ops projection.
+          const permissions = resolveMakesafeTradeViewer(viewer)
+          const restrictToJobIds = permissions.sees_all_makesafes
+            ? undefined
+            : await loadMakesafeAssignedJobIds(client, profile.id)
+          const canonicalRows = await loadCanonicalMakesafeBoard(
+            client,
+            restrictToJobIds ? { restrictToJobIds } : undefined,
+          )
+          const parity = checkMakesafeBoardParity(canonicalRows)
+          if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
+          const board = projectTradeMakesafeBoard(canonicalRows, viewer)
+          return json({
+            contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+            projection: 'trade',
+            generated_at: new Date().toISOString(),
+            ...board,
+            parity: { ok: true, contract_version: MAKESAFE_BOARD_CONTRACT_VERSION },
+          })
+        }
+
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
+        if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
+        return json({
+          contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+          projection: 'ops',
+          generated_at: new Date().toISOString(),
+          ...ops,
+          parity,
+        })
+      }
       case 'job_detail': {
         let jid = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
         // If not a UUID, try resolving as job_number (e.g. SWF-26037)
@@ -9897,6 +9965,9 @@ export function _deriveMakesafeBoardStage(
   // of any sent/report/invoice evidence it carried (report-then-cancel is allowed).
   // EARLY return — before the `new` default and every other branch below.
   if (jobStatus === 'cancelled' || jobStatus === 'canceled') return 'cancelled'
+  // Canonically archived jobs stay archived even when their historical detail or
+  // assignment rows are sparse. Never let an archive card fall back to New.
+  if (jobStatus === 'archived') return 'archive'
   const hasAssignments = assignments.length > 0
   const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
   const invoiceDone = hasActiveMakesafeInvoice(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
@@ -10339,6 +10410,19 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     // bare completed/archive column proxy. Completed cards with no send record
     // read as not-sent, not green. Fail-closed (unknown -> false).
     sent_to_builder: _makesafeSentToBuilder(packSent, pack),
+    // Canonical board seam: retain the non-financial report/pack facts so both
+    // projections can consume the same server-owned row without re-deriving.
+    report: report ? {
+      status: report.status || null,
+      submitted_at: report.submitted_at || report.created_at || null,
+      created_at: report.created_at || null,
+      cycle_number: report.cycle_number ?? null,
+    } : null,
+    report_pack: pack ? {
+      status: pack.status || null,
+      report_doc_id: pack.report_doc_id || null,
+      sent_at: pack.sent_at || null,
+    } : null,
     ...(docFlags || {}),
     // pack_sent is only meaningful (defined) when the caller loaded the marker.
     ...(packSent !== undefined ? { pack_sent: packSent === true } : {}),
@@ -10905,7 +10989,18 @@ async function makesafePortalRecheckEnqueue(client: any, body: any) {
 export const _makesafePortalRecheckEnqueue = makesafePortalRecheckEnqueue
 
 // ── Slice 3: dedicated make-safe pipeline ──
-async function makesafePipeline(client: any, params: URLSearchParams) {
+async function makesafePipeline(client: any, params: URLSearchParams, restrictJobIds?: string[]) {
+  // The canonical board endpoint requests history=all so archived/cancelled
+  // cards remain searchable. The legacy makesafe_pipeline response preserves its
+  // existing active + 90-day-cancelled window until its consumer migrates.
+  const allHistory = params.get('history') === 'all'
+  // Optional server-authorised scope: when present, BOTH the active and cancelled
+  // job queries are constrained to this id set so an allocated-only caller never
+  // loads make-safes it can't see. A caller passing an empty set gets nothing.
+  const restrict = Array.isArray(restrictJobIds) ? restrictJobIds : null
+  if (restrict && restrict.length === 0) {
+    return { columns: { new: [], allocated: [], trade_report_in: [], report_ready: [], completed: [], archive: [], cancelled: [] }, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: 0 }
+  }
   // T4 — full-history load. The old `.limit(200)` hid older completed/archived
   // make-safes from the archive column. Paginate the jobs query so the board
   // shows the COMPLETE history; T1's row-paginated dependent reads keep this
@@ -10914,10 +11009,12 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   {
     let offset = 0
     for (let guard = 0; guard < 1000; guard++) {
-      const { data, error } = await client.from('jobs')
+      let activeQuery = client.from('jobs')
         .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
         .eq('type', 'makesafe')
-        .not('status', 'in', '("cancelled","archived","lost")')
+        .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
+      if (restrict) activeQuery = activeQuery.in('id', restrict)
+      const { data, error } = await activeQuery
         .order('created_at', { ascending: false })
         .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
       if (error) throw error
@@ -11010,7 +11107,7 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
     const assigns = await _fetchAllByJobIdChunked(
       client,
       'job_assignments',
-      'job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)',
+      'id, job_id, user_id, scheduled_date, start_time, status, role, crew_name, travel_started_at, arrived_at, started_at, clocked_on_at, completed_at, users:user_id(id, name, phone)',
       jobIds,
       (q) => q.neq('status', 'cancelled').order('scheduled_date', { ascending: true }),
     )
@@ -11052,11 +11149,13 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   {
     let offset = 0
     for (let guard = 0; guard < 100; guard++) {
-      const { data, error } = await client.from('jobs')
+      let cancelledQuery = client.from('jobs')
         .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
         .eq('type', 'makesafe')
         .eq('status', 'cancelled')
-        .gte('updated_at', cancelledSinceIso)
+      if (restrict) cancelledQuery = cancelledQuery.in('id', restrict)
+      if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
+      const { data, error } = await cancelledQuery
         .order('updated_at', { ascending: false })
         .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
       if (error) throw error
@@ -11076,8 +11175,27 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
       cancelledIds,
     )
     for (const d of (cds || [])) cancelledDetailsMap[d.job_id] = d
+    // Retain assignment ownership on cancelled cards so the trade projection can
+    // keep an allocated-only trade's OWN worked-then-cancelled make-safes in their
+    // Archive. Cancelling a make-safe closes its open assignments to 'cancelled',
+    // so we deliberately load every status here (not .neq('status','cancelled')).
+    // tradeSafe still filters the per-card payload to the viewer's own assignment,
+    // so another trade's allocation is never exposed.
+    const cancelledAssignMap: Record<string, any[]> = {}
+    const cancelledAssigns = await _fetchAllByJobIdChunked(
+      client,
+      'job_assignments',
+      'id, job_id, user_id, scheduled_date, start_time, status, role, crew_name, travel_started_at, arrived_at, started_at, clocked_on_at, completed_at, users:user_id(id, name, phone)',
+      cancelledIds,
+      (q) => q.order('scheduled_date', { ascending: true }),
+    )
+    for (const a of (cancelledAssigns || [])) {
+      if (!a?.job_id) continue
+      if (!cancelledAssignMap[a.job_id]) cancelledAssignMap[a.job_id] = []
+      cancelledAssignMap[a.job_id].push(a)
+    }
     const cancelledCards = cancelledRaw.map((j: any) =>
-      enrichMakesafeBoardJob(j, cancelledDetailsMap[j.id] || null, [], undefined, undefined, undefined, undefined, null))
+      enrichMakesafeBoardJob(j, cancelledDetailsMap[j.id] || null, cancelledAssignMap[j.id] || [], undefined, undefined, undefined, undefined, null))
     // Order by cancelled_at (fallback updated_at) — freshest cancel first.
     cancelledCards.sort((a: any, b: any) =>
       String(b.cancelled_at || b.updated_at || '').localeCompare(String(a.cancelled_at || a.updated_at || '')))
@@ -11088,9 +11206,137 @@ async function makesafePipeline(client: any, params: URLSearchParams) {
   return { columns, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: (jobs || []).length }
 }
 
-// Test-only export alias (mirrors the `_`-prefixed export convention used for
-// the other make-safe helpers). Production routes still call makesafePipeline.
+// Server-owned scope for allocated-only trades: the make-safe job ids they are
+// assigned to. Scoped to type='makesafe' at the source (inner join) so patio /
+// fencing / other-type assignments never bloat the restrict IN-list passed into
+// the canonical loader. Cancelled-status assignments are retained on purpose:
+// cancelling a make-safe job closes its open assignments to 'cancelled', so a
+// trade's own worked-then-cancelled make-safes would otherwise never load into
+// their Archive. Returned ids feed the canonical loader so the full make-safe
+// history is never loaded for a caller who can only see their own jobs.
+// Row-paginated for the cap.
+async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<string[]> {
+  const ids = new Set<string>()
+  let offset = 0
+  for (let guard = 0; guard < 100; guard++) {
+    const { data, error } = await client.from('job_assignments')
+      .select('job_id, jobs:job_id!inner(type)')
+      .eq('user_id', userId)
+      .eq('jobs.type', 'makesafe')
+      .order('job_id', { ascending: true })
+      .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+    if (error) throw error
+    const batch = data || []
+    for (const a of batch) if (a?.job_id) ids.add(a.job_id)
+    if (batch.length < MAKESAFE_PAGE_SIZE) break
+    offset += MAKESAFE_PAGE_SIZE
+  }
+  return Array.from(ids)
+}
+
+// One audience-independent read. makesafePipeline remains the stage authority;
+// this loader adds only presentation facts (contacts/actions, report photo count,
+// notes and intake lineage) using cap-safe reads. Ops and trade projections are
+// generated from the returned rows, never from separate queries or client logic.
+async function loadCanonicalMakesafeBoard(
+  client: any,
+  opts?: { restrictToJobIds?: string[] },
+): Promise<any[]> {
+  const restrictToJobIds = opts?.restrictToJobIds
+  // Allocated-only callers pass an explicit, already-authorised id set. An empty
+  // set means "no visible make-safes" — return without loading any history.
+  if (restrictToJobIds && restrictToJobIds.length === 0) return []
+  const pipeline = await makesafePipeline(client, new URLSearchParams('history=all'), restrictToJobIds)
+  const baseRows: any[] = []
+  const seen = new Set<string>()
+  for (const stage of MAKESAFE_BOARD_STAGES) {
+    for (const row of (pipeline?.columns?.[stage] || [])) {
+      if (!row?.id || seen.has(row.id)) continue
+      seen.add(row.id)
+      baseRows.push(row)
+    }
+  }
+  const jobIds = baseRows.map((row) => row.id)
+  if (jobIds.length === 0) return []
+
+  // These reads are business-meaningful. _fetchAllByJobIdChunked checks every
+  // PostgREST error and paginates every 1000 rows, so empty means genuinely empty.
+  const [notes, photos, contacts] = await Promise.all([
+    _fetchAllByJobIdChunked(
+      client,
+      'job_events',
+      'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
+      jobIds,
+      (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
+    ),
+    _fetchAllByJobIdChunked(
+      client,
+      'job_media',
+      'id, job_id, type, phase',
+      jobIds,
+      (q) => q.eq('type', 'photo').eq('phase', 'completion').order('id', { ascending: true }),
+    ),
+    _fetchAllByJobIdChunked(
+      client,
+      'job_contacts',
+      'job_id, client_name, client_phone, is_primary, contact_label, status',
+      jobIds,
+      (q) => q.eq('status', 'active').order('id', { ascending: true }),
+    ),
+  ])
+
+  // The intake-case migration is shadow-first and can legitimately lag an edge
+  // function in a preview database. Claim/ref grouping below remains canonical;
+  // log loudly rather than failing the entire operational board on that additive
+  // lineage overlay.
+  let intakeCases: any[] = []
+  try {
+    intakeCases = await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_intake_cases',
+      'id, job_id, lineage_id, parent_case_id, parent_relation, cycle, updated_at',
+      jobIds,
+      (q) => q.order('cycle', { ascending: false }).order('id', { ascending: true }),
+    )
+  } catch (error) {
+    console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
+  }
+
+  const notesByJobId: Record<string, any[]> = {}
+  for (const note of notes) {
+    const body = note?.detail_json?.text ?? note?.detail_json?.note ?? ''
+    if (!note?.job_id || noteIsSystemMarker(body)) continue
+    if (!notesByJobId[note.job_id]) notesByJobId[note.job_id] = []
+    notesByJobId[note.job_id].push(note)
+  }
+  const photoCountByJobId: Record<string, number> = {}
+  for (const photo of photos) {
+    if (photo?.job_id) photoCountByJobId[photo.job_id] = (photoCountByJobId[photo.job_id] || 0) + 1
+  }
+  const contactsByJobId: Record<string, any[]> = {}
+  for (const contact of contacts) {
+    if (!contact?.job_id) continue
+    if (!contactsByJobId[contact.job_id]) contactsByJobId[contact.job_id] = []
+    contactsByJobId[contact.job_id].push(contact)
+  }
+  const intakeCaseByJobId: Record<string, any> = {}
+  for (const intakeCase of intakeCases) {
+    if (intakeCase?.job_id && !intakeCaseByJobId[intakeCase.job_id]) {
+      intakeCaseByJobId[intakeCase.job_id] = intakeCase
+    }
+  }
+
+  return buildCanonicalMakesafeRows(baseRows, {
+    notesByJobId,
+    photoCountByJobId,
+    contactsByJobId,
+    intakeCaseByJobId,
+  })
+}
+
+// Test-only exports. Production routes call the same functions.
 export const _makesafePipelineForTest = makesafePipeline
+export const _loadCanonicalMakesafeBoardForTest = loadCanonicalMakesafeBoard
 
 // Test-only export for the close-out doc-attach path (typed + idempotent).
 export const _attachMakesafeDocumentForTest = attachMakesafeDocument

@@ -1,0 +1,286 @@
+// deno-lint-ignore-file no-explicit-any no-import-prefix
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { _deriveMakesafeBoardStage } from "./index.ts";
+import {
+  buildCanonicalMakesafeRows,
+  checkMakesafeBoardParity,
+  mapOpsStageToTradeColumn,
+  OPS_MAKESAFE_STAGES,
+  projectOpsMakesafeBoard,
+  projectTradeMakesafeBoard,
+  TRADE_MAKESAFE_COLUMNS,
+} from "./makesafe_board_read_model.ts";
+
+const NOW = "2026-07-20T12:00:00Z";
+
+function baseJob(
+  stage: string,
+  id = `job-${stage}`,
+  over: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    job_number: `SWMS-${id}`,
+    type: "makesafe",
+    status: stage === "cancelled" ? "cancelled" : "scheduled",
+    board_stage: stage,
+    board_label: stage,
+    substatus: stage === "new"
+      ? "company_contact_required"
+      : "waiting_on_trade_report",
+    client_name: "Kim Client",
+    client_phone: "0400 111 222",
+    site_address: "10 Sample Street",
+    site_suburb: "Perth",
+    requesting_company_name: "ML Builders",
+    external_ref: "MLB-100",
+    metadata: {
+      builder_claim_ref: "MLB-100",
+      builder_po_number: `PO-${id}`,
+      makesafe_job_family: "general_makesafe",
+    },
+    makesafe_details: { substatus: "waiting_on_trade_report", cycle_number: 1 },
+    assignments: [{
+      id: `assignment-${id}`,
+      user_id: "trade-1",
+      status: "scheduled",
+      scheduled_date: "2026-07-20",
+      start_time: "09:00",
+      users: { id: "trade-1", name: "Hugo", phone: "0400 000 001" },
+    }],
+    report_status: "waiting_on_trade_report",
+    sent_to_builder: false,
+    age_hours: 20,
+    ...over,
+  };
+}
+
+Deno.test("parity: every ops stage maps exactly once to the captain's four trade columns", () => {
+  const rows = buildCanonicalMakesafeRows(
+    OPS_MAKESAFE_STAGES.map((stage) => baseJob(stage)),
+  );
+  const parity = checkMakesafeBoardParity(rows);
+  assertEquals(parity.ok, true);
+  assertEquals(parity.checked, OPS_MAKESAFE_STAGES.length);
+  assertEquals(parity.errors, []);
+  assertEquals(parity.unmapped_stage_job_ids, []);
+
+  const trade = projectTradeMakesafeBoard(rows, {
+    userId: "hugo-id",
+    name: "Hugo",
+    role: "installer",
+    managedVerticals: ["makesafe"],
+  });
+  assertEquals(Object.keys(trade.columns), [...TRADE_MAKESAFE_COLUMNS]);
+  assert(
+    !Object.keys(trade.columns).some((name) =>
+      name.toLowerCase().includes("office")
+    ),
+  );
+  assertEquals(trade.columns.New.map((r) => r.canonical_stage), ["new"]);
+  assertEquals(trade.columns.Allocated.map((r) => r.canonical_stage), [
+    "allocated",
+  ]);
+  assertEquals(
+    trade.columns.Complete.map((r) => r.canonical_stage),
+    ["trade_report_in", "report_ready"],
+  );
+  assertEquals(
+    trade.columns.Archive.map((r) => r.canonical_stage),
+    ["completed", "archive", "cancelled"],
+  );
+});
+
+Deno.test("historical divergence: assignment complete without a report remains Allocated", () => {
+  const stage = _deriveMakesafeBoardStage(
+    { status: "scheduled" },
+    { substatus: "waiting_on_trade_report" },
+    [{ user_id: "trade-1", status: "complete" }],
+    undefined,
+  );
+  assertEquals(stage, "allocated");
+  assertEquals(mapOpsStageToTradeColumn(stage).column, "Allocated");
+});
+
+Deno.test("historical divergence: Docs Ready/report_ready deterministically appears in Complete", () => {
+  assertEquals(mapOpsStageToTradeColumn("report_ready"), {
+    column: "Complete",
+    mapped: true,
+  });
+});
+
+Deno.test("historical divergence: unknown stage never vanishes silently", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseJob("mystery_status", "job-mystery"),
+  ]);
+  const ops = projectOpsMakesafeBoard(rows);
+  const trade = projectTradeMakesafeBoard(rows, {
+    userId: "hugo-id",
+    name: "Hugo",
+    managedVerticals: ["makesafe"],
+  });
+  assertEquals(ops.columns.new[0].id, "job-mystery");
+  assertEquals(trade.columns.New[0].id, "job-mystery");
+  assert(trade.columns.New[0].projection_warning.includes("mystery_status"));
+  assertEquals(checkMakesafeBoardParity(rows).unmapped_stage_job_ids, [
+    "job-mystery",
+  ]);
+});
+
+Deno.test("trade visibility is server-shaped: ordinary allocated-only, Hugo all, Khairo make-safe allocated-only", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseJob("new", "mine", {
+      assignments: [{
+        user_id: "ordinary",
+        status: "scheduled",
+        users: { name: "Ordinary" },
+      }],
+    }),
+    baseJob("allocated", "other", {
+      assignments: [{
+        user_id: "other-trade",
+        status: "scheduled",
+        users: { name: "Other" },
+      }],
+    }),
+  ]);
+
+  const ordinary = projectTradeMakesafeBoard(rows, {
+    userId: "ordinary",
+    name: "Sam Trade",
+    role: "installer",
+    managedVerticals: [],
+  });
+  assertEquals(ordinary.rows.map((r) => r.id), ["mine"]);
+  assertEquals(ordinary.rows[0].assignments.map((a: any) => a.user_id), [
+    "ordinary",
+  ]);
+
+  const hugo = projectTradeMakesafeBoard(rows, {
+    userId: "hugo",
+    name: "Hugo",
+    role: "installer",
+    managedVerticals: ["makesafe"],
+  });
+  assertEquals(new Set(hugo.rows.map((r) => r.id)), new Set(["mine", "other"]));
+  assertEquals(hugo.permissions.can_allocate, true);
+
+  const khairo = projectTradeMakesafeBoard(rows, {
+    userId: "khairo",
+    name: "Khairo",
+    role: "installer",
+    managedVerticals: ["fencing"],
+  });
+  assertEquals(khairo.rows, []);
+  assertEquals(khairo.permissions.fencing_view_only, true);
+  assertEquals(khairo.permissions.can_allocate, false);
+});
+
+Deno.test("contact actions are always live-linked or explicitly unavailable", () => {
+  const [linked] = buildCanonicalMakesafeRows([baseJob("allocated")]);
+  assertEquals(linked.contact.client_name, "Kim Client");
+  assertEquals(linked.contact.phone, "0400 111 222");
+  assertEquals(linked.contact.actions.call.href, "tel:0400111222");
+  assertEquals(linked.contact.actions.text.href, "sms:0400111222");
+  assert(
+    linked.contact.actions.navigate.href.includes(
+      encodeURIComponent("10 Sample Street, Perth"),
+    ),
+  );
+
+  const [missing] = buildCanonicalMakesafeRows([
+    baseJob("new", "missing-contact", {
+      client_name: null,
+      client_phone: null,
+      site_address: null,
+      site_suburb: null,
+    }),
+  ]);
+  assertEquals(missing.contact.actions.call.available, false);
+  assertEquals(missing.contact.actions.call.href, null);
+  assertEquals(missing.contact.actions.navigate.available, false);
+  assert(missing.contact.actions.call.unavailable_reason.length > 0);
+});
+
+Deno.test("canonical row carries report/photos, pack/send, notes, age and separates stale substatus", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "facts", {
+      substatus: "company_contact_required",
+      makesafe_details: {
+        substatus: "company_contact_required",
+        report_received_at: NOW,
+        report_type: "roof_report",
+      },
+      report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+      report_pack: { status: "drafted", report_doc_id: "doc-1", sent_at: null },
+      docs_missing: true,
+      missing_docs: ["invoice"],
+      age_hours: 60,
+    }),
+  ], {
+    photoCountByJobId: { facts: 7 },
+    notesByJobId: {
+      facts: [{
+        id: "note-1",
+        user_id: "trade-1",
+        detail_json: { text: "Client not reachable" },
+        users: { name: "Hugo" },
+        created_at: NOW,
+      }],
+    },
+  });
+
+  assertEquals(row.report.submitted_at, NOW);
+  assertEquals(row.report.photo_count, 7);
+  assertEquals(row.pack.state, "drafted");
+  assertEquals(row.notes[0].text, "Client not reachable");
+  assertEquals(row.age.target_hours, 48);
+  assertEquals(row.age.target_state, "over_target");
+  assertEquals(
+    row.blockers.stale_artifacts[0].code,
+    "stale_company_contact_substatus",
+  );
+  assert(
+    !row.blockers.real.some((b: any) => b.code === "client_contact_required"),
+  );
+  assert(
+    row.blockers.real.some((b: any) => b.code === "closeout_documents_missing"),
+  );
+});
+
+Deno.test("same property claim keeps one card per PO and links siblings", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseJob("allocated", "po-a", {
+      metadata: { builder_claim_ref: "MLB-900", builder_po_number: "PO-1" },
+      external_ref: "MLB-900",
+    }),
+    baseJob("new", "po-b", {
+      metadata: { builder_claim_ref: "MLB-900", builder_po_number: "PO-2" },
+      external_ref: "MLB-900",
+    }),
+  ]);
+  assertEquals(rows.length, 2);
+  assertEquals(rows[0].lineage.one_card_per_po, true);
+  assertEquals(rows[0].lineage.siblings[0].job_id, "po-b");
+  assertEquals(rows[0].lineage.siblings[0].builder_po_number, "PO-2");
+});
+
+Deno.test("trade payload is an allow-list with no pricing or invoice data", () => {
+  const [row] = buildCanonicalMakesafeRows([baseJob("allocated")]);
+  (row as any).pricing_json = { total: 999 };
+  (row as any).xero_invoice = { amount: 999 };
+  (row as any).trade_invoices = [{ user_id: "other" }];
+  const trade = projectTradeMakesafeBoard([row], {
+    userId: "hugo",
+    name: "Hugo",
+    managedVerticals: ["makesafe"],
+  });
+  const payload = JSON.stringify(trade);
+  assert(!payload.includes("pricing_json"));
+  assert(!payload.includes("xero_invoice"));
+  assert(!payload.includes("trade_invoices"));
+  assert(!payload.includes("999"));
+});
