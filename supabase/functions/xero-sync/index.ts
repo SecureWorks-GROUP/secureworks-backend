@@ -18,6 +18,8 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+// serve is only started when this module is the process entrypoint so unit
+// tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
   buildMaterialsFactRow,
@@ -72,7 +74,7 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-serve(async (req: Request) => {
+if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   const url = new URL(req.url)
@@ -753,7 +755,8 @@ async function syncInvoices(sb: any) {
 // Strategy 3: Multiple client_name matches → flag for manual review
 // ════════════════════════════════════════════════════════════
 
-async function matchUnlinkedInvoices(client: any) {
+/** Exported for regression tests (M1 Strategy 2 / silent-400 guard). */
+export async function matchUnlinkedInvoices(client: any) {
   try {
     // Get invoices with no job_id
     const { data: unlinked } = await client.from('xero_invoices')

@@ -259,6 +259,12 @@ async function resolveJobId(
   //    Only return if there's exactly ONE open/draft/sent PO from this supplier in
   //    the last 60 days — otherwise we'd misfile onto whichever PO happens to be
   //    most recent. With 2+ candidates, treat as no match and let humans link it.
+  //
+  // NEEDS A DECISION (M1): purchase_orders has no supplier_email column
+  // (verified against schema — email lives on suppliers). This .ilike filter
+  // 400s the query, so the inbox-to-PO domain matcher has never matched
+  // anything. Dropping the filter would be worse (match any recent PO). Real
+  // fix is a join via suppliers.email; left as-is pending product call.
   if (fromEmail && fromEmail.includes('@')) {
     const domain = fromEmail.split('@')[1]
     const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()

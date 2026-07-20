@@ -27190,11 +27190,13 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const isPerMetre = invoice_type === 'per_metre'
 
   // Prevent double-submit
+  // week_end is the live column (trade_invoices was rebuilt in
+  // 20260325000003_timer_invoice_system); week_ending does not exist.
   const { data: existing } = await client
     .from('trade_invoices')
     .select('id')
     .eq('user_id', userId)
-    .eq('week_ending', week_ending)
+    .eq('week_end', week_ending)
     .maybeSingle()
   if (existing) throw new Error(`You already submitted an invoice for week ending ${week_ending}. Contact the office if it needs changing.`)
 
@@ -27398,24 +27400,24 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     }
   }
 
-  // Insert local trade_invoices record
+  // Insert local trade_invoices record against the LIVE schema
+  // (20260325000003_timer_invoice_system): week_start/week_end, subtotal_ex,
+  // total_inc, xero_bill_id. The legacy week_ending/line_items/subtotal/total/
+  // xero_bill_number/xero_invoice_id names 400 the insert. Line detail lives on
+  // trade_invoice_lines (relational) — full line write is a separate path
+  // (generate_trade_invoice); this legacy submit only records the weekly totals.
+  const totalHours = lineItems.reduce((s, li) => s + (Number(li.Quantity) || 0), 0)
   const invoiceRecord = {
     org_id: DEFAULT_ORG_ID,
     user_id: userId,
-    week_ending,
-    line_items: lineItems.map((li, i) => ({
-      description: li.Description,
-      hours: li.Quantity,
-      rate: li.UnitAmount,
-      amount: Math.round(li.Quantity * li.UnitAmount * 100) / 100,
-      job_number: (assignments[i]?.jobs as any)?.job_number || '',
-    })),
-    subtotal,
+    week_start: weekStart,
+    week_end: week_ending,
+    total_hours: Math.round(totalHours * 100) / 100,
+    subtotal_ex: subtotal,
     gst,
-    total,
+    total_inc: total,
     notes: notes || null,
-    xero_invoice_id: xeroInvId || null,
-    xero_bill_number: billNumber || null,
+    xero_bill_id: billNumber || null,
     status: xeroInvId ? 'pushed_to_xero' : 'draft',
   }
 
