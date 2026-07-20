@@ -4,7 +4,18 @@
 **Mode:** local code against production read-only data access  
 **Window:** 60 days, `makesafe_scanned_at IS NULL`  
 **Writes:** none  
-**AI calls:** 0
+**AI calls:** 0  
+**Status:** historical record, superseded for exact figures
+
+> **Superseded.** These numbers were recorded against commit `3fc2dac`, before the
+> review commits that changed reason-code assignment (adding the pre-job
+> `awaiting_job_creation` state and bounding its retries), moved source accounting
+> ahead of job creation, paginated case-source reads, and changed case ordering.
+> The no-write, zero-AI-call, and zero-unaccounted properties still hold by
+> construction, and the verdict below still stands. The per-builder and
+> per-reason breakdowns are kept as a point-in-time record and are **not**
+> expected to reproduce exactly against the current runtime. Re-run the replay
+> and file fresh evidence before quoting these counts as current.
 
 The replay used the production `emails`, `email_attachments`, and active
 `makesafe_companies` evidence through the local deterministic runtime with
