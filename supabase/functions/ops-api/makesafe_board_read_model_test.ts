@@ -243,7 +243,9 @@ Deno.test("canonical row carries report/photos, pack/send, notes, age and separa
     row.blockers.stale_artifacts[0].code,
     "stale_company_contact_substatus",
   );
-  assert(!row.blockers.real.some((b: any) => b.code === "client_contact_required"));
+  assert(
+    !row.blockers.real.some((b: any) => b.code === "client_contact_required"),
+  );
   assert(
     row.blockers.real.some((b: any) => b.code === "closeout_documents_missing"),
   );

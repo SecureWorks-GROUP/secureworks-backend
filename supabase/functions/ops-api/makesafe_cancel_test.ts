@@ -53,7 +53,8 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
   for (const [table, tableRows] of Object.entries(seed)) {
     rows[table] = tableRows.map((r) => ({ ...r }));
   }
-  const nextId = (table: string) => `${table}-${(rows[table] || []).length + 1}`;
+  const nextId = (table: string) =>
+    `${table}-${(rows[table] || []).length + 1}`;
 
   function builder(table: string) {
     if (!rows[table]) rows[table] = [];
@@ -90,7 +91,9 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       if (insertRow) return applyInsert();
       if (updateRow) {
         const res = applyUpdate();
-        if (single) return { data: (res.data as any[])?.[0] ?? null, error: res.error };
+        if (single) {
+          return { data: (res.data as any[])?.[0] ?? null, error: res.error };
+        }
         return res;
       }
       const data = matchingRows();
@@ -98,7 +101,9 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
     };
 
     const parseInSet = (val: any): string[] =>
-      String(val).replace(/[()"']/g, "").split(",").map((s) => s.trim()).filter(Boolean);
+      String(val).replace(/[()"']/g, "").split(",").map((s) => s.trim()).filter(
+        Boolean,
+      );
 
     const b: any = {
       select: () => b,
@@ -197,13 +202,20 @@ const NON_MANAGER = {
 };
 const API_KEY = { authMode: "api_key" as const, operatorEmail: "ops@x" };
 
-const CANCEL_BODY = { job_id: "job-1", reason_code: "builder_recalled", note: "builder recalled" };
+const CANCEL_BODY = {
+  job_id: "job-1",
+  reason_code: "builder_recalled",
+  note: "builder recalled",
+};
 
 // ── 1. authz ────────────────────────────────────────────────────────────────
 
 Deno.test("cancel: a make-safe manager (managed_verticals includes makesafe) is allowed", async () => {
   const { client, rows } = makeClient(cancellableRows());
-  const res = await _cancelMakesafeForTest(client, { body: CANCEL_BODY, ...MANAGER });
+  const res = await _cancelMakesafeForTest(client, {
+    body: CANCEL_BODY,
+    ...MANAGER,
+  });
   assertEquals(res.ok, true);
   assertEquals(res.cancelled, true);
   assertEquals(rows.jobs[0].status, "cancelled");
@@ -221,7 +233,10 @@ Deno.test("cancel: a non-manager JWT (managed_verticals empty) is refused 403", 
 
 Deno.test("cancel: the ops api_key path is allowed (trusted-ops posture)", async () => {
   const { client, rows } = makeClient(cancellableRows());
-  const res = await _cancelMakesafeForTest(client, { body: CANCEL_BODY, ...API_KEY });
+  const res = await _cancelMakesafeForTest(client, {
+    body: CANCEL_BODY,
+    ...API_KEY,
+  });
   assertEquals(res.ok, true);
   assertEquals(rows.jobs[0].status, "cancelled");
 });
@@ -230,9 +245,16 @@ Deno.test("cancel: the ops api_key path is allowed (trusted-ops posture)", async
 
 Deno.test("cancel: a DRAFT invoice does NOT block the cancel", async () => {
   const { client, rows } = makeClient(cancellableRows({
-    xero_invoices: [{ job_id: "job-1", invoice_type: "ACCREC", status: "DRAFT" }],
+    xero_invoices: [{
+      job_id: "job-1",
+      invoice_type: "ACCREC",
+      status: "DRAFT",
+    }],
   }));
-  const res = await _cancelMakesafeForTest(client, { body: CANCEL_BODY, ...MANAGER });
+  const res = await _cancelMakesafeForTest(client, {
+    body: CANCEL_BODY,
+    ...MANAGER,
+  });
   assertEquals(res.ok, true);
   assertEquals(rows.jobs[0].status, "cancelled");
 });
@@ -242,7 +264,10 @@ for (const status of ["AUTHORISED", "SUBMITTED", "PAID"]) {
     const { client, rows } = makeClient(cancellableRows({
       xero_invoices: [{ job_id: "job-1", invoice_type: "ACCREC", status }],
     }));
-    const res = await _cancelMakesafeForTest(client, { body: CANCEL_BODY, ...MANAGER });
+    const res = await _cancelMakesafeForTest(client, {
+      body: CANCEL_BODY,
+      ...MANAGER,
+    });
     assertEquals(res.ok, false);
     assertEquals(res.code, "live_invoice");
     assert(String(res.error).includes("see admin"));
@@ -252,9 +277,16 @@ for (const status of ["AUTHORISED", "SUBMITTED", "PAID"]) {
 
 Deno.test("cancel: a VOIDED ACCREC invoice does NOT block (only live statuses block)", async () => {
   const { client, rows } = makeClient(cancellableRows({
-    xero_invoices: [{ job_id: "job-1", invoice_type: "ACCREC", status: "VOIDED" }],
+    xero_invoices: [{
+      job_id: "job-1",
+      invoice_type: "ACCREC",
+      status: "VOIDED",
+    }],
   }));
-  const res = await _cancelMakesafeForTest(client, { body: CANCEL_BODY, ...MANAGER });
+  const res = await _cancelMakesafeForTest(client, {
+    body: CANCEL_BODY,
+    ...MANAGER,
+  });
   assertEquals(res.ok, true);
   assertEquals(rows.jobs[0].status, "cancelled");
 });
@@ -275,10 +307,11 @@ Deno.test("cancel: a non-makesafe job is rejected", async () => {
 Deno.test("cancel: an empty note is rejected", async () => {
   const { client } = makeClient(cancellableRows());
   await assertRejects(
-    () => _cancelMakesafeForTest(client, {
-      body: { job_id: "job-1", reason_code: "other", note: "   " },
-      ...MANAGER,
-    }),
+    () =>
+      _cancelMakesafeForTest(client, {
+        body: { job_id: "job-1", reason_code: "other", note: "   " },
+        ...MANAGER,
+      }),
     Error,
     "note required",
   );
@@ -287,10 +320,11 @@ Deno.test("cancel: an empty note is rejected", async () => {
 Deno.test("cancel: an invalid reason_code is rejected", async () => {
   const { client } = makeClient(cancellableRows());
   await assertRejects(
-    () => _cancelMakesafeForTest(client, {
-      body: { job_id: "job-1", reason_code: "because", note: "x" },
-      ...MANAGER,
-    }),
+    () =>
+      _cancelMakesafeForTest(client, {
+        body: { job_id: "job-1", reason_code: "because", note: "x" },
+        ...MANAGER,
+      }),
     Error,
     "reason_code required",
   );
@@ -301,7 +335,11 @@ Deno.test("cancel: an invalid reason_code is rejected", async () => {
 Deno.test("cancel: writes cancel_* attribution, closes assignments, logs makesafe_cancelled", async () => {
   const { client, rows } = makeClient(cancellableRows());
   const res = await _cancelMakesafeForTest(client, {
-    body: { job_id: "job-1", reason_code: "reallocated", note: "given to another crew" },
+    body: {
+      job_id: "job-1",
+      reason_code: "reallocated",
+      note: "given to another crew",
+    },
     ...MANAGER,
   });
   assertEquals(res.ok, true);
@@ -321,7 +359,9 @@ Deno.test("cancel: writes cancel_* attribution, closes assignments, logs makesaf
   assertEquals(rows.job_assignments[0].status, "cancelled");
 
   // audit event shape.
-  const evt = rows.job_events.find((e) => e.event_type === "makesafe_cancelled");
+  const evt = rows.job_events.find((e) =>
+    e.event_type === "makesafe_cancelled"
+  );
   assert(!!evt, "makesafe_cancelled event written");
   assertEquals(evt.job_id, "job-1");
   assertEquals(evt.detail_json.reason_code, "reallocated");
@@ -346,7 +386,10 @@ Deno.test("cancel: re-cancelling an already-cancelled job is a clean no-op succe
     jobs: [{ id: "job-1", type: "makesafe", status: "cancelled" }],
     job_events: [],
   }));
-  const res = await _cancelMakesafeForTest(client, { body: CANCEL_BODY, ...MANAGER });
+  const res = await _cancelMakesafeForTest(client, {
+    body: CANCEL_BODY,
+    ...MANAGER,
+  });
   assertEquals(res.ok, true);
   assertEquals(res.idempotent, true);
   // No duplicate audit event written on the no-op.
@@ -367,7 +410,10 @@ Deno.test("cancel: an archived (terminally-dead) make-safe cannot be cancelled",
 // ── 6. board classification + feed ─────────────────────────────────────────────
 
 Deno.test("board derive: a cancelled make-safe derives to `cancelled`, not `new`", () => {
-  assertEquals(_deriveMakesafeBoardStage({ status: "cancelled" }, {}), "cancelled");
+  assertEquals(
+    _deriveMakesafeBoardStage({ status: "cancelled" }, {}),
+    "cancelled",
+  );
   // sanity: a bare live job with no signals still derives `new`.
   assertEquals(_deriveMakesafeBoardStage({ status: "accepted" }, {}), "new");
 });
@@ -408,15 +454,41 @@ Deno.test("board feed: cancelled job in `cancelled` column, 90-day window respec
   const { client } = makeClient({
     jobs: [
       // one ACTIVE make-safe (should count in total, land in `new`)
-      { id: "job-active", job_number: "A", type: "makesafe", status: "accepted", created_at: iso(now) },
+      {
+        id: "job-active",
+        job_number: "A",
+        type: "makesafe",
+        status: "accepted",
+        created_at: iso(now),
+      },
       // a recently-cancelled make-safe (in window)
-      { id: "job-recent", job_number: "R", type: "makesafe", status: "cancelled", created_at: iso(now - 6 * 86_400_000), updated_at: recentCancel },
+      {
+        id: "job-recent",
+        job_number: "R",
+        type: "makesafe",
+        status: "cancelled",
+        created_at: iso(now - 6 * 86_400_000),
+        updated_at: recentCancel,
+      },
       // an old cancelled make-safe (out of window)
-      { id: "job-old", job_number: "O", type: "makesafe", status: "cancelled", created_at: iso(now - 210 * 86_400_000), updated_at: oldCancel },
+      {
+        id: "job-old",
+        job_number: "O",
+        type: "makesafe",
+        status: "cancelled",
+        created_at: iso(now - 210 * 86_400_000),
+        updated_at: oldCancel,
+      },
     ],
     makesafe_job_details: [
       { job_id: "job-active" },
-      { job_id: "job-recent", cancel_reason: "duplicate", cancel_note: "dup", cancelled_by: "hugo@x", cancelled_at: recentCancel },
+      {
+        job_id: "job-recent",
+        cancel_reason: "duplicate",
+        cancel_note: "dup",
+        cancelled_by: "hugo@x",
+        cancelled_at: recentCancel,
+      },
       { job_id: "job-old", cancel_reason: "other", cancelled_at: oldCancel },
     ],
     job_service_reports: [],
@@ -427,25 +499,39 @@ Deno.test("board feed: cancelled job in `cancelled` column, 90-day window respec
     job_events: [],
   });
 
-  const pipeline: any = await _makesafePipelineForTest(client, new URLSearchParams());
+  const pipeline: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
 
   // total = ACTIVE board only (the exclusion keeps cancelled out of the main feed).
   assertEquals(pipeline.total, 1);
 
   // active job in `new`, not in cancelled.
-  assert(pipeline.columns.new.find((j: any) => j.id === "job-active"), "active in new");
+  assert(
+    pipeline.columns.new.find((j: any) => j.id === "job-active"),
+    "active in new",
+  );
 
   // recent cancel present in cancelled column, carrying attribution.
-  const recent = pipeline.columns.cancelled.find((j: any) => j.id === "job-recent");
+  const recent = pipeline.columns.cancelled.find((j: any) =>
+    j.id === "job-recent"
+  );
   assert(!!recent, "recent cancel in cancelled column");
   assertEquals(recent.cancel_reason, "duplicate");
   assertEquals(recent.board_stage, "cancelled");
 
   // old cancel outside the 90-day window is NOT fed.
-  assert(!pipeline.columns.cancelled.find((j: any) => j.id === "job-old"), "old cancel excluded by window");
+  assert(
+    !pipeline.columns.cancelled.find((j: any) => j.id === "job-old"),
+    "old cancel excluded by window",
+  );
 
   // a cancelled job never leaks into `new`.
-  assert(!pipeline.columns.new.find((j: any) => j.id === "job-recent"), "cancelled not in new");
+  assert(
+    !pipeline.columns.new.find((j: any) => j.id === "job-recent"),
+    "cancelled not in new",
+  );
 
   // stage_labels advertises the Cancelled column.
   assertEquals(pipeline.stage_labels.cancelled, "Cancelled");
@@ -458,12 +544,34 @@ Deno.test("board feed: a cancelled card retains its (now-cancelled) assignment o
 
   const { client } = makeClient({
     jobs: [
-      { id: "job-mine", job_number: "M", type: "makesafe", status: "cancelled", created_at: iso(now - 6 * 86_400_000), updated_at: recentCancel },
-      { id: "job-other", job_number: "T", type: "makesafe", status: "cancelled", created_at: iso(now - 6 * 86_400_000), updated_at: recentCancel },
+      {
+        id: "job-mine",
+        job_number: "M",
+        type: "makesafe",
+        status: "cancelled",
+        created_at: iso(now - 6 * 86_400_000),
+        updated_at: recentCancel,
+      },
+      {
+        id: "job-other",
+        job_number: "T",
+        type: "makesafe",
+        status: "cancelled",
+        created_at: iso(now - 6 * 86_400_000),
+        updated_at: recentCancel,
+      },
     ],
     makesafe_job_details: [
-      { job_id: "job-mine", cancel_reason: "duplicate", cancelled_at: recentCancel },
-      { job_id: "job-other", cancel_reason: "duplicate", cancelled_at: recentCancel },
+      {
+        job_id: "job-mine",
+        cancel_reason: "duplicate",
+        cancelled_at: recentCancel,
+      },
+      {
+        job_id: "job-other",
+        cancel_reason: "duplicate",
+        cancelled_at: recentCancel,
+      },
     ],
     job_service_reports: [],
     xero_invoices: [],
@@ -473,17 +581,34 @@ Deno.test("board feed: a cancelled card retains its (now-cancelled) assignment o
     // read must retain every status (not .neq('status','cancelled')) or the trade's
     // ownership evidence is lost and its own Archive card silently vanishes.
     job_assignments: [
-      { id: "as-mine", job_id: "job-mine", user_id: "trade-mine", status: "cancelled", users: { id: "trade-mine", name: "Mine" } },
-      { id: "as-other", job_id: "job-other", user_id: "trade-other", status: "cancelled", users: { id: "trade-other", name: "Other" } },
+      {
+        id: "as-mine",
+        job_id: "job-mine",
+        user_id: "trade-mine",
+        status: "cancelled",
+        users: { id: "trade-mine", name: "Mine" },
+      },
+      {
+        id: "as-other",
+        job_id: "job-other",
+        user_id: "trade-other",
+        status: "cancelled",
+        users: { id: "trade-other", name: "Other" },
+      },
     ],
     job_events: [],
   });
 
-  const pipeline: any = await _makesafePipelineForTest(client, new URLSearchParams());
+  const pipeline: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
 
   const mine = pipeline.columns.cancelled.find((j: any) => j.id === "job-mine");
   assert(!!mine, "own cancelled card fed");
-  assertEquals((mine.assignments || []).map((a: any) => a.user_id), ["trade-mine"]);
+  assertEquals((mine.assignments || []).map((a: any) => a.user_id), [
+    "trade-mine",
+  ]);
 
   // The allocated-only projection filter keys off assignment membership; with the
   // ownership retained, the trade keeps its own card and never sees another's.
@@ -570,7 +695,13 @@ Deno.test("reopen: a make-safe manager may reopen a CANCELLED job -> derived New
   const res = await _reopenMakesafeForTest(
     client,
     { job_id: "job-1", reason: "reopen after cancel" },
-    { privileged: false, authMode: "jwt", callerRole: "installer", managedVerticals: ["makesafe"], operatorEmail: "hugo@x" },
+    {
+      privileged: false,
+      authMode: "jwt",
+      callerRole: "installer",
+      managedVerticals: ["makesafe"],
+      operatorEmail: "hugo@x",
+    },
   );
   assertEquals(res.reopened, true);
   assertEquals(res.previous_status, "cancelled");
@@ -594,11 +725,18 @@ Deno.test("reopen: a make-safe manager may reopen a CANCELLED job -> derived New
 Deno.test("reopen: a non-manager JWT may NOT reopen a cancelled job", async () => {
   const { client } = makeClient(cancelledReopenRows());
   await assertRejects(
-    () => _reopenMakesafeForTest(
-      client,
-      { job_id: "job-1", reason: "x" },
-      { privileged: false, authMode: "jwt", callerRole: "installer", managedVerticals: [], operatorEmail: "crew@x" },
-    ),
+    () =>
+      _reopenMakesafeForTest(
+        client,
+        { job_id: "job-1", reason: "x" },
+        {
+          privileged: false,
+          authMode: "jwt",
+          callerRole: "installer",
+          managedVerticals: [],
+          operatorEmail: "crew@x",
+        },
+      ),
     Error,
     "Not authorized",
   );
@@ -611,11 +749,18 @@ Deno.test("reopen: a manager may NOT reopen a COMPLETE job (admin/api-key only)"
     job_events: [],
   });
   await assertRejects(
-    () => _reopenMakesafeForTest(
-      client,
-      { job_id: "job-1", reason: "x" },
-      { privileged: false, authMode: "jwt", callerRole: "installer", managedVerticals: ["makesafe"], operatorEmail: "hugo@x" },
-    ),
+    () =>
+      _reopenMakesafeForTest(
+        client,
+        { job_id: "job-1", reason: "x" },
+        {
+          privileged: false,
+          authMode: "jwt",
+          callerRole: "installer",
+          managedVerticals: ["makesafe"],
+          operatorEmail: "hugo@x",
+        },
+      ),
     Error,
     "requires an admin/owner or the ops key",
   );
@@ -654,9 +799,13 @@ function makeMyJobsClient(fx: { jobs: MjJob[]; details: MjDetail[] }) {
     if (st.table === "jobs") {
       let rows = fx.jobs.slice();
       if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
-      if (st.eq.status != null) rows = rows.filter((j) => j.status === st.eq.status);
+      if (st.eq.status != null) {
+        rows = rows.filter((j) => j.status === st.eq.status);
+      }
       if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
-      if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals.includes(j.id));
+      if (st.inCol === "id" && st.inVals) {
+        rows = rows.filter((j) => st.inVals.includes(j.id));
+      }
       if (st.notIn) {
         const ex = new Set<string>();
         for (const m of String(st.notIn).matchAll(/"([^"]+)"/g)) ex.add(m[1]);
@@ -670,35 +819,73 @@ function makeMyJobsClient(fx: { jobs: MjJob[]; details: MjDetail[] }) {
             const val = rest.join(".");
             const cell = String(j[col] ?? "");
             if (op === "eq") return cell === val;
-            if (op === "ilike") return cell.toLowerCase().startsWith(val.replace(/%$/, "").toLowerCase());
+            if (op === "ilike") {
+              return cell.toLowerCase().startsWith(
+                val.replace(/%$/, "").toLowerCase(),
+              );
+            }
             return false;
           })
         );
       }
       if (st.gteCol === "updated_at" && st.gteVal != null) {
-        rows = rows.filter((j) => String(j.updated_at ?? "") >= String(st.gteVal));
+        rows = rows.filter((j) =>
+          String(j.updated_at ?? "") >= String(st.gteVal)
+        );
       }
       return { data: rows.map((j) => ({ ...j })), error: null };
     }
     if (st.table === "makesafe_job_details") {
       let rows = fx.details.slice();
-      if (st.inCol === "job_id" && st.inVals) rows = rows.filter((d) => st.inVals.includes(d.job_id));
+      if (st.inCol === "job_id" && st.inVals) {
+        rows = rows.filter((d) => st.inVals.includes(d.job_id));
+      }
       return { data: rows.map((d) => ({ ...d })), error: null };
     }
     // job_assignments / purchase_orders / job_contacts — none seeded here.
     return { data: [], error: null };
   }
   function from(table: string) {
-    const st: any = { table, eq: {}, neq: {}, gteCol: null, gteVal: null, refOr: null, notIn: null, inCol: null, inVals: null };
+    const st: any = {
+      table,
+      eq: {},
+      neq: {},
+      gteCol: null,
+      gteVal: null,
+      refOr: null,
+      notIn: null,
+      inCol: null,
+      inVals: null,
+    };
     const b: any = {
       select: () => b,
-      eq: (k: string, v: unknown) => { st.eq[k] = v; return b; },
-      neq: (k: string, v: unknown) => { st.neq[k] = v; return b; },
-      gte: (k: string, v: string) => { st.gteCol = k; st.gteVal = v; return b; },
+      eq: (k: string, v: unknown) => {
+        st.eq[k] = v;
+        return b;
+      },
+      neq: (k: string, v: unknown) => {
+        st.neq[k] = v;
+        return b;
+      },
+      gte: (k: string, v: string) => {
+        st.gteCol = k;
+        st.gteVal = v;
+        return b;
+      },
       lt: () => b,
-      in: (k: string, arr: unknown[]) => { st.inCol = k; st.inVals = arr; return b; },
-      not: (k: string, op: string, v: string) => { if (k === "status" && op === "in") st.notIn = v; return b; },
-      or: (s: string, opts?: { referencedTable?: string }) => { st.refOr = { str: s, referencedTable: opts?.referencedTable ?? null }; return b; },
+      in: (k: string, arr: unknown[]) => {
+        st.inCol = k;
+        st.inVals = arr;
+        return b;
+      },
+      not: (k: string, op: string, v: string) => {
+        if (k === "status" && op === "in") st.notIn = v;
+        return b;
+      },
+      or: (s: string, opts?: { referencedTable?: string }) => {
+        st.refOr = { str: s, referencedTable: opts?.referencedTable ?? null };
+        return b;
+      },
       ilike: () => b,
       order: () => b,
       limit: () => b,
@@ -725,12 +912,36 @@ function myJobsCancelFixtures() {
   const iso = (ms: number) => new Date(ms).toISOString();
   return {
     jobs: [
-      { id: "j-recent", type: "makesafe", status: "cancelled", job_number: "SWF-70001", client_name: "Recent", updated_at: iso(now - 3 * 86_400_000) },
-      { id: "j-old", type: "makesafe", status: "cancelled", job_number: "SWF-70002", client_name: "Old", updated_at: iso(now - 200 * 86_400_000) },
+      {
+        id: "j-recent",
+        type: "makesafe",
+        status: "cancelled",
+        job_number: "SWF-70001",
+        client_name: "Recent",
+        updated_at: iso(now - 3 * 86_400_000),
+      },
+      {
+        id: "j-old",
+        type: "makesafe",
+        status: "cancelled",
+        job_number: "SWF-70002",
+        client_name: "Old",
+        updated_at: iso(now - 200 * 86_400_000),
+      },
     ],
     details: [
-      { job_id: "j-recent", cancel_reason: "builder_recalled", cancel_note: "recalled", cancelled_by: "hugo@x", cancelled_at: iso(now - 3 * 86_400_000) },
-      { job_id: "j-old", cancel_reason: "duplicate", cancelled_at: iso(now - 200 * 86_400_000) },
+      {
+        job_id: "j-recent",
+        cancel_reason: "builder_recalled",
+        cancel_note: "recalled",
+        cancelled_by: "hugo@x",
+        cancelled_at: iso(now - 3 * 86_400_000),
+      },
+      {
+        job_id: "j-old",
+        cancel_reason: "duplicate",
+        cancelled_at: iso(now - 200 * 86_400_000),
+      },
     ],
   };
 }
@@ -738,7 +949,15 @@ function myJobsCancelFixtures() {
 Deno.test("W2-A: a make-safe MANAGER's my_jobs includes a recently-cancelled make-safe with cancel_* attached", async () => {
   const client = makeMyJobsClient(myJobsCancelFixtures());
   // showAll=false, isDispatcher=false, isMakesafeManager=true, poolVerticals=['makesafe']
-  const grouped: any = await myJobs(client as any, "hugo-id", false, false, true, ["makesafe"], []);
+  const grouped: any = await myJobs(
+    client as any,
+    "hugo-id",
+    false,
+    false,
+    true,
+    ["makesafe"],
+    [],
+  );
   const cards = allCards(grouped);
   const card = cards.find((c) => c.jobs?.id === "j-recent");
   assert(!!card, "recently-cancelled make-safe present in manager my_jobs");
@@ -752,15 +971,37 @@ Deno.test("W2-A: a make-safe MANAGER's my_jobs includes a recently-cancelled mak
 
 Deno.test("W2-A: a cancelled make-safe older than 90 days is EXCLUDED from the feed", async () => {
   const client = makeMyJobsClient(myJobsCancelFixtures());
-  const grouped: any = await myJobs(client as any, "hugo-id", false, false, true, ["makesafe"], []);
+  const grouped: any = await myJobs(
+    client as any,
+    "hugo-id",
+    false,
+    false,
+    true,
+    ["makesafe"],
+    [],
+  );
   const cards = allCards(grouped);
-  assert(!cards.find((c) => c.jobs?.id === "j-old"), "the >90-day cancel is not fed");
+  assert(
+    !cards.find((c) => c.jobs?.id === "j-old"),
+    "the >90-day cancel is not fed",
+  );
 });
 
 Deno.test("W2-A: a NON-manager (no makesafe pool visibility) does NOT get the cancelled feed", async () => {
   const client = makeMyJobsClient(myJobsCancelFixtures());
   // isDispatcher=false, isMakesafeManager=false, poolVerticals=[]
-  const grouped: any = await myJobs(client as any, "crew-id", false, false, false, [], []);
+  const grouped: any = await myJobs(
+    client as any,
+    "crew-id",
+    false,
+    false,
+    false,
+    [],
+    [],
+  );
   const cards = allCards(grouped);
-  assert(!cards.find((c) => c.jobs?.id === "j-recent"), "non-manager gets no cancelled make-safe cards");
+  assert(
+    !cards.find((c) => c.jobs?.id === "j-recent"),
+    "non-manager gets no cancelled make-safe cards",
+  );
 });
