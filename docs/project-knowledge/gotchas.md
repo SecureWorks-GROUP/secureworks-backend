@@ -20,6 +20,14 @@ Use `scripts/deploy-edge-function.sh ops-api` and
 `sb.from('table').insert({...}).catch(() => {})` will CRASH with "catch is not a function".
 **Fix**: Use `try { await sb.from('table').insert({...}) } catch (_) { }` instead.
 
+### A wrong column name returns zero rows, not an error
+PostgREST rejects a select naming a non-existent column with a 400 (`42703`): `data` is null and `error` is set. Call sites that destructure `{ data }` only degrade silently to zero rows — a $0 pipeline figure, an empty digest, or an unmatched invoice reads exactly like a quiet week. Several of these survived for months.
+
+**Fix pattern**: verify names against `information_schema.columns` (not the migrations); alias in the select to keep the response shape (`select('date:invoice_date')`) but use the REAL name in `.eq()`/`.gte()`/`.order()`; and check `error` on any read whose emptiness is business-meaningful — `logQueryErrors()` in `_shared/pgrest.ts` labels a `Promise.all` batch. Live names that commonly surprise are listed in `database-schema.md` and `AGENTS.md`.
+
+### Apply migrations before deploying edge functions
+Migrations and edge deploys are separate manual steps. Deploy a function that selects a column the migration has not added yet and, per the gotcha above, it reports zero instead of failing. `jobs.quoted_value` (`20260717000001`) is the current case — `daily-digest`, `ops-api` and `reporting-api` all read it.
+
 ### PostgREST 1000-row limit
 Supabase REST API returns max 1000 rows by default. MUST use `fetchAll()` helper with `.range()` pagination for any query that might return > 1000 rows.
 
