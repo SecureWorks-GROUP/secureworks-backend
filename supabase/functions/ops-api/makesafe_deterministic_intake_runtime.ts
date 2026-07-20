@@ -25,13 +25,25 @@ export interface DeterministicRuntimeOptions {
   onlyUnscanned?: boolean;
   nowIso?: string;
   maxCases?: number;
+  allowSourcePostIds?: readonly string[];
+  allowInstructionKeys?: readonly string[];
+  includeSanitizedCases?: boolean;
+  requireAllAllowlistMatches?: boolean;
   approveDraft?: (client: any, body: any) => Promise<any>;
 }
 
-// An edge invocation has a hard wall clock. Each run commits a bounded slice of
-// cases and stamps them as it goes, so a timeout never discards accounting for
-// drafts and jobs that already exist.
-const DEFAULT_MAX_CASES_PER_RUN = 25;
+export interface DeterministicRolloutControls {
+  mode: "legacy" | "deterministic";
+  maxCases: number;
+  sourcePostIds: readonly string[];
+  instructionKeys: readonly string[];
+}
+
+// There is deliberately no backlog-sized runtime default. The DB starts at one,
+// and both DB and runtime reject caps outside this explicit canary/batch bound.
+const DEFAULT_MAX_CASES_PER_RUN = 1;
+const MAX_CASES_PER_RUN = 10;
+const MAX_ALLOWLIST_ITEMS = 50;
 // Repeat failures must not spend the commit budget, but they still cost time, so
 // one run stops after this many attempts regardless of how many committed.
 const MAX_ATTEMPT_MULTIPLIER = 4;
@@ -62,6 +74,47 @@ export interface DeterministicRuntimeReport {
   // True when the run spent its attempt ceiling without committing a single case.
   // Repeat failures crowding out advanceable work is then visible, not silent.
   attempt_cap_reached_without_commit: boolean;
+  selection: {
+    source_allowlist_count: number;
+    instruction_allowlist_count: number;
+    selected_cases: number;
+    selected_sources: number;
+    unmatched_source_allowlist: number;
+    unmatched_instruction_allowlist: number;
+  };
+  identity_floor: {
+    unit: "canonical_case";
+    known_builder_work_candidates: number;
+    reached: number;
+    shortfall: number;
+    percentage: number | null;
+    formula: "reached / known_builder_work_candidates * 100";
+    by_builder: Record<
+      string,
+      { candidates: number; reached: number; shortfall: number }
+    >;
+  };
+  proposed_cases?: Array<{
+    case_key_sha256: string;
+    outcome: DeterministicCasePlan["state"];
+    reason_code: DeterministicCasePlan["reasonCode"];
+    builder: string;
+    job_family: string | null;
+    source_count: number;
+    blocked_reasons: readonly string[];
+    missing_fields: readonly string[];
+    conflicting_field_names: string[];
+    parent_relation: DeterministicCasePlan["parentRelation"];
+    identity_evidence: {
+      known_company: boolean;
+      external_reference: boolean;
+      builder_work_order: boolean;
+      builder_purchase_order: boolean;
+      client_name: boolean;
+      site_address: boolean;
+      designated_pdf: boolean;
+    };
+  }>;
   by_builder_and_outcome: Record<string, Record<string, number>>;
   by_builder_and_reason: Record<string, Record<string, number>>;
   // Non-PII failure classification. Keys are message classes, never source content.
@@ -116,6 +169,83 @@ export async function loadDeterministicIntakeMode(
     throw new Error(`intake mode read failed: ${error.message || error}`);
   }
   return selectIntakeMode(data?.intake_mode);
+}
+
+function exactAllowlist(values: unknown, label: string): string[] {
+  if (!Array.isArray(values) || values.length > MAX_ALLOWLIST_ITEMS) {
+    throw new Error(
+      `${label} must be an array of at most ${MAX_ALLOWLIST_ITEMS} exact values`,
+    );
+  }
+  const result = values.map((value) => String(value));
+  if (result.some((value) => !value.trim() || value !== value.trim())) {
+    throw new Error(`${label} contains an empty or non-canonical value`);
+  }
+  if (new Set(result).size !== result.length) {
+    throw new Error(`${label} contains duplicate values`);
+  }
+  return result;
+}
+
+/** Reads rollout authority from the single DB settings row. An old schema may
+ * continue in legacy mode, but deterministic mode is never allowed to run when
+ * the cap/allowlist columns cannot be proved. */
+export async function loadDeterministicRolloutControls(
+  client: any,
+): Promise<DeterministicRolloutControls> {
+  const columns = [
+    "intake_mode",
+    "deterministic_max_cases_per_run",
+    "deterministic_source_allowlist",
+    "deterministic_instruction_allowlist",
+  ].join(",");
+  const { data, error } = await client.from("makesafe_cron_settings")
+    .select(columns)
+    .eq("id", true)
+    .maybeSingle();
+  if (error) {
+    const missingControls = String(error.code || "") === "42703" ||
+      /deterministic_(?:max_cases_per_run|source_allowlist|instruction_allowlist).*(?:does not exist|schema cache|column)/i
+        .test(error.message || "");
+    if (!missingControls) {
+      throw new Error(
+        `deterministic rollout controls read failed: ${error.message || error}`,
+      );
+    }
+    const mode = await loadDeterministicIntakeMode(client);
+    if (mode === "deterministic") {
+      throw new Error(
+        "deterministic mode is set but DB rollout controls are unavailable",
+      );
+    }
+    return {
+      mode: "legacy",
+      maxCases: 1,
+      sourcePostIds: [],
+      instructionKeys: [],
+    };
+  }
+  const mode = selectIntakeMode(data?.intake_mode);
+  const maxCases = Number(data?.deterministic_max_cases_per_run);
+  if (
+    !Number.isInteger(maxCases) || maxCases < 1 || maxCases > MAX_CASES_PER_RUN
+  ) {
+    throw new Error(
+      `deterministic rollout cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
+    );
+  }
+  return {
+    mode,
+    maxCases,
+    sourcePostIds: exactAllowlist(
+      data?.deterministic_source_allowlist,
+      "deterministic source allowlist",
+    ),
+    instructionKeys: exactAllowlist(
+      data?.deterministic_instruction_allowlist,
+      "deterministic instruction allowlist",
+    ),
+  };
 }
 
 async function fetchAll(
@@ -293,6 +423,148 @@ function byBuilderReason(
   return result;
 }
 
+function selectedPlan(
+  fullPlan: DeterministicIntakePlan,
+  sourcePostIds: readonly string[],
+  instructionKeys: readonly string[],
+  requireAllMatches: boolean,
+): DeterministicIntakePlan {
+  const sourceSet = new Set(sourcePostIds);
+  const instructionSet = new Set(instructionKeys);
+  const cases = fullPlan.cases.filter((intakeCase) =>
+    instructionSet.has(intakeCase.instructionKey) ||
+    intakeCase.sourcePostIds.some((postId) => sourceSet.has(postId))
+  );
+  const matchedSources = new Set(
+    cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
+  );
+  const matchedInstructions = new Set(
+    cases.map((intakeCase) => intakeCase.instructionKey),
+  );
+  const missingSourceCount =
+    sourcePostIds.filter((postId) => !matchedSources.has(postId)).length;
+  const missingInstructionCount =
+    instructionKeys.filter((key) => !matchedInstructions.has(key)).length;
+  if (requireAllMatches && (missingSourceCount || missingInstructionCount)) {
+    throw new Error(
+      `exact deterministic allowlist did not resolve (${missingSourceCount} source ids, ${missingInstructionCount} instruction keys)`,
+    );
+  }
+  const sourceClassifications = cases.flatMap((intakeCase) =>
+    intakeCase.sourceClassifications
+  );
+  const uniqueSources = new Set(
+    sourceClassifications.map((item) => item.postId),
+  );
+  return {
+    ...fullPlan,
+    cases,
+    sourceClassifications,
+    totals: {
+      sources: uniqueSources.size,
+      cases: cases.length,
+      confirmed:
+        sourceClassifications.filter((item) =>
+          item.outcome === "confirmed_canonical_input"
+        ).length,
+      blocked:
+        sourceClassifications.filter((item) =>
+          item.outcome === "visible_blocked_with_recovery"
+        ).length,
+      exceptions:
+        sourceClassifications.filter((item) =>
+          item.outcome === "reason_coded_exception"
+        ).length,
+      nonWork:
+        sourceClassifications.filter((item) =>
+          item.outcome === "accounted_non_work"
+        ).length,
+      unaccounted: uniqueSources.size -
+        new Set(sourceClassifications.map((item) => item.postId)).size,
+    },
+  };
+}
+
+function identityFloorFacts(
+  plan: DeterministicIntakePlan,
+): DeterministicRuntimeReport["identity_floor"] {
+  const excludedReasons = new Set([
+    "cancellation",
+    "duplicate",
+    "revision",
+    "non_makesafe",
+  ]);
+  const candidates = plan.cases.filter((intakeCase) =>
+    Boolean(intakeCase.identity.companyId) &&
+    intakeCase.state !== "accounted_non_wo" &&
+    !excludedReasons.has(String(intakeCase.reasonCode || ""))
+  );
+  const byBuilder: DeterministicRuntimeReport["identity_floor"]["by_builder"] =
+    {};
+  let reached = 0;
+  for (const intakeCase of candidates) {
+    const builder = intakeCase.identity.builderSlug || "known";
+    byBuilder[builder] ||= { candidates: 0, reached: 0, shortfall: 0 };
+    byBuilder[builder].candidates++;
+    const reaches = intakeCase.state === "confirmed_live_job" ||
+      intakeCase.state === "blocked_live_job";
+    if (reaches) {
+      reached++;
+      byBuilder[builder].reached++;
+    } else byBuilder[builder].shortfall++;
+  }
+  return {
+    unit: "canonical_case",
+    known_builder_work_candidates: candidates.length,
+    reached,
+    shortfall: candidates.length - reached,
+    percentage: candidates.length === 0
+      ? null
+      : Math.round((reached / candidates.length) * 10_000) / 100,
+    formula: "reached / known_builder_work_candidates * 100",
+    by_builder: byBuilder,
+  };
+}
+
+async function sha256Hex(value: string | Uint8Array): Promise<string> {
+  const bytes = typeof value === "string"
+    ? new TextEncoder().encode(value)
+    : value;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    bytes as unknown as BufferSource,
+  );
+  return [...new Uint8Array(digest)].map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+async function sanitizedCases(
+  plan: DeterministicIntakePlan,
+): Promise<NonNullable<DeterministicRuntimeReport["proposed_cases"]>> {
+  return await Promise.all(plan.cases.map(async (intakeCase) => ({
+    case_key_sha256: await sha256Hex(intakeCase.instructionKey),
+    outcome: intakeCase.state,
+    reason_code: intakeCase.reasonCode,
+    builder: intakeCase.identity.builderSlug || "unknown",
+    job_family: intakeCase.identity.jobFamily || null,
+    source_count: intakeCase.sourcePostIds.length,
+    blocked_reasons: intakeCase.blockedReasons,
+    missing_fields: intakeCase.missingFields,
+    conflicting_field_names: Object.keys(intakeCase.conflictingFields).sort(),
+    parent_relation: intakeCase.parentRelation,
+    identity_evidence: {
+      known_company: Boolean(intakeCase.identity.companyId),
+      external_reference: Boolean(intakeCase.identity.externalRefCanonical),
+      builder_work_order: Boolean(intakeCase.identity.builderWoCanonical),
+      builder_purchase_order: Boolean(intakeCase.identity.builderPoCanonical),
+      client_name: Boolean(intakeCase.identity.clientName),
+      site_address: Boolean(intakeCase.identity.siteAddress),
+      designated_pdf: intakeCase.recoveryCursor.sideEffectKeys.pdfs.length > 0,
+    },
+  })));
+}
+
 function sourceRole(plan: DeterministicCasePlan, postId: string): string {
   const eventKinds = plan.story.filter((event) => event.sourcePostId === postId)
     .map((event) => event.kind);
@@ -410,11 +682,12 @@ function casePayload(
 
 async function stageAttachments(
   client: any,
+  caseId: string,
   plan: DeterministicCasePlan,
   sources: Map<string, DeterministicSourceItem>,
   onStorageBlocker: (blocker: string) => void,
 ): Promise<any[]> {
-  const result: any[] = [];
+  const result = new Map<string, any>();
   const attachments = plan.sourcePostIds.flatMap((id) =>
     sources.get(id)?.attachments || []
   )
@@ -423,13 +696,6 @@ async function stageAttachments(
       (/pdf/i.test(a.contentType || "") || /\.pdf$/i.test(a.name || ""))
     );
   for (const attachment of attachments) {
-    const safeName = (attachment.name || "work-order.pdf").replace(
-      /[^a-zA-Z0-9._-]/g,
-      "_",
-    ).slice(-80);
-    const path = `makesafe-deterministic/${
-      encodeURIComponent(plan.instructionFingerprint)
-    }/${encodeURIComponent(attachment.id)}/${safeName}`;
     const { data: blob, error: downloadError } = await client.storage.from(
       "makesafe-emails",
     ).download(attachment.storagePath!);
@@ -438,27 +704,98 @@ async function stageAttachments(
       continue;
     }
     const bytes = new Uint8Array(await blob.arrayBuffer());
-    const { error: uploadError } = await client.storage.from("job-documents")
-      .upload(path, bytes, {
-        contentType: "application/pdf",
-        upsert: true,
+    const contentSha256 = await sha256Hex(bytes);
+    const artifactKey = `pdf:${plan.instructionKey}:sha256:${contentSha256}`;
+    if (result.has(artifactKey)) continue;
+
+    const { data: existing, error: existingError } = await client.from(
+      "makesafe_intake_artifacts",
+    )
+      .select("case_id,artifact_key,status,storage_locator")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .eq("artifact_key", artifactKey)
+      .maybeSingle();
+    if (existingError) {
+      throw new Error(
+        `artifact ledger read failed: ${
+          existingError.message || existingError
+        }`,
+      );
+    }
+    let path = existing?.status === "completed"
+      ? existing.storage_locator
+      : null;
+    if (existing && existing.case_id !== caseId) {
+      throw new Error("artifact ledger case mismatch");
+    }
+    if (!path) {
+      path = `makesafe-deterministic/${
+        encodeURIComponent(plan.instructionFingerprint)
+      }/sha256-${contentSha256}.pdf`;
+      const { error: uploadError } = await client.storage.from("job-documents")
+        .upload(path, bytes, {
+          contentType: "application/pdf",
+          upsert: true,
+        });
+      if (uploadError) {
+        onStorageBlocker("job-documents_upload_failed");
+        continue;
+      }
+      const { error: ledgerError } = await client.from(
+        "makesafe_intake_artifacts",
+      ).insert({
+        org_id: DEFAULT_ORG_ID,
+        case_id: caseId,
+        artifact_key: artifactKey,
+        artifact_kind: "pdf",
+        status: "completed",
+        storage_locator: path,
+        evidence: {
+          content_sha256: contentSha256,
+          size_bytes: bytes.byteLength,
+        },
+        recovery_cursor: { version: DETERMINISTIC_INTAKE_VERSION },
+        completed_at: new Date().toISOString(),
       });
-    if (uploadError) {
-      onStorageBlocker("job-documents_upload_failed");
-      continue;
+      if (ledgerError && String(ledgerError.code) !== "23505") {
+        throw new Error(
+          `artifact ledger insert failed: ${
+            ledgerError.message || ledgerError
+          }`,
+        );
+      }
+      if (ledgerError) {
+        const { data: raced, error: racedError } = await client.from(
+          "makesafe_intake_artifacts",
+        )
+          .select("case_id,artifact_key,status,storage_locator")
+          .eq("org_id", DEFAULT_ORG_ID)
+          .eq("artifact_key", artifactKey)
+          .maybeSingle();
+        if (
+          racedError || raced?.case_id !== caseId ||
+          raced?.status !== "completed"
+        ) {
+          throw new Error(
+            "artifact ledger race did not resolve to the approved case",
+          );
+        }
+        path = raced.storage_locator;
+      }
     }
     const { data: publicUrl } = client.storage.from("job-documents")
       .getPublicUrl(path);
-    result.push({
+    result.set(artifactKey, {
       name: attachment.name,
       file_name: attachment.name,
       storage_url: path,
       pdf_url: publicUrl?.publicUrl || null,
       is_work_order: true,
-      deterministic_artifact_key: `pdf:${plan.instructionKey}:${attachment.id}`,
+      deterministic_artifact_key: artifactKey,
+      content_sha256: contentSha256,
     });
   }
-  return result;
+  return [...result.values()];
 }
 
 async function findCase(
@@ -572,6 +909,7 @@ async function findDraft(
 
 async function ensureDraftAndJob(
   client: any,
+  caseId: string,
   plan: DeterministicCasePlan,
   sourceMap: Map<string, DeterministicSourceItem>,
   approveDraft: (client: any, body: any) => Promise<any>,
@@ -591,6 +929,7 @@ async function ensureDraftAndJob(
     const primary = sourceMap.get(plan.primarySourcePostId)!;
     const attachments = await stageAttachments(
       client,
+      caseId,
       plan,
       sourceMap,
       onStorageBlocker,
@@ -849,8 +1188,45 @@ export async function runDeterministicIntake(
   const days = Math.max(1, Math.min(options.days ?? 60, 180));
   const nowIso = options.nowIso || new Date().toISOString();
   const onlyUnscanned = options.onlyUnscanned === true;
+  const allowSourcePostIds = exactAllowlist(
+    options.allowSourcePostIds ?? [],
+    "source allowlist",
+  );
+  const allowInstructionKeys = exactAllowlist(
+    options.allowInstructionKeys ?? [],
+    "instruction allowlist",
+  );
+  const hasAllowlist = allowSourcePostIds.length > 0 ||
+    allowInstructionKeys.length > 0;
+  if (!dryRun && !hasAllowlist) {
+    throw new Error(
+      "deterministic live mode requires a non-empty exact DB allowlist",
+    );
+  }
+  if (options.includeSanitizedCases && !hasAllowlist) {
+    throw new Error(
+      "case-level dark observe requires a non-empty exact allowlist",
+    );
+  }
   const input = await readInputs(client, { days, onlyUnscanned, nowIso });
-  const plan = buildDeterministicIntakePlan(input.sources, input.profiles);
+  const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
+  const requireAllAllowlistMatches =
+    options.requireAllAllowlistMatches === true ||
+    options.includeSanitizedCases === true;
+  const plan = hasAllowlist
+    ? selectedPlan(
+      fullPlan,
+      allowSourcePostIds,
+      allowInstructionKeys,
+      requireAllAllowlistMatches,
+    )
+    : fullPlan;
+  const matchedCaseSources = new Set(
+    plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
+  );
+  const matchedCaseKeys = new Set(
+    plan.cases.map((intakeCase) => intakeCase.instructionKey),
+  );
   const report: DeterministicRuntimeReport = {
     ok: true,
     mode: "deterministic",
@@ -873,11 +1249,26 @@ export async function runDeterministicIntake(
       job_creation_deferred: 0,
     },
     attempt_cap_reached_without_commit: false,
+    selection: {
+      source_allowlist_count: allowSourcePostIds.length,
+      instruction_allowlist_count: allowInstructionKeys.length,
+      selected_cases: plan.cases.length,
+      selected_sources: plan.totals.sources,
+      unmatched_source_allowlist:
+        allowSourcePostIds.filter((postId) => !matchedCaseSources.has(postId))
+          .length,
+      unmatched_instruction_allowlist:
+        allowInstructionKeys.filter((key) => !matchedCaseKeys.has(key)).length,
+    },
+    identity_floor: identityFloorFacts(plan),
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),
     write_failure_reasons: {},
     storage_blockers: [],
   };
+  if (options.includeSanitizedCases) {
+    report.proposed_cases = await sanitizedCases(plan);
+  }
   if (dryRun) return report;
   if (!options.approveDraft) {
     throw new Error(
@@ -892,7 +1283,14 @@ export async function runDeterministicIntake(
       report.storage_blockers.push(blocker);
     }
   };
-  const maxCases = Math.max(1, options.maxCases ?? DEFAULT_MAX_CASES_PER_RUN);
+  const maxCases = Number(options.maxCases ?? DEFAULT_MAX_CASES_PER_RUN);
+  if (
+    !Number.isInteger(maxCases) || maxCases < 1 || maxCases > MAX_CASES_PER_RUN
+  ) {
+    throw new Error(
+      `deterministic runtime cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
+    );
+  }
   // A case can only advance if it is new, if it carries evidence the case row has
   // not accounted yet, or if its persisted state no longer matches what this plan
   // would write for the job it already has. Everything else is stuck until more
@@ -936,7 +1334,6 @@ export async function runDeterministicIntake(
     ...jobRetries.slice(0, retryHead),
     ...fresh,
     ...jobRetries.slice(retryHead),
-    ...plan.cases.filter((c) => ranked.get(c) === "stuck"),
   ];
   // The budget counts cases that actually committed, so a failure never spends a
   // commit slot. Attempts still carry their own ceiling so one run stays bounded.
@@ -981,6 +1378,7 @@ export async function runDeterministicIntake(
       if (wantsJob && transitionAllowed) {
         const live = await ensureDraftAndJob(
           client,
+          saved.caseRow.id,
           casePlan,
           sourceMap,
           options.approveDraft,

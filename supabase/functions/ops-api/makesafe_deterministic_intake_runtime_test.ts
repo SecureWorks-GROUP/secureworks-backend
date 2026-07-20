@@ -72,6 +72,29 @@ class FakeQuery {
   private run(): { data: any[]; error: any } {
     this.store[this.table] ||= [];
     if (this.op === "insert") {
+      const duplicate = this.table === "makesafe_intake_case_sources"
+        ? this.store[this.table].some((row) =>
+          row.org_id === this.payload.org_id &&
+          row.post_id === this.payload.post_id
+        )
+        : this.table === "makesafe_intake_artifacts"
+        ? this.store[this.table].some((row) =>
+          row.org_id === this.payload.org_id &&
+          row.artifact_key === this.payload.artifact_key
+        )
+        : this.table === "makesafe_intake_drafts" &&
+            this.payload.deterministic_key
+        ? this.store[this.table].some((row) =>
+          row.org_id === this.payload.org_id &&
+          row.deterministic_key === this.payload.deterministic_key
+        )
+        : false;
+      if (duplicate) {
+        return {
+          data: [],
+          error: { code: "23505", message: "duplicate key value" },
+        };
+      }
       const row = {
         id: `${this.table}-${this.store[this.table].length + 1}`,
         ...this.payload,
@@ -171,6 +194,7 @@ function baseStore(): Store {
     email_attachments: [],
     makesafe_intake_cases: [],
     makesafe_intake_case_sources: [],
+    makesafe_intake_artifacts: [],
     makesafe_intake_drafts: [],
     makesafe_intake_health: [],
   };
@@ -275,6 +299,7 @@ Deno.test("live run persists thread coordinates onto case sources", async () => 
     dryRun: false,
     days: 30,
     nowIso: NOW,
+    allowSourcePostIds: ["s-1"],
     approveDraft,
   });
 
@@ -304,6 +329,7 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
     days: 30,
     nowIso: NOW,
     onlyUnscanned: true,
+    allowSourcePostIds: ["late-1"],
     approveDraft,
   });
   assertEquals(first.totals.jobs_created, 0);
@@ -329,6 +355,7 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
     days: 30,
     nowIso: NOW,
     onlyUnscanned: true,
+    allowSourcePostIds: ["late-1"],
     approveDraft,
   });
 
@@ -339,6 +366,46 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
   assertEquals(second.totals.write_failures, 0);
   // Now that it is settled, the source is stamped and drops out of the next window.
   assertEquals(store.emails[0].makesafe_scanned_at, NOW);
+});
+
+Deno.test("live default N=1 exact allowlist cannot pick up unrelated backlog", async () => {
+  const store = baseStore();
+  for (const source of ["approved-one", "unapproved-backlog"]) {
+    store.emails.push(email({
+      post_id: source,
+      subject: `NEW WORK ORDER MLB-${
+        source === "approved-one" ? "63001" : "63002"
+      } Work Order: WO-${source === "approved-one" ? "63001" : "63002"}`,
+      body_content: `Client: ${source}\nAddress: 1 Exact Way, Perth`,
+    }));
+    store.email_attachments.push({
+      id: `att-${source}`,
+      email_id: source,
+      name: "wo.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${source}.pdf`,
+      status: "uploaded",
+      size_bytes: 1024,
+    });
+  }
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    allowSourcePostIds: ["approved-one"],
+    approveDraft,
+  });
+
+  assertEquals(report.selection.source_allowlist_count, 1);
+  assertEquals(report.selection.selected_cases, 1);
+  assertEquals(report.totals.cases_attempted, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources[0].post_id, "approved-one");
+  assertEquals(
+    store.emails.find((row) => row.post_id === "unapproved-backlog")
+      ?.makesafe_scanned_at,
+    null,
+  );
 });
 
 Deno.test("live batch is capped per invocation and defers the remainder", async () => {
@@ -367,6 +434,7 @@ Deno.test("live batch is capped per invocation and defers the remainder", async 
     days: 30,
     nowIso: NOW,
     maxCases: 2,
+    allowSourcePostIds: ["cap-1", "cap-2", "cap-3", "cap-4"],
     approveDraft,
   });
 
@@ -402,6 +470,7 @@ Deno.test("stuck exceptions cannot consume the whole per-run budget", async () =
     nowIso: NOW,
     onlyUnscanned: true,
     maxCases: 2,
+    allowSourcePostIds: ["stuck-1", "stuck-2"],
     approveDraft,
   });
   assertEquals(first.totals.jobs_created, 0);
@@ -431,6 +500,7 @@ Deno.test("stuck exceptions cannot consume the whole per-run budget", async () =
     nowIso: NOW,
     onlyUnscanned: true,
     maxCases: 2,
+    allowSourcePostIds: ["stuck-1", "stuck-2", "fresh-1"],
     approveDraft,
   });
 
@@ -500,6 +570,7 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
     nowIso: NOW,
     onlyUnscanned: true,
     maxCases: 1,
+    allowSourcePostIds: ["fail-1", "fail-2", "good-1"],
     approveDraft: flakyApprove,
   });
 
@@ -548,6 +619,7 @@ Deno.test("repeat failures are deprioritised on the next run", async () => {
     nowIso: NOW,
     onlyUnscanned: true,
     maxCases: 1,
+    allowSourcePostIds: ["dead-1", "dead-2", "dead-3", "dead-4"],
     approveDraft: deadApprove,
   });
   assertEquals(first.totals.jobs_created, 0);
@@ -580,6 +652,7 @@ Deno.test("repeat failures are deprioritised on the next run", async () => {
     nowIso: NOW,
     onlyUnscanned: true,
     maxCases: 1,
+    allowSourcePostIds: ["dead-1", "dead-2", "dead-3", "dead-4", "late-1"],
     approveDraft: deadApprove,
   });
 
@@ -616,6 +689,7 @@ Deno.test("a disallowed state transition never creates an orphan job", async () 
     dryRun: false,
     days: 30,
     nowIso: NOW,
+    allowSourcePostIds: ["orphan-1"],
     approveDraft,
   });
   const persisted = store.makesafe_intake_cases[0];
@@ -634,6 +708,7 @@ Deno.test("a disallowed state transition never creates an orphan job", async () 
     dryRun: false,
     days: 30,
     nowIso: NOW,
+    allowSourcePostIds: ["orphan-1"],
     approveDraft,
   });
 
@@ -678,6 +753,7 @@ Deno.test("write failures are classified without retaining source content", asyn
     dryRun: false,
     days: 30,
     nowIso: NOW,
+    allowSourcePostIds: ["fail-1"],
     approveDraft: () => Promise.resolve({ job: null }),
   });
 
@@ -686,6 +762,143 @@ Deno.test("write failures are classified without retaining source content", asyn
   const serialised = JSON.stringify(report);
   assert(!serialised.includes("Fail Client"));
   assert(!serialised.includes("12 Fail Way"));
+});
+
+Deno.test("dark observe is case-level, sanitized, exact, zero-write and zero-AI", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "dark-secret-source",
+    subject: "NEW WORK ORDER MLB-61001 Work Order: WO-61001",
+    body_content: "Client: Private Person\nAddress: 99 Secret Street, Perth",
+  }));
+  store.email_attachments.push({
+    id: "dark-att",
+    email_id: "dark-secret-source",
+    name: "private-client-work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/private.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const before = JSON.stringify(store);
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+    allowSourcePostIds: ["dark-secret-source"],
+    includeSanitizedCases: true,
+  });
+
+  assertEquals(JSON.stringify(store), before);
+  assertEquals(report.ai_calls, 0);
+  assertEquals(report.dry_run, true);
+  assertEquals(report.selection.selected_cases, 1);
+  assertEquals(report.proposed_cases?.length, 1);
+  const serialized = JSON.stringify(report);
+  for (
+    const forbidden of [
+      "dark-secret-source",
+      "Private Person",
+      "99 Secret Street",
+      "WO-61001",
+      "private-client-work-order.pdf",
+    ]
+  ) assert(!serialized.includes(forbidden), `dark output leaked ${forbidden}`);
+});
+
+Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no side effects", async () => {
+  const store = baseStore();
+  store.job_assignments = [];
+  store.work_orders = [];
+  store.xero_invoices = [];
+  store.outbound_messages = [];
+  store.emails.push(
+    email({
+      post_id: "twin-a",
+      conversation_id: "twin-conversation",
+      subject: "NEW WORK ORDER MLB-62001 Work Order: WO-62001",
+      body_content: "Client: Twin Client\nAddress: 1 Twin Way, Perth",
+    }),
+    email({
+      post_id: "twin-b",
+      conversation_id: "twin-conversation",
+      subject: "NEW WORK ORDER MLB-62001 Work Order: WO-62001",
+      body_content: "Client: Twin Client\nAddress: 1 Twin Way, Perth",
+    }),
+  );
+  for (const source of ["twin-a", "twin-b"]) {
+    store.email_attachments.push({
+      id: `att-${source}`,
+      email_id: source,
+      name: "wo.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${source}.pdf`,
+      status: "uploaded",
+      size_bytes: 3,
+    });
+  }
+  let approvals = 0;
+  const approving = () => {
+    approvals++;
+    return Promise.resolve({ job: { id: "job-twin" } });
+  };
+  const client = fakeClient(store);
+  const first = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxCases: 1,
+    allowSourcePostIds: ["twin-a"],
+    approveDraft: approving,
+  });
+  assertEquals(first.ai_calls, 0);
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 2);
+  assertEquals(store.makesafe_intake_artifacts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].attachments_json.length, 1);
+  assertEquals(approvals, 1);
+
+  const counts = Object.fromEntries(
+    Object.entries(store).map(([table, rows]) => [table, rows.length]),
+  );
+  const second = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: "2026-07-20T12:02:00.000Z",
+    onlyUnscanned: false,
+    maxCases: 1,
+    allowSourcePostIds: ["twin-a"],
+    requireAllAllowlistMatches: true,
+    approveDraft: approving,
+  });
+  assertEquals(second.selection.selected_cases, 1);
+  assertEquals(second.totals.cases_attempted, 0);
+  assertEquals(second.totals.case_rows_created, 0);
+  assertEquals(second.totals.source_rows_created, 0);
+  assertEquals(second.totals.drafts_created, 0);
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(second.ai_calls, 0);
+  assertEquals(approvals, 1);
+  for (
+    const table of [
+      "makesafe_intake_cases",
+      "makesafe_intake_case_sources",
+      "makesafe_intake_artifacts",
+      "makesafe_intake_drafts",
+      "job_assignments",
+      "work_orders",
+      "xero_invoices",
+      "outbound_messages",
+    ]
+  ) {
+    assertEquals(
+      store[table].length,
+      counts[table],
+      `${table} changed on replay`,
+    );
+  }
 });
 
 Deno.test("storage failure surfaces a storage blocker instead of staying silent", async () => {
@@ -717,9 +930,18 @@ Deno.test("storage failure surfaces a storage blocker instead of staying silent"
     dryRun: false,
     days: 30,
     nowIso: NOW,
+    allowSourcePostIds: ["blk-1"],
     approveDraft,
   });
 
   assertEquals(report.storage_blockers, ["makesafe-emails_download_failed"]);
   assertEquals(report.write_failure_reasons.attachment_staging, 1);
+  assertEquals(report.ai_calls, 0);
+  assertEquals(report.totals.drafts_created, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.job_assignments?.length ?? 0, 0);
+  assertEquals(store.work_orders?.length ?? 0, 0);
+  assertEquals(store.xero_invoices?.length ?? 0, 0);
+  assertEquals(store.outbound_messages?.length ?? 0, 0);
 });
