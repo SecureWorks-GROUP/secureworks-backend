@@ -74,7 +74,10 @@ Rules:
   `CAL_FINANCIAL_COLUMNS` applies: verify names against
   `information_schema.columns`, not the migrations. `ops_summary` also enumerates
   `jobs_needing_scheduling` (`OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS`) and its
-  active-jobs count read (`OPS_SUMMARY_ACTIVE_JOB_COLUMNS`).
+  active-jobs count read (`OPS_SUMMARY_ACTIVE_JOB_COLUMNS`). Because explicit
+  projections turn schema drift into PostgREST 400s, all three go through
+  `logQueryErrors()` (see the live-schema section below) so a drifted column name
+  is logged instead of surfacing as a quiet day on the board.
 - `calendar_events` `include_financials=true` enumerates columns
   (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
   in sync with the LIVE `calendar_events` view — check
@@ -123,11 +126,25 @@ cannot be used. With it, a read-only check on 2026-07-20 returned zero candidate
 The fallback recovers neighbours ONLY — the old `value` chain read properties off
 the raw column, so a string blob yielded 0 there, and "fixing" it would be a
 behaviour change. The probe logs and degrades rather than failing the board if it
-errors.
+errors, and it is skipped entirely when the endpoint's `type` filter is set to
+anything other than `fencing`.
+
+The probe is hard-capped at `PIPELINE_MALFORMED_PRICING_LIMIT` (100 rows). The
+null-path predicates describe today's blob shape, not an invariant: if the
+fencing quote format stops writing those exact paths, every non-empty fencing row
+becomes a candidate and an uncapped probe would refetch full blobs up to the
+PostgREST 1000-row ceiling on every `pipeline` request — silently restoring the
+payload this projection removes. Hitting the cap is a data problem to clean up
+separately, so the probe `console.warn`s loudly and leaves neighbours beyond the
+cap unrecovered rather than degrading quietly.
 
 Related pre-existing behaviour, deliberately unchanged: `ops_summary`'s
-`today_schedule` omits `job_number`. Adding it would be an API change, not a
-performance change.
+`today_schedule` omits `job_number`, and its `not_invoiced` attention items emit
+`client`/`suburb` as `undefined` because the active-jobs read never selected
+`client_name`/`site_suburb`. `OPS_SUMMARY_ACTIVE_JOB_COLUMNS` (`id, status,
+type`) preserves both omissions exactly — it is NOT a regression introduced by
+the narrowing. Populating either would be an API change, not a performance
+change.
 
 ## `job_intelligence` Shape Differs Between Live and Migrations
 
@@ -188,7 +205,11 @@ migration FIRST — otherwise the query 400s and, per the entry above, silently
 reports zero. `jobs.quoted_value`
 (`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
 `daily-digest` selects it, and as of 2026-07-20 the migration is still NOT
-applied in production (a read-only check returned `42703`). `ops-api` and
+applied in production (a read-only check returned `42703`). **That means the four
+`daily-digest` reads that select `quoted_value` are 400ing in production right
+now** and, per the entry above, degrade to empty — the sales conversion,
+pipeline, and margin-trend sections of the digest silently report zero. This is PRE-EXISTING and unrelated to the `ops-api` lean-read work; the fix
+is to apply `20260717000001_jobs_quoted_value_generated.sql`. `ops-api` and
 `reporting-api` do not select it — `reporting-api`'s `quoted_value` is a response
 key derived from `pricing_json`, and `ops-api` `pipeline` deliberately projects
 `pricing_json` paths instead so the read is not coupled to migration order.
