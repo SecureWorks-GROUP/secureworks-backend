@@ -34,13 +34,37 @@ The deterministic branch imports no model SDK and has no AI fallback. Health rec
 
 ## Query and payload constraints
 
-The replay/runtime reads only named columns. Email reads paginate explicitly in
-500-row pages and attachment IDs are fetched in bounded batches. It never selects
+The replay/runtime reads only named columns. Email reads and the persisted
+case/case-source resume reads all paginate explicitly in 500-row pages, below the
+PostgREST 1,000-row cap, and attachment IDs are fetched in bounded batches. It never selects
 `jobs.scope_json`, `calendar_events.scope_json`, `pricing_json`, or any list/feed
 `select('*')` payload.
 
 Open PR 334 changes unrelated `ops_summary` calendar and pipeline pricing projections.
 This package does not touch those query blocks and does not duplicate that PR.
+
+## Bounded resumable runs
+
+A live scan is incremental, not a single drain of the backlog. One invocation
+commits at most 25 cases and stops after four times that many attempts, so an edge
+timeout never discards accounting for drafts and jobs that already exist. Cases are
+stamped as they go and the next scan resumes.
+
+Ordering inside a run is: deferred/failed job-creation retries up to half the
+budget, then cases never attempted before, then the remaining retries, then cases
+already at their resolved state. A systematically failing case therefore cannot
+crowd out fresh work.
+
+A case that is accounted but whose guarded job creation has not yet succeeded is
+persisted with reason code `awaiting_job_creation`. It is a pre-job state, not an
+adapter failure, and it is retried on the next run. The full approved reason-code
+set is enforced by both `MAKESAFE_REASON_CODES` and the
+`makesafe_intake_cases_reason_code_check` constraint refreshed in migration
+`20260720000002`:
+
+`cancellation`, `duplicate`, `revision`, `unknown_builder`, `non_makesafe`,
+`ambiguous_scope`, `below_identity_floor`, `adapter_parse_failure`,
+`conflicting_fields`, `awaiting_job_creation`.
 
 ## Offline tests
 
@@ -49,14 +73,21 @@ This package does not touch those query blocks and does not duplicate that PR.
   supabase/functions/_shared/makesafe_intake_case_model_test.ts \
   supabase/functions/_shared/makesafe_intake_case_migration_test.ts \
   supabase/functions/ops-api/makesafe_deterministic_intake_test.ts \
-  supabase/functions/ops-api/makesafe_deterministic_intake_migration_test.ts
+  supabase/functions/ops-api/makesafe_deterministic_intake_migration_test.ts \
+  supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
 ```
 
-The tests cover MLB, AJS/AJBR, Prime, RAPID, chatter, case-wide late evidence,
-address-only hostile identity, distinct POs, WO formatting, significant PO suffix
-punctuation, claim-only exclusion, revisions, reopen cycles, twins, resends,
+The pure adapter tests cover MLB, AJS/AJBR, Prime, RAPID, chatter, case-wide late
+evidence, address-only hostile identity, distinct POs, WO formatting, significant PO
+suffix punctuation, claim-only exclusion, revisions, reopen cycles, twins, resends,
 cancellation, unknown builders, replay equality, zero unaccounted sources, and zero AI
 fallback.
+
+The runtime tests cover the commit-and-resume behaviour: the per-run case budget and
+attempt ceiling, source accounting before job creation, bounded job-creation retries
+that cannot starve fresh cases, paged case/case-source resume reads, write-failure
+classification that retains no source content, and storage failures surfacing as a
+visible blocker rather than silence.
 
 Run the existing migration clone harness before production migration approval:
 
@@ -174,7 +205,10 @@ After the first deterministic scan, verify without mutating production:
    outbound message, or duplicate approval was created
 6. exceptions name the missing requirement, sources searched, rejected candidates, reason
    code, and next action
-7. rerun the same window and verify zero new cases, drafts, jobs, approvals, or artifacts
+7. rerun the same window and verify that already-settled cases produce zero new cases,
+   drafts, jobs, approvals, or artifacts. A rerun may still advance cases the previous
+   run left unattempted or in `awaiting_job_creation`; that is the bounded resume, not
+   duplication. Only cases already at their resolved state must be inert.
 8. reconcile aliases/twins using the merged PR 338 safeguards
 
 Backfill remains a separate approved production action. This runbook does not authorise

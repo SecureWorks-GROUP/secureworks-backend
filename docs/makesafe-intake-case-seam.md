@@ -2,10 +2,14 @@
 
 ## Status and authority
 
-This is the inert U1 structural slice for the approved deterministic make-safe
-intake mission. The migration is drafted but has not been applied. No current
-adapter, scan, draft, approval, auto-file, job creation, board, notification or
-AI path imports or writes this model.
+This is the U1 structural slice for the approved deterministic make-safe intake
+mission. The migration is drafted but has not been applied.
+
+The deterministic cutover package (`docs/makesafe-deterministic-intake-cutover.md`)
+now builds on this model: its runtime imports the shared case model and writes cases
+and case sources when `makesafe_cron_settings.intake_mode = 'deterministic'`. That
+switch defaults to `legacy`, so the model stays unwritten until the separately
+approved cutover. No draft, auto-file, board, notification or AI path writes it.
 
 Up migration:
 
