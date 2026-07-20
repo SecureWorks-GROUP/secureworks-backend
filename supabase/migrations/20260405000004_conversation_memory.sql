@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS conversation_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id TEXT NOT NULL,
-  channel TEXT NOT NULL DEFAULT 'dashboard',
+  channel TEXT NOT NULL DEFAULT 'telegram',
   started_at TIMESTAMPTZ DEFAULT NOW(),
   last_activity_at TIMESTAMPTZ DEFAULT NOW(),
   message_count INTEGER DEFAULT 0,
@@ -21,7 +21,7 @@ CREATE POLICY "service_role_all" ON conversation_sessions FOR ALL TO service_rol
 CREATE TABLE IF NOT EXISTS conversation_history (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id TEXT NOT NULL,
-  channel TEXT NOT NULL DEFAULT 'dashboard',
+  channel TEXT NOT NULL DEFAULT 'telegram',
   session_id UUID NOT NULL REFERENCES conversation_sessions(id),
   role TEXT NOT NULL,
   content TEXT NOT NULL,

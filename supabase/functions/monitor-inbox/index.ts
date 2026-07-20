@@ -715,6 +715,7 @@ Deno.serve(async (req) => {
     const result = {
       success: true,
       processed: totalProcessed,
+      notified: 0,
       mailboxes: activeMailboxes.length,
       mailbox_source: configRows.length > 0 ? 'monitored_mailboxes' : 'hard_coded',
       timestamp: new Date().toISOString(),

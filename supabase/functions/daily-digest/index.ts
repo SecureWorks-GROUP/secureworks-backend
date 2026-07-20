@@ -1397,7 +1397,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       const aiResult = await aiResp.json()
       const briefText = aiResult.content?.[0]?.text || 'Weekly financial brief could not be generated.'
 
-      return json({ success: true, brief: briefText })
+      return json({ success: true, brief: briefText, sent_to: 0 })
     } catch (err) {
       console.error('[daily-digest] CEO financial brief error:', err)
       return json({ error: (err as Error).message }, 500)
@@ -3279,6 +3279,9 @@ async function createDailyAnnotations(sb: any, digest: any) {
   } catch (e) {
     console.log('[daily-digest] price drift annotation failed:', (e as Error).message)
   }
+
+  // ── Ghost PO Detection ──
+  await detectGhostPOs(sb)
 
   // ── Auto-Resolution Cleanup ──
   await cleanupResolvedAnnotations(sb)

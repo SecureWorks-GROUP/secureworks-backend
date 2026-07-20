@@ -111,6 +111,21 @@ async function flush() {
 const smsCalls = (calls: FetchCall[]) => calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
 const smsPhones = (calls: FetchCall[]) => smsCalls(calls).map((c) => JSON.parse(c.body).phone);
 
+// Durable invariant: manager notification is SMS-via-GHL only. Every outbound
+// call must be either one of our own edge functions or an allowlisted
+// non-messaging service (geocoding) — never a direct third-party message send.
+const ALLOWED_THIRD_PARTY = ["nominatim.openstreetmap.org"];
+const assertNoThirdPartySend = (calls: FetchCall[], msg: string) =>
+  assertEquals(
+    calls
+      .filter((c) =>
+        !c.url.includes("/functions/v1/") && !ALLOWED_THIRD_PARTY.some((h) => c.url.includes(h))
+      )
+      .map((c) => c.url),
+    [],
+    msg,
+  );
+
 // The full crew per D4: Hugo (make-safe), Henry (fencing), Nithin + Jan (patio).
 // Marnin (admin) and Shaun (ops_manager, no phone) must never be texted.
 const USERS = [
@@ -143,6 +158,7 @@ Deno.test("U2a: direct createMakesafeJob texts Hugo only (no dispatchers or phon
     assert(body.message.includes("12 Example St, Padbury"), "carries the site");
     assert(body.message.includes("MLB Insurance Building"), "carries the builder");
     assert(body.message.includes("Open in Trade:"), "carries the trade link");
+    assertNoThirdPartySend(calls, "make-safe creation makes no third-party outbound call");
   } finally {
     restore();
   }
@@ -161,6 +177,7 @@ Deno.test("U2a (G3): suppress_notifications:true (the intake-approve path) still
     await flush();
     assertEquals(res.ok, true);
     assertEquals(smsPhones(calls), ["+61400000001"], "intake-created make-safes are no longer silent");
+    assertNoThirdPartySend(calls, "intake-approve path makes no third-party outbound call");
   } finally {
     restore();
   }
@@ -207,6 +224,7 @@ Deno.test("U2b: fencing quoted -> order_confirmed texts Henry only", async () =>
     assert(body.message.includes("Job ready for crew"), "ready wording");
     assert(body.message.includes("SWF-100"));
     assert(body.message.includes("order_confirmed"));
+    assertNoThirdPartySend(calls, "status transition makes no third-party outbound call");
   } finally {
     restore();
   }

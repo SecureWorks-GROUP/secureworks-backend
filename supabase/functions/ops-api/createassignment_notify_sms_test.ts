@@ -104,6 +104,16 @@ async function flush() {
 
 const smsCalls = (calls: FetchCall[]) => calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
 
+// Durable invariant: installer notification is SMS-via-GHL only. Every outbound
+// call stays on our own edge functions, and the only send path is ghl-proxy
+// send_sms — never a direct third-party HTTP send.
+const assertNoThirdPartySend = (calls: FetchCall[], msg: string) =>
+  assertEquals(
+    calls.filter((c) => !c.url.includes("/functions/v1/")).map((c) => c.url),
+    [],
+    msg,
+  );
+
 const JOB = {
   id: "job-1",
   type: "fencing",
@@ -150,6 +160,7 @@ Deno.test("createAssignment (via allocateJob): new allocation sends plain-text S
     );
     assert(!body.message.includes("<b>") && !body.message.includes("</b>"), "SMS body is plain text, no HTML");
 
+    assertNoThirdPartySend(calls, "allocation makes no third-party outbound call");
   } finally {
     restore();
   }
@@ -170,6 +181,7 @@ Deno.test("createAssignment (via allocateJob): installer without a phone gets no
     assertEquals(res.ok, true);
     assertEquals(res.mode, "create");
     assertEquals(smsCalls(calls).length, 0);
+    assertNoThirdPartySend(calls, "phone-less installer triggers no outbound call at all");
     assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1);
   } finally {
     restore();
@@ -260,6 +272,7 @@ Deno.test("createAssignment: explicit placeholder/tentative or suppress_notifica
       await flush();
       assertEquals(res.ok, true, JSON.stringify(extra));
       assertEquals(smsCalls(calls).length, 0, `no SMS for ${JSON.stringify(extra)}`);
+      assertNoThirdPartySend(calls, `suppressed notify makes no outbound call for ${JSON.stringify(extra)}`);
       assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1, "assignment still written");
     } finally {
       restore();
@@ -326,6 +339,7 @@ Deno.test("U2c: self-assign (allocator == assignee) -> ZERO SMS, allocation stil
     assertEquals(res.ok, true);
     assertEquals(res.mode, "create");
     assertEquals(smsCalls(calls).length, 0, "no text on self-assign");
+    assertNoThirdPartySend(calls, "self-assign makes no outbound call at all");
     assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 1, "assignment still written");
   } finally {
     restore();
