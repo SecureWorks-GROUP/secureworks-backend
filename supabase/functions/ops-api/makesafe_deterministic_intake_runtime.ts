@@ -24,8 +24,14 @@ export interface DeterministicRuntimeOptions {
   days?: number;
   onlyUnscanned?: boolean;
   nowIso?: string;
+  maxCases?: number;
   approveDraft?: (client: any, body: any) => Promise<any>;
 }
+
+// An edge invocation has a hard wall clock. Each run commits a bounded slice of
+// cases and stamps them as it goes, so a timeout never discards accounting for
+// drafts and jobs that already exist.
+const DEFAULT_MAX_CASES_PER_RUN = 25;
 
 export interface DeterministicRuntimeReport {
   ok: true;
@@ -42,10 +48,36 @@ export interface DeterministicRuntimeReport {
     jobs_created: number;
     resumed: number;
     write_failures: number;
+    cases_attempted: number;
+    cases_deferred: number;
   };
   by_builder_and_outcome: Record<string, Record<string, number>>;
   by_builder_and_reason: Record<string, Record<string, number>>;
+  // Non-PII failure classification. Keys are message classes, never source content.
+  write_failure_reasons: Record<string, number>;
   credential_blocker: string | null;
+}
+
+// Maps a thrown failure onto a small fixed vocabulary. Nothing derived from
+// source bodies, subjects, or identity values is retained.
+function classifyWriteFailure(error: unknown): string {
+  const code = (error as any)?.code;
+  const message = String((error as any)?.message || error || "");
+  if (/attachment staging failed/i.test(message)) return "attachment_staging";
+  if (/lineage parent is not persisted/i.test(message)) {
+    return "lineage_parent_pending";
+  }
+  if (/approval returned no job id/i.test(message)) return "approval_no_job";
+  if (/no job link; reconciliation required/i.test(message)) {
+    return "approved_draft_unlinked";
+  }
+  if (/draft insert failed/i.test(message)) return "draft_insert";
+  if (/case insert failed/i.test(message)) return "case_insert";
+  if (/case update failed/i.test(message)) return "case_update";
+  if (/source accounting failed/i.test(message)) return "source_accounting";
+  if (/lineage parent read failed/i.test(message)) return "lineage_parent_read";
+  if (code) return `postgres_${String(code)}`;
+  return "unclassified";
 }
 
 export async function loadDeterministicIntakeMode(
@@ -123,6 +155,9 @@ async function readInputs(
     .toISOString();
   const columns = [
     "post_id",
+    "internet_message_id",
+    "conversation_id",
+    "thread_id",
     "subject",
     "body_content",
     "body_preview",
@@ -193,6 +228,9 @@ async function readInputs(
     const body = row.body_content || row.body_preview || "";
     return {
       postId: row.post_id,
+      internetMessageId: row.internet_message_id || null,
+      conversationId: row.conversation_id || null,
+      threadId: row.thread_id || null,
       fromEmail: row.from_email || null,
       fromName: row.from_name || null,
       subject: row.subject || null,
@@ -327,7 +365,9 @@ function casePayload(
     blocked_reasons: state === "blocked_live_job" ? plan.blockedReasons : [],
     job_id: jobId,
     is_authoritative: true,
-    side_effects_suppressed: false,
+    // Guarded approval passes suppress_manager_notification for this provenance,
+    // so the manager SMS side effect really is suppressed for deterministic cases.
+    side_effects_suppressed: true,
     last_decision_provenance: "deterministic",
     last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
     last_decision_reason: jobId
@@ -348,6 +388,7 @@ async function stageAttachments(
   client: any,
   plan: DeterministicCasePlan,
   sources: Map<string, DeterministicSourceItem>,
+  onStorageBlocker: (blocker: string) => void,
 ): Promise<any[]> {
   const result: any[] = [];
   const attachments = plan.sourcePostIds.flatMap((id) =>
@@ -368,14 +409,20 @@ async function stageAttachments(
     const { data: blob, error: downloadError } = await client.storage.from(
       "makesafe-emails",
     ).download(attachment.storagePath!);
-    if (downloadError || !blob) continue;
+    if (downloadError || !blob) {
+      onStorageBlocker("makesafe-emails_download_failed");
+      continue;
+    }
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const { error: uploadError } = await client.storage.from("job-documents")
       .upload(path, bytes, {
         contentType: "application/pdf",
         upsert: true,
       });
-    if (uploadError) continue;
+    if (uploadError) {
+      onStorageBlocker("job-documents_upload_failed");
+      continue;
+    }
     const { data: publicUrl } = client.storage.from("job-documents")
       .getPublicUrl(path);
     result.push({
@@ -446,6 +493,7 @@ async function ensureDraftAndJob(
   plan: DeterministicCasePlan,
   sourceMap: Map<string, DeterministicSourceItem>,
   approveDraft: (client: any, body: any) => Promise<any>,
+  onStorageBlocker: (blocker: string) => void,
 ): Promise<
   {
     jobId: string;
@@ -459,7 +507,12 @@ async function ensureDraftAndJob(
   let draftCreated = false;
   if (!draft) {
     const primary = sourceMap.get(plan.primarySourcePostId)!;
-    const attachments = await stageAttachments(client, plan, sourceMap);
+    const attachments = await stageAttachments(
+      client,
+      plan,
+      sourceMap,
+      onStorageBlocker,
+    );
     if (
       !attachments.length && plan.identity.jobFamily !== "roof_report" &&
       plan.identity.jobFamily !== "assessment_report_quote"
@@ -556,14 +609,34 @@ async function ensureDraftAndJob(
   return { jobId, draftCreated, jobCreated: true, resumed: !draftCreated };
 }
 
+// Mirrors makesafe_intake_case_transition_allowed in migration 20260720000001.
+// An upgrade is attempted only along an edge the database already accepts.
+const ALLOWED_TRANSITIONS: Record<string, readonly string[]> = {
+  confirmed_live_job: ["blocked_live_job"],
+  blocked_live_job: ["confirmed_live_job", "exception"],
+  exception: ["confirmed_live_job", "blocked_live_job", "accounted_non_wo"],
+  accounted_non_wo: ["exception"],
+};
+
 async function insertCaseAndSources(
   client: any,
   plan: DeterministicCasePlan,
   jobId: string | null,
   sourceMap: Map<string, DeterministicSourceItem>,
-): Promise<{ caseCreated: boolean; sourceCreated: number; resumed: boolean }> {
-  let existing = await findCase(client, plan.instructionKey);
+  knownExisting?: any | null,
+): Promise<
+  {
+    caseCreated: boolean;
+    caseUpgraded: boolean;
+    sourceCreated: number;
+    resumed: boolean;
+  }
+> {
+  let existing = knownExisting !== undefined
+    ? knownExisting
+    : await findCase(client, plan.instructionKey);
   let caseCreated = false;
+  let caseUpgraded = false;
   if (!existing) {
     const parent = plan.parentInstructionKey
       ? await findCase(client, plan.parentInstructionKey)
@@ -585,6 +658,36 @@ async function insertCaseAndSources(
     } else {
       existing = data;
       caseCreated = true;
+    }
+  } else {
+    // A resumed case is re-decided against the current plan. Late evidence (a work
+    // order PDF that landed after the instruction email) must be able to promote a
+    // reason-coded exception into a live job rather than staying stuck forever.
+    const desired = casePayload(plan, jobId, null);
+    const nextState = desired.state as string;
+    if (
+      nextState !== existing.state &&
+      (ALLOWED_TRANSITIONS[existing.state as string] || []).includes(nextState)
+    ) {
+      const {
+        org_id: _org,
+        instruction_key: _key,
+        received_at: _received,
+        ...mutable
+      } = desired;
+      const { data, error } = await client.from("makesafe_intake_cases")
+        .update({ ...mutable, job_id: jobId ?? existing.job_id ?? null })
+        .eq("org_id", DEFAULT_ORG_ID)
+        .eq("instruction_key", plan.instructionKey)
+        .select("id,instruction_key,lineage_id,cycle,state,job_id")
+        .single();
+      if (error) {
+        throw new Error(
+          `deterministic case update failed: ${error.message || error}`,
+        );
+      }
+      existing = data;
+      caseUpgraded = true;
     }
   }
   let sourceCreated = 0;
@@ -618,7 +721,7 @@ async function insertCaseAndSources(
       );
     }
   }
-  return { caseCreated, sourceCreated, resumed: !caseCreated };
+  return { caseCreated, caseUpgraded, sourceCreated, resumed: !caseCreated };
 }
 
 async function writeHealth(
@@ -674,9 +777,12 @@ export async function runDeterministicIntake(
       jobs_created: 0,
       resumed: 0,
       write_failures: 0,
+      cases_attempted: 0,
+      cases_deferred: 0,
     },
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),
+    write_failure_reasons: {},
     credential_blocker: null,
   };
   if (dryRun) return report;
@@ -688,34 +794,28 @@ export async function runDeterministicIntake(
   const sourceMap = new Map(
     input.sources.map((source) => [source.postId, source]),
   );
-  const completedPostIds = new Set<string>();
-  for (const casePlan of plan.cases) {
+  const onStorageBlocker = (blocker: string) => {
+    report.credential_blocker ||= blocker;
+  };
+  const maxCases = Math.max(1, options.maxCases ?? DEFAULT_MAX_CASES_PER_RUN);
+  const slice = plan.cases.slice(0, maxCases);
+  report.totals.cases_attempted = slice.length;
+  report.totals.cases_deferred = plan.cases.length - slice.length;
+  for (const casePlan of slice) {
     try {
       const existing = await findCase(client, casePlan.instructionKey);
-      if (existing) {
-        const saved = await insertCaseAndSources(
-          client,
-          casePlan,
-          existing.job_id || null,
-          sourceMap,
-        );
-        report.totals.source_rows_created += saved.sourceCreated;
-        report.totals.resumed++;
-        for (const postId of casePlan.sourcePostIds) {
-          completedPostIds.add(postId);
-        }
-        continue;
-      }
-      let jobId: string | null = null;
+      let jobId: string | null = existing?.job_id || null;
       if (
-        casePlan.state === "confirmed_live_job" ||
-        casePlan.state === "blocked_live_job"
+        !jobId &&
+        (casePlan.state === "confirmed_live_job" ||
+          casePlan.state === "blocked_live_job")
       ) {
         const live = await ensureDraftAndJob(
           client,
           casePlan,
           sourceMap,
           options.approveDraft,
+          onStorageBlocker,
         );
         jobId = live.jobId;
         if (live.draftCreated) report.totals.drafts_created++;
@@ -727,26 +827,36 @@ export async function runDeterministicIntake(
         casePlan,
         jobId,
         sourceMap,
+        existing,
       );
       if (saved.caseCreated) report.totals.case_rows_created++;
       report.totals.source_rows_created += saved.sourceCreated;
       if (saved.resumed) report.totals.resumed++;
-      for (const postId of casePlan.sourcePostIds) {
-        completedPostIds.add(postId);
+      // Stamp per case, not once at the end, so a wall-clock timeout keeps the
+      // accounting for every case this run already committed.
+      //
+      // Sources of a case still sitting in a reason-coded exception stay unstamped:
+      // the next run must be able to re-read the original instruction alongside the
+      // late work order in order to promote the case.
+      const settled = saved.caseUpgraded
+        ? casePlan.state !== "exception"
+        : (existing?.state || casePlan.state) !== "exception";
+      if (!settled) continue;
+      for (const ids of chunk(casePlan.sourcePostIds)) {
+        const { error } = await client.from("emails")
+          .update({ makesafe_scanned_at: nowIso })
+          .in("post_id", ids);
+        if (error) report.totals.write_failures++;
       }
-    } catch (_) {
-      // No source contents or PII are logged. The exception/case remains visible on
-      // replay and the deterministic natural keys make the next run resumable.
+    } catch (error) {
+      // No source contents or PII are logged; only a fixed failure class. The
+      // exception/case remains visible on replay and the deterministic natural keys
+      // make the next run resumable.
+      const reason = classifyWriteFailure(error);
+      report.write_failure_reasons[reason] =
+        (report.write_failure_reasons[reason] || 0) + 1;
       report.totals.write_failures++;
     }
-  }
-  // Mark only structurally-accounted sources, in bounded batches. A failed case
-  // stays unmarked and is retried; successful reruns avoid scanning old bodies.
-  for (const ids of chunk([...completedPostIds])) {
-    const { error } = await client.from("emails")
-      .update({ makesafe_scanned_at: nowIso })
-      .in("post_id", ids);
-    if (error) report.totals.write_failures++;
   }
   await writeHealth(
     client,

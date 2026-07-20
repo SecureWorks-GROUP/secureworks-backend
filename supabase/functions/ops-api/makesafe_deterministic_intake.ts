@@ -207,6 +207,7 @@ export interface DeterministicCasePlan {
   correlatedSourcePostIds: readonly string[];
   primarySourcePostId: string;
   story: readonly StoryEvent[];
+  correlatedStory: readonly StoryEvent[];
   evidenceMap: Readonly<Record<string, EvidenceMapEntry>>;
   sourceClassifications: readonly DeterministicSourceClassification[];
   recoveryCursor: RecoveryCursor;
@@ -811,29 +812,6 @@ class UnionFind {
   }
 }
 
-function explicitRelated(
-  a: DeterministicSourceItem,
-  b: DeterministicSourceItem,
-): boolean {
-  if (a.replyToPostId === b.postId || b.replyToPostId === a.postId) return true;
-  if (
-    a.relatedPostIds?.includes(b.postId) || b.relatedPostIds?.includes(a.postId)
-  ) return true;
-  if (
-    a.siblingPostIds?.includes(b.postId) || b.siblingPostIds?.includes(a.postId)
-  ) return true;
-  if (a.threadId && b.threadId && a.threadId === b.threadId) return true;
-  if (
-    a.conversationId && b.conversationId &&
-    a.conversationId === b.conversationId
-  ) return true;
-  if (
-    a.internetMessageId && b.internetMessageId &&
-    a.internetMessageId === b.internetMessageId
-  ) return true;
-  return false;
-}
-
 function strongIdentityConflict(a: AdaptedSource, b: AdaptedSource): boolean {
   if (
     a.identity.builderSlug && b.identity.builderSlug &&
@@ -848,32 +826,49 @@ function strongIdentityConflict(a: AdaptedSource, b: AdaptedSource): boolean {
   return false;
 }
 
-function shouldCorrelate(a: AdaptedSource, b: AdaptedSource): boolean {
-  if (explicitRelated(a.source, b.source)) return true;
+// Normalised correlation coordinates, computed once per adapted source. The
+// pairwise pass runs inside builder buckets only, so the regex normalisers are
+// never re-run per candidate pair.
+interface CorrelationKeys {
+  builderSlug: string | null;
+  address: string | null;
+  client: string | null;
+  contact: string | null;
+}
+
+function correlationKeysFor(item: AdaptedSource): CorrelationKeys {
+  return {
+    builderSlug: item.identity.builderSlug,
+    address: normaliseAddress(item.identity.siteAddress),
+    client: normaliseContact(item.identity.clientName),
+    contact: normaliseContact(
+      item.identity.clientPhone || item.identity.clientEmail,
+    ),
+  };
+}
+
+// Identity/address correlation for a pair already known to share a non-null
+// builder slug. Explicit thread relationships are unioned separately and are not
+// subject to the conflict guard.
+function correlatedWithinBuilder(
+  a: AdaptedSource,
+  b: AdaptedSource,
+  ka: CorrelationKeys,
+  kb: CorrelationKeys,
+): boolean {
   if (strongIdentityConflict(a, b)) return false;
-  const sameBuilder = !!a.identity.builderSlug &&
-    a.identity.builderSlug === b.identity.builderSlug;
   const sameWo = !!a.identity.builderWoCanonical &&
     a.identity.builderWoCanonical === b.identity.builderWoCanonical;
   const sameRef = !!a.identity.externalRefCanonical &&
     a.identity.externalRefCanonical === b.identity.externalRefCanonical;
   const samePo = !!a.identity.builderPoCanonical &&
     a.identity.builderPoCanonical === b.identity.builderPoCanonical;
-  if (sameBuilder && (sameWo || sameRef || samePo)) return true;
-
-  const sameAddress = !!normaliseAddress(a.identity.siteAddress) &&
-    normaliseAddress(a.identity.siteAddress) ===
-      normaliseAddress(b.identity.siteAddress);
-  const sameClient = !!normaliseContact(a.identity.clientName) &&
-    normaliseContact(a.identity.clientName) ===
-      normaliseContact(b.identity.clientName);
-  const sameContact =
-    !!normaliseContact(a.identity.clientPhone || a.identity.clientEmail) &&
-    normaliseContact(a.identity.clientPhone || a.identity.clientEmail) ===
-      normaliseContact(b.identity.clientPhone || b.identity.clientEmail);
+  if (sameWo || sameRef || samePo) return true;
   // Address-only is never enough. Supporting address evidence may correlate only
   // with builder plus client/contact, and never across conflicting strong identity.
-  return sameBuilder && sameAddress && (sameClient || sameContact);
+  return !!ka.address && ka.address === kb.address &&
+    ((!!ka.client && ka.client === kb.client) ||
+      (!!ka.contact && ka.contact === kb.contact));
 }
 
 function mergeField(
@@ -1104,9 +1099,63 @@ export function buildDeterministicIntakePlan(
     adaptDeterministicSource(item, profiles)
   );
   const union = new UnionFind(adapted.length);
+  const keys = adapted.map(correlationKeysFor);
+  const indexByPostId = new Map(
+    adapted.map((item, index) => [item.source.postId, index]),
+  );
+  // Explicit thread coordinates union globally: they are authoritative and may
+  // legitimately cross builder slugs or reach sources carrying no identity.
+  const threadBuckets = new Map<string, number[]>();
   for (let i = 0; i < adapted.length; i++) {
-    for (let j = i + 1; j < adapted.length; j++) {
-      if (shouldCorrelate(adapted[i], adapted[j])) union.union(i, j);
+    const item = adapted[i].source;
+    for (
+      const key of [
+        item.threadId ? `thread:${item.threadId}` : null,
+        item.conversationId ? `conversation:${item.conversationId}` : null,
+        item.internetMessageId ? `message:${item.internetMessageId}` : null,
+      ]
+    ) {
+      if (!key) continue;
+      const bucket = threadBuckets.get(key);
+      if (bucket) bucket.push(i);
+      else threadBuckets.set(key, [i]);
+    }
+    for (
+      const postId of [
+        item.replyToPostId,
+        ...(item.relatedPostIds || []),
+        ...(item.siblingPostIds || []),
+      ]
+    ) {
+      if (!postId) continue;
+      const other = indexByPostId.get(postId);
+      if (other !== undefined) union.union(i, other);
+    }
+  }
+  for (const bucket of threadBuckets.values()) {
+    for (let i = 1; i < bucket.length; i++) union.union(bucket[0], bucket[i]);
+  }
+  // Identity and address correlation both require an equal non-null builder slug,
+  // so only same-builder pairs can ever match. Bucketing first keeps the pairwise
+  // pass proportional to per-builder volume rather than the whole read window.
+  const builderBuckets = new Map<string, number[]>();
+  for (let i = 0; i < adapted.length; i++) {
+    const slug = keys[i].builderSlug;
+    if (!slug) continue;
+    const bucket = builderBuckets.get(slug);
+    if (bucket) bucket.push(i);
+    else builderBuckets.set(slug, [i]);
+  }
+  for (const bucket of builderBuckets.values()) {
+    for (let x = 0; x < bucket.length; x++) {
+      for (let y = x + 1; y < bucket.length; y++) {
+        const i = bucket[x];
+        const j = bucket[y];
+        if (union.find(i) === union.find(j)) continue;
+        if (
+          correlatedWithinBuilder(adapted[i], adapted[j], keys[i], keys[j])
+        ) union.union(i, j);
+      }
     }
   }
   const clusters = new Map<number, AdaptedSource[]>();
@@ -1129,6 +1178,7 @@ export function buildDeterministicIntakePlan(
       }`
     ).sort();
     const clusterKey = `lineage:${stableHash(clusterStrong.join("|"))}`;
+    const clusterStory = dedupeStory(sortedCluster);
     const groups = new Map<string, AdaptedSource[]>();
     const strongDiscriminators = sortedCluster
       .filter((item) =>
@@ -1167,7 +1217,11 @@ export function buildDeterministicIntakePlan(
         : instructionItems.some((i) => i.intent === "work")
         ? "work"
         : "ambiguous";
-      const story = dedupeStory(sortedCluster);
+      // The case's own story is its instruction's events. The cluster-wide story
+      // stays available for case-wide recovery without leaking a sibling
+      // instruction's revision/reopen events into this case's lineage or its
+      // earliest-event received_at.
+      const story = dedupeStory(instructionItems);
       const reopen = instructionItems.some((i) =>
         i.story.some((event) => event.kind === "reopen")
       );
@@ -1191,9 +1245,10 @@ export function buildDeterministicIntakePlan(
           `${item.source.subject || ""}\n${item.source.body || ""}`
             .toLowerCase().replace(/\s+/g, " ").trim(),
         ),
-        attachments: item.source.attachments.map((a) =>
-          `${a.name || ""}:${a.sizeBytes || ""}`
-        ).sort(),
+        // Attachments are deliberately excluded. Attachment rows sync separately
+        // from the post, so a work order PDF that lands after its instruction
+        // email would otherwise change the instruction key and fork a second case
+        // instead of promoting the existing exception.
       }));
       const fingerprintInput = [...new Map(
         fingerprintRepresentations.map((
@@ -1335,6 +1390,7 @@ export function buildDeterministicIntakePlan(
         correlatedSourcePostIds,
         primarySourcePostId: primary.source.postId,
         story,
+        correlatedStory: clusterStory,
         evidenceMap,
         sourceClassifications: classifications,
         recoveryCursor: {

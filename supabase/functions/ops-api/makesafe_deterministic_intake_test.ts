@@ -358,9 +358,16 @@ Deno.test("revision and reopen cycles remain separate ordered lineage cases", ()
   );
   assert(
     plan.cases.every((c) =>
-      c.story.some((event) => event.sourcePostId === "cycle-1")
+      c.correlatedStory.some((event) => event.sourcePostId === "cycle-1")
     ),
   );
+  // Each case's own story stays scoped to its instruction, so received_at and
+  // lineage inference cannot be driven by a sibling instruction's events.
+  for (const intakeCase of plan.cases) {
+    for (const event of intakeCase.story) {
+      assert(intakeCase.sourcePostIds.includes(event.sourcePostId));
+    }
+  }
 });
 
 Deno.test("replay is deterministic, idempotent, and every source has exactly one outcome", () => {
