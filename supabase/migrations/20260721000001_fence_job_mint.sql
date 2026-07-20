@@ -310,7 +310,12 @@ BEGIN
 EXCEPTION WHEN unique_violation THEN
   -- Two simultaneous retries carrying the same requestId can both reach an
   -- INSERT. The loser replays the canonical ledger instead of failing opaquely.
-  RETURN public._fence_mint_progress(p_request_id, false, false);
+  -- A violation of the opportunity reservation index instead leaves no row for
+  -- this request, and is a caller-resolvable mapping collision, not a 5xx.
+  IF EXISTS (SELECT 1 FROM public.fence_job_mint_requests WHERE request_id = p_request_id) THEN
+    RETURN public._fence_mint_progress(p_request_id, false, false);
+  END IF;
+  RETURN jsonb_build_object('decision', 'conflict', 'code', 'opportunity_mapping_conflict', 'message', 'Opportunity is reserved by another mint request');
 END;
 $$;
 
@@ -552,6 +557,25 @@ BEGIN
     UPDATE public.jobs SET ghl_contact_id = COALESCE(ghl_contact_id, v_request.contact_id), updated_at = now() WHERE id = v_job.id
     RETURNING id, org_id, status, ghl_contact_id, ghl_opportunity_id, job_number, scope_version, updated_at INTO v_job;
     v_outcome := COALESCE(v_request.mapping_outcome, 'existing_opportunity_reused');
+  ELSIF v_request.job_id IS NOT NULL THEN
+    -- Bind already resolved this mint onto an existing job. Idempotency requires
+    -- the same canonical result on every retry, so a status change after bind
+    -- (including complete or invoiced) must never cause a second job to be
+    -- minted. Only broken identity may end this branch, and it ends it typed.
+    SELECT id, org_id, status, ghl_contact_id, ghl_opportunity_id, job_number, scope_version, updated_at
+    INTO v_job FROM public.jobs WHERE id = v_request.job_id AND org_id = v_request.org_id FOR UPDATE;
+    IF NOT FOUND THEN
+      RETURN jsonb_build_object('decision', 'conflict', 'code', 'bound_job_missing', 'message', 'The job bound to this mint no longer exists');
+    END IF;
+    IF (v_job.ghl_contact_id IS NOT NULL AND v_job.ghl_contact_id <> v_request.contact_id)
+      OR (v_job.ghl_opportunity_id IS NOT NULL AND v_job.ghl_opportunity_id <> v_request.opportunity_id) THEN
+      RETURN jsonb_build_object('decision', 'conflict', 'code', 'bound_job_identity_conflict', 'message', 'The job bound to this mint now carries different contact or opportunity identity');
+    END IF;
+    UPDATE public.jobs SET ghl_contact_id = COALESCE(ghl_contact_id, v_request.contact_id),
+      ghl_opportunity_id = COALESCE(ghl_opportunity_id, v_request.opportunity_id), updated_at = now()
+    WHERE id = v_job.id
+    RETURNING id, org_id, status, ghl_contact_id, ghl_opportunity_id, job_number, scope_version, updated_at INTO v_job;
+    v_outcome := COALESCE(v_request.mapping_outcome, 'existing_contact_job_reused');
   ELSE
     SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO v_jobs FROM public.jobs
       WHERE org_id = v_request.org_id AND type = 'fencing' AND ghl_contact_id = v_request.contact_id
@@ -629,16 +653,22 @@ EXCEPTION WHEN unique_violation THEN
 END;
 $$;
 
+-- Failure telemetry expires the target's lease, so it is a privileged write.
+-- A caller may only stamp a row it owns, or the owner row it is currently
+-- executing against as a takeover executor. Without this, submitting another
+-- tenant's requestId would repeatedly expire that live mint's lease.
 CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(
   p_request_id uuid,
   p_code text,
-  p_message text
+  p_message text,
+  p_org_id uuid,
+  p_actor_id uuid
 ) RETURNS void
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public
 AS $$
-  UPDATE public.fence_job_mint_requests
+  UPDATE public.fence_job_mint_requests r
   SET last_error_code = left(p_code, 120), last_error_message = left(p_message, 1000),
       state = CASE WHEN p_code IN (
         'contact_identity_conflict', 'contact_mapping_conflict',
@@ -646,10 +676,20 @@ AS $$
         'opportunity_mapping_conflict', 'contact_opportunity_job_conflict',
         'multiple_active_jobs', 'stale_existing_job_evidence',
         'ambiguous_historical_mapping', 'duplicate_stamped_opportunities',
-        'mapping_uniqueness_conflict'
-      ) THEN 'conflict' ELSE state END,
+        'mapping_uniqueness_conflict', 'bound_job_missing',
+        'bound_job_identity_conflict'
+      ) THEN 'conflict' ELSE r.state END,
       lease_expires_at = now(), updated_at = now()
-  WHERE request_id = p_request_id AND state <> 'complete'
+  WHERE r.request_id = p_request_id AND r.state <> 'complete'
+    AND r.org_id = p_org_id
+    AND (
+      r.requested_by = p_actor_id
+      OR EXISTS (
+        SELECT 1 FROM public.fence_job_mint_requests c
+        WHERE c.owner_request_id = r.request_id
+          AND c.org_id = p_org_id AND c.requested_by = p_actor_id
+      )
+    )
 $$;
 
 REVOKE ALL ON TABLE public.fence_job_mint_requests FROM PUBLIC, anon, authenticated;
@@ -662,14 +702,14 @@ REVOKE ALL ON FUNCTION public.reserve_fence_job_mint(uuid, uuid, uuid, text, tex
 REVOKE ALL ON FUNCTION public.bind_fence_job_mint_identity(uuid, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_fence_job_mint_opportunity(uuid, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.complete_fence_job_mint(uuid) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid) FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.reserve_fence_job_mint(uuid, uuid, uuid, text, text, text, text, text, uuid[], text, text, text, text, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.get_fence_job_mint_progress(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.bind_fence_job_mint_identity(uuid, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_fence_job_mint_opportunity(uuid, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_fence_job_mint(uuid) TO service_role;
-GRANT EXECUTE ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid) TO service_role;
 
 COMMENT ON TABLE public.fence_job_mint_requests IS
   'Server-owned fencing mint ledger. Same request UUID resumes; contact/type races serialize through fence_job_mint_locks. Contains no send or approval action.';

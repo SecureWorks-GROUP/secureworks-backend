@@ -331,13 +331,19 @@ async function fetchOpportunityPages(args: {
       newRows++
     }
 
+    // A short page is the only positive proof that the result set ended.
+    if (rows.length < limit) { exhausted = true; break }
+
     const nextStartAfter = meta.startAfter ?? rows[rows.length - 1]?.sort?.[0] ?? null
     const nextStartAfterId =
       meta.startAfterId ??
       rows[rows.length - 1]?.sort?.[1] ??
       rows[rows.length - 1]?.contactId ??
       null
-    if (newRows === 0 || !nextStartAfter || !nextStartAfterId || rows.length < limit) { exhausted = true; break }
+    // A stalled cursor (a full page of already-seen ids) or a full page with no
+    // derivable cursor says nothing about the tail. Stop scanning, but leave
+    // exhausted false so callers that must not act on an absence fail closed.
+    if (newRows === 0 || !nextStartAfter || !nextStartAfterId) break
     startAfter = nextStartAfter
     startAfterId = String(nextStartAfterId)
   }
@@ -1823,6 +1829,7 @@ serve(async (req: Request) => {
         mint_request_not_found: 500,
         mint_owner_not_found: 500,
         canonical_job_missing: 500,
+        bound_job_missing: 500,
       }
       try {
         const MINT_BODY_LIMIT = 32768
@@ -2079,6 +2086,8 @@ serve(async (req: Request) => {
                 p_request_id: requestId,
                 p_code: code,
                 p_message: message,
+                p_org_id: input.organisationId,
+                p_actor_id: authUserId,
               })
               if (error) throw error
             },

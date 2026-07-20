@@ -624,6 +624,156 @@ Deno.test("edge stamp recovery is contact scoped, fails closed and classes non-c
   assertStringIncludes(source, "MINT_CONFLICT_STATUS[conflictCode] ?? 409");
 });
 
+Deno.test("takeover executor records failure on the owner row it actually drove", async () => {
+  const stamped: string[] = [];
+  await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A),
+        actorId: "user-1",
+        deps: deps({
+          // Expired-lease takeover: this caller joins REQUEST_B's ledger row but
+          // is elected executor and runs every RPC against it.
+          reserve: async () =>
+            progress({
+              ownerRequestId: REQUEST_B,
+              joined: true,
+              executor: true,
+            }),
+          bindIdentity: async ({ ownerRequestId, contact }) =>
+            progress({
+              ownerRequestId,
+              state: "contact_resolved",
+              contactId: contact.id,
+            }),
+          createStampedOpportunity: () => {
+            throw new FenceMintError(502, "ghl_request_failed", "GHL exploded");
+          },
+          recordFailure: async ({ requestId }) => {
+            stamped.push(requestId);
+          },
+        }),
+      }),
+    FenceMintError,
+  );
+  assertEquals(stamped, [REQUEST_B]);
+});
+
+Deno.test("bind-time joiner never stamps failure on the still-active owner", async () => {
+  const stamped: string[] = [];
+  await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A),
+        actorId: "user-1",
+        deps: deps({
+          bindIdentity: async ({ contact }) =>
+            progress({
+              ownerRequestId: REQUEST_B,
+              state: "contact_resolved",
+              joined: true,
+              executor: false,
+              contactId: contact.id,
+            }),
+          awaitCanonical: () => {
+            throw new Error("network timeout while polling owner");
+          },
+          recordFailure: async ({ requestId }) => {
+            stamped.push(requestId);
+          },
+        }),
+      }),
+    FenceMintError,
+  );
+  // The owner's lease must survive a joiner's transient poll failure.
+  assertEquals(stamped, [REQUEST_A]);
+});
+
+Deno.test("opportunity pagination only claims exhaustion on a proven short page", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const paging = source.slice(
+    source.indexOf("async function fetchOpportunityPages"),
+    source.indexOf("return { opportunities, pagesScanned, total, exhausted }"),
+  );
+  // A stalled cursor or a missing cursor on a full page proves nothing.
+  assertStringIncludes(paging, "if (rows.length < limit) { exhausted = true; break }");
+  assertStringIncludes(
+    paging,
+    "if (newRows === 0 || !nextStartAfter || !nextStartAfterId) break",
+  );
+  assertEquals(
+    /newRows === 0[^\n]*exhausted = true/.test(paging),
+    false,
+  );
+});
+
+Deno.test("failure telemetry is scoped to the owning tenant and an entitled caller", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  // Another tenant's requestId must not be able to expire a live lease.
+  assertStringIncludes(sql, "AND r.org_id = p_org_id");
+  assertStringIncludes(sql, "r.requested_by = p_actor_id");
+  assertStringIncludes(sql, "WHERE c.owner_request_id = r.request_id");
+  assertStringIncludes(
+    sql,
+    "record_fence_job_mint_failure(uuid, text, text, uuid, uuid) TO service_role",
+  );
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertStringIncludes(source, "p_org_id: input.organisationId,");
+  assertStringIncludes(source, "p_actor_id: authUserId,");
+});
+
+Deno.test("reserve classes an opportunity collision as a conflict, not a server error", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const reserve = sql.slice(
+    sql.indexOf("FUNCTION public.reserve_fence_job_mint"),
+    sql.indexOf("FUNCTION public.get_fence_job_mint_progress"),
+  );
+  // Only a real request row justifies replaying progress; its absence means the
+  // opportunity reservation index rejected the insert.
+  assertStringIncludes(
+    reserve,
+    "IF EXISTS (SELECT 1 FROM public.fence_job_mint_requests WHERE request_id = p_request_id) THEN",
+  );
+  assertStringIncludes(reserve, "'code', 'opportunity_mapping_conflict'");
+});
+
+Deno.test("complete preserves the bound existing job even after its status moves on", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const complete = sql.slice(
+    sql.indexOf("FUNCTION public.complete_fence_job_mint"),
+    sql.indexOf("FUNCTION public.record_fence_job_mint_failure"),
+  );
+  // A retry must reuse the bound job rather than fall through to a fresh mint.
+  assertStringIncludes(complete, "ELSIF v_request.job_id IS NOT NULL THEN");
+  assertStringIncludes(
+    complete,
+    "WHERE id = v_request.job_id AND org_id = v_request.org_id FOR UPDATE",
+  );
+  // Broken identity ends the branch typed, never by re-binding a new job.
+  assertStringIncludes(complete, "'code', 'bound_job_identity_conflict'");
+  assertStringIncludes(complete, "'code', 'bound_job_missing'");
+  const boundBranch = complete.slice(
+    complete.indexOf("ELSIF v_request.job_id IS NOT NULL THEN"),
+    complete.indexOf("SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO v_jobs"),
+  );
+  assertEquals(/next_job_number|INSERT INTO public\.jobs/.test(boundBranch), false);
+});
+
 Deno.test("migration contract has narrow projections, uniqueness and no outbound communication", async () => {
   const sql = await Deno.readTextFile(
     new URL(

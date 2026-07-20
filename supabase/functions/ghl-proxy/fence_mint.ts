@@ -455,6 +455,10 @@ export async function executeFenceJobMint(args: {
   };
 
   let ownerRequestId = input.requestId;
+  // Tracks whether this caller is the one actually executing RPCs against
+  // ownerRequestId. A takeover executor drives another request's ledger row, so
+  // its failures belong on that row, not on its own joined row.
+  let executing = false;
   try {
     const fingerprint = await fenceMintFingerprint(input);
     const progress = await deps.reserve({
@@ -464,6 +468,7 @@ export async function executeFenceJobMint(args: {
       identityKey: fenceMintIdentityKey(input),
     });
     ownerRequestId = progress.ownerRequestId;
+    executing = progress.executor;
     mark("reserve");
 
     if (progress.canonical) {
@@ -566,6 +571,7 @@ export async function executeFenceJobMint(args: {
       });
     }
     if (bound.ownerRequestId !== preBindOwnerRequestId) {
+      executing = false;
       // Callers that reserved under different identity keys (email vs phone)
       // only converge on the contact lock at bind time. The caller that loses
       // ownership stops executing and replays the canonical owner's result.
@@ -681,10 +687,11 @@ export async function executeFenceJobMint(args: {
     );
     try {
       if (typed.code !== "mint_in_progress") {
-        // Only ever stamp the caller's own ledger row. Recording against a
-        // joined owner would expire that still-active owner's lease.
+        // Stamp the ledger row this caller actually executed against. A plain
+        // joiner records on its own row, so it can never expire the lease of a
+        // still-active owner it merely polled.
         await deps.recordFailure?.({
-          requestId: input.requestId,
+          requestId: executing ? ownerRequestId : input.requestId,
           code: typed.code,
           message: typed.message,
         });
