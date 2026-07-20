@@ -6437,11 +6437,35 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
 // consumers and is a superset here, so tracking it would re-fetch columns this
 // action never reads. Source of truth for the names is the LIVE calendar_events
 // view, NOT the migrations — the view has drifted ahead of them. See AGENTS.md.
-const OPS_SUMMARY_SCHEDULE_COLUMNS = [
+export const OPS_SUMMARY_SCHEDULE_COLUMNS = [
   'assignment_id', 'job_id', 'client_name', 'site_suburb', 'site_address', 'job_type',
   'assignment_type', 'crew_name', 'assigned_to', 'start_time', 'end_time',
   'assignment_status', 'job_status',
 ].join(', ')
+
+export const OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS = [
+  'id', 'client_name', 'site_suburb', 'type', 'days_waiting',
+].join(', ')
+
+export const OPS_SUMMARY_ACTIVE_JOB_COLUMNS = ['id', 'status', 'type'].join(', ')
+
+export function toOpsSummaryScheduleEvent(ev: any) {
+  return {
+    assignment_id: ev.assignment_id,
+    job_id: ev.job_id,
+    client_name: ev.client_name,
+    site_suburb: ev.site_suburb,
+    site_address: ev.site_address,
+    job_type: ev.job_type,
+    assignment_type: ev.assignment_type,
+    crew_name: ev.crew_name,
+    assigned_to: ev.assigned_to,
+    start_time: ev.start_time,
+    end_time: ev.end_time,
+    assignment_status: ev.assignment_status,
+    job_status: ev.job_status,
+  }
+}
 
 async function opsSummary(client: any) {
   const now = new Date()
@@ -6489,9 +6513,10 @@ async function opsSummary(client: any) {
       .lte('scheduled_date', weekEnd.toISOString().slice(0, 10))
       .neq('status', 'cancelled'),
 
-    // Jobs needing scheduling
+    // Jobs needing scheduling. The view may grow; keep this bounded to the five
+    // fields consumed by the attention-item builder below.
     client.from('jobs_needing_scheduling')
-      .select('*')
+      .select(OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS)
       .eq('org_id', DEFAULT_ORG_ID)
       .not('job_number', 'is', null)
       .limit(20),
@@ -6502,7 +6527,7 @@ async function opsSummary(client: any) {
     // dropped jobs in `awaiting_deposit, order_materials, awaiting_supplier, order_confirmed,
     // partially_accepted, schedule_install, rectification, final_payment, get_review`.
     client.from('jobs')
-      .select('id, status, type, accepted_at, completed_at, pricing_json')
+      .select(OPS_SUMMARY_ACTIVE_JOB_COLUMNS)
       .eq('org_id', DEFAULT_ORG_ID)
       .not('legacy', 'is', true)
       .in('status', [
@@ -6803,21 +6828,7 @@ async function opsSummary(client: any) {
       quotes_pending: quotePendingCount,
       pipeline: pipelineCounts,
     },
-    today_schedule: (todaySchedule.data || []).map((ev: any) => ({
-      assignment_id: ev.assignment_id,
-      job_id: ev.job_id,
-      client_name: ev.client_name,
-      site_suburb: ev.site_suburb,
-      site_address: ev.site_address,
-      job_type: ev.job_type,
-      assignment_type: ev.assignment_type,
-      crew_name: ev.crew_name,
-      assigned_to: ev.assigned_to,
-      start_time: ev.start_time,
-      end_time: ev.end_time,
-      assignment_status: ev.assignment_status,
-      job_status: ev.job_status,
-    })),
+    today_schedule: (todaySchedule.data || []).map(toOpsSummaryScheduleEvent),
     attention,
     kpis: {
       jobs_completed_month: (monthCompletedJobs.data || []).length,
@@ -7050,11 +7061,12 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
 // NULL → null instead of undefined, which is indistinguishable downstream: both
 // aliases only ever feed `||` chains and Array.isArray().
 //
-// M1 dependency: if a `jobs.quoted_value` generated column lands, pj_total_inc /
-// pj_total collapse into a single read of it. No such column exists as of this
-// change (migrations define `pricing_json jsonb default '{}'::jsonb` only), so the
-// JSON path is the lean option available today.
-const PIPELINE_PRICING_PROJECTION = [
+// A `jobs.quoted_value` migration now exists, but the column is not yet applied in
+// production (read-only verification on 2026-07-20 returned 42703). Keeping these
+// paths avoids coupling this read to migration/deploy order. Both total paths stay
+// load-bearing for response compatibility: the existing value chain falls back
+// from totalIncGST to total.
+export const PIPELINE_PRICING_PROJECTION = [
   'pj_total_inc:pricing_json->totalIncGST',
   'pj_total:pricing_json->total',
   'pj_split_neighbours:pricing_json->neighbour_splits->neighbours',
@@ -7063,7 +7075,20 @@ const PIPELINE_PRICING_PROJECTION = [
 
 // The alias half of each entry, derived rather than restated: adding a projection
 // key must never leak the alias into the response shape.
-const PIPELINE_PRICING_ALIASES = PIPELINE_PRICING_PROJECTION.map((p) => p.slice(0, p.indexOf(':')))
+export const PIPELINE_PRICING_ALIASES = PIPELINE_PRICING_PROJECTION.map((p) => p.slice(0, p.indexOf(':')))
+
+export function pipelinePricingProjectionValues(row: any) {
+  return {
+    value: row.pj_total_inc || row.pj_total || 0,
+    neighbours: row.pj_split_neighbours || row.pj_job_neighbours,
+  }
+}
+
+export function stripPipelinePricingAliases(row: any) {
+  const leanRow: Record<string, any> = { ...row }
+  for (const alias of PIPELINE_PRICING_ALIASES) delete leanRow[alias]
+  return leanRow
+}
 
 async function pipeline(client: any, params: URLSearchParams) {
   const typeFilter = params.get('type')
@@ -7188,14 +7213,13 @@ async function pipeline(client: any, params: URLSearchParams) {
   }
 
   const enriched = jobs.map((j: any) => {
-    const value = j.pj_total_inc || j.pj_total || 0
+    const { value, neighbours } = pipelinePricingProjectionValues(j)
     // Neighbour count for fencing shared fence badge.
     // The old JSON.parse(string) branch is gone with the blob: pricing_json is jsonb,
     // so a projected path always deserialises to a value, never to a raw string.
     let neighbourCount = 0
     if (j.type === 'fencing') {
-      const ns = j.pj_split_neighbours || j.pj_job_neighbours
-      if (Array.isArray(ns)) neighbourCount = ns.length
+      if (Array.isArray(neighbours)) neighbourCount = neighbours.length
       if (neighbourCount === 0) neighbourCount = neighbourContactMap[j.id] || 0
     }
     const stageStart = j.status === 'accepted' ? j.accepted_at
@@ -7214,8 +7238,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     // Strip the pricing projection from the response — value/neighbourCount already
     // extracted. Previously this dropped the whole `pricing_json` blob; the aliases
     // occupy its slot in the select, so the surviving key order is unchanged.
-    const jLite: Record<string, any> = { ...j }
-    for (const alias of PIPELINE_PRICING_ALIASES) delete jLite[alias]
+    const jLite = stripPipelinePricingAliases(j)
     return {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,
