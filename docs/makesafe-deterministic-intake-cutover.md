@@ -38,11 +38,18 @@ Runtime components:
 - `supabase/functions/ops-api/makesafe_deterministic_intake_runtime.ts`
 - `scan_ses_makesafes`, which reads the DB switch once and enters exactly one path
 - `makesafe_deterministic_intake_replay`, a no-write aggregate replay action
-- `makesafe_deterministic_intake_dark_observe`, a privileged no-write action that
+- `makesafe_deterministic_intake_dark_observe`, an authenticated no-write action that
   requires exact source ids or instruction keys and returns sanitized case proposals
 
-The deterministic branch imports no model SDK and has no AI fallback. Health records
-`intake_mode=deterministic` and `last_scan_model_calls=0`.
+The deterministic branch imports no model SDK and has no AI fallback. The paid AI
+extraction API stays off and is not required by automatic scans, terminal skill runs
+or manual operator checks. Health records `intake_mode=deterministic` and
+`last_scan_model_calls=0`.
+
+The terminal skill integration contract is
+`docs/makesafe-intake-terminal-hook.md`. Automatic cron, scoped terminal routine and
+manual operator calls all enter the same deterministic scanner; only DB-approved exact
+allowlists can reach business writes.
 
 ## Query and payload constraints
 
@@ -141,7 +148,7 @@ The aggregate response also includes `identity_floor`, calculated at canonical-c
 grain as `reached / known_builder_work_candidates * 100`, with per-builder counts.
 File that sanitized object with the current commit so the 95% gate is reproducible.
 
-For the required N=1 human comparison, call the privileged dark surface with exactly
+For the required N=1 human comparison, call the authenticated dark surface with exactly
 one approved source id (or one approved instruction key):
 
 ```text

@@ -149,6 +149,9 @@ reports zero. `jobs.quoted_value`
 intake also requires `20260721000001_makesafe_intake_production_controls.sql`
 before its matching `ops-api`: health and scan read those rollout/auth columns.
 The migration is inert (`intake_mode` stays `legacy`); do not deploy code first.
+Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual
+intake checks all use the deterministic contract in
+`docs/makesafe-intake-terminal-hook.md`.
 
 ## Fencing Job Mint Invariant
 

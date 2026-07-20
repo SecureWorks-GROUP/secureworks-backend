@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix
 // Wave 0 (Make-Safe Autopilot) hardening proof tests.
 //
 // PROVES the Wave 0 gate fixes in ops-api/index.ts, including the scoped-routine-key
@@ -107,6 +108,8 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   "get_makesafe_attachment_url",
   "job_detail",
   "list_intake_drafts",
+  "makesafe_deterministic_intake_replay",
+  "makesafe_deterministic_intake_dark_observe",
   "list_makesafe_companies",
   "scan_ses_makesafes",
   "create_intake_draft",
@@ -207,6 +210,8 @@ Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach fe
       "create_intake_draft",
       "scan_ses_makesafes",
       "list_intake_drafts",
+      "makesafe_deterministic_intake_replay",
+      "makesafe_deterministic_intake_dark_observe",
       "attach_makesafe_document",
       "submit_makesafe_report",
       "ops_summary",

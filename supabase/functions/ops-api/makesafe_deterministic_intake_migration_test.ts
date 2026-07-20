@@ -29,6 +29,9 @@ const core = await Deno.readTextFile(
   new URL("./makesafe_deterministic_intake.ts", import.meta.url),
 );
 const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+const terminalHook = await Deno.readTextFile(
+  new URL("../../../docs/makesafe-intake-terminal-hook.md", import.meta.url),
+);
 
 Deno.test("cutover migration defaults to legacy and exposes one deterministic switch", () => {
   assertStringIncludes(
@@ -155,6 +158,22 @@ Deno.test("deterministic runtime has no assignment, work-order, invoice or commu
       `runtime contains forbidden writer ${forbidden}`,
     );
   }
+});
+
+Deno.test("ruling 5 terminal skill hook stays deterministic and non-privileged", () => {
+  const routineAllowlist = index.slice(
+    index.indexOf("const ROUTINE_ALLOWED_ACTIONS"),
+    index.indexOf("if (authMode === 'routine'"),
+  );
+  assertStringIncludes(
+    routineAllowlist,
+    "'makesafe_deterministic_intake_dark_observe'",
+  );
+  assertStringIncludes(terminalHook, "Automatic code");
+  assertStringIncludes(terminalHook, "Terminal make-safe skill");
+  assertStringIncludes(terminalHook, "Manual operator");
+  assertStringIncludes(terminalHook, "paid AI extraction API stays off");
+  assertStringIncludes(terminalHook, "may not call\n`approve_intake_draft`");
 });
 
 Deno.test("health exposes effective mode and fresh authenticated alarm proof", () => {

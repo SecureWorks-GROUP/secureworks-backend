@@ -2229,8 +2229,9 @@ if (import.meta.main) serve(async (req: Request) => {
   //              PRIVILEGED: may approve / create live jobs / authorise.
   //   jwt      — a logged-in Supabase user (role admin/owner = privileged).
   //   routine  — the LESSER MAKESAFE_ROUTINE_KEY held by the make-safe automation.
-  //              May create/read DRAFTS only; rejected by approve/authorise and
-  //              forced-to-draft on live-job creation. NEVER privileged.
+  //              May read/create drafts and trigger the DB-allowlisted deterministic
+  //              scanner; rejected by direct approve/authorise and cannot set or widen
+  //              rollout authority. Forced-to-draft on direct live-job creation.
   // The routine key is a DISTINCT secret from SW_API_KEY; the routine env carries the
   // routine key ONLY, never SW_API_KEY (morning provisioning discipline). The env var
   // may be UNSET until provisioned, so we only ever match it when it is non-empty;
@@ -2328,6 +2329,9 @@ if (import.meta.main) serve(async (req: Request) => {
       // Golden-set and deterministic cutover replays are read-only, key-less, no writes.
       'intake_golden_replay',
       'makesafe_deterministic_intake_replay',
+      // Ruling 5 terminal-skill hook: exact allowlist in, sanitized case proposal
+      // out. It is zero-write and carries no source ids/content in its response.
+      'makesafe_deterministic_intake_dark_observe',
       'list_makesafe_companies',
       // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
       // normal work-order drafts through the internal auto-approval gate; it never
@@ -2695,13 +2699,13 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       // True dark observation: exact named sources/instruction keys, sanitized
       // case-level proposals, no storage mutation, approval, model call or DB write.
-      // Unlike aggregate replay this is privileged-only and suitable for the N=1
-      // human old/new comparison sheet.
+      // Routine/privileged callers may use it for the N=1 human old/new
+      // comparison; ordinary JWT users remain denied.
       case 'makesafe_deterministic_intake_dark_observe': {
-        const darkObservePrivileged = authMode === 'api_key' ||
+        const darkObserveAllowed = authMode === 'api_key' || authMode === 'routine' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
-        if (!darkObservePrivileged) {
-          return json({ error: 'forbidden: makesafe_deterministic_intake_dark_observe requires the privileged ops key or an admin/owner session' }, 403)
+        if (!darkObserveAllowed) {
+          return json({ error: 'forbidden: makesafe_deterministic_intake_dark_observe requires the routine/privileged ops key or an admin/owner session' }, 403)
         }
         const sourceIds = Array.isArray(body?.source_ids)
           ? body.source_ids
