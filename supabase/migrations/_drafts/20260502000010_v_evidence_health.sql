@@ -55,7 +55,7 @@ SELECT
                      OR source_table IS NULL
                      OR source_id IS NULL)                AS missing_envelope,
   COUNT(*) FILTER (WHERE body_preview IS NULL
-                     AND channel IN ('email','sms','call','note'))
+                     AND channel IN ('email','sms','call','telegram','note'))
                                                           AS comms_missing_preview,
   COUNT(*) FILTER (WHERE body_preview IS NOT NULL
                      AND char_length(body_preview) >= 500
