@@ -202,7 +202,10 @@ Deno.test("double-encoded pricing_json recovers neighbours but leaves value at t
   assertFalse(Array.isArray(projectedOnly.neighbours));
 
   // The fallback restores only the fencing neighbour list.
-  assertEquals(pipelinePricingFallbackNeighbours(doubleEncoded), legacy.neighbours);
+  assertEquals(
+    pipelinePricingFallbackNeighbours(doubleEncoded),
+    legacy.neighbours,
+  );
 });
 
 Deno.test("malformed-blob fallback matches the old neighbour chain and never throws", () => {
@@ -214,14 +217,17 @@ Deno.test("malformed-blob fallback matches the old neighbour chain and never thr
 
   // No neighbour list at all: nothing to recover, so the projection stands.
   assertEquals(
-    pipelinePricingFallbackNeighbours(JSON.stringify({ totalIncGST: 0, total: 999 })),
+    pipelinePricingFallbackNeighbours(
+      JSON.stringify({ totalIncGST: 0, total: 999 }),
+    ),
     null,
   );
 
   const jobNeighbours = { job: { neighbours: ["one", "two", "three"] } };
   assertEquals(
     pipelinePricingFallbackNeighbours(JSON.stringify(jobNeighbours)),
-    oldPipelineValues({ pricing_json: JSON.stringify(jobNeighbours) }).neighbours,
+    oldPipelineValues({ pricing_json: JSON.stringify(jobNeighbours) })
+      .neighbours,
   );
 
   // Already-decoded jsonb objects flow through unchanged.
