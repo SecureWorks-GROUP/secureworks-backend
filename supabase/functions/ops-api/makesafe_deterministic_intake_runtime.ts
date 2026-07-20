@@ -35,6 +35,9 @@ const DEFAULT_MAX_CASES_PER_RUN = 25;
 // Repeat failures must not spend the commit budget, but they still cost time, so
 // one run stops after this many attempts regardless of how many committed.
 const MAX_ATTEMPT_MULTIPLIER = 4;
+// PostgREST caps an unranged response at 1000 rows, so batched source reads page
+// below that cap rather than silently truncating.
+const SOURCE_PAGE_SIZE = 500;
 
 export interface DeterministicRuntimeReport {
   ok: true;
@@ -329,6 +332,10 @@ function casePayload(
     ? plan.reasonCode
     : plan.reasonCode || (plan.state === "accounted_non_wo"
       ? "non_makesafe"
+      : plan.state === "confirmed_live_job" || plan.state === "blocked_live_job"
+      // The adapter parsed fine; the case is only accounted ahead of the guarded
+      // job creation, so it must not be reported as an adapter failure.
+      ? "awaiting_job_creation"
       : "adapter_parse_failure");
   return {
     org_id: DEFAULT_ORG_ID,
@@ -497,19 +504,28 @@ async function readPersistedSourcePostIds(
 ): Promise<Map<string, Set<string>>> {
   const byCase = new Map<string, Set<string>>();
   for (const ids of chunk(caseIds, 200)) {
-    const { data, error } = await client.from("makesafe_intake_case_sources")
-      .select("case_id,post_id")
-      .eq("org_id", DEFAULT_ORG_ID)
-      .in("case_id", ids);
-    if (error) {
-      throw new Error(
-        `deterministic case source read failed: ${error.message || error}`,
-      );
-    }
-    for (const row of data || []) {
-      const set = byCase.get(row.case_id) || new Set<string>();
-      set.add(row.post_id);
-      byCase.set(row.case_id, set);
+    // A truncated page would look like unaccounted evidence and put stuck cases
+    // back at the head of every run, so the read is paged to exhaustion.
+    for (let from = 0;; from += SOURCE_PAGE_SIZE) {
+      const { data, error } = await client.from("makesafe_intake_case_sources")
+        .select("case_id,post_id")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("case_id", ids)
+        .order("case_id", { ascending: true })
+        .order("post_id", { ascending: true })
+        .range(from, from + SOURCE_PAGE_SIZE - 1);
+      if (error) {
+        throw new Error(
+          `deterministic case source read failed: ${error.message || error}`,
+        );
+      }
+      const rows = data || [];
+      for (const row of rows) {
+        const set = byCase.get(row.case_id) || new Set<string>();
+        set.add(row.post_id);
+        byCase.set(row.case_id, set);
+      }
+      if (rows.length < SOURCE_PAGE_SIZE) break;
     }
   }
   return byCase;
@@ -690,6 +706,7 @@ async function insertCaseAndSources(
   jobId: string | null,
   sourceMap: Map<string, DeterministicSourceItem>,
   knownExisting?: any | null,
+  skipSources = false,
 ): Promise<
   {
     caseRow: any;
@@ -758,7 +775,7 @@ async function insertCaseAndSources(
     }
   }
   let sourceCreated = 0;
-  for (const postId of plan.sourcePostIds) {
+  for (const postId of skipSources ? [] : plan.sourcePostIds) {
     const source = sourceMap.get(postId)!;
     const refs = source.attachments.map((a) => a.id);
     const { error } = await client.from("makesafe_intake_case_sources").insert({
@@ -950,14 +967,16 @@ export async function runDeterministicIntake(
         if (live.draftCreated) report.totals.drafts_created++;
         if (live.jobCreated) report.totals.jobs_created++;
         resumedCase = resumedCase || live.resumed;
+        // Sources were already accounted by the pre-job hop above, so this call
+        // only moves the case onto its job.
         saved = await insertCaseAndSources(
           client,
           casePlan,
           jobId,
           sourceMap,
           saved.caseRow,
+          true,
         );
-        report.totals.source_rows_created += saved.sourceCreated;
       }
       committed++;
       // One case counts once, however many of its artefacts already existed.

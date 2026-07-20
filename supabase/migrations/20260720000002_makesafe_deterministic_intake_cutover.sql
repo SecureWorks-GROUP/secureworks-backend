@@ -62,6 +62,22 @@ ALTER TABLE public.makesafe_intake_cases
     )
   );
 
+ALTER TABLE public.makesafe_intake_cases
+  DROP CONSTRAINT IF EXISTS makesafe_intake_cases_reason_code_check;
+ALTER TABLE public.makesafe_intake_cases
+  ADD CONSTRAINT makesafe_intake_cases_reason_code_check CHECK (reason_code IN (
+    'cancellation',
+    'duplicate',
+    'revision',
+    'unknown_builder',
+    'non_makesafe',
+    'ambiguous_scope',
+    'below_identity_floor',
+    'adapter_parse_failure',
+    'conflicting_fields',
+    'awaiting_job_creation'
+  ));
+
 CREATE INDEX IF NOT EXISTS idx_makesafe_intake_cases_source_fingerprint
   ON public.makesafe_intake_cases (org_id, source_fingerprint)
   WHERE source_fingerprint IS NOT NULL;
