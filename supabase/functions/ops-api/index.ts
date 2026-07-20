@@ -14311,12 +14311,14 @@ async function scanSesMakesafes(client: any) {
       // Exact allowlists make the read narrow at case selection time. Include
       // already-scanned sources so a configured key can be proved on every run;
       // settled cases then replay with zero new business writes rather than a
-      // missing key being mistaken for a successful empty scan.
+      // missing key being mistaken for a successful empty scan. The window read
+      // is capped per run and allowlisted sources are read by id, so scan cost
+      // stays flat as the mailbox grows and one stale entry only shows up as an
+      // unmatched count instead of poisoning every later scan.
       onlyUnscanned: false,
       maxCases: rollout.maxCases,
       allowSourcePostIds: rollout.sourcePostIds,
       allowInstructionKeys: rollout.instructionKeys,
-      requireAllAllowlistMatches: true,
       approveDraft: approveIntakeDraft,
     })
   }

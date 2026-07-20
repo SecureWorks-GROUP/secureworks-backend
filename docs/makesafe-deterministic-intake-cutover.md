@@ -1,5 +1,16 @@
 # Make-safe deterministic intake cutover runbook
 
+## Flagged for Marnin: two live-scan behaviour changes
+
+1. A stale allowlist entry no longer poisons later scans. Entries that no longer
+   resolve to a case are reported as `selection.unmatched_source_allowlist` /
+   `selection.unmatched_instruction_allowlist` and the scan continues on the
+   resolved set. Only an allowlist that resolves **no** case at all fails closed.
+2. Each live scan now has a flat read and plan cost. The window read is capped at
+   500 rows per run (`source_read.cap`), and allowlisted sources are read by id
+   outside that cap, so a named source is still proved on every run once it ages
+   out of the newest rows. Scan cost no longer grows with mailbox age.
+
 ## Authority and scope
 
 This runbook prepares the direct deterministic cutover. It is not deployment or
@@ -67,7 +78,11 @@ This package does not touch those query blocks and does not duplicate that PR.
 A live scan is incremental and cannot drain an unrelated backlog. It reads its exact
 source/instruction allowlists and case cap from `makesafe_cron_settings`. The cap
 defaults to exactly one and is constrained to 1 through 10. Empty allowlists fail
-closed. One invocation can attempt only allowlisted cases and stops after four times
+closed, and so does an allowlist that resolves no case; a partially resolved
+allowlist reports its unmatched entries and proceeds on the resolved set. The
+window read is capped per invocation and allowlisted sources are read by id, so
+read and plan cost stay flat as the mailbox grows.
+One invocation can attempt only allowlisted cases and stops after four times
 the explicit case cap, so an edge timeout never discards accounting already committed.
 Cases are stamped as they go and the next scan resumes.
 

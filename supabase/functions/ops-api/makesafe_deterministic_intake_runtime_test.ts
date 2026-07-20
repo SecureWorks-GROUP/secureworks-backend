@@ -7,6 +7,7 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { runDeterministicIntake } from "./makesafe_deterministic_intake_runtime.ts";
 
@@ -944,4 +945,138 @@ Deno.test("storage failure surfaces a storage blocker instead of staying silent"
   assertEquals(store.work_orders?.length ?? 0, 0);
   assertEquals(store.xero_invoices?.length ?? 0, 0);
   assertEquals(store.outbound_messages?.length ?? 0, 0);
+});
+
+Deno.test("window read cost is capped and does not grow with the mailbox", async () => {
+  const bulk = (count: number, prefix: string) =>
+    Array.from({ length: count }, (_, index) =>
+      email({
+        post_id: `${prefix}-${index}`,
+        subject: `Re: general chatter ${index}`,
+        body_content: "Thanks, noted.",
+      }));
+
+  const small = baseStore();
+  small.emails.push(...bulk(900, "a"));
+  const smallLog: Array<[string, string]> = [];
+  const first = await runDeterministicIntake(fakeClient(small, smallLog), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+  });
+
+  const large = baseStore();
+  large.emails.push(...bulk(4000, "b"));
+  const largeLog: Array<[string, string]> = [];
+  const second = await runDeterministicIntake(fakeClient(large, largeLog), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+  });
+
+  assertEquals(first.source_read.cap, 500);
+  assertEquals(first.source_read.window_rows, 500);
+  assertEquals(first.source_read.cap_reached, true);
+  assertEquals(first.totals.sources, 500);
+  // A mailbox four times the size reads exactly the same number of rows through
+  // the same number of round trips.
+  assertEquals(second.source_read.window_rows, first.source_read.window_rows);
+  assertEquals(second.totals.sources, first.totals.sources);
+  assertEquals(
+    largeLog.filter(([table]) => table === "emails").length,
+    smallLog.filter(([table]) => table === "emails").length,
+  );
+});
+
+Deno.test("an allowlisted source outside the capped window is still read by id", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({ post_id: "noise-1", subject: "Re: chatter", body_content: "ok" }),
+    email({ post_id: "noise-2", subject: "Re: chatter", body_content: "ok" }),
+    email({
+      post_id: "aged-1",
+      subject: "NEW WORK ORDER MLB-61000 Work Order: WO-61000",
+      body_content: "Client: Aged Client\nAddress: 15 Aged Avenue, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-aged",
+    email_id: "aged-1",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/aged.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 1,
+    allowSourcePostIds: ["aged-1"],
+    approveDraft,
+  });
+
+  assertEquals(report.source_read.window_rows, 1);
+  assertEquals(report.source_read.seed_rows, 1);
+  assertEquals(report.selection.selected_cases, 1);
+  assertEquals(report.selection.unmatched_source_allowlist, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+});
+
+Deno.test("a stale allowlist entry is reported and the resolved set still runs", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "live-1",
+      subject: "NEW WORK ORDER MLB-62000 Work Order: WO-62000",
+      body_content: "Client: Live Client\nAddress: 16 Live Loop, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-live",
+    email_id: "live-1",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/live.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    allowSourcePostIds: ["live-1", "deleted-long-ago"],
+    allowInstructionKeys: ["instruction:that:no:longer:groups"],
+    approveDraft,
+  });
+
+  assertEquals(report.selection.unmatched_source_allowlist, 1);
+  assertEquals(report.selection.unmatched_instruction_allowlist, 1);
+  assertEquals(report.selection.selected_cases, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+});
+
+Deno.test("a fully unresolved allowlist fails closed instead of scanning empty", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "other-1",
+      subject: "NEW WORK ORDER MLB-63000 Work Order: WO-63000",
+      body_content: "Client: Other Client\nAddress: 17 Other Way, Perth",
+    }),
+  );
+  await assertRejects(
+    () =>
+      runDeterministicIntake(fakeClient(store), {
+        dryRun: false,
+        days: 30,
+        nowIso: NOW,
+        allowSourcePostIds: ["deleted-long-ago"],
+        approveDraft,
+      }),
+    Error,
+    "resolved no cases",
+  );
+  assertEquals(store.makesafe_intake_cases.length, 0);
 });

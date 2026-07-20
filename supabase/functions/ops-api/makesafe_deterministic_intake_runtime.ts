@@ -1,7 +1,8 @@
 // DB-bound deterministic make-safe intake runtime.
 // deno-lint-ignore-file no-explicit-any
 //
-// Reads the complete bounded source window before planning. Dry-run performs no
+// Reads a capped source window plus every allowlisted source by id before
+// planning, so per-run cost is a constant. Dry-run performs no
 // writes or storage mutations. Live mode is reachable only through the DB-backed
 // cutover switch and never falls back to AI.
 
@@ -29,6 +30,7 @@ export interface DeterministicRuntimeOptions {
   allowInstructionKeys?: readonly string[];
   includeSanitizedCases?: boolean;
   requireAllAllowlistMatches?: boolean;
+  maxSources?: number;
   approveDraft?: (client: any, body: any) => Promise<any>;
 }
 
@@ -50,6 +52,12 @@ const MAX_ATTEMPT_MULTIPLIER = 4;
 // PostgREST caps an unranged response at 1000 rows, so batched source reads page
 // below that cap rather than silently truncating.
 const SOURCE_PAGE_SIZE = 500;
+// A scheduled run reads at most this many window rows regardless of how large the
+// mailbox has grown. Allowlisted sources are read separately by id, so a named
+// source is still proved on every run even once it has aged out of the newest
+// rows, and already-scanned rows inside the bound are still revisited.
+const DEFAULT_MAX_SOURCES_PER_RUN = 500;
+const MAX_SOURCES_PER_RUN = 2000;
 
 export interface DeterministicRuntimeReport {
   ok: true;
@@ -81,6 +89,14 @@ export interface DeterministicRuntimeReport {
     selected_sources: number;
     unmatched_source_allowlist: number;
     unmatched_instruction_allowlist: number;
+  };
+  // Per-run read bound. cap_reached means older rows in the window were not read
+  // this run; allowlisted sources are read by id and are never dropped by it.
+  source_read: {
+    cap: number;
+    window_rows: number;
+    seed_rows: number;
+    cap_reached: boolean;
   };
   identity_floor: {
     unit: "canonical_case";
@@ -248,13 +264,16 @@ export async function loadDeterministicRolloutControls(
   };
 }
 
-async function fetchAll(
+// Pages like fetchAll but never reads more than `cap` rows, so a caller's read
+// cost is a constant it chose rather than a function of how much history matches.
+async function fetchCapped(
+  cap: number,
   queryFactory: (from: number, to: number) => Promise<any>,
 ): Promise<any[]> {
   const rows: any[] = [];
-  const size = 500;
-  for (let from = 0;; from += size) {
-    const result = await queryFactory(from, from + size - 1);
+  while (rows.length < cap) {
+    const size = Math.min(SOURCE_PAGE_SIZE, cap - rows.length);
+    const result = await queryFactory(rows.length, rows.length + size - 1);
     if (result.error) {
       throw new Error(result.error.message || String(result.error));
     }
@@ -262,7 +281,7 @@ async function fetchAll(
     rows.push(...page);
     if (page.length < size) break;
   }
-  return rows;
+  return rows.slice(0, cap);
 }
 
 // Graph post ids are long. Keep PostgREST .in() URLs comfortably below gateway
@@ -288,13 +307,24 @@ function linksFromBody(
 
 async function readInputs(
   client: any,
-  options: Required<
-    Pick<DeterministicRuntimeOptions, "days" | "onlyUnscanned" | "nowIso">
-  >,
+  options:
+    & Required<
+      Pick<
+        DeterministicRuntimeOptions,
+        "days" | "onlyUnscanned" | "nowIso" | "maxSources"
+      >
+    >
+    & { seedPostIds: readonly string[] },
 ): Promise<
   {
     sources: DeterministicSourceItem[];
     profiles: DeterministicCompanyProfile[];
+    read: {
+      cap: number;
+      window_rows: number;
+      seed_rows: number;
+      cap_reached: boolean;
+    };
   }
 > {
   const since = new Date(Date.parse(options.nowIso) - options.days * 86_400_000)
@@ -312,16 +342,46 @@ async function readInputs(
     "received_at",
     "makesafe_scanned_at",
   ].join(",");
-  const emails = await fetchAll(async (from, to) => {
+  // Newest-first, hard-capped: one run's window read cost is the cap, not the
+  // size of the mailbox history inside the window.
+  const windowRows = await fetchCapped(options.maxSources, async (from, to) => {
     let query = client.from("emails").select(columns)
       .eq("mailbox", SES_MAILBOX)
       .is("pii_purged_at", null)
       .gte("received_at", since)
-      .order("received_at", { ascending: true })
+      .order("received_at", { ascending: false })
       .range(from, to);
     if (options.onlyUnscanned) query = query.is("makesafe_scanned_at", null);
     return await query;
   });
+  const byPostId = new Map<string, any>();
+  for (const row of windowRows) {
+    if (row?.post_id) byPostId.set(row.post_id, row);
+  }
+  const missingSeeds = [...new Set(options.seedPostIds)].filter((postId) =>
+    !byPostId.has(postId)
+  );
+  let seedRows = 0;
+  for (const ids of chunk(missingSeeds)) {
+    const { data, error } = await client.from("emails").select(columns)
+      .eq("mailbox", SES_MAILBOX)
+      .is("pii_purged_at", null)
+      .in("post_id", ids);
+    if (error) {
+      throw new Error(
+        `emails allowlist read failed: ${error.message || error}`,
+      );
+    }
+    for (const row of (data || [])) {
+      if (row?.post_id && !byPostId.has(row.post_id)) {
+        byPostId.set(row.post_id, row);
+        seedRows++;
+      }
+    }
+  }
+  const emails = [...byPostId.values()].sort((a, b) =>
+    String(a.received_at).localeCompare(String(b.received_at))
+  );
   const postIds = emails.map((row) => row.post_id).filter(Boolean);
   const attachmentRows: any[] = [];
   for (const ids of chunk(postIds)) {
@@ -386,7 +446,16 @@ async function readInputs(
       links: linksFromBody(row.post_id, body),
     };
   });
-  return { sources, profiles };
+  return {
+    sources,
+    profiles,
+    read: {
+      cap: options.maxSources,
+      window_rows: windowRows.length,
+      seed_rows: seedRows,
+      cap_reached: windowRows.length >= options.maxSources,
+    },
+  };
 }
 
 function byBuilderOutcome(
@@ -1208,7 +1277,22 @@ export async function runDeterministicIntake(
       "case-level dark observe requires a non-empty exact allowlist",
     );
   }
-  const input = await readInputs(client, { days, onlyUnscanned, nowIso });
+  const maxSources = Number(options.maxSources ?? DEFAULT_MAX_SOURCES_PER_RUN);
+  if (
+    !Number.isInteger(maxSources) || maxSources < 1 ||
+    maxSources > MAX_SOURCES_PER_RUN
+  ) {
+    throw new Error(
+      `deterministic source read cap must be an integer between 1 and ${MAX_SOURCES_PER_RUN}`,
+    );
+  }
+  const input = await readInputs(client, {
+    days,
+    onlyUnscanned,
+    nowIso,
+    maxSources,
+    seedPostIds: allowSourcePostIds,
+  });
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
@@ -1260,6 +1344,7 @@ export async function runDeterministicIntake(
       unmatched_instruction_allowlist:
         allowInstructionKeys.filter((key) => !matchedCaseKeys.has(key)).length,
     },
+    source_read: input.read,
     identity_floor: identityFloorFacts(plan),
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),
@@ -1270,6 +1355,15 @@ export async function runDeterministicIntake(
     report.proposed_cases = await sanitizedCases(plan);
   }
   if (dryRun) return report;
+  // A stale entry (aged out, deleted, or no longer grouping into a case) is
+  // reported through selection.unmatched_* and the run continues on whatever the
+  // allowlist did resolve. Only a fully unresolved allowlist fails closed, so a
+  // missing key is never mistaken for a successful empty scan.
+  if (!plan.cases.length) {
+    throw new Error(
+      `exact deterministic allowlist resolved no cases (${report.selection.unmatched_source_allowlist} source ids, ${report.selection.unmatched_instruction_allowlist} instruction keys unmatched)`,
+    );
+  }
   if (!options.approveDraft) {
     throw new Error(
       "deterministic live mode requires the guarded approval callback",
