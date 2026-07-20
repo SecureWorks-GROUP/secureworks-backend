@@ -875,7 +875,8 @@ Deno.test("dark observe is case-level, sanitized, exact, zero-AI and writes only
     includeSanitizedCases: true,
   });
 
-  const { makesafe_intake_health: healthAfter, ...businessAfter } = store as any;
+  const { makesafe_intake_health: healthAfter, ...businessAfter } =
+    store as any;
   assertEquals(JSON.stringify(businessAfter), before);
   // The one permitted dry-run write is the observe sweep position (its tuple of
   // received_at plus tie-breaker post_id). It must not claim a successful
