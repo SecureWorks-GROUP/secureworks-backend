@@ -187,6 +187,10 @@ import {
 import {
   makesafeIntakeGoldenReplay as _makesafeIntakeGoldenReplay,
 } from './makesafe_intake_golden_replay.ts'
+import {
+  loadDeterministicIntakeMode as _loadDeterministicIntakeMode,
+  runDeterministicIntake as _runDeterministicIntake,
+} from './makesafe_deterministic_intake_runtime.ts'
 // M1.5 cost hardening — local PDF text extraction, per-builder template parsers, and
 // the token/cost ledger. See makesafe_pdf_text.ts / makesafe_template_parser.ts /
 // makesafe_cost.ts. All deterministic + key-less; the model call is the only paid step.
@@ -367,6 +371,7 @@ import {
   normaliseCompany as _normaliseDedupCompany,
   normaliseJobFamily as _normaliseDedupJobFamily,
   decideInsertConflictAction as _decideInsertConflictAction,
+  workOrderIdentityKey as _workOrderIdentityKey,
   workOrderCompanyKey as _workOrderCompanyKey,
 } from './makesafe_intake_dedup.ts'
 // M-A2 / W2-B: two-email late WO-PDF landing. When a builder announces a WO with no
@@ -2320,8 +2325,9 @@ if (import.meta.main) serve(async (req: Request) => {
       // Link backfill: routine may run the DRY-RUN only; the live patch (dry_run:false)
       // is blocked inside the case for a routine caller (privileged-only).
       'makesafe_intake_link_backfill',
-      // Golden-set replay proof — read-only, key-less, no writes.
+      // Golden-set and deterministic cutover replays are read-only, key-less, no writes.
       'intake_golden_replay',
+      'makesafe_deterministic_intake_replay',
       'list_makesafe_companies',
       // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
       // normal work-order drafts through the internal auto-approval gate; it never
@@ -2667,6 +2673,20 @@ if (import.meta.main) serve(async (req: Request) => {
           limit: Number(url.searchParams.get('limit') || '') || undefined,
           downloadPdf: goldenDownloadPdf,
           maxPdfExtractions: Number(url.searchParams.get('max_pdf') || '') || undefined,
+        }))
+      }
+      // Complete deterministic adapter replay. Read-only by construction: no
+      // storage writes, cases, drafts, jobs, approvals, sends or model calls.
+      // The response contains aggregate counts only, never message bodies or PII.
+      case 'makesafe_deterministic_intake_replay': {
+        return json(await _runDeterministicIntake(client, {
+          dryRun: true,
+          days: Math.min(
+            Number(url.searchParams.get('days') || body?.days || '') || 60,
+            60,
+          ),
+          onlyUnscanned: url.searchParams.get('only_unscanned') === 'true' ||
+            body?.only_unscanned === true,
         }))
       }
       case 'makesafe_intake_backfill_report': {
@@ -9216,6 +9236,7 @@ async function createMakesafeJob(client: any, body: any) {
     builder_email_text_for_trade, builder_email_subject, builder_email_received_at,
     makesafe_job_family, makesafe_job_family_label,
     builder_claim_ref, builder_work_order_number, builder_po_number,
+    suppress_manager_notification,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -9369,11 +9390,11 @@ async function createMakesafeJob(client: any, body: any) {
   // exists. REPLACES the legacy Telegram-to-Shaun block that lived here —
   // Telegram is retired business-wide, and Shaun (no-texts by choice, dispatcher
   // role) is naturally excluded by the manager lookup's phone + non-dispatcher
-  // gates. This deliberately IGNORES body.suppress_notifications: that flag
-  // belonged to the old Telegram broadcast, and the DOMINANT creation path
-  // (intake approve) passes it — gating on it left every intake-created
-  // make-safe silent. Non-blocking; notifyVerticalManagersSms never throws.
-  {
+  // gates. The legacy suppress_notifications flag remains intentionally ignored.
+  // Deterministic intake has its own narrow suppress_manager_notification input
+  // because that mission owns no communications. Other creation paths are unchanged.
+  // Non-blocking; notifyVerticalManagersSms never throws.
+  if (suppress_manager_notification !== true) {
     const msSite = `${site_address || ''}${suburb ? ', ' + suburb : ''}`.trim()
     const msText = [
       `New make-safe: ${jobNumber} - ${client_name || 'Client'}`.trim(),
@@ -12911,6 +12932,10 @@ async function approveIntakeDraft(client: any, body: any) {
       // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
       // the refs already on live jobs is cheap and lets us match on normalised form.
       const approvedCompanyKey = String(approvedFields.requesting_company_slug || approvedFields.requesting_company_name || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+      const approvedWorkOrderIdentity = _workOrderIdentityKey(
+        extraction?.builder_work_order_number,
+        extraction?.builder_po_number,
+      )
       const { data: candidates } = await client.from('makesafe_job_details')
         .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
         .not('external_ref', 'is', null)
@@ -12923,6 +12948,17 @@ async function approveIntakeDraft(client: any, body: any) {
         if (!approvedCompanyKey || !existingCompanyKey || approvedCompanyKey !== existingCompanyKey) return false
         const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs
         const existingMetadata = parseJsonObject(existingJob?.metadata)
+        const existingWorkOrderIdentity = _workOrderIdentityKey(
+          existingMetadata.builder_work_order_number,
+          existingMetadata.builder_po_number,
+        )
+        // PR 338/339 identity invariant: one claim/reference can carry multiple
+        // distinct PO-backed instructions. A different proven WO/PO is not a
+        // duplicate even when the display ref and family match.
+        if (
+          approvedWorkOrderIdentity && existingWorkOrderIdentity &&
+          approvedWorkOrderIdentity !== existingWorkOrderIdentity
+        ) return false
         const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
           row.external_ref || '',
           [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),
@@ -13001,6 +13037,10 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
+      // Deterministic intake owns no communications. The existing guarded
+      // approval/job boundary remains in use, but its manager SMS side effect is
+      // explicitly suppressed for this provenance.
+      suppress_manager_notification: extraction?.deterministic_intake === true,
     })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
@@ -14353,6 +14393,19 @@ async function landLateWorkOrderPdfOntoDraft(
 export const _landLateWorkOrderPdfOntoDraftForTest = landLateWorkOrderPdfOntoDraft
 
 async function scanSesMakesafes(client: any) {
+  // One DB-backed authority switch. Deterministic mode has no code path to the
+  // legacy model extraction below and therefore cannot silently fall back to AI.
+  // Rollback changes this one row back to legacy for the next scan.
+  const intakeMode = await _loadDeterministicIntakeMode(client)
+  if (intakeMode === 'deterministic') {
+    return await _runDeterministicIntake(client, {
+      dryRun: false,
+      days: 60,
+      onlyUnscanned: true,
+      approveDraft: approveIntakeDraft,
+    })
+  }
+
   // The group-sync projection keys ses@ mail under this mailbox (the canonical
   // value used by monitor-ses-makesafes + reconcile + the GAP reads).
   const SES_MAILBOX = _SES_MAILBOX

@@ -24,6 +24,7 @@ export const MAKESAFE_REASON_CODES = [
   "below_identity_floor",
   "adapter_parse_failure",
   "conflicting_fields",
+  "awaiting_job_creation",
 ] as const;
 export type MakesafeReasonCode = typeof MAKESAFE_REASON_CODES[number];
 
