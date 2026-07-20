@@ -16,8 +16,57 @@ const BUILDER_REF_WITH_PO_RE =
   /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
 const BUILDER_REF_RE =
   /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
-const PO_RE =
-  /\b(?:P\s*O|purchase\s+order)(?:\s*(?:number|no\.?))?\s*[:#-]?\s*(\d{3,})\b/i;
+/**
+ * The PO label this module can read, as a source pattern. Exported so downstream
+ * identity matching derives the SAME grammar instead of keeping a second copy:
+ * a downstream regex that reads a spelling this one cannot would produce a PO
+ * token while the canonical PO stays null, leaving PO-separation guards blind.
+ */
+export const PO_LABEL_PATTERN = "(?:P\\s*O|purchase\\s+order)";
+/**
+ * Every PO-shaped label, including the dotted and unspaced spellings PO_RE cannot
+ * read. Strictly a superset of PO_LABEL_PATTERN, so the two together partition
+ * PO-labelled text into "parseable" and "present but unknown".
+ */
+const LOOSE_PO_LABEL_PATTERN = "(?:p\\s*[./]?\\s*o\\s*\\.?|purchase\\s*order)";
+/**
+ * A bare, explicitly numbered "Order No <digits>" label. It is NOT a purchase order:
+ * builders use it for their own work-order reference as often as for a PO, so reading
+ * it as PO doubt would strand the whole archetype as permanently unaccountable — it
+ * would carry poUnparsed forever while yielding no identity token to match on. It is
+ * instead read downstream as a generic, sender-scoped work-order reference, alongside
+ * the "work order" spelling. The explicit number requirement keeps prose like "in
+ * order to lay 250 metres" out.
+ */
+export const ORDER_LABEL_PATTERN = "order\\s*(?:number|no\\.?|#)";
+const PO_TAIL_PATTERN = "(?:\\s*(?:number|no\\.?))?\\s*[:#-]?\\s*";
+
+const PO_RE = new RegExp(
+  `\\b${PO_LABEL_PATTERN}${PO_TAIL_PATTERN}(\\d{3,})\\b`,
+  "i",
+);
+const LOOSE_PO_RE = new RegExp(
+  `\\b(?:${LOOSE_PO_LABEL_PATTERN})${PO_TAIL_PATTERN}\\d{3,}\\b`,
+  "i",
+);
+/**
+ * True when the text names a PO in a spelling the canonical grammar cannot parse,
+ * so the PO is unknown rather than absent. "P.O. Box 1234" does not qualify: the
+ * number does not follow the label directly.
+ */
+export function hasUnparseablePoLabel(text: string): boolean {
+  if (PO_RE.test(text)) return false;
+  return LOOSE_PO_RE.test(text);
+}
+
+/**
+ * True when the text names a PO at all, in any spelling either grammar recognises.
+ * Callers reading text that may quote another instruction use this to know a PO is
+ * being discussed without adopting its number as their own identity.
+ */
+export function hasAnyPoLabel(text: string): boolean {
+  return PO_RE.test(text) || LOOSE_PO_RE.test(text);
+}
 
 function canonicalClaim(prefix: string, digits: string): string {
   return `${prefix.toUpperCase()}-${digits}`;
@@ -81,6 +130,19 @@ function scanText(
     current.builder_work_order_number =
       `${current.builder_claim_ref}${current.builder_po_number}`;
   }
+}
+
+/**
+ * The literal builder reference substring as the source wrote it, before any
+ * canonicalisation. Shares the builder prefix vocabulary with the extractor so a
+ * new prefix cannot be recognised by one and missed by the other.
+ */
+export function matchBuilderRefText(
+  value: string | null | undefined,
+): string | null {
+  const text = String(value || "");
+  return text.match(BUILDER_REF_WITH_PO_RE)?.[0] ||
+    text.match(BUILDER_REF_RE)?.[0] || null;
 }
 
 export function extractBuilderWorkOrderIdentity(

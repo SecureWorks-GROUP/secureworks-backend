@@ -9,18 +9,28 @@ const SENDER_PATTERNS = ["mlbuilders.com.au"];
 
 Deno.test("invariant: an email with a linked draft is accounted", () => {
   const inv = summarizeIntakeReconcileInvariant({
-    emails: [{ post_id: "p1", subject: "NEW WORK ORDER - MLB-25096", from_email: "jobs@mlbuilders.com.au" }],
+    emails: [{
+      post_id: "p1",
+      subject: "NEW WORK ORDER - MLB-25096",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
     drafts: [{ graph_message_id: "p1", status: "needs_review" }],
     jobs: [],
     senderPatterns: SENDER_PATTERNS,
   });
   assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "matched");
+  assertEquals(inv.items[0].reason, "source_post_id_matches_draft");
   assert(inv.live_and_true);
 });
 
 Deno.test("invariant: our own outbound copy is accounted, not flagged", () => {
   const inv = summarizeIntakeReconcileInvariant({
-    emails: [{ post_id: "p2", subject: "Make Safe Report and Invoice - MLB-25096", from_email: "invoices@secureworksgroup.app" }],
+    emails: [{
+      post_id: "p2",
+      subject: "Make Safe Report and Invoice - MLB-25096",
+      from_email: "invoices@secureworksgroup.app",
+    }],
     drafts: [],
     jobs: [],
     senderPatterns: SENDER_PATTERNS,
@@ -30,7 +40,11 @@ Deno.test("invariant: our own outbound copy is accounted, not flagged", () => {
 
 Deno.test("invariant: an excluded non-work-order subject is accounted", () => {
   const inv = summarizeIntakeReconcileInvariant({
-    emails: [{ post_id: "p3", subject: "Photo Evidence - MLB-25096 - Balcatta", from_email: "jobs@mlbuilders.com.au" }],
+    emails: [{
+      post_id: "p3",
+      subject: "Photo Evidence - MLB-25096 - Balcatta",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
     drafts: [],
     jobs: [],
     senderPatterns: SENDER_PATTERNS,
@@ -40,7 +54,11 @@ Deno.test("invariant: an excluded non-work-order subject is accounted", () => {
 
 Deno.test("invariant: a non-make-safe email from an unknown sender is accounted (not a candidate)", () => {
   const inv = summarizeIntakeReconcileInvariant({
-    emails: [{ post_id: "p4", subject: "Weekly newsletter", from_email: "news@randomvendor.com" }],
+    emails: [{
+      post_id: "p4",
+      subject: "Weekly newsletter",
+      from_email: "news@randomvendor.com",
+    }],
     drafts: [],
     jobs: [],
     senderPatterns: SENDER_PATTERNS,
@@ -50,7 +68,11 @@ Deno.test("invariant: a non-make-safe email from an unknown sender is accounted 
 
 Deno.test("invariant: a real WO from a known sender with NO draft and NO job is UNACCOUNTED", () => {
   const inv = summarizeIntakeReconcileInvariant({
-    emails: [{ post_id: "p5", subject: "NEW WORK ORDER - MLB-99999 12 Some St", from_email: "jobs@mlbuilders.com.au" }],
+    emails: [{
+      post_id: "p5",
+      subject: "NEW WORK ORDER - MLB-99999 12 Some St",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
     drafts: [],
     jobs: [],
     senderPatterns: SENDER_PATTERNS,
@@ -58,26 +80,1450 @@ Deno.test("invariant: a real WO from a known sender with NO draft and NO job is 
   assertEquals(inv.counts.unaccounted, 1);
   assertEquals(inv.live_and_true, false);
   assertEquals(inv.unaccounted[0].post_id, "p5");
-  assertEquals(inv.unaccounted[0].reason, "make_safe_candidate_no_draft_no_job");
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.unaccounted[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+  assertEquals(
+    inv.unaccounted[0].reason,
+    "make_safe_candidate_no_draft_no_job",
+  );
 });
 
 Deno.test("invariant: a known-sender WO whose ref is already a live job is accounted", () => {
   const inv = summarizeIntakeReconcileInvariant({
-    emails: [{ post_id: "p6", subject: "NEW WORK ORDER - MLB-25096 7 Broughton St", from_email: "jobs@mlbuilders.com.au" }],
+    emails: [{
+      post_id: "p6",
+      subject: "NEW WORK ORDER - MLB-25096 7 Broughton St",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
     drafts: [],
     jobs: [{ external_ref: "MLB-25096" }],
     senderPatterns: SENDER_PATTERNS,
   });
   assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.counts.accounted_alias_revision, 1);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(
+    inv.items[0].reason,
+    "resend_or_revision_matches_live_job_identity",
+  );
   assert(inv.live_and_true);
 });
 
 Deno.test("invariant: a pure ack with no attachment is accounted", () => {
   const inv = summarizeIntakeReconcileInvariant({
-    emails: [{ post_id: "p7", subject: "Our Ref: MLB-25795 - thanks", from_email: "jobs@mlbuilders.com.au", has_attachments: false }],
+    emails: [{
+      post_id: "p7",
+      subject: "Our Ref: MLB-25795 - thanks",
+      from_email: "jobs@mlbuilders.com.au",
+      has_attachments: false,
+    }],
     drafts: [],
     jobs: [],
     senderPatterns: SENDER_PATTERNS,
   });
   assertEquals(inv.counts.unaccounted, 0);
+});
+
+Deno.test("invariant regression: z2 twin Graph post ids account against one durable draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [
+      {
+        post_id: "mailbox_sanitized_26567",
+        subject: "Our Ref: MLB-26567 - Make Safe",
+        from_email: "jobs@mlbuilders.com.au",
+        received_at: "2026-07-17T03:20:59.000Z",
+        body_preview: "Please attend the insured property. Claim MLB-26567.",
+      },
+      {
+        post_id: "AAMk-sanitized-26567",
+        subject: "Our Ref: MLB-26567 - Make Safe",
+        from_email: "jobs@mlbuilders.com.au",
+        received_at: "2026-07-17T03:21:00.000Z",
+        body_preview: "Please attend the insured property. Claim MLB-26567.",
+      },
+    ],
+    drafts: [{
+      id: "draft-26567",
+      graph_message_id: "AAMk-sanitized-26567",
+      external_ref: "MLB-26567",
+      subject: "Our Ref: MLB-26567 - Make Safe",
+      from_email: "jobs@mlbuilders.com.au",
+      body_preview: "Please attend the insured property. Claim MLB-26567.",
+      received_at: "2026-07-17T03:21:00.000Z",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items.length, 2);
+  assertEquals(inv.items.map((item) => item.classification), [
+    "accounted_alias_revision",
+    "matched",
+  ]);
+  assertEquals(inv.items[0].reason, "twin_graph_post_content_fingerprint");
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-26567" });
+});
+
+// emails.body_preview and makesafe_intake_drafts.body_preview are produced by different
+// strippers and truncations (a naive tag strip at 500 chars vs the trade stripper at
+// 2000), so a body hash is never durable twin proof. Two genuinely separate ref-less
+// work orders from one sender in one minute must therefore stay unaccounted rather than
+// alias onto each other on body text alone.
+Deno.test("invariant hostile near-collision: ref-less production-shaped bodies never twin", () => {
+  const html = `<html><body><p>Attend the insured property and make safe.</p>${
+    "<p>Scope note line describing the same generic make safe attendance.</p>"
+      .repeat(12)
+  }<p>Site contact differs per work order.</p></body></html>`;
+  const mailboxPreview = html.replace(/<[^>]+>/g, " ").slice(0, 500);
+  const draftPreview = html.replace(/<[^>]+>/g, "\n").replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 2000);
+  assertEquals(mailboxPreview === draftPreview, false);
+
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-refless-body-only",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:10:20.000Z",
+      body_preview: mailboxPreview,
+    }],
+    drafts: [{
+      id: "draft-refless-body-only",
+      graph_message_id: "AAMk-sanitized-refless-other",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:10:21.000Z",
+      body_preview: draftPreview,
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// The same fixture with byte-identical previews must also decline: body text carries no
+// twin authority at all, so a test that happened to share a preview string cannot mask
+// the divergence above.
+Deno.test("invariant hostile near-collision: identical ref-less bodies still never twin", () => {
+  const body = "Attend the insured property and make safe. Generic scope.";
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-refless-identical-body",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:20:20.000Z",
+      body_preview: body,
+    }],
+    drafts: [{
+      id: "draft-refless-identical-body",
+      graph_message_id: "AAMk-sanitized-refless-identical",
+      subject: "Make Safe Request",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-07-16T04:20:21.000Z",
+      body_preview: body,
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant regression: z2 claim-only source matches a PO-suffixed captured reference", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-24659",
+      subject: "Our Ref: MLB-24659 - Rapid Repair",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-24659", external_ref: "MLB-24659PO-56155" }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].reason, "claim_reference_alias_of_po_captured_job");
+  assertEquals(inv.items[0].raw_reference, "MLB-24659");
+  assertEquals(inv.items[0].canonical_claim_ref, "MLB-24659");
+  assertEquals(inv.items[0].canonical_po_ref, null);
+  assertEquals(inv.items[0].evidence, { kind: "job", id: "job-24659" });
+});
+
+Deno.test("invariant regression: z2 PO-variant source aliases a captured draft without erasing either representation", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-26678",
+      subject: "NEW WORK ORDER MLB-26678",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-26678-po55291",
+      graph_message_id: "AAMk-sanitized-26678",
+      external_ref: "MLB-26678PO-55291",
+      status: "needs_review",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(
+    inv.items[0].reason,
+    "claim_reference_alias_of_po_captured_draft",
+  );
+  assertEquals(inv.items[0].raw_reference, "MLB-26678");
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-26678-po55291",
+  });
+});
+
+Deno.test("invariant hostile near-collision: explicit new PO does not collapse into a legacy claim-only job", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-24404-po55601",
+      subject: "NEW WORK ORDER MLB-24404 PO-55601",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "legacy-job-24404", external_ref: "MLB-24404" }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].canonical_po_ref, "PO-55601");
+});
+
+Deno.test("invariant hostile near-collision: distinct PO deliverables sharing a claim stay separate", () => {
+  const commonBody =
+    "Attend the same property. Scope wording intentionally identical.";
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-27037-po2",
+      subject: "NEW WORK ORDER MLB-27037 PO-56397",
+      from_email: "jobs@mlbuilders.com.au",
+      body_preview: commonBody,
+      received_at: "2026-07-16T02:00:30.000Z",
+    }],
+    drafts: [{
+      id: "draft-27037-po1",
+      graph_message_id: "AAMk-sanitized-27037-po1",
+      external_ref: "MLB-27037PO-56395",
+      subject: "NEW WORK ORDER MLB-27037 PO-56395",
+      from_email: "jobs@mlbuilders.com.au",
+      body_preview: commonBody,
+      received_at: "2026-07-16T02:00:31.000Z",
+      status: "approved",
+    }],
+    jobs: [{ job_id: "job-27037-po1", external_ref: "MLB-27037PO-56395" }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.unaccounted[0].post_id, "mailbox-sanitized-27037-po2");
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+  assertEquals(
+    inv.unaccounted[0].reason,
+    "distinct_claim_po_has_no_draft_or_job",
+  );
+  assertEquals(inv.unaccounted[0].canonical_po_ref, "PO-56397");
+});
+
+Deno.test("invariant: bare 'Job No <NNNNN>' archetype is accounted by a same-sender draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68592",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-68592",
+      graph_message_id: "AAMk-sanitized-jobno-68592",
+      external_ref: "68592",
+      from_email: "WorkOrders@AJS.build",
+      subject: "Make Safe - Balga - Job No 68592",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-68592" });
+  assertEquals(inv.items[0].raw_reference, "Job No 68592");
+});
+
+Deno.test("invariant hostile near-collision: a bare job number never matches an unrelated builder's draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68592-ajs",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-mlb-68592",
+      graph_message_id: "AAMk-sanitized-mlb-68592",
+      external_ref: "68592",
+      from_email: "jobs@mlbuilders.com.au",
+      subject: "Make Safe - Kelmscott - Job No 68592",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build", "mlbuilders.com.au"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: a bare job number never matches a global job row", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68592-nojob",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-68592", external_ref: "68592" }],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: 'Our Ref' shared across builders stays separate", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-ourref-41288",
+      subject: "Make Safe - Our Ref: 41288 - Yokine",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-mlb-ourref-41288",
+      graph_message_id: "AAMk-sanitized-mlb-ourref-41288",
+      external_ref: "41288",
+      from_email: "jobs@mlbuilders.com.au",
+      subject: "Make Safe - Our Ref: 41288 - Gosnells",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build", "mlbuilders.com.au"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.unaccounted[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant: a short labelled work order ref still matches its same-sender draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-wo-1234",
+      subject: "Make Safe - Work Order: 1234 - Dianella",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [{
+      id: "draft-wo-1234",
+      graph_message_id: "AAMk-sanitized-wo-1234",
+      external_ref: "1234",
+      from_email: "workorders@ajs.build",
+      subject: "Make Safe - Work Order: 1234 - Dianella",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-wo-1234" });
+});
+
+Deno.test("invariant: known ref outside the builder claim vocabulary is accounted by a draft", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-srj-41288",
+      subject: "NEW WORK ORDER SRJ-41288 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-srj-41288",
+      graph_message_id: "AAMk-sanitized-srj-41288",
+      external_ref: "SRJ-41288",
+      subject: "NEW WORK ORDER SRJ-41288 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-srj-41288" });
+  assertEquals(inv.items[0].canonical_claim_ref, null);
+});
+
+Deno.test("invariant hostile near-collision: neighbouring non-prefix refs stay separate", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-srj-41289",
+      subject: "NEW WORK ORDER SRJ-41289 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-srj-41288", external_ref: "SRJ-41288" }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: distinct job numbers are never collapsed", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-jobno-68593",
+      subject: "Make Safe - Balga - Job No 68593",
+      from_email: "workorders@ajs.build",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-68592", external_ref: "68592" }],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: non-prefix ref with an explicit new PO stays visible", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-srj-41288-po",
+      subject: "NEW WORK ORDER SRJ-41288 PO 55601 - Mirrabooka",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [],
+    jobs: [{ job_id: "job-srj-41288", external_ref: "SRJ-41288" }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].canonical_po_ref, "PO-55601");
+});
+
+Deno.test("invariant hostile near-collision: shared suburb postcode is not a work identity", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-postcode-b",
+      subject: "Make Safe - 88 Jones Rd, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-postcode-a",
+      graph_message_id: "AAMk-sanitized-postcode-a",
+      subject: "Make Safe - 12 Smith St, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant hostile near-collision: shared lot number is not a work identity", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-lot-b",
+      subject: "Make Safe - Lot 245 Jones Rd, Ellenbrook",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-lot-a",
+      graph_message_id: "AAMk-sanitized-lot-a",
+      subject: "Make Safe - Lot 245 Smith Rd, Byford",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].raw_reference, null);
+});
+
+Deno.test("invariant hostile near-collision: shared unit number is not a work identity", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-unit-b",
+      subject: "Make Safe - Unit 1203 Hay St, Perth",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-unit-a",
+      graph_message_id: "AAMk-sanitized-unit-a",
+      subject: "Make Safe - Unit 1203 Beaufort St, Mount Lawley",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].raw_reference, null);
+});
+
+Deno.test("invariant: address text never becomes a raw reference or fingerprint discriminator", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-addr-disc",
+      subject: "Make Safe Required - 12 Smith St, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-04T01:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-addr-disc",
+      graph_message_id: "AAMk-sanitized-addr-disc",
+      subject: "Make Safe Required - 88 Jones Rd, Balcatta WA 6021",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-04T01:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.items[0].raw_reference, null);
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+Deno.test("invariant: an explicitly labelled non-prefix reference is still accounted", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-ourref",
+      subject: "Make Safe - Our Ref: SRJ-41290 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-ourref",
+      graph_message_id: "AAMk-sanitized-ourref",
+      external_ref: "SRJ-41290",
+      subject: "Make Safe - Our Ref: SRJ-41290 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].raw_reference, "Our Ref: SRJ-41290");
+});
+
+// The twin arrives with no post id and no internet message id, so only the content
+// fingerprint can collapse it. The source carries the label text ("Job No 68592")
+// while the draft carries the stored ref ("68592"): both sides must reduce to the
+// same canonical token or the twin is reported as new work every morning.
+Deno.test("invariant: a bare 'Job No' twin collapses despite label-vs-stored-ref wording", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-jobno-twin",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-jobno-twin",
+      graph_message_id: "AAMk-sanitized-jobno-twin",
+      external_ref: "68592",
+      subject: "Make Safe - Balga - Job No 68592",
+      from_email: "workorders@ajs.build",
+      created_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].reason, "twin_graph_post_content_fingerprint");
+});
+
+// Same contract for the labelled "Our Ref" archetype.
+Deno.test("invariant: an 'Our Ref' twin collapses against the stored bare ref", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-ourref-twin",
+      subject: "Make Safe Request - Our Ref: 41288",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T03:20:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-ourref-twin",
+      graph_message_id: "AAMk-sanitized-ourref-twin",
+      external_ref: "41288",
+      subject: "Make Safe Request - Our Ref: 41288",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T03:20:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+});
+
+// Two genuinely different work orders from one sender in the same minute with the
+// same generic subject must never collapse: the canonical discriminator stays
+// job-unique.
+// Sender, subject, minute and body are IDENTICAL, so only the canonical discriminator
+// can keep the two apart: the draft carries a job number the source does not. A
+// ref-bearing capture must never fall back to the body hash, or two different work
+// orders behind one generic subject would silently collapse.
+Deno.test("invariant hostile near-collision: distinct job numbers never share a fingerprint", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-jobno-distinct",
+      subject: "Make Safe Request - Balga",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-jobno-other",
+      graph_message_id: "AAMk-sanitized-jobno-other",
+      external_ref: "68593",
+      subject: "Make Safe Request - Balga",
+      from_email: "workorders@ajs.build",
+      created_at: "2026-05-06T02:10:00.000Z",
+      body_preview: "Attend site and make safe.",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: ["ajs.build"],
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// A draft enriched by its stored extraction resolves to a RICHER token than the same
+// instruction's subject-only source row. Both sides publish every token they can
+// derive, so the twin still collapses instead of reporting phantom unaccounted work.
+Deno.test("invariant: an extraction-enriched draft still twins with its subject-only source", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-enriched-twin",
+      subject: "NEW WORK ORDER - MLB 25096 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-enriched-twin",
+      graph_message_id: "AAMk-sanitized-enriched-twin",
+      external_ref: "MLB-25096",
+      subject: "NEW WORK ORDER - MLB 25096 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+      extraction_json: {
+        builder_claim_ref: "MLB-25096",
+        builder_po_number: "PO-4477",
+        builder_work_order_number: "MLB-25096-PO-4477",
+      },
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+});
+
+// PO separation survives the widened token set: an explicit, DIFFERENT source PO must
+// not collapse into the enriched draft merely because the shared claim token aligns.
+Deno.test("invariant hostile near-collision: a different explicit PO never twins on the shared claim", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-distinct-po",
+      subject: "NEW WORK ORDER - MLB 25096 - PO 9911 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-distinct-po",
+      graph_message_id: "AAMk-sanitized-distinct-po",
+      external_ref: "MLB-25096-PO-4477",
+      subject: "NEW WORK ORDER - MLB 25096 - PO 9911 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T04:15:00.000Z",
+      body_preview: "Attend site and make safe.",
+      extraction_json: {
+        builder_claim_ref: "MLB-25096",
+        builder_po_number: "PO-4477",
+        builder_work_order_number: "MLB-25096-PO-4477",
+      },
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// The builder prefix vocabulary lives in extractBuilderWorkOrderIdentity, so the
+// display reference is matched with that same vocabulary. It keeps the literal text
+// the source wrote ("MLB 25096"), while the canonical fields stay normalised.
+Deno.test("invariant: a prefixed builder reference is displayed as the source wrote it", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-prefix-display",
+      subject: "NEW WORK ORDER - MLB 25096 - Balga",
+      from_email: "jobs@mlbuilders.com.au",
+    }],
+    drafts: [{
+      id: "draft-prefix-display",
+      graph_message_id: "AAMk-sanitized-prefix-display",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].raw_reference, "MLB 25096");
+  assertEquals(inv.items[0].canonical_claim_ref, "MLB-25096");
+});
+
+// "PO: ABC-1234" is not a PO the canonical extractor can parse, so identity.po stays
+// empty and the PO-separation guards can never fire for it. A token that participates
+// in matching while its PO is invisible to the guard is unsafe, so an alphanumeric PO
+// earns no identity key at all: two make-safes at different properties quoting the same
+// alphanumeric PO must fail open rather than collapse onto one lineage.
+Deno.test("invariant hostile near-collision: an alphanumeric PO never becomes an identity token", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-alphanumeric-po",
+      subject: "MAKE SAFE REQUEST - 12 Smith St Balga - PO: ABC-1234",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-alphanumeric-po",
+      graph_message_id: "AAMk-sanitized-alphanumeric-po",
+      subject: "MAKE SAFE REQUEST - 7 Jones Rd Kingsley - PO: ABC-1234",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T05:30:00.000Z",
+      external_ref: null,
+      status: "needs_review",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// A bare-digit PO stays inside the grammar the canonical extractor parses, so it keeps
+// its identity key and the PO guard stays able to separate deliverables.
+Deno.test("invariant: a bare-digit labelled PO still yields a durable identity key", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-digit-po",
+      subject: "MAKE SAFE REQUEST - Balga - PO: 55291",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-digit-po",
+      graph_message_id: "AAMk-sanitized-digit-po",
+      subject: "MAKE SAFE REQUEST - Balga - PO: 55291",
+      from_email: "jobs@mlbuilders.com.au",
+      created_at: "2026-05-06T05:30:00.000Z",
+      external_ref: null,
+      status: "needs_review",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, { kind: "draft", id: "draft-digit-po" });
+});
+
+// Two drafts under one claim but with DIFFERENT POs share sender, subject, minute and
+// body, so both land on the same claim-token fingerprint. Neither the fingerprint nor
+// the claim relation can say which of the two genuinely different deliverables a PO-less
+// source belongs to, so both paths must decline and the row reports unaccounted rather
+// than naming whichever draft happened to occupy the slot first.
+Deno.test("invariant hostile near-collision: ambiguous same-claim two-PO drafts never twin on fingerprint", () => {
+  const shared = {
+    subject: "NEW WORK ORDER - MLB 25096 - Balga",
+    from_email: "jobs@mlbuilders.com.au",
+    created_at: "2026-05-06T05:30:00.000Z",
+    body_preview: "Attend site and make safe.",
+    status: "approved",
+  };
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-two-po-ambiguous",
+      subject: shared.subject,
+      from_email: shared.from_email,
+      received_at: shared.created_at,
+      body_preview: shared.body_preview,
+    }],
+    drafts: [
+      {
+        ...shared,
+        id: "draft-two-po-4477",
+        graph_message_id: "AAMk-sanitized-two-po-4477",
+        external_ref: "MLB-25096-PO-4477",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-4477",
+          builder_work_order_number: "MLB-25096-PO-4477",
+        },
+      },
+      {
+        ...shared,
+        id: "draft-two-po-9999",
+        graph_message_id: "AAMk-sanitized-two-po-9999",
+        external_ref: "MLB-25096-PO-9999",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-9999",
+          builder_work_order_number: "MLB-25096-PO-9999",
+        },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].reason, "make_safe_candidate_no_draft_no_job");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// The same shadowing shape, but the source names its PO explicitly: PO separation
+// resolves the ambiguity and the twin collapses against the RIGHT draft.
+Deno.test("invariant: an explicit source PO picks its own draft out of a shadowed fingerprint", () => {
+  const shared = {
+    subject: "NEW WORK ORDER - MLB 25096 - Balga",
+    from_email: "jobs@mlbuilders.com.au",
+    created_at: "2026-05-06T05:30:00.000Z",
+    body_preview: "Attend site and make safe.",
+    status: "approved",
+  };
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-two-po-explicit",
+      subject: "NEW WORK ORDER - MLB 25096 - PO 9999 - Balga",
+      from_email: shared.from_email,
+      received_at: shared.created_at,
+      body_preview: shared.body_preview,
+    }],
+    drafts: [
+      {
+        ...shared,
+        id: "draft-shadow-4477",
+        graph_message_id: "AAMk-sanitized-shadow-4477",
+        external_ref: "MLB-25096-PO-4477",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-4477",
+          builder_work_order_number: "MLB-25096-PO-4477",
+        },
+      },
+      {
+        ...shared,
+        id: "draft-shadow-9999",
+        graph_message_id: "AAMk-sanitized-shadow-9999",
+        external_ref: "MLB-25096-PO-9999",
+        extraction_json: {
+          builder_claim_ref: "MLB-25096",
+          builder_po_number: "PO-9999",
+          builder_work_order_number: "MLB-25096-PO-9999",
+        },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence.id, "draft-shadow-9999");
+});
+
+// The SAME deliverable captured twice: once with the PO folded into external_ref and
+// once as the legacy claim-only ref with the PO carried in extraction_json. The derived
+// work-order token differs between the two rows, but claim and PO agree, so the pool
+// describes one deliverable and a PO-less source must still be accounted.
+Deno.test("invariant: enriched and legacy captures of one PO deliverable are not ambiguous", () => {
+  const shared = {
+    from_email: "jobs@mlbuilders.com.au",
+    created_at: "2026-05-07T02:15:00.000Z",
+    body_preview: "Attend site and make safe.",
+    status: "approved",
+  };
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-enriched-vs-legacy",
+      subject: "NEW WORK ORDER - MLB 25188 - Balga",
+      from_email: shared.from_email,
+      received_at: "2026-05-07T06:40:00.000Z",
+      body_preview: shared.body_preview,
+    }],
+    drafts: [
+      {
+        ...shared,
+        id: "draft-enriched-po-4477",
+        graph_message_id: "AAMk-sanitized-enriched-4477",
+        subject: "NEW WORK ORDER - MLB 25188 - PO 4477 - Balga",
+        external_ref: "MLB-25188-PO-4477",
+        extraction_json: {
+          builder_claim_ref: "MLB-25188",
+          builder_po_number: "PO-4477",
+          builder_work_order_number: "MLB-25188-PO-4477",
+        },
+      },
+      {
+        ...shared,
+        id: "draft-legacy-po-4477",
+        graph_message_id: "AAMk-sanitized-legacy-4477",
+        subject: "NEW WORK ORDER - MLB 25188 - Balga",
+        external_ref: "MLB-25188",
+        extraction_json: {
+          builder_claim_ref: "MLB-25188",
+          builder_po_number: "PO-4477",
+        },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(
+    inv.items[0].reason,
+    "claim_reference_alias_of_po_captured_draft",
+  );
+});
+
+// Two captures from ONE sender sharing a labelled reference token but carrying
+// DIFFERENT explicit POs. Neither has a parseable builder claim, so the scoped token
+// fallback is the only path — and it must apply the same fail-open ambiguity rule as
+// the claim path rather than naming whichever capture was indexed first.
+Deno.test("invariant hostile near-collision: ambiguous same-token distinct PO captures never account", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-sanitized-ambiguous-token",
+      subject: "Make Safe - Our Ref: 41288 - Yokine",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-08T01:00:00.000Z",
+    }],
+    drafts: [
+      {
+        id: "draft-token-po-4477",
+        graph_message_id: "AAMk-sanitized-token-4477",
+        external_ref: "41288",
+        from_email: "workorders@ajs.build",
+        subject: "Make Safe - Our Ref: 41288 - Yokine - PO 4477",
+        created_at: "2026-05-07T09:00:00.000Z",
+        extraction_json: { builder_po_number: "PO-4477" },
+      },
+      {
+        id: "draft-token-po-9999",
+        graph_message_id: "AAMk-sanitized-token-9999",
+        external_ref: "41288",
+        from_email: "workorders@ajs.build",
+        subject: "Make Safe - Our Ref: 41288 - Yokine - PO 9999",
+        created_at: "2026-05-07T10:00:00.000Z",
+        extraction_json: { builder_po_number: "PO-9999" },
+      },
+    ],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// A source that HAS a canonical token also probes the null-derived fingerprint form, so
+// a token-less draft of the same instruction stays reachable. The widening must not
+// collapse a token-less draft whose body differs: that is a different work order.
+Deno.test("invariant hostile near-collision: null-derived fingerprint probe never twins two ref-less bodies", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-null-probe",
+      subject: "Make Safe Request - Balga",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-09T03:20:00.000Z",
+      body_preview: "Job No 68592 - attend site and make safe.",
+    }],
+    drafts: [{
+      id: "draft-null-probe-other",
+      graph_message_id: "AAMk-sanitized-null-probe-other",
+      external_ref: null,
+      from_email: "workorders@ajs.build",
+      subject: "Make Safe Request - Balga",
+      created_at: "2026-05-09T03:20:00.000Z",
+      body_preview: "Job No 68593 - attend site and make safe.",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// A builder writing "Order No <digits>" means its own work-order reference, not a
+// purchase order. Read as PO doubt it would be permanently unaccountable — doubt with
+// no token to match on — so the whole archetype would hold the morning report red.
+Deno.test("invariant: a bare Order No reference accounts against its capture", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-order-no",
+      subject: "Make Safe - Order No 68592 - Balga",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-09T03:20:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-order-no-68592",
+      graph_message_id: "AAMk-sanitized-order-no",
+      external_ref: "68592",
+      from_email: "workorders@ajs.build",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-order-no-68592",
+  });
+});
+
+// The same token from a DIFFERENT builder is a different numbering space. The bare
+// reference fallback is sender-scoped, so it must not reach across senders.
+Deno.test("invariant hostile near-collision: a bare Order No never crosses senders", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "group-post-order-no-cross",
+      subject: "Make Safe - Order No 68592 - Balga",
+      from_email: "workorders@ajs.build",
+      received_at: "2026-05-09T03:20:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-order-no-other-builder",
+      graph_message_id: "AAMk-sanitized-order-no-other",
+      external_ref: "68592",
+      from_email: "jobs@mlbuilders.com.au",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// The production capture extractor does not read "P.O." or "purchaseorder", and this
+// slice must not widen it. Reconciliation therefore cannot see the PO either, so such
+// a source must fail open rather than read as claim-only and alias a captured job
+// carrying a DIFFERENT PO.
+Deno.test("invariant hostile near-collision: an unparseable PO label never aliases a different PO", () => {
+  for (
+    const [post, subject] of [
+      ["mailbox-dotted-po", "NEW WO - MLB 25096 - P.O. 4477"],
+      ["mailbox-dotted-hash-po", "NEW WO - MLB 25096 - P.O.#4477"],
+      ["mailbox-typo-po", "NEW WO - MLB 25096 - purchaseorder 4477"],
+      ["mailbox-spaced-dotted-po", "NEW WO - MLB 25096 - P O. 4477"],
+      ["mailbox-slashed-po", "NEW WO - MLB 25096 - P/O 4477"],
+      ["mailbox-order-no", "NEW WO - MLB 25096 - Order No 4477"],
+      ["mailbox-order-number", "NEW WO - MLB 25096 - Order Number 4477"],
+    ]
+  ) {
+    const inv = summarizeIntakeReconcileInvariant({
+      emails: [{
+        post_id: post,
+        subject,
+        from_email: "jobs@mlbuilders.com.au",
+        received_at: "2026-05-06T05:30:00.000Z",
+      }],
+      drafts: [{
+        id: "draft-dotted-po-9999",
+        graph_message_id: "AAMk-sanitized-dotted-po",
+        external_ref: "MLB-25096PO-9999",
+        status: "approved",
+      }],
+      jobs: [],
+      senderPatterns: SENDER_PATTERNS,
+    });
+
+    assertEquals(inv.counts.unaccounted, 1);
+    assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+    assertEquals(inv.items[0].canonical_claim_ref, "MLB-25096");
+    assertEquals(inv.items[0].canonical_po_ref, null);
+    assertEquals(inv.items[0].evidence, {
+      kind: "classification",
+      id: "no_durable_capture_evidence",
+    });
+  }
+});
+
+// An unparseable PO label is an UNKNOWN PO, not an absent one, so it may not settle
+// onto a claim-only capture either: that is the "explicit new PO against a legacy
+// claim-only job stays visible" invariant.
+Deno.test("invariant: an unparseable PO label does not settle on a claim-only capture", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-dotted-po-vs-legacy",
+      subject: "NEW WO - MLB 25096 - P.O. 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-legacy-claim-only",
+      graph_message_id: "AAMk-sanitized-legacy-claim-only",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// The scoped token fallback is the weakest matching path, so it must honour the
+// unknown-PO rule too: a claim-less labelled ref carrying a PO we cannot read may
+// not be accounted against a same-sender capture bearing a different PO.
+Deno.test("invariant hostile near-collision: an unparseable PO never accounts through the token fallback", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-token-fallback-dotted-po",
+      subject: "Make Safe - Work Order: 68592 - P.O. 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-token-fallback-po-9999",
+      graph_message_id: "AAMk-sanitized-token-fallback-po",
+      external_ref: "68592",
+      subject: "Make Safe - Work Order: 68592 - PO 9999",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:10:00.000Z",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+});
+
+// The same token fallback must still account a labelled ref whose PO both sides
+// can read: the unknown-PO guard fails open, it does not close the path.
+Deno.test("invariant: a readable PO still accounts through the token fallback", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-token-fallback-readable-po",
+      subject: "Make Safe - Work Order: 68592 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-token-fallback-po-4477",
+      graph_message_id: "AAMk-sanitized-token-fallback-readable",
+      external_ref: "68592",
+      subject: "Make Safe - Work Order: 68592 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T04:10:00.000Z",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].evidence.id, "draft-token-fallback-po-4477");
+});
+
+// The spelling the production extractor DOES read still accounts exactly, so failing
+// open on dotted forms costs no legitimate match.
+Deno.test("invariant: a parseable explicit PO matches its own captured deliverable", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-spaced-po-exact",
+      subject: "NEW WO - MLB 25096 - P O 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+    }],
+    drafts: [{
+      id: "draft-spaced-po-4477",
+      graph_message_id: "AAMk-sanitized-spaced-po-exact",
+      external_ref: "MLB-25096PO-4477",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-spaced-po-4477",
+  });
+  assertEquals(inv.items[0].canonical_po_ref, "PO-4477");
+});
+
+// A bare "Order No" is a generic work-order reference, not a purchase order, so
+// quoting one in the body raises no PO doubt: both sides remain claim-only with no PO
+// in play and the source matches its capture instead of reporting as new work.
+Deno.test("invariant: a bare order label quoted in the body is not PO doubt", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-quoted-order-label",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview:
+        "Please attend.\n> From an earlier thread: Order No 4477 was raised.",
+    }],
+    drafts: [{
+      id: "draft-quoted-order-label",
+      graph_message_id: "AAMk-sanitized-quoted-order-label",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "accounted_alias_revision");
+  assertEquals(inv.items[0].canonical_po_ref, null);
+});
+
+// The same doubt, in a spelling the canonical grammar cannot read at all.
+Deno.test("invariant: a dotted PO quoted in the body withholds identity aliasing", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-dotted-po",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview:
+        "Please attend.\n> From an earlier thread: P.O. 4477 was raised.",
+    }],
+    drafts: [{
+      id: "draft-body-dotted-po",
+      graph_message_id: "AAMk-sanitized-body-dotted-po",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+});
+
+// Withholding identity inference must not withhold durable evidence: the twin here
+// is proven by the internet message id, which reasons about no PO at all.
+Deno.test("invariant: a quoted body PO still accounts on durable message-id evidence", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-po-with-message-id",
+      internet_message_id: "<sanitized-body-po-twin@mlbuilders.com.au>",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: P.O. 4477 was raised.",
+    }],
+    drafts: [{
+      id: "draft-body-po-with-message-id",
+      graph_message_id: "AAMk-sanitized-body-po-twin",
+      internet_message_id: "<sanitized-body-po-twin@mlbuilders.com.au>",
+      external_ref: "MLB-25096",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence, {
+    kind: "draft",
+    id: "draft-body-po-with-message-id",
+  });
+});
+
+// A body PO the canonical grammar CAN read is not adopted either — a quoted "PO
+// 9999" reads identically to an instruction's own. It blocks aliasing onto the
+// capture's PO-4477 lineage, and canonical_po_ref stays empty because no
+// authoritative field named a PO.
+Deno.test("invariant hostile near-collision: a parseable body PO does not alias a different captured PO", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-parseable-po",
+      subject: "NEW WO - MLB 25096",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend. PO 9999 applies to this instruction.",
+    }],
+    drafts: [{
+      id: "draft-body-parseable-po",
+      graph_message_id: "AAMk-sanitized-body-parseable-po",
+      external_ref: "MLB-25096-PO-4477",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].evidence, {
+    kind: "classification",
+    id: "no_durable_capture_evidence",
+  });
+  assertEquals(inv.items[0].canonical_po_ref, null);
+});
+
+// A subject-borne PO the canonical grammar cannot read can no longer be masked by
+// body text: the subject's own doubt stands on its own, so the row may not alias
+// the capture's explicit PO-9999.
+Deno.test("invariant hostile near-collision: a subject P.O. is not masked by a quoted body PO", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-subject-dotted-po-body-po",
+      subject: "NEW WO - MLB 25096 - P.O. 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: PO 9999 raised.",
+    }],
+    drafts: [{
+      id: "draft-subject-dotted-po-body-po",
+      graph_message_id: "AAMk-sanitized-subject-dotted-po",
+      external_ref: "MLB-25096-PO-9999",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
+  assertEquals(inv.items[0].canonical_po_ref, null);
+});
+
+// Body doubt only stands while a PO is unknown. Builder make-safes routinely name
+// the PO in the body as well, so an explicit subject PO that equals the capture's
+// must still account — otherwise the common shape reports as unaccounted noise.
+Deno.test("invariant: an explicit PO named in both subject and body still accounts", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-body-echoes-subject-po",
+      subject: "NEW WO - MLB 25096 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: P.O. 4477 raised.",
+    }],
+    drafts: [{
+      id: "draft-body-echoes-subject-po",
+      graph_message_id: "AAMk-sanitized-body-echoes-subject-po",
+      external_ref: "MLB-25096-PO-4477",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].evidence.id, "draft-body-echoes-subject-po");
+});
+
+// The same shape with a differing explicit PO stays separate: the bypass may never
+// collapse two deliverables.
+Deno.test("invariant hostile near-collision: explicit differing POs never collapse under body doubt", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "mailbox-explicit-po-differs",
+      subject: "NEW WO - MLB 25096 - PO 4477",
+      from_email: "jobs@mlbuilders.com.au",
+      received_at: "2026-05-06T05:30:00.000Z",
+      body_preview: "Please attend.\n> Earlier: PO 9999 raised.",
+    }],
+    drafts: [{
+      id: "draft-explicit-po-differs",
+      graph_message_id: "AAMk-sanitized-explicit-po-differs",
+      external_ref: "MLB-25096-PO-9999",
+      status: "approved",
+    }],
+    jobs: [],
+    senderPatterns: SENDER_PATTERNS,
+  });
+
+  assertEquals(inv.counts.unaccounted, 1);
+  assertEquals(inv.items[0].classification, "genuinely_unaccounted");
 });

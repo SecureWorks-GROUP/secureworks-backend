@@ -14,7 +14,10 @@ Branch: `makesafe/intake-resurrect-harden`. Deploys/merges are the First Mate's;
 - **D-d auto-file** — clean high-confidence WOs auto-approved through the gated internal path
   (`approved_by: 'auto-intake'` + `makesafe_auto_filed` job event). Kill switch:
   `makesafe_cron_settings.auto_file_enabled` (default TRUE).
-- **D-e `intake_reconcile`** — the "did we miss anything" invariant (0 unaccounted = live+true).
+- **D-e `intake_reconcile`** — the "did we miss anything" invariant (0 genuinely unaccounted =
+  live+true). Every source row is classified `matched` / `accounted_alias_revision` /
+  `genuinely_unaccounted` with a reason and evidence pointer, so capture aliases, twin Graph posts
+  and PO-suffixed reference variants no longer read as missed work.
 - **D-f `intake_golden_replay`** — key-less proof: gate verdict vs the job actually created.
 
 ## Extraction reliability slice (additive, code only — no schema/cron/recipient change)
@@ -111,8 +114,17 @@ SELECT cron.schedule('makesafe-ses-poll', '*/2 * * * *',
 8. **Link backfill (D-c):** `makesafe_intake_link_backfill` (dry-run) → review `patches` +
    `no_source` → when satisfied, run live with `{ "dry_run": false }` (privileged). In-place
    metadata patch only; no delete/reopen. Deterministic regex, so it runs even with a dead key.
-9. **Audit:** `intake_reconcile` → `unaccounted.count` should be 0. Any items are real emails with
-   no draft/job — intake them by hand (manual fallback path in the intake skill).
+9. **Audit:** `intake_reconcile` → `counts.genuinely_unaccounted` should be 0. Every source email
+   comes back in `items[]` with an explicit `classification` — `matched` (linked draft or a
+   deterministic non-work-order gate verdict), `accounted_alias_revision` (a twin Graph post, or a
+   resend/revision of an already-captured claim/PO), or `genuinely_unaccounted` — plus a `reason`
+   and an `evidence` pointer (`{ kind: 'draft' | 'job' | 'classification', id }`). Each item also
+   carries the raw source reference (`raw_reference`) beside the separately canonicalised
+   `canonical_claim_ref` and `canonical_po_ref`. Only `genuinely_unaccounted` items are real emails
+   with no draft/job — intake them by hand (manual fallback path in the intake skill). Two explicit
+   different POs are never collapsed, so a new PO against a legacy claim-only job stays visible. A
+   bare `Order No <digits>` is read as the sender's own work-order reference, not a PO, so those
+   rows show a null `canonical_po_ref` — that is expected, not a parse miss.
 
 ## Rollback / brakes
 
