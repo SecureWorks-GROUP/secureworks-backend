@@ -481,8 +481,8 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
     size_bytes: 1024,
   });
   const client = fakeClient(store);
-  // The two older cases fail on every run and are never persisted, so they keep
-  // sorting into the priority head. A budget spent on them would starve the rest.
+  // The two older cases fail on every run. A budget spent on them would starve
+  // every case behind them.
   const flakyApprove = (_client: any, body: any) => {
     const draft = store.makesafe_intake_drafts.find((d: any) =>
       d.id === body.draft_id
@@ -506,6 +506,88 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
   assertEquals(report.totals.jobs_created, 1);
   assertEquals(
     store.emails.find((e) => e.post_id === "good-1")?.makesafe_scanned_at,
+    NOW,
+  );
+});
+
+Deno.test("repeat failures are deprioritised on the next run", async () => {
+  const store = baseStore();
+  // Enough permanently failing cases to exhaust the attempt ceiling on their own.
+  for (let i = 1; i <= 4; i++) {
+    store.emails.push(
+      email({
+        post_id: `dead-${i}`,
+        received_at: `2026-07-19T0${i}:00:00.000Z`,
+        subject: `NEW WORK ORDER MLB-5920${i} Work Order: WO-5920${i}`,
+        body_content: `Client: Dead Client ${i}\nAddress: ${i} Dead End, Perth`,
+      }),
+    );
+    store.email_attachments.push({
+      id: `att-dead-${i}`,
+      email_id: `dead-${i}`,
+      name: "wo.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/dead-${i}.pdf`,
+      status: "uploaded",
+      size_bytes: 1024,
+    });
+  }
+  const client = fakeClient(store);
+  const deadApprove = (_client: any, body: any) => {
+    const draft = store.makesafe_intake_drafts.find((d: any) =>
+      d.id === body.draft_id
+    );
+    return /WO-5920[1-4]/.test(String(draft?.deterministic_key || ""))
+      ? Promise.resolve({})
+      : Promise.resolve({ job: { id: "job-late" } });
+  };
+  const first = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxCases: 1,
+    approveDraft: deadApprove,
+  });
+  assertEquals(first.totals.jobs_created, 0);
+  // No commit landed, and the attempt ceiling stopped the run: that is reported
+  // rather than looking like a quiet, healthy scan.
+  assertEquals(first.attempt_cap_reached_without_commit, true);
+  assertEquals(first.totals.cases_failed, 4);
+
+  // A fully evidenced instruction arrives behind all four failures.
+  store.emails.push(
+    email({
+      post_id: "late-1",
+      received_at: "2026-07-20T02:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-59205 Work Order: WO-59205",
+      body_content: "Client: Late Client\nAddress: 5 Late Lane, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-late",
+    email_id: "late-1",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/late.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const second = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxCases: 1,
+    approveDraft: deadApprove,
+  });
+
+  // The failed cases accounted their sources on the first run, so they no longer
+  // look like fresh work and the run reaches the case that can advance.
+  assertEquals(second.totals.jobs_created, 1);
+  assertEquals(second.attempt_cap_reached_without_commit, false);
+  assertEquals(
+    store.emails.find((e) => e.post_id === "late-1")?.makesafe_scanned_at,
     NOW,
   );
 });
@@ -555,7 +637,9 @@ Deno.test("a disallowed state transition never creates an orphan job", async () 
   });
 
   assertEquals(report.totals.jobs_created, 0);
-  assertEquals(report.write_failure_reasons.case_transition_not_allowed, 1);
+  // A deferral, not a write failure: the case itself committed successfully.
+  assertEquals(report.totals.job_creation_deferred, 1);
+  assertEquals(report.totals.write_failures, 0);
   // No orphan job, and the case is routed through the one edge the state machine
   // permits rather than being abandoned mid-run.
   assertEquals(store.makesafe_intake_cases[0].state, "exception");

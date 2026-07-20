@@ -53,7 +53,12 @@ export interface DeterministicRuntimeReport {
     write_failures: number;
     cases_attempted: number;
     cases_deferred: number;
+    cases_failed: number;
+    job_creation_deferred: number;
   };
+  // True when the run spent its attempt ceiling without committing a single case.
+  // Repeat failures crowding out advanceable work is then visible, not silent.
+  attempt_cap_reached_without_commit: boolean;
   by_builder_and_outcome: Record<string, Record<string, number>>;
   by_builder_and_reason: Record<string, Record<string, number>>;
   // Non-PII failure classification. Keys are message classes, never source content.
@@ -483,6 +488,33 @@ async function readPersistedCases(
   return rows;
 }
 
+// Which sources a case has already accounted. New evidence arriving on a case is
+// the only reason a previously stuck case can advance, so it is the signal that
+// keeps repeat failures from re-occupying the priority head of every run.
+async function readPersistedSourcePostIds(
+  client: any,
+  caseIds: readonly string[],
+): Promise<Map<string, Set<string>>> {
+  const byCase = new Map<string, Set<string>>();
+  for (const ids of chunk(caseIds, 200)) {
+    const { data, error } = await client.from("makesafe_intake_case_sources")
+      .select("case_id,post_id")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("case_id", ids);
+    if (error) {
+      throw new Error(
+        `deterministic case source read failed: ${error.message || error}`,
+      );
+    }
+    for (const row of data || []) {
+      const set = byCase.get(row.case_id) || new Set<string>();
+      set.add(row.post_id);
+      byCase.set(row.case_id, set);
+    }
+  }
+  return byCase;
+}
+
 async function findIdentityParent(
   client: any,
   plan: DeterministicCasePlan,
@@ -660,6 +692,7 @@ async function insertCaseAndSources(
   knownExisting?: any | null,
 ): Promise<
   {
+    caseRow: any;
     caseCreated: boolean;
     caseUpgraded: boolean;
     sourceCreated: number;
@@ -755,7 +788,13 @@ async function insertCaseAndSources(
       );
     }
   }
-  return { caseCreated, caseUpgraded, sourceCreated, resumed: !caseCreated };
+  return {
+    caseRow: existing,
+    caseCreated,
+    caseUpgraded,
+    sourceCreated,
+    resumed: !caseCreated,
+  };
 }
 
 async function writeHealth(
@@ -813,7 +852,10 @@ export async function runDeterministicIntake(
       write_failures: 0,
       cases_attempted: 0,
       cases_deferred: 0,
+      cases_failed: 0,
+      job_creation_deferred: 0,
     },
+    attempt_cap_reached_without_commit: false,
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),
     write_failure_reasons: {},
@@ -834,23 +876,30 @@ export async function runDeterministicIntake(
     }
   };
   const maxCases = Math.max(1, options.maxCases ?? DEFAULT_MAX_CASES_PER_RUN);
-  // Cases already persisted in exactly the state this plan would write cannot make
-  // progress without new evidence. They are the oldest unstamped sources, so a
-  // head-of-list slice would let them occupy the whole budget forever. Order the
-  // run so every case that can actually advance is attempted first.
+  // A case can only advance if it is new, if it carries evidence the case row has
+  // not accounted yet, or if its persisted state no longer matches what this plan
+  // would write for the job it already has. Everything else is stuck until more
+  // evidence arrives, including a case whose job creation failed on an earlier run:
+  // its sources were accounted before that attempt, so it is not mistaken for
+  // fresh work and cannot re-occupy the priority head of every subsequent run.
   const persisted = await readPersistedCases(client, plan.cases);
+  const persistedSources = await readPersistedSourcePostIds(
+    client,
+    [...persisted.values()].map((row) => row.id),
+  );
+  const canAdvance = (casePlan: DeterministicCasePlan) => {
+    const row = persisted.get(casePlan.instructionKey);
+    if (!row) return true;
+    const known = persistedSources.get(row.id) || new Set<string>();
+    if (casePlan.sourcePostIds.some((postId) => !known.has(postId))) return true;
+    return row.state !== resolvedState(casePlan, row.job_id || null);
+  };
   const ordered = [
-    ...plan.cases.filter((c) =>
-      persisted.get(c.instructionKey)?.state !== c.state
-    ),
-    ...plan.cases.filter((c) =>
-      persisted.get(c.instructionKey)?.state === c.state
-    ),
+    ...plan.cases.filter(canAdvance),
+    ...plan.cases.filter((c) => !canAdvance(c)),
   ];
-  // The budget counts cases that actually committed. A case that throws is never
-  // persisted and so keeps sorting into the priority head; if failures spent the
-  // budget, enough of them would starve every advanceable case forever. Attempts
-  // still carry their own ceiling so one run stays bounded.
+  // The budget counts cases that actually committed, so a failure never spends a
+  // commit slot. Attempts still carry their own ceiling so one run stays bounded.
   const maxAttempts = maxCases * MAX_ATTEMPT_MULTIPLIER;
   let attempted = 0;
   let committed = 0;
@@ -858,26 +907,38 @@ export async function runDeterministicIntake(
     if (committed >= maxCases || attempted >= maxAttempts) break;
     attempted++;
     try {
-      let resumedCase = false;
       const existing = persisted.get(casePlan.instructionKey) || null;
+      const stateBeforeRun: string | null = existing?.state ?? null;
       let jobId: string | null = existing?.job_id || null;
-      // Never create a guarded job the case row cannot then be moved to: the
-      // update would be skipped and the job left with no case linkage. The case
-      // still records its sources so nothing goes unaccounted.
-      const transitionBlocked = Boolean(existing) &&
-        casePlan.state !== existing.state &&
-        !(ALLOWED_TRANSITIONS[existing.state as string] || []).includes(
-          casePlan.state,
-        );
-      if (transitionBlocked) {
-        report.write_failure_reasons.case_transition_not_allowed =
-          (report.write_failure_reasons.case_transition_not_allowed || 0) + 1;
-      }
-      if (
-        !transitionBlocked && !jobId &&
+      // Account the case and its sources before any job-creating work. Nothing is
+      // left outside the accounting invariant when the job attempt fails, and the
+      // failed attempt becomes visible to the next run's ordering.
+      let saved = await insertCaseAndSources(
+        client,
+        casePlan,
+        jobId,
+        sourceMap,
+        existing,
+      );
+      let resumedCase = saved.resumed;
+      if (saved.caseCreated) report.totals.case_rows_created++;
+      report.totals.source_rows_created += saved.sourceCreated;
+      const wantsJob = !jobId &&
         (casePlan.state === "confirmed_live_job" ||
-          casePlan.state === "blocked_live_job")
-      ) {
+          casePlan.state === "blocked_live_job");
+      // Never create a guarded job the case row cannot then be moved to: the
+      // update would be skipped and the job left with no case linkage. This is a
+      // deferral, not a write failure - the case itself committed. The edge is
+      // judged against the state the case held before this run, so accounting it
+      // through the permitted exception hop cannot launder a forbidden edge into
+      // an allowed one.
+      const transitionAllowed = !stateBeforeRun ||
+        stateBeforeRun === casePlan.state ||
+        (ALLOWED_TRANSITIONS[stateBeforeRun] || []).includes(casePlan.state);
+      if (wantsJob && !transitionAllowed) {
+        report.totals.job_creation_deferred++;
+      }
+      if (wantsJob && transitionAllowed) {
         const live = await ensureDraftAndJob(
           client,
           casePlan,
@@ -889,19 +950,18 @@ export async function runDeterministicIntake(
         if (live.draftCreated) report.totals.drafts_created++;
         if (live.jobCreated) report.totals.jobs_created++;
         resumedCase = resumedCase || live.resumed;
+        saved = await insertCaseAndSources(
+          client,
+          casePlan,
+          jobId,
+          sourceMap,
+          saved.caseRow,
+        );
+        report.totals.source_rows_created += saved.sourceCreated;
       }
-      const saved = await insertCaseAndSources(
-        client,
-        casePlan,
-        jobId,
-        sourceMap,
-        existing,
-      );
       committed++;
-      if (saved.caseCreated) report.totals.case_rows_created++;
-      report.totals.source_rows_created += saved.sourceCreated;
       // One case counts once, however many of its artefacts already existed.
-      if (resumedCase || saved.resumed) report.totals.resumed++;
+      if (resumedCase) report.totals.resumed++;
       // Stamp per case, not once at the end, so a wall-clock timeout keeps the
       // accounting for every case this run already committed.
       //
@@ -909,11 +969,7 @@ export async function runDeterministicIntake(
       // be able to re-read the original instruction alongside the late work order in
       // order to promote the case. A case that already produced a live job is not
       // awaiting anything, so it settles even when downgraded to an exception.
-      const written = resolvedState(casePlan, jobId);
-      const state = saved.caseCreated || saved.caseUpgraded
-        ? written
-        : (existing?.state || written);
-      const settled = state !== "exception" || Boolean(jobId);
+      const settled = saved.caseRow.state !== "exception" || Boolean(jobId);
       if (!settled) continue;
       for (const ids of chunk(casePlan.sourcePostIds)) {
         const { error } = await client.from("emails")
@@ -929,10 +985,13 @@ export async function runDeterministicIntake(
       report.write_failure_reasons[reason] =
         (report.write_failure_reasons[reason] || 0) + 1;
       report.totals.write_failures++;
+      report.totals.cases_failed++;
     }
   }
   report.totals.cases_attempted = attempted;
   report.totals.cases_deferred = plan.cases.length - attempted;
+  report.attempt_cap_reached_without_commit = attempted >= maxAttempts &&
+    committed === 0;
   await writeHealth(
     client,
     nowIso,
