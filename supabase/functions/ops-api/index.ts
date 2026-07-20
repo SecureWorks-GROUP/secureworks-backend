@@ -14312,9 +14312,10 @@ async function scanSesMakesafes(client: any) {
       // already-scanned sources so a configured key can be proved on every run;
       // settled cases then replay with zero new business writes rather than a
       // missing key being mistaken for a successful empty scan. The window read
-      // is capped per run and allowlisted sources are read by id, so scan cost
-      // stays flat as the mailbox grows and one stale entry only shows up as an
-      // unmatched count instead of poisoning every later scan.
+      // is capped per run and split oldest-unscanned/newest, and allowlisted
+      // sources are read by id, so scan cost stays flat as the mailbox grows
+      // without any in-window source being starved. One stale entry only shows up
+      // as an unmatched count instead of poisoning every later scan.
       onlyUnscanned: false,
       maxCases: rollout.maxCases,
       allowSourcePostIds: rollout.sourcePostIds,

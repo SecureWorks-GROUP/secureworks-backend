@@ -9,7 +9,10 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { runDeterministicIntake } from "./makesafe_deterministic_intake_runtime.ts";
+import {
+  _readInputsForTest,
+  runDeterministicIntake,
+} from "./makesafe_deterministic_intake_runtime.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 
@@ -21,6 +24,7 @@ class FakeQuery {
   private filters: Array<(row: any) => boolean> = [];
   private sliceRange: [number, number] | null = null;
   private limitTo: number | null = null;
+  private sortBy: { column: string; ascending: boolean } | null = null;
   selectedColumns: string | null = null;
 
   constructor(
@@ -58,7 +62,10 @@ class FakeQuery {
     this.filters.push((row) => values.includes(row[column]));
     return this;
   }
-  order() {
+  // The bounded two-part read depends on real ordering, so the double sorts
+  // rather than returning insertion order.
+  order(column: string, opts?: { ascending?: boolean }) {
+    this.sortBy = { column, ascending: opts?.ascending !== false };
     return this;
   }
   limit(n: number) {
@@ -116,6 +123,19 @@ class FakeQuery {
       return { data: matched, error: null };
     }
     let data = this.rows();
+    if (this.sortBy) {
+      const { column, ascending } = this.sortBy;
+      data = data
+        .map((row, index) => ({ row, index }))
+        .sort((a, b) => {
+          const left = String(a.row[column] ?? "");
+          const right = String(b.row[column] ?? "");
+          const cmp = left.localeCompare(right);
+          if (cmp !== 0) return ascending ? cmp : -cmp;
+          return ascending ? a.index - b.index : b.index - a.index;
+        })
+        .map((entry) => entry.row);
+    }
     if (this.sliceRange) {
       data = data.slice(this.sliceRange[0], this.sliceRange[1] + 1);
     }
@@ -985,6 +1005,181 @@ Deno.test("window read cost is capped and does not grow with the mailbox", async
   assertEquals(
     largeLog.filter(([table]) => table === "emails").length,
     smallLog.filter(([table]) => table === "emails").length,
+  );
+});
+
+// The bound is only safe if it defers work rather than dropping it. A newest-first
+// truncation would keep re-reading the same newest rows forever; the oldest-unscanned
+// half is what turns the cap into a queue.
+Deno.test("every in-window source is eventually read despite the per-run cap", async () => {
+  const store = baseStore();
+  const total = 40;
+  const cap = 10;
+  for (let index = 0; index < total; index++) {
+    store.emails.push(email({
+      post_id: `q-${index}`,
+      received_at: `2026-07-${
+        String(index + 1).padStart(2, "0")
+      }T01:00:00.000Z`,
+      subject: `Re: chatter ${index}`,
+      body_content: "Thanks, noted.",
+    }));
+  }
+  const client = fakeClient(store);
+  const seen = new Set<string>();
+  let runs = 0;
+  while (seen.size < total && runs < 20) {
+    runs++;
+    const input = await _readInputsForTest(client, {
+      days: 60,
+      onlyUnscanned: false,
+      nowIso: "2026-08-01T00:00:00.000Z",
+      maxSources: cap,
+      seedPostIds: [],
+    });
+    // Cost stays bounded on every single run, not just on average.
+    assert(input.read.window_rows <= cap);
+    assert(input.read.backlog_rows <= input.read.backlog_cap);
+    for (const source of input.sources) seen.add(source.postId);
+    // A live run stamps the sources of each case it settles; that is what lets
+    // the oldest-unscanned half advance instead of re-reading the same rows.
+    for (const row of store.emails) {
+      if (input.sources.some((s) => s.postId === row.post_id)) {
+        row.makesafe_scanned_at = "2026-08-01T00:00:00.000Z";
+      }
+    }
+  }
+  assertEquals(seen.size, total);
+  assert(
+    runs < 20,
+    `expected convergence well inside the run budget, got ${runs}`,
+  );
+});
+
+Deno.test("a capped run is not clean zero-unaccounted evidence", async () => {
+  const capped = baseStore();
+  capped.emails.push(
+    ...Array.from({ length: 900 }, (_, index) =>
+      email({
+        post_id: `c-${index}`,
+        received_at: `2026-07-${
+          String((index % 20) + 1).padStart(2, "0")
+        }T01:00:00.000Z`,
+        subject: `Re: chatter ${index}`,
+        body_content: "Thanks, noted.",
+      })),
+  );
+  const cappedReport = await runDeterministicIntake(fakeClient(capped), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+  });
+  assertEquals(cappedReport.source_read.cap_reached, true);
+  // totals.unaccounted alone still reads as clean, which is exactly why the gate
+  // must key off the evidence block instead.
+  assertEquals(cappedReport.totals.unaccounted, 0);
+  assertEquals(cappedReport.evidence.source_accounting_complete, false);
+  assertEquals(cappedReport.evidence.zero_unaccounted_proved, false);
+  assert(cappedReport.evidence.caveats.includes("source_read_capped"));
+
+  const whole = baseStore();
+  whole.emails.push(
+    email({ post_id: "w-1", subject: "Re: chatter", body_content: "ok" }),
+  );
+  const wholeReport = await runDeterministicIntake(fakeClient(whole), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+  });
+  assertEquals(wholeReport.source_read.cap_reached, false);
+  assertEquals(wholeReport.evidence.source_accounting_complete, true);
+  assertEquals(wholeReport.evidence.zero_unaccounted_proved, true);
+  assertEquals(wholeReport.evidence.caveats, []);
+});
+
+Deno.test("an allowlisted instruction key is seeded by id and stays cap-proof", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "wo-1",
+    received_at: "2026-07-01T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-64000 Work Order: WO-64000",
+    body_content: "Client: Key Client\nAddress: 18 Key Court, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-key",
+    email_id: "wo-1",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/key.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    allowSourcePostIds: ["wo-1"],
+    approveDraft,
+  });
+  const instructionKey = store.makesafe_intake_cases[0].instruction_key;
+  assert(instructionKey);
+
+  // Bury the instruction's source under newer traffic and cap the window to one
+  // row, so it is only reachable through the instruction-key seed read.
+  for (let index = 0; index < 20; index++) {
+    store.emails.push(email({
+      post_id: `newer-${index}`,
+      received_at: "2026-07-19T01:00:00.000Z",
+      subject: `Re: chatter ${index}`,
+      body_content: "Thanks, noted.",
+    }));
+  }
+  const report = await runDeterministicIntake(client, {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 1,
+    allowInstructionKeys: [instructionKey],
+    requireAllAllowlistMatches: true,
+  });
+  assert(report.source_read.seed_rows >= 1);
+  assertEquals(report.selection.selected_cases, 1);
+  assertEquals(report.selection.unmatched_instruction_allowlist, 0);
+  assertEquals(report.selection.cap_exposed_instruction_allowlist, 0);
+});
+
+Deno.test("a cap-induced instruction-key miss is never reported as stale", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "live-key-1",
+      received_at: "2026-07-19T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-65000 Work Order: WO-65000",
+      body_content: "Client: Capped Client\nAddress: 19 Capped Close, Perth",
+    }),
+    email({
+      post_id: "noise-key-1",
+      received_at: "2026-07-19T02:00:00.000Z",
+      subject: "Re: chatter",
+      body_content: "ok",
+    }),
+  );
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 2,
+    allowSourcePostIds: ["live-key-1"],
+    allowInstructionKeys: ["instruction:never:persisted"],
+    // A capped run must not fail closed on a key it could not have read.
+    requireAllAllowlistMatches: true,
+  });
+  assertEquals(report.source_read.cap_reached, true);
+  assertEquals(report.selection.unmatched_instruction_allowlist, 0);
+  assertEquals(report.selection.cap_exposed_instruction_allowlist, 1);
+  assert(
+    report.evidence.caveats.includes("instruction_allowlist_cap_exposed"),
   );
 });
 

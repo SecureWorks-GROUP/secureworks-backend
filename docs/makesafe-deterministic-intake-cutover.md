@@ -151,7 +151,14 @@ write totals must remain zero.
 
 Required acceptance checks:
 
-- `unaccounted = 0`
+- `evidence.zero_unaccounted_proved = true`. `totals.unaccounted = 0` on its own is
+  not sufficient: a run that spent its per-run source read cap only accounts for the
+  rows it read, reports `evidence.source_accounting_complete = false` and
+  `source_read_capped` in `evidence.caveats`, and must not be filed as clean
+  evidence. Re-run with a higher `maxSources`, or a narrower `days`, until the run
+  comes back complete.
+- `evidence.caveats = []`, so no instruction key went unresolved purely because the
+  cap hid its sources (`instruction_allowlist_cap_exposed`)
 - every known-builder shortfall is visible in an exception outcome
 - distinct PO fixtures stay distinct
 - no address-only merge
@@ -265,7 +272,8 @@ the U1 physical down migration once any case is authoritative.
 After the first deterministic scan, verify without mutating production:
 
 1. health reports deterministic mode, OK status, and zero model calls
-2. structural source accounting has zero unaccounted emails
+2. structural source accounting has zero unaccounted emails and the run reports
+   `evidence.zero_unaccounted_proved = true` rather than a capped read
 3. aggregate outcomes match the approved no-write replay
 4. all created jobs are unassigned
 5. no manager SMS, client SMS/email, invoice, PDF duplicate, screenshot duplicate,
