@@ -1,5 +1,11 @@
 -- jobs.quoted_value — lean generated column over pricing_json (M1, 2026-07-17)
 --
+-- DEPLOY ORDER (required):
+--   Apply this migration BEFORE deploying daily-digest / ops-api / reporting-api.
+--   Those functions select jobs.quoted_value; if they ship first the queries 400
+--   and the digest silently reports $0 pipeline value. Migrations and edge
+--   deploys are separate steps in this repo, so the order is not automatic.
+--
 -- Purpose:
 --   Nine server-side call sites select jobs.quoted_value, which has never
 --   existed. PostgREST rejects the whole request with 400 (42703 undefined

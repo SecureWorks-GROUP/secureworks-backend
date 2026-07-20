@@ -155,6 +155,9 @@ import {
 import {
   canonicalJobRef as _canonicalJobRef,
   poDeliveryInstruction as _poDeliveryInstruction,
+  formatPoDeliveryNotes,
+  parsePoDeliveryAddress,
+  isPoPickup,
 } from '../_shared/po_reference.ts'
 
 // Mission makesafe-live-truth-2026-06-14 (Phase 2) — reconciliation D1-D4.
@@ -570,8 +573,11 @@ export const _refMatchesExternalRefForTest = refMatchesExternalRef
 // makesafe_hours_flag.ts. Read-only; builder/client invoice amounts are never
 // read here (they must never raise the trade allowance — 2026-06-19 ruling).
 //
-//   • ops_set  ← work_orders.estimated_hours (office-set expectation; the only
-//                ops-set expected-hours field in the data model today).
+//   • ops_set  ← NO LIVE SOURCE. The M4 design named work_orders.estimated_hours,
+//                but that column does not exist in the schema and nothing writes
+//                it, so this source is permanently null and the resolver falls
+//                through to `report` / the 2hr rule default. Repoint it here once
+//                an ops-set expected-hours field actually lands (CP1).
 //   • report   ← job_service_reports.checklist_json (trade_count × labour_hours;
 //                the trade's OWN report — wired but UNTRUSTED by default until
 //                CP1 verifies reliability + the exact per-trade/total formula).
@@ -588,23 +594,8 @@ async function fetchMakesafeAllowanceInputs(
   if (ids.length === 0) return out
   for (const id of ids) out[id] = { ops_set: null, report: null }
 
-  // ops_set: latest non-cancelled work order's estimated_hours per job.
-  try {
-    const { data: wos } = await client.from('work_orders')
-      .select('job_id, created_at, status')
-      .in('job_id', ids)
-      .neq('status', 'cancelled')
-      .order('created_at', { ascending: false })
-    const seen = new Set<string>()
-    for (const wo of (wos || [])) {
-      if (!wo?.job_id || seen.has(wo.job_id)) continue
-      const h = Number(wo.estimated_hours)
-      if (Number.isFinite(h) && h > 0) {
-        out[wo.job_id].ops_set = h
-        seen.add(wo.job_id)
-      }
-    }
-  } catch (e) { console.log('[ops-api] hours-flag ops_set read failed (non-blocking):', (e as Error).message) }
+  // ops_set stays null: no ops-set expected-hours column exists to read from.
+  console.log(`[ops-api] hours-flag ops_set unavailable (no live source) for ${ids.length} job(s)`)
 
   // report: latest service report per job → trade_count × labour_hours.
   // NOTE: labour_hours may be per-trade OR total in production data — this
@@ -17182,7 +17173,7 @@ async function createPO(client: any, body: any) {
       subtotal, tax, total,
       delivery_date: delivery_date || deliveryDate || null,
       reference: reference || null,
-      notes: (delivery_address ? 'Deliver to: ' + delivery_address + (notes ? '\n' + notes : '') : notes) || null,
+      notes: formatPoDeliveryNotes(delivery_address, notes),
       status: body.status || 'draft',
       created_by: body.operator_email || body.user_email || null,
     })
@@ -21258,14 +21249,15 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
       .order('created_at', { ascending: false })
     for (const po of (pos || [])) {
       if (!poMap[po.job_id]) {
-        // Determine pickup vs delivery from notes or delivery_address
-        const notes = (po.notes || '').toUpperCase()
-        const isPickup = notes.includes('PICKUP') || !po.delivery_address
+        // purchase_orders has no delivery_address column — the address is encoded
+        // into notes at PO creation; _shared/po_reference.ts owns both sides.
+        const deliverTo = parsePoDeliveryAddress(po.notes)
+        const isPickup = isPoPickup(po.notes)
         poMap[po.job_id] = {
           delivery_method: isPickup ? 'pickup' : 'delivery',
           delivery_date: po.delivery_date,
-          delivery_address: po.delivery_address,
-          pickup_location: isPickup ? (po.delivery_address || 'R&R Wangara') : null,
+          delivery_address: deliverTo,
+          pickup_location: isPickup ? (deliverTo || 'R&R Wangara') : null,
           po_status: po.status,
           materials_confirmed: ['confirmed', 'delivered', 'billed', 'authorised'].includes(po.status),
         }
@@ -27251,6 +27243,34 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
   const lineItems: any[] = []
+  // Per-job aggregation for the relational trade_invoice_lines write below.
+  const jobLines: Record<string, {
+    job_id: string
+    job_number: string
+    client_name: string | null
+    total_hours: number
+    hourly_rate: number
+    line_total_ex: number
+    assignment_ids: string[]
+    days: Set<string>
+  }> = {}
+  const addJobLine = (jobId: string, job: any, hours: number, lineRate: number, amount: number, assignmentId?: string, day?: string) => {
+    if (!jobId) return
+    const l = jobLines[jobId] ||= {
+      job_id: jobId,
+      job_number: job?.job_number || '',
+      client_name: job?.client_name || null,
+      total_hours: 0,
+      hourly_rate: lineRate,
+      line_total_ex: 0,
+      assignment_ids: [],
+      days: new Set<string>(),
+    }
+    l.total_hours += hours
+    l.line_total_ex += amount
+    if (assignmentId) l.assignment_ids.push(assignmentId)
+    if (day) l.days.add(day)
+  }
   let subtotal = 0
 
   if (isPerMetre) {
@@ -27289,6 +27309,9 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         TaxType: stTaxType,
         Tracking: xeroTracking(job.job_number || ''),
       })
+      // Per-metre work has no hours — record the cost and job attribution only,
+      // so reconciliation never reads metres as if they were hours.
+      addJobLine(item.job_id, job, 0, 0, amount)
     }
 
     if (lineItems.length === 0) throw new Error('All metre amounts are zero. Enter the metres you installed on each job.')
@@ -27336,6 +27359,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         TaxType: stTaxType,
         Tracking: xeroTracking(job?.job_number || ''),
       })
+      addJobLine(job?.id, job, hours, rate, amount, a.id, a.scheduled_date)
     }
   }
 
@@ -27403,10 +27427,9 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   // Insert local trade_invoices record against the LIVE schema
   // (20260325000003_timer_invoice_system): week_start/week_end, subtotal_ex,
   // total_inc, xero_bill_id. The legacy week_ending/line_items/subtotal/total/
-  // xero_bill_number/xero_invoice_id names 400 the insert. Line detail lives on
-  // trade_invoice_lines (relational) — full line write is a separate path
-  // (generate_trade_invoice); this legacy submit only records the weekly totals.
-  const totalHours = lineItems.reduce((s, li) => s + (Number(li.Quantity) || 0), 0)
+  // xero_bill_number/xero_invoice_id names 400 the insert. Per-job detail is
+  // written relationally to trade_invoice_lines below.
+  const totalHours = Object.values(jobLines).reduce((s, l) => s + l.total_hours, 0)
   const invoiceRecord = {
     org_id: DEFAULT_ORG_ID,
     user_id: userId,
@@ -27421,7 +27444,25 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     status: xeroInvId ? 'pushed_to_xero' : 'draft',
   }
 
-  await client.from('trade_invoices').insert(invoiceRecord)
+  const { data: insertedInvoice, error: invInsertErr } = await client
+    .from('trade_invoices').insert(invoiceRecord).select('id').single()
+  if (invInsertErr) throw invInsertErr
+
+  const lineRows = Object.values(jobLines).map((l) => ({
+    trade_invoice_id: insertedInvoice.id,
+    job_id: l.job_id,
+    job_number: l.job_number,
+    client_name: l.client_name,
+    total_hours: Math.round(l.total_hours * 100) / 100,
+    hourly_rate: l.hourly_rate,
+    line_total_ex: Math.round(l.line_total_ex * 100) / 100,
+    days_worked: l.days.size || null,
+    assignment_ids: l.assignment_ids.length ? l.assignment_ids : null,
+  }))
+  if (lineRows.length > 0) {
+    const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
+    if (lineErr) console.error('Non-blocking: failed to write trade invoice lines:', lineErr.message)
+  }
 
   return { success: true, xero_bill_number: billNumber, total }
 }
@@ -27589,22 +27630,22 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
 
   // Get trade invoices that reference this job
   const jobNumber = job?.job_number || ''
-  const { data: invoices } = await client.from('trade_invoices')
-    .select('id, user_id, week_ending:week_end, subtotal:subtotal_ex, total:total_inc, status, xero_bill_number:xero_bill_id, users:user_id(name)')
+  // Per-job detail lives on trade_invoice_lines (relational), not on a JSON blob.
+  const { data: invoices, error: invErr } = await client.from('trade_invoices')
+    .select('id, user_id, week_ending:week_end, subtotal:subtotal_ex, total:total_inc, status, xero_bill_number:xero_bill_id, users:user_id(name), trade_invoice_lines!inner(job_id, job_number, total_hours, line_total_ex)')
+    .eq('trade_invoice_lines.job_id', jobId)
     .order('week_end', { ascending: false })
+  if (invErr) throw invErr
 
-  // Filter to invoices that contain this job's hours
-  const jobInvoices = (invoices || []).filter((inv: any) => {
-    const items = inv.line_items || []
-    return items.some((li: any) => (li.job_number || '') === jobNumber)
-  }).map((inv: any) => {
-    const items = (inv.line_items || []).filter((li: any) => (li.job_number || '') === jobNumber)
-    const jobHours = items.reduce((s: number, li: any) => s + (li.hours || 0), 0)
-    const jobAmount = items.reduce((s: number, li: any) => s + (li.amount || 0), 0)
+  const jobInvoices = (invoices || []).map((inv: any) => {
+    const items = inv.trade_invoice_lines || []
+    const jobHours = items.reduce((s: number, li: any) => s + (Number(li.total_hours) || 0), 0)
+    const jobAmount = items.reduce((s: number, li: any) => s + (Number(li.line_total_ex) || 0), 0)
+    const { trade_invoice_lines: _lines, ...rest } = inv
     return {
-      ...inv,
-      job_hours: jobHours,
-      job_amount: jobAmount,
+      ...rest,
+      job_hours: Math.round(jobHours * 100) / 100,
+      job_amount: Math.round(jobAmount * 100) / 100,
     }
   })
 

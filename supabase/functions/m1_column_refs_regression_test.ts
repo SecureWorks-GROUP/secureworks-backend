@@ -261,7 +261,7 @@ Deno.test("trade_invoices submit write uses live column names", async () => {
   const ops = await readRepo("functions/ops-api/index.ts");
   // Extract the invoiceRecord object literal keys (not comments / return fields).
   const recMatch = ops.match(
-    /const invoiceRecord = \{([\s\S]*?)\n  \}\n\n  await client\.from\('trade_invoices'\)\.insert/,
+    /const invoiceRecord = \{([\s\S]*?)\n  \}\n/,
   );
   assert(recMatch, "expected trade_invoices invoiceRecord insert block");
   const body = recMatch[1];

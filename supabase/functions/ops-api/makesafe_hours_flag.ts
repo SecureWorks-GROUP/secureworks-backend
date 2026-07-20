@@ -38,11 +38,12 @@
 // not the resolver code below. Each source the resolver may draw an allowance
 // from is listed with whether it is trusted enough to RAISE the allowance
 // above the rule default:
-//   • ops_set — the office-set expectation. Wired in index.ts to
-//     work_orders.estimated_hours (the only ops-set expected-hours field in
-//     the data model today; job_assignments carries only hours_worked, which
-//     is the CHARGED value, not an allowance). TRUSTED by default per Marnin's
-//     2026-07-04 ruling: it is set by the office, not the trade.
+//   • ops_set — the office-set expectation. NOT WIRED: the intended field
+//     (work_orders.estimated_hours) does not exist in the schema and nothing
+//     writes it, so index.ts always yields null here (job_assignments carries
+//     only hours_worked, which is the CHARGED value, not an allowance).
+//     TRUSTED by default per Marnin's 2026-07-04 ruling once a source exists:
+//     it is set by the office, not the trade.
 //   • report — the trade's OWN completion report
 //     (job_service_reports.checklist_json: trade_count × labour_hours). NOT
 //     trusted yet: the June 2026 finding was that self-reported trade_count is

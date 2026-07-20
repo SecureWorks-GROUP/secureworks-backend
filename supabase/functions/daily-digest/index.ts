@@ -14,6 +14,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { logQueryErrors } from '../_shared/pgrest.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -208,6 +209,16 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
       sb.from('purchase_orders')
         .select('supplier_name, total_amount:total, created_at')
         .gte('created_at', ninetyDaysAgo),
+    ])
+
+    logQueryErrors([
+      ['diagnostics.stale_quotes', staleQuotes],
+      ['diagnostics.recent_jobs', recentJobs],
+      ['diagnostics.assignments_14d', assignments14d],
+      ['diagnostics.sales_jobs_90d', salesJobs90d],
+      ['diagnostics.xero_invoices', xeroInvoices],
+      ['diagnostics.completed_jobs_costs', completedJobsCosts],
+      ['diagnostics.supplier_pos', supplierPOs],
     ])
 
     // 1. Lead response time
