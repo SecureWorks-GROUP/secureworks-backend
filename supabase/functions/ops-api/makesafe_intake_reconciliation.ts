@@ -11,10 +11,21 @@
 // mutation.
 
 import {
+  contentFingerprint,
+  contentFingerprintChecks,
   normaliseCompany,
   normaliseJobFamily,
   normaliseRef,
+  subjectJobNumber,
 } from "./makesafe_intake_dedup.ts";
+import {
+  extractBuilderWorkOrderIdentity,
+  hasAnyPoLabel,
+  hasUnparseablePoLabel,
+  matchBuilderRefText,
+  ORDER_LABEL_PATTERN,
+  PO_LABEL_PATTERN,
+} from "./makesafe_builder_work_order_identity.ts";
 import {
   isPureAckNoAction,
   subjectIsExcludedNonWorkOrder,
@@ -26,8 +37,10 @@ import { senderMatchesPattern } from "../_shared/makesafe_intake_classification.
 
 export interface IntakeReconEmail {
   post_id?: string | null;
+  internet_message_id?: string | null;
   subject?: string | null;
   from_email?: string | null;
+  body_preview?: string | null;
   received_at?: string | null;
   has_attachments?: boolean | null;
 }
@@ -42,6 +55,8 @@ export interface IntakeReconDraft {
   status?: string | null;
   report_type?: string | null;
   subject?: string | null;
+  from_email?: string | null;
+  body_preview?: string | null;
   received_at?: string | null;
   created_at?: string | null;
   confidence?: string | null;
@@ -518,8 +533,21 @@ export async function makesafeIntakeReconciliation(
 // its ref (dedup would skip it), OR a deterministic non-work-order classification
 // with a reason (own outbound, excluded subject, pure ack, or not a make-safe
 // candidate at all). Anything left is a genuine inbound make-safe candidate with no
-// draft and no job. ZERO unaccounted = the board is live and true. This reuses the
-// SAME gate helpers the scan uses, so the accounting matches what the scan would do.
+// draft and no job. ZERO unaccounted = the board is live and true. Every source row
+// is returned as matched, accounted alias/revision, or genuinely unaccounted with an
+// evidence pointer. Raw refs remain intact beside separately canonicalised claim/PO
+// identity. This reuses the SAME gate helpers the scan uses, so accounting matches
+// what the scan would do.
+
+export type IntakeReconcileClassification =
+  | "matched"
+  | "accounted_alias_revision"
+  | "genuinely_unaccounted";
+
+export interface IntakeReconcileEvidencePointer {
+  kind: "draft" | "job" | "classification";
+  id: string;
+}
 
 export interface IntakeReconcileInvariantItem {
   post_id: string | null;
@@ -528,7 +556,13 @@ export interface IntakeReconcileInvariantItem {
   received_at: string | null;
   age_minutes: number | null;
   state: "accounted" | "unaccounted";
+  classification: IntakeReconcileClassification;
   reason: string;
+  evidence: IntakeReconcileEvidencePointer;
+  /** Raw source representation retained for operator audit. */
+  raw_reference: string | null;
+  canonical_claim_ref: string | null;
+  canonical_po_ref: string | null;
 }
 
 export interface IntakeReconcileInvariant {
@@ -538,10 +572,436 @@ export interface IntakeReconcileInvariant {
   live_and_true: boolean;
   counts: {
     source_emails: number;
+    matched: number;
+    accounted_alias_revision: number;
     accounted: number;
+    genuinely_unaccounted: number;
     unaccounted: number;
   };
+  /** One explicit classification per source row. */
+  items: IntakeReconcileInvariantItem[];
   unaccounted: IntakeReconcileInvariantItem[];
+}
+
+interface ReconcileIdentity {
+  claim: string;
+  po: string;
+  workOrder: string;
+  raw: string | null;
+  /**
+   * Every normalised job-unique token this row can offer as a content-fingerprint
+   * discriminator, richest first. A stored draft is enriched by its extraction_json
+   * while a source only has its subject, so neither side can be relied on to produce
+   * the SAME single token; both publish all of theirs and a twin needs one to align.
+   * `raw` is label text ("Job No 12345") and is for operator display only — feeding it
+   * to the fingerprint would make a source resolve to r:JOBNO12345 while the stored
+   * draft resolves to r:12345.
+   */
+  canonicalRefs: string[];
+  /**
+   * Durable exact identity tokens used only when no canonical builder claim is
+   * parseable — known refs whose prefix is outside the builder claim vocabulary and
+   * the bare "Job No <NNNNN>" archetype. Namespaced so a job number can never
+   * collide with a reference whose digits happen to match.
+   */
+  keys: string[];
+  /**
+   * The subject carries a PO label the canonical extractor cannot parse, so this row
+   * may name a PO we cannot see. Treated as "PO unknown", never as "no PO": a
+   * claim-only alias would collapse it onto another PO's lineage.
+   */
+  poUnparsed: boolean;
+  /**
+   * poUnparsed, or the body names a PO in any spelling. A quoted or footer PO is not
+   * adopted as identity, but it does mean the authoritative fields may not show the
+   * whole picture, so identity inference (claim and token matching) is withheld
+   * unless both sides already name an explicit PO, which pins the deliverable.
+   * Durable evidence — post id, internet message id, content fingerprint — is
+   * unaffected, since none of it reasons about the PO.
+   */
+  poContextAmbiguous: boolean;
+}
+
+const JOB_NUMBER_TEXT_RE = /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*\d{3,7}\b/i;
+/**
+ * Australian state abbreviation followed by a four digit postcode. Address text
+ * shaped exactly like a reference token, so it must never become an identity key:
+ * two unrelated make-safes in the same suburb would collapse into one.
+ */
+const AU_STATE_POSTCODE_RE = /^(?:WA|SA|NSW|VIC|QLD|TAS|NT|ACT)\d{4}$/;
+
+/**
+ * Unlabelled tokens are never identity. "Lot 245", "Unit 1203" and "WA 6021" all
+ * read as references but describe a property, so two unrelated make-safes would
+ * collapse into one. Only an explicit durable label earns an identity key.
+ * Under-matching costs a genuinely_unaccounted report, over-matching silently
+ * loses work.
+ *
+ * The PO label alternative is derived from PO_LABEL_PATTERN, the grammar the
+ * canonical extractor reads, so it cannot drift into a spelling that produces a PO
+ * token while identity.po stays empty and the PO-separation guards stay blind.
+ * Spellings outside it yield no key and the row fails open instead.
+ *
+ * A bare "Order No <digits>" is read here, as a sender-scoped generic reference, and
+ * deliberately NOT as a PO: it names no system, and treating it as an unknown PO
+ * would give the row permanent PO doubt with no token to match on, making the whole
+ * archetype structurally unaccountable.
+ */
+const LABELLED_IDENTITY_RE = new RegExp(
+  `\\b(?:(job)\\s*(?:no\\.?|number|#)|${PO_LABEL_PATTERN}\\s*(?:no\\.?|number|#)?|(?:work\\s*order|w\\/o|our\\s*ref(?:erence)?|ref(?:erence)?|claim)\\s*(?:no\\.?|number|#)?|(${ORDER_LABEL_PATTERN}))\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\b`,
+  "gi",
+);
+const PO_LABEL_PREFIX_RE = new RegExp(`^${PO_LABEL_PATTERN}`, "i");
+
+function isAddressLikeToken(normalised: string): boolean {
+  return AU_STATE_POSTCODE_RE.test(normalised);
+}
+
+/**
+ * Namespaced identity keys from explicitly labelled references only. A PO number
+ * and a job number that share digits stay distinct.
+ */
+function labelledIdentityKeys(subject: string | null | undefined): string[] {
+  const keys: string[] = [];
+  for (const match of String(subject || "").matchAll(LABELLED_IDENTITY_RE)) {
+    const label = String(match[0]).toLowerCase();
+    const token = normaliseRef(match[3]);
+    if (!/\d{3,}/.test(token) || isAddressLikeToken(token)) continue;
+    const ns = match[1] ? "JOB" : PO_LABEL_PREFIX_RE.test(label) ? "PO" : "REF";
+    // A PO key must be a PO the canonical extractor can also parse (bare digits),
+    // otherwise the token would participate in matching while identity.po stays
+    // empty and the PO-separation guards could never fire for it.
+    if (ns === "PO" && !/^\d{3,}$/.test(token)) continue;
+    // A bare "Order No" is the weakest label here: it names no system, so it is only
+    // trusted as a plain reference number. Anything else after it is more likely
+    // address or prose fragment than a work-order reference, and REF keys are only
+    // sender-scoped, so an over-broad token would collide across builders.
+    if (match[2] && !/^\d{3,9}$/.test(token)) continue;
+    keys.push(`${ns}:${token}`);
+  }
+  return keys;
+}
+
+function rawReferenceFromText(value: string | null | undefined): string | null {
+  const text = String(value || "");
+  return text.match(JOB_NUMBER_TEXT_RE)?.[0] ||
+    [...text.matchAll(LABELLED_IDENTITY_RE)].find((m) =>
+      /\d{3,}/.test(normaliseRef(m[3])) &&
+      !isAddressLikeToken(normaliseRef(m[3]))
+    )?.[0] || null;
+}
+
+/**
+ * Fallback identity tokens for sources/captures with no canonical claim. Exact
+ * token equality only — never substring containment — so a near-collision between
+ * two distinct deliverables cannot silently collapse.
+ */
+function fallbackIdentityKeys(
+  externalRef: string | null | undefined,
+  subject: string | null | undefined,
+): string[] {
+  const keys = new Set<string>();
+  const ref = normaliseRef(externalRef);
+  if (/\d{3,}/.test(ref) && !isAddressLikeToken(ref)) keys.add(`REF:${ref}`);
+  if (/^\d{3,7}$/.test(ref)) keys.add(`JOB:${ref}`);
+  const text = String(subject || "");
+  const jobNo = subjectJobNumber(text);
+  if (jobNo) keys.add(`JOB:${jobNo}`);
+  for (const key of labelledIdentityKeys(text)) keys.add(key);
+  return [...keys];
+}
+
+/**
+ * The job-unique tokens a fingerprint may be discriminated by, richest first. Always
+ * normalised parsed values — never the raw label text a subject happened to use. Both
+ * the enriched (extraction-bearing) and the bare (subject-only) representation of the
+ * same instruction are emitted so the two capture paths can meet on one of them.
+ */
+function canonicalIdentityTokens(input: {
+  claim: string;
+  workOrder: string;
+  keys: string[];
+  externalRef?: string | null;
+}): string[] {
+  const out = new Set<string>();
+  if (input.workOrder) out.add(input.workOrder);
+  if (input.claim) out.add(input.claim);
+  for (const ns of ["JOB:", "REF:", "PO:"]) {
+    for (const key of input.keys.filter((k) => k.startsWith(ns))) {
+      out.add(key.slice(ns.length));
+    }
+  }
+  const ref = normaliseRef(input.externalRef);
+  if (ref) out.add(ref);
+  return [...out];
+}
+
+/**
+ * Canonical identity comes only from evidence that belongs to THIS row: its
+ * external_ref, its stored extraction fields and its current subject. body_preview
+ * is never parsed for identity — it carries quoted threads and footers as often as
+ * it carries this instruction's own reference, and adopting a quoted "PO 4477" as
+ * this row's PO names the wrong lineage.
+ *
+ * Body text still matters, but only as doubt: any PO-shaped label in it, parseable
+ * or not, means a PO may be in play that the authoritative fields do not show. That
+ * raises poContextAmbiguous, which withholds claim/token identity inference unless
+ * both sides carry a reliably parsed explicit PO and those POs are equal. When either
+ * side lacks an explicit PO, or its subject PO label could not be parsed at all
+ * (poUnparsed, which stays scoped to this row's subject), the doubt stands and no
+ * inference is made. Such a row can still be accounted by durable evidence (post id,
+ * internet message id, content fingerprint); it simply may not be collapsed on
+ * identity inference alone.
+ */
+function reconcileIdentity(input: {
+  externalRef?: string | null;
+  subject?: string | null;
+  bodyText?: string | null;
+  extraction?: any;
+}): ReconcileIdentity {
+  const parsed = extractBuilderWorkOrderIdentity({
+    externalRef: input.externalRef,
+    subject: input.subject,
+  });
+  const extraction = parseObj(input.extraction);
+  const claim = normaliseRef(
+    extraction.builder_claim_ref || parsed.builder_claim_ref,
+  );
+  const po = normaliseRef(
+    extraction.builder_po_number || parsed.builder_po_number,
+  ).replace(/^PO/, "");
+  const workOrder = normaliseRef(
+    extraction.builder_work_order_number || parsed.builder_work_order_number,
+  );
+  const keys = fallbackIdentityKeys(input.externalRef, input.subject);
+  const poUnparsed = !po && hasUnparseablePoLabel(input.subject || "");
+  return {
+    claim,
+    po,
+    workOrder,
+    raw: matchBuilderRefText(input.subject) ||
+      rawReferenceFromText(input.subject) || input.externalRef ||
+      parsed.builder_work_order_number || parsed.builder_claim_ref || null,
+    canonicalRefs: canonicalIdentityTokens({
+      claim,
+      workOrder,
+      keys,
+      externalRef: input.externalRef,
+    }),
+    keys,
+    // A subject PO label the canonical grammar cannot read means "PO unknown",
+    // never "no PO".
+    poUnparsed,
+    // Body text raises the same doubt whatever the spelling, because we never adopt
+    // its number: seeing a PO discussed at all is enough to stop identity aliasing.
+    poContextAmbiguous: poUnparsed || hasAnyPoLabel(input.bodyText || ""),
+  };
+}
+
+/**
+ * Matching keys are normalised ("MLB25096") but jobs and drafts store the hyphenated
+ * canonical form, so the operator-facing field is re-hyphenated to the shape an
+ * external_ref search actually accepts, matching canonical_po_ref.
+ */
+function displayClaimRef(claim: string): string | null {
+  if (!claim) return null;
+  const parts = claim.match(/^([A-Z]+)(\d+)$/);
+  return parts ? `${parts[1]}-${parts[2]}` : claim;
+}
+
+type Relation = "exact" | "claim_po_alias";
+
+function identityRelation(
+  source: ReconcileIdentity,
+  captured: ReconcileIdentity,
+): Relation | null {
+  if (!source.claim || source.claim !== captured.claim) return null;
+  // A PO we can see but cannot parse is an unknown PO. Relating on the claim alone
+  // would either alias a different PO's capture or read as "no PO on either side",
+  // both of which hide a possibly-new deliverable. Only an aligned work order,
+  // which carries the PO in its own token, survives.
+  if (source.poContextAmbiguous || captured.poContextAmbiguous) {
+    // Body doubt only matters while a PO is unknown. When both sides name an
+    // explicit PO from authoritative fields the deliverable is already pinned, so
+    // equal POs are the same work and different POs are different work.
+    if (source.po && captured.po) {
+      return source.po === captured.po ? "exact" : null;
+    }
+    return source.workOrder && source.workOrder === captured.workOrder
+      ? "exact"
+      : null;
+  }
+  // Two explicit, different POs are two deliverables. Never collapse them merely
+  // because the property/claim is shared.
+  if (source.po && captured.po && source.po !== captured.po) return null;
+  if (
+    (source.workOrder && source.workOrder === captured.workOrder) ||
+    (source.po && source.po === captured.po) ||
+    (!source.po && !captured.po)
+  ) return "exact";
+  // A claim-only SOURCE may alias a richer PO-suffixed captured identity. The reverse
+  // is deliberately unsafe: an explicit new source PO against a legacy claim-only
+  // job can be genuinely new work and must remain visible.
+  //
+  // "Claim-only" means the source offers nothing beyond the claim. A source naming a
+  // reference the capture does not carry — a bare "Order No 4477" against a capture
+  // whose only reference is PO-9999 — is describing something the capture cannot be
+  // shown to cover, so it stays visible instead of being folded into that lineage.
+  if (source.po || !captured.po) return null;
+  const capturedTokens = new Set(captured.canonicalRefs);
+  const unmatchedRef = source.keys.some((k) =>
+    k.startsWith("REF:") && !capturedTokens.has(k.slice(4))
+  );
+  return unmatchedRef ? null : "claim_po_alias";
+}
+
+/**
+ * Pick the single candidate a source may be accounted against. The pool must describe
+ * ONE deliverable: differing captured identities mean the evidence cannot say which
+ * capture the source belongs to, so we fail open and let the row report as unaccounted
+ * rather than name the wrong lineage.
+ *
+ * A deliverable is claim + PO. workOrder is derived enrichment — the same instruction
+ * stored as "MLB-25096-PO-4477" and as "MLB-25096" with an extracted PO resolves to
+ * two different workOrder tokens while describing one job — so it is not a
+ * distinctness signal.
+ */
+function soleCompatibleCandidate<T extends { identity: ReconcileIdentity }>(
+  pool: T[],
+): T | undefined {
+  const first = pool[0];
+  if (!first) return undefined;
+  const distinct = pool.some((c) =>
+    c.identity.claim !== first.identity.claim ||
+    c.identity.po !== first.identity.po
+  );
+  return distinct ? undefined : first;
+}
+
+/**
+ * Choose which of the drafts sharing a content fingerprint the source is a twin of.
+ * PO separation is enforced first, then the surviving candidates must describe ONE
+ * deliverable: differing captured identities under one fingerprint mean the evidence
+ * cannot say which draft the source belongs to, so we fail open and let the row report
+ * as unaccounted rather than name the wrong draft.
+ */
+function resolveFingerprintTwin(
+  candidates:
+    | { draft: IntakeReconDraft; identity: ReconcileIdentity }[]
+    | undefined,
+  source: ReconcileIdentity,
+): IntakeReconDraft | undefined {
+  // Two explicit, different POs are two deliverables, whatever else aligns. An
+  // explicit source PO against a PO-less capture is potentially new work too, so the
+  // widened token set may never route around PO separation.
+  const compatible = (candidates || []).filter((c) =>
+    !c.identity.poUnparsed &&
+    (source.po ? source.po === c.identity.po : !source.poUnparsed)
+  );
+  if (!compatible.length) return undefined;
+  const exact = compatible.filter((c) => c.identity.po === source.po);
+  const pool = exact.length ? exact : compatible;
+  return soleCompatibleCandidate(pool)?.draft;
+}
+
+interface CapturedIdentity<T> {
+  entry: T;
+  identity: ReconcileIdentity;
+  /**
+   * Normalised sender the capture came from. A bare job/reference number is only
+   * unique inside one builder's numbering, so the token fallback is scoped to it.
+   */
+  scope: string;
+}
+
+interface CapturedIndex<T> {
+  byClaim: Map<string, CapturedIdentity<T>[]>;
+  byKey: Map<string, CapturedIdentity<T>[]>;
+}
+
+function normaliseSenderScope(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function scopedKey(scope: string, key: string): string {
+  return `${scope}\u0000${key}`;
+}
+
+function indexCapturedIdentities<T>(
+  captured: CapturedIdentity<T>[],
+): CapturedIndex<T> {
+  const byClaim = new Map<string, CapturedIdentity<T>[]>();
+  const byKey = new Map<string, CapturedIdentity<T>[]>();
+  for (const c of captured) {
+    if (c.identity.claim) {
+      const arr = byClaim.get(c.identity.claim);
+      if (arr) arr.push(c);
+      else byClaim.set(c.identity.claim, [c]);
+    }
+    // No sender evidence means no same-builder proof, so the row is claim-only.
+    if (!c.scope) continue;
+    for (const key of c.identity.keys) {
+      const k = scopedKey(c.scope, key);
+      const arr = byKey.get(k);
+      if (arr) arr.push(c);
+      else byKey.set(k, [c]);
+    }
+  }
+  return { byClaim, byKey };
+}
+
+function findCapturedIdentity<T>(
+  source: ReconcileIdentity,
+  index: CapturedIndex<T>,
+  sourceScope: string,
+): { entry: T; relation: Relation } | null {
+  // A canonical claim is the strongest identity we have: resolve it exclusively so
+  // the weaker token fallback can never route around explicit PO separation.
+  if (source.claim) {
+    const hits: {
+      entry: T;
+      identity: ReconcileIdentity;
+      relation: Relation;
+    }[] = [];
+    for (const c of index.byClaim.get(source.claim) || []) {
+      const relation = identityRelation(source, c.identity);
+      if (relation) {
+        hits.push({ entry: c.entry, identity: c.identity, relation });
+      }
+    }
+    if (!hits.length) return null;
+    // A claim-only source may alias exactly one PO capture. When the claim carries
+    // several distinct PO deliverables the evidence cannot name a lineage, so fail
+    // open to genuinely unaccounted instead of pointing at an arbitrary draft.
+    const exact = hits.filter((h) => h.relation === "exact");
+    const hit = soleCompatibleCandidate(exact.length ? exact : hits);
+    return hit ? { entry: hit.entry, relation: hit.relation } : null;
+  }
+  // A bare number carries no builder namespace, so it may only resolve against a
+  // capture from the exact same sender. Fail open across builders: reporting work
+  // as genuinely unaccounted is recoverable, collapsing two builders' jobs is not.
+  if (!sourceScope) return null;
+  for (const key of source.keys) {
+    const candidates = index.byKey.get(scopedKey(sourceScope, key)) || [];
+    // Same token, different explicit POs are different deliverables; a PO neither
+    // side can parse is an unknown PO, not an absent one, so it may not alias either.
+    // And when the survivors still describe more than one deliverable no evidence
+    // names a lineage, so fail open rather than account against whichever was
+    // indexed first.
+    // Explicit equal POs on both sides pin the deliverable, so body doubt cannot
+    // change what the row is.
+    const compatible = candidates.filter((c) =>
+      (!!source.po && source.po === c.identity.po) ||
+      (!source.po && !source.poContextAmbiguous &&
+        !c.identity.poContextAmbiguous)
+    );
+    if (!compatible.length) continue;
+    const exact = compatible.filter((c) => c.identity.po === source.po);
+    const c = soleCompatibleCandidate(exact.length ? exact : compatible);
+    if (!c) continue;
+    return { entry: c.entry, relation: "exact" };
+  }
+  return null;
 }
 
 export function summarizeIntakeReconcileInvariant(input: {
@@ -560,49 +1020,189 @@ export function summarizeIntakeReconcileInvariant(input: {
     .map((p) => String(p || "").toLowerCase())
     .filter(Boolean);
 
-  // Linkage: a draft's graph_message_id equals the source email post_id.
-  const draftedPostIds = new Set<string>();
-  for (const d of input.drafts || []) {
-    if (d.graph_message_id) draftedPostIds.add(d.graph_message_id);
+  const drafts = input.drafts || [];
+  const jobs = input.jobs || [];
+  const draftsByPostId = new Map<string, IntakeReconDraft>();
+  const draftsByInternetId = new Map<string, IntakeReconDraft>();
+  // Every draft that lands on a fingerprint, not just the first. A draft publishes its
+  // broad claim token as well as its rich work-order token, so two distinct
+  // deliverables sharing a claim, sender, subject and minute collide here. Keeping all
+  // of them lets the lookup pick on identity instead of insertion order.
+  const draftFingerprints = new Map<
+    string,
+    { draft: IntakeReconDraft; identity: ReconcileIdentity }[]
+  >();
+  const draftIdentities: CapturedIdentity<IntakeReconDraft>[] = [];
+  for (const d of drafts) {
+    if (d.graph_message_id) draftsByPostId.set(d.graph_message_id, d);
+    if (d.internet_message_id) draftsByInternetId.set(d.internet_message_id, d);
+    const identity = reconcileIdentity({
+      externalRef: d.external_ref,
+      subject: d.subject,
+      bodyText: d.body_preview,
+      extraction: d.extraction_json,
+    });
+    draftIdentities.push({
+      entry: d,
+      identity,
+      scope: normaliseSenderScope(d.from_email),
+    });
+    for (
+      const token of identity.canonicalRefs.length
+        ? identity.canonicalRefs
+        : [null]
+    ) {
+      const fingerprint = contentFingerprint(
+        d.from_email,
+        d.subject,
+        d.received_at || d.created_at,
+        token,
+        null,
+      );
+      if (!fingerprint) continue;
+      const slot = draftFingerprints.get(fingerprint);
+      if (slot) slot.push({ draft: d, identity });
+      else draftFingerprints.set(fingerprint, [{ draft: d, identity }]);
+    }
   }
-  const jobRefs: string[] = [];
-  for (const j of input.jobs || []) {
-    const nr = normaliseRef(j.external_ref);
-    if (nr.length >= 5) jobRefs.push(nr);
-  }
+  // Jobs carry no sender, so they resolve on canonical prefixed claim/PO identity
+  // only. A bare number on a job row is not proof of which builder issued it.
+  const jobIdentities: CapturedIdentity<IntakeReconJob>[] = jobs.map((job) => ({
+    entry: job,
+    identity: reconcileIdentity({ externalRef: job.external_ref }),
+    scope: "",
+  }));
+  const draftIndex = indexCapturedIdentities(draftIdentities);
+  const jobIndex = indexCapturedIdentities(jobIdentities);
 
+  const items: IntakeReconcileInvariantItem[] = [];
   const unaccounted: IntakeReconcileInvariantItem[] = [];
-  let accounted = 0;
+  let matched = 0;
+  let aliasRevision = 0;
+
+  function record(
+    e: IntakeReconEmail,
+    classification: IntakeReconcileClassification,
+    reason: string,
+    evidence: IntakeReconcileEvidencePointer,
+    identity: ReconcileIdentity,
+  ): void {
+    const item: IntakeReconcileInvariantItem = {
+      post_id: e.post_id || null,
+      subject: e.subject || null,
+      from_email: e.from_email || null,
+      received_at: e.received_at || null,
+      age_minutes: minutesOld(e.received_at, nowMs),
+      state: classification === "genuinely_unaccounted"
+        ? "unaccounted"
+        : "accounted",
+      classification,
+      reason,
+      evidence,
+      raw_reference: identity.raw,
+      canonical_claim_ref: displayClaimRef(identity.claim),
+      canonical_po_ref: identity.po ? `PO-${identity.po}` : null,
+    };
+    items.push(item);
+    if (classification === "matched") matched++;
+    else if (classification === "accounted_alias_revision") aliasRevision++;
+    else unaccounted.push(item);
+  }
 
   for (const e of input.emails || []) {
     const postId = e.post_id || null;
     const subject = e.subject || "";
     const fromEmail = e.from_email || "";
+    const identity = reconcileIdentity({ subject, bodyText: e.body_preview });
 
-    // 1) linked draft (any status)
-    if (postId && draftedPostIds.has(postId)) {
-      accounted++;
+    // Exact source evidence linkage remains authoritative and preserves the raw id.
+    const directDraft = postId ? draftsByPostId.get(postId) : undefined;
+    if (directDraft) {
+      record(e, "matched", "source_post_id_matches_draft", {
+        kind: "draft",
+        id: directDraft.id || directDraft.graph_message_id || postId!,
+      }, identity);
       continue;
     }
-    // 2) our own outbound copy — never an inbound intake candidate
+
+    // Graph exposes one instruction through group-post and mailbox projections. Only
+    // collapse when a durable message id or the existing fail-open content fingerprint
+    // proves equivalence. Missing fingerprint inputs never alias.
+    const internetTwin = e.internet_message_id
+      ? draftsByInternetId.get(e.internet_message_id)
+      : undefined;
+    const fingerprintTwin = internetTwin || (() => {
+      // A draft with no parseable ref publishes its fingerprint under the null
+      // discriminator, which contentFingerprint then derives from the subject job
+      // number. A source carrying "Job No 12345" must still probe that form or the
+      // bare job-number archetype can never meet its own capture. Body text is NOT
+      // offered as a discriminator here: emails.body_preview and the draft preview
+      // are produced by different strippers and truncations, so a body hash is not
+      // durable twin proof across the two tables. Without a ref or job number the
+      // fingerprint is empty and the row fails open to unaccounted.
+      const tokens: (string | null)[] = [...identity.canonicalRefs, null];
+      for (const token of tokens) {
+        for (
+          const fp of contentFingerprintChecks(
+            e.from_email,
+            e.subject,
+            e.received_at,
+            token,
+            null,
+          )
+        ) {
+          const hit = resolveFingerprintTwin(
+            draftFingerprints.get(fp),
+            identity,
+          );
+          if (hit) return hit;
+        }
+      }
+      return undefined;
+    })();
+    if (fingerprintTwin) {
+      record(
+        e,
+        "accounted_alias_revision",
+        internetTwin
+          ? "twin_graph_post_same_internet_message_id"
+          : "twin_graph_post_content_fingerprint",
+        {
+          kind: "draft",
+          id: fingerprintTwin.id || fingerprintTwin.graph_message_id || "draft",
+        },
+        identity,
+      );
+      continue;
+    }
+
+    // Deterministic non-work classifications are explicit matched rows, not omitted
+    // bookkeeping. Their evidence pointer names the exact gate decision.
     const at = fromEmail.lastIndexOf("@");
-    const domain = at >= 0 ? fromEmail.slice(at + 1).trim().toLowerCase() : null;
+    const domain = at >= 0
+      ? fromEmail.slice(at + 1).trim().toLowerCase()
+      : null;
     if (isOwnDomain(domain)) {
-      accounted++;
+      record(e, "matched", "own_outbound_non_candidate", {
+        kind: "classification",
+        id: "isOwnDomain",
+      }, identity);
       continue;
     }
-    // 3) gate-excluded non-work-order subject (photo evidence / report / invoice / …)
     if (subjectIsExcludedNonWorkOrder(subject)) {
-      accounted++;
+      record(e, "matched", "excluded_non_work_order_subject", {
+        kind: "classification",
+        id: "subjectIsExcludedNonWorkOrder",
+      }, identity);
       continue;
     }
-    // 4) pure acknowledgement (thanks/noted, no action, no attachment)
     if (isPureAckNoAction(subject, !!e.has_attachments)) {
-      accounted++;
+      record(e, "matched", "pure_ack_no_action", {
+        kind: "classification",
+        id: "isPureAckNoAction",
+      }, identity);
       continue;
     }
-    // 5) not a make-safe candidate at all — the scan's matchedMessages filter would
-    //    never draft it (unknown sender AND no WO/report subject on a builder-ish domain).
     const senderMatch = senderPatterns.some((p) =>
       senderMatchesPattern(fromEmail, p)
     );
@@ -614,27 +1214,71 @@ export function summarizeIntakeReconcileInvariant(input: {
     const builderish = fromEmail.includes(".build") ||
       fromEmail.includes("primeeco.tech");
     if (!(senderMatch || (woSubject && builderish))) {
-      accounted++;
+      record(e, "matched", "not_make_safe_candidate", {
+        kind: "classification",
+        id: "sender_and_subject_floor",
+      }, identity);
       continue;
     }
-    // 6) candidate with no draft: is a live job already on a ref named in the subject?
-    const normSubject = normaliseRef(subject);
-    if (jobRefs.some((r) => normSubject.includes(r))) {
-      accounted++;
+
+    // Re-send/revision lineage may be represented by a draft or live job. Compare
+    // claim and PO independently: claim-only <-> PO-suffixed is an alias; two
+    // explicit different POs are never equivalent.
+    const draftIdentityHit = findCapturedIdentity(
+      identity,
+      draftIndex,
+      normaliseSenderScope(fromEmail),
+    );
+    if (draftIdentityHit) {
+      record(
+        e,
+        "accounted_alias_revision",
+        draftIdentityHit.relation === "claim_po_alias"
+          ? "claim_reference_alias_of_po_captured_draft"
+          : "resend_or_revision_matches_draft_identity",
+        {
+          kind: "draft",
+          id: draftIdentityHit.entry.id ||
+            draftIdentityHit.entry.graph_message_id || "draft",
+        },
+        identity,
+      );
       continue;
     }
-    // 7) a real inbound make-safe candidate with NO draft and NO job — UNACCOUNTED.
-    unaccounted.push({
-      post_id: postId,
-      subject: e.subject || null,
-      from_email: e.from_email || null,
-      received_at: e.received_at || null,
-      age_minutes: minutesOld(e.received_at, nowMs),
-      state: "unaccounted",
-      reason: "make_safe_candidate_no_draft_no_job",
-    });
+    const jobIdentityHit = findCapturedIdentity(identity, jobIndex, "");
+    if (jobIdentityHit) {
+      record(
+        e,
+        "accounted_alias_revision",
+        jobIdentityHit.relation === "claim_po_alias"
+          ? "claim_reference_alias_of_po_captured_job"
+          : "resend_or_revision_matches_live_job_identity",
+        {
+          kind: "job",
+          id: jobIdentityHit.entry.job_id ||
+            jobIdentityHit.entry.external_ref ||
+            "job",
+        },
+        identity,
+      );
+      continue;
+    }
+
+    record(
+      e,
+      "genuinely_unaccounted",
+      identity.claim && identity.po
+        ? "distinct_claim_po_has_no_draft_or_job"
+        : "make_safe_candidate_no_draft_no_job",
+      {
+        kind: "classification",
+        id: "no_durable_capture_evidence",
+      },
+      identity,
+    );
   }
 
+  const accounted = matched + aliasRevision;
   return {
     ok: true,
     window_days: windowDays,
@@ -642,16 +1286,21 @@ export function summarizeIntakeReconcileInvariant(input: {
     live_and_true: unaccounted.length === 0,
     counts: {
       source_emails: (input.emails || []).length,
+      matched,
+      accounted_alias_revision: aliasRevision,
       accounted,
+      genuinely_unaccounted: unaccounted.length,
       unaccounted: unaccounted.length,
     },
+    items,
     unaccounted: unaccounted.slice(0, limit),
   };
 }
 
 export async function makesafeIntakeReconcileInvariant(
   client: any,
-  opts: { nowIso?: string; windowDays?: number; limitUnaccounted?: number } = {},
+  opts: { nowIso?: string; windowDays?: number; limitUnaccounted?: number } =
+    {},
 ): Promise<IntakeReconcileInvariant> {
   const windowDays = opts.windowDays ?? 7;
   const nowMs = opts.nowIso ? Date.parse(opts.nowIso) : Date.now();
@@ -659,18 +1308,23 @@ export async function makesafeIntakeReconcileInvariant(
 
   const [emailsRes, draftsRes, jobsRes, companiesRes] = await Promise.all([
     client.from("emails")
-      .select("post_id, subject, from_email, received_at, has_attachments")
+      .select(
+        "post_id, internet_message_id, subject, from_email, body_preview, received_at, has_attachments",
+      )
       .eq("mailbox", "ses@secureworkswa.com.au")
       .is("pii_purged_at", null)
       .gte("received_at", sinceIso)
       .order("received_at", { ascending: false })
       .limit(1000),
     client.from("makesafe_intake_drafts")
-      .select("graph_message_id, status, received_at, created_at")
+      .select(
+        "id, graph_message_id, internet_message_id, external_ref, subject, from_email, body_preview, status, received_at, created_at, builder_claim_ref:extraction_json->>builder_claim_ref, builder_po_number:extraction_json->>builder_po_number, builder_work_order_number:extraction_json->>builder_work_order_number",
+      )
       .gte("received_at", sinceIso)
+      .order("received_at", { ascending: false })
       .limit(1000),
     client.from("makesafe_job_details")
-      .select("external_ref")
+      .select("job_id, external_ref")
       .not("external_ref", "is", null)
       .limit(2000),
     client.from("makesafe_companies")
@@ -685,7 +1339,9 @@ export async function makesafeIntakeReconcileInvariant(
   }
   if (draftsRes.error) {
     throw new Error(
-      `intake drafts read failed: ${draftsRes.error.message ?? draftsRes.error}`,
+      `intake drafts read failed: ${
+        draftsRes.error.message ?? draftsRes.error
+      }`,
     );
   }
   if (jobsRes.error) {
@@ -701,9 +1357,29 @@ export async function makesafeIntakeReconcileInvariant(
     }
   }
 
+  // extraction_json is an unbounded jsonb blob, so only the three identity keys
+  // reconcileIdentity actually reads are projected. They are re-nested here so the
+  // draft shape stays the one summarize/reconcileIdentity expect.
+  const drafts: IntakeReconDraft[] = (draftsRes.data || []).map((row: any) => {
+    const {
+      builder_claim_ref,
+      builder_po_number,
+      builder_work_order_number,
+      ...rest
+    } = row;
+    return {
+      ...rest,
+      extraction_json: {
+        builder_claim_ref,
+        builder_po_number,
+        builder_work_order_number,
+      },
+    };
+  });
+
   return summarizeIntakeReconcileInvariant({
     emails: emailsRes.data || [],
-    drafts: draftsRes.data || [],
+    drafts,
     jobs: jobsRes.data || [],
     senderPatterns,
     nowIso: opts.nowIso,

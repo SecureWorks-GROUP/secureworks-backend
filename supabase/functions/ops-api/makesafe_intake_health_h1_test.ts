@@ -4,10 +4,15 @@
 // migration, the ledger columns don't exist; PostgREST rejects the full upsert and
 // supabase-js returns {error} WITHOUT throwing. The write must detect that and RETRY
 // with only the base M1 columns so a dead key stays visible.
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _writeIntakeHealthForTest as writeIntakeHealth } from "./index.ts";
 
-function makeClient(opts: { costColumnsExist: boolean; prevBase?: any; prevCost?: any }) {
+function makeClient(
+  opts: { costColumnsExist: boolean; prevBase?: any; prevCost?: any },
+) {
   const upserts: Array<{ hasCost: boolean; row: any }> = [];
   const from = (_table: string) => ({
     select: (cols: string) => ({
@@ -17,7 +22,12 @@ function makeClient(opts: { costColumnsExist: boolean; prevBase?: any; prevCost?
             return Promise.resolve(
               opts.costColumnsExist
                 ? { data: opts.prevCost ?? null, error: null }
-                : { data: null, error: { message: 'column "total_model_calls" does not exist' } },
+                : {
+                  data: null,
+                  error: {
+                    message: 'column "total_model_calls" does not exist',
+                  },
+                },
             );
           }
           return Promise.resolve({ data: opts.prevBase ?? null, error: null });
@@ -25,11 +35,17 @@ function makeClient(opts: { costColumnsExist: boolean; prevBase?: any; prevCost?
       }),
     }),
     upsert: (row: any) => {
-      const hasCost = Object.prototype.hasOwnProperty.call(row, "total_model_calls");
+      const hasCost = Object.prototype.hasOwnProperty.call(
+        row,
+        "total_model_calls",
+      );
       upserts.push({ hasCost, row });
       if (hasCost && !opts.costColumnsExist) {
         return Promise.resolve({
-          error: { message: 'column "total_model_calls" of relation "makesafe_intake_health" does not exist' },
+          error: {
+            message:
+              'column "total_model_calls" of relation "makesafe_intake_health" does not exist',
+          },
         });
       }
       return Promise.resolve({ error: null });
@@ -41,13 +57,22 @@ function makeClient(opts: { costColumnsExist: boolean; prevBase?: any; prevCost?
 const COST = {
   model_calls: 3,
   model_skips: 1,
-  usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  usage: {
+    input_tokens: 100,
+    output_tokens: 20,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  },
 };
 
 Deno.test("H1: PRE-migration (ledger columns absent) still writes the M1 base banner via retry", async () => {
   const client = makeClient({
     costColumnsExist: false,
-    prevBase: { extraction_status: "ok", degraded_since: null, last_successful_extraction_at: null },
+    prevBase: {
+      extraction_status: "ok",
+      degraded_since: null,
+      last_successful_extraction_at: null,
+    },
   });
   await writeIntakeHealth(client as any, {
     extractionStatus: "degraded",
@@ -65,18 +90,35 @@ Deno.test("H1: PRE-migration (ledger columns absent) still writes the M1 base ba
   const base = client.upserts[1].row;
   assertEquals(base.extraction_status, "degraded");
   assertEquals(base.degraded_reason, "auth_failed");
-  assert(base.degraded_since, "degraded_since must be stamped on the ok->degraded transition");
+  assert(
+    base.degraded_since,
+    "degraded_since must be stamped on the ok->degraded transition",
+  );
   assert(base.last_scan_at, "last_scan_at must be written");
   assertEquals(base.last_scan_drafts_created, 5);
   // The base retry must NOT carry any ledger column.
-  assertEquals(Object.prototype.hasOwnProperty.call(base, "total_model_calls"), false);
+  assertEquals(
+    Object.prototype.hasOwnProperty.call(base, "total_model_calls"),
+    false,
+  );
 });
 
 Deno.test("H1: POST-migration writes the full row in ONE upsert (no retry)", async () => {
   const client = makeClient({
     costColumnsExist: true,
-    prevBase: { extraction_status: "ok", degraded_since: null, last_successful_extraction_at: null },
-    prevCost: { total_model_calls: 10, total_model_skips: 2, total_input_tokens: 1000, total_output_tokens: 200, total_cache_read_tokens: 0, total_cache_write_tokens: 0 },
+    prevBase: {
+      extraction_status: "ok",
+      degraded_since: null,
+      last_successful_extraction_at: null,
+    },
+    prevCost: {
+      total_model_calls: 10,
+      total_model_skips: 2,
+      total_input_tokens: 1000,
+      total_output_tokens: 200,
+      total_cache_read_tokens: 0,
+      total_cache_write_tokens: 0,
+    },
   });
   await writeIntakeHealth(client as any, {
     extractionStatus: "ok",
@@ -88,7 +130,11 @@ Deno.test("H1: POST-migration writes the full row in ONE upsert (no retry)", asy
   });
   assertEquals(client.upserts.length, 1);
   const row = client.upserts[0].row;
-  assertEquals(row.hasCost ?? Object.prototype.hasOwnProperty.call(row, "total_model_calls"), true);
+  assertEquals(
+    row.hasCost ??
+      Object.prototype.hasOwnProperty.call(row, "total_model_calls"),
+    true,
+  );
   // Lifetime counters increment off the previous totals.
   assertEquals(row.total_model_calls, 13); // 10 + 3
   assertEquals(row.total_model_skips, 3); // 2 + 1
@@ -96,8 +142,54 @@ Deno.test("H1: POST-migration writes the full row in ONE upsert (no retry)", asy
   assertEquals(row.extraction_status, "ok");
 });
 
+Deno.test("health stays degraded on a quiet scan until recovery is proven", async () => {
+  const client = makeClient({
+    costColumnsExist: true,
+    prevBase: {
+      extraction_status: "degraded",
+      degraded_reason: "usage_cap",
+      degraded_since: "2026-07-14T21:23:00Z",
+      last_successful_extraction_at: "2026-07-14T21:20:00Z",
+    },
+  });
+  await writeIntakeHealth(client as any, {
+    extractionStatus: "ok",
+    degradedReason: null,
+    anyExtractionSucceeded: false,
+    draftsCreated: 0,
+    autoFiled: 0,
+  });
+  assertEquals(client.upserts[0].row.extraction_status, "degraded");
+  assertEquals(client.upserts[0].row.degraded_reason, "usage_cap");
+  assertEquals(client.upserts[0].row.degraded_since, "2026-07-14T21:23:00Z");
+});
+
+Deno.test("a proven successful extraction clears prior degradation", async () => {
+  const client = makeClient({
+    costColumnsExist: true,
+    prevBase: {
+      extraction_status: "degraded",
+      degraded_reason: "usage_cap",
+      degraded_since: "2026-07-14T21:23:00Z",
+    },
+  });
+  await writeIntakeHealth(client as any, {
+    extractionStatus: "ok",
+    degradedReason: null,
+    anyExtractionSucceeded: true,
+    draftsCreated: 1,
+    autoFiled: 0,
+  });
+  assertEquals(client.upserts[0].row.extraction_status, "ok");
+  assertEquals(client.upserts[0].row.degraded_reason, null);
+  assertEquals(client.upserts[0].row.degraded_since, null);
+});
+
 Deno.test("H1: no-cost caller writes base row only, single upsert", async () => {
-  const client = makeClient({ costColumnsExist: true, prevBase: { extraction_status: "ok" } });
+  const client = makeClient({
+    costColumnsExist: true,
+    prevBase: { extraction_status: "ok" },
+  });
   await writeIntakeHealth(client as any, {
     extractionStatus: "ok",
     degradedReason: null,
