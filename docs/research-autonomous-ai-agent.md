@@ -347,12 +347,14 @@ Cron Job ──────→ Edge Function (scheduled check)  ──→ AI Cor
 
 ### Role-Based Access
 
-| Role | SMS Access | Dashboard Access | AI Capabilities |
-|------|----------------|------------------|-----------------|
-| **CEO (Marnin)** | Full — all commands, all data | Full — CEO dashboard | Full autonomy view, override any AI decision |
-| **Sales (Nithin, Khairo)** | Sales pipeline, quotes, lead status | Sale dashboard | Quote generation, lead status, pricing queries |
-| **Ops** | Schedule, crews, materials, job status | Ops dashboard | Schedule management, PO creation, crew dispatch |
-| **Installers** | Job details, site photos, check-in/out | Trade dashboard | Job-specific info only, photo upload, time tracking |
+| Role | Dashboard Access | AI Capabilities |
+|------|------------------|-----------------|
+| **CEO (Marnin)** | Full — CEO dashboard | Full autonomy view, override any AI decision |
+| **Sales (Nithin, Khairo)** | Sale dashboard | Quote generation, lead status, pricing queries |
+| **Ops** | Ops dashboard | Schedule management, PO creation, crew dispatch |
+| **Installers** | Trade dashboard | Job-specific info only, photo upload, time tracking |
+
+> The per-role chat-channel access column was removed 2026-07-20 with the retired delivery architecture. Those capabilities were researched for that channel only and have not been re-researched for any surviving channel.
 
 **Implementation:** Pass `caller_role` and `caller_id` to every AI edge function. The system prompt changes based on role. Data queries are filtered by permission level.
 

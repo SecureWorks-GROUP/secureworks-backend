@@ -67,7 +67,6 @@ Railway Agent ──→ ops-api / reporting-api
 | **conversation_history** | NEW: Full message persistence | session_id, role, content, tool_calls |
 | **inbox_events** | NEW: Email inbox monitoring | graph_message_id, classification, priority |
 | **users** | Team members | name, email, role |
-| **pending_confirmations** | Action approval queue | action_type, action_payload, status |
 | **financial_snapshots** | Daily pre-computed financials | snapshot_date, revenue_mtd, outstanding |
 | **material_price_ledger** | Supplier price tracking | supplier_name, material_code, unit_price |
 | **org_config** | Business targets/settings | config_key, config_value |
@@ -204,8 +203,10 @@ Dashboard request
 |----------|------|--------|
 | AI Implementation Roadmap | `docs/ai-implementation-roadmap.md` | Current (7-phase build spec) |
 | Data Architecture Spec | `docs/data-architecture-spec.md` | Definitive (6-layer, CloudEvents) |
+| Autonomous Agent Research | `docs/research-autonomous-ai-agent.md` | Dated research record (600+ lines, L0-L4 autonomy) |
 | System Upgrade Plan | `docs/strategy/SYSTEM-UPGRADE-PLAN.md` | Active (3 flywheels, 90-day plan) |
 | Business Context | `docs/strategy/SECUREWORKS-BUSINESS-CONTEXT.md` | Current ($5.5M target) |
+| Autonomous Agent Build Plan | `AUTONOMOUS-AGENT-BUILD-PLAN.md` | v2 corrected (agent SDK strategy) |
 | Phase 2 Handoffs | `PHASE2_HANDOFFS.md` | Build spec (terminal handoffs) |
 | Design Brief | `SECUREWORKS-DESIGN-BRIEF.md` | Current (Architectural Assurance) |
 | Project Knowledge Base | `docs/project-knowledge/*.md` | 7 subdocs (architecture, schema, GHL, gotchas) |
