@@ -632,7 +632,8 @@ export async function executeFenceJobMint(args: {
       // find one already created. Reconciliation is confined to ambiguous
       // retries, where a prior attempt's response may have been lost. This keeps
       // the unverified contact-scoped listing off the normal create path.
-      const ambiguousRetry = (bound.attemptCount ?? progress.attemptCount ?? 1) > 1;
+      const ambiguousRetry =
+        (bound.attemptCount ?? progress.attemptCount ?? 1) > 1;
       opportunity = (ambiguousRetry
         ? await deps.findStampedOpportunity({
           ownerRequestId,

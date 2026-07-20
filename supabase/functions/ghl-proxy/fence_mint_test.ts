@@ -174,7 +174,8 @@ Deno.test("mint rejects scope/pricing payloads and unbounded existing-job eviden
   assertEquals(evidenceError.code, "invalid_existing_job_evidence");
 
   const nonUuidError = await assertRejects(
-    async () => input(REQUEST_A, { expectedExistingJobIds: ["not-a-job-uuid"] }),
+    async () =>
+      input(REQUEST_A, { expectedExistingJobIds: ["not-a-job-uuid"] }),
     FenceMintError,
   );
   assertEquals(nonUuidError.code, "invalid_existing_job_evidence");
@@ -592,7 +593,10 @@ Deno.test("migration derives replay freshness from the job, not the stored outco
   );
   // The empty-scope cursor is only legal for a job whose scope is genuinely
   // still empty. scope_version alone is inert: save_scope never bumps it.
-  assertStringIncludes(sql, "COALESCE(j.scope_json, '{}'::jsonb) = '{}'::jsonb");
+  assertStringIncludes(
+    sql,
+    "COALESCE(j.scope_json, '{}'::jsonb) = '{}'::jsonb",
+  );
   assertStringIncludes(sql, "AND j.scope_updated_at IS NULL");
   const jobJson = sql.slice(
     sql.indexOf("CREATE OR REPLACE FUNCTION public._fence_mint_job_json("),
@@ -617,7 +621,9 @@ Deno.test("migration derives replay freshness from the job, not the stored outco
 });
 
 Deno.test("edge stamp recovery is contact scoped, fails closed and classes non-conflict codes correctly", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   const recovery = source.slice(
     source.indexOf("findStampedOpportunity: async"),
     source.indexOf("createStampedOpportunity: async"),
@@ -701,13 +707,18 @@ Deno.test("bind-time joiner never stamps failure on the still-active owner", asy
 });
 
 Deno.test("opportunity pagination only claims exhaustion on a proven short page", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   const paging = source.slice(
     source.indexOf("async function fetchOpportunityPages"),
     source.indexOf("return { opportunities, pagesScanned, total, exhausted }"),
   );
   // A stalled cursor or a missing cursor on a full page proves nothing.
-  assertStringIncludes(paging, "if (rows.length < limit) { exhausted = true; break }");
+  assertStringIncludes(
+    paging,
+    "if (rows.length < limit) { exhausted = true; break }",
+  );
   assertStringIncludes(
     paging,
     "if (newRows === 0 || !nextStartAfter || !nextStartAfterId) break",
@@ -736,7 +747,9 @@ Deno.test("failure telemetry is scoped to the owning tenant and an entitled call
     sql,
     "record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid) TO service_role",
   );
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   assertStringIncludes(source, "p_org_id: input.organisationId,");
   assertStringIncludes(source, "p_actor_id: authUserId,");
 });
@@ -783,9 +796,14 @@ Deno.test("complete preserves the bound existing job even after its status moves
   assertStringIncludes(complete, "'code', 'bound_job_missing'");
   const boundBranch = complete.slice(
     complete.indexOf("ELSIF v_request.job_id IS NOT NULL THEN"),
-    complete.indexOf("SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO v_jobs"),
+    complete.indexOf(
+      "SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO v_jobs",
+    ),
   );
-  assertEquals(/next_job_number|INSERT INTO public\.jobs/.test(boundBranch), false);
+  assertEquals(
+    /next_job_number|INSERT INTO public\.jobs/.test(boundBranch),
+    false,
+  );
 });
 
 Deno.test("migration contract has narrow projections, uniqueness and no outbound communication", async () => {
@@ -865,7 +883,10 @@ Deno.test("progress resolves multi-hop ownership chains with cycle and depth gua
   // A bind-time join can repoint an owner that other requests already point at,
   // so ownership must be followed to its root rather than exactly one hop.
   assertStringIncludes(progressFn, "FOR v_hop IN 1..8 LOOP");
-  assertStringIncludes(progressFn, "EXIT WHEN v_owner.owner_request_id IS NULL");
+  assertStringIncludes(
+    progressFn,
+    "EXIT WHEN v_owner.owner_request_id IS NULL",
+  );
   assertStringIncludes(progressFn, "v_owner_id := v_owner.owner_request_id");
   // A cycle or an over-deep chain is ledger corruption, never "still in progress".
   assertStringIncludes(progressFn, "IF v_owner_id = ANY(v_seen) THEN");
@@ -884,7 +905,9 @@ Deno.test("delegated failure writes are bounded to a still-active child attempt"
     ),
   );
   const fn = sql.slice(
-    sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
+    sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(",
+    ),
   );
   // 'joined' is terminal, so a state-only bound never expires. The grant must
   // name the exact executing request and require the owner to still record it as
@@ -906,16 +929,25 @@ Deno.test("delegated failure writes are bounded to a still-active child attempt"
   // legitimate execution outran the 90s lease, so the real typed conflict never
   // reached joiners. Election identity, not expiry, bounds the grant.
   assertEquals(
-    fn.includes("AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at > now()"),
+    fn.includes(
+      "AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at > now()",
+    ),
     false,
   );
   assertEquals(
-    fn.includes("AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')"),
+    fn.includes(
+      "AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')",
+    ),
     false,
   );
   assertStringIncludes(fn, "AND r.org_id = p_org_id");
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assertStringIncludes(source, "p_executing_request_id: executingRequestId ?? null,");
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  assertStringIncludes(
+    source,
+    "p_executing_request_id: executingRequestId ?? null,",
+  );
 });
 
 Deno.test("a dropped failure write is error-level only for an elected executor", async () => {
@@ -933,7 +965,11 @@ Deno.test("a dropped failure write is error-level only for an elected executor",
         actorId: "user-1",
         deps: deps({
           reserve: async () =>
-            progress({ ownerRequestId: REQUEST_B, joined: true, executor: true }),
+            progress({
+              ownerRequestId: REQUEST_B,
+              joined: true,
+              executor: true,
+            }),
           bindIdentity: async ({ ownerRequestId, contact }) =>
             progress({
               ownerRequestId,
@@ -973,7 +1009,9 @@ Deno.test("a dropped failure write is error-level only for an elected executor",
   assertEquals(seen[0].executing, true);
   assertEquals(seen[1].executing === true, false);
 
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   assertStringIncludes(
     source,
     "if (executing && outcome === 'denied') console.error(line)",
@@ -1059,12 +1097,17 @@ Deno.test("a takeover executor can be re-elected after a failed attempt", async 
   );
   const reserve = sql.slice(
     sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("),
-    sql.indexOf("CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress("),
+    sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress(",
+    ),
   );
   // A takeover caller is recorded as 'joined'. Without re-election its retry
   // could never execute again and the requestId would be unmintable forever.
   assertStringIncludes(reserve, "ELSIF v_existing.state = 'joined' THEN");
-  assertStringIncludes(reserve, "v_root_id := public._fence_mint_root_owner(p_request_id);");
+  assertStringIncludes(
+    reserve,
+    "v_root_id := public._fence_mint_root_owner(p_request_id);",
+  );
   assertStringIncludes(
     reserve,
     "IF FOUND AND v_root.state IN ('reserved', 'contact_resolved', 'opportunity_created')",
@@ -1081,7 +1124,9 @@ Deno.test("a completed opportunity re-entry replays the canonical job instead of
   );
   const reserve = sql.slice(
     sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("),
-    sql.indexOf("CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress("),
+    sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress(",
+    ),
   );
   // A completed mint keeps its opportunity reserved. A later requestId for the
   // same lead must resolve to that canonical job, never mint a duplicate and
@@ -1103,7 +1148,9 @@ Deno.test("a completed opportunity re-entry replays the canonical job instead of
 });
 
 Deno.test("stamp matching tolerates absent shape fields rather than discarding a real match", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   // pipelineId/contactId are not proven to be returned by /opportunities/search.
   // Treating an absent field as a mismatch would hide a committed opportunity
   // and authorise the exact duplicate this guard exists to prevent.
@@ -1227,7 +1274,9 @@ Deno.test("every lease election records the elected holder", async () => {
   );
   const reserve = sql.slice(
     sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("),
-    sql.indexOf("CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress("),
+    sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress(",
+    ),
   );
   // The delegated-write grant is keyed on election identity, so an election that
   // forgets to record its holder would silently strip a real executor's grant.
@@ -1237,8 +1286,14 @@ Deno.test("every lease election records the elected holder", async () => {
     reserve.split("lease_holder_request_id = p_request_id").length - 1;
   assertEquals(holderWrites, 3);
   // The first reserved row elects itself at insert time.
-  assertStringIncludes(reserve, "attempt_count, lease_expires_at, lease_holder_request_id");
-  assertStringIncludes(reserve, "1, now() + interval '90 seconds', p_request_id");
+  assertStringIncludes(
+    reserve,
+    "attempt_count, lease_expires_at, lease_holder_request_id",
+  );
+  assertStringIncludes(
+    reserve,
+    "1, now() + interval '90 seconds', p_request_id",
+  );
 });
 
 Deno.test("a dropped failure write is reported rather than read as success", async () => {
@@ -1255,11 +1310,15 @@ Deno.test("a dropped failure write is reported rather than read as success", asy
     "DROP FUNCTION IF EXISTS public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid);",
   );
   const fn = sql.slice(
-    sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
+    sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(",
+    ),
   );
   assertStringIncludes(fn, ") RETURNS text");
   assertStringIncludes(fn, "RETURN 'applied';");
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   assertStringIncludes(source, "fence_mint_failure_write_dropped");
 });
 
@@ -1271,7 +1330,9 @@ Deno.test("benign failure-write races are not reported as operator errors", asyn
     ),
   );
   const fn = sql.slice(
-    sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
+    sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(",
+    ),
   );
   // A boolean conflated a stranded executor with two expected races: the root
   // completing concurrently (the outer UPDATE excludes state 'complete'), and a
@@ -1280,7 +1341,9 @@ Deno.test("benign failure-write races are not reported as operator errors", asyn
   assertStringIncludes(fn, "RETURN 'lease_revoked';");
   assertStringIncludes(fn, "RETURN 'no_row';");
   assertStringIncludes(fn, "RETURN 'denied';");
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   // Only a rejected write from the elected executor strands joiners, so that is
   // the sole error-level case.
   assertStringIncludes(
@@ -1291,7 +1354,9 @@ Deno.test("benign failure-write races are not reported as operator errors", asyn
 });
 
 Deno.test("the recovery scan is bounded by wall clock inside the mint lease", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   // Page count alone does not bound elapsed time. A scan that outruns the 90s
   // lease lets a second executor be elected while this one still reconciles.
   assertStringIncludes(source, "if (Date.now() - startedAt >= budgetMs) break");

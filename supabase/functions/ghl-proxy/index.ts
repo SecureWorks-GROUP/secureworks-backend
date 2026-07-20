@@ -71,14 +71,14 @@ import {
 import {
   authorizeFenceMintCaller,
   executeFenceJobMint,
+  type FenceMintCanonical,
+  type FenceMintContact,
+  FenceMintError,
+  type FenceMintOpportunity,
+  type FenceMintProgress,
   opportunityHasFenceMintStamp,
   stampedFenceOpportunityName,
   validateFenceMintInput,
-  FenceMintError,
-  type FenceMintCanonical,
-  type FenceMintContact,
-  type FenceMintOpportunity,
-  type FenceMintProgress,
 } from './fence_mint.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
