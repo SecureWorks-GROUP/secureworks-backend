@@ -904,25 +904,39 @@ export async function runDeterministicIntake(
     client,
     [...persisted.values()].map((row) => row.id),
   );
-  const canAdvance = (casePlan: DeterministicCasePlan) => {
+  type CaseRank = "fresh" | "job_retry" | "stuck";
+  const rankCase = (casePlan: DeterministicCasePlan): CaseRank => {
     const row = persisted.get(casePlan.instructionKey);
-    if (!row) return true;
+    if (!row) return "fresh";
+    const known = persistedSources.get(row.id) || new Set<string>();
+    if (casePlan.sourcePostIds.some((postId) => !known.has(postId))) {
+      return "fresh";
+    }
+    if (row.state !== resolvedState(casePlan, row.job_id || null)) {
+      return "fresh";
+    }
+    // Accounted case whose job creation was deferred or failed earlier. It can
+    // still advance, but a systematically failing one must never crowd out work
+    // that has never been attempted, so it only gets a bounded share of the run.
     if (
       !row.job_id &&
       (casePlan.state === "confirmed_live_job" ||
         casePlan.state === "blocked_live_job")
     ) {
-      return true;
+      return "job_retry";
     }
-    const known = persistedSources.get(row.id) || new Set<string>();
-    if (casePlan.sourcePostIds.some((postId) => !known.has(postId))) return true;
-    return row.state !== resolvedState(casePlan, row.job_id || null);
+    return "stuck";
   };
-  const advanceable = new Map<DeterministicCasePlan, boolean>();
-  for (const c of plan.cases) advanceable.set(c, canAdvance(c));
+  const ranked = new Map<DeterministicCasePlan, CaseRank>();
+  for (const c of plan.cases) ranked.set(c, rankCase(c));
+  const fresh = plan.cases.filter((c) => ranked.get(c) === "fresh");
+  const jobRetries = plan.cases.filter((c) => ranked.get(c) === "job_retry");
+  const retryHead = Math.max(1, Math.floor(maxCases / 2));
   const ordered = [
-    ...plan.cases.filter((c) => advanceable.get(c)),
-    ...plan.cases.filter((c) => !advanceable.get(c)),
+    ...jobRetries.slice(0, retryHead),
+    ...fresh,
+    ...jobRetries.slice(retryHead),
+    ...plan.cases.filter((c) => ranked.get(c) === "stuck"),
   ];
   // The budget counts cases that actually committed, so a failure never spends a
   // commit slot. Attempts still carry their own ceiling so one run stays bounded.
