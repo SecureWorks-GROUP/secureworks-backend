@@ -907,13 +907,22 @@ export async function runDeterministicIntake(
   const canAdvance = (casePlan: DeterministicCasePlan) => {
     const row = persisted.get(casePlan.instructionKey);
     if (!row) return true;
+    if (
+      !row.job_id &&
+      (casePlan.state === "confirmed_live_job" ||
+        casePlan.state === "blocked_live_job")
+    ) {
+      return true;
+    }
     const known = persistedSources.get(row.id) || new Set<string>();
     if (casePlan.sourcePostIds.some((postId) => !known.has(postId))) return true;
     return row.state !== resolvedState(casePlan, row.job_id || null);
   };
+  const advanceable = new Map<DeterministicCasePlan, boolean>();
+  for (const c of plan.cases) advanceable.set(c, canAdvance(c));
   const ordered = [
-    ...plan.cases.filter(canAdvance),
-    ...plan.cases.filter((c) => !canAdvance(c)),
+    ...plan.cases.filter((c) => advanceable.get(c)),
+    ...plan.cases.filter((c) => !advanceable.get(c)),
   ];
   // The budget counts cases that actually committed, so a failure never spends a
   // commit slot. Attempts still carry their own ceiling so one run stays bounded.
