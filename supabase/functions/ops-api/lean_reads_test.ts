@@ -8,6 +8,7 @@ import {
   OPS_SUMMARY_ACTIVE_JOB_COLUMNS,
   OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS,
   OPS_SUMMARY_SCHEDULE_COLUMNS,
+  PIPELINE_MALFORMED_PRICING_LIMIT,
   PIPELINE_PRICING_ALIASES,
   PIPELINE_PRICING_NULL_PATHS,
   PIPELINE_PRICING_PROJECTION,
@@ -193,6 +194,24 @@ Deno.test("malformed pricing_json probe targets exactly the projected paths", as
     probe,
     "malformedPricingQuery.is(path, null)",
   );
+
+  // Hard cap: the null-path predicates describe today's blob shape, so a format
+  // change must not let this probe refetch full blobs up to the PostgREST ceiling.
+  assertEquals(PIPELINE_MALFORMED_PRICING_LIMIT, 100);
+  assertStringIncludes(probe, ".limit(PIPELINE_MALFORMED_PRICING_LIMIT)");
+  assertStringIncludes(probe, ".order('updated_at', { ascending: false })");
+
+  const handlerStart = probeEnd;
+  const handlerEnd = source.indexOf(
+    "if (!jobs || jobs.length === 0)",
+    handlerStart,
+  );
+  const handler = source.slice(handlerStart, handlerEnd);
+  assertStringIncludes(
+    handler,
+    "malformedRows.length >= PIPELINE_MALFORMED_PRICING_LIMIT",
+  );
+  assertStringIncludes(handler, "console.warn(");
 });
 
 Deno.test("double-encoded pricing_json recovers neighbours but leaves value at the legacy 0", () => {

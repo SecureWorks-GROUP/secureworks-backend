@@ -7128,6 +7128,14 @@ export const PIPELINE_PRICING_NULL_PATHS = PIPELINE_PRICING_PROJECTION.map(
   (projection) => pipelinePricingProjectionParts(projection)[1],
 )
 
+// Hard cap on the probe. The null-path predicates describe today's blob shape, not
+// an invariant: if the fencing quote format ever stops writing those exact paths,
+// every non-empty fencing row becomes a candidate and an uncapped probe would refetch
+// full blobs up to the PostgREST 1000-row ceiling on every pipeline request, silently
+// restoring the payload this projection removes. Hitting the cap is a data problem to
+// clean up separately, so it warns loudly rather than degrading quietly.
+export const PIPELINE_MALFORMED_PRICING_LIMIT = 100
+
 export function pipelinePricingFallbackNeighbours(blob: any) {
   let pj = blob
   if (typeof pj === 'string') {
@@ -7190,7 +7198,9 @@ async function pipeline(client: any, params: URLSearchParams) {
   for (const path of PIPELINE_PRICING_NULL_PATHS) {
     malformedPricingQuery = malformedPricingQuery.is(path, null)
   }
-  malformedPricingQuery = malformedPricingQuery.order('updated_at', { ascending: false })
+  malformedPricingQuery = malformedPricingQuery
+    .order('updated_at', { ascending: false })
+    .limit(PIPELINE_MALFORMED_PRICING_LIMIT)
 
   const [{ data: jobs, error }, malformedPricingRes] = await Promise.all([
     query,
@@ -7207,7 +7217,15 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (malformedPricingRes?.error) {
     console.error('[pipeline] malformed pricing_json probe failed:', malformedPricingRes.error)
   } else {
-    for (const row of (malformedPricingRes?.data || [])) {
+    const malformedRows = malformedPricingRes?.data || []
+    if (malformedRows.length >= PIPELINE_MALFORMED_PRICING_LIMIT) {
+      console.warn(
+        `[pipeline] malformed pricing_json probe hit its ${PIPELINE_MALFORMED_PRICING_LIMIT}-row cap — ` +
+        'pricing_json shape has likely drifted from the projected paths; neighbours beyond the cap ' +
+        'are not recovered. Investigate and clean up the malformed rows.',
+      )
+    }
+    for (const row of malformedRows) {
       const recovered = pipelinePricingFallbackNeighbours(row.pricing_json)
       if (recovered) malformedNeighbourMap[row.id] = recovered
     }
