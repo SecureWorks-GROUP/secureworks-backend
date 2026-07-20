@@ -97,14 +97,21 @@ Deno.test("quoted_value type guard: number keys populate; string/object/null sta
   );
   // Non-numeric JSON must NOT throw and must yield null (write-safe)
   assertEquals(
-    quotedValueFromPricingJson({ totalIncGST: "not-a-number" as unknown as number }),
+    quotedValueFromPricingJson({
+      totalIncGST: "not-a-number" as unknown as number,
+    }),
     null,
   );
   assertEquals(
-    quotedValueFromPricingJson({ totalIncGST: { amount: 10 } as unknown as number }),
+    quotedValueFromPricingJson({
+      totalIncGST: { amount: 10 } as unknown as number,
+    }),
     null,
   );
-  assertEquals(quotedValueFromPricingJson({ totalIncGST: null as unknown as number }), null);
+  assertEquals(
+    quotedValueFromPricingJson({ totalIncGST: null as unknown as number }),
+    null,
+  );
   assertEquals(quotedValueFromPricingJson({}), null);
   assertEquals(quotedValueFromPricingJson(null), null);
   assertEquals(quotedValueFromPricingJson(undefined), null);
@@ -261,34 +268,40 @@ Deno.test("trade_invoices submit write uses live column names", async () => {
   const ops = await readRepo("functions/ops-api/index.ts");
   // Extract the invoiceRecord object literal keys (not comments / return fields).
   const recMatch = ops.match(
-    /const invoiceRecord = \{([\s\S]*?)\n  \}\n/,
+    /const invoiceRecord = \{([\s\S]*?)\n {2}\}\n/,
   );
   assert(recMatch, "expected trade_invoices invoiceRecord insert block");
   const body = recMatch[1];
   const keys = [...body.matchAll(/^\s{4}([a-z_]+):/gm)].map((m) => m[1]);
-  for (const required of [
-    "week_start",
-    "week_end",
-    "subtotal_ex",
-    "total_inc",
-    "xero_bill_id",
-  ]) {
+  for (
+    const required of [
+      "week_start",
+      "week_end",
+      "subtotal_ex",
+      "total_inc",
+      "xero_bill_id",
+    ]
+  ) {
     assert(
       keys.includes(required),
       `invoiceRecord must include ${required}; got ${keys.join(",")}`,
     );
   }
-  for (const banned of [
-    "week_ending",
-    "line_items",
-    "subtotal",
-    "total",
-    "xero_bill_number",
-    "xero_invoice_id",
-  ]) {
+  for (
+    const banned of [
+      "week_ending",
+      "line_items",
+      "subtotal",
+      "total",
+      "xero_bill_number",
+      "xero_invoice_id",
+    ]
+  ) {
     assert(
       !keys.includes(banned),
-      `invoiceRecord must not write legacy key ${banned}; got ${keys.join(",")}`,
+      `invoiceRecord must not write legacy key ${banned}; got ${
+        keys.join(",")
+      }`,
     );
   }
 });
@@ -318,9 +331,10 @@ Deno.test("unresolved site 2: ops-api quote_revisions.superseded_at stays pendin
     "must keep the NEEDS A DECISION comment on superseded_at",
   );
   assert(
-    /from\('quote_revisions'\)[\s\S]{0,250}\.is\('superseded_at',\s*null\)/.test(
-      ops,
-    ),
+    /from\('quote_revisions'\)[\s\S]{0,250}\.is\('superseded_at',\s*null\)/
+      .test(
+        ops,
+      ),
     "superseded_at filter left as-is pending product call",
   );
   // Ordering was the safe fix we did apply
@@ -333,7 +347,9 @@ Deno.test("unresolved site 2: ops-api quote_revisions.superseded_at stays pendin
 Deno.test("unresolved site 3: monitor-inbox purchase_orders.supplier_email stays pending", async () => {
   const inbox = await readRepo("functions/monitor-inbox/index.ts");
   assert(
-    inbox.includes("NEEDS A DECISION (M1): purchase_orders has no supplier_email") ||
+    inbox.includes(
+      "NEEDS A DECISION (M1): purchase_orders has no supplier_email",
+    ) ||
       inbox.includes("purchase_orders has no supplier_email column"),
     "must keep the product-decision comment on supplier_email",
   );

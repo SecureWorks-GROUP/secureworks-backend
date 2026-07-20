@@ -41,8 +41,8 @@ function makeClient(opts: {
     const call: Call = { table, filters: [] };
     let mode: "select" | "update" | "insert" = "select";
     let updateRow: any = null;
-    let insertRow: any = null;
-    let eqFilters: Record<string, unknown> = {};
+    let _insertRow: any = null;
+    const eqFilters: Record<string, unknown> = {};
 
     const b: any = {
       select: (s: string) => {
@@ -58,7 +58,7 @@ function makeClient(opts: {
       },
       insert: (row: any) => {
         mode = "insert";
-        insertRow = row;
+        _insertRow = row;
         call.insert = row;
         inserts.push({ table, row });
         return b;
@@ -219,8 +219,7 @@ Deno.test("Strategy 2: PostgREST error is visible and does not auto-link", async
         "Jane Client": {
           data: null,
           error: {
-            message:
-              'column jobs.quoted_value does not exist',
+            message: "column jobs.quoted_value does not exist",
             code: "42703",
           },
         },
@@ -236,9 +235,7 @@ Deno.test("Strategy 2: PostgREST error is visible and does not auto-link", async
       "must not write job_id when the lookup failed",
     );
     assert(
-      errors.some((e) =>
-        e.includes("Strategy 2") && e.includes("INV-1001")
-      ),
+      errors.some((e) => e.includes("Strategy 2") && e.includes("INV-1001")),
       `expected a visible Strategy 2 error log; got: ${JSON.stringify(errors)}`,
     );
   } finally {
