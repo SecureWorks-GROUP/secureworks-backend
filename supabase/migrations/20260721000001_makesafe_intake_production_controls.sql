@@ -72,3 +72,13 @@ ALTER TABLE public.makesafe_intake_health
 
 COMMENT ON COLUMN public.makesafe_intake_health.alarm_auth_verified_at IS
   'Most recent time the authenticated makesafe_email_canary handler was reached. Health treats stale or absent proof as not ready.';
+
+-- Bounded scans need a progress guarantee that does not depend on any row ever
+-- being stamped as scanned. The deterministic sweep half of each read starts
+-- after this received_at position and moves it forward every live run, restarting
+-- at the oldest in-window row once the sweep reaches the end.
+ALTER TABLE public.makesafe_intake_health
+  ADD COLUMN IF NOT EXISTS deterministic_scan_cursor_at timestamptz;
+
+COMMENT ON COLUMN public.makesafe_intake_health.deterministic_scan_cursor_at IS
+  'Advancing received_at position of the bounded deterministic source sweep. NULL restarts the sweep at the oldest row inside the window.';

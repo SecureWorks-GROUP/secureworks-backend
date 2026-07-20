@@ -9,10 +9,7 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  _readInputsForTest,
-  runDeterministicIntake,
-} from "./makesafe_deterministic_intake_runtime.ts";
+import { runDeterministicIntake } from "./makesafe_deterministic_intake_runtime.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 
@@ -56,6 +53,10 @@ class FakeQuery {
   }
   gte(column: string, value: any) {
     this.filters.push((row) => String(row[column]) >= String(value));
+    return this;
+  }
+  gt(column: string, value: any) {
+    this.filters.push((row) => String(row[column]) > String(value));
     return this;
   }
   in(column: string, values: any[]) {
@@ -1009,13 +1010,16 @@ Deno.test("window read cost is capped and does not grow with the mailbox", async
 });
 
 // The bound is only safe if it defers work rather than dropping it. A newest-first
-// truncation would keep re-reading the same newest rows forever; the oldest-unscanned
-// half is what turns the cap into a queue.
+// truncation would keep re-reading the same newest rows forever, and so would a
+// backlog half filtered on makesafe_scanned_at, because ordinary non-actionable
+// SES mail is never stamped by any run. The persisted received_at sweep is what
+// turns the cap into a rotation. Nothing here stamps or advances anything by hand:
+// every read and every cursor write comes out of runDeterministicIntake.
 Deno.test("every in-window source is eventually read despite the per-run cap", async () => {
   const store = baseStore();
-  const total = 40;
+  const chatter = 40;
   const cap = 10;
-  for (let index = 0; index < total; index++) {
+  for (let index = 0; index < chatter; index++) {
     store.emails.push(email({
       post_id: `q-${index}`,
       received_at: `2026-07-${
@@ -1025,34 +1029,198 @@ Deno.test("every in-window source is eventually read despite the per-run cap", a
       body_content: "Thanks, noted.",
     }));
   }
+  // Live mode needs a resolvable allowlist. This source is read by id every run
+  // and so never consumes the sweep's progress.
+  store.emails.push(email({
+    post_id: "sweep-wo",
+    received_at: "2026-07-10T05:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-64000 Work Order: WO-64000",
+    body_content: "Client: Sweep Client\nAddress: 4 Sweep Way, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-sweep",
+    email_id: "sweep-wo",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/sweep.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+
   const client = fakeClient(store);
-  const seen = new Set<string>();
+  const readIds = new Set<string>();
+  const baseFrom = client.from.bind(client);
+  client.from = (table: string) => {
+    const api = baseFrom(table);
+    if (table !== "emails") return api;
+    const baseSelect = api.select;
+    api.select = (columns: string) => {
+      const query = baseSelect(columns);
+      const baseThen = query.then.bind(query);
+      query.then = (resolve: (value: any) => void) =>
+        baseThen((result: any) => {
+          for (const row of result.data || []) {
+            if (row?.post_id) readIds.add(row.post_id);
+          }
+          resolve(result);
+        });
+      return query;
+    };
+    return api;
+  };
+
   let runs = 0;
-  while (seen.size < total && runs < 20) {
+  while (runs < 25) {
     runs++;
-    const input = await _readInputsForTest(client, {
+    const report = await runDeterministicIntake(client, {
+      dryRun: false,
       days: 60,
-      onlyUnscanned: false,
       nowIso: "2026-08-01T00:00:00.000Z",
       maxSources: cap,
-      seedPostIds: [],
+      allowSourcePostIds: ["sweep-wo"],
+      approveDraft,
     });
     // Cost stays bounded on every single run, not just on average.
-    assert(input.read.window_rows <= cap);
-    assert(input.read.backlog_rows <= input.read.backlog_cap);
-    for (const source of input.sources) seen.add(source.postId);
-    // A live run stamps the sources of each case it settles; that is what lets
-    // the oldest-unscanned half advance instead of re-reading the same rows.
-    for (const row of store.emails) {
-      if (input.sources.some((s) => s.postId === row.post_id)) {
-        row.makesafe_scanned_at = "2026-08-01T00:00:00.000Z";
-      }
-    }
+    assert(report.source_read.window_rows <= cap);
+    assert(report.source_read.backlog_rows <= report.source_read.backlog_cap);
+    if (readIds.size >= chatter + 1) break;
   }
-  assertEquals(seen.size, total);
+
+  for (let index = 0; index < chatter; index++) {
+    assert(readIds.has(`q-${index}`), `source q-${index} was never read`);
+  }
+  // The rows that matter are the ones a newest-first cap would have starved: they
+  // sit behind the sweep's first page and ahead of the newest half.
+  assert(readIds.has("q-10"));
+  assert(readIds.has("q-20"));
   assert(
-    runs < 20,
+    runs < 25,
     `expected convergence well inside the run budget, got ${runs}`,
+  );
+});
+
+Deno.test("the scan sweep advances across runs and restarts at the window head", async () => {
+  const store = baseStore();
+  for (let index = 0; index < 12; index++) {
+    store.emails.push(email({
+      post_id: `s-${index}`,
+      received_at: `2026-07-${
+        String(index + 1).padStart(2, "0")
+      }T01:00:00.000Z`,
+      subject: `Re: chatter ${index}`,
+      body_content: "Thanks, noted.",
+    }));
+  }
+  store.emails.push(email({
+    post_id: "cursor-wo",
+    received_at: "2026-07-06T05:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-64100 Work Order: WO-64100",
+    body_content: "Client: Cursor Client\nAddress: 5 Cursor Way, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-cursor",
+    email_id: "cursor-wo",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/cursor.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const run = () =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 60,
+      nowIso: "2026-08-01T00:00:00.000Z",
+      maxSources: 4,
+      allowSourcePostIds: ["cursor-wo"],
+      approveDraft,
+    });
+
+  const first = await run();
+  assertEquals(first.source_read.cursor_at, null);
+  assertEquals(first.source_read.next_cursor_at, "2026-07-02T01:00:00.000Z");
+  assertEquals(
+    store.makesafe_intake_health[0].deterministic_scan_cursor_at,
+    "2026-07-02T01:00:00.000Z",
+  );
+
+  const second = await run();
+  assertEquals(second.source_read.cursor_at, "2026-07-02T01:00:00.000Z");
+  assert(
+    String(second.source_read.next_cursor_at) >
+      String(first.source_read.next_cursor_at),
+    "the sweep must move forward on every run",
+  );
+
+  let restarted = false;
+  for (let index = 0; index < 12 && !restarted; index++) {
+    const report = await run();
+    if (report.source_read.next_cursor_at === null) restarted = true;
+  }
+  assert(restarted, "the sweep must restart once it reaches the window end");
+  assertEquals(
+    store.makesafe_intake_health[0].deterministic_scan_cursor_at,
+    null,
+  );
+});
+
+Deno.test("an all-cap-exposed run is a reported no-op, never a poisoned cron", async () => {
+  const store = baseStore();
+  for (let index = 0; index < 30; index++) {
+    store.emails.push(email({
+      post_id: `x-${index}`,
+      received_at: `2026-07-${
+        String(index + 1).padStart(2, "0")
+      }T01:00:00.000Z`,
+      subject: `Re: chatter ${index}`,
+      body_content: "Thanks, noted.",
+    }));
+  }
+  // Configured but never yet planned, so it has no persisted case to seed it by
+  // id, and its source sits outside this run's cap.
+  store.emails.push(email({
+    post_id: "hidden-wo",
+    received_at: "2026-07-15T05:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-64200 Work Order: WO-64200",
+    body_content: "Client: Hidden Client\nAddress: 6 Hidden Way, Perth",
+  }));
+  const client = fakeClient(store);
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 60,
+    nowIso: "2026-08-01T00:00:00.000Z",
+    maxSources: 4,
+    allowInstructionKeys: ["mlb:wo-64200"],
+    approveDraft,
+  });
+
+  assertEquals(report.source_read.cap_reached, true);
+  assertEquals(report.selection.selected_cases, 0);
+  assertEquals(report.selection.unmatched_instruction_allowlist, 0);
+  assertEquals(report.selection.cap_exposed_instruction_allowlist, 1);
+  assert(report.evidence.caveats.includes("no_cases_readable_within_cap"));
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.totals.write_failures, 0);
+  // The cron still made progress, so the configuration is not pinned out of reach.
+  assert(store.makesafe_intake_health[0].deterministic_scan_cursor_at !== null);
+});
+
+Deno.test("a genuinely stale allowlist still fails closed", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({ post_id: "s-1", subject: "Re: chatter", body_content: "ok" }),
+  );
+  await assertRejects(
+    () =>
+      runDeterministicIntake(fakeClient(store), {
+        dryRun: false,
+        days: 30,
+        nowIso: NOW,
+        allowInstructionKeys: ["mlb:wo-does-not-exist"],
+        approveDraft,
+      }),
+    Error,
   );
 });
 
@@ -1125,8 +1293,15 @@ Deno.test("an allowlisted instruction key is seeded by id and stays cap-proof", 
   const instructionKey = store.makesafe_intake_cases[0].instruction_key;
   assert(instructionKey);
 
-  // Bury the instruction's source under newer traffic and cap the window to one
-  // row, so it is only reachable through the instruction-key seed read.
+  // Bury the instruction's source between older and newer traffic and cap the
+  // window to one row, so neither half of the bounded read can reach it and it is
+  // only reachable through the instruction-key seed read.
+  store.emails.push(email({
+    post_id: "older-1",
+    received_at: "2026-06-25T01:00:00.000Z",
+    subject: "Re: earlier chatter",
+    body_content: "Thanks, noted.",
+  }));
   for (let index = 0; index < 20; index++) {
     store.emails.push(email({
       post_id: `newer-${index}`,

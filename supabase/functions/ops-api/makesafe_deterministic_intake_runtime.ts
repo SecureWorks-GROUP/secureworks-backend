@@ -1,11 +1,11 @@
 // DB-bound deterministic make-safe intake runtime.
 // deno-lint-ignore-file no-explicit-any
 //
-// Reads a capped source window (oldest-unscanned half plus newest half) together
-// with every allowlisted source by id before planning, so per-run cost is a
-// constant while every in-window source is still eventually planned. Dry-run performs no
-// writes or storage mutations. Live mode is reachable only through the DB-backed
-// cutover switch and never falls back to AI.
+// Reads a capped source window (a sweep half driven by a persisted received_at
+// cursor plus a newest half) together with every allowlisted source by id before
+// planning, so per-run cost is a constant while every in-window source is still
+// eventually planned. Dry-run performs no writes or storage mutations. Live mode
+// is reachable only through the DB-backed cutover switch and never falls back to AI.
 
 import {
   buildDeterministicIntakePlan,
@@ -59,11 +59,12 @@ const SOURCE_PAGE_SIZE = 500;
 // rows, and already-scanned rows inside the bound are still revisited.
 const DEFAULT_MAX_SOURCES_PER_RUN = 500;
 const MAX_SOURCES_PER_RUN = 2000;
-// The bounded read is split oldest-unsettled first / newest last. Newest-only
-// truncation would bound cost but starve anything that ever falls behind the cap;
-// spending a fixed share on the oldest unscanned rows means a deferred source is
-// only ever deferred, because settling a case stamps makesafe_scanned_at and the
-// next-oldest rows take its place on the following run.
+// The bounded read is split sweep-first / newest-last. Newest-only truncation
+// would bound cost but starve anything that ever falls behind the cap. The sweep
+// half walks the window in received_at order from a cursor persisted across runs
+// and restarts once it reaches the end, so progress never depends on a row being
+// stamped: the vast majority of SES mail never settles a case and would otherwise
+// hold the same oldest rows in front of the read forever.
 const BACKLOG_READ_SHARE = 0.5;
 
 export interface DeterministicRuntimeReport {
@@ -113,6 +114,11 @@ export interface DeterministicRuntimeReport {
     window_rows: number;
     seed_rows: number;
     cap_reached: boolean;
+    // Sweep position this run started from and the one the next run starts from.
+    // null means the sweep reached the end of the window and restarts at its
+    // oldest row, which is what makes the cap a rotation rather than a truncation.
+    cursor_at: string | null;
+    next_cursor_at: string | null;
   };
   // Evidence gates read this, not totals.unaccounted on its own. A capped run
   // only accounts for the rows it read, so its zero-unaccounted result is not a
@@ -376,6 +382,43 @@ async function resolveInstructionKeySeeds(
   return { postIds, capProofKeys };
 }
 
+// The sweep cursor is deliberately tolerant on both ends. A pre-migration DB, or
+// a health row that has never been written, simply sweeps from the oldest row
+// every run; that is the old behaviour, not a new failure. Losing the cursor
+// costs coverage, so the run says so through a caveat rather than throwing.
+async function readScanCursor(
+  client: any,
+): Promise<{ cursorAt: string | null; available: boolean }> {
+  try {
+    const { data, error } = await client.from("makesafe_intake_health")
+      .select("deterministic_scan_cursor_at")
+      .eq("id", true)
+      .maybeSingle();
+    if (error) return { cursorAt: null, available: false };
+    return {
+      cursorAt: data?.deterministic_scan_cursor_at ?? null,
+      available: true,
+    };
+  } catch {
+    return { cursorAt: null, available: false };
+  }
+}
+
+async function persistScanCursor(
+  client: any,
+  cursorAt: string | null,
+): Promise<boolean> {
+  try {
+    const { error } = await client.from("makesafe_intake_health").upsert({
+      id: true,
+      deterministic_scan_cursor_at: cursorAt,
+    }, { onConflict: "id" });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 async function readInputs(
   client: any,
   options:
@@ -385,7 +428,7 @@ async function readInputs(
         "days" | "onlyUnscanned" | "nowIso" | "maxSources"
       >
     >
-    & { seedPostIds: readonly string[] },
+    & { seedPostIds: readonly string[]; cursorAt: string | null },
 ): Promise<
   {
     sources: DeterministicSourceItem[];
@@ -409,22 +452,25 @@ async function readInputs(
     "makesafe_scanned_at",
   ].join(",");
   // Two-part, hard-capped read. One run's cost is the cap, not the size of the
-  // mailbox history inside the window, and the oldest-unscanned half gives the
-  // bound a progress guarantee: every in-window source is eventually planned.
+  // mailbox history inside the window, and the cursor-driven sweep half gives the
+  // bound a progress guarantee: every in-window source is eventually planned,
+  // whether or not anything ever stamps it as scanned.
   const backlogCap = Math.max(
     1,
     Math.floor(options.maxSources * BACKLOG_READ_SHARE),
   );
   const backlogRows = await fetchCapped(
     backlogCap,
-    async (from, to) =>
-      await client.from("emails").select(columns)
+    async (from, to) => {
+      let query = client.from("emails").select(columns)
         .eq("mailbox", SES_MAILBOX)
         .is("pii_purged_at", null)
-        .gte("received_at", since)
-        .is("makesafe_scanned_at", null)
+        .gte("received_at", since);
+      if (options.cursorAt) query = query.gt("received_at", options.cursorAt);
+      return await query
         .order("received_at", { ascending: true })
-        .range(from, to),
+        .range(from, to);
+    },
   );
   const recentCap = Math.max(0, options.maxSources - backlogRows.length);
   const recentRows = recentCap === 0 ? [] : await fetchCapped(
@@ -547,6 +593,13 @@ async function readInputs(
       // whole window, so it reports as capped even in the boundary case where it
       // happened to.
       cap_reached: backlogRows.length + recentRows.length >= options.maxSources,
+      cursor_at: options.cursorAt,
+      // A short sweep page means the cursor reached the end of the window, so the
+      // next run restarts at its oldest row. A full page leaves the cursor on the
+      // last row read, which is what stops the same rows being re-read forever.
+      next_cursor_at: backlogRows.length >= backlogCap
+        ? String(backlogRows[backlogRows.length - 1].received_at)
+        : null,
     },
   };
 }
@@ -1369,13 +1422,22 @@ export async function runDeterministicIntake(
     client,
     allowInstructionKeys,
   );
+  const cursor = await readScanCursor(client);
   const input = await readInputs(client, {
     days,
     onlyUnscanned,
     nowIso,
     maxSources,
+    cursorAt: cursor.cursorAt,
     seedPostIds: [...allowSourcePostIds, ...instructionSeeds.postIds],
   });
+  // Advanced immediately after the read, before any planning or business write can
+  // throw. A run that fails on a stale allowlist still moves the sweep on, so no
+  // configuration fault can pin the window read to the same rows indefinitely.
+  // Dry-run keeps its zero-write contract and only observes the live position.
+  const cursorPersisted = dryRun
+    ? cursor.available
+    : await persistScanCursor(client, input.read.next_cursor_at);
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
@@ -1421,6 +1483,15 @@ export async function runDeterministicIntake(
   if (capExposedInstructionKeys.length) {
     caveats.push("instruction_allowlist_cap_exposed");
   }
+  if (!cursorPersisted) caveats.push("scan_cursor_unavailable");
+  // Nothing this run could act on was inside the cap, and every unresolved
+  // allowlist entry was cap-exposed rather than stale. That is a no-op the sweep
+  // will resolve on a later run, so it is reported loudly instead of throwing.
+  const capExposedNoOp = !plan.cases.length &&
+    capExposedInstructionKeys.length > 0 &&
+    !unmatchedSourceAllowlist.length &&
+    !unmatchedInstructionAllowlist.length;
+  if (capExposedNoOp) caveats.push("no_cases_readable_within_cap");
   const report: DeterministicRuntimeReport = {
     ok: true,
     mode: "deterministic",
@@ -1473,6 +1544,13 @@ export async function runDeterministicIntake(
   // reported through selection.unmatched_* and the run continues on whatever the
   // allowlist did resolve. Only a fully unresolved allowlist fails closed, so a
   // missing key is never mistaken for a successful empty scan.
+  // Volume meeting configuration must never poison the cron. When the only reason
+  // nothing resolved is that the sources sit outside this run's cap, the run ends
+  // as a reported no-op and the sweep brings them inside the cap on a later run.
+  if (capExposedNoOp) {
+    await writeHealth(client, nowIso, 0, 0, 0);
+    return report;
+  }
   if (!plan.cases.length) {
     throw new Error(
       `exact deterministic allowlist resolved no cases (${report.selection.unmatched_source_allowlist} source ids, ${report.selection.unmatched_instruction_allowlist} instruction keys unmatched, ${report.selection.cap_exposed_instruction_allowlist} instruction keys unread inside the per-run cap)`,

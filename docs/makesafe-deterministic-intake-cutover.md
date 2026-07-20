@@ -10,6 +10,21 @@
    500 rows per run (`source_read.cap`), and allowlisted sources are read by id
    outside that cap, so a named source is still proved on every run once it ages
    out of the newest rows. Scan cost no longer grows with mailbox age.
+3. The cap comes with a progress guarantee. Half the per-run budget is a sweep
+   driven by `makesafe_intake_health.deterministic_scan_cursor_at`, an advancing
+   `received_at` position persisted across live runs and restarted at the window
+   head once it reaches the end (`source_read.cursor_at` /
+   `source_read.next_cursor_at`). Progress does not depend on anything being
+   stamped `makesafe_scanned_at`, so ordinary non-actionable SES mail, which no
+   run ever stamps, cannot hold the read in place. Dry-run and dark-observe keep
+   their zero-write contract: they read the position and never move it. If the
+   cursor column is unreadable or unwritable the run still completes and reports
+   `scan_cursor_unavailable` in `evidence.caveats`.
+4. Volume meeting configuration can no longer poison the cron. When a run resolves
+   no case and every unresolved allowlist entry was merely outside this run's cap,
+   the run ends as a reported no-op carrying `no_cases_readable_within_cap` rather
+   than throwing; the sweep brings those sources inside the cap on a later run. A
+   genuinely stale allowlist that resolves nothing still fails closed.
 
 ## Authority and scope
 
@@ -81,7 +96,10 @@ defaults to exactly one and is constrained to 1 through 10. Empty allowlists fai
 closed, and so does an allowlist that resolves no case; a partially resolved
 allowlist reports its unmatched entries and proceeds on the resolved set. The
 window read is capped per invocation and allowlisted sources are read by id, so
-read and plan cost stay flat as the mailbox grows.
+read and plan cost stay flat as the mailbox grows. The cap defers work instead of
+dropping it: the sweep half of the read walks the whole window from a persisted
+`received_at` cursor, so every in-window source is eventually planned no matter how
+far behind the newest rows it falls.
 One invocation can attempt only allowlisted cases and stops after four times
 the explicit case cap, so an edge timeout never discards accounting already committed.
 Cases are stamped as they go and the next scan resumes.
