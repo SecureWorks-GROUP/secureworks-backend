@@ -64,6 +64,7 @@ function progress(patch: Partial<FenceMintProgress> = {}): FenceMintProgress {
     executor: true,
     contactId: null,
     opportunityId: null,
+    attemptCount: 1,
     canonical: null,
     ...patch,
   };
@@ -305,7 +306,9 @@ Deno.test("lost GHL create response reconciles the stamped opportunity before re
   });
   assertEquals(minted.jobId, "job-1");
   assertEquals(creates, 1);
-  assertEquals(searches, 2);
+  // A first attempt never pre-scans: the stamp embeds this requestId, so nothing
+  // could already exist. Only the lost-response catch reconciles.
+  assertEquals(searches, 1);
 });
 
 Deno.test("stale opportunity contact mapping stops before bind or mutation", async () => {
@@ -587,10 +590,18 @@ Deno.test("migration derives replay freshness from the job, not the stored outco
       import.meta.url,
     ),
   );
-  // The empty-scope cursor is only legal for a job still at its initial revision.
-  assertStringIncludes(
-    sql,
-    "p_outcome IN ('created', 'deliberate_repeat_created') AND COALESCE(j.scope_version, 1) = 1",
+  // The empty-scope cursor is only legal for a job whose scope is genuinely
+  // still empty. scope_version alone is inert: save_scope never bumps it.
+  assertStringIncludes(sql, "COALESCE(j.scope_json, '{}'::jsonb) = '{}'::jsonb");
+  assertStringIncludes(sql, "AND j.scope_updated_at IS NULL");
+  const jobJson = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public._fence_mint_job_json("),
+    sql.indexOf("CREATE OR REPLACE FUNCTION public._fence_mint_sorted_uuids("),
+  );
+  // Freshness must not rest on scope_version alone.
+  assertEquals(
+    /COALESCE\(j\.scope_version, 1\) = 1\s*\n\s*THEN '44136fa/.test(jobJson),
+    false,
   );
   assertEquals(
     /'requiresLoad', p_outcome NOT IN \('created', 'deliberate_repeat_created'\)/
@@ -717,10 +728,10 @@ Deno.test("failure telemetry is scoped to the owning tenant and an entitled call
   // Another tenant's requestId must not be able to expire a live lease.
   assertStringIncludes(sql, "AND r.org_id = p_org_id");
   assertStringIncludes(sql, "r.requested_by = p_actor_id");
-  assertStringIncludes(sql, "WHERE c.owner_request_id = r.request_id");
+  assertStringIncludes(sql, "AND c.owner_request_id = r.request_id");
   assertStringIncludes(
     sql,
-    "record_fence_job_mint_failure(uuid, text, text, uuid, uuid) TO service_role",
+    "record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid) TO service_role",
   );
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
   assertStringIncludes(source, "p_org_id: input.organisationId,");
@@ -798,6 +809,15 @@ Deno.test("an unproven stamp scan fails closed without creating a duplicate oppo
         input: input(REQUEST_A),
         actorId: "user-1",
         deps: deps({
+          // An ambiguous retry (a prior attempt is on record) is the only state
+          // that reaches recovery at all.
+          reserve: async () => progress({ attemptCount: 2 }),
+          bindIdentity: async () =>
+            progress({
+              state: "contact_resolved",
+              contactId: "contact-1",
+              attemptCount: 2,
+            }),
           findStampedOpportunity: () => {
             throw new FenceMintError(
               503,
@@ -863,11 +883,181 @@ Deno.test("delegated failure writes are bounded to a still-active child attempt"
   const fn = sql.slice(
     sql.indexOf("CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure("),
   );
-  // Without the state bound, any same-org user who once joined this request could
-  // expire its lease and overwrite its error long after their attempt ended.
+  // 'joined' is terminal, so a state-only bound never expires. The grant must
+  // name the exact executing request and require a live lease on the owner.
+  assertStringIncludes(fn, "WHERE c.request_id = p_executing_request_id");
+  assertStringIncludes(fn, "AND c.owner_request_id = r.request_id");
   assertStringIncludes(
     fn,
-    "AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')",
+    "AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at > now()",
+  );
+  assertEquals(
+    fn.includes("AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')"),
+    false,
   );
   assertStringIncludes(fn, "AND r.org_id = p_org_id");
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertStringIncludes(source, "p_executing_request_id: executingRequestId ?? null,");
+});
+
+Deno.test("first execution never scans, an ambiguous retry recovers the committed stamp", async () => {
+  let searches = 0;
+  let creates = 0;
+  const firstAttempt = deps({
+    findStampedOpportunity: async () => {
+      searches++;
+      return null;
+    },
+    createStampedOpportunity: async ({ ownerRequestId, contact }) => {
+      creates++;
+      return {
+        id: "opp-1",
+        contactId: contact.id,
+        pipelineId: FENCE_PIPELINE_ID,
+        name: fenceMintStamp(ownerRequestId),
+      };
+    },
+  });
+  await executeFenceJobMint({
+    input: input(REQUEST_A),
+    actorId: "user-1",
+    deps: firstAttempt,
+  });
+  // The unverified contact-scoped listing must stay off the hot path entirely.
+  assertEquals(searches, 0);
+  assertEquals(creates, 1);
+
+  let retrySearches = 0;
+  let retryCreates = 0;
+  const retry = await executeFenceJobMint({
+    input: input(REQUEST_A),
+    actorId: "user-1",
+    deps: deps({
+      reserve: async () => progress({ attemptCount: 3 }),
+      bindIdentity: async ({ contact }) =>
+        progress({
+          state: "contact_resolved",
+          contactId: contact.id,
+          attemptCount: 3,
+        }),
+      findStampedOpportunity: async ({ ownerRequestId }) => {
+        retrySearches++;
+        return {
+          id: "opp-committed",
+          contactId: "contact-1",
+          pipelineId: FENCE_PIPELINE_ID,
+          name: fenceMintStamp(ownerRequestId),
+        };
+      },
+      createStampedOpportunity: async () => {
+        retryCreates++;
+        throw new Error("must not create a duplicate on an ambiguous retry");
+      },
+      recordOpportunity: async ({ opportunity }) => {
+        assertEquals(opportunity.id, "opp-committed");
+        return progress({
+          state: "opportunity_created",
+          contactId: "contact-1",
+          opportunityId: opportunity.id,
+          attemptCount: 3,
+        });
+      },
+    }),
+  });
+  assertEquals(retrySearches, 1);
+  assertEquals(retryCreates, 0);
+  assertEquals(retry.jobId, "job-1");
+});
+
+Deno.test("a takeover executor can be re-elected after a failed attempt", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const reserve = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("),
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress("),
+  );
+  // A takeover caller is recorded as 'joined'. Without re-election its retry
+  // could never execute again and the requestId would be unmintable forever.
+  assertStringIncludes(reserve, "ELSIF v_existing.state = 'joined' THEN");
+  assertStringIncludes(reserve, "v_root_id := public._fence_mint_root_owner(p_request_id);");
+  assertStringIncludes(
+    reserve,
+    "IF FOUND AND v_root.state IN ('reserved', 'contact_resolved', 'opportunity_created')",
+  );
+  assertStringIncludes(reserve, "v_executor := true;");
+});
+
+Deno.test("a completed opportunity re-entry replays the canonical job instead of conflicting", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260721000001_fence_job_mint.sql",
+      import.meta.url,
+    ),
+  );
+  const reserve = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("),
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.get_fence_job_mint_progress("),
+  );
+  // A completed mint keeps its opportunity reserved. A later requestId for the
+  // same lead must resolve to that canonical job, never mint a duplicate and
+  // never dead-end on an unresolvable 409.
+  assertStringIncludes(reserve, "IF FOUND AND v_reserved.state = 'complete'");
+  assertStringIncludes(
+    reserve,
+    "(p_contact_id IS NULL OR v_reserved.contact_id IS NULL OR v_reserved.contact_id = p_contact_id)",
+  );
+  assertStringIncludes(
+    reserve,
+    "RETURN public._fence_mint_progress(v_reserved.request_id, true, false);",
+  );
+  // An identity mismatch remains a real conflict.
+  assertStringIncludes(reserve, "'code', 'opportunity_mapping_conflict'");
+});
+
+Deno.test("stamp matching tolerates absent shape fields rather than discarding a real match", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  // pipelineId/contactId are not proven to be returned by /opportunities/search.
+  // Treating an absent field as a mismatch would hide a committed opportunity
+  // and authorise the exact duplicate this guard exists to prevent.
+  assertStringIncludes(
+    source,
+    "(!opportunity.contactId || opportunity.contactId === contactId)",
+  );
+  assertStringIncludes(
+    source,
+    "(!opportunity.pipelineId || opportunity.pipelineId === PIPELINES.fencing)",
+  );
+  // A row with no contact id is a shape variation, not proof the filter dropped.
+  assertStringIncludes(
+    source,
+    "if (args.contactId && rowContactId && rowContactId !== args.contactId)",
+  );
+});
+
+Deno.test("a saved scope makes a replay require a load rather than a blank cursor", async () => {
+  const replayed = await executeFenceJobMint({
+    input: input(REQUEST_A),
+    actorId: "user-1",
+    deps: deps({
+      reserve: async () =>
+        progress({
+          state: "complete",
+          executor: false,
+          canonical: {
+            ...canonical("idempotent_replay"),
+            scopeVersion: 1,
+            scopeHash: null,
+            requiresLoad: true,
+          },
+        }),
+    }),
+  });
+  // scope_version stays 1 through normal saves, so it can never be the signal
+  // that lets a client resume from an empty scope.
+  assertEquals(replayed.revision.scopeHash, null);
+  assertEquals(replayed.revision.requiresLoad, true);
 });

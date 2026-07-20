@@ -71,6 +71,9 @@ export type FenceMintProgress = {
   executor: boolean;
   contactId: string | null;
   opportunityId: string | null;
+  // Attempts recorded against the executing ledger row. 1 means no outbound
+  // create has ever been attempted for this mint.
+  attemptCount: number;
   canonical: FenceMintCanonical | null;
 };
 
@@ -113,7 +116,12 @@ export type FenceMintDeps = {
     },
   ) => Promise<FenceMintOpportunity>;
   recordFailure?: (
-    args: { requestId: string; code: string; message: string },
+    args: {
+      requestId: string;
+      code: string;
+      message: string;
+      executingRequestId?: string;
+    },
   ) => Promise<void>;
   now?: () => number;
 };
@@ -612,10 +620,17 @@ export async function executeFenceJobMint(args: {
           address: contact.address1 ?? input.address,
         })
       } — Fencing`;
-      opportunity = await deps.findStampedOpportunity({
-        ownerRequestId,
-        contactId: contact.id,
-      }) as FenceMintOpportunity;
+      // The stamp embeds this requestId, so a first execution cannot possibly
+      // find one already created. Reconciliation is confined to ambiguous
+      // retries, where a prior attempt's response may have been lost. This keeps
+      // the unverified contact-scoped listing off the normal create path.
+      const ambiguousRetry = (bound.attemptCount ?? progress.attemptCount ?? 1) > 1;
+      opportunity = (ambiguousRetry
+        ? await deps.findStampedOpportunity({
+          ownerRequestId,
+          contactId: contact.id,
+        })
+        : null) as FenceMintOpportunity;
       if (!opportunity) {
         try {
           opportunity = await deps.createStampedOpportunity({
@@ -694,6 +709,7 @@ export async function executeFenceJobMint(args: {
           requestId: executing ? ownerRequestId : input.requestId,
           code: typed.code,
           message: typed.message,
+          executingRequestId: input.requestId,
         });
       }
     } catch (_) {

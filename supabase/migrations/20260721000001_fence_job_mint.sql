@@ -90,15 +90,25 @@ AS $$
     'scopeVersion', COALESCE(j.scope_version, 1),
     'updatedAt', j.updated_at,
     -- Never read or transfer scope_json through mint. Only a job that this mint
-    -- created AND that still sits at its untouched initial revision may use the
-    -- known empty-scope cursor. Any later replay of the same request sees the
-    -- job's current scope_version and is told to load, so a stale client can
+    -- created AND whose scope is still genuinely empty may use the known
+    -- empty-scope cursor. scope_version alone is not a freshness signal: the
+    -- normal save_scope path writes scope_json without bumping it, so a replay
+    -- months after real scope was saved would otherwise be told the scope is
+    -- blank. Emptiness is tested here, never transferred, so a stale client can
     -- never start from a blank scope and overwrite saved work.
     'scopeHash', CASE
-      WHEN p_outcome IN ('created', 'deliberate_repeat_created') AND COALESCE(j.scope_version, 1) = 1
+      WHEN p_outcome IN ('created', 'deliberate_repeat_created')
+        AND COALESCE(j.scope_version, 1) = 1
+        AND j.scope_updated_at IS NULL
+        AND COALESCE(j.scope_json, '{}'::jsonb) = '{}'::jsonb
       THEN '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
       ELSE NULL END,
-    'requiresLoad', NOT (p_outcome IN ('created', 'deliberate_repeat_created') AND COALESCE(j.scope_version, 1) = 1)
+    'requiresLoad', NOT (
+      p_outcome IN ('created', 'deliberate_repeat_created')
+      AND COALESCE(j.scope_version, 1) = 1
+      AND j.scope_updated_at IS NULL
+      AND COALESCE(j.scope_json, '{}'::jsonb) = '{}'::jsonb
+    )
   )
   FROM public.jobs j
   WHERE j.id = p_job_id
@@ -114,6 +124,32 @@ SET search_path = public
 AS $$
   SELECT COALESCE(array_agg(DISTINCT id ORDER BY id), '{}'::uuid[])
   FROM unnest(COALESCE(p_ids, '{}'::uuid[])) AS id
+$$;
+
+-- Root of a mint ownership chain, bounded and cycle guarded. NULL means the
+-- chain could not be resolved and the caller must not act on it.
+CREATE OR REPLACE FUNCTION public._fence_mint_root_owner(p_request_id uuid)
+RETURNS uuid
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_id uuid := p_request_id;
+  v_next uuid;
+  v_seen uuid[] := ARRAY[]::uuid[];
+BEGIN
+  FOR v_hop IN 1..8 LOOP
+    IF v_id = ANY(v_seen) THEN RETURN NULL; END IF;
+    v_seen := v_seen || v_id;
+    SELECT owner_request_id INTO v_next FROM public.fence_job_mint_requests WHERE request_id = v_id;
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    IF v_next IS NULL THEN RETURN v_id; END IF;
+    v_id := v_next;
+  END LOOP;
+  RETURN NULL;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public._fence_mint_progress(
@@ -157,7 +193,7 @@ BEGIN
     v_seen := v_seen || v_owner_id;
     SELECT request_id, org_id, requested_by, type, intent, identity_key, input_fingerprint,
       state, owner_request_id, contact_id, opportunity_id, job_id,
-      expected_existing_job_ids, repeat_reason, mapping_outcome,
+      expected_existing_job_ids, repeat_reason, mapping_outcome, attempt_count,
       last_error_code, last_error_message, created_at, updated_at
     INTO v_owner FROM public.fence_job_mint_requests WHERE request_id = v_owner_id;
     IF NOT FOUND THEN
@@ -204,6 +240,10 @@ BEGIN
     'executor', p_executor,
     'contactId', v_owner.contact_id,
     'opportunityId', v_owner.opportunity_id,
+    -- The executing row's attempt count is the durable record of whether an
+    -- outbound create was ever attempted for this mint. A first attempt cannot
+    -- have created anything, so the edge skips lost-response reconciliation.
+    'attemptCount', COALESCE(v_owner.attempt_count, 1),
     'canonical', NULL
   );
 END;
@@ -235,6 +275,9 @@ DECLARE
   v_existing record;
   v_lock record;
   v_owner record;
+  v_root record;
+  v_root_id uuid;
+  v_reserved record;
   v_has_owner boolean := false;
   v_executor boolean := false;
 BEGIN
@@ -257,6 +300,27 @@ BEGIN
         SET attempt_count = attempt_count + 1, lease_expires_at = now() + interval '90 seconds', updated_at = now()
         WHERE request_id = p_request_id;
       v_executor := true;
+    ELSIF v_existing.state = 'joined' THEN
+      -- A takeover executor is recorded as 'joined' while executing on the owner
+      -- row. Without re-election here its retry could never become executor
+      -- again and the requestId would be permanently unmintable once the
+      -- original owner's client is gone. Re-elect it against the live root owner
+      -- whenever that owner's lease has lapsed.
+      v_root_id := public._fence_mint_root_owner(p_request_id);
+      IF v_root_id IS NOT NULL AND v_root_id <> p_request_id THEN
+        SELECT request_id, state, lease_expires_at INTO v_root
+          FROM public.fence_job_mint_requests WHERE request_id = v_root_id FOR UPDATE;
+        IF FOUND AND v_root.state IN ('reserved', 'contact_resolved', 'opportunity_created')
+          AND (v_root.lease_expires_at IS NULL OR v_root.lease_expires_at <= now()) THEN
+          UPDATE public.fence_job_mint_requests
+            SET lease_expires_at = now() + interval '90 seconds', attempt_count = attempt_count + 1, updated_at = now()
+            WHERE request_id = v_root.request_id;
+          v_executor := true;
+        END IF;
+      END IF;
+      UPDATE public.fence_job_mint_requests
+        SET attempt_count = attempt_count + 1, updated_at = now()
+        WHERE request_id = p_request_id;
     ELSE
       UPDATE public.fence_job_mint_requests
         SET attempt_count = attempt_count + 1, updated_at = now()
@@ -327,6 +391,21 @@ EXCEPTION WHEN unique_violation THEN
   -- this request, and is a caller-resolvable mapping collision, not a 5xx.
   IF EXISTS (SELECT 1 FROM public.fence_job_mint_requests WHERE request_id = p_request_id) THEN
     RETURN public._fence_mint_progress(p_request_id, false, false);
+  END IF;
+  -- An opportunity that a prior mint already completed against stays reserved by
+  -- that completed row. A later requestId re-entering the same known lead must
+  -- resolve to that completed canonical job rather than conflict forever or mint
+  -- a duplicate. Only an identity mismatch is a real conflict.
+  IF p_opportunity_id IS NOT NULL THEN
+    SELECT request_id, org_id, state, contact_id, opportunity_id, job_id
+    INTO v_reserved FROM public.fence_job_mint_requests
+      WHERE org_id = p_org_id AND opportunity_id = p_opportunity_id
+        AND owner_request_id IS NULL AND state <> 'conflict'
+      LIMIT 1;
+    IF FOUND AND v_reserved.state = 'complete'
+      AND (p_contact_id IS NULL OR v_reserved.contact_id IS NULL OR v_reserved.contact_id = p_contact_id) THEN
+      RETURN public._fence_mint_progress(v_reserved.request_id, true, false);
+    END IF;
   END IF;
   RETURN jsonb_build_object('decision', 'conflict', 'code', 'opportunity_mapping_conflict', 'message', 'Opportunity is reserved by another mint request');
 END;
@@ -675,7 +754,8 @@ CREATE OR REPLACE FUNCTION public.record_fence_job_mint_failure(
   p_code text,
   p_message text,
   p_org_id uuid,
-  p_actor_id uuid
+  p_actor_id uuid,
+  p_executing_request_id uuid DEFAULT NULL
 ) RETURNS void
 LANGUAGE sql
 SECURITY DEFINER
@@ -697,15 +777,21 @@ AS $$
     AND r.org_id = p_org_id
     AND (
       r.requested_by = p_actor_id
-      -- A takeover executor may stamp the owner row it is actually executing on,
-      -- but only while its own attempt is still live. Without the state bound any
-      -- same-org user who once joined this request could expire its lease and
-      -- overwrite its error long after their attempt ended.
-      OR EXISTS (
-        SELECT 1 FROM public.fence_job_mint_requests c
-        WHERE c.owner_request_id = r.request_id
-          AND c.org_id = p_org_id AND c.requested_by = p_actor_id
-          AND c.state IN ('reserved', 'joined', 'contact_resolved', 'opportunity_created')
+      -- A takeover executor may stamp the owner row it is actually executing on.
+      -- The grant is bound to the exact request the caller names as its own and
+      -- to that row still holding a live lease on this owner. Inferring it from
+      -- a state alone does not expire: 'joined' is terminal, so any same-org user
+      -- who once joined this request would otherwise keep the ability to expire
+      -- its lease and overwrite its error indefinitely.
+      OR (
+        p_executing_request_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM public.fence_job_mint_requests c
+          WHERE c.request_id = p_executing_request_id
+            AND c.owner_request_id = r.request_id
+            AND c.org_id = p_org_id AND c.requested_by = p_actor_id
+            AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at > now()
+        )
       )
     )
 $$;
@@ -714,20 +800,21 @@ REVOKE ALL ON TABLE public.fence_job_mint_requests FROM PUBLIC, anon, authentica
 REVOKE ALL ON TABLE public.fence_job_mint_locks FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public._fence_mint_job_json(uuid, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public._fence_mint_sorted_uuids(uuid[]) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public._fence_mint_root_owner(uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public._fence_mint_progress(uuid, boolean, boolean) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.get_fence_job_mint_progress(uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.reserve_fence_job_mint(uuid, uuid, uuid, text, text, text, text, text, uuid[], text, text, text, text, text, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.bind_fence_job_mint_identity(uuid, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_fence_job_mint_opportunity(uuid, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.complete_fence_job_mint(uuid) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid) FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.reserve_fence_job_mint(uuid, uuid, uuid, text, text, text, text, text, uuid[], text, text, text, text, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.get_fence_job_mint_progress(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.bind_fence_job_mint_identity(uuid, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_fence_job_mint_opportunity(uuid, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_fence_job_mint(uuid) TO service_role;
-GRANT EXECUTE ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_fence_job_mint_failure(uuid, text, text, uuid, uuid, uuid) TO service_role;
 
 COMMENT ON TABLE public.fence_job_mint_requests IS
   'Server-owned fencing mint ledger. Same request UUID resumes; contact/type races serialize through fence_job_mint_locks. Contains no send or approval action.';

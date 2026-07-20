@@ -330,7 +330,11 @@ async function fetchOpportunityPages(args: {
 
     let newRows = 0
     for (const opp of rows) {
-      if (args.contactId && (opp?.contact?.id || opp?.contactId || '') !== args.contactId) {
+      // Only a row that actually names a different contact proves the filter was
+      // dropped. A row that carries no contact id at all is a shape variation and
+      // says nothing either way.
+      const rowContactId = opp?.contact?.id || opp?.contactId || ''
+      if (args.contactId && rowContactId && rowContactId !== args.contactId) {
         contactFilterHonoured = false
       }
       if (opp?.id && seenIds.has(opp.id)) continue
@@ -1921,6 +1925,7 @@ serve(async (req: Request) => {
             executor: !!data.executor,
             contactId: data.contactId ? String(data.contactId) : null,
             opportunityId: data.opportunityId ? String(data.opportunityId) : null,
+            attemptCount: Number(data.attemptCount || 1),
             canonical,
           }
         }
@@ -2061,8 +2066,11 @@ serve(async (req: Request) => {
               })
               const exact = paged.opportunities
                 .map(opportunityShape)
-                .filter((opportunity) => opportunity.contactId === contactId &&
-                  opportunity.pipelineId === PIPELINES.fencing &&
+                // pipelineId is not proven to be returned by /opportunities/search
+                // and the scan is already server-side scoped by pipeline_id, so an
+                // absent field must not silently discard a real match.
+                .filter((opportunity) => (!opportunity.contactId || opportunity.contactId === contactId) &&
+                  (!opportunity.pipelineId || opportunity.pipelineId === PIPELINES.fencing) &&
                   opportunityHasFenceMintStamp(opportunity, ownerRequestId))
               if (exact.length > 1) {
                 throw new FenceMintError(409, 'duplicate_stamped_opportunities', 'Multiple GHL opportunities carry the same mint request stamp')
@@ -2109,13 +2117,14 @@ serve(async (req: Request) => {
               }),
               signal: AbortSignal.timeout(10000),
             })),
-            recordFailure: async ({ requestId, code, message }) => {
+            recordFailure: async ({ requestId, code, message, executingRequestId }) => {
               const { error } = await sb.rpc('record_fence_job_mint_failure', {
                 p_request_id: requestId,
                 p_code: code,
                 p_message: message,
                 p_org_id: input.organisationId,
                 p_actor_id: authUserId,
+                p_executing_request_id: executingRequestId ?? null,
               })
               if (error) throw error
             },

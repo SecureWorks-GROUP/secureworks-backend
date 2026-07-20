@@ -72,7 +72,7 @@ Rules:
 
 `mapping.outcome` is one of `created`, `deliberate_repeat_created`, `existing_opportunity_reused`, `existing_contact_job_reused`, `concurrent_request_reused`, or `idempotent_replay`. `canonicalOutcome` preserves the ledger's original outcome when the current transport is a replay/race join.
 
-For a brand-new job that is still at its initial revision, `scopeHash` is the known empty-scope cursor and `requiresLoad` is false. Both are derived from the job's current `scope_version`, not from the stored mint outcome, so a replay of the same request after scope has been saved returns `requiresLoad: true` and a null `scopeHash` rather than a stale empty-scope cursor. The entry funnel can hydrate its existing local draft onto the canonical identity without a redundant `find_job`, `load_job`, or job-number request. For an existing cloud job, `scopeHash` is null and `requiresLoad` is true: checkpoint the local draft, then use the existing authenticated `load_job` path before any cloud write. The mint response never reads or transfers `jobs.scope_json`.
+For a brand-new job whose scope is still genuinely empty, `scopeHash` is the known empty-scope cursor and `requiresLoad` is false. Both are derived from the job's current scope emptiness, not from the stored mint outcome and not from `scope_version` alone (the normal `save_scope` path writes `scope_json` without bumping `scope_version`, so version is not a freshness signal). A replay of the same request after scope has been saved therefore returns `requiresLoad: true` and a null `scopeHash` rather than a stale empty-scope cursor. Emptiness is tested server side; `jobs.scope_json` is never read into or transferred through the mint response. The entry funnel can hydrate its existing local draft onto the canonical identity without a redundant `find_job`, `load_job`, or job-number request. For an existing cloud job, `scopeHash` is null and `requiresLoad` is true: checkpoint the local draft, then use the existing authenticated `load_job` path before any cloud write. The mint response never reads or transfers `jobs.scope_json`.
 
 The response also exposes a `Server-Timing` header and `Timing-Allow-Origin: *`. Stage timings contain no client identity.
 
@@ -93,6 +93,19 @@ All failures return `{ "error": "...", "code": "...", "details": ... }` and no q
 | 400 | `invalid_mint_request` | Reservation input was rejected by the ledger. Fix the input; retrying unchanged never resolves. |
 | 500 | `mint_request_not_found`, `mint_owner_not_found`, `canonical_job_missing` | Ledger integrity failure, not a caller conflict. Escalate rather than loop. |
 | 503 | `mint_reconciliation_unproven` | The contact-scoped stamp scan could not be completed, so a create was refused. Retry the same request ID. |
+
+## Lost-response reconciliation
+
+A first execution of a `requestId` never runs the stamped-opportunity scan. The stamp embeds that `requestId`, so nothing can already exist and the scan could only ever return nothing; running it would put an unverified contact-scoped GHL listing on every mint's hot path. Reconciliation is confined to the two states where a prior attempt may have committed silently:
+
+- an ambiguous retry, identified by the executing ledger row's `attemptCount` exceeding 1
+- the catch path after a create whose response was lost
+
+In those states the scan lists opportunities scoped to the resolved contact and matches the stamp client side. If completeness cannot be proven the mint fails closed with `mint_reconciliation_unproven` (or `mint_contact_scope_unsupported`) and never creates a replacement.
+
+## Re-entering a completed opportunity
+
+A completed mint keeps its `opportunityId` reserved in the ledger. A later `requestId` supplying that same opportunity, with consistent tenant and contact identity, resolves to the completed canonical job and returns it as a replay. It is never a duplicate mint and never an unresolvable conflict. An identity mismatch on the same opportunity is still `opportunity_mapping_conflict`. Genuinely new work against a completed opportunity requires a separate explicit flow and is out of scope here.
 | 503 | `mint_persistence_failed` | Retain the local draft and retry the same request ID. No GHL create occurs before reservation. |
 | 5xx | GHL/command typed failure | Retain the local draft and retry the same request ID. A stamped GHL opportunity is reconciled before replacement creation. |
 
