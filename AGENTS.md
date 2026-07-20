@@ -26,6 +26,15 @@ Invariants (do not regress):
   `send_payment_link`) throws a 409 for any non-AUTHORISED invoice, and the cron
   only records "reminder sent" when the send actually succeeded.
 
+## Make-Safe Boards Share One Server Read Model
+
+The Ops and Trade make-safe boards must consume `ops-api?action=makesafe_board`
+and the projection helpers in `supabase/functions/ops-api/makesafe_board_read_model.ts`.
+Never derive a board column from `job_assignments.status` in a client. Ops stages
+and the Trade `New / Allocated / Complete / Archive` columns are parity-checked
+from the same canonical rows. Keep trade payloads allow-listed and free of pricing
+and trade-invoice data.
+
 ## Never Select `scope_json` In A List/Feed Query
 
 `jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small

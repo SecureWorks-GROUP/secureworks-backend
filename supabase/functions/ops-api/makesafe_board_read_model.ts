@@ -1,0 +1,497 @@
+// deno-lint-ignore-file no-explicit-any
+// Canonical make-safe board row and its two audience projections.
+// Clients must never derive a board column from assignment status.
+
+export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
+export const OPS_MAKESAFE_STAGES = [
+  "new",
+  "allocated",
+  "trade_report_in",
+  "report_ready",
+  "completed",
+  "archive",
+  "cancelled",
+] as const;
+export type OpsMakesafeStage = (typeof OPS_MAKESAFE_STAGES)[number];
+export type TradeMakesafeColumn = "New" | "Allocated" | "Complete" | "Archive";
+export const TRADE_MAKESAFE_COLUMNS: readonly TradeMakesafeColumn[] = [
+  "New",
+  "Allocated",
+  "Complete",
+  "Archive",
+];
+export const OPS_TO_TRADE_COLUMN: Record<
+  OpsMakesafeStage,
+  TradeMakesafeColumn
+> = {
+  new: "New",
+  allocated: "Allocated",
+  trade_report_in: "Complete",
+  report_ready: "Complete",
+  completed: "Archive",
+  archive: "Archive",
+  cancelled: "Archive",
+};
+
+export interface MakesafeBoardViewer {
+  userId: string;
+  name?: string | null;
+  role?: string | null;
+  managedVerticals?: unknown;
+}
+export interface CanonicalMakesafeExtras {
+  notesByJobId?: Record<string, any[]>;
+  photoCountByJobId?: Record<string, number>;
+  contactsByJobId?: Record<string, any[]>;
+  intakeCaseByJobId?: Record<string, any>;
+}
+
+const txt = (v: unknown): string | null => String(v ?? "").trim() || null;
+const token = (v: unknown) =>
+  String(v ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+function phoneHref(value: unknown): string | null {
+  const raw = txt(value);
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  return digits ? `${raw.startsWith("+") ? "+" : ""}${digits}` : null;
+}
+
+function addressOf(job: any): string | null {
+  const address = txt(job?.site_address);
+  const suburb = txt(job?.site_suburb);
+  if (!address) return suburb;
+  return !suburb || address.toLowerCase().includes(suburb.toLowerCase())
+    ? address
+    : `${address}, ${suburb}`;
+}
+
+export function buildMakesafeContact(job: any, contacts: any[] = []) {
+  const active = contacts.filter((c) =>
+    !c?.status || String(c.status).toLowerCase() === "active"
+  );
+  const fallback = active.find((c) => c?.is_primary === true) || active[0] ||
+    {};
+  const clientName = txt(job?.client_name) || txt(fallback?.client_name);
+  const phone = txt(job?.client_phone) || txt(fallback?.client_phone);
+  const address = addressOf(job);
+  const hrefPhone = phoneHref(phone);
+  return {
+    client_name: clientName,
+    phone,
+    address,
+    actions: {
+      call: hrefPhone
+        ? {
+          available: true,
+          href: `tel:${hrefPhone}`,
+          unavailable_reason: null,
+        }
+        : {
+          available: false,
+          href: null,
+          unavailable_reason: "No client phone on file",
+        },
+      text: hrefPhone
+        ? {
+          available: true,
+          href: `sms:${hrefPhone}`,
+          unavailable_reason: null,
+        }
+        : {
+          available: false,
+          href: null,
+          unavailable_reason: "No client phone on file",
+        },
+      navigate: address
+        ? {
+          available: true,
+          href: `https://www.google.com/maps/search/?api=1&query=${
+            encodeURIComponent(address)
+          }`,
+          unavailable_reason: null,
+        }
+        : {
+          available: false,
+          href: null,
+          unavailable_reason: "No site address on file",
+        },
+    },
+  };
+}
+
+function assignmentFacts(rows: any[]) {
+  return rows.map((a) => ({
+    assignment_id: a?.id || null,
+    user_id: a?.user_id || a?.users?.id || null,
+    name: a?.users?.name || a?.user?.name || a?.crew_name || null,
+    phone: a?.users?.phone || a?.user?.phone || null,
+    crew_name: a?.crew_name || null,
+    role: a?.role || null,
+    status: a?.status || null,
+    scheduled_date: a?.scheduled_date || null,
+    start_time: a?.start_time || null,
+    travel_started_at: a?.travel_started_at || null,
+    arrived_at: a?.arrived_at || null,
+    started_at: a?.started_at || a?.clocked_on_at || null,
+    completed_at: a?.completed_at || null,
+  }));
+}
+
+function targetHours(base: any) {
+  const family = String(base?.metadata?.makesafe_job_family || "")
+    .toLowerCase();
+  return base?.makesafe_details?.report_type || family.includes("report") ||
+      family.includes("assessment")
+    ? 48
+    : 24;
+}
+function ageFacts(base: any) {
+  const age = Math.max(0, Number(base?.age_hours || 0));
+  const target = targetHours(base);
+  return {
+    age_hours: age,
+    age_days: Math.floor(age / 24),
+    target_hours: target,
+    hard_max_hours: target === 48 ? 72 : 48,
+    overdue_hours: Math.max(0, age - target),
+    target_state: age <= target ? "within_target" : "over_target",
+  };
+}
+
+function blockerFacts(base: any, assignments: any[]) {
+  const substatus = txt(base?.substatus || base?.makesafe_details?.substatus);
+  const hasAllocation = assignments.length > 0 ||
+    ["scheduled", "in_progress"].includes(
+      String(base?.status || "").toLowerCase(),
+    );
+  const stale = substatus === "company_contact_required" && hasAllocation;
+  const real: any[] = [];
+  if (substatus === "company_contact_required" && !stale) {
+    real.push({
+      code: "client_contact_required",
+      category: "client_availability",
+    });
+  }
+  if (base?.docs_missing === true) {
+    real.push({
+      code: "closeout_documents_missing",
+      category: "ops_closeout",
+      documents: Array.isArray(base?.missing_docs) ? base.missing_docs : [],
+    });
+  }
+  return {
+    blocked: real.length > 0,
+    real,
+    stale_artifacts: stale
+      ? [{
+        code: "stale_company_contact_substatus",
+        source: "known_allocation_write_path",
+      }]
+      : [],
+  };
+}
+
+function noteFacts(rows: any[]) {
+  return rows.map((n) => ({
+    id: n?.id || null,
+    text: txt(n?.detail_json?.text ?? n?.detail_json?.note),
+    author: n?.users?.name || n?.user?.name || null,
+    user_id: n?.user_id || null,
+    from_ops: n?.detail_json?.from_ops === true,
+    created_at: n?.created_at || null,
+  })).filter((n) => !!n.text);
+}
+
+function claimKey(base: any): string | null {
+  const company = token(
+    base?.requesting_company_slug || base?.requesting_company_name ||
+      base?.requesting_company,
+  );
+  const claim = token(
+    base?.makesafe_details?.external_ref || base?.external_ref ||
+      base?.metadata?.builder_claim_ref,
+  );
+  if (claim) return `${company || "unknown"}:${claim}`;
+  const address = token(base?.site_address);
+  return address ? `${company || "unknown"}:address:${address}` : null;
+}
+
+function lineageFacts(base: any, intakeCase: any) {
+  const combined = base?.metadata?.combined_sibling;
+  return {
+    property_claim_key: claimKey(base),
+    one_card_per_po: true,
+    builder_claim_ref: base?.metadata?.builder_claim_ref ||
+      base?.external_ref || null,
+    builder_work_order_number: base?.metadata?.builder_work_order_number ||
+      null,
+    builder_po_number: base?.metadata?.builder_po_number || null,
+    intake_case_id: intakeCase?.id || null,
+    lineage_id: intakeCase?.lineage_id || null,
+    parent_case_id: intakeCase?.parent_case_id || null,
+    parent_relation: intakeCase?.parent_relation || null,
+    cycle: Number(intakeCase?.cycle || base?.cycle_number || 1),
+    siblings: combined?.job_id
+      ? [{
+        job_id: combined.job_id,
+        job_number: combined.job_number || null,
+        role: combined.role || null,
+        relationship: "combined_work_order",
+      }]
+      : [],
+  };
+}
+
+export function buildCanonicalMakesafeRows(
+  baseRows: any[],
+  extras: CanonicalMakesafeExtras = {},
+): any[] {
+  const rows = (baseRows || []).map((base) => {
+    const assignments = assignmentFacts(base?.assignments || []);
+    const report = base?.report || null;
+    const pack = base?.report_pack || null;
+    return {
+      contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+      id: base?.id,
+      job_number: base?.job_number || null,
+      type: "makesafe",
+      job_state: base?.status || null,
+      substatus: base?.substatus || null,
+      canonical_stage: base?.board_stage || "new",
+      canonical_stage_label: base?.board_label || null,
+      makesafe_type: base?.metadata?.makesafe_job_family_label ||
+        base?.metadata?.makesafe_job_family ||
+        base?.makesafe_details?.report_type ||
+        "Make-safe",
+      builder: {
+        name: base?.requesting_company_name || base?.requesting_company || null,
+        external_ref: base?.external_ref || null,
+      },
+      contact: buildMakesafeContact(
+        base,
+        extras.contactsByJobId?.[base?.id] || [],
+      ),
+      assignments,
+      report: {
+        state: report?.status || base?.report_status ||
+          "waiting_on_trade_report",
+        submitted_at: report?.submitted_at || report?.created_at ||
+          base?.makesafe_details?.report_received_at || null,
+        photo_count: Number(extras.photoCountByJobId?.[base?.id] || 0),
+        cycle_number: Number(report?.cycle_number || base?.cycle_number || 1),
+      },
+      pack: {
+        state: pack?.status || (base?.sent_to_builder ? "sent" : "not_started"),
+        sent: base?.sent_to_builder === true,
+        sent_at: pack?.sent_at || base?.makesafe_details?.report_sent_at ||
+          null,
+        drafted: !!pack?.report_doc_id ||
+          ["drafted", "authorised_not_sent"].includes(
+            String(pack?.status || ""),
+          ),
+        closeout_documents: {
+          report: base?.has_report_doc === true,
+          invoice: base?.has_invoice_doc === true,
+          swms: base?.has_swms_doc === true,
+        },
+      },
+      notes: noteFacts(extras.notesByJobId?.[base?.id] || []),
+      lineage: lineageFacts(base, extras.intakeCaseByJobId?.[base?.id]),
+      age: ageFacts(base),
+      blockers: blockerFacts(base, assignments),
+      cancelled: base?.board_stage === "cancelled"
+        ? {
+          reason: base?.cancel_reason || null,
+          note: base?.cancel_note || null,
+          by: base?.cancelled_by || null,
+          at: base?.cancelled_at || null,
+        }
+        : null,
+    };
+  });
+
+  const grouped = new Map<string, any[]>();
+  for (const row of rows) {
+    const key = row.lineage.property_claim_key;
+    if (key) grouped.set(key, [...(grouped.get(key) || []), row]);
+  }
+  for (const group of grouped.values()) {
+    if (group.length < 2) continue;
+    for (const row of group) {
+      const known = new Set(row.lineage.siblings.map((s: any) => s.job_id));
+      for (const sibling of group) {
+        if (sibling.id === row.id || known.has(sibling.id)) continue;
+        row.lineage.siblings.push({
+          job_id: sibling.id,
+          job_number: sibling.job_number,
+          role: sibling.makesafe_type,
+          relationship: "same_property_claim",
+          builder_po_number: sibling.lineage.builder_po_number,
+          builder_work_order_number: sibling.lineage.builder_work_order_number,
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+export function mapOpsStageToTradeColumn(stage: unknown): {
+  column: TradeMakesafeColumn;
+  mapped: boolean;
+} {
+  const normalized = String(stage || "").toLowerCase() as OpsMakesafeStage;
+  return (OPS_MAKESAFE_STAGES as readonly string[]).includes(normalized)
+    ? { column: OPS_TO_TRADE_COLUMN[normalized], mapped: true }
+    : { column: "New", mapped: false };
+}
+
+export function projectOpsMakesafeBoard(rows: any[]) {
+  const columns: Record<string, any[]> = Object.fromEntries(
+    OPS_MAKESAFE_STAGES.map((stage) => [stage, []]),
+  );
+  const unmapped: string[] = [];
+  for (const row of rows || []) {
+    const stage = String(row?.canonical_stage || "").toLowerCase();
+    if ((OPS_MAKESAFE_STAGES as readonly string[]).includes(stage)) {
+      columns[stage].push(row);
+    } else {
+      columns.new.push({
+        ...row,
+        projection_warning: `Unknown canonical stage: ${stage || "(blank)"}`,
+      });
+      if (row?.id) unmapped.push(row.id);
+    }
+  }
+  return {
+    columns,
+    rows: Object.values(columns).flat(),
+    unmapped_stage_job_ids: unmapped,
+  };
+}
+
+export function resolveMakesafeTradeViewer(viewer: MakesafeBoardViewer) {
+  const role = String(viewer?.role || "").toLowerCase();
+  const name = String(viewer?.name || "").trim().toLowerCase();
+  const managed = Array.isArray(viewer?.managedVerticals)
+    ? viewer.managedVerticals.map((v) => String(v || "").trim().toLowerCase())
+    : [];
+  const privileged = ["admin", "owner", "ops_manager"].includes(role);
+  const hugo = name === "hugo" || name.startsWith("hugo ");
+  const khairo = name === "khairo" || name.startsWith("khairo ");
+  const jan = name === "jan" || name.startsWith("jan ");
+  const all = privileged || jan || hugo || managed.includes("makesafe");
+  return {
+    visibility: all ? "all_makesafes" : "allocated_only",
+    sees_all_makesafes: all,
+    fencing_view_only: khairo,
+    can_allocate: all && !khairo,
+  };
+}
+
+function tradeSafe(row: any, viewer: MakesafeBoardViewer, all: boolean) {
+  const mapped = mapOpsStageToTradeColumn(row?.canonical_stage);
+  return {
+    contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+    id: row?.id,
+    job_number: row?.job_number,
+    type: row?.type,
+    makesafe_type: row?.makesafe_type,
+    column: mapped.column,
+    canonical_stage: row?.canonical_stage,
+    projection_warning: mapped.mapped
+      ? null
+      : `Unknown canonical stage: ${row?.canonical_stage || "(blank)"}`,
+    job_state: row?.job_state,
+    substatus: row?.substatus,
+    builder: row?.builder,
+    contact: row?.contact,
+    assignments: all
+      ? row?.assignments || []
+      : (row?.assignments || []).filter((a: any) =>
+        a.user_id === viewer.userId
+      ),
+    report: row?.report,
+    pack: row?.pack,
+    notes: row?.notes,
+    lineage: row?.lineage,
+    age: row?.age,
+    blockers: row?.blockers,
+    cancelled: row?.cancelled,
+  };
+}
+
+export function projectTradeMakesafeBoard(
+  rows: any[],
+  viewer: MakesafeBoardViewer,
+) {
+  const permissions = resolveMakesafeTradeViewer(viewer);
+  const visible = permissions.sees_all_makesafes
+    ? rows || []
+    : (rows || []).filter((r) =>
+      (r?.assignments || []).some((a: any) => a.user_id === viewer.userId)
+    );
+  const columns: Record<TradeMakesafeColumn, any[]> = {
+    New: [],
+    Allocated: [],
+    Complete: [],
+    Archive: [],
+  };
+  const unmapped: string[] = [];
+  for (const row of visible) {
+    const projected = tradeSafe(row, viewer, permissions.sees_all_makesafes);
+    columns[projected.column].push(projected);
+    if (projected.projection_warning && row?.id) unmapped.push(row.id);
+  }
+  return {
+    columns,
+    rows: TRADE_MAKESAFE_COLUMNS.flatMap((column) => columns[column]),
+    permissions,
+    unmapped_stage_job_ids: unmapped,
+  };
+}
+
+export function checkMakesafeBoardParity(rows: any[]) {
+  const ops = projectOpsMakesafeBoard(rows || []);
+  const trade = projectTradeMakesafeBoard(rows || [], {
+    userId: "parity-checker",
+    name: "Hugo",
+    role: "installer",
+    managedVerticals: ["makesafe"],
+  });
+  const errors: string[] = [];
+  for (const row of rows || []) {
+    if (!row?.id) {
+      errors.push("canonical row missing id");
+      continue;
+    }
+    const opsRows = ops.rows.filter((r: any) => r.id === row.id);
+    const tradeRows = trade.rows.filter((r: any) => r.id === row.id);
+    if (opsRows.length !== 1) {
+      errors.push(`${row.id}: ops projection count ${opsRows.length}`);
+    }
+    if (tradeRows.length !== 1) {
+      errors.push(`${row.id}: trade projection count ${tradeRows.length}`);
+    }
+    const expected = mapOpsStageToTradeColumn(row.canonical_stage).column;
+    if (tradeRows[0]?.column !== expected) {
+      errors.push(
+        `${row.id}: expected trade ${expected}, got ${tradeRows[0]?.column}`,
+      );
+    }
+    if (tradeRows[0]?.canonical_stage !== row.canonical_stage) {
+      errors.push(`${row.id}: canonical stage changed in projection`);
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    checked: (rows || []).length,
+    errors,
+    unmapped_stage_job_ids: Array.from(
+      new Set([
+        ...ops.unmapped_stage_job_ids,
+        ...trade.unmapped_stage_job_ids,
+      ]),
+    ),
+  };
+}
