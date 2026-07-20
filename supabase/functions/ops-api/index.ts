@@ -27293,10 +27293,12 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     for (const item of items) {
       const metres = Number(item.metres) || 0
       if (metres <= 0) continue
+      const job = jobMap[item.job_id]
+      if (!job) throw new Error('One of the jobs submitted is not assigned to you for this week. Refresh and try again.')
+
       const amount = Math.round(metres * pmRate * 100) / 100
       subtotal += amount
 
-      const job = jobMap[item.job_id] || {}
       // Change 4: include builder ref in Xero description when present
       const pmBuilderRef = job?.metadata?.external_ref
       const desc = [
