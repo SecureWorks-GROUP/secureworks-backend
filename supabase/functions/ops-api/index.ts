@@ -27283,9 +27283,19 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Enter the metres installed on at least one job before submitting.')
     const pmRate = Number(rate_per_metre) || 35
 
-    // Build a job lookup from server-side assignments for descriptions
+    // Build a job lookup from every assignment this trade holds for the week —
+    // metres are billable regardless of whether the assignment has been closed
+    // out, so scoping must not inherit the completed-hours filter above.
+    const { data: pmAssignments, error: pmAssignErr } = await client
+      .from('job_assignments')
+      .select(`jobs:job_id ( id, type, job_number, client_name, site_address, site_suburb, metadata )`)
+      .eq('user_id', userId)
+      .gte('scheduled_date', weekStart)
+      .lte('scheduled_date', week_ending)
+    if (pmAssignErr) throw pmAssignErr
+
     const jobMap: Record<string, any> = {}
-    for (const a of assignments) {
+    for (const a of (pmAssignments || [])) {
       const job = a.jobs as any
       if (job?.id) jobMap[job.id] = job
     }
@@ -27294,7 +27304,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       const metres = Number(item.metres) || 0
       if (metres <= 0) continue
       const job = jobMap[item.job_id]
-      if (!job) throw new Error('One of the jobs submitted is not assigned to you for this week. Refresh and try again.')
+      if (!job) throw new Error(`Job ${item.job_number || item.job_id} is not assigned to you for the week ending ${week_ending}, so it cannot be invoiced. Ask the office to add the assignment, then remove that job and submit the rest.`)
 
       const amount = Math.round(metres * pmRate * 100) / 100
       subtotal += amount
