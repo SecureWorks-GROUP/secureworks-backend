@@ -381,6 +381,119 @@ Deno.test("live batch is capped per invocation and defers the remainder", async 
   );
 });
 
+Deno.test("stuck exceptions cannot consume the whole per-run budget", async () => {
+  const store = baseStore();
+  // Two older instructions that can never advance without a work order PDF.
+  for (let i = 1; i <= 2; i++) {
+    store.emails.push(
+      email({
+        post_id: `stuck-${i}`,
+        received_at: `2026-07-19T0${i}:00:00.000Z`,
+        subject: `NEW WORK ORDER MLB-5900${i} Work Order: WO-5900${i}`,
+        body_content: `Client: Stuck Client ${i}\nAddress: ${i} Stuck Way, Perth`,
+      }),
+    );
+  }
+  const client = fakeClient(store);
+  const first = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxCases: 2,
+    approveDraft,
+  });
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+
+  // A newer, fully evidenced instruction arrives behind them in received_at order.
+  store.emails.push(
+    email({
+      post_id: "fresh-1",
+      received_at: "2026-07-20T02:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-59003 Work Order: WO-59003",
+      body_content: "Client: Fresh Client\nAddress: 3 Fresh Road, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-fresh",
+    email_id: "fresh-1",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/fresh.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const second = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxCases: 2,
+    approveDraft,
+  });
+
+  // The unchanged exceptions are deprioritised, so the run still reaches the case
+  // that can actually make progress.
+  assertEquals(second.totals.jobs_created, 1);
+  assertEquals(
+    store.emails.find((e) => e.post_id === "fresh-1")?.makesafe_scanned_at,
+    NOW,
+  );
+});
+
+Deno.test("a disallowed state transition never creates an orphan job", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "orphan-1",
+      subject: "NEW WORK ORDER MLB-59500 Work Order: WO-59500",
+      body_content: "Client: Orphan Client\nAddress: 5 Orphan Rise, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-orphan",
+    email_id: "orphan-1",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/orphan.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    approveDraft,
+  });
+  const persisted = store.makesafe_intake_cases[0];
+  assert(
+    persisted.state === "confirmed_live_job" ||
+      persisted.state === "blocked_live_job",
+  );
+
+  // Force the case into a state with no edge back to a live-job state.
+  persisted.state = "accounted_non_wo";
+  persisted.job_id = null;
+  for (const row of store.emails) row.makesafe_scanned_at = null;
+  store.makesafe_intake_drafts.length = 0;
+
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    approveDraft,
+  });
+
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.write_failure_reasons.case_transition_not_allowed, 1);
+  assertEquals(store.makesafe_intake_cases[0].state, "accounted_non_wo");
+  assertEquals(store.makesafe_intake_cases[0].job_id, null);
+  // The failed case is not stamped away; it stays visible for the next run.
+  assertEquals(store.emails[0].makesafe_scanned_at, null);
+});
+
 Deno.test("write failures are classified without retaining source content", async () => {
   const store = baseStore();
   store.emails.push(
@@ -414,7 +527,7 @@ Deno.test("write failures are classified without retaining source content", asyn
   assert(!serialised.includes("12 Fail Way"));
 });
 
-Deno.test("storage failure surfaces a credential blocker instead of staying silent", async () => {
+Deno.test("storage failure surfaces a storage blocker instead of staying silent", async () => {
   const store = baseStore();
   store.emails.push(
     email({
@@ -446,6 +559,6 @@ Deno.test("storage failure surfaces a credential blocker instead of staying sile
     approveDraft,
   });
 
-  assertEquals(report.credential_blocker, "makesafe-emails_download_failed");
+  assertEquals(report.storage_blockers, ["makesafe-emails_download_failed"]);
   assertEquals(report.write_failure_reasons.attachment_staging, 1);
 });

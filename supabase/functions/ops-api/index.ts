@@ -2681,7 +2681,10 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'makesafe_deterministic_intake_replay': {
         return json(await _runDeterministicIntake(client, {
           dryRun: true,
-          days: Number(url.searchParams.get('days') || body?.days || '') || 60,
+          days: Math.min(
+            Number(url.searchParams.get('days') || body?.days || '') || 60,
+            60,
+          ),
           onlyUnscanned: url.searchParams.get('only_unscanned') === 'true' ||
             body?.only_unscanned === true,
         }))

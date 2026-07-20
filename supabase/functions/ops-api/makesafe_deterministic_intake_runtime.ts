@@ -55,7 +55,9 @@ export interface DeterministicRuntimeReport {
   by_builder_and_reason: Record<string, Record<string, number>>;
   // Non-PII failure classification. Keys are message classes, never source content.
   write_failure_reasons: Record<string, number>;
-  credential_blocker: string | null;
+  // Storage read/write blockers observed this run, in first-seen order. These are
+  // bucket-level failures, not credential problems, and every distinct one is kept.
+  storage_blockers: string[];
 }
 
 // Maps a thrown failure onto a small fixed vocabulary. Nothing derived from
@@ -74,6 +76,9 @@ function classifyWriteFailure(error: unknown): string {
   if (/draft insert failed/i.test(message)) return "draft_insert";
   if (/case insert failed/i.test(message)) return "case_insert";
   if (/case update failed/i.test(message)) return "case_update";
+  if (/transition is not allowed/i.test(message)) {
+    return "case_transition_not_allowed";
+  }
   if (/source accounting failed/i.test(message)) return "source_accounting";
   if (/lineage parent read failed/i.test(message)) return "lineage_parent_read";
   if (code) return `postgres_${String(code)}`;
@@ -449,6 +454,21 @@ async function findCase(
   return data || null;
 }
 
+async function readPersistedStates(
+  client: any,
+  cases: readonly DeterministicCasePlan[],
+): Promise<Map<string, string>> {
+  const states = new Map<string, string>();
+  for (const keys of chunk(cases.map((c) => c.instructionKey), 200)) {
+    const { data } = await client.from("makesafe_intake_cases")
+      .select("instruction_key,state")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("instruction_key", keys);
+    for (const row of data || []) states.set(row.instruction_key, row.state);
+  }
+  return states;
+}
+
 async function findIdentityParent(
   client: any,
   plan: DeterministicCasePlan,
@@ -783,7 +803,7 @@ export async function runDeterministicIntake(
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),
     write_failure_reasons: {},
-    credential_blocker: null,
+    storage_blockers: [],
   };
   if (dryRun) return report;
   if (!options.approveDraft) {
@@ -795,16 +815,39 @@ export async function runDeterministicIntake(
     input.sources.map((source) => [source.postId, source]),
   );
   const onStorageBlocker = (blocker: string) => {
-    report.credential_blocker ||= blocker;
+    if (!report.storage_blockers.includes(blocker)) {
+      report.storage_blockers.push(blocker);
+    }
   };
   const maxCases = Math.max(1, options.maxCases ?? DEFAULT_MAX_CASES_PER_RUN);
-  const slice = plan.cases.slice(0, maxCases);
+  // Cases already persisted in exactly the state this plan would write cannot make
+  // progress without new evidence. They are the oldest unstamped sources, so a
+  // head-of-list slice would let them occupy the whole budget forever. Order the
+  // run so every case that can actually advance is attempted first.
+  const persisted = await readPersistedStates(client, plan.cases);
+  const slice = [
+    ...plan.cases.filter((c) => persisted.get(c.instructionKey) !== c.state),
+    ...plan.cases.filter((c) => persisted.get(c.instructionKey) === c.state),
+  ].slice(0, maxCases);
   report.totals.cases_attempted = slice.length;
   report.totals.cases_deferred = plan.cases.length - slice.length;
   for (const casePlan of slice) {
     try {
+      let resumedCase = false;
       const existing = await findCase(client, casePlan.instructionKey);
       let jobId: string | null = existing?.job_id || null;
+      // Never create a guarded job the case row cannot then be moved to. Without
+      // this the job would exist with no case linkage once the update is skipped.
+      if (
+        existing && casePlan.state !== existing.state &&
+        !(ALLOWED_TRANSITIONS[existing.state as string] || []).includes(
+          casePlan.state,
+        )
+      ) {
+        throw new Error(
+          "deterministic case transition is not allowed by the state machine",
+        );
+      }
       if (
         !jobId &&
         (casePlan.state === "confirmed_live_job" ||
@@ -820,7 +863,7 @@ export async function runDeterministicIntake(
         jobId = live.jobId;
         if (live.draftCreated) report.totals.drafts_created++;
         if (live.jobCreated) report.totals.jobs_created++;
-        if (live.resumed) report.totals.resumed++;
+        resumedCase = resumedCase || live.resumed;
       }
       const saved = await insertCaseAndSources(
         client,
@@ -831,16 +874,19 @@ export async function runDeterministicIntake(
       );
       if (saved.caseCreated) report.totals.case_rows_created++;
       report.totals.source_rows_created += saved.sourceCreated;
-      if (saved.resumed) report.totals.resumed++;
+      // One case counts once, however many of its artefacts already existed.
+      if (resumedCase || saved.resumed) report.totals.resumed++;
       // Stamp per case, not once at the end, so a wall-clock timeout keeps the
       // accounting for every case this run already committed.
       //
-      // Sources of a case still sitting in a reason-coded exception stay unstamped:
-      // the next run must be able to re-read the original instruction alongside the
-      // late work order in order to promote the case.
-      const settled = saved.caseUpgraded
-        ? casePlan.state !== "exception"
-        : (existing?.state || casePlan.state) !== "exception";
+      // Sources of a case still awaiting evidence stay unstamped: the next run must
+      // be able to re-read the original instruction alongside the late work order in
+      // order to promote the case. A case that already produced a live job is not
+      // awaiting anything, so it settles even when downgraded to an exception.
+      const state = saved.caseUpgraded
+        ? casePlan.state
+        : (existing?.state || casePlan.state);
+      const settled = state !== "exception" || Boolean(jobId);
       if (!settled) continue;
       for (const ids of chunk(casePlan.sourcePostIds)) {
         const { error } = await client.from("emails")
