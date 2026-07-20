@@ -147,6 +147,17 @@ reports zero. `jobs.quoted_value`
 (`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
 `daily-digest`, `ops-api` and `reporting-api` all read it.
 
+## Fencing Job Mint Invariant
+
+The fence browser must not mint permanent jobs, job numbers, GHL contacts, or
+opportunities itself. The additive authenticated command is
+`ghl-proxy?action=mint_fence_job`; its client contract and separately approved
+release proof are in `docs/fence-mint-contract.md`, with atomic ledger/lock RPCs
+in `20260721000001_fence_job_mint.sql`. Keep the request UUID stable across
+retries, preserve tenant/role/mapping guards, never transfer `scope_json` in the
+mint response, and never add quote/send/communication effects to this command.
+Legacy non-fence create endpoints remain unchanged until separately migrated.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one

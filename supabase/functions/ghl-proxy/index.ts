@@ -12,6 +12,7 @@
 //   GET  ?action=find_job&opportunityId=xxx  — find Supabase job by GHL opp ID
 //   POST ?action=create_job  { opportunityId, toolType, clientName, ... }
 //   POST ?action=create_contact_and_opportunity  { firstName, lastName, email, phone, address, suburb, toolType }
+//   POST ?action=mint_fence_job  { requestId, organisationId, intent, contactId?, opportunityId?, ... }
 //   POST ?action=save_scope  { jobId, scopeJson, meta }
 //   POST ?action=update_contact  { contactId, name, email, phone, address, suburb }
 //   GET  ?action=get_conversation&contactId=xxx  — GHL conversation thread (last 30 msgs)
@@ -67,6 +68,18 @@ import {
   stalePreparedContactIds,
   verifiedJobStorageOrgId,
 } from './hardening_helpers.ts'
+import {
+  authorizeFenceMintCaller,
+  executeFenceJobMint,
+  type FenceMintCanonical,
+  type FenceMintContact,
+  FenceMintError,
+  type FenceMintOpportunity,
+  type FenceMintProgress,
+  opportunityHasFenceMintStamp,
+  stampedFenceOpportunityName,
+  validateFenceMintInput,
+} from './fence_mint.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -271,26 +284,45 @@ function mapOpp(opp: any, stages: Record<string, string>) {
 
 async function fetchOpportunityPages(args: {
   pipelineId?: string
+  contactId?: string
   q?: string
   limit?: number
   maxPages?: number
   perPageTimeoutMs?: number
+  budgetMs?: number
 }) {
   const limit = Math.min(args.limit || 100, 100)
   const maxPages = Math.min(args.maxPages || 20, 50)
+  // Wall-clock ceiling for the whole scan. Page count alone does not bound
+  // elapsed time, and a scan that outruns the caller's mint lease lets a second
+  // executor be elected for the same identity while this one still reconciles.
+  const startedAt = Date.now()
+  const budgetMs = args.budgetMs ?? Infinity
   const opportunities: any[] = []
   const seenIds = new Set<string>()
   let startAfter: string | number | null = null
   let startAfterId: string | null = null
   let pagesScanned = 0
   let total: number | null = null
+  // True only when the scan reached the real end of the result set. Callers that
+  // must not act on an absence (lost-response reconciliation) fail closed on false.
+  let exhausted = false
+  // GHL is not documented to honour contact_id on /opportunities/search and no
+  // other call site proves it does, so the filter is never assumed. Any row for a
+  // different contact means the server ignored it and the scan silently widened to
+  // the whole pipeline.
+  let contactFilterHonoured = true
 
   for (let page = 1; page <= maxPages; page++) {
+    // Stop before spending another page's timeout past the budget. exhausted
+    // stays false, so callers that must not act on an absence fail closed.
+    if (Date.now() - startedAt >= budgetMs) break
     const params = new URLSearchParams({
       location_id: GHL_LOCATION_ID,
       limit: String(limit),
     })
     if (args.pipelineId) params.set('pipeline_id', args.pipelineId)
+    if (args.contactId) params.set('contact_id', args.contactId)
     if (args.q) params.set('q', args.q)
     if (startAfter != null) params.set('startAfter', String(startAfter))
     if (startAfterId) params.set('startAfterId', startAfterId)
@@ -303,15 +335,25 @@ async function fetchOpportunityPages(args: {
     const meta = data.meta || {}
     pagesScanned++
     if (typeof meta.total === 'number') total = meta.total
-    if (!rows.length) break
+    if (!rows.length) { exhausted = true; break }
 
     let newRows = 0
     for (const opp of rows) {
+      // Only a row that actually names a different contact proves the filter was
+      // dropped. A row that carries no contact id at all is a shape variation and
+      // says nothing either way.
+      const rowContactId = opp?.contact?.id || opp?.contactId || ''
+      if (args.contactId && rowContactId && rowContactId !== args.contactId) {
+        contactFilterHonoured = false
+      }
       if (opp?.id && seenIds.has(opp.id)) continue
       if (opp?.id) seenIds.add(opp.id)
       opportunities.push(opp)
       newRows++
     }
+
+    // A short page is the only positive proof that the result set ended.
+    if (rows.length < limit) { exhausted = true; break }
 
     const nextStartAfter = meta.startAfter ?? rows[rows.length - 1]?.sort?.[0] ?? null
     const nextStartAfterId =
@@ -319,12 +361,15 @@ async function fetchOpportunityPages(args: {
       rows[rows.length - 1]?.sort?.[1] ??
       rows[rows.length - 1]?.contactId ??
       null
-    if (newRows === 0 || !nextStartAfter || !nextStartAfterId || rows.length < limit) break
+    // A stalled cursor (a full page of already-seen ids) or a full page with no
+    // derivable cursor says nothing about the tail. Stop scanning, but leave
+    // exhausted false so callers that must not act on an absence fail closed.
+    if (newRows === 0 || !nextStartAfter || !nextStartAfterId) break
     startAfter = nextStartAfter
     startAfterId = String(nextStartAfterId)
   }
 
-  return { opportunities, pagesScanned, total }
+  return { opportunities, pagesScanned, total, exhausted, contactFilterHonoured }
 }
 
 // lead_search's last resort when GHL contacts search (incl. the first-word retry)
@@ -1793,6 +1838,367 @@ serve(async (req: Request) => {
       })
 
       return json({ jobs: trimmed })
+    }
+
+    // ── Authenticated, idempotent fencing job mint ──
+    // One narrow command replaces the browser's fence-only create-contact/opp,
+    // create-job and assign-number chain. It never sends a quote or message.
+    if (action === 'mint_fence_job' && req.method === 'POST') {
+      const requestStarted = performance.now()
+      const MINT_CONFLICT_STATUS: Record<string, number> = {
+        invalid_mint_request: 400,
+        mint_request_not_found: 500,
+        mint_owner_not_found: 500,
+        mint_owner_chain_corrupt: 500,
+        canonical_job_missing: 500,
+        bound_job_missing: 500,
+      }
+      try {
+        const MINT_BODY_LIMIT = 32768
+        if (Number(req.headers.get('content-length') || 0) > MINT_BODY_LIMIT) {
+          throw new FenceMintError(413, 'mint_payload_too_large', 'Fence mint request exceeds 32 KB')
+        }
+        // Chunked or header-less requests bypass the content-length check, so the
+        // read itself is bounded rather than trusting the declared size.
+        const chunks: Uint8Array[] = []
+        let bodyBytes = 0
+        const reader = req.body?.getReader()
+        while (reader) {
+          const { done, value } = await reader.read()
+          if (done) break
+          bodyBytes += value.byteLength
+          if (bodyBytes > MINT_BODY_LIMIT) {
+            await reader.cancel()
+            throw new FenceMintError(413, 'mint_payload_too_large', 'Fence mint request exceeds 32 KB')
+          }
+          chunks.push(value)
+        }
+        const joined = new Uint8Array(bodyBytes)
+        let offset = 0
+        for (const chunk of chunks) {
+          joined.set(chunk, offset)
+          offset += chunk.byteLength
+        }
+        const bodyText = new TextDecoder().decode(joined)
+        let parsedBody: unknown
+        try {
+          parsedBody = JSON.parse(bodyText)
+        } catch {
+          throw new FenceMintError(400, 'invalid_request', 'JSON object body required')
+        }
+        const input = validateFenceMintInput(parsedBody)
+        authorizeFenceMintCaller({
+          mode: credential.mode,
+          authUserId,
+          profile: authProfile,
+          organisationId: input.organisationId,
+        })
+
+        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const progressFromRpc = (raw: any): FenceMintProgress => {
+          const data = Array.isArray(raw) ? raw[0] : raw
+          if (!data || typeof data !== 'object') {
+            throw new FenceMintError(503, 'mint_persistence_invalid', 'Mint persistence returned an invalid response')
+          }
+          if (data.decision === 'conflict') {
+            const conflictCode = String(data.code || 'mint_conflict')
+            // Not every SQL conflict is a caller-resolvable 409. Bad input stays
+            // 400 and ledger integrity failures stay 5xx so clients that retry
+            // on 409 cannot loop on a condition that will never resolve.
+            const conflictStatus = MINT_CONFLICT_STATUS[conflictCode] ?? 409
+            throw new FenceMintError(conflictStatus, conflictCode, String(data.message || 'Mint identity evidence conflicts'), {
+              jobIds: data.jobIds,
+              candidateCount: data.candidateCount,
+            })
+          }
+          const canonical = data.canonical
+            ? {
+              jobId: String(data.canonical.jobId || ''),
+              jobNumber: String(data.canonical.jobNumber || ''),
+              contactId: String(data.canonical.contactId || ''),
+              opportunityId: String(data.canonical.opportunityId || ''),
+              mappingOutcome: String(data.canonical.mappingOutcome || 'reused'),
+              scopeVersion: Number(data.canonical.scopeVersion || 1),
+              updatedAt: String(data.canonical.updatedAt || ''),
+              scopeHash: data.canonical.scopeHash ? String(data.canonical.scopeHash) : null,
+              requiresLoad: data.canonical.requiresLoad !== false,
+            } as FenceMintCanonical
+            : null
+          if (canonical && (!canonical.jobId || !canonical.jobNumber || !canonical.contactId || !canonical.opportunityId)) {
+            throw new FenceMintError(503, 'canonical_mapping_incomplete', 'Canonical mint result is missing permanent identity fields')
+          }
+          return {
+            ownerRequestId: String(data.ownerRequestId || input.requestId),
+            state: String(data.state || 'reserved') as FenceMintProgress['state'],
+            joined: !!data.joined,
+            completedReentry: !!data.completedReentry,
+            executor: !!data.executor,
+            contactId: data.contactId ? String(data.contactId) : null,
+            opportunityId: data.opportunityId ? String(data.opportunityId) : null,
+            attemptCount: Number(data.attemptCount || 1),
+            canonical,
+          }
+        }
+        const rpcProgress = async (name: string, params: Record<string, unknown>) => {
+          const { data, error } = await sb.rpc(name, params)
+          if (error) {
+            console.error(`[ghl-proxy/mint] rpc=${name} code=${error.code || 'unknown'}`)
+            throw new FenceMintError(503, 'mint_persistence_failed', `Fence mint persistence failed at ${name}`)
+          }
+          return progressFromRpc(data)
+        }
+        const opportunityShape = (raw: any): FenceMintOpportunity => {
+          const opportunity = raw?.opportunity || raw
+          return {
+            id: String(opportunity?.id || ''),
+            contactId: String(opportunity?.contactId || opportunity?.contact?.id || ''),
+            pipelineId: String(opportunity?.pipelineId || ''),
+            name: opportunity?.name || null,
+          }
+        }
+        const contactShape = (raw: any): FenceMintContact => {
+          const contact = raw?.contact || raw
+          return {
+            id: String(contact?.id || ''),
+            firstName: contact?.firstName || null,
+            lastName: contact?.lastName || null,
+            email: contact?.email || null,
+            phone: contact?.phone || null,
+            address1: contact?.address1 || contact?.address || null,
+            city: contact?.city || null,
+          }
+        }
+
+        const result = await executeFenceJobMint({
+          input,
+          actorId: authUserId!,
+          deps: {
+            fencePipelineId: PIPELINES.fencing,
+            reserve: ({ input: reserved, actorId, fingerprint, identityKey }) => rpcProgress('reserve_fence_job_mint', {
+              p_request_id: reserved.requestId,
+              p_org_id: reserved.organisationId,
+              p_actor_id: actorId,
+              p_identity_key: identityKey,
+              p_input_fingerprint: fingerprint,
+              p_intent: reserved.intent,
+              p_contact_id: reserved.contactId,
+              p_opportunity_id: reserved.opportunityId,
+              p_expected_existing_job_ids: reserved.expectedExistingJobIds,
+              p_repeat_reason: reserved.repeatReason,
+              p_first_name: reserved.firstName,
+              p_last_name: reserved.lastName,
+              p_client_email: reserved.email,
+              p_client_phone: reserved.phone,
+              p_site_address: reserved.address,
+              p_site_suburb: reserved.suburb,
+            }),
+            bindIdentity: ({ ownerRequestId, contact, opportunity }) => rpcProgress('bind_fence_job_mint_identity', {
+              p_request_id: ownerRequestId,
+              p_contact_id: contact.id,
+              p_opportunity_id: opportunity?.id || null,
+            }),
+            recordOpportunity: ({ ownerRequestId, opportunity }) => rpcProgress('record_fence_job_mint_opportunity', {
+              p_request_id: ownerRequestId,
+              p_opportunity_id: opportunity.id,
+              p_contact_id: opportunity.contactId,
+            }),
+            complete: async ({ ownerRequestId }) => {
+              const completed = await rpcProgress('complete_fence_job_mint', { p_request_id: ownerRequestId })
+              if (!completed.canonical) throw new FenceMintError(503, 'mint_completion_incomplete', 'Fence mint did not reach a canonical result')
+              return completed.canonical
+            },
+            awaitCanonical: async ({ ownerRequestId }) => {
+              // Race-only path: seven bounded reads over ~7.8s. Normal mints do
+              // not poll, and no read selects jobs.scope_json.
+              for (const delayMs of [0, 100, 250, 500, 1000, 2000, 4000]) {
+                if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs))
+                const progress = await rpcProgress('get_fence_job_mint_progress', { p_request_id: ownerRequestId })
+                if (progress.canonical) return progress.canonical
+              }
+              return null
+            },
+            getContact: async (contactId) => contactShape(await ghl(`/contacts/${encodeURIComponent(contactId)}`)),
+            findContacts: async (candidate) => {
+              const lookups: Promise<any>[] = []
+              if (candidate.email) {
+                lookups.push(ghl('/contacts/search/duplicate', {
+                  method: 'POST',
+                  body: JSON.stringify({ locationId: GHL_LOCATION_ID, email: candidate.email }),
+                  signal: AbortSignal.timeout(8000),
+                }))
+              }
+              if (candidate.phone) {
+                lookups.push(ghl('/contacts/search/duplicate', {
+                  method: 'POST',
+                  body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizeAUPhone(candidate.phone) }),
+                  signal: AbortSignal.timeout(8000),
+                }))
+              }
+              // At most two independent identity reads, in one bounded batch.
+              const matches = await Promise.all(lookups)
+              return matches.map(contactShape).filter((contact) => contact.id)
+            },
+            createContact: async (candidate) => {
+              try {
+                return contactShape(await ghl('/contacts/', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    firstName: candidate.firstName,
+                    lastName: candidate.lastName,
+                    email: candidate.email || undefined,
+                    phone: candidate.phone || undefined,
+                    address1: candidate.address,
+                    city: candidate.suburb,
+                    locationId: GHL_LOCATION_ID,
+                  }),
+                  signal: AbortSignal.timeout(10000),
+                }))
+              } catch (error) {
+                const duplicateId = ((error as Error)?.message || '').match(/"contactId"\s*:\s*"([^"]+)"/)?.[1]
+                if (duplicateId) return contactShape(await ghl(`/contacts/${encodeURIComponent(duplicateId)}`))
+                throw error
+              }
+            },
+            getOpportunity: async (opportunityId) => opportunityShape(await ghl(`/opportunities/${encodeURIComponent(opportunityId)}`, {
+              signal: AbortSignal.timeout(8000),
+            })),
+            findStampedOpportunity: async ({ ownerRequestId, contactId }) => {
+              // Never trust GHL's free-text `q` to match a bracketed stamp. The
+              // scan is scoped to the resolved contact's fencing opportunities
+              // and the stamp is matched client side, so recovery depends only
+              // on the listing being complete.
+              const paged = await fetchOpportunityPages({
+                pipelineId: PIPELINES.fencing,
+                contactId,
+                limit: 100,
+                maxPages: 10,
+                perPageTimeoutMs: 8000,
+                // Held well inside the 90s mint lease so reconciliation cannot
+                // outlive the lease and admit a second executor. An exhausted
+                // budget leaves the absence unproven, never authorising a create.
+                budgetMs: 30000,
+              })
+              const exact = paged.opportunities
+                .map(opportunityShape)
+                // pipelineId is not proven to be returned by /opportunities/search
+                // and the scan is already server-side scoped by pipeline_id, so an
+                // absent field must not silently discard a real match.
+                .filter((opportunity) => (!opportunity.contactId || opportunity.contactId === contactId) &&
+                  (!opportunity.pipelineId || opportunity.pipelineId === PIPELINES.fencing) &&
+                  opportunityHasFenceMintStamp(opportunity, ownerRequestId))
+              if (exact.length > 1) {
+                throw new FenceMintError(409, 'duplicate_stamped_opportunities', 'Multiple GHL opportunities carry the same mint request stamp')
+              }
+              if (!paged.contactFilterHonoured) {
+                // Rows for other contacts came back, so GHL ignored contact_id and
+                // the scan degraded to the whole fencing pipeline. An exhausted
+                // scan of that superset still proves presence or absence for this
+                // contact, so recovery stays sound; only the cost changes.
+                console.error(JSON.stringify({
+                  event: 'fence_mint_stamp_scan_contact_filter_dropped',
+                  request_id: ownerRequestId,
+                  contact_id: contactId,
+                  pages_scanned: paged.pagesScanned,
+                  exhausted: paged.exhausted,
+                }))
+              }
+              if (!exact.length && !paged.exhausted) {
+                // An absence that was never proven must not authorise a create.
+                const unprovenCode = paged.contactFilterHonoured
+                  ? 'mint_reconciliation_unproven'
+                  : 'mint_contact_scope_unsupported'
+                console.error(JSON.stringify({
+                  event: 'fence_mint_stamp_scan_truncated',
+                  request_id: ownerRequestId,
+                  code: unprovenCode,
+                  pages_scanned: paged.pagesScanned,
+                  total: paged.total,
+                }))
+                throw new FenceMintError(503, unprovenCode, paged.contactFilterHonoured
+                  ? 'Could not prove whether a stamped opportunity already exists; retry with the same requestId'
+                  : 'GHL ignored the contact scope filter and the widened scan could not be completed; retry with the same requestId')
+              }
+              return exact[0] || null
+            },
+            createStampedOpportunity: async ({ ownerRequestId, contact, cleanName }) => opportunityShape(await ghl('/opportunities/', {
+              method: 'POST',
+              body: JSON.stringify({
+                pipelineId: PIPELINES.fencing,
+                locationId: GHL_LOCATION_ID,
+                contactId: contact.id,
+                name: stampedFenceOpportunityName(cleanName, ownerRequestId),
+                status: 'open',
+              }),
+              signal: AbortSignal.timeout(10000),
+            })),
+            recordFailure: async ({ requestId, code, message, executingRequestId, executing }) => {
+              const { data, error } = await sb.rpc('record_fence_job_mint_failure', {
+                p_request_id: requestId,
+                p_code: code,
+                p_message: message,
+                p_org_id: input.organisationId,
+                p_actor_id: authUserId,
+                p_executing_request_id: executingRequestId ?? null,
+              })
+              if (error) throw error
+              // The RPC reports why the stamp did or did not land. Only a
+              // rejected write from the elected executor strands joiners on
+              // mint_in_progress, so only 'denied' with executing is an error.
+              // 'already_complete' (the root finished concurrently) and
+              // 'lease_revoked' (another takeover was legitimately elected)
+              // are expected races, and 'no_row' is routine when reserve threw
+              // before any ledger row existed.
+              const outcome = typeof data === 'string' ? data : 'denied'
+              if (outcome !== 'applied') {
+                const line = JSON.stringify({
+                  event: 'fence_mint_failure_write_dropped',
+                  request_id: requestId,
+                  executing_request_id: executingRequestId ?? null,
+                  executing: executing === true,
+                  outcome,
+                  code,
+                })
+                if (executing && outcome === 'denied') console.error(line)
+                else console.log(line)
+              }
+            },
+          },
+        })
+
+        const serverTiming = Object.entries(result.timingMs)
+          .map(([name, duration]) => `${name.replace(/[^a-z0-9_]/gi, '_')};dur=${Number(duration).toFixed(1)}`)
+          .join(', ')
+        console.log(JSON.stringify({
+          event: 'fence_mint_complete',
+          request_id: input.requestId,
+          job_id: result.jobId,
+          mapping_outcome: result.mapping.outcome,
+          timing_ms: result.timingMs,
+          communication_sent: false,
+        }))
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            ...CORS,
+            'Server-Timing': serverTiming,
+            'Timing-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Server-Timing',
+          },
+        })
+      } catch (error) {
+        const typed = error instanceof FenceMintError
+          ? error
+          : new FenceMintError(500, 'fence_mint_failed', (error as Error)?.message || 'Fence mint failed')
+        console.error(JSON.stringify({
+          event: 'fence_mint_failed',
+          code: typed.code,
+          status: typed.status,
+          total_ms: Math.round((performance.now() - requestStarted) * 10) / 10,
+          communication_sent: false,
+        }))
+        return json({ error: typed.message, code: typed.code, details: typed.details || null }, typed.status)
+      }
     }
 
     // ── Create a Supabase job linked to a GHL opportunity ──
