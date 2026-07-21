@@ -29,8 +29,11 @@ import { isReportOnlyType } from "./makesafe_intake_gate.ts";
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
 
+export type DeterministicSelectionMode = "exact" | "full_open";
+
 export interface DeterministicRuntimeOptions {
   dryRun?: boolean;
+  selectionMode?: DeterministicSelectionMode;
   days?: number;
   onlyUnscanned?: boolean;
   nowIso?: string;
@@ -45,6 +48,7 @@ export interface DeterministicRuntimeOptions {
 
 export interface DeterministicRolloutControls {
   mode: "legacy" | "deterministic";
+  selectionMode: DeterministicSelectionMode;
   maxCases: number;
   sourcePostIds: readonly string[];
   instructionKeys: readonly string[];
@@ -100,6 +104,7 @@ export interface DeterministicRuntimeReport {
   // Repeat failures crowding out advanceable work is then visible, not silent.
   attempt_cap_reached_without_commit: boolean;
   selection: {
+    mode: DeterministicSelectionMode;
     source_allowlist_count: number;
     instruction_allowlist_count: number;
     selected_cases: number;
@@ -254,6 +259,7 @@ export async function loadDeterministicRolloutControls(
 ): Promise<DeterministicRolloutControls> {
   const columns = [
     "intake_mode",
+    "deterministic_selection_mode",
     "deterministic_max_cases_per_run",
     "deterministic_source_allowlist",
     "deterministic_instruction_allowlist",
@@ -264,7 +270,7 @@ export async function loadDeterministicRolloutControls(
     .maybeSingle();
   if (error) {
     const missingControls = String(error.code || "") === "42703" ||
-      /deterministic_(?:max_cases_per_run|source_allowlist|instruction_allowlist).*(?:does not exist|schema cache|column)/i
+      /deterministic_(?:selection_mode|max_cases_per_run|source_allowlist|instruction_allowlist).*(?:does not exist|schema cache|column)/i
         .test(error.message || "");
     if (!missingControls) {
       throw new Error(
@@ -279,12 +285,19 @@ export async function loadDeterministicRolloutControls(
     }
     return {
       mode: "legacy",
+      selectionMode: "exact",
       maxCases: 1,
       sourcePostIds: [],
       instructionKeys: [],
     };
   }
   const mode = selectIntakeMode(data?.intake_mode);
+  const selectionMode = data?.deterministic_selection_mode;
+  if (selectionMode !== "exact" && selectionMode !== "full_open") {
+    throw new Error(
+      "deterministic selection mode must be exact or full_open",
+    );
+  }
   const maxCases = Number(data?.deterministic_max_cases_per_run);
   if (
     !Number.isInteger(maxCases) || maxCases < 1 || maxCases > MAX_CASES_PER_RUN
@@ -293,17 +306,31 @@ export async function loadDeterministicRolloutControls(
       `deterministic rollout cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
     );
   }
+  const sourcePostIds = exactAllowlist(
+    data?.deterministic_source_allowlist,
+    "deterministic source allowlist",
+  );
+  const instructionKeys = exactAllowlist(
+    data?.deterministic_instruction_allowlist,
+    "deterministic instruction allowlist",
+  );
+  const hasAllowlist = sourcePostIds.length > 0 || instructionKeys.length > 0;
+  if (selectionMode === "full_open" && hasAllowlist) {
+    throw new Error(
+      "deterministic full_open mode requires empty exact allowlists",
+    );
+  }
+  if (mode === "deterministic" && selectionMode === "exact" && !hasAllowlist) {
+    throw new Error(
+      "deterministic exact mode requires a non-empty exact allowlist",
+    );
+  }
   return {
     mode,
+    selectionMode,
     maxCases,
-    sourcePostIds: exactAllowlist(
-      data?.deterministic_source_allowlist,
-      "deterministic source allowlist",
-    ),
-    instructionKeys: exactAllowlist(
-      data?.deterministic_instruction_allowlist,
-      "deterministic instruction allowlist",
-    ),
+    sourcePostIds,
+    instructionKeys,
   };
 }
 
@@ -1874,6 +1901,10 @@ export async function runDeterministicIntake(
   options: DeterministicRuntimeOptions = {},
 ): Promise<DeterministicRuntimeReport> {
   const dryRun = options.dryRun !== false;
+  const selectionMode = options.selectionMode ?? "exact";
+  if (selectionMode !== "exact" && selectionMode !== "full_open") {
+    throw new Error("deterministic selection mode must be exact or full_open");
+  }
   const days = Math.max(1, Math.min(options.days ?? 60, 180));
   const nowIso = options.nowIso || new Date().toISOString();
   const onlyUnscanned = options.onlyUnscanned === true;
@@ -1887,9 +1918,14 @@ export async function runDeterministicIntake(
   );
   const hasAllowlist = allowSourcePostIds.length > 0 ||
     allowInstructionKeys.length > 0;
-  if (!dryRun && !hasAllowlist) {
+  if (!dryRun && selectionMode === "exact" && !hasAllowlist) {
     throw new Error(
-      "deterministic live mode requires a non-empty exact DB allowlist",
+      "deterministic exact mode requires a non-empty exact DB allowlist",
+    );
+  }
+  if (selectionMode === "full_open" && hasAllowlist) {
+    throw new Error(
+      "deterministic full_open mode requires empty exact allowlists",
     );
   }
   if (options.includeSanitizedCases && !hasAllowlist) {
@@ -1943,7 +1979,9 @@ export async function runDeterministicIntake(
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
     options.includeSanitizedCases === true;
-  const selected = hasAllowlist
+  const selected = selectionMode === "full_open"
+    ? fullPlan
+    : hasAllowlist
     ? selectedPlan(fullPlan, allowSourcePostIds, allowInstructionKeys)
     : fullPlan;
   const authorityBoundPlan = bindSelectedPlanToPersistedSourceAuthority(
@@ -2035,6 +2073,7 @@ export async function runDeterministicIntake(
     },
     attempt_cap_reached_without_commit: false,
     selection: {
+      mode: selectionMode,
       source_allowlist_count: allowSourcePostIds.length,
       instruction_allowlist_count: allowInstructionKeys.length,
       selected_cases: plan.cases.length,

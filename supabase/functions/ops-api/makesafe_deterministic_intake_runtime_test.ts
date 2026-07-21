@@ -600,6 +600,73 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
   assertEquals(store.emails[0].makesafe_scanned_at, NOW);
 });
 
+Deno.test("full-open processes the bounded page while exact-empty and mixed configs fail closed", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "full-open-1",
+      received_at: "2026-07-19T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-57001 Work Order: WO-57001",
+      body_content: "Address: 1 Open Way, Perth",
+    }),
+    email({
+      post_id: "full-open-2",
+      received_at: "2026-07-20T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-57002 Work Order: WO-57002",
+      body_content: "Address: 2 Open Way, Perth",
+    }),
+  );
+  const client = fakeClient(store);
+  const options = {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxSources: 4,
+    maxCases: 1,
+    approveDraft,
+  } as const;
+
+  const first = await runDeterministicIntake(client, options);
+  assertEquals(first.selection.mode, "full_open");
+  assertEquals(first.selection.source_allowlist_count, 0);
+  assertEquals(first.selection.instruction_allowlist_count, 0);
+  assertEquals(first.selection.selected_cases, 2);
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.totals.cases_attempted, 1);
+  assertEquals(first.totals.cases_deferred, 1);
+  assertEquals(first.totals.artifacts_created, 0);
+  assertEquals(first.totals.drafts_created, 0);
+
+  const second = await runDeterministicIntake(client, options);
+  assertEquals(second.totals.case_rows_created, 1);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+
+  await assertRejects(
+    () =>
+      runDeterministicIntake(fakeClient(baseStore()), {
+        dryRun: false,
+        selectionMode: "exact",
+        approveDraft,
+      }),
+    Error,
+    "exact mode requires a non-empty exact DB allowlist",
+  );
+  await assertRejects(
+    () =>
+      runDeterministicIntake(fakeClient(baseStore()), {
+        dryRun: false,
+        selectionMode: "full_open",
+        allowSourcePostIds: ["must-not-mix"],
+        approveDraft,
+      }),
+    Error,
+    "full_open mode requires empty exact allowlists",
+  );
+});
+
 Deno.test("live default N=1 exact allowlist cannot pick up unrelated backlog", async () => {
   const store = baseStore();
   for (const source of ["approved-one", "unapproved-backlog"]) {

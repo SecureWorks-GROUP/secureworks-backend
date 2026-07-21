@@ -60,11 +60,13 @@ Apply in order only after approval:
 2. `supabase/migrations/20260720000001_makesafe_intake_cases.sql`
 3. `supabase/migrations/20260720000002_makesafe_deterministic_intake_cutover.sql`
 4. `supabase/migrations/20260721000001_makesafe_intake_production_controls.sql`
+5. `supabase/migrations/20260721000002_makesafe_intake_full_open.sql`
 
 The intake migrations remain inert because
 `makesafe_cron_settings.intake_mode` defaults to `legacy`. The rollout controls
-default to a cap of one and empty exact allowlists, so an unapproved case cannot be
-selected.
+default to `selection_mode=exact`, a cap of one and empty exact allowlists, so an
+unapproved case cannot be selected. `full_open` is a separate explicit authority;
+it is never inferred from empty lists.
 
 Runtime components:
 
@@ -98,11 +100,14 @@ This package does not touch those query blocks and does not duplicate that PR.
 
 ## Bounded resumable runs
 
-A live scan is incremental and cannot drain an unrelated backlog. It reads its exact
-source/instruction allowlists and case cap from `makesafe_cron_settings`. The cap
-defaults to exactly one and is constrained to 1 through 10. Empty allowlists fail
-closed, and so does an allowlist that resolves no case; a partially resolved
-allowlist reports its unmatched entries and proceeds on the resolved set. The
+A live scan is incremental and cannot drain an unrelated backlog. It reads its
+selection mode and case cap from `makesafe_cron_settings`. The cap defaults to
+exactly one and is constrained to 1 through 10. In `exact` mode, empty allowlists
+fail closed, and so does an allowlist that resolves no case; a partially resolved
+allowlist reports its unmatched entries and proceeds on the resolved set. In
+`full_open` mode, both allowlists must be empty and the runtime processes the bounded
+cursor page directly. A mixed full-open plus allowlist configuration fails closed in
+both the database and runtime. The
 window read is capped per invocation and allowlisted sources are read by id, so
 read and plan cost stay flat as the mailbox grows. The cap defers work instead of
 dropping it: the sweep half of the read walks the whole window from a persisted
@@ -283,6 +288,7 @@ source and cap:
 ```sql
 update public.makesafe_cron_settings
 set intake_mode = 'deterministic',
+    deterministic_selection_mode = 'exact',
     deterministic_max_cases_per_run = 1,
     deterministic_source_allowlist = array['<one approved source post id>'],
     deterministic_instruction_allowlist = array[]::text[],
@@ -297,6 +303,29 @@ where id = true
 Require exactly one updated row. The next scan can select only that canonical case
 (and its correlated twin/resend evidence), up to one case. It cannot enter the
 legacy/model branch or pick up unrelated backlog during that invocation.
+
+After the exact N=1 loop is accepted and full-open activation is separately approved,
+widen with one atomic configuration change:
+
+```sql
+update public.makesafe_cron_settings
+set deterministic_selection_mode = 'full_open',
+    deterministic_max_cases_per_run = 1,
+    deterministic_source_allowlist = array[]::text[],
+    deterministic_instruction_allowlist = array[]::text[],
+    deterministic_rollout_changed_at = now(),
+    deterministic_rollout_changed_by = '<approved full-open operator>'
+where id = true
+  and intake_mode = 'deterministic'
+  and deterministic_selection_mode = 'exact'
+  and cardinality(deterministic_source_allowlist) = 1
+  and cardinality(deterministic_instruction_allowlist) = 0;
+```
+
+Require exactly one updated row. Keep the case cap at one during the bounded
+observation window. Full-open changes selection authority only: source reads remain
+capped, cursor-driven and zero-AI. An invalid selection mode, non-empty allowlist in
+full-open, or exact-empty deterministic configuration fails closed.
 
 ## One-switch rollback
 
