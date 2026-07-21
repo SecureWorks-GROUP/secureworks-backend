@@ -838,6 +838,62 @@ function replaceInstructionKey(
   return value.split(from).join(to);
 }
 
+function instructionKeyForCycle(instructionKey: string, cycle: number): string {
+  if (!/\/cycle:\d+$/.test(instructionKey)) {
+    throw new Error("deterministic instruction key has no cycle suffix");
+  }
+  return instructionKey.replace(/\/cycle:\d+$/, `/cycle:${cycle}`);
+}
+
+function cycleFromInstructionKey(instructionKey: string): number {
+  const match = instructionKey.match(/\/cycle:(\d+)$/);
+  if (!match) {
+    throw new Error("deterministic instruction key has no cycle suffix");
+  }
+  return Number(match[1]);
+}
+
+function rekeyCasePlan(
+  intakeCase: DeterministicCasePlan,
+  instructionKey: string,
+): DeterministicCasePlan {
+  const oldKey = intakeCase.instructionKey;
+  if (oldKey === instructionKey) return intakeCase;
+  const rewrite = (value: string) =>
+    replaceInstructionKey(value, oldKey, instructionKey);
+  return {
+    ...intakeCase,
+    instructionKey,
+    sourceClassifications: intakeCase.sourceClassifications.map((item) => ({
+      ...item,
+      instructionKey,
+    })),
+    recoveryCursor: {
+      ...intakeCase.recoveryCursor,
+      stagedArtifactKeys: intakeCase.recoveryCursor.stagedArtifactKeys.map(
+        rewrite,
+      ),
+      sideEffectKeys: {
+        ...intakeCase.recoveryCursor.sideEffectKeys,
+        draft: rewrite(intakeCase.recoveryCursor.sideEffectKeys.draft),
+        job: rewrite(intakeCase.recoveryCursor.sideEffectKeys.job),
+        pdfs: intakeCase.recoveryCursor.sideEffectKeys.pdfs.map(rewrite),
+        screenshots: intakeCase.recoveryCursor.sideEffectKeys.screenshots.map(
+          rewrite,
+        ),
+        invoices: intakeCase.recoveryCursor.sideEffectKeys.invoices.map(
+          rewrite,
+        ),
+        outboundMessages: intakeCase.recoveryCursor.sideEffectKeys
+          .outboundMessages.map(rewrite),
+        approvals: intakeCase.recoveryCursor.sideEffectKeys.approvals.map(
+          rewrite,
+        ),
+      },
+    },
+  };
+}
+
 function bindSelectedPlanToPersistedSourceAuthority(
   plan: DeterministicIntakePlan,
   exactSourcePostIds: readonly string[],
@@ -867,39 +923,15 @@ function bindSelectedPlanToPersistedSourceAuthority(
     if (oldKey !== stableKey) keyRemap.set(oldKey, stableKey);
     const stableFingerprint = authority.source_fingerprint ||
       intakeCase.instructionFingerprint;
-    const rewrite = (value: string) =>
-      replaceInstructionKey(value, oldKey, stableKey);
+    const rebound = rekeyCasePlan(intakeCase, stableKey);
     return {
-      ...intakeCase,
-      instructionKey: stableKey,
+      ...rebound,
       instructionFingerprint: stableFingerprint,
       // The source already belongs to this row. Its persisted lineage is
       // authoritative; a partial page may enrich it but cannot re-parent it.
       parentInstructionKey: null,
       parentRelation: authority.parent_relation ?? null,
       cycle: authority.cycle,
-      sourceClassifications: intakeCase.sourceClassifications.map((item) => ({
-        ...item,
-        instructionKey: stableKey,
-      })),
-      recoveryCursor: {
-        ...intakeCase.recoveryCursor,
-        stagedArtifactKeys: intakeCase.recoveryCursor.stagedArtifactKeys.map(
-          rewrite,
-        ),
-        sideEffectKeys: {
-          ...intakeCase.recoveryCursor.sideEffectKeys,
-          draft: rewrite(intakeCase.recoveryCursor.sideEffectKeys.draft),
-          job: rewrite(intakeCase.recoveryCursor.sideEffectKeys.job),
-          pdfs: intakeCase.recoveryCursor.sideEffectKeys.pdfs.map(rewrite),
-          screenshots: intakeCase.recoveryCursor.sideEffectKeys.screenshots.map(
-            rewrite,
-          ),
-          approvals: intakeCase.recoveryCursor.sideEffectKeys.approvals.map(
-            rewrite,
-          ),
-        },
-      },
     };
   });
   const relinked = keyRemap.size
@@ -1296,6 +1328,7 @@ async function resolveSelectedLineage(
   }
 
   const exactSources = new Set(exactSourcePostIds);
+  const keyRemap = new Map<string, string>();
   const cases = plan.cases.map((item) => {
     const missingExternalParent = item.parentInstructionKey &&
       !selectedKeys.has(item.parentInstructionKey) &&
@@ -1307,22 +1340,73 @@ async function resolveSelectedLineage(
       missingExternalParent && exactSelected && item.state === "exception" &&
       item.parentRelation === "sibling_of"
     ) {
+      // Exact N=1 authority promotes this review exception to a real root. Root
+      // promotion must rebase every deterministic key as well as clearing the
+      // ambient parent: the database assigns roots cycle 1 and rejects any key
+      // whose /cycle:N suffix disagrees with that trigger-assigned cycle.
+      const rootKey = instructionKeyForCycle(item.instructionKey, 1);
+      if (rootKey !== item.instructionKey) {
+        keyRemap.set(item.instructionKey, rootKey);
+      }
       return {
-        ...item,
+        ...rekeyCasePlan(item, rootKey),
         parentInstructionKey: null,
         parentRelation: null,
+        cycle: 1,
       };
     }
     return item;
   });
+  // Promoting a parent to cycle 1 collapses that lineage's entire cycle numbering.
+  // Re-pointing a selected revision/reopen child at the rebased parent is not
+  // enough: the child's own /cycle:N suffix was computed against the pre-promotion
+  // depth, while the trigger now derives the child's cycle from the collapsed
+  // parent, so the child insert would hit the same instruction-key cycle check
+  // this promotion targets. Shift every descendant's key suffix and cycle by the
+  // same collapse delta, cascading through grandchildren whose parents were
+  // themselves rebased.
+  let relinked = cases;
+  if (keyRemap.size) {
+    const remap = new Map(keyRemap);
+    for (let unresolved = true; unresolved;) {
+      unresolved = false;
+      relinked = relinked.map((item) => {
+        const parentKey = item.parentInstructionKey;
+        if (!parentKey) return item;
+        const newParentKey = remap.get(parentKey);
+        if (!newParentKey || newParentKey === parentKey) return item;
+        const delta = cycleFromInstructionKey(parentKey) -
+          cycleFromInstructionKey(newParentKey);
+        const childCycle = cycleFromInstructionKey(item.instructionKey) - delta;
+        const childKey = instructionKeyForCycle(
+          item.instructionKey,
+          childCycle,
+        );
+        if (childKey !== item.instructionKey) {
+          remap.set(item.instructionKey, childKey);
+          unresolved = true;
+        }
+        return {
+          ...rekeyCasePlan(item, childKey),
+          parentInstructionKey: newParentKey,
+          cycle: childCycle,
+        };
+      });
+    }
+  }
+  const selectedResolvedKeys = new Set(
+    relinked.map((item) => item.instructionKey),
+  );
   const resolvedPlan = {
     ...plan,
-    cases,
-    sourceClassifications: cases.flatMap((item) => item.sourceClassifications),
+    cases: relinked,
+    sourceClassifications: relinked.flatMap((item) =>
+      item.sourceClassifications
+    ),
   };
-  const missingParents = cases.filter((item) =>
+  const missingParents = relinked.filter((item) =>
     item.parentInstructionKey &&
-    !selectedKeys.has(item.parentInstructionKey) &&
+    !selectedResolvedKeys.has(item.parentInstructionKey) &&
     !persisted.has(item.parentInstructionKey)
   );
   return { plan: resolvedPlan, missingParents };

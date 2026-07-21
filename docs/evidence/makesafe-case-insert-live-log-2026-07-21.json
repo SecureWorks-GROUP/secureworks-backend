@@ -1,0 +1,21 @@
+{
+  "canary_scan_generated_at": "2026-07-21T08:20:13.660Z",
+  "failed_request": {
+    "table": "public.makesafe_intake_cases",
+    "http_status": 400,
+    "postgres_error_code": "23514",
+    "error_class": "check_violation"
+  },
+  "selected_plan": {
+    "instruction_key_sha256": "380560e971794b6979070c38e1097fa33adb1507cf54072fe1003a853dea5118",
+    "instruction_cycle_suffix": 3,
+    "normalised_parent_relation": null
+  },
+  "discarded_ambient_parent_lookup": {
+    "instruction_key_sha256": "129e0247fb16c030f117e3162a92ee2f5d9a45278e35d0f809f7ba68f2abc6f1",
+    "instruction_cycle_suffix": 1,
+    "persisted_match_found": false
+  },
+  "proxy_status": "PostgREST; error=23514",
+  "business_identifiers_redacted": true
+}

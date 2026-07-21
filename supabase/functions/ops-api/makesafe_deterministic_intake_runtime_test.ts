@@ -9,7 +9,11 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { runDeterministicIntake } from "./makesafe_deterministic_intake_runtime.ts";
+import {
+  _readInputsForTest,
+  runDeterministicIntake,
+} from "./makesafe_deterministic_intake_runtime.ts";
+import { buildDeterministicIntakePlan } from "./makesafe_deterministic_intake.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 
@@ -165,10 +169,43 @@ class FakeQuery {
           error: { code: "23505", message: "duplicate key value" },
         };
       }
-      const row = {
-        id: `${this.table}-${this.store[this.table].length + 1}`,
-        ...this.payload,
-      };
+      const id = `${this.table}-${this.store[this.table].length + 1}`;
+      let payload = this.payload;
+      if (this.table === "makesafe_intake_cases") {
+        const parent = this.payload.parent_case_id
+          ? this.store[this.table].find((candidate) =>
+            candidate.org_id === this.payload.org_id &&
+            candidate.id === this.payload.parent_case_id
+          )
+          : null;
+        if (this.payload.parent_case_id && !parent) {
+          return {
+            data: [],
+            error: { code: "23503", message: "lineage parent does not exist" },
+          };
+        }
+        const cycle = parent
+          ? this.payload.parent_relation === "reopen_of"
+            ? (parent.cycle ?? 1) + 1
+            : parent.cycle ?? 1
+          : this.payload.cycle ?? 1;
+        if (!String(this.payload.instruction_key).endsWith(`/cycle:${cycle}`)) {
+          return {
+            data: [],
+            error: {
+              code: "23514",
+              message:
+                "makesafe_intake_cases_instruction_key_cycle_check violated",
+            },
+          };
+        }
+        payload = {
+          ...this.payload,
+          cycle,
+          lineage_id: parent ? parent.lineage_id ?? parent.id : id,
+        };
+      }
+      const row = { id, ...payload };
       this.store[this.table].push(row);
       return { data: [row], error: null };
     }
@@ -1720,18 +1757,27 @@ Deno.test("persisted source authority survives capped-cursor sibling re-key acro
 Deno.test("live-shaped fresh exception loop converges across cron rerun and same-instruction mail", async () => {
   const store = baseStore();
   store.emails.push(
-    email({
-      post_id: "loop-noise",
-      received_at: "2026-07-01T01:00:00.000Z",
-      subject: "FYI",
-      body_content: "No work instruction.",
-    }),
-    // Ambient distinct-PO work makes the exact fresh source below a sibling in
-    // the full mailbox plan. Exact N=1 authority must not persist this parent.
+    // The real canary's exact source was planned after two earlier reopen groups.
+    // It was therefore a cycle-3 sibling before N=1 authority promoted it to a
+    // root. Keep all four sources in the capped page to reproduce that shape.
     email({
       post_id: "loop-ambient-po",
-      received_at: "2026-07-05T01:00:00.000Z",
+      received_at: "2026-07-01T01:00:00.000Z",
       subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-A",
+      body_content: "Address: 5 Loop Street, Perth",
+    }),
+    email({
+      post_id: "loop-ambient-reopen-1",
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-C",
+      body_content: "Address: 5 Loop Street, Perth",
+    }),
+    email({
+      post_id: "loop-ambient-reopen-2",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-D",
       body_content: "Address: 5 Loop Street, Perth",
     }),
     email({
@@ -1751,6 +1797,26 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
     size_bytes: 1024,
   });
   const client = fakeClient(store);
+  const plannedInputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["loop-selected-po"],
+    cursor: null,
+  });
+  const preAuthorityPlan = buildDeterministicIntakePlan(
+    plannedInputs.sources,
+    plannedInputs.profiles,
+  );
+  const preAuthoritySelected = preAuthorityPlan.cases.find((item) =>
+    item.sourcePostIds.includes("loop-selected-po")
+  );
+  assert(preAuthoritySelected);
+  assertEquals(preAuthoritySelected.cycle, 3);
+  assertEquals(preAuthoritySelected.parentRelation, "sibling_of");
+  assert(/\/cycle:3$/.test(preAuthoritySelected.instructionKey));
+
   const options = {
     dryRun: false,
     days: 30,
@@ -1778,7 +1844,22 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
   const stableKeyHash = first.proposed_cases?.[0].case_key_sha256;
   assert(stableKeyHash);
   assertEquals(store.makesafe_intake_cases.length, 1);
-  assertEquals(store.makesafe_intake_cases[0].state, "exception");
+  const persistedRoot = store.makesafe_intake_cases[0];
+  assertEquals(persistedRoot.state, "exception");
+  assertEquals(persistedRoot.cycle, 1);
+  assert(/\/cycle:1$/.test(persistedRoot.instruction_key));
+  assertEquals(
+    persistedRoot.recovery_cursor.sideEffectKeys.draft,
+    `draft:${persistedRoot.instruction_key}`,
+  );
+  assertEquals(
+    persistedRoot.recovery_cursor.sideEffectKeys.job,
+    `job:${persistedRoot.instruction_key}`,
+  );
+  assertEquals(
+    persistedRoot.recovery_cursor.sideEffectKeys.approvals,
+    [`approval:${persistedRoot.instruction_key}`],
+  );
   assertEquals(store.makesafe_intake_case_sources.length, 1);
 
   // Immediate cron rerun: the pending review exception is fully inert.
@@ -1835,6 +1916,127 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
   assertEquals(store.makesafe_intake_case_sources.length, 2);
   assertEquals(store.makesafe_intake_artifacts.length, 0);
   assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+Deno.test("exact selection promoting a cycle-N sibling rebases its selected reopen child to the collapsed cycle", async () => {
+  const store = baseStore();
+  store.emails.push(
+    // Same lineage shape as the single-case canary, but the exact selection now
+    // also pulls the promoted sibling's own reopen child. The sibling is a cycle-3
+    // review exception and the reopen is its cycle-4 child.
+    email({
+      post_id: "child-ambient-po",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-A",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-ambient-reopen-1",
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-C",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-ambient-reopen-2",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-D",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-selected-po",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-B",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-selected-reopen",
+      received_at: "2026-07-12T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-E",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-child-selected",
+    email_id: "child-selected-po",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/child-selected.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const plannedInputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 5,
+    seedPostIds: ["child-selected-po", "child-selected-reopen"],
+    cursor: null,
+  });
+  const preAuthorityPlan = buildDeterministicIntakePlan(
+    plannedInputs.sources,
+    plannedInputs.profiles,
+  );
+  const promotedSibling = preAuthorityPlan.cases.find((item) =>
+    item.sourcePostIds.includes("child-selected-po")
+  );
+  const reopenChild = preAuthorityPlan.cases.find((item) =>
+    item.sourcePostIds.includes("child-selected-reopen")
+  );
+  assert(promotedSibling);
+  assert(reopenChild);
+  // Before N=1 authority: the fresh sibling is a cycle-3 exception and the reopen
+  // is its cycle-4 child. A naive promotion to cycle 1 would collapse the sibling
+  // but leave the child's /cycle:4 suffix disagreeing with the trigger-derived
+  // cycle, hitting the exact instruction-key cycle check this fix targets.
+  assertEquals(promotedSibling.cycle, 3);
+  assertEquals(promotedSibling.parentRelation, "sibling_of");
+  assert(/\/cycle:3$/.test(promotedSibling.instructionKey));
+  assertEquals(reopenChild.cycle, 4);
+  assertEquals(reopenChild.parentRelation, "reopen_of");
+  assertEquals(
+    reopenChild.parentInstructionKey,
+    promotedSibling.instructionKey,
+  );
+  assert(/\/cycle:4$/.test(reopenChild.instructionKey));
+
+  const run = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 5,
+    maxCases: 2,
+    allowSourcePostIds: ["child-selected-po", "child-selected-reopen"],
+    includeSanitizedCases: true,
+    approveDraft,
+  });
+
+  // Both cases commit with no cycle-check failure: the promoted sibling roots the
+  // lineage at cycle 1 and its selected reopen child rebases to cycle 2, the cycle
+  // the trigger derives from the collapsed parent.
+  assertEquals(run.selection.selected_cases, 2);
+  assertEquals(run.totals.write_failures, 0);
+  assertEquals(run.totals.cases_failed, 0);
+  assertEquals(run.totals.case_rows_created, 2);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+
+  const persistedRoot = store.makesafe_intake_cases.find((row) =>
+    row.parent_relation == null
+  );
+  const persistedChild = store.makesafe_intake_cases.find((row) =>
+    row.parent_relation === "reopen_of"
+  );
+  assert(persistedRoot);
+  assert(persistedChild);
+  assertEquals(persistedRoot.cycle, 1);
+  assert(/\/cycle:1$/.test(persistedRoot.instruction_key));
+  assertEquals(persistedChild.cycle, 2);
+  assert(/\/cycle:2$/.test(persistedChild.instruction_key));
+  assertEquals(persistedChild.parent_case_id, persistedRoot.id);
+  assertEquals(persistedChild.lineage_id, persistedRoot.lineage_id);
 });
 
 Deno.test("semantic lineage parent fails identically in observe and live before every business write", async () => {

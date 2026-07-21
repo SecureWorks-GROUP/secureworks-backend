@@ -1,0 +1,26 @@
+[
+  {
+    "tablename": "makesafe_intake_case_events",
+    "policyname": "service_role_all_makesafe_intake_case_events",
+    "roles": "{service_role}",
+    "cmd": "ALL"
+  },
+  {
+    "tablename": "makesafe_intake_case_sources",
+    "policyname": "service_role_all_makesafe_intake_case_sources",
+    "roles": "{service_role}",
+    "cmd": "ALL"
+  },
+  {
+    "tablename": "makesafe_intake_cases",
+    "policyname": "service_role_all_makesafe_intake_cases",
+    "roles": "{service_role}",
+    "cmd": "ALL"
+  },
+  {
+    "tablename": "makesafe_intake_health",
+    "policyname": "service_role_all",
+    "roles": "{service_role}",
+    "cmd": "ALL"
+  }
+]

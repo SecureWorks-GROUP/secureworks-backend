@@ -1,0 +1,11 @@
+{
+  "effective_mode": "legacy",
+  "case_rows": 1,
+  "source_rows": 4,
+  "artifact_rows": 2,
+  "deterministic_draft_rows": 1,
+  "canonical_cases_with_jobs": 0,
+  "extraction_status": "degraded",
+  "degraded_reason": "deterministic_write_failure",
+  "last_scan_model_calls": 0
+}
