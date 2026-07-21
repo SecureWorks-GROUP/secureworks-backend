@@ -1,8 +1,12 @@
 import {
   assertEquals,
   assertRejects,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _updateMakesafeJobFamily } from "./index.ts";
+import {
+  _assertReviewedFamilyConsistency,
+  _updateMakesafeJobFamily,
+} from "./index.ts";
 
 type Store = {
   job: any;
@@ -130,6 +134,70 @@ Deno.test("reviewed family correction refuses stale before value", async () => {
   assertEquals(store.jobUpdates, []);
   assertEquals(store.detailUpdates, []);
   assertEquals(store.events, []);
+});
+
+Deno.test("reviewed family consistency: no override is always allowed", () => {
+  _assertReviewedFamilyConsistency(null, null, false, false);
+  _assertReviewedFamilyConsistency(null, "roof_report", false, true);
+  _assertReviewedFamilyConsistency(null, null, true, false);
+});
+
+Deno.test("reviewed family consistency: report family requires the matching report type", () => {
+  _assertReviewedFamilyConsistency("roof_report", "roof_report", false, true);
+  _assertReviewedFamilyConsistency("assessment_report_quote", "assessment_report", false, true);
+});
+
+Deno.test("reviewed family consistency: report family on a physical/null type is rejected", () => {
+  assertThrows(
+    () => _assertReviewedFamilyConsistency("roof_report", null, false, false),
+    Error,
+    "requires report_type 'roof_report'",
+  );
+  assertThrows(
+    () => _assertReviewedFamilyConsistency("assessment_report_quote", null, false, false),
+    Error,
+    "requires report_type 'assessment_report'",
+  );
+  // roof family with a non-matching (assessment) report type is still a mismatch
+  assertThrows(
+    () => _assertReviewedFamilyConsistency("roof_report", "assessment_report", false, true),
+    Error,
+    "requires report_type 'roof_report'",
+  );
+});
+
+Deno.test("reviewed family consistency: physical family on a report-only type is rejected", () => {
+  assertThrows(
+    () => _assertReviewedFamilyConsistency("general_makesafe", "roof_report", false, true),
+    Error,
+    "is a physical make-safe",
+  );
+  assertThrows(
+    () => _assertReviewedFamilyConsistency("temp_fence_makesafe", "assessment_report", false, true),
+    Error,
+    "is a physical make-safe",
+  );
+});
+
+Deno.test("reviewed family consistency: physical family on a physical primary is allowed", () => {
+  _assertReviewedFamilyConsistency("general_makesafe", null, false, false);
+  _assertReviewedFamilyConsistency("temp_fence_makesafe", "make_safe", false, false);
+});
+
+Deno.test("reviewed family consistency: combined split rejects a report family, allows a physical one", () => {
+  assertThrows(
+    () => _assertReviewedFamilyConsistency("roof_report", null, true, false),
+    Error,
+    "belongs to the secondary card",
+  );
+  assertThrows(
+    () => _assertReviewedFamilyConsistency("assessment_report_quote", null, true, false),
+    Error,
+    "belongs to the secondary card",
+  );
+  // a physical family override still preserves the deliberately physical primary
+  _assertReviewedFamilyConsistency("general_makesafe", null, true, false);
+  _assertReviewedFamilyConsistency("temp_fence_makesafe", null, true, false);
 });
 
 Deno.test("reconciliation approval flags remain explicitly privileged and opt-in", async () => {

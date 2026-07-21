@@ -13310,6 +13310,32 @@ async function _crossLinkCombinedCards(
   await link(secondary.id, secondary, primary)
 }
 
+function assertReviewedFamilyConsistency(
+  reviewedFamily: string | null,
+  effectiveReportType: string | null,
+  splitObligation: boolean,
+  primaryIsReportOnly: boolean,
+): void {
+  if (!reviewedFamily) return
+  const reviewedFamilyReportType = _reportTypeForJobFamily(reviewedFamily)
+  if (splitObligation) {
+    if (reviewedFamilyReportType) {
+      throw new ApiError(`reviewed makesafe_job_family '${reviewedFamily}' is a report family, but this draft auto-splits into a physical make-safe primary; the report family belongs to the secondary card`, 400)
+    }
+    return
+  }
+  if (reviewedFamilyReportType) {
+    if (effectiveReportType !== reviewedFamilyReportType) {
+      throw new ApiError(`reviewed makesafe_job_family '${reviewedFamily}' requires report_type '${reviewedFamilyReportType}', but the effective report_type is '${effectiveReportType || 'null'}'`, 400)
+    }
+    return
+  }
+  if (primaryIsReportOnly) {
+    throw new ApiError(`reviewed makesafe_job_family '${reviewedFamily}' is a physical make-safe, but the effective report_type '${effectiveReportType}' is report-only`, 400)
+  }
+}
+export const _assertReviewedFamilyConsistency = assertReviewedFamilyConsistency
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
@@ -13342,6 +13368,7 @@ async function approveIntakeDraft(client: any, body: any) {
   // never attach and the physical make-safe would be lost.
   const splitObligation = combinedSplitObligation(extraction)
   const primaryIsReportOnly = splitObligation ? false : isReportOnlyDraft
+  assertReviewedFamilyConsistency(reviewedFamily, effectiveReportType, !!splitObligation, primaryIsReportOnly)
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
 
   const approvedFields = {
