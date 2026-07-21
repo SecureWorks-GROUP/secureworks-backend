@@ -1535,7 +1535,9 @@ function deterministicSplitObligation(
 // Mirrors approveIntakeDraft's primaryIsReportOnly: a report family is report-only
 // UNLESS it carries a split obligation, in which case the primary is physical and a
 // servable work-order PDF is required before any storage/artifact/draft write.
-function deterministicPrimaryIsReportOnly(plan: DeterministicCasePlan): boolean {
+function deterministicPrimaryIsReportOnly(
+  plan: DeterministicCasePlan,
+): boolean {
   if (deterministicSplitObligation(plan)) return false;
   return plan.identity.jobFamily === "roof_report" ||
     plan.identity.jobFamily === "assessment_report_quote";
