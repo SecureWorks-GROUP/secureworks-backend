@@ -95,6 +95,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { logQueryErrors } from '../_shared/pgrest.ts'
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
@@ -6542,6 +6543,42 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
 // OPS DASHBOARD — READ ACTIONS
 // ════════════════════════════════════════════════════════════
 
+// The calendar_events columns ops_summary's today_schedule actually emits — kept
+// in lockstep with the map in the return block below. Deliberately NOT reusing
+// CAL_LIGHT_COLUMNS: that list is maintained for the calendar endpoint's own
+// consumers and is a superset here, so tracking it would re-fetch columns this
+// action never reads. Source of truth for the names is the LIVE calendar_events
+// view, NOT the migrations — the view has drifted ahead of them. See AGENTS.md.
+export const OPS_SUMMARY_SCHEDULE_COLUMNS = [
+  'assignment_id', 'job_id', 'client_name', 'site_suburb', 'site_address', 'job_type',
+  'assignment_type', 'crew_name', 'assigned_to', 'start_time', 'end_time',
+  'assignment_status', 'job_status',
+].join(', ')
+
+export const OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS = [
+  'id', 'client_name', 'site_suburb', 'type', 'days_waiting',
+].join(', ')
+
+export const OPS_SUMMARY_ACTIVE_JOB_COLUMNS = ['id', 'status', 'type'].join(', ')
+
+export function toOpsSummaryScheduleEvent(ev: any) {
+  return {
+    assignment_id: ev.assignment_id,
+    job_id: ev.job_id,
+    client_name: ev.client_name,
+    site_suburb: ev.site_suburb,
+    site_address: ev.site_address,
+    job_type: ev.job_type,
+    assignment_type: ev.assignment_type,
+    crew_name: ev.crew_name,
+    assigned_to: ev.assigned_to,
+    start_time: ev.start_time,
+    end_time: ev.end_time,
+    assignment_status: ev.assignment_status,
+    job_status: ev.job_status,
+  }
+}
+
 async function opsSummary(client: any) {
   const now = new Date()
   const todayStr = now.toISOString().slice(0, 10)
@@ -6568,9 +6605,14 @@ async function opsSummary(client: any) {
     scopePending,
     upcomingAssignments,
   ] = await Promise.all([
-    // Today's schedule from calendar_events view
+    // Today's schedule from calendar_events view.
+    // Lean projection, not select('*'): the view carries scope_json (~100 kB/row
+    // avg, 2.6 MB peak — see the calendar OOM note further down) and pricing_json,
+    // neither of which ops_summary reads. These 13 columns are exactly the keys
+    // the today_schedule map below emits; the filters (org_id, scheduled_date,
+    // assignment_status) and the start_time sort need no projection of their own.
     client.from('calendar_events')
-      .select('*')
+      .select(OPS_SUMMARY_SCHEDULE_COLUMNS)
       .eq('org_id', DEFAULT_ORG_ID)
       .eq('scheduled_date', todayStr)
       .neq('assignment_status', 'cancelled')
@@ -6583,9 +6625,10 @@ async function opsSummary(client: any) {
       .lte('scheduled_date', weekEnd.toISOString().slice(0, 10))
       .neq('status', 'cancelled'),
 
-    // Jobs needing scheduling
+    // Jobs needing scheduling. The view may grow; keep this bounded to the five
+    // fields consumed by the attention-item builder below.
     client.from('jobs_needing_scheduling')
-      .select('*')
+      .select(OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS)
       .eq('org_id', DEFAULT_ORG_ID)
       .not('job_number', 'is', null)
       .limit(20),
@@ -6596,7 +6639,7 @@ async function opsSummary(client: any) {
     // dropped jobs in `awaiting_deposit, order_materials, awaiting_supplier, order_confirmed,
     // partially_accepted, schedule_install, rectification, final_payment, get_review`.
     client.from('jobs')
-      .select('id, status, type, accepted_at, completed_at, pricing_json')
+      .select(OPS_SUMMARY_ACTIVE_JOB_COLUMNS)
       .eq('org_id', DEFAULT_ORG_ID)
       .not('legacy', 'is', true)
       .in('status', [
@@ -6670,6 +6713,14 @@ async function opsSummary(client: any) {
       .eq('status', 'scheduled')
       .gte('scheduled_date', todayStr)
       .lte('scheduled_date', new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)),
+  ])
+
+  // Explicit projections turn schema drift into PostgREST 400s. Keep the legacy
+  // partial-response behaviour, but never let those failures look like a quiet day.
+  logQueryErrors([
+    ['ops_summary.today_schedule', todaySchedule],
+    ['ops_summary.needs_scheduling', needsScheduling],
+    ['ops_summary.active_jobs', allActiveJobs],
   ])
 
   // ── Stat Cards ──
@@ -6897,21 +6948,7 @@ async function opsSummary(client: any) {
       quotes_pending: quotePendingCount,
       pipeline: pipelineCounts,
     },
-    today_schedule: (todaySchedule.data || []).map((ev: any) => ({
-      assignment_id: ev.assignment_id,
-      job_id: ev.job_id,
-      client_name: ev.client_name,
-      site_suburb: ev.site_suburb,
-      site_address: ev.site_address,
-      job_type: ev.job_type,
-      assignment_type: ev.assignment_type,
-      crew_name: ev.crew_name,
-      assigned_to: ev.assigned_to,
-      start_time: ev.start_time,
-      end_time: ev.end_time,
-      assignment_status: ev.assignment_status,
-      job_status: ev.job_status,
-    })),
+    today_schedule: (todaySchedule.data || []).map(toOpsSummaryScheduleEvent),
     attention,
     kpis: {
       jobs_completed_month: (monthCompletedJobs.data || []).length,
@@ -7132,33 +7169,178 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
   return { events: lightEvents, deliveries: deliveries || [], readiness, truncated }
 }
 
+// ── Pipeline pricing projection ─────────────────────────────────────────────
+// jobs.pricing_json is a full quote blob, and pipeline pulls one for EVERY active
+// job (~hundreds of rows) only to read four values out of it — the blob is then
+// stripped from the response by the enrich map below, so it never reaches ops.html.
+// Project just those four via PostgREST JSON paths and leave the blob on the DB.
+//
+// `->` returns the JSON value verbatim (not `->>`, which would coerce to text and
+// turn a numeric total into a string), so each alias deserialises to exactly the
+// value the old `j.pricing_json?.<key>` chain produced. A missing key yields SQL
+// NULL → null instead of undefined, which is indistinguishable downstream: both
+// aliases only ever feed `||` chains and Array.isArray().
+//
+// A `jobs.quoted_value` migration now exists, but the column is not yet applied in
+// production (read-only verification on 2026-07-20 returned 42703). Keeping these
+// paths avoids coupling this read to migration/deploy order. Both total paths stay
+// load-bearing for response compatibility: the existing value chain falls back
+// from totalIncGST to total.
+export const PIPELINE_PRICING_PROJECTION = [
+  'pj_total_inc:pricing_json->totalIncGST',
+  'pj_total:pricing_json->total',
+  'pj_split_neighbours:pricing_json->neighbour_splits->neighbours',
+  'pj_job_neighbours:pricing_json->job->neighbours',
+]
+
+// The alias half of each entry, derived rather than restated: adding a projection
+// key must never leak the alias into the response shape. Fail at module load if a
+// future entry omits its alias rather than silently leaking a truncated key.
+function pipelinePricingProjectionParts(projection: string) {
+  const separator = projection.indexOf(':')
+  if (separator <= 0 || separator === projection.length - 1) {
+    throw new Error(`Invalid pipeline pricing projection: ${projection}`)
+  }
+  return [projection.slice(0, separator), projection.slice(separator + 1)] as const
+}
+
+export const PIPELINE_PRICING_ALIASES = PIPELINE_PRICING_PROJECTION.map(
+  (projection) => pipelinePricingProjectionParts(projection)[0],
+)
+
+export function pipelinePricingProjectionValues(row: any) {
+  return {
+    value: row.pj_total_inc || row.pj_total || 0,
+    neighbours: row.pj_split_neighbours || row.pj_job_neighbours,
+  }
+}
+
+// ── Malformed-blob fallback ─────────────────────────────────────────────────
+// A row whose pricing_json is a JSON-encoded STRING (double-encoded write, or a
+// text-typed value) makes every path above return SQL NULL, dropping its fencing
+// neighbour badge — the case the old `typeof pricing_json === 'string' ?
+// JSON.parse(...)` branch caught. That branch fed the fencing neighbour count ONLY;
+// the old `value` chain read properties straight off the raw column, so a string
+// blob yielded 0 there. This fallback therefore recovers neighbours and nothing
+// else — correcting `value` would be a behaviour change, not a perf change.
+// A read-only comparison over all 938 active rows on 2026-07-20 found zero such
+// rows (zero value, value-type, and neighbour mismatches), so this path is expected
+// to return nothing; it exists so a future bad write degrades to the old behaviour
+// instead of to wrong numbers.
+//
+// Detection is server-side: the same base filters as the main read, fencing only,
+// a non-null/non-empty blob, and all four projected paths NULL. The empty-object
+// exclusion is load-bearing: 56 live fencing rows match the null-path predicates,
+// but every blob is `{}` (112 bytes total) and cannot contain neighbours. Excluding
+// them left zero candidates in the read-only 2026-07-20 check. A returned non-empty
+// candidate is fetched because parsing it is necessary to distinguish a malformed
+// string from an unusual object and recover any neighbour list.
+export const PIPELINE_PRICING_NULL_PATHS = PIPELINE_PRICING_PROJECTION.map(
+  (projection) => pipelinePricingProjectionParts(projection)[1],
+)
+
+// Hard cap on the probe. The null-path predicates describe today's blob shape, not
+// an invariant: if the fencing quote format ever stops writing those exact paths,
+// every non-empty fencing row becomes a candidate and an uncapped probe would refetch
+// full blobs up to the PostgREST 1000-row ceiling on every pipeline request, silently
+// restoring the payload this projection removes. Hitting the cap is a data problem to
+// clean up separately, so it warns loudly rather than degrading quietly.
+export const PIPELINE_MALFORMED_PRICING_LIMIT = 100
+
+export function pipelinePricingFallbackNeighbours(blob: any) {
+  let pj = blob
+  if (typeof pj === 'string') {
+    try {
+      pj = JSON.parse(pj)
+    } catch (_) {
+      return null
+    }
+  }
+  if (!pj || typeof pj !== 'object') return null
+  const ns = pj.neighbour_splits?.neighbours || pj.job?.neighbours
+  return Array.isArray(ns) ? ns : null
+}
+
+export function stripPipelinePricingAliases(row: any) {
+  const leanRow: Record<string, any> = { ...row }
+  for (const alias of PIPELINE_PRICING_ALIASES) delete leanRow[alias]
+  return leanRow
+}
+
 async function pipeline(client: any, params: URLSearchParams) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
   const search = params.get('search') || ''
 
-  let query = client.from('jobs')
-    .select('id, type, status, client_name, client_phone, site_address, site_suburb, pricing_json, ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required')
-    .eq('org_id', DEFAULT_ORG_ID)
-    .or('legacy.is.null,legacy.eq.false')
-    .or('job_number.not.is.null,status.eq.draft')
+  // Single source of truth for the row set, shared with the malformed-blob probe
+  // below so the two reads can never drift apart.
+  const applyJobFilters = (q: any) => {
+    let scoped = q
+      .eq('org_id', DEFAULT_ORG_ID)
+      .or('legacy.is.null,legacy.eq.false')
+      .or('job_number.not.is.null,status.eq.draft')
+    if (statusFilter) {
+      scoped = scoped.eq('status', statusFilter)
+    } else {
+      // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
+      scoped = scoped.in('status', [
+        'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
+        'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
+        'schedule_install', 'scheduled', 'in_progress', 'rectification',
+        'complete', 'final_payment', 'invoiced', 'get_review', 'archived'
+      ])
+    }
+    if (typeFilter) scoped = scoped.eq('type', typeFilter)
+    return scoped
+  }
+
+  // The projection sits exactly where `pricing_json` used to, so that stripping the
+  // aliases below restores the previous key order — the response stays byte-identical.
+  const query = applyJobFilters(client.from('jobs')
+    .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
+      PIPELINE_PRICING_PROJECTION.join(', ') +
+      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required'))
     .order('updated_at', { ascending: false })
 
-  if (statusFilter) {
-    query = query.eq('status', statusFilter)
-  } else {
-    // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
-    query = query.in('status', [
-      'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit', 'deposit',
-      'approvals', 'order_materials', 'processing', 'awaiting_supplier', 'order_confirmed',
-      'schedule_install', 'scheduled', 'in_progress', 'rectification',
-      'complete', 'final_payment', 'invoiced', 'get_review', 'archived'
-    ])
+  let malformedPricingQuery = applyJobFilters(client.from('jobs').select('id, pricing_json'))
+    .eq('type', 'fencing')
+    .not('pricing_json', 'is', null)
+    .not('pricing_json', 'eq', '{}')
+  for (const path of PIPELINE_PRICING_NULL_PATHS) {
+    malformedPricingQuery = malformedPricingQuery.is(path, null)
   }
-  if (typeFilter) query = query.eq('type', typeFilter)
+  malformedPricingQuery = malformedPricingQuery
+    .order('updated_at', { ascending: false })
+    .limit(PIPELINE_MALFORMED_PRICING_LIMIT)
 
-  const { data: jobs, error } = await query
+  const [{ data: jobs, error }, malformedPricingRes] = await Promise.all([
+    query,
+    // A non-fencing endpoint filter can skip the defensive query entirely.
+    typeFilter && typeFilter !== 'fencing'
+      ? Promise.resolve({ data: [], error: null })
+      : malformedPricingQuery,
+  ])
   if (error) throw error
+
+  // Degrade to the projection (current behaviour) rather than 500 the whole board
+  // if this purely defensive probe fails.
+  const malformedNeighbourMap: Record<string, any[]> = {}
+  if (malformedPricingRes?.error) {
+    console.error('[pipeline] malformed pricing_json probe failed:', malformedPricingRes.error)
+  } else {
+    const malformedRows = malformedPricingRes?.data || []
+    if (malformedRows.length >= PIPELINE_MALFORMED_PRICING_LIMIT) {
+      console.warn(
+        `[pipeline] malformed pricing_json probe hit its ${PIPELINE_MALFORMED_PRICING_LIMIT}-row cap — ` +
+        'pricing_json shape has likely drifted from the projected paths; neighbours beyond the cap ' +
+        'are not recovered. Investigate and clean up the malformed rows.',
+      )
+    }
+    for (const row of malformedRows) {
+      const recovered = pipelinePricingFallbackNeighbours(row.pricing_json)
+      if (recovered) malformedNeighbourMap[row.id] = recovered
+    }
+  }
 
   if (!jobs || jobs.length === 0) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
@@ -7251,17 +7433,15 @@ async function pipeline(client: any, params: URLSearchParams) {
   }
 
   const enriched = jobs.map((j: any) => {
-    const value = j.pricing_json?.totalIncGST || j.pricing_json?.total || 0
-    // Neighbour count for fencing shared fence badge
+    const { value, neighbours } = pipelinePricingProjectionValues(j)
+    // Neighbour count for fencing shared fence badge. Rows whose blob is a
+    // double-encoded string are recovered above via the malformed-blob probe, which
+    // reproduces the old JSON.parse(string) branch for exactly those rows. `value`
+    // stays on the projection: the old chain never used that parsed blob.
     let neighbourCount = 0
     if (j.type === 'fencing') {
-      if (j.pricing_json) {
-        try {
-          const pj = typeof j.pricing_json === 'string' ? JSON.parse(j.pricing_json) : j.pricing_json
-          const ns = pj?.neighbour_splits?.neighbours || pj?.job?.neighbours
-          if (Array.isArray(ns)) neighbourCount = ns.length
-        } catch (_) {}
-      }
+      const fencingNeighbours = malformedNeighbourMap[j.id] || neighbours
+      if (Array.isArray(fencingNeighbours)) neighbourCount = fencingNeighbours.length
       if (neighbourCount === 0) neighbourCount = neighbourContactMap[j.id] || 0
     }
     const stageStart = j.status === 'accepted' ? j.accepted_at
@@ -7277,8 +7457,10 @@ async function pipeline(client: any, params: URLSearchParams) {
 
     const councilInfo = councilStatusMap[j.id] || null
     const emailActivity = emailActivityMap[j.id] || null
-    // Strip pricing_json from response — value already extracted
-    const { pricing_json: _p, ...jLite } = j
+    // Strip the pricing projection from the response — value/neighbourCount already
+    // extracted. Previously this dropped the whole `pricing_json` blob; the aliases
+    // occupy its slot in the select, so the surviving key order is unchanged.
+    const jLite = stripPipelinePricingAliases(j)
     return {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,

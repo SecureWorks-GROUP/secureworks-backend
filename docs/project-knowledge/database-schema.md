@@ -22,7 +22,7 @@
 
 ## Key Tables
 - **jobs** — central entity. Has: client_name, site_address, site_suburb, status, type, scope_json, pricing_json, job_number, xero_contact_id, ghl_opportunity_id, ghl_contact_id. Note the live names: `site_address`/`site_suburb`/`type`, NOT `address`/`suburb`/`job_type`.
-  - **quoted_value** (added `20260717000001`) — `numeric`, `GENERATED ALWAYS AS ... STORED` over `pricing_json` (`totalIncGST`, falling back to `totalIncGst` / `total_inc_gst`). Read-only: Postgres maintains it, so any INSERT/UPDATE naming it is rejected — write `pricing_json` instead. Null where the blob carries no total key. Apply the migration before deploying any function that selects it.
+  - **quoted_value** (added `20260717000001`) — `numeric`, `GENERATED ALWAYS AS ... STORED` over `pricing_json` (`totalIncGST`, falling back to `totalIncGst` / `total_inc_gst`). Read-only: Postgres maintains it, so any INSERT/UPDATE naming it is rejected — write `pricing_json` instead. Null where the blob carries no total key. Apply the migration before deploying any function that selects it — as of 2026-07-20 it is NOT applied in production (a read-only check returned `42703`), so the four `daily-digest` reads that select it are 400ing today and their sections silently report zero. That is also why `ops-api?action=pipeline` derives its value from `pricing_json` JSON paths rather than from this column.
 - **job_assignments** — scheduling. Links jobs to users with dates, times, crew, status, started_at, completed_at
 - **job_service_reports** — trade sign-off. checklist_json, notes, signature_data (base64 PNG), signature_name, share_token, status (draft/submitted/approved)
 - **job_media** — photos/videos. phase: scope/in_progress/completion/receipt. po_id (nullable FK) for receipt photos linked to POs
@@ -38,8 +38,8 @@
 - **webhook_log** — audit trail for all sync operations
 
 ## Key Views
-- **calendar_events** — joins assignments + jobs + users for calendar rendering. Carries `jobs.scope_json` through, so never `select('*')` or select `scope_json` from it across a date range — that OOM-kills the edge worker (see `gotchas.md`). The live view has also drifted ahead of the migrations here (live has 44 columns, the newest migration declares 41); check `information_schema.columns`, not the migrations, before enumerating its columns.
-- **jobs_needing_scheduling** — accepted/quoted jobs with no future assignments
+- **calendar_events** — joins assignments + jobs + users for calendar rendering. Carries `jobs.scope_json` through, so never `select('*')` or select `scope_json` from it across a date range — that OOM-kills the edge worker (see `gotchas.md`). The live view has also drifted ahead of the migrations here (live has 44 columns, the newest migration declares 41); check `information_schema.columns`, not the migrations, before enumerating its columns. Both consumers enumerate: `CAL_FINANCIAL_COLUMNS` / `CAL_LIGHT_COLUMNS` for the calendar, `OPS_SUMMARY_SCHEDULE_COLUMNS` for `ops_summary`'s `today_schedule`.
+- **jobs_needing_scheduling** — accepted/quoted jobs with no future assignments. `ops_summary` reads only `id, client_name, site_suburb, type, days_waiting` (`OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS`), so the view can grow without widening that read.
 
 ## Key Functions
 - **next_job_number(job_type)** — generates SWP-25001, SWF-25002, etc.
