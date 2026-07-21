@@ -183,6 +183,25 @@ Deno.test("U2a (G3): suppress_notifications:true (the intake-approve path) still
   }
 });
 
+Deno.test("U2a: explicit deterministic/reconciliation suppression creates silently", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store: Store = { users: USERS.map((u) => ({ ...u })) };
+    const res = await _createMakesafeJob(makeClient(store), {
+      client_name: "Reviewed Intake Client",
+      site_address: "4 Evidence Way",
+      suburb: "Eaton",
+      suppress_manager_notification: true,
+    });
+    await flush();
+    assertEquals(res.ok, true);
+    assertEquals(smsCalls(calls).length, 0);
+    assertNoThirdPartySend(calls, "explicit reviewed intake suppression is silent");
+  } finally {
+    restore();
+  }
+});
+
 Deno.test("U2a: no eligible manager (no phones) -> zero SMS, creation still succeeds", async () => {
   const { calls, restore } = stubFetch();
   try {

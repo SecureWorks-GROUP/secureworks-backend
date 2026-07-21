@@ -2539,6 +2539,14 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
+      case 'update_makesafe_job_family': {
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({ error: 'forbidden: update_makesafe_job_family requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        return json(await updateMakesafeJobFamily(client, body))
+      }
       case 'backfill_makesafe_job_families': {
         const isPrivileged = authMode === 'api_key' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
@@ -9655,6 +9663,86 @@ async function updateMakesafeDetails(client: any, body: any) {
   return { ok: true, details: data }
 }
 
+const RECONCILE_MAKESAFE_FAMILIES = new Set([
+  'assessment_report_quote',
+  'roof_report',
+  'temp_fence_makesafe',
+  'general_makesafe',
+])
+
+// Privileged exact correction for a reviewed live card. Unlike the additive
+// backfill, this action may replace an incorrect non-null family, but only when
+// the caller supplies the family it observed before the write. It preserves all
+// other metadata, keeps report_type in sync, changes no stage/substatus, and
+// emits an audit event. The routine key cannot reach this action.
+async function updateMakesafeJobFamily(client: any, body: any) {
+  const jId = body?.job_id || body?.jobId
+  const family = cleanReviewedString(body?.makesafe_job_family || body?.family)
+  const expectedBefore = cleanReviewedString(body?.expected_before_family || body?.expectedBeforeFamily)
+  if (!jId || !family) throw new ApiError('job_id and makesafe_job_family required', 400)
+  if (!expectedBefore) throw new ApiError('expected_before_family required', 400)
+  if (!RECONCILE_MAKESAFE_FAMILIES.has(family)) {
+    throw new ApiError(`invalid makesafe_job_family '${family}'`, 400)
+  }
+
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, job_number, type, status, metadata').eq('id', jId).single()
+  if (jobErr || !job) throw jobErr || new ApiError('job not found', 404)
+  if (job.type !== 'makesafe') throw new ApiError('job is not a make-safe', 409)
+  const beforeMetadata = parseJsonObject(job.metadata)
+  const beforeFamily = cleanReviewedString(beforeMetadata.makesafe_job_family)
+  if (beforeFamily !== expectedBefore) {
+    throw new ApiError(`family drift: expected '${expectedBefore}', found '${beforeFamily || 'null'}'`, 409)
+  }
+
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
+    .select('job_id, report_type, substatus').eq('job_id', jId).single()
+  if (detailErr || !detail) throw detailErr || new ApiError('make-safe details not found', 404)
+  const nextReportType = family === 'roof_report'
+    ? 'roof_report'
+    : family === 'assessment_report_quote'
+    ? 'assessment_report'
+    : null
+  const nowIso = new Date().toISOString()
+  const nextMetadata = {
+    ...beforeMetadata,
+    makesafe_job_family: family,
+    makesafe_job_family_label: _makeSafeJobFamilyLabel(family),
+  }
+  const { error: updateJobErr } = await client.from('jobs')
+    .update({ metadata: nextMetadata, updated_at: nowIso }).eq('id', jId)
+  if (updateJobErr) throw updateJobErr
+  const { error: updateDetailErr } = await client.from('makesafe_job_details')
+    .update({ report_type: nextReportType, updated_at: nowIso }).eq('job_id', jId)
+  if (updateDetailErr) {
+    await client.from('jobs').update({ metadata: beforeMetadata, updated_at: new Date().toISOString() }).eq('id', jId)
+    throw updateDetailErr
+  }
+
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'makesafe_job_family_corrected',
+    detail_json: {
+      before_family: beforeFamily,
+      after_family: family,
+      before_report_type: detail.report_type || null,
+      after_report_type: nextReportType,
+      substatus_unchanged: detail.substatus || null,
+      changed_at: nowIso,
+      reason: cleanReviewedString(body?.reason) || 'reviewed source work-order correction',
+    },
+  }).then(() => {}).catch(() => {})
+
+  return {
+    ok: true,
+    job_id: jId,
+    job_number: job.job_number || null,
+    before: { makesafe_job_family: beforeFamily, report_type: detail.report_type || null, substatus: detail.substatus || null },
+    after: { makesafe_job_family: family, report_type: nextReportType, substatus: detail.substatus || null },
+  }
+}
+export const _updateMakesafeJobFamily = updateMakesafeJobFamily
+
 type MakesafeFamilyBackfillCandidate = {
   job_id: string
   job_number: string | null
@@ -13232,12 +13320,19 @@ async function approveIntakeDraft(client: any, body: any) {
   if (dErr || !draft) throw new Error('Draft not found')
 
   const extraction = parseJsonObject(draft.extraction_json)
-  // Codex issue 2 + live roof/assessment backlog: older drafts may have
-  // report_type=NULL even though the subject/body/attachment names clearly say
-  // roof report / assessment report. Treat that as a computed report-only type
-  // at approval time so they take the report-only path instead of the physical
-  // make-safe WO path.
-  const effectiveReportType = effectiveIntakeReportType(draft)
+  const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
+  const reviewedReportType = cleanReviewedString(reviewed.report_type)
+  if (reviewedReportType && !_isReportOnlyType(reviewedReportType)) {
+    throw new ApiError(`reviewed report_type must be 'roof_report' or 'assessment_report', got '${reviewedReportType}'`, 400)
+  }
+  const reviewedFamily = cleanReviewedString(reviewed.makesafe_job_family)
+  if (reviewedFamily && !RECONCILE_MAKESAFE_FAMILIES.has(reviewedFamily)) {
+    throw new ApiError(`invalid reviewed makesafe_job_family '${reviewedFamily}'`, 400)
+  }
+  // A privileged reviewer may carry exact document evidence the degraded parser
+  // could not read. That explicit report type wins over the stored fallback while
+  // the existing automatic path remains unchanged when no override is supplied.
+  const effectiveReportType = reviewedReportType || effectiveIntakeReportType(draft)
   const isReportOnlyDraft = _isReportOnlyType(effectiveReportType)
   // Item 3b — combined make-safe + report AUTO-SPLIT. When the draft carries an
   // UNAMBIGUOUS secondary report obligation, approval creates TWO cards: the PRIMARY
@@ -13247,7 +13342,6 @@ async function approveIntakeDraft(client: any, body: any) {
   // never attach and the physical make-safe would be lost.
   const splitObligation = combinedSplitObligation(extraction)
   const primaryIsReportOnly = splitObligation ? false : isReportOnlyDraft
-  const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
 
   const approvedFields = {
@@ -13285,7 +13379,7 @@ async function approveIntakeDraft(client: any, body: any) {
 
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
   // draft's roof/assessment family (that belongs to the secondary report card).
-  const approvedJobFamily = splitObligation
+  const approvedJobFamily = reviewedFamily || (splitObligation
     ? _classifyMakeSafeJobFamily(
       draft?.subject || approvedFields.external_ref || '',
       [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
@@ -13299,7 +13393,7 @@ async function approveIntakeDraft(client: any, body: any) {
       approvedFields.makesafe_type,
     ].filter(Boolean).join('\n'),
     effectiveReportType || null,
-  )
+  ))
   const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
@@ -13419,10 +13513,11 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
-      // Deterministic intake owns no communications. The existing guarded
-      // approval/job boundary remains in use, but its manager SMS side effect is
-      // explicitly suppressed for this provenance.
-      suppress_manager_notification: extraction?.deterministic_intake === true,
+      // Deterministic intake and privileged reconciliation own no communications.
+      // The reviewed path must opt in explicitly; routine callers cannot reach the
+      // approval route and therefore cannot abuse this suppression flag.
+      suppress_manager_notification: body?.suppress_manager_notification === true ||
+        extraction?.deterministic_intake === true,
     })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
@@ -13436,7 +13531,10 @@ async function approveIntakeDraft(client: any, body: any) {
       try {
         await client.from('makesafe_job_details').update({
           report_type: effectiveReportType,
-          substatus: 'ready_to_invoice',
+          // Reconciliation of still-owed work starts unsubmitted. The legacy path
+          // retains its current ready_to_invoice behaviour unless the privileged
+          // caller explicitly supplies report_unsubmitted=true.
+          ...(body?.report_unsubmitted === true ? {} : { substatus: 'ready_to_invoice' }),
           updated_at: new Date().toISOString(),
         }).eq('job_id', createdJobId)
       } catch (e: any) {
@@ -13471,7 +13569,7 @@ async function approveIntakeDraft(client: any, body: any) {
     // Report-only jobs have no WO PDF — skip the attach loop for them. A combined
     // split attaches the WO to the physical make-safe primary here (and shares it
     // onto the report card below).
-    if (!primaryIsReportOnly) {
+    if (!primaryIsReportOnly || body?.attach_work_order_for_report === true) {
       for (const att of attachments) {
         if (att.storage_url || att.pdf_url) {
           try {
@@ -13522,6 +13620,8 @@ async function approveIntakeDraft(client: any, body: any) {
           builder_claim_ref: extraction?.builder_claim_ref || null,
           builder_work_order_number: extraction?.builder_work_order_number || null,
           builder_po_number: extraction?.builder_po_number || null,
+          suppress_manager_notification: body?.suppress_manager_notification === true ||
+            extraction?.deterministic_intake === true,
         })
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {

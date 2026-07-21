@@ -1,0 +1,142 @@
+import {
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { _updateMakesafeJobFamily } from "./index.ts";
+
+type Store = {
+  job: any;
+  detail: any;
+  events: any[];
+  jobUpdates: any[];
+  detailUpdates: any[];
+};
+
+function clientFor(store: Store) {
+  return {
+    from(table: string) {
+      let updatePayload: any = null;
+      const chain: any = {
+        select() {
+          return chain;
+        },
+        update(payload: any) {
+          updatePayload = payload;
+          return chain;
+        },
+        eq() {
+          return chain;
+        },
+        single() {
+          if (table === "jobs" && updatePayload == null) {
+            return Promise.resolve({ data: structuredClone(store.job), error: null });
+          }
+          if (table === "makesafe_job_details" && updatePayload == null) {
+            return Promise.resolve({ data: structuredClone(store.detail), error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+        insert(payload: any) {
+          if (table === "job_events") store.events.push(structuredClone(payload));
+          return Promise.resolve({ data: null, error: null });
+        },
+        then(resolve: any, reject: any) {
+          try {
+            if (updatePayload != null) {
+              if (table === "jobs") {
+                store.jobUpdates.push(structuredClone(updatePayload));
+                store.job = { ...store.job, ...structuredClone(updatePayload) };
+              }
+              if (table === "makesafe_job_details") {
+                store.detailUpdates.push(structuredClone(updatePayload));
+                store.detail = { ...store.detail, ...structuredClone(updatePayload) };
+              }
+            }
+            return Promise.resolve(resolve({ data: null, error: null }));
+          } catch (error) {
+            return reject ? Promise.resolve(reject(error)) : Promise.reject(error);
+          }
+        },
+      };
+      return chain;
+    },
+  };
+}
+
+function fixture(): Store {
+  return {
+    job: {
+      id: "job-1",
+      job_number: "SWMS-1",
+      type: "makesafe",
+      status: "processing",
+      metadata: {
+        makesafe_job_family: "general_makesafe",
+        makesafe_job_family_label: "General Make-safe",
+        preserve_me: "yes",
+      },
+    },
+    detail: {
+      job_id: "job-1",
+      report_type: null,
+      substatus: "waiting_on_trade_report",
+    },
+    events: [],
+    jobUpdates: [],
+    detailUpdates: [],
+  };
+}
+
+Deno.test("reviewed family correction preserves metadata and does not move substatus", async () => {
+  const store = fixture();
+  const result = await _updateMakesafeJobFamily(clientFor(store), {
+    job_id: "job-1",
+    expected_before_family: "general_makesafe",
+    makesafe_job_family: "roof_report",
+    reason: "source WO says roof report",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.before, {
+    makesafe_job_family: "general_makesafe",
+    report_type: null,
+    substatus: "waiting_on_trade_report",
+  });
+  assertEquals(result.after, {
+    makesafe_job_family: "roof_report",
+    report_type: "roof_report",
+    substatus: "waiting_on_trade_report",
+  });
+  assertEquals(store.job.metadata.preserve_me, "yes");
+  assertEquals(store.job.metadata.makesafe_job_family, "roof_report");
+  assertEquals(store.detail.report_type, "roof_report");
+  assertEquals(store.detail.substatus, "waiting_on_trade_report");
+  assertEquals(store.events.length, 1);
+  assertEquals(store.events[0].event_type, "makesafe_job_family_corrected");
+});
+
+Deno.test("reviewed family correction refuses stale before value", async () => {
+  const store = fixture();
+  await assertRejects(
+    () =>
+      _updateMakesafeJobFamily(clientFor(store), {
+        job_id: "job-1",
+        expected_before_family: "temp_fence_makesafe",
+        makesafe_job_family: "roof_report",
+      }),
+    Error,
+    "family drift",
+  );
+  assertEquals(store.jobUpdates, []);
+  assertEquals(store.detailUpdates, []);
+  assertEquals(store.events, []);
+});
+
+Deno.test("reconciliation approval flags remain explicitly privileged and opt-in", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertEquals(source.includes("reviewedReportType || effectiveIntakeReportType(draft)"), true);
+  assertEquals(source.includes("body?.suppress_manager_notification === true"), true);
+  assertEquals(source.includes("body?.report_unsubmitted === true"), true);
+  assertEquals(source.includes("body?.attach_work_order_for_report === true"), true);
+  assertEquals(source.includes("forbidden: approve_intake_draft requires the privileged ops key"), true);
+});
