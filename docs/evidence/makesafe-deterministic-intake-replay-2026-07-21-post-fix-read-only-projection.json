@@ -1,0 +1,72 @@
+{
+  "evidence_type": "read_only_post_fix_projection",
+  "window": {
+    "since": "2026-07-06T23:12:39.950Z",
+    "until": "2026-07-20T23:12:39.950Z"
+  },
+  "production_access": "Supabase Management API SELECT only",
+  "dark_deployed": false,
+  "activation_changed": false,
+  "source_read": {
+    "exact_window_rows": 260,
+    "directions": {
+      "inbound": 170,
+      "own_outbound": 90
+    },
+    "source_identifiers_returned": false
+  },
+  "plan": {
+    "version": "makesafe-deterministic-intake@2026-07-21.v2",
+    "ai_calls": 0,
+    "totals": {
+      "sources": 260,
+      "cases": 155,
+      "confirmed": 0,
+      "blocked": 0,
+      "exceptions": 156,
+      "nonWork": 104,
+      "unaccounted": 0
+    },
+    "identity_floor": {
+      "unit": "canonical_case",
+      "known_builder_work_candidates": 51,
+      "reached": 50,
+      "shortfall": 1,
+      "percentage": 98.04,
+      "formula": "reached / known_builder_work_candidates * 100",
+      "by_builder": {
+        "mlb": {
+          "candidates": 43,
+          "reached": 42,
+          "shortfall": 1
+        },
+        "aj": {
+          "candidates": 8,
+          "reached": 8,
+          "shortfall": 0
+        }
+      }
+    },
+    "candidate_reason_cases": {
+      "adapter_parse_failure": 46,
+      "conflicting_fields": 3,
+      "below_identity_floor": 2
+    },
+    "candidate_missing_field_cases": {
+      "client_name": 51,
+      "portal_capture": 4,
+      "builder_work_order": 1,
+      "work_order_attachment": 1
+    }
+  },
+  "unmatched_remainder": {
+    "cases": 1,
+    "reason": "Known-builder case had an external claim ref but no deterministic builder WO or PO. Claim-only evidence deliberately remains below the identity floor and cannot enter confirmed-live state."
+  },
+  "acceptance": {
+    "identity_floor_at_least_95": true,
+    "zero_unaccounted": true,
+    "zero_ai_calls": true
+  },
+  "caveat": "This is the fixed code projected over the filed production window through read-only SELECTs. The production edge function remains current main and legacy; a fresh endpoint replay must be filed only after merge and authorized dark deployment."
+}

@@ -25,7 +25,7 @@ import {
 } from "./makesafe_intake_gate.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-20.v1";
+  "makesafe-deterministic-intake@2026-07-21.v2";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 
 export type AdapterId = "mlb" | "ajs_ajbr" | "prime" | "rapid" | "chatter";
@@ -73,6 +73,10 @@ export interface DeterministicSourceItem {
   receivedAt: string;
   attachments: readonly DeterministicAttachment[];
   links: readonly DeterministicLink[];
+  // Set by the runtime from the shared SES mailbox direction classifier. Own
+  // outbound copies still belong in structural source accounting, but they are
+  // non-work evidence and must never enter the identity-floor denominator.
+  direction?: "inbound" | "own_outbound";
 }
 
 export interface DeterministicCompanyProfile {
@@ -774,6 +778,19 @@ export function adaptDeterministicSource(
   item: DeterministicSourceItem,
   profiles: readonly DeterministicCompanyProfile[],
 ): AdaptedSource {
+  if (item.direction === "own_outbound") {
+    const identity = blankIdentity();
+    return {
+      source: item,
+      adapterId: "chatter",
+      adapterVersion: "chatter@v1|own-outbound",
+      intent: "chatter",
+      identity,
+      evidence: evidenceFor(item, identity),
+      story: storyFor(item),
+      parseWarnings: ["own_outbound_copy"],
+    };
+  }
   const adapter = DETERMINISTIC_ADAPTER_REGISTRY.find((candidate) =>
     candidate.matches(item, profiles)
   );
@@ -978,10 +995,18 @@ function manifestFor(
   return [
     { id: "source_email", required: true, blocking: "identity" },
     { id: "sender_routing", required: true, blocking: "identity" },
+    // A dedicated WO remains required for confirmed/blocked live state and for
+    // the replay identity floor. Claim-only work stays an exception and can
+    // never create a live job without further evidence.
     { id: "builder_work_order", required: true, blocking: "identity" },
     { id: "purchase_order", required: false, blocking: "none" },
-    { id: "client_name", required: true, blocking: "identity" },
-    { id: "site_address", required: true, blocking: "identity" },
+    // These fields are required before a new live job can be created, but they
+    // are job material rather than the builder instruction's canonical identity.
+    // Real MLB messages commonly carry the client only in an image-font PDF;
+    // reporting that deterministic extraction gap as an identity mismatch made
+    // the replay floor read 0% even when WO/PO/ref identity was present.
+    { id: "client_name", required: true, blocking: "live" },
+    { id: "site_address", required: true, blocking: "live" },
     { id: "client_phone", required: true, blocking: "secondary" },
     { id: "work_order_attachment", required: !report, blocking: "live" },
     { id: "portal_link", required: report, blocking: "live" },

@@ -35,6 +35,17 @@ and the Trade `New / Allocated / Complete / Archive` columns are parity-checked
 from the same canonical rows. Keep trade payloads allow-listed and free of pricing
 and trade-invoice data.
 
+## Deterministic Make-Safe Replay Measures Identity, Not Job Readiness
+
+The canonical diagnosis and sanitized production projection are in
+`docs/evidence/makesafe-deterministic-intake-zero-match-diagnosis-2026-07-21.md`.
+Keep own-domain SES copies accounted as non-work, shape HTML through the shared
+legacy stripper, and measure strong WO/PO identity separately from missing
+client/address/PDF/portal recovery. Claim-only work stays below the floor and
+cannot become live. Aggregate replay must expose no cursor post IDs, and clean
+evidence requires both cursor timestamps null, no cap, and no caveats in the same
+response. Use the bounded `max_sources` replay option when needed.
+
 ## Never Select `scope_json` In A List/Feed Query
 
 `jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small

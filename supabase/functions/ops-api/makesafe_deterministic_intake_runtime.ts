@@ -22,6 +22,8 @@ import {
   type DeterministicSourceItem,
   selectIntakeMode,
 } from "./makesafe_deterministic_intake.ts";
+import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
+import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -119,13 +121,11 @@ export interface DeterministicRuntimeReport {
     window_rows: number;
     seed_rows: number;
     cap_reached: boolean;
-    // Sweep position this run started from and the one the next run starts from.
-    // null means the sweep reached the end of the window and restarts at its
-    // oldest row, which is what makes the cap a rotation rather than a truncation.
+    // Sweep timestamp this run started from and the one the next run starts from.
+    // The internal post-id tie breaker is deliberately excluded: aggregate replay
+    // responses must never disclose source identifiers.
     cursor_at: string | null;
-    cursor_post_id: string | null;
     next_cursor_at: string | null;
-    next_cursor_post_id: string | null;
   };
   // Evidence gates read this, not totals.unaccounted on its own. A capped run
   // only accounts for the rows it read, so its zero-unaccounted result is not a
@@ -471,6 +471,9 @@ async function readInputs(
     sources: DeterministicSourceItem[];
     profiles: DeterministicCompanyProfile[];
     read: DeterministicRuntimeReport["source_read"];
+    // Internal tuple used to persist sweep progress. Its source-id tie breaker is
+    // never copied into the aggregate runtime report.
+    nextCursor: SweepCursor | null;
   }
 > {
   const since = new Date(Date.parse(options.nowIso) - options.days * 86_400_000)
@@ -611,7 +614,11 @@ async function readInputs(
     parsingRules: row.parsing_rules || null,
   }));
   const sources = emails.map((row: any): DeterministicSourceItem => {
-    const body = row.body_content || row.body_preview || "";
+    const rawBody = row.body_content || row.body_preview || "";
+    // Match the proven legacy intake shape: regexes receive readable text, not a
+    // newline-free HTML document whose tags hide labels and make address captures
+    // consume the rest of a reply chain. Links still come from the raw body.
+    const body = stripEmailHtmlForTrade(rawBody) || row.body_preview || "";
     return {
       postId: row.post_id,
       internetMessageId: row.internet_message_id || null,
@@ -623,9 +630,20 @@ async function readInputs(
       body,
       receivedAt: row.received_at,
       attachments: attachmentsByPost.get(row.post_id) || [],
-      links: linksFromBody(row.post_id, body),
+      links: linksFromBody(row.post_id, rawBody),
+      direction: isOwnDomain(deriveFromDomain(row.from_email))
+        ? "own_outbound"
+        : "inbound",
     };
   });
+  const backlogPageFull = backlogRows.length >= backlogCap;
+  const recentPageFull = recentCap === 0 || recentRows.length >= recentCap;
+  const nextCursor = backlogPageFull
+    ? {
+      receivedAt: String(backlogRows[backlogRows.length - 1].received_at),
+      postId: String(backlogRows[backlogRows.length - 1].post_id),
+    }
+    : null;
   return {
     sources,
     profiles,
@@ -636,23 +654,15 @@ async function readInputs(
       recent_rows: recentRows.length,
       window_rows: windowRows,
       seed_rows: seedRows,
-      // Conservative: a run that spent its whole budget cannot prove it saw the
-      // whole window, so it reports as capped even in the boundary case where it
-      // happened to.
-      cap_reached: backlogRows.length + recentRows.length >= options.maxSources,
+      // Either full sub-read leaves structural uncertainty. In particular, a
+      // full sweep page means a non-null next cursor even when recent/backlog
+      // overlap keeps their raw sum below maxSources. That was the gate report's
+      // false clean-sweep shape (250 backlog + 194 recent, cursor still present).
+      cap_reached: backlogPageFull || recentPageFull,
       cursor_at: options.cursor?.receivedAt ?? null,
-      cursor_post_id: options.cursor?.postId ?? null,
-      // A short sweep page means the cursor reached the end of the window, so the
-      // next run restarts at its oldest row. A full page leaves the cursor on the
-      // last row read, which is what stops the same rows being re-read forever.
-      // The tuple pins both the received_at and its tie-breaker post_id.
-      next_cursor_at: backlogRows.length >= backlogCap
-        ? String(backlogRows[backlogRows.length - 1].received_at)
-        : null,
-      next_cursor_post_id: backlogRows.length >= backlogCap
-        ? String(backlogRows[backlogRows.length - 1].post_id)
-        : null,
+      next_cursor_at: nextCursor?.receivedAt ?? null,
     },
+    nextCursor,
   };
 }
 
@@ -759,8 +769,13 @@ function identityFloorFacts(
     const builder = intakeCase.identity.builderSlug || "known";
     byBuilder[builder] ||= { candidates: 0, reached: 0, shortfall: 0 };
     byBuilder[builder].candidates++;
-    const reaches = intakeCase.state === "confirmed_live_job" ||
-      intakeCase.state === "blocked_live_job";
+    // This gate measures canonical instruction identity, not whether every field
+    // and artefact needed to create a new job is already available. Client name,
+    // address, phone, WO PDF and portal capture are recovery/job-readiness facts.
+    // Treating those as identity made 89 cases with builder WO/PO/ref evidence
+    // report 0% merely because all recent MLB client names live in image-font PDFs.
+    // Claim-only evidence remains below the floor and cannot create a live job.
+    const reaches = Boolean(intakeCase.identity.woPoIdentityKey);
     if (reaches) {
       reached++;
       byBuilder[builder].reached++;
@@ -1498,16 +1513,10 @@ export async function runDeterministicIntake(
   // Dry-run advances its own observe-only position for the same reason: cutover
   // evidence has to come from observation that eventually covers the whole window,
   // which a cursor pinned at null could never do.
-  const nextCursor: SweepCursor | null = input.read.next_cursor_at == null
-    ? null
-    : {
-      receivedAt: input.read.next_cursor_at,
-      postId: input.read.next_cursor_post_id ?? "",
-    };
   const cursorPersisted = await persistScanCursor(
     client,
     cursorColumns,
-    nextCursor,
+    input.nextCursor,
   );
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
   const requireAllAllowlistMatches =
@@ -1550,7 +1559,10 @@ export async function runDeterministicIntake(
     );
   }
   const caveats: string[] = [];
-  if (input.read.cap_reached) caveats.push("source_read_capped");
+  if (input.read.cap_reached || input.read.next_cursor_at !== null) {
+    caveats.push("source_read_capped");
+  }
+  if (input.read.cursor_at !== null) caveats.push("source_sweep_partial");
   if (capExposedInstructionKeys.length) {
     caveats.push("instruction_allowlist_cap_exposed");
   }
@@ -1563,6 +1575,8 @@ export async function runDeterministicIntake(
     !unmatchedSourceAllowlist.length &&
     !unmatchedInstructionAllowlist.length;
   if (capExposedNoOp) caveats.push("no_cases_readable_within_cap");
+  const sourceAccountingComplete = !input.read.cap_reached &&
+    input.read.cursor_at === null && input.read.next_cursor_at === null;
   const report: DeterministicRuntimeReport = {
     ok: true,
     mode: "deterministic",
@@ -1596,8 +1610,8 @@ export async function runDeterministicIntake(
     },
     source_read: input.read,
     evidence: {
-      source_accounting_complete: !input.read.cap_reached,
-      zero_unaccounted_proved: !input.read.cap_reached &&
+      source_accounting_complete: sourceAccountingComplete,
+      zero_unaccounted_proved: sourceAccountingComplete &&
         plan.totals.unaccounted === 0,
       caveats,
     },
