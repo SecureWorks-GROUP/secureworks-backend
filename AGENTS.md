@@ -251,10 +251,16 @@ bounded deterministic batch can legitimately run longer. Keep the nested
 await the scan or paper over batch growth with a larger fixed timeout. The scan
 remains bounded by its 500-source read cap, 1..10 case cap and attempt ceiling.
 
-The deterministic sweep cursor is a completion checkpoint. Persist it only after
-truthful health and a run with zero write/case failures. A cancelled, rejected or
-failed run must retain the prior cursor and reread idempotently. The cap-5 incident
-and 750-row explicit cursor recovery are recorded in
+Transfer the existing 10-minute mailbox lease to that continuation and release it
+only when the nested scan settles, so the two-minute poll cannot launch overlapping
+batches.
+
+The deterministic sweep cursor is a completion checkpoint. A cancelled, rejected or
+thrown run retains the prior cursor and rereads idempotently. A completed degraded
+run writes truthful health, advances with the explicit
+`scan_page_completed_degraded_retry_next_sweep` caveat, and retries when the bounded
+sweep returns to the window head rather than letting one poison case pin every older
+page. The cap-5 incident and 750-row explicit cursor recovery are recorded in
 `docs/makesafe-cap5-timeout-root-cause-2026-07-21.md`.
 
 ## Fencing Job Mint Invariant

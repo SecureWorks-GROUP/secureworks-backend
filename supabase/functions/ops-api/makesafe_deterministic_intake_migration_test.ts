@@ -145,7 +145,10 @@ Deno.test("production controls default to N=1, exact empty allowlists and bounde
 Deno.test("scheduled scans detach from pg_net and cursor progress means completion", () => {
   assertStringIncludes(index, "selectionMode: rollout.selectionMode");
   assertStringIncludes(runtime, "const commitCompletedCursor");
-  assertStringIncludes(runtime, '"scan_cursor_held_for_retry"');
+  assertStringIncludes(
+    runtime,
+    '"scan_page_completed_degraded_retry_next_sweep"',
+  );
   const cursorCommit = runtime.lastIndexOf("await commitCompletedCursor();");
   const healthWrite = runtime.lastIndexOf("await writeHealth(");
   assert(
@@ -158,6 +161,8 @@ Deno.test("scheduled scans detach from pg_net and cursor progress means completi
   );
   assertStringIncludes(monitor, "_scheduleIntakeScanContinuation");
   assertStringIncludes(monitor, "edgeRuntime.waitUntil(promise)");
+  assertStringIncludes(monitor, "lockHeld = false;");
+  assertStringIncludes(monitor, "continuation lock release failed");
   assert(!monitor.includes("const scanResp = await fetch(opsApiUrl"));
 });
 

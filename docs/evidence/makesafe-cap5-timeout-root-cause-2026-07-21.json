@@ -58,15 +58,17 @@
   "selected_fix": {
     "design": "async_continuation_plus_completion_checkpoint",
     "monitor_request": "Register the nested scan with EdgeRuntime.waitUntil and return the sync poll response without awaiting scan completion.",
+    "single_flight": "Transfer the existing 10-minute mailbox lease to the continuation and release it only after settlement, so later two-minute polls exit locked rather than overlap.",
     "scan_bound": "The continuation remains bounded by the existing 500-source read cap, 1..10 case cap and attempt ceiling.",
-    "cursor_rule": "Persist the cursor only after successful run health and no write/case failures. Failed, rejected or cancelled runs retain the prior cursor and reread idempotently.",
+    "cursor_rule": "Persist the cursor only after truthful run health. Rejected, thrown or cancelled runs retain the prior cursor and reread immediately. Completed degraded runs advance with an explicit retry-next-sweep caveat so one poison case cannot pin older pages.",
     "timeout_raise": false,
     "reason": "A larger fixed timeout only moves the failure threshold and still couples scheduler liveness to batch cost."
   },
   "tests": {
     "continuation_returns_before_delayed_scan": true,
     "failed_allowlist_does_not_advance_cursor": true,
-    "write_failure_holds_cursor_for_retry": true,
+    "write_failure_advances_only_after_degraded_health_with_retry_caveat": true,
+    "continuation_holds_mailbox_lease_until_settlement": true,
     "live_shaped_source_and_case_caps_preserved": true
   },
   "contains_credentials_or_personal_data": false

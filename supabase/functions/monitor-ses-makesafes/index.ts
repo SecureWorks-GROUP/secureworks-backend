@@ -1969,6 +1969,7 @@ export function _scheduleIntakeScanContinuation(
   waitUntil: (promise: Promise<void>) => void,
   url: string,
   headers: Record<string, string>,
+  onSettled: () => Promise<void> = () => Promise.resolve(),
 ): void {
   const continuation = (async () => {
     try {
@@ -1985,6 +1986,15 @@ export function _scheduleIntakeScanContinuation(
         "[monitor-ses] intake scan continuation failed (non-fatal):",
         (scanErr as Error).message,
       );
+    } finally {
+      try {
+        await onSettled();
+      } catch (releaseErr) {
+        console.error(
+          "[monitor-ses] continuation settlement failed:",
+          (releaseErr as Error).message,
+        );
+      }
     }
   })();
   waitUntil(continuation);
@@ -2227,20 +2237,38 @@ async function handler(req: Request): Promise<Response> {
       `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
     const edgeRuntime = (globalThis as any).EdgeRuntime;
     if (typeof edgeRuntime?.waitUntil !== "function") {
-      throw new Error(
-        "EdgeRuntime.waitUntil unavailable for bounded intake continuation",
+      // Mail sync already committed successfully. Keep continuation failure
+      // non-fatal and let the normal finally block release the mailbox lease.
+      console.error(
+        "[monitor-ses] EdgeRuntime.waitUntil unavailable; intake scan deferred to next poll",
       );
+    } else {
+      _scheduleIntakeScanContinuation(
+        fetch,
+        (promise) => edgeRuntime.waitUntil(promise),
+        opsApiUrl,
+        {
+          "Content-Type": "application/json",
+          "x-api-key": SW_API_KEY,
+          "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+        },
+        async () => {
+          const { error } = await sb.rpc("unlock_mailbox_sync", {
+            p_mailbox: MAILBOX,
+          });
+          if (error) {
+            console.error(
+              "[monitor-ses] continuation lock release failed:",
+              error.message,
+            );
+          }
+        },
+      );
+      // Transfer the existing 10-minute mailbox lease to the continuation. The
+      // next scheduled poll exits as locked until this scan settles, preventing
+      // overlapping deterministic batches from reading one completion cursor.
+      lockHeld = false;
     }
-    _scheduleIntakeScanContinuation(
-      fetch,
-      (promise) => edgeRuntime.waitUntil(promise),
-      opsApiUrl,
-      {
-        "Content-Type": "application/json",
-        "x-api-key": SW_API_KEY,
-        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
-      },
-    );
 
     const result = {
       success: true,

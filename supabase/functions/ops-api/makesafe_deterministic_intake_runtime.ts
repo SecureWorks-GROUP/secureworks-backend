@@ -2105,8 +2105,11 @@ export async function runDeterministicIntake(
   }
 
   if (missingParents.length) {
-    report.evidence.caveats.push("scan_cursor_held_for_retry");
+    report.evidence.caveats.push(
+      "scan_page_completed_degraded_retry_next_sweep",
+    );
     await writeHealth(client, nowIso, missingParents.length, 0, 0);
+    await commitCompletedCursor();
     return report;
   }
   // A stale entry (aged out, deleted, or no longer grouping into a case) is
@@ -2306,9 +2309,15 @@ export async function runDeterministicIntake(
     report.totals.jobs_created,
   );
   if (report.totals.write_failures > 0 || report.totals.cases_failed > 0) {
-    report.evidence.caveats.push("scan_cursor_held_for_retry");
-  } else {
-    await commitCompletedCursor();
+    // This invocation completed and wrote truthful degraded health, so advance
+    // rather than letting one poison case pin every older page. The full sweep
+    // resets to the window head and retries it on the next cycle; the caveat keeps
+    // that delayed retry explicit. Cancellation/throws never reach this checkpoint
+    // and therefore retain the prior cursor for immediate idempotent reread.
+    report.evidence.caveats.push(
+      "scan_page_completed_degraded_retry_next_sweep",
+    );
   }
+  await commitCompletedCursor();
   return report;
 }

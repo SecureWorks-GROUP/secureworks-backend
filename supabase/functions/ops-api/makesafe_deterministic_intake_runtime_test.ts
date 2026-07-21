@@ -876,11 +876,12 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
 
   assertEquals(report.write_failure_reasons.approval_no_job, 2);
   assertEquals(report.totals.jobs_created, 1);
-  assert(report.evidence.caveats.includes("scan_cursor_held_for_retry"));
-  assertEquals(
-    store.makesafe_intake_health[0].deterministic_scan_cursor_at ?? null,
-    null,
+  assert(
+    report.evidence.caveats.includes(
+      "scan_page_completed_degraded_retry_next_sweep",
+    ),
   );
+  assert(store.makesafe_intake_health[0].deterministic_scan_cursor_at !== null);
   assertEquals(
     store.emails.find((e) => e.post_id === "good-1")?.makesafe_scanned_at,
     NOW,

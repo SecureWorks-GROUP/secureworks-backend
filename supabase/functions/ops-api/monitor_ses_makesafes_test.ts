@@ -84,6 +84,7 @@ Deno.test("intake scan continuation returns before a scan beyond pg_net's five-s
   const captured: {
     registered?: Promise<void>;
     request?: { url: string; init?: RequestInit };
+    leaseReleased?: boolean;
   } = {};
   const fetchStub = ((url: string | URL | Request, init?: RequestInit) => {
     captured.request = { url: String(url), init };
@@ -96,6 +97,9 @@ Deno.test("intake scan continuation returns before a scan beyond pg_net's five-s
     (promise) => captured.registered = promise,
     "https://example.invalid/ops-api?action=scan_ses_makesafes",
     { "x-api-key": "test-only" },
+    async () => {
+      captured.leaseReleased = true;
+    },
   );
   const schedulingMs = performance.now() - started;
 
@@ -109,9 +113,11 @@ Deno.test("intake scan continuation returns before a scan beyond pg_net's five-s
     new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 10)),
   ]);
   assertEquals(state, "pending");
+  assertEquals(captured.leaseReleased, undefined);
 
   releaseScan(new Response("{}", { status: 200 }));
   await registered;
+  assertEquals(captured.leaseReleased, true);
 });
 
 // ── Classifier: domain-boundary matching ──────────────────────────────────────

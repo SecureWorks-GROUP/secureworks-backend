@@ -66,8 +66,11 @@ cost.
 is still bounded by the existing 500-source read cap, 1..10 committed-case cap and
 attempt ceiling.
 
-If `EdgeRuntime.waitUntil` is unavailable, the monitor fails loudly instead of
-silently launching an unowned scan.
+The existing 10-minute mailbox lease is transferred to the continuation and released
+only after the nested scan settles. A later two-minute poll exits cleanly as locked
+instead of starting an overlapping scan. If `EdgeRuntime.waitUntil` is unavailable,
+the already-committed mail poll stays successful, logs the deferred scan, and releases
+the lease normally so the next poll retries.
 
 ### Completion checkpoint cursor
 
@@ -75,15 +78,18 @@ The deterministic sweep cursor is now committed only after the run has:
 
 1. completed planning and case attempts
 2. written truthful deterministic health
-3. reported zero write and case failures
+3. recorded any write or lineage failure in degraded health and report caveats
 
 A dry observation commits only after its complete report. A completed cap-exposed
-no-op also commits. A stale/rejected configuration, thrown request, cancelled request,
-lineage failure or business write failure retains the prior cursor. Retrying the same
-page is safe because canonical case/source/artifact/draft keys are deterministic and
-idempotent.
+no-op also commits. A stale/rejected configuration, thrown request or cancelled
+request never reaches the checkpoint and retains the prior cursor for immediate
+idempotent reread. A completed degraded run advances with
+`scan_page_completed_degraded_retry_next_sweep`: its failure is loud, and the bounded
+sweep retries it after returning to the window head instead of letting one poison
+case pin all older pages.
 
-This changes the cursor from a read-ahead marker to a completion checkpoint.
+This changes the cursor from a read-ahead marker to a completion checkpoint without
+sacrificing bounded sweep progress.
 
 ## 4. Test boundary
 
@@ -95,8 +101,11 @@ Live-shaped tests cover both halves of the incident:
   scan resolves
 - a capped source page followed by a rejected exact source does not create or advance
   a cursor
-- a completed run with case write failures reports `scan_cursor_held_for_retry` and
-  retains the prior cursor
+- a completed run with case write failures reports
+  `scan_page_completed_degraded_retry_next_sweep`, commits only after degraded health,
+  and preserves bounded sweep progress
+- the continuation owns the existing mailbox lease until settlement, preventing the
+  next poll from launching an overlapping batch
 - successful bounded sweeps still advance and reset across the full window
 
 The full deterministic suite must pass before `/no-mistakes`, merge and canonical
