@@ -9,7 +9,10 @@
 //     TRANSITIONS INTO the crew-ready set — never on repeat saves, moves within
 //     the set, non-ready transitions, or make-safe/decking types.
 // All sends fetch-intercepted — zero real texts.
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _createMakesafeJob, _updateJobStatus } from "./index.ts";
 
 // ── Mock client: users reverse-lookup (.contains) + jobs read/update ────────
@@ -17,7 +20,9 @@ type Store = {
   users?: Array<Record<string, unknown>>;
   jobs?: Record<string, Record<string, unknown>>;
   inserts?: Array<{ table: string; row: unknown }>;
-  updates?: Array<{ table: string; row: Record<string, unknown>; id?: unknown }>;
+  updates?: Array<
+    { table: string; row: Record<string, unknown>; id?: unknown }
+  >;
 };
 
 function makeClient(store: Store) {
@@ -46,7 +51,9 @@ function makeClient(store: Store) {
         if (containsFilter?.col === "managed_verticals") {
           rows = rows.filter((u) => {
             const mv = (u.managed_verticals as unknown[]) || [];
-            return (containsFilter!.arr as unknown[]).every((v) => mv.includes(v));
+            return (containsFilter!.arr as unknown[]).every((v) =>
+              mv.includes(v)
+            );
           });
         }
         if (notNullCol) rows = rows.filter((u) => u[notNullCol!] != null);
@@ -57,9 +64,15 @@ function makeClient(store: Store) {
     // deno-lint-ignore no-explicit-any
     const b: any = {
       select: () => b,
-      insert: (row: Record<string, unknown>) => { op = "insert"; insertRow = row; store.inserts!.push({ table, row }); return b; },
+      insert: (row: Record<string, unknown>) => {
+        op = "insert";
+        insertRow = row;
+        store.inserts!.push({ table, row });
+        return b;
+      },
       update: (row: Record<string, unknown>) => {
-        op = "update"; updateRow = row;
+        op = "update";
+        updateRow = row;
         const rec = { table, row, id: undefined as unknown };
         store.updates!.push(rec);
         // Backfill target id at eq() time via closure.
@@ -73,15 +86,23 @@ function makeClient(store: Store) {
       },
       neq: () => b,
       is: () => b,
-      contains: (col: string, arr: unknown[]) => { containsFilter = { col, arr }; return b; },
-      not: (col: string, cmp: string, v: unknown) => { if (cmp === "is" && v === null) notNullCol = col; return b; },
+      contains: (col: string, arr: unknown[]) => {
+        containsFilter = { col, arr };
+        return b;
+      },
+      not: (col: string, cmp: string, v: unknown) => {
+        if (cmp === "is" && v === null) notNullCol = col;
+        return b;
+      },
       ilike: () => b,
       order: () => b,
       limit: () => b,
-      maybeSingle: () => Promise.resolve({ data: resolveSingle(), error: null }),
+      maybeSingle: () =>
+        Promise.resolve({ data: resolveSingle(), error: null }),
       single: () => Promise.resolve({ data: resolveSingle(), error: null }),
       // deno-lint-ignore no-explicit-any
-      then: (res: any, rej: any) => Promise.resolve({ data: resolveArray(), error: null }).then(res, rej),
+      then: (res: any, rej: any) =>
+        Promise.resolve({ data: resolveArray(), error: null }).then(res, rej),
       catch: () => Promise.resolve({ data: null, error: null }),
     };
     return b;
@@ -100,16 +121,28 @@ function stubFetch() {
   globalThis.fetch = ((input: unknown, init?: { body?: unknown }) => {
     const url = String(input instanceof Request ? input.url : input);
     calls.push({ url, body: String(init?.body ?? "") });
-    return Promise.resolve(new Response(JSON.stringify({ success: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    return Promise.resolve(
+      new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
   }) as typeof fetch;
-  return { calls, restore: () => { globalThis.fetch = original; } };
+  return {
+    calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 async function flush() {
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
 }
-const smsCalls = (calls: FetchCall[]) => calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
-const smsPhones = (calls: FetchCall[]) => smsCalls(calls).map((c) => JSON.parse(c.body).phone);
+const smsCalls = (calls: FetchCall[]) =>
+  calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
+const smsPhones = (calls: FetchCall[]) =>
+  smsCalls(calls).map((c) => JSON.parse(c.body).phone);
 
 // Durable invariant: manager notification is SMS-via-GHL only. Every outbound
 // call must be either one of our own edge functions or an allowlisted
@@ -119,7 +152,8 @@ const assertNoThirdPartySend = (calls: FetchCall[], msg: string) =>
   assertEquals(
     calls
       .filter((c) =>
-        !c.url.includes("/functions/v1/") && !ALLOWED_THIRD_PARTY.some((h) => c.url.includes(h))
+        !c.url.includes("/functions/v1/") &&
+        !ALLOWED_THIRD_PARTY.some((h) => c.url.includes(h))
       )
       .map((c) => c.url),
     [],
@@ -129,12 +163,48 @@ const assertNoThirdPartySend = (calls: FetchCall[], msg: string) =>
 // The full crew per D4: Hugo (make-safe), Henry (fencing), Nithin + Jan (patio).
 // Marnin (admin) and Shaun (ops_manager, no phone) must never be texted.
 const USERS = [
-  { id: "u-hugo", name: "Hugo", role: "lead_installer", managed_verticals: ["makesafe"], phone: "+61400000001" },
-  { id: "u-henry", name: "Henry", role: "lead_installer", managed_verticals: ["fencing"], phone: "+61400000002" },
-  { id: "u-nithin", name: "Nithin", role: "sales", managed_verticals: ["patio"], phone: "+61400000003" },
-  { id: "u-jan", name: "Jan", role: "lead_installer", managed_verticals: ["patio"], phone: "+61400000004" },
-  { id: "u-marnin", name: "Marnin", role: "admin", managed_verticals: ["makesafe", "fencing", "patio", "decking"], phone: "+61400000009" },
-  { id: "u-shaun", name: "Shaun", role: "ops_manager", managed_verticals: ["makesafe", "fencing", "patio", "decking"], phone: null },
+  {
+    id: "u-hugo",
+    name: "Hugo",
+    role: "lead_installer",
+    managed_verticals: ["makesafe"],
+    phone: "+61400000001",
+  },
+  {
+    id: "u-henry",
+    name: "Henry",
+    role: "lead_installer",
+    managed_verticals: ["fencing"],
+    phone: "+61400000002",
+  },
+  {
+    id: "u-nithin",
+    name: "Nithin",
+    role: "sales",
+    managed_verticals: ["patio"],
+    phone: "+61400000003",
+  },
+  {
+    id: "u-jan",
+    name: "Jan",
+    role: "lead_installer",
+    managed_verticals: ["patio"],
+    phone: "+61400000004",
+  },
+  {
+    id: "u-marnin",
+    name: "Marnin",
+    role: "admin",
+    managed_verticals: ["makesafe", "fencing", "patio", "decking"],
+    phone: "+61400000009",
+  },
+  {
+    id: "u-shaun",
+    name: "Shaun",
+    role: "ops_manager",
+    managed_verticals: ["makesafe", "fencing", "patio", "decking"],
+    phone: null,
+  },
 ];
 
 // ── U2a: make-safe creation texts the make-safe manager ─────────────────────
@@ -152,13 +222,23 @@ Deno.test("U2a: direct createMakesafeJob texts Hugo only (no dispatchers or phon
     await flush();
 
     assertEquals(res.ok, true);
-    assertEquals(smsPhones(calls), ["+61400000001"], "exactly one SMS, to Hugo (Marnin/Shaun/other verticals excluded)");
+    assertEquals(
+      smsPhones(calls),
+      ["+61400000001"],
+      "exactly one SMS, to Hugo (Marnin/Shaun/other verticals excluded)",
+    );
     const body = JSON.parse(smsCalls(calls)[0].body);
     assert(body.message.includes("SWMS-27001"), "carries the job number");
     assert(body.message.includes("12 Example St, Padbury"), "carries the site");
-    assert(body.message.includes("MLB Insurance Building"), "carries the builder");
+    assert(
+      body.message.includes("MLB Insurance Building"),
+      "carries the builder",
+    );
     assert(body.message.includes("Open in Trade:"), "carries the trade link");
-    assertNoThirdPartySend(calls, "make-safe creation makes no third-party outbound call");
+    assertNoThirdPartySend(
+      calls,
+      "make-safe creation makes no third-party outbound call",
+    );
   } finally {
     restore();
   }
@@ -176,8 +256,15 @@ Deno.test("U2a (G3): suppress_notifications:true (the intake-approve path) still
     });
     await flush();
     assertEquals(res.ok, true);
-    assertEquals(smsPhones(calls), ["+61400000001"], "intake-created make-safes are no longer silent");
-    assertNoThirdPartySend(calls, "intake-approve path makes no third-party outbound call");
+    assertEquals(
+      smsPhones(calls),
+      ["+61400000001"],
+      "intake-created make-safes are no longer silent",
+    );
+    assertNoThirdPartySend(
+      calls,
+      "intake-approve path makes no third-party outbound call",
+    );
   } finally {
     restore();
   }
@@ -196,7 +283,10 @@ Deno.test("U2a: explicit deterministic/reconciliation suppression creates silent
     await flush();
     assertEquals(res.ok, true);
     assertEquals(smsCalls(calls).length, 0);
-    assertNoThirdPartySend(calls, "explicit reviewed intake suppression is silent");
+    assertNoThirdPartySend(
+      calls,
+      "explicit reviewed intake suppression is silent",
+    );
   } finally {
     restore();
   }
@@ -224,8 +314,14 @@ function jobFixture(type: string, status: string): Store {
     users: USERS.map((u) => ({ ...u })),
     jobs: {
       "job-1": {
-        id: "job-1", type, status, job_number: "SWF-100", client_name: "Jane Client",
-        site_address: "12 Example St", site_suburb: "Padbury", pricing_json: null,
+        id: "job-1",
+        type,
+        status,
+        job_number: "SWF-100",
+        client_name: "Jane Client",
+        site_address: "12 Example St",
+        site_suburb: "Padbury",
+        pricing_json: null,
       },
     },
   };
@@ -235,15 +331,25 @@ Deno.test("U2b: fencing quoted -> order_confirmed texts Henry only", async () =>
   const { calls, restore } = stubFetch();
   try {
     const store = jobFixture("fencing", "quoted");
-    const res = await _updateJobStatus(makeClient(store), { job_id: "job-1", status: "order_confirmed" });
+    const res = await _updateJobStatus(makeClient(store), {
+      job_id: "job-1",
+      status: "order_confirmed",
+    });
     await flush();
     assertEquals(res.success, true);
-    assertEquals(smsPhones(calls), ["+61400000002"], "Henry (fencing manager) only");
+    assertEquals(
+      smsPhones(calls),
+      ["+61400000002"],
+      "Henry (fencing manager) only",
+    );
     const body = JSON.parse(smsCalls(calls)[0].body);
     assert(body.message.includes("Job ready for crew"), "ready wording");
     assert(body.message.includes("SWF-100"));
     assert(body.message.includes("order_confirmed"));
-    assertNoThirdPartySend(calls, "status transition makes no third-party outbound call");
+    assertNoThirdPartySend(
+      calls,
+      "status transition makes no third-party outbound call",
+    );
   } finally {
     restore();
   }
@@ -253,7 +359,10 @@ Deno.test("U2b: patio quoted -> scheduled texts BOTH patio managers (Nithin + Ja
   const { calls, restore } = stubFetch();
   try {
     const store = jobFixture("patio", "quoted");
-    const res = await _updateJobStatus(makeClient(store), { job_id: "job-1", status: "scheduled" });
+    const res = await _updateJobStatus(makeClient(store), {
+      job_id: "job-1",
+      status: "scheduled",
+    });
     await flush();
     assertEquals(res.success, true);
     assertEquals(smsPhones(calls).sort(), ["+61400000003", "+61400000004"]);
@@ -263,18 +372,48 @@ Deno.test("U2b: patio quoted -> scheduled texts BOTH patio managers (Nithin + Ja
 });
 
 Deno.test("U2b: NO text on repeat save, within-set move, non-ready transition, or non-fencing/patio types", async () => {
-  const cases: Array<{ type: string; from: string; to: string; label: string }> = [
-    { type: "fencing", from: "order_confirmed", to: "order_confirmed", label: "repeat save of the same ready status" },
-    { type: "fencing", from: "schedule_install", to: "scheduled", label: "move WITHIN the ready set" },
-    { type: "fencing", from: "quoted", to: "awaiting_deposit", label: "non-ready transition" },
-    { type: "makesafe", from: "accepted", to: "scheduled", label: "make-safe type (creation text covers it)" },
-    { type: "decking", from: "quoted", to: "order_confirmed", label: "decking type (no manager crew flow)" },
+  const cases: Array<
+    { type: string; from: string; to: string; label: string }
+  > = [
+    {
+      type: "fencing",
+      from: "order_confirmed",
+      to: "order_confirmed",
+      label: "repeat save of the same ready status",
+    },
+    {
+      type: "fencing",
+      from: "schedule_install",
+      to: "scheduled",
+      label: "move WITHIN the ready set",
+    },
+    {
+      type: "fencing",
+      from: "quoted",
+      to: "awaiting_deposit",
+      label: "non-ready transition",
+    },
+    {
+      type: "makesafe",
+      from: "accepted",
+      to: "scheduled",
+      label: "make-safe type (creation text covers it)",
+    },
+    {
+      type: "decking",
+      from: "quoted",
+      to: "order_confirmed",
+      label: "decking type (no manager crew flow)",
+    },
   ];
   for (const c of cases) {
     const { calls, restore } = stubFetch();
     try {
       const store = jobFixture(c.type, c.from);
-      const res = await _updateJobStatus(makeClient(store), { job_id: "job-1", status: c.to });
+      const res = await _updateJobStatus(makeClient(store), {
+        job_id: "job-1",
+        status: c.to,
+      });
       await flush();
       assertEquals(res.success, true, c.label);
       assertEquals(smsCalls(calls).length, 0, `zero SMS: ${c.label}`);

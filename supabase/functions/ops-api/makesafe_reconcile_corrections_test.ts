@@ -33,15 +33,23 @@ function clientFor(store: Store) {
         },
         single() {
           if (table === "jobs" && updatePayload == null) {
-            return Promise.resolve({ data: structuredClone(store.job), error: null });
+            return Promise.resolve({
+              data: structuredClone(store.job),
+              error: null,
+            });
           }
           if (table === "makesafe_job_details" && updatePayload == null) {
-            return Promise.resolve({ data: structuredClone(store.detail), error: null });
+            return Promise.resolve({
+              data: structuredClone(store.detail),
+              error: null,
+            });
           }
           return Promise.resolve({ data: null, error: null });
         },
         insert(payload: any) {
-          if (table === "job_events") store.events.push(structuredClone(payload));
+          if (table === "job_events") {
+            store.events.push(structuredClone(payload));
+          }
           return Promise.resolve({ data: null, error: null });
         },
         then(resolve: any, reject: any) {
@@ -53,12 +61,17 @@ function clientFor(store: Store) {
               }
               if (table === "makesafe_job_details") {
                 store.detailUpdates.push(structuredClone(updatePayload));
-                store.detail = { ...store.detail, ...structuredClone(updatePayload) };
+                store.detail = {
+                  ...store.detail,
+                  ...structuredClone(updatePayload),
+                };
               }
             }
             return Promise.resolve(resolve({ data: null, error: null }));
           } catch (error) {
-            return reject ? Promise.resolve(reject(error)) : Promise.reject(error);
+            return reject
+              ? Promise.resolve(reject(error))
+              : Promise.reject(error);
           }
         },
       };
@@ -144,7 +157,12 @@ Deno.test("reviewed family consistency: no override is always allowed", () => {
 
 Deno.test("reviewed family consistency: report family requires the matching report type", () => {
   _assertReviewedFamilyConsistency("roof_report", "roof_report", false, true);
-  _assertReviewedFamilyConsistency("assessment_report_quote", "assessment_report", false, true);
+  _assertReviewedFamilyConsistency(
+    "assessment_report_quote",
+    "assessment_report",
+    false,
+    true,
+  );
 });
 
 Deno.test("reviewed family consistency: report family on a physical/null type is rejected", () => {
@@ -154,13 +172,25 @@ Deno.test("reviewed family consistency: report family on a physical/null type is
     "requires report_type 'roof_report'",
   );
   assertThrows(
-    () => _assertReviewedFamilyConsistency("assessment_report_quote", null, false, false),
+    () =>
+      _assertReviewedFamilyConsistency(
+        "assessment_report_quote",
+        null,
+        false,
+        false,
+      ),
     Error,
     "requires report_type 'assessment_report'",
   );
   // roof family with a non-matching (assessment) report type is still a mismatch
   assertThrows(
-    () => _assertReviewedFamilyConsistency("roof_report", "assessment_report", false, true),
+    () =>
+      _assertReviewedFamilyConsistency(
+        "roof_report",
+        "assessment_report",
+        false,
+        true,
+      ),
     Error,
     "requires report_type 'roof_report'",
   );
@@ -168,12 +198,24 @@ Deno.test("reviewed family consistency: report family on a physical/null type is
 
 Deno.test("reviewed family consistency: physical family on a report-only type is rejected", () => {
   assertThrows(
-    () => _assertReviewedFamilyConsistency("general_makesafe", "roof_report", false, true),
+    () =>
+      _assertReviewedFamilyConsistency(
+        "general_makesafe",
+        "roof_report",
+        false,
+        true,
+      ),
     Error,
     "is a physical make-safe",
   );
   assertThrows(
-    () => _assertReviewedFamilyConsistency("temp_fence_makesafe", "assessment_report", false, true),
+    () =>
+      _assertReviewedFamilyConsistency(
+        "temp_fence_makesafe",
+        "assessment_report",
+        false,
+        true,
+      ),
     Error,
     "is a physical make-safe",
   );
@@ -181,7 +223,12 @@ Deno.test("reviewed family consistency: physical family on a report-only type is
 
 Deno.test("reviewed family consistency: physical family on a physical primary is allowed", () => {
   _assertReviewedFamilyConsistency("general_makesafe", null, false, false);
-  _assertReviewedFamilyConsistency("temp_fence_makesafe", "make_safe", false, false);
+  _assertReviewedFamilyConsistency(
+    "temp_fence_makesafe",
+    "make_safe",
+    false,
+    false,
+  );
 });
 
 Deno.test("reviewed family consistency: combined split rejects a report family, allows a physical one", () => {
@@ -191,7 +238,13 @@ Deno.test("reviewed family consistency: combined split rejects a report family, 
     "belongs to the secondary card",
   );
   assertThrows(
-    () => _assertReviewedFamilyConsistency("assessment_report_quote", null, true, false),
+    () =>
+      _assertReviewedFamilyConsistency(
+        "assessment_report_quote",
+        null,
+        true,
+        false,
+      ),
     Error,
     "belongs to the secondary card",
   );
@@ -201,10 +254,26 @@ Deno.test("reviewed family consistency: combined split rejects a report family, 
 });
 
 Deno.test("reconciliation approval flags remain explicitly privileged and opt-in", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assertEquals(source.includes("reviewedReportType || effectiveIntakeReportType(draft)"), true);
-  assertEquals(source.includes("body?.suppress_manager_notification === true"), true);
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  assertEquals(
+    source.includes("reviewedReportType || effectiveIntakeReportType(draft)"),
+    true,
+  );
+  assertEquals(
+    source.includes("body?.suppress_manager_notification === true"),
+    true,
+  );
   assertEquals(source.includes("body?.report_unsubmitted === true"), true);
-  assertEquals(source.includes("body?.attach_work_order_for_report === true"), true);
-  assertEquals(source.includes("forbidden: approve_intake_draft requires the privileged ops key"), true);
+  assertEquals(
+    source.includes("body?.attach_work_order_for_report === true"),
+    true,
+  );
+  assertEquals(
+    source.includes(
+      "forbidden: approve_intake_draft requires the privileged ops key",
+    ),
+    true,
+  );
 });
