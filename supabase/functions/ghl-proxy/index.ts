@@ -30,6 +30,10 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 //
 // Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
+// Fence test lab: append &testMode=true and configure
+//   GHL_TEST_FENCING_PIPELINE_ID + SUPABASE_TEST_ORG_ID.
+// The captain supplies the GHL TEST pipeline ID through env config, never code.
+// Test mode remains unavailable until both values exist and always blocks comms.
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -80,13 +84,14 @@ import {
   stampedFenceOpportunityName,
   validateFenceMintInput,
 } from './fence_mint.ts'
+import { resolveGhlProxyRoute, testModeCommsBlock } from './test_mode.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
 const GHL_BASE = 'https://services.leadconnectorhq.com'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
-const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
+const PRODUCTION_DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Per-pipeline salesperson UUIDs (public.users.id) — mirrors the auto-assign
 // in ghl-webhook/index.ts. Without this, new jobs created via create_job
@@ -105,13 +110,13 @@ function salespersonFor(type: string | null | undefined): string | null {
 }
 
 // Sales pipelines (leads → quotes)
-const PIPELINES: Record<string, string> = {
+const PRODUCTION_PIPELINES: Record<string, string> = {
   fencing: 'I9t8njpuR0Dm7B2NDcvI',
   patio: 'OGZLpPPVWVarN94HL6af',
 }
 
 // Execution pipelines (accepted jobs)
-const EXECUTION_PIPELINES: Record<string, string> = {
+const PRODUCTION_EXECUTION_PIPELINES: Record<string, string> = {
   fencing_exec: 'fgV2mkFh6BD4gOZZx94y',
   patio_exec: 'SxayUz0KRDlCUk58apCC',
 }
@@ -120,20 +125,20 @@ const EXECUTION_PIPELINES: Record<string, string> = {
 const MATERIALS_PIPELINE = 'SkgfC3nzTsOHqTSv9LNl'
 
 // "Scope Complete" stage IDs per pipeline
-const SCOPE_COMPLETE_STAGES: Record<string, string> = {
+const PRODUCTION_SCOPE_COMPLETE_STAGES: Record<string, string> = {
   fencing: '418534d4-6356-4c20-a274-51fbb892c2fa',  // Scope Complete
   patio: '9b9e5313-8e0e-4ed6-8654-d50413b99885',    // Scope Complete / Quote to be Sent
 }
 
 // "Job Complete" stage IDs per execution pipeline (discovered from GHL API 2026-03-04)
-const JOB_COMPLETE_STAGES: Record<string, string> = {
+const PRODUCTION_JOB_COMPLETE_STAGES: Record<string, string> = {
   fencing: 'f622844c-2fac-4627-81d4-978a6a864c72',  // "Get Final Payment Both Clients"
   patio: '54d52061-6fca-4dfe-a421-f35a3b88d434',    // "Job complete Needs to be invoiced"
 }
 
 // Reverse lookup: Supabase status → GHL execution pipeline stage UUID
 // Used by ops-api to push status changes to GHL
-const OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
+const PRODUCTION_OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
   fencing: {
     accepted:    'c1615373-9140-4e49-92aa-aa0cfa8e9793', // Job Accepted Ready for Execution
     // approvals: fencing skips approvals — stays at accepted stage in GHL
@@ -536,6 +541,59 @@ serve(async (req: Request) => {
   const url = new URL(req.url)
   const action = url.searchParams.get('action')
 
+  // Test routing is an exact request-level opt-in. Any absent or malformed
+  // value stays on the existing production constants. An exact test request is
+  // fail-closed until both captain-supplied route IDs exist in edge secrets.
+  const routeResult = resolveGhlProxyRoute(url.searchParams.get('testMode'), {
+    productionFencingPipelineId: PRODUCTION_PIPELINES.fencing,
+    productionOrganisationId: PRODUCTION_DEFAULT_ORG_ID,
+    testFencingPipelineId: Deno.env.get('GHL_TEST_FENCING_PIPELINE_ID'),
+    testOrganisationId: Deno.env.get('SUPABASE_TEST_ORG_ID'),
+  })
+  if (!routeResult.ok) {
+    return json({
+      error: routeResult.error,
+      code: routeResult.code,
+      missing: routeResult.missing,
+    }, routeResult.status)
+  }
+  const route = routeResult.route
+
+  // This guard runs before any action handler can resolve/create a contact or
+  // call the conversations API. It remains effective even if a test pipeline
+  // ID is accidentally configured to a production pipeline.
+  const commsBlock = testModeCommsBlock(route.testMode, action)
+  if (commsBlock) return json(commsBlock.body, commsBlock.status)
+
+  // Shadow the production maps per request. Test mode has no execution/stage
+  // fallback: only the configured fencing lead pipeline can be targeted.
+  const PIPELINES: Record<string, string> = route.testMode
+    ? { fencing: route.fencingPipelineId }
+    : PRODUCTION_PIPELINES
+  const EXECUTION_PIPELINES: Record<string, string> = route.testMode
+    ? {}
+    : PRODUCTION_EXECUTION_PIPELINES
+  const SCOPE_COMPLETE_STAGES: Record<string, string> = route.testMode
+    ? {}
+    : PRODUCTION_SCOPE_COMPLETE_STAGES
+  const JOB_COMPLETE_STAGES: Record<string, string> = route.testMode
+    ? {}
+    : PRODUCTION_JOB_COMPLETE_STAGES
+  const OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = route.testMode
+    ? {}
+    : PRODUCTION_OPS_TO_GHL_STAGES
+  const DEFAULT_ORG_ID = route.organisationId
+
+  if (route.testMode) {
+    const requestedPipeline = url.searchParams.get('pipeline')
+    if (requestedPipeline && requestedPipeline !== 'fencing') {
+      return json({
+        error: 'Fence test mode only supports the configured fencing pipeline',
+        code: 'test_mode_fencing_only',
+      }, 400)
+    }
+  }
+
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -590,6 +648,17 @@ serve(async (req: Request) => {
     }
   }
 
+  if (
+    route.testMode &&
+    credential.mode === 'user_jwt' &&
+    !isSameOrg(authProfile?.org_id, route.organisationId)
+  ) {
+    return json({
+      error: 'Fence test mode requires a user from the configured test organisation',
+      code: 'test_mode_org_required',
+    }, 403)
+  }
+
   try {
     console.log(`[ghl-proxy] action=${action} method=${req.method}`)
     const requireSameOrgJob = async (sb: any, jobId: string) => {
@@ -598,7 +667,10 @@ serve(async (req: Request) => {
       if (error || !job) {
         return { ok: false as const, response: json({ error: error?.message || 'Job not found', code: 'job_not_found' }, 404) }
       }
-      if (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, job.org_id)) {
+      if (
+        (route.testMode && !isSameOrg(route.organisationId, job.org_id)) ||
+        (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, job.org_id))
+      ) {
         return { ok: false as const, response: json({ error: 'Job belongs to a different organisation', code: 'org_mismatch' }, 403) }
       }
       return { ok: true as const, job }
@@ -1886,7 +1958,14 @@ serve(async (req: Request) => {
         } catch {
           throw new FenceMintError(400, 'invalid_request', 'JSON object body required')
         }
-        const input = validateFenceMintInput(parsedBody)
+        const routedBody = route.testMode && parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+          ? {
+            ...(parsedBody as Record<string, unknown>),
+            organisationId: route.organisationId,
+            organisation_id: route.organisationId,
+          }
+          : parsedBody
+        const input = validateFenceMintInput(routedBody)
         authorizeFenceMintCaller({
           mode: credential.mode,
           authUserId,
@@ -2205,11 +2284,19 @@ serve(async (req: Request) => {
     if (action === 'create_job' && req.method === 'POST') {
       const body = await req.json()
       const { opportunityId, toolType, clientName, clientPhone, clientEmail, siteAddress, siteSuburb } = body
+      if (route.testMode && toolType !== 'fencing') {
+        return json({ error: 'Fence test mode requires toolType=fencing', code: 'test_mode_fencing_only' }, 400)
+      }
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       // Default org for service callers; browser callers inherit the verified profile org.
-      const orgId = credential.mode === 'user_jwt' ? authProfile.org_id : '00000000-0000-0000-0000-000000000001'
+      // Test mode always targets its configured lab org and never trusts a caller org.
+      const orgId = route.testMode
+        ? route.organisationId
+        : credential.mode === 'user_jwt'
+        ? authProfile.org_id
+        : PRODUCTION_DEFAULT_ORG_ID
 
       const resolvedType = toolType || 'patio'
       const insertData: Record<string, unknown> = {
@@ -2222,7 +2309,7 @@ serve(async (req: Request) => {
         client_email: clientEmail || '',
         site_address: siteAddress || '',
         site_suburb: siteSuburb || '',
-        created_by: salespersonFor(resolvedType),
+        created_by: route.testMode ? authUserId : salespersonFor(resolvedType),
       }
       // GHL link is optional — walk-up scopes may not have an opportunity
       if (opportunityId) insertData.ghl_opportunity_id = opportunityId
@@ -2264,6 +2351,9 @@ serve(async (req: Request) => {
     if (action === 'create_contact_and_opportunity' && req.method === 'POST') {
       const body = await req.json()
       const { firstName, lastName, email, phone, address, suburb, toolType, skipOpportunity, name } = body
+      if (route.testMode && toolType !== 'fencing') {
+        return json({ error: 'Fence test mode requires toolType=fencing', code: 'test_mode_fencing_only' }, 400)
+      }
 
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
@@ -2427,7 +2517,10 @@ serve(async (req: Request) => {
         console.log('[ghl-proxy] save_scope target lookup error:', targetError)
         return json({ error: targetError?.message || 'Job not found' }, 404)
       }
-      if (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, targetJob.org_id)) {
+      if (
+        (route.testMode && !isSameOrg(route.organisationId, targetJob.org_id)) ||
+        (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, targetJob.org_id))
+      ) {
         return json({ error: 'Job belongs to a different organisation', code: 'org_mismatch' }, 403)
       }
 
