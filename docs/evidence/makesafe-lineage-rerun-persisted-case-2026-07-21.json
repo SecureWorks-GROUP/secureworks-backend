@@ -1,0 +1,10 @@
+[
+  {
+    "persisted_case_key_sha256": "be7cf646282d8a1277f2925066105cdf7dd261a9a000b2ea8902d8f8263432dc",
+    "state": "exception",
+    "reason_code": "adapter_parse_failure",
+    "parent_relation": null,
+    "parent_present": false,
+    "created_at": "2026-07-21 05:54:03.123812+00"
+  }
+]
