@@ -1,0 +1,39 @@
+{
+  "stage": "canonical_ops_api_deploy",
+  "canonical_release_worktree": "/Users/marninstobbe/Projects/_release/secureworks-site-main",
+  "source_branch": "main",
+  "source_commit": "5ce103e6aed938ad6139e23f750fefa438e049f8",
+  "ops_api_version": 848,
+  "verify_jwt": false,
+  "deployed_at": "2026-07-21T09:55:50Z",
+  "deployed_version_proof": {
+    "source_repo": "secureworks-site",
+    "build_label_present": true,
+    "commit_sha_matched": true
+  },
+  "first_guarded_smoke": {
+    "credential_source": "unused_rotated_key_durable_copy",
+    "http_auth_result": 401,
+    "checks_passed": 6,
+    "checks_failed": 3,
+    "failed_checks": [
+      "ops_api_canonical_source",
+      "ops_api_build_label",
+      "ops_api_commit_sha"
+    ]
+  },
+  "diagnostic_smoke_with_active_production_client_key": {
+    "checks_passed": 9,
+    "checks_failed": 0,
+    "commit_sha_matched": true,
+    "required_actions_recognised": 67
+  },
+  "effective_intake_mode_after_stop": "legacy",
+  "deterministic_max_cases_per_run": 1,
+  "deterministic_source_allowlist_count": 1,
+  "deterministic_instruction_allowlist_count": 0,
+  "n1_canary_attempted": false,
+  "full_live_widening_attempted": false,
+  "stop_reason": "The first post-deploy smoke produced an authentication anomaly. The active-key diagnostic proved the deployed binary, but the approved any-anomaly rule requires stopping before canary activation.",
+  "secret_values_recorded": false
+}
