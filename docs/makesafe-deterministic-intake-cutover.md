@@ -84,8 +84,9 @@ or manual operator checks. Health records `intake_mode=deterministic` and
 
 The terminal skill integration contract is
 `docs/makesafe-intake-terminal-hook.md`. Automatic cron, scoped terminal routine and
-manual operator calls all enter the same deterministic scanner; only DB-approved exact
-allowlists can reach business writes.
+manual operator calls all enter the same deterministic scanner; only a DB-approved
+selection authority can reach business writes: `exact` via its non-empty allowlists,
+or separately approved `full_open` via the bounded cursor page.
 
 ## Query and payload constraints
 
@@ -164,7 +165,9 @@ suffix punctuation, claim-only exclusion, revisions, reopen cycles, twins, resen
 cancellation, unknown builders, replay equality, zero unaccounted sources, and zero AI
 fallback.
 
-The runtime tests cover commit-and-resume behaviour, exact allowlist selection, the
+The runtime tests cover commit-and-resume behaviour, exact allowlist selection,
+full-open selection processing the bounded cursor page while exact-empty and mixed
+full-open-plus-allowlist configurations fail closed, the
 N=1 cap, bounded fairness, run-twice zero-new-write behaviour, source accounting before
 job creation, content-hash artifact deduplication across twin posts, failure injection,
 zero AI, and zero assignment/work-order/invoice/client-communication writes. They also
