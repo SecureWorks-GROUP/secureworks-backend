@@ -1,0 +1,92 @@
+{
+  "recorded_at": "2026-07-21T14:43:09Z",
+  "production_release": {
+    "commit": "e114a427",
+    "ops_api_version": 860,
+    "ops_api_verify_jwt": false,
+    "monitor_ses_makesafes_version": 109,
+    "monitor_verify_jwt": true,
+    "active_key_smoke": {"passed": 9, "failed": 0}
+  },
+  "activation": {
+    "intake_mode": "deterministic",
+    "selection_mode": "full_open",
+    "max_cases_per_run": 10,
+    "source_allowlist_count": 0,
+    "instruction_allowlist_count": 0,
+    "activated_at": "2026-07-21T13:59:38.847064Z",
+    "full_live_cap10_at": "2026-07-21T14:23:30.919404Z"
+  },
+  "ladder": [
+    {
+      "cap": 1,
+      "scheduled_health_at": "2026-07-21T14:01:01.721Z",
+      "health": "ok",
+      "model_calls": 0,
+      "counts_after": {"cases": 6, "sources": 15, "artifacts": 4, "deterministic_drafts": 2, "jobs": 0},
+      "result": "clean"
+    },
+    {
+      "cap": 2,
+      "scheduled_health_at": "2026-07-21T14:03:01.861Z",
+      "health": "ok",
+      "model_calls": 0,
+      "counts_after": {"cases": 8, "sources": 17, "artifacts": 4, "deterministic_drafts": 2, "jobs": 0},
+      "result": "clean"
+    },
+    {
+      "cap": 5,
+      "scheduled_health_at": "2026-07-21T14:05:02.002Z",
+      "nested_http_status": 200,
+      "health": "ok",
+      "model_calls": 0,
+      "counts_after": {"cases": 13, "sources": 23, "artifacts": 4, "deterministic_drafts": 2, "jobs": 0},
+      "result": "clean"
+    },
+    {
+      "cap": 10,
+      "scheduled_scans_observed": 9,
+      "nested_http_200": 9,
+      "nested_http_non_200": 0,
+      "observation_start": "2026-07-21T14:23:30.919404Z",
+      "last_health_at": "2026-07-21T14:41:02.094Z",
+      "health": "ok",
+      "model_calls": 0,
+      "cases_created": 87,
+      "cases_with_suppressed_side_effects": 87,
+      "jobs_created": 0,
+      "result": "clean"
+    }
+  ],
+  "final_health": {
+    "extraction_status": "ok",
+    "degraded_reason": null,
+    "last_scan_model_calls": 0,
+    "last_scan_drafts_created": 0,
+    "last_scan_auto_filed": 0,
+    "last_scan_insert_conflicts_healed": 0,
+    "last_scan_insert_conflicts_live": 0,
+    "last_scan_dropped_work_orders": 0,
+    "mailbox_lease_held": false
+  },
+  "final_counts": {
+    "cases": 128,
+    "sources": 257,
+    "artifacts": 4,
+    "deterministic_drafts": 2,
+    "cases_with_jobs": 0
+  },
+  "new_case_state_summary": {
+    "accounted_non_wo_non_makesafe": 32,
+    "exception_adapter_parse_failure": 85,
+    "exception_conflicting_fields": 6,
+    "all_side_effects_suppressed": true
+  },
+  "error_log_scan": {
+    "window_start": "2026-07-21T14:00:00Z",
+    "ops_api_errors": 0,
+    "continuation_http_500_logs": 0
+  },
+  "rollback": "Set makesafe_cron_settings.intake_mode to legacy. Canonical case and source evidence remains append-only.",
+  "contains_credentials_or_personal_data": false
+}
