@@ -89,6 +89,7 @@ class FakeQuery {
     private op: "select" | "insert" | "update" | "upsert",
     private payload: any = null,
     private log?: (table: string, columns: string) => void,
+    private inLog?: (table: string, column: string, count: number) => void,
   ) {}
 
   private rows(): any[] {
@@ -119,6 +120,7 @@ class FakeQuery {
     return this;
   }
   in(column: string, values: any[]) {
+    this.inLog?.(this.table, column, values.length);
     this.filters.push((row) => values.includes(row[column]));
     return this;
   }
@@ -268,7 +270,11 @@ class FakeQuery {
   }
 }
 
-function fakeClient(store: Store, selectLog: Array<[string, string]> = []) {
+function fakeClient(
+  store: Store,
+  selectLog: Array<[string, string]> = [],
+  inLog?: (table: string, column: string, count: number) => void,
+) {
   return {
     selectLog,
     store,
@@ -276,13 +282,15 @@ function fakeClient(store: Store, selectLog: Array<[string, string]> = []) {
       const log = (t: string, c: string) => selectLog.push([t, c]);
       return {
         select: (columns: string) =>
-          new FakeQuery(store, table, "select", null, log).select(columns),
+          new FakeQuery(store, table, "select", null, log, inLog).select(
+            columns,
+          ),
         insert: (payload: any) =>
-          new FakeQuery(store, table, "insert", payload, log),
+          new FakeQuery(store, table, "insert", payload, log, inLog),
         update: (payload: any) =>
-          new FakeQuery(store, table, "update", payload, log),
+          new FakeQuery(store, table, "update", payload, log, inLog),
         upsert: (payload: any) =>
-          new FakeQuery(store, table, "upsert", payload, log),
+          new FakeQuery(store, table, "upsert", payload, log, inLog),
       };
     },
     storage: {
@@ -664,6 +672,44 @@ Deno.test("full-open processes the bounded page while exact-empty and mixed conf
       }),
     Error,
     "full_open mode requires empty exact allowlists",
+  );
+});
+
+Deno.test("full-open chunks long instruction-key filters below the live URL failure boundary", async () => {
+  const store = baseStore();
+  for (let index = 0; index < 220; index++) {
+    const ref = 70000 + index;
+    store.emails.push(email({
+      post_id: `url-boundary-${String(index).padStart(3, "0")}`,
+      received_at: "2026-07-19T01:00:00.000Z",
+      subject: `NEW WORK ORDER MLB-${ref} Work Order: WO-${ref}`,
+      body_content: `${index} Boundary Way, Perth`,
+    }));
+  }
+  const instructionKeyBatchSizes: number[] = [];
+  const client = fakeClient(store, [], (table, column, count) => {
+    if (table === "makesafe_intake_cases" && column === "instruction_key") {
+      instructionKeyBatchSizes.push(count);
+    }
+  });
+
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxSources: 500,
+    maxCases: 1,
+    approveDraft,
+  });
+
+  assertEquals(report.selection.selected_cases, 220);
+  assertEquals(report.totals.cases_attempted, 1);
+  assertEquals(report.totals.case_rows_created, 1);
+  assertEquals(instructionKeyBatchSizes.length, 9);
+  assert(
+    instructionKeyBatchSizes.every((size) => size <= 25),
+    `oversized instruction-key filter batches: ${instructionKeyBatchSizes}`,
   );
 });
 

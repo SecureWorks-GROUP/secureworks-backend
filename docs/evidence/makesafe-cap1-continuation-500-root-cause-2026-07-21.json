@@ -1,0 +1,62 @@
+{
+  "recorded_at": "2026-07-21T13:45:00Z",
+  "production_mode_during_diagnosis": "legacy",
+  "deployment": {
+    "commit": "ca90bf84",
+    "monitor_ses_makesafes_version": 108,
+    "ops_api_version": 857,
+    "active_key_smoke": "9/9"
+  },
+  "invocations": {
+    "monitor": {
+      "execution_id": "f6a6912c-b261-49ef-8f01-3983c156cd87",
+      "started_at": "2026-07-21T13:35:00.228Z",
+      "response_at": "2026-07-21T13:35:01.505Z",
+      "http_status": 200,
+      "continuation_status_logged_at": "2026-07-21T13:35:09.864Z",
+      "continuation_http_status": 500
+    },
+    "ops_scan": {
+      "execution_id": "df94ffa1-c727-400a-9df3-e78428aff176",
+      "booted_at": "2026-07-21T13:35:01.693Z",
+      "action_logged_at": "2026-07-21T13:35:01.705Z",
+      "error_logged_at": "2026-07-21T13:35:09.847Z",
+      "response_at": "2026-07-21T13:35:09.851Z",
+      "http_status": 500,
+      "action_to_error_seconds": 8.142
+    },
+    "mailbox_lease_released_at": "2026-07-21T13:35:09.884Z"
+  },
+  "platform_background_work_hypothesis": {
+    "hypothesis": "Supabase Edge terminated post-response waitUntil work before completion",
+    "confirmed": false,
+    "disproved_by": [
+      "The nested ops-api execution booted after the monitor response lifecycle began.",
+      "The continuation remained active for more than eight seconds, received the nested HTTP 500, logged that status and ran its settlement path.",
+      "The transferred mailbox lease was released after the continuation settled."
+    ]
+  },
+  "root_cause": {
+    "failure_stage": "readPersistedCases",
+    "error_class": "TypeError error sending PostgREST request",
+    "query_shape": "makesafe_intake_cases instruction_key in (...) GET filter",
+    "pre_fix_chunk_size": 200,
+    "key_shape": "long deterministic instruction keys",
+    "effect": "The encoded PostgREST GET URL exceeded a reliable request boundary before case attempts or health.",
+    "cursor_advanced": false,
+    "health_advanced": false,
+    "business_counts_changed": false
+  },
+  "fix": {
+    "postgrest_filter_chunk_size": 25,
+    "affected_reads": [
+      "external lineage parent instruction keys",
+      "persisted deterministic case instruction keys",
+      "persisted case-source case IDs"
+    ],
+    "request_count_bound": "The 500-source input cap bounds plan size, so 25-item filters remain a fixed per-invocation request count.",
+    "continuation_design_changed": false,
+    "timeout_raised": false
+  },
+  "contains_credentials_or_personal_data": false
+}

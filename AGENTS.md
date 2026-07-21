@@ -255,6 +255,11 @@ Transfer the existing 10-minute mailbox lease to that continuation and release i
 only when the nested scan settles, so the two-minute poll cannot launch overlapping
 batches.
 
+Deterministic instruction keys are long enough that 200 values overflow a reliable
+PostgREST GET URL. Keep all case/lineage `.in()` filters on the runtime's 25-item
+default chunk; the cap-1 continuation 500 is recorded in
+`docs/makesafe-cap1-continuation-500-root-cause-2026-07-21.md`.
+
 The deterministic sweep cursor is a completion checkpoint. A cancelled, rejected or
 thrown run retains the prior cursor and rereads idempotently. A completed degraded
 run writes truthful health, advances with the explicit

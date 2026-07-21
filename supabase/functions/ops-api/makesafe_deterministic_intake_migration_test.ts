@@ -147,6 +147,11 @@ Deno.test("scheduled scans detach from pg_net and cursor progress means completi
   assertStringIncludes(runtime, "const commitCompletedCursor");
   assertStringIncludes(
     runtime,
+    "chunk(cases.map((c) => c.instructionKey))",
+  );
+  assert(!runtime.includes("chunk(cases.map((c) => c.instructionKey), 200)"));
+  assertStringIncludes(
+    runtime,
     '"scan_page_completed_degraded_retry_next_sweep"',
   );
   const cursorCommit = runtime.lastIndexOf("await commitCompletedCursor();");
