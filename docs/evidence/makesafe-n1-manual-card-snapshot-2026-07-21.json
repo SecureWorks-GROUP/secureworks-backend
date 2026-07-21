@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-07-21T05:34:14Z",
+  "manual_card": {
+    "assignment_count": 2,
+    "assignment_statuses": [
+      "complete",
+      "complete"
+    ],
+    "builder": "ML Builders",
+    "canonical_stage": "allocated",
+    "contact_fields": {
+      "address": true,
+      "call_action": true,
+      "client_name": true,
+      "navigate_action": true,
+      "phone": true,
+      "text_action": true
+    },
+    "external_reference": "MLB-26443",
+    "job_number": "SWMS-26902",
+    "job_state": "processing",
+    "lineage_fields": {
+      "builder_purchase_order": false,
+      "builder_work_order": false,
+      "claim_reference": true,
+      "one_card_per_po": true
+    },
+    "makesafe_type": "MakeSafe",
+    "pack_sent": false,
+    "pack_state": "sending",
+    "real_blocker_count": 0,
+    "report_state": "waiting_on_trade_report",
+    "report_submitted": false,
+    "stale_artifact_count": 0,
+    "substatus": "waiting_on_trade_report"
+  },
+  "selection_basis": {
+    "attachment_count": 1,
+    "from_domain": "primeeco.tech",
+    "inbound": true,
+    "pdf_count": 1,
+    "real_ses_email": true,
+    "received_at": "2026-07-02T07:12:07+00:00",
+    "recent": true,
+    "source_reference": "MLB-26443",
+    "target_job_present": true,
+    "uploaded_count": 1,
+    "work_order_filename_hint": true
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-07-21T05:29:30.481Z",
+  "intake_mode": "legacy",
+  "healthy": false,
+  "extraction": {
+    "status": "degraded",
+    "degraded_reason": "usage_cap",
+    "last_scan_at": "2026-07-21T05:29:07.42+00:00"
+  },
+  "alarm_readiness": {
+    "ready": true,
+    "action": "makesafe_email_canary",
+    "cadence_minutes": 15,
+    "authentication_max_age_minutes": 15,
+    "required_auth": "SW_API_KEY_or_service_role",
+    "authentication": {
+      "status": "verified",
+      "http_status": null,
+      "verified_at": "2026-07-21T05:28:24.711+00:00",
+      "age_minutes": 1.1,
+      "reason": null
+    },
+    "latest_observed_at": "2026-07-21T05:28:24.711+00:00",
+    "alarm_enabled": true,
+    "recipients_configured": true,
+    "recipient_count": 1,
+    "settings_read_error": null
+  }
+}

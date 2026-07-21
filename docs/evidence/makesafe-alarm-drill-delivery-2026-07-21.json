@@ -1,0 +1,9 @@
+{
+  "canonical_alarm_event_recorded": true,
+  "canonical_alarm_occurred_at": "2026-07-21 05:28:24.998591+00",
+  "sms_submission_recorded_with_message_id": true,
+  "sms_submitted_at": "2026-07-21 05:28:26.423+00",
+  "alarm_rate_limit_recorded_at": "2026-07-21 05:28:24.946+00",
+  "alarm_auth_verified_at": "2026-07-21 05:28:24.711+00",
+  "alarm_auth_action": "makesafe_email_canary"
+}

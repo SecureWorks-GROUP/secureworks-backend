@@ -1,0 +1,19 @@
+{
+  "checked": 0,
+  "ok": 0,
+  "alerts": [],
+  "heartbeat": {
+    "stalled": false,
+    "shouldAlert": false,
+    "alerted": false,
+    "detail": "pipeline healthy: 4 email(s), 1 draft(s) in last 2h"
+  },
+  "extraction_health": {
+    "alarm": true,
+    "reason": "degraded",
+    "shouldAlert": true,
+    "alerted": true,
+    "detail": "make-safe intake extraction DEGRADED (reason: usage_cap) since 2026-07-19T20:27:07.9+00:00. The classifier is not producing valid extractions — new intake cards are empty/needs_review dockets until it recovers."
+  },
+  "alarm_auth_recorded": true
+}

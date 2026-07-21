@@ -389,6 +389,88 @@ async function resolveInstructionKeySeeds(
   return { postIds, capProofKeys };
 }
 
+interface PersistedSourceAuthority {
+  id: string;
+  instruction_key: string;
+  cycle: number;
+  parent_relation: DeterministicCasePlan["parentRelation"];
+  source_fingerprint: string | null;
+}
+
+// An exact source that is already canonical-accounted is stronger authority than
+// whichever correlated neighbours happen to share this run's moving capped page.
+// Seed its complete persisted source closure before planning, then bind the plan
+// back to the persisted case below. Without both halves, a later cursor page can
+// re-key the same source as a new sibling and defeat idempotency.
+async function resolvePersistedSourceAuthorities(
+  client: any,
+  sourcePostIds: readonly string[],
+): Promise<{
+  byPostId: Map<string, PersistedSourceAuthority>;
+  seedPostIds: string[];
+}> {
+  const byPostId = new Map<string, PersistedSourceAuthority>();
+  if (!sourcePostIds.length) return { byPostId, seedPostIds: [] };
+
+  const caseIdByPostId = new Map<string, string>();
+  for (const ids of chunk(sourcePostIds)) {
+    const { data, error } = await client.from("makesafe_intake_case_sources")
+      .select("post_id,case_id")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("post_id", ids);
+    if (error) {
+      throw new Error(
+        `deterministic source authority read failed: ${error.message || error}`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.post_id && row?.case_id) {
+        caseIdByPostId.set(row.post_id, row.case_id);
+      }
+    }
+  }
+
+  const authorityByCaseId = new Map<string, PersistedSourceAuthority>();
+  for (const ids of chunk([...new Set(caseIdByPostId.values())])) {
+    const { data, error } = await client.from("makesafe_intake_cases")
+      .select(
+        "id,instruction_key,cycle,parent_relation,source_fingerprint",
+      )
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("id", ids);
+    if (error) {
+      throw new Error(
+        `deterministic source authority case read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.id && row?.instruction_key) authorityByCaseId.set(row.id, row);
+    }
+  }
+
+  for (const [postId, caseId] of caseIdByPostId) {
+    const authority = authorityByCaseId.get(caseId);
+    if (!authority) {
+      throw new Error(
+        "deterministic source authority points to an unreadable canonical case",
+      );
+    }
+    byPostId.set(postId, authority);
+  }
+  const persistedSources = await readPersistedSourcePostIds(
+    client,
+    [...authorityByCaseId.keys()],
+  );
+  const seedPostIds = [
+    ...new Set(
+      [...persistedSources.values()].flatMap((ids) => [...ids]),
+    ),
+  ];
+  return { byPostId, seedPostIds };
+}
+
 // Live scanning and dark observation sweep the same window independently, so each
 // owns its own position. Sharing one column would make a live run skip rows an
 // observe run had already passed, and would make pre-cutover observation depend on
@@ -748,6 +830,96 @@ function selectedPlan(
   };
 }
 
+function replaceInstructionKey(
+  value: string,
+  from: string,
+  to: string,
+): string {
+  return value.split(from).join(to);
+}
+
+function bindSelectedPlanToPersistedSourceAuthority(
+  plan: DeterministicIntakePlan,
+  exactSourcePostIds: readonly string[],
+  authorityByPostId: Map<string, PersistedSourceAuthority>,
+): DeterministicIntakePlan {
+  const exactSources = new Set(exactSourcePostIds);
+  // A partial page can compute a different this-run key for a persisted parent.
+  // Any in-plan child parented to that this-run key must follow the parent back to
+  // its stable key, or the lineage guard would read the child as an orphan.
+  const keyRemap = new Map<string, string>();
+  const cases = plan.cases.map((intakeCase) => {
+    const authorities = new Map<string, PersistedSourceAuthority>();
+    for (const postId of intakeCase.sourcePostIds) {
+      if (!exactSources.has(postId)) continue;
+      const authority = authorityByPostId.get(postId);
+      if (authority) authorities.set(authority.id, authority);
+    }
+    if (!authorities.size) return intakeCase;
+    if (authorities.size > 1) {
+      throw new Error(
+        "one deterministic plan merged exact sources from multiple persisted cases",
+      );
+    }
+    const authority = [...authorities.values()][0];
+    const oldKey = intakeCase.instructionKey;
+    const stableKey = authority.instruction_key;
+    if (oldKey !== stableKey) keyRemap.set(oldKey, stableKey);
+    const stableFingerprint = authority.source_fingerprint ||
+      intakeCase.instructionFingerprint;
+    const rewrite = (value: string) =>
+      replaceInstructionKey(value, oldKey, stableKey);
+    return {
+      ...intakeCase,
+      instructionKey: stableKey,
+      instructionFingerprint: stableFingerprint,
+      // The source already belongs to this row. Its persisted lineage is
+      // authoritative; a partial page may enrich it but cannot re-parent it.
+      parentInstructionKey: null,
+      parentRelation: authority.parent_relation ?? null,
+      cycle: authority.cycle,
+      sourceClassifications: intakeCase.sourceClassifications.map((item) => ({
+        ...item,
+        instructionKey: stableKey,
+      })),
+      recoveryCursor: {
+        ...intakeCase.recoveryCursor,
+        stagedArtifactKeys: intakeCase.recoveryCursor.stagedArtifactKeys.map(
+          rewrite,
+        ),
+        sideEffectKeys: {
+          ...intakeCase.recoveryCursor.sideEffectKeys,
+          draft: rewrite(intakeCase.recoveryCursor.sideEffectKeys.draft),
+          job: rewrite(intakeCase.recoveryCursor.sideEffectKeys.job),
+          pdfs: intakeCase.recoveryCursor.sideEffectKeys.pdfs.map(rewrite),
+          screenshots: intakeCase.recoveryCursor.sideEffectKeys.screenshots.map(
+            rewrite,
+          ),
+          approvals: intakeCase.recoveryCursor.sideEffectKeys.approvals.map(
+            rewrite,
+          ),
+        },
+      },
+    };
+  });
+  const relinked = keyRemap.size
+    ? cases.map((intakeCase) => {
+      const parentKey = intakeCase.parentInstructionKey;
+      if (!parentKey) return intakeCase;
+      const stableParent = keyRemap.get(parentKey);
+      if (!stableParent || stableParent === parentKey) return intakeCase;
+      return { ...intakeCase, parentInstructionKey: stableParent };
+    })
+    : cases;
+  return {
+    ...plan,
+    cases: relinked,
+    sourceClassifications: relinked.flatMap((intakeCase) =>
+      intakeCase.sourceClassifications
+    ),
+  };
+}
+
 function identityFloorFacts(
   plan: DeterministicIntakePlan,
 ): DeterministicRuntimeReport["identity_floor"] {
@@ -1076,6 +1248,50 @@ async function findCase(
     .eq("instruction_key", instructionKey)
     .maybeSingle();
   return data || null;
+}
+
+// Validate the selected lineage as one dependency closure before the first
+// business write. A child whose parent was filtered out by exact-source
+// selection must fail as a zero-write plan, not halfway through the case loop.
+async function unresolvedParentDependencies(
+  client: any,
+  cases: readonly DeterministicCasePlan[],
+): Promise<DeterministicCasePlan[]> {
+  const selectedKeys = new Set(cases.map((item) => item.instructionKey));
+  const externalParentKeys = [
+    ...new Set(
+      cases.flatMap((item) =>
+        item.parentInstructionKey &&
+          !selectedKeys.has(item.parentInstructionKey)
+          ? [item.parentInstructionKey]
+          : []
+      ),
+    ),
+  ];
+  if (!externalParentKeys.length) return [];
+
+  const persisted = new Set<string>();
+  for (const keys of chunk(externalParentKeys, 200)) {
+    const { data, error } = await client.from("makesafe_intake_cases")
+      .select("instruction_key")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("instruction_key", keys);
+    if (error) {
+      throw new Error(
+        `deterministic lineage dependency read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.instruction_key) persisted.add(row.instruction_key);
+    }
+  }
+  return cases.filter((item) =>
+    item.parentInstructionKey &&
+    !selectedKeys.has(item.parentInstructionKey) &&
+    !persisted.has(item.parentInstructionKey)
+  );
 }
 
 async function readPersistedCases(
@@ -1497,6 +1713,10 @@ export async function runDeterministicIntake(
     client,
     allowInstructionKeys,
   );
+  const sourceAuthorities = await resolvePersistedSourceAuthorities(
+    client,
+    allowSourcePostIds,
+  );
   const cursorColumns = dryRun ? OBSERVE_CURSOR_COLUMNS : LIVE_CURSOR_COLUMNS;
   const cursor = await readScanCursor(client, cursorColumns);
   const input = await readInputs(client, {
@@ -1505,7 +1725,11 @@ export async function runDeterministicIntake(
     nowIso,
     maxSources,
     cursor,
-    seedPostIds: [...allowSourcePostIds, ...instructionSeeds.postIds],
+    seedPostIds: [
+      ...allowSourcePostIds,
+      ...instructionSeeds.postIds,
+      ...sourceAuthorities.seedPostIds,
+    ],
   });
   // Advanced immediately after the read, before any planning or business write can
   // throw. A run that fails on a stale allowlist still moves the sweep on, so no
@@ -1522,9 +1746,14 @@ export async function runDeterministicIntake(
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
     options.includeSanitizedCases === true;
-  const plan = hasAllowlist
+  const selected = hasAllowlist
     ? selectedPlan(fullPlan, allowSourcePostIds, allowInstructionKeys)
     : fullPlan;
+  const plan = bindSelectedPlanToPersistedSourceAuthority(
+    selected,
+    allowSourcePostIds,
+    sourceAuthorities.byPostId,
+  );
   const matchedCaseSources = new Set(
     plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
   );
@@ -1625,6 +1854,19 @@ export async function runDeterministicIntake(
     report.proposed_cases = await sanitizedCases(plan);
   }
   if (dryRun) return report;
+
+  const missingParents = await unresolvedParentDependencies(client, plan.cases);
+  if (missingParents.length) {
+    report.totals.write_failures = missingParents.length;
+    report.totals.cases_failed = missingParents.length;
+    report.write_failure_reasons.lineage_parent_unselected =
+      missingParents.length;
+    if (!report.evidence.caveats.includes("lineage_parent_unselected")) {
+      report.evidence.caveats.push("lineage_parent_unselected");
+    }
+    await writeHealth(client, nowIso, missingParents.length, 0, 0);
+    return report;
+  }
   // A stale entry (aged out, deleted, or no longer grouping into a case) is
   // reported through selection.unmatched_* and the run continues on whatever the
   // allowlist did resolve. Only a fully unresolved allowlist fails closed, so a

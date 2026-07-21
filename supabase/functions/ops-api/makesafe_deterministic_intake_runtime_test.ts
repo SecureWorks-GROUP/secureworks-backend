@@ -1628,6 +1628,247 @@ Deno.test("a full backlog page cannot claim a clean sweep while its cursor remai
   assertEquals("next_cursor_post_id" in completeReport.source_read, false);
 });
 
+Deno.test("persisted source authority survives capped-cursor sibling re-key across reruns", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "cursor-noise",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "FYI",
+      body_content: "No work instruction.",
+    }),
+    // This distinct-PO sibling is outside the first one-row sweep page. On the
+    // second run it becomes the earlier/root instruction, which used to re-key
+    // the exact selected source below as an unpersisted sibling child.
+    email({
+      post_id: "cursor-parent-po",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90001 Work Order: WO-90001 PO: PO-90001-A",
+      body_content: "Address: 1 Stable Street, Perth",
+    }),
+    email({
+      post_id: "cursor-selected-po",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90001 Work Order: WO-90001 PO: PO-90001-B",
+      body_content: "Address: 1 Stable Street, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-cursor-selected",
+    email_id: "cursor-selected-po",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/cursor-selected.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const options = {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 1,
+    maxCases: 1,
+    allowSourcePostIds: ["cursor-selected-po"],
+    includeSanitizedCases: true,
+    approveDraft,
+  } as const;
+
+  const first = await runDeterministicIntake(client, options);
+  assertEquals(first.source_read.cursor_at, null);
+  assertEquals(first.source_read.seed_rows, 1);
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.totals.source_rows_created, 1);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(first.proposed_cases?.[0].parent_relation, null);
+  const stableKeyHash = first.proposed_cases?.[0].case_key_sha256;
+  assert(stableKeyHash);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+
+  // The cursor now exposes cursor-parent-po. The raw planner sees two distinct
+  // PO instructions and would make cursor-selected-po a sibling. Persisted-source
+  // authority must retain the original key/root and make this rerun inert.
+  const second = await runDeterministicIntake(client, options);
+  assert(second.source_read.cursor_at !== null);
+  assertEquals(second.proposed_cases?.[0].case_key_sha256, stableKeyHash);
+  assertEquals(second.proposed_cases?.[0].parent_relation, null);
+  assertEquals(second.totals.case_rows_created, 0);
+  assertEquals(second.totals.source_rows_created, 0);
+  assertEquals(second.totals.drafts_created, 0);
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(second.totals.write_failures, 0);
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+
+  // A consecutive third page reaches the selected source naturally. It must
+  // still converge to the same persisted case with no new business writes.
+  const third = await runDeterministicIntake(client, options);
+  assert(third.source_read.cursor_at !== null);
+  assertEquals(third.proposed_cases?.[0].case_key_sha256, stableKeyHash);
+  assertEquals(third.proposed_cases?.[0].parent_relation, null);
+  assertEquals(third.totals.case_rows_created, 0);
+  assertEquals(third.totals.source_rows_created, 0);
+  assertEquals(third.totals.drafts_created, 0);
+  assertEquals(third.totals.jobs_created, 0);
+  assertEquals(third.totals.write_failures, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+});
+
+Deno.test("unselected lineage parent fails before every business write", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "guard-parent-po",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-91001 Work Order: WO-91001 PO: PO-91001-A",
+      body_content: "Client: Parent Client\nAddress: 2 Guard Street, Perth",
+    }),
+    email({
+      post_id: "guard-selected-po",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-91001 Work Order: WO-91001 PO: PO-91001-B",
+      body_content: "Client: Child Client\nAddress: 2 Guard Street, Perth",
+    }),
+  );
+  for (const postId of ["guard-parent-po", "guard-selected-po"]) {
+    store.email_attachments.push({
+      id: `att-${postId}`,
+      email_id: postId,
+      name: "wo.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${postId}.pdf`,
+      status: "uploaded",
+      size_bytes: 1024,
+    });
+  }
+
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 10,
+    maxCases: 1,
+    allowSourcePostIds: ["guard-selected-po"],
+    approveDraft,
+  });
+
+  assertEquals(report.ok, true);
+  assertEquals(report.totals.write_failures, 1);
+  assertEquals(report.totals.cases_failed, 1);
+  assertEquals(report.totals.cases_attempted, 0);
+  assertEquals(report.write_failure_reasons.lineage_parent_unselected, 1);
+  assert(report.evidence.caveats.includes("lineage_parent_unselected"));
+  assertEquals(store.makesafe_intake_cases.length, 0);
+  assertEquals(store.makesafe_intake_case_sources.length, 0);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(
+    store.makesafe_intake_health[0].degraded_reason,
+    "deterministic_write_failure",
+  );
+});
+
+Deno.test("a re-keyed persisted parent re-points its in-plan child instead of failing closed", async () => {
+  const store = baseStore();
+  // Run one persists the parent instruction alone, fixing its stable key/root.
+  store.emails.push(email({
+    post_id: "multi-parent-po",
+    received_at: "2026-07-05T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-A",
+    body_content: "Client: Multi Client\nAddress: 3 Multi Street, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-multi-parent",
+    email_id: "multi-parent-po",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/multi-parent.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const first = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 50,
+    allowSourcePostIds: ["multi-parent-po"],
+    includeSanitizedCases: true,
+    approveDraft,
+  });
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.proposed_cases?.[0].parent_relation, null);
+  const parentStableHash = first.proposed_cases?.[0].case_key_sha256;
+  assert(parentStableHash);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+
+  // A twin of the parent instruction arrives and drifts the parent group's
+  // fingerprint, so this run computes a different this-run key for the persisted
+  // parent. A brand-new distinct-PO sibling child is parented to that this-run
+  // key. Rebinding the parent back to its stable key must also re-point the child.
+  store.emails.push(
+    email({
+      post_id: "multi-parent-twin",
+      received_at: "2026-07-06T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-A",
+      body_content:
+        "Client: Multi Client\nAddress: 3 Multi Street, Perth\nFollow-up copy for the same order.",
+    }),
+    email({
+      post_id: "multi-child-po",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-B",
+      body_content: "Client: Multi Client\nAddress: 3 Multi Street, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-multi-child",
+    email_id: "multi-child-po",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/multi-child.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+
+  const second = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 50,
+    maxCases: 2,
+    allowSourcePostIds: ["multi-parent-po", "multi-child-po"],
+    includeSanitizedCases: true,
+    approveDraft,
+  });
+
+  // The lineage guard must not fail closed: the parent is present under its stable
+  // key, and the child was re-pointed to it rather than left dangling on the
+  // parent's this-run key.
+  assertEquals(
+    second.write_failure_reasons.lineage_parent_unselected,
+    undefined,
+  );
+  assertEquals(second.totals.write_failures, 0);
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(second.selection.selected_cases, 2);
+  assert(
+    second.proposed_cases?.some((c) =>
+      c.case_key_sha256 === parentStableHash && c.parent_relation === null
+    ),
+    "persisted parent retains its stable key and root identity",
+  );
+  assert(
+    second.proposed_cases?.some((c) => c.parent_relation === "sibling_of"),
+    "the newly-arrived child is planned as a re-pointed sibling",
+  );
+  // The new child instruction becomes its own persisted case alongside the parent.
+  assertEquals(store.makesafe_intake_cases.length, 2);
+});
+
 Deno.test("an allowlisted instruction key is seeded by id and stays cap-proof", async () => {
   const store = baseStore();
   store.emails.push(email({
