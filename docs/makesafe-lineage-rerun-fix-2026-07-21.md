@@ -8,6 +8,7 @@ This patch fixes the production-reproduced `lineage_parent_pending` rerun failur
 - Every source already assigned to that case seeds the capped read, providing a stable case closure across cursor pages.
 - The selected plan is rebound to the persisted instruction key, fingerprint, cycle and parent relation. A moving page can enrich the case but cannot re-key or re-parent it.
 - Side-effect and artifact idempotency keys are rebound with the canonical instruction key.
+- When a partial page re-keys a persisted parent back to its stable key, any in-plan child parented to that page-local key is relinked to the stable parent key, so the lineage guard does not misread it as an orphan.
 - Before any case, source, artifact, draft or job write, lineage parents must either already exist or be included in the selected authorised plan. A missing dependency returns `lineage_parent_unselected`, writes only degraded health, and performs zero business writes.
 
 ## Regression proof
@@ -21,4 +22,4 @@ The runtime regression recreates the production shape with a one-row source cap:
 
 A separate guard test selects an unpersisted child while its parent is filtered out. It proves zero case, source, artifact and draft writes before the degraded health result.
 
-The full deterministic intake suite passes 118 tests. Production remains in `legacy`; this patch does not deploy or alter rollout state.
+The full deterministic intake suite passes 119 tests. Production remains in `legacy`; this patch does not deploy or alter rollout state.
