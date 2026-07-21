@@ -215,6 +215,15 @@ export interface DeterministicCasePlan {
   evidenceMap: Readonly<Record<string, EvidenceMapEntry>>;
   sourceClassifications: readonly DeterministicSourceClassification[];
   recoveryCursor: RecoveryCursor;
+  // A combined make-safe + report obligation, when the primary is a physical
+  // make-safe and a separate report card is still owed. Mirrors the AI intake's
+  // extraction.secondary_obligation so a report-family plan carrying this is
+  // treated as physical by both prevalidation and the approval split machinery.
+  secondaryObligation?: Readonly<{
+    type: string;
+    reason: string;
+    detail?: string;
+  }> | null;
 }
 
 export interface DeterministicIntakePlan {

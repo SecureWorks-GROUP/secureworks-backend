@@ -24,6 +24,7 @@ import {
 } from "./makesafe_deterministic_intake.ts";
 import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
 import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
+import { isReportOnlyType } from "./makesafe_intake_gate.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -1517,6 +1518,29 @@ async function findDraft(
   return data || null;
 }
 
+// Parity with approveIntakeDraft's combinedSplitObligation: a report-family plan
+// whose primary is a combined make-safe + report keeps a physical WO on the
+// primary card, so the split report type belongs to the secondary card only.
+const COMBINED_OBLIGATION_MISSING_FIELD = "combined_makesafe_and_report";
+
+function deterministicSplitObligation(
+  plan: DeterministicCasePlan,
+): { reportType: string } | null {
+  const so = plan.secondaryObligation;
+  if (!so || typeof so !== "object") return null;
+  if (so.reason !== COMBINED_OBLIGATION_MISSING_FIELD) return null;
+  return isReportOnlyType(so.type) ? { reportType: so.type } : null;
+}
+
+// Mirrors approveIntakeDraft's primaryIsReportOnly: a report family is report-only
+// UNLESS it carries a split obligation, in which case the primary is physical and a
+// servable work-order PDF is required before any storage/artifact/draft write.
+function deterministicPrimaryIsReportOnly(plan: DeterministicCasePlan): boolean {
+  if (deterministicSplitObligation(plan)) return false;
+  return plan.identity.jobFamily === "roof_report" ||
+    plan.identity.jobFamily === "assessment_report_quote";
+}
+
 function approvalPrevalidationMissingFields(
   plan: DeterministicCasePlan,
   sourceMap: Map<string, DeterministicSourceItem>,
@@ -1529,8 +1553,7 @@ function approvalPrevalidationMissingFields(
   ) missing.push("external_ref");
   if (!plan.identity.clientName) missing.push("client_name");
   if (!plan.identity.siteAddress) missing.push("site_address");
-  const reportOnly = plan.identity.jobFamily === "roof_report" ||
-    plan.identity.jobFamily === "assessment_report_quote";
+  const reportOnly = deterministicPrimaryIsReportOnly(plan);
   const hasWorkOrderPdf = plan.sourcePostIds.some((postId) =>
     (sourceMap.get(postId)?.attachments || []).some((attachment) =>
       attachment.status === "uploaded" && Boolean(attachment.storagePath) &&
@@ -1584,12 +1607,10 @@ async function ensureDraftAndJob(
       onStorageBlocker,
       onPersistedOutcome,
     );
-    if (
-      !attachments.length && plan.identity.jobFamily !== "roof_report" &&
-      plan.identity.jobFamily !== "assessment_report_quote"
-    ) {
+    if (!attachments.length && !deterministicPrimaryIsReportOnly(plan)) {
       throw new Error("deterministic work-order attachment staging failed");
     }
+    const splitObligation = deterministicSplitObligation(plan);
     const extraction = {
       deterministic_intake: true,
       deterministic_version: DETERMINISTIC_INTAKE_VERSION,
@@ -1603,6 +1624,9 @@ async function ensureDraftAndJob(
       recovery_cursor: plan.recoveryCursor,
       builder_email_subject: primary.subject,
       builder_email_received_at: primary.receivedAt,
+      ...(plan.secondaryObligation
+        ? { secondary_obligation: plan.secondaryObligation }
+        : {}),
     };
     const { data, error } = await client.from("makesafe_intake_drafts").insert({
       org_id: DEFAULT_ORG_ID,
@@ -1627,7 +1651,9 @@ async function ensureDraftAndJob(
       missing_fields: plan.blockedReasons,
       extraction_json: extraction,
       attachments_json: attachments,
-      report_type: plan.identity.jobFamily === "roof_report"
+      report_type: splitObligation
+        ? null
+        : plan.identity.jobFamily === "roof_report"
         ? "roof_report"
         : plan.identity.jobFamily === "assessment_report_quote"
         ? "assessment_report"

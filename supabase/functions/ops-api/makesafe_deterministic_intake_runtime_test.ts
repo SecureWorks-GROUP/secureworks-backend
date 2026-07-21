@@ -1991,6 +1991,107 @@ Deno.test("approval prevalidation rejects a null canonical client before artifac
   assertEquals(store.makesafe_intake_drafts.length, 0);
 });
 
+Deno.test("report-family split obligation requires a work-order PDF before any artifact or draft", async () => {
+  const store = baseStore();
+  // A report-family email with NO servable work-order PDF. On its own this would be
+  // report-only (WO PDF not required), but a combined make-safe + report obligation
+  // forces the primary physical: parity with approveIntakeDraft primaryIsReportOnly.
+  store.emails.push(email({
+    post_id: "split-obligation-target",
+    subject: "NEW WORK ORDER MLB-93010 Work Order: WO-93010 Roof Report",
+    body_content: "Client: Split Client\nAddress: 7 Split Way, Perth",
+  }));
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["split-obligation-target"],
+    cursor: null,
+  });
+  const built = buildDeterministicIntakePlan(inputs.sources, inputs.profiles)
+    .cases[0];
+  assert(built);
+  const splitReport = {
+    ...built,
+    identity: { ...built.identity, jobFamily: "roof_report" },
+    secondaryObligation: {
+      type: "roof_report",
+      reason: "combined_makesafe_and_report",
+    },
+    state: "confirmed_live_job" as const,
+  };
+  let approvalCalls = 0;
+  const persistedOutcomes: string[] = [];
+  await assertRejects(
+    () =>
+      _ensureDraftAndJobForTest(
+        client,
+        "case-split-obligation",
+        splitReport,
+        new Map(inputs.sources.map((source) => [source.postId, source])),
+        () => {
+          approvalCalls++;
+          return Promise.resolve({ job: { id: "must-not-run" } });
+        },
+        () => {},
+        (outcome) => persistedOutcomes.push(outcome),
+      ),
+    Error,
+    "approval prevalidation failed: work_order_pdf",
+  );
+  assertEquals(approvalCalls, 0);
+  assertEquals(persistedOutcomes, []);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+Deno.test("report-family plan without a split obligation still needs no work-order PDF", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "report-only-target",
+    subject: "NEW WORK ORDER MLB-93011 Work Order: WO-93011 Roof Report",
+    body_content: "Client: Report Client\nAddress: 8 Report Way, Perth",
+  }));
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["report-only-target"],
+    cursor: null,
+  });
+  const built = buildDeterministicIntakePlan(inputs.sources, inputs.profiles)
+    .cases[0];
+  assert(built);
+  const reportOnly = {
+    ...built,
+    identity: { ...built.identity, jobFamily: "roof_report" },
+    state: "confirmed_live_job" as const,
+  };
+  let approvalCalls = 0;
+  const persistedOutcomes: string[] = [];
+  const result = await _ensureDraftAndJobForTest(
+    client,
+    "case-report-only",
+    reportOnly,
+    new Map(inputs.sources.map((source) => [source.postId, source])),
+    () => {
+      approvalCalls++;
+      return Promise.resolve({ job: { id: "job-report" } });
+    },
+    () => {},
+    (outcome) => persistedOutcomes.push(outcome),
+  );
+  // Prevalidation passed with no WO PDF: the report-only path is not over-tightened.
+  assertEquals(result.jobId, "job-report");
+  assertEquals(approvalCalls, 1);
+  assert(persistedOutcomes.includes("draft"));
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+});
+
 Deno.test("production-shaped moving sweep cannot satisfy a null canonical client from off-case candidates", async () => {
   const store = baseStore();
   store.emails.push(
