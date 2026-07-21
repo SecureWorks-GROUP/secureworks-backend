@@ -19,7 +19,10 @@
 //   - ref normalisation
 //   - the four pinned regression refs classify as make-safe
 
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _auditExclusion,
   _classifyPost,
@@ -39,6 +42,7 @@ import {
   _persistPost,
   _processAttachments,
   _runBackfillFull,
+  _scheduleIntakeScanContinuation,
   _senderMatchesPattern,
   _setTestClientFactory,
   isGraphMailReadError,
@@ -75,17 +79,67 @@ const COMPANIES = [
   { slug: "mlb", name: "MLB", pattern: "mlb.com.au" },
 ];
 
+Deno.test("intake scan continuation returns before a scan beyond pg_net's five-second boundary", async () => {
+  let releaseScan!: (response: Response) => void;
+  const delayedScan = new Promise<Response>((resolve) => {
+    releaseScan = resolve;
+  });
+  const captured: {
+    registered?: Promise<void>;
+    request?: { url: string; init?: RequestInit };
+    leaseReleased?: boolean;
+  } = {};
+  const fetchStub = ((url: string | URL | Request, init?: RequestInit) => {
+    captured.request = { url: String(url), init };
+    return delayedScan;
+  }) as typeof fetch;
+
+  const started = performance.now();
+  _scheduleIntakeScanContinuation(
+    fetchStub,
+    (promise) => captured.registered = promise,
+    "https://example.invalid/ops-api?action=scan_ses_makesafes",
+    { "x-api-key": "test-only" },
+    async () => {
+      captured.leaseReleased = true;
+    },
+  );
+  const schedulingMs = performance.now() - started;
+
+  assert(schedulingMs < 100, `scheduling blocked for ${schedulingMs}ms`);
+  assert(captured.registered);
+  assertEquals(captured.request?.init?.method, "POST");
+  assertEquals(captured.request?.init?.body, "{}");
+  const registered = captured.registered;
+  const state = await Promise.race([
+    registered.then(() => "completed"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 10)),
+  ]);
+  assertEquals(state, "pending");
+  assertEquals(captured.leaseReleased, undefined);
+
+  releaseScan(new Response("{}", { status: 200 }));
+  await registered;
+  assertEquals(captured.leaseReleased, true);
+});
+
 // ── Classifier: domain-boundary matching ──────────────────────────────────────
 // SCHEMA NOTE: a raw group post has NO `subject`; collectPosts sets post.subject
 // from the parent thread `topic`. `withTopic` mirrors that so classifier tests run
 // against the same shape the classifier sees in production.
-function withTopic(post: typeof FX_MLB_POST, topic: string): typeof FX_MLB_POST {
+function withTopic(
+  post: typeof FX_MLB_POST,
+  topic: string,
+): typeof FX_MLB_POST {
   return { ...post, subject: topic };
 }
 
 Deno.test("classifier: exact sender domain matches the company pattern", () => {
   // Subject comes from the THREAD topic (threaded onto the post by collectPosts).
-  const r = _classifyPost(withTopic(FX_MLB_POST, FX_MLB_THREAD.topic!), COMPANIES);
+  const r = _classifyPost(
+    withTopic(FX_MLB_POST, FX_MLB_THREAD.topic!),
+    COMPANIES,
+  );
   assertEquals(r.include, true);
   assertEquals(r.reason, "sender:mlb");
   assertEquals(r.ref, "AJBR-67200");
@@ -112,7 +166,10 @@ Deno.test("classifier: lookalike domain does NOT match (over-match rejection)", 
 });
 
 Deno.test("classifier: substring-but-not-suffix domain rejected", () => {
-  assertEquals(_senderMatchesPattern("x@mlb.com.au.evil.test", "mlb.com.au"), false);
+  assertEquals(
+    _senderMatchesPattern("x@mlb.com.au.evil.test", "mlb.com.au"),
+    false,
+  );
   assertEquals(_senderMatchesPattern("x@evilmlb.com.au", "mlb.com.au"), false);
   assertEquals(_senderMatchesPattern("x@mlb.com.au", "mlb.com.au"), true);
   assertEquals(_senderMatchesPattern("x@sub.mlb.com.au", "mlb.com.au"), true);
@@ -138,7 +195,10 @@ Deno.test("classifier: subject ref with no sender match still includes", () => {
 });
 
 Deno.test("classifier: 'make safe' keyword in subject includes", () => {
-  const post = { ...FX_NON_MAKESAFE_POST, subject: "Emergency make safe required tonight" };
+  const post = {
+    ...FX_NON_MAKESAFE_POST,
+    subject: "Emergency make safe required tonight",
+  };
   const r = _classifyPost(post, COMPANIES);
   assertEquals(r.include, true);
   assertEquals(r.reason, "subject_keyword");
@@ -155,25 +215,45 @@ Deno.test("classifier: the four pinned regression refs all classify make-safe", 
     assertEquals(r.include, true, `expected include for ${fx.subject}`);
     assertEquals(r.ref, fx.classifierRef, `classifier ref for ${fx.subject}`);
     // B1: classify-time ref must be non-null for every pinned make-safe subject.
-    assertEquals(r.ref !== null, true, `B1: non-null classify ref for ${fx.subject}`);
+    assertEquals(
+      r.ref !== null,
+      true,
+      `B1: non-null classify ref for ${fx.subject}`,
+    );
     // The recon-side normaliser canonicalises all four straight from the subject
     // (incl. the bare numeric 67005 and the space-separated AJBR 67134).
-    assertEquals(_normaliseReconRef(fx.subject), fx.reconNorm, `recon norm for ${fx.subject}`);
+    assertEquals(
+      _normaliseReconRef(fx.subject),
+      fx.reconNorm,
+      `recon norm for ${fx.subject}`,
+    );
   }
 });
 
 // B1 — extractRef directly: spaced-prefix, bare-numeric, and body fallback.
 Deno.test("extractRef: spaced/bare/body forms all yield a non-null ref (B1)", () => {
   // Space-separated prefix in subject.
-  assertEquals(_extractRef("AJBR 67134 Tapping work order", null), "AJBR-67134");
+  assertEquals(
+    _extractRef("AJBR 67134 Tapping work order", null),
+    "AJBR-67134",
+  );
   // Bare-numeric core in subject (no prefix).
   assertEquals(_extractRef("Make Safe 67005 Alexander Heights", null), "67005");
   // Dashed prefix.
   assertEquals(_extractRef("MLB-67166 Bassendean", null), "MLB-67166");
   // No ref in subject -> body fallback (prefixed).
-  assertEquals(_extractRef("Emergency make safe tonight", "<p>ref AJBR 67999 attached</p>"), "AJBR-67999");
+  assertEquals(
+    _extractRef(
+      "Emergency make safe tonight",
+      "<p>ref AJBR 67999 attached</p>",
+    ),
+    "AJBR-67999",
+  );
   // No ref in subject -> body fallback (bare numeric).
-  assertEquals(_extractRef("make safe please", "job number 67500 confirmed"), "67500");
+  assertEquals(
+    _extractRef("make safe please", "job number 67500 confirmed"),
+    "67500",
+  );
   // Truly no ref anywhere -> null.
   assertEquals(_extractRef("make safe please", "no number here"), null);
 });
@@ -186,12 +266,18 @@ Deno.test("extractRef: spaced/bare/body forms all yield a non-null ref (B1)", ()
 // is now recognised in compact, spaced, and dashed forms.
 Deno.test("extractRef: MS-prefixed COMPACT ref 'MS191190' yields a non-null ref (B1 still-open)", () => {
   assertEquals(_extractRef("MS191190", null), "MS-191190");
-  assertEquals(_extractRef("RE: MS191190 emergency make safe", null), "MS-191190");
+  assertEquals(
+    _extractRef("RE: MS191190 emergency make safe", null),
+    "MS-191190",
+  );
   // Spaced + dashed MS variants too.
   assertEquals(_extractRef("MS 191190 attend tonight", null), "MS-191190");
   assertEquals(_extractRef("Work Order MS-191190", null), "MS-191190");
   // Body fallback for a compact MS ref.
-  assertEquals(_extractRef("make safe please", "<p>job MS191190 attached</p>"), "MS-191190");
+  assertEquals(
+    _extractRef("make safe please", "<p>job MS191190 attached</p>"),
+    "MS-191190",
+  );
 });
 
 Deno.test("normaliseRef: compact MS ref collapses to MS-191190 (default prefix floor)", () => {
@@ -204,7 +290,10 @@ Deno.test("classifyPost: an MS-prefixed subject classifies make-safe with a non-
   // No sender match (random domain), subject carries only the compact MS ref. It
   // must still INCLUDE (subject_ref) with a NON-NULL ref so persistPost writes a
   // pipeline_items row instead of silently dropping it.
-  const post = { ...FX_NON_MAKESAFE_POST, subject: "MS191190 emergency make safe" };
+  const post = {
+    ...FX_NON_MAKESAFE_POST,
+    subject: "MS191190 emergency make safe",
+  };
   const r = _classifyPost(post, COMPANIES);
   assertEquals(r.include, true);
   assertEquals(r.reason, "subject_ref");
@@ -232,11 +321,17 @@ Deno.test("classifyPost: a DATA-DRIVEN company prefix ('KBA') is recognised code
   // fallback cannot catch it (digits glued to the "A" -> no \b before the run), so
   // with the floor-only set it drops to ref=null -- exactly the MS191190 class of
   // bug. The DATA-DRIVEN prefix set is the only thing that recovers it.
-  const post = { ...FX_NON_MAKESAFE_POST, subject: "KBA88123 make safe Joondalup" };
+  const post = {
+    ...FX_NON_MAKESAFE_POST,
+    subject: "KBA88123 make safe Joondalup",
+  };
   // Default (floor-only) set: no KBA prefix + glued digits -> null (the drop).
   assertEquals(_classifyPost(post, COMPANIES).ref, null);
   // Data-driven set (floor UNION company prefixes) -> prefixed canonical form.
-  const driven = _classifyPost(post, COMPANIES, [..._DEFAULT_REF_PREFIXES, "KBA"]);
+  const driven = _classifyPost(post, COMPANIES, [
+    ..._DEFAULT_REF_PREFIXES,
+    "KBA",
+  ]);
   assertEquals(driven.include, true);
   assertEquals(driven.ref, "KBA-88123");
 });
@@ -258,7 +353,10 @@ Deno.test("parseSenderDomain: extracts lowercased domain", () => {
 
 // ── PDF magic-byte validation ─────────────────────────────────────────────────
 Deno.test("isPdfMagic: accepts %PDF, rejects others", () => {
-  const okBytes = Uint8Array.from(atob(FX_PDF_ATTACHMENT.contentBytes!), (c) => c.charCodeAt(0));
+  const okBytes = Uint8Array.from(
+    atob(FX_PDF_ATTACHMENT.contentBytes!),
+    (c) => c.charCodeAt(0),
+  );
   assertEquals(_isPdfMagic(okBytes), true);
   assertEquals(_isPdfMagic(new Uint8Array([0x3c, 0x68, 0x74, 0x6d])), false); // <htm
   assertEquals(_isPdfMagic(new Uint8Array([0x25])), false); // too short
@@ -278,13 +376,20 @@ Deno.test("graphGetAll: drains all pages via @odata.nextLink", async () => {
   // deno-lint-ignore no-explicit-any
   (globalThis as any).fetch = (url: string) => {
     calls.push(url);
-    if (url === "page1") return Promise.resolve(pageResponse([{ id: "a" }, { id: "b" }], "page2"));
-    if (url === "page2") return Promise.resolve(pageResponse([{ id: "c" }], "page3"));
+    if (url === "page1") {
+      return Promise.resolve(pageResponse([{ id: "a" }, { id: "b" }], "page2"));
+    }
+    if (url === "page2") {
+      return Promise.resolve(pageResponse([{ id: "c" }], "page3"));
+    }
     if (url === "page3") return Promise.resolve(pageResponse([{ id: "d" }]));
     throw new Error("unexpected url " + url);
   };
   try {
-    const { values, pages } = await _graphGetAll<{ id: string }>("page1", "tok");
+    const { values, pages } = await _graphGetAll<{ id: string }>(
+      "page1",
+      "tok",
+    );
     assertEquals(values.map((v) => v.id), ["a", "b", "c", "d"]);
     assertEquals(pages, 3);
     assertEquals(calls, ["page1", "page2", "page3"]);
@@ -301,7 +406,9 @@ Deno.test("graphGetAll: a thread gaining a post after page 1 is captured (re-pol
   // deno-lint-ignore no-explicit-any
   (globalThis as any).fetch = (url: string) => {
     if (url === "thread-posts") {
-      return Promise.resolve(pageResponse([{ id: "post-1" }], "thread-posts-p2"));
+      return Promise.resolve(
+        pageResponse([{ id: "post-1" }], "thread-posts-p2"),
+      );
     }
     if (url === "thread-posts-p2") {
       // post-2 is the NEW reply that arrived between page fetches.
@@ -310,7 +417,10 @@ Deno.test("graphGetAll: a thread gaining a post after page 1 is captured (re-pol
     throw new Error("unexpected url " + url);
   };
   try {
-    const { values } = await _graphGetAll<{ id: string }>("thread-posts", "tok");
+    const { values } = await _graphGetAll<{ id: string }>(
+      "thread-posts",
+      "tok",
+    );
     assertEquals(values.map((v) => v.id), ["post-1", "post-2-new-reply"]);
   } finally {
     globalThis.fetch = realFetch;
@@ -321,11 +431,14 @@ Deno.test("graphGetAll: 429 Retry-After is respected then the page succeeds", as
   const realFetch = globalThis.fetch;
   let n = 0;
   // deno-lint-ignore no-explicit-any
-  (globalThis as any).fetch = (url: string) => {
+  (globalThis as any).fetch = (_url: string) => {
     n++;
     if (n === 1) {
       return Promise.resolve(
-        new Response("throttled", { status: 429, headers: { "Retry-After": "0" } }),
+        new Response("throttled", {
+          status: 429,
+          headers: { "Retry-After": "0" },
+        }),
       );
     }
     return Promise.resolve(pageResponse([{ id: "z" }]));
@@ -343,24 +456,35 @@ function url0() {
   return "throttled-url";
 }
 
-
 Deno.test("fallback mailbox: ses-addressed Prime messages are collected for intake", async () => {
   const realFetch = globalThis.fetch;
   const calls: string[] = [];
   // deno-lint-ignore no-explicit-any
   (globalThis as any).fetch = (url: string) => {
     calls.push(url);
-    if (url.includes("/users/marnin%40secureworkswa.com.au/mailFolders/inbox/messages")) {
+    if (
+      url.includes(
+        "/users/marnin%40secureworkswa.com.au/mailFolders/inbox/messages",
+      )
+    ) {
       return Promise.resolve(pageResponse([{
         id: "user-msg-26109",
         internetMessageId: "<prime-26109@example.test>",
         conversationId: "conv-user-26109",
         receivedDateTime: new Date().toISOString(),
-        from: { emailAddress: { address: "noreply@notifications.primeeco.tech" } },
-        toRecipients: [{ emailAddress: { address: "ses@secureworkswa.com.au" } }],
-        subject: "NEW WORK ORDER - MLB-26109 49 Shearers Cl, Quedjinup, WA 6281",
+        from: {
+          emailAddress: { address: "noreply@notifications.primeeco.tech" },
+        },
+        toRecipients: [{
+          emailAddress: { address: "ses@secureworkswa.com.au" },
+        }],
+        subject:
+          "NEW WORK ORDER - MLB-26109 49 Shearers Cl, Quedjinup, WA 6281",
         hasAttachments: true,
-        body: { contentType: "html", content: "Shed make safe attendance required" },
+        body: {
+          contentType: "html",
+          content: "Shed make safe attendance required",
+        },
       }]));
     }
     throw new Error("unexpected url " + url);
@@ -372,7 +496,10 @@ Deno.test("fallback mailbox: ses-addressed Prime messages are collected for inta
     assertEquals(posts.length, 1);
     assertEquals(posts[0].sourceKind, "mailbox_message");
     assertEquals(posts[0].mailboxAddress, "marnin@secureworkswa.com.au");
-    assertEquals(posts[0].subject, "NEW WORK ORDER - MLB-26109 49 Shearers Cl, Quedjinup, WA 6281");
+    assertEquals(
+      posts[0].subject,
+      "NEW WORK ORDER - MLB-26109 49 Shearers Cl, Quedjinup, WA 6281",
+    );
     const cls = _classifyPost(posts[0], COMPANIES);
     assertEquals(cls.include, true);
     assertEquals(cls.ref, "MLB-26109");
@@ -399,7 +526,12 @@ Deno.test("collectPosts: subject comes from the THREAD topic; post $select omits
     calls.push(url);
     // conversations
     if (url.includes("/conversations?")) {
-      return Promise.resolve(pageResponse([{ id: "conv-67200", lastDeliveredDateTime: "2026-06-13T01:00:00Z" }]));
+      return Promise.resolve(
+        pageResponse([{
+          id: "conv-67200",
+          lastDeliveredDateTime: "2026-06-13T01:00:00Z",
+        }]),
+      );
     }
     // threads under the conversation — MUST carry `topic` (the subject lives here)
     if (url.includes("/conversations/conv-67200/threads")) {
@@ -427,25 +559,42 @@ Deno.test("collectPosts: subject comes from the THREAD topic; post $select omits
     throw new Error("unexpected url " + url);
   };
   try {
-    const { posts } = await _collectPosts("tok", GROUP, new Date(0).toISOString());
+    const { posts } = await _collectPosts(
+      "tok",
+      GROUP,
+      new Date(0).toISOString(),
+    );
 
     // The post $select MUST NOT request subject or internetMessageId (the 400 cause).
-    const postSelectCall = calls.find((c) => c.includes(`/threads/${FX_MLB_THREAD.id}/posts`))!;
+    const postSelectCall = calls.find((c) =>
+      c.includes(`/threads/${FX_MLB_THREAD.id}/posts`)
+    )!;
     assert(postSelectCall, "expected a posts $select call");
-    assert(!/[?&]\$select=[^&]*\bsubject\b/.test(postSelectCall), "post $select must NOT request subject");
+    assert(
+      !/[?&]\$select=[^&]*\bsubject\b/.test(postSelectCall),
+      "post $select must NOT request subject",
+    );
     assert(
       !/[?&]\$select=[^&]*internetMessageId/.test(postSelectCall),
       "post $select must NOT request internetMessageId",
     );
 
     // The thread $select MUST request topic (so we can source the subject).
-    const threadSelectCall = calls.find((c) => c.includes("/threads") && c.includes("conv-67200"))!;
-    assert(/\$select=[^&]*\btopic\b/.test(threadSelectCall), "thread $select must request topic");
+    const threadSelectCall = calls.find((c) =>
+      c.includes("/threads") && c.includes("conv-67200")
+    )!;
+    assert(
+      /\$select=[^&]*\btopic\b/.test(threadSelectCall),
+      "thread $select must request topic",
+    );
     assert(
       /\$select=[^&]*lastDeliveredDateTime/.test(threadSelectCall),
       "thread $select must request lastDeliveredDateTime",
     );
-    assert(/\$select=[^&]*toRecipients/.test(threadSelectCall), "thread $select must request toRecipients");
+    assert(
+      /\$select=[^&]*toRecipients/.test(threadSelectCall),
+      "thread $select must request toRecipients",
+    );
 
     // The collected post's subject is the THREAD topic, and recipients are threaded.
     assertEquals(posts.length, 1);
@@ -468,10 +617,17 @@ Deno.test("collectPosts: a threaded reply inherits the thread topic as its subje
   // deno-lint-ignore no-explicit-any
   (globalThis as any).fetch = (url: string) => {
     if (url.includes("/conversations?")) {
-      return Promise.resolve(pageResponse([{ id: "conv-67200", lastDeliveredDateTime: "2026-06-13T02:30:00Z" }]));
+      return Promise.resolve(
+        pageResponse([{
+          id: "conv-67200",
+          lastDeliveredDateTime: "2026-06-13T02:30:00Z",
+        }]),
+      );
     }
     if (url.includes("/conversations/conv-67200/threads")) {
-      return Promise.resolve(pageResponse([{ id: FX_MLB_THREAD.id, topic: FX_MLB_THREAD.topic }]));
+      return Promise.resolve(
+        pageResponse([{ id: FX_MLB_THREAD.id, topic: FX_MLB_THREAD.topic }]),
+      );
     }
     if (url.includes(`/threads/${FX_MLB_THREAD.id}/posts`)) {
       // Raw reply post: NO subject of its own.
@@ -486,7 +642,11 @@ Deno.test("collectPosts: a threaded reply inherits the thread topic as its subje
     throw new Error("unexpected url " + url);
   };
   try {
-    const { posts } = await _collectPosts("tok", "g", new Date(0).toISOString());
+    const { posts } = await _collectPosts(
+      "tok",
+      "g",
+      new Date(0).toISOString(),
+    );
     assertEquals(posts.length, 1);
     assertEquals(posts[0].subject, FX_MLB_THREAD.topic);
     const cls = _classifyPost(posts[0], COMPANIES);
@@ -509,8 +669,11 @@ Deno.test("persistPost: emails row stores internet_message_id=null and subject=t
           (upserts[table] ||= []).push({ row, opts });
           return Promise.resolve({ error: null, data: null });
         },
-        insert: (row: any) => ({
-          select: () => ({ single: () => Promise.resolve({ data: { id: "ev-1" }, error: null }) }),
+        insert: (_row: any) => ({
+          select: () => ({
+            single: () =>
+              Promise.resolve({ data: { id: "ev-1" }, error: null }),
+          }),
         }),
         update: () => ({ eq: () => Promise.resolve({ error: null }) }), // attachments_settled marker
         select: () => chain,
@@ -524,7 +687,11 @@ Deno.test("persistPost: emails row stores internet_message_id=null and subject=t
     },
   };
   // The post as collectPosts produces it: subject = thread topic, no internetMessageId.
-  const post = { ...FX_MLB_POST, subject: FX_MLB_THREAD.topic!, hasAttachments: false };
+  const post = {
+    ...FX_MLB_POST,
+    subject: FX_MLB_THREAD.topic!,
+    hasAttachments: false,
+  };
   const cls = _classifyPost(post, COMPANIES);
   await _persistPost(sb, "tok", "group-1", post, cls);
 
@@ -550,7 +717,9 @@ function makeAttachmentSb() {
             eq() {
               return {
                 eq() {
-                  return { maybeSingle: async () => ({ data: null, error: null }) };
+                  return {
+                    maybeSingle: async () => ({ data: null, error: null }),
+                  };
                 },
                 maybeSingle: async () => ({ data: null, error: null }),
               };
@@ -564,7 +733,11 @@ function makeAttachmentSb() {
         // Supersede step: processAttachments deletes stale synthetic placeholders
         // after a successful fetch with real attachments. .delete().eq().in().
         delete() {
-          return { eq() { return { in: async () => ({ error: null }) }; } };
+          return {
+            eq() {
+              return { in: async () => ({ error: null }) };
+            },
+          };
         },
       };
     },
@@ -593,10 +766,16 @@ async function runProcessAttachments(atts: any[]) {
   const { sb, upserts, uploads } = makeAttachmentSb();
   const realFetch = globalThis.fetch;
   // deno-lint-ignore no-explicit-any
-  (globalThis as any).fetch = (_url: string) => Promise.resolve(attListResponse(atts));
+  (globalThis as any).fetch = (_url: string) =>
+    Promise.resolve(attListResponse(atts));
   try {
     const post = { ...FX_MLB_POST, hasAttachments: true };
-    const unresolved = await _processAttachments(sb, "tok", "group-1", post as any);
+    const unresolved = await _processAttachments(
+      sb,
+      "tok",
+      "group-1",
+      post as any,
+    );
     return { unresolved, upserts, uploads };
   } finally {
     globalThis.fetch = realFetch;
@@ -604,7 +783,9 @@ async function runProcessAttachments(atts: any[]) {
 }
 
 Deno.test("attachments: a valid PDF is uploaded (status uploaded), 0 unresolved", async () => {
-  const { unresolved, upserts, uploads } = await runProcessAttachments([FX_PDF_ATTACHMENT]);
+  const { unresolved, upserts, uploads } = await runProcessAttachments([
+    FX_PDF_ATTACHMENT,
+  ]);
   assertEquals(unresolved, 0);
   assertEquals(uploads.length, 1);
   const finalRow = upserts.find((r) => r.status === "uploaded");
@@ -613,35 +794,48 @@ Deno.test("attachments: a valid PDF is uploaded (status uploaded), 0 unresolved"
 });
 
 Deno.test("attachments: referenceAttachment routes to needs_review", async () => {
-  const { unresolved, upserts, uploads } = await runProcessAttachments([FX_REFERENCE_ATTACHMENT]);
+  const { unresolved, upserts, uploads } = await runProcessAttachments([
+    FX_REFERENCE_ATTACHMENT,
+  ]);
   assertEquals(unresolved, 1);
   assertEquals(uploads.length, 0);
   assertEquals(upserts[0].status, "needs_review");
 });
 
 Deno.test("attachments: itemAttachment routes to needs_review", async () => {
-  const { unresolved, upserts } = await runProcessAttachments([FX_ITEM_ATTACHMENT]);
+  const { unresolved, upserts } = await runProcessAttachments([
+    FX_ITEM_ATTACHMENT,
+  ]);
   assertEquals(unresolved, 1);
   assertEquals(upserts[0].status, "needs_review");
 });
 
 Deno.test("attachments: inline attachment is skipped (benign, non-blocking)", async () => {
-  const { unresolved, upserts } = await runProcessAttachments([FX_INLINE_ATTACHMENT]);
+  const { unresolved, upserts } = await runProcessAttachments([
+    FX_INLINE_ATTACHMENT,
+  ]);
   assertEquals(unresolved, 0); // skipped is resolved-as-skipped, NOT unresolved
   assertEquals(upserts[0].status, "skipped");
   assertEquals(upserts[0].attachment_kind, "inline");
 });
 
 Deno.test("attachments: PDF with no inline contentBytes routes to needs_review (value-path required, app-only can't fetch)", async () => {
-  const { unresolved, upserts, uploads } = await runProcessAttachments([FX_OVERSIZE_ATTACHMENT]);
+  const { unresolved, upserts, uploads } = await runProcessAttachments([
+    FX_OVERSIZE_ATTACHMENT,
+  ]);
   assertEquals(unresolved, 1);
   assertEquals(uploads.length, 0);
   assertEquals(upserts[0].status, "needs_review");
-  assertEquals(upserts[0].last_error, "pdf_no_inline_bytes_value_path_required");
+  assertEquals(
+    upserts[0].last_error,
+    "pdf_no_inline_bytes_value_path_required",
+  );
 });
 
 Deno.test("attachments: non-PDF file attachment is skipped (PDF-only policy, non-blocking)", async () => {
-  const { unresolved, upserts, uploads } = await runProcessAttachments([FX_NON_PDF_FILE_ATTACHMENT]);
+  const { unresolved, upserts, uploads } = await runProcessAttachments([
+    FX_NON_PDF_FILE_ATTACHMENT,
+  ]);
   assertEquals(unresolved, 0); // skipped is resolved-as-skipped, NOT unresolved
   assertEquals(uploads.length, 0);
   assertEquals(upserts[0].status, "skipped");
@@ -649,7 +843,9 @@ Deno.test("attachments: non-PDF file attachment is skipped (PDF-only policy, non
 });
 
 Deno.test("attachments: a fake-PDF (claims pdf, bad magic bytes) is marked failed", async () => {
-  const { unresolved, upserts, uploads } = await runProcessAttachments([FX_FAKE_PDF_ATTACHMENT]);
+  const { unresolved, upserts, uploads } = await runProcessAttachments([
+    FX_FAKE_PDF_ATTACHMENT,
+  ]);
   assertEquals(unresolved, 1);
   assertEquals(uploads.length, 0);
   const failed = upserts.find((r) => r.status === "failed");
@@ -660,7 +856,12 @@ Deno.test("attachments: a fake-PDF (claims pdf, bad magic bytes) is marked faile
 Deno.test("attachments: a post with hasAttachments=false does no work", async () => {
   const { sb } = makeAttachmentSb();
   const post = { ...FX_MLB_POST, hasAttachments: false };
-  const unresolved = await _processAttachments(sb, "tok", "group-1", post as any);
+  const unresolved = await _processAttachments(
+    sb,
+    "tok",
+    "group-1",
+    post as any,
+  );
   assertEquals(unresolved, 0);
 });
 
@@ -690,7 +891,9 @@ function makeConfigurableAttachmentSb(opts: {
             eq() {
               return {
                 eq() {
-                  return { maybeSingle: async () => ({ data: null, error: null }) };
+                  return {
+                    maybeSingle: async () => ({ data: null, error: null }),
+                  };
                 },
                 maybeSingle: async () => ({ data: null, error: null }),
               };
@@ -707,7 +910,11 @@ function makeConfigurableAttachmentSb(opts: {
         },
         // Supersede step: .delete().eq().in() of stale synthetic placeholders.
         delete() {
-          return { eq() { return { in: async () => ({ error: null }) }; } };
+          return {
+            eq() {
+              return { in: async () => ({ error: null }) };
+            },
+          };
         },
       };
     },
@@ -716,7 +923,9 @@ function makeConfigurableAttachmentSb(opts: {
         return {
           upload: async (path: string, _bytes: Uint8Array, _o?: any) => {
             uploads.push({ path });
-            if (opts.uploadError) return { error: { message: opts.uploadError } };
+            if (opts.uploadError) {
+              return { error: { message: opts.uploadError } };
+            }
             return { error: null };
           },
           remove: async (paths: string[]) => {
@@ -748,7 +957,12 @@ async function runWith(
   };
   try {
     const post = { ...FX_MLB_POST, hasAttachments: true };
-    const unresolved = await _processAttachments(sbBundle.sb, "tok", "group-1", post as any);
+    const unresolved = await _processAttachments(
+      sbBundle.sb,
+      "tok",
+      "group-1",
+      post as any,
+    );
     return { unresolved };
   } finally {
     globalThis.fetch = realFetch;
@@ -762,7 +976,9 @@ Deno.test("attachments [FINDING 1]: list-fetch failure + placeholder upsert fail
   const sbBundle = makeConfigurableAttachmentSb({
     // The placeholder row uses the synthetic list-fetch id; error it too.
     upsertError: (row) =>
-      row.graph_attachment_id === "_list_fetch_failed" ? "db down on placeholder" : null,
+      row.graph_attachment_id === "_list_fetch_failed"
+        ? "db down on placeholder"
+        : null,
   });
   let threw = false;
   try {
@@ -774,7 +990,11 @@ Deno.test("attachments [FINDING 1]: list-fetch failure + placeholder upsert fail
       `expected fail-closed throw, got: ${(e as Error).message}`,
     );
   }
-  assertEquals(threw, true, "must throw when both the list fetch AND the placeholder write fail");
+  assertEquals(
+    threw,
+    true,
+    "must throw when both the list fetch AND the placeholder write fail",
+  );
   // It DID attempt to record the placeholder (durable-record-first), then threw.
   assertEquals(sbBundle.upserts.length, 1);
   assertEquals(sbBundle.upserts[0].graph_attachment_id, "_list_fetch_failed");
@@ -791,8 +1011,12 @@ Deno.test("attachments [FINDING 1]: list-fetch failure with a successful placeho
   assertEquals(sbBundle.upserts[0].status, "failed");
   // last_error now carries the REAL Graph/fetch error, prefixed with the label.
   assert(
-    String(sbBundle.upserts[0].last_error).startsWith("attachment_list_fetch_failed"),
-    `last_error should start with the label, got: ${sbBundle.upserts[0].last_error}`,
+    String(sbBundle.upserts[0].last_error).startsWith(
+      "attachment_list_fetch_failed",
+    ),
+    `last_error should start with the label, got: ${
+      sbBundle.upserts[0].last_error
+    }`,
   );
 });
 
@@ -802,7 +1026,11 @@ Deno.test("attachments [FINDING 1]: list-fetch failure with a successful placeho
 Deno.test("attachments [FINDING 2]: hasAttachments=true + empty list -> synthetic needs_review row, unresolved=1", async () => {
   const sbBundle = makeConfigurableAttachmentSb();
   const { unresolved } = await runWith([], sbBundle, "ok");
-  assertEquals(unresolved, 1, "an empty list under hasAttachments=true must be unresolved (DEGRADED)");
+  assertEquals(
+    unresolved,
+    1,
+    "an empty list under hasAttachments=true must be unresolved (DEGRADED)",
+  );
   assertEquals(sbBundle.upserts.length, 1);
   const row = sbBundle.upserts[0];
   assertEquals(row.graph_attachment_id, "_hasattachments_true_empty_list");
@@ -815,7 +1043,9 @@ Deno.test("attachments [FINDING 2]: hasAttachments=true + empty list -> syntheti
 Deno.test("attachments [FINDING 2]: empty list + synthetic upsert failure -> THROWS (fail closed)", async () => {
   const sbBundle = makeConfigurableAttachmentSb({
     upsertError: (row) =>
-      row.graph_attachment_id === "_hasattachments_true_empty_list" ? "db down" : null,
+      row.graph_attachment_id === "_hasattachments_true_empty_list"
+        ? "db down"
+        : null,
   });
   let threw = false;
   try {
@@ -824,7 +1054,11 @@ Deno.test("attachments [FINDING 2]: empty list + synthetic upsert failure -> THR
     threw = true;
     assert((e as Error).message.includes("empty-list synthetic upsert failed"));
   }
-  assertEquals(threw, true, "must fail closed when the synthetic empty-list row cannot be written");
+  assertEquals(
+    threw,
+    true,
+    "must fail closed when the synthetic empty-list row cannot be written",
+  );
 });
 
 // FINDING 3 (sweep) — Storage upload failure -> a durable FAILED row is recorded
@@ -834,7 +1068,10 @@ Deno.test("attachments [FINDING 3]: storage upload failure -> durable failed row
   const { unresolved } = await runWith([FX_PDF_ATTACHMENT], sbBundle, "ok");
   assertEquals(unresolved, 1);
   const failed = sbBundle.upserts.find((r) => r.status === "failed");
-  assert(!!failed, "expected a durable failed row after a storage upload failure");
+  assert(
+    !!failed,
+    "expected a durable failed row after a storage upload failure",
+  );
   assert(
     String(failed.last_error).startsWith("storage_upload_failed:"),
     `last_error should record the storage failure, got: ${failed.last_error}`,
@@ -847,7 +1084,9 @@ Deno.test("attachments [FINDING 3]: row upsert failure after upload -> orphan cl
   const sbBundle = makeConfigurableAttachmentSb({
     // Error ONLY the success ("uploaded") row write; the subsequent markAttachmentFailed
     // ("failed") write must succeed so a durable failed row is left.
-    upsertError: (row) => (row.status === "uploaded" ? "row write conflict" : null),
+    upsertError: (
+      row,
+    ) => (row.status === "uploaded" ? "row write conflict" : null),
   });
   const { unresolved } = await runWith([FX_PDF_ATTACHMENT], sbBundle, "ok");
   assertEquals(unresolved, 1);
@@ -874,7 +1113,11 @@ Deno.test("attachments [FINDING 3]: upload ok but BOTH row writes fail -> THROWS
     threw = true;
     assert((e as Error).message.includes("markAttachmentFailed upsert failed"));
   }
-  assertEquals(threw, true, "must fail closed when neither the uploaded nor the failed row can be written");
+  assertEquals(
+    threw,
+    true,
+    "must fail closed when neither the uploaded nor the failed row can be written",
+  );
   // The orphan was still cleaned up before the throw.
   assertEquals(sbBundle.removes.length, 1);
 });
@@ -893,7 +1136,11 @@ Deno.test("attachments [FINDING 4]: invalid base64 -> durable failed row (base64
   const sbBundle = makeConfigurableAttachmentSb();
   const { unresolved } = await runWith([badB64Pdf], sbBundle, "ok");
   assertEquals(unresolved, 1);
-  assertEquals(sbBundle.uploads.length, 0, "must not upload anything for undecodable bytes");
+  assertEquals(
+    sbBundle.uploads.length,
+    0,
+    "must not upload anything for undecodable bytes",
+  );
   const failed = sbBundle.upserts.find((r) => r.status === "failed");
   assert(!!failed, "expected a durable failed row for invalid base64");
   assertEquals(failed.last_error, "base64_decode_failed");
@@ -914,17 +1161,31 @@ function makePersistSb() {
       in: () => b,
       limit: async () => ({ data: [], error: null }),
       maybeSingle: async () => ({ data: null, error: null }),
-      single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }),
-      upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: null }; },
+      single: async () => ({
+        data: { id: `ev-${writes.length}` },
+        error: null,
+      }),
+      upsert: async (row: any, _o?: any) => {
+        writes.push({ table, op: "upsert", row });
+        return { error: null };
+      },
       // persistPost's final attachments_settled marker: .update(...).eq("post_id", id).
       update: (row: any) => ({
-        eq: async (_c: string, _v: unknown) => { writes.push({ table, op: "update", row }); return { error: null }; },
+        eq: async (_c: string, _v: unknown) => {
+          writes.push({ table, op: "update", row });
+          return { error: null };
+        },
       }),
       insert: (row: any) => {
         writes.push({ table, op: "insert", row });
         // email_events_raw.insert(...).select("id").single() chain.
         return {
-          select: () => ({ single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }) }),
+          select: () => ({
+            single: async () => ({
+              data: { id: `ev-${writes.length}` },
+              error: null,
+            }),
+          }),
           then: (resolve: (v: any) => any) => resolve({ error: null }),
         };
       },
@@ -939,12 +1200,16 @@ async function persistAndGetPipelineItem(subject: string) {
   const post = { ...FX_MLB_POST, subject, hasAttachments: false };
   const cls = _classifyPost(post as any, COMPANIES);
   await _persistPost(sb as any, "tok", "group-1", post as any, cls);
-  const pi = writes.find((w) => w.table === "pipeline_items" && w.op === "upsert");
+  const pi = writes.find((w) =>
+    w.table === "pipeline_items" && w.op === "upsert"
+  );
   return { pi, cls, writes };
 }
 
 Deno.test("persistPost: a SPACE-separated ref ('AJBR 67134') writes a pipeline_items row with a non-null ref (B1)", async () => {
-  const { pi, cls } = await persistAndGetPipelineItem("AJBR 67134 Tapping work order");
+  const { pi, cls } = await persistAndGetPipelineItem(
+    "AJBR 67134 Tapping work order",
+  );
   assertEquals(cls.include, true);
   assertEquals(cls.ref, "AJBR-67134");
   assertEquals(!!pi, true, "expected a pipeline_items upsert");
@@ -953,7 +1218,9 @@ Deno.test("persistPost: a SPACE-separated ref ('AJBR 67134') writes a pipeline_i
 });
 
 Deno.test("persistPost: a BARE-numeric ref ('Make Safe 67005') writes a pipeline_items row with a non-null ref (B1)", async () => {
-  const { pi, cls } = await persistAndGetPipelineItem("Make Safe 67005 Alexander Heights");
+  const { pi, cls } = await persistAndGetPipelineItem(
+    "Make Safe 67005 Alexander Heights",
+  );
   assertEquals(cls.include, true);
   assertEquals(cls.ref, "67005");
   assertEquals(!!pi, true, "expected a pipeline_items upsert");
@@ -966,15 +1233,21 @@ Deno.test("persistPost: a BARE-numeric ref ('Make Safe 67005') writes a pipeline
 // This is the trace that closes the MS drop: classify -> non-null ref -> a
 // pipeline_items row exists -> D1 can see it.
 Deno.test("persistPost: a COMPACT MS ref ('MS191190') writes a pipeline_items row with a non-null ref (B1 still-open)", async () => {
-  const { pi, cls } = await persistAndGetPipelineItem("MS191190 emergency make safe Marangaroo");
+  const { pi, cls } = await persistAndGetPipelineItem(
+    "MS191190 emergency make safe Marangaroo",
+  );
   assertEquals(cls.include, true);
   assertEquals(cls.ref, "MS-191190");
   assertEquals(!!pi, true, "expected a pipeline_items upsert for the MS ref");
   assertEquals(pi!.row.ref, "MS-191190");
   assertEquals(pi!.row.ref !== null, true);
   // The append-only replay log also records the extracted ref (rebuildability).
-  const { writes } = await persistAndGetPipelineItem("MS191190 emergency make safe Marangaroo");
-  const ev = writes.find((w) => w.table === "email_events_raw" && w.op === "insert");
+  const { writes } = await persistAndGetPipelineItem(
+    "MS191190 emergency make safe Marangaroo",
+  );
+  const ev = writes.find((w) =>
+    w.table === "email_events_raw" && w.op === "insert"
+  );
   assertEquals(!!ev, true, "expected an email_events_raw audit row");
   assertEquals(ev!.row.extracted_ref, "MS-191190");
 });
@@ -986,15 +1259,24 @@ Deno.test("persistPost: an MS ref in the BODY (generic subject) still writes a p
   const post = {
     ...FX_MLB_POST,
     subject: "Emergency make safe tonight",
-    body: { contentType: "html", content: "<p>Please attend, ref MS191190 attached.</p>" },
+    body: {
+      contentType: "html",
+      content: "<p>Please attend, ref MS191190 attached.</p>",
+    },
     hasAttachments: false,
   };
   const cls = _classifyPost(post as any, COMPANIES);
   assertEquals(cls.include, true);
   assertEquals(cls.ref, "MS-191190");
   await _persistPost(sb as any, "tok", "group-1", post as any, cls);
-  const pi = writes.find((w) => w.table === "pipeline_items" && w.op === "upsert");
-  assertEquals(!!pi, true, "expected a pipeline_items upsert from a body-only MS ref");
+  const pi = writes.find((w) =>
+    w.table === "pipeline_items" && w.op === "upsert"
+  );
+  assertEquals(
+    !!pi,
+    true,
+    "expected a pipeline_items upsert from a body-only MS ref",
+  );
   assertEquals(pi!.row.ref, "MS-191190");
 });
 
@@ -1030,15 +1312,29 @@ function makeCompaniesSb(companyRows: any[]) {
       in: () => b,
       limit: async () => ({ data: [], error: null }),
       maybeSingle: async () => ({ data: null, error: null }),
-      single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }),
-      upsert: async (row: any, _o?: any) => { writes.push({ table, op: "upsert", row }); return { error: null }; },
+      single: async () => ({
+        data: { id: `ev-${writes.length}` },
+        error: null,
+      }),
+      upsert: async (row: any, _o?: any) => {
+        writes.push({ table, op: "upsert", row });
+        return { error: null };
+      },
       update: (row: any) => ({ // attachments_settled marker
-        eq: async (_c?: string, _v?: unknown) => { writes.push({ table, op: "update", row }); return { error: null }; },
+        eq: async (_c?: string, _v?: unknown) => {
+          writes.push({ table, op: "update", row });
+          return { error: null };
+        },
       }),
       insert: (row: any) => {
         writes.push({ table, op: "insert", row });
         return {
-          select: () => ({ single: async () => ({ data: { id: `ev-${writes.length}` }, error: null }) }),
+          select: () => ({
+            single: async () => ({
+              data: { id: `ev-${writes.length}` },
+              error: null,
+            }),
+          }),
           then: (resolve: (v: any) => any) => resolve({ error: null }),
         };
       },
@@ -1060,13 +1356,19 @@ Deno.test("FINDING 1 parity: a company-supplied prefix 'KBA' flows through monit
   const { sb, writes } = makeCompaniesSb(companyRows);
   const { patterns, refPrefixes } = await _loadCompanyPatterns(sb as any);
   // The data-driven set includes the company prefix on TOP of the static floor.
-  assert(refPrefixes.includes("KBA"), "loadCompanyPatterns must include the company prefix KBA");
+  assert(
+    refPrefixes.includes("KBA"),
+    "loadCompanyPatterns must include the company prefix KBA",
+  );
   assert(refPrefixes.includes("MLB"), "floor prefix MLB must still be present");
 
   // Classify a KBA post (compact glued-digit ref). With the floor-only set this
   // would drop to ref=null (the parity bug); with the data-driven set it is a
   // non-null canonical ref.
-  const post = { ...FX_NON_MAKESAFE_POST, subject: "KBA88123 make safe Joondalup" };
+  const post = {
+    ...FX_NON_MAKESAFE_POST,
+    subject: "KBA88123 make safe Joondalup",
+  };
   // Floor-only: dropped.
   assertEquals(_classifyPost(post as any, patterns).ref, null);
   // Data-driven set: recognised.
@@ -1076,7 +1378,9 @@ Deno.test("FINDING 1 parity: a company-supplied prefix 'KBA' flows through monit
 
   // Persist -> a pipeline_items row with the non-null KBA ref exists.
   await _persistPost(sb as any, "tok", "group-1", post as any, cls);
-  const pi = writes.find((w) => w.table === "pipeline_items" && w.op === "upsert");
+  const pi = writes.find((w) =>
+    w.table === "pipeline_items" && w.op === "upsert"
+  );
   assert(!!pi, "expected a pipeline_items upsert for the KBA ref");
   assertEquals(pi!.row.ref, "KBA-88123");
 
@@ -1087,7 +1391,12 @@ Deno.test("FINDING 1 parity: a company-supplied prefix 'KBA' flows through monit
   // match -> a real dropped intake.
   const r = reconcileD1(
     [{ ref: "KBA-88123", source_email_id: "post-kba" }],
-    [{ external_ref: "KBA88123", source_email_id: null, job_number: "SWMS-KBA", substatus: null }],
+    [{
+      external_ref: "KBA88123",
+      source_email_id: null,
+      job_number: "SWMS-KBA",
+      substatus: null,
+    }],
     { refPrefixes },
   );
   assertEquals(r.counts.matched, 1);
@@ -1102,7 +1411,12 @@ Deno.test("FINDING 1 parity: a company-supplied prefix 'KBA' flows through monit
   // shared data-driven prefix set produces the clean exact match above.
   const rFloorOnly = reconcileD1(
     [{ ref: "KBA-88123", source_email_id: "post-kba" }],
-    [{ external_ref: "KBA88123", source_email_id: null, job_number: "SWMS-KBA", substatus: null }],
+    [{
+      external_ref: "KBA88123",
+      source_email_id: null,
+      job_number: "SWMS-KBA",
+      substatus: null,
+    }],
     { refPrefixes: [..._DEFAULT_REF_PREFIXES] },
   );
   assertEquals(rFloorOnly.counts.matched, 0); // NOT cleanly matched without KBA
@@ -1116,20 +1430,24 @@ Deno.test("FINDING 1 parity: a company-supplied prefix 'KBA' flows through monit
 // ════════════════════════════════════════════════════════════
 Deno.test("FINDING 4: invalid company prefixes are rejected; floor still works", async () => {
   // validateRefPrefix unit shape.
-  assertEquals(_validateRefPrefix("X"), false);   // single char
-  assertEquals(_validateRefPrefix("*"), false);   // regex metachar
-  assertEquals(_validateRefPrefix(""), false);    // empty
+  assertEquals(_validateRefPrefix("X"), false); // single char
+  assertEquals(_validateRefPrefix("*"), false); // regex metachar
+  assertEquals(_validateRefPrefix(""), false); // empty
   assertEquals(_validateRefPrefix("A.B"), false); // punctuation/metachar
   assertEquals(_validateRefPrefix("A|B"), false);
-  assertEquals(_validateRefPrefix("KBA"), true);  // valid
-  assertEquals(_validateRefPrefix("kba"), true);  // case-insensitive
+  assertEquals(_validateRefPrefix("KBA"), true); // valid
+  assertEquals(_validateRefPrefix("kba"), true); // case-insensitive
 
   // extractRefPrefixes drops the invalid tokens, keeps the valid one.
-  assertEquals(_extractRefPrefixes({ ref_prefixes: ["X", "*", "", "KBA"] }), ["KBA"]);
+  assertEquals(_extractRefPrefixes({ ref_prefixes: ["X", "*", "", "KBA"] }), [
+    "KBA",
+  ]);
 
   // loadRefPrefixes (the shared loader) drops invalids and unions floor + valid.
   const { sb } = makeCompaniesSb([{
-    slug: "bad", name: "Bad Co", sender_patterns: [],
+    slug: "bad",
+    name: "Bad Co",
+    sender_patterns: [],
     parsing_rules: { ref_prefixes: ["X", "*", "", "KBA"] },
   }]);
   const prefixes = await _loadRefPrefixes(sb as any);
@@ -1141,7 +1459,10 @@ Deno.test("FINDING 4: invalid company prefixes are rejected; floor still works",
   // No over-match: a generic post that merely CONTAINS an "X" must not be classified
   // make-safe by an invalid "X" prefix. With the cleaned set there is no KBA/etc in
   // the subject, no sender match, no keyword -> excluded.
-  const post = { ...FX_NON_MAKESAFE_POST, subject: "Xtra savings this June (X marks it)" };
+  const post = {
+    ...FX_NON_MAKESAFE_POST,
+    subject: "Xtra savings this June (X marks it)",
+  };
   assertEquals(_classifyPost(post as any, [], prefixes).include, false);
 
   // A floor-prefix ref still classifies make-safe even when an invalid company
@@ -1191,20 +1512,32 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
 
   function keyFor(table: string, row: any): string {
     switch (table) {
-      case "emails": return `post:${row.post_id}`;
-      case "pipeline_items": return `${row.mailbox}|${row.ref}`;
-      case "sync_state": return `mb:${row.mailbox}`;
-      case "mail_sync_cursors": return `mb:${row.mailbox}`;
-      case "email_classifier_exclusions": return `post:${row.post_id}`;
-      case "email_attachments": return `${row.email_id}|${row.graph_attachment_id}`;
-      default: return `${eventSeq}`;
+      case "emails":
+        return `post:${row.post_id}`;
+      case "pipeline_items":
+        return `${row.mailbox}|${row.ref}`;
+      case "sync_state":
+        return `mb:${row.mailbox}`;
+      case "mail_sync_cursors":
+        return `mb:${row.mailbox}`;
+      case "email_classifier_exclusions":
+        return `post:${row.post_id}`;
+      case "email_attachments":
+        return `${row.email_id}|${row.graph_attachment_id}`;
+      default:
+        return `${eventSeq}`;
     }
   }
 
-  function matchingRows(table: string, filters: Array<[string, unknown]>): any[] {
+  function matchingRows(
+    table: string,
+    filters: Array<[string, unknown]>,
+  ): any[] {
     const map = tables[table];
     if (!map) return [];
-    return Array.from(map.values()).filter((row) => filters.every(([c, v]) => row[c] === v));
+    return Array.from(map.values()).filter((row) =>
+      filters.every(([c, v]) => row[c] === v)
+    );
   }
 
   // The builder is a THENABLE query: terminal awaits (.maybeSingle/.single, or
@@ -1218,15 +1551,24 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
         if (opts && opts.count) return builderWith(table, true);
         return b;
       },
-      eq: (col: string, val: unknown) => { filters.push([col, val]); return b; },
-      ilike: (col: string, val: unknown) => { filters.push([col, String(val)]); return b; },
+      eq: (col: string, val: unknown) => {
+        filters.push([col, val]);
+        return b;
+      },
+      ilike: (col: string, val: unknown) => {
+        filters.push([col, String(val)]);
+        return b;
+      },
       in: (_col: string, _vals: unknown[]) => {
         // count head-query terminal (refreshSyncState attachment count): clean run
         // -> 0 unresolved attachments.
         if (countMode) return Promise.resolve({ count: 0, error: null });
         return b;
       },
-      limit: async (_n: number) => ({ data: matchingRows(table, filters), error: null }),
+      limit: async (_n: number) => ({
+        data: matchingRows(table, filters),
+        error: null,
+      }),
       // Paginated read terminal (fetchAllRows): returns the filtered rows in [from,to].
       range: async (from: number, to: number) => ({
         data: matchingRows(table, filters).slice(from, to + 1),
@@ -1245,7 +1587,12 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
         resolve({ data: matchingRows(table, filters), error: null }),
       upsert: async (row: any, _o?: any) => {
         const map = tables[table];
-        if (map) map.set(keyFor(table, row), { ...(map.get(keyFor(table, row)) || {}), ...row });
+        if (map) {
+          map.set(keyFor(table, row), {
+            ...(map.get(keyFor(table, row)) || {}),
+            ...row,
+          });
+        }
         return { error: null };
       },
       insert: (row: any) => {
@@ -1253,7 +1600,9 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
         const id = `ev-${++eventSeq}`;
         if (table === "email_events_raw") tables[table].set(id, { id, ...row });
         return {
-          select: () => ({ single: async () => ({ data: { id }, error: null }) }),
+          select: () => ({
+            single: async () => ({ data: { id }, error: null }),
+          }),
           then: (resolve: (v: any) => any) => resolve({ error: null }),
         };
       },
@@ -1297,8 +1646,12 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
     const priorFloor = priorSs.recon_inventory_floor ?? null;
     const priorCeiling = priorSs.recon_inventory_ceiling ?? null;
     // LEAST(existing, new) / GREATEST(existing, new) — coverage only widens.
-    const newFloor = priorFloor && priorFloor < args.p_floor ? priorFloor : args.p_floor;
-    const newCeiling = priorCeiling && priorCeiling > args.p_ceiling ? priorCeiling : args.p_ceiling;
+    const newFloor = priorFloor && priorFloor < args.p_floor
+      ? priorFloor
+      : args.p_floor;
+    const newCeiling = priorCeiling && priorCeiling > args.p_ceiling
+      ? priorCeiling
+      : args.p_ceiling;
     const nowStamp = new Date().toISOString();
     // (a) sync_state: coverage bounds + completion marker.
     tables.sync_state.set(ssKey, {
@@ -1333,12 +1686,21 @@ function makeStatefulSb(opts: { commitRpcError?: string } = {}) {
   }
 
   const sb: any = {
-    from(table: string) { return builder(table); },
+    from(table: string) {
+      return builder(table);
+    },
     rpc: async (fn: string, args: any) => {
       if (fn === "commit_makesafe_backfill") return commitBackfill(args);
       return { data: null, error: null };
     },
-    storage: { from() { return { upload: async () => ({ error: null }), remove: async () => ({ error: null }) }; } },
+    storage: {
+      from() {
+        return {
+          upload: async () => ({ error: null }),
+          remove: async () => ({ error: null }),
+        };
+      },
+    },
     _tables: tables,
     _insertCounts: insertCounts,
   };
@@ -1368,50 +1730,78 @@ const FX_BACKFILL_EXCLUDED = {
 
 function backfillDeps(opts: {
   posts: any[];
-  persistPost?: (sb: any, token: string, groupId: string, post: any, cls: any) => Promise<number>;
+  persistPost?: (
+    sb: any,
+    token: string,
+    groupId: string,
+    post: any,
+    cls: any,
+  ) => Promise<number>;
   auditExclusion?: (sb: any, post: any, reason: string) => Promise<void>;
-  collectPosts?: (token: string, groupId: string, sinceIso: string) => Promise<any>;
+  collectPosts?: (
+    token: string,
+    groupId: string,
+    sinceIso: string,
+  ) => Promise<any>;
   nowIso?: string;
   capture?: { since?: string; persisted: any[]; excluded: any[] };
 }) {
   return {
     getGraphToken: async () => "tok",
     resolveGroupId: async (_t: string) => "group-1",
-    loadCompanyPatterns: async (_sb: any) => ({ patterns: COMPANIES, refPrefixes: [..._DEFAULT_REF_PREFIXES] }),
-    collectPosts: opts.collectPosts ?? (async (_t: string, _g: string, since: string) => {
-      if (opts.capture) opts.capture.since = since;
-      return { posts: opts.posts, pageCounts: { conversations: 1, threads: 1, posts: 1 } };
+    loadCompanyPatterns: async (_sb: any) => ({
+      patterns: COMPANIES,
+      refPrefixes: [..._DEFAULT_REF_PREFIXES],
     }),
-    persistPost: opts.persistPost ?? (async (sb: any, _t: string, _g: string, post: any, _cls: any) => {
-      if (opts.capture) opts.capture.persisted.push(post.id);
-      // Mirror the real persistPost's emails write so the chunked backfill's DB-based
-      // floor (loadIngestedFloor) and done-detection (loadBackfillState) are testable.
-      await sb.from("emails").upsert({
-        post_id: post.id,
-        mailbox: "ses@secureworkswa.com.au",
-        received_at: post.receivedDateTime ?? post.createdDateTime ?? null,
-        has_attachments: post.hasAttachments ?? false,
-        attachments_settled: true, // stub stands in for the whole persistPost incl the done marker
-      });
-      return 0;
-    }),
-    auditExclusion: opts.auditExclusion ?? (async (sb: any, post: any, _r: string) => {
-      if (opts.capture) opts.capture.excluded.push(post.id);
-      // Mirror the real auditExclusion so done-detection skips excluded posts on re-run.
-      await sb.from("email_classifier_exclusions").upsert({ post_id: post.id });
-    }),
+    collectPosts: opts.collectPosts ??
+      (async (_t: string, _g: string, since: string) => {
+        if (opts.capture) opts.capture.since = since;
+        return {
+          posts: opts.posts,
+          pageCounts: { conversations: 1, threads: 1, posts: 1 },
+        };
+      }),
+    persistPost: opts.persistPost ??
+      (async (sb: any, _t: string, _g: string, post: any, _cls: any) => {
+        if (opts.capture) opts.capture.persisted.push(post.id);
+        // Mirror the real persistPost's emails write so the chunked backfill's DB-based
+        // floor (loadIngestedFloor) and done-detection (loadBackfillState) are testable.
+        await sb.from("emails").upsert({
+          post_id: post.id,
+          mailbox: "ses@secureworkswa.com.au",
+          received_at: post.receivedDateTime ?? post.createdDateTime ?? null,
+          has_attachments: post.hasAttachments ?? false,
+          attachments_settled: true, // stub stands in for the whole persistPost incl the done marker
+        });
+        return 0;
+      }),
+    auditExclusion: opts.auditExclusion ??
+      (async (sb: any, post: any, _r: string) => {
+        if (opts.capture) opts.capture.excluded.push(post.id);
+        // Mirror the real auditExclusion so done-detection skips excluded posts on re-run.
+        await sb.from("email_classifier_exclusions").upsert({
+          post_id: post.id,
+        });
+      }),
     nowIso: opts.nowIso,
   };
 }
 
 Deno.test("backfill: traverses from EPOCH and ingests via the persistPost path (excluded -> audit)", async () => {
   const sb = makeStatefulSb();
-  const capture = { persisted: [] as any[], excluded: [] as any[], since: undefined as string | undefined };
-  const res = await _runBackfillFull(sb, backfillDeps({
-    posts: [FX_BACKFILL_OLD, FX_BACKFILL_EXCLUDED, FX_BACKFILL_NEW],
-    nowIso: "2026-06-15T00:00:00Z",
-    capture,
-  }));
+  const capture = {
+    persisted: [] as any[],
+    excluded: [] as any[],
+    since: undefined as string | undefined,
+  };
+  const res = await _runBackfillFull(
+    sb,
+    backfillDeps({
+      posts: [FX_BACKFILL_OLD, FX_BACKFILL_EXCLUDED, FX_BACKFILL_NEW],
+      nowIso: "2026-06-15T00:00:00Z",
+      capture,
+    }),
+  );
   // Epoch lower bound — the WHOLE history, no recent-only filter.
   assertEquals(capture.since, new Date(0).toISOString());
   // The two make-safe posts went through persistPost; the newsletter was audited.
@@ -1424,10 +1814,13 @@ Deno.test("backfill: traverses from EPOCH and ingests via the persistPost path (
 
 Deno.test("backfill: sets recon_inventory_floor to the EARLIEST ingested received + ceiling to now + commits cursor at START", async () => {
   const sb = makeStatefulSb();
-  const res = await _runBackfillFull(sb, backfillDeps({
-    posts: [FX_BACKFILL_NEW, FX_BACKFILL_OLD], // out of order on purpose
-    nowIso: "2026-06-15T00:00:00Z",
-  }));
+  const res = await _runBackfillFull(
+    sb,
+    backfillDeps({
+      posts: [FX_BACKFILL_NEW, FX_BACKFILL_OLD], // out of order on purpose
+      nowIso: "2026-06-15T00:00:00Z",
+    }),
+  );
   // Floor = earliest INGESTED receivedDateTime (the 2024 post), NOT the newest.
   assertEquals(res.inventory_floor, "2024-01-15T00:00:00Z");
   // Ceiling = backfill start (now).
@@ -1451,22 +1844,33 @@ Deno.test("backfill [CHUNKED]: > cap posts -> first invoke is PARTIAL (no commit
     ...FX_MLB_POST,
     id: `post-chunk-${i}`,
     subject: `Work Order AJBR-7${String(i).padStart(4, "0")} job`,
-    receivedDateTime: `2026-05-${String((i % 27) + 1).padStart(2, "0")}T00:00:00Z`,
+    receivedDateTime: `2026-05-${
+      String((i % 27) + 1).padStart(2, "0")
+    }T00:00:00Z`,
     hasAttachments: false,
   }));
 
   // Invoke 1 — processes the first 40, 5 remain -> PARTIAL, nothing committed.
-  const r1 = await _runBackfillFull(sb, backfillDeps({ posts, nowIso: "2026-06-15T00:00:00Z" }));
+  const r1 = await _runBackfillFull(
+    sb,
+    backfillDeps({ posts, nowIso: "2026-06-15T00:00:00Z" }),
+  );
   assertEquals(r1.partial, true);
   assertEquals(r1.remaining, 5);
   assertEquals(r1.included, 40);
   assertEquals(r1.committed_cursor, ""); // not committed
-  assertEquals(sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au"), undefined);
+  assertEquals(
+    sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au"),
+    undefined,
+  );
   const ssAfter1 = sb._tables.sync_state.get("mb:ses@secureworkswa.com.au");
   assertEquals(ssAfter1?.backfill_complete ?? false, false); // FAIL CLOSED: no marker yet
 
   // Invoke 2 — the 40 done posts are skipped; the last 5 processed -> commit.
-  const r2 = await _runBackfillFull(sb, backfillDeps({ posts, nowIso: "2026-06-15T00:05:00Z" }));
+  const r2 = await _runBackfillFull(
+    sb,
+    backfillDeps({ posts, nowIso: "2026-06-15T00:05:00Z" }),
+  );
   assertEquals(r2.partial, false);
   assertEquals(r2.remaining, 0);
   assertEquals(r2.included, 5); // only the previously-unprocessed remainder
@@ -1479,7 +1883,10 @@ Deno.test("backfill [CHUNKED]: > cap posts -> first invoke is PARTIAL (no commit
 
 Deno.test("backfill: empty group -> floor == ceiling == start (no false historical floor)", async () => {
   const sb = makeStatefulSb();
-  const res = await _runBackfillFull(sb, backfillDeps({ posts: [], nowIso: "2026-06-15T00:00:00Z" }));
+  const res = await _runBackfillFull(
+    sb,
+    backfillDeps({ posts: [], nowIso: "2026-06-15T00:00:00Z" }),
+  );
   assertEquals(res.included, 0);
   assertEquals(res.inventory_floor, "2026-06-15T00:00:00Z");
   assertEquals(res.inventory_ceiling, "2026-06-15T00:00:00Z");
@@ -1510,19 +1917,33 @@ Deno.test("backfill: a re-run does NOT double-insert (ON CONFLICT idempotency vi
   assertEquals(emailsAfter2, 2, "re-run must not create duplicate emails rows");
   // Two distinct refs -> two pipeline_items, unchanged on re-run.
   assertEquals(piAfter1, 2);
-  assertEquals(piAfter2, 2, "re-run must not create duplicate pipeline_items rows");
+  assertEquals(
+    piAfter2,
+    2,
+    "re-run must not create duplicate pipeline_items rows",
+  );
   // MEDIUM (idempotency) — exactly two 'created' event rows (one per post), and the
   // re-run must NOT append duplicate raw event rows (the previous plain-insert path
   // appended a new row per re-run). Dedupe on (post_id, change_type) holds it at 2.
   assertEquals(eventsAfter1, 2, "first run writes one created event per post");
-  assertEquals(eventsAfter2, 2, "re-run must not append duplicate email_events_raw rows");
+  assertEquals(
+    eventsAfter2,
+    2,
+    "re-run must not append duplicate email_events_raw rows",
+  );
   // And no post_id has more than one 'created' row.
   const createdByPost: Record<string, number> = {};
   for (const ev of sb._tables.email_events_raw.values()) {
-    if (ev.change_type === "created") createdByPost[ev.post_id] = (createdByPost[ev.post_id] || 0) + 1;
+    if (ev.change_type === "created") {
+      createdByPost[ev.post_id] = (createdByPost[ev.post_id] || 0) + 1;
+    }
   }
   for (const [pid, n] of Object.entries(createdByPost)) {
-    assertEquals(n, 1, `post ${pid} must have exactly one 'created' event row after two runs`);
+    assertEquals(
+      n,
+      1,
+      `post ${pid} must have exactly one 'created' event row after two runs`,
+    );
   }
 });
 
@@ -1535,7 +1956,7 @@ Deno.test("backfill [idempotency]: a re-run does NOT append duplicate EXCLUDED e
   const deps = backfillDeps({
     posts: [FX_BACKFILL_EXCLUDED, FX_BACKFILL_OLD],
     nowIso: "2026-06-15T00:00:00Z",
-    persistPost: _persistPost,    // REAL persist path for the make-safe post
+    persistPost: _persistPost, // REAL persist path for the make-safe post
     auditExclusion: _auditExclusion, // REAL exclusion path for the newsletter
   });
   await _runBackfillFull(sb, deps);
@@ -1545,7 +1966,11 @@ Deno.test("backfill [idempotency]: a re-run does NOT append duplicate EXCLUDED e
   const exclAfter2 = Array.from(sb._tables.email_events_raw.values())
     .filter((e: any) => e.change_type === "excluded").length;
   assertEquals(exclAfter1, 1, "first run writes exactly one excluded event");
-  assertEquals(exclAfter2, 1, "re-run must not append a duplicate excluded event");
+  assertEquals(
+    exclAfter2,
+    1,
+    "re-run must not append a duplicate excluded event",
+  );
   // The classifier-exclusions row is also a single (ON CONFLICT post_id) row.
   assertEquals(sb._tables.email_classifier_exclusions.size, 1);
 });
@@ -1554,23 +1979,40 @@ Deno.test("backfill [FAIL CLOSED]: a persistPost throw mid-pass does NOT set flo
   const sb = makeStatefulSb();
   let threw = false;
   try {
-    await _runBackfillFull(sb, backfillDeps({
-      posts: [FX_BACKFILL_OLD, FX_BACKFILL_NEW],
-      nowIso: "2026-06-15T00:00:00Z",
-      persistPost: async (_sb, _t, _g, post: any) => {
-        if (post.id === "post-new-2026") throw new Error("ingest boom mid-pass");
-        return 0;
-      },
-    }));
+    await _runBackfillFull(
+      sb,
+      backfillDeps({
+        posts: [FX_BACKFILL_OLD, FX_BACKFILL_NEW],
+        nowIso: "2026-06-15T00:00:00Z",
+        persistPost: async (_sb, _t, _g, post: any) => {
+          if (post.id === "post-new-2026") {
+            throw new Error("ingest boom mid-pass");
+          }
+          return 0;
+        },
+      }),
+    );
   } catch (e) {
     threw = true;
     assert((e as Error).message.includes("ingest boom mid-pass"));
   }
-  assertEquals(threw, true, "a mid-pass ingest failure must propagate (fail closed)");
+  assertEquals(
+    threw,
+    true,
+    "a mid-pass ingest failure must propagate (fail closed)",
+  );
   // CRITICAL: NO floor, NO ceiling, NO live cursor written -> recon_verified can
   // never read true over the un-ingested history.
-  assertEquals(sb._tables.sync_state.size, 0, "no sync_state floor/ceiling on partial backfill");
-  assertEquals(sb._tables.mail_sync_cursors.size, 0, "no live cursor on partial backfill");
+  assertEquals(
+    sb._tables.sync_state.size,
+    0,
+    "no sync_state floor/ceiling on partial backfill",
+  );
+  assertEquals(
+    sb._tables.mail_sync_cursors.size,
+    0,
+    "no live cursor on partial backfill",
+  );
 });
 
 // BLOCKER (atomic commit) — the floor/ceiling AND the cursor are now committed in
@@ -1581,7 +2023,9 @@ Deno.test("backfill [FAIL CLOSED]: a persistPost throw mid-pass does NOT set flo
 // atomic RPC there is no intermediate state to leak. (MEDIUM #3: ORDERING proof.)
 Deno.test("backfill [FAIL CLOSED]: an atomic-commit RPC failure leaves NO floor/ceiling/marker AND no cursor (all-or-nothing)", async () => {
   // Seed a PRIOR cursor + sync_state so we can prove neither is mutated on failure.
-  const sb = makeStatefulSb({ commitRpcError: "atomic commit boom (tx rolled back)" });
+  const sb = makeStatefulSb({
+    commitRpcError: "atomic commit boom (tx rolled back)",
+  });
   sb._tables.mail_sync_cursors.set("mb:ses@secureworkswa.com.au", {
     mailbox: "ses@secureworkswa.com.au",
     last_completed_max: "2026-01-01T00:00:00Z", // a PRIOR cursor that must NOT move
@@ -1596,7 +2040,13 @@ Deno.test("backfill [FAIL CLOSED]: an atomic-commit RPC failure leaves NO floor/
 
   let threw = false;
   try {
-    await _runBackfillFull(sb, backfillDeps({ posts: [FX_BACKFILL_OLD], nowIso: "2026-06-15T00:00:00Z" }));
+    await _runBackfillFull(
+      sb,
+      backfillDeps({
+        posts: [FX_BACKFILL_OLD],
+        nowIso: "2026-06-15T00:00:00Z",
+      }),
+    );
   } catch (e) {
     threw = true;
     assert((e as Error).message.includes("atomic commit failed"));
@@ -1605,13 +2055,29 @@ Deno.test("backfill [FAIL CLOSED]: an atomic-commit RPC failure leaves NO floor/
 
   // NOTHING moved: the prior cursor is unchanged (NOT advanced to the backfill start)...
   const cur = sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au");
-  assertEquals(cur.last_completed_max, "2026-01-01T00:00:00Z", "cursor must be unchanged on atomic-commit failure");
+  assertEquals(
+    cur.last_completed_max,
+    "2026-01-01T00:00:00Z",
+    "cursor must be unchanged on atomic-commit failure",
+  );
   // ...and the coverage bounds + completion marker were NOT set (still null / false),
   // so combineVerifiedGate stays blocked (floor unestablished + backfill_incomplete).
   const ss = sb._tables.sync_state.get("mb:ses@secureworkswa.com.au");
-  assertEquals(ss.recon_inventory_floor, null, "no floor set on atomic-commit failure");
-  assertEquals(ss.recon_inventory_ceiling, null, "no ceiling set on atomic-commit failure");
-  assertEquals(ss.backfill_complete, false, "backfill_complete must stay false on atomic-commit failure");
+  assertEquals(
+    ss.recon_inventory_floor,
+    null,
+    "no floor set on atomic-commit failure",
+  );
+  assertEquals(
+    ss.recon_inventory_ceiling,
+    null,
+    "no ceiling set on atomic-commit failure",
+  );
+  assertEquals(
+    ss.backfill_complete,
+    false,
+    "backfill_complete must stay false on atomic-commit failure",
+  );
 });
 
 // BLOCKER (atomic commit, POSITIVE control + gate integration) — a SUCCESSFUL
@@ -1620,10 +2086,13 @@ Deno.test("backfill [FAIL CLOSED]: an atomic-commit RPC failure leaves NO floor/
 // This is the end-to-end proof that the atomic commit is what unblocks the gate.
 Deno.test("backfill [ATOMIC]: a successful commit sets floor+ceiling+cursor+backfill_complete TOGETHER and the gate can verify", async () => {
   const sb = makeStatefulSb();
-  const res = await _runBackfillFull(sb, backfillDeps({
-    posts: [FX_BACKFILL_OLD, FX_BACKFILL_NEW],
-    nowIso: "2026-06-15T00:00:00Z",
-  }));
+  const res = await _runBackfillFull(
+    sb,
+    backfillDeps({
+      posts: [FX_BACKFILL_OLD, FX_BACKFILL_NEW],
+      nowIso: "2026-06-15T00:00:00Z",
+    }),
+  );
   assertEquals(res.success, true);
   const ss = sb._tables.sync_state.get("mb:ses@secureworkswa.com.au");
   const cur = sb._tables.mail_sync_cursors.get("mb:ses@secureworkswa.com.au");
@@ -1635,7 +2104,16 @@ Deno.test("backfill [ATOMIC]: a successful commit sets floor+ceiling+cursor+back
 
   // Gate integration: floor + fresh ceiling + completed backfill + clean -> verified.
   const gate = combineVerifiedGate(
-    { verified: true, mode: "OK", email_no_job: 0, job_no_email: 0, ambiguous: 0, missing_posts: 0, unresolved_attachments: 0, reason: "clean" },
+    {
+      verified: true,
+      mode: "OK",
+      email_no_job: 0,
+      job_no_email: 0,
+      ambiguous: 0,
+      missing_posts: 0,
+      unresolved_attachments: 0,
+      reason: "clean",
+    },
     {
       otherVerified: true,
       d2MissingPosts: 0,
@@ -1650,7 +2128,16 @@ Deno.test("backfill [ATOMIC]: a successful commit sets floor+ceiling+cursor+back
   // CONTRAST: the SAME clean drift + bounds but WITHOUT a completed backfill is
   // blocked with backfill_incomplete — proving the marker is load-bearing, not inert.
   const blocked = combineVerifiedGate(
-    { verified: true, mode: "OK", email_no_job: 0, job_no_email: 0, ambiguous: 0, missing_posts: 0, unresolved_attachments: 0, reason: "clean" },
+    {
+      verified: true,
+      mode: "OK",
+      email_no_job: 0,
+      job_no_email: 0,
+      ambiguous: 0,
+      missing_posts: 0,
+      unresolved_attachments: 0,
+      reason: "clean",
+    },
     {
       otherVerified: true,
       d2MissingPosts: 0,
@@ -1673,12 +2160,16 @@ function makeLockHandlerSb(lockGranted: boolean) {
   const sb: any = {
     rpc: async (fn: string, _args: any) => {
       calls.push(fn);
-      if (fn === "try_lock_mailbox_sync") return { data: lockGranted, error: null };
+      if (fn === "try_lock_mailbox_sync") {
+        return { data: lockGranted, error: null };
+      }
       return { data: true, error: null };
     },
     from: (_t: string) => {
       const b: any = {
-        select: () => b, eq: () => b, in: () => Promise.resolve({ count: 0, error: null }),
+        select: () => b,
+        eq: () => b,
+        in: () => Promise.resolve({ count: 0, error: null }),
         maybeSingle: async () => ({ data: null, error: null }),
         upsert: async () => ({ error: null }),
       };
@@ -1710,8 +2201,11 @@ Deno.test("backfill [LOCK]: a held advisory lock makes the REAL handler exit ear
     // service-key bearer if captured; if NEITHER is set the handler 401s before the
     // lock branch (still a valid gate assertion).
     const swApiKey = Deno.env.get("SW_API_KEY") || "";
-    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_KEY") || "";
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ||
+      Deno.env.get("SUPABASE_SERVICE_KEY") || "";
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
     if (swApiKey) headers["x-api-key"] = swApiKey;
     else if (svcKey) headers["authorization"] = `Bearer ${svcKey}`;
 
@@ -1750,9 +2244,12 @@ Deno.test("backfill [LOCK control]: a GRANTED lock lets the real handler proceed
   _setTestClientFactory(() => sbFree);
   try {
     const swApiKey = Deno.env.get("SW_API_KEY") || "";
-    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_KEY") || "";
+    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ||
+      Deno.env.get("SUPABASE_SERVICE_KEY") || "";
     if (!swApiKey && !svcKey) return; // no credential in this env -> skip (covered above)
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
     if (swApiKey) headers["x-api-key"] = swApiKey;
     else headers["authorization"] = `Bearer ${svcKey}`;
     const req = new Request("https://x/functions/v1/monitor-ses-makesafes", {
@@ -1824,8 +2321,15 @@ const FAKE_API_KEY = "sw-api-key-bbb";
 
 Deno.test("auth [FIX]: a Bearer JWT with role=service_role is ACCEPTED (the pg_cron _sw_service_key() path)", () => {
   // A cron-style service-role JWT whose raw value differs from the injected key.
-  const cronJwt = fakeJwt({ role: "service_role", iss: "supabase", ref: "proj" });
-  assert(cronJwt !== FAKE_SERVICE_KEY, "fixture must NOT byte-equal the injected key");
+  const cronJwt = fakeJwt({
+    role: "service_role",
+    iss: "supabase",
+    ref: "proj",
+  });
+  assert(
+    cronJwt !== FAKE_SERVICE_KEY,
+    "fixture must NOT byte-equal the injected key",
+  );
   assertEquals(_decodeJwtRole(cronJwt), "service_role");
   assert(_isAuthorized(reqWithBearer(cronJwt), FAKE_SERVICE_KEY, FAKE_API_KEY));
 });
@@ -1833,29 +2337,52 @@ Deno.test("auth [FIX]: a Bearer JWT with role=service_role is ACCEPTED (the pg_c
 Deno.test("auth [FIX]: a Bearer JWT with role=anon is REJECTED", () => {
   const anonJwt = fakeJwt({ role: "anon", iss: "supabase", ref: "proj" });
   assertEquals(_decodeJwtRole(anonJwt), "anon");
-  assertEquals(_isAuthorized(reqWithBearer(anonJwt), FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+  assertEquals(
+    _isAuthorized(reqWithBearer(anonJwt), FAKE_SERVICE_KEY, FAKE_API_KEY),
+    false,
+  );
 });
 
 Deno.test("auth [FIX]: x-api-key === SW_API_KEY is ACCEPTED", () => {
-  assert(_isAuthorized(reqWithApiKey(FAKE_API_KEY), FAKE_SERVICE_KEY, FAKE_API_KEY));
+  assert(
+    _isAuthorized(reqWithApiKey(FAKE_API_KEY), FAKE_SERVICE_KEY, FAKE_API_KEY),
+  );
 });
 
 Deno.test("auth [FIX]: a wrong x-api-key is REJECTED", () => {
-  assertEquals(_isAuthorized(reqWithApiKey("not-the-key"), FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+  assertEquals(
+    _isAuthorized(reqWithApiKey("not-the-key"), FAKE_SERVICE_KEY, FAKE_API_KEY),
+    false,
+  );
 });
 
 Deno.test("auth [FIX]: a garbage (non-JWT) Bearer is REJECTED and decode returns null (no throw)", () => {
   assertEquals(_decodeJwtRole("not.a.jwt"), null); // 3 parts but middle is not base64 JSON
   assertEquals(_decodeJwtRole("totally-garbage"), null); // not even 3 parts
-  assertEquals(_isAuthorized(reqWithBearer("totally-garbage"), FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+  assertEquals(
+    _isAuthorized(
+      reqWithBearer("totally-garbage"),
+      FAKE_SERVICE_KEY,
+      FAKE_API_KEY,
+    ),
+    false,
+  );
 });
 
 Deno.test("auth [FIX]: the exact injected service key as Bearer is still ACCEPTED (fast path kept)", () => {
-  assert(_isAuthorized(reqWithBearer(FAKE_SERVICE_KEY), FAKE_SERVICE_KEY, FAKE_API_KEY));
+  assert(
+    _isAuthorized(
+      reqWithBearer(FAKE_SERVICE_KEY),
+      FAKE_SERVICE_KEY,
+      FAKE_API_KEY,
+    ),
+  );
 });
 
 Deno.test("auth [FIX]: no credentials at all is REJECTED", () => {
-  const bare = new Request("https://x/functions/v1/monitor-ses-makesafes", { method: "POST" });
+  const bare = new Request("https://x/functions/v1/monitor-ses-makesafes", {
+    method: "POST",
+  });
   assertEquals(_isAuthorized(bare, FAKE_SERVICE_KEY, FAKE_API_KEY), false);
 });
 
@@ -1864,11 +2391,27 @@ Deno.test("auth [FIX]: no credentials at all is REJECTED", () => {
 // ════════════════════════════════════════════════════════════
 
 Deno.test("item12: isGraphMailReadError recognises the outage shapes, not unrelated errors", () => {
-  assert(isGraphMailReadError("Graph GET failed 401 for https://...: Lifetime validation failed, the token is expired"));
-  assert(isGraphMailReadError("Group resolution failed 401: InvalidAuthenticationToken"));
-  assert(isGraphMailReadError("Graph token request failed: 400 invalid_client"));
-  assertEquals(isGraphMailReadError("advisory lock RPC failed: deadlock"), false);
-  assertEquals(isGraphMailReadError("sync_state upsert failed: timeout"), false);
+  assert(
+    isGraphMailReadError(
+      "Graph GET failed 401 for https://...: Lifetime validation failed, the token is expired",
+    ),
+  );
+  assert(
+    isGraphMailReadError(
+      "Group resolution failed 401: InvalidAuthenticationToken",
+    ),
+  );
+  assert(
+    isGraphMailReadError("Graph token request failed: 400 invalid_client"),
+  );
+  assertEquals(
+    isGraphMailReadError("advisory lock RPC failed: deadlock"),
+    false,
+  );
+  assertEquals(
+    isGraphMailReadError("sync_state upsert failed: timeout"),
+    false,
+  );
   assertEquals(isGraphMailReadError(null), false);
 });
 
@@ -1889,7 +2432,13 @@ Deno.test("item12: graphGetAll self-heals a mid-scan expired-token 401 (force-re
     if (url.includes("login.microsoftonline.com")) {
       tokenMints++;
       return Promise.resolve(
-        new Response(JSON.stringify({ access_token: `fresh-${tokenMints}`, expires_in: 3600 }), { status: 200 }),
+        new Response(
+          JSON.stringify({
+            access_token: `fresh-${tokenMints}`,
+            expires_in: 3600,
+          }),
+          { status: 200 },
+        ),
       );
     }
     graphCalls++;
@@ -1897,12 +2446,16 @@ Deno.test("item12: graphGetAll self-heals a mid-scan expired-token 401 (force-re
     // The captured (stale) token was minted before the scan; mid-scan it expires.
     if (auth === "Bearer stale") {
       return Promise.resolve(
-        new Response("Lifetime validation failed, the token is expired.", { status: 401 }),
+        new Response("Lifetime validation failed, the token is expired.", {
+          status: 401,
+        }),
       );
     }
     // The retry carries the force-refreshed token → the page drains normally.
     return Promise.resolve(
-      new Response(JSON.stringify({ value: [{ id: "post-1" }] }), { status: 200 }),
+      new Response(JSON.stringify({ value: [{ id: "post-1" }] }), {
+        status: 200,
+      }),
     );
   };
   try {

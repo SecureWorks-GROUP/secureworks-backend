@@ -118,6 +118,13 @@ One invocation can attempt only allowlisted cases and stops after four times
 the explicit case cap, so an edge timeout never discards accounting already committed.
 Cases are stamped as they go and the next scan resumes.
 
+That cursor is a completion checkpoint, not a read-ahead marker: it advances only
+after the run finishes its writes and truthful health update. A cancelled, rejected
+or thrown run therefore retains the prior cursor and rereads the same page
+idempotently. A completed but degraded run still advances, carrying the explicit
+`scan_page_completed_degraded_retry_next_sweep` caveat so one poison page cannot pin
+every older page; the bounded sweep retries it on its next pass to the window head.
+
 Ordering inside a run is: deferred/failed job-creation retries up to half the
 budget, then cases never attempted before, then the remaining retries. Cases already
 at their resolved state are inert. A systematically failing case therefore cannot

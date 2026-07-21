@@ -114,8 +114,9 @@ Deno.test("deterministic normal path has no model import or silent fallback", ()
   assertStringIncludes(runtime, "ai_calls: 0");
 });
 
-Deno.test("dry-run replay and exact dark observe take no write branch", () => {
-  assertStringIncludes(runtime, "if (dryRun) return report;");
+Deno.test("dry-run replay and exact dark observe take no business-write branch", () => {
+  assertStringIncludes(runtime, "if (dryRun) {");
+  assertStringIncludes(runtime, "await commitCompletedCursor();");
   assertStringIncludes(runtime, "by_builder_and_outcome");
   assertStringIncludes(runtime, "includeSanitizedCases");
   assertStringIncludes(
@@ -139,6 +140,30 @@ Deno.test("production controls default to N=1, exact empty allowlists and bounde
   assertStringIncludes(runtime, "loadDeterministicRolloutControls");
   assertStringIncludes(runtime, "requires a non-empty exact DB allowlist");
   assertStringIncludes(index, "requireAllAllowlistMatches: true");
+});
+
+Deno.test("scheduled scans detach from pg_net and cursor progress means completion", () => {
+  assertStringIncludes(index, "selectionMode: rollout.selectionMode");
+  assertStringIncludes(runtime, "const commitCompletedCursor");
+  assertStringIncludes(
+    runtime,
+    '"scan_page_completed_degraded_retry_next_sweep"',
+  );
+  const cursorCommit = runtime.lastIndexOf("await commitCompletedCursor();");
+  const healthWrite = runtime.lastIndexOf("await writeHealth(");
+  assert(
+    cursorCommit > healthWrite,
+    "live cursor must commit after truthful health",
+  );
+
+  const monitor = Deno.readTextFileSync(
+    new URL("../monitor-ses-makesafes/index.ts", import.meta.url),
+  );
+  assertStringIncludes(monitor, "_scheduleIntakeScanContinuation");
+  assertStringIncludes(monitor, "edgeRuntime.waitUntil(promise)");
+  assertStringIncludes(monitor, "lockHeld = false;");
+  assertStringIncludes(monitor, "continuation lock release failed");
+  assert(!monitor.includes("const scanResp = await fetch(opsApiUrl"));
 });
 
 Deno.test("full-open is explicit, bounded and distinct from exact-empty fail-closed", () => {

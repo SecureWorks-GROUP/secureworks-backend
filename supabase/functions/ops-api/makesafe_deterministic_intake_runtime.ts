@@ -1964,17 +1964,12 @@ export async function runDeterministicIntake(
       ...sourceAuthorities.seedPostIds,
     ],
   });
-  // Advanced immediately after the read, before any planning or business write can
-  // throw. A run that fails on a stale allowlist still moves the sweep on, so no
-  // configuration fault can pin the window read to the same rows indefinitely.
-  // Dry-run advances its own observe-only position for the same reason: cutover
-  // evidence has to come from observation that eventually covers the whole window,
-  // which a cursor pinned at null could never do.
-  const cursorPersisted = await persistScanCursor(
-    client,
-    cursorColumns,
-    input.nextCursor,
-  );
+  // The cursor is a completion checkpoint, not a read-ahead marker. Persisting it
+  // here used to let a caller timeout after the read but before accounting/health,
+  // temporarily hiding an entire page behind unproved progress. Commit it only
+  // after the run has completed its writes and truthful health update. A failed or
+  // cancelled request therefore rereads the same page; deterministic natural keys
+  // make that retry safe.
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
@@ -2037,7 +2032,6 @@ export async function runDeterministicIntake(
   if (capExposedInstructionKeys.length) {
     caveats.push("instruction_allowlist_cap_exposed");
   }
-  if (!cursorPersisted) caveats.push("scan_cursor_unavailable");
   if (missingParents.length) caveats.push("lineage_parent_unselected");
   // Nothing this run could act on was inside the cap, and every unresolved
   // allowlist entry was cap-exposed rather than stale. That is a no-op the sweep
@@ -2100,10 +2094,22 @@ export async function runDeterministicIntake(
   if (options.includeSanitizedCases) {
     report.proposed_cases = await sanitizedCases(plan);
   }
-  if (dryRun) return report;
+  const commitCompletedCursor = async (): Promise<void> => {
+    if (!(await persistScanCursor(client, cursorColumns, input.nextCursor))) {
+      report.evidence.caveats.push("scan_cursor_unavailable");
+    }
+  };
+  if (dryRun) {
+    await commitCompletedCursor();
+    return report;
+  }
 
   if (missingParents.length) {
+    report.evidence.caveats.push(
+      "scan_page_completed_degraded_retry_next_sweep",
+    );
     await writeHealth(client, nowIso, missingParents.length, 0, 0);
+    await commitCompletedCursor();
     return report;
   }
   // A stale entry (aged out, deleted, or no longer grouping into a case) is
@@ -2122,6 +2128,7 @@ export async function runDeterministicIntake(
       0,
       "deterministic_no_cases_readable_within_cap",
     );
+    await commitCompletedCursor();
     return report;
   }
   if (!plan.cases.length) {
@@ -2301,5 +2308,16 @@ export async function runDeterministicIntake(
     report.totals.drafts_created,
     report.totals.jobs_created,
   );
+  if (report.totals.write_failures > 0 || report.totals.cases_failed > 0) {
+    // This invocation completed and wrote truthful degraded health, so advance
+    // rather than letting one poison case pin every older page. The full sweep
+    // resets to the window head and retries it on the next cycle; the caveat keeps
+    // that delayed retry explicit. Cancellation/throws never reach this checkpoint
+    // and therefore retain the prior cursor for immediate idempotent reread.
+    report.evidence.caveats.push(
+      "scan_page_completed_degraded_retry_next_sweep",
+    );
+  }
+  await commitCompletedCursor();
   return report;
 }

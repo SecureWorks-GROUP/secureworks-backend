@@ -1,0 +1,75 @@
+{
+  "recorded_at": "2026-07-21T12:18:52Z",
+  "production_mode_during_diagnosis": "legacy",
+  "incident": {
+    "deterministic_selection_mode": "full_open",
+    "case_cap": 5,
+    "scheduled_request_times": [
+      "2026-07-21T11:57:00.857590Z",
+      "2026-07-21T11:59:00.053707Z",
+      "2026-07-21T12:01:00.074895Z"
+    ],
+    "pg_net_timeout_ms": 5000,
+    "all_three_timed_out": true,
+    "last_completed_deterministic_health_at": "2026-07-21T11:55:02.131Z",
+    "business_counts_changed_during_cap5": false
+  },
+  "data_safety": {
+    "window_start": "2026-05-22T11:47:32Z",
+    "eligible_rows": 1339,
+    "timed_out_cursor_pages": [
+      {
+        "cursor_at": "2026-06-05T05:36:24Z",
+        "rows_through_page": 250
+      },
+      {
+        "cursor_at": "2026-06-18T07:41:01Z",
+        "rows_since_prior_cursor": 250
+      },
+      {
+        "cursor_at": "2026-06-29T03:44:47Z",
+        "rows_since_prior_cursor": 250
+      }
+    ],
+    "rows_behind_persisted_timeout_cursor": 750,
+    "rows_after_persisted_timeout_cursor": 589,
+    "completed_accounting_proved_for_timeout_pages": false,
+    "permanent_loss_proved": false,
+    "reason_not_permanent": "The tuple sweep resets to the window head after reaching the tail, but relying on eventual reset would delay recovery and cannot prove completion of an aborted page.",
+    "explicit_recovery": {
+      "live_cursor_reset_to_window_head": true,
+      "deterministic_scan_cursor_at": null,
+      "deterministic_scan_cursor_post_id": null,
+      "performed_only_while_intake_mode": "legacy",
+      "business_rows_written": 0,
+      "confirmation_at": "2026-07-21T12:18:52Z"
+    }
+  },
+  "root_cause": {
+    "scheduler_request": "pg_net -> monitor-ses-makesafes",
+    "nested_request": "monitor-ses-makesafes -> ops-api?action=scan_ses_makesafes",
+    "pre_fix_monitor_behavior": "awaited the full nested deterministic scan before returning",
+    "cap2_completed_within_boundary": true,
+    "cap2_health_offsets_seconds_after_schedule": [1.75, 2.131],
+    "cap5_completed_within_boundary": false,
+    "cost_driver": "The source read/plan is fixed at 500 rows, while sequential per-case persistence work rises with the configured case cap. At cap 5 the awaited nested request crossed pg_net's fixed 5-second caller deadline.",
+    "cursor_fault": "The live sweep cursor was persisted immediately after reading each 250-row sweep page, before case accounting and health. Caller cancellation therefore left read-ahead cursor progress without completion proof."
+  },
+  "selected_fix": {
+    "design": "async_continuation_plus_completion_checkpoint",
+    "monitor_request": "Register the nested scan with EdgeRuntime.waitUntil and return the sync poll response without awaiting scan completion.",
+    "single_flight": "Transfer the existing 10-minute mailbox lease to the continuation and release it only after settlement, so later two-minute polls exit locked rather than overlap.",
+    "scan_bound": "The continuation remains bounded by the existing 500-source read cap, 1..10 case cap and attempt ceiling.",
+    "cursor_rule": "Persist the cursor only after truthful run health. Rejected, thrown or cancelled runs retain the prior cursor and reread immediately. Completed degraded runs advance with an explicit retry-next-sweep caveat so one poison case cannot pin older pages.",
+    "timeout_raise": false,
+    "reason": "A larger fixed timeout only moves the failure threshold and still couples scheduler liveness to batch cost."
+  },
+  "tests": {
+    "continuation_returns_before_delayed_scan": true,
+    "failed_allowlist_does_not_advance_cursor": true,
+    "write_failure_advances_only_after_degraded_health_with_retry_caveat": true,
+    "continuation_holds_mailbox_lease_until_settlement": true,
+    "live_shaped_source_and_case_caps_preserved": true
+  },
+  "contains_credentials_or_personal_data": false
+}
