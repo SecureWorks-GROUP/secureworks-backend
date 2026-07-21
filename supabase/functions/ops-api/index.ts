@@ -118,10 +118,10 @@ import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
+  authorizeMakesafeTradeProjection,
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
   projectTradeMakesafeBoard,
-  resolveMakesafeTradeViewer,
 } from './makesafe_board_read_model.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
@@ -2194,6 +2194,24 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
 // REQUEST HANDLER
 // ════════════════════════════════════════════════════════════
 
+export function _resolveOpsApiAuthIntent(input: {
+  xApiKey: string | null
+  bearerToken: string | null
+  validKey?: string | null
+  serviceKey?: string | null
+  routineKey?: string | null
+}): 'api_key' | 'jwt' | 'routine' | 'none' {
+  const { xApiKey, bearerToken, validKey, serviceKey, routineKey } = input
+  if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) return 'routine'
+  if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) return 'api_key'
+  // A verified user Bearer is the caller identity even when a browser wrapper
+  // also sends x-api-key. The old x-api-key-first ordering misclassified that
+  // mixed request as a master-key call and rejected the Trade projection.
+  if (bearerToken) return 'jwt'
+  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) return 'api_key'
+  return 'none'
+}
+
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
@@ -2254,19 +2272,24 @@ if (import.meta.main) serve(async (req: Request) => {
 
   let authMode: 'api_key' | 'jwt' | 'routine' = 'api_key'
   let authUser: { id: string; email: string; role: string } | null = null
+  const authIntent = _resolveOpsApiAuthIntent({
+    xApiKey,
+    bearerToken,
+    validKey,
+    serviceKey,
+    routineKey,
+  })
 
-  if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) {
+  if (authIntent === 'routine') {
     // Scoped automation caller (presents the routine key, NOT SW_API_KEY).
     authMode = 'routine'
-  } else if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
-    authMode = 'api_key' // Server-to-server call via x-api-key header
-  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) {
-    authMode = 'api_key' // Server-to-server call via Authorization header
-  } else if (bearerToken) {
+  } else if (authIntent === 'api_key') {
+    authMode = 'api_key'
+  } else if (authIntent === 'jwt') {
     // Validate as user JWT (browser request)
     try {
       const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const { data: { user }, error } = await adminClient.auth.getUser(bearerToken)
+      const { data: { user }, error } = await adminClient.auth.getUser(bearerToken!)
       if (error || !user) {
         return new Response(JSON.stringify({ error: 'Session expired — please log in again' }), {
           status: 401, headers: { ...CORS, 'Content-Type': 'application/json' }
@@ -2429,11 +2452,13 @@ if (import.meta.main) serve(async (req: Request) => {
             role: profile.role,
             managedVerticals: profile.managed_verticals,
           }
+          const access = authorizeMakesafeTradeProjection(authMode, viewer)
+          if (!access.ok) return json({ error: access.error }, access.status)
           // Server-scope the load BEFORE building the canonical model: allocated-only
           // trades never load or receive full make-safe history — only the (already
           // server-authorised) jobs assigned to them. Full-history rows are built
           // solely for all-makesafe viewers (Hugo/admins) and the Ops projection.
-          const permissions = resolveMakesafeTradeViewer(viewer)
+          const permissions = access.permissions
           const restrictToJobIds = permissions.sees_all_makesafes
             ? undefined
             : await loadMakesafeAssignedJobIds(client, profile.id)

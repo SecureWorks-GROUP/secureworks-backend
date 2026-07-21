@@ -39,6 +39,54 @@ export interface MakesafeBoardViewer {
   role?: string | null;
   managedVerticals?: unknown;
 }
+
+export type MakesafeTradeProjectionAuthMode =
+  | "api_key"
+  | "jwt"
+  | "routine"
+  | "anonymous";
+
+// These are the real role values carried by signed-in production users that may
+// open the Trade projection. owner is retained for the approved platform-owner
+// scope even though production currently has no owner row. Everything else is
+// fail-closed rather than silently becoming an ordinary trade.
+export const MAKESAFE_TRADE_PROJECTION_ROLES = [
+  "admin",
+  "owner",
+  "ops_manager",
+  "crew",
+  "estimator",
+  "installer",
+  "lead_installer",
+  "sales",
+] as const;
+
+export function authorizeMakesafeTradeProjection(
+  authMode: MakesafeTradeProjectionAuthMode,
+  viewer?: MakesafeBoardViewer | null,
+) {
+  if (authMode !== "jwt" || !viewer) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: "trade projection requires an authenticated trade session",
+    };
+  }
+  const role = String(viewer.role || "").trim().toLowerCase();
+  if (!(MAKESAFE_TRADE_PROJECTION_ROLES as readonly string[]).includes(role)) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: "trade projection is not permitted for this account role",
+    };
+  }
+  return {
+    ok: true as const,
+    status: 200,
+    permissions: resolveMakesafeTradeViewer(viewer),
+  };
+}
+
 export interface CanonicalMakesafeExtras {
   notesByJobId?: Record<string, any[]>;
   photoCountByJobId?: Record<string, number>;
@@ -379,10 +427,12 @@ export function projectOpsMakesafeBoard(rows: any[]) {
 //     action-gated — can_allocate is always false. Provision via a
 //     "makesafe_view" / "makesafe_readonly" managed vertical (flagged for Marnin
 //     in the PR to flip to full "makesafe" if allocate rights are ever wanted).
-//   - Fencing leads (e.g. Khairo, managed_verticals "fencing"): make-safe
-//     view-only, no allocate, and no all-makesafe visibility.
+//   - Fencing viewers (managed_verticals "fencing", or the production sales
+//     role used by Khairo): make-safe view-only, no allocate, and no
+//     all-makesafe visibility. A sales profile that explicitly manages makesafe
+//     still takes the manager scope first (the current Nithin shape).
 export function resolveMakesafeTradeViewer(viewer: MakesafeBoardViewer) {
-  const role = String(viewer?.role || "").toLowerCase();
+  const role = String(viewer?.role || "").trim().toLowerCase();
   const managed = Array.isArray(viewer?.managedVerticals)
     ? viewer.managedVerticals.map((v) => String(v || "").trim().toLowerCase())
     : [];
@@ -390,7 +440,8 @@ export function resolveMakesafeTradeViewer(viewer: MakesafeBoardViewer) {
   const makesafeManager = privileged || managed.includes("makesafe");
   const makesafeViewer = managed.includes("makesafe_view") ||
     managed.includes("makesafe_readonly");
-  const fencingViewOnly = managed.includes("fencing") && !makesafeManager;
+  const fencingViewOnly = !makesafeManager &&
+    (managed.includes("fencing") || role === "sales");
   const seesAll = makesafeManager || makesafeViewer;
   return {
     visibility: seesAll ? "all_makesafes" : "allocated_only",

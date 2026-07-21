@@ -9,7 +9,7 @@ Consumer contract for the Ops and Trade board builds.
 Contract version: `makesafe-board.v1`.
 
 - `projection=ops` requires the ops API key or an admin, owner, or ops-manager JWT.
-- `projection=trade` requires the signed-in trade JWT. Visibility is resolved server-side.
+- `projection=trade` requires the signed-in trade JWT. If a browser request also carries the dashboard `x-api-key`, the verified user Bearer remains the caller identity. Visibility is resolved server-side.
 - Clients must not query Supabase tables directly and must not derive a column from `job_assignments.status`.
 - Reads paginate with PostgREST `.range()` and chunk job IDs. The feed is not capped at 1,000 dependent rows.
 
@@ -55,12 +55,12 @@ The only column names are:
 
 `Complete` means the trade report is submitted while office processing may still be underway. Never label it “office”.
 
-Visibility is server-owned. It derives only from the caller's `role` and `managed_verticals`, never from their display name.
+Visibility is server-owned. It derives only from the caller's `role` and `managed_verticals`, never from their display name. The production roles `admin`, `ops_manager`, `crew`, `estimator`, `installer`, `lead_installer`, and `sales` are explicit; `owner` retains its approved platform scope. Any other role is refused with 403.
 
-- Ordinary trades receive only jobs carrying their own assignment. Their assignment array is also reduced to their own rows. The server scopes the read to their assigned job ids before building the canonical model, so an allocated-only caller never loads or receives full make-safe history.
+- Ordinary `crew`, `estimator`, `installer`, and `lead_installer` profiles receive only jobs carrying their own assignment. Their assignment array is also reduced to their own rows. The server scopes the read to their assigned job ids before building the canonical model, so an allocated-only caller never loads or receives full make-safe history.
 - A profile managing the `makesafe` vertical (Hugo), or a platform admin/owner/ops manager, receives all make-safes including complete, archived and cancelled cards, and `can_allocate` is true.
 - A make-safe view-only capability (managed vertical `makesafe_view` / `makesafe_readonly`, e.g. Jan) sees all make-safes but is action-gated: `can_allocate` is always false. This is the standing information-free / actions-gated posture for Jan; flip his profile to the full `makesafe` vertical if allocate rights are ever wanted.
-- Khairo remains fencing view-only (managed vertical `fencing`). On this make-safe endpoint he receives only a make-safe specifically allocated to him, normally none. `permissions.fencing_view_only` is true and `can_allocate` is false.
+- Khairo remains fencing view-only. His production `sales` role is mapped to this read-only scope when no make-safe manager capability supersedes it; an explicit managed vertical `fencing` produces the same scope. On this make-safe endpoint he receives only a make-safe specifically allocated to him, normally none. `permissions.fencing_view_only` is true and `can_allocate` is false.
 
 The trade projection is an explicit allow-list. It contains no pricing, Xero invoice data, trade invoices, or another trade's invoice data.
 
