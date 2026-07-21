@@ -8,14 +8,17 @@ const OUTBOUND_COMMS_ACTIONS = new Set([
 
 export type GhlProxyRoute = {
   testMode: boolean;
-  fencingPipelineId: string;
+  pipelineId: string;
+  locationId: string;
   organisationId: string;
 };
 
 type RouteConfig = {
-  productionFencingPipelineId: string;
+  productionPipelineId: string;
+  productionLocationId: string;
   productionOrganisationId: string;
-  testFencingPipelineId?: string | null;
+  testPipelineId?: string | null;
+  testLocationId?: string | null;
   testOrganisationId?: string | null;
 };
 
@@ -42,16 +45,19 @@ export function resolveGhlProxyRoute(
       ok: true,
       route: {
         testMode: false,
-        fencingPipelineId: config.productionFencingPipelineId,
+        pipelineId: config.productionPipelineId,
+        locationId: config.productionLocationId,
         organisationId: config.productionOrganisationId,
       },
     };
   }
 
-  const testFencingPipelineId = String(config.testFencingPipelineId || "").trim();
+  const testPipelineId = String(config.testPipelineId || "").trim();
+  const testLocationId = String(config.testLocationId || "").trim();
   const testOrganisationId = String(config.testOrganisationId || "").trim();
   const missing: string[] = [];
-  if (!testFencingPipelineId) missing.push("GHL_TEST_FENCING_PIPELINE_ID");
+  if (!testPipelineId) missing.push("GHL_TEST_PIPELINE_ID");
+  if (!testLocationId) missing.push("GHL_TEST_LOCATION_ID");
   if (!testOrganisationId) missing.push("SUPABASE_TEST_ORG_ID");
 
   if (missing.length) {
@@ -59,7 +65,7 @@ export function resolveGhlProxyRoute(
       ok: false,
       status: 503,
       code: "test_mode_not_configured",
-      error: "Fence test mode is unavailable until all test route IDs are configured",
+      error: "Test mode is unavailable until all test route IDs are configured",
       missing,
     };
   }
@@ -68,7 +74,8 @@ export function resolveGhlProxyRoute(
     ok: true,
     route: {
       testMode: true,
-      fencingPipelineId: testFencingPipelineId,
+      pipelineId: testPipelineId,
+      locationId: testLocationId,
       organisationId: testOrganisationId,
     },
   };
@@ -84,7 +91,7 @@ export function testModeCommsBlock(testMode: boolean, action: string | null) {
     status: 403,
     body: {
       success: false,
-      error: "Outbound communications are disabled in fence test mode",
+      error: "Outbound communications are disabled in test mode",
       code: "test_mode_comms_blocked",
     },
   } as const;

@@ -30,10 +30,11 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 //
 // Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
-// Fence test lab: append &testMode=true and configure
-//   GHL_TEST_FENCING_PIPELINE_ID + SUPABASE_TEST_ORG_ID.
-// The captain supplies the GHL TEST pipeline ID through env config, never code.
-// Test mode remains unavailable until both values exist and always blocks comms.
+// General scope test lab: append &testMode=true and configure
+//   GHL_TEST_PIPELINE_ID + GHL_TEST_LOCATION_ID + SUPABASE_TEST_ORG_ID.
+// Captain config: TESTTESTTEST (pipeline kMSiJnd4KyPyIUletHbH) in location
+// 13yKADzN94BRxX4hByYX. IDs belong in edge env config, never routing code.
+// Test mode remains unavailable until all values exist and always blocks comms.
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -87,7 +88,7 @@ import {
 import { resolveGhlProxyRoute, testModeCommsBlock } from './test_mode.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
-const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
+const PRODUCTION_GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
 const GHL_BASE = 'https://services.leadconnectorhq.com'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -236,27 +237,27 @@ function extractScopeIdentity(scopeJson: any, meta: any = {}) {
   }
 }
 
-// ── Stage name cache (all pipelines loaded at once) ──
-let stageCache: Record<string, Record<string, string>> = {}
-let stageCacheLoaded = false
+// ── Stage name cache (all pipelines loaded once per location) ──
+const stageCacheByLocation: Record<string, Record<string, Record<string, string>>> = {}
 
-async function resolveStages(pipelineId: string, signal?: AbortSignal) {
-  if (!stageCacheLoaded) {
+async function resolveStages(pipelineId: string, locationId: string, signal?: AbortSignal) {
+  if (!stageCacheByLocation[locationId]) {
     try {
-      const data = await ghl(`/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`, signal ? { signal } : {})
+      const locationCache: Record<string, Record<string, string>> = {}
+      const data = await ghl(`/opportunities/pipelines?locationId=${locationId}`, signal ? { signal } : {})
       for (const p of (data.pipelines || [])) {
         const map: Record<string, string> = {}
         for (const s of (p.stages || [])) {
           map[s.id] = s.name
         }
-        stageCache[p.id] = map
+        locationCache[p.id] = map
       }
-      stageCacheLoaded = true
+      stageCacheByLocation[locationId] = locationCache
     } catch (e) {
       console.log('[ghl-proxy] Stage fetch failed:', e)
     }
   }
-  return stageCache[pipelineId] || {}
+  return stageCacheByLocation[locationId]?.[pipelineId] || {}
 }
 
 function mapOpp(opp: any, stages: Record<string, string>) {
@@ -288,6 +289,7 @@ function mapOpp(opp: any, stages: Record<string, string>) {
 }
 
 async function fetchOpportunityPages(args: {
+  locationId?: string
   pipelineId?: string
   contactId?: string
   q?: string
@@ -323,7 +325,7 @@ async function fetchOpportunityPages(args: {
     // stays false, so callers that must not act on an absence fail closed.
     if (Date.now() - startedAt >= budgetMs) break
     const params = new URLSearchParams({
-      location_id: GHL_LOCATION_ID,
+      location_id: args.locationId || PRODUCTION_GHL_LOCATION_ID,
       limit: String(limit),
     })
     if (args.pipelineId) params.set('pipeline_id', args.pipelineId)
@@ -543,11 +545,13 @@ serve(async (req: Request) => {
 
   // Test routing is an exact request-level opt-in. Any absent or malformed
   // value stays on the existing production constants. An exact test request is
-  // fail-closed until both captain-supplied route IDs exist in edge secrets.
+  // fail-closed until all captain-supplied route IDs exist in edge secrets.
   const routeResult = resolveGhlProxyRoute(url.searchParams.get('testMode'), {
-    productionFencingPipelineId: PRODUCTION_PIPELINES.fencing,
+    productionPipelineId: PRODUCTION_PIPELINES.fencing,
+    productionLocationId: PRODUCTION_GHL_LOCATION_ID,
     productionOrganisationId: PRODUCTION_DEFAULT_ORG_ID,
-    testFencingPipelineId: Deno.env.get('GHL_TEST_FENCING_PIPELINE_ID'),
+    testPipelineId: Deno.env.get('GHL_TEST_PIPELINE_ID'),
+    testLocationId: Deno.env.get('GHL_TEST_LOCATION_ID'),
     testOrganisationId: Deno.env.get('SUPABASE_TEST_ORG_ID'),
   })
   if (!routeResult.ok) {
@@ -565,10 +569,16 @@ serve(async (req: Request) => {
   const commsBlock = testModeCommsBlock(route.testMode, action)
   if (commsBlock) return json(commsBlock.body, commsBlock.status)
 
-  // Shadow the production maps per request. Test mode has no execution/stage
-  // fallback: only the configured fencing lead pipeline can be targeted.
+  // Shadow production targeting per request. The captain's TESTTESTTEST
+  // pipeline is a general lab shared by every scoping tool.
+  const GHL_LOCATION_ID = route.locationId
   const PIPELINES: Record<string, string> = route.testMode
-    ? { fencing: route.fencingPipelineId }
+    ? {
+      fencing: route.pipelineId,
+      patio: route.pipelineId,
+      decking: route.pipelineId,
+      combo: route.pipelineId,
+    }
     : PRODUCTION_PIPELINES
   const EXECUTION_PIPELINES: Record<string, string> = route.testMode
     ? {}
@@ -583,16 +593,6 @@ serve(async (req: Request) => {
     ? {}
     : PRODUCTION_OPS_TO_GHL_STAGES
   const DEFAULT_ORG_ID = route.organisationId
-
-  if (route.testMode) {
-    const requestedPipeline = url.searchParams.get('pipeline')
-    if (requestedPipeline && requestedPipeline !== 'fencing') {
-      return json({
-        error: 'Fence test mode only supports the configured fencing pipeline',
-        code: 'test_mode_fencing_only',
-      }, 400)
-    }
-  }
 
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
@@ -654,7 +654,7 @@ serve(async (req: Request) => {
     !isSameOrg(authProfile?.org_id, route.organisationId)
   ) {
     return json({
-      error: 'Fence test mode requires a user from the configured test organisation',
+      error: 'Test mode requires a user from the configured test organisation',
       code: 'test_mode_org_required',
     }, 403)
   }
@@ -778,8 +778,8 @@ serve(async (req: Request) => {
 
       const maxPages = Math.min(Number(url.searchParams.get('max_pages')) || 20, 20)
       const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 100)
-      const [stages] = await Promise.all([resolveStages(pipelineId)])
-      const paged = await fetchOpportunityPages({ pipelineId, limit, maxPages })
+      const [stages] = await Promise.all([resolveStages(pipelineId, GHL_LOCATION_ID)])
+      const paged = await fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId, limit, maxPages })
 
       const opps = paged.opportunities.map((o: any) => mapOpp(o, stages))
       return json({ opportunities: opps, count: opps.length, total: paged.total, pages_scanned: paged.pagesScanned })
@@ -926,8 +926,8 @@ serve(async (req: Request) => {
       if (!q && !pipelineId) return json({ opportunities: [] })
 
       const [stages, paged] = await Promise.all([
-        pipelineId ? resolveStages(pipelineId) : Promise.resolve({} as Record<string, string>),
-        fetchOpportunityPages({ pipelineId: pipelineId || undefined, q: q || undefined, limit: 100, maxPages: 10 }),
+        pipelineId ? resolveStages(pipelineId, GHL_LOCATION_ID) : Promise.resolve({} as Record<string, string>),
+        fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId: pipelineId || undefined, q: q || undefined, limit: 100, maxPages: 10 }),
       ])
       const opps = (paged.opportunities || []).map((o: any) => mapOpp(o, stages))
 
@@ -1059,7 +1059,7 @@ serve(async (req: Request) => {
         }
 
         // Stage names (8s; resolveStages swallows abort → blank stage names, never fails)
-        const stages = await resolveStages(pipelineId, AbortSignal.timeout(8000))
+        const stages = await resolveStages(pipelineId, GHL_LOCATION_ID, AbortSignal.timeout(8000))
 
         // Per-contact opportunity lookups in parallel, each with its own 8s timeout.
         const lookups: Record<string, { opps: any[]; failed: boolean }> = {}
@@ -1131,10 +1131,10 @@ serve(async (req: Request) => {
       // ── recent browse mode (no query) ──
       if (!pipelineId) return json({ opportunities: [], _mode: 'recent_browse' })
 
-      const stages = await resolveStages(pipelineId, AbortSignal.timeout(8000))
+      const stages = await resolveStages(pipelineId, GHL_LOCATION_ID, AbortSignal.timeout(8000))
       let paged: { opportunities: any[] }
       try {
-        paged = await fetchOpportunityPages({ pipelineId, limit: 100, maxPages: 2, perPageTimeoutMs: 10000 })
+        paged = await fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId, limit: 100, maxPages: 2, perPageTimeoutMs: 10000 })
       } catch (e) {
         if (isTimeoutError(e)) {
           console.log('[ghl-proxy] lead_search browse fetch timed out')
@@ -2147,6 +2147,7 @@ serve(async (req: Request) => {
               // and the stamp is matched client side, so recovery depends only
               // on the listing being complete.
               const paged = await fetchOpportunityPages({
+                locationId: GHL_LOCATION_ID,
                 pipelineId: PIPELINES.fencing,
                 contactId,
                 limit: 100,
@@ -2284,10 +2285,6 @@ serve(async (req: Request) => {
     if (action === 'create_job' && req.method === 'POST') {
       const body = await req.json()
       const { opportunityId, toolType, clientName, clientPhone, clientEmail, siteAddress, siteSuburb } = body
-      if (route.testMode && toolType !== 'fencing') {
-        return json({ error: 'Fence test mode requires toolType=fencing', code: 'test_mode_fencing_only' }, 400)
-      }
-
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       // Default org for service callers; browser callers inherit the verified profile org.
@@ -2351,10 +2348,6 @@ serve(async (req: Request) => {
     if (action === 'create_contact_and_opportunity' && req.method === 'POST') {
       const body = await req.json()
       const { firstName, lastName, email, phone, address, suburb, toolType, skipOpportunity, name } = body
-      if (route.testMode && toolType !== 'fencing') {
-        return json({ error: 'Fence test mode requires toolType=fencing', code: 'test_mode_fencing_only' }, 400)
-      }
-
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
       // a NEW opportunity in the pipeline. oppName is built from the FETCHED
@@ -3719,7 +3712,15 @@ serve(async (req: Request) => {
       let totalUpdated = 0
       const errors: string[] = []
 
-      // Sync from BOTH sales and execution pipelines
+      // Sync from BOTH sales and execution pipelines. The general test pipeline
+      // mixes tool types, so bulk sync cannot infer a safe jobs.type from its
+      // pipeline name and is deliberately unavailable in test mode.
+      if (route.testMode) {
+        return json({
+          error: 'sync_ghl is unavailable for the mixed-tool test pipeline',
+          code: 'test_mode_sync_unsupported',
+        }, 400)
+      }
       const allPipelines = {
         ...PIPELINES,
         ...EXECUTION_PIPELINES,
@@ -3729,9 +3730,9 @@ serve(async (req: Request) => {
         const jobType = pipelineName.includes('fencing') ? 'fencing' : 'patio'
 
         // Load stage names for this pipeline
-        const stages = await resolveStages(pipelineId)
+        const stages = await resolveStages(pipelineId, GHL_LOCATION_ID)
 
-        const paged = await fetchOpportunityPages({ pipelineId, limit: 100, maxPages: 20 })
+        const paged = await fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId, limit: 100, maxPages: 20 })
 
         for (const opp of paged.opportunities) {
             const oppTime = Date.parse(opp.updatedAt || opp.lastStatusChangeAt || opp.lastStageChangeAt || opp.createdAt || '')
