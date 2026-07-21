@@ -1,0 +1,7 @@
+{
+  "intake_mode": "deterministic",
+  "deterministic_max_cases_per_run": 1,
+  "source_allowlist_count": 1,
+  "instruction_allowlist_count": 0,
+  "intake_mode_changed_at": "2026-07-21 10:02:45.697835+00"
+}
