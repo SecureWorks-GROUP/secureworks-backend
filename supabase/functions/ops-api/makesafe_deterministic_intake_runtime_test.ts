@@ -1848,7 +1848,10 @@ Deno.test("a re-keyed persisted parent re-points its in-plan child instead of fa
   // The lineage guard must not fail closed: the parent is present under its stable
   // key, and the child was re-pointed to it rather than left dangling on the
   // parent's this-run key.
-  assertEquals(second.write_failure_reasons.lineage_parent_unselected, undefined);
+  assertEquals(
+    second.write_failure_reasons.lineage_parent_unselected,
+    undefined,
+  );
   assertEquals(second.totals.write_failures, 0);
   assertEquals(second.totals.cases_failed, 0);
   assertEquals(second.selection.selected_cases, 2);
