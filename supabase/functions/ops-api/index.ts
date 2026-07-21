@@ -2547,6 +2547,14 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await updateMakesafeJobFamily(client, body))
       }
+      case 'convert_makesafe_to_insurance': {
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({ error: 'forbidden: convert_makesafe_to_insurance requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        return json(await convertMakesafeToInsurance(client, body))
+      }
       case 'backfill_makesafe_job_families': {
         const isPrivileged = authMode === 'api_key' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
@@ -9742,6 +9750,99 @@ async function updateMakesafeJobFamily(client: any, body: any) {
   }
 }
 export const _updateMakesafeJobFamily = updateMakesafeJobFamily
+
+const INSURANCE_CONVERSION_CLASSES: Record<string, string> = {
+  patio_repair: 'Patio Insurance Repair',
+  fencing_repair: 'Fencing Insurance Repair',
+  rapid_repair: 'Rapid Insurance Repair',
+  restoration: 'Restoration Insurance Work',
+}
+
+// Captain-reviewed pipeline correction. The original job, job number, evidence,
+// assignment, invoices and status stay in place; only the owning pipeline/type
+// and explicit insurance classification change. This removes non-make-safe work
+// from the make-safe board without archiving or losing the live obligation.
+async function convertMakesafeToInsurance(client: any, body: any) {
+  const jId = body?.job_id || body?.jobId
+  const expectedBeforeType = cleanReviewedString(body?.expected_before_type || body?.expectedBeforeType)
+  const classification = cleanReviewedString(body?.insurance_job_type || body?.classification)
+  if (!jId || !expectedBeforeType || !classification) {
+    throw new ApiError('job_id, expected_before_type and insurance_job_type required', 400)
+  }
+  if (expectedBeforeType !== 'makesafe') {
+    throw new ApiError("expected_before_type must be 'makesafe'", 400)
+  }
+  const label = INSURANCE_CONVERSION_CLASSES[classification]
+  if (!label) throw new ApiError(`invalid insurance_job_type '${classification}'`, 400)
+
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, job_number, type, status, metadata').eq('id', jId).single()
+  if (jobErr || !job) throw jobErr || new ApiError('job not found', 404)
+  if (job.type !== expectedBeforeType) {
+    throw new ApiError(`job type drift: expected '${expectedBeforeType}', found '${job.type || 'null'}'`, 409)
+  }
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
+    .select('job_id, external_ref, substatus, report_type').eq('job_id', jId).single()
+  if (detailErr || !detail) throw detailErr || new ApiError('make-safe details not found', 404)
+
+  const beforeMetadata = parseJsonObject(job.metadata)
+  const nowIso = new Date().toISOString()
+  const conversion = {
+    from_job_type: job.type,
+    to_job_type: 'insurance',
+    insurance_job_type: classification,
+    insurance_job_type_label: label,
+    captain_ruling: cleanReviewedString(body?.captain_ruling) || null,
+    reason: cleanReviewedString(body?.reason) || null,
+    converted_at: nowIso,
+    source_job_number: job.job_number || null,
+    source_external_ref: detail.external_ref || null,
+  }
+  const nextMetadata = {
+    ...beforeMetadata,
+    insurance_job_type: classification,
+    insurance_job_type_label: label,
+    pipeline_conversion: conversion,
+  }
+  const { data: updated, error: updateErr } = await client.from('jobs')
+    .update({ type: 'insurance', metadata: nextMetadata, updated_at: nowIso })
+    .eq('id', jId)
+    .eq('type', expectedBeforeType)
+    .select('id, job_number, type, status, metadata')
+    .single()
+  if (updateErr) throw updateErr
+
+  await client.from('job_events').insert({
+    job_id: jId,
+    event_type: 'makesafe_converted_to_insurance',
+    detail_json: {
+      ...conversion,
+      job_status_unchanged: job.status || null,
+      substatus_preserved: detail.substatus || null,
+      prior_makesafe_job_family: beforeMetadata.makesafe_job_family || null,
+    },
+  }).then(() => {}).catch(() => {})
+
+  return {
+    ok: true,
+    job_id: jId,
+    job_number: updated.job_number || null,
+    before: {
+      type: job.type,
+      status: job.status || null,
+      makesafe_job_family: beforeMetadata.makesafe_job_family || null,
+      substatus: detail.substatus || null,
+    },
+    after: {
+      type: updated.type,
+      status: updated.status || null,
+      insurance_job_type: updated.metadata?.insurance_job_type || null,
+      insurance_job_type_label: updated.metadata?.insurance_job_type_label || null,
+      substatus: detail.substatus || null,
+    },
+  }
+}
+export const _convertMakesafeToInsurance = convertMakesafeToInsurance
 
 type MakesafeFamilyBackfillCandidate = {
   job_id: string

@@ -5,6 +5,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _assertReviewedFamilyConsistency,
+  _convertMakesafeToInsurance,
   _updateMakesafeJobFamily,
 } from "./index.ts";
 
@@ -41,6 +42,14 @@ function clientFor(store: Store) {
           if (table === "makesafe_job_details" && updatePayload == null) {
             return Promise.resolve({
               data: structuredClone(store.detail),
+              error: null,
+            });
+          }
+          if (table === "jobs" && updatePayload != null) {
+            store.jobUpdates.push(structuredClone(updatePayload));
+            store.job = { ...store.job, ...structuredClone(updatePayload) };
+            return Promise.resolve({
+              data: structuredClone(store.job),
               error: null,
             });
           }
@@ -130,6 +139,34 @@ Deno.test("reviewed family correction preserves metadata and does not move subst
   assertEquals(store.detail.substatus, "waiting_on_trade_report");
   assertEquals(store.events.length, 1);
   assertEquals(store.events[0].event_type, "makesafe_job_family_corrected");
+});
+
+Deno.test("captain conversion preserves the live job and classifies insurance ownership", async () => {
+  const store = fixture();
+  store.job.status = "processing";
+  const result = await _convertMakesafeToInsurance(clientFor(store), {
+    job_id: "job-1",
+    expected_before_type: "makesafe",
+    insurance_job_type: "restoration",
+    captain_ruling: "keep live; actual attendance owed",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.before.type, "makesafe");
+  assertEquals(result.after, {
+    type: "insurance",
+    status: "processing",
+    insurance_job_type: "restoration",
+    insurance_job_type_label: "Restoration Insurance Work",
+    substatus: "waiting_on_trade_report",
+  });
+  assertEquals(store.job.type, "insurance");
+  assertEquals(store.job.status, "processing");
+  assertEquals(store.job.metadata.preserve_me, "yes");
+  assertEquals(store.job.metadata.insurance_job_type, "restoration");
+  assertEquals(store.detail.substatus, "waiting_on_trade_report");
+  assertEquals(store.events.length, 1);
+  assertEquals(store.events[0].event_type, "makesafe_converted_to_insurance");
 });
 
 Deno.test("reviewed family correction refuses stale before value", async () => {
