@@ -2794,6 +2794,8 @@ if (import.meta.main) serve(async (req: Request) => {
       // position, which is what lets repeated replays cover a whole large window.
       // The response contains aggregate counts only, never message bodies or PII.
       case 'makesafe_deterministic_intake_replay': {
+        const replayMaxSources = url.searchParams.get('max_sources') ??
+          body?.max_sources ?? body?.maxSources
         return json(await _runDeterministicIntake(client, {
           dryRun: true,
           days: Math.min(
@@ -2802,6 +2804,11 @@ if (import.meta.main) serve(async (req: Request) => {
           ),
           onlyUnscanned: url.searchParams.get('only_unscanned') === 'true' ||
             body?.only_unscanned === true,
+          // A clean sweep may need a larger bounded read than the production
+          // default. The runtime enforces the hard 1..2000 limit.
+          maxSources: replayMaxSources == null || replayMaxSources === ''
+            ? undefined
+            : Number(replayMaxSources),
         }))
       }
       // True dark observation: exact named sources/instruction keys, sanitized

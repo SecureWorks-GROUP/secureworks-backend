@@ -358,6 +358,110 @@ Deno.test("runtime reads thread coordinates and correlates on conversation id", 
   assertEquals(report.totals.unaccounted, 0);
 });
 
+Deno.test("sanitized live traces reach canonical identity without mistaking job readiness for identity", async () => {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: "22222222-2222-2222-2222-222222222222",
+    slug: "aj",
+    name: "AJ",
+    sender_patterns: ["ajs.build"],
+    parsing_rules: null,
+    active: true,
+  });
+  const traced = [
+    {
+      id: "trace-mlb-1",
+      from: "dispatch@mlb.test",
+      subject: "NEW WORK ORDER MLB-70001 Work Order: WO-70001 PO: PO-101",
+      body:
+        "<html><table><tr><td>Site Address:</td><td>1 Redacted Road, Perth</td></tr><tr><td>Phone:</td><td>0400 000 001</td></tr></table></html>",
+    },
+    {
+      id: "trace-mlb-2",
+      from: "dispatch@mlb.test",
+      subject: "NEW WORK ORDER MLB-70002 Work Order: WO-70002 PO: PO-102",
+      body:
+        "<html><table><tr><td>Site Address:</td><td>2 Redacted Road, Perth</td></tr><tr><td>Phone:</td><td>0400 000 002</td></tr></table></html>",
+    },
+    {
+      id: "trace-mlb-3",
+      from: "dispatch@mlb.test",
+      subject: "NEW WORK ORDER MLB-70003 Work Order: WO-70003 PO: PO-103",
+      body:
+        "<html><table><tr><td>Site Address:</td><td>3 Redacted Road, Perth</td></tr><tr><td>Phone:</td><td>0400 000 003</td></tr></table></html>",
+    },
+    {
+      id: "trace-prime-4",
+      from: "notifications@primeeco.test",
+      subject: "Prime roof report Work Order: 70004",
+      body:
+        "<html><p>Site Address: 4 Redacted Road, Perth</p><p>Complete roof report at https://portal.test/report</p></html>",
+    },
+    {
+      id: "trace-aj-5",
+      from: "dispatch@ajs.build",
+      subject: "Make Safe - Redacted - Job No 70005 Work Order: 70005",
+      body:
+        "<html><table><tr><td>Address:</td><td>5 Redacted Road, Perth</td></tr><tr><td>Phone:</td><td>0400 000 005</td></tr></table></html>",
+    },
+  ];
+  for (const trace of traced) {
+    store.emails.push(email({
+      post_id: trace.id,
+      from_email: trace.from,
+      subject: trace.subject,
+      body_content: trace.body,
+    }));
+    store.email_attachments.push({
+      id: `att-${trace.id}`,
+      email_id: trace.id,
+      name: "sanitized-work-order.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${trace.id}.pdf`,
+      status: "uploaded",
+      size_bytes: 1024,
+    });
+  }
+  // ses@ receives copies of SecureWorks' own sends. The proven legacy path drops
+  // them before matching; deterministic replay must account for one as non-work,
+  // not let its quoted builder ref inflate the identity denominator.
+  store.emails.push(email({
+    post_id: "trace-own-copy",
+    from_email: "ops@secureworkswa.com.au",
+    subject: "NEW WORK ORDER MLB-79999 Work Order: WO-79999",
+    body_content:
+      "<p>Client: Outbound Copy</p><p>Address: 99 Redacted Road</p>",
+  }));
+
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+  });
+
+  assertEquals(report.totals.sources, 6);
+  assertEquals(report.totals.unaccounted, 0);
+  assertEquals(report.totals.nonWork, 1);
+  assertEquals(report.identity_floor.known_builder_work_candidates, 5);
+  assertEquals(report.identity_floor.reached, 5);
+  assertEquals(report.identity_floor.percentage, 100);
+  assertEquals(report.identity_floor.by_builder.mlb, {
+    candidates: 4,
+    reached: 4,
+    shortfall: 0,
+  });
+  assertEquals(report.identity_floor.by_builder.aj, {
+    candidates: 1,
+    reached: 1,
+    shortfall: 0,
+  });
+  // Client data remains a loud parser/recovery gap. The matcher now reports the
+  // WO/ref identity honestly without pretending these are job-creation-ready.
+  assertEquals(report.by_builder_and_reason.mlb.adapter_parse_failure, 4);
+  assertEquals(report.by_builder_and_reason.aj.adapter_parse_failure, 1);
+  assertEquals(report.ai_calls, 0);
+});
+
 Deno.test("live run persists thread coordinates onto case sources", async () => {
   const store = baseStore();
   store.emails.push(
@@ -1471,6 +1575,57 @@ Deno.test("a capped run is not clean zero-unaccounted evidence", async () => {
   assertEquals(wholeReport.evidence.source_accounting_complete, true);
   assertEquals(wholeReport.evidence.zero_unaccounted_proved, true);
   assertEquals(wholeReport.evidence.caveats, []);
+});
+
+Deno.test("a full backlog page cannot claim a clean sweep while its cursor remains", async () => {
+  const capped = baseStore();
+  for (let index = 0; index < 6; index++) {
+    capped.emails.push(email({
+      post_id: `overlap-${index}`,
+      received_at: `2026-07-${
+        String(index + 1).padStart(2, "0")
+      }T01:00:00.000Z`,
+      subject: `Re: chatter ${index}`,
+      body_content: "Thanks, noted.",
+      // Reproduce the gate-report shape: the sweep reads all rows, while the
+      // newest half sees fewer because only-unscanned excludes two.
+      makesafe_scanned_at: index < 2 ? NOW : null,
+    }));
+  }
+  const cappedReport = await runDeterministicIntake(fakeClient(capped), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxSources: 10,
+  });
+  assertEquals(cappedReport.source_read.backlog_rows, 5);
+  assertEquals(cappedReport.source_read.recent_rows, 4);
+  assertEquals(cappedReport.source_read.window_rows, 6);
+  assertEquals(cappedReport.source_read.next_cursor_at !== null, true);
+  assertEquals(cappedReport.source_read.cap_reached, true);
+  assertEquals(cappedReport.evidence.source_accounting_complete, false);
+  assertEquals(cappedReport.evidence.zero_unaccounted_proved, false);
+  assert(cappedReport.evidence.caveats.includes("source_read_capped"));
+
+  // A larger bounded replay from the window head can prove the same six rows in
+  // one response and returns no tie-breaker source identifiers.
+  const complete = baseStore();
+  complete.emails.push(...capped.emails.map((row) => ({ ...row })));
+  const completeReport = await runDeterministicIntake(fakeClient(complete), {
+    dryRun: true,
+    days: 30,
+    nowIso: NOW,
+    onlyUnscanned: true,
+    maxSources: 20,
+  });
+  assertEquals(completeReport.source_read.next_cursor_at, null);
+  assertEquals(completeReport.source_read.cap_reached, false);
+  assertEquals(completeReport.evidence.source_accounting_complete, true);
+  assertEquals(completeReport.evidence.zero_unaccounted_proved, true);
+  assertEquals(completeReport.evidence.caveats, []);
+  assertEquals("cursor_post_id" in completeReport.source_read, false);
+  assertEquals("next_cursor_post_id" in completeReport.source_read, false);
 });
 
 Deno.test("an allowlisted instruction key is seeded by id and stays cap-proof", async () => {

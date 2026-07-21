@@ -318,6 +318,8 @@ Deno.test("claim-only evidence cannot enter confirmed-live state", () => {
     }],
   });
   const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.woPoIdentityKey, null);
+  assertEquals(plan.cases[0].identity.externalRefCanonical, "MLB-32000");
   assertEquals(plan.cases[0].state, "exception");
   assertEquals(plan.cases[0].reasonCode, "below_identity_floor");
 });

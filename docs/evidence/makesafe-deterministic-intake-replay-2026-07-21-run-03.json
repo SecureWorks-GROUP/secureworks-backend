@@ -1,0 +1,107 @@
+{
+  "ai_calls": 0,
+  "ai_enabled": false,
+  "attempt_cap_reached_without_commit": false,
+  "by_builder_and_outcome": {
+    "aj": {
+      "accounted_non_work": 24,
+      "reason_coded_exception": 7
+    },
+    "mlb": {
+      "accounted_non_work": 97,
+      "reason_coded_exception": 316
+    },
+    "unknown": {
+      "reason_coded_exception": 6
+    }
+  },
+  "by_builder_and_reason": {
+    "aj": {
+      "below_identity_floor": 7,
+      "non_makesafe": 24
+    },
+    "mlb": {
+      "below_identity_floor": 249,
+      "conflicting_fields": 67,
+      "non_makesafe": 97
+    },
+    "unknown": {
+      "unknown_builder": 6
+    }
+  },
+  "days": 60,
+  "dry_run": true,
+  "evidence": {
+    "caveats": [
+      "source_read_capped"
+    ],
+    "source_accounting_complete": false,
+    "zero_unaccounted_proved": false
+  },
+  "generated_at": "2026-07-20T23:12:13.100Z",
+  "identity_floor": {
+    "by_builder": {
+      "aj": {
+        "candidates": 7,
+        "reached": 0,
+        "shortfall": 7
+      },
+      "mlb": {
+        "candidates": 152,
+        "reached": 0,
+        "shortfall": 152
+      }
+    },
+    "formula": "reached / known_builder_work_candidates * 100",
+    "known_builder_work_candidates": 159,
+    "percentage": 0,
+    "reached": 0,
+    "shortfall": 159,
+    "unit": "canonical_case"
+  },
+  "mode": "deterministic",
+  "ok": true,
+  "selection": {
+    "cap_exposed_instruction_allowlist": 0,
+    "instruction_allowlist_count": 0,
+    "selected_cases": 286,
+    "selected_sources": 450,
+    "source_allowlist_count": 0,
+    "unmatched_instruction_allowlist": 0,
+    "unmatched_source_allowlist": 0
+  },
+  "source_read": {
+    "backlog_cap": 250,
+    "backlog_rows": 50,
+    "cap": 500,
+    "cap_reached": true,
+    "cursor_at": "2026-07-16T08:23:18+00:00",
+    "cursor_post_id": "<redacted-source-id>",
+    "next_cursor_at": null,
+    "next_cursor_post_id": null,
+    "recent_rows": 450,
+    "seed_rows": 0,
+    "window_rows": 450
+  },
+  "storage_blockers": [],
+  "totals": {
+    "blocked": 0,
+    "case_rows_created": 0,
+    "cases": 286,
+    "cases_attempted": 0,
+    "cases_deferred": 0,
+    "cases_failed": 0,
+    "confirmed": 0,
+    "drafts_created": 0,
+    "exceptions": 329,
+    "job_creation_deferred": 0,
+    "jobs_created": 0,
+    "nonWork": 121,
+    "resumed": 0,
+    "source_rows_created": 0,
+    "sources": 450,
+    "unaccounted": 0,
+    "write_failures": 0
+  },
+  "write_failure_reasons": {}
+}

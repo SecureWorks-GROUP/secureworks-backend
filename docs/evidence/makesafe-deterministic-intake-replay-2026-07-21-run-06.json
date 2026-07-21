@@ -1,0 +1,111 @@
+{
+  "ai_calls": 0,
+  "ai_enabled": false,
+  "attempt_cap_reached_without_commit": false,
+  "by_builder_and_outcome": {
+    "aj": {
+      "accounted_non_work": 28,
+      "reason_coded_exception": 6
+    },
+    "mlb": {
+      "accounted_non_work": 40,
+      "confirmed_canonical_input": 165,
+      "reason_coded_exception": 257
+    },
+    "unknown": {
+      "reason_coded_exception": 4
+    }
+  },
+  "by_builder_and_reason": {
+    "aj": {
+      "below_identity_floor": 6,
+      "non_makesafe": 28
+    },
+    "mlb": {
+      "adapter_parse_failure": 99,
+      "below_identity_floor": 82,
+      "cancellation": 2,
+      "confirmed": 165,
+      "conflicting_fields": 74,
+      "non_makesafe": 40
+    },
+    "unknown": {
+      "unknown_builder": 4
+    }
+  },
+  "days": 60,
+  "dry_run": true,
+  "evidence": {
+    "caveats": [
+      "source_read_capped"
+    ],
+    "source_accounting_complete": false,
+    "zero_unaccounted_proved": false
+  },
+  "generated_at": "2026-07-20T23:12:18.467Z",
+  "identity_floor": {
+    "by_builder": {
+      "aj": {
+        "candidates": 6,
+        "reached": 0,
+        "shortfall": 6
+      },
+      "mlb": {
+        "candidates": 217,
+        "reached": 96,
+        "shortfall": 121
+      }
+    },
+    "formula": "reached / known_builder_work_candidates * 100",
+    "known_builder_work_candidates": 223,
+    "percentage": 43.05,
+    "reached": 96,
+    "shortfall": 127,
+    "unit": "canonical_case"
+  },
+  "mode": "deterministic",
+  "ok": true,
+  "selection": {
+    "cap_exposed_instruction_allowlist": 0,
+    "instruction_allowlist_count": 0,
+    "selected_cases": 296,
+    "selected_sources": 500,
+    "source_allowlist_count": 0,
+    "unmatched_instruction_allowlist": 0,
+    "unmatched_source_allowlist": 0
+  },
+  "source_read": {
+    "backlog_cap": 250,
+    "backlog_rows": 250,
+    "cap": 500,
+    "cap_reached": true,
+    "cursor_at": "2026-06-18T07:41:01+00:00",
+    "cursor_post_id": "<redacted-source-id>",
+    "next_cursor_at": "2026-06-29T03:44:47+00:00",
+    "next_cursor_post_id": "<redacted-source-id>",
+    "recent_rows": 250,
+    "seed_rows": 0,
+    "window_rows": 500
+  },
+  "storage_blockers": [],
+  "totals": {
+    "blocked": 0,
+    "case_rows_created": 0,
+    "cases": 296,
+    "cases_attempted": 0,
+    "cases_deferred": 0,
+    "cases_failed": 0,
+    "confirmed": 165,
+    "drafts_created": 0,
+    "exceptions": 267,
+    "job_creation_deferred": 0,
+    "jobs_created": 0,
+    "nonWork": 68,
+    "resumed": 0,
+    "source_rows_created": 0,
+    "sources": 500,
+    "unaccounted": 0,
+    "write_failures": 0
+  },
+  "write_failure_reasons": {}
+}

@@ -167,22 +167,27 @@ Do not point this at production.
 After the new code is deployed dark and before the mode flip, call:
 
 ```text
-GET /ops-api?action=makesafe_deterministic_intake_replay&days=60&only_unscanned=true
+GET /ops-api?action=makesafe_deterministic_intake_replay&days=60&only_unscanned=true&max_sources=2000
 ```
 
-Use the existing privileged read credential. The response contains aggregate totals by
-builder and outcome only. It never returns message bodies, addresses, client details,
-attachment URLs, secrets, or source identifiers. `dry_run=true`, `ai_calls=0`, and all
-write totals must remain zero.
+Use the existing privileged read credential. `max_sources` is optional, bounded to
+1 through 2,000, and exists so a narrow acceptance window can be proved in one
+response when the 500-row production default is too small. The response contains
+aggregate totals by builder and outcome only. It never returns message bodies,
+addresses, client details, attachment URLs, secrets, source identifiers, or the
+internal post-id tie breaker used by the sweep cursor. `dry_run=true`, `ai_calls=0`,
+and all write totals must remain zero.
 
 Required acceptance checks:
 
 - `evidence.zero_unaccounted_proved = true`. `totals.unaccounted = 0` on its own is
-  not sufficient: a run that spent its per-run source read cap only accounts for the
-  rows it read, reports `evidence.source_accounting_complete = false` and
-  `source_read_capped` in `evidence.caveats`, and must not be filed as clean
-  evidence. Re-run with a higher `maxSources`, or a narrower `days`, until the run
-  comes back complete.
+  not sufficient: a run that filled either source sub-read, started partway through
+  a sweep, or returned a non-null next cursor only accounts for the rows represented
+  in that response. It reports `evidence.source_accounting_complete = false` and a
+  `source_read_capped` or `source_sweep_partial` caveat, and must not be filed as
+  clean evidence. Re-run from the sweep head with a higher `max_sources`, or use a
+  narrower `days`, until `cursor_at=null`, `next_cursor_at=null`,
+  `source_read.cap_reached=false`, and `evidence.caveats=[]` in the same response.
 - `evidence.caveats = []`, so no instruction key went unresolved purely because the
   cap hid its sources (`instruction_allowlist_cap_exposed`)
 - every known-builder shortfall is visible in an exception outcome
@@ -194,7 +199,13 @@ Required acceptance checks:
 
 The aggregate response also includes `identity_floor`, calculated at canonical-case
 grain as `reached / known_builder_work_candidates * 100`, with per-builder counts.
-File that sanitized object with the current commit so the 95% gate is reproducible.
+`reached` means the known-builder case has canonical WO/PO identity. Claim-only
+work remains below the floor and cannot enter confirmed-live state. The metric does
+not claim the case is ready to create a job: missing
+client/address, work-order PDF, phone or portal capture remains a loud parser,
+artifact or recovery outcome. Own-domain SES copies are structurally accounted as
+non-work and never inflate the denominator. File that sanitized object with the
+current commit so the 95% gate is reproducible.
 
 For the required N=1 human comparison, call the authenticated dark surface with exactly
 one approved source id (or one approved instruction key):
