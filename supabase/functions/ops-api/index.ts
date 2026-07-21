@@ -2891,6 +2891,11 @@ if (import.meta.main) serve(async (req: Request) => {
       // NO paid API is called here. Read gate matches the other intake reads
       // (api_key / admin-owner jwt / routine).
       case 'makesafe_gap_fill_queue': {
+        const gapFillQueueAllowed = authMode === 'api_key' || authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!gapFillQueueAllowed) {
+          return json({ error: 'forbidden: makesafe_gap_fill_queue requires the routine/privileged ops key or an admin/owner session' }, 403)
+        }
         return json(await _loadGapFillQueue(client, {
           limit: Number(url.searchParams.get('limit') || '') || undefined,
           includeReportReady: url.searchParams.get('include_report_ready') !== 'false',

@@ -89,7 +89,6 @@ export async function loadReportReadyItems(
     "main",
   );
   if (!dueIds.length) return [];
-  const dueSet = new Set(dueIds);
 
   // Display data: job header + the submitted service report for the current cycle.
   const { data: jobs, error: jobErr } = await client
@@ -131,7 +130,6 @@ export async function loadReportReadyItems(
   for (const d of detailRows) detailByJob.set(d.job_id, d);
 
   return dueIds
-    .filter((id) => dueSet.has(id))
     .map((jobId): ReportReadyItem => {
       const d = detailByJob.get(jobId) || {};
       const j = jobById.get(jobId) || {};
