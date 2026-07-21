@@ -15,7 +15,10 @@ const TEST_PIPELINE = "kMSiJnd4KyPyIUletHbH";
 const TEST_LOCATION = "13yKADzN94BRxX4hByYX";
 const TEST_ORG = "00000000-0000-0000-0000-00000000f001";
 
-function route(rawTestMode: string | null, overrides: Record<string, unknown> = {}) {
+function route(
+  rawTestMode: string | null,
+  overrides: Record<string, unknown> = {},
+) {
   return resolveGhlProxyRoute(rawTestMode, {
     productionPipelineId: PRODUCTION_PIPELINE,
     productionLocationId: PRODUCTION_LOCATION,
@@ -75,8 +78,14 @@ Deno.test("test mode refuses when any test route ID is unconfigured and never re
     "GHL_TEST_LOCATION_ID",
     "SUPABASE_TEST_ORG_ID",
   ]);
-  assertStrictEquals(JSON.stringify(noIds).includes(PRODUCTION_PIPELINE), false);
-  assertStrictEquals(JSON.stringify(noIds).includes(PRODUCTION_LOCATION), false);
+  assertStrictEquals(
+    JSON.stringify(noIds).includes(PRODUCTION_PIPELINE),
+    false,
+  );
+  assertStrictEquals(
+    JSON.stringify(noIds).includes(PRODUCTION_LOCATION),
+    false,
+  );
   assertStrictEquals(JSON.stringify(noIds).includes(PRODUCTION_ORG), false);
 });
 
@@ -101,28 +110,46 @@ Deno.test("test-mode proxy guard blocks outbound communications and leaves produ
 });
 
 Deno.test("deployed handler applies general test routing before action handlers", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   const routeGuard = source.indexOf("resolveGhlProxyRoute(");
   const smsHandler = source.indexOf("action === 'send_sms'");
   const emailHandler = source.indexOf("action === 'send_email'");
   assertStrictEquals(routeGuard >= 0, true);
-  assertStrictEquals(source.indexOf("testModeCommsBlock(route.testMode, action)", routeGuard) > routeGuard, true);
+  assertStrictEquals(
+    source.indexOf("testModeCommsBlock(route.testMode, action)", routeGuard) >
+      routeGuard,
+    true,
+  );
   assertStrictEquals(source.includes("fencing: route.pipelineId"), true);
   assertStrictEquals(source.includes("patio: route.pipelineId"), true);
   assertStrictEquals(source.includes("decking: route.pipelineId"), true);
   assertStrictEquals(source.includes("combo: route.pipelineId"), true);
-  assertStrictEquals(source.includes("const GHL_LOCATION_ID = route.locationId"), true);
+  assertStrictEquals(
+    source.includes("const GHL_LOCATION_ID = route.locationId"),
+    true,
+  );
   assertStrictEquals(routeGuard < smsHandler, true);
   assertStrictEquals(routeGuard < emailHandler, true);
 });
 
 Deno.test("TEST-ZZZ general scope seed is idempotent and contains no real contact data", async () => {
   const sql = await Deno.readTextFile(
-    new URL("../../migrations/20260722000001_scope_test_lab_seed.sql", import.meta.url),
+    new URL(
+      "../../migrations/20260722000001_scope_test_lab_seed.sql",
+      import.meta.url,
+    ),
   );
   assertStrictEquals(sql.includes("TEST-ZZZ Scope Save Lab"), true);
   assertStrictEquals(sql.includes("test-zzz-scope-lab@example.invalid"), true);
   assertStrictEquals(sql.includes("ON CONFLICT DO NOTHING"), true);
-  assertStrictEquals(sql.includes("00000000-0000-0000-0000-00000000f001"), true);
-  assertStrictEquals(sql.includes("00000000-0000-0000-0000-00000000f002"), true);
+  assertStrictEquals(
+    sql.includes("00000000-0000-0000-0000-00000000f001"),
+    true,
+  );
+  assertStrictEquals(
+    sql.includes("00000000-0000-0000-0000-00000000f002"),
+    true,
+  );
 });
