@@ -1,0 +1,10 @@
+{
+  "intake_mode": "legacy",
+  "case_rows": 1,
+  "source_rows": 4,
+  "case_event_rows": 1,
+  "artifact_rows": 2,
+  "deterministic_draft_rows": 1,
+  "approved_deterministic_drafts": 0,
+  "canonical_cases_with_jobs": 0
+}

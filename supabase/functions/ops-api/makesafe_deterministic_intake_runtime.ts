@@ -1250,17 +1250,24 @@ async function findCase(
   return data || null;
 }
 
-// Validate the selected lineage as one dependency closure before the first
-// business write. A child whose parent was filtered out by exact-source
-// selection must fail as a zero-write plan, not halfway through the case loop.
-async function unresolvedParentDependencies(
+// Resolve the selected lineage once for both observation and live execution.
+// Exact N=1 authority is case authority, not authority to persist an ambient
+// sibling merely because the full mailbox plan happened to encounter it first.
+// A fresh selected review-exception sibling may therefore become the root of its
+// own authorised lineage. Live candidates and semantic parents
+// (revision/cancellation/reopen) remain mandatory.
+async function resolveSelectedLineage(
   client: any,
-  cases: readonly DeterministicCasePlan[],
-): Promise<DeterministicCasePlan[]> {
-  const selectedKeys = new Set(cases.map((item) => item.instructionKey));
+  plan: DeterministicIntakePlan,
+  exactSourcePostIds: readonly string[],
+): Promise<{
+  plan: DeterministicIntakePlan;
+  missingParents: DeterministicCasePlan[];
+}> {
+  const selectedKeys = new Set(plan.cases.map((item) => item.instructionKey));
   const externalParentKeys = [
     ...new Set(
-      cases.flatMap((item) =>
+      plan.cases.flatMap((item) =>
         item.parentInstructionKey &&
           !selectedKeys.has(item.parentInstructionKey)
           ? [item.parentInstructionKey]
@@ -1268,7 +1275,7 @@ async function unresolvedParentDependencies(
       ),
     ),
   ];
-  if (!externalParentKeys.length) return [];
+  if (!externalParentKeys.length) return { plan, missingParents: [] };
 
   const persisted = new Set<string>();
   for (const keys of chunk(externalParentKeys, 200)) {
@@ -1287,11 +1294,38 @@ async function unresolvedParentDependencies(
       if (row?.instruction_key) persisted.add(row.instruction_key);
     }
   }
-  return cases.filter((item) =>
+
+  const exactSources = new Set(exactSourcePostIds);
+  const cases = plan.cases.map((item) => {
+    const missingExternalParent = item.parentInstructionKey &&
+      !selectedKeys.has(item.parentInstructionKey) &&
+      !persisted.has(item.parentInstructionKey);
+    const exactSelected = item.sourcePostIds.some((postId) =>
+      exactSources.has(postId)
+    );
+    if (
+      missingExternalParent && exactSelected && item.state === "exception" &&
+      item.parentRelation === "sibling_of"
+    ) {
+      return {
+        ...item,
+        parentInstructionKey: null,
+        parentRelation: null,
+      };
+    }
+    return item;
+  });
+  const resolvedPlan = {
+    ...plan,
+    cases,
+    sourceClassifications: cases.flatMap((item) => item.sourceClassifications),
+  };
+  const missingParents = cases.filter((item) =>
     item.parentInstructionKey &&
     !selectedKeys.has(item.parentInstructionKey) &&
     !persisted.has(item.parentInstructionKey)
   );
+  return { plan: resolvedPlan, missingParents };
 }
 
 async function readPersistedCases(
@@ -1749,11 +1783,18 @@ export async function runDeterministicIntake(
   const selected = hasAllowlist
     ? selectedPlan(fullPlan, allowSourcePostIds, allowInstructionKeys)
     : fullPlan;
-  const plan = bindSelectedPlanToPersistedSourceAuthority(
+  const authorityBoundPlan = bindSelectedPlanToPersistedSourceAuthority(
     selected,
     allowSourcePostIds,
     sourceAuthorities.byPostId,
   );
+  const lineage = await resolveSelectedLineage(
+    client,
+    authorityBoundPlan,
+    allowSourcePostIds,
+  );
+  const plan = lineage.plan;
+  const missingParents = lineage.missingParents;
   const matchedCaseSources = new Set(
     plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
   );
@@ -1796,6 +1837,7 @@ export async function runDeterministicIntake(
     caveats.push("instruction_allowlist_cap_exposed");
   }
   if (!cursorPersisted) caveats.push("scan_cursor_unavailable");
+  if (missingParents.length) caveats.push("lineage_parent_unselected");
   // Nothing this run could act on was inside the cap, and every unresolved
   // allowlist entry was cap-exposed rather than stale. That is a no-op the sweep
   // will resolve on a later run, so it is reported loudly instead of throwing.
@@ -1821,10 +1863,10 @@ export async function runDeterministicIntake(
       drafts_created: 0,
       jobs_created: 0,
       resumed: 0,
-      write_failures: 0,
+      write_failures: missingParents.length,
       cases_attempted: 0,
       cases_deferred: 0,
-      cases_failed: 0,
+      cases_failed: missingParents.length,
       job_creation_deferred: 0,
     },
     attempt_cap_reached_without_commit: false,
@@ -1847,7 +1889,9 @@ export async function runDeterministicIntake(
     identity_floor: identityFloorFacts(plan),
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),
-    write_failure_reasons: {},
+    write_failure_reasons: missingParents.length
+      ? { lineage_parent_unselected: missingParents.length }
+      : {},
     storage_blockers: [],
   };
   if (options.includeSanitizedCases) {
@@ -1855,15 +1899,7 @@ export async function runDeterministicIntake(
   }
   if (dryRun) return report;
 
-  const missingParents = await unresolvedParentDependencies(client, plan.cases);
   if (missingParents.length) {
-    report.totals.write_failures = missingParents.length;
-    report.totals.cases_failed = missingParents.length;
-    report.write_failure_reasons.lineage_parent_unselected =
-      missingParents.length;
-    if (!report.evidence.caveats.includes("lineage_parent_unselected")) {
-      report.evidence.caveats.push("lineage_parent_unselected");
-    }
     await writeHealth(client, nowIso, missingParents.length, 0, 0);
     return report;
   }

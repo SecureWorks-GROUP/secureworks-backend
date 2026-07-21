@@ -1,0 +1,12 @@
+{
+  "slug": "ops-api",
+  "version": 838,
+  "status": "ACTIVE",
+  "verify_jwt": false,
+  "updated_at": 1784619387013,
+  "release_commit": "e9652e24226f76685a5cea0c5374c5b389ceb757",
+  "guarded_smoke": {
+    "passed": 9,
+    "failed": 0
+  }
+}

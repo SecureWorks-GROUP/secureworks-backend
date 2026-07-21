@@ -1717,23 +1717,147 @@ Deno.test("persisted source authority survives capped-cursor sibling re-key acro
   assertEquals(store.makesafe_intake_case_sources.length, 1);
 });
 
-Deno.test("unselected lineage parent fails before every business write", async () => {
+Deno.test("live-shaped fresh exception loop converges across cron rerun and same-instruction mail", async () => {
   const store = baseStore();
   store.emails.push(
     email({
-      post_id: "guard-parent-po",
+      post_id: "loop-noise",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "FYI",
+      body_content: "No work instruction.",
+    }),
+    // Ambient distinct-PO work makes the exact fresh source below a sibling in
+    // the full mailbox plan. Exact N=1 authority must not persist this parent.
+    email({
+      post_id: "loop-ambient-po",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-A",
+      body_content: "Address: 5 Loop Street, Perth",
+    }),
+    email({
+      post_id: "loop-selected-po",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-B",
+      body_content: "Address: 5 Loop Street, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-loop-selected",
+    email_id: "loop-selected-po",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/loop-selected.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const options = {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 4,
+    maxCases: 1,
+    allowSourcePostIds: ["loop-selected-po"],
+    includeSanitizedCases: true,
+    approveDraft,
+  } as const;
+
+  // Production cron pass: the fresh exact sibling becomes the authorised root
+  // review exception rather than pulling in or waiting for the ambient sibling.
+  const first = await runDeterministicIntake(client, options);
+  assertEquals(first.source_read.cap_reached, true);
+  assertEquals(first.proposed_cases?.[0].outcome, "exception");
+  assertEquals(first.proposed_cases?.[0].reason_code, "adapter_parse_failure");
+  assert(first.proposed_cases?.[0].missing_fields.includes("client_name"));
+  assertEquals(first.proposed_cases?.[0].parent_relation, null);
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.totals.source_rows_created, 1);
+  assertEquals(first.totals.write_failures, 0);
+  assertEquals(first.totals.drafts_created, 0);
+  assertEquals(first.totals.jobs_created, 0);
+  const stableKeyHash = first.proposed_cases?.[0].case_key_sha256;
+  assert(stableKeyHash);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].state, "exception");
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+
+  // Immediate cron rerun: the pending review exception is fully inert.
+  const rerun = await runDeterministicIntake(client, options);
+  assert(rerun.source_read.cursor_at !== null);
+  assertEquals(rerun.proposed_cases?.[0].case_key_sha256, stableKeyHash);
+  assertEquals(rerun.proposed_cases?.[0].parent_relation, null);
+  assertEquals(rerun.totals.case_rows_created, 0);
+  assertEquals(rerun.totals.source_rows_created, 0);
+  assertEquals(rerun.totals.write_failures, 0);
+  assertEquals(rerun.totals.drafts_created, 0);
+  assertEquals(rerun.totals.jobs_created, 0);
+
+  // A second real-shaped mail for the same WO/PO arrives with changed content.
+  // This used to re-fingerprint the instruction and reopen the first seam.
+  store.emails.push(email({
+    post_id: "loop-selected-resend",
+    received_at: "2026-07-11T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-B",
+    body_content:
+      "Address: 5 Loop Street, Perth\nFollow-up copy for the same instruction.",
+  }));
+  store.email_attachments.push({
+    id: "att-loop-resend",
+    email_id: "loop-selected-resend",
+    name: "work-order-resend.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/loop-selected-resend.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+
+  const withResend = await runDeterministicIntake(client, options);
+  assertEquals(withResend.proposed_cases?.[0].case_key_sha256, stableKeyHash);
+  assertEquals(withResend.proposed_cases?.[0].parent_relation, null);
+  assertEquals(withResend.totals.case_rows_created, 0);
+  assertEquals(withResend.totals.source_rows_created, 1);
+  assertEquals(withResend.totals.write_failures, 0);
+  assertEquals(withResend.totals.drafts_created, 0);
+  assertEquals(withResend.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 2);
+
+  // Final cron rerun converges after the new source has been accounted.
+  const finalRerun = await runDeterministicIntake(client, options);
+  assertEquals(finalRerun.proposed_cases?.[0].case_key_sha256, stableKeyHash);
+  assertEquals(finalRerun.proposed_cases?.[0].parent_relation, null);
+  assertEquals(finalRerun.totals.case_rows_created, 0);
+  assertEquals(finalRerun.totals.source_rows_created, 0);
+  assertEquals(finalRerun.totals.write_failures, 0);
+  assertEquals(finalRerun.totals.drafts_created, 0);
+  assertEquals(finalRerun.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 2);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+Deno.test("semantic lineage parent fails identically in observe and live before every business write", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "guard-original",
+      thread_id: "guard-thread",
       received_at: "2026-07-05T01:00:00.000Z",
       subject: "NEW WORK ORDER MLB-91001 Work Order: WO-91001 PO: PO-91001-A",
       body_content: "Client: Parent Client\nAddress: 2 Guard Street, Perth",
     }),
     email({
-      post_id: "guard-selected-po",
+      post_id: "guard-revision",
+      thread_id: "guard-thread",
       received_at: "2026-07-10T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-91001 Work Order: WO-91001 PO: PO-91001-B",
-      body_content: "Client: Child Client\nAddress: 2 Guard Street, Perth",
+      subject:
+        "REVISED WORK ORDER MLB-91001 Work Order: WO-91001 PO: PO-91001-A",
+      body_content:
+        "Client: Parent Client\nAddress: 2 Guard Street, Perth\nUpdated instruction",
     }),
   );
-  for (const postId of ["guard-parent-po", "guard-selected-po"]) {
+  for (const postId of ["guard-original", "guard-revision"]) {
     store.email_attachments.push({
       id: `att-${postId}`,
       email_id: postId,
@@ -1744,23 +1868,43 @@ Deno.test("unselected lineage parent fails before every business write", async (
       size_bytes: 1024,
     });
   }
-
-  const report = await runDeterministicIntake(fakeClient(store), {
-    dryRun: false,
+  const client = fakeClient(store);
+  const options = {
     days: 30,
     nowIso: NOW,
     maxSources: 10,
     maxCases: 1,
-    allowSourcePostIds: ["guard-selected-po"],
+    allowSourcePostIds: ["guard-revision"],
+    includeSanitizedCases: true,
     approveDraft,
-  });
+  } as const;
 
-  assertEquals(report.ok, true);
-  assertEquals(report.totals.write_failures, 1);
-  assertEquals(report.totals.cases_failed, 1);
-  assertEquals(report.totals.cases_attempted, 0);
-  assertEquals(report.write_failure_reasons.lineage_parent_unselected, 1);
-  assert(report.evidence.caveats.includes("lineage_parent_unselected"));
+  const observed = await runDeterministicIntake(client, {
+    ...options,
+    dryRun: true,
+  });
+  assertEquals(observed.proposed_cases?.[0].parent_relation, "revision_of");
+  assertEquals(observed.totals.write_failures, 1);
+  assertEquals(observed.totals.cases_failed, 1);
+  assertEquals(
+    observed.write_failure_reasons.lineage_parent_unselected,
+    1,
+  );
+  assert(observed.evidence.caveats.includes("lineage_parent_unselected"));
+  assertEquals(store.makesafe_intake_cases.length, 0);
+  assertEquals(store.makesafe_intake_case_sources.length, 0);
+
+  const live = await runDeterministicIntake(client, {
+    ...options,
+    dryRun: false,
+  });
+  assertEquals(live.ok, true);
+  assertEquals(live.proposed_cases?.[0].parent_relation, "revision_of");
+  assertEquals(live.totals.write_failures, 1);
+  assertEquals(live.totals.cases_failed, 1);
+  assertEquals(live.totals.cases_attempted, 0);
+  assertEquals(live.write_failure_reasons.lineage_parent_unselected, 1);
+  assert(live.evidence.caveats.includes("lineage_parent_unselected"));
   assertEquals(store.makesafe_intake_cases.length, 0);
   assertEquals(store.makesafe_intake_case_sources.length, 0);
   assertEquals(store.makesafe_intake_artifacts.length, 0);

@@ -1,0 +1,10 @@
+{
+  "intake_mode": "deterministic",
+  "deterministic_max_cases_per_run": 1,
+  "source_allowlist_count": 1,
+  "instruction_allowlist_count": 0,
+  "deterministic_rollout_changed_at": "2026-07-21 07:38:49.914788+00",
+  "deterministic_rollout_changed_by": "captain-approved-pr347-reactivation-2026-07-21",
+  "intake_mode_changed_at": "2026-07-21 07:38:49.914788+00",
+  "intake_mode_changed_by": "captain-approved-pr347-reactivation-2026-07-21"
+}

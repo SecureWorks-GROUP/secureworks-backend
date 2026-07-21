@@ -1,0 +1,47 @@
+{
+  "compared_at": "2026-07-21T07:39:30Z",
+  "working_dark_observe": {
+    "dry_run": true,
+    "selected_cases": 1,
+    "selected_sources": 4,
+    "parent_relation": "sibling_of",
+    "outcome": "exception",
+    "reason_code": "adapter_parse_failure",
+    "write_failures": 0,
+    "cases_attempted": 0
+  },
+  "failing_live_pass": {
+    "dry_run": false,
+    "selected_cases": 1,
+    "selected_sources": 4,
+    "outcome_builder_reason": {
+      "mlb": {
+        "adapter_parse_failure": 4
+      }
+    },
+    "write_failures": 1,
+    "cases_attempted": 0,
+    "cases_failed": 1,
+    "failure_reasons": {
+      "lineage_parent_unselected": 1
+    },
+    "caveats": [
+      "source_read_capped",
+      "source_sweep_partial",
+      "lineage_parent_unselected"
+    ],
+    "business_writes": {
+      "cases": 0,
+      "sources": 0,
+      "drafts": 0,
+      "jobs": 0
+    }
+  },
+  "post_reversal": {
+    "effective_mode": "legacy",
+    "case_rows": 1,
+    "source_rows": 4,
+    "deterministic_drafts": 1,
+    "canonical_cases_with_jobs": 0
+  }
+}
