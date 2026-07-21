@@ -117,6 +117,18 @@ budget, then cases never attempted before, then the remaining retries. Cases alr
 at their resolved state are inert. A systematically failing case therefore cannot
 crowd out fresh work.
 
+The guarded job path runs the same required-field gate as approval before any
+storage, artifact-ledger or draft write, so an approval rejection (for example a null
+canonical client, or a missing work-order PDF on a physical report-family case) leaves
+no persisted case, artifact or draft side effect. The `artifacts_created` and
+`drafts_created` totals increment at the successful insert boundary, not after approval
+returns, so a later rejection cannot leave an uncounted write. Case-wide recovery never
+lets off-case client-name evidence flip a null canonical client to satisfied: the gate
+validates the actual canonical field, not the correlated cluster hint. A report-family
+plan that carries a combined make-safe + report obligation
+(`extraction.secondary_obligation`) is treated as physical, so it too requires a
+servable work-order PDF and splits the report type onto the secondary card.
+
 A case that is accounted but whose guarded job creation has not yet succeeded is
 persisted with reason code `awaiting_job_creation`. It is a pre-job state, not an
 adapter failure, and it is retried on the next run. The full approved reason-code
@@ -150,7 +162,13 @@ fallback.
 The runtime tests cover commit-and-resume behaviour, exact allowlist selection, the
 N=1 cap, bounded fairness, run-twice zero-new-write behaviour, source accounting before
 job creation, content-hash artifact deduplication across twin posts, failure injection,
-zero AI, and zero assignment/work-order/invoice/client-communication writes.
+zero AI, and zero assignment/work-order/invoice/client-communication writes. They also
+cover the PR 351 rerun remediation: approval prevalidation rejecting a null canonical
+client before any artifact or draft persistence, the production-shaped moving-sweep case
+where three off-case candidates cannot satisfy a null canonical client, overlapping
+manual and scheduled exact invocations converging without prevalidation side effects,
+and a report-family combined split obligation requiring a work-order PDF while a plain
+report-family plan still needs none.
 
 Run the existing migration clone harness before production migration approval:
 
