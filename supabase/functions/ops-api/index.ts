@@ -2200,15 +2200,19 @@ export function _resolveOpsApiAuthIntent(input: {
   validKey?: string | null
   serviceKey?: string | null
   routineKey?: string | null
+  preferBearerOverApiKey?: boolean
 }): 'api_key' | 'jwt' | 'routine' | 'none' {
-  const { xApiKey, bearerToken, validKey, serviceKey, routineKey } = input
+  const { xApiKey, bearerToken, validKey, serviceKey, routineKey, preferBearerOverApiKey } = input
   if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) return 'routine'
   if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) return 'api_key'
   // A verified user Bearer is the caller identity even when a browser wrapper
-  // also sends x-api-key. The old x-api-key-first ordering misclassified that
-  // mixed request as a master-key call and rejected the Trade projection.
-  if (bearerToken) return 'jwt'
+  // also sends x-api-key — but ONLY for the make-safe Trade board request, whose
+  // browser clients legitimately carry both. Every other action keeps the
+  // pre-existing x-api-key-first precedence, so a master-key server call that
+  // also happens to carry a user Bearer stays classified as api_key (privileged).
+  if (preferBearerOverApiKey && bearerToken) return 'jwt'
   if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) return 'api_key'
+  if (bearerToken) return 'jwt'
   return 'none'
 }
 
@@ -2272,12 +2276,19 @@ if (import.meta.main) serve(async (req: Request) => {
 
   let authMode: 'api_key' | 'jwt' | 'routine' = 'api_key'
   let authUser: { id: string; email: string; role: string } | null = null
+  // Bearer-over-x-api-key precedence is scoped to the make-safe Trade board read
+  // ONLY (action=makesafe_board&projection=trade). Every other action keeps the
+  // pre-existing x-api-key-first precedence so mixed-credential calls to privileged
+  // api_key-gated actions are unaffected (decision: auth-precedence-scope NARROW).
+  const preferBearerForTradeBoard = _preAuthUrl.searchParams.get('action') === 'makesafe_board' &&
+    String(_preAuthUrl.searchParams.get('projection') || '').toLowerCase() === 'trade'
   const authIntent = _resolveOpsApiAuthIntent({
     xApiKey,
     bearerToken,
     validKey,
     serviceKey,
     routineKey,
+    preferBearerOverApiKey: preferBearerForTradeBoard,
   })
 
   if (authIntent === 'routine') {

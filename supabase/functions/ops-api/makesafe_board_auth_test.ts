@@ -42,16 +42,68 @@ function tradeRoute(
   return { status: 200, body: projectTradeMakesafeBoard(ROWS, viewer!) };
 }
 
-Deno.test("mixed browser credentials prefer the signed-in ES256 Bearer over x-api-key", () => {
-  const es256Jwt = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature";
+const ES256_JWT = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature";
+
+Deno.test("Trade board mixed credentials prefer the signed-in ES256 Bearer over x-api-key", () => {
   assertEquals(
     _resolveOpsApiAuthIntent({
       xApiKey: "master-key",
-      bearerToken: es256Jwt,
+      bearerToken: ES256_JWT,
+      validKey: "master-key",
+      serviceKey: "service-key",
+      preferBearerOverApiKey: true,
+    }),
+    "jwt",
+  );
+});
+
+Deno.test("non-Trade actions keep x-api-key precedence under the same mixed credentials", () => {
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: "master-key",
+      bearerToken: ES256_JWT,
+      validKey: "master-key",
+      serviceKey: "service-key",
+      preferBearerOverApiKey: false,
+    }),
+    "api_key",
+  );
+  // Absent flag defaults to the pre-existing precedence (no behaviour change).
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: "master-key",
+      bearerToken: ES256_JWT,
       validKey: "master-key",
       serviceKey: "service-key",
     }),
-    "jwt",
+    "api_key",
+  );
+});
+
+Deno.test("master Bearer stays api_key even for the Trade board", () => {
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: null,
+      bearerToken: "master-key",
+      validKey: "master-key",
+      serviceKey: "service-key",
+      preferBearerOverApiKey: true,
+    }),
+    "api_key",
+  );
+});
+
+Deno.test("routine key still wins regardless of Trade board scoping", () => {
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: "routine-key",
+      bearerToken: ES256_JWT,
+      validKey: "master-key",
+      serviceKey: "service-key",
+      routineKey: "routine-key",
+      preferBearerOverApiKey: true,
+    }),
+    "routine",
   );
 });
 
