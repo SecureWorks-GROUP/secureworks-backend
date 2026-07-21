@@ -868,6 +868,7 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
     days: 30,
     nowIso: NOW,
     onlyUnscanned: true,
+    maxSources: 4,
     maxCases: 1,
     allowSourcePostIds: ["fail-1", "fail-2", "good-1"],
     approveDraft: flakyApprove,
@@ -875,6 +876,11 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
 
   assertEquals(report.write_failure_reasons.approval_no_job, 2);
   assertEquals(report.totals.jobs_created, 1);
+  assert(report.evidence.caveats.includes("scan_cursor_held_for_retry"));
+  assertEquals(
+    store.makesafe_intake_health[0].deterministic_scan_cursor_at ?? null,
+    null,
+  );
   assertEquals(
     store.emails.find((e) => e.post_id === "good-1")?.makesafe_scanned_at,
     NOW,
@@ -1635,10 +1641,18 @@ Deno.test("an all-cap-exposed run is a reported no-op, never a poisoned cron", a
   assertEquals(health.last_scan_at, "2026-08-01T00:00:00.000Z");
 });
 
-Deno.test("a genuinely stale allowlist still fails closed", async () => {
+Deno.test("a genuinely stale allowlist fails closed without advancing its page", async () => {
   const store = baseStore();
   store.emails.push(
-    email({ post_id: "s-1", subject: "Re: chatter", body_content: "ok" }),
+    ...Array.from({ length: 8 }, (_, index) =>
+      email({
+        post_id: `s-${index}`,
+        received_at: `2026-07-${
+          String(index + 1).padStart(2, "0")
+        }T01:00:00.000Z`,
+        subject: "Re: chatter",
+        body_content: "ok",
+      })),
   );
   await assertRejects(
     () =>
@@ -1646,11 +1660,13 @@ Deno.test("a genuinely stale allowlist still fails closed", async () => {
         dryRun: false,
         days: 30,
         nowIso: NOW,
-        allowInstructionKeys: ["mlb:wo-does-not-exist"],
+        maxSources: 4,
+        allowSourcePostIds: ["source-does-not-exist"],
         approveDraft,
       }),
     Error,
   );
+  assertEquals(store.makesafe_intake_health.length, 0);
 });
 
 Deno.test("a capped run is not clean zero-unaccounted evidence", async () => {

@@ -41,6 +41,7 @@ import {
   _runBackfillFull,
   _senderMatchesPattern,
   _setTestClientFactory,
+  _scheduleIntakeScanContinuation,
   isGraphMailReadError,
 } from "../monitor-ses-makesafes/index.ts";
 import { _resetGraphTokenCache } from "../_shared/graph_client.ts";
@@ -74,6 +75,44 @@ import {
 const COMPANIES = [
   { slug: "mlb", name: "MLB", pattern: "mlb.com.au" },
 ];
+
+Deno.test("intake scan continuation returns before a scan beyond pg_net's five-second boundary", async () => {
+  let releaseScan!: (response: Response) => void;
+  const delayedScan = new Promise<Response>((resolve) => {
+    releaseScan = resolve;
+  });
+  const captured: {
+    registered?: Promise<void>;
+    request?: { url: string; init?: RequestInit };
+  } = {};
+  const fetchStub = ((url: string | URL | Request, init?: RequestInit) => {
+    captured.request = { url: String(url), init };
+    return delayedScan;
+  }) as typeof fetch;
+
+  const started = performance.now();
+  _scheduleIntakeScanContinuation(
+    fetchStub,
+    (promise) => captured.registered = promise,
+    "https://example.invalid/ops-api?action=scan_ses_makesafes",
+    { "x-api-key": "test-only" },
+  );
+  const schedulingMs = performance.now() - started;
+
+  assert(schedulingMs < 100, `scheduling blocked for ${schedulingMs}ms`);
+  assert(captured.registered);
+  assertEquals(captured.request?.init?.method, "POST");
+  assertEquals(captured.request?.init?.body, "{}");
+  const registered = captured.registered;
+  const state = await Promise.race([
+    registered.then(() => "completed"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 10)),
+  ]);
+  assertEquals(state, "pending");
+
+  releaseScan(new Response("{}", { status: 200 }));
+  await registered;
+});
 
 // ── Classifier: domain-boundary matching ──────────────────────────────────────
 // SCHEMA NOTE: a raw group post has NO `subject`; collectPosts sets post.subject

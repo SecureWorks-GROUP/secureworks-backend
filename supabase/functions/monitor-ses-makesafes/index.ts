@@ -1964,6 +1964,32 @@ async function logMailReadFailureEvent(
   }
 }
 
+export function _scheduleIntakeScanContinuation(
+  fetchFn: typeof fetch,
+  waitUntil: (promise: Promise<void>) => void,
+  url: string,
+  headers: Record<string, string>,
+): void {
+  const continuation = (async () => {
+    try {
+      const scanResp = await fetchFn(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({}),
+      });
+      console.log(
+        `[monitor-ses] intake scan continuation status=${scanResp.status}`,
+      );
+    } catch (scanErr) {
+      console.error(
+        "[monitor-ses] intake scan continuation failed (non-fatal):",
+        (scanErr as Error).message,
+      );
+    }
+  })();
+  waitUntil(continuation);
+}
+
 // ════════════════════════════════════════════════════════════
 // Main handler
 // ════════════════════════════════════════════════════════════
@@ -2192,31 +2218,29 @@ async function handler(req: Request): Promise<Response> {
 
     // Wave 1 (intake autopilot): after a successful group-sync poll, trigger the
     // ops-api intake scan so a work-order email becomes a draft within ~5 min.
-    // Best-effort: a scan failure must NOT fail the sync poll (the watermark is
-    // already committed). The scan is idempotent (dedups by post_id + external_ref),
-    // so re-triggering on every poll is safe. The scan creates DRAFTS only; it can
-    // never approve (Wave 0 C2 gate: approve_intake_draft is human-JWT-only).
-    try {
-      const opsApiUrl =
-        `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
-      const scanResp = await fetch(opsApiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": SW_API_KEY,
-          "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
-        },
-        body: JSON.stringify({}),
-      });
-      console.log(
-        `[monitor-ses] intake scan tail-call status=${scanResp.status}`,
-      );
-    } catch (scanErr) {
-      console.error(
-        "[monitor-ses] intake scan tail-call failed (non-fatal):",
-        (scanErr as Error).message,
+    // The pg_net caller has a fixed 5-second timeout, while a bounded deterministic
+    // batch can legitimately take longer as its case cap rises. Register the scan
+    // as an EdgeRuntime continuation and return the poll response immediately. The
+    // continuation owns the long request lifecycle; caller disconnect can no longer
+    // cancel a scan between its source read and completion checkpoint.
+    const opsApiUrl =
+      `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
+    const edgeRuntime = (globalThis as any).EdgeRuntime;
+    if (typeof edgeRuntime?.waitUntil !== "function") {
+      throw new Error(
+        "EdgeRuntime.waitUntil unavailable for bounded intake continuation",
       );
     }
+    _scheduleIntakeScanContinuation(
+      fetch,
+      (promise) => edgeRuntime.waitUntil(promise),
+      opsApiUrl,
+      {
+        "Content-Type": "application/json",
+        "x-api-key": SW_API_KEY,
+        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    );
 
     const result = {
       success: true,

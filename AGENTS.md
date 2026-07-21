@@ -243,6 +243,20 @@ Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and man
 intake checks all use the deterministic contract in
 `docs/makesafe-intake-terminal-hook.md`.
 
+## Make-safe Scheduled Scan Completion Boundary
+
+`makesafe-ses-poll` is called by `pg_net` with a 5-second request deadline, but a
+bounded deterministic batch can legitimately run longer. Keep the nested
+`scan_ses_makesafes` call owned by `EdgeRuntime.waitUntil`; never make the monitor
+await the scan or paper over batch growth with a larger fixed timeout. The scan
+remains bounded by its 500-source read cap, 1..10 case cap and attempt ceiling.
+
+The deterministic sweep cursor is a completion checkpoint. Persist it only after
+truthful health and a run with zero write/case failures. A cancelled, rejected or
+failed run must retain the prior cursor and reread idempotently. The cap-5 incident
+and 750-row explicit cursor recovery are recorded in
+`docs/makesafe-cap5-timeout-root-cause-2026-07-21.md`.
+
 ## Fencing Job Mint Invariant
 
 The fence browser must not mint permanent jobs, job numbers, GHL contacts, or
