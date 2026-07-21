@@ -95,9 +95,9 @@ When an exact-selected review exception is promoted from `sibling_of` to root, t
 4. propagate that key to source classifications, recovery cursor, artifact keys, draft/job keys and approval keys
 5. preserve the instruction fingerprint and identity discriminator
 
-True revision, cancellation and reopen children remain parent-bound and are not root-normalised.
+True revision, cancellation and reopen children remain parent-bound and are not root-normalised. But promoting a parent to cycle 1 collapses that lineage's whole cycle numbering, so any selected descendant must have its own `/cycle:N` suffix and cycle rebased by the same collapse delta, cascading through grandchildren whose parents were themselves rebased. Each descendant stays parent-bound to the rebased parent; only its cycle numbering shifts to the value the trigger now derives from the collapsed parent. Left unshifted, the descendant insert would hit the same instruction-key cycle check this promotion targets.
 
-Regression coverage must add a real-shaped cycle-3 cluster to the full live loop and assert the selected fresh root has `cycle=1`, a matching `/cycle:1` key, and stable rerun/resend convergence. The case insert path also needs a DB-faithful check using the disposable migration/schema-clone harness, or the in-memory fake must explicitly enforce the root cycle/key constraint. Without one of those, future SQL-only divergences can still pass the runtime double.
+Regression coverage must add a real-shaped cycle-3 cluster to the full live loop and assert the selected fresh root has `cycle=1`, a matching `/cycle:1` key, and stable rerun/resend convergence, plus a case that also selects the promoted node's reopen child and asserts the child rebases to the collapsed cycle. The case insert path also needs a DB-faithful check using the disposable migration/schema-clone harness, or the in-memory fake must explicitly enforce the root cycle/key constraint. The shipped fix takes the second option: the runtime double now derives each case's trigger cycle, root lineage id, and instruction-key `/cycle:N` agreement on insert, so future SQL-only divergences no longer pass the runtime double.
 
 Changing or dropping the production cycle constraint would hide the defect and violate the canonical lineage invariant. Do not do that.
 
