@@ -322,6 +322,28 @@ If you are unsure, do not deploy. Open a PR or run the read-only smoke script:
 SW_API_KEY=... scripts/smoke-edge-functions.sh
 ```
 
+## Make-safe Gap-Fill Is Subscription-Claude, Never The Paid API
+
+The deterministic intake flags what it cannot resolve (`exception` /
+`blocked_live_job` cases). Draining that backlog is the job of the batch AI
+gap-fill, driven by the captain's SUBSCRIPTION Claude — the edge function calls no
+model. Two ops-api actions: `makesafe_gap_fill_queue` (read the flags + the
+report-submitted-but-pack-not-drafted jobs) and `makesafe_gap_fill_apply`
+(additive audited write). Code in `supabase/functions/ops-api/makesafe_gap_fill.ts`
++ `makesafe_gap_fill_report_ready.ts`; the runnable procedure is
+`docs/makesafe-gap-fill-batch-skill.md`; the trade-submit ping is designed (not yet
+built) in `docs/makesafe-gap-fill-ping-design.md`.
+
+Invariants (do not regress): fills are ADDITIVE (only currently-empty job-material
+fields `client_name/client_phone/client_email/site_address/site_suburb`), never
+overwrite a populated value, never mint builder WO/PO/reference identity, never
+create a job or change state/reason_code/lineage, and never send. Each fill writes
+`last_decision_provenance='ai'` + a fresh reason, which the case triggers record as
+an append-only `case_update` event. There is deliberately NO approval gate. `apply`
+is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is a
+read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
+and the reporting run agree on "not yet drafted".
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
