@@ -1,0 +1,15 @@
+{
+  "ops_api_version": 842,
+  "release_commit": "c283b6a6241828e915fe0538be36fb00ed7f85f9",
+  "verify_jwt": false,
+  "settings_read_http_status": 200,
+  "case_insert_http_status": 400,
+  "case_insert_postgres_error_code": "23514",
+  "post_failure_health_upsert_http_status": 200,
+  "service_credentials_operational": true,
+  "required_secret_values_inspected": false,
+  "env_divergence_found": false,
+  "permission_divergence_found": false,
+  "extension_divergence_found": false,
+  "schema_missing_migration_found": false
+}
