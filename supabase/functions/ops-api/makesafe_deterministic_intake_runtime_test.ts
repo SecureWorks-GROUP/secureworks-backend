@@ -10,6 +10,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _ensureDraftAndJobForTest,
   _readInputsForTest,
   runDeterministicIntake,
 } from "./makesafe_deterministic_intake_runtime.ts";
@@ -146,7 +147,12 @@ class FakeQuery {
   private run(): { data: any[]; error: any } {
     this.store[this.table] ||= [];
     if (this.op === "insert") {
-      const duplicate = this.table === "makesafe_intake_case_sources"
+      const duplicate = this.table === "makesafe_intake_cases"
+        ? this.store[this.table].some((row) =>
+          row.org_id === this.payload.org_id &&
+          row.instruction_key === this.payload.instruction_key
+        )
+        : this.table === "makesafe_intake_case_sources"
         ? this.store[this.table].some((row) =>
           row.org_id === this.payload.org_id &&
           row.post_id === this.payload.post_id
@@ -985,6 +991,13 @@ Deno.test("write failures are classified without retaining source content", asyn
 
   assertEquals(report.totals.write_failures, 1);
   assertEquals(report.write_failure_reasons.approval_no_job, 1);
+  // Validation passed, so these writes are legitimate persisted outcomes even
+  // though the injected approval callback returned no job. Counters must report
+  // what committed rather than waiting for ensureDraftAndJob to return.
+  assertEquals(report.totals.artifacts_created, 1);
+  assertEquals(report.totals.drafts_created, 1);
+  assertEquals(store.makesafe_intake_artifacts.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
   const serialised = JSON.stringify(report);
   assert(!serialised.includes("Fail Client"));
   assert(!serialised.includes("12 Fail Way"));
@@ -1916,6 +1929,256 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
   assertEquals(store.makesafe_intake_case_sources.length, 2);
   assertEquals(store.makesafe_intake_artifacts.length, 0);
   assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+Deno.test("approval prevalidation rejects a null canonical client before artifact or draft persistence", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "prevalidate-target",
+    subject: "NEW WORK ORDER MLB-93000 Work Order: WO-93000",
+    body_content: "Client: Initially Present\nAddress: 1 Guard Way, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-prevalidate-target",
+    email_id: "prevalidate-target",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/prevalidate-target.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["prevalidate-target"],
+    cursor: null,
+  });
+  const built = buildDeterministicIntakePlan(inputs.sources, inputs.profiles)
+    .cases[0];
+  assert(built);
+  // Reproduce the production contradiction directly: live-ready manifest/state,
+  // but the actual canonical client value is null.
+  const contradictory = {
+    ...built,
+    identity: { ...built.identity, clientName: null },
+    state: "confirmed_live_job" as const,
+  };
+  let approvalCalls = 0;
+  const persistedOutcomes: string[] = [];
+  await assertRejects(
+    () =>
+      _ensureDraftAndJobForTest(
+        client,
+        "case-prevalidate",
+        contradictory,
+        new Map(inputs.sources.map((source) => [source.postId, source])),
+        () => {
+          approvalCalls++;
+          return Promise.resolve({ job: { id: "must-not-run" } });
+        },
+        () => {},
+        (outcome) => persistedOutcomes.push(outcome),
+      ),
+    Error,
+    "approval prevalidation failed: client_name",
+  );
+  assertEquals(approvalCalls, 0);
+  assertEquals(persistedOutcomes, []);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+Deno.test("production-shaped moving sweep cannot satisfy a null canonical client from off-case candidates", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "sweep-noise-1",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "FYI one",
+      body_content: "No work instruction.",
+    }),
+    email({
+      post_id: "sweep-noise-2",
+      received_at: "2026-07-02T01:00:00.000Z",
+      subject: "FYI two",
+      body_content: "No work instruction.",
+    }),
+    email({
+      post_id: "sweep-noise-3",
+      received_at: "2026-07-02T02:00:00.000Z",
+      subject: "FYI three",
+      body_content: "No work instruction.",
+    }),
+    // These sibling instructions enter only after the live sweep cursor advances.
+    // Their client evidence must never satisfy the target instruction.
+    email({
+      post_id: "sweep-off-case-client-1",
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-A",
+      body_content:
+        "Client: Other Instruction Client\nAddress: 3 Sweep Way, Perth",
+    }),
+    email({
+      post_id: "sweep-off-case-client-2",
+      received_at: "2026-07-04T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-C",
+      body_content:
+        "Client: Other Instruction Client\nAddress: 3 Sweep Way, Perth",
+    }),
+    email({
+      post_id: "sweep-off-case-client-3",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-D",
+      body_content:
+        "Client: Other Instruction Client\nAddress: 3 Sweep Way, Perth",
+    }),
+    email({
+      post_id: "sweep-target-copy-1",
+      received_at: "2026-07-09T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-B",
+      body_content: "Address: 3 Sweep Way, Perth",
+    }),
+    email({
+      post_id: "sweep-target-copy-2",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-B",
+      body_content: "Address: 3 Sweep Way, Perth",
+    }),
+    email({
+      post_id: "sweep-target-exact",
+      received_at: "2026-07-11T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-B",
+      body_content: "Address: 3 Sweep Way, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-sweep-target",
+    email_id: "sweep-target-exact",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/sweep-target.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const options = {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 6,
+    maxCases: 1,
+    allowSourcePostIds: ["sweep-target-exact"],
+    includeSanitizedCases: true,
+    approveDraft,
+  } as const;
+
+  const manual = await runDeterministicIntake(client, options);
+  assertEquals(manual.proposed_cases?.[0].outcome, "exception");
+  assert(manual.proposed_cases?.[0].missing_fields.includes("client_name"));
+  assertEquals(manual.totals.case_rows_created, 1);
+  assertEquals(manual.totals.artifacts_created, 0);
+  assertEquals(manual.totals.drafts_created, 0);
+
+  const cursorRow = store.makesafe_intake_health[0];
+  const scheduledInputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 6,
+    seedPostIds: ["sweep-target-exact"],
+    cursor: {
+      receivedAt: cursorRow.deterministic_scan_cursor_at,
+      postId: cursorRow.deterministic_scan_cursor_post_id,
+    },
+  });
+  const scheduledPlan = buildDeterministicIntakePlan(
+    scheduledInputs.sources,
+    scheduledInputs.profiles,
+  );
+  const scheduledTarget = scheduledPlan.cases.find((item) =>
+    item.sourcePostIds.includes("sweep-target-exact")
+  );
+  assert(scheduledTarget);
+  assertEquals(scheduledTarget.identity.clientName, null);
+  assertEquals(scheduledTarget.evidenceMap.client_name.status, "missing");
+  assertEquals(scheduledTarget.evidenceMap.client_name.evidence.length, 0);
+  assertEquals(
+    scheduledTarget.evidenceMap.client_name.rejectedCandidateLocators.length,
+    3,
+  );
+
+  // This is the 10:03 shape: the scheduled invocation sees the persisted source
+  // authority plus a different sweep page carrying three off-case evidence
+  // candidates. Canonical client identity remains null, so it must stay inert.
+  const scheduled = await runDeterministicIntake(client, options);
+  assert(scheduled.source_read.cursor_at !== null);
+  assertEquals(scheduled.proposed_cases?.[0].outcome, "exception");
+  assert(scheduled.proposed_cases?.[0].missing_fields.includes("client_name"));
+  assertEquals(
+    scheduled.proposed_cases?.[0].identity_evidence.client_name,
+    false,
+  );
+  assertEquals(scheduled.totals.case_rows_created, 0);
+  assertEquals(scheduled.totals.source_rows_created, 0);
+  assertEquals(scheduled.totals.artifacts_created, 0);
+  assertEquals(scheduled.totals.drafts_created, 0);
+  assertEquals(scheduled.totals.jobs_created, 0);
+  assertEquals(scheduled.totals.write_failures, 0);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+Deno.test("overlapping manual and scheduled exact invocations converge without prevalidation side effects", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "overlap-target",
+    received_at: "2026-07-10T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-93002 Work Order: WO-93002",
+    body_content: "Address: 4 Sweep Way, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-overlap-target",
+    email_id: "overlap-target",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/overlap-target.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const options = {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 4,
+    maxCases: 1,
+    allowSourcePostIds: ["overlap-target"],
+    includeSanitizedCases: true,
+    approveDraft,
+  } as const;
+
+  const [manual, scheduled] = await Promise.all([
+    runDeterministicIntake(client, options),
+    runDeterministicIntake(client, options),
+  ]);
+  assertEquals(manual.totals.write_failures, 0);
+  assertEquals(scheduled.totals.write_failures, 0);
+  // Both calls read the same pre-write cursor before either persisted progress,
+  // proving the fake exercised an actual overlap rather than a serial rerun.
+  assertEquals(manual.source_read.cursor_at, null);
+  assertEquals(scheduled.source_read.cursor_at, null);
+  assertEquals(
+    manual.totals.case_rows_created + scheduled.totals.case_rows_created,
+    1,
+  );
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+  assertEquals(store.makesafe_intake_artifacts.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(store.makesafe_intake_cases[0].state, "exception");
 });
 
 Deno.test("exact selection promoting a cycle-N sibling rebases its selected reopen child to the collapsed cycle", async () => {

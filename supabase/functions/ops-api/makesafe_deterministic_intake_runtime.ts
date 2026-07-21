@@ -85,6 +85,7 @@ export interface DeterministicRuntimeReport {
   totals: DeterministicIntakePlan["totals"] & {
     case_rows_created: number;
     source_rows_created: number;
+    artifacts_created: number;
     drafts_created: number;
     jobs_created: number;
     resumed: number;
@@ -186,6 +187,9 @@ function classifyWriteFailure(error: unknown): string {
   if (/attachment staging failed/i.test(message)) return "attachment_staging";
   if (/lineage parent is not persisted/i.test(message)) {
     return "lineage_parent_pending";
+  }
+  if (/approval prevalidation failed/i.test(message)) {
+    return "approval_validation";
   }
   if (/approval returned no job id/i.test(message)) return "approval_no_job";
   if (/no job link; reconciliation required/i.test(message)) {
@@ -1152,12 +1156,15 @@ function casePayload(
   };
 }
 
+type PersistedOutcome = "artifact" | "draft";
+
 async function stageAttachments(
   client: any,
   caseId: string,
   plan: DeterministicCasePlan,
   sources: Map<string, DeterministicSourceItem>,
   onStorageBlocker: (blocker: string) => void,
+  onPersistedOutcome: (outcome: PersistedOutcome) => void,
 ): Promise<any[]> {
   const result = new Map<string, any>();
   const attachments = plan.sourcePostIds.flatMap((id) =>
@@ -1236,6 +1243,7 @@ async function stageAttachments(
           }`,
         );
       }
+      if (!ledgerError) onPersistedOutcome("artifact");
       if (ledgerError) {
         const { data: raced, error: racedError } = await client.from(
           "makesafe_intake_artifacts",
@@ -1509,6 +1517,31 @@ async function findDraft(
   return data || null;
 }
 
+function approvalPrevalidationMissingFields(
+  plan: DeterministicCasePlan,
+  sourceMap: Map<string, DeterministicSourceItem>,
+): string[] {
+  const missing: string[] = [];
+  if (!plan.identity.builderSlug) missing.push("requesting_company");
+  if (
+    !plan.identity.builderWoCanonical &&
+    !plan.identity.externalRefCanonical
+  ) missing.push("external_ref");
+  if (!plan.identity.clientName) missing.push("client_name");
+  if (!plan.identity.siteAddress) missing.push("site_address");
+  const reportOnly = plan.identity.jobFamily === "roof_report" ||
+    plan.identity.jobFamily === "assessment_report_quote";
+  const hasWorkOrderPdf = plan.sourcePostIds.some((postId) =>
+    (sourceMap.get(postId)?.attachments || []).some((attachment) =>
+      attachment.status === "uploaded" && Boolean(attachment.storagePath) &&
+      (/pdf/i.test(attachment.contentType || "") ||
+        /\.pdf$/i.test(attachment.name || ""))
+    )
+  );
+  if (!reportOnly && !hasWorkOrderPdf) missing.push("work_order_pdf");
+  return missing;
+}
+
 async function ensureDraftAndJob(
   client: any,
   caseId: string,
@@ -1516,6 +1549,7 @@ async function ensureDraftAndJob(
   sourceMap: Map<string, DeterministicSourceItem>,
   approveDraft: (client: any, body: any) => Promise<any>,
   onStorageBlocker: (blocker: string) => void,
+  onPersistedOutcome: (outcome: PersistedOutcome) => void,
 ): Promise<
   {
     jobId: string;
@@ -1524,6 +1558,19 @@ async function ensureDraftAndJob(
     resumed: boolean;
   }
 > {
+  // Run the same required-field gate as approval before storage, artifact-ledger
+  // or draft writes. A validation rejection must leave no persisted side effects.
+  const prevalidationMissing = approvalPrevalidationMissingFields(
+    plan,
+    sourceMap,
+  );
+  if (prevalidationMissing.length) {
+    throw new Error(
+      `deterministic approval prevalidation failed: ${
+        prevalidationMissing.join(", ")
+      }`,
+    );
+  }
   const key = plan.recoveryCursor.sideEffectKeys.draft;
   let draft = await findDraft(client, key);
   let draftCreated = false;
@@ -1535,6 +1582,7 @@ async function ensureDraftAndJob(
       plan,
       sourceMap,
       onStorageBlocker,
+      onPersistedOutcome,
     );
     if (
       !attachments.length && plan.identity.jobFamily !== "roof_report" &&
@@ -1597,6 +1645,7 @@ async function ensureDraftAndJob(
     } else {
       draft = data;
       draftCreated = true;
+      onPersistedOutcome("draft");
     }
   }
   if (draft.approved_job_id) {
@@ -1631,6 +1680,8 @@ async function ensureDraftAndJob(
   if (!jobId) throw new Error("guarded approval returned no job id");
   return { jobId, draftCreated, jobCreated: true, resumed: !draftCreated };
 }
+
+export const _ensureDraftAndJobForTest = ensureDraftAndJob;
 
 // Mirrors makesafe_intake_case_transition_allowed in migration 20260720000001.
 // An upgrade is attempted only along an edge the database already accepts.
@@ -1944,6 +1995,7 @@ export async function runDeterministicIntake(
       ...plan.totals,
       case_rows_created: 0,
       source_rows_created: 0,
+      artifacts_created: 0,
       drafts_created: 0,
       jobs_created: 0,
       resumed: 0,
@@ -2123,9 +2175,12 @@ export async function runDeterministicIntake(
           sourceMap,
           options.approveDraft,
           onStorageBlocker,
+          (outcome) => {
+            if (outcome === "artifact") report.totals.artifacts_created++;
+            if (outcome === "draft") report.totals.drafts_created++;
+          },
         );
         jobId = live.jobId;
-        if (live.draftCreated) report.totals.drafts_created++;
         if (live.jobCreated) report.totals.jobs_created++;
         resumedCase = resumedCase || live.resumed;
         // Sources were already accounted by the pre-job hop above, so this call
