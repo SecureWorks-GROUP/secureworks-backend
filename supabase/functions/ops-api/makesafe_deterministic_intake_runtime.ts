@@ -1378,7 +1378,10 @@ async function resolveSelectedLineage(
         const delta = cycleFromInstructionKey(parentKey) -
           cycleFromInstructionKey(newParentKey);
         const childCycle = cycleFromInstructionKey(item.instructionKey) - delta;
-        const childKey = instructionKeyForCycle(item.instructionKey, childCycle);
+        const childKey = instructionKeyForCycle(
+          item.instructionKey,
+          childCycle,
+        );
         if (childKey !== item.instructionKey) {
           remap.set(item.instructionKey, childKey);
           unresolved = true;
