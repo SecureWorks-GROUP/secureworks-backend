@@ -1,0 +1,21 @@
+{
+  "mode": "legacy",
+  "case_rows": 2,
+  "max_cases": 1,
+  "source_rows": 8,
+  "target_cycle": 1,
+  "artifact_rows": 4,
+  "target_exists": true,
+  "target_is_root": true,
+  "target_case_state": "exception",
+  "target_draft_rows": 1,
+  "target_case_reason": "adapter_parse_failure",
+  "target_job_present": false,
+  "target_source_rows": 4,
+  "target_artifact_rows": 2,
+  "target_client_present": false,
+  "source_allowlist_count": 1,
+  "deterministic_draft_rows": 2,
+  "canonical_cases_with_jobs": 0,
+  "instruction_allowlist_count": 0
+}

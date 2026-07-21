@@ -1,0 +1,17 @@
+{
+  "blocker": "no_full_live_selection_mode",
+  "runtime_requires_nonempty_exact_allowlist": true,
+  "empty_allowlist_behavior": "throws_before_business_writes",
+  "source_allowlist_max_items": 50,
+  "instruction_allowlist_max_items": 50,
+  "case_cap_range": [1, 10],
+  "automatic_future_mail_allowlist_producer_found": false,
+  "safe_interpretation": "The current contract supports guarded exact batches only. It cannot process arbitrary future incoming mail without an external allowlist producer or a separately designed full-live mode.",
+  "unsafe_options_rejected": [
+    "empty both allowlists while deterministic",
+    "leave the settled N=1 source as the only allowlist entry",
+    "claim a finite current-source batch is full live"
+  ],
+  "widening_attempted": false,
+  "rollback_to_legacy_completed": true
+}
