@@ -1,0 +1,12 @@
+{
+  "intake_mode": "legacy",
+  "source_allowlist_count": 0,
+  "instruction_allowlist_count": 0,
+  "case_rows": 0,
+  "case_source_rows": 0,
+  "case_event_rows": 0,
+  "artifact_rows": 0,
+  "deterministic_draft_rows": 0,
+  "live_scan_cursor_at": null,
+  "observe_cursor_at": "2026-06-05 05:36:24+00"
+}
