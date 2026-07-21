@@ -1,0 +1,15 @@
+{
+  "slug": "ops-api",
+  "version": 842,
+  "status": "ACTIVE",
+  "verify_jwt": false,
+  "updated_at": 1784621718935,
+  "release_commit": "c283b6a6241828e915fe0538be36fb00ed7f85f9",
+  "guarded_smoke": {
+    "passed": 9,
+    "failed": 0
+  },
+  "effective_mode": "legacy",
+  "version_endpoint_verified": true,
+  "deployed_at": "2026-07-21T08:14:36Z"
+}
