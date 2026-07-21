@@ -354,8 +354,9 @@ async function fetchCapped(
   return rows.slice(0, cap);
 }
 
-// Graph post ids are long. Keep PostgREST .in() URLs comfortably below gateway
-// limits rather than batching by a row-count that is safe only for UUIDs.
+// Graph post ids and deterministic instruction keys are long. Keep PostgREST
+// .in() URLs comfortably below gateway limits rather than batching by a
+// row-count that is safe only for UUIDs.
 function chunk<T>(values: readonly T[], size = 25): T[][] {
   const result: T[][] = [];
   for (let i = 0; i < values.length; i += size) {
@@ -1346,7 +1347,7 @@ async function resolveSelectedLineage(
   if (!externalParentKeys.length) return { plan, missingParents: [] };
 
   const persisted = new Set<string>();
-  for (const keys of chunk(externalParentKeys, 200)) {
+  for (const keys of chunk(externalParentKeys)) {
     const { data, error } = await client.from("makesafe_intake_cases")
       .select("instruction_key")
       .eq("org_id", DEFAULT_ORG_ID)
@@ -1453,7 +1454,7 @@ async function readPersistedCases(
   cases: readonly DeterministicCasePlan[],
 ): Promise<Map<string, any>> {
   const rows = new Map<string, any>();
-  for (const keys of chunk(cases.map((c) => c.instructionKey), 200)) {
+  for (const keys of chunk(cases.map((c) => c.instructionKey))) {
     const { data, error } = await client.from("makesafe_intake_cases")
       .select("id,instruction_key,lineage_id,cycle,state,job_id")
       .eq("org_id", DEFAULT_ORG_ID)
@@ -1478,7 +1479,7 @@ async function readPersistedSourcePostIds(
   caseIds: readonly string[],
 ): Promise<Map<string, Set<string>>> {
   const byCase = new Map<string, Set<string>>();
-  for (const ids of chunk(caseIds, 200)) {
+  for (const ids of chunk(caseIds)) {
     // A truncated page would look like unaccounted evidence and put stuck cases
     // back at the head of every run, so the read is paged to exhaustion.
     for (let from = 0;; from += SOURCE_PAGE_SIZE) {
