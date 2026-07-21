@@ -845,6 +845,14 @@ function instructionKeyForCycle(instructionKey: string, cycle: number): string {
   return instructionKey.replace(/\/cycle:\d+$/, `/cycle:${cycle}`);
 }
 
+function cycleFromInstructionKey(instructionKey: string): number {
+  const match = instructionKey.match(/\/cycle:(\d+)$/);
+  if (!match) {
+    throw new Error("deterministic instruction key has no cycle suffix");
+  }
+  return Number(match[1]);
+}
+
 function rekeyCasePlan(
   intakeCase: DeterministicCasePlan,
   instructionKey: string,
@@ -1349,14 +1357,40 @@ async function resolveSelectedLineage(
     }
     return item;
   });
-  const relinked = keyRemap.size
-    ? cases.map((item) => {
-      const parentKey = item.parentInstructionKey;
-      if (!parentKey) return item;
-      const rootKey = keyRemap.get(parentKey);
-      return rootKey ? { ...item, parentInstructionKey: rootKey } : item;
-    })
-    : cases;
+  // Promoting a parent to cycle 1 collapses that lineage's entire cycle numbering.
+  // Re-pointing a selected revision/reopen child at the rebased parent is not
+  // enough: the child's own /cycle:N suffix was computed against the pre-promotion
+  // depth, while the trigger now derives the child's cycle from the collapsed
+  // parent, so the child insert would hit the same instruction-key cycle check
+  // this promotion targets. Shift every descendant's key suffix and cycle by the
+  // same collapse delta, cascading through grandchildren whose parents were
+  // themselves rebased.
+  let relinked = cases;
+  if (keyRemap.size) {
+    const remap = new Map(keyRemap);
+    for (let unresolved = true; unresolved;) {
+      unresolved = false;
+      relinked = relinked.map((item) => {
+        const parentKey = item.parentInstructionKey;
+        if (!parentKey) return item;
+        const newParentKey = remap.get(parentKey);
+        if (!newParentKey || newParentKey === parentKey) return item;
+        const delta = cycleFromInstructionKey(parentKey) -
+          cycleFromInstructionKey(newParentKey);
+        const childCycle = cycleFromInstructionKey(item.instructionKey) - delta;
+        const childKey = instructionKeyForCycle(item.instructionKey, childCycle);
+        if (childKey !== item.instructionKey) {
+          remap.set(item.instructionKey, childKey);
+          unresolved = true;
+        }
+        return {
+          ...rekeyCasePlan(item, childKey),
+          parentInstructionKey: newParentKey,
+          cycle: childCycle,
+        };
+      });
+    }
+  }
   const selectedResolvedKeys = new Set(
     relinked.map((item) => item.instructionKey),
   );

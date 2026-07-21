@@ -1918,6 +1918,127 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
   assertEquals(store.makesafe_intake_drafts.length, 0);
 });
 
+Deno.test("exact selection promoting a cycle-N sibling rebases its selected reopen child to the collapsed cycle", async () => {
+  const store = baseStore();
+  store.emails.push(
+    // Same lineage shape as the single-case canary, but the exact selection now
+    // also pulls the promoted sibling's own reopen child. The sibling is a cycle-3
+    // review exception and the reopen is its cycle-4 child.
+    email({
+      post_id: "child-ambient-po",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-A",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-ambient-reopen-1",
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-C",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-ambient-reopen-2",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-D",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-selected-po",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-B",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+    email({
+      post_id: "child-selected-reopen",
+      received_at: "2026-07-12T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-E",
+      body_content: "Address: 7 Child Street, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-child-selected",
+    email_id: "child-selected-po",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/child-selected.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const plannedInputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 5,
+    seedPostIds: ["child-selected-po", "child-selected-reopen"],
+    cursor: null,
+  });
+  const preAuthorityPlan = buildDeterministicIntakePlan(
+    plannedInputs.sources,
+    plannedInputs.profiles,
+  );
+  const promotedSibling = preAuthorityPlan.cases.find((item) =>
+    item.sourcePostIds.includes("child-selected-po")
+  );
+  const reopenChild = preAuthorityPlan.cases.find((item) =>
+    item.sourcePostIds.includes("child-selected-reopen")
+  );
+  assert(promotedSibling);
+  assert(reopenChild);
+  // Before N=1 authority: the fresh sibling is a cycle-3 exception and the reopen
+  // is its cycle-4 child. A naive promotion to cycle 1 would collapse the sibling
+  // but leave the child's /cycle:4 suffix disagreeing with the trigger-derived
+  // cycle, hitting the exact instruction-key cycle check this fix targets.
+  assertEquals(promotedSibling.cycle, 3);
+  assertEquals(promotedSibling.parentRelation, "sibling_of");
+  assert(/\/cycle:3$/.test(promotedSibling.instructionKey));
+  assertEquals(reopenChild.cycle, 4);
+  assertEquals(reopenChild.parentRelation, "reopen_of");
+  assertEquals(
+    reopenChild.parentInstructionKey,
+    promotedSibling.instructionKey,
+  );
+  assert(/\/cycle:4$/.test(reopenChild.instructionKey));
+
+  const run = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 5,
+    maxCases: 2,
+    allowSourcePostIds: ["child-selected-po", "child-selected-reopen"],
+    includeSanitizedCases: true,
+    approveDraft,
+  });
+
+  // Both cases commit with no cycle-check failure: the promoted sibling roots the
+  // lineage at cycle 1 and its selected reopen child rebases to cycle 2, the cycle
+  // the trigger derives from the collapsed parent.
+  assertEquals(run.selection.selected_cases, 2);
+  assertEquals(run.totals.write_failures, 0);
+  assertEquals(run.totals.cases_failed, 0);
+  assertEquals(run.totals.case_rows_created, 2);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+
+  const persistedRoot = store.makesafe_intake_cases.find((row) =>
+    row.parent_relation == null
+  );
+  const persistedChild = store.makesafe_intake_cases.find((row) =>
+    row.parent_relation === "reopen_of"
+  );
+  assert(persistedRoot);
+  assert(persistedChild);
+  assertEquals(persistedRoot.cycle, 1);
+  assert(/\/cycle:1$/.test(persistedRoot.instruction_key));
+  assertEquals(persistedChild.cycle, 2);
+  assert(/\/cycle:2$/.test(persistedChild.instruction_key));
+  assertEquals(persistedChild.parent_case_id, persistedRoot.id);
+  assertEquals(persistedChild.lineage_id, persistedRoot.lineage_id);
+});
+
 Deno.test("semantic lineage parent fails identically in observe and live before every business write", async () => {
   const store = baseStore();
   store.emails.push(
