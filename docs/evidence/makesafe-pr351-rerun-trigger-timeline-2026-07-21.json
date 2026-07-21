@@ -1,0 +1,59 @@
+{
+  "authority_switch": {
+    "deterministic_at": "2026-07-21T10:02:45.697835Z",
+    "legacy_rollback_at": "2026-07-21T10:03:51.077064Z"
+  },
+  "pre_activation_scheduled_run": {
+    "monitor_started_at": "2026-07-21T10:01:00.526Z",
+    "ops_scan_started_at": "2026-07-21T10:01:01.829Z",
+    "ops_scan_completed_at": "2026-07-21T10:01:08.433Z",
+    "monitor_completed_at": "2026-07-21T10:01:08.479Z",
+    "completed_before_deterministic_activation": true
+  },
+  "manual_canary": {
+    "request_started_at": "2026-07-21T10:02:53.538Z",
+    "generated_at": "2026-07-21T10:02:53.621Z",
+    "case_insert_at": "2026-07-21T10:02:54.850Z",
+    "last_source_insert_at": "2026-07-21T10:02:55.066Z",
+    "health_write_at": "2026-07-21T10:02:55.088Z",
+    "request_completed_at": "2026-07-21T10:02:55.124Z",
+    "reported_drafts_created": 0,
+    "reported_write_failures": 0
+  },
+  "scheduled_initiator": {
+    "cron_job_id": 90,
+    "cron_job_name": "makesafe-ses-poll",
+    "schedule": "1-59/2 * * * *",
+    "cron_started_at": "2026-07-21T10:03:00.055014Z",
+    "cron_enqueue_completed_at": "2026-07-21T10:03:00.062081Z",
+    "database_trigger_function": "public.trigger_monitor_ses_makesafes()",
+    "edge_function": "monitor-ses-makesafes",
+    "monitor_started_at": "2026-07-21T10:03:00.517Z",
+    "tail_called_action": "ops-api?action=scan_ses_makesafes",
+    "tail_call_started_at": "2026-07-21T10:03:01.602Z",
+    "rollout_settings_read_at": "2026-07-21T10:03:01.624Z",
+    "mode_at_settings_read": "deterministic",
+    "tail_call_completed_http_200_at": "2026-07-21T10:03:05.551Z",
+    "monitor_completed_at": "2026-07-21T10:03:05.581Z"
+  },
+  "scheduled_deterministic_writes": {
+    "source_authority_read_at": "2026-07-21T10:03:01.652Z",
+    "scan_cursor_health_write_at": "2026-07-21T10:03:02.481Z",
+    "duplicate_source_conflicts": 4,
+    "first_artifact_insert_at": "2026-07-21T10:03:03.613Z",
+    "second_artifact_insert_at": "2026-07-21T10:03:04.207Z",
+    "draft_insert_at": "2026-07-21T10:03:05.231Z",
+    "final_health_write_at": "2026-07-21T10:03:05.523Z"
+  },
+  "legacy_hypothesis": {
+    "tested": true,
+    "result": "rejected",
+    "reason": "The pre-activation 10:01 scheduled run completed at 10:01:08.479. The creating 10:03 invocation began after activation, read rollout settings 35.926 seconds after deterministic activation, and then used deterministic-only source-authority, artifact-ledger and deterministic-draft paths. All created rows carry deterministic v2 markers."
+  },
+  "post_rollback_legacy_scan": {
+    "last_scan_at": "2026-07-21T10:05:11.909Z",
+    "last_scan_model_calls": 1,
+    "separate_from_canary_writes": true
+  },
+  "business_identifiers_redacted": true
+}

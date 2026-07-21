@@ -1,0 +1,58 @@
+{
+  "timestamps_unit": "microseconds_since_epoch",
+  "events": [
+    {
+      "timestamp": 1784628174850000,
+      "event": "first_case_insert_201"
+    },
+    {
+      "timestamp": 1784628174987000,
+      "event": "first_source_insert_1_201"
+    },
+    {
+      "timestamp": 1784628175011000,
+      "event": "first_source_insert_2_201"
+    },
+    {
+      "timestamp": 1784628175035000,
+      "event": "first_source_insert_3_201"
+    },
+    {
+      "timestamp": 1784628175066000,
+      "event": "first_source_insert_4_201"
+    },
+    {
+      "timestamp": 1784628181652000,
+      "event": "second_invocation_source_authority_read_200"
+    },
+    {
+      "timestamp": 1784628182765000,
+      "event": "second_invocation_duplicate_source_1_409"
+    },
+    {
+      "timestamp": 1784628182784000,
+      "event": "second_invocation_duplicate_source_2_409"
+    },
+    {
+      "timestamp": 1784628182807000,
+      "event": "second_invocation_duplicate_source_3_409"
+    },
+    {
+      "timestamp": 1784628182827000,
+      "event": "second_invocation_duplicate_source_4_409"
+    },
+    {
+      "timestamp": 1784628183613000,
+      "event": "second_invocation_artifact_1_201"
+    },
+    {
+      "timestamp": 1784628184207000,
+      "event": "second_invocation_artifact_2_201"
+    },
+    {
+      "timestamp": 1784628185231000,
+      "event": "second_invocation_draft_201"
+    }
+  ],
+  "request_urls_and_business_identifiers_redacted": true
+}

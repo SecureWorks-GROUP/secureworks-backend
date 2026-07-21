@@ -1,0 +1,20 @@
+{
+  "first_plan_case": {
+    "missing_fields": [
+      "client_name"
+    ],
+    "story_event_count": 28,
+    "client_evidence_count": 0,
+    "searched_source_count": 251,
+    "client_manifest_status": "missing",
+    "client_identity_present": false
+  },
+  "second_plan_draft": {
+    "story_event_count": 28,
+    "draft_missing_fields": [],
+    "client_evidence_count": 3,
+    "searched_source_count": 359,
+    "client_manifest_status": "satisfied",
+    "client_identity_present": false
+  }
+}

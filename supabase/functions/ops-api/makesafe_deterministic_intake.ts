@@ -215,6 +215,17 @@ export interface DeterministicCasePlan {
   evidenceMap: Readonly<Record<string, EvidenceMapEntry>>;
   sourceClassifications: readonly DeterministicSourceClassification[];
   recoveryCursor: RecoveryCursor;
+  // A combined make-safe + report obligation, when the primary is a physical
+  // make-safe and a separate report card is still owed. Mirrors the AI intake's
+  // extraction.secondary_obligation so a report-family plan carrying this is
+  // treated as physical by both prevalidation and the approval split machinery.
+  secondaryObligation?:
+    | Readonly<{
+      type: string;
+      reason: string;
+      detail?: string;
+    }>
+    | null;
 }
 
 export interface DeterministicIntakePlan {
@@ -1298,6 +1309,25 @@ export function buildDeterministicIntakePlan(
 
       const manifest = manifestFor(merged.identity, intent);
       const evidenceMap = buildEvidenceMap(manifest, sortedCluster);
+      // Case-wide recovery may discover supporting client evidence on a sibling
+      // instruction, but that evidence cannot populate this instruction's canonical
+      // identity. Never let an off-case candidate make a null client look live-ready:
+      // guarded approval validates the actual canonical field, not the cluster hint.
+      if (!merged.identity.clientName && evidenceMap.client_name) {
+        const candidateLocators = evidenceMap.client_name.evidence.map((item) =>
+          item.locator
+        );
+        evidenceMap.client_name = {
+          ...evidenceMap.client_name,
+          status: "missing",
+          evidence: [],
+          rejectedCandidateLocators: [
+            ...evidenceMap.client_name.rejectedCandidateLocators,
+            ...candidateLocators,
+          ],
+          nextRecoveryAction: "extract_client_name_from_selected_instruction",
+        };
+      }
       const missingIdentity = manifest.filter((r) =>
         r.required && r.blocking === "identity" &&
         evidenceMap[r.id]?.status === "missing"
