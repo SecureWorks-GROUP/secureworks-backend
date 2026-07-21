@@ -844,6 +844,10 @@ function bindSelectedPlanToPersistedSourceAuthority(
   authorityByPostId: Map<string, PersistedSourceAuthority>,
 ): DeterministicIntakePlan {
   const exactSources = new Set(exactSourcePostIds);
+  // A partial page can compute a different this-run key for a persisted parent.
+  // Any in-plan child parented to that this-run key must follow the parent back to
+  // its stable key, or the lineage guard would read the child as an orphan.
+  const keyRemap = new Map<string, string>();
   const cases = plan.cases.map((intakeCase) => {
     const authorities = new Map<string, PersistedSourceAuthority>();
     for (const postId of intakeCase.sourcePostIds) {
@@ -860,6 +864,7 @@ function bindSelectedPlanToPersistedSourceAuthority(
     const authority = [...authorities.values()][0];
     const oldKey = intakeCase.instructionKey;
     const stableKey = authority.instruction_key;
+    if (oldKey !== stableKey) keyRemap.set(oldKey, stableKey);
     const stableFingerprint = authority.source_fingerprint ||
       intakeCase.instructionFingerprint;
     const rewrite = (value: string) =>
@@ -897,10 +902,19 @@ function bindSelectedPlanToPersistedSourceAuthority(
       },
     };
   });
+  const relinked = keyRemap.size
+    ? cases.map((intakeCase) => {
+      const parentKey = intakeCase.parentInstructionKey;
+      if (!parentKey) return intakeCase;
+      const stableParent = keyRemap.get(parentKey);
+      if (!stableParent || stableParent === parentKey) return intakeCase;
+      return { ...intakeCase, parentInstructionKey: stableParent };
+    })
+    : cases;
   return {
     ...plan,
-    cases,
-    sourceClassifications: cases.flatMap((intakeCase) =>
+    cases: relinked,
+    sourceClassifications: relinked.flatMap((intakeCase) =>
       intakeCase.sourceClassifications
     ),
   };

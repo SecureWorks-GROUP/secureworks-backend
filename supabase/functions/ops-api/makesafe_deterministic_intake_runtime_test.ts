@@ -1771,6 +1771,101 @@ Deno.test("unselected lineage parent fails before every business write", async (
   );
 });
 
+Deno.test("a re-keyed persisted parent re-points its in-plan child instead of failing closed", async () => {
+  const store = baseStore();
+  // Run one persists the parent instruction alone, fixing its stable key/root.
+  store.emails.push(email({
+    post_id: "multi-parent-po",
+    received_at: "2026-07-05T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-A",
+    body_content: "Client: Multi Client\nAddress: 3 Multi Street, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-multi-parent",
+    email_id: "multi-parent-po",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/multi-parent.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const first = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 50,
+    allowSourcePostIds: ["multi-parent-po"],
+    includeSanitizedCases: true,
+    approveDraft,
+  });
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.proposed_cases?.[0].parent_relation, null);
+  const parentStableHash = first.proposed_cases?.[0].case_key_sha256;
+  assert(parentStableHash);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+
+  // A twin of the parent instruction arrives and drifts the parent group's
+  // fingerprint, so this run computes a different this-run key for the persisted
+  // parent. A brand-new distinct-PO sibling child is parented to that this-run
+  // key. Rebinding the parent back to its stable key must also re-point the child.
+  store.emails.push(
+    email({
+      post_id: "multi-parent-twin",
+      received_at: "2026-07-06T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-A",
+      body_content:
+        "Client: Multi Client\nAddress: 3 Multi Street, Perth\nFollow-up copy for the same order.",
+    }),
+    email({
+      post_id: "multi-child-po",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-B",
+      body_content: "Client: Multi Client\nAddress: 3 Multi Street, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-multi-child",
+    email_id: "multi-child-po",
+    name: "wo.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/multi-child.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+
+  const second = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 50,
+    maxCases: 2,
+    allowSourcePostIds: ["multi-parent-po", "multi-child-po"],
+    includeSanitizedCases: true,
+    approveDraft,
+  });
+
+  // The lineage guard must not fail closed: the parent is present under its stable
+  // key, and the child was re-pointed to it rather than left dangling on the
+  // parent's this-run key.
+  assertEquals(second.write_failure_reasons.lineage_parent_unselected, undefined);
+  assertEquals(second.totals.write_failures, 0);
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(second.selection.selected_cases, 2);
+  assert(
+    second.proposed_cases?.some((c) =>
+      c.case_key_sha256 === parentStableHash && c.parent_relation === null
+    ),
+    "persisted parent retains its stable key and root identity",
+  );
+  assert(
+    second.proposed_cases?.some((c) => c.parent_relation === "sibling_of"),
+    "the newly-arrived child is planned as a re-pointed sibling",
+  );
+  // The new child instruction becomes its own persisted case alongside the parent.
+  assertEquals(store.makesafe_intake_cases.length, 2);
+});
+
 Deno.test("an allowlisted instruction key is seeded by id and stays cap-proof", async () => {
   const store = baseStore();
   store.emails.push(email({
