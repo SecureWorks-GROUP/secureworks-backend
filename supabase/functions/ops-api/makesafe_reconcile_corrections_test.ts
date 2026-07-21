@@ -186,6 +186,74 @@ Deno.test("reviewed family correction refuses stale before value", async () => {
   assertEquals(store.events, []);
 });
 
+Deno.test("reviewed family correction surfaces detail error even when metadata rollback fails", async () => {
+  const store = fixture();
+  const detailError = new Error("detail update failed");
+  let jobUpdateCount = 0;
+  const client = {
+    from(table: string) {
+      let updatePayload: any = null;
+      const chain: any = {
+        select() {
+          return chain;
+        },
+        update(payload: any) {
+          updatePayload = payload;
+          return chain;
+        },
+        eq() {
+          return chain;
+        },
+        single() {
+          if (table === "jobs") {
+            return Promise.resolve({
+              data: structuredClone(store.job),
+              error: null,
+            });
+          }
+          return Promise.resolve({
+            data: structuredClone(store.detail),
+            error: null,
+          });
+        },
+        then(resolve: any, reject: any) {
+          try {
+            if (table === "jobs") {
+              jobUpdateCount += 1;
+              if (jobUpdateCount >= 2) throw new Error("rollback failed");
+              return Promise.resolve(resolve({ data: null, error: null }));
+            }
+            if (table === "makesafe_job_details") {
+              return Promise.resolve(
+                resolve({ data: null, error: detailError }),
+              );
+            }
+            return Promise.resolve(resolve({ data: null, error: null }));
+          } catch (error) {
+            return reject
+              ? Promise.resolve(reject(error))
+              : Promise.reject(error);
+          }
+        },
+      };
+      return chain;
+    },
+  };
+
+  const err = await assertRejects(
+    () =>
+      _updateMakesafeJobFamily(client, {
+        job_id: "job-1",
+        expected_before_family: "general_makesafe",
+        makesafe_job_family: "roof_report",
+      }),
+    Error,
+    "detail update failed",
+  );
+  assertEquals(err, detailError);
+  assertEquals(jobUpdateCount, 2);
+});
+
 Deno.test("reviewed family consistency: no override is always allowed", () => {
   _assertReviewedFamilyConsistency(null, null, false, false);
   _assertReviewedFamilyConsistency(null, "roof_report", false, true);

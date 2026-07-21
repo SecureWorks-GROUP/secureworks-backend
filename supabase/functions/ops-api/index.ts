@@ -9706,11 +9706,7 @@ async function updateMakesafeJobFamily(client: any, body: any) {
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
     .select('job_id, report_type, substatus').eq('job_id', jId).single()
   if (detailErr || !detail) throw detailErr || new ApiError('make-safe details not found', 404)
-  const nextReportType = family === 'roof_report'
-    ? 'roof_report'
-    : family === 'assessment_report_quote'
-    ? 'assessment_report'
-    : null
+  const nextReportType = _reportTypeForJobFamily(family)
   const nowIso = new Date().toISOString()
   const nextMetadata = {
     ...beforeMetadata,
@@ -9723,7 +9719,10 @@ async function updateMakesafeJobFamily(client: any, body: any) {
   const { error: updateDetailErr } = await client.from('makesafe_job_details')
     .update({ report_type: nextReportType, updated_at: nowIso }).eq('job_id', jId)
   if (updateDetailErr) {
-    await client.from('jobs').update({ metadata: beforeMetadata, updated_at: new Date().toISOString() }).eq('id', jId)
+    await client.from('jobs')
+      .update({ metadata: beforeMetadata, updated_at: new Date().toISOString() })
+      .eq('id', jId)
+      .then(() => {}).catch(() => {})
     throw updateDetailErr
   }
 
