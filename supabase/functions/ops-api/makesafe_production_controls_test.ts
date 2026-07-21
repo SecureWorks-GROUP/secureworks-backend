@@ -35,6 +35,7 @@ Deno.test("DB rollout controls return exact N=1 source authority", async () => {
   const controls = await loadDeterministicRolloutControls(clientFor({
     data: {
       intake_mode: "deterministic",
+      deterministic_selection_mode: "exact",
       deterministic_max_cases_per_run: 1,
       deterministic_source_allowlist: ["approved-source"],
       deterministic_instruction_allowlist: [],
@@ -43,6 +44,7 @@ Deno.test("DB rollout controls return exact N=1 source authority", async () => {
   }));
   assertEquals(controls, {
     mode: "deterministic",
+    selectionMode: "exact",
     maxCases: 1,
     sourcePostIds: ["approved-source"],
     instructionKeys: [],
@@ -55,6 +57,7 @@ Deno.test("invalid or duplicate rollout values fail closed", async () => {
       loadDeterministicRolloutControls(clientFor({
         data: {
           intake_mode: "deterministic",
+          deterministic_selection_mode: "exact",
           deterministic_max_cases_per_run: 25,
           deterministic_source_allowlist: ["approved-source"],
           deterministic_instruction_allowlist: [],
@@ -69,6 +72,7 @@ Deno.test("invalid or duplicate rollout values fail closed", async () => {
       loadDeterministicRolloutControls(clientFor({
         data: {
           intake_mode: "deterministic",
+          deterministic_selection_mode: "exact",
           deterministic_max_cases_per_run: 1,
           deterministic_source_allowlist: ["same", "same"],
           deterministic_instruction_allowlist: [],
@@ -80,10 +84,62 @@ Deno.test("invalid or duplicate rollout values fail closed", async () => {
   );
 });
 
+Deno.test("full-open authority is explicit and mutually exclusive with exact allowlists", async () => {
+  const controls = await loadDeterministicRolloutControls(clientFor({
+    data: {
+      intake_mode: "deterministic",
+      deterministic_selection_mode: "full_open",
+      deterministic_max_cases_per_run: 3,
+      deterministic_source_allowlist: [],
+      deterministic_instruction_allowlist: [],
+    },
+    error: null,
+  }));
+  assertEquals(controls, {
+    mode: "deterministic",
+    selectionMode: "full_open",
+    maxCases: 3,
+    sourcePostIds: [],
+    instructionKeys: [],
+  });
+
+  await assertRejects(
+    () =>
+      loadDeterministicRolloutControls(clientFor({
+        data: {
+          intake_mode: "deterministic",
+          deterministic_selection_mode: "full_open",
+          deterministic_max_cases_per_run: 1,
+          deterministic_source_allowlist: ["must-not-mix"],
+          deterministic_instruction_allowlist: [],
+        },
+        error: null,
+      })),
+    Error,
+    "full_open mode requires empty exact allowlists",
+  );
+  await assertRejects(
+    () =>
+      loadDeterministicRolloutControls(clientFor({
+        data: {
+          intake_mode: "deterministic",
+          deterministic_selection_mode: "exact",
+          deterministic_max_cases_per_run: 1,
+          deterministic_source_allowlist: [],
+          deterministic_instruction_allowlist: [],
+        },
+        error: null,
+      })),
+    Error,
+    "exact mode requires a non-empty exact allowlist",
+  );
+});
+
 Deno.test("one-switch rollback on current schema returns authority to legacy", async () => {
   const controls = await loadDeterministicRolloutControls(clientFor({
     data: {
       intake_mode: "legacy",
+      deterministic_selection_mode: "exact",
       deterministic_max_cases_per_run: 10,
       deterministic_source_allowlist: ["inert-after-rollback"],
       deterministic_instruction_allowlist: [],
@@ -103,6 +159,7 @@ Deno.test("old schema is legal only while legacy retains authority", async () =>
   };
   const legacy = await loadDeterministicRolloutControls(clientFor(missing));
   assertEquals(legacy.mode, "legacy");
+  assertEquals(legacy.selectionMode, "exact");
   assertEquals(legacy.maxCases, 1);
   await assertRejects(
     () =>

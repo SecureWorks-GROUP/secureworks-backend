@@ -1,0 +1,66 @@
+{
+  "deployed_commit": "99d80345ceec94026c5f3d4f3bfa54048cea686b",
+  "ops_api_version": 851,
+  "guarded_smoke": {"passed": 9, "failed": 0},
+  "preflight": {"passed": 4, "failed": 0},
+  "alarm_readiness": true,
+  "activation_at": "2026-07-21T11:00:25.563262Z",
+  "exact_controls": {
+    "max_cases": 1,
+    "source_allowlist_count": 1,
+    "instruction_allowlist_count": 0
+  },
+  "manual_scan_1": {
+    "generated_at": "2026-07-21T11:00:44.712Z",
+    "case_rows_created": 0,
+    "source_rows_created": 0,
+    "artifacts_created": 0,
+    "drafts_created": 0,
+    "jobs_created": 0,
+    "write_failures": 0,
+    "ai_calls": 0
+  },
+  "scheduled_scan_1": {
+    "last_scan_at": "2026-07-21T11:01:02.098Z",
+    "health_status": "ok",
+    "health_reason": null,
+    "last_scan_drafts_created": 0,
+    "last_scan_jobs_created": 0,
+    "last_scan_model_calls": 0
+  },
+  "manual_scan_2": {
+    "generated_at": "2026-07-21T11:01:56.375Z",
+    "case_rows_created": 0,
+    "source_rows_created": 0,
+    "artifacts_created": 0,
+    "drafts_created": 0,
+    "jobs_created": 0,
+    "write_failures": 0,
+    "ai_calls": 0
+  },
+  "scheduled_scan_2": {
+    "last_scan_at": "2026-07-21T11:03:02.104Z",
+    "health_status": "ok",
+    "health_reason": null,
+    "last_scan_drafts_created": 0,
+    "last_scan_jobs_created": 0,
+    "last_scan_model_calls": 0
+  },
+  "baseline_counts": {
+    "cases": 2,
+    "sources": 8,
+    "artifacts": 4,
+    "deterministic_drafts": 2,
+    "canonical_cases_with_jobs": 0
+  },
+  "final_counts": {
+    "cases": 2,
+    "sources": 8,
+    "artifacts": 4,
+    "deterministic_drafts": 2,
+    "canonical_cases_with_jobs": 0
+  },
+  "n1_result": "clean_green",
+  "widening_attempted": false,
+  "effective_mode_after_safe_stop": "legacy"
+}

@@ -115,8 +115,8 @@ SELECT cron.schedule('makesafe-ses-poll', '*/2 * * * *',
    bare db push never starts polling) and `auto_file_enabled = true` (Captain D1).
 6. **Health:** `intake_health` → `healthy: true` (classifier ok AND unaccounted = 0 AND a
    known `intake_mode` AND `alarm_readiness.ready`). The response also carries `intake_mode`
-   and a `deterministic_rollout` block (`max_cases_per_run`, source/instruction allowlist
-   counts, `exact_allowlist_configured`).
+   and a `deterministic_rollout` block (`selection_mode`, `max_cases_per_run`,
+   source/instruction allowlist counts, `exact_allowlist_configured`).
 7. **Proof (Captain's D1 rider — joint accuracy-testing window):** `intake_golden_replay` — read
    each email's replay verdict vs the draft/job actually created; investigate any
    `agreement.draft_presence_match: false` or `family_match: false`. This is the artifact to walk

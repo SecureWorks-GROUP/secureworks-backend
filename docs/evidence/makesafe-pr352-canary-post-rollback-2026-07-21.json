@@ -1,0 +1,15 @@
+{
+  "case_rows": 2,
+  "source_rows": 8,
+  "last_scan_at": "2026-07-21T11:03:02.104+00:00",
+  "artifact_rows": 4,
+  "effective_mode": "legacy",
+  "last_health_mode": "deterministic",
+  "last_scan_reason": null,
+  "last_scan_status": "ok",
+  "last_scan_auto_filed": 0,
+  "last_scan_model_calls": 0,
+  "deterministic_draft_rows": 2,
+  "last_scan_drafts_created": 0,
+  "canonical_cases_with_jobs": 0
+}

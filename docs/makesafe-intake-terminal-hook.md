@@ -17,8 +17,10 @@ invoice, send or client-contact authority.
 
 The scheduled path calls `scan_ses_makesafes`. When the DB authority is
 `deterministic`, it runs only deterministic adapters and records `ai_calls=0`. The DB
-case cap and exact source/instruction allowlists remain authoritative. No API key for a
-paid extraction model is required or read by this branch.
+case cap and selection mode remain authoritative: `exact` selection requires and reads
+the source/instruction allowlists, while separately approved `full_open` selection
+requires both allowlists empty and processes only the bounded cursor page. No API key
+for a paid extraction model is required or read by this branch.
 
 ### Terminal make-safe skill
 

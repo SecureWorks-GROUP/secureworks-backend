@@ -16,6 +16,12 @@ const controlsMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const fullOpenMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260721000002_makesafe_intake_full_open.sql",
+    import.meta.url,
+  ),
+);
 const rollback = await Deno.readTextFile(
   new URL(
     "../../rollbacks/20260720000002_makesafe_deterministic_intake_mode_rollback.sql",
@@ -133,6 +139,31 @@ Deno.test("production controls default to N=1, exact empty allowlists and bounde
   assertStringIncludes(runtime, "loadDeterministicRolloutControls");
   assertStringIncludes(runtime, "requires a non-empty exact DB allowlist");
   assertStringIncludes(index, "requireAllAllowlistMatches: true");
+});
+
+Deno.test("full-open is explicit, bounded and distinct from exact-empty fail-closed", () => {
+  assertStringIncludes(
+    fullOpenMigration,
+    "deterministic_selection_mode text NOT NULL DEFAULT 'exact'",
+  );
+  assertStringIncludes(
+    fullOpenMigration,
+    "deterministic_selection_mode IN ('exact', 'full_open')",
+  );
+  assertStringIncludes(
+    fullOpenMigration,
+    "makesafe_cron_settings_full_open_empty_allowlists_check",
+  );
+  assertStringIncludes(runtime, 'selectionMode === "full_open"');
+  assertStringIncludes(
+    runtime,
+    "deterministic exact mode requires a non-empty exact DB allowlist",
+  );
+  assertStringIncludes(
+    runtime,
+    "deterministic full_open mode requires empty exact allowlists",
+  );
+  assertStringIncludes(index, "selectionMode: rollout.selectionMode");
 });
 
 Deno.test("attachment staging uses a content hash and append-only artifact ledger", () => {

@@ -234,9 +234,11 @@ is to apply `20260717000001_jobs_quoted_value_generated.sql`. `ops-api` and
 key derived from `pricing_json`, and `ops-api` `pipeline` deliberately projects
 `pricing_json` paths instead so the read is not coupled to migration order.
 Deterministic make-safe intake also requires
-`20260721000001_makesafe_intake_production_controls.sql`
-before its matching `ops-api`: health and scan read those rollout/auth columns.
-The migration is inert (`intake_mode` stays `legacy`); do not deploy code first.
+`20260721000001_makesafe_intake_production_controls.sql` and then
+`20260721000002_makesafe_intake_full_open.sql` before its matching `ops-api`:
+health and scan read those rollout/auth/selection columns. Both migrations are
+inert (`intake_mode` stays `legacy`, selection defaults to `exact`); do not deploy
+code first.
 Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual
 intake checks all use the deterministic contract in
 `docs/makesafe-intake-terminal-hook.md`.

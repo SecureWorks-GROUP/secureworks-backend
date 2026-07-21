@@ -15009,6 +15009,7 @@ async function scanSesMakesafes(client: any) {
   if (rollout.mode === 'deterministic') {
     return await _runDeterministicIntake(client, {
       dryRun: false,
+      selectionMode: rollout.selectionMode,
       days: 60,
       // Exact allowlists make the read narrow at case selection time. Include
       // already-scanned sources so a configured key can be proved on every run;
@@ -16881,7 +16882,7 @@ async function intakeHealth(client: any) {
   const { data: health } = await client.from('makesafe_intake_health')
     .select('*').eq('id', true).maybeSingle()
   const { data: settings, error: settingsError } = await client.from('makesafe_cron_settings')
-    .select('cron_enabled, auto_file_enabled, enabled_at, enabled_by, updated_at, intake_mode, deterministic_max_cases_per_run, deterministic_source_allowlist, deterministic_instruction_allowlist')
+    .select('cron_enabled, auto_file_enabled, enabled_at, enabled_by, updated_at, intake_mode, deterministic_selection_mode, deterministic_max_cases_per_run, deterministic_source_allowlist, deterministic_instruction_allowlist')
     .eq('id', true).maybeSingle()
   const { data: sync } = await client.from('sync_state')
     .select('last_successful_sync_at, last_attempt_at, mode, pending_attachments, last_error')
@@ -16988,6 +16989,7 @@ async function intakeHealth(client: any) {
       settings_read_error: settingsError?.message || null,
     },
     deterministic_rollout: {
+      selection_mode: settings?.deterministic_selection_mode ?? null,
       max_cases_per_run: settings?.deterministic_max_cases_per_run ?? null,
       source_allowlist_count: Array.isArray(settings?.deterministic_source_allowlist)
         ? settings.deterministic_source_allowlist.length
