@@ -354,8 +354,9 @@ async function fetchCapped(
   return rows.slice(0, cap);
 }
 
-// Graph post ids are long. Keep PostgREST .in() URLs comfortably below gateway
-// limits rather than batching by a row-count that is safe only for UUIDs.
+// Graph post ids and deterministic instruction keys are long. Keep PostgREST
+// .in() URLs comfortably below gateway limits rather than batching by a
+// row-count that is safe only for UUIDs.
 function chunk<T>(values: readonly T[], size = 25): T[][] {
   const result: T[][] = [];
   for (let i = 0; i < values.length; i += size) {
