@@ -412,6 +412,21 @@ import {
 } from './makesafe_builder_work_order_identity.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
+// Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
+// our-letterhead PDF). Template/pricing/validation helpers are pure; the
+// renderer mirrors makesafe_report_render.ts.
+import { renderRoofReportPdf } from './roof_report_render.ts'
+import {
+  ROOF_REPORT_PACK_KIND,
+  ROOF_REPORT_TEMPLATE_VERSION,
+  getRoofReportTemplate,
+  roofReportPrice,
+  normaliseStorey,
+  validateRoofReportForSubmit,
+  sanitiseRoofReportFields,
+  sanitiseRoofPhotosMeta,
+  buildRoofReportJob,
+} from './roof_report_template.ts'
 // M2/U4 — materials reconciliation queue (ops worklist that drains unmatched
 // non-mirror ACCPAY bills into manual materials facts, auditably).
 import {
@@ -2402,6 +2417,7 @@ if (import.meta.main) serve(async (req: Request) => {
       // which is DELIBERATELY NOT in this allow-list and so is denied by default-deny.
       'create_makesafe_draft_invoice', // creates a Xero DRAFT invoice (reversible, no authorise)
       'makesafe_render_report', // renders the report PDF artifact (no send)
+      'render_roof_report', // Wave 3: renders OUR letterhead roof report PDF + attaches (no send)
       'draft_makesafe_report_pack', // Claude Draft Pack: report + DRAFT invoice + draft PDFs only
       'draft_makesafe_report_pack_due', // cron batch: find trade-report-in jobs and run Draft Pack only
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
@@ -4042,6 +4058,12 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await createMakesafeDraftInvoice(client, body))
       case 'makesafe_render_report':
         return json(await makesafeRenderReport(client, body))
+      // Wave 3 -- SecureWorks own-letterhead roof report. render_roof_report is
+      // routine-safe (renders OUR PDF + attaches it; no send, no authorise). The
+      // roof_report_template read + save_roof_report/submit_roof_report writes are
+      // trade-authenticated and live in the trade block below.
+      case 'render_roof_report':
+        return json(await renderRoofReportAction(client, body))
       case 'draft_makesafe_report_pack':
         return json(await draftMakesafeReportPack(client, body, authMode))
       case 'draft_makesafe_report_pack_due':
@@ -4354,6 +4376,9 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'generate_trade_invoice':
       case 'my_invoices':
       case 'acknowledge_invoice_line':
+      case 'roof_report_template':
+      case 'save_roof_report':
+      case 'submit_roof_report':
       case 'clock_event':
       case 'submit_makesafe_report': {
         const tradeUser = await authTrade(req, client)
@@ -4389,6 +4414,13 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin))
           case 'submit_service_report': return json(await submitServiceReport(client, { ...body, userId: tradeUser.id }))
           case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id))
+          // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled).
+          case 'roof_report_template':
+            return json(await getRoofReportTemplateForJob(client, url.searchParams.get('job_id') || url.searchParams.get('jobId') || body?.job_id || body?.jobId))
+          case 'save_roof_report':
+            return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }))
+          case 'submit_roof_report':
+            return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }))
           case 'update_my_assignment': return json(await updateMyAssignment(client, body, tradeUser.id))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
@@ -23182,7 +23214,12 @@ async function attachEmailAttachmentToJob(
 async function attachMakesafeDocument(client: any, body: any) {
   const jId = body.job_id || body.jobId
   const type = body.type
-  const allowedTypes = ['work_order', 'makesafe_report', 'invoice', 'swms']
+  // 'roof_report' is the SecureWorks own-letterhead roof inspection report. Unlike
+  // 'makesafe_report' (blocked on report-type jobs below), the roof report is
+  // DELIBERATELY produced for report-type jobs -- generating our own letterhead
+  // report is the whole point of the roof-report flow -- so it is not subject to
+  // the report-type gate.
+  const allowedTypes = ['work_order', 'makesafe_report', 'roof_report', 'invoice', 'swms']
   if (!jId) throw new Error('job_id required')
   if (!allowedTypes.includes(type)) {
     throw new Error('type must be one of ' + allowedTypes.join(', '))
@@ -23242,7 +23279,7 @@ async function attachMakesafeDocument(client: any, body: any) {
   // Visibility: report + swms are operational docs trades/ops view on site;
   // invoice is client/admin only; work_order stays trade-visible. Caller may
   // override with visible_to_trades.
-  const defaultVisible = ['work_order', 'makesafe_report', 'swms'].includes(type)
+  const defaultVisible = ['work_order', 'makesafe_report', 'roof_report', 'swms'].includes(type)
   const isVisible = body.visible_to_trades != null ? body.visible_to_trades : defaultVisible
   const isPdf = /\.pdf$/i.test(fileName)
 
@@ -24469,6 +24506,419 @@ async function makesafeRenderReport(client: any, body: any) {
     render_hash: rendered.renderHash,
   }
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Wave 3 -- SecureWorks own-letterhead Roof Report (trade-filled -> our PDF).
+//
+// Flow the trade app binds to:
+//   1. roof_report_template  (READ)   -- schema + job header + any existing draft
+//   2. save_roof_report      (WRITE)  -- draft-safe, idempotent upsert of the fill
+//   3. submit_roof_report    (WRITE)  -- final fill + render OUR PDF + advance the
+//                                        reporting checklist (substatus)
+//   4. render_roof_report    (WRITE)  -- routine-safe re-render/preview (ops)
+//
+// Persistence: makesafe_roof_report_drafts (one row per job, pack_kind='roof').
+// The rendered PDF attaches as job_documents type 'roof_report'. Every write
+// records a job_events audit row. RLS-safe: all writes go through this edge
+// function's service client.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const UUID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+function roofUuidOrNull(v: unknown): string | null {
+  return typeof v === 'string' && UUID_RE.test(v) ? v : null
+}
+
+// Read the job identity the renderer needs (ref/address/contact) from the live
+// job + make-safe detail rows. The report ref is the builder external ref joined
+// with our SWMS job number; the address is site_address + suburb.
+async function loadRoofReportJobMeta(client: any, jobId: string) {
+  const { data: job } = await client.from('jobs')
+    .select('id, job_number, client_name, site_address, site_suburb, metadata')
+    .eq('id', jobId).maybeSingle()
+  if (!job) throw new ApiError('job not found', 404)
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('external_ref').eq('job_id', jobId).maybeSingle()
+  const metaExternalRef = parseJsonObject(job.metadata)?.external_ref || null
+  const externalRef = detail?.external_ref || metaExternalRef || null
+  const ref = [externalRef, job.job_number].filter(Boolean).join(' / ') ||
+    job.job_number || jobId
+  const address = [job.site_address, job.site_suburb].filter(Boolean).join(', ') ||
+    job.site_address || ''
+  return {
+    ref,
+    address,
+    contact: job.client_name || '',
+    client: job.client_name || '',
+    job_number: job.job_number || '',
+  }
+}
+
+// Resolve the photos to render: explicit body.photos wins (may carry base64 for
+// an immediate render), then the persisted draft photo meta (URL + label), then a
+// fall back to the job's completion/scope photos in job_media (labels included).
+// The renderer fetches any URL bytes itself at render time.
+async function resolveRoofReportPhotos(
+  client: any,
+  jobId: string,
+  bodyPhotos: unknown,
+  draftPhotos: unknown,
+): Promise<Array<{ url?: string; bytesBase64?: string; contentType?: string; label?: string }>> {
+  if (Array.isArray(bodyPhotos) && bodyPhotos.length) {
+    return (bodyPhotos as any[]).map((p) => ({
+      url: typeof p?.url === 'string' ? p.url : undefined,
+      bytesBase64: typeof p?.bytesBase64 === 'string' ? p.bytesBase64 : undefined,
+      contentType: typeof p?.contentType === 'string' ? p.contentType : undefined,
+      label: typeof p?.label === 'string' ? p.label : undefined,
+    })).filter((p) => p.url || p.bytesBase64)
+  }
+  if (Array.isArray(draftPhotos) && draftPhotos.length) {
+    return (draftPhotos as any[]).map((p) => ({
+      url: typeof p?.url === 'string' ? p.url : undefined,
+      contentType: typeof p?.contentType === 'string' ? p.contentType : undefined,
+      label: typeof p?.label === 'string' ? p.label : undefined,
+    })).filter((p) => p.url)
+  }
+  const { data: media } = await client.from('job_media')
+    .select('storage_url, label, type, phase').eq('job_id', jobId).eq('type', 'photo').limit(20)
+  return ((media as any[]) || [])
+    .filter((m) => m?.storage_url)
+    .map((m) => ({ url: m.storage_url as string, label: (m.label as string) || undefined }))
+}
+
+// Render OUR letterhead roof-report PDF and attach it as a 'roof_report' document.
+// Shared by submit_roof_report and render_roof_report. attachMakesafeDocument
+// writes the makesafe_document_attached audit row.
+async function renderAndAttachRoofReport(
+  client: any,
+  jobId: string,
+  renderJob: Record<string, unknown>,
+  operator: string,
+) {
+  const rendered = await renderRoofReportPdf(renderJob as any)
+  let bin = ''
+  for (let i = 0; i < rendered.bytes.length; i++) bin += String.fromCharCode(rendered.bytes[i])
+  const pdfBase64 = btoa(bin)
+  const attached = await attachMakesafeDocument(client, {
+    job_id: jobId,
+    type: 'roof_report',
+    file_name: rendered.fileName,
+    pdf_base64: pdfBase64,
+    uploaded_by: operator,
+  })
+  return {
+    document_id: attached.document_id,
+    file_name: rendered.fileName,
+    render_hash: rendered.renderHash,
+  }
+}
+
+// (Wave 3a) roof_report_template -- READ. Returns the field schema, the job
+// header the form shows, and any existing draft for resume.
+async function getRoofReportTemplateForJob(client: any, jobId: string | null) {
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertMakesafeJob(client, jobId)
+  const meta = await loadRoofReportJobMeta(client, jobId)
+  const { data: existing } = await client.from('makesafe_roof_report_drafts')
+    .select('fields_json, storey, status, report_doc_id, submitted_at, template_version, updated_at')
+    .eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
+  return { template: getRoofReportTemplate(), job: meta, draft: existing || null }
+}
+
+// (Wave 3b) save_roof_report -- WRITE. Draft-safe, idempotent upsert of the fill.
+// Never renders, never advances the board. A save on an already-submitted fill is
+// a no-op (the submitted report is terminal).
+async function saveRoofReport(client: any, body: any) {
+  const jobId = body.job_id || body.jobId
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertMakesafeJob(client, jobId)
+
+  const rawFields = (body.fields && typeof body.fields === 'object') ? body.fields : {}
+  const textFields = sanitiseRoofReportFields(rawFields)
+  const photosMeta = sanitiseRoofPhotosMeta(body.photos ?? (rawFields as any).photos)
+  const storey = normaliseStorey((textFields as any).storeys)
+  const fieldsJson = { ...textFields, photos: photosMeta }
+  const nowIso = new Date().toISOString()
+  const uId = roofUuidOrNull(body.userId || body.user_id)
+
+  const { data: existing } = await client.from('makesafe_roof_report_drafts')
+    .select('id, status').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
+  if (existing?.status === 'submitted') {
+    return { ok: true, status: 'submitted', already_submitted: true, saved: false, draft_id: existing.id }
+  }
+
+  let draft: any
+  if (existing) {
+    const { data, error } = await client.from('makesafe_roof_report_drafts')
+      .update({
+        fields_json: fieldsJson,
+        storey,
+        template_version: ROOF_REPORT_TEMPLATE_VERSION,
+        updated_at: nowIso,
+      })
+      .eq('id', existing.id).select().single()
+    if (error) throw error
+    draft = data
+  } else {
+    const { data, error } = await client.from('makesafe_roof_report_drafts')
+      .insert({
+        org_id: DEFAULT_ORG_ID,
+        job_id: jobId,
+        pack_kind: ROOF_REPORT_PACK_KIND,
+        template_version: ROOF_REPORT_TEMPLATE_VERSION,
+        fields_json: fieldsJson,
+        storey,
+        status: 'draft',
+        created_by: uId,
+        updated_at: nowIso,
+      }).select().single()
+    if (error) throw error
+    draft = data
+  }
+
+  // Audit (non-blocking: a draft save must still succeed if the ledger insert fails).
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      user_id: uId,
+      event_type: 'roof_report_saved',
+      detail_json: {
+        draft_id: draft.id,
+        status: 'draft',
+        storey,
+        field_keys: Object.keys(textFields),
+        photo_count: photosMeta.length,
+        template_version: ROOF_REPORT_TEMPLATE_VERSION,
+      },
+    })
+  } catch (_e) { /* non-blocking */ }
+
+  let price: any = null
+  try { price = roofReportPrice(storey) } catch { price = null }
+  return { ok: true, status: 'draft', saved: true, draft_id: draft.id, storey, price }
+}
+
+// (Wave 3c) submit_roof_report -- WRITE. Validates the merged fill, renders OUR
+// letterhead PDF, persists the final fill, and advances the reporting checklist
+// (substatus admin_to_send_report + cycle-scoped verification, sourced from our
+// rendered report). Idempotent: a re-submit of an already-submitted fill returns
+// the existing report without re-rendering or re-advancing.
+interface RoofRenderDeps {
+  renderAndAttach?: (
+    client: any,
+    jobId: string,
+    renderJob: Record<string, unknown>,
+    operator: string,
+  ) => Promise<{ document_id: string; file_name: string; render_hash: string }>
+}
+
+async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {}) {
+  const renderAndAttach = deps.renderAndAttach || renderAndAttachRoofReport
+  const jobId = body.job_id || body.jobId
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertMakesafeJob(client, jobId)
+
+  const { data: existing } = await client.from('makesafe_roof_report_drafts')
+    .select('*').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
+
+  if (existing?.status === 'submitted') {
+    return {
+      ok: true,
+      already_submitted: true,
+      status: 'submitted',
+      draft_id: existing.id,
+      report_doc_id: existing.report_doc_id,
+      render_hash: existing.last_render_hash,
+    }
+  }
+
+  const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object')
+    ? existing.fields_json : {}
+  const reqFields = (body.fields && typeof body.fields === 'object') ? body.fields : {}
+  const mergedText = sanitiseRoofReportFields({ ...draftFields, ...reqFields })
+
+  const validation = validateRoofReportForSubmit(mergedText as any)
+  if (!validation.ok) {
+    throw new ApiError('Roof report incomplete: ' + validation.errors.join('; '), 400)
+  }
+  // storeys is validated above, so this cannot throw.
+  const price = roofReportPrice((mergedText as any).storeys)
+
+  const draftPhotos = Array.isArray((draftFields as any).photos) ? (draftFields as any).photos : []
+  const photosMeta = sanitiseRoofPhotosMeta(body.photos ?? (reqFields as any).photos ?? draftPhotos)
+  const photosForRender = await resolveRoofReportPhotos(
+    client,
+    jobId,
+    body.photos ?? (reqFields as any).photos,
+    draftPhotos,
+  )
+  const fieldsJson = { ...mergedText, photos: photosMeta }
+
+  // Render + attach OUR letterhead PDF.
+  const meta = await loadRoofReportJobMeta(client, jobId)
+  const renderJob = buildRoofReportJob(fieldsJson, meta, photosForRender)
+  const attached = await renderAndAttach(
+    client,
+    jobId,
+    renderJob,
+    body.operator || body.operator_email || 'roof report (trade)',
+  )
+
+  const nowIso = new Date().toISOString()
+  const uId = roofUuidOrNull(body.userId || body.user_id)
+  const finalRow = {
+    org_id: DEFAULT_ORG_ID,
+    job_id: jobId,
+    pack_kind: ROOF_REPORT_PACK_KIND,
+    template_version: ROOF_REPORT_TEMPLATE_VERSION,
+    fields_json: fieldsJson,
+    storey: price.storey,
+    status: 'submitted',
+    report_doc_id: roofUuidOrNull(attached.document_id),
+    last_render_hash: attached.render_hash,
+    submitted_by: uId,
+    submitted_at: nowIso,
+    updated_at: nowIso,
+  }
+  let draft: any
+  if (existing) {
+    const { data, error } = await client.from('makesafe_roof_report_drafts')
+      .update(finalRow).eq('id', existing.id).select().single()
+    if (error) throw error
+    draft = data
+  } else {
+    const { data, error } = await client.from('makesafe_roof_report_drafts')
+      .insert(finalRow).select().single()
+    if (error) throw error
+    draft = data
+  }
+
+  // Advance the reporting checklist. Mirrors mark_makesafe_portal_report_done:
+  // our submitted+rendered roof report IS the verified deliverable for this cycle.
+  const boardSync = await advanceRoofReportChecklist(client, jobId, nowIso, body)
+
+  // Audit event (non-blocking after the board sync succeeded).
+  let eventSync: any = { ok: true }
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      user_id: uId,
+      event_type: 'roof_report_submitted',
+      detail_json: {
+        draft_id: draft.id,
+        report_doc_id: attached.document_id,
+        storey: price.storey,
+        price_ex_gst: price.ex_gst,
+        price_inc_gst: price.inc_gst,
+        render_hash: attached.render_hash,
+        photo_count: photosForRender.length,
+        template_version: ROOF_REPORT_TEMPLATE_VERSION,
+      },
+    })
+  } catch (e) {
+    eventSync = { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+
+  return {
+    ok: true,
+    status: 'submitted',
+    draft_id: draft.id,
+    report_doc_id: attached.document_id,
+    file_name: attached.file_name,
+    render_hash: attached.render_hash,
+    price,
+    board_sync: boardSync,
+    event_sync: eventSync,
+  }
+}
+
+// Advance the make-safe reporting checklist for a roof-report submit. Sets the
+// board to admin_to_send_report + report_received_at and records a cycle-scoped
+// verification stamp (our rendered report is the verified deliverable, exactly as
+// mark_makesafe_portal_report_done stamps a portal-locked verification). Throws
+// loudly if the detail row is missing or the update fails, so a submit never
+// silently leaves the board un-advanced.
+async function advanceRoofReportChecklist(
+  client: any,
+  jobId: string,
+  nowIso: string,
+  body: any,
+) {
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('job_id, substatus, cycle_number').eq('job_id', jobId).maybeSingle()
+  if (!detail) {
+    throw new ApiError('roof report saved but board sync failed: makesafe detail row missing', 500)
+  }
+  const currentCycle = Number(detail.cycle_number ?? 1)
+  const verifyActor = body.operator_email || body.user_email || body.operator || 'roof_report_submit'
+  const { data: updated, error } = await client.from('makesafe_job_details')
+    .update({
+      substatus: 'admin_to_send_report',
+      report_received_at: nowIso,
+      portal_verified_at: nowIso,
+      portal_verified_cycle: currentCycle,
+      portal_verified_signal: 'secureworks roof report submitted',
+      portal_verified_by: verifyActor,
+      updated_at: nowIso,
+    })
+    .eq('job_id', jobId)
+    .select('substatus, report_received_at')
+    .maybeSingle()
+  if (error) {
+    throw new ApiError('roof report saved but board sync failed: ' + (error.message || error), 500)
+  }
+  // Advancing to a finished substatus closes any still-open crew assignments.
+  await closeOpenAssignmentsForJob(client, jobId, 'complete')
+  return {
+    ok: true,
+    substatus: updated?.substatus || 'admin_to_send_report',
+    report_received_at: updated?.report_received_at || nowIso,
+  }
+}
+
+// (Wave 3d) render_roof_report -- WRITE (routine-safe). Renders OUR letterhead PDF
+// from the current draft (merged with any body.fields) and attaches it, WITHOUT
+// submitting or advancing the board. For ops re-render / preview.
+async function renderRoofReportAction(client: any, body: any, deps: RoofRenderDeps = {}) {
+  const renderAndAttach = deps.renderAndAttach || renderAndAttachRoofReport
+  const jobId = body.job_id || body.jobId
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertMakesafeJob(client, jobId)
+  const { data: existing } = await client.from('makesafe_roof_report_drafts')
+    .select('fields_json').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
+  const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object')
+    ? existing.fields_json : {}
+  const reqFields = (body.fields && typeof body.fields === 'object') ? body.fields : {}
+  const mergedText = sanitiseRoofReportFields({ ...draftFields, ...reqFields })
+  const draftPhotos = Array.isArray((draftFields as any).photos) ? (draftFields as any).photos : []
+  const photosForRender = await resolveRoofReportPhotos(
+    client,
+    jobId,
+    body.photos ?? (reqFields as any).photos,
+    draftPhotos,
+  )
+  const meta = await loadRoofReportJobMeta(client, jobId)
+  const renderJob = buildRoofReportJob({ ...mergedText, photos: [] }, meta, photosForRender)
+  const attached = await renderAndAttach(
+    client,
+    jobId,
+    renderJob,
+    body.operator || 'roof report render',
+  )
+  return {
+    success: true,
+    document_id: attached.document_id,
+    file_name: attached.file_name,
+    render_hash: attached.render_hash,
+  }
+}
+
+// Test-only exports for the roof-report flow (mirror the `_`-suffixed convention).
+export const _saveRoofReportForTest = saveRoofReport
+export const _submitRoofReportForTest = submitRoofReport
+export const _renderRoofReportActionForTest = renderRoofReportAction
+export const _getRoofReportTemplateForJobForTest = getRoofReportTemplateForJob
+export const _loadRoofReportJobMetaForTest = loadRoofReportJobMeta
 
 interface DraftMakesafeReportPackDueDeps {
   listDueJobs?: (

@@ -279,6 +279,23 @@ retries, preserve tenant/role/mapping guards, never transfer `scope_json` in the
 mint response, and never add quote/send/communication effects to this command.
 Legacy non-fence create endpoints remain unchanged until separately migrated.
 
+## Roof Report Runs In ops-api, Not The Wiki Python
+
+The SecureWorks own-letterhead roof report is a trade-filled template that
+renders our branded PDF. The renderer that actually runs is the TS/jsPDF
+`supabase/functions/ops-api/roof_report_render.ts` (sibling of
+`makesafe_report_render.ts`), NOT the wiki `render_makesafe_report.py` - render
+executes in ops-api. `roof_report_template.ts` is the single source of truth for
+the field set, the locked storey pricing (Single $275 inc / Double $385 inc,
+2026-07-16), validation, and the field->render-job mapping. Actions:
+`roof_report_template` (read), `save_roof_report` (draft), `submit_roof_report`
+(render + advance checklist), `render_roof_report` (routine-safe re-render). Fills
+persist in `makesafe_roof_report_drafts` (one row per job, pack_kind `roof`).
+`roof_report` is an allowed `attachMakesafeDocument` doc type and is deliberately
+NOT subject to the make-safe report-type gate (generating our own report for
+report-type jobs is the point). Full flow + action contract in
+`docs/evidence/roof-report-template-flow-2026-07-22.md`.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one
