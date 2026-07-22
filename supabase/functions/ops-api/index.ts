@@ -24728,11 +24728,35 @@ interface RoofRenderDeps {
   ) => Promise<{ document_id: string; file_name: string; render_hash: string }>
 }
 
+// Report-type gate — mirrors mark_makesafe_portal_report_done EXACTLY. A roof
+// report is a report-type deliverable and advances the same reporting checklist,
+// so it must never be accepted on an ordinary make-safe: that would mark the
+// reporting checklist satisfied and let the job proceed toward invoicing while
+// bypassing the real make-safe report. Two PERSISTED server-read sources qualify:
+//   1. makesafe_job_details.report_type (intake approval writes this), or
+//   2. jobs.metadata.makesafe_job_family being a report family.
+// Body-supplied report_type / is_report_type flags are IGNORED either way.
+async function assertRoofReportIsReportTypeJob(client: any, jobId: string) {
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('report_type').eq('job_id', jobId).maybeSingle()
+  let reportType = String(detail?.report_type || '').trim() || null
+  if (!reportType) {
+    const { data: jobRow } = await client.from('jobs')
+      .select('id, metadata').eq('id', jobId).maybeSingle()
+    const persistedFamily = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
+    reportType = _reportTypeForJobFamily(persistedFamily) || null
+  }
+  if (!reportType) {
+    throw new ApiError('roof report is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real make-safe report.', 409)
+  }
+}
+
 async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {}) {
   const renderAndAttach = deps.renderAndAttach || renderAndAttachRoofReport
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
+  await assertRoofReportIsReportTypeJob(client, jobId)
 
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
     .select('*').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()

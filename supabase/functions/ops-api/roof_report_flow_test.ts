@@ -541,6 +541,83 @@ Deno.test("submit_roof_report: idempotent -- resubmit returns existing report, n
   assertEquals(rows.job_events.length, 0);
 });
 
+Deno.test("submit_roof_report: 409s on a normal (non-report-type) make-safe, nothing persisted or advanced", async () => {
+  const { client, rows } = makeClient(baseRows({
+    jobs: [{
+      id: "job-1",
+      job_number: "SWMS-26861",
+      type: "makesafe",
+      status: "scheduled",
+      client_name: "Major Loss Builders",
+      site_address: "10 Caversham Way",
+      site_suburb: "Caversham",
+      metadata: {},
+    }],
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      external_ref: "MLB-17270PO-54939",
+      report_type: null,
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  await assertRejects(
+    () =>
+      _submitRoofReportForTest(client, {
+        job_id: "job-1",
+        fields: fullFill,
+      }, deps),
+    Error,
+    "restricted to report-type jobs",
+  );
+
+  // Nothing rendered, nothing persisted, board untouched.
+  assertEquals(calls.length, 0);
+  assertEquals(rows.makesafe_roof_report_drafts.length, 0);
+  assertEquals(
+    rows.makesafe_job_details[0].substatus,
+    "waiting_on_trade_report",
+  );
+  assertEquals(rows.makesafe_job_details[0].report_received_at, null);
+});
+
+Deno.test("submit_roof_report: a report-family job (no report_type, family metadata) still succeeds", async () => {
+  const { client, rows } = makeClient(baseRows({
+    jobs: [{
+      id: "job-1",
+      job_number: "SWMS-26861",
+      type: "makesafe",
+      status: "scheduled",
+      client_name: "Major Loss Builders",
+      site_address: "10 Caversham Way",
+      site_suburb: "Caversham",
+      metadata: { makesafe_job_family: "roof_report" },
+    }],
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      external_ref: "MLB-17270PO-54939",
+      report_type: null,
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  const res: any = await _submitRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: fullFill,
+  }, deps);
+
+  assertEquals(res.ok, true);
+  assertEquals(res.status, "submitted");
+  assertEquals(calls.length, 1);
+  assertEquals(rows.makesafe_job_details[0].substatus, "admin_to_send_report");
+});
+
 Deno.test("submit_roof_report: board-sync failure surfaces loudly", async () => {
   const { client } = makeClient(baseRows(), {
     "makesafe_job_details.update": "permission denied for makesafe_job_details",
