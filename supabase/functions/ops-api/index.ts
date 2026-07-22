@@ -200,6 +200,15 @@ import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
   runDeterministicIntake as _runDeterministicIntake,
 } from './makesafe_deterministic_intake_runtime.ts'
+// Batch AI gap-fill for deterministic-intake "needs-a-human" flags. Read (queue)
+// + additive audited write (apply). No paid API: the AI judgment runs on the
+// captain's subscription Claude, which reads this queue and posts fills back here.
+// See docs/makesafe-gap-fill-batch-skill.md.
+import {
+  applyGapFill as _applyGapFill,
+  GapFillError as _GapFillError,
+  loadGapFillQueue as _loadGapFillQueue,
+} from './makesafe_gap_fill.ts'
 // M1.5 cost hardening — local PDF text extraction, per-builder template parsers, and
 // the token/cost ledger. See makesafe_pdf_text.ts / makesafe_template_parser.ts /
 // makesafe_cost.ts. All deterministic + key-less; the model call is the only paid step.
@@ -2381,6 +2390,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // Auto-Intake v2 (M1) read-only health + audit-invariant checks.
       'intake_health',
       'intake_reconcile',
+      // Batch AI gap-fill: the QUEUE read only (lists needs-a-human flags +
+      // report-ready jobs). The paired WRITE (makesafe_gap_fill_apply) is
+      // deliberately NOT allow-listed — a routine caller cannot write case fills.
+      'makesafe_gap_fill_queue',
       // Link backfill: routine may run the DRY-RUN only; the live patch (dry_run:false)
       // is blocked inside the case for a routine caller (privileged-only).
       'makesafe_intake_link_backfill',
@@ -2885,6 +2898,49 @@ if (import.meta.main) serve(async (req: Request) => {
           includeSanitizedCases: true,
           requireAllAllowlistMatches: true,
         }))
+      }
+      // ── Batch AI gap-fill (campaign makesafe-gap-fill) ──────────────────────
+      // READ-ONLY queue of deterministic-intake "needs-a-human" flags (exception +
+      // blocked cases) plus trade-report-submitted-but-pack-not-run jobs. The
+      // captain's subscription Claude reads this, resolves gaps with AI judgment
+      // using the existing read actions, then posts fills to makesafe_gap_fill_apply.
+      // NO paid API is called here. Read gate matches the other intake reads
+      // (api_key / admin-owner jwt / routine).
+      case 'makesafe_gap_fill_queue': {
+        const gapFillQueueAllowed = authMode === 'api_key' || authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!gapFillQueueAllowed) {
+          return json({ error: 'forbidden: makesafe_gap_fill_queue requires the routine/privileged ops key or an admin/owner session' }, 403)
+        }
+        return json(await _loadGapFillQueue(client, {
+          limit: Number(url.searchParams.get('limit') || '') || undefined,
+          includeReportReady: url.searchParams.get('include_report_ready') !== 'false',
+        }))
+      }
+      // Apply one AI-judged, additive, audited fill to a single case. Privileged
+      // ONLY (api_key or admin/owner jwt) — it writes case facts, so the automation
+      // routine is refused (default-deny keeps it out; asserted here too). It never
+      // creates jobs, sends, deletes, or changes state/identity; it only fills a
+      // currently-empty job-material field and records an append-only 'ai' audit
+      // event. There is deliberately NO approval gate (captain ruling 2026-07-21).
+      case 'makesafe_gap_fill_apply': {
+        const gapFillPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!gapFillPrivileged) {
+          return json({ error: 'forbidden: makesafe_gap_fill_apply requires the privileged ops key or an admin/owner session; the make-safe automation routine cannot write case fills' }, 403)
+        }
+        try {
+          return json(await _applyGapFill(client, {
+            caseId: body?.case_id ?? body?.caseId ?? null,
+            instructionKey: body?.instruction_key ?? body?.instructionKey ?? null,
+            fills: body?.fills ?? null,
+            evidenceNote: body?.evidence_note ?? body?.evidenceNote ?? null,
+            actor: body?.actor ?? null,
+          }))
+        } catch (e) {
+          if (e instanceof _GapFillError) return json({ error: e.message }, e.status)
+          throw e
+        }
       }
       case 'makesafe_intake_backfill_report': {
         return json(await _makesafeIntakeBackfillReport(client, {
