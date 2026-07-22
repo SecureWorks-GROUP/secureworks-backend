@@ -9,7 +9,11 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _saveRoofReportForTest, _submitRoofReportForTest } from "./index.ts";
+import {
+  _renderRoofReportActionForTest,
+  _saveRoofReportForTest,
+  _submitRoofReportForTest,
+} from "./index.ts";
 import { STOREY_DOUBLE, STOREY_SINGLE } from "./roof_report_template.ts";
 
 type TableRows = Record<string, any[]>;
@@ -633,4 +637,68 @@ Deno.test("submit_roof_report: board-sync failure surfaces loudly", async () => 
     Error,
     "board sync failed",
   );
+});
+
+Deno.test("render_roof_report: 409s on a normal (non-report-type) make-safe, nothing attached", async () => {
+  const { client, rows } = makeClient(baseRows({
+    jobs: [{
+      id: "job-1",
+      job_number: "SWMS-26861",
+      type: "makesafe",
+      status: "scheduled",
+      client_name: "Major Loss Builders",
+      site_address: "10 Caversham Way",
+      site_suburb: "Caversham",
+      metadata: {},
+    }],
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      external_ref: "MLB-17270PO-54939",
+      report_type: null,
+    }],
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "draft",
+      fields_json: { ...fullFill },
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  await assertRejects(
+    () => _renderRoofReportActionForTest(client, { job_id: "job-1" }, deps),
+    Error,
+    "restricted to report-type jobs",
+  );
+
+  // Nothing rendered or attached.
+  assertEquals(calls.length, 0);
+  assertEquals(rows.job_documents.length, 0);
+});
+
+Deno.test("render_roof_report: succeeds on a report_type='roof_report' job", async () => {
+  const { client } = makeClient(baseRows({
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "draft",
+      fields_json: { ...fullFill },
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  const res: any = await _renderRoofReportActionForTest(
+    client,
+    { job_id: "job-1" },
+    deps,
+  );
+
+  assertEquals(res.success, true);
+  assertEquals(res.document_id, "00000000-0000-0000-0000-0000000000aa");
+  assertEquals(calls.length, 1);
 });

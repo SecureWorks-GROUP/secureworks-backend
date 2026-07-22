@@ -25006,6 +25006,7 @@ async function renderRoofReportAction(client: any, body: any, deps: RoofRenderDe
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
+  await assertRoofReportIsReportTypeJob(client, jobId)
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
     .select('fields_json').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
   const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object')
