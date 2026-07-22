@@ -36,6 +36,21 @@ All in `supabase/functions/`. Deploy with:
   `contact_not_found`), and a NEW opportunity is created with a name built from
   the fetched contact's identity. `body.skipOpportunity` suppresses opportunity
   creation on either path.
+- **Test-lab routing** (`&testMode=true`): an exact, request-level opt-in that
+  shadows the production route so every scoping tool (fencing, patio, decking,
+  combo) writes to the captain-approved GENERAL TESTTESTTEST GHL pipeline and
+  the dedicated TEST-ZZZ Supabase org instead of live data. Routing IDs come
+  only from secrets `GHL_TEST_PIPELINE_ID`, `GHL_TEST_LOCATION_ID`, and
+  `SUPABASE_TEST_ORG_ID` (never hardcoded). Rules: any absent or malformed value
+  (e.g. `1`, `TRUE`, body-only flag) keeps production behaviour; an exact
+  `testMode=true` request with any secret missing fails closed (503
+  `test_mode_not_configured`, no production fallback); test mode blocks
+  `send_sms`, `send_email`, and `initiate_call` at the proxy layer (403
+  `test_mode_comms_blocked`) even if routing is misconfigured; user-JWT callers
+  must belong to the test org (403 `test_mode_org_required`); and `sync_ghl` is
+  unavailable for the mixed-tool test pipeline (400 `test_mode_sync_unsupported`).
+  The fake test org + user are seeded idempotently by
+  `20260722000001_scope_test_lab_seed.sql`. Logic lives in `ghl-proxy/test_mode.ts`.
 
 ### xero-sync
 - **Purpose**: All Xero API interactions

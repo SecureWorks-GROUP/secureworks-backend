@@ -30,6 +30,11 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 //
 // Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
+// General scope test lab: append &testMode=true and configure
+//   GHL_TEST_PIPELINE_ID + GHL_TEST_LOCATION_ID + SUPABASE_TEST_ORG_ID.
+// Captain config: TESTTESTTEST (pipeline kMSiJnd4KyPyIUletHbH) in location
+// 13yKADzN94BRxX4hByYX. IDs belong in edge env config, never routing code.
+// Test mode remains unavailable until all values exist and always blocks comms.
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -80,13 +85,14 @@ import {
   stampedFenceOpportunityName,
   validateFenceMintInput,
 } from './fence_mint.ts'
+import { resolveGhlProxyRoute, testModeCommsBlock } from './test_mode.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
-const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
+const PRODUCTION_GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
 const GHL_BASE = 'https://services.leadconnectorhq.com'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
-const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
+const PRODUCTION_DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Per-pipeline salesperson UUIDs (public.users.id) — mirrors the auto-assign
 // in ghl-webhook/index.ts. Without this, new jobs created via create_job
@@ -105,13 +111,13 @@ function salespersonFor(type: string | null | undefined): string | null {
 }
 
 // Sales pipelines (leads → quotes)
-const PIPELINES: Record<string, string> = {
+const PRODUCTION_PIPELINES: Record<string, string> = {
   fencing: 'I9t8njpuR0Dm7B2NDcvI',
   patio: 'OGZLpPPVWVarN94HL6af',
 }
 
 // Execution pipelines (accepted jobs)
-const EXECUTION_PIPELINES: Record<string, string> = {
+const PRODUCTION_EXECUTION_PIPELINES: Record<string, string> = {
   fencing_exec: 'fgV2mkFh6BD4gOZZx94y',
   patio_exec: 'SxayUz0KRDlCUk58apCC',
 }
@@ -120,20 +126,20 @@ const EXECUTION_PIPELINES: Record<string, string> = {
 const MATERIALS_PIPELINE = 'SkgfC3nzTsOHqTSv9LNl'
 
 // "Scope Complete" stage IDs per pipeline
-const SCOPE_COMPLETE_STAGES: Record<string, string> = {
+const PRODUCTION_SCOPE_COMPLETE_STAGES: Record<string, string> = {
   fencing: '418534d4-6356-4c20-a274-51fbb892c2fa',  // Scope Complete
   patio: '9b9e5313-8e0e-4ed6-8654-d50413b99885',    // Scope Complete / Quote to be Sent
 }
 
 // "Job Complete" stage IDs per execution pipeline (discovered from GHL API 2026-03-04)
-const JOB_COMPLETE_STAGES: Record<string, string> = {
+const PRODUCTION_JOB_COMPLETE_STAGES: Record<string, string> = {
   fencing: 'f622844c-2fac-4627-81d4-978a6a864c72',  // "Get Final Payment Both Clients"
   patio: '54d52061-6fca-4dfe-a421-f35a3b88d434',    // "Job complete Needs to be invoiced"
 }
 
 // Reverse lookup: Supabase status → GHL execution pipeline stage UUID
 // Used by ops-api to push status changes to GHL
-const OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
+const PRODUCTION_OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
   fencing: {
     accepted:    'c1615373-9140-4e49-92aa-aa0cfa8e9793', // Job Accepted Ready for Execution
     // approvals: fencing skips approvals — stays at accepted stage in GHL
@@ -231,27 +237,27 @@ function extractScopeIdentity(scopeJson: any, meta: any = {}) {
   }
 }
 
-// ── Stage name cache (all pipelines loaded at once) ──
-let stageCache: Record<string, Record<string, string>> = {}
-let stageCacheLoaded = false
+// ── Stage name cache (all pipelines loaded once per location) ──
+const stageCacheByLocation: Record<string, Record<string, Record<string, string>>> = {}
 
-async function resolveStages(pipelineId: string, signal?: AbortSignal) {
-  if (!stageCacheLoaded) {
+async function resolveStages(pipelineId: string, locationId: string, signal?: AbortSignal) {
+  if (!stageCacheByLocation[locationId]) {
     try {
-      const data = await ghl(`/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`, signal ? { signal } : {})
+      const locationCache: Record<string, Record<string, string>> = {}
+      const data = await ghl(`/opportunities/pipelines?locationId=${locationId}`, signal ? { signal } : {})
       for (const p of (data.pipelines || [])) {
         const map: Record<string, string> = {}
         for (const s of (p.stages || [])) {
           map[s.id] = s.name
         }
-        stageCache[p.id] = map
+        locationCache[p.id] = map
       }
-      stageCacheLoaded = true
+      stageCacheByLocation[locationId] = locationCache
     } catch (e) {
       console.log('[ghl-proxy] Stage fetch failed:', e)
     }
   }
-  return stageCache[pipelineId] || {}
+  return stageCacheByLocation[locationId]?.[pipelineId] || {}
 }
 
 function mapOpp(opp: any, stages: Record<string, string>) {
@@ -283,6 +289,7 @@ function mapOpp(opp: any, stages: Record<string, string>) {
 }
 
 async function fetchOpportunityPages(args: {
+  locationId?: string
   pipelineId?: string
   contactId?: string
   q?: string
@@ -318,7 +325,7 @@ async function fetchOpportunityPages(args: {
     // stays false, so callers that must not act on an absence fail closed.
     if (Date.now() - startedAt >= budgetMs) break
     const params = new URLSearchParams({
-      location_id: GHL_LOCATION_ID,
+      location_id: args.locationId || PRODUCTION_GHL_LOCATION_ID,
       limit: String(limit),
     })
     if (args.pipelineId) params.set('pipeline_id', args.pipelineId)
@@ -536,6 +543,57 @@ serve(async (req: Request) => {
   const url = new URL(req.url)
   const action = url.searchParams.get('action')
 
+  // Test routing is an exact request-level opt-in. Any absent or malformed
+  // value stays on the existing production constants. An exact test request is
+  // fail-closed until all captain-supplied route IDs exist in edge secrets.
+  const routeResult = resolveGhlProxyRoute(url.searchParams.get('testMode'), {
+    productionPipelineId: PRODUCTION_PIPELINES.fencing,
+    productionLocationId: PRODUCTION_GHL_LOCATION_ID,
+    productionOrganisationId: PRODUCTION_DEFAULT_ORG_ID,
+    testPipelineId: Deno.env.get('GHL_TEST_PIPELINE_ID'),
+    testLocationId: Deno.env.get('GHL_TEST_LOCATION_ID'),
+    testOrganisationId: Deno.env.get('SUPABASE_TEST_ORG_ID'),
+  })
+  if (!routeResult.ok) {
+    return json({
+      error: routeResult.error,
+      code: routeResult.code,
+      missing: routeResult.missing,
+    }, routeResult.status)
+  }
+  const route = routeResult.route
+
+  // This guard runs before any action handler can resolve/create a contact or
+  // call the conversations API. It remains effective even if a test pipeline
+  // ID is accidentally configured to a production pipeline.
+  const commsBlock = testModeCommsBlock(route.testMode, action)
+  if (commsBlock) return json(commsBlock.body, commsBlock.status)
+
+  // Shadow production targeting per request. The captain's TESTTESTTEST
+  // pipeline is a general lab shared by every scoping tool.
+  const GHL_LOCATION_ID = route.locationId
+  const PIPELINES: Record<string, string> = route.testMode
+    ? {
+      fencing: route.pipelineId,
+      patio: route.pipelineId,
+      decking: route.pipelineId,
+      combo: route.pipelineId,
+    }
+    : PRODUCTION_PIPELINES
+  const EXECUTION_PIPELINES: Record<string, string> = route.testMode
+    ? {}
+    : PRODUCTION_EXECUTION_PIPELINES
+  const SCOPE_COMPLETE_STAGES: Record<string, string> = route.testMode
+    ? {}
+    : PRODUCTION_SCOPE_COMPLETE_STAGES
+  const JOB_COMPLETE_STAGES: Record<string, string> = route.testMode
+    ? {}
+    : PRODUCTION_JOB_COMPLETE_STAGES
+  const OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = route.testMode
+    ? {}
+    : PRODUCTION_OPS_TO_GHL_STAGES
+  const DEFAULT_ORG_ID = route.organisationId
+
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -590,6 +648,17 @@ serve(async (req: Request) => {
     }
   }
 
+  if (
+    route.testMode &&
+    credential.mode === 'user_jwt' &&
+    !isSameOrg(authProfile?.org_id, route.organisationId)
+  ) {
+    return json({
+      error: 'Test mode requires a user from the configured test organisation',
+      code: 'test_mode_org_required',
+    }, 403)
+  }
+
   try {
     console.log(`[ghl-proxy] action=${action} method=${req.method}`)
     const requireSameOrgJob = async (sb: any, jobId: string) => {
@@ -598,7 +667,10 @@ serve(async (req: Request) => {
       if (error || !job) {
         return { ok: false as const, response: json({ error: error?.message || 'Job not found', code: 'job_not_found' }, 404) }
       }
-      if (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, job.org_id)) {
+      if (
+        (route.testMode && !isSameOrg(route.organisationId, job.org_id)) ||
+        (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, job.org_id))
+      ) {
         return { ok: false as const, response: json({ error: 'Job belongs to a different organisation', code: 'org_mismatch' }, 403) }
       }
       return { ok: true as const, job }
@@ -706,8 +778,8 @@ serve(async (req: Request) => {
 
       const maxPages = Math.min(Number(url.searchParams.get('max_pages')) || 20, 20)
       const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 100)
-      const [stages] = await Promise.all([resolveStages(pipelineId)])
-      const paged = await fetchOpportunityPages({ pipelineId, limit, maxPages })
+      const [stages] = await Promise.all([resolveStages(pipelineId, GHL_LOCATION_ID)])
+      const paged = await fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId, limit, maxPages })
 
       const opps = paged.opportunities.map((o: any) => mapOpp(o, stages))
       return json({ opportunities: opps, count: opps.length, total: paged.total, pages_scanned: paged.pagesScanned })
@@ -854,8 +926,8 @@ serve(async (req: Request) => {
       if (!q && !pipelineId) return json({ opportunities: [] })
 
       const [stages, paged] = await Promise.all([
-        pipelineId ? resolveStages(pipelineId) : Promise.resolve({} as Record<string, string>),
-        fetchOpportunityPages({ pipelineId: pipelineId || undefined, q: q || undefined, limit: 100, maxPages: 10 }),
+        pipelineId ? resolveStages(pipelineId, GHL_LOCATION_ID) : Promise.resolve({} as Record<string, string>),
+        fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId: pipelineId || undefined, q: q || undefined, limit: 100, maxPages: 10 }),
       ])
       const opps = (paged.opportunities || []).map((o: any) => mapOpp(o, stages))
 
@@ -987,7 +1059,7 @@ serve(async (req: Request) => {
         }
 
         // Stage names (8s; resolveStages swallows abort → blank stage names, never fails)
-        const stages = await resolveStages(pipelineId, AbortSignal.timeout(8000))
+        const stages = await resolveStages(pipelineId, GHL_LOCATION_ID, AbortSignal.timeout(8000))
 
         // Per-contact opportunity lookups in parallel, each with its own 8s timeout.
         const lookups: Record<string, { opps: any[]; failed: boolean }> = {}
@@ -1059,10 +1131,10 @@ serve(async (req: Request) => {
       // ── recent browse mode (no query) ──
       if (!pipelineId) return json({ opportunities: [], _mode: 'recent_browse' })
 
-      const stages = await resolveStages(pipelineId, AbortSignal.timeout(8000))
+      const stages = await resolveStages(pipelineId, GHL_LOCATION_ID, AbortSignal.timeout(8000))
       let paged: { opportunities: any[] }
       try {
-        paged = await fetchOpportunityPages({ pipelineId, limit: 100, maxPages: 2, perPageTimeoutMs: 10000 })
+        paged = await fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId, limit: 100, maxPages: 2, perPageTimeoutMs: 10000 })
       } catch (e) {
         if (isTimeoutError(e)) {
           console.log('[ghl-proxy] lead_search browse fetch timed out')
@@ -1886,7 +1958,14 @@ serve(async (req: Request) => {
         } catch {
           throw new FenceMintError(400, 'invalid_request', 'JSON object body required')
         }
-        const input = validateFenceMintInput(parsedBody)
+        const routedBody = route.testMode && parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+          ? {
+            ...(parsedBody as Record<string, unknown>),
+            organisationId: route.organisationId,
+            organisation_id: route.organisationId,
+          }
+          : parsedBody
+        const input = validateFenceMintInput(routedBody)
         authorizeFenceMintCaller({
           mode: credential.mode,
           authUserId,
@@ -2068,6 +2147,7 @@ serve(async (req: Request) => {
               // and the stamp is matched client side, so recovery depends only
               // on the listing being complete.
               const paged = await fetchOpportunityPages({
+                locationId: GHL_LOCATION_ID,
                 pipelineId: PIPELINES.fencing,
                 contactId,
                 limit: 100,
@@ -2205,11 +2285,15 @@ serve(async (req: Request) => {
     if (action === 'create_job' && req.method === 'POST') {
       const body = await req.json()
       const { opportunityId, toolType, clientName, clientPhone, clientEmail, siteAddress, siteSuburb } = body
-
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       // Default org for service callers; browser callers inherit the verified profile org.
-      const orgId = credential.mode === 'user_jwt' ? authProfile.org_id : '00000000-0000-0000-0000-000000000001'
+      // Test mode always targets its configured lab org and never trusts a caller org.
+      const orgId = route.testMode
+        ? route.organisationId
+        : credential.mode === 'user_jwt'
+        ? authProfile.org_id
+        : PRODUCTION_DEFAULT_ORG_ID
 
       const resolvedType = toolType || 'patio'
       const insertData: Record<string, unknown> = {
@@ -2222,7 +2306,7 @@ serve(async (req: Request) => {
         client_email: clientEmail || '',
         site_address: siteAddress || '',
         site_suburb: siteSuburb || '',
-        created_by: salespersonFor(resolvedType),
+        created_by: route.testMode ? authUserId : salespersonFor(resolvedType),
       }
       // GHL link is optional — walk-up scopes may not have an opportunity
       if (opportunityId) insertData.ghl_opportunity_id = opportunityId
@@ -2264,7 +2348,6 @@ serve(async (req: Request) => {
     if (action === 'create_contact_and_opportunity' && req.method === 'POST') {
       const body = await req.json()
       const { firstName, lastName, email, phone, address, suburb, toolType, skipOpportunity, name } = body
-
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
       // a NEW opportunity in the pipeline. oppName is built from the FETCHED
@@ -2427,7 +2510,10 @@ serve(async (req: Request) => {
         console.log('[ghl-proxy] save_scope target lookup error:', targetError)
         return json({ error: targetError?.message || 'Job not found' }, 404)
       }
-      if (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, targetJob.org_id)) {
+      if (
+        (route.testMode && !isSameOrg(route.organisationId, targetJob.org_id)) ||
+        (credential.mode === 'user_jwt' && !isSameOrg(authProfile?.org_id, targetJob.org_id))
+      ) {
         return json({ error: 'Job belongs to a different organisation', code: 'org_mismatch' }, 403)
       }
 
@@ -3626,7 +3712,15 @@ serve(async (req: Request) => {
       let totalUpdated = 0
       const errors: string[] = []
 
-      // Sync from BOTH sales and execution pipelines
+      // Sync from BOTH sales and execution pipelines. The general test pipeline
+      // mixes tool types, so bulk sync cannot infer a safe jobs.type from its
+      // pipeline name and is deliberately unavailable in test mode.
+      if (route.testMode) {
+        return json({
+          error: 'sync_ghl is unavailable for the mixed-tool test pipeline',
+          code: 'test_mode_sync_unsupported',
+        }, 400)
+      }
       const allPipelines = {
         ...PIPELINES,
         ...EXECUTION_PIPELINES,
@@ -3636,9 +3730,9 @@ serve(async (req: Request) => {
         const jobType = pipelineName.includes('fencing') ? 'fencing' : 'patio'
 
         // Load stage names for this pipeline
-        const stages = await resolveStages(pipelineId)
+        const stages = await resolveStages(pipelineId, GHL_LOCATION_ID)
 
-        const paged = await fetchOpportunityPages({ pipelineId, limit: 100, maxPages: 20 })
+        const paged = await fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId, limit: 100, maxPages: 20 })
 
         for (const opp of paged.opportunities) {
             const oppTime = Date.parse(opp.updatedAt || opp.lastStatusChangeAt || opp.lastStageChangeAt || opp.createdAt || '')

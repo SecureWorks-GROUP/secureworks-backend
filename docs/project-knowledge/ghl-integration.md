@@ -29,6 +29,26 @@
 - **Execution**: Fencing `fgV2mkFh6BD4gOZZx94y`, Patios `SxayUz0KRDlCUk58apCC`
 - **Materials**: `SkgfC3nzTsOHqTSv9LNl`
 - **Scope Complete stages**: Fencing `418534d4-6356-4c20-a274-51fbb892c2fa`, Patios `9b9e5313-8e0e-4ed6-8654-d50413b99885`
+- These are the production constants. They are only used when a request is NOT in test mode (see below).
+
+## Test-Lab Routing (`&testMode=true`)
+Any scoping tool can append `&testMode=true` to a ghl-proxy request to write to
+the captain-approved GENERAL TESTTESTTEST GHL pipeline and the dedicated
+TEST-ZZZ Supabase org instead of live pipelines/org. This is an exact,
+request-level opt-in resolved in `ghl-proxy/test_mode.ts`.
+- **Route IDs come only from edge secrets** — `GHL_TEST_PIPELINE_ID`,
+  `GHL_TEST_LOCATION_ID`, `SUPABASE_TEST_ORG_ID`. No test IDs are hardcoded.
+  Captain config: pipeline `kMSiJnd4KyPyIUletHbH` in location `13yKADzN94BRxX4hByYX`.
+- **Fail-safe defaults**: only the exact string `testMode=true` triggers it;
+  absent/malformed values (`1`, `TRUE`, body-only flag) keep production routing.
+- **Fail-closed**: an exact test request with any of the three secrets missing
+  returns 503 `test_mode_not_configured` — never a production fallback.
+- **Comms blocked**: `send_sms`, `send_email`, `initiate_call` are refused at the
+  proxy (403 `test_mode_comms_blocked`) even if routing is misconfigured.
+- **Org guard**: user-JWT callers must be in the test org (403 `test_mode_org_required`).
+- **`sync_ghl`** is unavailable in test mode (mixed-tool pipeline) — 400 `test_mode_sync_unsupported`.
+- The fake test org + user are seeded idempotently by migration
+  `20260722000001_scope_test_lab_seed.sql`.
 
 ## Key Files (shared between both tools)
 - `tools/shared/cloud.js` — Supabase client, auth, GHL API methods
