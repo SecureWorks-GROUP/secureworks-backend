@@ -24633,19 +24633,35 @@ async function saveRoofReport(client: any, body: any) {
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
 
-  const rawFields = (body.fields && typeof body.fields === 'object') ? body.fields : {}
-  const textFields = sanitiseRoofReportFields(rawFields)
-  const photosMeta = sanitiseRoofPhotosMeta(body.photos ?? (rawFields as any).photos)
-  const storey = normaliseStorey((textFields as any).storeys)
-  const fieldsJson = { ...textFields, photos: photosMeta }
   const nowIso = new Date().toISOString()
   const uId = roofUuidOrNull(body.userId || body.user_id)
 
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
-    .select('id, status').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
+    .select('id, status, fields_json').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
   if (existing?.status === 'submitted') {
     return { ok: true, status: 'submitted', already_submitted: true, saved: false, draft_id: existing.id }
   }
+
+  // Merge this (possibly partial) save over the existing draft so an autosave
+  // that omits fields never wipes previously-entered ones — consistent with
+  // submit_roof_report's draft+request merge.
+  const existingFields = (existing?.fields_json && typeof existing.fields_json === 'object')
+    ? existing.fields_json : {}
+  const existingText = sanitiseRoofReportFields(existingFields as any)
+  const existingPhotos = Array.isArray((existingFields as any).photos)
+    ? (existingFields as any).photos : []
+
+  const rawFields = (body.fields && typeof body.fields === 'object') ? body.fields : {}
+  const reqText = sanitiseRoofReportFields(rawFields)
+  const textFields = { ...existingText, ...reqText }
+  // A save that carries no photos keeps the previously-saved photo meta; an
+  // explicit photos array (even empty) replaces it.
+  const hasReqPhotos = body.photos !== undefined || (rawFields as any).photos !== undefined
+  const photosMeta = hasReqPhotos
+    ? sanitiseRoofPhotosMeta(body.photos ?? (rawFields as any).photos)
+    : sanitiseRoofPhotosMeta(existingPhotos)
+  const storey = normaliseStorey((textFields as any).storeys)
+  const fieldsJson = { ...textFields, photos: photosMeta }
 
   let draft: any
   if (existing) {
@@ -24686,7 +24702,7 @@ async function saveRoofReport(client: any, body: any) {
         draft_id: draft.id,
         status: 'draft',
         storey,
-        field_keys: Object.keys(textFields),
+        field_keys: Object.keys(reqText),
         photo_count: photosMeta.length,
         template_version: ROOF_REPORT_TEMPLATE_VERSION,
       },
@@ -24722,6 +24738,16 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     .select('*').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
 
   if (existing?.status === 'submitted') {
+    // A prior submit persisted the fill but its board advance may have failed
+    // transiently, leaving the board un-advanced. Re-run the (idempotent)
+    // checklist advance so a retry always completes the board sync — never
+    // re-renders. Still throws loudly on a genuinely missing detail row.
+    const boardSync = await advanceRoofReportChecklist(
+      client,
+      jobId,
+      new Date().toISOString(),
+      body,
+    )
     return {
       ok: true,
       already_submitted: true,
@@ -24729,6 +24755,7 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
       draft_id: existing.id,
       report_doc_id: existing.report_doc_id,
       render_hash: existing.last_render_hash,
+      board_sync: boardSync,
     }
   }
 
@@ -24845,20 +24872,52 @@ async function advanceRoofReportChecklist(
   body: any,
 ) {
   const { data: detail } = await client.from('makesafe_job_details')
-    .select('job_id, substatus, cycle_number').eq('job_id', jobId).maybeSingle()
+    .select('job_id, substatus, cycle_number, report_received_at, portal_verified_at, portal_verified_cycle')
+    .eq('job_id', jobId).maybeSingle()
   if (!detail) {
     throw new ApiError('roof report saved but board sync failed: makesafe detail row missing', 500)
   }
   const currentCycle = Number(detail.cycle_number ?? 1)
   const verifyActor = body.operator_email || body.user_email || body.operator || 'roof_report_submit'
+  const verificationStamp = {
+    portal_verified_at: nowIso,
+    portal_verified_cycle: currentCycle,
+    portal_verified_signal: 'secureworks roof report submitted',
+    portal_verified_by: verifyActor,
+  }
+  const alreadyVerifiedThisCycle = !!detail.portal_verified_at &&
+    Number(detail.portal_verified_cycle) === currentCycle
+  const currentSubstatus = normalizeMakesafeSubstatus(detail.substatus)
+
+  // Idempotent / already-advanced guard — mirrors mark_makesafe_portal_report_done.
+  // If the board is already at or beyond admin_to_send_report, NEVER regress the
+  // substatus or re-stamp report_received_at; still record this cycle's
+  // verification if it is missing (our rendered report is the deliverable).
+  if (currentSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(currentSubstatus)) {
+    let verificationRecorded = false
+    if (!alreadyVerifiedThisCycle) {
+      const { error: verifyErr } = await client.from('makesafe_job_details')
+        .update({ ...verificationStamp, updated_at: nowIso })
+        .eq('job_id', jobId)
+      if (verifyErr) {
+        throw new ApiError('roof report saved but board sync failed: ' + (verifyErr.message || verifyErr), 500)
+      }
+      verificationRecorded = true
+    }
+    return {
+      ok: true,
+      already_advanced: true,
+      substatus: currentSubstatus,
+      report_received_at: detail.report_received_at || null,
+      verification_recorded: verificationRecorded,
+    }
+  }
+
   const { data: updated, error } = await client.from('makesafe_job_details')
     .update({
       substatus: 'admin_to_send_report',
       report_received_at: nowIso,
-      portal_verified_at: nowIso,
-      portal_verified_cycle: currentCycle,
-      portal_verified_signal: 'secureworks roof report submitted',
-      portal_verified_by: verifyActor,
+      ...verificationStamp,
       updated_at: nowIso,
     })
     .eq('job_id', jobId)
@@ -24871,8 +24930,10 @@ async function advanceRoofReportChecklist(
   await closeOpenAssignmentsForJob(client, jobId, 'complete')
   return {
     ok: true,
+    already_advanced: false,
     substatus: updated?.substatus || 'admin_to_send_report',
     report_received_at: updated?.report_received_at || nowIso,
+    verification_recorded: true,
   }
 }
 

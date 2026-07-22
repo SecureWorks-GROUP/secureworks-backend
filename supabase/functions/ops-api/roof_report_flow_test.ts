@@ -237,6 +237,130 @@ Deno.test("save_roof_report: a save on an already-submitted fill is a no-op", as
   );
 });
 
+Deno.test("save_roof_report: a partial save merges over the existing draft, never wiping prior fields", async () => {
+  const { client, rows } = makeClient(baseRows({
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "draft",
+      storey: "double",
+      fields_json: {
+        inspected_by: "Sam Trade",
+        roof_type: "Terracotta Tiles",
+        storeys: STOREY_DOUBLE,
+        photos: [{ url: "https://x/ridge.jpg", label: "Ridge" }],
+      },
+    }],
+  }));
+
+  // Autosave only touches one text field; no photos in the request.
+  const res: any = await _saveRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: { roof_condition: "Fair" },
+  });
+
+  assertEquals(res.saved, true);
+  const draft = rows.makesafe_roof_report_drafts[0];
+  // New field written.
+  assertEquals(draft.fields_json.roof_condition, "Fair");
+  // Prior text fields preserved.
+  assertEquals(draft.fields_json.inspected_by, "Sam Trade");
+  assertEquals(draft.fields_json.roof_type, "Terracotta Tiles");
+  // Storey preserved (a text-only save must not reset it).
+  assertEquals(draft.fields_json.storeys, STOREY_DOUBLE);
+  assertEquals(draft.storey, "double");
+  // Photos preserved (request carried none).
+  assertEquals(draft.fields_json.photos.length, 1);
+  assertEquals(draft.fields_json.photos[0].label, "Ridge");
+});
+
+Deno.test("save_roof_report: an explicit empty photos array clears prior photos", async () => {
+  const { client, rows } = makeClient(baseRows({
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "draft",
+      fields_json: {
+        inspected_by: "Sam Trade",
+        photos: [{ url: "https://x/ridge.jpg", label: "Ridge" }],
+      },
+    }],
+  }));
+
+  await _saveRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: { roof_type: "Colorbond" },
+    photos: [],
+  });
+
+  const draft = rows.makesafe_roof_report_drafts[0];
+  assertEquals(draft.fields_json.photos.length, 0);
+  assertEquals(draft.fields_json.inspected_by, "Sam Trade");
+});
+
+Deno.test("submit_roof_report: does not regress a board already at ready_to_invoice", async () => {
+  const { client, rows } = makeClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "ready_to_invoice",
+      report_received_at: "2026-07-19T00:00:00.000Z",
+      cycle_number: 1,
+      external_ref: "MLB-17270PO-54939",
+      report_type: "roof_report",
+    }],
+  }));
+  const { deps } = stubRenderDeps();
+
+  const res: any = await _submitRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: fullFill,
+  }, deps);
+
+  assertEquals(res.ok, true);
+  assertEquals(res.board_sync.already_advanced, true);
+  // Board NOT regressed and report_received_at NOT re-stamped.
+  const detail = rows.makesafe_job_details[0];
+  assertEquals(detail.substatus, "ready_to_invoice");
+  assertEquals(detail.report_received_at, "2026-07-19T00:00:00.000Z");
+  // Our-report verification still recorded for this cycle.
+  assertEquals(detail.portal_verified_cycle, 1);
+  assertEquals(res.board_sync.verification_recorded, true);
+});
+
+Deno.test("submit_roof_report: a resubmit completes an un-advanced board (retry after board failure)", async () => {
+  // Fill already persisted as submitted, but the board never advanced (a prior
+  // transient board-sync failure). A retry must finish the board sync.
+  const { client, rows } = makeClient(baseRows({
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "submitted",
+      report_doc_id: "00000000-0000-0000-0000-0000000000aa",
+      last_render_hash: "cafe".repeat(16),
+      fields_json: { ...fullFill },
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  const res: any = await _submitRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: fullFill,
+  }, deps);
+
+  assertEquals(res.already_submitted, true);
+  assertEquals(calls.length, 0, "must not re-render on retry");
+  // Board advanced by the retry.
+  assertEquals(res.board_sync.ok, true);
+  assertEquals(
+    rows.makesafe_job_details[0].substatus,
+    "admin_to_send_report",
+  );
+  assert(rows.makesafe_job_details[0].report_received_at);
+});
+
 Deno.test("submit_roof_report: rejects an incomplete fill (missing required fields)", async () => {
   const { client, rows } = makeClient(baseRows());
   const { deps } = stubRenderDeps();
@@ -336,6 +460,16 @@ Deno.test("submit_roof_report: merges an existing draft with the submit request 
 
 Deno.test("submit_roof_report: idempotent -- resubmit returns existing report, no re-render", async () => {
   const { client, rows } = makeClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "admin_to_send_report",
+      report_received_at: "2026-07-20T00:00:00.000Z",
+      cycle_number: 1,
+      portal_verified_at: "2026-07-20T00:00:00.000Z",
+      portal_verified_cycle: 1,
+      external_ref: "MLB-17270PO-54939",
+      report_type: "roof_report",
+    }],
     makesafe_roof_report_drafts: [{
       id: "draft-1",
       job_id: "job-1",
