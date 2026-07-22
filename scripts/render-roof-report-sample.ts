@@ -53,9 +53,21 @@ const meta = {
 const onePx =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 const photos = [
-  { bytesBase64: onePx, contentType: "image/png", label: "Front elevation and roof line" },
-  { bytesBase64: onePx, contentType: "image/png", label: "Cracked ridge capping above master bedroom" },
-  { bytesBase64: onePx, contentType: "image/png", label: "Southern face - lifted tiles" },
+  {
+    bytesBase64: onePx,
+    contentType: "image/png",
+    label: "Front elevation and roof line",
+  },
+  {
+    bytesBase64: onePx,
+    contentType: "image/png",
+    label: "Cracked ridge capping above master bedroom",
+  },
+  {
+    bytesBase64: onePx,
+    contentType: "image/png",
+    label: "Southern face - lifted tiles",
+  },
 ];
 
 const price = roofReportPrice(fields.storeys);

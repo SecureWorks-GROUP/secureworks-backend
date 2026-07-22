@@ -427,7 +427,10 @@ Deno.test("submit_roof_report: a reopened newer cycle files a FRESH report and a
   }, deps);
 
   // Fresh submit, not the idempotent no-op.
-  assert(!res.already_submitted, "reopened cycle is a fresh submit, not idempotent");
+  assert(
+    !res.already_submitted,
+    "reopened cycle is a fresh submit, not idempotent",
+  );
   assertEquals(res.status, "submitted");
   assertEquals(calls.length, 1, "renders a fresh report for the new cycle");
   // Row re-stamped for cycle 2 (still one row).
