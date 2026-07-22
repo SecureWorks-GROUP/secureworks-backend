@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS public.makesafe_roof_report_drafts (
   report_doc_id uuid,
   last_render_hash text,
 
+  -- The make-safe work cycle (makesafe_job_details.cycle_number) this fill was
+  -- SUBMITTED for, stamped at submit time. Cycle-scopes the idempotent board
+  -- advance: a repeat submit only re-advances the reporting checklist while the
+  -- job is still on this same cycle. If the job is reopened (cycle_number bumped,
+  -- substatus reset), a stale prior-cycle roof report must never re-advance the
+  -- new cycle's board off itself. null while a draft has not been submitted yet.
+  submitted_cycle int,
+
   submitted_by uuid,
   submitted_at timestamptz,
   created_by uuid,

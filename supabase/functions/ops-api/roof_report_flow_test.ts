@@ -338,6 +338,7 @@ Deno.test("submit_roof_report: a resubmit completes an un-advanced board (retry 
       job_id: "job-1",
       pack_kind: "roof",
       status: "submitted",
+      submitted_cycle: 1,
       report_doc_id: "00000000-0000-0000-0000-0000000000aa",
       last_render_hash: "cafe".repeat(16),
       fields_json: { ...fullFill },
@@ -359,6 +360,50 @@ Deno.test("submit_roof_report: a resubmit completes an un-advanced board (retry 
     "admin_to_send_report",
   );
   assert(rows.makesafe_job_details[0].report_received_at);
+});
+
+Deno.test("submit_roof_report: a reopened newer cycle is NOT re-advanced off the stale prior-cycle report", async () => {
+  // Roof report was submitted for cycle 1. The job was later reopened: cycle
+  // bumped to 2, substatus reset to an earlier stage, board un-advanced. A repeat
+  // submit (trade retry, duplicate tap) must NOT re-advance the new cycle's board
+  // off this stale cycle-1 report.
+  const { client, rows } = makeClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 2,
+      external_ref: "MLB-17270PO-54939",
+      report_type: "roof_report",
+    }],
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "submitted",
+      submitted_cycle: 1,
+      report_doc_id: "00000000-0000-0000-0000-0000000000aa",
+      last_render_hash: "cafe".repeat(16),
+      fields_json: { ...fullFill },
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  const res: any = await _submitRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: fullFill,
+  }, deps);
+
+  assertEquals(res.already_submitted, true);
+  assertEquals(calls.length, 0, "must not re-render");
+  // Board advance skipped: the report is for a prior cycle.
+  assertEquals(res.board_sync.skipped, true);
+  assertEquals(res.board_sync.reason, "cycle_advanced");
+  // Reopened cycle's board left untouched — NOT regressed to admin_to_send_report.
+  const detail = rows.makesafe_job_details[0];
+  assertEquals(detail.substatus, "waiting_on_trade_report");
+  assertEquals(detail.report_received_at, null);
+  assert(!detail.portal_verified_at, "no stale-cycle verification stamped");
 });
 
 Deno.test("submit_roof_report: rejects an incomplete fill (missing required fields)", async () => {

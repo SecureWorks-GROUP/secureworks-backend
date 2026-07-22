@@ -24740,14 +24740,43 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
   if (existing?.status === 'submitted') {
     // A prior submit persisted the fill but its board advance may have failed
     // transiently, leaving the board un-advanced. Re-run the (idempotent)
-    // checklist advance so a retry always completes the board sync — never
-    // re-renders. Still throws loudly on a genuinely missing detail row.
-    const boardSync = await advanceRoofReportChecklist(
-      client,
-      jobId,
-      new Date().toISOString(),
-      body,
-    )
+    // checklist advance so a retry completes the board sync — but ONLY within the
+    // same make-safe cycle this report was submitted for. If the job was reopened
+    // (cycle_number bumped, substatus reset), this terminal draft is a stale
+    // prior-cycle report and must never re-advance the new cycle's board off
+    // itself. Never re-renders. Still throws loudly on a genuinely missing detail.
+    const { data: detail } = await client.from('makesafe_job_details')
+      .select('job_id, substatus, cycle_number, report_received_at')
+      .eq('job_id', jobId).maybeSingle()
+    if (!detail) {
+      throw new ApiError('roof report saved but board sync failed: makesafe detail row missing', 500)
+    }
+    const currentCycle = Number(detail.cycle_number ?? 1)
+    const submittedCycle = existing.submitted_cycle == null ? null : Number(existing.submitted_cycle)
+    const boardSubstatus = normalizeMakesafeSubstatus(detail.substatus)
+    const boardAdvanced = !!detail.report_received_at ||
+      (!!boardSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(boardSubstatus))
+    const sameCycle = submittedCycle !== null && submittedCycle === currentCycle
+    let boardSync: any
+    if (sameCycle && !boardAdvanced) {
+      boardSync = await advanceRoofReportChecklist(
+        client,
+        jobId,
+        new Date().toISOString(),
+        body,
+      )
+    } else {
+      boardSync = {
+        ok: true,
+        skipped: true,
+        already_advanced: boardAdvanced,
+        substatus: boardSubstatus,
+        report_received_at: detail.report_received_at || null,
+        reason: !sameCycle ? 'cycle_advanced' : 'board_already_advanced',
+        submitted_cycle: submittedCycle,
+        current_cycle: currentCycle,
+      }
+    }
     return {
       ok: true,
       already_submitted: true,
@@ -24793,6 +24822,13 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
 
   const nowIso = new Date().toISOString()
   const uId = roofUuidOrNull(body.userId || body.user_id)
+  // Stamp the make-safe cycle this fill is submitted for, so a later retry can
+  // cycle-scope its board re-advance (see the already_submitted branch above).
+  // Persisted BEFORE the board advance so a transient advance failure leaves the
+  // draft correctly cycle-tagged and the retry stays within the same cycle.
+  const { data: submitCycleDetail } = await client.from('makesafe_job_details')
+    .select('cycle_number').eq('job_id', jobId).maybeSingle()
+  const submittedCycle = Number(submitCycleDetail?.cycle_number ?? 1)
   const finalRow = {
     org_id: DEFAULT_ORG_ID,
     job_id: jobId,
@@ -24803,6 +24839,7 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     status: 'submitted',
     report_doc_id: roofUuidOrNull(attached.document_id),
     last_render_hash: attached.render_hash,
+    submitted_cycle: submittedCycle,
     submitted_by: uId,
     submitted_at: nowIso,
     updated_at: nowIso,
