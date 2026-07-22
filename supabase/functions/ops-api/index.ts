@@ -24796,6 +24796,12 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
     .select('*').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
 
+  // A submitted row is terminal only within its own make-safe cycle. When the job
+  // has been reopened (cycle_number bumped past submitted_cycle) the stored fill
+  // belongs to an OLDER cycle and must NOT seed the new cycle's report — mirrors
+  // saveRoofReport's staleSubmitted clean-slate handling.
+  let staleSubmitted = false
+
   if (existing?.status === 'submitted') {
     // A prior submit persisted the fill but its board advance may have failed
     // transiently, leaving the board un-advanced. Re-run the (idempotent)
@@ -24814,6 +24820,7 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     const currentCycle = Number(detail.cycle_number ?? 1)
     const submittedCycle = existing.submitted_cycle == null ? null : Number(existing.submitted_cycle)
     const reopenedNewerCycle = submittedCycle !== null && currentCycle > submittedCycle
+    staleSubmitted = reopenedNewerCycle
     if (!reopenedNewerCycle) {
       const boardSubstatus = normalizeMakesafeSubstatus(detail.substatus)
       const boardAdvanced = !!detail.report_received_at ||
@@ -24852,7 +24859,10 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     // reopenedNewerCycle: fall through to a fresh submit for the new cycle.
   }
 
-  const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object')
+  // A stale prior-cycle fill is NOT a merge base: the reopened cycle's report is
+  // built only from this submit request, so last cycle's data never leaks into the
+  // new-cycle letterhead deliverable. A same-cycle draft still merges draft+request.
+  const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object' && !staleSubmitted)
     ? existing.fields_json : {}
   const reqFields = (body.fields && typeof body.fields === 'object') ? body.fields : {}
   const mergedText = sanitiseRoofReportFields({ ...draftFields, ...reqFields })

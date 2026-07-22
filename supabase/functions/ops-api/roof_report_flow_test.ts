@@ -440,6 +440,61 @@ Deno.test("submit_roof_report: a reopened newer cycle files a FRESH report and a
   assertEquals(detail.portal_verified_cycle, 2);
 });
 
+Deno.test("submit_roof_report: a reopened cycle does NOT carry prior-cycle fields or photos into the new report", async () => {
+  // The stale cycle-1 draft holds distinctive values and a photo. A cycle-2 direct
+  // submit (no prior cycle-2 save) must build the render from THIS request only:
+  // last cycle's scope note, photo, and any fields the request omits must NOT leak
+  // into the new-cycle letterhead deliverable — symmetric with saveRoofReport's
+  // clean-slate reopen handling.
+  const { client, rows } = makeClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 2,
+      external_ref: "MLB-17270PO-54939",
+      report_type: "roof_report",
+    }],
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "submitted",
+      submitted_cycle: 1,
+      report_doc_id: "00000000-0000-0000-0000-0000000000aa",
+      last_render_hash: "cafe".repeat(16),
+      fields_json: {
+        ...fullFill,
+        inspected_by: "Cycle One Inspector",
+        scope_summary: "STALE CYCLE 1 SCOPE",
+        photos: [{ url: "https://x/cycle1.jpg", label: "Cycle 1" }],
+      },
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  // Cycle-2 request: a complete fill with distinct values and NO scope_summary/photos.
+  const res: any = await _submitRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: { ...fullFill, inspected_by: "Cycle Two Inspector" },
+  }, deps);
+
+  assert(!res.already_submitted, "reopened cycle is a fresh submit");
+  assertEquals(calls.length, 1);
+  const renderJob = calls[0].renderJob;
+  // New request value used, not the stale cycle-1 value.
+  assertEquals(renderJob.inspected_by, "Cycle Two Inspector");
+  // A field only the stale draft carried must NOT leak into the new render.
+  assertEquals(renderJob.scope_summary, undefined);
+  // Stale photo must NOT leak: the request carried none.
+  assertEquals((renderJob.photos as any[]).length, 0);
+  // Persisted fill likewise clean of the stale-only field and photo.
+  const draft = rows.makesafe_roof_report_drafts[0];
+  assertEquals(draft.submitted_cycle, 2);
+  assertEquals(draft.fields_json.scope_summary, undefined);
+  assertEquals(draft.fields_json.photos.length, 0);
+});
+
 Deno.test("submit_roof_report: after refiling a reopened cycle, a same-cycle repeat is idempotent", async () => {
   // The cycle-2 refile has already happened (submitted_cycle=2, board advanced).
   // A duplicate submit within cycle 2 must be the idempotent no-op: no re-render,
