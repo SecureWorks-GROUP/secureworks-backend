@@ -29,6 +29,8 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
     const preds: Array<(r: any) => boolean> = [];
     let insertRow: any = null;
     let updateRow: any = null;
+    let upsertRow: any = null;
+    let upsertConflict: string | null = null;
     let maxRows: number | null = null;
     const matching = () => {
       const m = rows[table].filter((r) => preds.every((p) => p(r)));
@@ -52,9 +54,29 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       for (const row of m) Object.assign(row, updateRow);
       return { data: m[0] || null, error: null };
     };
+    // Upsert honours the UNIQUE conflict key: an existing row on that key is
+    // updated in place; otherwise a new row is inserted. Models PostgREST
+    // on-conflict so two "first" writes never duplicate or 500.
+    const applyUpsert = () => {
+      const f = failure("upsert") || failure("insert");
+      if (f) return f;
+      const cols = (upsertConflict || "")
+        .split(",").map((c) => c.trim()).filter(Boolean);
+      const hit = cols.length
+        ? rows[table].find((r) => cols.every((c) => r?.[c] === upsertRow?.[c]))
+        : null;
+      if (hit) {
+        Object.assign(hit, upsertRow);
+        return { data: hit, error: null };
+      }
+      const row = { id: upsertRow.id || nextId(table), ...upsertRow };
+      rows[table].push(row);
+      return { data: row, error: null };
+    };
     const terminal = (single = false) => {
       if (insertRow) return applyInsert();
       if (updateRow) return applyUpdate();
+      if (upsertRow) return applyUpsert();
       const d = matching();
       return { data: single ? d[0] || null : d, error: null };
     };
@@ -85,6 +107,11 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       },
       update: (row: any) => {
         updateRow = row;
+        return b;
+      },
+      upsert: (row: any, opts?: { onConflict?: string }) => {
+        upsertRow = row;
+        upsertConflict = opts?.onConflict || null;
         return b;
       },
       maybeSingle: async () => terminal(true),
@@ -366,11 +393,12 @@ Deno.test("submit_roof_report: a resubmit completes an un-advanced board (retry 
   assert(rows.makesafe_job_details[0].report_received_at);
 });
 
-Deno.test("submit_roof_report: a reopened newer cycle is NOT re-advanced off the stale prior-cycle report", async () => {
+Deno.test("submit_roof_report: a reopened newer cycle files a FRESH report and advances cycle 2", async () => {
   // Roof report was submitted for cycle 1. The job was later reopened: cycle
-  // bumped to 2, substatus reset to an earlier stage, board un-advanced. A repeat
-  // submit (trade retry, duplicate tap) must NOT re-advance the new cycle's board
-  // off this stale cycle-1 report.
+  // bumped to 2, substatus reset to an earlier stage, board un-advanced. A submit
+  // for the new cycle must render a FRESH report and advance cycle 2 (it must NOT
+  // stay stuck on the terminal cycle-1 row, and must NOT advance off the stale
+  // cycle-1 render — it produces a new one).
   const { client, rows } = makeClient(baseRows({
     makesafe_job_details: [{
       job_id: "job-1",
@@ -398,16 +426,117 @@ Deno.test("submit_roof_report: a reopened newer cycle is NOT re-advanced off the
     fields: fullFill,
   }, deps);
 
-  assertEquals(res.already_submitted, true);
-  assertEquals(calls.length, 0, "must not re-render");
-  // Board advance skipped: the report is for a prior cycle.
-  assertEquals(res.board_sync.skipped, true);
-  assertEquals(res.board_sync.reason, "cycle_advanced");
-  // Reopened cycle's board left untouched — NOT regressed to admin_to_send_report.
+  // Fresh submit, not the idempotent no-op.
+  assert(!res.already_submitted, "reopened cycle is a fresh submit, not idempotent");
+  assertEquals(res.status, "submitted");
+  assertEquals(calls.length, 1, "renders a fresh report for the new cycle");
+  // Row re-stamped for cycle 2 (still one row).
+  assertEquals(rows.makesafe_roof_report_drafts.length, 1);
+  assertEquals(rows.makesafe_roof_report_drafts[0].submitted_cycle, 2);
+  // Reopened cycle's board advanced and verified for cycle 2.
   const detail = rows.makesafe_job_details[0];
-  assertEquals(detail.substatus, "waiting_on_trade_report");
-  assertEquals(detail.report_received_at, null);
-  assert(!detail.portal_verified_at, "no stale-cycle verification stamped");
+  assertEquals(detail.substatus, "admin_to_send_report");
+  assert(detail.report_received_at);
+  assertEquals(detail.portal_verified_cycle, 2);
+});
+
+Deno.test("submit_roof_report: after refiling a reopened cycle, a same-cycle repeat is idempotent", async () => {
+  // The cycle-2 refile has already happened (submitted_cycle=2, board advanced).
+  // A duplicate submit within cycle 2 must be the idempotent no-op: no re-render,
+  // board not re-stamped.
+  const { client, rows } = makeClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "admin_to_send_report",
+      report_received_at: "2026-07-21T00:00:00.000Z",
+      cycle_number: 2,
+      portal_verified_at: "2026-07-21T00:00:00.000Z",
+      portal_verified_cycle: 2,
+      external_ref: "MLB-17270PO-54939",
+      report_type: "roof_report",
+    }],
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "submitted",
+      submitted_cycle: 2,
+      report_doc_id: "00000000-0000-0000-0000-0000000000aa",
+      last_render_hash: "cafe".repeat(16),
+      fields_json: { ...fullFill },
+    }],
+  }));
+  const { calls, deps } = stubRenderDeps();
+
+  const res: any = await _submitRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: fullFill,
+  }, deps);
+
+  assertEquals(res.already_submitted, true);
+  assertEquals(calls.length, 0, "must not re-render a same-cycle repeat");
+  assertEquals(res.report_doc_id, "00000000-0000-0000-0000-0000000000aa");
+});
+
+Deno.test("save_roof_report: a reopened newer cycle resets the submitted row to a fresh draft", async () => {
+  // The cycle-1 report is terminal, but the job was reopened to cycle 2. A save
+  // for the new cycle must reset the row to a draft (not return already_submitted)
+  // so the trade can fill and submit a fresh cycle-2 report.
+  const { client, rows } = makeClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 2,
+      external_ref: "MLB-17270PO-54939",
+      report_type: "roof_report",
+    }],
+    makesafe_roof_report_drafts: [{
+      id: "draft-1",
+      job_id: "job-1",
+      pack_kind: "roof",
+      status: "submitted",
+      submitted_cycle: 1,
+      report_doc_id: "00000000-0000-0000-0000-0000000000aa",
+      last_render_hash: "cafe".repeat(16),
+      fields_json: { ...fullFill },
+    }],
+  }));
+
+  const res: any = await _saveRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: { inspected_by: "Fresh Cycle 2" },
+  });
+
+  assertEquals(res.ok, true);
+  assertEquals(res.saved, true);
+  assertEquals(res.status, "draft");
+  const draft = rows.makesafe_roof_report_drafts[0];
+  assertEquals(draft.status, "draft");
+  // Prior cycle's submit state cleared.
+  assertEquals(draft.submitted_cycle, null);
+  assertEquals(draft.report_doc_id, null);
+  // Fresh fill starts clean — the stale cycle-1 fields are NOT the merge base.
+  assertEquals(draft.fields_json.inspected_by, "Fresh Cycle 2");
+  assertEquals(draft.fields_json.roof_type, undefined);
+});
+
+Deno.test("save_roof_report: concurrent first-time writes upsert to a single row (no unique-constraint 500)", async () => {
+  // Two racing first saves both see no existing row; the on-conflict upsert must
+  // collapse them to one row rather than one of them 500-ing on the UNIQUE key.
+  const { client, rows } = makeClient(baseRows());
+  const results = await Promise.all([
+    _saveRoofReportForTest(client, {
+      job_id: "job-1",
+      fields: { inspected_by: "Racer A", storeys: STOREY_SINGLE },
+    }),
+    _saveRoofReportForTest(client, {
+      job_id: "job-1",
+      fields: { inspected_by: "Racer B" },
+    }),
+  ]);
+  for (const r of results as any[]) assertEquals(r.ok, true);
+  assertEquals(rows.makesafe_roof_report_drafts.length, 1);
 });
 
 Deno.test("submit_roof_report: rejects an incomplete fill (missing required fields)", async () => {

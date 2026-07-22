@@ -24532,6 +24532,14 @@ function roofUuidOrNull(v: unknown): string | null {
 // Read the job identity the renderer needs (ref/address/contact) from the live
 // job + make-safe detail rows. The report ref is the builder external ref joined
 // with our SWMS job number; the address is site_address + suburb.
+// The make-safe cycle a roof-report write is scoped to. Defaults to 1 when the
+// detail row carries no cycle_number.
+async function loadMakesafeCycleNumber(client: any, jobId: string): Promise<number> {
+  const { data } = await client.from('makesafe_job_details')
+    .select('cycle_number').eq('job_id', jobId).maybeSingle()
+  return Number(data?.cycle_number ?? 1)
+}
+
 async function loadRoofReportJobMeta(client: any, jobId: string) {
   const { data: job } = await client.from('jobs')
     .select('id, job_number, client_name, site_address, site_suburb, metadata')
@@ -24637,15 +24645,27 @@ async function saveRoofReport(client: any, body: any) {
   const uId = roofUuidOrNull(body.userId || body.user_id)
 
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
-    .select('id, status, fields_json').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
+    .select('id, status, fields_json, submitted_cycle').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
+  // Cycle-scope the terminal 'submitted' state. A submitted row is terminal only
+  // WITHIN its own make-safe cycle. If the job has since been reopened
+  // (cycle_number bumped past submitted_cycle), that submitted state belongs to an
+  // older cycle and must not block a fresh roof report for the new one — the row
+  // is reset to a fresh draft below.
+  let staleSubmitted = false
   if (existing?.status === 'submitted') {
-    return { ok: true, status: 'submitted', already_submitted: true, saved: false, draft_id: existing.id }
+    const currentCycle = await loadMakesafeCycleNumber(client, jobId)
+    const submittedCycle = existing.submitted_cycle == null ? null : Number(existing.submitted_cycle)
+    staleSubmitted = submittedCycle !== null && currentCycle > submittedCycle
+    if (!staleSubmitted) {
+      return { ok: true, status: 'submitted', already_submitted: true, saved: false, draft_id: existing.id }
+    }
   }
 
   // Merge this (possibly partial) save over the existing draft so an autosave
   // that omits fields never wipes previously-entered ones — consistent with
-  // submit_roof_report's draft+request merge.
-  const existingFields = (existing?.fields_json && typeof existing.fields_json === 'object')
+  // submit_roof_report's draft+request merge. A stale prior-cycle fill is NOT a
+  // merge base: the new cycle starts from a clean slate.
+  const existingFields = (existing?.fields_json && typeof existing.fields_json === 'object' && !staleSubmitted)
     ? existing.fields_json : {}
   const existingText = sanitiseRoofReportFields(existingFields as any)
   const existingPhotos = Array.isArray((existingFields as any).photos)
@@ -24665,19 +24685,34 @@ async function saveRoofReport(client: any, body: any) {
 
   let draft: any
   if (existing) {
+    const updatePayload: any = {
+      fields_json: fieldsJson,
+      storey,
+      template_version: ROOF_REPORT_TEMPLATE_VERSION,
+      updated_at: nowIso,
+    }
+    // Reopened cycle: clear the prior cycle's submit state so the row is once
+    // again a plain draft the trade can fill and submit for the new cycle. The
+    // old cycle's attached roof_report document is left untouched.
+    if (staleSubmitted) {
+      updatePayload.status = 'draft'
+      updatePayload.report_doc_id = null
+      updatePayload.last_render_hash = null
+      updatePayload.submitted_cycle = null
+      updatePayload.submitted_at = null
+      updatePayload.submitted_by = null
+    }
     const { data, error } = await client.from('makesafe_roof_report_drafts')
-      .update({
-        fields_json: fieldsJson,
-        storey,
-        template_version: ROOF_REPORT_TEMPLATE_VERSION,
-        updated_at: nowIso,
-      })
+      .update(updatePayload)
       .eq('id', existing.id).select().single()
     if (error) throw error
     draft = data
   } else {
+    // Upsert on the UNIQUE (job_id, pack_kind) key rather than a bare insert so
+    // two concurrent first-time writes (a trailing autosave racing another save)
+    // can't collide on the constraint and 500 — the loser updates instead.
     const { data, error } = await client.from('makesafe_roof_report_drafts')
-      .insert({
+      .upsert({
         org_id: DEFAULT_ORG_ID,
         job_id: jobId,
         pack_kind: ROOF_REPORT_PACK_KIND,
@@ -24687,7 +24722,7 @@ async function saveRoofReport(client: any, body: any) {
         status: 'draft',
         created_by: uId,
         updated_at: nowIso,
-      }).select().single()
+      }, { onConflict: 'job_id,pack_kind' }).select().single()
     if (error) throw error
     draft = data
   }
@@ -24766,9 +24801,10 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     // transiently, leaving the board un-advanced. Re-run the (idempotent)
     // checklist advance so a retry completes the board sync — but ONLY within the
     // same make-safe cycle this report was submitted for. If the job was reopened
-    // (cycle_number bumped, substatus reset), this terminal draft is a stale
-    // prior-cycle report and must never re-advance the new cycle's board off
-    // itself. Never re-renders. Still throws loudly on a genuinely missing detail.
+    // (cycle_number bumped past submitted_cycle), this terminal draft is a stale
+    // prior-cycle report: we do NOT treat it as terminal, and fall through below
+    // to render+advance a FRESH report for the new cycle. Never re-renders on the
+    // same-cycle retry. Still throws loudly on a genuinely missing detail.
     const { data: detail } = await client.from('makesafe_job_details')
       .select('job_id, substatus, cycle_number, report_received_at')
       .eq('job_id', jobId).maybeSingle()
@@ -24777,39 +24813,43 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     }
     const currentCycle = Number(detail.cycle_number ?? 1)
     const submittedCycle = existing.submitted_cycle == null ? null : Number(existing.submitted_cycle)
-    const boardSubstatus = normalizeMakesafeSubstatus(detail.substatus)
-    const boardAdvanced = !!detail.report_received_at ||
-      (!!boardSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(boardSubstatus))
-    const sameCycle = submittedCycle !== null && submittedCycle === currentCycle
-    let boardSync: any
-    if (sameCycle && !boardAdvanced) {
-      boardSync = await advanceRoofReportChecklist(
-        client,
-        jobId,
-        new Date().toISOString(),
-        body,
-      )
-    } else {
-      boardSync = {
+    const reopenedNewerCycle = submittedCycle !== null && currentCycle > submittedCycle
+    if (!reopenedNewerCycle) {
+      const boardSubstatus = normalizeMakesafeSubstatus(detail.substatus)
+      const boardAdvanced = !!detail.report_received_at ||
+        (!!boardSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(boardSubstatus))
+      const sameCycle = submittedCycle !== null && submittedCycle === currentCycle
+      let boardSync: any
+      if (sameCycle && !boardAdvanced) {
+        boardSync = await advanceRoofReportChecklist(
+          client,
+          jobId,
+          new Date().toISOString(),
+          body,
+        )
+      } else {
+        boardSync = {
+          ok: true,
+          skipped: true,
+          already_advanced: boardAdvanced,
+          substatus: boardSubstatus,
+          report_received_at: detail.report_received_at || null,
+          reason: !sameCycle ? 'cycle_advanced' : 'board_already_advanced',
+          submitted_cycle: submittedCycle,
+          current_cycle: currentCycle,
+        }
+      }
+      return {
         ok: true,
-        skipped: true,
-        already_advanced: boardAdvanced,
-        substatus: boardSubstatus,
-        report_received_at: detail.report_received_at || null,
-        reason: !sameCycle ? 'cycle_advanced' : 'board_already_advanced',
-        submitted_cycle: submittedCycle,
-        current_cycle: currentCycle,
+        already_submitted: true,
+        status: 'submitted',
+        draft_id: existing.id,
+        report_doc_id: existing.report_doc_id,
+        render_hash: existing.last_render_hash,
+        board_sync: boardSync,
       }
     }
-    return {
-      ok: true,
-      already_submitted: true,
-      status: 'submitted',
-      draft_id: existing.id,
-      report_doc_id: existing.report_doc_id,
-      render_hash: existing.last_render_hash,
-      board_sync: boardSync,
-    }
+    // reopenedNewerCycle: fall through to a fresh submit for the new cycle.
   }
 
   const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object')
@@ -24875,8 +24915,11 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     if (error) throw error
     draft = data
   } else {
+    // Upsert on the UNIQUE (job_id, pack_kind) key rather than a bare insert so a
+    // first-time submit racing a trailing autosave can't collide on the constraint
+    // and 500 — the loser updates the same row.
     const { data, error } = await client.from('makesafe_roof_report_drafts')
-      .insert(finalRow).select().single()
+      .upsert(finalRow, { onConflict: 'job_id,pack_kind' }).select().single()
     if (error) throw error
     draft = data
   }
