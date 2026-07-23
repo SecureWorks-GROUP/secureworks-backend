@@ -231,6 +231,30 @@ export function canonicalObligationPoCore(
   return bare?.[0] ?? null;
 }
 
+// ── canonicalCompanyDedupeKey ─────────────────────────────────────────────────
+// Collapse the ESTABLISHED builder aliases to one dedupe key so the make-safe
+// obligation boundary (deterministic selection dedupe AND intake-draft approval
+// duplicate guard) matches an incoming obligation against a pre-existing manual
+// or recovery job even when one side stored a non-canonical variant of the same
+// builder ("majorloss"/"mlbuilder"/"MLB", an AJ cluster spelling, a raw company
+// name, etc.). This mirrors canonicalSlug's alias set from
+// makesafe_deterministic_intake.ts and is the ONE shared helper both boundaries
+// use so the alias set can never drift between them. Returns "" for empty input
+// (callers treat an empty key as "no company proof" and fail open to review).
+export function canonicalCompanyDedupeKey(value: unknown): string {
+  const key = String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!key) return "";
+  if (["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes(key)) {
+    return "ajsajbr";
+  }
+  if (key.includes("rapid")) return "rapid";
+  if (key.includes("prime")) return "prime";
+  if (key === "mlb" || key.includes("majorloss") || key.includes("mlbuilder")) {
+    return "mlb";
+  }
+  return key;
+}
+
 // ── extractRef (finding 1) ────────────────────────────────────────────────────
 // Extract a make-safe ref from the FULL subject, then the body as a fallback,
 // handling prefixed (AJBR-67200 / AJBR 67200 / AJBR67200 / MS191190),

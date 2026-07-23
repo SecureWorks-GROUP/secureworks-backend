@@ -26,6 +26,7 @@ import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
 import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 import { isReportOnlyType } from "./makesafe_intake_gate.ts";
 import {
+  canonicalCompanyDedupeKey,
   canonicalExternalObligationRef,
   canonicalObligationPoCore,
   loadRefPrefixes,
@@ -1477,15 +1478,21 @@ async function resolveSelectedLineage(
   return { plan: resolvedPlan, missingParents };
 }
 
-function dedupeCompanyKey(value: unknown): string {
-  const key = String(value ?? "").trim().toLowerCase().replace(
-    /[^a-z0-9]/g,
-    "",
+// Statuses that mean an existing job is no longer a live obligation. A later
+// genuine re-issue of the same claim/PO must NOT bind to a dead job, so these are
+// excluded from the obligation match (the boundary then creates a live job).
+const OBLIGATION_DEAD_STATUSES = new Set([
+  "cancelled",
+  "canceled",
+  "void",
+  "voided",
+  "superseded",
+]);
+
+function isDeadObligationJobStatus(status: unknown): boolean {
+  return OBLIGATION_DEAD_STATUSES.has(
+    String(status ?? "").trim().toLowerCase(),
   );
-  if (["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes(key)) {
-    return "ajsajbr";
-  }
-  return key;
 }
 
 async function readExistingObligationJobs(
@@ -1530,7 +1537,7 @@ async function readExistingObligationJobs(
       item.identity.externalRefCanonical,
       prefixes,
     );
-    const targetCompany = dedupeCompanyKey(item.identity.builderSlug);
+    const targetCompany = canonicalCompanyDedupeKey(item.identity.builderSlug);
     const targetPo = canonicalObligationPoCore(item.identity.builderPoCanonical);
     if (!targetRef || !targetCompany) continue;
     const targetReportOnly = deterministicPrimaryIsReportOnly(item);
@@ -1539,19 +1546,24 @@ async function readExistingObligationJobs(
       if (
         canonicalExternalObligationRef(row.external_ref, prefixes) !== targetRef
       ) return false;
-      const existingCompany = dedupeCompanyKey(
+      const existingCompany = canonicalCompanyDedupeKey(
         row.requesting_company_slug || row.requesting_company_name,
       );
       if (!existingCompany || existingCompany !== targetCompany) return false;
       if (isReportOnlyType(row.report_type) !== targetReportOnly) return false;
       const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      // A cancelled/void/superseded job is a dead obligation: a later genuine
+      // re-issue of the same claim/PO must create a live job, not bind here.
+      if (isDeadObligationJobStatus(existingJob?.status)) return false;
       const metadata = existingJob?.metadata &&
           typeof existingJob.metadata === "object"
         ? existingJob.metadata
         : {};
-      const existingPo = canonicalObligationPoCore(
-        metadata.builder_po_number,
-      ) || canonicalObligationPoCore(row.external_ref, true);
+      // Distinct explicit PO stored only in builder_work_order_number still
+      // counts, so two explicitly-different POs are never over-deduped.
+      const existingPo = canonicalObligationPoCore(metadata.builder_po_number) ||
+        canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
+        canonicalObligationPoCore(row.external_ref, true);
       // One claim can carry distinct PO-backed instructions. Canonical claim
       // matching dedupes storage variants, never two explicitly different POs.
       return !(targetPo && existingPo && targetPo !== existingPo);

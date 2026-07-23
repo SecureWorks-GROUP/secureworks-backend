@@ -5,6 +5,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  canonicalCompanyDedupeKey,
   canonicalExternalObligationRef,
   canonicalObligationPoCore,
 } from "../_shared/makesafe_refs.ts";
@@ -170,6 +171,54 @@ Deno.test("intake-draft approval mirrors the runtime composite-ref PO fallback",
     "approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore",
   );
   assertStringIncludes(runtime, "canonicalObligationPoCore(row.external_ref, true)");
+});
+
+Deno.test("obligation dedupe collapses the full established builder alias set at one shared boundary", () => {
+  // All MLB storage variants (raw slug, "majorloss", "mlbuilder", a company name)
+  // collapse to one key so a deterministic MLB obligation matches a pre-existing
+  // manual/recovery MLB job and never spawns a duplicate live job.
+  assertEquals(canonicalCompanyDedupeKey("mlb"), "mlb");
+  assertEquals(canonicalCompanyDedupeKey("Major Loss Builders"), "mlb");
+  assertEquals(canonicalCompanyDedupeKey("mlbuilder"), "mlb");
+  // AJ cluster and the rapid/prime aliases collapse too.
+  assertEquals(canonicalCompanyDedupeKey("AJBR"), "ajsajbr");
+  assertEquals(canonicalCompanyDedupeKey("aj building restoration"), "ajsajbr");
+  assertEquals(canonicalCompanyDedupeKey("Rapid Response Group"), "rapid");
+  assertEquals(canonicalCompanyDedupeKey("Prime Building"), "prime");
+  // Distinct builders stay distinct; empty input is "no company proof".
+  assert(canonicalCompanyDedupeKey("mlb") !== canonicalCompanyDedupeKey("acme"));
+  assertEquals(canonicalCompanyDedupeKey(""), "");
+  assertEquals(canonicalCompanyDedupeKey(null), "");
+  // Both obligation boundaries use the ONE shared helper, not a local strip.
+  assertStringIncludes(runtime, "canonicalCompanyDedupeKey(item.identity.builderSlug)");
+  assertStringIncludes(index, "canonicalCompanyDedupeKey(approvedFields.requesting_company_slug");
+  assertStringIncludes(index, "canonicalCompanyDedupeKey(row.requesting_company_slug");
+});
+
+Deno.test("cancelled/void/superseded jobs are excluded from the obligation match so a re-issue creates a live job", () => {
+  // The runtime obligation dedupe selects jobs(metadata,status) and must skip dead
+  // jobs; otherwise a fresh claim binds to a cancelled job_id and never goes live.
+  assertStringIncludes(runtime, "isDeadObligationJobStatus(existingJob?.status)");
+  assertStringIncludes(runtime, '"superseded"');
+  assertStringIncludes(runtime, '"cancelled"');
+  assertStringIncludes(runtime, '"void"');
+  // The approve-path duplicate guard mirrors the same re-issue exclusion.
+  assert(
+    index.includes("['cancelled','canceled','void','voided','superseded'].includes(String(existingJob?.status"),
+  );
+});
+
+Deno.test("runtime existing-PO derivation mirrors the approve path's builder_work_order_number fallback", () => {
+  // A distinct explicit PO stored only in builder_work_order_number must count on
+  // BOTH boundaries so two explicitly-different POs are never over-deduped.
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(metadata.builder_work_order_number, true)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalObligationPoCore(existingMetadata.builder_work_order_number, true)",
+  );
 });
 
 Deno.test("dry-run replay and exact dark observe take no business-write branch", () => {
