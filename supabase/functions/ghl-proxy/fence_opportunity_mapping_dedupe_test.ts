@@ -250,7 +250,9 @@ Deno.test("dedupe migration guards public.job_scope through a to_regclass-safe h
     false,
   );
   assert(
-    sql.indexOf("CREATE OR REPLACE FUNCTION public._fence_opportunity_mapping_job_scope_count") <
+    sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public._fence_opportunity_mapping_job_scope_count",
+    ) <
       sql.indexOf("WITH duplicate_groups AS"),
     "the guard helper must be defined before the dedupe statement uses it",
   );
