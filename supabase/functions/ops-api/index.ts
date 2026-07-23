@@ -2529,7 +2529,9 @@ if (import.meta.main) serve(async (req: Request) => {
         }
 
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
-        await persistMakesafeStatusShadow(client, canonicalRows)
+        // Shadow persistence is a WRITE and does not belong in this frequently
+        // polled read path. The dedicated makesafe_status_shadow_refresh action and
+        // the 30-min cron own the shadow table; the board GET stays side-effect-free.
         const canary = makesafeStatusCanaryFromRows(canonicalRows)
         if (!canary.ok) {
           console.error('[ops-api] makesafe_status_canary alarm:', JSON.stringify(canary.alarms))
@@ -3050,7 +3052,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
       case 'create_intake_draft': return json(await createIntakeDraft(client, body))
       case 'scan_ses_makesafes': return json(await scanSesMakesafes(client))
-      case 'submit_makesafe_report': return json(await submitMakesafeReport(client, body))
+      case 'submit_makesafe_report':
+        return json(await submitMakesafeReport(client, {
+          ...body,
+          userId: body?.userId || body?.user_id || authUser?.id || null,
+        }))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       // ── Job P&L (M3) — pairs with ops.html #119 + M1 migration ──
       case 'job_financials': return json(await listJobFinancials(client))
@@ -11811,7 +11817,7 @@ async function loadCanonicalMakesafeBoard(
 
   // These reads are business-meaningful. _fetchAllByJobIdChunked checks every
   // PostgREST error and paginates every 1000 rows, so empty means genuinely empty.
-  const [notes, photos, contacts, holds] = await Promise.all([
+  const [notes, photos, contacts] = await Promise.all([
     _fetchAllByJobIdChunked(
       client,
       'job_events',
@@ -11833,14 +11839,24 @@ async function loadCanonicalMakesafeBoard(
       jobIds,
       (q) => q.eq('status', 'active').order('id', { ascending: true }),
     ),
-    _fetchAllByJobIdChunked(
+  ])
+
+  // The status-holds table is an additive shadow overlay that can legitimately lag
+  // the edge function in a preview database. Holds only decorate the board with
+  // reason-coded badges, so tolerate a missing table and log loudly rather than
+  // failing the entire operator-facing make-safe board on that overlay.
+  let holds: any[] = []
+  try {
+    holds = await _fetchAllByJobIdChunked(
       client,
       'makesafe_status_holds',
       'id, job_id, cycle_number, reason_code, note, held_by, created_at, lifted_at',
       jobIds,
       (q) => q.order('created_at', { ascending: false }),
-    ),
-  ])
+    )
+  } catch (error) {
+    console.error('[ops-api] makesafe_board status holds read unavailable:', (error as Error).message)
+  }
 
   // The intake-case migration is shadow-first and can legitimately lag an edge
   // function in a preview database. Claim/ref grouping below remains canonical;
