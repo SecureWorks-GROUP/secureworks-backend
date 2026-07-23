@@ -109,7 +109,7 @@
 | Table | Column Added | Type | Notes |
 |-------|-------------|------|-------|
 | po_communications | communication_type | text DEFAULT 'purchase_order' | 'purchase_order', 'council', 'engineering' |
-| email_events | comms_trigger | text | 13 lifecycle values (see templates below) |
+| email_events | comms_trigger | text | 19 lifecycle values (see templates below) |
 | email_events | comms_channel | text DEFAULT 'email' | 'email', 'sms', 'both' |
 | jobs | callback_parent_id | uuid FK→jobs | Links callback to original job |
 | jobs | is_callback | boolean DEFAULT false | |
@@ -166,7 +166,14 @@
 
 **IMPORTANT:** `send_client_update` is **caller-triggered only**. It is NOT automatic. The ops dashboard, AI, or Phase 2 trigger logic must call it explicitly. Phase 2 terminals that want automated lifecycle comms should build trigger logic and use this as the delivery mechanism.
 
-**SMS:** Always via GHL (locked). **Email:** Via Resend.
+**`install_rescheduled` (CP1 calendar drag-to-reschedule) is special-cased:**
+- Requires `template_vars.new_date` (`YYYY-MM-DD`, must be a real calendar date) — 400 otherwise.
+- `{reschedule_date}` ("Thursday the 2nd of July") and `{street}` (street name only, no number/suburb) are server-derived from `new_date` and the job's site address, never caller-supplied.
+- Dedup is per **(job, new date)** against the most recent successfully-sent reschedule, not once-per-job: a double-tap on the same drop is swallowed, a later reschedule to a different date still sends, and a failed send never blocks a retry. Every other trigger keeps once-per-job (or per-contact) dedup.
+- The only SMS trigger WITHOUT the cross-sell footer — the approved wording ends "Cheers, Shaun".
+- Fired only from the ops calendar reschedule popup's explicit Yes; nothing sends it automatically.
+
+**SMS:** Always via GHL (locked). **Email:** Via Resend. SMS messages get a cross-sell footer appended (`SecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe`), except `install_rescheduled`.
 
 ### Duration Monitoring
 | Action | Input | Output |
@@ -198,7 +205,7 @@ Uses source_ref deduplication to prevent duplicate annotations.
 
 ---
 
-## Client Comms Templates (18)
+## Client Comms Templates (19)
 
 | Trigger | Channel | Template |
 |---------|---------|----------|
@@ -209,6 +216,7 @@ Uses source_ref deduplication to prevent duplicate annotations.
 | council_submitted | sms | We've submitted your application to {council}... |
 | council_approved | sms | Great news! Your {service} has been approved... |
 | crew_scheduled | sms | Your install is booked for {date}. {installer} and team will arrive... |
+| install_rescheduled | sms | Hi {name}, ... we've got your fence install rescheduled for {reschedule_date} at {street}... Cheers, Shaun |
 | crew_arriving | sms | Our crew is on their way to {address}... |
 | daily_progress | sms | Day {day} update: {progress_note} |
 | job_complete | email | Your {service} is complete! Please review and sign off... |
