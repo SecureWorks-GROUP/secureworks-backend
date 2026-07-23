@@ -17,13 +17,18 @@
 //               return to A and a failed send never blocks a retry.
 // All sends are asserted against a stubbed globalThis.fetch: nothing in this
 // file (or the code under test, run this way) touches a live channel.
-import { assert, assertEquals, assertRejects, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   createAssignment,
-  updateAssignment,
-  sendClientUpdate,
   formatDayDateMonth,
+  sendClientUpdate,
   streetFromAddress,
+  updateAssignment,
 } from "./index.ts";
 
 // ── Minimal chainable Supabase mock (shape follows m3c_calendar_ops_test.ts) ──
@@ -50,11 +55,15 @@ function makeClient(store: Store) {
     const resolveSingle = () => {
       if (op === "insert") return { id: "new-row", ...payload };
       if (op === "update") {
-        const base = (table === "job_assignments" ? store.assignments?.[filters.id] : null) || { id: filters.id };
+        const base = (table === "job_assignments"
+          ? store.assignments?.[filters.id]
+          : null) || { id: filters.id };
         return { ...base, ...payload };
       }
       if (table === "jobs") return store.jobs?.[filters.id] ?? null;
-      if (table === "job_assignments") return store.assignments?.[filters.id] ?? null;
+      if (table === "job_assignments") {
+        return store.assignments?.[filters.id] ?? null;
+      }
       if (table === "users") return store.users?.[filters.id] ?? null;
       return null;
     };
@@ -67,14 +76,40 @@ function makeClient(store: Store) {
         if (table === "email_events") store.emailEvents!.push(row);
         return b;
       },
-      update: (row: Row) => { op = "update"; payload = row; store.updates!.push({ table, row }); return b; },
-      delete: () => { op = "delete"; return b; },
-      eq: (k: string, v: any) => { filters[k] = v; return b; },
-      neq: () => b, not: () => b, in: () => b, or: () => b, gte: () => b, lte: () => b, lt: () => b,
-      is: () => b, ilike: () => b,
-      order: (k: string, opts?: { ascending?: boolean }) => { orderKey = k; orderAsc = opts?.ascending !== false; return b; },
-      limit: (n: number) => { limitN = n; return b; },
-      maybeSingle: () => Promise.resolve({ data: resolveSingle(), error: null }),
+      update: (row: Row) => {
+        op = "update";
+        payload = row;
+        store.updates!.push({ table, row });
+        return b;
+      },
+      delete: () => {
+        op = "delete";
+        return b;
+      },
+      eq: (k: string, v: any) => {
+        filters[k] = v;
+        return b;
+      },
+      neq: () => b,
+      not: () => b,
+      in: () => b,
+      or: () => b,
+      gte: () => b,
+      lte: () => b,
+      lt: () => b,
+      is: () => b,
+      ilike: () => b,
+      order: (k: string, opts?: { ascending?: boolean }) => {
+        orderKey = k;
+        orderAsc = opts?.ascending !== false;
+        return b;
+      },
+      limit: (n: number) => {
+        limitN = n;
+        return b;
+      },
+      maybeSingle: () =>
+        Promise.resolve({ data: resolveSingle(), error: null }),
       single: () => Promise.resolve({ data: resolveSingle(), error: null }),
       then: (res: any, rej: any) => {
         // Both dedup shapes await the builder itself: the once-per-job count
@@ -85,7 +120,9 @@ function makeClient(store: Store) {
         if (op === "select" && table === "email_events") {
           const matched = store.emailEvents!
             .map((r, i) => ({ r, i }))
-            .filter(({ r }) => Object.entries(filters).every(([k, v]) => r[k] === v));
+            .filter(({ r }) =>
+              Object.entries(filters).every(([k, v]) => r[k] === v)
+            );
           if (orderKey) {
             matched.sort((a, b2) => {
               const av = String(a.r[orderKey!] ?? "");
@@ -96,9 +133,13 @@ function makeClient(store: Store) {
           }
           let data = matched.map(({ r }) => r);
           if (limitN != null) data = data.slice(0, limitN);
-          return Promise.resolve({ count: matched.length, data, error: null }).then(res, rej);
+          return Promise.resolve({ count: matched.length, data, error: null })
+            .then(res, rej);
         }
-        return Promise.resolve({ data: [], error: null, count: 0 }).then(res, rej);
+        return Promise.resolve({ data: [], error: null, count: 0 }).then(
+          res,
+          rej,
+        );
       },
       catch: () => Promise.resolve({ data: null, error: null }),
     };
@@ -114,28 +155,55 @@ function stubFetch(opts: { failSms?: boolean } = {}) {
   globalThis.fetch = ((input: any, init?: any) => {
     const url = String(input instanceof Request ? input.url : input);
     calls.push({ url, init });
-    if (opts.failSms && url.includes("send_sms")) return Promise.reject(new Error("GHL unreachable"));
-    return Promise.resolve(new Response(JSON.stringify({ success: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    if (opts.failSms && url.includes("send_sms")) {
+      return Promise.reject(new Error("GHL unreachable"));
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
   }) as typeof fetch;
-  return { calls, opts, restore: () => { globalThis.fetch = original; } };
+  return {
+    calls,
+    opts,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
-const smsCalls = (calls: FetchCall[]) => calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
+const smsCalls = (calls: FetchCall[]) =>
+  calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
 
 function baseStore(): Store {
   return {
     jobs: {
       "job-1": {
-        id: "job-1", type: "fencing", job_number: "SWF-100", status: "processing",
-        client_name: "Jane Citizen", client_phone: "+61400000000", client_email: null,
-        site_address: "12 Example St, Padbury WA 6025", site_suburb: "Padbury",
-        ghl_contact_id: "ghl-abc", ghl_opportunity_id: null,
+        id: "job-1",
+        type: "fencing",
+        job_number: "SWF-100",
+        status: "processing",
+        client_name: "Jane Citizen",
+        client_phone: "+61400000000",
+        client_email: null,
+        site_address: "12 Example St, Padbury WA 6025",
+        site_suburb: "Padbury",
+        ghl_contact_id: "ghl-abc",
+        ghl_opportunity_id: null,
       },
     },
     users: { "inst-1": { id: "inst-1", name: "Hugo", phone: "+61400111222" } },
     assignments: {
       "a-1": {
-        id: "a-1", job_id: "job-1", user_id: "inst-1", confirmation_status: "tentative",
-        scheduled_date: "2026-07-20", scheduled_end: "2026-07-21", duration_days: 2, crew_name: "Hugo",
+        id: "a-1",
+        job_id: "job-1",
+        user_id: "inst-1",
+        confirmation_status: "tentative",
+        scheduled_date: "2026-07-20",
+        scheduled_end: "2026-07-21",
+        duration_days: 2,
+        crew_name: "Hugo",
       },
     },
   };
@@ -147,27 +215,42 @@ Deno.test("real-crew: createAssignment REJECTS a null user_id for an install (cl
   try {
     const store = baseStore();
     await assertRejects(
-      () => createAssignment(makeClient(store), {
-        jobId: "job-1", scheduledDate: "2026-07-27", crewName: "Somebody Typed",
-        assignmentType: "install", confirmationStatus: "tentative",
-      }),
+      () =>
+        createAssignment(makeClient(store), {
+          jobId: "job-1",
+          scheduledDate: "2026-07-27",
+          crewName: "Somebody Typed",
+          assignmentType: "install",
+          confirmationStatus: "tentative",
+        }),
       Error,
       "real crew member",
     );
     // Guard fires before any write.
-    assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 0);
-  } finally { restore(); }
+    assertEquals(
+      store.inserts!.filter((i) => i.table === "job_assignments").length,
+      0,
+    );
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("real-crew: default assignment_type (install) with no user_id also rejects", async () => {
   const { restore } = stubFetch();
   try {
     await assertRejects(
-      () => createAssignment(makeClient(baseStore()), { jobId: "job-1", scheduledDate: "2026-07-27" }),
+      () =>
+        createAssignment(makeClient(baseStore()), {
+          jobId: "job-1",
+          scheduledDate: "2026-07-27",
+        }),
       Error,
       "real crew member",
     );
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("real-crew: meeting/reminder planning entries keep the existing null-user shape", async () => {
@@ -175,12 +258,17 @@ Deno.test("real-crew: meeting/reminder planning entries keep the existing null-u
   try {
     const store = baseStore();
     const res = await createAssignment(makeClient(store), {
-      jobId: "job-1", scheduledDate: "2026-07-27", assignmentType: "meeting",
-      label: "Team meeting", confirmationStatus: "tentative",
+      jobId: "job-1",
+      scheduledDate: "2026-07-27",
+      assignmentType: "meeting",
+      label: "Team meeting",
+      confirmationStatus: "tentative",
     });
     assertEquals(res.assignment.user_id, null);
     assertEquals(smsCalls(calls).length, 0); // planning entry never texts
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("real-crew: install WITH a user_id writes the row and passes duration_days through", async () => {
@@ -188,14 +276,21 @@ Deno.test("real-crew: install WITH a user_id writes the row and passes duration_
   try {
     const store = baseStore();
     const res = await createAssignment(makeClient(store), {
-      jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-27", scheduledEnd: "2026-07-29",
-      durationDays: 3, crewName: "Hugo", confirmationStatus: "tentative",
+      jobId: "job-1",
+      userId: "inst-1",
+      scheduledDate: "2026-07-27",
+      scheduledEnd: "2026-07-29",
+      durationDays: 3,
+      crewName: "Hugo",
+      confirmationStatus: "tentative",
     });
     assertEquals(res.assignment.user_id, "inst-1");
     assertEquals(res.assignment.duration_days, 3);
     assertEquals(res.assignment.scheduled_end, "2026-07-29");
     assertEquals(smsCalls(calls).length, 0); // tentative planning stays silent
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("real-crew: duration_days omitted -> column left to its DB default (not written)", async () => {
@@ -203,11 +298,19 @@ Deno.test("real-crew: duration_days omitted -> column left to its DB default (no
   try {
     const store = baseStore();
     await createAssignment(makeClient(store), {
-      jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-27", confirmationStatus: "tentative",
+      jobId: "job-1",
+      userId: "inst-1",
+      scheduledDate: "2026-07-27",
+      confirmationStatus: "tentative",
     });
     const row = store.inserts!.find((i) => i.table === "job_assignments")!.row;
-    assert(!("duration_days" in row), "duration_days must not be written when the caller omits it");
-  } finally { restore(); }
+    assert(
+      !("duration_days" in row),
+      "duration_days must not be written when the caller omits it",
+    );
+  } finally {
+    restore();
+  }
 });
 
 // ── Drag/resize round-trip through update_assignment ───────────────────────
@@ -216,25 +319,38 @@ Deno.test("round-trip: updateAssignment carries scheduled_date + scheduled_end +
   try {
     const store = baseStore();
     const res = await updateAssignment(makeClient(store), {
-      assignmentId: "a-1", crew_name: "Hugo",
-      scheduled_date: "2026-07-22", scheduled_end: "2026-07-24", duration_days: 3,
+      assignmentId: "a-1",
+      crew_name: "Hugo",
+      scheduled_date: "2026-07-22",
+      scheduled_end: "2026-07-24",
+      duration_days: 3,
     });
     const upd = store.updates!.find((u) => u.table === "job_assignments")!.row;
     assertEquals(upd, {
-      crew_name: "Hugo", scheduled_date: "2026-07-22", scheduled_end: "2026-07-24", duration_days: 3,
+      crew_name: "Hugo",
+      scheduled_date: "2026-07-22",
+      scheduled_end: "2026-07-24",
+      duration_days: 3,
     });
     assertEquals(res.assignment.duration_days, 3);
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("round-trip: camelCase durationDays maps to duration_days too", async () => {
   const { restore } = stubFetch();
   try {
     const store = baseStore();
-    await updateAssignment(makeClient(store), { assignmentId: "a-1", durationDays: 4 });
+    await updateAssignment(makeClient(store), {
+      assignmentId: "a-1",
+      durationDays: 4,
+    });
     const upd = store.updates!.find((u) => u.table === "job_assignments")!.row;
     assertEquals(upd, { duration_days: 4 });
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("round-trip: updateAssignment drops non-positive/non-numeric duration_days instead of writing them", async () => {
@@ -242,21 +358,34 @@ Deno.test("round-trip: updateAssignment drops non-positive/non-numeric duration_
   try {
     for (const bad of [0, -2, 0.4, "abc"]) {
       const store = baseStore();
-      await updateAssignment(makeClient(store), { assignmentId: "a-1", scheduled_date: "2026-07-22", duration_days: bad });
-      const upd = store.updates!.find((u) => u.table === "job_assignments")!.row;
+      await updateAssignment(makeClient(store), {
+        assignmentId: "a-1",
+        scheduled_date: "2026-07-22",
+        duration_days: bad,
+      });
+      const upd = store.updates!.find((u) =>
+        u.table === "job_assignments"
+      )!.row;
       assertEquals(upd, { scheduled_date: "2026-07-22" });
     }
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("round-trip: updateAssignment rounds fractional duration_days to a positive integer", async () => {
   const { restore } = stubFetch();
   try {
     const store = baseStore();
-    await updateAssignment(makeClient(store), { assignmentId: "a-1", duration_days: 2.6 });
+    await updateAssignment(makeClient(store), {
+      assignmentId: "a-1",
+      duration_days: 2.6,
+    });
     const upd = store.updates!.find((u) => u.table === "job_assignments")!.row;
     assertEquals(upd, { duration_days: 3 });
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("real-crew: createAssignment rounds before the positive check — 0.4 never writes duration_days 0", async () => {
@@ -264,16 +393,24 @@ Deno.test("real-crew: createAssignment rounds before the positive check — 0.4 
   try {
     const store = baseStore();
     await createAssignment(makeClient(store), {
-      jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-27", durationDays: 0.4, confirmationStatus: "tentative",
+      jobId: "job-1",
+      userId: "inst-1",
+      scheduledDate: "2026-07-27",
+      durationDays: 0.4,
+      confirmationStatus: "tentative",
     });
     const row = store.inserts!.find((i) => i.table === "job_assignments")!.row;
-    assert(!("duration_days" in row), "a value that rounds to 0 must not be written");
-  } finally { restore(); }
+    assert(
+      !("duration_days" in row),
+      "a value that rounds to 0 must not be written",
+    );
+  } finally {
+    restore();
+  }
 });
 
 // ── install_rescheduled trigger ────────────────────────────────────────────
-const EXPECTED_SMS =
-  "Hi Jane,\n" +
+const EXPECTED_SMS = "Hi Jane,\n" +
   "Hope you're well! Just letting you know we've got your fence install rescheduled for Thursday the 2nd of July at Example St. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\n" +
   "Let us know if you have any questions.\n" +
   "Cheers, Shaun";
@@ -283,7 +420,8 @@ Deno.test("install_rescheduled: renders Shaun's wording verbatim — day-the-dat
   try {
     const store = baseStore();
     const res = await sendClientUpdate(makeClient(store), {
-      job_id: "job-1", comms_trigger: "install_rescheduled",
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
       template_vars: { new_date: "2026-07-02" },
     });
     assertEquals(res.sent, true);
@@ -293,7 +431,9 @@ Deno.test("install_rescheduled: renders Shaun's wording verbatim — day-the-dat
     const body = JSON.parse(sms[0].init.body);
     assertEquals(body.contactId, "ghl-abc");
     assertEquals(body.message, EXPECTED_SMS); // exact — including NO cross-sell footer
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("install_rescheduled: dedup is per (job, new date) — double-tap swallowed, re-reschedule to a new date sends", async () => {
@@ -301,32 +441,64 @@ Deno.test("install_rescheduled: dedup is per (job, new date) — double-tap swal
   try {
     const store = baseStore();
     const client = makeClient(store);
-    const first = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const first = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(first.sent, true);
-    const dup = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const dup = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(dup.sent, false);
     assertStringIncludes(dup.reason, "job and date");
-    const again = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-06" } });
+    const again = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-06" },
+    });
     assertEquals(again.sent, true);
     assertEquals(smsCalls(calls).length, 2);
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("install_rescheduled: A→B→A re-sends for the return to A (most recent SENT row carries B)", async () => {
   const { calls, restore } = stubFetch();
   try {
     const client = makeClient(baseStore());
-    const a1 = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const a1 = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(a1.sent, true);
-    const b = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-06" } });
+    const b = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-06" },
+    });
     assertEquals(b.sent, true);
-    const a2 = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const a2 = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(a2.sent, true);
     assertEquals(smsCalls(calls).length, 3);
-    const dup = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const dup = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(dup.sent, false);
     assertStringIncludes(dup.reason, "job and date");
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("install_rescheduled: a failed send never blocks the operator's retry", async () => {
@@ -334,15 +506,34 @@ Deno.test("install_rescheduled: a failed send never blocks the operator's retry"
   try {
     const store = baseStore();
     const client = makeClient(store);
-    const failed = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const failed = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(failed.sent, false);
-    assertEquals(store.emailEvents!.filter((r) => r.comms_trigger === "install_rescheduled" && r.status === "failed").length, 1);
+    assertEquals(
+      store.emailEvents!.filter((r) =>
+        r.comms_trigger === "install_rescheduled" && r.status === "failed"
+      ).length,
+      1,
+    );
     stub.opts.failSms = false;
-    const retry = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const retry = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(retry.sent, true);
-    const dup = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    const dup = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
     assertEquals(dup.sent, false);
-  } finally { stub.restore(); }
+  } finally {
+    stub.restore();
+  }
 });
 
 Deno.test("install_rescheduled: calendar-invalid new_date rejected with 400 — no garbage SMS", async () => {
@@ -350,24 +541,37 @@ Deno.test("install_rescheduled: calendar-invalid new_date rejected with 400 — 
   try {
     for (const bad of ["2026-02-30", "2026-13-01", "2026-02-29"]) {
       await assertRejects(
-        () => sendClientUpdate(makeClient(baseStore()), { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: bad } }),
+        () =>
+          sendClientUpdate(makeClient(baseStore()), {
+            job_id: "job-1",
+            comms_trigger: "install_rescheduled",
+            template_vars: { new_date: bad },
+          }),
         Error,
         "new_date",
       );
     }
     assertEquals(smsCalls(calls).length, 0);
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("install_rescheduled: requires template_vars.new_date (YYYY-MM-DD)", async () => {
   const { restore } = stubFetch();
   try {
     await assertRejects(
-      () => sendClientUpdate(makeClient(baseStore()), { job_id: "job-1", comms_trigger: "install_rescheduled" }),
+      () =>
+        sendClientUpdate(makeClient(baseStore()), {
+          job_id: "job-1",
+          comms_trigger: "install_rescheduled",
+        }),
       Error,
       "new_date",
     );
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 Deno.test("other SMS triggers keep the cross-sell footer and once-per-job dedup (no regression)", async () => {
@@ -375,13 +579,21 @@ Deno.test("other SMS triggers keep the cross-sell footer and once-per-job dedup 
   try {
     const store = baseStore();
     const client = makeClient(store);
-    const res = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "quote_accepted" });
+    const res = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "quote_accepted",
+    });
     assertEquals(res.sent, true);
     const body = JSON.parse(smsCalls(calls)[0].init.body);
     assertStringIncludes(body.message, "SecureWorks Group — Patios | Fencing");
-    const dup = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "quote_accepted" });
+    const dup = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "quote_accepted",
+    });
     assertEquals(dup.sent, false);
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });
 
 // ── Pure formatting helpers ────────────────────────────────────────────────
@@ -396,7 +608,10 @@ Deno.test("formatDayDateMonth: '[day] the [date] of [month]' with correct ordina
 });
 
 Deno.test("streetFromAddress: street name only — numbers, units and suburb tail stripped", () => {
-  assertEquals(streetFromAddress("12 Example St, Padbury WA 6025"), "Example St");
+  assertEquals(
+    streetFromAddress("12 Example St, Padbury WA 6025"),
+    "Example St",
+  );
   assertEquals(streetFromAddress("12A Ocean Drive"), "Ocean Drive");
   assertEquals(streetFromAddress("U2/34 Foo Street, Padbury"), "Foo Street");
   assertEquals(streetFromAddress("3/45 Bar Rd, Suburb"), "Bar Rd");
