@@ -1154,6 +1154,71 @@ Deno.test("a confirmed grouped plan binds no-job exception secondaries but rejec
   assertEquals(divergent.makesafe_intake_case_sources.length, 2);
 });
 
+Deno.test("exact selection ignores an unrelated fresh multi-authority case on the bounded page", async () => {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: "22222222-2222-2222-2222-222222222222",
+    slug: "aj",
+    name: "AJ",
+    sender_patterns: ["aj.test"],
+    parsing_rules: null,
+    active: true,
+  });
+  for (const [index, suffix] of ["a", "b", "fresh"].entries()) {
+    store.emails.push(email({
+      post_id: `unrelated-merge-${suffix}`,
+      from_email: "dispatch@aj.test",
+      received_at: `2026-07-0${index + 2}T01:00:00.000Z`,
+      subject: "Make Safe - Redacted - Job No 69019",
+      body_content: "Work Order AJBR 69019 received for review.",
+    }));
+  }
+  store.emails.push(email({
+    post_id: "exact-independent-tail",
+    received_at: "2026-07-09T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-99002 Work Order: WO-99002",
+    body_content: "Address: 2 Tail Way, Perth",
+  }));
+  seedCanonicalCase(
+    store,
+    "unrelated-case-a",
+    "fingerprint:unrelated-a/deliverable:wo%3AAJBR-69019/cycle:1",
+    "unrelated-merge-a",
+  );
+  seedCanonicalCase(
+    store,
+    "unrelated-case-b",
+    "fingerprint:unrelated-b/deliverable:wo%3AAJBR-69019/cycle:1",
+    "unrelated-merge-b",
+  );
+
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    days: 30,
+    nowIso: NOW,
+    maxCases: 1,
+    allowSourcePostIds: ["exact-independent-tail"],
+    approveDraft,
+  });
+
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.totals.case_rows_created, 1);
+  assertEquals(report.totals.source_rows_created, 1);
+  assert(
+    store.makesafe_intake_case_sources.some((row) =>
+      row.post_id === "exact-independent-tail"
+    ),
+  );
+  assert(
+    !store.makesafe_intake_case_sources.some((row) =>
+      row.post_id === "unrelated-merge-fresh"
+    ),
+    "exact mode must leave the unrelated unsafe merge untouched",
+  );
+  assertEquals(store.makesafe_intake_cases.length, 3);
+});
+
 Deno.test("repeatedly failing cases do not consume the commit budget", async () => {
   const store = baseStore();
   for (let i = 1; i <= 2; i++) {

@@ -2175,27 +2175,45 @@ export async function runDeterministicIntake(
   // cancelled request therefore rereads the same page; deterministic natural keys
   // make that retry safe.
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
-  // Canonical source ownership is part of selection, not a repair after it. A
-  // persisted exact source may look like a child on this moving page even though
-  // its stored case is an authoritative root; binding first prevents exact mode
-  // from pulling and writing that page-only ambient ancestor. A genuinely fresh
-  // selected child keeps its parent edge, so selectedPlan closes that ancestry.
-  const authorityBoundFullPlan = bindSelectedPlanToPersistedSourceAuthority(
-    fullPlan,
-    sourceAuthorities.byPostId,
-  );
+  // Canonical source ownership is part of selection, not a repair after it. Full
+  // open binds its whole bounded plan. Exact mode must not validate or fail on an
+  // unrelated case merely because that case shares the ambient 500-source page:
+  // close the raw selected ancestry, bind only that closure, then select/close it
+  // again. The second pass prunes a page-only ambient ancestor when a persisted
+  // exact source binds back to its authoritative root; a genuinely fresh child
+  // keeps its edge and therefore keeps its required parent closure.
+  // Instruction allowlists seed their persisted sources before the bounded read;
+  // include those ids as internal selection coordinates so a moving raw key can
+  // still reach the case that binding restores to the allowlisted stable key.
+  const exactSelectionSourcePostIds = [
+    ...allowSourcePostIds,
+    ...instructionSeeds.postIds,
+  ];
+  const selected = selectionMode === "full_open"
+    ? bindSelectedPlanToPersistedSourceAuthority(
+      fullPlan,
+      sourceAuthorities.byPostId,
+    )
+    : hasAllowlist
+    ? selectedPlan(
+      bindSelectedPlanToPersistedSourceAuthority(
+        selectedPlan(
+          fullPlan,
+          exactSelectionSourcePostIds,
+          allowInstructionKeys,
+        ),
+        sourceAuthorities.byPostId,
+      ),
+      exactSelectionSourcePostIds,
+      allowInstructionKeys,
+    )
+    : bindSelectedPlanToPersistedSourceAuthority(
+      fullPlan,
+      sourceAuthorities.byPostId,
+    );
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
     options.includeSanitizedCases === true;
-  const selected = selectionMode === "full_open"
-    ? authorityBoundFullPlan
-    : hasAllowlist
-    ? selectedPlan(
-      authorityBoundFullPlan,
-      allowSourcePostIds,
-      allowInstructionKeys,
-    )
-    : authorityBoundFullPlan;
   const lineage = await resolveSelectedLineage(
     client,
     selected,
