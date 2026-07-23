@@ -2380,9 +2380,11 @@ if (import.meta.main) serve(async (req: Request) => {
       'makesafe_pipeline',
       'makesafe_pipeline_items',
       'makesafe_audit',
-      // Board-truth M1 shadow/read-only reconciliation. refresh writes only the
-      // reversible computed_status cache; disagreement/canary never mutate.
-      'makesafe_status_shadow_refresh',
+      // Board-truth M1 read-only reconciliation. disagreement/canary never mutate.
+      // makesafe_status_shadow_refresh is deliberately NOT allow-listed: it UPDATEs
+      // the computed_status shadow cache, so it stays a write and is reachable only
+      // via the privileged api_key path (dashboard + service-key cron), never the
+      // routine — keeping this allow-list writes-free.
       'makesafe_status_disagreements',
       'makesafe_status_canary',
       'makesafe_new_emails',
@@ -2529,13 +2531,10 @@ if (import.meta.main) serve(async (req: Request) => {
         }
 
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
-        // Shadow persistence is a WRITE and does not belong in this frequently
-        // polled read path. The dedicated makesafe_status_shadow_refresh action and
-        // the 30-min cron own the shadow table; the board GET stays side-effect-free.
-        const canary = makesafeStatusCanaryFromRows(canonicalRows)
-        if (!canary.ok) {
-          console.error('[ops-api] makesafe_status_canary alarm:', JSON.stringify(canary.alarms))
-        }
+        // This frequently-polled read path stays side-effect-free and quiet. Shadow
+        // persistence (a WRITE) and the declared≠computed canary (an alarm-level log
+        // that would fire on nearly every poll during M1 shadow) are both owned by
+        // their dedicated actions and the 30-min cron, not the board GET.
         const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
         if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
         return json({
@@ -2547,6 +2546,14 @@ if (import.meta.main) serve(async (req: Request) => {
         })
       }
       case 'makesafe_status_shadow_refresh': {
+        // Shadow-cache WRITE: privileged only (master api_key / service-key cron, or
+        // admin/owner JWT). The routine is already denied by the allow-list above;
+        // this also keeps ordinary trade JWTs off the board-wide computed_status write.
+        const shadowRefreshPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!shadowRefreshPrivileged) {
+          return json({ error: 'makesafe_status_shadow_refresh requires ops privilege' }, 403)
+        }
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
         const shadow = await persistMakesafeStatusShadow(client, canonicalRows)
         return json({
@@ -11899,7 +11906,13 @@ async function loadCanonicalMakesafeBoard(
     }
   }
   const holdsByJobId: Record<string, any> = {}
-  const cycleByJobId = new Map(baseRows.map((row) => [row.id, Number(row.cycle_number || 1)]))
+  // Match the computed-status read model's cycle authority (detail-first) so holds
+  // recorded on cycle>1 attach as badges even when the base pipeline row carries no
+  // top-level cycle_number: read_model uses detail?.cycle_number ?? base?.cycle_number.
+  const cycleByJobId = new Map(baseRows.map((row) => [
+    row.id,
+    Number(row?.makesafe_details?.cycle_number ?? row?.cycle_number ?? 1),
+  ]))
   for (const hold of holds) {
     if (hold?.lifted_at) continue
     const currentCycle = cycleByJobId.get(hold?.job_id) || 1
@@ -12628,8 +12641,9 @@ async function submitMakesafeReport(client: any, body: any) {
   // scoped to the same cycle, so a prior-cycle submitted report never blocks the
   // second visit's submission and is never overwritten).
   const { data: cycleDetail } = await client.from('makesafe_job_details')
-    .select('cycle_number').eq('job_id', jId).maybeSingle()
+    .select('cycle_number, substatus').eq('job_id', jId).maybeSingle()
   const currentCycle = (cycleDetail as { cycle_number?: number } | null)?.cycle_number ?? 1
+  const detailSubstatus = (cycleDetail as { substatus?: string } | null)?.substatus || null
 
   const reportFields: Record<string, any> = {
     cycle_number: currentCycle,
@@ -12660,11 +12674,21 @@ async function submitMakesafeReport(client: any, body: any) {
     .select('id, status').eq('job_id', jId).eq('cycle_number', currentCycle).limit(1).maybeSingle()
 
   const submittingFinal = (reportStatus || 'submitted') === 'submitted'
+  // A report already persisted as 'submitted' whose board sync completed (detail
+  // already advanced to the finished substatus) is a genuine duplicate submit and
+  // is still rejected. But one saved as 'submitted' whose board never advanced —
+  // a prior call that failed a post-save step (auto-assignment, board substatus,
+  // event log) and returned 500 — is NOT a duplicate: it is a stuck card. Rather
+  // than dead-ending the retry with 'Report already submitted', we resume and
+  // re-run the idempotent sync steps below to finish the job.
+  const boardSyncComplete = detailSubstatus === 'admin_to_send_report'
+  const resumingSubmitted = submittingFinal &&
+    existing?.status === 'submitted' && !boardSyncComplete
   if (submittingFinal) {
     // Captain D1: a final report is always attributable. Trade JWT dispatch
     // supplies this server-side; privileged callers must supply an actor too.
     if (!uId) throw new ApiError('user_id required for final MakeSafe report attribution', 400)
-    if (existing?.status === 'submitted') throw new Error('Report already submitted')
+    if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
       .select('phase')
       .eq('job_id', jId)
@@ -12680,10 +12704,19 @@ async function submitMakesafeReport(client: any, body: any) {
   let report
   if (existing) {
     if (existing.status === 'approved') throw new Error('Report already approved')
-    const { data, error } = await client.from('job_service_reports')
-      .update(reportFields).eq('id', existing.id).select().single()
-    if (error) throw error
-    report = data
+    if (resumingSubmitted) {
+      // Preserve the original submission (submitted_by/submitted_at) on a resume
+      // and just re-read the row; the sync steps below are what still need to run.
+      const { data, error } = await client.from('job_service_reports')
+        .select().eq('id', existing.id).single()
+      if (error) throw error
+      report = data
+    } else {
+      const { data, error } = await client.from('job_service_reports')
+        .update(reportFields).eq('id', existing.id).select().single()
+      if (error) throw error
+      report = data
+    }
   } else {
     const { data, error } = await client.from('job_service_reports')
       .insert({ job_id: jId, ...reportFields }).select().single()
@@ -12765,26 +12798,43 @@ async function submitMakesafeReport(client: any, body: any) {
     // Do not mark the job final complete/invoiced here. The MakeSafe ops board
     // derives its report_ready stage from substatus=admin_to_send_report above.
     try {
-      const { error: eventErr } = await client.from('job_events').insert({
-        job_id: jId,
-        user_id: uId,
-        event_type: 'makesafe_report_submitted',
-        detail_json: {
-          report_id: report.id,
-          labour_hours,
-          trade_count,
-          materials_used,
-          auto_assignment_id: autoAssignment?.id || null,
-          auto_assigned_submitter: !!autoAssignment,
-          assignment_attribution: autoAssignment ? 'final_makesafe_report_submitter' : null,
-          cycle_number: currentCycle,
-        },
-      })
-      if (eventErr) {
-        eventSync = { ok: false, error: eventErr.message || String(eventErr) }
-        warnings.push('event_sync_failed')
+      // On a resume, an earlier attempt may already have logged this event; skip
+      // re-inserting so retries stay idempotent instead of duplicating history.
+      let priorEvent = false
+      if (resumingSubmitted) {
+        const { data: existingEvent } = await client.from('job_events')
+          .select('id')
+          .eq('job_id', jId)
+          .eq('event_type', 'makesafe_report_submitted')
+          .eq('detail_json->>cycle_number', String(currentCycle))
+          .limit(1)
+          .maybeSingle()
+        priorEvent = !!existingEvent
+      }
+      if (priorEvent) {
+        eventSync = { ok: true, skipped: 'already_logged' }
       } else {
-        eventSync = { ok: true }
+        const { error: eventErr } = await client.from('job_events').insert({
+          job_id: jId,
+          user_id: uId,
+          event_type: 'makesafe_report_submitted',
+          detail_json: {
+            report_id: report.id,
+            labour_hours,
+            trade_count,
+            materials_used,
+            auto_assignment_id: autoAssignment?.id || null,
+            auto_assigned_submitter: !!autoAssignment,
+            assignment_attribution: autoAssignment ? 'final_makesafe_report_submitter' : null,
+            cycle_number: currentCycle,
+          },
+        })
+        if (eventErr) {
+          eventSync = { ok: false, error: eventErr.message || String(eventErr) }
+          warnings.push('event_sync_failed')
+        } else {
+          eventSync = { ok: true }
+        }
       }
     } catch (err) {
       eventSync = { ok: false, error: err instanceof Error ? err.message : String(err) }

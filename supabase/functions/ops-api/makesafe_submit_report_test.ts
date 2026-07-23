@@ -298,8 +298,15 @@ Deno.test("submit_makesafe_report requires an attributed actor before writing a 
   assertEquals(rows.job_assignments.length, 0);
 });
 
-Deno.test("submit_makesafe_report blocks duplicate submitted reports", async () => {
+Deno.test("submit_makesafe_report blocks a genuine duplicate once the board has advanced", async () => {
   const { client } = makeSubmitClient(baseRows({
+    // A genuine duplicate: the first submit fully synced the board (substatus
+    // already at the finished value), so a second submit is rejected.
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "admin_to_send_report",
+      report_received_at: "2026-06-16T01:05:00Z",
+    }],
     job_service_reports: [{
       id: "report-existing",
       job_id: "job-1",
@@ -317,6 +324,38 @@ Deno.test("submit_makesafe_report blocks duplicate submitted reports", async () 
     Error,
     "Report already submitted",
   );
+});
+
+Deno.test("submit_makesafe_report resumes a submitted report stuck before board sync", async () => {
+  // A prior submit saved the report row as 'submitted' but failed a post-save step
+  // (e.g. auto-assignment insert) and returned 500, leaving the board un-advanced.
+  // The retry must resume and finish the sync instead of dead-ending.
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+    }],
+    job_service_reports: [{
+      id: "report-existing",
+      job_id: "job-1",
+      cycle_number: 1,
+      status: "submitted",
+      submitted_at: "2026-06-16T01:00:00Z",
+      submitted_by: "trade-1",
+      checklist_json: {},
+    }],
+  }));
+
+  const result = await _submitMakesafeReportForTest(client, validBody());
+  assert(result.ok);
+  // Board advanced and the submitter was auto-assigned by the resumed sync.
+  assertEquals(rows.makesafe_job_details[0].substatus, "admin_to_send_report");
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_events.length, 1);
+  // The original submission attribution/timestamp is preserved (not overwritten).
+  assertEquals(rows.job_service_reports.length, 1);
+  assertEquals(rows.job_service_reports[0].submitted_at, "2026-06-16T01:00:00Z");
 });
 
 Deno.test("submit_makesafe_report fails visibly when the report-ready board sync fails", async () => {
