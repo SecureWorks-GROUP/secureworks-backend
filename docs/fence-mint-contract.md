@@ -1,6 +1,6 @@
 # Fence entry integration: server-owned job mint
 
-Status: implementation contract for the guarded `fence-entry-funnel-load-paths-e2` branch. Not deployed. Migration not applied.
+Status: `ghl-proxy` is deployed. The audited dedupe and base mint migrations were applied on 2026-07-23; live verification remains blocked until the SQLSTATE `55000` correction in `20260723000001_fence_job_mint_record_guards.sql` is merged, applied, and dry-probed. See `docs/evidence/fence-opportunity-mapping-dedupe-2026-07-23.md`.
 
 ## Rulings requiring Marnin review
 
@@ -171,7 +171,7 @@ Do not perform these steps from this task branch.
    ```
 
    Required result: zero rows. If rows remain, the historical duplicate mappings are resolved first by the audited, non-deleting `20260720235959_fence_opportunity_mapping_dedupe.sql`, which keeps a deterministic richest-evidence winner, audits every original mapping, and unmaps only losers (never deleting a job). Its production evidence and ambiguous-case list are in `docs/evidence/fence-opportunity-mapping-dedupe-2026-07-23.md`. Any residual duplicate still stops release.
-3. Apply the migrations through the normal migration pipeline in order — `20260720235959_fence_opportunity_mapping_dedupe.sql` first (it enforces its own post-dedupe zero-duplicate gate), then `20260721000001_fence_job_mint.sql`. Do not apply them manually from a feature worktree.
+3. Apply the migrations through the normal migration pipeline in order: `20260720235959_fence_opportunity_mapping_dedupe.sql` first (it enforces its own post-dedupe zero-duplicate gate), then `20260721000001_fence_job_mint.sql`, then `20260723000001_fence_job_mint_record_guards.sql`. Do not apply them manually from a feature worktree.
 4. Deploy `ghl-proxy` from approved `main` CI using its existing `--no-verify-jwt` configuration. Do not manually deploy from this worktree.
 5. Keep the entry-funnel branch's browser mint stop in place until the endpoint proof below is green and that branch integrates this exact contract.
 6. Merge/deploy the fence entry integration separately. Do not merge fence #61 or patio #123 by implication; each keeps its own review/release decision.

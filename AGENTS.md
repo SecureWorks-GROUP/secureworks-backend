@@ -282,8 +282,12 @@ Historical duplicate opportunity mappings are resolved by
 it audits every original mapping, unmaps only deterministic losers, and never
 deletes jobs. The production evidence and ambiguous-case list are in
 `docs/evidence/fence-opportunity-mapping-dedupe-2026-07-23.md`; never bypass the
-post-dedupe zero-duplicate gate. Legacy non-fence create endpoints remain
-unchanged until separately migrated.
+post-dedupe zero-duplicate gate. Apply
+`20260723000001_fence_job_mint_record_guards.sql` after the base mint migration:
+untyped PL/pgSQL records must be protected by nested `FOUND`/owner guards, never
+`FOUND AND record.field`, because a no-row result otherwise raises SQLSTATE
+`55000`. Legacy non-fence create endpoints remain unchanged until separately
+migrated.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
