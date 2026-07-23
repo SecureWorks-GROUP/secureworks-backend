@@ -29,6 +29,22 @@ Every card originates as one canonical job row with:
 
 A stale `company_contact_required` substatus on an already allocated/scheduled job is reported as `stale_company_contact_substatus`. It is not presented as a real client blocker.
 
+## Derived status shadow (M1, not consumer-facing)
+
+Each canonical row also carries an evidence-derived shadow status that runs beside the declared model. These fields are **shadow-only**: no Ops or Trade projection column reads them in M1, and consumers must not wire to them. The declared `canonical_stage`/`substatus` remain the operator-visible truth.
+
+- `computed_status`, `computed_status_job_type`, `computed_status_reasons[]`, `computed_status_missing[]`, `computed_status_at`
+- `computed_status_hold`: an active, reason-coded hold surfaced as a badge on the derived column (never moves the card)
+- `computed_status_evidence`: `report_received_at`, `has_submitted_service_report`, `has_current_portal_capture`
+
+The derivation is a pure engine (`makesafe_computed_status.ts`) fed by typed portal evidence (assessment-report/quote cards require the assessment 3-of-3 predicate). A missing `makesafe_status_holds` overlay is tolerated and logged, never fatal to the board.
+
+Three read-only reconciliation endpoints support captain review; none mutate the board:
+
+- `?action=makesafe_status_disagreements` — declared≠computed cards
+- `?action=makesafe_status_canary` — alarm-only consistency check (logs, returns `ok`)
+- `?action=makesafe_status_shadow_refresh` — writes the `computed_status` shadow cache; privileged (`api_key`/service-role cron) only, never routine- or JWT-callable
+
 ## Ops projection
 
 Ops retains the full stages:
