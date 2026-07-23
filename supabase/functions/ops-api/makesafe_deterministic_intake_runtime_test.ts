@@ -952,6 +952,64 @@ Deno.test("full-open does not spend its cap reattaching sources already settled 
   assertEquals(store.makesafe_intake_cases.length, 3);
 });
 
+Deno.test("a fresh cross-case merge spanning distinct persisted deliverables fails loudly", async () => {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: "22222222-2222-2222-2222-222222222222",
+    slug: "aj",
+    name: "AJ",
+    sender_patterns: ["aj.test"],
+    parsing_rules: null,
+    active: true,
+  });
+  store.emails.push(
+    email({
+      post_id: "merge-a",
+      from_email: "dispatch@aj.test",
+      received_at: "2026-07-02T01:00:00.000Z",
+      subject: "Make Safe - Redacted - Job No 69019",
+      body_content: "Work Order AJBR 69019 received for review.",
+    }),
+    email({
+      post_id: "merge-b",
+      from_email: "dispatch@aj.test",
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject: "Make Safe - Redacted - Job No 69019",
+      body_content: "Work Order AJBR 69019 received for review.",
+    }),
+  );
+  // Same deliverable this run, but the two persisted authorities were split under
+  // different deliverables. Collapsing them under one primary row would silently
+  // rewrite a genuinely distinct canonical source, so binding must throw.
+  seedCanonicalCase(
+    store,
+    "merge-case-a",
+    "fingerprint:merge-a/deliverable:wo%3AAJBR-69019/cycle:1",
+    "merge-a",
+  );
+  seedCanonicalCase(
+    store,
+    "merge-case-b",
+    "fingerprint:merge-b/deliverable:wo%3AAJBR-70000/cycle:1",
+    "merge-b",
+  );
+
+  await assertRejects(
+    () =>
+      runDeterministicIntake(fakeClient(store), {
+        dryRun: false,
+        selectionMode: "full_open",
+        days: 30,
+        nowIso: NOW,
+        maxCases: 1,
+        approveDraft,
+      }),
+    Error,
+    "multiple persisted deliverables",
+  );
+  assertEquals(store.makesafe_intake_cases.length, 2);
+});
+
 Deno.test("repeatedly failing cases do not consume the commit budget", async () => {
   const store = baseStore();
   for (let i = 1; i <= 2; i++) {

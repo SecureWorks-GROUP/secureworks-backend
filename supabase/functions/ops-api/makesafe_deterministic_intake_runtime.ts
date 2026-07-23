@@ -954,6 +954,14 @@ function rekeyCasePlan(
   };
 }
 
+function deliverableSegment(instructionKey: string): string {
+  const match = /\/deliverable:([^/]+)\//.exec(instructionKey);
+  if (!match) {
+    throw new Error("deterministic instruction key has no deliverable segment");
+  }
+  return match[1];
+}
+
 function bindSelectedPlanToPersistedSourceAuthority(
   plan: DeterministicIntakePlan,
   authorityByPostId: Map<string, PersistedSourceAuthority>,
@@ -969,10 +977,30 @@ function bindSelectedPlanToPersistedSourceAuthority(
   // its stable key, or the lineage guard would read the child as an orphan.
   const keyRemap = new Map<string, string>();
   const cases = plan.cases.map((intakeCase) => {
+    // Grouped history is legitimate: several older canonical cases can share one
+    // deliverable and land in a single plan case on this page. That is safe because
+    // every non-primary source stays canonically accounted and is deferred, not
+    // rewritten under the primary row. A merge that spans different deliverables is
+    // instead a genuine cross-case mismerge; binding it silently would write a
+    // fresh secondary source under the primary case, so it must fail loudly.
+    const ownedAuthorities = new Map<string, PersistedSourceAuthority>();
+    for (const postId of intakeCase.sourcePostIds) {
+      const owned = authorityByPostId.get(postId);
+      if (owned) ownedAuthorities.set(owned.id, owned);
+    }
     const authority = authorityByPostId.get(intakeCase.primarySourcePostId) ||
-      intakeCase.sourcePostIds.map((postId) => authorityByPostId.get(postId))
-        .find((candidate) => Boolean(candidate));
+      [...ownedAuthorities.values()][0];
     if (!authority) return intakeCase;
+    if (ownedAuthorities.size > 1) {
+      const primaryDeliverable = deliverableSegment(authority.instruction_key);
+      for (const candidate of ownedAuthorities.values()) {
+        if (deliverableSegment(candidate.instruction_key) !== primaryDeliverable) {
+          throw new Error(
+            "one deterministic plan merged canonical sources from multiple persisted deliverables",
+          );
+        }
+      }
+    }
     const oldKey = intakeCase.instructionKey;
     const stableKey = authority.instruction_key;
     if (oldKey !== stableKey) keyRemap.set(oldKey, stableKey);
