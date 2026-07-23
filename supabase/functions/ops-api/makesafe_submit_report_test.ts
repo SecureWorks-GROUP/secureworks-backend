@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 import {
   assert,
   assertEquals,
@@ -355,7 +356,10 @@ Deno.test("submit_makesafe_report resumes a submitted report stuck before board 
   assertEquals(rows.job_events.length, 1);
   // The original submission attribution/timestamp is preserved (not overwritten).
   assertEquals(rows.job_service_reports.length, 1);
-  assertEquals(rows.job_service_reports[0].submitted_at, "2026-06-16T01:00:00Z");
+  assertEquals(
+    rows.job_service_reports[0].submitted_at,
+    "2026-06-16T01:00:00Z",
+  );
 });
 
 Deno.test("submit_makesafe_report fails visibly when the report-ready board sync fails", async () => {
