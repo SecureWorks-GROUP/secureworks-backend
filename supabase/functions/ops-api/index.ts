@@ -2546,12 +2546,13 @@ if (import.meta.main) serve(async (req: Request) => {
         })
       }
       case 'makesafe_status_shadow_refresh': {
-        // Shadow-cache WRITE: privileged only (master api_key / service-key cron, or
-        // admin/owner JWT). The routine is already denied by the allow-list above;
-        // this also keeps ordinary trade JWTs off the board-wide computed_status write.
-        const shadowRefreshPrivileged = authMode === 'api_key' ||
-          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
-        if (!shadowRefreshPrivileged) {
+        // Shadow-cache WRITE: api_key/cron (service-role) callers ONLY. The
+        // underlying refresh_makesafe_status_shadow RPC hard-requires
+        // auth.role()='service_role', so JWT callers are excluded outright rather
+        // than allowed through to a guaranteed RPC failure. The routine is already
+        // denied by the allow-list above; this keeps every JWT off the board-wide
+        // computed_status write.
+        if (authMode !== 'api_key') {
           return json({ error: 'makesafe_status_shadow_refresh requires ops privilege' }, 403)
         }
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
@@ -12681,7 +12682,14 @@ async function submitMakesafeReport(client: any, body: any) {
   // event log) and returned 500 — is NOT a duplicate: it is a stuck card. Rather
   // than dead-ending the retry with 'Report already submitted', we resume and
   // re-run the idempotent sync steps below to finish the job.
-  const boardSyncComplete = detailSubstatus === 'admin_to_send_report'
+  // A card can legitimately advance past the report-in substatus (to
+  // ready_to_invoice or complete) while its report row is still 'submitted'
+  // (board advancement never flips the report to 'approved'). Treat the whole
+  // finished-substatus set as board-sync-complete so a duplicate submit is
+  // rejected rather than resumed — a resume re-writes substatus back to
+  // admin_to_send_report and would regress an already-advanced card.
+  const FINISHED_SUBSTATUSES = ['admin_to_send_report', 'ready_to_invoice', 'complete']
+  const boardSyncComplete = FINISHED_SUBSTATUSES.includes(detailSubstatus || '')
   const resumingSubmitted = submittingFinal &&
     existing?.status === 'submitted' && !boardSyncComplete
   if (submittingFinal) {
