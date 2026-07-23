@@ -1,6 +1,12 @@
 // deno-lint-ignore-file no-explicit-any
 // Canonical make-safe board row and its two audience projections.
 // Clients must never derive a board column from assignment status.
+import {
+  computeMakesafeStatus,
+  type MakesafePortalCapture,
+  type MakesafeStatusHold,
+  reportInEvidence,
+} from "./makesafe_computed_status.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 export const OPS_MAKESAFE_STAGES = [
@@ -92,6 +98,8 @@ export interface CanonicalMakesafeExtras {
   photoCountByJobId?: Record<string, number>;
   contactsByJobId?: Record<string, any[]>;
   intakeCaseByJobId?: Record<string, any>;
+  holdsByJobId?: Record<string, MakesafeStatusHold>;
+  computedAt?: string;
 }
 
 const txt = (v: unknown): string | null => String(v ?? "").trim() || null;
@@ -291,14 +299,113 @@ function lineageFacts(base: any, intakeCase: any) {
   };
 }
 
+function portalCapturesFromDetail(base: any): MakesafePortalCapture[] {
+  const detail = base?.makesafe_details || {};
+  const cycle = Number(detail?.cycle_number ?? base?.cycle_number ?? 1);
+  const captures: MakesafePortalCapture[] = [];
+  const append = (value: unknown) => {
+    if (!Array.isArray(value)) return;
+    for (const item of value) {
+      if (item && typeof item === "object") {
+        captures.push(item as MakesafePortalCapture);
+      }
+    }
+  };
+
+  // New reporting records may be embedded by the evidence sync. Read them as-is;
+  // the board never re-runs or re-classifies capture_portal_evidence.py.
+  append(detail?.portal_evidence);
+  append(detail?.portal_captures);
+  for (
+    const link of Array.isArray(detail?.external_links)
+      ? detail.external_links
+      : []
+  ) {
+    if (String(link?.status || "").toLowerCase() === "done") {
+      captures.push({
+        status: "done",
+        role: link?.role || link?.kind,
+        cycle_number: link?.cycle_number ?? cycle,
+      });
+    }
+  }
+
+  // portal_verified_signal can carry the reporting skill's JSON capture list.
+  // Plain legacy verification is sufficient only for a one-link roof report. It
+  // can never satisfy the assessment 3-of-3 predicate.
+  const signal = detail?.portal_verified_signal;
+  if (typeof signal === "string" && /^[\[{]/.test(signal.trim())) {
+    try {
+      const parsed = JSON.parse(signal);
+      append(
+        Array.isArray(parsed) ? parsed : parsed?.entries || parsed?.captures,
+      );
+    } catch {
+      // A human-readable signal remains audit text, never manufactured evidence.
+    }
+  }
+  const verifiedThisCycle = !!detail?.portal_verified_at &&
+    Number(detail?.portal_verified_cycle) === cycle;
+  const reportType = token(
+    detail?.report_type || base?.metadata?.makesafe_job_family,
+  );
+  if (
+    verifiedThisCycle && reportType === "roofreport" &&
+    !captures.some((capture) =>
+      String(capture.status || "").toLowerCase() === "done"
+    )
+  ) {
+    captures.push({ status: "done", role: "roof_report", cycle_number: cycle });
+  }
+  return captures;
+}
+
+function rawInvoiceStatus(base: any): string | null {
+  const status = String(base?.invoice_status || "").toLowerCase();
+  if (status === "draft") return "DRAFT";
+  if (status === "paid") return "PAID";
+  if (status === "invoiced") return "AUTHORISED";
+  return status ? status.toUpperCase() : null;
+}
+
 export function buildCanonicalMakesafeRows(
   baseRows: any[],
   extras: CanonicalMakesafeExtras = {},
 ): any[] {
+  const computedAt = extras.computedAt || new Date().toISOString();
   const rows = (baseRows || []).map((base) => {
     const assignments = assignmentFacts(base?.assignments || []);
     const report = base?.report || null;
     const pack = base?.report_pack || null;
+    const detail = base?.makesafe_details || {};
+    const portalCaptures = portalCapturesFromDetail(base);
+    const hold = extras.holdsByJobId?.[base?.id] || null;
+    const swmsRequired = base?.has_swms_doc === true || !!pack?.swms_doc_id ||
+      (Array.isArray(base?.missing_docs) && base.missing_docs.includes("swms"));
+    const statusInput = {
+      job: base,
+      detail,
+      evidence: {
+        assignments,
+        serviceReports: report ? [report] : [],
+        completionPhotoCount: Number(extras.photoCountByJobId?.[base?.id] || 0),
+        portalCaptures,
+        packState: pack?.review_state || null,
+        pack,
+        invoiceStatus: rawInvoiceStatus(base),
+        packSent: base?.pack_sent === true,
+        documents: {
+          report: base?.has_report_doc === true,
+          invoice: base?.has_invoice_doc === true,
+          swms: base?.has_swms_doc === true,
+        },
+        swmsRequired,
+        hold,
+      },
+      nowIso: computedAt,
+    };
+    const computation = computeMakesafeStatus(statusInput);
+    const reportIn = reportInEvidence(statusInput);
     return {
       contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
       id: base?.id,
@@ -308,6 +415,23 @@ export function buildCanonicalMakesafeRows(
       substatus: base?.substatus || null,
       canonical_stage: base?.board_stage || "new",
       canonical_stage_label: base?.board_label || null,
+      // M1 shadow only. No projection column reads these fields yet.
+      computed_status: computation.status,
+      computed_status_reasons: computation.reasons,
+      computed_status_missing: computation.missing,
+      computed_status_at: computedAt,
+      computed_status_hold: computation.hold,
+      computed_status_job_type: computation.job_type,
+      computed_status_evidence: {
+        report_received_at: detail?.report_received_at || null,
+        has_submitted_service_report: !!report &&
+          ["submitted", "approved"].includes(
+            String(report?.status || "").toLowerCase(),
+          ),
+        has_current_portal_capture:
+          computation.job_type !== "physical_makesafe" &&
+          reportIn.satisfied,
+      },
       makesafe_type: base?.metadata?.makesafe_job_family_label ||
         base?.metadata?.makesafe_job_family ||
         base?.makesafe_details?.report_type ||
