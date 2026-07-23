@@ -44,7 +44,12 @@ legacy stripper, and measure strong WO/PO identity separately from missing
 client/address/PDF/portal recovery. Claim-only work stays below the floor and
 cannot become live. Aggregate replay must expose no cursor post IDs, and clean
 evidence requires both cursor timestamps null, no cap, and no caveats in the same
-response. Use the bounded `max_sources` replay option when needed.
+response. Use the bounded `max_sources` replay option when needed. Selection binds
+every bounded source to its persisted primary-source case authority before exact
+closure or full-open ranking. Exact selection closes semantic parent ancestry before
+lineage validation, except the intentional fresh review-exception `sibling_of`
+promotion, and a source already canonical-accounted on any case cannot make a
+regrouped case fresh or spend the run cap.
 
 ## Never Select `scope_json` In A List/Feed Query
 

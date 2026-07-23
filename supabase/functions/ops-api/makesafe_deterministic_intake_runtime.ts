@@ -829,10 +829,39 @@ function selectedPlan(
   instructionKeys: readonly string[],
 ): DeterministicIntakePlan {
   const sourceSet = new Set(sourcePostIds);
-  const instructionSet = new Set(instructionKeys);
+  const selectedKeys = new Set(instructionKeys);
+  for (const intakeCase of fullPlan.cases) {
+    if (intakeCase.sourcePostIds.some((postId) => sourceSet.has(postId))) {
+      selectedKeys.add(intakeCase.instructionKey);
+    }
+  }
+  // Exact authority names the case to advance, but a child cannot be validated or
+  // persisted without its complete semantic ancestry. Pull the transitive parent
+  // chain from the already-bounded plan. A fresh review-exception `sibling_of`
+  // remains the deliberate exception: sibling orientation is arbitrary, so exact
+  // authority promotes it to its own root rather than writing an ambient sibling.
+  // Semantic revision/cancellation/reopen parents and non-work sibling ancestry
+  // are never dropped. This does not select descendants or unrelated siblings,
+  // and the normal per-run case cap still bounds writes.
+  const byInstructionKey = new Map(
+    fullPlan.cases.map((intakeCase) => [intakeCase.instructionKey, intakeCase]),
+  );
+  const pending = [...selectedKeys];
+  while (pending.length) {
+    const intakeCase = byInstructionKey.get(pending.pop()!);
+    if (
+      intakeCase?.state === "exception" &&
+      intakeCase.parentRelation === "sibling_of"
+    ) {
+      continue;
+    }
+    const parentKey = intakeCase?.parentInstructionKey;
+    if (!parentKey || selectedKeys.has(parentKey)) continue;
+    selectedKeys.add(parentKey);
+    pending.push(parentKey);
+  }
   const cases = fullPlan.cases.filter((intakeCase) =>
-    instructionSet.has(intakeCase.instructionKey) ||
-    intakeCase.sourcePostIds.some((postId) => sourceSet.has(postId))
+    selectedKeys.has(intakeCase.instructionKey)
   );
   const sourceClassifications = cases.flatMap((intakeCase) =>
     intakeCase.sourceClassifications
@@ -925,30 +954,55 @@ function rekeyCasePlan(
   };
 }
 
+function deliverableSegment(instructionKey: string): string {
+  const match = /\/deliverable:([^/]+)\//.exec(instructionKey);
+  if (!match) {
+    throw new Error("deterministic instruction key has no deliverable segment");
+  }
+  return match[1];
+}
+
 function bindSelectedPlanToPersistedSourceAuthority(
   plan: DeterministicIntakePlan,
-  exactSourcePostIds: readonly string[],
   authorityByPostId: Map<string, PersistedSourceAuthority>,
 ): DeterministicIntakePlan {
-  const exactSources = new Set(exactSourcePostIds);
-  // A partial page can compute a different this-run key for a persisted parent.
-  // Any in-plan child parented to that this-run key must follow the parent back to
+  // A moving partial page can compute a different this-run key for any canonical
+  // source, not only an exact allowlist seed. Bind every selected node back to the
+  // stable case owning its primary source (or its first owned source). Production
+  // history can contain several older canonical cases that the current planner now
+  // groups together; their sources stay where they are and the primary owner gives
+  // the merged plan one deterministic orientation.
+  //
+  // Any in-plan child parented to the this-run key must follow that parent back to
   // its stable key, or the lineage guard would read the child as an orphan.
   const keyRemap = new Map<string, string>();
   const cases = plan.cases.map((intakeCase) => {
-    const authorities = new Map<string, PersistedSourceAuthority>();
+    // Grouped history is legitimate: several older canonical cases can share one
+    // deliverable and land in a single plan case on this page. That is safe because
+    // every non-primary source stays canonically accounted and is deferred, not
+    // rewritten under the primary row. A merge that spans different deliverables is
+    // instead a genuine cross-case mismerge; binding it silently would write a
+    // fresh secondary source under the primary case, so it must fail loudly.
+    const ownedAuthorities = new Map<string, PersistedSourceAuthority>();
     for (const postId of intakeCase.sourcePostIds) {
-      if (!exactSources.has(postId)) continue;
-      const authority = authorityByPostId.get(postId);
-      if (authority) authorities.set(authority.id, authority);
+      const owned = authorityByPostId.get(postId);
+      if (owned) ownedAuthorities.set(owned.id, owned);
     }
-    if (!authorities.size) return intakeCase;
-    if (authorities.size > 1) {
-      throw new Error(
-        "one deterministic plan merged exact sources from multiple persisted cases",
-      );
+    const authority = authorityByPostId.get(intakeCase.primarySourcePostId) ||
+      [...ownedAuthorities.values()][0];
+    if (!authority) return intakeCase;
+    if (ownedAuthorities.size > 1) {
+      const primaryDeliverable = deliverableSegment(authority.instruction_key);
+      for (const candidate of ownedAuthorities.values()) {
+        if (
+          deliverableSegment(candidate.instruction_key) !== primaryDeliverable
+        ) {
+          throw new Error(
+            "one deterministic plan merged canonical sources from multiple persisted deliverables",
+          );
+        }
+      }
     }
-    const authority = [...authorities.values()][0];
     const oldKey = intakeCase.instructionKey;
     const stableKey = authority.instruction_key;
     if (oldKey !== stableKey) keyRemap.set(oldKey, stableKey);
@@ -2071,7 +2125,7 @@ export async function runDeterministicIntake(
     client,
     allowInstructionKeys,
   );
-  const sourceAuthorities = await resolvePersistedSourceAuthorities(
+  const exactSourceAuthorities = await resolvePersistedSourceAuthorities(
     client,
     allowSourcePostIds,
   );
@@ -2086,9 +2140,17 @@ export async function runDeterministicIntake(
     seedPostIds: [
       ...allowSourcePostIds,
       ...instructionSeeds.postIds,
-      ...sourceAuthorities.seedPostIds,
+      ...exactSourceAuthorities.seedPostIds,
     ],
   });
+  // Selection and ranking must use canonical ownership for every bounded source.
+  // Otherwise a moving page can regroup an already-accounted source under another
+  // case, classify it as fresh, and spend the whole case cap on duplicate inserts
+  // while genuinely unaccounted tail sources starve.
+  const sourceAuthorities = await resolvePersistedSourceAuthorities(
+    client,
+    input.sources.map((source) => source.postId),
+  );
   // The cursor is a completion checkpoint, not a read-ahead marker. Persisting it
   // here used to let a caller timeout after the read but before accounting/health,
   // temporarily hiding an entire page behind unproved progress. Commit it only
@@ -2096,22 +2158,30 @@ export async function runDeterministicIntake(
   // cancelled request therefore rereads the same page; deterministic natural keys
   // make that retry safe.
   const fullPlan = buildDeterministicIntakePlan(input.sources, input.profiles);
+  // Canonical source ownership is part of selection, not a repair after it. A
+  // persisted exact source may look like a child on this moving page even though
+  // its stored case is an authoritative root; binding first prevents exact mode
+  // from pulling and writing that page-only ambient ancestor. A genuinely fresh
+  // selected child keeps its parent edge, so selectedPlan closes that ancestry.
+  const authorityBoundFullPlan = bindSelectedPlanToPersistedSourceAuthority(
+    fullPlan,
+    sourceAuthorities.byPostId,
+  );
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
     options.includeSanitizedCases === true;
   const selected = selectionMode === "full_open"
-    ? fullPlan
+    ? authorityBoundFullPlan
     : hasAllowlist
-    ? selectedPlan(fullPlan, allowSourcePostIds, allowInstructionKeys)
-    : fullPlan;
-  const authorityBoundPlan = bindSelectedPlanToPersistedSourceAuthority(
-    selected,
-    allowSourcePostIds,
-    sourceAuthorities.byPostId,
-  );
+    ? selectedPlan(
+      authorityBoundFullPlan,
+      allowSourcePostIds,
+      allowInstructionKeys,
+    )
+    : authorityBoundFullPlan;
   const lineage = await resolveSelectedLineage(
     client,
-    authorityBoundPlan,
+    selected,
     allowSourcePostIds,
   );
   const plan = lineage.plan;
@@ -2297,12 +2367,19 @@ export async function runDeterministicIntake(
     client,
     [...persisted.values()].map((row) => row.id),
   );
+  const canonicallyAccountedSources = new Set(
+    sourceAuthorities.byPostId.keys(),
+  );
   type CaseRank = "fresh" | "job_retry" | "stuck";
   const rankCase = (casePlan: DeterministicCasePlan): CaseRank => {
     const row = persisted.get(casePlan.instructionKey);
     if (!row) return "fresh";
     const known = persistedSources.get(row.id) || new Set<string>();
-    if (casePlan.sourcePostIds.some((postId) => !known.has(postId))) {
+    if (
+      casePlan.sourcePostIds.some((postId) =>
+        !known.has(postId) && !canonicallyAccountedSources.has(postId)
+      )
+    ) {
       return "fresh";
     }
     const obligationJobId = existingObligationJobs.get(
