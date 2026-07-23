@@ -210,6 +210,27 @@ export function canonicalExternalObligationRef(
   return normaliseRef(value, prefixes);
 }
 
+// ── canonicalObligationPoCore ─────────────────────────────────────────────────
+// Pull the PO discriminator core out of any storage shape a make-safe obligation
+// might carry it in: an explicit builder_po_number ("PO-56922", "56922") OR a
+// composite recovery display ref that glues the claim and PO together
+// (MLB-26537PO-56922). This is the SHARED boundary both the deterministic
+// selection dedupe (readExistingObligationJobs) and the intake-draft approval
+// duplicate guard use so distinct explicit POs are preserved symmetrically.
+// requireLabel=true only accepts a "PO"-labelled core (used when reading from a
+// composite ref, so the claim digits themselves are never mistaken for a PO).
+export function canonicalObligationPoCore(
+  value: unknown,
+  requireLabel = false,
+): string | null {
+  const text = String(value ?? "").toUpperCase();
+  const labelled = text.match(/PO[\s#._/-]*(\d{3,})/);
+  if (labelled) return labelled[1];
+  if (requireLabel) return null;
+  const bare = text.match(/\d{3,}/);
+  return bare?.[0] ?? null;
+}
+
 // ── extractRef (finding 1) ────────────────────────────────────────────────────
 // Extract a make-safe ref from the FULL subject, then the body as a fallback,
 // handling prefixed (AJBR-67200 / AJBR 67200 / AJBR67200 / MS191190),

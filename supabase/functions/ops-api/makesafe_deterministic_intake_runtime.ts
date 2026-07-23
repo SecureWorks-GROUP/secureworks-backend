@@ -27,6 +27,7 @@ import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 import { isReportOnlyType } from "./makesafe_intake_gate.ts";
 import {
   canonicalExternalObligationRef,
+  canonicalObligationPoCore,
   loadRefPrefixes,
 } from "../_shared/makesafe_refs.ts";
 
@@ -1487,15 +1488,6 @@ function dedupeCompanyKey(value: unknown): string {
   return key;
 }
 
-function dedupePoCore(value: unknown, requireLabel = false): string | null {
-  const text = String(value ?? "").toUpperCase();
-  const labelled = text.match(/PO[\s#._/-]*(\d{3,})/);
-  if (labelled) return labelled[1];
-  if (requireLabel) return null;
-  const bare = text.match(/\d{3,}/);
-  return bare?.[0] ?? null;
-}
-
 async function readExistingObligationJobs(
   client: any,
   cases: readonly DeterministicCasePlan[],
@@ -1528,7 +1520,7 @@ async function readExistingObligationJobs(
       prefixes,
     );
     const targetCompany = dedupeCompanyKey(item.identity.builderSlug);
-    const targetPo = dedupePoCore(item.identity.builderPoCanonical);
+    const targetPo = canonicalObligationPoCore(item.identity.builderPoCanonical);
     if (!targetRef || !targetCompany) continue;
     const targetReportOnly = deterministicPrimaryIsReportOnly(item);
     const match = (data || []).find((row: any) => {
@@ -1546,9 +1538,9 @@ async function readExistingObligationJobs(
           typeof existingJob.metadata === "object"
         ? existingJob.metadata
         : {};
-      const existingPo = dedupePoCore(
+      const existingPo = canonicalObligationPoCore(
         metadata.builder_po_number,
-      ) || dedupePoCore(row.external_ref, true);
+      ) || canonicalObligationPoCore(row.external_ref, true);
       // One claim can carry distinct PO-backed instructions. Canonical claim
       // matching dedupes storage variants, never two explicitly different POs.
       return !(targetPo && existingPo && targetPo !== existingPo);

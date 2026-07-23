@@ -538,7 +538,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
-import { canonicalExternalObligationRef, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
+import { canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -13627,6 +13627,14 @@ async function approveIntakeDraft(client: any, body: any) {
         extraction?.builder_work_order_number,
         extraction?.builder_po_number,
       )
+      // Shared PO-core boundary (mirrors readExistingObligationJobs): a distinct
+      // explicit PO must never be false-blocked even when only ONE side proves a
+      // WO/PO pair. The approved PO comes from the explicit fields; the existing
+      // PO falls back to the composite recovery ref (MLB-26537PO-56922) when the
+      // live job stored the PO only in external_ref, not in job metadata.
+      const approvedPoCore = canonicalObligationPoCore(extraction?.builder_po_number)
+        || canonicalObligationPoCore(extraction?.builder_work_order_number, true)
+        || canonicalObligationPoCore(approvedFields.external_ref, true)
       const { data: candidates } = await client.from('makesafe_job_details')
         .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
         .not('external_ref', 'is', null)
@@ -13650,6 +13658,10 @@ async function approveIntakeDraft(client: any, body: any) {
           approvedWorkOrderIdentity && existingWorkOrderIdentity &&
           approvedWorkOrderIdentity !== existingWorkOrderIdentity
         ) return false
+        const existingPoCore = canonicalObligationPoCore(existingMetadata.builder_po_number)
+          || canonicalObligationPoCore(existingMetadata.builder_work_order_number, true)
+          || canonicalObligationPoCore(row.external_ref, true)
+        if (approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore) return false
         const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
           row.external_ref || '',
           [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),

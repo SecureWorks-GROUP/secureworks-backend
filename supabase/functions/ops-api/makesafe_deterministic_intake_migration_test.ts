@@ -4,7 +4,10 @@ import {
   assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { canonicalExternalObligationRef } from "../_shared/makesafe_refs.ts";
+import {
+  canonicalExternalObligationRef,
+  canonicalObligationPoCore,
+} from "../_shared/makesafe_refs.ts";
 
 const migration = await Deno.readTextFile(
   new URL(
@@ -139,6 +142,34 @@ Deno.test("canonical external-obligation dedupe covers recovery composite refs a
     index,
     "canonicalExternalObligationRef(row.external_ref, prefixes)",
   );
+});
+
+Deno.test("shared PO-core boundary reads a composite recovery ref only when labelled", () => {
+  // Explicit PO fields: labelled and bare both resolve to the same core.
+  assertEquals(canonicalObligationPoCore("PO-56922"), "56922");
+  assertEquals(canonicalObligationPoCore("56922"), "56922");
+  // Composite recovery ref supplies the PO ONLY under requireLabel, so the
+  // claim digits (26537) are never mistaken for a PO.
+  assertEquals(canonicalObligationPoCore("MLB-26537PO-56922", true), "56922");
+  assertEquals(canonicalObligationPoCore("MLB-26537", true), null);
+  // Distinct explicit POs stay distinct; a shared claim ref does not collapse them.
+  assert(
+    canonicalObligationPoCore("MLB-26537PO-56922", true) !==
+      canonicalObligationPoCore("MLB-26537PO-56923", true),
+  );
+});
+
+Deno.test("intake-draft approval mirrors the runtime composite-ref PO fallback", () => {
+  // Approval boundary must fall back to the composite external_ref for BOTH the
+  // approved side and the existing live job, exactly like readExistingObligationJobs,
+  // so a distinct explicit PO is not false-blocked when the PO lives only in the ref.
+  assertStringIncludes(index, "canonicalObligationPoCore(approvedFields.external_ref, true)");
+  assertStringIncludes(index, "canonicalObligationPoCore(row.external_ref, true)");
+  assertStringIncludes(
+    index,
+    "approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore",
+  );
+  assertStringIncludes(runtime, "canonicalObligationPoCore(row.external_ref, true)");
 });
 
 Deno.test("dry-run replay and exact dark observe take no business-write branch", () => {
