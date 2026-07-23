@@ -221,6 +221,39 @@ Deno.test("runtime existing-PO derivation mirrors the approve path's builder_wor
   );
 });
 
+Deno.test("runtime incoming (target) PO derivation mirrors the WO and composite-ref fallbacks", () => {
+  // The INCOMING side must fall back to builderWoCanonical and the composite
+  // externalRefCanonical exactly like the existing/approve sides, so a distinct
+  // PO carried only in the WO or the composite ref still discriminates and a
+  // genuinely distinct-PO obligation is not over-deduped into an existing job.
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(item.identity.builderWoCanonical, true)",
+  );
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(item.identity.externalRefCanonical, true)",
+  );
+  // The shared PO-core helper proves the fallback semantics the target relies on:
+  // a WO-labelled or composite value yields its PO core, a bare claim does not.
+  assertEquals(canonicalObligationPoCore("PO-56922", true), "56922");
+  assertEquals(canonicalObligationPoCore("MLB-26537PO-56922", true), "56922");
+  assertEquals(canonicalObligationPoCore("MLB-26537", true), null);
+});
+
+Deno.test("canonicalSlug delegates to the one shared canonical company alias set", () => {
+  // canonicalSlug (company/profile resolution) must not carry its own copy of the
+  // builder alias set; it delegates to canonicalCompanyDedupeKey so a new alias
+  // added there can never drift from the make-safe obligation dedupe boundary.
+  assertStringIncludes(core, "canonicalCompanyDedupeKey(slug)");
+  assertStringIncludes(
+    core,
+    'import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts"',
+  );
+  // The alias set is no longer hand-copied inside canonicalSlug.
+  assert(!core.includes('["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes'));
+});
+
 Deno.test("dry-run replay and exact dark observe take no business-write branch", () => {
   assertStringIncludes(runtime, "if (dryRun) {");
   assertStringIncludes(runtime, "await commitCompletedCursor();");

@@ -23,6 +23,7 @@ import {
   subjectIsKnownBuilderNoise,
   textHasExplicitReportRequest,
 } from "./makesafe_intake_gate.ts";
+import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
   "makesafe-deterministic-intake@2026-07-21.v2";
@@ -300,15 +301,15 @@ function clean(value: unknown): string | null {
 }
 
 function canonicalSlug(slug: string): string {
-  const s = slug.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes(s)) {
-    return "ajs-ajbr";
-  }
-  if (s.includes("rapid")) return "rapid";
-  if (s.includes("prime")) return "prime";
-  if (s === "mlb" || s.includes("majorloss") || s.includes("mlbuilder")) {
-    return "mlb";
-  }
+  // Delegate alias detection to the one shared canonical key so the builder
+  // alias set never drifts from the make-safe obligation dedupe boundary.
+  // canonicalSlug keeps its own display contract ("ajs-ajbr" dashed; the raw
+  // lowercased slug for non-alias companies).
+  const key = canonicalCompanyDedupeKey(slug);
+  if (key === "ajsajbr") return "ajs-ajbr";
+  if (key === "rapid") return "rapid";
+  if (key === "prime") return "prime";
+  if (key === "mlb") return "mlb";
   return slug.toLowerCase();
 }
 

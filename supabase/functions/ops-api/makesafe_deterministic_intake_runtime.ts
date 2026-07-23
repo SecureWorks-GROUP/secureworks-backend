@@ -1538,7 +1538,12 @@ async function readExistingObligationJobs(
       prefixes,
     );
     const targetCompany = canonicalCompanyDedupeKey(item.identity.builderSlug);
-    const targetPo = canonicalObligationPoCore(item.identity.builderPoCanonical);
+    // Mirror the existing/approve side: a distinct PO carried only in the work
+    // order field or the composite external ref still discriminates, so two
+    // explicitly-different POs are never over-deduped into one obligation.
+    const targetPo = canonicalObligationPoCore(item.identity.builderPoCanonical) ||
+      canonicalObligationPoCore(item.identity.builderWoCanonical, true) ||
+      canonicalObligationPoCore(item.identity.externalRefCanonical, true);
     if (!targetRef || !targetCompany) continue;
     const targetReportOnly = deterministicPrimaryIsReportOnly(item);
     const match = (data || []).find((row: any) => {
