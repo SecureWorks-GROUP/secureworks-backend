@@ -124,6 +124,10 @@ import {
   checkMakesafeBoardParity,
   projectTradeMakesafeBoard,
 } from './makesafe_board_read_model.ts'
+import {
+  buildMakesafeDisagreementList,
+  checkMakesafeStatusCanary,
+} from './makesafe_computed_status.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -2376,6 +2380,11 @@ if (import.meta.main) serve(async (req: Request) => {
       'makesafe_pipeline',
       'makesafe_pipeline_items',
       'makesafe_audit',
+      // Board-truth M1 shadow/read-only reconciliation. refresh writes only the
+      // reversible computed_status cache; disagreement/canary never mutate.
+      'makesafe_status_shadow_refresh',
+      'makesafe_status_disagreements',
+      'makesafe_status_canary',
       'makesafe_new_emails',
       'get_makesafe_email',
       'get_makesafe_attachment_url',
@@ -2520,6 +2529,11 @@ if (import.meta.main) serve(async (req: Request) => {
         }
 
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        await persistMakesafeStatusShadow(client, canonicalRows)
+        const canary = makesafeStatusCanaryFromRows(canonicalRows)
+        if (!canary.ok) {
+          console.error('[ops-api] makesafe_status_canary alarm:', JSON.stringify(canary.alarms))
+        }
         const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
         if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
         return json({
@@ -2529,6 +2543,35 @@ if (import.meta.main) serve(async (req: Request) => {
           ...ops,
           parity,
         })
+      }
+      case 'makesafe_status_shadow_refresh': {
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const shadow = await persistMakesafeStatusShadow(client, canonicalRows)
+        return json({
+          ok: shadow.ok,
+          checked: canonicalRows.length,
+          refreshed: shadow.refreshed,
+          generated_at: new Date().toISOString(),
+          ...(shadow.error ? { error: shadow.error } : {}),
+        }, shadow.ok ? 200 : 503)
+      }
+      case 'makesafe_status_disagreements': {
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const disagreements = makesafeStatusDisagreementsFromRows(canonicalRows)
+        return json({
+          ok: true,
+          count: disagreements.length,
+          disagreements,
+          generated_at: new Date().toISOString(),
+        })
+      }
+      case 'makesafe_status_canary': {
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const canary = makesafeStatusCanaryFromRows(canonicalRows)
+        if (!canary.ok) {
+          console.error('[ops-api] makesafe_status_canary alarm:', JSON.stringify(canary.alarms))
+        }
+        return json({ ...canary, generated_at: new Date().toISOString() })
       }
       case 'job_detail': {
         let jid = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
@@ -10320,6 +10363,9 @@ export function _makesafeMissingCloseoutDocs(
 export interface MakesafeReportPackLike {
   status?: string | null
   report_doc_id?: string | null
+  invoice_doc_id?: string | null
+  swms_doc_id?: string | null
+  review_state?: string | null
   sent_at?: string | null
 }
 export interface MakesafeSurfacing {
@@ -10922,6 +10968,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     report_pack: pack ? {
       status: pack.status || null,
       report_doc_id: pack.report_doc_id || null,
+      invoice_doc_id: pack.invoice_doc_id || null,
+      swms_doc_id: pack.swms_doc_id || null,
+      review_state: pack.review_state || null,
       sent_at: pack.sent_at || null,
     } : null,
     ...(docFlags || {}),
@@ -11581,7 +11630,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       _fetchAllByJobIdChunked(
         client,
         'makesafe_report_packs',
-        'job_id, pack_kind, status, report_doc_id, sent_at',
+        'job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
         jobIds,
       ),
     ])
@@ -11762,7 +11811,7 @@ async function loadCanonicalMakesafeBoard(
 
   // These reads are business-meaningful. _fetchAllByJobIdChunked checks every
   // PostgREST error and paginates every 1000 rows, so empty means genuinely empty.
-  const [notes, photos, contacts] = await Promise.all([
+  const [notes, photos, contacts, holds] = await Promise.all([
     _fetchAllByJobIdChunked(
       client,
       'job_events',
@@ -11783,6 +11832,13 @@ async function loadCanonicalMakesafeBoard(
       'job_id, client_name, client_phone, is_primary, contact_label, status',
       jobIds,
       (q) => q.eq('status', 'active').order('id', { ascending: true }),
+    ),
+    _fetchAllByJobIdChunked(
+      client,
+      'makesafe_status_holds',
+      'id, job_id, cycle_number, reason_code, note, held_by, created_at, lifted_at',
+      jobIds,
+      (q) => q.order('created_at', { ascending: false }),
     ),
   ])
 
@@ -11826,18 +11882,89 @@ async function loadCanonicalMakesafeBoard(
       intakeCaseByJobId[intakeCase.job_id] = intakeCase
     }
   }
+  const holdsByJobId: Record<string, any> = {}
+  const cycleByJobId = new Map(baseRows.map((row) => [row.id, Number(row.cycle_number || 1)]))
+  for (const hold of holds) {
+    if (hold?.lifted_at) continue
+    const currentCycle = cycleByJobId.get(hold?.job_id) || 1
+    if (hold?.job_id && Number(hold?.cycle_number || 1) === currentCycle && !holdsByJobId[hold.job_id]) {
+      holdsByJobId[hold.job_id] = hold
+    }
+  }
 
   return buildCanonicalMakesafeRows(baseRows, {
     notesByJobId,
     photoCountByJobId,
     contactsByJobId,
     intakeCaseByJobId,
+    holdsByJobId,
   })
+}
+
+function makesafeStatusReviewCards(rows: any[]) {
+  return (rows || []).map((row: any) => ({
+    id: row.id,
+    job_number: row.job_number || null,
+    substatus: row.substatus || null,
+    // The operator-visible canonical stage remains the declared side throughout
+    // M1. No UI projection reads computed_status in this mission.
+    declared_status: row.canonical_stage || 'new',
+    computation: {
+      status: row.computed_status,
+      job_type: row.computed_status_job_type,
+      reasons: row.computed_status_reasons || [],
+      missing: row.computed_status_missing || [],
+      hold: row.computed_status_hold || null,
+    },
+    report_received_at: row.computed_status_evidence?.report_received_at || null,
+    has_submitted_service_report:
+      row.computed_status_evidence?.has_submitted_service_report === true,
+    has_current_portal_capture:
+      row.computed_status_evidence?.has_current_portal_capture === true,
+  }))
+}
+
+function makesafeStatusDisagreementsFromRows(rows: any[]) {
+  return buildMakesafeDisagreementList(makesafeStatusReviewCards(rows))
+}
+
+function makesafeStatusCanaryFromRows(rows: any[]) {
+  return checkMakesafeStatusCanary(makesafeStatusReviewCards(rows))
+}
+
+async function persistMakesafeStatusShadow(client: any, rows: any[]): Promise<{
+  ok: boolean
+  refreshed: number
+  error?: string
+}> {
+  if (!client || typeof client.rpc !== 'function') {
+    return { ok: false, refreshed: 0, error: 'Supabase RPC client unavailable' }
+  }
+  const payload = (rows || []).map((row: any) => ({
+    job_id: row.id,
+    computed_status: row.computed_status,
+    reasons: row.computed_status_reasons || [],
+    missing: row.computed_status_missing || [],
+    computed_at: row.computed_status_at || new Date().toISOString(),
+  }))
+  if (payload.length === 0) return { ok: true, refreshed: 0 }
+  const { data, error } = await client.rpc('refresh_makesafe_status_shadow', {
+    p_rows: payload,
+  })
+  if (error) {
+    const message = error?.message || String(error)
+    console.error('[ops-api] makesafe status shadow refresh failed:', message)
+    return { ok: false, refreshed: 0, error: message }
+  }
+  return { ok: true, refreshed: Number(data || 0) }
 }
 
 // Test-only exports. Production routes call the same functions.
 export const _makesafePipelineForTest = makesafePipeline
 export const _loadCanonicalMakesafeBoardForTest = loadCanonicalMakesafeBoard
+export const _makesafeStatusDisagreementsFromRowsForTest = makesafeStatusDisagreementsFromRows
+export const _makesafeStatusCanaryFromRowsForTest = makesafeStatusCanaryFromRows
+export const _persistMakesafeStatusShadowForTest = persistMakesafeStatusShadow
 
 // Test-only export for the close-out doc-attach path (typed + idempotent).
 export const _attachMakesafeDocumentForTest = attachMakesafeDocument
@@ -12518,6 +12645,9 @@ async function submitMakesafeReport(client: any, body: any) {
 
   const submittingFinal = (reportStatus || 'submitted') === 'submitted'
   if (submittingFinal) {
+    // Captain D1: a final report is always attributable. Trade JWT dispatch
+    // supplies this server-side; privileged callers must supply an actor too.
+    if (!uId) throw new ApiError('user_id required for final MakeSafe report attribution', 400)
     if (existing?.status === 'submitted') throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
       .select('phase')
@@ -12551,6 +12681,39 @@ async function submitMakesafeReport(client: any, body: any) {
   const warnings: string[] = []
   if (submittingFinal) {
     const syncAt = new Date().toISOString()
+
+    // Captain D1: allocation never gates report-in. When a genuine final report
+    // arrives on a card with no assignment row at all, record the submitter as
+    // the completed lead so the crew ledger tells the same operational story.
+    // Existing assignments are never replaced or duplicated.
+    const { data: assignmentRows, error: assignmentReadErr } = await client
+      .from('job_assignments')
+      .select('id')
+      .eq('job_id', jId)
+      .limit(1)
+    if (assignmentReadErr) {
+      throw new ApiError(`MakeSafe report saved but submitter assignment check failed: ${assignmentReadErr.message || assignmentReadErr}`, 500)
+    }
+    let autoAssignment: any = null
+    if ((assignmentRows || []).length === 0) {
+      const { data: insertedAssignment, error: assignmentInsertErr } = await client
+        .from('job_assignments')
+        .insert({
+          job_id: jId,
+          user_id: uId,
+          role: 'lead_installer',
+          status: 'complete',
+          completed_at: syncAt,
+          notes: `Auto-assigned from final MakeSafe report submission (cycle ${currentCycle})`,
+        })
+        .select('id, user_id, status')
+        .single()
+      if (assignmentInsertErr) {
+        throw new ApiError(`MakeSafe report saved but submitter auto-assignment failed: ${assignmentInsertErr.message || assignmentInsertErr}`, 500)
+      }
+      autoAssignment = insertedAssignment
+    }
+
     const { data: detailSync, error: detailSyncErr } = await client.from('makesafe_job_details')
       .update({
         substatus: 'admin_to_send_report',
@@ -12575,6 +12738,12 @@ async function submitMakesafeReport(client: any, body: any) {
       ok: true,
       substatus: detailSync.substatus || 'admin_to_send_report',
       report_received_at: detailSync.report_received_at || syncAt,
+      auto_assignment: autoAssignment ? {
+        id: autoAssignment.id,
+        user_id: autoAssignment.user_id || uId,
+        status: autoAssignment.status || 'complete',
+        attribution: 'final_makesafe_report_submitter',
+      } : null,
     }
 
     // Do not mark the job final complete/invoiced here. The MakeSafe ops board
@@ -12584,7 +12753,16 @@ async function submitMakesafeReport(client: any, body: any) {
         job_id: jId,
         user_id: uId,
         event_type: 'makesafe_report_submitted',
-        detail_json: { report_id: report.id, labour_hours, trade_count, materials_used },
+        detail_json: {
+          report_id: report.id,
+          labour_hours,
+          trade_count,
+          materials_used,
+          auto_assignment_id: autoAssignment?.id || null,
+          auto_assigned_submitter: !!autoAssignment,
+          assignment_attribution: autoAssignment ? 'final_makesafe_report_submitter' : null,
+          cycle_number: currentCycle,
+        },
       })
       if (eventErr) {
         eventSync = { ok: false, error: eventErr.message || String(eventErr) }

@@ -361,6 +361,16 @@ is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is
 read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
 and the reporting run agree on "not yet drafted".
 
+## Make-Safe Derived Status Is Shadow-Only Until Approved Cutover
+
+M1 lives in `supabase/functions/ops-api/makesafe_computed_status.ts` with additive
+schema in `20260723000001_makesafe_board_truth_shadow.sql`. Ops and Trade still
+render the declared board model. Do not point either projection at
+`computed_status`, rewrite `substatus`, or backfill missing PO cards without the
+separately approved cutover/reconciliation mission. The read-only disagreement
+and canary actions are the captain review surfaces; holds remain reason-coded
+badges on the evidence-derived column.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

@@ -2,6 +2,7 @@ import {
   assert,
   assertEquals,
   assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _makesafePipelineForTest,
@@ -68,6 +69,7 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
       },
       not: () => b,
       gte: () => b,
+      or: () => b,
       in: (col: string, vals: any[]) => {
         preds.push((r) => vals.includes(r?.[col]));
         return b;
@@ -210,7 +212,7 @@ Deno.test("submit_makesafe_report rejects final submit with fewer than 5 photos"
   assertEquals(rows.job_service_reports.length, 0);
 });
 
-Deno.test("submit_makesafe_report saves report, flips board state, records event, and pipeline returns Trade Report In", async () => {
+Deno.test("submit_makesafe_report auto-assigns an unassigned submitter, records attribution, and leaves declared board behavior unchanged", async () => {
   const { client, rows } = makeSubmitClient(baseRows());
 
   const res: any = await _submitMakesafeReportForTest(client, validBody());
@@ -230,8 +232,21 @@ Deno.test("submit_makesafe_report saves report, flips board state, records event
     rows.makesafe_job_details[0].report_received_at,
     "report_received_at should be written",
   );
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].user_id, "trade-1");
+  assertEquals(rows.job_assignments[0].status, "complete");
+  assertStringIncludes(
+    rows.job_assignments[0].notes,
+    "Auto-assigned from final MakeSafe report submission",
+  );
+  assertEquals(res.board_sync.auto_assignment.user_id, "trade-1");
+  assertEquals(
+    res.board_sync.auto_assignment.attribution,
+    "final_makesafe_report_submitter",
+  );
   assertEquals(rows.job_events.length, 1);
   assertEquals(rows.job_events[0].event_type, "makesafe_report_submitted");
+  assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
 
   const pipeline: any = await _makesafePipelineForTest(
     client,
@@ -251,6 +266,36 @@ Deno.test("submit_makesafe_report saves report, flips board state, records event
     !pipeline.columns.report_ready.find((j: any) => j.id === "job-1"),
     "un-drafted report must not sit in Report Ready",
   );
+});
+
+Deno.test("submit_makesafe_report preserves an existing assignment instead of duplicating it", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    job_assignments: [{
+      id: "assignment-existing",
+      job_id: "job-1",
+      user_id: "trade-existing",
+      status: "scheduled",
+      role: "lead_installer",
+    }],
+  }));
+
+  const res: any = await _submitMakesafeReportForTest(client, validBody());
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].id, "assignment-existing");
+  assertEquals(rows.job_assignments[0].status, "complete");
+  assertEquals(res.board_sync.auto_assignment, null);
+  assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, false);
+});
+
+Deno.test("submit_makesafe_report requires an attributed actor before writing a final report", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody({ userId: null })),
+    Error,
+    "user_id required",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
 });
 
 Deno.test("submit_makesafe_report blocks duplicate submitted reports", async () => {
