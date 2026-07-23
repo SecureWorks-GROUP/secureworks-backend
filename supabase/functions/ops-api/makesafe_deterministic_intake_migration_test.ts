@@ -164,13 +164,22 @@ Deno.test("intake-draft approval mirrors the runtime composite-ref PO fallback",
   // Approval boundary must fall back to the composite external_ref for BOTH the
   // approved side and the existing live job, exactly like readExistingObligationJobs,
   // so a distinct explicit PO is not false-blocked when the PO lives only in the ref.
-  assertStringIncludes(index, "canonicalObligationPoCore(approvedFields.external_ref, true)");
-  assertStringIncludes(index, "canonicalObligationPoCore(row.external_ref, true)");
+  assertStringIncludes(
+    index,
+    "canonicalObligationPoCore(approvedFields.external_ref, true)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalObligationPoCore(row.external_ref, true)",
+  );
   assertStringIncludes(
     index,
     "approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore",
   );
-  assertStringIncludes(runtime, "canonicalObligationPoCore(row.external_ref, true)");
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(row.external_ref, true)",
+  );
 });
 
 Deno.test("obligation dedupe collapses the full established builder alias set at one shared boundary", () => {
@@ -186,25 +195,41 @@ Deno.test("obligation dedupe collapses the full established builder alias set at
   assertEquals(canonicalCompanyDedupeKey("Rapid Response Group"), "rapid");
   assertEquals(canonicalCompanyDedupeKey("Prime Building"), "prime");
   // Distinct builders stay distinct; empty input is "no company proof".
-  assert(canonicalCompanyDedupeKey("mlb") !== canonicalCompanyDedupeKey("acme"));
+  assert(
+    canonicalCompanyDedupeKey("mlb") !== canonicalCompanyDedupeKey("acme"),
+  );
   assertEquals(canonicalCompanyDedupeKey(""), "");
   assertEquals(canonicalCompanyDedupeKey(null), "");
   // Both obligation boundaries use the ONE shared helper, not a local strip.
-  assertStringIncludes(runtime, "canonicalCompanyDedupeKey(item.identity.builderSlug)");
-  assertStringIncludes(index, "canonicalCompanyDedupeKey(approvedFields.requesting_company_slug");
-  assertStringIncludes(index, "canonicalCompanyDedupeKey(row.requesting_company_slug");
+  assertStringIncludes(
+    runtime,
+    "canonicalCompanyDedupeKey(item.identity.builderSlug)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalCompanyDedupeKey(approvedFields.requesting_company_slug",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalCompanyDedupeKey(row.requesting_company_slug",
+  );
 });
 
 Deno.test("cancelled/void/superseded jobs are excluded from the obligation match so a re-issue creates a live job", () => {
   // The runtime obligation dedupe selects jobs(metadata,status) and must skip dead
   // jobs; otherwise a fresh claim binds to a cancelled job_id and never goes live.
-  assertStringIncludes(runtime, "isDeadObligationJobStatus(existingJob?.status)");
+  assertStringIncludes(
+    runtime,
+    "isDeadObligationJobStatus(existingJob?.status)",
+  );
   assertStringIncludes(runtime, '"superseded"');
   assertStringIncludes(runtime, '"cancelled"');
   assertStringIncludes(runtime, '"void"');
   // The approve-path duplicate guard mirrors the same re-issue exclusion.
   assert(
-    index.includes("['cancelled','canceled','void','voided','superseded'].includes(String(existingJob?.status"),
+    index.includes(
+      "['cancelled','canceled','void','voided','superseded'].includes(String(existingJob?.status",
+    ),
   );
 });
 
@@ -251,7 +276,9 @@ Deno.test("canonicalSlug delegates to the one shared canonical company alias set
     'import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts"',
   );
   // The alias set is no longer hand-copied inside canonicalSlug.
-  assert(!core.includes('["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes'));
+  assert(
+    !core.includes('["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes'),
+  );
 });
 
 Deno.test("dry-run replay and exact dark observe take no business-write branch", () => {

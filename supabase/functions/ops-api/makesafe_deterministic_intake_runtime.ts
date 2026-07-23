@@ -1541,7 +1541,8 @@ async function readExistingObligationJobs(
     // Mirror the existing/approve side: a distinct PO carried only in the work
     // order field or the composite external ref still discriminates, so two
     // explicitly-different POs are never over-deduped into one obligation.
-    const targetPo = canonicalObligationPoCore(item.identity.builderPoCanonical) ||
+    const targetPo =
+      canonicalObligationPoCore(item.identity.builderPoCanonical) ||
       canonicalObligationPoCore(item.identity.builderWoCanonical, true) ||
       canonicalObligationPoCore(item.identity.externalRefCanonical, true);
     if (!targetRef || !targetCompany) continue;
@@ -1566,7 +1567,8 @@ async function readExistingObligationJobs(
         : {};
       // Distinct explicit PO stored only in builder_work_order_number still
       // counts, so two explicitly-different POs are never over-deduped.
-      const existingPo = canonicalObligationPoCore(metadata.builder_po_number) ||
+      const existingPo =
+        canonicalObligationPoCore(metadata.builder_po_number) ||
         canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
         canonicalObligationPoCore(row.external_ref, true);
       // One claim can carry distinct PO-backed instructions. Canonical claim
