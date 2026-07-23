@@ -994,7 +994,9 @@ function bindSelectedPlanToPersistedSourceAuthority(
     if (ownedAuthorities.size > 1) {
       const primaryDeliverable = deliverableSegment(authority.instruction_key);
       for (const candidate of ownedAuthorities.values()) {
-        if (deliverableSegment(candidate.instruction_key) !== primaryDeliverable) {
+        if (
+          deliverableSegment(candidate.instruction_key) !== primaryDeliverable
+        ) {
           throw new Error(
             "one deterministic plan merged canonical sources from multiple persisted deliverables",
           );
