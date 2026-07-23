@@ -130,23 +130,27 @@ budget, then cases never attempted before, then the remaining retries. Cases alr
 at their resolved state are inert. A systematically failing case therefore cannot
 crowd out fresh work.
 
-Selection and ranking run on canonical ownership, not the moving page. Before the
-plan is selected or ranked, every bounded source is bound back to the persisted case
-that owns it (its primary source, or its first owned source), so a partial page that
-regroups an already-accounted source under another case cannot classify it as fresh,
-spend the whole case cap on duplicate inserts, and starve the genuinely unaccounted
-tail. Binding a multi-authority plan case is safe only when every source is already
-canonically accounted, all owned authorities share one deliverable, and every
-non-primary persisted case already matches the state this plan derives; a merge that
-introduces a fresh source across persisted cases, spans distinct persisted
-deliverables, or carries a state-divergent secondary authority is a cross-case
-mismerge and fails loudly rather than writing a fresh or misattributed secondary
-source under the primary case. Exact selection then closes the selected
-case's transitive semantic parent ancestry from the bounded plan before lineage
-validation, so a fresh selected child keeps its required parent edge. The one
-deliberate exception is a fresh review-exception `sibling_of` case: sibling
-orientation is arbitrary, so exact authority promotes it to its own root rather than
-pulling a page-only ambient sibling.
+Selection and ranking run on canonical ownership, not the moving page. Full-open
+binds every bounded source back to the persisted case that owns it (its primary
+source, or its first owned source) before ranking, so a partial page that regroups an
+already-accounted source under another case cannot classify it as fresh, spend the
+whole case cap on duplicate inserts, and starve the genuinely unaccounted tail. Exact
+mode does not bind the whole page: it closes the raw selected ancestry, binds only
+that closure back to its persisted authority, then selects and closes it again, so an
+unrelated case that merely shares the ambient 500-source page is never bound,
+validated, or able to block the exact run. Binding a multi-authority plan case is safe
+only when every source is already canonically accounted, all owned authorities share
+one deliverable, and every non-primary persisted case already matches the state this
+plan derives; a merge that introduces a fresh source across persisted cases, spans
+distinct persisted deliverables, or carries a state-divergent secondary authority is a
+cross-case mismerge and fails loudly rather than writing a fresh or misattributed
+secondary source under the primary case. That loud multi-authority guard evaluates
+only the selected closure, not unrelated ambient cases on the same bounded page. The
+second exact pass prunes a page-only ambient ancestor when a persisted exact source
+binds back to its authoritative root, so a fresh selected child keeps its required
+parent edge. The one deliberate exception is a fresh review-exception `sibling_of`
+case: sibling orientation is arbitrary, so exact authority promotes it to its own root
+rather than pulling a page-only ambient sibling.
 
 The guarded job path runs the same required-field gate as approval before any
 storage, artifact-ledger or draft write, so an approval rejection (for example a null
@@ -238,8 +242,9 @@ selection-authority boundary: full-open does not spend its cap reattaching sourc
 already settled on canonical cases, a fresh source spanning multiple persisted cases,
 a merge spanning distinct persisted deliverables, and a state-divergent secondary
 authority each fail loudly, exact selection pulls the semantic parent chain
-and advances it within the case cap, and a production-shaped own copy closes onto its
-persisted ambient parent. The
+and advances it within the case cap, a production-shaped own copy closes onto its
+persisted ambient parent, and an unrelated fresh multi-authority case sharing the
+bounded page is left untouched and cannot block the exact run. The
 migration-contract tests assert both write boundaries share the same canonical ref,
 PO-core and builder-alias helpers so they cannot drift.
 
