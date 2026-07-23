@@ -170,8 +170,8 @@ Do not perform these steps from this task branch.
    HAVING count(*) > 1;
    ```
 
-   Required result: zero rows. Any row stops release for a separately approved mapping decision.
-3. Apply `20260721000001_fence_job_mint.sql` through the normal migration pipeline. Do not apply it manually from a feature worktree.
+   Required result: zero rows. If rows remain, the historical duplicate mappings are resolved first by the audited, non-deleting `20260720235959_fence_opportunity_mapping_dedupe.sql`, which keeps a deterministic richest-evidence winner, audits every original mapping, and unmaps only losers (never deleting a job). Its production evidence and ambiguous-case list are in `docs/evidence/fence-opportunity-mapping-dedupe-2026-07-23.md`. Any residual duplicate still stops release.
+3. Apply the migrations through the normal migration pipeline in order — `20260720235959_fence_opportunity_mapping_dedupe.sql` first (it enforces its own post-dedupe zero-duplicate gate), then `20260721000001_fence_job_mint.sql`. Do not apply them manually from a feature worktree.
 4. Deploy `ghl-proxy` from approved `main` CI using its existing `--no-verify-jwt` configuration. Do not manually deploy from this worktree.
 5. Keep the entry-funnel branch's browser mint stop in place until the endpoint proof below is green and that branch integrates this exact contract.
 6. Merge/deploy the fence entry integration separately. Do not merge fence #61 or patio #123 by implication; each keeps its own review/release decision.

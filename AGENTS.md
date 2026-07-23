@@ -277,7 +277,13 @@ release proof are in `docs/fence-mint-contract.md`, with atomic ledger/lock RPCs
 in `20260721000001_fence_job_mint.sql`. Keep the request UUID stable across
 retries, preserve tenant/role/mapping guards, never transfer `scope_json` in the
 mint response, and never add quote/send/communication effects to this command.
-Legacy non-fence create endpoints remain unchanged until separately migrated.
+Historical duplicate opportunity mappings are resolved by
+`20260720235959_fence_opportunity_mapping_dedupe.sql` before the mint migration:
+it audits every original mapping, unmaps only deterministic losers, and never
+deletes jobs. The production evidence and ambiguous-case list are in
+`docs/evidence/fence-opportunity-mapping-dedupe-2026-07-23.md`; never bypass the
+post-dedupe zero-duplicate gate. Legacy non-fence create endpoints remain
+unchanged until separately migrated.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 

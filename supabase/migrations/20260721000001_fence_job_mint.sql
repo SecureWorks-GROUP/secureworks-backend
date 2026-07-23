@@ -12,7 +12,9 @@ ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS scope_updated_at timestamptz;
 -- SELECT org_id, type, ghl_opportunity_id, count(*)
 -- FROM public.jobs WHERE ghl_opportunity_id IS NOT NULL
 -- GROUP BY 1,2,3 HAVING count(*) > 1;
--- If it does not, stop. Do not choose a winner inside this migration.
+-- If it does not, stop. Do not choose a winner inside this migration. Historical
+-- duplicates must first be resolved by the audited, non-deleting
+-- 20260720235959_fence_opportunity_mapping_dedupe.sql migration.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_org_type_ghl_opportunity
   ON public.jobs (org_id, type, ghl_opportunity_id)
   WHERE ghl_opportunity_id IS NOT NULL;
