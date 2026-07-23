@@ -10,6 +10,12 @@
 
 `public.job_scope` exists in the live production schema but has **no repository migration** (schema drift). The dedupe migration counts its rows as legacy job-scope artifact evidence, but only through the `public._fence_opportunity_mapping_job_scope_count(uuid)` helper, which returns `0` when `to_regclass('public.job_scope')` is `NULL`. This keeps the migration applying cleanly on fresh migration-provisioned databases where the table is absent, while still tallying live `job_scope` evidence in production. Follow-up: add a repository migration for `public.job_scope` (or confirm and drop it) so the repo and live schema converge. This does not change the documented production winner evidence below, which was snapshotted with `job_scope` present.
 
+## Production dry-probe follow-up
+
+The dedupe and base mint migrations were applied on 2026-07-23. Post-dedupe verification returned 76 kept mappings, 133 audited/unmapped mappings, 209 audit rows, zero incorrect audit actions, and zero duplicate groups. The first transaction-rolled-back reserve probe then exposed SQLSTATE `55000`: `v_owner` was structurally unassigned when no current lock owner existed, and the expression `v_has_owner AND v_owner.state ...` attempted field resolution before safely rejecting the false guard. Four sibling `FOUND AND record.field ...` guards had the same latent PL/pgSQL hazard.
+
+`20260723000001_fence_job_mint_record_guards.sql` replaces the three affected RPC definitions with nested owner/`FOUND` guards. It executes no data migration and sends no communication. Production live-flow verification must wait until that correction is merged, applied, and the transaction-rolled-back reserve/progress probe passes.
+
 ## Finding
 
 The population is not mostly empty retry husks. Only **13 rows** meet the strict husk definition: draft, empty scope, empty pricing, no quote/financial/operational/artifact/lifecycle evidence, and at most one event. The other rows contain scoped work, GHL pricing, documents, quotes, invoices, assignments, or lifecycle evidence. **48 groups are genuinely ambiguous** because at least two rows carry quote, financial, or operational relation evidence.
@@ -321,16 +327,18 @@ Recommendation for every listed case: use the provisional winner shown in the fu
 
 ## Production apply order
 
-Apply only after the PR is merged and the release checkout is on clean `main`. The two SQL files must run in this order. `ON_ERROR_STOP` and one transaction per file prevent a partial migration:
+Apply only after the relevant PR is merged and the release checkout is on clean `main`. A fresh environment must run these SQL files in order. `ON_ERROR_STOP` and one transaction per file prevent a partial migration:
 
 ```bash
 psql "$PRODUCTION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -1 \
   -f supabase/migrations/20260720235959_fence_opportunity_mapping_dedupe.sql
 psql "$PRODUCTION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -1 \
   -f supabase/migrations/20260721000001_fence_job_mint.sql
+psql "$PRODUCTION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -1 \
+  -f supabase/migrations/20260723000001_fence_job_mint_record_guards.sql
 ```
 
-If the approved Supabase migration connection is used instead of `psql`, submit the full contents of the same two files as two migrations in the same order. Do not use a broad `db push`: production migration history is intentionally sparse and unrelated pending files must not be swept in.
+Production already has the first two files, so after the corrective PR merges apply only `20260723000001_fence_job_mint_record_guards.sql`. If the approved Supabase migration connection is used instead of `psql`, submit the full file contents as separate migrations in the same order. Do not use a broad `db push`: production migration history is intentionally sparse and unrelated pending files must not be swept in.
 
 ## Production verification queries
 

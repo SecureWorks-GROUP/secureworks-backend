@@ -257,3 +257,47 @@ Deno.test("dedupe migration guards public.job_scope through a to_regclass-safe h
     "the guard helper must be defined before the dedupe statement uses it",
   );
 });
+
+Deno.test("fence mint correction guards unassigned records before field access", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260723000001_fence_job_mint_record_guards.sql",
+      import.meta.url,
+    ),
+  );
+  const executableSql = sql.replace(/--.*$/gm, "");
+
+  assertStringIncludes(
+    sql,
+    "CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint(",
+  );
+  assertStringIncludes(
+    sql,
+    "CREATE OR REPLACE FUNCTION public.record_fence_job_mint_opportunity(",
+  );
+  assertStringIncludes(
+    sql,
+    "CREATE OR REPLACE FUNCTION public.complete_fence_job_mint(",
+  );
+  assertStringIncludes(sql, "IF v_has_owner THEN");
+  assertStringIncludes(sql, "IF FOUND THEN\n          IF v_root.state IN");
+  assertStringIncludes(
+    sql,
+    "IF FOUND THEN\n      IF v_reserved.state = 'complete'",
+  );
+  assertStringIncludes(
+    sql,
+    "IF FOUND THEN\n    IF v_mapped.ghl_contact_id IS NOT NULL",
+  );
+  assertStringIncludes(
+    sql,
+    "IF FOUND THEN\n    IF v_job.ghl_contact_id IS NULL",
+  );
+
+  // An untyped record is structurally undefined after SELECT INTO finds no row.
+  // Every guard must therefore be nested; SQL/PLpgSQL AND evaluation is not a
+  // safe short circuit for record.field resolution.
+  assertEquals(/\bFOUND\s+AND\s+v_[a-z_]+\./i.test(executableSql), false);
+  assertEquals(/\bv_has_owner\s+AND\s+v_owner\./i.test(executableSql), false);
+  assertEquals(/send_quote|send_sms|send_email/i.test(executableSql), false);
+});
