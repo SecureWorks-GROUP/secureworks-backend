@@ -186,6 +186,30 @@ export function normaliseRef(
   return collapsed || null;
 }
 
+// ── canonicalExternalObligationRef ───────────────────────────────────────────
+// Manual/recovery jobs can store a builder claim and PO in one display token
+// (for example MLB-26537PO-56922), while deterministic intake stores the claim as
+// MLB-26537. Dedupe boundaries must compare the claim obligation, not the storage
+// formatting. Keep this separate from normaliseRef: extraction still needs the
+// complete token and legacy intake behaviour must remain unchanged.
+export function canonicalExternalObligationRef(
+  raw: string | null | undefined,
+  prefixes: readonly string[] = REF_PREFIX_FLOOR,
+): string | null {
+  if (raw == null) return null;
+  const value = String(raw).trim();
+  if (!value) return null;
+  const alt = cleanPrefixes(prefixes).map(escapeRegExp).join("|");
+  // Deliberately no trailing word boundary after the digits. In a composite
+  // MLB-26537PO-56922 value, P is also a word character; requiring a boundary
+  // would miss the claim that the recovery path embedded in the token.
+  const match = value.match(
+    new RegExp(`\\b(${alt})\\s*-?\\s*(\\d+)`, "i"),
+  );
+  if (match) return `${match[1].toUpperCase()}-${match[2]}`;
+  return normaliseRef(value, prefixes);
+}
+
 // ── extractRef (finding 1) ────────────────────────────────────────────────────
 // Extract a make-safe ref from the FULL subject, then the body as a fallback,
 // handling prefixed (AJBR-67200 / AJBR 67200 / AJBR67200 / MS191190),

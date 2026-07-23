@@ -1,8 +1,10 @@
 // deno-lint-ignore-file no-import-prefix
 import {
   assert,
+  assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { canonicalExternalObligationRef } from "../_shared/makesafe_refs.ts";
 
 const migration = await Deno.readTextFile(
   new URL(
@@ -112,6 +114,31 @@ Deno.test("deterministic normal path has no model import or silent fallback", ()
   assertStringIncludes(index, "approvedWorkOrderIdentity");
   assertStringIncludes(index, "existingWorkOrderIdentity");
   assertStringIncludes(runtime, "ai_calls: 0");
+});
+
+Deno.test("canonical external-obligation dedupe covers recovery composite refs at both write boundaries", () => {
+  assertEquals(
+    canonicalExternalObligationRef("MLB-26537"),
+    canonicalExternalObligationRef("MLB-26537PO-56922"),
+  );
+  assertEquals(
+    canonicalExternalObligationRef("mlb 26537 po 56866"),
+    "MLB-26537",
+  );
+  assert(
+    canonicalExternalObligationRef("MLB-26537PO-56922") !==
+      canonicalExternalObligationRef("MLB-26538PO-56922"),
+  );
+  assertStringIncludes(runtime, "readExistingObligationJobs");
+  assertStringIncludes(runtime, "canonicalExternalObligationRef(");
+  assertStringIncludes(
+    index,
+    "canonicalExternalObligationRef(approvedFields.external_ref, prefixes)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalExternalObligationRef(row.external_ref, prefixes)",
+  );
 });
 
 Deno.test("dry-run replay and exact dark observe take no business-write branch", () => {

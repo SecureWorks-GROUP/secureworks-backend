@@ -25,6 +25,10 @@ import {
 import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
 import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 import { isReportOnlyType } from "./makesafe_intake_gate.ts";
+import {
+  canonicalExternalObligationRef,
+  loadRefPrefixes,
+} from "../_shared/makesafe_refs.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -1346,10 +1350,10 @@ async function resolveSelectedLineage(
   ];
   if (!externalParentKeys.length) return { plan, missingParents: [] };
 
-  const persisted = new Set<string>();
+  const persisted = new Map<string, { cycle: number }>();
   for (const keys of chunk(externalParentKeys)) {
     const { data, error } = await client.from("makesafe_intake_cases")
-      .select("instruction_key")
+      .select("instruction_key,cycle")
       .eq("org_id", DEFAULT_ORG_ID)
       .in("instruction_key", keys);
     if (error) {
@@ -1360,13 +1364,36 @@ async function resolveSelectedLineage(
       );
     }
     for (const row of data || []) {
-      if (row?.instruction_key) persisted.add(row.instruction_key);
+      if (
+        row?.instruction_key && Number.isInteger(row.cycle) && row.cycle > 0
+      ) {
+        persisted.set(row.instruction_key, { cycle: row.cycle });
+      }
     }
   }
 
   const exactSources = new Set(exactSourcePostIds);
   const keyRemap = new Map<string, string>();
   const cases = plan.cases.map((item) => {
+    const persistedParent = item.parentInstructionKey
+      ? persisted.get(item.parentInstructionKey)
+      : null;
+    if (persistedParent && item.parentRelation === "sibling_of") {
+      // The trigger assigns a sibling the persisted parent's cycle. A page-local
+      // plan can carry a deeper ambient cycle, so re-key the child to the cycle
+      // the trigger will derive while preserving its persisted sibling ancestry.
+      const siblingKey = instructionKeyForCycle(
+        item.instructionKey,
+        persistedParent.cycle,
+      );
+      if (siblingKey !== item.instructionKey) {
+        keyRemap.set(item.instructionKey, siblingKey);
+      }
+      return {
+        ...rekeyCasePlan(item, siblingKey),
+        cycle: persistedParent.cycle,
+      };
+    }
     const missingExternalParent = item.parentInstructionKey &&
       !selectedKeys.has(item.parentInstructionKey) &&
       !persisted.has(item.parentInstructionKey);
@@ -1447,6 +1474,88 @@ async function resolveSelectedLineage(
     !persisted.has(item.parentInstructionKey)
   );
   return { plan: resolvedPlan, missingParents };
+}
+
+function dedupeCompanyKey(value: unknown): string {
+  const key = String(value ?? "").trim().toLowerCase().replace(
+    /[^a-z0-9]/g,
+    "",
+  );
+  if (["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes(key)) {
+    return "ajsajbr";
+  }
+  return key;
+}
+
+function dedupePoCore(value: unknown, requireLabel = false): string | null {
+  const text = String(value ?? "").toUpperCase();
+  const labelled = text.match(/PO[\s#._/-]*(\d{3,})/);
+  if (labelled) return labelled[1];
+  if (requireLabel) return null;
+  const bare = text.match(/\d{3,}/);
+  return bare?.[0] ?? null;
+}
+
+async function readExistingObligationJobs(
+  client: any,
+  cases: readonly DeterministicCasePlan[],
+): Promise<Map<string, string>> {
+  if (!cases.some((item) => item.identity.externalRefCanonical)) {
+    return new Map();
+  }
+  const prefixes = await loadRefPrefixes(client);
+  const { data, error } = await client.from("makesafe_job_details")
+    .select(
+      "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(metadata,status)",
+    );
+  if (error) {
+    throw new Error(
+      `deterministic external-obligation dedupe read failed: ${
+        error.message || error
+      }`,
+    );
+  }
+  const matches = new Map<string, string>();
+  for (const item of cases) {
+    // Exception/accounted rows cannot carry a job_id under the case-model DB
+    // checks. They remain safely accounted without a job until evidence makes
+    // them live-ready; the same boundary will bind the recovery job on that run.
+    if (
+      item.state !== "confirmed_live_job" && item.state !== "blocked_live_job"
+    ) continue;
+    const targetRef = canonicalExternalObligationRef(
+      item.identity.externalRefCanonical,
+      prefixes,
+    );
+    const targetCompany = dedupeCompanyKey(item.identity.builderSlug);
+    const targetPo = dedupePoCore(item.identity.builderPoCanonical);
+    if (!targetRef || !targetCompany) continue;
+    const targetReportOnly = deterministicPrimaryIsReportOnly(item);
+    const match = (data || []).find((row: any) => {
+      if (!row?.job_id) return false;
+      if (
+        canonicalExternalObligationRef(row.external_ref, prefixes) !== targetRef
+      ) return false;
+      const existingCompany = dedupeCompanyKey(
+        row.requesting_company_slug || row.requesting_company_name,
+      );
+      if (!existingCompany || existingCompany !== targetCompany) return false;
+      if (isReportOnlyType(row.report_type) !== targetReportOnly) return false;
+      const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      const metadata = existingJob?.metadata &&
+          typeof existingJob.metadata === "object"
+        ? existingJob.metadata
+        : {};
+      const existingPo = dedupePoCore(
+        metadata.builder_po_number,
+      ) || dedupePoCore(row.external_ref, true);
+      // One claim can carry distinct PO-backed instructions. Canonical claim
+      // matching dedupes storage variants, never two explicitly different POs.
+      return !(targetPo && existingPo && targetPo !== existingPo);
+    });
+    if (match) matches.set(item.instructionKey, match.job_id);
+  }
+  return matches;
 }
 
 async function readPersistedCases(
@@ -2164,6 +2273,10 @@ export async function runDeterministicIntake(
   // evidence arrives, including a case whose job creation failed on an earlier run:
   // its sources were accounted before that attempt, so it is not mistaken for
   // fresh work and cannot re-occupy the priority head of every subsequent run.
+  const existingObligationJobs = await readExistingObligationJobs(
+    client,
+    plan.cases,
+  );
   const persisted = await readPersistedCases(client, plan.cases);
   const persistedSources = await readPersistedSourcePostIds(
     client,
@@ -2177,9 +2290,14 @@ export async function runDeterministicIntake(
     if (casePlan.sourcePostIds.some((postId) => !known.has(postId))) {
       return "fresh";
     }
-    if (row.state !== resolvedState(casePlan, row.job_id || null)) {
+    const obligationJobId = existingObligationJobs.get(
+      casePlan.instructionKey,
+    );
+    const effectiveJobId = row.job_id || obligationJobId || null;
+    if (row.state !== resolvedState(casePlan, effectiveJobId)) {
       return "fresh";
     }
+    if (!row.job_id && obligationJobId) return "fresh";
     // Accounted case whose job creation was deferred or failed earlier. It can
     // still advance, but a systematically failing one must never crowd out work
     // that has never been attempted, so it only gets a bounded share of the run.
@@ -2213,7 +2331,8 @@ export async function runDeterministicIntake(
     try {
       const existing = persisted.get(casePlan.instructionKey) || null;
       const stateBeforeRun: string | null = existing?.state ?? null;
-      let jobId: string | null = existing?.job_id || null;
+      let jobId: string | null = existing?.job_id ||
+        existingObligationJobs.get(casePlan.instructionKey) || null;
       // Account the case and its sources before any job-creating work. Nothing is
       // left outside the accounting invariant when the job attempt fails, and the
       // failed attempt becomes visible to the next run's ordering.

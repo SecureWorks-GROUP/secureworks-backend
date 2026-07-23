@@ -538,7 +538,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
-import { loadRefPrefixes, normaliseRef } from '../_shared/makesafe_refs.ts'
+import { canonicalExternalObligationRef, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -13618,7 +13618,7 @@ async function approveIntakeDraft(client: any, body: any) {
   // is a no-op and distinct refs still pass.
   if (approvedFields.external_ref) {
     const prefixes = await loadRefPrefixes(client)
-    const normTarget = normaliseRef(approvedFields.external_ref, prefixes)
+    const normTarget = canonicalExternalObligationRef(approvedFields.external_ref, prefixes)
     if (normTarget) {
       // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
       // the refs already on live jobs is cheap and lets us match on normalised form.
@@ -13631,7 +13631,7 @@ async function approveIntakeDraft(client: any, body: any) {
         .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
         .not('external_ref', 'is', null)
       const dup = (candidates || []).find((row: any) => {
-        if (normaliseRef(row.external_ref, prefixes) !== normTarget) return false
+        if (canonicalExternalObligationRef(row.external_ref, prefixes) !== normTarget) return false
         const existingCompanyKey = String(row.requesting_company_slug || row.requesting_company_name || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
         // Known-company approvals must only block against the same known company.
         // If either side lacks company metadata, fail open to the review queue
