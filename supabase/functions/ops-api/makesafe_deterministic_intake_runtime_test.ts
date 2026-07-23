@@ -1010,6 +1010,74 @@ Deno.test("a fresh cross-case merge spanning distinct persisted deliverables fai
   assertEquals(store.makesafe_intake_cases.length, 2);
 });
 
+Deno.test("fresh or state-mismatched multi-authority merges fail loudly", async () => {
+  const groupedStore = (prefix: string, includeFresh: boolean) => {
+    const store = baseStore();
+    store.makesafe_companies.push({
+      id: "22222222-2222-2222-2222-222222222222",
+      slug: "aj",
+      name: "AJ",
+      sender_patterns: ["aj.test"],
+      parsing_rules: null,
+      active: true,
+    });
+    for (
+      const [index, suffix] of ["a", "b", ...(includeFresh ? ["c"] : [])]
+        .entries()
+    ) {
+      store.emails.push(email({
+        post_id: `${prefix}-${suffix}`,
+        from_email: "dispatch@aj.test",
+        received_at: `2026-07-0${index + 2}T01:00:00.000Z`,
+        subject: "Make Safe - Redacted - Job No 69019",
+        body_content: "Work Order AJBR 69019 received for review.",
+      }));
+    }
+    seedCanonicalCase(
+      store,
+      `${prefix}-case-a`,
+      `fingerprint:${prefix}-a/deliverable:wo%3AAJBR-69019/cycle:1`,
+      `${prefix}-a`,
+    );
+    seedCanonicalCase(
+      store,
+      `${prefix}-case-b`,
+      `fingerprint:${prefix}-b/deliverable:wo%3AAJBR-69019/cycle:1`,
+      `${prefix}-b`,
+    );
+    return store;
+  };
+  const options = {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxCases: 1,
+    approveDraft,
+  } as const;
+
+  const fresh = groupedStore("fresh-merge", true);
+  await assertRejects(
+    () => runDeterministicIntake(fakeClient(fresh), options),
+    Error,
+    "fresh source across multiple persisted cases",
+  );
+  assertEquals(fresh.makesafe_intake_cases.length, 2);
+  assertEquals(fresh.makesafe_intake_case_sources.length, 2);
+
+  const stateMismatch = groupedStore("state-merge", false);
+  stateMismatch.makesafe_intake_cases.find((row) =>
+    row.id === "state-merge-case-b"
+  ).state = "accounted_non_wo";
+  await assertRejects(
+    () => runDeterministicIntake(fakeClient(stateMismatch), options),
+    Error,
+    "state-mismatched secondary persisted case",
+  );
+  assertEquals(stateMismatch.makesafe_intake_cases.length, 2);
+  assertEquals(stateMismatch.makesafe_intake_case_sources.length, 2);
+});
+
 Deno.test("repeatedly failing cases do not consume the commit budget", async () => {
   const store = baseStore();
   for (let i = 1; i <= 2; i++) {

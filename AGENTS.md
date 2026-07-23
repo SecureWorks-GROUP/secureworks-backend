@@ -49,7 +49,10 @@ every bounded source to its persisted primary-source case authority before exact
 closure or full-open ranking. Exact selection closes semantic parent ancestry before
 lineage validation, except the intentional fresh review-exception `sibling_of`
 promotion, and a source already canonical-accounted on any case cannot make a
-regrouped case fresh or spend the run cap.
+regrouped case fresh or spend the run cap. Multi-authority regrouping is allowed
+only when every source is already canonical, all authorities share one deliverable,
+and every non-primary case already matches the planned state. Fresh, cross-deliverable
+or state-divergent merges fail loudly before writes.
 
 ## Never Select `scope_json` In A List/Feed Query
 
