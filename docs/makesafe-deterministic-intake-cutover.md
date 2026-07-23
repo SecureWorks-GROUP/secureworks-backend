@@ -155,10 +155,15 @@ over-deduping into one obligation. A cancelled/void/superseded job is a dead
 obligation and is excluded from the match, so a later genuine re-issue of the same
 claim/PO creates a live job rather than binding to the dead one. The dedupe read is
 paged to exhaustion so an obligation past the PostgREST 1,000-row cap cannot hide.
-Separately, an exact-selected `sibling_of` case whose parent is already persisted is
-re-keyed to the cycle the database trigger derives from that parent, so a page-local
-plan carrying a deeper ambient cycle still lands on the trigger's sibling cycle
-without weakening revision, cancellation, reopen or distinct-PO ancestry semantics.
+Separately, before any write every selected lineage node is normalised to the cycle
+the database trigger will derive: roots land on cycle 1, `reopen_of` children on their
+parent's cycle plus one, and every other typed relation (sibling, revision,
+cancellation, duplicate) inherits its parent's cycle. Normalisation resolves
+recursively, so a reopen descendant is rebased when an earlier sibling or root
+collapses to its database cycle, and a parent that is already persisted while also
+appearing in the full-open selected plan keeps its authoritative database cycle. Only
+the `/cycle:N` key identity and cycle number are aligned to the trigger; revision,
+cancellation, reopen and distinct-PO ancestry semantics are preserved.
 
 A case that is accounted but whose guarded job creation has not yet succeeded is
 persisted with reason code `awaiting_job_creation`. It is a pre-job state, not an
@@ -206,7 +211,11 @@ boundary: deterministic selection links a canonical claim ref to its composite-r
 recovery job, an exact-selected sibling of a persisted cycle-1 root rebases to the
 trigger-derived cycle (and its persisted source authority survives a capped-cursor
 re-key across reruns), a cancelled/void/superseded job is excluded so a re-issue
-creates a live job, and two explicitly different POs are never over-deduped. The
+creates a live job, and two explicitly different POs are never over-deduped. Full-open
+lineage normalisation is covered directly: a parentless reopen root planned at an
+ambient cycle is written as database cycle 1, and a selected plan whose persisted root
+also appears in the full-open set has its siblings, `cancellation_of` node and reopen
+descendants all rebased to the cycles the trigger derives. The
 migration-contract tests assert both write boundaries share the same canonical ref,
 PO-core and builder-alias helpers so they cannot drift.
 

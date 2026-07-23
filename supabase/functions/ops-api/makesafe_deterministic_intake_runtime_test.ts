@@ -2017,6 +2017,210 @@ Deno.test("exact-selected sibling of a persisted cycle-1 root rebases to the tri
   assertEquals(store.makesafe_intake_case_sources.length, 2);
 });
 
+Deno.test("full-open normalizes a parentless reopen root to database cycle 1", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "fresh-reopen-root",
+    thread_id: "fresh-reopen-root-thread",
+    received_at: "2026-07-10T01:00:00.000Z",
+    subject: "REOPEN WORK ORDER MLB-28001 Work Order: WO-28001 PO: PO-58001",
+    body_content: "Address: 1 Root Cycle Way, Perth",
+  }));
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 5,
+    seedPostIds: [],
+    cursor: null,
+  });
+  const rawRoot = buildDeterministicIntakePlan(inputs.sources, inputs.profiles)
+    .cases[0];
+  assert(rawRoot);
+  assertEquals(rawRoot.parentRelation, null);
+  assertEquals(rawRoot.cycle, 2);
+  assert(/\/cycle:2$/.test(rawRoot.instructionKey));
+
+  const run = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxSources: 5,
+    maxCases: 1,
+    approveDraft,
+  });
+  assertEquals(run.totals.write_failures, 0);
+  assertEquals(run.totals.case_rows_created, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].parent_relation ?? null, null);
+  assertEquals(store.makesafe_intake_cases[0].cycle, 1);
+  assert(/\/cycle:1$/.test(store.makesafe_intake_cases[0].instruction_key));
+});
+
+Deno.test("full-open normalizes selected persisted-root siblings, cancellation, and reopen descendants", async () => {
+  const store = baseStore();
+  const thread = "full-open-cycle-thread";
+  store.emails.push(
+    email({
+      post_id: "selected-root",
+      thread_id: thread,
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-26499 Work Order: WO-26499 PO: PO-BOX",
+      body_content: "Address: 2 Selected Root Way, Perth",
+    }),
+    email({
+      post_id: "root-reopen-1",
+      thread_id: thread,
+      received_at: "2026-07-02T01:00:00.000Z",
+      subject: "REOPEN WORK ORDER MLB-26499 Work Order: WO-26499 PO: PO-R1",
+      body_content: "Address: 2 Selected Root Way, Perth",
+    }),
+    email({
+      post_id: "root-reopen-2",
+      thread_id: thread,
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject: "REOPEN WORK ORDER MLB-26499 Work Order: WO-26499 PO: PO-R2",
+      body_content: "Address: 2 Selected Root Way, Perth",
+    }),
+    email({
+      post_id: "cycle-3-sibling",
+      thread_id: thread,
+      received_at: "2026-07-04T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-26658 Work Order: WO-26658 PO: PO-BOX",
+      body_content: "Address: 2 Selected Root Way, Perth",
+    }),
+    email({
+      post_id: "sibling-reopen-1",
+      thread_id: thread,
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject: "REOPEN WORK ORDER MLB-26658 Work Order: WO-26658 PO: PO-R3",
+      body_content: "Address: 2 Selected Root Way, Perth",
+    }),
+    email({
+      post_id: "sibling-reopen-2",
+      thread_id: thread,
+      received_at: "2026-07-06T01:00:00.000Z",
+      subject: "REOPEN WORK ORDER MLB-26658 Work Order: WO-26658 PO: PO-R4",
+      body_content: "Address: 2 Selected Root Way, Perth",
+    }),
+    email({
+      post_id: "cycle-5-cancellation",
+      thread_id: thread,
+      received_at: "2026-07-07T01:00:00.000Z",
+      subject: "CANCELLED WORK ORDER MLB-24749 Work Order: WO-24749 PO: PO-BOX",
+      body_content:
+        "Cancel this instruction. Address: 2 Selected Root Way, Perth",
+    }),
+  );
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 10,
+    seedPostIds: [],
+    cursor: null,
+  });
+  const rawPlan = buildDeterministicIntakePlan(inputs.sources, inputs.profiles);
+  const root = rawPlan.cases.find((item) =>
+    item.sourcePostIds.includes("selected-root")
+  );
+  const sibling = rawPlan.cases.find((item) =>
+    item.sourcePostIds.includes("cycle-3-sibling")
+  );
+  const firstSiblingReopen = rawPlan.cases.find((item) =>
+    item.sourcePostIds.includes("sibling-reopen-1")
+  );
+  const secondSiblingReopen = rawPlan.cases.find((item) =>
+    item.sourcePostIds.includes("sibling-reopen-2")
+  );
+  const cancellation = rawPlan.cases.find((item) =>
+    item.sourcePostIds.includes("cycle-5-cancellation")
+  );
+  assert(root);
+  assert(sibling);
+  assert(firstSiblingReopen);
+  assert(secondSiblingReopen);
+  assert(cancellation);
+  assertEquals(root.cycle, 1);
+  assertEquals(sibling.parentRelation, "sibling_of");
+  assertEquals(sibling.cycle, 3);
+  assertEquals(firstSiblingReopen.parentRelation, "reopen_of");
+  assertEquals(firstSiblingReopen.parentInstructionKey, sibling.instructionKey);
+  assertEquals(firstSiblingReopen.cycle, 4);
+  assertEquals(secondSiblingReopen.parentRelation, "reopen_of");
+  assertEquals(
+    secondSiblingReopen.parentInstructionKey,
+    firstSiblingReopen.instructionKey,
+  );
+  assertEquals(secondSiblingReopen.cycle, 5);
+  assertEquals(cancellation.parentRelation, "cancellation_of");
+  assertEquals(cancellation.cycle, 5);
+
+  store.makesafe_intake_cases.push({
+    id: "selected-persisted-root",
+    org_id: "00000000-0000-0000-0000-000000000001",
+    instruction_key: root.instructionKey,
+    lineage_id: "selected-persisted-root",
+    cycle: 1,
+    state: "exception",
+    reason_code: "adapter_parse_failure",
+    job_id: null,
+  });
+  store.makesafe_intake_case_sources.push({
+    id: "selected-persisted-root-source",
+    org_id: "00000000-0000-0000-0000-000000000001",
+    case_id: "selected-persisted-root",
+    post_id: "selected-root",
+  });
+
+  const run = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxSources: 10,
+    maxCases: 10,
+    approveDraft,
+  });
+  assertEquals(run.totals.write_failures, 0);
+  assertEquals(run.totals.cases_failed, 0);
+  assertEquals(run.write_failure_reasons, {});
+
+  const savedSibling = store.makesafe_intake_cases.find((row: any) =>
+    row.external_ref_canonical === "MLB-26658" &&
+    row.parent_relation === "sibling_of"
+  );
+  const savedCancellation = store.makesafe_intake_cases.find((row: any) =>
+    row.reason_code === "cancellation"
+  );
+  assert(savedSibling);
+  assert(savedCancellation);
+  assertEquals(savedSibling.cycle, 1);
+  assert(/\/cycle:1$/.test(savedSibling.instruction_key));
+  assertEquals(savedCancellation.cycle, 1);
+  assert(/\/cycle:1$/.test(savedCancellation.instruction_key));
+
+  const firstSavedSiblingReopen = store.makesafe_intake_cases.find((row: any) =>
+    row.parent_relation === "reopen_of" &&
+    row.parent_case_id === savedSibling.id
+  );
+  assert(firstSavedSiblingReopen);
+  const secondSavedSiblingReopen = store.makesafe_intake_cases.find((
+    row: any,
+  ) =>
+    row.parent_relation === "reopen_of" &&
+    row.parent_case_id === firstSavedSiblingReopen.id
+  );
+  assert(secondSavedSiblingReopen);
+  assertEquals(firstSavedSiblingReopen.cycle, 2);
+  assertEquals(secondSavedSiblingReopen.cycle, 3);
+  assert(firstSavedSiblingReopen.instruction_key.endsWith("/cycle:2"));
+  assert(secondSavedSiblingReopen.instruction_key.endsWith("/cycle:3"));
+});
+
 Deno.test("deterministic selection links a canonical MLB ref to its composite-ref recovery job", async () => {
   const store = baseStore();
   store.emails.push(email({
