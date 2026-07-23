@@ -1012,7 +1012,7 @@ function bindSelectedPlanToPersistedSourceAuthority(
         }
         if (
           candidate.id !== authority.id &&
-          candidate.state !== intakeCase.state
+          candidate.state !== resolvedState(intakeCase, candidate.job_id)
         ) {
           throw new Error(
             "one deterministic plan merged a state-mismatched secondary persisted case",
