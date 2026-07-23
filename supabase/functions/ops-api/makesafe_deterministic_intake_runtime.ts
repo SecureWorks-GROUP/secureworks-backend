@@ -1496,16 +1496,27 @@ async function readExistingObligationJobs(
     return new Map();
   }
   const prefixes = await loadRefPrefixes(client);
-  const { data, error } = await client.from("makesafe_job_details")
-    .select(
-      "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(metadata,status)",
-    );
-  if (error) {
-    throw new Error(
-      `deterministic external-obligation dedupe read failed: ${
-        error.message || error
-      }`,
-    );
+  // A truncated page would hide an existing obligation past the PostgREST
+  // 1000-row cap and let runDeterministicIntake create a duplicate live job for
+  // the same obligation, so the dedupe read is paged to exhaustion.
+  const data: any[] = [];
+  for (let from = 0;; from += SOURCE_PAGE_SIZE) {
+    const { data: page, error } = await client.from("makesafe_job_details")
+      .select(
+        "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(metadata,status)",
+      )
+      .order("job_id", { ascending: true })
+      .range(from, from + SOURCE_PAGE_SIZE - 1);
+    if (error) {
+      throw new Error(
+        `deterministic external-obligation dedupe read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    const rows = page || [];
+    data.push(...rows);
+    if (rows.length < SOURCE_PAGE_SIZE) break;
   }
   const matches = new Map<string, string>();
   for (const item of cases) {
