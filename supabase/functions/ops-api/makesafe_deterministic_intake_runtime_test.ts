@@ -358,6 +358,32 @@ function email(input: Record<string, any>) {
 const approveDraft = (_client: any, _body: any) =>
   Promise.resolve({ job: { id: "job-abc" } });
 
+function seedCanonicalCase(
+  store: Store,
+  id: string,
+  instructionKey: string,
+  postId: string,
+) {
+  store.makesafe_intake_cases.push({
+    id,
+    org_id: "00000000-0000-0000-0000-000000000001",
+    instruction_key: instructionKey,
+    lineage_id: id,
+    cycle: 1,
+    parent_relation: null,
+    source_fingerprint: instructionKey.match(/fingerprint:([^/]+)/)?.[1] ??
+      null,
+    state: "exception",
+    job_id: null,
+  });
+  store.makesafe_intake_case_sources.push({
+    id: `source-${id}`,
+    org_id: "00000000-0000-0000-0000-000000000001",
+    case_id: id,
+    post_id: postId,
+  });
+}
+
 Deno.test("runtime reads thread coordinates and correlates on conversation id", async () => {
   const store = baseStore();
   store.emails.push(
@@ -857,6 +883,73 @@ Deno.test("stuck exceptions cannot consume the whole per-run budget", async () =
     store.emails.find((e) => e.post_id === "fresh-1")?.makesafe_scanned_at,
     NOW,
   );
+});
+
+Deno.test("full-open does not spend its cap reattaching sources already settled on canonical cases", async () => {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: "22222222-2222-2222-2222-222222222222",
+    slug: "aj",
+    name: "AJ",
+    sender_patterns: ["aj.test"],
+    parsing_rules: null,
+    active: true,
+  });
+  store.emails.push(
+    email({
+      post_id: "settled-a",
+      from_email: "dispatch@aj.test",
+      received_at: "2026-07-02T01:00:00.000Z",
+      subject: "Make Safe - Redacted - Job No 69019",
+      body_content: "Work Order AJBR 69019 received for review.",
+    }),
+    email({
+      post_id: "settled-b",
+      from_email: "dispatch@aj.test",
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject: "Make Safe - Redacted - Job No 69019",
+      body_content: "Work Order AJBR 69019 received for review.",
+    }),
+    email({
+      post_id: "tail-fresh",
+      received_at: "2026-07-09T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-99001 Work Order: WO-99001",
+      body_content: "Address: 1 Tail Way, Perth",
+    }),
+  );
+  seedCanonicalCase(
+    store,
+    "settled-case-a",
+    "fingerprint:settled-a/deliverable:wo%3AAJBR-69019/cycle:1",
+    "settled-a",
+  );
+  seedCanonicalCase(
+    store,
+    "settled-case-b",
+    "fingerprint:settled-b/deliverable:wo%3AAJBR-69019/cycle:1",
+    "settled-b",
+  );
+
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxCases: 1,
+    approveDraft,
+  });
+
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.totals.cases_attempted, 1);
+  assertEquals(report.totals.case_rows_created, 1);
+  assertEquals(report.totals.source_rows_created, 1);
+  assert(
+    store.makesafe_intake_case_sources.some((row) =>
+      row.post_id === "tail-fresh"
+    ),
+    "the unaccounted tail source must receive the only commit slot",
+  );
+  assertEquals(store.makesafe_intake_cases.length, 3);
 });
 
 Deno.test("repeatedly failing cases do not consume the commit budget", async () => {
@@ -2926,7 +3019,7 @@ Deno.test("exact selection promoting a cycle-N sibling rebases its selected reop
   assertEquals(persistedChild.lineage_id, persistedRoot.lineage_id);
 });
 
-Deno.test("semantic lineage parent fails identically in observe and live before every business write", async () => {
+Deno.test("exact selection pulls the semantic parent chain and advances it within the case cap", async () => {
   const store = baseStore();
   store.emails.push(
     email({
@@ -2959,6 +3052,7 @@ Deno.test("semantic lineage parent fails identically in observe and live before 
   }
   const client = fakeClient(store);
   const options = {
+    dryRun: false,
     days: 30,
     nowIso: NOW,
     maxSources: 10,
@@ -2968,40 +3062,97 @@ Deno.test("semantic lineage parent fails identically in observe and live before 
     approveDraft,
   } as const;
 
-  const observed = await runDeterministicIntake(client, {
-    ...options,
-    dryRun: true,
-  });
-  assertEquals(observed.proposed_cases?.[0].parent_relation, "revision_of");
-  assertEquals(observed.totals.write_failures, 1);
-  assertEquals(observed.totals.cases_failed, 1);
-  assertEquals(
-    observed.write_failure_reasons.lineage_parent_unselected,
-    1,
-  );
-  assert(observed.evidence.caveats.includes("lineage_parent_unselected"));
-  assertEquals(store.makesafe_intake_cases.length, 0);
-  assertEquals(store.makesafe_intake_case_sources.length, 0);
+  const first = await runDeterministicIntake(client, options);
+  assertEquals(first.selection.selected_cases, 2);
+  assertEquals(first.totals.write_failures, 0);
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.totals.cases_deferred, 1);
+  assertEquals(first.proposed_cases?.[0].parent_relation, null);
+  assertEquals(first.proposed_cases?.[1].parent_relation, "revision_of");
 
-  const live = await runDeterministicIntake(client, {
-    ...options,
-    dryRun: false,
-  });
-  assertEquals(live.ok, true);
-  assertEquals(live.proposed_cases?.[0].parent_relation, "revision_of");
-  assertEquals(live.totals.write_failures, 1);
-  assertEquals(live.totals.cases_failed, 1);
-  assertEquals(live.totals.cases_attempted, 0);
-  assertEquals(live.write_failure_reasons.lineage_parent_unselected, 1);
-  assert(live.evidence.caveats.includes("lineage_parent_unselected"));
-  assertEquals(store.makesafe_intake_cases.length, 0);
-  assertEquals(store.makesafe_intake_case_sources.length, 0);
-  assertEquals(store.makesafe_intake_artifacts.length, 0);
-  assertEquals(store.makesafe_intake_drafts.length, 0);
-  assertEquals(
-    store.makesafe_intake_health[0].degraded_reason,
-    "deterministic_write_failure",
+  const second = await runDeterministicIntake(client, options);
+  assertEquals(second.totals.write_failures, 0);
+  assertEquals(second.totals.case_rows_created, 1);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+  const revision = store.makesafe_intake_cases.find((row) =>
+    row.parent_relation === "revision_of"
   );
+  assert(revision?.parent_case_id);
+  assertEquals(store.makesafe_intake_artifacts.length, 2);
+  assertEquals(store.makesafe_intake_drafts.length, 2);
+});
+
+Deno.test("production-shaped own copy closes onto its persisted ambient parent", async () => {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: "22222222-2222-2222-2222-222222222222",
+    slug: "aj",
+    name: "AJ",
+    sender_patterns: ["aj.test"],
+    parsing_rules: null,
+    active: true,
+  });
+  store.emails.push(
+    email({
+      post_id: "ambient-a",
+      thread_id: "ambient-thread",
+      from_email: "dispatch@aj.test",
+      received_at: "2026-07-02T03:35:24.000Z",
+      subject: "Make Safe - Redacted - Job No 68554",
+      body_content: "Work Order AJBR 68554 received for review.",
+    }),
+    email({
+      post_id: "ambient-b",
+      thread_id: "ambient-thread",
+      from_email: "dispatch@aj.test",
+      received_at: "2026-07-06T22:46:51.000Z",
+      subject: "Make Safe - Redacted - Job No 68554",
+      body_content: "Work Order AJBR 68554 received for review.",
+    }),
+    email({
+      post_id: "exact-own-copy",
+      thread_id: "ambient-thread",
+      from_email: "ops@secureworkswa.com.au",
+      received_at: "2026-07-07T01:01:48.000Z",
+      subject: "Make Safe - Redacted - Job No 68554",
+      body_content: "SecureWorks acknowledgement for Job No 68554.",
+    }),
+  );
+  seedCanonicalCase(
+    store,
+    "ambient-case-a",
+    "fingerprint:ambient-a/deliverable:wo%3AAJBR-68554/cycle:1",
+    "ambient-a",
+  );
+  seedCanonicalCase(
+    store,
+    "ambient-case-b",
+    "fingerprint:ambient-b/deliverable:wo%3AAJBR-68554/cycle:1",
+    "ambient-b",
+  );
+
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxCases: 1,
+    allowSourcePostIds: ["exact-own-copy"],
+    includeSanitizedCases: true,
+    approveDraft,
+  });
+
+  assertEquals(report.selection.selected_cases, 2);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.cases_attempted, 1);
+  assertEquals(report.totals.case_rows_created, 1);
+  assertEquals(report.totals.source_rows_created, 1);
+  const ownCopyCase = store.makesafe_intake_cases.find((row) =>
+    row.state === "accounted_non_wo"
+  );
+  assert(ownCopyCase);
+  assertEquals(ownCopyCase.parent_case_id, "ambient-case-a");
+  assertEquals(ownCopyCase.parent_relation, "sibling_of");
 });
 
 Deno.test("a re-keyed persisted parent re-points its in-plan child instead of failing closed", async () => {
