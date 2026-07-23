@@ -537,6 +537,16 @@ NOT subject to the make-safe report-type gate (generating our own report for
 report-type jobs is the point). Full flow + action contract in
 `docs/evidence/roof-report-template-flow-2026-07-22.md`.
 
+## The Ops Dash UI Lives In The `dashboard` Submodule
+
+`dashboard/` is a git SUBMODULE of `SecureWorks-GROUP/secureworks-ux` (see
+`.gitmodules`) — `ops.html`, `trade.html`, and their Playwright tests live THERE,
+not in this repo, and the pinned commit here is routinely far behind ux `main`.
+For any Ops Dash / Trade App UI work: `git submodule update --init dashboard`,
+then branch the submodule off ITS `origin/main` (not the stale pin). UI changes
+ship as a secureworks-ux PR; this repo's gitlink is only bumped by occasional
+pointer chores — never point it at an unpushed commit.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one
