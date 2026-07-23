@@ -1143,8 +1143,8 @@ Deno.test("a confirmed grouped plan binds no-job exception secondaries but rejec
   // The secondary is genuinely divergent in resolved space: accounted_non_wo can
   // never collapse to the plan's exception, so binding must fail loudly.
   const divergent = groupedStore();
-  divergent.makesafe_intake_cases.find((row) => row.id === "conf-case-b").state =
-    "accounted_non_wo";
+  divergent.makesafe_intake_cases.find((row) => row.id === "conf-case-b")
+    .state = "accounted_non_wo";
   await assertRejects(
     () => runDeterministicIntake(fakeClient(divergent), options),
     Error,
@@ -3653,4 +3653,3 @@ Deno.test("a fully unresolved allowlist fails closed instead of scanning empty",
   );
   assertEquals(store.makesafe_intake_cases.length, 0);
 });
-
