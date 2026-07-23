@@ -91,6 +91,37 @@ REVOKE ALL ON FUNCTION public._fence_opportunity_mapping_rank(
   bigint, bigint, bigint, bigint, bigint, boolean, boolean, bigint
 ) FROM PUBLIC, anon, authenticated;
 
+-- public.job_scope exists in the live production schema but has no repository
+-- migration (schema drift; tracked as a repo-hygiene follow-up in
+-- docs/evidence/fence-opportunity-mapping-dedupe-2026-07-23.md). This helper
+-- counts its rows only when the relation is present, so the dedupe still tallies
+-- live job_scope evidence in production while applying cleanly on fresh
+-- migration-provisioned databases where the table is absent. The plpgsql body is
+-- not planned against the relation until execution, and the to_regclass guard
+-- short-circuits before the dynamic lookup runs.
+CREATE OR REPLACE FUNCTION public._fence_opportunity_mapping_job_scope_count(
+  p_job_id uuid
+) RETURNS bigint
+LANGUAGE plpgsql
+STABLE
+SET search_path = public
+AS $$
+DECLARE
+  v_count bigint;
+BEGIN
+  IF to_regclass('public.job_scope') IS NULL THEN
+    RETURN 0;
+  END IF;
+  EXECUTE 'SELECT count(*) FROM public.job_scope WHERE job_id = $1'
+    INTO v_count
+    USING p_job_id;
+  RETURN COALESCE(v_count, 0);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public._fence_opportunity_mapping_job_scope_count(uuid)
+  FROM PUBLIC, anon, authenticated;
+
 WITH duplicate_groups AS (
   SELECT org_id, type, ghl_opportunity_id, count(*)::integer AS group_size
   FROM public.jobs
@@ -137,7 +168,7 @@ WITH duplicate_groups AS (
       (SELECT count(*) FROM public.job_documents d WHERE d.job_id = j.id)
       + (SELECT count(*) FROM public.job_media m WHERE m.job_id = j.id)
       + (SELECT count(*) FROM public.scope_revisions s WHERE s.job_id = j.id)
-      + (SELECT count(*) FROM public.job_scope s WHERE s.job_id = j.id)
+      + public._fence_opportunity_mapping_job_scope_count(j.id)
     )::bigint AS artifact_count,
     (
       (j.status::text <> 'draft')::integer

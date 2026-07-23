@@ -6,6 +6,10 @@
 - No client names, addresses, phone numbers, email addresses, or JSON payloads are included.
 - Source migration: `supabase/migrations/20260720235959_fence_opportunity_mapping_dedupe.sql`.
 
+## Repo-hygiene follow-up: `public.job_scope` schema drift
+
+`public.job_scope` exists in the live production schema but has **no repository migration** (schema drift). The dedupe migration counts its rows as legacy job-scope artifact evidence, but only through the `public._fence_opportunity_mapping_job_scope_count(uuid)` helper, which returns `0` when `to_regclass('public.job_scope')` is `NULL`. This keeps the migration applying cleanly on fresh migration-provisioned databases where the table is absent, while still tallying live `job_scope` evidence in production. Follow-up: add a repository migration for `public.job_scope` (or confirm and drop it) so the repo and live schema converge. This does not change the documented production winner evidence below, which was snapshotted with `job_scope` present.
+
 ## Finding
 
 The population is not mostly empty retry husks. Only **13 rows** meet the strict husk definition: draft, empty scope, empty pricing, no quote/financial/operational/artifact/lifecycle evidence, and at most one event. The other rows contain scoped work, GHL pricing, documents, quotes, invoices, assignments, or lifecycle evidence. **48 groups are genuinely ambiguous** because at least two rows carry quote, financial, or operational relation evidence.

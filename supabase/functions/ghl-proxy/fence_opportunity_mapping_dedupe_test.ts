@@ -221,3 +221,37 @@ Deno.test("dedupe migration audits every mapping and only nulls losing mappings"
     "migration must document that it precedes the mint uniqueness migration",
   );
 });
+
+Deno.test("dedupe migration guards public.job_scope through a to_regclass-safe helper", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260720235959_fence_opportunity_mapping_dedupe.sql",
+      import.meta.url,
+    ),
+  );
+
+  // job_scope has no repository migration, so it must never be queried directly
+  // from the set-based statement; the only reference is inside the guarded
+  // plpgsql helper's dynamic EXECUTE, which is not planned until execution.
+  assertStringIncludes(
+    sql,
+    "CREATE OR REPLACE FUNCTION public._fence_opportunity_mapping_job_scope_count",
+  );
+  assertStringIncludes(sql, "to_regclass('public.job_scope') IS NULL");
+  assertStringIncludes(sql, "RETURN 0;");
+  assertStringIncludes(
+    sql,
+    "public._fence_opportunity_mapping_job_scope_count(j.id)",
+  );
+  // The artifact tally must go through the helper, never the old correlated
+  // subquery, so a fresh database without job_scope still applies the migration.
+  assertEquals(
+    /SELECT\s+count\(\*\)\s+FROM\s+public\.job_scope\s+\w+\s+WHERE/i.test(sql),
+    false,
+  );
+  assert(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public._fence_opportunity_mapping_job_scope_count") <
+      sql.indexOf("WITH duplicate_groups AS"),
+    "the guard helper must be defined before the dedupe statement uses it",
+  );
+});
