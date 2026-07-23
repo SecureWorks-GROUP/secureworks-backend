@@ -1,8 +1,14 @@
 // deno-lint-ignore-file no-import-prefix
 import {
   assert,
+  assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  canonicalCompanyDedupeKey,
+  canonicalExternalObligationRef,
+  canonicalObligationPoCore,
+} from "../_shared/makesafe_refs.ts";
 
 const migration = await Deno.readTextFile(
   new URL(
@@ -112,6 +118,167 @@ Deno.test("deterministic normal path has no model import or silent fallback", ()
   assertStringIncludes(index, "approvedWorkOrderIdentity");
   assertStringIncludes(index, "existingWorkOrderIdentity");
   assertStringIncludes(runtime, "ai_calls: 0");
+});
+
+Deno.test("canonical external-obligation dedupe covers recovery composite refs at both write boundaries", () => {
+  assertEquals(
+    canonicalExternalObligationRef("MLB-26537"),
+    canonicalExternalObligationRef("MLB-26537PO-56922"),
+  );
+  assertEquals(
+    canonicalExternalObligationRef("mlb 26537 po 56866"),
+    "MLB-26537",
+  );
+  assert(
+    canonicalExternalObligationRef("MLB-26537PO-56922") !==
+      canonicalExternalObligationRef("MLB-26538PO-56922"),
+  );
+  assertStringIncludes(runtime, "readExistingObligationJobs");
+  assertStringIncludes(runtime, "canonicalExternalObligationRef(");
+  assertStringIncludes(
+    index,
+    "canonicalExternalObligationRef(approvedFields.external_ref, prefixes)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalExternalObligationRef(row.external_ref, prefixes)",
+  );
+});
+
+Deno.test("shared PO-core boundary reads a composite recovery ref only when labelled", () => {
+  // Explicit PO fields: labelled and bare both resolve to the same core.
+  assertEquals(canonicalObligationPoCore("PO-56922"), "56922");
+  assertEquals(canonicalObligationPoCore("56922"), "56922");
+  // Composite recovery ref supplies the PO ONLY under requireLabel, so the
+  // claim digits (26537) are never mistaken for a PO.
+  assertEquals(canonicalObligationPoCore("MLB-26537PO-56922", true), "56922");
+  assertEquals(canonicalObligationPoCore("MLB-26537", true), null);
+  // Distinct explicit POs stay distinct; a shared claim ref does not collapse them.
+  assert(
+    canonicalObligationPoCore("MLB-26537PO-56922", true) !==
+      canonicalObligationPoCore("MLB-26537PO-56923", true),
+  );
+});
+
+Deno.test("intake-draft approval mirrors the runtime composite-ref PO fallback", () => {
+  // Approval boundary must fall back to the composite external_ref for BOTH the
+  // approved side and the existing live job, exactly like readExistingObligationJobs,
+  // so a distinct explicit PO is not false-blocked when the PO lives only in the ref.
+  assertStringIncludes(
+    index,
+    "canonicalObligationPoCore(approvedFields.external_ref, true)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalObligationPoCore(row.external_ref, true)",
+  );
+  assertStringIncludes(
+    index,
+    "approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore",
+  );
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(row.external_ref, true)",
+  );
+});
+
+Deno.test("obligation dedupe collapses the full established builder alias set at one shared boundary", () => {
+  // All MLB storage variants (raw slug, "majorloss", "mlbuilder", a company name)
+  // collapse to one key so a deterministic MLB obligation matches a pre-existing
+  // manual/recovery MLB job and never spawns a duplicate live job.
+  assertEquals(canonicalCompanyDedupeKey("mlb"), "mlb");
+  assertEquals(canonicalCompanyDedupeKey("Major Loss Builders"), "mlb");
+  assertEquals(canonicalCompanyDedupeKey("mlbuilder"), "mlb");
+  // AJ cluster and the rapid/prime aliases collapse too.
+  assertEquals(canonicalCompanyDedupeKey("AJBR"), "ajsajbr");
+  assertEquals(canonicalCompanyDedupeKey("aj building restoration"), "ajsajbr");
+  assertEquals(canonicalCompanyDedupeKey("Rapid Response Group"), "rapid");
+  assertEquals(canonicalCompanyDedupeKey("Prime Building"), "prime");
+  // Distinct builders stay distinct; empty input is "no company proof".
+  assert(
+    canonicalCompanyDedupeKey("mlb") !== canonicalCompanyDedupeKey("acme"),
+  );
+  assertEquals(canonicalCompanyDedupeKey(""), "");
+  assertEquals(canonicalCompanyDedupeKey(null), "");
+  // Both obligation boundaries use the ONE shared helper, not a local strip.
+  assertStringIncludes(
+    runtime,
+    "canonicalCompanyDedupeKey(item.identity.builderSlug)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalCompanyDedupeKey(approvedFields.requesting_company_slug",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalCompanyDedupeKey(row.requesting_company_slug",
+  );
+});
+
+Deno.test("cancelled/void/superseded jobs are excluded from the obligation match so a re-issue creates a live job", () => {
+  // The runtime obligation dedupe selects jobs(metadata,status) and must skip dead
+  // jobs; otherwise a fresh claim binds to a cancelled job_id and never goes live.
+  assertStringIncludes(
+    runtime,
+    "isDeadObligationJobStatus(existingJob?.status)",
+  );
+  assertStringIncludes(runtime, '"superseded"');
+  assertStringIncludes(runtime, '"cancelled"');
+  assertStringIncludes(runtime, '"void"');
+  // The approve-path duplicate guard mirrors the same re-issue exclusion.
+  assert(
+    index.includes(
+      "['cancelled','canceled','void','voided','superseded'].includes(String(existingJob?.status",
+    ),
+  );
+});
+
+Deno.test("runtime existing-PO derivation mirrors the approve path's builder_work_order_number fallback", () => {
+  // A distinct explicit PO stored only in builder_work_order_number must count on
+  // BOTH boundaries so two explicitly-different POs are never over-deduped.
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(metadata.builder_work_order_number, true)",
+  );
+  assertStringIncludes(
+    index,
+    "canonicalObligationPoCore(existingMetadata.builder_work_order_number, true)",
+  );
+});
+
+Deno.test("runtime incoming (target) PO derivation mirrors the WO and composite-ref fallbacks", () => {
+  // The INCOMING side must fall back to builderWoCanonical and the composite
+  // externalRefCanonical exactly like the existing/approve sides, so a distinct
+  // PO carried only in the WO or the composite ref still discriminates and a
+  // genuinely distinct-PO obligation is not over-deduped into an existing job.
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(item.identity.builderWoCanonical, true)",
+  );
+  assertStringIncludes(
+    runtime,
+    "canonicalObligationPoCore(item.identity.externalRefCanonical, true)",
+  );
+  // The shared PO-core helper proves the fallback semantics the target relies on:
+  // a WO-labelled or composite value yields its PO core, a bare claim does not.
+  assertEquals(canonicalObligationPoCore("PO-56922", true), "56922");
+  assertEquals(canonicalObligationPoCore("MLB-26537PO-56922", true), "56922");
+  assertEquals(canonicalObligationPoCore("MLB-26537", true), null);
+});
+
+Deno.test("canonicalSlug delegates to the one shared canonical company alias set", () => {
+  // canonicalSlug (company/profile resolution) must not carry its own copy of the
+  // builder alias set; it delegates to canonicalCompanyDedupeKey so a new alias
+  // added there can never drift from the make-safe obligation dedupe boundary.
+  assertStringIncludes(core, "canonicalCompanyDedupeKey(slug)");
+  assertStringIncludes(
+    core,
+    'import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts"',
+  );
+  // The alias set is no longer hand-copied inside canonicalSlug.
+  assert(
+    !core.includes('["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes'),
+  );
 });
 
 Deno.test("dry-run replay and exact dark observe take no business-write branch", () => {

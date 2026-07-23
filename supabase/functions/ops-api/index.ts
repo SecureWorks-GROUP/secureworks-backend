@@ -538,7 +538,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
-import { loadRefPrefixes, normaliseRef } from '../_shared/makesafe_refs.ts'
+import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -13618,26 +13618,38 @@ async function approveIntakeDraft(client: any, body: any) {
   // is a no-op and distinct refs still pass.
   if (approvedFields.external_ref) {
     const prefixes = await loadRefPrefixes(client)
-    const normTarget = normaliseRef(approvedFields.external_ref, prefixes)
+    const normTarget = canonicalExternalObligationRef(approvedFields.external_ref, prefixes)
     if (normTarget) {
       // makesafe_job_details is small (make-safe jobs only), so a bounded scan of
       // the refs already on live jobs is cheap and lets us match on normalised form.
-      const approvedCompanyKey = String(approvedFields.requesting_company_slug || approvedFields.requesting_company_name || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+      const approvedCompanyKey = canonicalCompanyDedupeKey(approvedFields.requesting_company_slug || approvedFields.requesting_company_name)
       const approvedWorkOrderIdentity = _workOrderIdentityKey(
         extraction?.builder_work_order_number,
         extraction?.builder_po_number,
       )
+      // Shared PO-core boundary (mirrors readExistingObligationJobs): a distinct
+      // explicit PO must never be false-blocked even when only ONE side proves a
+      // WO/PO pair. The approved PO comes from the explicit fields; the existing
+      // PO falls back to the composite recovery ref (MLB-26537PO-56922) when the
+      // live job stored the PO only in external_ref, not in job metadata.
+      const approvedPoCore = canonicalObligationPoCore(extraction?.builder_po_number)
+        || canonicalObligationPoCore(extraction?.builder_work_order_number, true)
+        || canonicalObligationPoCore(approvedFields.external_ref, true)
       const { data: candidates } = await client.from('makesafe_job_details')
         .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
         .not('external_ref', 'is', null)
       const dup = (candidates || []).find((row: any) => {
-        if (normaliseRef(row.external_ref, prefixes) !== normTarget) return false
-        const existingCompanyKey = String(row.requesting_company_slug || row.requesting_company_name || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+        if (canonicalExternalObligationRef(row.external_ref, prefixes) !== normTarget) return false
+        const existingCompanyKey = canonicalCompanyDedupeKey(row.requesting_company_slug || row.requesting_company_name)
         // Known-company approvals must only block against the same known company.
         // If either side lacks company metadata, fail open to the review queue
         // rather than silently suppress a different builder's same-number ref.
         if (!approvedCompanyKey || !existingCompanyKey || approvedCompanyKey !== existingCompanyKey) return false
         const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs
+        // A cancelled/void/superseded job is a dead obligation; it must not block
+        // a later genuine re-issue of the same claim/PO (mirrors the runtime
+        // obligation dedupe boundary in makesafe_deterministic_intake_runtime.ts).
+        if (['cancelled','canceled','void','voided','superseded'].includes(String(existingJob?.status || '').trim().toLowerCase())) return false
         const existingMetadata = parseJsonObject(existingJob?.metadata)
         const existingWorkOrderIdentity = _workOrderIdentityKey(
           existingMetadata.builder_work_order_number,
@@ -13650,6 +13662,10 @@ async function approveIntakeDraft(client: any, body: any) {
           approvedWorkOrderIdentity && existingWorkOrderIdentity &&
           approvedWorkOrderIdentity !== existingWorkOrderIdentity
         ) return false
+        const existingPoCore = canonicalObligationPoCore(existingMetadata.builder_po_number)
+          || canonicalObligationPoCore(existingMetadata.builder_work_order_number, true)
+          || canonicalObligationPoCore(row.external_ref, true)
+        if (approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore) return false
         const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
           row.external_ref || '',
           [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),

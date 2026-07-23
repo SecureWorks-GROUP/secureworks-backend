@@ -69,9 +69,7 @@ export function extractRefPrefixes(
 ): { valid: string[]; dropped: string[] } {
   const raw = (parsingRules as { ref_prefixes?: unknown } | null | undefined)
     ?.ref_prefixes;
-  const arr = Array.isArray(raw)
-    ? raw
-    : (typeof raw === "string" ? [raw] : []);
+  const arr = Array.isArray(raw) ? raw : (typeof raw === "string" ? [raw] : []);
   const valid: string[] = [];
   const dropped: string[] = [];
   for (const item of arr) {
@@ -109,19 +107,25 @@ export interface RefPrefixClient {
 export async function loadRefPrefixes(
   sb: RefPrefixClient,
 ): Promise<string[]> {
-  const prefixSet = new Set<string>(REF_PREFIX_FLOOR.map((p) => p.toUpperCase()));
+  const prefixSet = new Set<string>(
+    REF_PREFIX_FLOOR.map((p) => p.toUpperCase()),
+  );
   const { data, error } = await sb.from("makesafe_companies")
     .select("parsing_rules")
     .eq("active", true);
   if (error) {
-    throw new Error(`makesafe_companies ref-prefix query failed: ${error.message}`);
+    throw new Error(
+      `makesafe_companies ref-prefix query failed: ${error.message}`,
+    );
   }
   for (const co of (data || [])) {
     const { valid, dropped } = extractRefPrefixes(co.parsing_rules);
     for (const pre of valid) prefixSet.add(pre);
     if (dropped.length > 0) {
       console.warn(
-        `[makesafe_refs] dropped invalid company ref prefixes: ${dropped.join(", ")}`,
+        `[makesafe_refs] dropped invalid company ref prefixes: ${
+          dropped.join(", ")
+        }`,
       );
     }
   }
@@ -150,7 +154,9 @@ function cleanPrefixes(prefixes: readonly string[]): string[] {
 // Build the subject/body ref matcher from a prefix set. Each prefix matches
 // "<PREFIX>[\s-]?<digits>" so dashed ("AJBR-67134"), spaced ("AJBR 67134"), and
 // COMPACT ("MS191190") forms are all captured. Every prefix is regex-ESCAPED.
-export function buildSubjectRef(prefixes: readonly string[] = REF_PREFIX_FLOOR): RegExp {
+export function buildSubjectRef(
+  prefixes: readonly string[] = REF_PREFIX_FLOOR,
+): RegExp {
   const sorted = cleanPrefixes(prefixes);
   const alt = sorted.map((p) => `${escapeRegExp(p)}[\\s-]?\\d+`).join("|");
   return new RegExp(`\\b(${alt})\\b`, "i");
@@ -184,6 +190,75 @@ export function normaliseRef(
   // Fall back to an upper, whitespace-collapsed token.
   const collapsed = s.replace(/\s+/g, "").toUpperCase();
   return collapsed || null;
+}
+
+// ── canonicalExternalObligationRef ───────────────────────────────────────────
+// Manual/recovery jobs can store a builder claim and PO in one display token
+// (for example MLB-26537PO-56922), while deterministic intake stores the claim as
+// MLB-26537. Dedupe boundaries must compare the claim obligation, not the storage
+// formatting. Keep this separate from normaliseRef: extraction still needs the
+// complete token and legacy intake behaviour must remain unchanged.
+export function canonicalExternalObligationRef(
+  raw: string | null | undefined,
+  prefixes: readonly string[] = REF_PREFIX_FLOOR,
+): string | null {
+  if (raw == null) return null;
+  const value = String(raw).trim();
+  if (!value) return null;
+  const alt = cleanPrefixes(prefixes).map(escapeRegExp).join("|");
+  // Deliberately no trailing word boundary after the digits. In a composite
+  // MLB-26537PO-56922 value, P is also a word character; requiring a boundary
+  // would miss the claim that the recovery path embedded in the token.
+  const match = value.match(
+    new RegExp(`\\b(${alt})\\s*-?\\s*(\\d+)`, "i"),
+  );
+  if (match) return `${match[1].toUpperCase()}-${match[2]}`;
+  return normaliseRef(value, prefixes);
+}
+
+// ── canonicalObligationPoCore ─────────────────────────────────────────────────
+// Pull the PO discriminator core out of any storage shape a make-safe obligation
+// might carry it in: an explicit builder_po_number ("PO-56922", "56922") OR a
+// composite recovery display ref that glues the claim and PO together
+// (MLB-26537PO-56922). This is the SHARED boundary both the deterministic
+// selection dedupe (readExistingObligationJobs) and the intake-draft approval
+// duplicate guard use so distinct explicit POs are preserved symmetrically.
+// requireLabel=true only accepts a "PO"-labelled core (used when reading from a
+// composite ref, so the claim digits themselves are never mistaken for a PO).
+export function canonicalObligationPoCore(
+  value: unknown,
+  requireLabel = false,
+): string | null {
+  const text = String(value ?? "").toUpperCase();
+  const labelled = text.match(/PO[\s#._/-]*(\d{3,})/);
+  if (labelled) return labelled[1];
+  if (requireLabel) return null;
+  const bare = text.match(/\d{3,}/);
+  return bare?.[0] ?? null;
+}
+
+// ── canonicalCompanyDedupeKey ─────────────────────────────────────────────────
+// Collapse the ESTABLISHED builder aliases to one dedupe key so the make-safe
+// obligation boundary (deterministic selection dedupe AND intake-draft approval
+// duplicate guard) matches an incoming obligation against a pre-existing manual
+// or recovery job even when one side stored a non-canonical variant of the same
+// builder ("majorloss"/"mlbuilder"/"MLB", an AJ cluster spelling, a raw company
+// name, etc.). This mirrors canonicalSlug's alias set from
+// makesafe_deterministic_intake.ts and is the ONE shared helper both boundaries
+// use so the alias set can never drift between them. Returns "" for empty input
+// (callers treat an empty key as "no company proof" and fail open to review).
+export function canonicalCompanyDedupeKey(value: unknown): string {
+  const key = String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!key) return "";
+  if (["aj", "ajs", "ajbr", "ajbuildingrestoration"].includes(key)) {
+    return "ajsajbr";
+  }
+  if (key.includes("rapid")) return "rapid";
+  if (key.includes("prime")) return "prime";
+  if (key === "mlb" || key.includes("majorloss") || key.includes("mlbuilder")) {
+    return "mlb";
+  }
+  return key;
 }
 
 // ── extractRef (finding 1) ────────────────────────────────────────────────────

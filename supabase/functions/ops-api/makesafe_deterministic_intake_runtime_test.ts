@@ -333,6 +333,7 @@ function baseStore(): Store {
     makesafe_intake_artifacts: [],
     makesafe_intake_drafts: [],
     makesafe_intake_health: [],
+    makesafe_job_details: [],
   };
 }
 
@@ -1895,6 +1896,194 @@ Deno.test("persisted source authority survives capped-cursor sibling re-key acro
   assertEquals(third.totals.write_failures, 0);
   assertEquals(store.makesafe_intake_cases.length, 1);
   assertEquals(store.makesafe_intake_case_sources.length, 1);
+});
+
+Deno.test("exact-selected sibling of a persisted cycle-1 root rebases to the trigger-derived cycle", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "persisted-parent-root",
+      thread_id: "persisted-parent-thread",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-25953 Work Order: WO-25953 PO: PO-25953-A",
+      body_content: "Address: 9 Persisted Street, Perth",
+    }),
+    email({
+      post_id: "persisted-parent-reopen-1",
+      thread_id: "persisted-parent-thread",
+      received_at: "2026-07-03T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-25953 Work Order: WO-25953 PO: PO-25953-C",
+      body_content: "Address: 9 Persisted Street, Perth",
+    }),
+    email({
+      post_id: "persisted-parent-reopen-2",
+      thread_id: "persisted-parent-thread",
+      received_at: "2026-07-05T01:00:00.000Z",
+      subject:
+        "REOPEN WORK ORDER MLB-25953 Work Order: WO-25953 PO: PO-25953-D",
+      body_content: "Address: 9 Persisted Street, Perth",
+    }),
+    // Production shape: two correlated copies of a new exact-selected MLB case,
+    // whose ambient sibling parent has a different external reference and is
+    // already persisted as a cycle-1 review exception.
+    email({
+      post_id: "persisted-parent-selected-1",
+      thread_id: "persisted-parent-thread",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-26537 Work Order: WO-26537 PO: PO-56922",
+      body_content: "Address: 9 Persisted Street, Perth",
+    }),
+    email({
+      post_id: "persisted-parent-selected-2",
+      thread_id: "persisted-parent-thread",
+      received_at: "2026-07-10T01:00:01.000Z",
+      subject: "NEW WORK ORDER MLB-26537 Work Order: WO-26537 PO: PO-56922",
+      body_content: "Address: 9 Persisted Street, Perth",
+    }),
+  );
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 5,
+    seedPostIds: ["persisted-parent-selected-1"],
+    cursor: null,
+  });
+  const rawPlan = buildDeterministicIntakePlan(inputs.sources, inputs.profiles);
+  const ambientParent = rawPlan.cases.find((item) =>
+    item.sourcePostIds.includes("persisted-parent-root")
+  );
+  const selectedChild = rawPlan.cases.find((item) =>
+    item.sourcePostIds.includes("persisted-parent-selected-1")
+  );
+  assert(ambientParent);
+  assert(selectedChild);
+  assertEquals(ambientParent.cycle, 1);
+  assertEquals(selectedChild.parentRelation, "sibling_of");
+  assertEquals(
+    selectedChild.parentInstructionKey,
+    ambientParent.instructionKey,
+  );
+  assertEquals(selectedChild.cycle, 3);
+  assert(/\/cycle:3$/.test(selectedChild.instructionKey));
+  assertEquals(selectedChild.sourcePostIds.length, 2);
+
+  store.makesafe_intake_cases.push({
+    id: "persisted-cycle-1-parent",
+    org_id: "00000000-0000-0000-0000-000000000001",
+    instruction_key: ambientParent.instructionKey,
+    lineage_id: "persisted-cycle-1-parent",
+    cycle: 1,
+    state: "exception",
+    reason_code: "adapter_parse_failure",
+    job_id: null,
+    external_ref_canonical: "MLB-25953",
+  });
+  const options = {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 5,
+    maxCases: 1,
+    allowSourcePostIds: ["persisted-parent-selected-1"],
+    includeSanitizedCases: true,
+    approveDraft,
+  } as const;
+
+  const first = await runDeterministicIntake(client, options);
+  assertEquals(first.selection.selected_cases, 1);
+  assertEquals(first.selection.selected_sources, 2);
+  assertEquals(first.proposed_cases?.[0].parent_relation, "sibling_of");
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.totals.source_rows_created, 2);
+  assertEquals(first.totals.write_failures, 0);
+  assertEquals(first.totals.jobs_created, 0);
+  const child = store.makesafe_intake_cases.find((row: any) =>
+    row.parent_case_id === "persisted-cycle-1-parent"
+  );
+  assert(child);
+  assertEquals(child.cycle, 1);
+  assert(/\/cycle:1$/.test(child.instruction_key));
+
+  const rerun = await runDeterministicIntake(client, options);
+  assertEquals(rerun.totals.case_rows_created, 0);
+  assertEquals(rerun.totals.source_rows_created, 0);
+  assertEquals(rerun.totals.write_failures, 0);
+  assertEquals(rerun.totals.drafts_created, 0);
+  assertEquals(rerun.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+  assertEquals(store.makesafe_intake_case_sources.length, 2);
+});
+
+Deno.test("deterministic selection links a canonical MLB ref to its composite-ref recovery job", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "canonical-ref-selected",
+    received_at: "2026-07-10T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-26537 Work Order: WO-26537 PO: PO-56922",
+    body_content: "Client: Dedupe Client\nAddress: 10 Canonical Way, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-canonical-ref-selected",
+    email_id: "canonical-ref-selected",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/canonical-ref.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  store.makesafe_job_details.push({
+    job_id: "different-po-job",
+    external_ref: "MLB-26537PO-56866",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "MLB",
+    report_type: null,
+    jobs: {
+      status: "accepted",
+      metadata: { builder_po_number: "PO-56866" },
+    },
+  }, {
+    job_id: "manual-recovery-job",
+    external_ref: "MLB-26537PO-56922",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "MLB",
+    report_type: null,
+    jobs: {
+      status: "accepted",
+      metadata: { builder_po_number: "PO-56922" },
+    },
+  });
+  const client = fakeClient(store);
+  const options = {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxSources: 5,
+    maxCases: 1,
+    allowSourcePostIds: ["canonical-ref-selected"],
+    includeSanitizedCases: true,
+    approveDraft,
+  } as const;
+
+  const first = await runDeterministicIntake(client, options);
+  assertEquals(first.selection.selected_cases, 1);
+  assertEquals(first.totals.case_rows_created, 1);
+  assertEquals(first.totals.source_rows_created, 1);
+  assertEquals(first.totals.drafts_created, 0);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(first.totals.write_failures, 0);
+  assertEquals(store.makesafe_intake_cases[0].job_id, "manual-recovery-job");
+  assertEquals(store.makesafe_intake_cases[0].state, "blocked_live_job");
+
+  const rerun = await runDeterministicIntake(client, options);
+  assertEquals(rerun.totals.case_rows_created, 0);
+  assertEquals(rerun.totals.source_rows_created, 0);
+  assertEquals(rerun.totals.drafts_created, 0);
+  assertEquals(rerun.totals.jobs_created, 0);
+  assertEquals(rerun.totals.write_failures, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
 });
 
 Deno.test("live-shaped fresh exception loop converges across cron rerun and same-instruction mail", async () => {

@@ -142,6 +142,24 @@ plan that carries a combined make-safe + report obligation
 (`extraction.secondary_obligation`) is treated as physical, so it too requires a
 servable work-order PDF and splits the report type onto the secondary card.
 
+Before planning live jobs, the run reads existing make-safe jobs and binds a case
+to a pre-existing obligation instead of creating a duplicate. The match is made at
+one shared canonical boundary (`_shared/makesafe_refs.ts`) used by both this
+selection dedupe and the intake-draft approval duplicate guard, so the two never
+drift: the external ref is canonicalised so a manual/recovery composite display
+token (`MLB-26537PO-56922`) matches the deterministic claim (`MLB-26537`); the
+builder is collapsed through the one shared alias set (`majorloss`/`mlbuilder`/`MLB`,
+the AJ cluster, etc.); and a PO discriminator pulled from the explicit PO, the work
+order field, or the composite ref keeps two explicitly different POs from ever
+over-deduping into one obligation. A cancelled/void/superseded job is a dead
+obligation and is excluded from the match, so a later genuine re-issue of the same
+claim/PO creates a live job rather than binding to the dead one. The dedupe read is
+paged to exhaustion so an obligation past the PostgREST 1,000-row cap cannot hide.
+Separately, an exact-selected `sibling_of` case whose parent is already persisted is
+re-keyed to the cycle the database trigger derives from that parent, so a page-local
+plan carrying a deeper ambient cycle still lands on the trigger's sibling cycle
+without weakening revision, cancellation, reopen or distinct-PO ancestry semantics.
+
 A case that is accounted but whose guarded job creation has not yet succeeded is
 persisted with reason code `awaiting_job_creation`. It is a pre-job state, not an
 adapter failure, and it is retried on the next run. The full approved reason-code
@@ -183,7 +201,14 @@ client before any artifact or draft persistence, the production-shaped moving-sw
 where three off-case candidates cannot satisfy a null canonical client, overlapping
 manual and scheduled exact invocations converging without prevalidation side effects,
 and a report-family combined split obligation requiring a work-order PDF while a plain
-report-family plan still needs none.
+report-family plan still needs none. They also cover the external-obligation dedupe
+boundary: deterministic selection links a canonical claim ref to its composite-ref
+recovery job, an exact-selected sibling of a persisted cycle-1 root rebases to the
+trigger-derived cycle (and its persisted source authority survives a capped-cursor
+re-key across reruns), a cancelled/void/superseded job is excluded so a re-issue
+creates a live job, and two explicitly different POs are never over-deduped. The
+migration-contract tests assert both write boundaries share the same canonical ref,
+PO-core and builder-alias helpers so they cannot drift.
 
 Run the existing migration clone harness before production migration approval:
 
