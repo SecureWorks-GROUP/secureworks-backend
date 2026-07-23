@@ -135,10 +135,13 @@ plan is selected or ranked, every bounded source is bound back to the persisted 
 that owns it (its primary source, or its first owned source), so a partial page that
 regroups an already-accounted source under another case cannot classify it as fresh,
 spend the whole case cap on duplicate inserts, and starve the genuinely unaccounted
-tail. Binding a plan case is safe when its non-primary sources share the primary's
-deliverable and stay canonically accounted; a merge that spans distinct persisted
-deliverables is a cross-case mismerge and fails loudly rather than writing a fresh
-secondary source under the primary case. Exact selection then closes the selected
+tail. Binding a multi-authority plan case is safe only when every source is already
+canonically accounted, all owned authorities share one deliverable, and every
+non-primary persisted case already matches the state this plan derives; a merge that
+introduces a fresh source across persisted cases, spans distinct persisted
+deliverables, or carries a state-divergent secondary authority is a cross-case
+mismerge and fails loudly rather than writing a fresh or misattributed secondary
+source under the primary case. Exact selection then closes the selected
 case's transitive semantic parent ancestry from the bounded plan before lineage
 validation, so a fresh selected child keeps its required parent edge. The one
 deliberate exception is a fresh review-exception `sibling_of` case: sibling
@@ -232,8 +235,9 @@ ambient cycle is written as database cycle 1, and a selected plan whose persiste
 also appears in the full-open set has its siblings, `cancellation_of` node and reopen
 descendants all rebased to the cycles the trigger derives. They also cover the
 selection-authority boundary: full-open does not spend its cap reattaching sources
-already settled on canonical cases, a fresh cross-case merge spanning distinct
-persisted deliverables fails loudly, exact selection pulls the semantic parent chain
+already settled on canonical cases, a fresh source spanning multiple persisted cases,
+a merge spanning distinct persisted deliverables, and a state-divergent secondary
+authority each fail loudly, exact selection pulls the semantic parent chain
 and advances it within the case cap, and a production-shaped own copy closes onto its
 persisted ambient parent. The
 migration-contract tests assert both write boundaries share the same canonical ref,

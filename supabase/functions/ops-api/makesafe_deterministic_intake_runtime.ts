@@ -434,6 +434,8 @@ interface PersistedSourceAuthority {
   cycle: number;
   parent_relation: DeterministicCasePlan["parentRelation"];
   source_fingerprint: string | null;
+  state: string;
+  job_id: string | null;
 }
 
 // An exact source that is already canonical-accounted is stronger authority than
@@ -473,7 +475,7 @@ async function resolvePersistedSourceAuthorities(
   for (const ids of chunk([...new Set(caseIdByPostId.values())])) {
     const { data, error } = await client.from("makesafe_intake_cases")
       .select(
-        "id,instruction_key,cycle,parent_relation,source_fingerprint",
+        "id,instruction_key,cycle,parent_relation,source_fingerprint,state,job_id",
       )
       .eq("org_id", DEFAULT_ORG_ID)
       .in("id", ids);
@@ -977,12 +979,11 @@ function bindSelectedPlanToPersistedSourceAuthority(
   // its stable key, or the lineage guard would read the child as an orphan.
   const keyRemap = new Map<string, string>();
   const cases = plan.cases.map((intakeCase) => {
-    // Grouped history is legitimate: several older canonical cases can share one
-    // deliverable and land in a single plan case on this page. That is safe because
-    // every non-primary source stays canonically accounted and is deferred, not
-    // rewritten under the primary row. A merge that spans different deliverables is
-    // instead a genuine cross-case mismerge; binding it silently would write a
-    // fresh secondary source under the primary case, so it must fail loudly.
+    // Grouped history is legitimate only when every source is already canonical,
+    // every authority shares one deliverable, and each non-primary case is already
+    // in the state this plan derives. Anything fresh or state-divergent is a real
+    // cross-case merge: binding it silently could attribute new evidence to the
+    // wrong primary row, so it must fail loudly.
     const ownedAuthorities = new Map<string, PersistedSourceAuthority>();
     for (const postId of intakeCase.sourcePostIds) {
       const owned = authorityByPostId.get(postId);
@@ -992,6 +993,14 @@ function bindSelectedPlanToPersistedSourceAuthority(
       [...ownedAuthorities.values()][0];
     if (!authority) return intakeCase;
     if (ownedAuthorities.size > 1) {
+      const unownedSources = intakeCase.sourcePostIds.filter((postId) =>
+        !authorityByPostId.has(postId)
+      );
+      if (unownedSources.length) {
+        throw new Error(
+          "one deterministic plan merged a fresh source across multiple persisted cases",
+        );
+      }
       const primaryDeliverable = deliverableSegment(authority.instruction_key);
       for (const candidate of ownedAuthorities.values()) {
         if (
@@ -999,6 +1008,14 @@ function bindSelectedPlanToPersistedSourceAuthority(
         ) {
           throw new Error(
             "one deterministic plan merged canonical sources from multiple persisted deliverables",
+          );
+        }
+        if (
+          candidate.id !== authority.id &&
+          candidate.state !== resolvedState(intakeCase, candidate.job_id)
+        ) {
+          throw new Error(
+            "one deterministic plan merged a state-mismatched secondary persisted case",
           );
         }
       }
