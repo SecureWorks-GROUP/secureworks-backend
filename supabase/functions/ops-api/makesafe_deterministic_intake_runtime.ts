@@ -884,14 +884,6 @@ function instructionKeyForCycle(instructionKey: string, cycle: number): string {
   return instructionKey.replace(/\/cycle:\d+$/, `/cycle:${cycle}`);
 }
 
-function cycleFromInstructionKey(instructionKey: string): number {
-  const match = instructionKey.match(/\/cycle:(\d+)$/);
-  if (!match) {
-    throw new Error("deterministic instruction key has no cycle suffix");
-  }
-  return Number(match[1]);
-}
-
 function rekeyCasePlan(
   intakeCase: DeterministicCasePlan,
   instructionKey: string,
@@ -1340,20 +1332,19 @@ async function resolveSelectedLineage(
   missingParents: DeterministicCasePlan[];
 }> {
   const selectedKeys = new Set(plan.cases.map((item) => item.instructionKey));
-  const externalParentKeys = [
+  const parentKeys = [
     ...new Set(
       plan.cases.flatMap((item) =>
-        item.parentInstructionKey &&
-          !selectedKeys.has(item.parentInstructionKey)
-          ? [item.parentInstructionKey]
-          : []
+        item.parentInstructionKey ? [item.parentInstructionKey] : []
       ),
     ),
   ];
-  if (!externalParentKeys.length) return { plan, missingParents: [] };
 
+  // A parent can already be persisted while also appearing in the full-open
+  // selected plan. Its database cycle is still authoritative, so read every
+  // parent key rather than only dependencies outside the selected set.
   const persisted = new Map<string, { cycle: number }>();
-  for (const keys of chunk(externalParentKeys)) {
+  for (const keys of chunk(parentKeys)) {
     const { data, error } = await client.from("makesafe_intake_cases")
       .select("instruction_key,cycle")
       .eq("org_id", DEFAULT_ORG_ID)
@@ -1375,27 +1366,8 @@ async function resolveSelectedLineage(
   }
 
   const exactSources = new Set(exactSourcePostIds);
-  const keyRemap = new Map<string, string>();
+  const promotionRemap = new Map<string, string>();
   const cases = plan.cases.map((item) => {
-    const persistedParent = item.parentInstructionKey
-      ? persisted.get(item.parentInstructionKey)
-      : null;
-    if (persistedParent && item.parentRelation === "sibling_of") {
-      // The trigger assigns a sibling the persisted parent's cycle. A page-local
-      // plan can carry a deeper ambient cycle, so re-key the child to the cycle
-      // the trigger will derive while preserving its persisted sibling ancestry.
-      const siblingKey = instructionKeyForCycle(
-        item.instructionKey,
-        persistedParent.cycle,
-      );
-      if (siblingKey !== item.instructionKey) {
-        keyRemap.set(item.instructionKey, siblingKey);
-      }
-      return {
-        ...rekeyCasePlan(item, siblingKey),
-        cycle: persistedParent.cycle,
-      };
-    }
     const missingExternalParent = item.parentInstructionKey &&
       !selectedKeys.has(item.parentInstructionKey) &&
       !persisted.has(item.parentInstructionKey);
@@ -1406,13 +1378,11 @@ async function resolveSelectedLineage(
       missingExternalParent && exactSelected && item.state === "exception" &&
       item.parentRelation === "sibling_of"
     ) {
-      // Exact N=1 authority promotes this review exception to a real root. Root
-      // promotion must rebase every deterministic key as well as clearing the
-      // ambient parent: the database assigns roots cycle 1 and rejects any key
-      // whose /cycle:N suffix disagrees with that trigger-assigned cycle.
+      // Exact N=1 authority promotes this review exception to a real root while
+      // semantic revision/cancellation/reopen dependencies remain mandatory.
       const rootKey = instructionKeyForCycle(item.instructionKey, 1);
       if (rootKey !== item.instructionKey) {
-        keyRemap.set(item.instructionKey, rootKey);
+        promotionRemap.set(item.instructionKey, rootKey);
       }
       return {
         ...rekeyCasePlan(item, rootKey),
@@ -1423,43 +1393,66 @@ async function resolveSelectedLineage(
     }
     return item;
   });
-  // Promoting a parent to cycle 1 collapses that lineage's entire cycle numbering.
-  // Re-pointing a selected revision/reopen child at the rebased parent is not
-  // enough: the child's own /cycle:N suffix was computed against the pre-promotion
-  // depth, while the trigger now derives the child's cycle from the collapsed
-  // parent, so the child insert would hit the same instruction-key cycle check
-  // this promotion targets. Shift every descendant's key suffix and cycle by the
-  // same collapse delta, cascading through grandchildren whose parents were
-  // themselves rebased.
-  let relinked = cases;
-  if (keyRemap.size) {
-    const remap = new Map(keyRemap);
-    for (let unresolved = true; unresolved;) {
-      unresolved = false;
-      relinked = relinked.map((item) => {
-        const parentKey = item.parentInstructionKey;
-        if (!parentKey) return item;
-        const newParentKey = remap.get(parentKey);
-        if (!newParentKey || newParentKey === parentKey) return item;
-        const delta = cycleFromInstructionKey(parentKey) -
-          cycleFromInstructionKey(newParentKey);
-        const childCycle = cycleFromInstructionKey(item.instructionKey) - delta;
-        const childKey = instructionKeyForCycle(
-          item.instructionKey,
-          childCycle,
-        );
-        if (childKey !== item.instructionKey) {
-          remap.set(item.instructionKey, childKey);
-          unresolved = true;
-        }
-        return {
-          ...rekeyCasePlan(item, childKey),
-          parentInstructionKey: newParentKey,
-          cycle: childCycle,
-        };
-      });
-    }
+
+  // Normalize every selected node to the cycle the database trigger derives:
+  // roots are cycle 1; reopen children are parent+1; every other relation
+  // (sibling, revision, cancellation, duplicate) inherits the parent's cycle.
+  // This preserves the typed ancestry and only aligns deterministic key identity
+  // with the trigger before any write. Recursive resolution also rebases reopen
+  // descendants when an earlier sibling/root collapses to its database cycle.
+  const selectedByKey = new Map<string, DeterministicCasePlan>();
+  for (const item of cases) selectedByKey.set(item.instructionKey, item);
+  for (const [oldKey, newKey] of promotionRemap) {
+    const item = selectedByKey.get(newKey);
+    if (item) selectedByKey.set(oldKey, item);
   }
+  const normalized = new Map<DeterministicCasePlan, DeterministicCasePlan>();
+  const visiting = new Set<DeterministicCasePlan>();
+  const normalize = (item: DeterministicCasePlan): DeterministicCasePlan => {
+    const cached = normalized.get(item);
+    if (cached) return cached;
+    if (visiting.has(item)) {
+      throw new Error("deterministic selected lineage contains a cycle");
+    }
+    visiting.add(item);
+
+    let parentKey = item.parentInstructionKey;
+    let parentCycle: number | null = null;
+    if (parentKey) {
+      const promotedParentKey = promotionRemap.get(parentKey) || parentKey;
+      const selectedParent = selectedByKey.get(parentKey) ||
+        selectedByKey.get(promotedParentKey);
+      if (selectedParent) {
+        const resolvedParent = normalize(selectedParent);
+        parentKey = resolvedParent.instructionKey;
+        parentCycle = resolvedParent.cycle;
+      } else {
+        const persistedParent = persisted.get(parentKey) ||
+          persisted.get(promotedParentKey);
+        if (persistedParent) parentCycle = persistedParent.cycle;
+        parentKey = promotedParentKey;
+      }
+    }
+
+    const expectedCycle = parentKey && parentCycle !== null
+      ? item.parentRelation === "reopen_of" ? parentCycle + 1 : parentCycle
+      : parentKey
+      ? item.cycle
+      : 1;
+    const instructionKey = instructionKeyForCycle(
+      item.instructionKey,
+      expectedCycle,
+    );
+    const result = {
+      ...rekeyCasePlan(item, instructionKey),
+      parentInstructionKey: parentKey,
+      cycle: expectedCycle,
+    };
+    visiting.delete(item);
+    normalized.set(item, result);
+    return result;
+  };
+  const relinked = cases.map(normalize);
   const selectedResolvedKeys = new Set(
     relinked.map((item) => item.instructionKey),
   );
