@@ -11,8 +11,10 @@
 //               a reassign-recreate.
 //   SMS         The NEW install_rescheduled trigger renders Shaun's approved
 //               wording verbatim — "[day] the [date] of [month]", street name
-//               only, no cross-sell footer — and dedups per (job, new date) so
-//               a later re-reschedule still sends while a double-tap does not.
+//               only, no cross-sell footer — and dedups against the MOST
+//               RECENT successfully-sent reschedule only: a double-tap on the
+//               same drop is swallowed, but an A→B→A sequence re-sends for the
+//               return to A and a failed send never blocks a retry.
 // All sends are asserted against a stubbed globalThis.fetch: nothing in this
 // file (or the code under test, run this way) touches a live channel.
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
@@ -42,6 +44,9 @@ function makeClient(store: Store) {
     const filters: Record<string, any> = {};
     let op: "select" | "insert" | "update" | "delete" = "select";
     let payload: any = null;
+    let orderKey: string | null = null;
+    let orderAsc = true;
+    let limitN: number | null = null;
     const resolveSingle = () => {
       if (op === "insert") return { id: "new-row", ...payload };
       if (op === "update") {
@@ -66,16 +71,32 @@ function makeClient(store: Store) {
       delete: () => { op = "delete"; return b; },
       eq: (k: string, v: any) => { filters[k] = v; return b; },
       neq: () => b, not: () => b, in: () => b, or: () => b, gte: () => b, lte: () => b, lt: () => b,
-      is: () => b, ilike: () => b, order: () => b, limit: () => b,
+      is: () => b, ilike: () => b,
+      order: (k: string, opts?: { ascending?: boolean }) => { orderKey = k; orderAsc = opts?.ascending !== false; return b; },
+      limit: (n: number) => { limitN = n; return b; },
       maybeSingle: () => Promise.resolve({ data: resolveSingle(), error: null }),
       single: () => Promise.resolve({ data: resolveSingle(), error: null }),
       then: (res: any, rej: any) => {
-        // The dedup check awaits the builder itself with { count: 'exact' } —
-        // emulate it against the rows this mock has actually inserted.
+        // Both dedup shapes await the builder itself: the once-per-job count
+        // query AND install_rescheduled's most-recent-sent lookup (filters +
+        // order desc + limit 1). Emulate both against the rows this mock has
+        // actually inserted; ties on the order key resolve to latest-inserted
+        // first when descending.
         if (op === "select" && table === "email_events") {
-          const count = store.emailEvents!
-            .filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v)).length;
-          return Promise.resolve({ count, data: null, error: null }).then(res, rej);
+          const matched = store.emailEvents!
+            .map((r, i) => ({ r, i }))
+            .filter(({ r }) => Object.entries(filters).every(([k, v]) => r[k] === v));
+          if (orderKey) {
+            matched.sort((a, b2) => {
+              const av = String(a.r[orderKey!] ?? "");
+              const bv = String(b2.r[orderKey!] ?? "");
+              const cmp = av < bv ? -1 : av > bv ? 1 : a.i - b2.i;
+              return orderAsc ? cmp : -cmp;
+            });
+          }
+          let data = matched.map(({ r }) => r);
+          if (limitN != null) data = data.slice(0, limitN);
+          return Promise.resolve({ count: matched.length, data, error: null }).then(res, rej);
         }
         return Promise.resolve({ data: [], error: null, count: 0 }).then(res, rej);
       },
@@ -87,14 +108,16 @@ function makeClient(store: Store) {
 }
 
 type FetchCall = { url: string; init?: any };
-function stubFetch() {
+function stubFetch(opts: { failSms?: boolean } = {}) {
   const calls: FetchCall[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = ((input: any, init?: any) => {
-    calls.push({ url: String(input instanceof Request ? input.url : input), init });
+    const url = String(input instanceof Request ? input.url : input);
+    calls.push({ url, init });
+    if (opts.failSms && url.includes("send_sms")) return Promise.reject(new Error("GHL unreachable"));
     return Promise.resolve(new Response(JSON.stringify({ success: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
   }) as typeof fetch;
-  return { calls, restore: () => { globalThis.fetch = original; } };
+  return { calls, opts, restore: () => { globalThis.fetch = original; } };
 }
 const smsCalls = (calls: FetchCall[]) => calls.filter((c) => c.url.includes("ghl-proxy?action=send_sms"));
 
@@ -214,6 +237,40 @@ Deno.test("round-trip: camelCase durationDays maps to duration_days too", async 
   } finally { restore(); }
 });
 
+Deno.test("round-trip: updateAssignment drops non-positive/non-numeric duration_days instead of writing them", async () => {
+  const { restore } = stubFetch();
+  try {
+    for (const bad of [0, -2, 0.4, "abc"]) {
+      const store = baseStore();
+      await updateAssignment(makeClient(store), { assignmentId: "a-1", scheduled_date: "2026-07-22", duration_days: bad });
+      const upd = store.updates!.find((u) => u.table === "job_assignments")!.row;
+      assertEquals(upd, { scheduled_date: "2026-07-22" });
+    }
+  } finally { restore(); }
+});
+
+Deno.test("round-trip: updateAssignment rounds fractional duration_days to a positive integer", async () => {
+  const { restore } = stubFetch();
+  try {
+    const store = baseStore();
+    await updateAssignment(makeClient(store), { assignmentId: "a-1", duration_days: 2.6 });
+    const upd = store.updates!.find((u) => u.table === "job_assignments")!.row;
+    assertEquals(upd, { duration_days: 3 });
+  } finally { restore(); }
+});
+
+Deno.test("real-crew: createAssignment rounds before the positive check — 0.4 never writes duration_days 0", async () => {
+  const { restore } = stubFetch();
+  try {
+    const store = baseStore();
+    await createAssignment(makeClient(store), {
+      jobId: "job-1", userId: "inst-1", scheduledDate: "2026-07-27", durationDays: 0.4, confirmationStatus: "tentative",
+    });
+    const row = store.inserts!.find((i) => i.table === "job_assignments")!.row;
+    assert(!("duration_days" in row), "a value that rounds to 0 must not be written");
+  } finally { restore(); }
+});
+
 // ── install_rescheduled trigger ────────────────────────────────────────────
 const EXPECTED_SMS =
   "Hi Jane,\n" +
@@ -252,6 +309,53 @@ Deno.test("install_rescheduled: dedup is per (job, new date) — double-tap swal
     const again = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-06" } });
     assertEquals(again.sent, true);
     assertEquals(smsCalls(calls).length, 2);
+  } finally { restore(); }
+});
+
+Deno.test("install_rescheduled: A→B→A re-sends for the return to A (most recent SENT row carries B)", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const client = makeClient(baseStore());
+    const a1 = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    assertEquals(a1.sent, true);
+    const b = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-06" } });
+    assertEquals(b.sent, true);
+    const a2 = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    assertEquals(a2.sent, true);
+    assertEquals(smsCalls(calls).length, 3);
+    const dup = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    assertEquals(dup.sent, false);
+    assertStringIncludes(dup.reason, "job and date");
+  } finally { restore(); }
+});
+
+Deno.test("install_rescheduled: a failed send never blocks the operator's retry", async () => {
+  const stub = stubFetch({ failSms: true });
+  try {
+    const store = baseStore();
+    const client = makeClient(store);
+    const failed = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    assertEquals(failed.sent, false);
+    assertEquals(store.emailEvents!.filter((r) => r.comms_trigger === "install_rescheduled" && r.status === "failed").length, 1);
+    stub.opts.failSms = false;
+    const retry = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    assertEquals(retry.sent, true);
+    const dup = await sendClientUpdate(client, { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: "2026-07-02" } });
+    assertEquals(dup.sent, false);
+  } finally { stub.restore(); }
+});
+
+Deno.test("install_rescheduled: calendar-invalid new_date rejected with 400 — no garbage SMS", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    for (const bad of ["2026-02-30", "2026-13-01", "2026-02-29"]) {
+      await assertRejects(
+        () => sendClientUpdate(makeClient(baseStore()), { job_id: "job-1", comms_trigger: "install_rescheduled", template_vars: { new_date: bad } }),
+        Error,
+        "new_date",
+      );
+    }
+    assertEquals(smsCalls(calls).length, 0);
   } finally { restore(); }
 });
 

@@ -23733,8 +23733,9 @@ export async function createAssignment(client: any, body: any) {
     scheduled_date: sDate,
     scheduled_end: scheduledEnd || scheduled_end || null,
     // CP1: working-day span length. Only written when the caller provides a
-    // positive number so legacy callers keep the column's default of 1.
-    ...(Number(body.durationDays || body.duration_days) > 0
+    // number that rounds to a positive integer, so legacy callers keep the
+    // column's default of 1.
+    ...(Math.round(Number(body.durationDays || body.duration_days)) > 0
       ? { duration_days: Math.round(Number(body.durationDays || body.duration_days)) } : {}),
     start_time: startTime || start_time || null,
     end_time: endTime || end_time || null,
@@ -23937,6 +23938,14 @@ export async function updateAssignment(client: any, body: any) {
       update.attendance_cycle_id = cycle.id
       update.cycle_attribution = 'bound'
     }
+  }
+
+  // CP1: same positive-integer coercion as createAssignment — a drag/resize
+  // must never write 0, negative, or non-numeric span lengths.
+  if (update.duration_days !== undefined) {
+    const durationDays = Math.round(Number(update.duration_days))
+    if (durationDays > 0) update.duration_days = durationDays
+    else delete update.duration_days
   }
 
   const { data, error } = await client
@@ -44094,27 +44103,48 @@ export async function sendClientUpdate(client: any, body: any) {
   let rescheduleDateIso: string | null = null
   if (comms_trigger === 'install_rescheduled') {
     rescheduleDateIso = String(template_vars?.new_date || '').slice(0, 10)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(rescheduleDateIso)) {
+    // Calendar-invalid dates must be rejected, not rendered: V8 rolls some
+    // out-of-range days over (2026-02-30 parses as March 2) and yields Invalid
+    // Date for others, so require an exact round-trip back to the input.
+    const parsedRescheduleDate = new Date(rescheduleDateIso + 'T00:00:00Z')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(rescheduleDateIso) ||
+        Number.isNaN(parsedRescheduleDate.getTime()) ||
+        parsedRescheduleDate.toISOString().slice(0, 10) !== rescheduleDateIso) {
       throw new ApiError('install_rescheduled requires template_vars.new_date (YYYY-MM-DD)', 400)
     }
   }
-  // The subject doubles as the dedup key for install_rescheduled: a job can be
-  // legitimately rescheduled many times, so dedup is per (job, trigger, NEW
-  // date) — double-taps on the same drop are still swallowed. Every other
-  // trigger keeps the original once-per-job semantics and a byte-identical
-  // subject.
+  // The subject records the NEW date for install_rescheduled: a job can be
+  // legitimately rescheduled many times, so dedup compares that date against
+  // the MOST RECENT successfully-sent reschedule below. Every other trigger
+  // keeps the original once-per-job semantics and a byte-identical subject.
   const eventSubject = `Client update: ${comms_trigger}${job_contact_id ? ' (contact)' : ''}${rescheduleDateIso ? ' -> ' + rescheduleDateIso : ''}`
 
-  // Check for duplicate: per contact if specified, otherwise per job
-  let dupQuery = client.from('email_events')
-    .select('id', { count: 'exact', head: true })
-    .eq('job_id', job_id)
-    .eq('comms_trigger', comms_trigger)
-  if (job_contact_id) dupQuery = dupQuery.eq('recipient', job_contact_id)
-  if (rescheduleDateIso) dupQuery = dupQuery.eq('subject', eventSubject)
-  const { count: existing } = await dupQuery
-  if ((existing || 0) > 0) {
-    return { sent: false, reason: `${comms_trigger} already sent for this ${rescheduleDateIso ? 'job and date' : job_contact_id ? 'contact' : 'job'}` }
+  if (rescheduleDateIso) {
+    // install_rescheduled only: a double-tap on the same drop is swallowed, but
+    // a failed send never blocks the operator's retry, and an A→B→A sequence
+    // re-sends for the return to A (the most recent SENT row carries B then).
+    let recentQuery = client.from('email_events')
+      .select('subject')
+      .eq('job_id', job_id)
+      .eq('comms_trigger', comms_trigger)
+      .eq('status', 'sent')
+    if (job_contact_id) recentQuery = recentQuery.eq('recipient', job_contact_id)
+    const { data: recentRows } = await recentQuery.order('sent_at', { ascending: false }).limit(1)
+    const lastSentDate = String(recentRows?.[0]?.subject || '').match(/ -> (\d{4}-\d{2}-\d{2})$/)?.[1] || null
+    if (lastSentDate === rescheduleDateIso) {
+      return { sent: false, reason: `${comms_trigger} already sent for this job and date` }
+    }
+  } else {
+    // Check for duplicate: per contact if specified, otherwise per job
+    let dupQuery = client.from('email_events')
+      .select('id', { count: 'exact', head: true })
+      .eq('job_id', job_id)
+      .eq('comms_trigger', comms_trigger)
+    if (job_contact_id) dupQuery = dupQuery.eq('recipient', job_contact_id)
+    const { count: existing } = await dupQuery
+    if ((existing || 0) > 0) {
+      return { sent: false, reason: `${comms_trigger} already sent for this ${job_contact_id ? 'contact' : 'job'}` }
+    }
   }
 
   // Get job + client details
