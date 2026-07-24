@@ -1940,9 +1940,10 @@ async function readExistingObligationJobs(
       // Direct-ops jobs can store the same builder-scoped obligation as a bare
       // number (AJBR-70062 versus 70062). Accept that storage difference only
       // when builder and address also agree; reference core alone is insufficient.
+      const targetRefCore = obligationRefNumericCore(targetRef);
       const builderScopedBareRefMatch = !!targetAddress &&
-        obligationRefNumericCore(targetRef) ===
-          obligationRefNumericCore(existingRef) &&
+        targetRefCore !== null &&
+        targetRefCore === obligationRefNumericCore(existingRef) &&
         obligationAddressesMatch(targetAddress, existingJob?.site_address);
       if (!exactRefMatch && !builderScopedBareRefMatch) return false;
       const metadata = existingJob?.metadata &&
