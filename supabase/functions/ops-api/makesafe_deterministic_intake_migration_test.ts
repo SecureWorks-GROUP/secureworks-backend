@@ -57,6 +57,16 @@ const terminalHook = await Deno.readTextFile(
   new URL("../../../docs/makesafe-intake-terminal-hook.md", import.meta.url),
 );
 
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 Deno.test("cutover migration defaults to legacy and exposes one deterministic switch", () => {
   assertStringIncludes(
     migration,
@@ -573,6 +583,37 @@ Deno.test("second-round lineage supersession is exact, append-only and operation
   assertStringIncludes(
     runtime,
     "source correction supersession prior authority mismatch; reconciliation required",
+  );
+});
+
+Deno.test("second-round lineage manifest pins the exact reviewed production source set", async () => {
+  const manifestMatch = lineageSupersessionMigration.match(
+    /\$manifest\$\n([\s\S]+?)\n\$manifest\$/,
+  );
+  assert(manifestMatch, "reviewed production manifest must be embedded");
+  const manifest = JSON.parse(manifestMatch[1]) as Array<
+    [string, string, string, string, string[]]
+  >;
+  const manifestSources = manifest
+    .flatMap((entry) => entry[4])
+    .sort();
+  const mlb24749CancellationGraphId =
+    "AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAqod-2AAA=";
+
+  assertEquals(
+    await sha256Hex(manifestSources.join(",")),
+    "d6963b8db18cd3474566bd61e713f9bbc14f269a1c91058ec7b8936ce9e326ff",
+  );
+  assert(
+    manifestSources.includes(mlb24749CancellationGraphId),
+    "the reviewed MLB-24749 cancellation Graph id must remain complete",
+  );
+  assertEquals(mlb24749CancellationGraphId.length, 152);
+  assert(
+    manifestSources
+      .filter((source) => source.startsWith("AAMk"))
+      .every((source) => source.length === 152),
+    "a truncated Graph source id must not pass the exact manifest test",
   );
 });
 
