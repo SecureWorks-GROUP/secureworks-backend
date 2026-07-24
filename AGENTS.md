@@ -53,7 +53,14 @@ promotion, and a source already canonical-accounted on any case cannot make a
 regrouped case fresh or spend the run cap. Multi-authority regrouping is allowed
 only when every source is already canonical, all authorities share one deliverable,
 and every non-primary case already matches the planned state. Fresh, cross-deliverable
-or state-divergent merges fail loudly before writes.
+or state-divergent merges fail loudly before writes. That guard now runs per
+isolated lineage component (cases are unioned by lineage cluster and by shared
+persisted authority, including a split old authority spanning clusters), so one
+poisoned component is quarantined into `isolated_failures` and the run reports
+`completion_status: 'completed_degraded'` with `components_failed` /
+`sources_quarantined` counts while every unrelated safe component still commits.
+An equal builder PO alone no longer unions two different explicit claims, and a
+persisted authority backing multiple corrected instructions fails its component.
 
 ## Never Select `scope_json` In A List/Feed Query
 
@@ -247,7 +254,16 @@ Deterministic make-safe intake also requires
 `20260721000002_makesafe_intake_full_open.sql` before its matching `ops-api`:
 health and scan read those rollout/auth/selection columns. Both migrations are
 inert (`intake_mode` stays `legacy`, selection defaults to `exact`); do not deploy
-code first.
+code first. The 2026-07-24 lineage-authority correction
+`20260724025815_makesafe_lineage_authority_corrections.sql` also lands before its
+matching `ops-api`: the runtime reads effective source authority (and the guarded
+`target_job_id` binding) from its append-only
+`makesafe_intake_source_authority_corrections` /
+`makesafe_intake_case_authority_corrections` ledgers. The migration only installs
+those tables on a non-production database and applies the reviewed 335-case /
+600-source false-`po:BOX` and AJ 70062 → SWMS-261055 data correction against the
+exact production snapshot; it never writes a job, assignment, draft, status or
+communication row.
 Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual
 intake checks all use the deterministic contract in
 `docs/makesafe-intake-terminal-hook.md`.

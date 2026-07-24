@@ -235,6 +235,11 @@ import {
   parseSubjectFields as _parseSubjectFields,
   resolveSubjectRef as _resolveSubjectRef,
 } from './makesafe_template_parser.ts'
+import {
+  applyAjIntakePrefill as _applyAjIntakePrefill,
+  assertAjExistingJobBinding as _assertAjExistingJobBinding,
+  deriveAjIntakePrefill as _deriveAjIntakePrefill,
+} from './makesafe_aj_intake_reconciliation.ts'
 // Cost-leak fix: extract-at-most-once marker helpers (mark-eligibility rule + the
 // batched, chunked, pre-migration-safe, idempotent DB write).
 import {
@@ -13426,13 +13431,42 @@ function effectiveIntakeReportType(draft: any): string | null {
 function enrichIntakeDraftForReview(draft: any): any {
   if (!draft) return draft
   const detected = effectiveIntakeReportType(draft)
-  if (!detected) return { ...draft, detected_report_type: null, report_type_source: draft.report_type ? 'stored' : null }
   const hasStored = !!cleanReviewedString(draft.report_type)
-  return {
+  const reportEnriched = {
     ...draft,
-    report_type: draft.report_type || detected,
-    detected_report_type: detected,
-    report_type_source: hasStored ? 'stored' : 'fallback_classifier',
+    report_type: draft.report_type || detected || null,
+    detected_report_type: detected || null,
+    report_type_source: detected ? (hasStored ? 'stored' : 'fallback_classifier') : (hasStored ? 'stored' : null),
+  }
+  const extraction = parseJsonObject(draft.extraction_json)
+  const prefill = _deriveAjIntakePrefill({
+    fromEmail: draft.from_email,
+    subject: draft.subject,
+    bodyText: extraction.builder_email_text_for_trade || draft.body_preview,
+  })
+  const applied = _applyAjIntakePrefill(extraction, prefill)
+  if (!applied.filledFields.length) return reportEnriched
+
+  const topLevelFields = [
+    'external_ref',
+    'client_name',
+    'client_phone',
+    'site_address',
+    'site_suburb',
+  ]
+  const prefilled = { ...reportEnriched }
+  for (const key of topLevelFields) {
+    if (!cleanReviewedString(prefilled[key])) prefilled[key] = applied.extraction[key] || null
+  }
+  const filledMissingNames = new Set(applied.filledFields.map((key) => cleanMissingFieldName(key)))
+  return {
+    ...prefilled,
+    extraction_json: applied.extraction,
+    missing_fields: parseJsonArray(draft.missing_fields).filter(
+      (field: any) => !filledMissingNames.has(cleanMissingFieldName(field)),
+    ),
+    deterministic_prefill_source: 'aj_labelled_email',
+    deterministic_prefill_fields: applied.filledFields,
   }
 }
 
@@ -13974,6 +14008,43 @@ function assertReviewedFamilyConsistency(
 }
 export const _assertReviewedFamilyConsistency = assertReviewedFamilyConsistency
 
+async function loadExistingJobBindingForDraft(client: any, draft: any): Promise<{
+  correction: any
+  targetJob: any
+  targetDetails: any
+} | null> {
+  const { data: correction, error: correctionError } = await client
+    .from('makesafe_intake_source_authority_corrections')
+    .select('org_id, source_post_id, target_job_id, correction_kind, expected_identity_key')
+    .eq('org_id', draft.org_id)
+    .eq('source_post_id', draft.graph_message_id)
+    .eq('correction_kind', 'existing_job_binding')
+    .maybeSingle()
+  if (correctionError) {
+    throw new Error(`existing_job_binding_reconciliation_required: correction lookup failed: ${correctionError.message || correctionError}`)
+  }
+  if (!correction) return null
+
+  const [{ data: targetJob, error: jobError }, { data: targetDetails, error: detailsError }] = await Promise.all([
+    client.from('jobs')
+      .select('*')
+      .eq('id', correction.target_job_id)
+      .maybeSingle(),
+    client.from('makesafe_job_details')
+      .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, substatus')
+      .eq('job_id', correction.target_job_id)
+      .maybeSingle(),
+  ])
+  if (jobError || detailsError || !targetJob || !targetDetails) {
+    throw new Error(
+      `existing_job_binding_reconciliation_required: guarded target could not be loaded: ${
+        jobError?.message || detailsError?.message || 'missing job/details'
+      }`,
+    )
+  }
+  return { correction, targetJob, targetDetails }
+}
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
@@ -13983,7 +14054,13 @@ async function approveIntakeDraft(client: any, body: any) {
     .select('*').eq('id', draft_id).single()
   if (dErr || !draft) throw new Error('Draft not found')
 
-  const extraction = parseJsonObject(draft.extraction_json)
+  let extraction = parseJsonObject(draft.extraction_json)
+  const ajPrefill = _deriveAjIntakePrefill({
+    fromEmail: draft.from_email,
+    subject: draft.subject,
+    bodyText: extraction.builder_email_text_for_trade || draft.body_preview,
+  })
+  extraction = _applyAjIntakePrefill(extraction, ajPrefill).extraction
   const reviewed = parseJsonObject(body.reviewed_fields || body.reviewedFields || {})
   const reviewedReportType = cleanReviewedString(reviewed.report_type)
   if (reviewedReportType && !_isReportOnlyType(reviewedReportType)) {
@@ -14060,6 +14137,78 @@ async function approveIntakeDraft(client: any, body: any) {
     effectiveReportType || null,
   ))
   const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
+
+  // A guarded source correction means the operational job already exists. The
+  // review gate must link this exact source to that job instead of running the
+  // duplicate guard or minting another case. The inverse guard below proves the
+  // source-derived AJ identity, reviewed values and one live target all agree.
+  // Cancelled/void targets fail closed, so SWMS-261054 can never be revived.
+  const existingJobBinding = await loadExistingJobBindingForDraft(client, draft)
+  if (existingJobBinding) {
+    _assertAjExistingJobBinding({
+      correction: existingJobBinding.correction,
+      draft,
+      prefill: ajPrefill,
+      approvedFields,
+      approvedJobFamily,
+      targetJob: existingJobBinding.targetJob,
+      targetDetails: existingJobBinding.targetDetails,
+    })
+
+    const claimedAt = new Date().toISOString()
+    const { data: claimed, error: claimErr } = await client.from('makesafe_intake_drafts')
+      .update({ status: 'approved', updated_at: claimedAt })
+      .eq('id', draft_id)
+      .in('status', ['needs_review', 'draft'])
+      .select()
+    if (claimErr) throw claimErr
+    if (!claimed || claimed.length === 0) {
+      throw new Error('Draft is not in a reviewable state (needs_review/draft) - already approved, rejected, or superseded; concurrent approval blocked')
+    }
+
+    const { error: linkError } = await client.from('makesafe_intake_drafts').update({
+      approved_job_id: existingJobBinding.targetJob.id,
+      approved_at: claimedAt,
+      approved_by: approved_by || null,
+      review_notes: body.review_notes || body.reviewNotes ||
+        `Linked by guarded source authority correction to existing ${existingJobBinding.targetJob.job_number}.`,
+      requesting_company_slug: approvedFields.requesting_company_slug,
+      requesting_company_name: approvedFields.requesting_company_name,
+      external_ref: approvedFields.external_ref,
+      client_name: approvedFields.client_name,
+      client_phone: approvedFields.client_phone,
+      client_email: approvedFields.client_email,
+      site_address: approvedFields.site_address,
+      site_suburb: approvedFields.site_suburb,
+      description: approvedFields.description,
+      safety_requirements: approvedFields.safety_requirements,
+      special_instructions: approvedFields.special_instructions,
+      report_type: effectiveReportType || draft.report_type || null,
+      extraction_json: extraction,
+      updated_at: claimedAt,
+    }).eq('id', draft_id)
+    if (linkError) {
+      try {
+        await client.from('makesafe_intake_drafts')
+          .update({ status: 'needs_review', updated_at: new Date().toISOString() })
+          .eq('id', draft_id)
+      } catch (_) { /* best-effort; no job was created */ }
+      throw linkError
+    }
+
+    return {
+      ok: true,
+      job: existingJobBinding.targetJob,
+      draft_id,
+      approved_fields: approvedFields,
+      report_type: effectiveReportType || null,
+      linked_existing_job: true,
+      existing_job_binding_identity: existingJobBinding.correction.expected_identity_key,
+      secondary_job: null,
+      split_combined: false,
+      job_ids: [existingJobBinding.targetJob.id],
+    }
+  }
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
   // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
@@ -15025,6 +15174,17 @@ async function _reextractExtractFields(
   if (!replyForwardRisk) {
     if (!cleanReviewedString(extraction.site_address) && subjectFields.site_address) extraction.site_address = subjectFields.site_address
     if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) extraction.site_suburb = subjectFields.site_suburb
+  }
+  const ajPrefill = _deriveAjIntakePrefill({
+    fromEmail,
+    subject,
+    bodyText: builderEmailTextForTrade || bodyPreview,
+  })
+  const ajApplied = _applyAjIntakePrefill(extraction, ajPrefill)
+  extraction = ajApplied.extraction
+  if (ajApplied.filledFields.length) {
+    const filled = new Set(ajApplied.filledFields.map((field) => cleanMissingFieldName(field)))
+    missingFields = missingFields.filter((field: string) => !filled.has(cleanMissingFieldName(field)))
   }
 
   // Item 5 — deterministic WO-PDF client-field fill (opt-in, default OFF). Same
@@ -16303,6 +16463,17 @@ async function scanSesMakesafes(client: any) {
       if (!cleanReviewedString(extraction.site_suburb) && subjectFields.site_suburb) {
         extraction.site_suburb = subjectFields.site_suburb
       }
+    }
+    const ajPrefill = _deriveAjIntakePrefill({
+      fromEmail,
+      subject,
+      bodyText: builderEmailTextForTrade || bodyPreview,
+    })
+    const ajApplied = _applyAjIntakePrefill(extraction, ajPrefill)
+    extraction = ajApplied.extraction
+    if (ajApplied.filledFields.length) {
+      const filled = new Set(ajApplied.filledFields.map((field) => cleanMissingFieldName(field)))
+      missingFields = missingFields.filter((field: string) => !filled.has(cleanMissingFieldName(field)))
     }
 
     // Item 5 — deterministic WO-PDF client-field fill (opt-in, default OFF). MLB
