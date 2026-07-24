@@ -61,6 +61,19 @@ Apply in order only after approval:
 3. `supabase/migrations/20260720000002_makesafe_deterministic_intake_cutover.sql`
 4. `supabase/migrations/20260721000001_makesafe_intake_production_controls.sql`
 5. `supabase/migrations/20260721000002_makesafe_intake_full_open.sql`
+6. `supabase/migrations/20260724025815_makesafe_lineage_authority_corrections.sql`
+
+Migration 6 is the append-only 2026-07-24 lineage-authority correction. It installs
+the `makesafe_intake_case_authority_corrections` /
+`makesafe_intake_source_authority_corrections` ledgers on every database, but only
+reconciles the reviewed 335-case / 600-source false-`po:BOX` footprint and maps both
+exact AJ 70062 SES sources to the already-created `SWMS-261054` job when applied
+against the exact production snapshot. It aborts the whole transaction if any
+observed footprint, manifest, AJ source or existing job/assignment invariant no
+longer matches that snapshot, and never inserts or updates a job, assignment, draft,
+status change or communication row. Apply it during deploy and before the matching
+`ops-api`: the runtime reads effective source authority (and the guarded
+`target_job_id` binding) from those ledgers.
 
 The intake migrations remain inert because
 `makesafe_cron_settings.intake_mode` defaults to `legacy`. The rollout controls
@@ -144,7 +157,18 @@ one deliverable, and every non-primary persisted case already matches the state 
 plan derives; a merge that introduces a fresh source across persisted cases, spans
 distinct persisted deliverables, or carries a state-divergent secondary authority is a
 cross-case mismerge and fails loudly rather than writing a fresh or misattributed
-secondary source under the primary case. That loud multi-authority guard evaluates
+secondary source under the primary case. A single persisted authority backing more
+than one corrected deterministic instruction is the inverse split and fails the same
+way. That guard now runs per isolated lineage component: the selected plan is unioned
+by lineage cluster and by shared persisted authority (including a parser-corrected old
+authority that spans otherwise independent clusters), each component is validated on
+its own, and a failing component is quarantined into `isolated_failures`
+(`source_post_ids`, `persisted_case_ids`, `planned_instruction_keys`, structural
+coordinates only) instead of failing the whole run. A run that quarantines any
+component still commits every safe component and reports
+`completion_status: 'completed_degraded'` with `components_failed` /
+`sources_quarantined` totals, so one poison source no longer blocks unrelated safe
+intake. That loud multi-authority guard evaluates
 only the selected closure, not unrelated ambient cases on the same bounded page. The
 second exact pass prunes a page-only ambient ancestor when a persisted exact source
 binds back to its authoritative root, so a fresh selected child keeps its required
@@ -173,9 +197,18 @@ token (`MLB-26537PO-56922`) matches the deterministic claim (`MLB-26537`); the
 builder is collapsed through the one shared alias set (`majorloss`/`mlbuilder`/`MLB`,
 the AJ cluster, etc.); and a PO discriminator pulled from the explicit PO, the work
 order field, or the composite ref keeps two explicitly different POs from ever
-over-deduping into one obligation. A cancelled/void/superseded job is a dead
+over-deduping into one obligation. PO identity uses one canonical numeric grammar on
+every make-safe path: the planner no longer runs a second permissive PO regex, so a
+postal `PO Box 2143` footer is left empty instead of becoming PO `BOX`, and only a
+numeric PO token becomes builder PO identity. An AJ subject that carries only
+`Job No 70062` (no repeated AJBR token) resolves to the `AJBR-70062` builder
+reference from the sender-selected adapter. A cancelled/void/superseded job is a dead
 obligation and is excluded from the match, so a later genuine re-issue of the same
-claim/PO creates a live job rather than binding to the dead one. The dedupe read is
+claim/PO creates a live job rather than binding to the dead one. A direct-ops job may
+store that builder-scoped obligation as a bare number (`AJBR-70062` versus `70062`);
+the dedupe accepts that storage difference only when the builder and the site address
+also agree, and it fails loudly rather than binding when more than one live job or a
+corrected `target_job_id` no longer uniquely matches. The dedupe read is
 paged to exhaustion so an obligation past the PostgREST 1,000-row cap cannot hide.
 Separately, before any write every selected lineage node is normalised to the cycle
 the database trigger will derive: roots land on cycle 1, `reopen_of` children on their
@@ -212,10 +245,13 @@ set is enforced by both `MAKESAFE_REASON_CODES` and the
 ```
 
 The pure adapter tests cover MLB, AJS/AJBR, Prime, RAPID, chatter, case-wide late
-evidence, address-only hostile identity, distinct POs, WO formatting, significant PO
-suffix punctuation, claim-only exclusion, revisions, reopen cycles, twins, resends,
-cancellation, unknown builders, replay equality, zero unaccounted sources, and zero AI
-fallback.
+evidence, address-only hostile identity, distinct POs, WO formatting, canonical
+numeric PO spellings converging, a postal `PO Box` footer never becoming purchase-order
+identity or a cross-claim lineage edge, an equal numeric PO alone never merging two
+different explicit claims, an AJ `Job No 70062` subject resolving to one isolated
+`AJBR-70062` obligation, claim-only exclusion, revisions, reopen cycles, twins,
+resends, cancellation, unknown builders, replay equality, zero unaccounted sources,
+and zero AI fallback.
 
 The runtime tests cover commit-and-resume behaviour, exact allowlist selection,
 full-open selection processing the bounded cursor page while exact-empty and mixed
@@ -244,9 +280,17 @@ a merge spanning distinct persisted deliverables, and a state-divergent secondar
 authority each fail loudly, exact selection pulls the semantic parent chain
 and advances it within the case cap, a production-shaped own copy closes onto its
 persisted ambient parent, and an unrelated fresh multi-authority case sharing the
-bounded page is left untouched and cannot block the exact run. The
+bounded page is left untouched and cannot block the exact run. They also cover
+lineage-component isolation: a poisoned component is quarantined into
+`isolated_failures` with a `completed_degraded` completion status while unrelated
+safe components still commit, and a source-authority correction whose overlaid
+identity no longer matches the deterministic plan fails its component. The
 migration-contract tests assert both write boundaries share the same canonical ref,
-PO-core and builder-alias helpers so they cannot drift.
+PO-core and builder-alias helpers so they cannot drift, and that the 2026-07-24
+lineage-authority correction migration is append-only (RLS-enabled, append-only
+trigger-guarded, `SELECT`-only grants), snapshot-guarded on the reviewed 335-case /
+600-source footprint and AJ 70062 → `SWMS-261054` mapping, and free of any job,
+assignment, draft, status or communication write.
 
 Run the existing migration clone harness before production migration approval:
 
