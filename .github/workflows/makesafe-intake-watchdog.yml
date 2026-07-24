@@ -9,10 +9,13 @@ name: MakeSafe Intake Watchdog
 # ENTIRE Supabase project being down.
 #
 # NOTE: scheduled workflows only run on the default branch, so this activates on merge
-# to main. It reads the EXISTING repo secret SW_API_KEY (already used by the deploy
-# workflow) as the ops-api x-api-key; no new secret is required. The functions base URL
-# can be overridden with the optional OPS_API_BASE_URL secret (defaults to the known
-# project URL, whose ref is not sensitive).
+# to main. It reads the EXISTING SW_API_KEY secret (already used by the deploy workflow)
+# as the ops-api x-api-key; no new secret is required. That secret is scoped to the
+# `production` ENVIRONMENT, not the repo, so this job must declare
+# `environment: production` or ${{ secrets.SW_API_KEY }} silently resolves to the empty
+# string and every scheduled run fails on the "secret is not set" guard below. The
+# functions base URL can be overridden with the optional OPS_API_BASE_URL secret
+# (defaults to the known project URL, whose ref is not sensitive).
 
 on:
   schedule:
@@ -25,6 +28,10 @@ permissions:
 jobs:
   intake-health:
     runs-on: ubuntu-latest
+    # SW_API_KEY is a `production` environment secret, not a repo secret. Without this
+    # line the job gets an empty key and fails every run. The deploy workflow already
+    # declares the same environment for the same reason.
+    environment: production
     steps:
       - name: Probe ops-api intake_health and fail on unreachable/stale
         env:
