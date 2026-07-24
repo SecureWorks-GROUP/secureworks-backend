@@ -1701,7 +1701,9 @@ export function buildDeterministicIntakePlan(
 }
 
 export function selectIntakeMode(value: unknown): "legacy" | "deterministic" {
-  return value === "deterministic" ? "deterministic" : "legacy";
+  // Compatibility parser only. Standing execution no longer branches on this
+  // column; unknown/old values must never revive the retired paid-AI path.
+  return value === "legacy" ? "legacy" : "deterministic";
 }
 
 export function deterministicModeAllowsAiFallback(): false {

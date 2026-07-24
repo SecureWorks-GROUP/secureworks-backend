@@ -252,9 +252,12 @@ key derived from `pricing_json`, and `ops-api` `pipeline` deliberately projects
 Deterministic make-safe intake also requires
 `20260721000001_makesafe_intake_production_controls.sql` and then
 `20260721000002_makesafe_intake_full_open.sql` before its matching `ops-api`:
-health and scan read those rollout/auth/selection columns. Both migrations are
-inert (`intake_mode` stays `legacy`, selection defaults to `exact`); do not deploy
-code first. The 2026-07-24 lineage-authority correction
+health and scan read those rollout/auth/selection columns. After the two
+lineage-authority migrations below, apply
+`20260724070000_makesafe_deterministic_standing_intake.sql` before its matching
+`ops-api`: it permanently establishes bounded `deterministic` / `full_open`
+standing authority (cap 10, empty exact allowlists). There is no legacy flip or
+rollback ritual. Do not deploy code first. The 2026-07-24 lineage-authority correction
 `20260724025815_makesafe_lineage_authority_corrections.sql` also lands before its
 matching `ops-api`: the runtime reads effective source authority (and the guarded
 `target_job_id` binding) from its append-only
@@ -272,9 +275,13 @@ reviewed authority splits, and rejects any supersession whose
 first-round result. It installs the table only on a non-production database,
 records 33 correction-only authorities plus 2 cleared identity expectations
 against the guarded snapshot, and likewise writes no operational row.
-Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual
-intake checks all use the deterministic contract in
-`docs/makesafe-intake-terminal-hook.md`.
+Captain Amendments 45-46 keep paid AI extraction off permanently: automatic,
+terminal-skill and manual intake checks all use the deterministic contract in
+`docs/makesafe-intake-terminal-hook.md`. Every SES reporting skill run calls
+`makesafe_reporting_intake_pass` exactly once; it runs one bounded scan and then
+advances only clean/high-confidence drafts through the same guarded approval
+function as the human review button. Explicit environment/database auto-file
+brakes remain, but advance-what-passes is the default.
 
 ## Make-safe Scheduled Scan Completion Boundary
 

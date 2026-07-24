@@ -1,551 +1,94 @@
-# Make-safe deterministic intake cutover runbook
+# Make-safe deterministic standing intake
 
-## Flagged for Marnin: two live-scan behaviour changes
+## Current authority
 
-1. A stale allowlist entry no longer poisons later scans. Entries that no longer
-   resolve to a case are reported as `selection.unmatched_source_allowlist` /
-   `selection.unmatched_instruction_allowlist` and the scan continues on the
-   resolved set. Only an allowlist that resolves **no** case at all fails closed.
-2. Each live scan now has a flat read and plan cost. The window read is capped at
-   500 rows per run (`source_read.cap`), and allowlisted sources are read by id
-   outside that cap, so a named source is still proved on every run once it ages
-   out of the newest rows. Scan cost no longer grows with mailbox age.
-3. The cap comes with a progress guarantee. Half the per-run budget is a sweep
-   driven by `makesafe_intake_health.deterministic_scan_cursor_at`, an advancing
-   `received_at` position persisted across live runs and restarted at the window
-   head once it reaches the end (`source_read.cursor_at` /
-   `source_read.next_cursor_at`). Progress does not depend on anything being
-   stamped `makesafe_scanned_at`, so ordinary non-actionable SES mail, which no
-   run ever stamps, cannot hold the read in place. Dry-run and dark-observe get
-   the same guarantee from their own separate position,
-   `deterministic_observe_cursor_at`: observation has to cover the whole window
-   before cutover, when no live run exists to advance anything, so the sweep
-   position is the one thing a dry run writes. It still creates no case, draft,
-   job, storage object or health state, and it never moves the live cursor. If
-   the cursor column is unreadable or unwritable the run still completes and
-   reports `scan_cursor_unavailable` in `evidence.caveats`.
-4. Volume meeting configuration can no longer poison the cron. When a run resolves
-   no case and every unresolved allowlist entry was merely outside this run's cap,
-   the run ends as a reported no-op carrying `no_cases_readable_within_cap` rather
-   than throwing; the sweep brings those sources inside the cap on a later run. A
-   genuinely stale allowlist that resolves nothing still fails closed. That no-op
-   is not a success: it writes `extraction_status = 'degraded'` with
-   `degraded_reason = 'deterministic_no_cases_readable_within_cap'` and does not
-   refresh `last_successful_extraction_at`, so the alarm and morning-report
-   surfaces see the degradation, not just the scan response.
+Captain Amendment 45 retired paid AI extraction permanently. Standing make-safe
+intake is deterministic email parsing plus bounded PDF text extraction, with no model
+fallback. Amendment 46 adds three first-class advancement lanes: human review,
+automatic advancement during every SES reporting run, and captain terminal feedback.
 
-## Authority and scope
+This supersedes the old legacy/deterministic flip runbook. Do not restore its one-pass
+flip or legacy rollback ritual.
 
-This runbook prepares the direct deterministic cutover. It is not deployment or
-migration authority. **Merge is not deploy.** Applying any migration, deploying
-`ops-api`, flipping the switch, production backfill, or rollback requires the
-separately recorded Captain approval.
+## Release order
 
-Production activation remains **NO-GO** after this controls PR merges. Activation
-still waits for the separate canonical Board/Hugo seam, the supervised authenticated
-alarm drill, a current-main replay that meets the identity-floor threshold with zero
-unaccounted sources, and every named G4/G5/G6/G9/H4 approval. This PR must first be
-migrated and deployed dark under those gates; no merge changes production state.
+Apply these intake migrations before the matching `ops-api`:
 
-The path creates only unassigned make-safe jobs through the existing guarded intake
-approval function. It does not plan, schedule, allocate, invoice, send email/SMS,
-authorise, mark paid, or move money. Deterministic intake suppresses the existing
-manager-arrival SMS side effect for its own provenance.
+1. `20260720000001_makesafe_intake_cases.sql`
+2. `20260720000002_makesafe_deterministic_intake_cutover.sql`
+3. `20260721000001_makesafe_intake_production_controls.sql`
+4. `20260721000002_makesafe_intake_full_open.sql`
+5. `20260724025815_makesafe_lineage_authority_corrections.sql`
+6. `20260724062509_makesafe_lineage_authority_supersessions.sql`
+7. `20260724070000_makesafe_deterministic_standing_intake.sql`
 
-## Package
+Migration 7 makes the singleton settings row and future defaults
+`deterministic/full_open`, clears exact allowlists, sets the bounded case cap to ten,
+and prevents `intake_mode` from returning to `legacy`.
 
-Apply in order only after approval:
+Production deploys remain restricted to main in
+`/Users/marninstobbe/Projects/_release/secureworks-site-main` using the guarded
+script documented in `AGENTS.md`.
 
-1. `supabase/migrations/20260717000001_jobs_quoted_value_generated.sql`
-2. `supabase/migrations/20260720000001_makesafe_intake_cases.sql`
-3. `supabase/migrations/20260720000002_makesafe_deterministic_intake_cutover.sql`
-4. `supabase/migrations/20260721000001_makesafe_intake_production_controls.sql`
-5. `supabase/migrations/20260721000002_makesafe_intake_full_open.sql`
-6. `supabase/migrations/20260724025815_makesafe_lineage_authority_corrections.sql`
-7. `supabase/migrations/20260724062509_makesafe_lineage_authority_supersessions.sql`
+## Standing and reporting entry points
 
-Migration 6 is the append-only 2026-07-24 lineage-authority correction. It installs
-the `makesafe_intake_case_authority_corrections` /
-`makesafe_intake_source_authority_corrections` ledgers on every database, but only
-reconciles the reviewed 335-case / 600-source false-`po:BOX` footprint and maps both
-exact AJ 70062 SES sources to the intake-born `SWMS-261055` job when applied
-against the exact production snapshot. It aborts the whole transaction if any
-observed footprint, manifest, AJ source or existing job/assignment invariant no
-longer matches that snapshot, and never inserts or updates a job, assignment, draft,
-status change or communication row. Apply it during deploy and before the matching
-`ops-api`: the runtime reads effective source authority (and the guarded
-`target_job_id` binding) from those ledgers. The guard also proves `SWMS-261054`
-remains a cancelled, unassigned duplicate and can never become source authority.
+- `scan_ses_makesafes`: privileged/monitor entry point. It unconditionally calls
+  `runDeterministicIntake`; the settings row supplies bounded selection controls but
+  cannot select the retired paid-AI implementation.
+- `makesafe_reporting_intake_pass`: routine-safe SES reporting hook. It calls the
+  standing scanner once, then runs one capped clean-draft advancement sweep.
+- `makesafe_deterministic_intake_replay`: aggregate dry-run evidence.
+- `makesafe_deterministic_intake_dark_observe`: exact sanitized dry-run evidence.
 
-Migration 7 is a second append-only overlay over the immutable first-round
-correction ledger. It is the reviewed resolution of the first production pass's
-15 `persisted_authority_split_reconciliation_required` components and one
-`source_correction_identity_mismatch_reconciliation_required` component. Against
-the exact guarded production snapshot it creates 33 correction-only case
-authorities, supersedes 58 exact source corrections onto those authorities, and
-clears the stale identity expectation on the two MLB-MW-26873 twin sources while
-leaving their authority unchanged. It inserts no immutable case-source row and no
-job, assignment, draft, document, notification or outbound-message row. Runtime
-accepts a supersession only when its `superseded_correction_id` and
-`prior_authority_case_id` still match the first-round result; either mismatch
-fails loudly with reconciliation required. Apply this migration before the
-matching `ops-api`, because that runtime reads the new table.
+The reporting hook is the only routine action allowed to cross the intake approval
+boundary. It advances through `approveIntakeDraft`, the same function used by the
+human review button, preserving required-field, work-order, duplicate, authority and
+concurrency guards. Both the environment brake
+`MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false` and the database
+`auto_file_enabled=false` brake still force preview-only behavior.
 
-After migration 7 and the matching `ops-api` are deployed, the deferred AJ
-materialisation is one separately authorised exact pass, not an automatic retry:
+## Bounded deterministic behavior
 
-1. Keep `selection_mode=exact` and set `max_cases=1`.
-2. Exact-allowlist both AJ 70062 source ids together:
-   `AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAr9x7QAAA=`
-   and
-   `mailbox_264b5ecbedc4e9de97560c373f5fb9941936cc42186dab6d5336d7bb6fd9650d`.
-3. Invoke the bounded scanner once through the established release procedure.
-4. Restore `intake_mode=legacy` unconditionally after the response; do not retry
-   automatically on an error or degraded result.
-5. Prove one `confirmed_live_job` case bound to job id
-   `985708c4-ffae-48e4-aab7-9c8ead7dac0e` (`SWMS-261055`), both source rows on
-   that case, and zero new jobs, drafts, assignments, communications or links to
-   cancelled `SWMS-261054`.
+- The live case cap is structurally constrained to 1..10 and defaults to 10.
+- The source read is cursor-driven and capped; case attempts have a fixed ceiling.
+- Each PDF is capped by bytes, pages and characters, with bounded PDFs per source and
+  per run.
+- A cancelled, rejected or thrown run retains its prior completion cursor.
+- A poisoned lineage component is written to `isolated_failures`; unrelated safe
+  components commit and the run reports `completion_status=completed_degraded`.
+- Retries reuse deterministic keys and append-only authority/artifact ledgers.
+- Email-derived values win; PDF-derived fields carry per-field provenance.
+- Gaps remain review work. No deterministic shortfall may call a paid AI endpoint or
+  weaken the review/auto-file gates.
 
-The matching `ops-api` deterministically prefills the narrow direct-AJ labelled
-email shape (`Job No`, `Address`, `Contact`, `Mobile`) without raising extraction
-confidence or removing the provider-degraded marker. That keeps the review gate
-usable during the Anthropic usage-cap outage while preserving human approval. If
-the remaining AJ mailbox twin is approved, the append-only correction is validated
-in reverse against the source-derived `AJBR-70062` identity and the live target,
-then the draft is linked to `SWMS-261055`; no job or second PDF row is created.
+The old paid-AI scanner implementation is retained only as unreachable historical
+code. It has no dispatch action, schedule, reporting hook, or standing caller.
 
-The intake migrations remain inert because
-`makesafe_cron_settings.intake_mode` defaults to `legacy`. The rollout controls
-default to `selection_mode=exact`, a cap of one and empty exact allowlists, so an
-unapproved case cannot be selected. `full_open` is a separate explicit authority;
-it is never inferred from empty lists.
+## Verification
 
-Runtime components:
-
-- `supabase/functions/ops-api/makesafe_deterministic_intake.ts`
-- `supabase/functions/ops-api/makesafe_deterministic_intake_runtime.ts`
-- `supabase/functions/ops-api/makesafe_pdf_text.ts`, bounded zero-AI PDF text-layer
-  extraction (pinned `unpdf@1.6.2` PDF.js build with the original content-stream
-  reader kept as a dependency-free fallback)
-- `supabase/functions/ops-api/makesafe_pdf_gap_fill.ts` /
-  `makesafe_pdf_client_fields.ts`, deterministic label-anchored work-order gap-fill
-- `scan_ses_makesafes`, which reads the DB switch once and enters exactly one path
-- `makesafe_deterministic_intake_replay`, a no-write aggregate replay action
-- `makesafe_deterministic_intake_dark_observe`, an authenticated no-write action that
-  requires exact source ids or instruction keys and returns sanitized case proposals
-
-The deterministic branch imports no model SDK and has no AI fallback. The paid AI
-extraction API stays off and is not required by automatic scans, terminal skill runs
-or manual operator checks. Health records `intake_mode=deterministic` and
-`last_scan_model_calls=0`.
-
-Attached digital builder work-order PDFs are text-extracted server-side in the edge
-runtime and used only to gap-fill `client_name`, `client_phone`, `site_address`,
-`site_suburb`, `external_ref` and `description` when email/template parsing left them
-empty. Extraction is deterministic and calls no model and no OCR. Every run is
-bounded: at most 5 MB, 25 pages and 40,000 readable characters per PDF
-(`PDF_TEXT_MAX_BYTES` / `PDF_TEXT_MAX_PAGES` / `PDF_TEXT_MAX_CHARS`), at most two PDF
-attachments per source and 50 extractions per run. Email-derived values always win,
-including across correlated sources, and human `reviewed_fields` remain the final
-authority. Per-field PDF provenance (`pdf_field_provenance` / `pdf_sourced_fields`),
-the readable `work_order_pdf_text` and per-record quarantine reasons are persisted on
-the case, source, draft and review surfaces. A corrupt, image-only, oversized or
-otherwise pathological PDF quarantines only its own record with a fixed reason and
-never aborts the batch.
-
-The terminal skill integration contract is
-`docs/makesafe-intake-terminal-hook.md`. Automatic cron, scoped terminal routine and
-manual operator calls all enter the same deterministic scanner; only a DB-approved
-selection authority can reach business writes: `exact` via its non-empty allowlists,
-or separately approved `full_open` via the bounded cursor page.
-
-## Query and payload constraints
-
-The replay/runtime reads only named columns. Email reads and the persisted
-case/case-source resume reads all paginate explicitly in 500-row pages, below the
-PostgREST 1,000-row cap, and attachment IDs are fetched in bounded batches. It never selects
-`jobs.scope_json`, `calendar_events.scope_json`, `pricing_json`, or any list/feed
-`select('*')` payload.
-
-Open PR 334 changes unrelated `ops_summary` calendar and pipeline pricing projections.
-This package does not touch those query blocks and does not duplicate that PR.
-
-## Bounded resumable runs
-
-A live scan is incremental and cannot drain an unrelated backlog. It reads its
-selection mode and case cap from `makesafe_cron_settings`. The cap defaults to
-exactly one and is constrained to 1 through 10. In `exact` mode, empty allowlists
-fail closed, and so does an allowlist that resolves no case; a partially resolved
-allowlist reports its unmatched entries and proceeds on the resolved set. In
-`full_open` mode, both allowlists must be empty and the runtime processes the bounded
-cursor page directly. A mixed full-open plus allowlist configuration fails closed in
-both the database and runtime. The
-window read is capped per invocation and allowlisted sources are read by id, so
-read and plan cost stay flat as the mailbox grows. The cap defers work instead of
-dropping it: the sweep half of the read walks the whole window from a persisted
-`received_at` cursor, so every in-window source is eventually planned no matter how
-far behind the newest rows it falls.
-One invocation can attempt only allowlisted cases and stops after four times
-the explicit case cap, so an edge timeout never discards accounting already committed.
-Cases are stamped as they go and the next scan resumes.
-
-That cursor is a completion checkpoint, not a read-ahead marker: it advances only
-after the run finishes its writes and truthful health update. A cancelled, rejected
-or thrown run therefore retains the prior cursor and rereads the same page
-idempotently. A completed but degraded run still advances, carrying the explicit
-`scan_page_completed_degraded_retry_next_sweep` caveat so one poison page cannot pin
-every older page; the bounded sweep retries it on its next pass to the window head.
-
-Ordering inside a run is: deferred/failed job-creation retries up to half the
-budget, then cases never attempted before, then the remaining retries. Cases already
-at their resolved state are inert. A systematically failing case therefore cannot
-crowd out fresh work.
-
-Selection and ranking run on canonical ownership, not the moving page. Full-open
-binds every bounded source back to the persisted case that owns it (its primary
-source, or its first owned source) before ranking, so a partial page that regroups an
-already-accounted source under another case cannot classify it as fresh, spend the
-whole case cap on duplicate inserts, and starve the genuinely unaccounted tail. Exact
-mode does not bind the whole page: it closes the raw selected ancestry, binds only
-that closure back to its persisted authority, then selects and closes it again, so an
-unrelated case that merely shares the ambient 500-source page is never bound,
-validated, or able to block the exact run. Binding a multi-authority plan case is safe
-only when every source is already canonically accounted, all owned authorities share
-one deliverable, and every non-primary persisted case already matches the state this
-plan derives; a merge that introduces a fresh source across persisted cases, spans
-distinct persisted deliverables, or carries a state-divergent secondary authority is a
-cross-case mismerge and fails loudly rather than writing a fresh or misattributed
-secondary source under the primary case. A single persisted authority backing more
-than one corrected deterministic instruction is the inverse split and fails the same
-way. That guard now runs per isolated lineage component: the selected plan is unioned
-by lineage cluster and by shared persisted authority (including a parser-corrected old
-authority that spans otherwise independent clusters), each component is validated on
-its own, and a failing component is quarantined into `isolated_failures`
-(`source_post_ids`, `persisted_case_ids`, `planned_instruction_keys`, structural
-coordinates only) instead of failing the whole run. A run that quarantines any
-component still commits every safe component and reports
-`completion_status: 'completed_degraded'` with `components_failed` /
-`sources_quarantined` totals, so one poison source no longer blocks unrelated safe
-intake. That loud multi-authority guard evaluates
-only the selected closure, not unrelated ambient cases on the same bounded page. The
-second exact pass prunes a page-only ambient ancestor when a persisted exact source
-binds back to its authoritative root, so a fresh selected child keeps its required
-parent edge. The one deliberate exception is a fresh review-exception `sibling_of`
-case: sibling orientation is arbitrary, so exact authority promotes it to its own root
-rather than pulling a page-only ambient sibling.
-
-The guarded job path runs the same required-field gate as approval before any
-storage, artifact-ledger or draft write, so an approval rejection (for example a null
-canonical client, or a missing work-order PDF on a physical report-family case) leaves
-no persisted case, artifact or draft side effect. The `artifacts_created` and
-`drafts_created` totals increment at the successful insert boundary, not after approval
-returns, so a later rejection cannot leave an uncounted write. Case-wide recovery never
-lets off-case client-name evidence flip a null canonical client to satisfied: the gate
-validates the actual canonical field, not the correlated cluster hint. A report-family
-plan that carries a combined make-safe + report obligation
-(`extraction.secondary_obligation`) is treated as physical, so it too requires a
-servable work-order PDF and splits the report type onto the secondary card.
-
-Before planning live jobs, the run reads existing make-safe jobs and binds a case
-to a pre-existing obligation instead of creating a duplicate. The match is made at
-one shared canonical boundary (`_shared/makesafe_refs.ts`) used by both this
-selection dedupe and the intake-draft approval duplicate guard, so the two never
-drift: the external ref is canonicalised so a manual/recovery composite display
-token (`MLB-26537PO-56922`) matches the deterministic claim (`MLB-26537`); the
-builder is collapsed through the one shared alias set (`majorloss`/`mlbuilder`/`MLB`,
-the AJ cluster, etc.); and a PO discriminator pulled from the explicit PO, the work
-order field, or the composite ref keeps two explicitly different POs from ever
-over-deduping into one obligation. PO identity uses one canonical numeric grammar on
-every make-safe path: the planner no longer runs a second permissive PO regex, so a
-postal `PO Box 2143` footer is left empty instead of becoming PO `BOX`, and only a
-numeric PO token becomes builder PO identity. An AJ subject that carries only
-`Job No 70062` (no repeated AJBR token) resolves to the `AJBR-70062` builder
-reference from the sender-selected adapter. A cancelled/void/superseded job is a dead
-obligation and is excluded from the match, so a later genuine re-issue of the same
-claim/PO creates a live job rather than binding to the dead one. A direct-ops job may
-store that builder-scoped obligation as a bare number (`AJBR-70062` versus `70062`);
-the dedupe accepts that storage difference only when the builder and the site address
-also agree, and it fails loudly rather than binding when more than one live job or a
-corrected `target_job_id` no longer uniquely matches. The dedupe read is
-paged to exhaustion so an obligation past the PostgREST 1,000-row cap cannot hide.
-Separately, before any write every selected lineage node is normalised to the cycle
-the database trigger will derive: roots land on cycle 1, `reopen_of` children on their
-parent's cycle plus one, and every other typed relation (sibling, revision,
-cancellation, duplicate) inherits its parent's cycle. Normalisation resolves
-recursively, so a reopen descendant is rebased when an earlier sibling or root
-collapses to its database cycle, and a parent that is already persisted while also
-appearing in the full-open selected plan keeps its authoritative database cycle. Only
-the `/cycle:N` key identity and cycle number are aligned to the trigger; revision,
-cancellation, reopen and distinct-PO ancestry semantics are preserved.
-
-A case that is accounted but whose guarded job creation has not yet succeeded is
-persisted with reason code `awaiting_job_creation`. It is a pre-job state, not an
-adapter failure, and it is retried on the next run. The full approved reason-code
-set is enforced by both `MAKESAFE_REASON_CODES` and the
-`makesafe_intake_cases_reason_code_check` constraint refreshed in migration
-`20260720000002`:
-
-`cancellation`, `duplicate`, `revision`, `unknown_builder`, `non_makesafe`,
-`ambiguous_scope`, `below_identity_floor`, `adapter_parse_failure`,
-`conflicting_fields`, `awaiting_job_creation`.
-
-## Offline tests
+Run the targeted contract:
 
 ```bash
-~/.deno/bin/deno test --allow-read \
-  supabase/functions/_shared/makesafe_intake_case_model_test.ts \
-  supabase/functions/_shared/makesafe_intake_case_migration_test.ts \
-  supabase/functions/ops-api/makesafe_deterministic_intake_test.ts \
-  supabase/functions/ops-api/makesafe_deterministic_intake_migration_test.ts \
-  supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts \
+~/.deno/bin/deno test -A --no-check \
   supabase/functions/ops-api/makesafe_production_controls_test.ts \
-  supabase/functions/ops-api/makesafe_alarm_readiness_test.ts
+  supabase/functions/ops-api/makesafe_deterministic_intake_test.ts \
+  supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts \
+  supabase/functions/ops-api/makesafe_deterministic_intake_migration_test.ts \
+  supabase/functions/ops-api/makesafe_intake_hardening_test.ts \
+  supabase/functions/ops-api/makesafe_wave0_hardening_test.ts \
+  supabase/functions/ops-api/makesafe_intake_recapture_test.ts \
+  supabase/functions/ops-api/monitor_ses_makesafes_test.ts \
+  supabase/functions/ops-api/makesafe_reporting_intake_pass_test.ts
 ```
 
-The pure adapter tests cover MLB, AJS/AJBR, Prime, RAPID, chatter, case-wide late
-evidence, address-only hostile identity, distinct POs, WO formatting, canonical
-numeric PO spellings converging, a postal `PO Box` footer never becoming purchase-order
-identity or a cross-claim lineage edge, an equal numeric PO alone never merging two
-different explicit claims, an AJ `Job No 70062` subject resolving to one isolated
-`AJBR-70062` obligation, claim-only exclusion, revisions, reopen cycles, twins,
-resends, cancellation, unknown builders, replay equality, zero unaccounted sources,
-and zero AI fallback.
+Acceptance evidence must show:
 
-The runtime tests cover commit-and-resume behaviour, exact allowlist selection,
-full-open selection processing the bounded cursor page while exact-empty and mixed
-full-open-plus-allowlist configurations fail closed, the
-N=1 cap, bounded fairness, run-twice zero-new-write behaviour, source accounting before
-job creation, content-hash artifact deduplication across twin posts, failure injection,
-zero AI, and zero assignment/work-order/invoice/client-communication writes. They also
-cover the PR 351 rerun remediation: approval prevalidation rejecting a null canonical
-client before any artifact or draft persistence, the production-shaped moving-sweep case
-where three off-case candidates cannot satisfy a null canonical client, overlapping
-manual and scheduled exact invocations converging without prevalidation side effects,
-and a report-family combined split obligation requiring a work-order PDF while a plain
-report-family plan still needs none. They also cover the external-obligation dedupe
-boundary: deterministic selection links a canonical claim ref to its composite-ref
-recovery job, an exact-selected sibling of a persisted cycle-1 root rebases to the
-trigger-derived cycle (and its persisted source authority survives a capped-cursor
-re-key across reruns), a cancelled/void/superseded job is excluded so a re-issue
-creates a live job, and two explicitly different POs are never over-deduped. Full-open
-lineage normalisation is covered directly: a parentless reopen root planned at an
-ambient cycle is written as database cycle 1, and a selected plan whose persisted root
-also appears in the full-open set has its siblings, `cancellation_of` node and reopen
-descendants all rebased to the cycles the trigger derives. They also cover the
-selection-authority boundary: full-open does not spend its cap reattaching sources
-already settled on canonical cases, a fresh source spanning multiple persisted cases,
-a merge spanning distinct persisted deliverables, and a state-divergent secondary
-authority each fail loudly, exact selection pulls the semantic parent chain
-and advances it within the case cap, a production-shaped own copy closes onto its
-persisted ambient parent, and an unrelated fresh multi-authority case sharing the
-bounded page is left untouched and cannot block the exact run. They also cover
-lineage-component isolation: a poisoned component is quarantined into
-`isolated_failures` with a `completed_degraded` completion status while unrelated
-safe components still commit, and a source-authority correction whose overlaid
-identity no longer matches the deterministic plan fails its component. The
-migration-contract tests assert both write boundaries share the same canonical ref,
-PO-core and builder-alias helpers so they cannot drift, and that the 2026-07-24
-lineage-authority correction migration is append-only (RLS-enabled, append-only
-trigger-guarded, `SELECT`-only grants), snapshot-guarded on the reviewed 335-case /
-600-source footprint and AJ 70062 → `SWMS-261055` mapping (with cancelled
-`SWMS-261054` explicitly excluded), and free of any job,
-assignment, draft, status or communication write.
-
-Run the existing migration clone harness before production migration approval:
-
-```bash
-MAKESAFE_PROD_SCHEMA_CLONE_URL='postgres://...' \
-MAKESAFE_PROD_SCHEMA_CLONE_ACK=I-confirm-this-is-a-disposable-prod-schema-clone \
-  scripts/test-makesafe-intake-case-migration.sh
-```
-
-Do not point this at production.
-
-## Read-only backlog replay
-
-After the new code is deployed dark and before the mode flip, call:
-
-```text
-GET /ops-api?action=makesafe_deterministic_intake_replay&days=60&only_unscanned=true&max_sources=2000
-```
-
-Use the existing privileged read credential. `max_sources` is optional, bounded to
-1 through 2,000, and exists so a narrow acceptance window can be proved in one
-response when the 500-row production default is too small. The response contains
-aggregate totals by builder and outcome only. It never returns message bodies,
-addresses, client details, attachment URLs, secrets, source identifiers, or the
-internal post-id tie breaker used by the sweep cursor. `dry_run=true`, `ai_calls=0`,
-and all write totals must remain zero.
-
-Required acceptance checks:
-
-- `evidence.zero_unaccounted_proved = true`. `totals.unaccounted = 0` on its own is
-  not sufficient: a run that filled either source sub-read, started partway through
-  a sweep, or returned a non-null next cursor only accounts for the rows represented
-  in that response. It reports `evidence.source_accounting_complete = false` and a
-  `source_read_capped` or `source_sweep_partial` caveat, and must not be filed as
-  clean evidence. Re-run from the sweep head with a higher `max_sources`, or use a
-  narrower `days`, until `cursor_at=null`, `next_cursor_at=null`,
-  `source_read.cap_reached=false`, and `evidence.caveats=[]` in the same response.
-- `evidence.caveats = []`, so no instruction key went unresolved purely because the
-  cap hid its sources (`instruction_allowlist_cap_exposed`)
-- every known-builder shortfall is visible in an exception outcome
-- distinct PO fixtures stay distinct
-- no address-only merge
-- no claim-only confirmed-live result
-- chatter is counted
-- model calls remain zero
-
-The aggregate response also includes `identity_floor`, calculated at canonical-case
-grain as `reached / known_builder_work_candidates * 100`, with per-builder counts.
-`reached` means the known-builder case has canonical WO/PO identity. Claim-only
-work remains below the floor and cannot enter confirmed-live state. The metric does
-not claim the case is ready to create a job: missing
-client/address, work-order PDF, phone or portal capture remains a loud parser,
-artifact or recovery outcome. Own-domain SES copies are structurally accounted as
-non-work and never inflate the denominator. File that sanitized object with the
-current commit so the 95% gate is reproducible.
-
-For the required N=1 human comparison, call the authenticated dark surface with exactly
-one approved source id (or one approved instruction key):
-
-```text
-POST /ops-api?action=makesafe_deterministic_intake_dark_observe
-{"source_ids":["<approved source id>"],"instruction_keys":[],"days":60}
-```
-
-The response contains hashed case handles, outcomes, reason/block fields and
-identity-evidence booleans. It returns no source id, raw/canonical ref, name, address,
-message text, attachment name or URL. `dry_run=true`, `ai_calls=0`, and every write
-total must be zero. A missing or partially resolved allowlist fails rather than
-silently widening the comparison.
-
-If the credential or safe endpoint is unavailable, record the exact blocker. Do not
-weaken the proof by reading production tables through an ad hoc broad query.
-
-## Preflight
-
-With the migration applied but mode still `legacy`, run:
-
-```sql
-select *
-from public.makesafe_deterministic_intake_preflight(
-  '00000000-0000-0000-0000-000000000001'::uuid
-);
-```
-
-Every check must be true. Also confirm:
-
-1. replay totals and reviewed fixture outcomes are accepted
-2. current intake health is truthful
-3. no deterministic run has produced model usage
-4. the release worktree is the authorised production release source
-5. migration and deploy approvals are recorded separately
-6. no live backfill is bundled with cutover
-
-Health must report the effective `intake_mode` and
-`alarm_readiness.ready=true` from a fresh authenticated canary timestamp. A configured
-recipient or existing cron without fresh authenticated proof is not ready.
-
-Production edge deploys are allowed only from main in:
-
-`/Users/marninstobbe/Projects/_release/secureworks-site-main`
-
-Use the repository guarded deploy script documented in `AGENTS.md`. Do not deploy from
-a feature worktree.
-
-## Direct guarded cutover
-
-There is no prolonged dual-running phase. This phase remains blocked until the
-separate Board/Hugo sender seam and every named gate pass. In the approved coordinated
-window, the first intake update must atomically bind authority to the one reviewed
-source and cap:
-
-```sql
-update public.makesafe_cron_settings
-set intake_mode = 'deterministic',
-    deterministic_selection_mode = 'exact',
-    deterministic_max_cases_per_run = 1,
-    deterministic_source_allowlist = array['<one approved source post id>'],
-    deterministic_instruction_allowlist = array[]::text[],
-    deterministic_rollout_changed_at = now(),
-    deterministic_rollout_changed_by = '<approved operator>',
-    intake_mode_changed_at = now(),
-    intake_mode_changed_by = '<approved operator>'
-where id = true
-  and intake_mode = 'legacy';
-```
-
-Require exactly one updated row. The next scan can select only that canonical case
-(and its correlated twin/resend evidence), up to one case. It cannot enter the
-legacy/model branch or pick up unrelated backlog during that invocation.
-
-After the exact N=1 loop is accepted and full-open activation is separately approved,
-widen with one atomic configuration change:
-
-```sql
-update public.makesafe_cron_settings
-set deterministic_selection_mode = 'full_open',
-    deterministic_max_cases_per_run = 1,
-    deterministic_source_allowlist = array[]::text[],
-    deterministic_instruction_allowlist = array[]::text[],
-    deterministic_rollout_changed_at = now(),
-    deterministic_rollout_changed_by = '<approved full-open operator>'
-where id = true
-  and intake_mode = 'deterministic'
-  and deterministic_selection_mode = 'exact'
-  and cardinality(deterministic_source_allowlist) = 1
-  and cardinality(deterministic_instruction_allowlist) = 0;
-```
-
-Require exactly one updated row. Keep the case cap at one during the bounded
-observation window. Full-open changes selection authority only: source reads remain
-capped, cursor-driven and zero-AI. An invalid selection mode, non-empty allowlist in
-full-open, or exact-empty deterministic configuration fails closed.
-
-## One-switch rollback
-
-Kill criteria include a duplicate job, silent/unaccounted source, ambiguous merge,
-incorrect PO collapse, communication side effect, false healthy state, or non-zero
-model call in deterministic mode.
-
-The separately approved rollback is:
-
-```sql
-update public.makesafe_cron_settings
-set intake_mode = 'legacy',
-    intake_mode_changed_at = now(),
-    intake_mode_changed_by = '<approved operator rollback>'
-where id = true
-  and intake_mode = 'deterministic';
-```
-
-The equivalent prepared file is:
-
-`supabase/rollbacks/20260720000002_makesafe_deterministic_intake_mode_rollback.sql`
-
-Do not drop canonical cases after cutover. They remain append-only evidence. Do not use
-the U1 physical down migration once any case is authoritative.
-
-## Post-cutover reconciliation
-
-After the first deterministic scan, verify without mutating production:
-
-1. health reports deterministic mode, OK status, and zero model calls
-2. structural source accounting has zero unaccounted emails and the run reports
-   `evidence.zero_unaccounted_proved = true` rather than a capped read
-3. aggregate outcomes match the approved no-write replay
-4. all created jobs are unassigned
-5. no manager SMS, client SMS/email, invoice, PDF duplicate, screenshot duplicate,
-   outbound message, or duplicate approval was created
-6. exceptions name the missing requirement, sources searched, rejected candidates, reason
-   code, and next action
-7. rerun the same window and verify that already-settled cases produce zero new cases,
-   drafts, jobs, approvals, or artifacts. A rerun may still advance cases the previous
-   run left unattempted or in `awaiting_job_creation`; that is the bounded resume, not
-   duplication. Only cases already at their resolved state must be inert.
-8. reconcile aliases/twins using the merged PR 338 safeguards
-
-Backfill remains a separate approved production action. This runbook does not authorise
-it.
+- a fresh SES work-order PDF fills deterministic draft/job fields with
+  `pdf_field_provenance` and `ai_calls=0`;
+- one pathological record is quarantined while the batch completes degraded;
+- one reporting-hook invocation records exactly one scanner call and one bounded
+  guarded advancement sweep;
+- the standing scanner slice contains none of `Anthropic`, `@anthropic-ai`,
+  `messages.create`, `ANTHROPIC_API_KEY`, or a metered endpoint;
+- incomplete/ambiguous drafts remain parked and passing drafts advance through the
+  same approval function as manual review.

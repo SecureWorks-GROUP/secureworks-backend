@@ -643,9 +643,10 @@ Deno.test("cancellation and unknown-builder work remain visible exceptions", () 
   assertEquals(plan.totals.unaccounted, 0);
 });
 
-Deno.test("deterministic switch is fail-closed and has no AI fallback", async () => {
+Deno.test("deterministic authority is the standing default and has no AI fallback", async () => {
   assertEquals(selectIntakeMode("deterministic"), "deterministic");
-  assertEquals(selectIntakeMode("anything-else"), "legacy");
+  assertEquals(selectIntakeMode("anything-else"), "deterministic");
+  assertEquals(selectIntakeMode("legacy"), "legacy");
   assertEquals(deterministicModeAllowsAiFallback(), false);
 
   const client = (result: unknown) => {
@@ -678,7 +679,7 @@ Deno.test("deterministic switch is fail-closed and has no AI fallback", async ()
       data: null,
       error: { code: "42703", message: "column intake_mode does not exist" },
     })),
-    "legacy",
+    "deterministic",
   );
   await assertRejects(
     () =>

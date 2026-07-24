@@ -11,11 +11,14 @@ BEGIN
   FROM public.makesafe_cron_settings
   WHERE id = true;
 
-  IF settings_row.intake_mode <> 'legacy' THEN
-    RAISE EXCEPTION 'clone control contract requires inert legacy mode';
+  IF settings_row.intake_mode <> 'deterministic' THEN
+    RAISE EXCEPTION 'standing intake authority must be deterministic';
   END IF;
-  IF settings_row.deterministic_max_cases_per_run <> 1 THEN
-    RAISE EXCEPTION 'deterministic rollout cap must default to exactly one';
+  IF settings_row.deterministic_selection_mode <> 'full_open' THEN
+    RAISE EXCEPTION 'standing deterministic selection must be full_open';
+  END IF;
+  IF settings_row.deterministic_max_cases_per_run <> 10 THEN
+    RAISE EXCEPTION 'standing deterministic cap must default to ten';
   END IF;
   IF cardinality(settings_row.deterministic_source_allowlist) <> 0
     OR cardinality(settings_row.deterministic_instruction_allowlist) <> 0

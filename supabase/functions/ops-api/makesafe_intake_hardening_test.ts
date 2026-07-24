@@ -2,7 +2,7 @@
 //   1. wrong-type guard (roof/assessment keyword-fallback vs a real WO PDF),
 //   2. cancellation path (CANCELLED WORK ORDER must never mint a draft),
 //   3. one email -> two cards (combined make-safe + report is flagged, never auto-filed),
-// plus the default-OFF opt-in auto-approval flag. The real live failure cases are named:
+// plus the default-on auto-approval flag and explicit false brake. The real live failure cases are named:
 // the MLB-25769 cancellation twins and the wrong-type roof fallback.
 import {
   assert,
@@ -608,17 +608,17 @@ Deno.test("sweep: a genuine two-WO combined draft with no stored obligation is b
   assertEquals(d.reason, "combined_makesafe_and_report_manual_review");
 });
 
-// ── Auto-approval flag: default OFF (opt-in) ─────────────────────────────────────
+// ── Auto-approval flag: default ON with an explicit deployment brake ──────────────
 
-Deno.test("autoApproveCleanIntakeEnabled: default OFF; only 'true' enables", () => {
+Deno.test("autoApproveCleanIntakeEnabled: default ON; explicit 'false' disables", () => {
   const prior = Deno.env.get("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE");
   try {
     Deno.env.delete("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE");
-    assertEquals(autoApproveEnabled(), false); // unset -> OFF
+    assertEquals(autoApproveEnabled(), true); // unset -> ON
     Deno.env.set("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE", "false");
     assertEquals(autoApproveEnabled(), false);
     Deno.env.set("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE", "1");
-    assertEquals(autoApproveEnabled(), false); // anything other than 'true' -> OFF
+    assertEquals(autoApproveEnabled(), true); // only exact 'false' disables
     Deno.env.set("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE", "true");
     assertEquals(autoApproveEnabled(), true);
   } finally {

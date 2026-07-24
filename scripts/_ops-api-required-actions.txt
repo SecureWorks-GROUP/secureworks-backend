@@ -94,6 +94,9 @@ makesafe_audit
 # read-only; dark observe additionally requires an exact source/key allowlist.
 makesafe_deterministic_intake_replay
 makesafe_deterministic_intake_dark_observe
+# SES reporting skill coupling: one bounded deterministic scan followed by the
+# existing guarded clean-draft advancement sweep.
+makesafe_reporting_intake_pass
 
 # ── Make-safe compact READ endpoints (Mission makesafe-live-truth-2026-06-14, M2)
 #    GAP-1..6: let the make-safe skills read the email-sync Supabase projection

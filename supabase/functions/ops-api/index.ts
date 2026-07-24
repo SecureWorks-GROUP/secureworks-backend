@@ -2426,11 +2426,12 @@ if (import.meta.main) serve(async (req: Request) => {
       // observe sweep position, which is what makes observation cover the window.
       'makesafe_deterministic_intake_dark_observe',
       'list_makesafe_companies',
-      // Make-safe intake. scan_ses_makesafes may promote ONLY clean, high-confidence
-      // normal work-order drafts through the internal auto-approval gate; it never
-      // sends, authorises, invoices, closes, or allocates. create_intake_draft stays
-      // draft-only.
-      'scan_ses_makesafes',
+      // Captain Amendment 46: the SES reporting skill owns one bounded deterministic
+      // scan plus one bounded clean-draft advancement sweep. This is the sole routine
+      // exception that may cross the intake approval boundary; it calls the same
+      // guarded approveIntakeDraft function as the human review button and still
+      // cannot send, invoice, authorise, close, or mutate named crew assignments.
+      'makesafe_reporting_intake_pass',
       'create_intake_draft',
       // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
       // own case, where a routine caller is REDIRECTED to a needs_review draft (it can
@@ -3196,7 +3197,32 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
       case 'create_intake_draft': return json(await createIntakeDraft(client, body))
-      case 'scan_ses_makesafes': return json(await scanSesMakesafes(client))
+      // Amendment 46: this pass composes the same guarded approveIntakeDraft as the
+      // sibling approval actions (auto_approve_clean_intake_drafts / approve_intake_draft),
+      // so it enforces the same privileged boundary. Allowed callers: the master ops
+      // key, the scoped make-safe reporting routine (its sole cross-approval exception,
+      // allow-listed above), or an admin/owner JWT. A non-admin JWT is rejected before
+      // any scan or advancement side effect, exactly as on the two approval actions.
+      case 'makesafe_reporting_intake_pass': {
+        const reportingIsPrivileged = authMode === 'api_key' || authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!reportingIsPrivileged) {
+          return json({ error: 'forbidden: makesafe_reporting_intake_pass requires the privileged ops key, the make-safe reporting routine, or an admin/owner session; a non-admin session cannot run the intake scan and advancement sweep' }, 403)
+        }
+        return json(await runMakesafeReportingIntakePass(client))
+      }
+      // scan_ses_makesafes now advances clean drafts inline (Amendment 46), so it
+      // crosses the same live-job approval boundary. It is no longer routine-allow-listed
+      // (the routine uses makesafe_reporting_intake_pass): the master ops key or an
+      // admin/owner JWT only, with a non-admin JWT rejected.
+      case 'scan_ses_makesafes': {
+        const scanIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!scanIsPrivileged) {
+          return json({ error: 'forbidden: scan_ses_makesafes requires the privileged ops key or an admin/owner session; the make-safe automation routine uses makesafe_reporting_intake_pass' }, 403)
+        }
+        return json(await scanSesMakesafes(client))
+      }
       case 'submit_makesafe_report':
         return json(await submitMakesafeReport(client, {
           ...body,
@@ -13207,15 +13233,12 @@ function hasWorkOrderAttachmentEvidence(attachments: any[]): boolean {
   return available.length === 1 && !attachmentNameLooksReportOnly(available[0])
 }
 
-// Auto-approval of clean intake drafts is OPT-IN and default OFF: it runs ONLY when
-// MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE is explicitly set to the string 'true'. An unset /
-// empty / any-other value keeps the human review gate as the default (the documented
-// model). This is the single authoritative env brake shared by the scanner auto-file,
-// the admin re-extract auto-file, and the privileged board sweep; the DB kill switch
-// (makesafe_cron_settings.auto_file_enabled) and the degraded-extraction block remain as
-// additional, independent brakes on top of it.
+// Clean, complete, high-confidence drafts advance by default (Captain Amendment 46).
+// An explicit "false" remains a deployment brake; the DB auto_file_enabled switch and
+// every field/duplicate/atomic-claim guard remain authoritative. No other value may
+// silently park all eligible drafts.
 function autoApproveCleanIntakeEnabled(): boolean {
-  return Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') === 'true'
+  return Deno.env.get('MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE') !== 'false'
 }
 
 // Intake item 5 — opt-in for the deterministic WO-PDF client-field fill. DEFAULT
@@ -13515,10 +13538,8 @@ function isAnthropicAuthFailure(err: unknown): boolean {
 
 // D-d kill switch: read makesafe_cron_settings.auto_file_enabled (Captain D1 default
 // TRUE). Fail-OPEN to true on a read error/missing row so a transient DB blip does not
-// silently flip this switch on its own — but note auto-approval is now default-OFF at the
-// env layer: it runs ONLY when MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE='true'
-// (autoApproveCleanIntakeEnabled). This DB switch and the degraded-extraction block are
-// the two additional independent brakes ON TOP of that opt-in env flag.
+// silently park all eligible drafts. The env switch is also default-on and disables
+// only when explicitly set to "false".
 async function isAutoFileEnabled(client: any): Promise<boolean> {
   try {
     const { data, error } = await client.from('makesafe_cron_settings')
@@ -13798,8 +13819,8 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const combinedSplittable = combinedSplitObligation(extraction) !== null
 
   // NOTE: this is a PURE cleanliness check (no `enabled` passed). Whether auto-approval
-  // is switched on at all is decided by the caller — the sweep action gates the opt-in
-  // MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE flag once, so a disabled flag still yields an
+  // is switched on at all is decided by the caller — the sweep action gates the default-on
+  // MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE flag once, so a braked flag still yields an
   // informative dry-run preview instead of masking every draft as 'disabled'.
   return shouldAutoApproveCleanIntake({
     reportType: effectiveReportType,
@@ -13823,7 +13844,7 @@ export const _combinedSplitObligationForTest = combinedSplitObligation
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
 // Intake hardening (items 1 + 3): exported so tests can exercise the positive-report
-// evidence pivot, the combined make-safe+report flagger, and the opt-in env flag.
+// evidence pivot, the combined make-safe+report flagger, and the default-on env brake.
 export const _hasPositiveReportOnlyEvidenceForTest = hasPositiveReportOnlyEvidence
 export const _flagCombinedIntakeObligationForTest = flagCombinedIntakeObligation
 export const _autoApproveCleanIntakeEnabledForTest = autoApproveCleanIntakeEnabled
@@ -13849,10 +13870,9 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
   const rawLimit = Number(body.limit || body.max || 60)
   const limit = Math.max(1, Math.min(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 60, 100))
   const requestedDryRun = body.dry_run === true || body.dryRun === true
-  // Default-OFF opt-in flag. When auto-approval is disabled this sweep still runs as a
-  // PREVIEW (computes which drafts are eligible) but performs NO live approvals — the
-  // dashboard button becomes an informative "N eligible, enable the flag to promote".
-  const enabled = autoApproveCleanIntakeEnabled()
+  // Both explicit brakes remain fail-safe. When either is disabled this sweep still
+  // produces a preview, but it performs no live approvals.
+  const enabled = autoApproveCleanIntakeEnabled() && await isAutoFileEnabled(client)
   const dryRun = requestedDryRun || !enabled
   const statuses = Array.isArray(body.statuses) && body.statuses.length
     ? body.statuses.map((s: any) => String(s || '').trim()).filter(Boolean)
@@ -15702,7 +15722,7 @@ async function landLateWorkOrderPdfOntoDraft(
   } catch { /* non-blocking breadcrumb */ }
 
   // Re-run the UNCHANGED strict gate on the merged row; auto-file only if now clean
-  // AND the same brakes (DB kill switch + opt-in env flag + not degraded) allow it.
+  // AND the same brakes (DB kill switch + default-on env brake + not degraded) allow it.
   let autoFiled: { job_id: string | null; reason: string } | null = null
   const decision = shouldAutoApproveCleanIntakeDraftRow(updated)
   const enabled = params.autoFileEnabled && !params.extractionDegraded && autoApproveCleanIntakeEnabled()
@@ -15723,30 +15743,59 @@ async function landLateWorkOrderPdfOntoDraft(
 export const _landLateWorkOrderPdfOntoDraftForTest = landLateWorkOrderPdfOntoDraft
 
 async function scanSesMakesafes(client: any) {
-  // One DB-backed authority switch. Deterministic mode has no code path to the
-  // legacy model extraction below and therefore cannot silently fall back to AI.
-  // Rollback changes this one row back to legacy for the next scan.
+  // Standing intake is deterministic unconditionally. The DB row supplies bounded
+  // selection controls only; it can no longer select the retired paid-AI engine.
   const rollout = await _loadDeterministicRolloutControls(client)
-  if (rollout.mode === 'deterministic') {
-    return await _runDeterministicIntake(client, {
-      dryRun: false,
-      selectionMode: rollout.selectionMode,
-      days: 60,
-      // Exact allowlists make the read narrow at case selection time. Include
-      // already-scanned sources so a configured key can be proved on every run;
-      // settled cases then replay with zero new business writes rather than a
-      // missing key being mistaken for a successful empty scan. The window read
-      // is capped per run and split oldest-unscanned/newest, and allowlisted
-      // sources are read by id, so scan cost stays flat as the mailbox grows
-      // without any in-window source being starved. One stale entry only shows up
-      // as an unmatched count instead of poisoning every later scan.
-      onlyUnscanned: false,
-      maxCases: rollout.maxCases,
-      allowSourcePostIds: rollout.sourcePostIds,
-      allowInstructionKeys: rollout.instructionKeys,
-      approveDraft: approveIntakeDraft,
-    })
+  // Read the two existing auto-file brakes once. They may park a clean draft, but
+  // they never turn off deterministic parsing, accounting or quarantine.
+  const advanceDrafts = autoApproveCleanIntakeEnabled() && await isAutoFileEnabled(client)
+  return await _runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: rollout.selectionMode,
+    days: 60,
+    // Full-open still reads a bounded cursor page and commits at most maxCases.
+    // Exact selection remains available only on explicit diagnostic actions.
+    onlyUnscanned: false,
+    maxCases: rollout.maxCases,
+    allowSourcePostIds: rollout.sourcePostIds,
+    allowInstructionKeys: rollout.instructionKeys,
+    advanceDrafts,
+    approveDraft: approveIntakeDraft,
+  })
+}
+
+const REPORTING_INTAKE_ADVANCE_LIMIT = 100
+
+async function runMakesafeReportingIntakePass(
+  client: any,
+  deps: {
+    scan?: (client: any) => Promise<any>
+    advance?: (client: any, body?: any) => Promise<any>
+  } = {},
+) {
+  // One reporting run owns exactly one bounded scanner invocation. The follow-up
+  // sweep advances only drafts that pass the same pure field gate and the same
+  // approveIntakeDraft duplicate/atomic-claim guards as a human review-button click.
+  const intake = await (deps.scan || scanSesMakesafes)(client)
+  const advancement = await (deps.advance || autoApproveCleanIntakeDrafts)(client, {
+    limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+    dry_run: false,
+    triggered_by: 'ses-reporting-skill',
+  })
+  return {
+    ok: true,
+    trigger: 'ses-reporting-skill',
+    bounded_intake_passes: 1,
+    advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+    intake,
+    advancement,
   }
+}
+export const _runMakesafeReportingIntakePassForTest = runMakesafeReportingIntakePass
+
+// Retained only as historical/manual implementation evidence. No dispatch action,
+// cron, reporting hook, or standing scanner can invoke this paid-AI engine.
+async function retiredPaidAiIntakeImplementation(client: any) {
 
   // The group-sync projection keys ses@ mail under this mailbox (the canonical
   // value used by monitor-ses-makesafes + reconcile + the GAP reads).
@@ -17320,9 +17369,7 @@ async function scanSesMakesafes(client: any) {
     }
 
     // D-d auto-file gate. THREE independent brakes decide `enabled`:
-    //   1. autoApproveCleanIntakeEnabled() — the OPT-IN env flag, DEFAULT OFF: auto-file
-    //      runs only when MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE='true' (the human review gate
-    //      is the default; enabling is a deliberate, single-string env flip),
+    //   1. autoApproveCleanIntakeEnabled() — default ON; exact env "false" parks drafts,
     //   2. autoFileEnabled  — the DB kill switch makesafe_cron_settings.auto_file_enabled
     //      (one UPDATE falls back to drafts-only, no redeploy),
     //   3. !draftExtractionDegraded — a dead-key run never auto-files (belt-and-braces
@@ -17587,6 +17634,8 @@ async function scanSesMakesafes(client: any) {
     source: 'group_sync_projection',
   }
 }
+export const _retiredPaidAiIntakeImplementationForManualTest =
+  retiredPaidAiIntakeImplementation
 
 async function recordMakesafeAlarmAuthentication(client: any, nowIso = new Date().toISOString()) {
   const { error } = await client.from('makesafe_intake_health').upsert({
@@ -17643,7 +17692,7 @@ async function intakeHealth(client: any) {
   // the older 'auto_intake_clean_gate' label is still counted for continuity).
   const { count: autoFiled24h } = await client.from('makesafe_intake_drafts')
     .select('id', { count: 'exact', head: true })
-    .in('approved_by', ['auto-intake', 'auto_intake_clean_gate'])
+    .in('approved_by', ['auto-intake', 'auto_intake_clean_gate', 'ses-reporting-skill'])
     .gte('approved_at', since24h)
 
   // M1.5 cost dashboard: read the per-draft cost records for the last 24h and roll them
@@ -17691,11 +17740,10 @@ async function intakeHealth(client: any) {
   }
 
   const status = String(health?.extraction_status || 'unknown')
-  const intakeMode = settingsError
-    ? 'unknown'
-    : settings?.intake_mode === 'legacy' || settings?.intake_mode === 'deterministic'
-    ? settings.intake_mode
-    : 'unknown'
+  // Application authority is deterministic even while a pre-migration compatibility
+  // row still says legacy. A settings read failure remains unknown because bounded
+  // selection controls cannot be proved.
+  const intakeMode = settingsError ? 'unknown' : 'deterministic'
   return {
     ok: true,
     generated_at: nowIso,

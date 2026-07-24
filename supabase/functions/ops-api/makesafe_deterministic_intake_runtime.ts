@@ -51,6 +51,9 @@ export interface DeterministicRuntimeOptions {
   includeSanitizedCases?: boolean;
   requireAllAllowlistMatches?: boolean;
   maxSources?: number;
+  // Parsing/accounting stays live when this brake is false, but a clean draft is
+  // parked for review instead of crossing the guarded approval boundary.
+  advanceDrafts?: boolean;
   approveDraft?: (client: any, body: any) => Promise<any>;
 }
 
@@ -78,6 +81,10 @@ export interface DeterministicIsolatedFailure {
 // and both DB and runtime reject caps outside this explicit canary/batch bound.
 const DEFAULT_MAX_CASES_PER_RUN = 1;
 const MAX_CASES_PER_RUN = 10;
+// Standing full-open cap that migration 20260724070000 writes to the singleton row.
+// It is the cap synthesised for a pre-migration schema whose row has not yet been
+// stamped, so deploy order cannot change the standing bound.
+const STANDING_DEFAULT_MAX_CASES = MAX_CASES_PER_RUN;
 const MAX_ALLOWLIST_ITEMS = 50;
 // Repeat failures must not spend the commit budget, but they still cost time, so
 // one run stops after this many attempts regardless of how many committed.
@@ -251,15 +258,14 @@ export async function loadDeterministicIntakeMode(
     .eq("id", true)
     .maybeSingle();
   if (error) {
-    // Pre-migration safe only for the known missing-column shape. Any network,
-    // auth, timeout, or other read failure aborts the scan: it must never turn a
-    // configured deterministic deployment into a silent legacy/AI fallback.
+    // A pre-migration database is still deterministic at the application boundary.
+    // Any other read failure aborts rather than guessing at rollout controls.
     if (
       String(error.code || "") === "42703" ||
       /intake_mode.*(?:does not exist|schema cache|column)/i.test(
         error.message || "",
       )
-    ) return "legacy";
+    ) return "deterministic";
     throw new Error(`intake mode read failed: ${error.message || error}`);
   }
   return selectIntakeMode(data?.intake_mode);
@@ -281,9 +287,28 @@ function exactAllowlist(values: unknown, label: string): string[] {
   return result;
 }
 
-/** Reads rollout authority from the single DB settings row. An old schema may
- * continue in legacy mode, but deterministic mode is never allowed to run when
- * the cap/allowlist columns cannot be proved. */
+// Standing full-open authority, synthesised when the DB row is still in the known
+// pre-20260724070000 shape. Deploy order stays harmless: the runtime resolves the
+// same bounded, zero-AI full-open behavior whether or not the migration has landed.
+function standingFullOpenControls(
+  maxCases = STANDING_DEFAULT_MAX_CASES,
+): DeterministicRolloutControls {
+  return {
+    mode: "deterministic",
+    selectionMode: "full_open",
+    maxCases,
+    sourcePostIds: [],
+    instructionKeys: [],
+  };
+}
+
+/** Reads bounded deterministic selection controls from the single DB settings row.
+ * The permanent-standing migration (20260724070000) pins selection to full_open with
+ * empty allowlists via CHECK constraints, so any full_open row is validated strictly
+ * and genuinely contradictory post-migration state fails closed. The known
+ * pre-migration legacy default (missing permanent-standing columns, or selection_mode
+ * still holding its 'exact' column default with empty allowlists) resolves to the same
+ * bounded full-open behavior rather than throwing, so deploy order never matters. */
 export async function loadDeterministicRolloutControls(
   client: any,
 ): Promise<DeterministicRolloutControls> {
@@ -307,35 +332,9 @@ export async function loadDeterministicRolloutControls(
         `deterministic rollout controls read failed: ${error.message || error}`,
       );
     }
-    const mode = await loadDeterministicIntakeMode(client);
-    if (mode === "deterministic") {
-      throw new Error(
-        "deterministic mode is set but DB rollout controls are unavailable",
-      );
-    }
-    return {
-      mode: "legacy",
-      selectionMode: "exact",
-      maxCases: 1,
-      sourcePostIds: [],
-      instructionKeys: [],
-    };
+    return standingFullOpenControls();
   }
-  const mode = selectIntakeMode(data?.intake_mode);
   const selectionMode = data?.deterministic_selection_mode;
-  if (selectionMode !== "exact" && selectionMode !== "full_open") {
-    throw new Error(
-      "deterministic selection mode must be exact or full_open",
-    );
-  }
-  const maxCases = Number(data?.deterministic_max_cases_per_run);
-  if (
-    !Number.isInteger(maxCases) || maxCases < 1 || maxCases > MAX_CASES_PER_RUN
-  ) {
-    throw new Error(
-      `deterministic rollout cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
-    );
-  }
   const sourcePostIds = exactAllowlist(
     data?.deterministic_source_allowlist,
     "deterministic source allowlist",
@@ -345,19 +344,36 @@ export async function loadDeterministicRolloutControls(
     "deterministic instruction allowlist",
   );
   const hasAllowlist = sourcePostIds.length > 0 || instructionKeys.length > 0;
-  if (selectionMode === "full_open" && hasAllowlist) {
-    throw new Error(
-      "deterministic full_open mode requires empty exact allowlists",
+  const maxCases = Number(data?.deterministic_max_cases_per_run);
+  const capValid = Number.isInteger(maxCases) &&
+    maxCases >= 1 && maxCases <= MAX_CASES_PER_RUN;
+  // Pre-migration legacy default: selection_mode still holds its 'exact' column
+  // default and both allowlists are empty. The migration's CHECK constraint makes
+  // 'exact' unreachable once applied, so this shape can only be the not-yet-migrated
+  // row; resolve it to the bounded standing full-open behavior.
+  if (selectionMode === "exact" && !hasAllowlist) {
+    return standingFullOpenControls(
+      capValid ? maxCases : STANDING_DEFAULT_MAX_CASES,
     );
   }
-  if (mode === "deterministic" && selectionMode === "exact" && !hasAllowlist) {
+  if (selectionMode !== "full_open") {
     throw new Error(
-      "deterministic exact mode requires a non-empty exact allowlist",
+      "deterministic standing selection mode must be full_open",
+    );
+  }
+  if (!capValid) {
+    throw new Error(
+      `deterministic rollout cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
+    );
+  }
+  if (hasAllowlist) {
+    throw new Error(
+      "deterministic standing full_open mode requires empty exact allowlists",
     );
   }
   return {
-    mode,
-    selectionMode,
+    mode: "deterministic",
+    selectionMode: "full_open",
     maxCases,
     sourcePostIds,
     instructionKeys,
@@ -2354,15 +2370,17 @@ async function ensureDraftAndJob(
   caseId: string,
   plan: DeterministicCasePlan,
   sourceMap: Map<string, DeterministicSourceItem>,
-  approveDraft: (client: any, body: any) => Promise<any>,
+  approveDraft: ((client: any, body: any) => Promise<any>) | undefined,
   onStorageBlocker: (blocker: string) => void,
   onPersistedOutcome: (outcome: PersistedOutcome) => void,
+  advanceDrafts = true,
 ): Promise<
   {
-    jobId: string;
+    jobId: string | null;
     draftCreated: boolean;
     jobCreated: boolean;
     resumed: boolean;
+    parked: boolean;
   }
 > {
   // Run the same required-field gate as approval before storage, artifact-ledger
@@ -2479,6 +2497,7 @@ async function ensureDraftAndJob(
       draftCreated,
       jobCreated: false,
       resumed: true,
+      parked: false,
     };
   }
   if (draft.status === "approved") {
@@ -2489,10 +2508,25 @@ async function ensureDraftAndJob(
         draftCreated,
         jobCreated: false,
         resumed: true,
+        parked: false,
       };
     }
     throw new Error(
       "approved deterministic draft has no job link; reconciliation required",
+    );
+  }
+  if (!advanceDrafts) {
+    return {
+      jobId: null,
+      draftCreated,
+      jobCreated: false,
+      resumed: !draftCreated,
+      parked: true,
+    };
+  }
+  if (!approveDraft) {
+    throw new Error(
+      "deterministic live mode requires the guarded approval callback",
     );
   }
   const approved = await approveDraft(client, {
@@ -2503,7 +2537,13 @@ async function ensureDraftAndJob(
   });
   const jobId = approved?.job?.id;
   if (!jobId) throw new Error("guarded approval returned no job id");
-  return { jobId, draftCreated, jobCreated: true, resumed: !draftCreated };
+  return {
+    jobId,
+    draftCreated,
+    jobCreated: true,
+    resumed: !draftCreated,
+    parked: false,
+  };
 }
 
 export const _ensureDraftAndJobForTest = ensureDraftAndJob;
@@ -2994,11 +3034,18 @@ export async function runDeterministicIntake(
     return report;
   }
   if (!plan.cases.length) {
+    // A standing full-open scan over a quiet mailbox is a successful bounded no-op,
+    // not the exact-allowlist configuration error below.
+    if (selectionMode === "full_open") {
+      await writeHealth(client, nowIso, 0, 0, 0);
+      await commitCompletedCursor();
+      return report;
+    }
     throw new Error(
       `exact deterministic allowlist resolved no cases (${report.selection.unmatched_source_allowlist} source ids, ${report.selection.unmatched_instruction_allowlist} instruction keys unmatched, ${report.selection.cap_exposed_instruction_allowlist} instruction keys unread inside the per-run cap)`,
     );
   }
-  if (!options.approveDraft) {
+  if (options.advanceDrafts !== false && !options.approveDraft) {
     throw new Error(
       "deterministic live mode requires the guarded approval callback",
     );
@@ -3146,20 +3193,24 @@ export async function runDeterministicIntake(
             if (outcome === "artifact") report.totals.artifacts_created++;
             if (outcome === "draft") report.totals.drafts_created++;
           },
+          options.advanceDrafts !== false,
         );
         jobId = live.jobId;
         if (live.jobCreated) report.totals.jobs_created++;
+        if (live.parked) report.totals.job_creation_deferred++;
         resumedCase = resumedCase || live.resumed;
-        // Sources were already accounted by the pre-job hop above, so this call
-        // only moves the case onto its job.
-        saved = await insertCaseAndSources(
-          client,
-          casePlan,
-          jobId,
-          sourceMap,
-          saved.caseRow,
-          true,
-        );
+        if (jobId) {
+          // Sources were already accounted by the pre-job hop above, so this call
+          // only moves the case onto its job.
+          saved = await insertCaseAndSources(
+            client,
+            casePlan,
+            jobId,
+            sourceMap,
+            saved.caseRow,
+            true,
+          );
+        }
       }
       committed++;
       // One case counts once, however many of its artefacts already existed.

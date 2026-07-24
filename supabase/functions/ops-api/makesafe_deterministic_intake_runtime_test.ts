@@ -530,6 +530,65 @@ Deno.test("live deterministic intake fills a draft from PDF and persists readabl
   );
 });
 
+Deno.test("auto-file brake parks a complete deterministic draft without stopping intake", async () => {
+  const store = baseStore();
+  const pdfBytes = digitalWorkOrderPdf();
+  store.emails.push(email({
+    post_id: "parked-live-1",
+    subject: "NEW WORK ORDER",
+    body_content: "The builder work order is attached.",
+  }));
+  store.email_attachments.push({
+    id: "parked-live-att",
+    email_id: "parked-live-1",
+    name: "MLB Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/parked-live.pdf",
+    status: "uploaded",
+    size_bytes: pdfBytes.length,
+  });
+  const client = fakeClient(store, [], undefined, () => pdfBytes);
+  let approvalCalls = 0;
+  const guardedApprove = (_client: any, _body: any) => {
+    approvalCalls++;
+    return Promise.resolve({ job: { id: "job-after-brake" } });
+  };
+
+  const parked = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["parked-live-1"],
+    maxCases: 1,
+    advanceDrafts: false,
+    approveDraft: guardedApprove,
+    nowIso: NOW,
+  });
+  assertEquals(parked.ai_calls, 0);
+  assertEquals(parked.totals.drafts_created, 1);
+  assertEquals(parked.totals.jobs_created, 0);
+  assertEquals(parked.totals.job_creation_deferred, 1);
+  assertEquals(approvalCalls, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].job_id, null);
+  assertEquals(store.emails[0].makesafe_scanned_at, null);
+
+  const advanced = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["parked-live-1"],
+    maxCases: 1,
+    advanceDrafts: true,
+    approveDraft: guardedApprove,
+    nowIso: NOW,
+  });
+  assertEquals(advanced.totals.drafts_created, 0);
+  assertEquals(advanced.totals.jobs_created, 1);
+  assertEquals(approvalCalls, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].job_id, "job-after-brake");
+  assertEquals(store.emails[0].makesafe_scanned_at, NOW);
+});
+
 function seedCanonicalCase(
   store: Store,
   id: string,
@@ -888,6 +947,25 @@ Deno.test("full-open processes the bounded page while exact-empty and mixed conf
     Error,
     "full_open mode requires empty exact allowlists",
   );
+});
+
+Deno.test("standing full-open completes cleanly when the bounded mailbox page is quiet", async () => {
+  const store = baseStore();
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxCases: 10,
+    approveDraft,
+  });
+
+  assertEquals(report.ok, true);
+  assertEquals(report.selection.mode, "full_open");
+  assertEquals(report.selection.selected_cases, 0);
+  assertEquals(report.totals.cases_attempted, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(store.makesafe_intake_cases.length, 0);
 });
 
 Deno.test("full-open chunks long instruction-key filters below the live URL failure boundary", async () => {

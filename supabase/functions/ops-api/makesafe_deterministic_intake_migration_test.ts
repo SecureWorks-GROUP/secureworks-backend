@@ -28,6 +28,12 @@ const fullOpenMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const standingMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260724070000_makesafe_deterministic_standing_intake.sql",
+    import.meta.url,
+  ),
+);
 const lineageCorrectionMigration = await Deno.readTextFile(
   new URL(
     "../../migrations/20260724025815_makesafe_lineage_authority_corrections.sql",
@@ -37,12 +43,6 @@ const lineageCorrectionMigration = await Deno.readTextFile(
 const lineageSupersessionMigration = await Deno.readTextFile(
   new URL(
     "../../migrations/20260724062509_makesafe_lineage_authority_supersessions.sql",
-    import.meta.url,
-  ),
-);
-const rollback = await Deno.readTextFile(
-  new URL(
-    "../../rollbacks/20260720000002_makesafe_deterministic_intake_mode_rollback.sql",
     import.meta.url,
   ),
 );
@@ -67,21 +67,36 @@ async function sha256Hex(value: string): Promise<string> {
     .join("");
 }
 
-Deno.test("cutover migration defaults to legacy and exposes one deterministic switch", () => {
+Deno.test("standing migration permanently selects bounded deterministic full-open authority", () => {
   assertStringIncludes(
-    migration,
-    "intake_mode text NOT NULL DEFAULT 'legacy'",
+    standingMigration,
+    "ALTER COLUMN intake_mode SET DEFAULT 'deterministic'",
   );
   assertStringIncludes(
-    migration,
-    "CHECK (intake_mode IN ('legacy', 'deterministic'))",
+    standingMigration,
+    "CHECK (intake_mode = 'deterministic')",
   );
-  assertStringIncludes(migration, "makesafe_deterministic_intake_preflight");
   assertStringIncludes(
-    rollback,
-    "SET intake_mode = 'legacy'",
+    standingMigration,
+    "deterministic_selection_mode = 'full_open'",
   );
-  assert(!rollback.match(/DROP\s|DELETE\s|TRUNCATE\s/i));
+  assertStringIncludes(
+    standingMigration,
+    "CHECK (deterministic_selection_mode = 'full_open')",
+  );
+  assertStringIncludes(
+    standingMigration,
+    "deterministic_max_cases_per_run = 10",
+  );
+  assertStringIncludes(
+    standingMigration,
+    "deterministic_source_allowlist = ARRAY[]::text[]",
+  );
+  assertStringIncludes(
+    standingMigration,
+    "SELECT 'deterministic'::text",
+  );
+  assert(!standingMigration.includes("SET intake_mode = 'legacy'"));
 });
 
 Deno.test("case persistence carries story, manifest evidence, recovery and side-effect identity", () => {
@@ -134,7 +149,19 @@ Deno.test("deterministic normal path has no model import or silent fallback", ()
     assert(!core.includes(token), `core must not contain ${token}`);
     assert(!runtime.includes(token), `runtime must not contain ${token}`);
   }
-  assertStringIncludes(index, "if (rollout.mode === 'deterministic')");
+  const standingStart = index.indexOf("async function scanSesMakesafes");
+  const retiredStart = index.indexOf(
+    "async function retiredPaidAiIntakeImplementation",
+  );
+  const standingScanner = index.slice(standingStart, retiredStart);
+  assert(standingStart >= 0 && retiredStart > standingStart);
+  for (const token of forbidden) {
+    assert(
+      !standingScanner.includes(token),
+      `standing scanner must not contain ${token}`,
+    );
+  }
+  assert(!standingScanner.includes("ANTHROPIC_API_KEY"));
   assertStringIncludes(index, "approveDraft: approveIntakeDraft");
   assertStringIncludes(index, "suppress_manager_notification");
   assertStringIncludes(index, "approvedWorkOrderIdentity");
@@ -315,16 +342,23 @@ Deno.test("dry-run replay and exact dark observe take no business-write branch",
   assert(!runtime.match(/console\.(?:log|error|warn)\s*\(/));
 });
 
-Deno.test("production controls default to N=1, exact empty allowlists and bounded later caps", () => {
+Deno.test("standing controls default to full-open N=10 and remain structurally bounded", () => {
   assertStringIncludes(
-    controlsMigration,
-    "deterministic_max_cases_per_run smallint NOT NULL DEFAULT 1",
+    standingMigration,
+    "ALTER COLUMN deterministic_max_cases_per_run SET DEFAULT 10",
   );
   assertStringIncludes(controlsMigration, "BETWEEN 1 AND 10");
-  assertStringIncludes(controlsMigration, "deterministic_source_allowlist");
   assertStringIncludes(
-    controlsMigration,
-    "deterministic_instruction_allowlist",
+    standingMigration,
+    "ALTER COLUMN deterministic_selection_mode SET DEFAULT 'full_open'",
+  );
+  assertStringIncludes(
+    standingMigration,
+    "deterministic_instruction_allowlist = ARRAY[]::text[]",
+  );
+  assertStringIncludes(
+    standingMigration,
+    "cardinality(deterministic_source_allowlist) = 0",
   );
   assertStringIncludes(runtime, "loadDeterministicRolloutControls");
   assertStringIncludes(runtime, "requires a non-empty exact DB allowlist");
@@ -383,6 +417,30 @@ Deno.test("full-open is explicit, bounded and distinct from exact-empty fail-clo
     "deterministic full_open mode requires empty exact allowlists",
   );
   assertStringIncludes(index, "selectionMode: rollout.selectionMode");
+});
+
+Deno.test("reporting hook runs one bounded scan then the existing guarded approval sweep", () => {
+  const hookStart = index.indexOf(
+    "async function runMakesafeReportingIntakePass",
+  );
+  const hookEnd = index.indexOf(
+    "export const _runMakesafeReportingIntakePassForTest",
+  );
+  const hook = index.slice(hookStart, hookEnd);
+  assert(hookStart >= 0 && hookEnd > hookStart);
+  assertStringIncludes(hook, "deps.scan || scanSesMakesafes");
+  assertStringIncludes(hook, "deps.advance || autoApproveCleanIntakeDrafts");
+  assertStringIncludes(hook, "bounded_intake_passes: 1");
+  assertStringIncludes(hook, "REPORTING_INTAKE_ADVANCE_LIMIT");
+  assertStringIncludes(index, "const REPORTING_INTAKE_ADVANCE_LIMIT = 100");
+  assertStringIncludes(
+    index,
+    "const decision = shouldAutoApproveCleanIntakeDraftRow(draft)",
+  );
+  assertStringIncludes(
+    index,
+    "const approved = await approveIntakeDraft(client",
+  );
 });
 
 Deno.test("lineage correction is append-only, snapshot-guarded and side-effect-free", () => {
@@ -651,11 +709,20 @@ Deno.test("ruling 5 terminal skill hook stays deterministic and non-privileged",
     routineAllowlist,
     "'makesafe_deterministic_intake_dark_observe'",
   );
+  assertStringIncludes(
+    routineAllowlist,
+    "'makesafe_reporting_intake_pass'",
+  );
+  assert(
+    !routineAllowlist.includes("'scan_ses_makesafes'"),
+    "routine must use the one-pass reporting hook, not invoke the raw scanner",
+  );
   assertStringIncludes(terminalHook, "Automatic code");
   assertStringIncludes(terminalHook, "Terminal make-safe skill");
   assertStringIncludes(terminalHook, "Manual operator");
   assertStringIncludes(terminalHook, "paid AI extraction API stays off");
-  assertStringIncludes(terminalHook, "may not call\n`approve_intake_draft`");
+  assertStringIncludes(terminalHook, "`approve_intake_draft`");
+  assertStringIncludes(terminalHook, "no longer routine-allowlisted");
 });
 
 Deno.test("health exposes effective mode and fresh authenticated alarm proof", () => {
