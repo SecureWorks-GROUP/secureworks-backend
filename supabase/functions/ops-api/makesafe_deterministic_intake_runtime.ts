@@ -352,7 +352,9 @@ export async function loadDeterministicRolloutControls(
   // 'exact' unreachable once applied, so this shape can only be the not-yet-migrated
   // row; resolve it to the bounded standing full-open behavior.
   if (selectionMode === "exact" && !hasAllowlist) {
-    return standingFullOpenControls(capValid ? maxCases : STANDING_DEFAULT_MAX_CASES);
+    return standingFullOpenControls(
+      capValid ? maxCases : STANDING_DEFAULT_MAX_CASES,
+    );
   }
   if (selectionMode !== "full_open") {
     throw new Error(
