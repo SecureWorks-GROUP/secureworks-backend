@@ -1,4 +1,3 @@
-// deno-lint-ignore-file no-explicit-any
 // Pure planning for the captain-approved make-safe board display cutover.
 //
 // Applying a plan appends to makesafe_board_status_applications. It never writes
