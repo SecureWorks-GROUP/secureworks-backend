@@ -13819,8 +13819,8 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const combinedSplittable = combinedSplitObligation(extraction) !== null
 
   // NOTE: this is a PURE cleanliness check (no `enabled` passed). Whether auto-approval
-  // is switched on at all is decided by the caller — the sweep action gates the opt-in
-  // MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE flag once, so a disabled flag still yields an
+  // is switched on at all is decided by the caller — the sweep action gates the default-on
+  // MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE flag once, so a braked flag still yields an
   // informative dry-run preview instead of masking every draft as 'disabled'.
   return shouldAutoApproveCleanIntake({
     reportType: effectiveReportType,
@@ -13844,7 +13844,7 @@ export const _combinedSplitObligationForTest = combinedSplitObligation
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
 // Intake hardening (items 1 + 3): exported so tests can exercise the positive-report
-// evidence pivot, the combined make-safe+report flagger, and the opt-in env flag.
+// evidence pivot, the combined make-safe+report flagger, and the default-on env brake.
 export const _hasPositiveReportOnlyEvidenceForTest = hasPositiveReportOnlyEvidence
 export const _flagCombinedIntakeObligationForTest = flagCombinedIntakeObligation
 export const _autoApproveCleanIntakeEnabledForTest = autoApproveCleanIntakeEnabled
@@ -15722,7 +15722,7 @@ async function landLateWorkOrderPdfOntoDraft(
   } catch { /* non-blocking breadcrumb */ }
 
   // Re-run the UNCHANGED strict gate on the merged row; auto-file only if now clean
-  // AND the same brakes (DB kill switch + opt-in env flag + not degraded) allow it.
+  // AND the same brakes (DB kill switch + default-on env brake + not degraded) allow it.
   let autoFiled: { job_id: string | null; reason: string } | null = null
   const decision = shouldAutoApproveCleanIntakeDraftRow(updated)
   const enabled = params.autoFileEnabled && !params.extractionDegraded && autoApproveCleanIntakeEnabled()

@@ -7,9 +7,11 @@ mission. The migration is drafted but has not been applied.
 
 The deterministic cutover package (`docs/makesafe-deterministic-intake-cutover.md`)
 now builds on this model: its runtime imports the shared case model and writes cases
-and case sources when `makesafe_cron_settings.intake_mode = 'deterministic'`. That
-switch defaults to `legacy`, so the model stays unwritten until the separately
-approved cutover. No draft, auto-file, board, notification or AI path writes it.
+and case sources on every standing deterministic scan. Standing make-safe intake is
+now permanently `deterministic`. `makesafe_cron_settings.intake_mode` defaults to
+`deterministic` and can no longer select the retired legacy path (see
+`20260724070000_makesafe_deterministic_standing_intake.sql`). No draft, auto-file,
+board, notification or AI path writes it.
 
 Up migration:
 
