@@ -19,6 +19,7 @@ import {
   type DeterministicCasePlan,
   type DeterministicCompanyProfile,
   type DeterministicIntakePlan,
+  type DeterministicPdfDocument,
   type DeterministicSourceItem,
   selectIntakeMode,
 } from "./makesafe_deterministic_intake.ts";
@@ -31,6 +32,7 @@ import {
   canonicalObligationPoCore,
   loadRefPrefixes,
 } from "../_shared/makesafe_refs.ts";
+import { extractPdfText, PDF_TEXT_MAX_BYTES } from "./makesafe_pdf_text.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -96,6 +98,8 @@ const MAX_SOURCES_PER_RUN = 2000;
 // stamped: the vast majority of SES mail never settles a case and would otherwise
 // hold the same oldest rows in front of the read forever.
 const BACKLOG_READ_SHARE = 0.5;
+const MAX_PDF_EXTRACTIONS_PER_RUN = 50;
+const MAX_PDF_ATTACHMENTS_PER_SOURCE = 2;
 
 export interface DeterministicRuntimeReport {
   ok: true;
@@ -766,6 +770,119 @@ async function persistScanCursor(
   }
 }
 
+function eligiblePdfAttachments(
+  source: DeterministicSourceItem,
+): DeterministicAttachment[] {
+  return source.attachments.filter((attachment) =>
+    attachment.status === "uploaded" && !!attachment.storagePath &&
+    (/pdf/i.test(attachment.contentType || "") ||
+      /\.pdf$/i.test(attachment.name || ""))
+  ).sort((a, b) => {
+    const score = (attachment: DeterministicAttachment) =>
+      /work\s*order|works\s*order|(?:^|[^A-Z])WO(?:[^A-Z]|$)/i.test(
+          attachment.name || "",
+        )
+        ? 0
+        : 1;
+    return score(a) - score(b) ||
+      String(a.name || "").localeCompare(String(b.name || "")) ||
+      a.id.localeCompare(b.id);
+  }).slice(0, MAX_PDF_ATTACHMENTS_PER_SOURCE);
+}
+
+function pdfDocument(
+  source: DeterministicSourceItem,
+  attachment: DeterministicAttachment,
+  values: Partial<DeterministicPdfDocument>,
+): DeterministicPdfDocument {
+  return {
+    sourcePostId: source.postId,
+    attachmentId: attachment.id,
+    attachmentName: attachment.name,
+    status: "quarantined",
+    text: null,
+    charCount: 0,
+    pageCount: null,
+    extractor: null,
+    truncated: false,
+    reason: null,
+    ...values,
+  };
+}
+
+export async function enrichSourcesWithPdfText(
+  client: any,
+  sources: readonly DeterministicSourceItem[],
+  priorityPostIds: readonly string[] = [],
+): Promise<DeterministicSourceItem[]> {
+  const priority = new Set(priorityPostIds);
+  const ordered = [...sources].sort((a, b) =>
+    Number(priority.has(b.postId)) - Number(priority.has(a.postId)) ||
+    a.receivedAt.localeCompare(b.receivedAt) ||
+    a.postId.localeCompare(b.postId)
+  );
+  const documentsByPost = new Map<string, DeterministicPdfDocument[]>();
+  let attempted = 0;
+  for (const source of ordered) {
+    if (source.direction === "own_outbound") continue;
+    for (const attachment of eligiblePdfAttachments(source)) {
+      let document: DeterministicPdfDocument;
+      if (attempted >= MAX_PDF_EXTRACTIONS_PER_RUN) {
+        document = pdfDocument(source, attachment, {
+          status: "deferred",
+          reason: "run_extraction_cap",
+        });
+      } else if (
+        Number(attachment.sizeBytes || 0) > PDF_TEXT_MAX_BYTES
+      ) {
+        attempted++;
+        document = pdfDocument(source, attachment, {
+          reason: "pdf_too_large",
+        });
+      } else {
+        attempted++;
+        try {
+          const storage = client?.storage?.from?.("makesafe-emails");
+          const { data: blob, error } = storage
+            ? await storage.download(attachment.storagePath!)
+            : { data: null, error: new Error("storage unavailable") };
+          if (error || !blob) {
+            document = pdfDocument(source, attachment, {
+              reason: "download_failed",
+            });
+          } else {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            const extracted = await extractPdfText(bytes);
+            document = pdfDocument(source, attachment, {
+              status: extracted.mode === "text" ? "extracted" : "quarantined",
+              text: extracted.mode === "text" ? extracted.text : null,
+              charCount: extracted.charCount,
+              pageCount: extracted.pageCount ?? null,
+              extractor: extracted.extractor ?? null,
+              truncated: extracted.truncated === true,
+              reason: extracted.mode === "text"
+                ? null
+                : extracted.note || "no_usable_text",
+            });
+          }
+        } catch {
+          document = pdfDocument(source, attachment, {
+            reason: "extraction_failed",
+          });
+        }
+      }
+      documentsByPost.set(source.postId, [
+        ...(documentsByPost.get(source.postId) || []),
+        document,
+      ]);
+    }
+  }
+  return sources.map((source) => ({
+    ...source,
+    pdfDocuments: documentsByPost.get(source.postId) || [],
+  }));
+}
+
 async function readInputs(
   client: any,
   options:
@@ -923,7 +1040,7 @@ async function readInputs(
       : [],
     parsingRules: row.parsing_rules || null,
   }));
-  const sources = emails.map((row: any): DeterministicSourceItem => {
+  const sourceRows = emails.map((row: any): DeterministicSourceItem => {
     const rawBody = row.body_content || row.body_preview || "";
     // Match the proven legacy intake shape: regexes receive readable text, not a
     // newline-free HTML document whose tags hide labels and make address captures
@@ -946,6 +1063,11 @@ async function readInputs(
         : "inbound",
     };
   });
+  const sources = await enrichSourcesWithPdfText(
+    client,
+    sourceRows,
+    options.seedPostIds,
+  );
   const backlogPageFull = backlogRows.length >= backlogCap;
   const recentPageFull = recentCap === 0 || recentRows.length >= recentCap;
   const nextCursor = backlogPageFull
@@ -1564,6 +1686,19 @@ function casePayload(
       builder_wo: plan.identity.builderWoRaw,
       builder_po: plan.identity.builderPoRaw,
       deliverable: plan.identity.deliverableRefRaw,
+      description: plan.identity.description,
+      work_order_pdf_text: plan.pdfDocuments.map((document) => ({
+        source_post_id: document.sourcePostId,
+        attachment_id: document.attachmentId,
+        attachment_name: document.attachmentName,
+        status: document.status,
+        text: document.text,
+        char_count: document.charCount,
+        page_count: document.pageCount,
+        extractor: document.extractor,
+        truncated: document.truncated,
+        reason: document.reason,
+      })),
     },
     field_provenance: plan.identity.companyId
       ? {
@@ -1572,8 +1707,9 @@ function casePayload(
           rule: plan.adapterVersion,
           sourcePostId: plan.primarySourcePostId,
         },
+        ...plan.fieldProvenance,
       }
-      : {},
+      : { ...plan.fieldProvenance },
     client_name: plan.identity.clientName,
     client_phone: plan.identity.clientPhone,
     client_email: plan.identity.clientEmail,
@@ -2272,6 +2408,21 @@ async function ensureDraftAndJob(
       recovery_cursor: plan.recoveryCursor,
       builder_email_subject: primary.subject,
       builder_email_received_at: primary.receivedAt,
+      description: plan.identity.description,
+      work_order_pdf_text: plan.pdfDocuments.map((document) => ({
+        source_post_id: document.sourcePostId,
+        attachment_id: document.attachmentId,
+        attachment_name: document.attachmentName,
+        status: document.status,
+        text: document.text,
+        char_count: document.charCount,
+        page_count: document.pageCount,
+        extractor: document.extractor,
+        truncated: document.truncated,
+        reason: document.reason,
+      })),
+      pdf_field_provenance: plan.fieldProvenance,
+      pdf_sourced_fields: Object.keys(plan.fieldProvenance),
       ...(plan.secondaryObligation
         ? { secondary_obligation: plan.secondaryObligation }
         : {}),
@@ -2294,7 +2445,7 @@ async function ensureDraftAndJob(
       client_email: plan.identity.clientEmail,
       site_address: plan.identity.siteAddress,
       site_suburb: plan.identity.siteSuburb,
-      description: plan.identity.jobFamily,
+      description: plan.identity.description || plan.identity.jobFamily,
       confidence: "high",
       missing_fields: plan.blockedReasons,
       extraction_json: extraction,
@@ -2474,6 +2625,17 @@ async function insertCaseAndSources(
       evidence: {
         adapter_id: plan.adapterId,
         instruction_key: plan.instructionKey,
+        pdf_extraction: (source.pdfDocuments || []).map((document) => ({
+          attachment_id: document.attachmentId,
+          attachment_name: document.attachmentName,
+          status: document.status,
+          text: document.text,
+          char_count: document.charCount,
+          page_count: document.pageCount,
+          extractor: document.extractor,
+          truncated: document.truncated,
+          reason: document.reason,
+        })),
       },
       provenance: "deterministic",
       received_at: source.receivedAt,

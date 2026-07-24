@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 export interface BuilderWorkOrderIdentityInput {
   externalRef?: string | null;
   subject?: string | null;
@@ -163,13 +164,17 @@ export function extractBuilderWorkOrderIdentity(
   }
 
   if (input.bodyText) {
-    const labelledLines = String(input.bodyText)
-      .split(/\r?\n/)
-      .filter((line) =>
-        /work\s*order|works?\s*order|purchase\s+order|\bP\s*O\b|claim|builder\s+ref|our\s+ref|job\s+number/i
+    const bodyLines = String(input.bodyText).split(/\r?\n/);
+    const labelledLines = bodyLines.flatMap((line, index) => {
+      if (
+        !/work\s*order|works?\s*order|purchase\s+order|\bP\s*O\b|claim|builder\s+ref|our\s+ref|job\s+number/i
           .test(line)
-      )
-      .join("\n");
+      ) return [];
+      // Generated builder PDFs commonly render a label and its value as two text
+      // rows. Carry the immediately following row into the same bounded identity
+      // scan; the strict builder/PO grammars still decide whether it is evidence.
+      return [line, bodyLines[index + 1] || ""];
+    }).join("\n");
     if (labelledLines) scanText(labelledLines, "body_text", result);
   }
 

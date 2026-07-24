@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   extractBuilderWorkOrderIdentity,
@@ -49,6 +50,18 @@ Deno.test("builder identity: body labels can supply PO when subject supplies cla
   assertEquals(identity.builder_claim_ref, "MLB-26072");
   assertEquals(identity.builder_po_number, "PO-55443");
   assertEquals(identity.builder_work_order_number, "MLB-26072PO-55443");
+});
+
+Deno.test("builder identity: PDF label and value on adjacent lines stay one identity", () => {
+  const identity = extractBuilderWorkOrderIdentity({
+    bodyText:
+      "Work Order Number\nMLB-26770PO-55296\nPolicyholders Name\nAmanda Parker",
+  });
+
+  assertEquals(identity.builder_claim_ref, "MLB-26770");
+  assertEquals(identity.builder_po_number, "PO-55296");
+  assertEquals(identity.builder_work_order_number, "MLB-26770PO-55296");
+  assertEquals(identity.evidence_sources, ["body_text"]);
 });
 
 // This extractor feeds the production capture path: its output becomes external_ref.

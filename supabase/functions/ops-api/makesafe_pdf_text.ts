@@ -1,4 +1,8 @@
-// deno-lint-ignore-file no-explicit-any
+// deno-lint-ignore-file no-explicit-any no-import-prefix
+import {
+  extractText as extractTextWithUnpdf,
+  getDocumentProxy,
+} from "npm:unpdf@1.6.2";
 // ════════════════════════════════════════════════════════════
 // MAKE-SAFE INTAKE — LOCAL PDF TEXT-LAYER EXTRACTION (cost hardening, M1.5)
 // Mission: makesafe/intake-cost-hardening (Auto-Intake v2 Wave 1 M1.5)
@@ -11,14 +15,11 @@
 // text — extracting it locally and sending it as a cheap `text` block costs a fraction
 // of the tokens with no loss of the fields we extract.
 //
-// DENO-COMPATIBILITY, BY DESIGN. This extractor uses ONLY Web APIs present in the
-// Deno / Supabase edge runtime — `DecompressionStream`, `TextDecoder`, `Uint8Array`.
-// No npm/esm dependency (unpdf / pdf.js are heavy and fragile under edge cold-start),
-// so it can never break the edge boot or fail key-less. The failure mode is always
-// safe: if a stream can't be inflated (unsupported filter, runtime without
-// DecompressionStream) or the extracted text looks like garbage, we return mode:'none'
-// and the caller falls back to the current `document`-block path — invariant 2 (the
-// same fields keep flowing) is preserved regardless.
+// The primary extractor is unpdf's serverless PDF.js build, pinned in deno.lock and
+// supported by the Deno/Supabase runtime. It resolves generated Type0/CID fonts via
+// their ToUnicode maps, which the original content-stream heuristic cannot do. The
+// heuristic remains as a dependency-independent fallback for malformed legacy
+// fixtures and simple PDFs. Every path is bounded and never throws.
 //
 // LIMITATION (documented): this reads the TEXT LAYER only. Scanned/image-only PDFs and
 // PDFs whose fonts use custom CID encodings without a plain text layer yield little or
@@ -29,6 +30,9 @@
 /** Minimum extracted-text length (chars) to prefer the cheap text path over the
  * document block. Below this an email is treated as a scanned/low-text PDF. */
 export const PDF_TEXT_MIN_CHARS = 200;
+export const PDF_TEXT_MAX_BYTES = 5_000_000;
+export const PDF_TEXT_MAX_PAGES = 25;
+export const PDF_TEXT_MAX_CHARS = 40_000;
 
 export type PdfTextMode = "text" | "none";
 
@@ -50,6 +54,12 @@ export interface PdfTextResult {
   mode: PdfTextMode;
   /** How many content streams were successfully decoded (observability). */
   streamsDecoded: number;
+  /** Extractor that produced rawText/text. */
+  extractor?: "unpdf@1.6.2" | "content_stream_v1";
+  /** Parsed page count when the primary PDF.js path opened the document. */
+  pageCount?: number;
+  /** True when readable text was capped at PDF_TEXT_MAX_CHARS. */
+  truncated?: boolean;
   /** Set when extraction bailed for a non-fatal reason (observability, never thrown). */
   note?: string;
 }
@@ -267,7 +277,7 @@ export function looksLikeText(text: string): boolean {
  * feed the classifier cheaply; otherwise mode:'none' so the caller keeps the current
  * document-block path. NEVER throws — every failure degrades to mode:'none'.
  */
-export async function extractPdfText(
+async function extractPdfTextFromContentStreams(
   bytes: Uint8Array,
 ): Promise<PdfTextResult> {
   const empty: PdfTextResult = {
@@ -372,8 +382,93 @@ export async function extractPdfText(
       charCount: text.length,
       mode: "text",
       streamsDecoded,
+      extractor: "content_stream_v1",
     };
   } catch (e) {
     return { ...empty, note: `error:${(e as Error).message}`.slice(0, 120) };
+  }
+}
+
+/**
+ * Extract a bounded digital text layer from a PDF. PDF.js handles generated
+ * builder work orders, including ToUnicode/CID fonts; the original stream reader
+ * remains a fallback. Image-only, corrupt and pathological inputs return
+ * mode:'none' with a fixed reason for per-source quarantine.
+ */
+export async function extractPdfText(
+  bytes: Uint8Array,
+): Promise<PdfTextResult> {
+  const empty: PdfTextResult = {
+    text: "",
+    rawText: "",
+    charCount: 0,
+    mode: "none",
+    streamsDecoded: 0,
+  };
+  if (!bytes || bytes.length < 5) return { ...empty, note: "empty" };
+  if (
+    !(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 &&
+      bytes[3] === 0x46)
+  ) {
+    return { ...empty, note: "not_pdf" };
+  }
+  if (bytes.byteLength > PDF_TEXT_MAX_BYTES) {
+    return { ...empty, note: "pdf_too_large" };
+  }
+
+  let pdf: any = null;
+  try {
+    // PDF.js may transfer its input buffer to a worker. Keep the caller's bytes
+    // intact for attachment staging and for the fallback extractor.
+    pdf = await getDocumentProxy(bytes.slice());
+    const pageCount = Number(pdf?.numPages || 0);
+    if (pageCount < 1) {
+      return { ...empty, pageCount, note: "no_pages" };
+    }
+    if (pageCount > PDF_TEXT_MAX_PAGES) {
+      return { ...empty, pageCount, note: "pdf_too_many_pages" };
+    }
+    const extracted = await extractTextWithUnpdf(pdf);
+    const joined = Array.isArray(extracted.text)
+      ? extracted.text.join("\n")
+      : String(extracted.text || "");
+    const normalized = joined.replace(/\r\n?/g, "\n").replace(
+      /[ \t]+\n/g,
+      "\n",
+    ).replace(/\n{3,}/g, "\n\n").trim();
+    const truncated = normalized.length > PDF_TEXT_MAX_CHARS;
+    const text = normalized.slice(0, PDF_TEXT_MAX_CHARS);
+    if (!looksLikeText(text)) {
+      return {
+        ...empty,
+        rawText: text,
+        charCount: text.length,
+        extractor: "unpdf@1.6.2",
+        pageCount,
+        truncated,
+        note: text.length ? "low_quality_text" : "no_text_layer",
+      };
+    }
+    return {
+      text,
+      rawText: text,
+      charCount: text.length,
+      mode: "text",
+      streamsDecoded: 0,
+      extractor: "unpdf@1.6.2",
+      pageCount,
+      truncated,
+    };
+  } catch {
+    const fallback = await extractPdfTextFromContentStreams(bytes);
+    return fallback.rawText || fallback.mode === "text"
+      ? { ...fallback, extractor: "content_stream_v1" }
+      : { ...fallback, note: "pdf_parse_failed" };
+  } finally {
+    try {
+      await pdf?.destroy?.();
+    } catch {
+      // Destruction is best-effort; extraction output remains deterministic.
+    }
   }
 }

@@ -1,5 +1,13 @@
 {
   "version": "5",
+  "specifiers": {
+    "npm:unpdf@1.6.2": "1.6.2"
+  },
+  "npm": {
+    "unpdf@1.6.2": {
+      "integrity": "sha512-zQ80ySoPuPHOsvIoRp/nJyQt8TOUoTh1+WBCGcBvlddQNgKDLRwm0AY3x8Q35I7+kIiRSgqMx+Ma2pl9McIp7A=="
+    }
+  },
   "redirects": {
     "https://esm.sh/@supabase/supabase-js@2": "https://esm.sh/@supabase/supabase-js@2.99.3",
     "https://esm.sh/@types/raf@~3.4.3/index.d.ts": "https://esm.sh/@types/raf@3.4.3/index.d.ts",

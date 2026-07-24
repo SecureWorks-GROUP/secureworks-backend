@@ -25,9 +25,15 @@ import {
 } from "./makesafe_intake_gate.ts";
 import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
 import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
+import {
+  gapFillFromWorkOrderPdf,
+  type PdfFieldProvenance,
+  type PdfGapFillField,
+  type PdfGapFillValues,
+} from "./makesafe_pdf_gap_fill.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-24.v3";
+  "makesafe-deterministic-intake@2026-07-24.v4";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 
 export type AdapterId = "mlb" | "ajs_ajbr" | "prime" | "rapid" | "chatter";
@@ -59,6 +65,19 @@ export interface DeterministicLink {
   sourcePostId: string;
 }
 
+export interface DeterministicPdfDocument {
+  sourcePostId: string;
+  attachmentId: string;
+  attachmentName: string | null;
+  status: "extracted" | "quarantined" | "deferred";
+  text: string | null;
+  charCount: number;
+  pageCount: number | null;
+  extractor: string | null;
+  truncated: boolean;
+  reason: string | null;
+}
+
 export interface DeterministicSourceItem {
   postId: string;
   internetMessageId?: string | null;
@@ -75,6 +94,7 @@ export interface DeterministicSourceItem {
   receivedAt: string;
   attachments: readonly DeterministicAttachment[];
   links: readonly DeterministicLink[];
+  pdfDocuments?: readonly DeterministicPdfDocument[];
   // Set by the runtime from the shared SES mailbox direction classifier. Own
   // outbound copies still belong in structural source accounting, but they are
   // non-work evidence and must never enter the identity-floor denominator.
@@ -108,6 +128,7 @@ export interface ExtractedIdentity {
   clientEmail: string | null;
   siteAddress: string | null;
   siteSuburb: string | null;
+  description: string | null;
   jobFamily: string;
 }
 
@@ -120,6 +141,9 @@ export interface AdaptedSource {
   evidence: readonly EvidenceCandidate[];
   story: readonly StoryEvent[];
   parseWarnings: readonly string[];
+  pdfFieldProvenance: Readonly<
+    Partial<Record<PdfGapFillField, PdfFieldProvenance>>
+  >;
 }
 
 export interface EvidenceCandidate {
@@ -217,6 +241,10 @@ export interface DeterministicCasePlan {
   evidenceMap: Readonly<Record<string, EvidenceMapEntry>>;
   sourceClassifications: readonly DeterministicSourceClassification[];
   recoveryCursor: RecoveryCursor;
+  fieldProvenance: Readonly<
+    Partial<Record<PdfGapFillField, PdfFieldProvenance>>
+  >;
+  pdfDocuments: readonly DeterministicPdfDocument[];
   // A combined make-safe + report obligation, when the primary is a physical
   // make-safe and a separate report card is still owed. Mirrors the AI intake's
   // extraction.secondary_obligation so a report-family plan carrying this is
@@ -292,6 +320,20 @@ const LABELLED_ADDRESS_RE =
 
 function text(item: DeterministicSourceItem): string {
   return `${item.subject || ""}\n${item.body || ""}`;
+}
+
+function extractedPdfDocuments(
+  item: DeterministicSourceItem,
+): DeterministicPdfDocument[] {
+  return (item.pdfDocuments || []).filter((document) =>
+    document.status === "extracted" && !!document.text
+  );
+}
+
+function pdfText(item: DeterministicSourceItem): string {
+  return extractedPdfDocuments(item).map((document) => document.text).filter(
+    Boolean,
+  ).join("\n");
 }
 
 function clean(value: unknown): string | null {
@@ -389,7 +431,9 @@ function extractRawIdentity(
   item: DeterministicSourceItem,
   adapterId: AdapterId,
 ): { externalRef: string | null; wo: string | null; po: string | null } {
-  const hay = text(item);
+  // Email stays first so an explicit email value wins. PDF text is a fallback for
+  // the common builder shape where the body only says "new work order".
+  const hay = `${text(item)}\n${pdfText(item)}`;
   const family = adapterId === "mlb" || adapterId === "prime"
     ? hay.match(/\bMLB[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i)
     : adapterId === "ajs_ajbr"
@@ -413,7 +457,7 @@ function extractRawIdentity(
   // subject. The sender-selected adapter supplies that builder scope, so the
   // numeric job number is strong AJBR identity for both the planner and the
   // existing-obligation lookup.
-  const externalRef = familyExternalRef ||
+  const preliminaryExternalRef = familyExternalRef ||
     (adapterId === "ajs_ajbr" && /^\d{3,}$/.test(jobNo || "")
       ? `AJBR-${jobNo}`
       : null);
@@ -440,17 +484,21 @@ function extractRawIdentity(
   // canonical extractor accepts only a numeric PO token and deliberately leaves
   // postal addresses such as "PO Box 2143" empty. Keeping a second permissive
   // planner regex here previously turned every MLB signature into PO "BOX".
-  const po = extractBuilderWorkOrderIdentity({
-    externalRef,
+  const sharedIdentity = extractBuilderWorkOrderIdentity({
+    externalRef: preliminaryExternalRef,
     subject: item.subject,
-    bodyText: item.body,
+    bodyText: `${item.body || ""}\n${pdfText(item)}`,
     attachmentNames: item.attachments.map((attachment) => attachment.name),
-  }).builder_po_number;
+  });
+  const externalRef = preliminaryExternalRef ||
+    sharedIdentity.builder_claim_ref;
+  const po = sharedIdentity.builder_po_number;
   // A labelled WO outranks a claim/reference. A claim is not silently promoted to
   // a WO: claim-only evidence must remain outside confirmed-live state.
   return {
     externalRef,
     wo: labelledWo || attachmentWo || builderScopedJobNo ||
+      sharedIdentity.builder_work_order_number ||
       (designatedWorkOrder ? externalRef : null),
     po,
   };
@@ -470,7 +518,11 @@ function inferDeliverable(item: DeterministicSourceItem): string {
 function fieldCandidates(
   item: DeterministicSourceItem,
   profile: DeterministicCompanyProfile | null,
-): Record<string, string> {
+): {
+  fields: Record<string, string>;
+  provenance: Partial<Record<PdfGapFillField, PdfFieldProvenance>>;
+  warnings: string[];
+} {
   const subjectFields = parseSubjectFields(item.subject);
   const parsed = parseWithTemplate(profile?.parsingRules, {
     subject: item.subject || "",
@@ -485,7 +537,7 @@ function fieldCandidates(
   const address = clean(parsed?.fields.site_address) ||
     clean(subjectFields.site_address) ||
     clean(hay.match(LABELLED_ADDRESS_RE)?.[1]);
-  return {
+  let fields: Record<string, string> = {
     ...(parsed?.fields || {}),
     ...(subjectFields.external_ref
       ? { external_ref: subjectFields.external_ref }
@@ -502,6 +554,24 @@ function fieldCandidates(
       ? { client_email: clean(hay.match(EMAIL_RE)?.[0])! }
       : {}),
   };
+  const provenance: Partial<
+    Record<PdfGapFillField, PdfFieldProvenance>
+  > = {};
+  const warnings: string[] = [];
+  for (const document of extractedPdfDocuments(item)) {
+    const result = gapFillFromWorkOrderPdf({
+      current: fields as PdfGapFillValues,
+      pdfText: document.text,
+      extractor: document.extractor || "unknown",
+      sourcePostId: item.postId,
+      attachmentId: document.attachmentId,
+      attachmentName: document.attachmentName,
+    });
+    fields = { ...fields, ...result.fields } as Record<string, string>;
+    Object.assign(provenance, result.provenance);
+    warnings.push(...result.warnings);
+  }
+  return { fields, provenance, warnings };
 }
 
 function storyFor(item: DeterministicSourceItem): StoryEvent[] {
@@ -562,6 +632,9 @@ function storyFor(item: DeterministicSourceItem): StoryEvent[] {
 function evidenceFor(
   item: DeterministicSourceItem,
   identity: ExtractedIdentity,
+  pdfFieldProvenance: Readonly<
+    Partial<Record<PdfGapFillField, PdfFieldProvenance>>
+  > = {},
 ): EvidenceCandidate[] {
   const out: EvidenceCandidate[] = [{
     requirement: "source_email",
@@ -600,11 +673,17 @@ function evidenceFor(
   ];
   for (const [requirement, value] of fields) {
     if (value) {
+      const provenanceKey = requirement === "external_reference"
+        ? "external_ref"
+        : requirement as PdfGapFillField;
+      const pdfSource = pdfFieldProvenance[provenanceKey];
       out.push({
         requirement,
         sourcePostId: item.postId,
         kind: "field",
-        locator: `field:${requirement}:${item.postId}`,
+        locator: pdfSource
+          ? `attachment:${pdfSource.attachmentId}:field:${requirement}`
+          : `field:${requirement}:${item.postId}`,
         strength: ["external_reference", "builder_work_order", "purchase_order"]
             .includes(requirement)
           ? "strong"
@@ -655,7 +734,8 @@ function buildKnown(
 ): AdaptedSource {
   const profile = profileFor(adapterId, item, profiles);
   const raw = extractRawIdentity(item, adapterId);
-  const fields = fieldCandidates(item, profile);
+  const parsed = fieldCandidates(item, profile);
+  const fields = parsed.fields;
   const deliverable = inferDeliverable(item);
   const canonical = normaliseMakesafeIdentity({
     externalRefRaw: raw.externalRef || fields.external_ref || null,
@@ -683,6 +763,7 @@ function buildKnown(
     clientEmail: clean(fields.client_email),
     siteAddress: clean(fields.site_address),
     siteSuburb: clean(fields.site_suburb),
+    description: clean(fields.description),
     jobFamily: classifyMakeSafeJobFamily(item.subject, item.body, null),
   };
   const hay = text(item);
@@ -703,12 +784,14 @@ function buildKnown(
     }`,
     intent,
     identity,
-    evidence: evidenceFor(item, identity),
+    evidence: evidenceFor(item, identity, parsed.provenance),
     story: storyFor(item),
     parseWarnings: [
       ...(!profile ? ["company_profile_not_resolved"] : []),
       ...(!raw.wo && raw.externalRef ? ["claim_only_identity"] : []),
+      ...parsed.warnings,
     ],
+    pdfFieldProvenance: parsed.provenance,
   };
 }
 
@@ -732,6 +815,7 @@ function blankIdentity(): ExtractedIdentity {
     clientEmail: null,
     siteAddress: null,
     siteSuburb: null,
+    description: null,
     jobFamily: "general_makesafe",
   };
 }
@@ -784,6 +868,7 @@ const CHATTER_ADAPTER: Adapter = {
     evidence: evidenceFor(item, blankIdentity()),
     story: storyFor(item),
     parseWarnings: [],
+    pdfFieldProvenance: {},
   }),
 };
 
@@ -813,6 +898,7 @@ export function adaptDeterministicSource(
       evidence: evidenceFor(item, identity),
       story: storyFor(item),
       parseWarnings: ["own_outbound_copy"],
+      pdfFieldProvenance: {},
     };
   }
   const adapter = DETERMINISTIC_ADAPTER_REGISTRY.find((candidate) =>
@@ -833,6 +919,7 @@ export function adaptDeterministicSource(
     evidence: evidenceFor(item, identity),
     story: storyFor(item),
     parseWarnings: ["unknown_builder"],
+    pdfFieldProvenance: {},
   };
 }
 
@@ -937,17 +1024,54 @@ function mergeField(
 
 function bestIdentity(
   items: readonly AdaptedSource[],
-): { identity: ExtractedIdentity; conflicts: Record<string, string[]> } {
+): {
+  identity: ExtractedIdentity;
+  conflicts: Record<string, string[]>;
+  fieldProvenance: Partial<Record<PdfGapFillField, PdfFieldProvenance>>;
+} {
   const ordered = [...items].sort((a, b) =>
     a.source.receivedAt.localeCompare(b.source.receivedAt) ||
     a.source.postId.localeCompare(b.source.postId)
   );
   const base = ordered.find((i) => i.identity.builderSlug) || ordered[0];
   const conflicts: Record<string, string[]> = {};
-  const client = mergeField(ordered.map((i) => i.identity.clientName));
-  const phone = mergeField(ordered.map((i) => i.identity.clientPhone));
+  const preferredItems = (
+    identityField: keyof ExtractedIdentity,
+    provenanceField: PdfGapFillField,
+  ) => {
+    const candidates = ordered.filter((item) =>
+      clean(item.identity[identityField]) !== null
+    );
+    const emailDerived = candidates.filter((item) =>
+      !item.pdfFieldProvenance[provenanceField]
+    );
+    return emailDerived.length ? emailDerived : candidates;
+  };
+  const preferredMerge = (
+    identityField: keyof ExtractedIdentity,
+    provenanceField: PdfGapFillField,
+  ) => {
+    const preferred = preferredItems(identityField, provenanceField);
+    return {
+      ...mergeField(
+        preferred.map((item) => clean(item.identity[identityField])),
+      ),
+      preferred,
+    };
+  };
+  const preferredStrong = (
+    identityField: keyof ExtractedIdentity,
+    provenanceField: PdfGapFillField,
+  ) =>
+    clean(
+      preferredItems(identityField, provenanceField)[0]?.identity[
+        identityField
+      ],
+    );
+  const client = preferredMerge("clientName", "client_name");
+  const phone = preferredMerge("clientPhone", "client_phone");
   const email = mergeField(ordered.map((i) => i.identity.clientEmail));
-  const address = mergeField(ordered.map((i) => i.identity.siteAddress));
+  const address = preferredMerge("siteAddress", "site_address");
   if (client.conflicts.length) conflicts.client_name = client.conflicts;
   if (phone.conflicts.length) conflicts.client_phone = phone.conflicts;
   if (email.conflicts.length) conflicts.client_email = email.conflicts;
@@ -958,28 +1082,59 @@ function bestIdentity(
     ): v is string => typeof v === "string" && !!v);
     return candidates[0] || null;
   };
+  const identity: ExtractedIdentity = {
+    ...base.identity,
+    companyId: strong("companyId"),
+    companyKey: strong("companyKey"),
+    externalRefRaw: preferredStrong("externalRefRaw", "external_ref"),
+    builderWoRaw: strong("builderWoRaw"),
+    builderPoRaw: strong("builderPoRaw"),
+    deliverableRefRaw: strong("deliverableRefRaw"),
+    externalRefCanonical: preferredStrong(
+      "externalRefCanonical",
+      "external_ref",
+    ),
+    builderWoCanonical: strong("builderWoCanonical"),
+    builderPoCanonical: strong("builderPoCanonical"),
+    deliverableRefCanonical: strong("deliverableRefCanonical"),
+    woPoIdentityKey: strong("woPoIdentityKey"),
+    clientName: client.value,
+    clientPhone: phone.value,
+    clientEmail: email.value,
+    siteAddress: address.value,
+    siteSuburb: preferredStrong("siteSuburb", "site_suburb"),
+    description: preferredStrong("description", "description"),
+    jobFamily: strong("jobFamily") || "general_makesafe",
+  };
+  const fieldMap: Array<
+    [PdfGapFillField, keyof ExtractedIdentity, string | null]
+  > = [
+    ["client_name", "clientName", identity.clientName],
+    ["client_phone", "clientPhone", identity.clientPhone],
+    ["site_address", "siteAddress", identity.siteAddress],
+    ["site_suburb", "siteSuburb", identity.siteSuburb],
+    ["external_ref", "externalRefRaw", identity.externalRefRaw],
+    ["description", "description", identity.description],
+  ];
+  const fieldProvenance: Partial<
+    Record<PdfGapFillField, PdfFieldProvenance>
+  > = {};
+  for (const [provenanceField, identityField, selectedValue] of fieldMap) {
+    if (!selectedValue) continue;
+    const preferred = preferredItems(identityField, provenanceField);
+    const selected = preferred.find((item) =>
+      clean(item.identity[identityField]) === clean(selectedValue) &&
+      !!item.pdfFieldProvenance[provenanceField]
+    );
+    if (selected?.pdfFieldProvenance[provenanceField]) {
+      fieldProvenance[provenanceField] =
+        selected.pdfFieldProvenance[provenanceField];
+    }
+  }
   return {
-    identity: {
-      ...base.identity,
-      companyId: strong("companyId"),
-      companyKey: strong("companyKey"),
-      externalRefRaw: strong("externalRefRaw"),
-      builderWoRaw: strong("builderWoRaw"),
-      builderPoRaw: strong("builderPoRaw"),
-      deliverableRefRaw: strong("deliverableRefRaw"),
-      externalRefCanonical: strong("externalRefCanonical"),
-      builderWoCanonical: strong("builderWoCanonical"),
-      builderPoCanonical: strong("builderPoCanonical"),
-      deliverableRefCanonical: strong("deliverableRefCanonical"),
-      woPoIdentityKey: strong("woPoIdentityKey"),
-      clientName: client.value,
-      clientPhone: phone.value,
-      clientEmail: email.value,
-      siteAddress: address.value,
-      siteSuburb: strong("siteSuburb"),
-      jobFamily: strong("jobFamily") || "general_makesafe",
-    },
+    identity,
     conflicts,
+    fieldProvenance,
   };
 }
 
@@ -1448,6 +1603,11 @@ export function buildDeterministicIntakePlan(
         evidenceMap.portal_capture?.status === "recovery_staged"
           ? [`screenshot:${instructionKey}:portal`]
           : [];
+      const pdfDocuments = [...new Map(
+        instructionItems.flatMap((item) => item.source.pdfDocuments || []).map(
+          (document) => [document.attachmentId, document],
+        ),
+      ).values()];
       cases.push({
         instructionKey,
         instructionFingerprint,
@@ -1471,6 +1631,8 @@ export function buildDeterministicIntakePlan(
         correlatedStory: clusterStory,
         evidenceMap,
         sourceClassifications: classifications,
+        fieldProvenance: merged.fieldProvenance,
+        pdfDocuments,
         recoveryCursor: {
           version: DETERMINISTIC_INTAKE_VERSION,
           completedStages: [

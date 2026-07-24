@@ -12,11 +12,52 @@ import {
 import {
   _ensureDraftAndJobForTest,
   _readInputsForTest,
+  enrichSourcesWithPdfText,
   runDeterministicIntake,
 } from "./makesafe_deterministic_intake_runtime.ts";
 import { buildDeterministicIntakePlan } from "./makesafe_deterministic_intake.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
+const ENCODER = new TextEncoder();
+
+function digitalWorkOrderPdf(): Uint8Array {
+  const lines = [
+    "Work Order Number MLB-26770PO-55296",
+    "Policyholders Name Amanda Parker",
+    "Mobile 0422636182",
+    "Site Address 8 Syrinx Pl Mullaloo WA 6027",
+    "Scope of Works Install temporary roof tarps and make the storm damaged property safe",
+    "Notes",
+    "Attend within twenty four hours and protect the occupants and contents from weather damage",
+  ];
+  const content = `BT /F1 10 Tf 72 760 Td ${
+    lines.map((line) => `(${line}) Tj 0 -14 Td`).join(" ")
+  } ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${
+      ENCODER.encode(content).length
+    } >>\nstream\n${content}\nendstream`,
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let index = 0; index < objects.length; index++) {
+    offsets.push(ENCODER.encode(pdf).length);
+    pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
+  }
+  const xrefOffset = ENCODER.encode(pdf).length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets.slice(1)) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${
+    objects.length + 1
+  } /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return ENCODER.encode(pdf);
+}
 
 interface Store {
   [table: string]: any[];
@@ -274,6 +315,7 @@ function fakeClient(
   store: Store,
   selectLog: Array<[string, string]> = [],
   inLog?: (table: string, column: string, count: number) => void,
+  downloadBytes?: (path: string) => Uint8Array,
 ) {
   return {
     selectLog,
@@ -296,11 +338,13 @@ function fakeClient(
     storage: {
       from() {
         return {
-          download: () =>
+          download: (path: string) =>
             Promise.resolve({
               data: {
                 arrayBuffer: () =>
-                  Promise.resolve(new Uint8Array([1, 2, 3]).buffer),
+                  Promise.resolve(
+                    (downloadBytes?.(path) || new Uint8Array([1, 2, 3])).buffer,
+                  ),
               },
               error: null,
             }),
@@ -359,6 +403,132 @@ function email(input: Record<string, any>) {
 
 const approveDraft = (_client: any, _body: any) =>
   Promise.resolve({ job: { id: "job-abc" } });
+
+Deno.test("PDF extraction quarantines bad records without aborting good records", async () => {
+  const goodBytes = digitalWorkOrderPdf();
+  const client = fakeClient(
+    baseStore(),
+    [],
+    undefined,
+    (path) =>
+      path === "raw/good.pdf" ? goodBytes : ENCODER.encode("%PDF-1.7\nbroken"),
+  );
+  const makeSource = (
+    postId: string,
+    attachmentId: string,
+    storagePath: string,
+    sizeBytes: number,
+  ) => ({
+    postId,
+    fromEmail: "dispatch@mlb.test",
+    subject: "NEW WORK ORDER",
+    body: "Attached.",
+    receivedAt: NOW,
+    attachments: [{
+      id: attachmentId,
+      sourcePostId: postId,
+      name: "Work Order.pdf",
+      contentType: "application/pdf",
+      storagePath,
+      status: "uploaded",
+      sizeBytes,
+    }],
+    links: [],
+    direction: "inbound" as const,
+  });
+  const enriched = await enrichSourcesWithPdfText(client, [
+    makeSource("good", "good-att", "raw/good.pdf", goodBytes.length),
+    makeSource("corrupt", "corrupt-att", "raw/corrupt.pdf", 20),
+    makeSource("pathological", "large-att", "raw/large.pdf", 5_000_001),
+  ]);
+  const byPost = new Map(enriched.map((source) => [source.postId, source]));
+  assertEquals(byPost.get("good")?.pdfDocuments?.[0].status, "extracted");
+  assert(
+    byPost.get("good")?.pdfDocuments?.[0].text?.includes("Amanda Parker"),
+  );
+  assertEquals(
+    byPost.get("corrupt")?.pdfDocuments?.[0].status,
+    "quarantined",
+  );
+  assertEquals(
+    byPost.get("corrupt")?.pdfDocuments?.[0].reason,
+    "pdf_parse_failed",
+  );
+  assertEquals(
+    byPost.get("pathological")?.pdfDocuments?.[0].reason,
+    "pdf_too_large",
+  );
+});
+
+Deno.test("live deterministic intake fills a draft from PDF and persists readable text provenance", async () => {
+  const store = baseStore();
+  const pdfBytes = digitalWorkOrderPdf();
+  store.emails.push(email({
+    post_id: "pdf-live-1",
+    subject: "NEW WORK ORDER",
+    body_content: "Please attend. The builder work order is attached.",
+  }));
+  store.email_attachments.push({
+    id: "pdf-live-att",
+    email_id: "pdf-live-1",
+    name: "MLB Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/pdf-live.pdf",
+    status: "uploaded",
+    size_bytes: pdfBytes.length,
+  });
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => pdfBytes,
+  );
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["pdf-live-1"],
+    maxCases: 1,
+    approveDraft,
+    nowIso: NOW,
+  });
+  assertEquals(report.ai_calls, 0);
+  assertEquals(report.totals.jobs_created, 1);
+  const intakeCase = store.makesafe_intake_cases[0];
+  assertEquals(intakeCase.client_name, "Amanda Parker");
+  assertEquals(
+    intakeCase.field_provenance.client_name.source,
+    "work_order_pdf_text",
+  );
+  assert(
+    intakeCase.raw_identity_json.work_order_pdf_text[0].text.includes(
+      "Amanda Parker",
+    ),
+  );
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.client_name, "Amanda Parker");
+  assertEquals(draft.client_phone, "0422636182");
+  assertEquals(
+    draft.description,
+    "Install temporary roof tarps and make the storm damaged property safe",
+  );
+  assertEquals(
+    draft.extraction_json.pdf_field_provenance.client_name.attachmentId,
+    "pdf-live-att",
+  );
+  assert(
+    draft.extraction_json.work_order_pdf_text[0].text.includes(
+      "Scope of Works",
+    ),
+  );
+  assertEquals(
+    store.makesafe_intake_case_sources[0].evidence.pdf_extraction[0].status,
+    "extracted",
+  );
+  assert(
+    store.makesafe_intake_case_sources[0].evidence.pdf_extraction[0].text
+      .includes("Amanda Parker"),
+  );
+});
 
 function seedCanonicalCase(
   store: Store,

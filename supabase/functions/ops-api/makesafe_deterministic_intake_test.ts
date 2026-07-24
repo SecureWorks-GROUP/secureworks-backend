@@ -57,6 +57,7 @@ function source(
     receivedAt: input.receivedAt ?? "2026-07-20T00:00:00.000Z",
     attachments: input.attachments ?? [],
     links: input.links ?? [],
+    pdfDocuments: input.pdfDocuments ?? [],
     conversationId: input.conversationId ?? null,
     threadId: input.threadId ?? null,
     replyToPostId: input.replyToPostId ?? null,
@@ -102,6 +103,115 @@ Deno.test("MLB adapter builds a confirmed identity without AI", () => {
   const plan = buildDeterministicIntakePlan([item], PROFILES);
   assertEquals(plan.cases[0].state, "confirmed_live_job");
   assertEquals(plan.aiCalls, 0);
+});
+
+Deno.test("PDF text gap-fills an email-only shell and retains field provenance", () => {
+  const item = source({
+    postId: "mlb-pdf-fill",
+    subject: "NEW WORK ORDER",
+    body: "Please attend as instructed. The work order is attached.",
+    attachments: [pdf("mlb-pdf-fill", "pdf-fill-attachment")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-pdf-fill",
+      attachmentId: "pdf-fill-attachment",
+      attachmentName: "MLB Work Order.pdf",
+      status: "extracted",
+      text: `Work Order Number
+MLB-26770PO-55296
+Policyholders Name
+Amanda Parker
+Mobile: 0422 636 182
+Site Address
+8 Syrinx Pl, Mullaloo, WA 6027
+Scope of Works
+Install temporary roof tarps and make the storm-damaged property safe.
+Notes
+Contact the supervisor after attendance.`,
+      charCount: 300,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  const intakeCase = plan.cases[0];
+  assertEquals(plan.aiCalls, 0);
+  assertEquals(intakeCase.state, "confirmed_live_job");
+  assertEquals(intakeCase.identity.externalRefCanonical, "MLB-26770");
+  assertEquals(intakeCase.identity.clientName, "Amanda Parker");
+  assertEquals(intakeCase.identity.clientPhone, "0422636182");
+  assertEquals(
+    intakeCase.identity.siteAddress,
+    "8 Syrinx Pl, Mullaloo, WA 6027",
+  );
+  assertEquals(intakeCase.identity.siteSuburb, "Mullaloo");
+  assertEquals(
+    intakeCase.identity.description,
+    "Install temporary roof tarps and make the storm-damaged property safe.",
+  );
+  assertEquals(
+    intakeCase.fieldProvenance.client_name?.attachmentId,
+    "pdf-fill-attachment",
+  );
+  assertEquals(
+    intakeCase.fieldProvenance.external_ref?.source,
+    "work_order_pdf_text",
+  );
+  assertEquals(
+    intakeCase.pdfDocuments[0].text?.includes("Amanda Parker"),
+    true,
+  );
+});
+
+Deno.test("email fields outrank older PDF-derived values across a case", () => {
+  const pdfSource = source({
+    postId: "mlb-pdf-older",
+    receivedAt: "2026-07-20T00:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-26770 Work Order: 26770",
+    body: "The work order is attached.",
+    attachments: [pdf("mlb-pdf-older", "pdf-older-attachment")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-pdf-older",
+      attachmentId: "pdf-older-attachment",
+      attachmentName: "MLB Work Order.pdf",
+      status: "extracted",
+      text: `Work Order Number
+MLB-26770
+Policyholders Name
+PDF Person
+Mobile: 0400 000 001
+Site Address
+1 PDF Road, Perth, WA 6000`,
+      charCount: 200,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const emailSource = source({
+    postId: "mlb-email-newer",
+    receivedAt: "2026-07-20T01:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-26770 Work Order: 26770",
+    body:
+      "Client: Email Person\nPhone: 0400 000 002\nSite Address: 2 Email Road, Perth, WA 6000",
+    attachments: [pdf("mlb-email-newer")],
+  });
+  const plan = buildDeterministicIntakePlan(
+    [pdfSource, emailSource],
+    PROFILES,
+  );
+  const intakeCase = plan.cases[0];
+  assertEquals(intakeCase.identity.clientName, "Email Person");
+  assertEquals(intakeCase.identity.clientPhone, "0400 000 002");
+  assertEquals(
+    intakeCase.identity.siteAddress,
+    "2 Email Road, Perth, WA 6000",
+  );
+  assertEquals(intakeCase.fieldProvenance.client_name, undefined);
+  assertEquals(intakeCase.fieldProvenance.client_phone, undefined);
+  assertEquals(intakeCase.fieldProvenance.site_address, undefined);
 });
 
 Deno.test("AJS and AJBR aliases resolve to one company adapter", () => {
