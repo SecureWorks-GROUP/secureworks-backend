@@ -7,6 +7,10 @@ import {
   type MakesafeStatusHold,
   reportInEvidence,
 } from "./makesafe_computed_status.ts";
+import {
+  isMakesafeTerminalDisplayStatus,
+  isMakesafeTerminalJobState,
+} from "./makesafe_status_apply.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 export const OPS_MAKESAFE_STAGES = [
@@ -37,6 +41,15 @@ export const OPS_TO_TRADE_COLUMN: Record<
   completed: "Archive",
   archive: "Archive",
   cancelled: "Archive",
+};
+export const OPS_MAKESAFE_STAGE_LABELS: Record<OpsMakesafeStage, string> = {
+  new: "New",
+  allocated: "Allocated",
+  trade_report_in: "Trade Report In",
+  report_ready: "Report Ready",
+  completed: "Completed This Week",
+  archive: "Archive",
+  cancelled: "Cancelled",
 };
 
 export interface MakesafeBoardViewer {
@@ -99,6 +112,7 @@ export interface CanonicalMakesafeExtras {
   contactsByJobId?: Record<string, any[]>;
   intakeCaseByJobId?: Record<string, any>;
   holdsByJobId?: Record<string, MakesafeStatusHold>;
+  statusApplicationsByJobId?: Record<string, any>;
   computedAt?: string;
 }
 
@@ -361,6 +375,10 @@ function portalCapturesFromDetail(base: any): MakesafePortalCapture[] {
 }
 
 function rawInvoiceStatus(base: any): string | null {
+  if (base && "invoice_raw_status" in base) {
+    const raw = String(base.invoice_raw_status || "").trim().toUpperCase();
+    return raw || null;
+  }
   const status = String(base?.invoice_status || "").toLowerCase();
   if (status === "draft") return "DRAFT";
   if (status === "paid") return "PAID";
@@ -382,6 +400,15 @@ export function buildCanonicalMakesafeRows(
     const hold = extras.holdsByJobId?.[base?.id] || null;
     const swmsRequired = base?.has_swms_doc === true || !!pack?.swms_doc_id ||
       (Array.isArray(base?.missing_docs) && base.missing_docs.includes("swms"));
+    const declaredStage = String(base?.board_stage || "new").toLowerCase();
+    const application = extras.statusApplicationsByJobId?.[base?.id] || null;
+    const applicationApplies = !!application &&
+      !isMakesafeTerminalDisplayStatus(declaredStage) &&
+      !isMakesafeTerminalJobState(base?.status) &&
+      String(application.source_status || "").toLowerCase() === declaredStage;
+    const displayStage = applicationApplies
+      ? String(application.after_status || declaredStage).toLowerCase()
+      : declaredStage;
     const statusInput = {
       job: base,
       detail,
@@ -393,6 +420,8 @@ export function buildCanonicalMakesafeRows(
         packState: pack?.review_state || null,
         pack,
         invoiceStatus: rawInvoiceStatus(base),
+        invoiceDate: base?.invoice_date || null,
+        invoiceCreatedAt: base?.invoice_created_at || null,
         packSent: base?.pack_sent === true,
         documents: {
           report: base?.has_report_doc === true,
@@ -402,6 +431,7 @@ export function buildCanonicalMakesafeRows(
         swmsRequired,
         hold,
       },
+      displayedStatus: displayStage,
       nowIso: computedAt,
     };
     const computation = computeMakesafeStatus(statusInput);
@@ -413,9 +443,22 @@ export function buildCanonicalMakesafeRows(
       type: "makesafe",
       job_state: base?.status || null,
       substatus: base?.substatus || null,
-      canonical_stage: base?.board_stage || "new",
-      canonical_stage_label: base?.board_label || null,
-      // M1 shadow only. No projection column reads these fields yet.
+      declared_stage: declaredStage,
+      canonical_stage: displayStage,
+      canonical_stage_label: applicationApplies
+        ? OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
+          displayStage
+        : base?.board_label || null,
+      status_application: applicationApplies
+        ? {
+          run_key: application.run_key,
+          before_status: application.before_status,
+          after_status: application.after_status,
+          evidence_ref: application.evidence_ref,
+          applied_by: application.applied_by,
+          applied_at: application.applied_at,
+        }
+        : null,
       computed_status: computation.status,
       computed_status_reasons: computation.reasons,
       computed_status_missing: computation.missing,

@@ -380,17 +380,19 @@ is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is
 read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
 and the reporting run agree on "not yet drafted".
 
-## Make-Safe Derived Status Is Shadow-Only Until Approved Cutover
+## Make-Safe Computed Status Cutover Is A Display-Only Ledger
 
-M1 lives in `supabase/functions/ops-api/makesafe_computed_status.ts` with additive
-schema in `20260723000001_makesafe_board_truth_shadow.sql`. Ops and Trade still
-render the declared board model. Do not point either projection at
-`computed_status`, rewrite `substatus`, or backfill missing PO cards without the
-separately approved cutover/reconciliation mission. Apply the additive migration
-before deploying its edge code because the board read loads `makesafe_status_holds`.
-`makesafe_status_disagreements` and the read-only `makesafe_status_canary` are the
-captain review surfaces; holds remain reason-coded badges on the evidence-derived
-column.
+M1 remains the pure engine in `makesafe_computed_status.ts`; the captain-approved
+cutover is the append-only `makesafe_board_status_applications` ledger introduced
+by `20260724005540_makesafe_board_truth_cutover.sql`. Apply the migration before
+the matching `ops-api`. `makesafe_status_apply` is service-role/API-key only,
+idempotency-keyed, exact-list guarded, and must never call operational status
+writers. It records before/after/evidence/attribution and changes only the server
+board projection; raw `jobs`, `makesafe_job_details.substatus`, assignments,
+invoices and communications remain untouched. Archived/completed/cancelled
+display stages and terminal job states are structurally read-only. The release
+sequence and seven-card first tranche are in
+`docs/makesafe-board-truth-cutover-2026-07-24.md`.
 
 ## Maintaining this file
 

@@ -126,3 +126,9 @@ mark_makesafe_portal_report_done
 # W2-C portal-truth honest fallback (this PR):
 makesafe_portal_recheck_queue
 makesafe_portal_recheck_enqueue
+
+# ── Make-safe board truth reconciliation + captain-applied display cutover ──
+makesafe_status_shadow_refresh
+makesafe_status_disagreements
+makesafe_status_canary
+makesafe_status_apply

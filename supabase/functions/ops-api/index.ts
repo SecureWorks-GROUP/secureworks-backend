@@ -128,6 +128,10 @@ import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
 } from './makesafe_computed_status.ts'
+import {
+  planMakesafeStatusApplications,
+  type MakesafeStatusApplication,
+} from './makesafe_status_apply.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -2564,6 +2568,134 @@ if (import.meta.main) serve(async (req: Request) => {
           generated_at: new Date().toISOString(),
           ...(shadow.error ? { error: shadow.error } : {}),
         }, shadow.ok ? 200 : 503)
+      }
+      case 'makesafe_status_apply': {
+        // Captain-approved display cutover. This path appends only to the
+        // makesafe_board_status_applications ledger; it never rewrites jobs,
+        // substatus, assignments, invoices, communications, or notifications.
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_status_apply requires ops privilege' }, 403)
+        }
+        const dryRun = body?.dry_run === true
+        const requestedJobNumbers: string[] | null = Array.isArray(body?.job_numbers)
+          ? [
+            ...new Set<string>(
+              body.job_numbers
+                .map((value: any) =>
+                  String(value || '').trim().toUpperCase()
+                )
+                .filter(Boolean),
+            ),
+          ]
+          : null
+        if (requestedJobNumbers && requestedJobNumbers.length > 500) {
+          return json({ error: 'job_numbers is capped at 500' }, 400)
+        }
+        if (!dryRun && (!requestedJobNumbers || requestedJobNumbers.length === 0)) {
+          return json({ error: 'job_numbers is required for a live apply' }, 400)
+        }
+
+        const runKey = String(body?.run_key || '').trim()
+        const appliedBy = String(body?.applied_by || '').trim()
+        const evidenceRef = String(body?.evidence_ref || '').trim()
+        if (!dryRun && (!runKey || !appliedBy || !evidenceRef)) {
+          return json({ error: 'run_key, applied_by, and evidence_ref are required for a live apply' }, 400)
+        }
+
+        if (!dryRun) {
+          const existing = await loadMakesafeStatusApplicationRun(client, runKey)
+          if (existing.length > 0) {
+            const existingNumbers = existing
+              .map((row: any) => String(row.job_number || '').trim().toUpperCase())
+              .sort()
+            const requestedNumbers = [...(requestedJobNumbers || [])]
+              .map((value) => value.toUpperCase())
+              .sort()
+            if (JSON.stringify(existingNumbers) !== JSON.stringify(requestedNumbers)) {
+              return json({
+                error: 'run_key already belongs to a different transition set',
+                run_key: runKey,
+                existing_job_numbers: existingNumbers,
+                requested_job_numbers: requestedNumbers,
+              }, 409)
+            }
+            const currentRows = await loadCanonicalMakesafeBoard(client)
+            const currentPlan = planMakesafeStatusApplications(currentRows, requestedJobNumbers)
+            return json({
+              ok: true,
+              dry_run: false,
+              idempotent_replay: true,
+              run_key: runKey,
+              applied_count: existing.length,
+              transitions: existing,
+              current_counts: currentPlan.before_counts,
+              terminal_untouched: currentPlan.terminal_untouched,
+              disagreement_count: makesafeStatusDisagreementsFromRows(currentRows).length,
+            })
+          }
+        }
+
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const plan = planMakesafeStatusApplications(canonicalRows, requestedJobNumbers)
+        if (dryRun) {
+          return json({
+            ok: true,
+            dry_run: true,
+            disagreement_count: makesafeStatusDisagreementsFromRows(canonicalRows).length,
+            ...plan,
+          })
+        }
+        if (plan.skipped.length > 0) {
+          return json({
+            error: 'apply plan contains skipped rows; no transitions were written',
+            dry_run: false,
+            ...plan,
+          }, 409)
+        }
+
+        const write = await persistMakesafeStatusApplications(client, {
+          runKey,
+          appliedBy,
+          evidenceRef,
+          transitions: plan.transitions,
+        })
+        if (!write.ok) {
+          return json({ error: write.error, run_key: runKey }, 503)
+        }
+        if (write.applied.length !== plan.transitions.length) {
+          return json({
+            error: 'apply count did not match the guarded plan',
+            run_key: runKey,
+            planned: plan.transitions.length,
+            applied: write.applied.length,
+          }, 409)
+        }
+        const afterRows = await loadCanonicalMakesafeBoard(client)
+        const afterPlan = planMakesafeStatusApplications(afterRows, requestedJobNumbers)
+        const afterByJobId = new Map(afterRows.map((row: any) => [row.id, row]))
+        const unapplied = plan.transitions.filter((transition) =>
+          String(afterByJobId.get(transition.job_id)?.canonical_stage || '').toLowerCase() !==
+            transition.after_status
+        )
+        if (unapplied.length > 0) {
+          return json({
+            error: 'one or more logged transitions did not become current display truth',
+            run_key: runKey,
+            unapplied,
+          }, 409)
+        }
+        return json({
+          ok: true,
+          dry_run: false,
+          idempotent_replay: false,
+          run_key: runKey,
+          applied_count: write.applied.length,
+          transitions: write.applied,
+          before_counts: plan.before_counts,
+          after_counts: afterPlan.before_counts,
+          terminal_untouched: plan.terminal_untouched,
+          disagreement_count: makesafeStatusDisagreementsFromRows(afterRows).length,
+        })
       }
       case 'makesafe_status_disagreements': {
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
@@ -10966,6 +11098,12 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     crew_members: crew.crew_members,
     report_status: makesafeReportStatus(boardStage, detail, report),
     invoice_status: makesafeInvoiceStatus(boardStage, invoice),
+    // Server-only inputs for the computed status completion-time fallback. The
+    // canonical projection consumes them but neither trade nor ops payloads expose
+    // raw invoice records.
+    invoice_raw_status: invoice?.status || null,
+    invoice_date: invoice?.invoice_date || null,
+    invoice_created_at: invoice?.created_at || null,
     // sent_to_builder (audit F5): the honest SENT-chip signal. TRUE only with a
     // real send record (pack-sent marker OR durable pack sent-status) — NEVER a
     // bare completed/archive column proxy. Completed cards with no send record
@@ -11883,6 +12021,21 @@ async function loadCanonicalMakesafeBoard(
     console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
   }
 
+  // The cutover ledger is append-only and display-only. Migration-first deploy
+  // remains required, but a missing preview table must not take down the board.
+  let statusApplications: any[] = []
+  try {
+    statusApplications = await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_board_status_current',
+      'id, run_key, job_id, source_status, before_status, after_status, evidence_ref, applied_by, applied_at',
+      jobIds,
+      (q) => q.order('applied_at', { ascending: false }).order('id', { ascending: false }),
+    )
+  } catch (error) {
+    console.error('[ops-api] makesafe_board status application read unavailable:', (error as Error).message)
+  }
+
   const notesByJobId: Record<string, any[]> = {}
   for (const note of notes) {
     const body = note?.detail_json?.text ?? note?.detail_json?.note ?? ''
@@ -11904,6 +12057,12 @@ async function loadCanonicalMakesafeBoard(
   for (const intakeCase of intakeCases) {
     if (intakeCase?.job_id && !intakeCaseByJobId[intakeCase.job_id]) {
       intakeCaseByJobId[intakeCase.job_id] = intakeCase
+    }
+  }
+  const statusApplicationsByJobId: Record<string, any> = {}
+  for (const application of statusApplications) {
+    if (application?.job_id && !statusApplicationsByJobId[application.job_id]) {
+      statusApplicationsByJobId[application.job_id] = application
     }
   }
   const holdsByJobId: Record<string, any> = {}
@@ -11928,6 +12087,7 @@ async function loadCanonicalMakesafeBoard(
     contactsByJobId,
     intakeCaseByJobId,
     holdsByJobId,
+    statusApplicationsByJobId,
   })
 }
 
@@ -11936,8 +12096,8 @@ function makesafeStatusReviewCards(rows: any[]) {
     id: row.id,
     job_number: row.job_number || null,
     substatus: row.substatus || null,
-    // The operator-visible canonical stage remains the declared side throughout
-    // M1. No UI projection reads computed_status in this mission.
+    // The canonical stage includes only captain-applied display transitions. Raw
+    // substatus remains available separately and is never rewritten by cutover.
     declared_status: row.canonical_stage || 'new',
     computation: {
       status: row.computed_status,
@@ -11989,12 +12149,50 @@ async function persistMakesafeStatusShadow(client: any, rows: any[]): Promise<{
   return { ok: true, refreshed: Number(data || 0) }
 }
 
+async function persistMakesafeStatusApplications(
+  client: any,
+  args: {
+    runKey: string
+    appliedBy: string
+    evidenceRef: string
+    transitions: MakesafeStatusApplication[]
+  },
+): Promise<{ ok: boolean; applied: any[]; error?: string }> {
+  if (!client || typeof client.rpc !== 'function') {
+    return { ok: false, applied: [], error: 'Supabase RPC client unavailable' }
+  }
+  if (args.transitions.length === 0) return { ok: true, applied: [] }
+  const { data, error } = await client.rpc('apply_makesafe_board_status', {
+    p_run_key: args.runKey,
+    p_applied_by: args.appliedBy,
+    p_evidence_ref: args.evidenceRef,
+    p_rows: args.transitions,
+  })
+  if (error) {
+    const message = error?.message || String(error)
+    console.error('[ops-api] makesafe status application failed:', message)
+    return { ok: false, applied: [], error: message }
+  }
+  const applied = Array.isArray(data) ? data : (data?.applied || [])
+  return { ok: true, applied }
+}
+
+async function loadMakesafeStatusApplicationRun(client: any, runKey: string): Promise<any[]> {
+  const { data, error } = await client.from('makesafe_board_status_applications')
+    .select('id, run_key, job_id, job_number, source_status, before_status, after_status, computed_at, computed_reasons, computed_missing, evidence_ref, applied_by, applied_at')
+    .eq('run_key', runKey)
+    .order('id', { ascending: true })
+  if (error) throw error
+  return data || []
+}
+
 // Test-only exports. Production routes call the same functions.
 export const _makesafePipelineForTest = makesafePipeline
 export const _loadCanonicalMakesafeBoardForTest = loadCanonicalMakesafeBoard
 export const _makesafeStatusDisagreementsFromRowsForTest = makesafeStatusDisagreementsFromRows
 export const _makesafeStatusCanaryFromRowsForTest = makesafeStatusCanaryFromRows
 export const _persistMakesafeStatusShadowForTest = persistMakesafeStatusShadow
+export const _persistMakesafeStatusApplicationsForTest = persistMakesafeStatusApplications
 
 // Test-only export for the close-out doc-attach path (typed + idempotent).
 export const _attachMakesafeDocumentForTest = attachMakesafeDocument

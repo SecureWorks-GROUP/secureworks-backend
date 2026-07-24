@@ -29,21 +29,41 @@ Every card originates as one canonical job row with:
 
 A stale `company_contact_required` substatus on an already allocated/scheduled job is reported as `stale_company_contact_substatus`. It is not presented as a real client blocker.
 
-## Derived status shadow (M1, not consumer-facing)
+## Derived status and captain-applied display truth
 
-Each canonical row also carries an evidence-derived shadow status that runs beside the declared model. These fields are **shadow-only**: no Ops or Trade projection column reads them in M1, and consumers must not wire to them. The declared `canonical_stage`/`substatus` remain the operator-visible truth.
+Each canonical row carries an evidence-derived status beside the raw declared
+model. The engine stays pure and never changes an operational record.
 
 - `computed_status`, `computed_status_job_type`, `computed_status_reasons[]`, `computed_status_missing[]`, `computed_status_at`
 - `computed_status_hold`: an active, reason-coded hold surfaced as a badge on the derived column (never moves the card)
 - `computed_status_evidence`: `report_received_at`, `has_submitted_service_report`, `has_current_portal_capture`
 
-The derivation is a pure engine (`makesafe_computed_status.ts`) fed by typed portal evidence (assessment-report/quote cards require the assessment 3-of-3 predicate). A missing `makesafe_status_holds` overlay is tolerated and logged, never fatal to the board.
+The derivation is a pure engine (`makesafe_computed_status.ts`) fed by typed
+portal evidence (assessment-report/quote cards require the assessment 3-of-3
+predicate). Durable sent-pack evidence plus an AUTHORISED/PAID ACCREC
+invoice is authoritative close-out proof even when historical typed portal
+captures are absent. Current archived/completed/cancelled display stages and
+terminal job states cannot be revived.
 
-Three read-only reconciliation endpoints support captain review; none mutate the board:
+The raw projection stage is returned as `declared_stage`. A captain-approved
+transition changes `canonical_stage` only through the latest applicable row in
+the append-only `makesafe_board_status_applications` ledger. It never rewrites
+`jobs`, `makesafe_job_details.substatus`, assignments, invoices, events, or
+communications. `status_application` carries its run key, before/after,
+evidence reference, attribution, and timestamp.
+
+Reconciliation actions:
 
 - `?action=makesafe_status_disagreements` — declared≠computed cards
 - `?action=makesafe_status_canary` — alarm-only consistency check (logs, returns `ok`)
 - `?action=makesafe_status_shadow_refresh` — writes the `computed_status` shadow cache; privileged (`api_key`/service-role cron) only, never routine- or JWT-callable
+- `?action=makesafe_status_apply` — dry-runs or atomically appends an exact,
+  idempotency-keyed, captain-approved display transition set; live apply is
+  API-key/service-role only and rejects terminal or stale cards
+
+A missing status-hold or status-application table in a preview environment is
+tolerated and logged, never fatal to the board. Production remains
+migration-first.
 
 ## Ops projection
 

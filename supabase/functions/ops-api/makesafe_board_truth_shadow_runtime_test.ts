@@ -3,6 +3,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _makesafeStatusCanaryFromRowsForTest,
   _makesafeStatusDisagreementsFromRowsForTest,
+  _persistMakesafeStatusApplicationsForTest,
   _persistMakesafeStatusShadowForTest,
 } from "./index.ts";
 
@@ -61,6 +62,57 @@ Deno.test("runtime disagreement response carries card, declared, computed and wh
   assertEquals(rows[0].why_they_differ.reasons, [
     "submitted report and photos present",
   ]);
+});
+
+Deno.test("status application persistence calls only the guarded append-only RPC", async () => {
+  const calls: any[] = [];
+  const client = {
+    rpc: (name: string, args: any) => {
+      calls.push({ name, args });
+      return Promise.resolve({
+        data: {
+          run_key: args.p_run_key,
+          applied_count: args.p_rows.length,
+          applied: args.p_rows.map((row: any, index: number) => ({
+            id: index + 1,
+            run_key: args.p_run_key,
+            ...row,
+          })),
+        },
+        error: null,
+      });
+    },
+  };
+  const transition = {
+    job_id: "job-1",
+    job_number: "SWMS-TEST",
+    source_status: "new",
+    before_status: "new",
+    after_status: "allocated",
+    computed_at: "2026-07-23T00:00:00Z",
+    computed_reasons: ["assignment exists"],
+    computed_missing: [],
+  };
+
+  const result = await _persistMakesafeStatusApplicationsForTest(client, {
+    runKey: "makesafe-stage1-20260724",
+    appliedBy: "captain-approved-cutover",
+    evidenceRef: "review://makesafe-board-review-surface-v1",
+    transitions: [transition],
+  });
+
+  assertEquals(calls, [{
+    name: "apply_makesafe_board_status",
+    args: {
+      p_run_key: "makesafe-stage1-20260724",
+      p_applied_by: "captain-approved-cutover",
+      p_evidence_ref: "review://makesafe-board-review-surface-v1",
+      p_rows: [transition],
+    },
+  }]);
+  assertEquals(result.ok, true);
+  assertEquals(result.applied.length, 1);
+  assertEquals(result.applied[0].after_status, "allocated");
 });
 
 Deno.test("runtime canary is read-only and catches the SWMS-26953 contradiction shape", () => {
