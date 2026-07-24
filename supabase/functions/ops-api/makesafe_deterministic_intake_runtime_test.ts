@@ -334,6 +334,7 @@ function baseStore(): Store {
     makesafe_intake_drafts: [],
     makesafe_intake_health: [],
     makesafe_job_details: [],
+    makesafe_intake_source_authority_corrections: [],
   };
 }
 
@@ -603,6 +604,14 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
   assertEquals(store.makesafe_intake_cases.length, 1);
   assertEquals(store.makesafe_intake_cases[0].state, "exception");
   assertEquals(store.makesafe_intake_cases[0].job_id, null);
+  const persistedIdentity = {
+    instruction_key: store.makesafe_intake_cases[0].instruction_key,
+    lineage_id: store.makesafe_intake_cases[0].lineage_id,
+    external_ref_canonical:
+      store.makesafe_intake_cases[0].external_ref_canonical,
+    builder_wo_canonical: store.makesafe_intake_cases[0].builder_wo_canonical,
+    builder_po_canonical: store.makesafe_intake_cases[0].builder_po_canonical,
+  };
   // An unresolved exception must stay unstamped, or the next run cannot re-read the
   // original instruction alongside the late work order.
   assertEquals(store.emails[0].makesafe_scanned_at, null);
@@ -629,6 +638,14 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
   assertEquals(store.makesafe_intake_cases.length, 1);
   assertEquals(store.makesafe_intake_cases[0].state, "confirmed_live_job");
   assertEquals(store.makesafe_intake_cases[0].job_id, "job-abc");
+  assertEquals({
+    instruction_key: store.makesafe_intake_cases[0].instruction_key,
+    lineage_id: store.makesafe_intake_cases[0].lineage_id,
+    external_ref_canonical:
+      store.makesafe_intake_cases[0].external_ref_canonical,
+    builder_wo_canonical: store.makesafe_intake_cases[0].builder_wo_canonical,
+    builder_po_canonical: store.makesafe_intake_cases[0].builder_po_canonical,
+  }, persistedIdentity);
   assertEquals(second.totals.jobs_created, 1);
   assertEquals(second.totals.write_failures, 0);
   // Now that it is settled, the source is stamped and drops out of the next window.
@@ -952,7 +969,7 @@ Deno.test("full-open does not spend its cap reattaching sources already settled 
   assertEquals(store.makesafe_intake_cases.length, 3);
 });
 
-Deno.test("a fresh cross-case merge spanning distinct persisted deliverables fails loudly", async () => {
+Deno.test("a fresh cross-case merge spanning distinct persisted deliverables is quarantined", async () => {
   const store = baseStore();
   store.makesafe_companies.push({
     id: "22222222-2222-2222-2222-222222222222",
@@ -994,23 +1011,34 @@ Deno.test("a fresh cross-case merge spanning distinct persisted deliverables fai
     "merge-b",
   );
 
-  await assertRejects(
-    () =>
-      runDeterministicIntake(fakeClient(store), {
-        dryRun: false,
-        selectionMode: "full_open",
-        days: 30,
-        nowIso: NOW,
-        maxCases: 1,
-        approveDraft,
-      }),
-    Error,
-    "multiple persisted deliverables",
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: NOW,
+    maxCases: 1,
+    approveDraft,
+  });
+  assertEquals(
+    report.isolated_failures[0]?.reason,
+    "multiple_persisted_deliverables",
+  );
+  assertEquals(report.totals.components_failed, 1);
+  assertEquals(report.totals.sources_quarantined, 2);
+  assertEquals(report.completion_status, "completed_degraded");
+  assertEquals(report.totals.write_failures, 1);
+  assert(
+    report.evidence.caveats.includes("lineage_components_quarantined"),
+  );
+  assert(
+    report.evidence.caveats.includes(
+      "scan_page_completed_degraded_retry_next_sweep",
+    ),
   );
   assertEquals(store.makesafe_intake_cases.length, 2);
 });
 
-Deno.test("fresh or state-mismatched multi-authority merges fail loudly", async () => {
+Deno.test("fresh or state-mismatched multi-authority merges are quarantined", async () => {
   const groupedStore = (prefix: string, includeFresh: boolean) => {
     const store = baseStore();
     store.makesafe_companies.push({
@@ -1057,11 +1085,15 @@ Deno.test("fresh or state-mismatched multi-authority merges fail loudly", async 
   } as const;
 
   const fresh = groupedStore("fresh-merge", true);
-  await assertRejects(
-    () => runDeterministicIntake(fakeClient(fresh), options),
-    Error,
-    "fresh source across multiple persisted cases",
+  const freshReport = await runDeterministicIntake(
+    fakeClient(fresh),
+    options,
   );
+  assertEquals(
+    freshReport.isolated_failures[0]?.reason,
+    "fresh_multi_authority_merge",
+  );
+  assertEquals(freshReport.totals.sources_quarantined, 3);
   assertEquals(fresh.makesafe_intake_cases.length, 2);
   assertEquals(fresh.makesafe_intake_case_sources.length, 2);
 
@@ -1069,16 +1101,348 @@ Deno.test("fresh or state-mismatched multi-authority merges fail loudly", async 
   stateMismatch.makesafe_intake_cases.find((row) =>
     row.id === "state-merge-case-b"
   ).state = "accounted_non_wo";
-  await assertRejects(
-    () => runDeterministicIntake(fakeClient(stateMismatch), options),
-    Error,
-    "state-mismatched secondary persisted case",
+  const mismatchReport = await runDeterministicIntake(
+    fakeClient(stateMismatch),
+    options,
   );
+  assertEquals(
+    mismatchReport.isolated_failures[0]?.reason,
+    "state_mismatched_secondary_authority",
+  );
+  assertEquals(mismatchReport.totals.sources_quarantined, 2);
   assertEquals(stateMismatch.makesafe_intake_cases.length, 2);
   assertEquals(stateMismatch.makesafe_intake_case_sources.length, 2);
 });
 
-Deno.test("a confirmed grouped plan binds no-job exception secondaries but rejects a genuine state divergence", async () => {
+Deno.test("inverse authority binding requires explicit correction across the four-authority BOX shape", async () => {
+  const buildCrossedStore = (
+    corrected: boolean,
+    identityMismatch = false,
+    includeFreshFollowUp = true,
+  ) => {
+    const store = baseStore();
+    const claims = ["26947", "26948", "26949", "26950"];
+    const legacyCaseIds = claims.map((_, index) => `box-legacy-${index + 1}`);
+    const effectiveCaseIds = claims.map((claim) => `box-effective-${claim}`);
+    for (const [index, claim] of claims.entries()) {
+      store.makesafe_intake_cases.push({
+        id: effectiveCaseIds[index],
+        org_id: "00000000-0000-0000-0000-000000000001",
+        instruction_key:
+          `fingerprint:corrected-${claim}/deliverable:wo%3AWO-${claim}/cycle:1`,
+        lineage_id: effectiveCaseIds[index],
+        cycle: 1,
+        parent_relation: null,
+        source_fingerprint: `corrected-${claim}`,
+        state: "exception",
+        job_id: null,
+        last_decision_provenance: "backfill",
+        normaliser_version:
+          "makesafe_refs.normaliseRef+wo_po_precedence@v2+po_box_reconciliation@v1",
+      });
+    }
+    for (const [authorityIndex, legacyCaseId] of legacyCaseIds.entries()) {
+      store.makesafe_intake_cases.push({
+        id: legacyCaseId,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        instruction_key:
+          `fingerprint:false-box-${authorityIndex}/deliverable:po%3ABOX/cycle:1`,
+        lineage_id: legacyCaseId,
+        cycle: 1,
+        parent_relation: null,
+        source_fingerprint: `false-box-${authorityIndex}`,
+        state: "exception",
+        job_id: null,
+      });
+      for (const [claimIndex, claim] of claims.entries()) {
+        const postId = `box-${authorityIndex + 1}-${claim}`;
+        store.emails.push(email({
+          post_id: postId,
+          received_at: `2026-07-${
+            String(2 + authorityIndex).padStart(2, "0")
+          }T0${claimIndex + 1}:00:00.000Z`,
+          subject: `NEW WORK ORDER MLB-${claim} Work Order: WO-${claim}`,
+          body_content: `Client: Claim ${claim}\nAddress: ${
+            claimIndex + 1
+          } Claim Street, Perth\nPO Box 2143, Malaga WA 6944`,
+        }));
+        store.makesafe_intake_case_sources.push({
+          id: `source-${postId}`,
+          org_id: "00000000-0000-0000-0000-000000000001",
+          case_id: legacyCaseId,
+          post_id: postId,
+        });
+        if (corrected) {
+          store.makesafe_intake_source_authority_corrections.push({
+            org_id: "00000000-0000-0000-0000-000000000001",
+            source_post_id: postId,
+            legacy_case_id: legacyCaseId,
+            effective_case_id: effectiveCaseIds[claimIndex],
+            target_job_id: null,
+            expected_identity_key:
+              identityMismatch && authorityIndex === 0 && claimIndex === 0
+                ? "wo:WO-99999"
+                : `wo:WO-${claim}`,
+          });
+        }
+      }
+    }
+    if (includeFreshFollowUp) {
+      store.emails.push(email({
+        post_id: "box-report-follow-up",
+        received_at: "2026-07-10T01:00:00.000Z",
+        subject: "Roof report required MLB-26950 Work Order: WO-26950",
+        body_content:
+          "Client: Claim 26950\nAddress: 4 Claim Street, Perth\nPO Box 2143, Malaga WA 6944",
+      }));
+    }
+    return store;
+  };
+
+  const uncorrected = await runDeterministicIntake(
+    fakeClient(buildCrossedStore(false)),
+    {
+      dryRun: true,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxCases: 10,
+    },
+  );
+  assertEquals(
+    uncorrected.isolated_failures[0]?.reason,
+    "persisted_authority_split_reconciliation_required",
+  );
+  assertEquals(uncorrected.totals.components_failed, 1);
+  assertEquals(uncorrected.totals.sources_quarantined, 17);
+
+  const corrected = await runDeterministicIntake(
+    fakeClient(buildCrossedStore(true)),
+    {
+      dryRun: true,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxCases: 10,
+    },
+  );
+  assertEquals(corrected.isolated_failures, []);
+  assertEquals(corrected.totals.sources_quarantined, 0);
+  assertEquals(corrected.selection.selected_sources, 17);
+  assertEquals(corrected.selection.selected_cases, 5);
+
+  const historicalOnlyStore = buildCrossedStore(true, false, false);
+  const historicalCaseCount = historicalOnlyStore.makesafe_intake_cases.length;
+  const historicalSourceCount =
+    historicalOnlyStore.makesafe_intake_case_sources.length;
+  let historicalApprovalCalls = 0;
+  const historicalOnly = await runDeterministicIntake(
+    fakeClient(historicalOnlyStore),
+    {
+      dryRun: false,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxCases: 10,
+      approveDraft: () => {
+        historicalApprovalCalls++;
+        throw new Error(
+          "reconciled BOX history must never enter operational approval",
+        );
+      },
+    },
+  );
+  assertEquals(historicalOnly.totals.cases_attempted, 0);
+  assertEquals(historicalOnly.totals.case_rows_created, 0);
+  assertEquals(historicalOnly.totals.source_rows_created, 0);
+  assertEquals(historicalOnly.totals.drafts_created, 0);
+  assertEquals(historicalOnly.totals.jobs_created, 0);
+  assertEquals(historicalApprovalCalls, 0);
+  assertEquals(
+    historicalOnlyStore.makesafe_intake_cases.length,
+    historicalCaseCount,
+  );
+  assertEquals(
+    historicalOnlyStore.makesafe_intake_case_sources.length,
+    historicalSourceCount,
+  );
+
+  const staleCorrection = await runDeterministicIntake(
+    fakeClient(buildCrossedStore(true, true)),
+    {
+      dryRun: true,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxCases: 10,
+    },
+  );
+  assertEquals(
+    staleCorrection.isolated_failures[0]?.reason,
+    "source_correction_identity_mismatch_reconciliation_required",
+  );
+  assert(staleCorrection.totals.sources_quarantined > 0);
+  assertEquals(staleCorrection.completion_status, "completed_degraded");
+});
+
+Deno.test("a poisoned BOX component cannot block AJ 70062 linking to existing SWMS-261054", async () => {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: "22222222-2222-2222-2222-222222222222",
+    slug: "aj",
+    name: "AJ Building & Restoration",
+    sender_patterns: ["ajs.build"],
+    parsing_rules: null,
+    active: true,
+  });
+  const poisonIds = ["box-poison-26947", "box-poison-26948"];
+  for (const [index, claim] of ["26947", "26948"].entries()) {
+    store.emails.push(email({
+      post_id: poisonIds[index],
+      received_at: `2026-07-23T0${index + 1}:00:00.000Z`,
+      subject: `NEW WORK ORDER MLB-${claim} Work Order: WO-${claim}`,
+      body_content: `Client: Poison ${claim}\nAddress: ${
+        index + 1
+      } Poison Street, Perth\nPO Box 2143, Malaga WA 6944`,
+    }));
+  }
+  seedCanonicalCase(
+    store,
+    "poison-box-authority",
+    "fingerprint:poison-box/deliverable:po%3ABOX/cycle:1",
+    poisonIds[0],
+  );
+  store.makesafe_intake_case_sources.push({
+    id: "source-poison-box-2",
+    org_id: "00000000-0000-0000-0000-000000000001",
+    case_id: "poison-box-authority",
+    post_id: poisonIds[1],
+  });
+
+  const ajSourceIds = [
+    "AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAr9x7QAAA=",
+    "mailbox_264b5ecbedc4e9de97560c373f5fb9941936cc42186dab6d5336d7bb6fd9650d",
+  ];
+  for (const [index, postId] of ajSourceIds.entries()) {
+    store.emails.push(email({
+      post_id: postId,
+      from_email: "workorders@ajs.build",
+      received_at: "2026-07-24T02:07:26.000Z",
+      subject: "Make Safe - Dianella - Job No 70062",
+      body_content:
+        "Client: Emma Clingan\nPhone: 0400 000 062\nAddress: 12 Railton Place, Dianella WA 6059",
+    }));
+    store.email_attachments.push({
+      id: `aj-70062-attachment-${index + 1}`,
+      email_id: postId,
+      name: "Works Order.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/aj-70062-${index + 1}.pdf`,
+      status: "uploaded",
+      size_bytes: 2048,
+      sha256:
+        "d76df8ef7248120bdb9c4356259234b92fe293df94eb8bdbcb42cbcb7f32e7b0",
+    });
+    store.makesafe_intake_source_authority_corrections.push({
+      org_id: "00000000-0000-0000-0000-000000000001",
+      source_post_id: postId,
+      legacy_case_id: null,
+      effective_case_id: null,
+      target_job_id: "401b97c8-b5e8-49ff-8202-5be5bb0a1135",
+      expected_identity_key: "wo:AJBR-70062",
+    });
+  }
+
+  const existingJob = {
+    id: "401b97c8-b5e8-49ff-8202-5be5bb0a1135",
+    job_number: "SWMS-261054",
+    status: "processing",
+    type: "makesafe",
+    site_address: "12 Railton Place, Dianella WA 6059",
+    metadata: { external_ref: "70062" },
+  };
+  const hugoAssignment = {
+    id: "b85b19b3-4eaa-4c14-a988-32a1194083f5",
+    job_id: existingJob.id,
+    user_id: "b353f39a-b3cc-495d-a016-50ebf4a8497d",
+    status: "scheduled",
+  };
+  store.jobs = [existingJob];
+  store.job_assignments = [hugoAssignment];
+  store.work_orders = [];
+  store.outbound_messages = [];
+  store.makesafe_job_details.push({
+    job_id: existingJob.id,
+    external_ref: "70062",
+    requesting_company_slug: "ajbr",
+    requesting_company_name: "AJ Building & Restoration",
+    report_type: null,
+    jobs: existingJob,
+  });
+  const jobsBefore = JSON.stringify(store.jobs);
+  const assignmentsBefore = JSON.stringify(store.job_assignments);
+  let approvalCalls = 0;
+
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 30,
+    nowIso: "2026-07-24T12:00:00.000Z",
+    maxCases: 10,
+    approveDraft: () => {
+      approvalCalls++;
+      throw new Error("AJ existing-job accounting must not approve a draft");
+    },
+  });
+
+  assertEquals(
+    report.isolated_failures[0]?.reason,
+    "persisted_authority_split_reconciliation_required",
+  );
+  assertEquals(report.totals.components_failed, 1);
+  assertEquals(report.totals.sources_quarantined, 2);
+  assertEquals(report.completion_status, "completed_degraded");
+  assertEquals(report.totals.case_rows_created, 1);
+  assertEquals(report.totals.source_rows_created, 2);
+  assertEquals(report.totals.drafts_created, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(approvalCalls, 0);
+  const ajCase = store.makesafe_intake_cases.find((row: any) =>
+    row.job_id === existingJob.id
+  );
+  assert(ajCase);
+  assertEquals(ajCase.external_ref_canonical, "AJBR-70062");
+  assertEquals(ajCase.state, "confirmed_live_job");
+  assertEquals(
+    store.makesafe_intake_case_sources
+      .filter((row: any) => row.case_id === ajCase.id)
+      .map((row: any) => row.post_id)
+      .sort(),
+    [...ajSourceIds].sort(),
+  );
+  assertEquals(
+    report.isolated_failures[0].source_post_ids.filter((postId) =>
+      ajSourceIds.includes(postId)
+    ),
+    [],
+  );
+  assertEquals(JSON.stringify(store.jobs), jobsBefore);
+  assertEquals(JSON.stringify(store.job_assignments), assignmentsBefore);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(store.work_orders.length, 0);
+  assertEquals(store.outbound_messages.length, 0);
+  assertEquals(
+    store.makesafe_intake_health[0].extraction_status,
+    "degraded",
+  );
+  assert(
+    report.evidence.caveats.includes(
+      "scan_page_completed_degraded_retry_next_sweep",
+    ),
+  );
+});
+
+Deno.test("a confirmed grouped plan binds no-job exception secondaries but quarantines a genuine state divergence", async () => {
   const groupedStore = () => {
     const store = baseStore();
     store.makesafe_companies.push({
@@ -1141,14 +1505,17 @@ Deno.test("a confirmed grouped plan binds no-job exception secondaries but rejec
   assertEquals(equal.makesafe_intake_cases.length, 2);
 
   // The secondary is genuinely divergent in resolved space: accounted_non_wo can
-  // never collapse to the plan's exception, so binding must fail loudly.
+  // never collapse to the plan's exception, so the component must be quarantined.
   const divergent = groupedStore();
   divergent.makesafe_intake_cases.find((row) => row.id === "conf-case-b")
     .state = "accounted_non_wo";
-  await assertRejects(
-    () => runDeterministicIntake(fakeClient(divergent), options),
-    Error,
-    "state-mismatched secondary persisted case",
+  const divergentReport = await runDeterministicIntake(
+    fakeClient(divergent),
+    options,
+  );
+  assertEquals(
+    divergentReport.isolated_failures[0]?.reason,
+    "state_mismatched_secondary_authority",
   );
   assertEquals(divergent.makesafe_intake_cases.length, 2);
   assertEquals(divergent.makesafe_intake_case_sources.length, 2);
@@ -2184,13 +2551,13 @@ Deno.test("persisted source authority survives capped-cursor sibling re-key acro
     email({
       post_id: "cursor-parent-po",
       received_at: "2026-07-05T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-90001 Work Order: WO-90001 PO: PO-90001-A",
+      subject: "NEW WORK ORDER MLB-90001 Work Order: WO-90001 PO: 900011",
       body_content: "Address: 1 Stable Street, Perth",
     }),
     email({
       post_id: "cursor-selected-po",
       received_at: "2026-07-10T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-90001 Work Order: WO-90001 PO: PO-90001-B",
+      subject: "NEW WORK ORDER MLB-90001 Work Order: WO-90001 PO: 900012",
       body_content: "Address: 1 Stable Street, Perth",
     }),
   );
@@ -2265,23 +2632,21 @@ Deno.test("exact-selected sibling of a persisted cycle-1 root rebases to the tri
       post_id: "persisted-parent-root",
       thread_id: "persisted-parent-thread",
       received_at: "2026-07-01T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-25953 Work Order: WO-25953 PO: PO-25953-A",
+      subject: "NEW WORK ORDER MLB-25953 Work Order: WO-25953 PO: 259531",
       body_content: "Address: 9 Persisted Street, Perth",
     }),
     email({
       post_id: "persisted-parent-reopen-1",
       thread_id: "persisted-parent-thread",
       received_at: "2026-07-03T01:00:00.000Z",
-      subject:
-        "REOPEN WORK ORDER MLB-25953 Work Order: WO-25953 PO: PO-25953-C",
+      subject: "REOPEN WORK ORDER MLB-25953 Work Order: WO-25953 PO: 259533",
       body_content: "Address: 9 Persisted Street, Perth",
     }),
     email({
       post_id: "persisted-parent-reopen-2",
       thread_id: "persisted-parent-thread",
       received_at: "2026-07-05T01:00:00.000Z",
-      subject:
-        "REOPEN WORK ORDER MLB-25953 Work Order: WO-25953 PO: PO-25953-D",
+      subject: "REOPEN WORK ORDER MLB-25953 Work Order: WO-25953 PO: 259534",
       body_content: "Address: 9 Persisted Street, Perth",
     }),
     // Production shape: two correlated copies of a new exact-selected MLB case,
@@ -2427,49 +2792,49 @@ Deno.test("full-open normalizes selected persisted-root siblings, cancellation, 
       post_id: "selected-root",
       thread_id: thread,
       received_at: "2026-07-01T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-26499 Work Order: WO-26499 PO: PO-BOX",
+      subject: "NEW WORK ORDER MLB-26499 Work Order: WO-26499 PO: 264990",
       body_content: "Address: 2 Selected Root Way, Perth",
     }),
     email({
       post_id: "root-reopen-1",
       thread_id: thread,
       received_at: "2026-07-02T01:00:00.000Z",
-      subject: "REOPEN WORK ORDER MLB-26499 Work Order: WO-26499 PO: PO-R1",
+      subject: "REOPEN WORK ORDER MLB-26499 Work Order: WO-26499 PO: 264991",
       body_content: "Address: 2 Selected Root Way, Perth",
     }),
     email({
       post_id: "root-reopen-2",
       thread_id: thread,
       received_at: "2026-07-03T01:00:00.000Z",
-      subject: "REOPEN WORK ORDER MLB-26499 Work Order: WO-26499 PO: PO-R2",
+      subject: "REOPEN WORK ORDER MLB-26499 Work Order: WO-26499 PO: 264992",
       body_content: "Address: 2 Selected Root Way, Perth",
     }),
     email({
       post_id: "cycle-3-sibling",
       thread_id: thread,
       received_at: "2026-07-04T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-26658 Work Order: WO-26658 PO: PO-BOX",
+      subject: "NEW WORK ORDER MLB-26658 Work Order: WO-26658 PO: 266580",
       body_content: "Address: 2 Selected Root Way, Perth",
     }),
     email({
       post_id: "sibling-reopen-1",
       thread_id: thread,
       received_at: "2026-07-05T01:00:00.000Z",
-      subject: "REOPEN WORK ORDER MLB-26658 Work Order: WO-26658 PO: PO-R3",
+      subject: "REOPEN WORK ORDER MLB-26658 Work Order: WO-26658 PO: 266583",
       body_content: "Address: 2 Selected Root Way, Perth",
     }),
     email({
       post_id: "sibling-reopen-2",
       thread_id: thread,
       received_at: "2026-07-06T01:00:00.000Z",
-      subject: "REOPEN WORK ORDER MLB-26658 Work Order: WO-26658 PO: PO-R4",
+      subject: "REOPEN WORK ORDER MLB-26658 Work Order: WO-26658 PO: 266584",
       body_content: "Address: 2 Selected Root Way, Perth",
     }),
     email({
       post_id: "cycle-5-cancellation",
       thread_id: thread,
       received_at: "2026-07-07T01:00:00.000Z",
-      subject: "CANCELLED WORK ORDER MLB-24749 Work Order: WO-24749 PO: PO-BOX",
+      subject: "CANCELLED WORK ORDER MLB-24749 Work Order: WO-24749 PO: 247490",
       body_content:
         "Cancel this instruction. Address: 2 Selected Root Way, Perth",
     }),
@@ -2659,27 +3024,25 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
     email({
       post_id: "loop-ambient-po",
       received_at: "2026-07-01T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-A",
+      subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905011",
       body_content: "Address: 5 Loop Street, Perth",
     }),
     email({
       post_id: "loop-ambient-reopen-1",
       received_at: "2026-07-03T01:00:00.000Z",
-      subject:
-        "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-C",
+      subject: "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905013",
       body_content: "Address: 5 Loop Street, Perth",
     }),
     email({
       post_id: "loop-ambient-reopen-2",
       received_at: "2026-07-05T01:00:00.000Z",
-      subject:
-        "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-D",
+      subject: "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905014",
       body_content: "Address: 5 Loop Street, Perth",
     }),
     email({
       post_id: "loop-selected-po",
       received_at: "2026-07-10T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-B",
+      subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905012",
       body_content: "Address: 5 Loop Street, Perth",
     }),
   );
@@ -2774,7 +3137,7 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
   store.emails.push(email({
     post_id: "loop-selected-resend",
     received_at: "2026-07-11T01:00:00.000Z",
-    subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: PO-90501-B",
+    subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905012",
     body_content:
       "Address: 5 Loop Street, Perth\nFollow-up copy for the same instruction.",
   }));
@@ -3001,40 +3364,40 @@ Deno.test("production-shaped moving sweep cannot satisfy a null canonical client
     email({
       post_id: "sweep-off-case-client-1",
       received_at: "2026-07-03T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-A",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: 930011",
       body_content:
         "Client: Other Instruction Client\nAddress: 3 Sweep Way, Perth",
     }),
     email({
       post_id: "sweep-off-case-client-2",
       received_at: "2026-07-04T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-C",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: 930013",
       body_content:
         "Client: Other Instruction Client\nAddress: 3 Sweep Way, Perth",
     }),
     email({
       post_id: "sweep-off-case-client-3",
       received_at: "2026-07-05T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-D",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: 930014",
       body_content:
         "Client: Other Instruction Client\nAddress: 3 Sweep Way, Perth",
     }),
     email({
       post_id: "sweep-target-copy-1",
       received_at: "2026-07-09T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-B",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: 930012",
       body_content: "Address: 3 Sweep Way, Perth",
     }),
     email({
       post_id: "sweep-target-copy-2",
       received_at: "2026-07-10T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-B",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: 930012",
       body_content: "Address: 3 Sweep Way, Perth",
     }),
     email({
       post_id: "sweep-target-exact",
       received_at: "2026-07-11T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: PO-93001-B",
+      subject: "NEW WORK ORDER MLB-93001 Work Order: WO-93001 PO: 930012",
       body_content: "Address: 3 Sweep Way, Perth",
     }),
   );
@@ -3174,34 +3537,31 @@ Deno.test("exact selection promoting a cycle-N sibling rebases its selected reop
     email({
       post_id: "child-ambient-po",
       received_at: "2026-07-01T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-A",
+      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: 906011",
       body_content: "Address: 7 Child Street, Perth",
     }),
     email({
       post_id: "child-ambient-reopen-1",
       received_at: "2026-07-03T01:00:00.000Z",
-      subject:
-        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-C",
+      subject: "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: 906013",
       body_content: "Address: 7 Child Street, Perth",
     }),
     email({
       post_id: "child-ambient-reopen-2",
       received_at: "2026-07-05T01:00:00.000Z",
-      subject:
-        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-D",
+      subject: "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: 906014",
       body_content: "Address: 7 Child Street, Perth",
     }),
     email({
       post_id: "child-selected-po",
       received_at: "2026-07-10T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-B",
+      subject: "NEW WORK ORDER MLB-90601 Work Order: WO-90601 PO: 906012",
       body_content: "Address: 7 Child Street, Perth",
     }),
     email({
       post_id: "child-selected-reopen",
       received_at: "2026-07-12T01:00:00.000Z",
-      subject:
-        "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: PO-90601-E",
+      subject: "REOPEN WORK ORDER MLB-90601 Work Order: WO-90601 PO: 906015",
       body_content: "Address: 7 Child Street, Perth",
     }),
   );
@@ -3293,15 +3653,14 @@ Deno.test("exact selection pulls the semantic parent chain and advances it withi
       post_id: "guard-original",
       thread_id: "guard-thread",
       received_at: "2026-07-05T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-91001 Work Order: WO-91001 PO: PO-91001-A",
+      subject: "NEW WORK ORDER MLB-91001 Work Order: WO-91001 PO: 910011",
       body_content: "Client: Parent Client\nAddress: 2 Guard Street, Perth",
     }),
     email({
       post_id: "guard-revision",
       thread_id: "guard-thread",
       received_at: "2026-07-10T01:00:00.000Z",
-      subject:
-        "REVISED WORK ORDER MLB-91001 Work Order: WO-91001 PO: PO-91001-A",
+      subject: "REVISED WORK ORDER MLB-91001 Work Order: WO-91001 PO: 910011",
       body_content:
         "Client: Parent Client\nAddress: 2 Guard Street, Perth\nUpdated instruction",
     }),
@@ -3428,7 +3787,7 @@ Deno.test("a re-keyed persisted parent re-points its in-plan child instead of fa
   store.emails.push(email({
     post_id: "multi-parent-po",
     received_at: "2026-07-05T01:00:00.000Z",
-    subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-A",
+    subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: 920011",
     body_content: "Client: Multi Client\nAddress: 3 Multi Street, Perth",
   }));
   store.email_attachments.push({
@@ -3464,14 +3823,14 @@ Deno.test("a re-keyed persisted parent re-points its in-plan child instead of fa
     email({
       post_id: "multi-parent-twin",
       received_at: "2026-07-06T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-A",
+      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: 920011",
       body_content:
         "Client: Multi Client\nAddress: 3 Multi Street, Perth\nFollow-up copy for the same order.",
     }),
     email({
       post_id: "multi-child-po",
       received_at: "2026-07-10T01:00:00.000Z",
-      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: PO-92001-B",
+      subject: "NEW WORK ORDER MLB-92001 Work Order: WO-92001 PO: 920012",
       body_content: "Client: Multi Client\nAddress: 3 Multi Street, Perth",
     }),
   );

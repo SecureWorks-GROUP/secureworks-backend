@@ -90,7 +90,7 @@ Deno.test("registry order is MLB, AJS/AJBR, Prime, RAPID, then chatter", () => {
 Deno.test("MLB adapter builds a confirmed identity without AI", () => {
   const item = source({
     postId: "mlb-1",
-    subject: "NEW WORK ORDER MLB-27037 Work Order: WO#27037 PO: 9182-A",
+    subject: "NEW WORK ORDER MLB-27037 Work Order: WO#27037 PO: 9182",
     body:
       "Client: Test Client\nSite Address: 10 Test Street, Perth\nPhone: 0400000000",
     attachments: [pdf("mlb-1")],
@@ -98,7 +98,7 @@ Deno.test("MLB adapter builds a confirmed identity without AI", () => {
   const adapted = adaptDeterministicSource(item, PROFILES);
   assertEquals(adapted.adapterId, "mlb");
   assertEquals(adapted.identity.builderWoCanonical, "WO-27037");
-  assertEquals(adapted.identity.builderPoCanonical, "9182-A");
+  assertEquals(adapted.identity.builderPoCanonical, "PO-9182");
   const plan = buildDeterministicIntakePlan([item], PROFILES);
   assertEquals(plan.cases[0].state, "confirmed_live_job");
   assertEquals(plan.aiCalls, 0);
@@ -125,6 +125,29 @@ Deno.test("AJS and AJBR aliases resolve to one company adapter", () => {
     assertEquals(adapted.identity.builderSlug, "aj");
     assertEquals(adapted.identity.companyId, PROFILES[1].id);
   }
+});
+
+Deno.test("AJ Job No subjects resolve to one isolated AJBR obligation", () => {
+  const items = ["aj-70062-graph", "aj-70062-mailbox"].map((postId) =>
+    source({
+      postId,
+      fromEmail: "workorders@ajs.test",
+      subject: "Make Safe - Dianella - Job No 70062",
+      body:
+        "Client: Emma Clingan\nPhone: 0400 000 062\nAddress: 12 Railton Place, Dianella WA 6059",
+      attachments: [pdf(postId)],
+    })
+  );
+  const plan = buildDeterministicIntakePlan(items, PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].identity.externalRefCanonical, "AJBR-70062");
+  assertEquals(plan.cases[0].identity.builderWoCanonical, "AJBR-70062");
+  assertEquals(plan.cases[0].identity.builderPoCanonical, null);
+  assertEquals(plan.cases[0].identity.jobFamily, "general_makesafe");
+  assertEquals(plan.cases[0].sourcePostIds, [
+    "aj-70062-graph",
+    "aj-70062-mailbox",
+  ]);
 });
 
 Deno.test("Prime wrapper adapter deterministically captures portal report work", () => {
@@ -263,13 +286,13 @@ Deno.test("address-only evidence never merges distinct work orders", () => {
 Deno.test("distinct POs remain distinct sibling instructions", () => {
   const a = source({
     postId: "po-a",
-    subject: "NEW WORK ORDER MLB-27037 Work Order: WO-27037 PO: PO-9182-A",
+    subject: "NEW WORK ORDER MLB-27037 Work Order: WO-27037 PO: 91821",
     body: "Client: PO Client\nAddress: 80 Zeta Close, Perth",
     attachments: [pdf("po-a")],
   });
   const b = source({
     postId: "po-b",
-    subject: "NEW WORK ORDER MLB-27037 Work Order: WO-27037 PO: PO-9182-B",
+    subject: "NEW WORK ORDER MLB-27037 Work Order: WO-27037 PO: 91822",
     body: "Client: PO Client\nAddress: 80 Zeta Close, Perth",
     attachments: [pdf("po-b")],
   });
@@ -283,26 +306,74 @@ Deno.test("distinct POs remain distinct sibling instructions", () => {
   assert(plan.cases.some((c) => c.parentRelation === "sibling_of"));
 });
 
-Deno.test("ordinary WO punctuation converges while significant PO punctuation stays distinct", () => {
-  const make = (postId: string, wo: string, po: string) =>
+Deno.test("ordinary WO punctuation and canonical numeric PO spellings converge", () => {
+  const make = (postId: string, wo: string, poLabel: string) =>
     source({
       postId,
-      subject: `NEW WORK ORDER MLB-31000 Work Order: ${wo} PO: ${po}`,
+      subject: `NEW WORK ORDER MLB-31000 Work Order: ${wo} ${poLabel}`,
       body: "Client: Format Client\nAddress: 90 Eta Way, Perth",
       attachments: [pdf(postId)],
     });
   const woPlan = buildDeterministicIntakePlan([
-    make("wo-hash", "WO#31000", "PO-1"),
-    make("wo-dot", "WO.31000", "PO-1"),
+    make("wo-hash", "WO#31000", "PO: 9182"),
+    make("wo-dot", "WO.31000", "Purchase Order 9182"),
   ], PROFILES);
   assertEquals(woPlan.cases.length, 1);
-  const poPlan = buildDeterministicIntakePlan([
-    make("po-dot", "WO-31000", "PO-1.2"),
-    make("po-dash", "WO-31000", "PO-1-2"),
-  ], PROFILES);
-  assertEquals(poPlan.cases.length, 2);
   assertEquals(
-    new Set(poPlan.cases.map((c) => c.identity.builderPoCanonical)).size,
+    woPlan.cases[0].identity.builderPoCanonical,
+    "PO-9182",
+  );
+});
+
+Deno.test("postal PO Box footers never become purchase-order identity or cross-claim edges", () => {
+  const sources = ["26947", "26948", "26949", "26950"].map((claim) =>
+    source({
+      postId: `postal-${claim}`,
+      subject: `Our Ref: MLB-${claim} - Make Safe`,
+      body:
+        `Client: Claim ${claim}\nAddress: ${claim} Separate Way, Perth\nMLB postal address: PO Box 2143, Malaga WA 6944`,
+      attachments: [{
+        ...pdf(`postal-${claim}`),
+        name: "Supporting report.pdf",
+      }],
+    })
+  );
+  const plan = buildDeterministicIntakePlan(sources, PROFILES);
+  assertEquals(plan.cases.length, 4);
+  assert(
+    plan.cases.every((item) => item.identity.builderPoCanonical === null),
+  );
+  assert(
+    plan.cases.every((item) => !item.instructionKey.includes("po%3ABOX")),
+  );
+  assertEquals(
+    new Set(plan.cases.map((item) => item.lineageClusterKey)).size,
+    4,
+  );
+});
+
+Deno.test("equal numeric PO cannot merge different explicit claims without the same WO", () => {
+  const make = (claim: string) =>
+    source({
+      postId: `shared-po-${claim}`,
+      subject: `Our Ref: MLB-${claim} - PO: 4477`,
+      body:
+        `Client: Shared Client\nAddress: 90 Shared Way, Perth\nPurchase Order 4477`,
+      attachments: [{
+        ...pdf(`shared-po-${claim}`),
+        name: "Supporting report.pdf",
+      }],
+    });
+  const plan = buildDeterministicIntakePlan(
+    [make("41001"), make("41002")],
+    PROFILES,
+  );
+  assertEquals(plan.cases.length, 2);
+  assert(
+    plan.cases.every((item) => item.identity.builderPoCanonical === "PO-4477"),
+  );
+  assertEquals(
+    new Set(plan.cases.map((item) => item.lineageClusterKey)).size,
     2,
   );
 });

@@ -60,6 +60,18 @@ export interface DeterministicRolloutControls {
   instructionKeys: readonly string[];
 }
 
+export interface DeterministicIsolatedFailure {
+  reason:
+    | "fresh_multi_authority_merge"
+    | "multiple_persisted_deliverables"
+    | "state_mismatched_secondary_authority"
+    | "persisted_authority_split_reconciliation_required"
+    | "source_correction_identity_mismatch_reconciliation_required";
+  source_post_ids: string[];
+  persisted_case_ids: string[];
+  planned_instruction_keys: string[];
+}
+
 // There is deliberately no backlog-sized runtime default. The DB starts at one,
 // and both DB and runtime reject caps outside this explicit canary/batch bound.
 const DEFAULT_MAX_CASES_PER_RUN = 1;
@@ -88,6 +100,7 @@ const BACKLOG_READ_SHARE = 0.5;
 export interface DeterministicRuntimeReport {
   ok: true;
   mode: "deterministic";
+  completion_status: "completed" | "completed_degraded";
   dry_run: boolean;
   ai_enabled: false;
   ai_calls: 0;
@@ -105,6 +118,8 @@ export interface DeterministicRuntimeReport {
     cases_deferred: number;
     cases_failed: number;
     job_creation_deferred: number;
+    components_failed: number;
+    sources_quarantined: number;
   };
   // True when the run spent its attempt ceiling without committing a single case.
   // Repeat failures crowding out advanceable work is then visible, not silent.
@@ -123,6 +138,8 @@ export interface DeterministicRuntimeReport {
     // Instruction keys that a capped run could not have proved either way. These
     // are never reported as stale and never fail a run closed.
     cap_exposed_instruction_allowlist: number;
+    quarantined_components: number;
+    quarantined_sources: number;
   };
   // Per-run read bound. cap_reached means older rows in the window were not read
   // this run; allowlisted sources are read by id and are never dropped by it.
@@ -186,6 +203,9 @@ export interface DeterministicRuntimeReport {
   by_builder_and_reason: Record<string, Record<string, number>>;
   // Non-PII failure classification. Keys are message classes, never source content.
   write_failure_reasons: Record<string, number>;
+  // Independent lineage components rejected before writes. Source and case ids
+  // are structural coordinates only; no subject/body/address content is exposed.
+  isolated_failures: DeterministicIsolatedFailure[];
   // Storage read/write blockers observed this run, in first-seen order. These are
   // bucket-level failures, not credential problems, and every distinct one is kept.
   storage_blockers: string[];
@@ -438,6 +458,14 @@ interface PersistedSourceAuthority {
   job_id: string | null;
 }
 
+interface SourceAuthorityCorrection {
+  source_post_id: string;
+  legacy_case_id: string | null;
+  effective_case_id: string | null;
+  target_job_id: string | null;
+  expected_identity_key: string;
+}
+
 // An exact source that is already canonical-accounted is stronger authority than
 // whichever correlated neighbours happen to share this run's moving capped page.
 // Seed its complete persisted source closure before planning, then bind the plan
@@ -448,10 +476,21 @@ async function resolvePersistedSourceAuthorities(
   sourcePostIds: readonly string[],
 ): Promise<{
   byPostId: Map<string, PersistedSourceAuthority>;
+  targetJobByPostId: Map<string, string>;
+  expectedIdentityByPostId: Map<string, string>;
   seedPostIds: string[];
 }> {
   const byPostId = new Map<string, PersistedSourceAuthority>();
-  if (!sourcePostIds.length) return { byPostId, seedPostIds: [] };
+  const targetJobByPostId = new Map<string, string>();
+  const expectedIdentityByPostId = new Map<string, string>();
+  if (!sourcePostIds.length) {
+    return {
+      byPostId,
+      targetJobByPostId,
+      expectedIdentityByPostId,
+      seedPostIds: [],
+    };
+  }
 
   const caseIdByPostId = new Map<string, string>();
   for (const ids of chunk(sourcePostIds)) {
@@ -468,6 +507,48 @@ async function resolvePersistedSourceAuthorities(
       if (row?.post_id && row?.case_id) {
         caseIdByPostId.set(row.post_id, row.case_id);
       }
+    }
+  }
+
+  // The original source ledger is append-only. Parser corrections therefore
+  // overlay effective authority here instead of rewriting historical ownership.
+  // A target_job_id is a separately guarded instruction to account a fresh source
+  // against an already-created operational job without drafting or minting again.
+  for (const ids of chunk(sourcePostIds)) {
+    const { data, error } = await client.from(
+      "makesafe_intake_source_authority_corrections",
+    )
+      .select(
+        "source_post_id,legacy_case_id,effective_case_id,target_job_id,expected_identity_key",
+      )
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("source_post_id", ids);
+    if (error) {
+      throw new Error(
+        `deterministic source correction read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    for (const row of (data || []) as SourceAuthorityCorrection[]) {
+      const actualLegacy = caseIdByPostId.get(row.source_post_id) || null;
+      if (
+        row.legacy_case_id && actualLegacy !== row.legacy_case_id
+      ) {
+        throw new Error(
+          "deterministic source correction legacy authority mismatch; reconciliation required",
+        );
+      }
+      if (row.effective_case_id) {
+        caseIdByPostId.set(row.source_post_id, row.effective_case_id);
+      }
+      if (row.target_job_id) {
+        targetJobByPostId.set(row.source_post_id, row.target_job_id);
+      }
+      expectedIdentityByPostId.set(
+        row.source_post_id,
+        row.expected_identity_key,
+      );
     }
   }
 
@@ -504,12 +585,37 @@ async function resolvePersistedSourceAuthorities(
     client,
     [...authorityByCaseId.keys()],
   );
+  const correctedSourcePostIds: string[] = [];
+  for (const ids of chunk([...authorityByCaseId.keys()])) {
+    const { data, error } = await client.from(
+      "makesafe_intake_source_authority_corrections",
+    )
+      .select("source_post_id,effective_case_id")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("effective_case_id", ids);
+    if (error) {
+      throw new Error(
+        `deterministic corrected source closure read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.source_post_id) correctedSourcePostIds.push(row.source_post_id);
+    }
+  }
   const seedPostIds = [
-    ...new Set(
-      [...persistedSources.values()].flatMap((ids) => [...ids]),
-    ),
+    ...new Set([
+      ...[...persistedSources.values()].flatMap((ids) => [...ids]),
+      ...correctedSourcePostIds,
+    ]),
   ];
-  return { byPostId, seedPostIds };
+  return {
+    byPostId,
+    targetJobByPostId,
+    expectedIdentityByPostId,
+    seedPostIds,
+  };
 }
 
 // Live scanning and dark observation sweep the same window independently, so each
@@ -865,6 +971,13 @@ function selectedPlan(
   const cases = fullPlan.cases.filter((intakeCase) =>
     selectedKeys.has(intakeCase.instructionKey)
   );
+  return planWithCases(fullPlan, cases);
+}
+
+function planWithCases(
+  fullPlan: DeterministicIntakePlan,
+  cases: readonly DeterministicCasePlan[],
+): DeterministicIntakePlan {
   const sourceClassifications = cases.flatMap((intakeCase) =>
     intakeCase.sourceClassifications
   );
@@ -964,6 +1077,42 @@ function deliverableSegment(instructionKey: string): string {
   return match[1];
 }
 
+class PersistedAuthorityBindingError extends Error {
+  constructor(
+    readonly failure: DeterministicIsolatedFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "PersistedAuthorityBindingError";
+  }
+}
+
+function bindingFailure(
+  reason: DeterministicIsolatedFailure["reason"],
+  plan: DeterministicIntakePlan,
+  authorityByPostId: Map<string, PersistedSourceAuthority>,
+  message: string,
+): PersistedAuthorityBindingError {
+  return new PersistedAuthorityBindingError({
+    reason,
+    source_post_ids: [
+      ...new Set(plan.cases.flatMap((item) => item.sourcePostIds)),
+    ].sort(),
+    persisted_case_ids: [
+      ...new Set(
+        plan.cases.flatMap((item) =>
+          item.sourcePostIds.flatMap((postId) => {
+            const authority = authorityByPostId.get(postId);
+            return authority ? [authority.id] : [];
+          })
+        ),
+      ),
+    ].sort(),
+    planned_instruction_keys: plan.cases.map((item) => item.instructionKey)
+      .sort(),
+  }, message);
+}
+
 function bindSelectedPlanToPersistedSourceAuthority(
   plan: DeterministicIntakePlan,
   authorityByPostId: Map<string, PersistedSourceAuthority>,
@@ -977,6 +1126,30 @@ function bindSelectedPlanToPersistedSourceAuthority(
   //
   // Any in-plan child parented to the this-run key must follow that parent back to
   // its stable key, or the lineage guard would read the child as an orphan.
+  const plannedKeysByAuthority = new Map<string, Set<string>>();
+  for (const intakeCase of plan.cases) {
+    for (const postId of intakeCase.sourcePostIds) {
+      const authority = authorityByPostId.get(postId);
+      if (!authority) continue;
+      const keys = plannedKeysByAuthority.get(authority.id) ||
+        new Set<string>();
+      keys.add(intakeCase.instructionKey);
+      plannedKeysByAuthority.set(authority.id, keys);
+    }
+  }
+  if (
+    [...plannedKeysByAuthority.values()].some((instructionKeys) =>
+      instructionKeys.size > 1
+    )
+  ) {
+    throw bindingFailure(
+      "persisted_authority_split_reconciliation_required",
+      plan,
+      authorityByPostId,
+      "one persisted source authority backs multiple corrected deterministic instructions; reconciliation required",
+    );
+  }
+
   const keyRemap = new Map<string, string>();
   const cases = plan.cases.map((intakeCase) => {
     // Grouped history is legitimate only when every source is already canonical,
@@ -997,7 +1170,10 @@ function bindSelectedPlanToPersistedSourceAuthority(
         !authorityByPostId.has(postId)
       );
       if (unownedSources.length) {
-        throw new Error(
+        throw bindingFailure(
+          "fresh_multi_authority_merge",
+          plan,
+          authorityByPostId,
           "one deterministic plan merged a fresh source across multiple persisted cases",
         );
       }
@@ -1006,7 +1182,10 @@ function bindSelectedPlanToPersistedSourceAuthority(
         if (
           deliverableSegment(candidate.instruction_key) !== primaryDeliverable
         ) {
-          throw new Error(
+          throw bindingFailure(
+            "multiple_persisted_deliverables",
+            plan,
+            authorityByPostId,
             "one deterministic plan merged canonical sources from multiple persisted deliverables",
           );
         }
@@ -1014,7 +1193,10 @@ function bindSelectedPlanToPersistedSourceAuthority(
           candidate.id !== authority.id &&
           candidate.state !== resolvedState(intakeCase, candidate.job_id)
         ) {
-          throw new Error(
+          throw bindingFailure(
+            "state_mismatched_secondary_authority",
+            plan,
+            authorityByPostId,
             "one deterministic plan merged a state-mismatched secondary persisted case",
           );
         }
@@ -1051,6 +1233,96 @@ function bindSelectedPlanToPersistedSourceAuthority(
     sourceClassifications: relinked.flatMap((intakeCase) =>
       intakeCase.sourceClassifications
     ),
+  };
+}
+
+function bindPlanComponentsToPersistedAuthority(
+  plan: DeterministicIntakePlan,
+  authorityByPostId: Map<string, PersistedSourceAuthority>,
+  expectedIdentityByPostId: ReadonlyMap<string, string>,
+): {
+  plan: DeterministicIntakePlan;
+  isolatedFailures: DeterministicIsolatedFailure[];
+} {
+  const parent = plan.cases.map((_, index) => index);
+  const find = (index: number): number =>
+    parent[index] === index ? index : (parent[index] = find(parent[index]));
+  const union = (left: number, right: number) => {
+    const a = find(left);
+    const b = find(right);
+    if (a !== b) parent[b] = a;
+  };
+  const firstByLineage = new Map<string, number>();
+  const firstByAuthority = new Map<string, number>();
+  for (const [index, intakeCase] of plan.cases.entries()) {
+    const lineageIndex = firstByLineage.get(intakeCase.lineageClusterKey);
+    if (lineageIndex === undefined) {
+      firstByLineage.set(intakeCase.lineageClusterKey, index);
+    } else {
+      union(lineageIndex, index);
+    }
+    for (const postId of intakeCase.sourcePostIds) {
+      const authority = authorityByPostId.get(postId);
+      if (!authority) continue;
+      const authorityIndex = firstByAuthority.get(authority.id);
+      if (authorityIndex === undefined) {
+        firstByAuthority.set(authority.id, index);
+      } else {
+        // A parser correction can split one old authority across otherwise
+        // independent lineage clusters. Keep those clusters in one validation
+        // component so the inverse guard quarantines the entire ambiguity.
+        union(authorityIndex, index);
+      }
+    }
+  }
+  const components = new Map<number, DeterministicCasePlan[]>();
+  for (const [index, intakeCase] of plan.cases.entries()) {
+    const root = find(index);
+    const component = components.get(root) || [];
+    component.push(intakeCase);
+    components.set(root, component);
+  }
+  const accepted: DeterministicCasePlan[] = [];
+  const isolatedFailures: DeterministicIsolatedFailure[] = [];
+  for (const cases of components.values()) {
+    const componentPlan = planWithCases(plan, cases);
+    try {
+      for (const intakeCase of componentPlan.cases) {
+        const actualIdentity = intakeCase.identity.builderWoCanonical
+          ? `wo:${intakeCase.identity.builderWoCanonical}`
+          : intakeCase.identity.builderPoCanonical
+          ? `po:${intakeCase.identity.builderPoCanonical}`
+          : intakeCase.identity.externalRefCanonical
+          ? `ref:${intakeCase.identity.externalRefCanonical}`
+          : null;
+        if (
+          intakeCase.sourcePostIds.some((postId) => {
+            const expected = expectedIdentityByPostId.get(postId);
+            return expected && expected !== actualIdentity;
+          })
+        ) {
+          throw bindingFailure(
+            "source_correction_identity_mismatch_reconciliation_required",
+            componentPlan,
+            authorityByPostId,
+            "source correction no longer matches deterministic identity; reconciliation required",
+          );
+        }
+      }
+      accepted.push(
+        ...bindSelectedPlanToPersistedSourceAuthority(
+          componentPlan,
+          authorityByPostId,
+        ).cases,
+      );
+    } catch (error) {
+      if (!(error instanceof PersistedAuthorityBindingError)) throw error;
+      isolatedFailures.push(error.failure);
+    }
+  }
+  return {
+    plan: planWithCases(plan, accepted),
+    isolatedFailures,
   };
 }
 
@@ -1559,9 +1831,33 @@ function isDeadObligationJobStatus(status: unknown): boolean {
   );
 }
 
+function obligationRefNumericCore(value: unknown): string | null {
+  const matches = String(value ?? "").match(/\d{5,}/g);
+  return matches?.[0] ?? null;
+}
+
+function obligationAddressKey(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/\bwa\b/g, " ")
+    .replace(/\b\d{4}\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function obligationAddressesMatch(left: unknown, right: unknown): boolean {
+  const a = obligationAddressKey(left);
+  const b = obligationAddressKey(right);
+  if (!a || !b) return false;
+  return a === b || (a.length >= 12 && b.length >= 12 &&
+    (a.includes(b) || b.includes(a)));
+}
+
 async function readExistingObligationJobs(
   client: any,
   cases: readonly DeterministicCasePlan[],
+  targetJobByPostId: ReadonlyMap<string, string>,
 ): Promise<Map<string, string>> {
   if (!cases.some((item) => item.identity.externalRefCanonical)) {
     return new Map();
@@ -1574,7 +1870,7 @@ async function readExistingObligationJobs(
   for (let from = 0;; from += SOURCE_PAGE_SIZE) {
     const { data: page, error } = await client.from("makesafe_job_details")
       .select(
-        "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(metadata,status)",
+        "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(metadata,status,site_address,type)",
       )
       .order("job_id", { ascending: true })
       .range(from, from + SOURCE_PAGE_SIZE - 1);
@@ -1602,6 +1898,19 @@ async function readExistingObligationJobs(
       prefixes,
     );
     const targetCompany = canonicalCompanyDedupeKey(item.identity.builderSlug);
+    const targetAddress = item.identity.siteAddress;
+    const correctedTargetJobIds = new Set(
+      item.sourcePostIds.flatMap((postId) => {
+        const jobId = targetJobByPostId.get(postId);
+        return jobId ? [jobId] : [];
+      }),
+    );
+    if (correctedTargetJobIds.size > 1) {
+      throw new Error(
+        "one deterministic instruction maps to multiple corrected target jobs; reconciliation required",
+      );
+    }
+    const correctedTargetJobId = [...correctedTargetJobIds][0] || null;
     // Mirror the existing/approve side: a distinct PO carried only in the work
     // order field or the composite external ref still discriminates, so two
     // explicitly-different POs are never over-deduped into one obligation.
@@ -1611,20 +1920,31 @@ async function readExistingObligationJobs(
       canonicalObligationPoCore(item.identity.externalRefCanonical, true);
     if (!targetRef || !targetCompany) continue;
     const targetReportOnly = deterministicPrimaryIsReportOnly(item);
-    const match = (data || []).find((row: any) => {
+    const matchingRows = (data || []).filter((row: any) => {
       if (!row?.job_id) return false;
-      if (
-        canonicalExternalObligationRef(row.external_ref, prefixes) !== targetRef
-      ) return false;
       const existingCompany = canonicalCompanyDedupeKey(
         row.requesting_company_slug || row.requesting_company_name,
       );
       if (!existingCompany || existingCompany !== targetCompany) return false;
       if (isReportOnlyType(row.report_type) !== targetReportOnly) return false;
       const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      if (existingJob?.type && existingJob.type !== "makesafe") return false;
       // A cancelled/void/superseded job is a dead obligation: a later genuine
       // re-issue of the same claim/PO must create a live job, not bind here.
       if (isDeadObligationJobStatus(existingJob?.status)) return false;
+      const existingRef = canonicalExternalObligationRef(
+        row.external_ref,
+        prefixes,
+      );
+      const exactRefMatch = existingRef === targetRef;
+      // Direct-ops jobs can store the same builder-scoped obligation as a bare
+      // number (AJBR-70062 versus 70062). Accept that storage difference only
+      // when builder and address also agree; reference core alone is insufficient.
+      const builderScopedBareRefMatch = !!targetAddress &&
+        obligationRefNumericCore(targetRef) ===
+          obligationRefNumericCore(existingRef) &&
+        obligationAddressesMatch(targetAddress, existingJob?.site_address);
+      if (!exactRefMatch && !builderScopedBareRefMatch) return false;
       const metadata = existingJob?.metadata &&
           typeof existingJob.metadata === "object"
         ? existingJob.metadata
@@ -1639,6 +1959,25 @@ async function readExistingObligationJobs(
       // matching dedupes storage variants, never two explicitly different POs.
       return !(targetPo && existingPo && targetPo !== existingPo);
     });
+    const uniqueMatches = [
+      ...new Map(
+        matchingRows.map((row: any) => [String(row.job_id), row]),
+      ).values(),
+    ];
+    if (uniqueMatches.length > 1) {
+      throw new Error(
+        "multiple live jobs matched one deterministic builder reference and address; reconciliation required",
+      );
+    }
+    const match = uniqueMatches[0] || null;
+    if (
+      correctedTargetJobId &&
+      (!match || String(match.job_id) !== correctedTargetJobId)
+    ) {
+      throw new Error(
+        "corrected target job no longer uniquely matches deterministic identity; reconciliation required",
+      );
+    }
     if (match) matches.set(item.instructionKey, match.job_id);
   }
   return matches;
@@ -1651,7 +1990,9 @@ async function readPersistedCases(
   const rows = new Map<string, any>();
   for (const keys of chunk(cases.map((c) => c.instructionKey))) {
     const { data, error } = await client.from("makesafe_intake_cases")
-      .select("id,instruction_key,lineage_id,cycle,state,job_id")
+      .select(
+        "id,instruction_key,lineage_id,cycle,state,job_id,last_decision_provenance,normaliser_version",
+      )
       .eq("org_id", DEFAULT_ORG_ID)
       .in("instruction_key", keys);
     // Failing open would silently degrade the run ordering back to a plain
@@ -1996,12 +2337,29 @@ async function insertCaseAndSources(
       nextState !== existing.state &&
       (ALLOWED_TRANSITIONS[existing.state as string] || []).includes(nextState)
     ) {
-      const {
-        org_id: _org,
-        instruction_key: _key,
-        received_at: _received,
-        ...mutable
-      } = desired;
+      // Persisted instruction/lineage/identity fields are authority. Resuming a
+      // case may enrich its operational facts and state, but a moving page must
+      // never restamp immutable identity (especially after a correction overlay).
+      const mutable = {
+        client_name: desired.client_name,
+        client_phone: desired.client_phone,
+        client_email: desired.client_email,
+        site_address: desired.site_address,
+        site_suburb: desired.site_suburb,
+        missing_fields: desired.missing_fields,
+        conflicting_fields: desired.conflicting_fields,
+        state: desired.state,
+        reason_code: desired.reason_code,
+        blocked_reasons: desired.blocked_reasons,
+        is_authoritative: desired.is_authoritative,
+        side_effects_suppressed: desired.side_effects_suppressed,
+        last_decision_provenance: desired.last_decision_provenance,
+        last_decision_actor: desired.last_decision_actor,
+        last_decision_reason: desired.last_decision_reason,
+        story_json: desired.story_json,
+        evidence_map: desired.evidence_map,
+        recovery_cursor: desired.recovery_cursor,
+      };
       const { data, error } = await client.from("makesafe_intake_cases")
         .update({ ...mutable, job_id: jobId ?? existing.job_id ?? null })
         .eq("org_id", DEFAULT_ORG_ID)
@@ -2189,28 +2547,28 @@ export async function runDeterministicIntake(
     ...allowSourcePostIds,
     ...instructionSeeds.postIds,
   ];
-  const selected = selectionMode === "full_open"
-    ? bindSelectedPlanToPersistedSourceAuthority(
-      fullPlan,
-      sourceAuthorities.byPostId,
-    )
+  const rawSelected = selectionMode === "full_open"
+    ? fullPlan
     : hasAllowlist
     ? selectedPlan(
-      bindSelectedPlanToPersistedSourceAuthority(
-        selectedPlan(
-          fullPlan,
-          exactSelectionSourcePostIds,
-          allowInstructionKeys,
-        ),
-        sourceAuthorities.byPostId,
-      ),
+      fullPlan,
       exactSelectionSourcePostIds,
       allowInstructionKeys,
     )
-    : bindSelectedPlanToPersistedSourceAuthority(
-      fullPlan,
-      sourceAuthorities.byPostId,
-    );
+    : fullPlan;
+  const boundSelection = bindPlanComponentsToPersistedAuthority(
+    rawSelected,
+    sourceAuthorities.byPostId,
+    sourceAuthorities.expectedIdentityByPostId,
+  );
+  const selected = selectionMode === "exact" && hasAllowlist
+    ? selectedPlan(
+      boundSelection.plan,
+      exactSelectionSourcePostIds,
+      allowInstructionKeys,
+    )
+    : boundSelection.plan;
+  const isolatedFailures = boundSelection.isolatedFailures;
   const requireAllAllowlistMatches =
     options.requireAllAllowlistMatches === true ||
     options.includeSanitizedCases === true;
@@ -2222,10 +2580,18 @@ export async function runDeterministicIntake(
   const plan = lineage.plan;
   const missingParents = lineage.missingParents;
   const matchedCaseSources = new Set(
-    plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
+    [
+      ...plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
+      ...isolatedFailures.flatMap((failure) => failure.source_post_ids),
+    ],
   );
   const matchedCaseKeys = new Set(
-    plan.cases.map((intakeCase) => intakeCase.instructionKey),
+    [
+      ...plan.cases.map((intakeCase) => intakeCase.instructionKey),
+      ...isolatedFailures.flatMap((failure) =>
+        failure.planned_instruction_keys
+      ),
+    ],
   );
   // Source ids are always read by id, so an unmatched one is always genuinely
   // stale. An instruction key is only a fair test when its sources were seeded by
@@ -2263,6 +2629,9 @@ export async function runDeterministicIntake(
     caveats.push("instruction_allowlist_cap_exposed");
   }
   if (missingParents.length) caveats.push("lineage_parent_unselected");
+  if (isolatedFailures.length) {
+    caveats.push("lineage_components_quarantined");
+  }
   // Nothing this run could act on was inside the cap, and every unresolved
   // allowlist entry was cap-exposed rather than stale. That is a no-op the sweep
   // will resolve on a later run, so it is reported loudly instead of throwing.
@@ -2271,11 +2640,15 @@ export async function runDeterministicIntake(
     !unmatchedSourceAllowlist.length &&
     !unmatchedInstructionAllowlist.length;
   if (capExposedNoOp) caveats.push("no_cases_readable_within_cap");
+  const isolatedNoOp = !plan.cases.length && isolatedFailures.length > 0;
   const sourceAccountingComplete = !input.read.cap_reached &&
     input.read.cursor_at === null && input.read.next_cursor_at === null;
   const report: DeterministicRuntimeReport = {
     ok: true,
     mode: "deterministic",
+    completion_status: missingParents.length || isolatedFailures.length
+      ? "completed_degraded"
+      : "completed",
     dry_run: dryRun,
     ai_enabled: false,
     ai_calls: 0,
@@ -2294,6 +2667,10 @@ export async function runDeterministicIntake(
       cases_deferred: 0,
       cases_failed: missingParents.length,
       job_creation_deferred: 0,
+      components_failed: isolatedFailures.length,
+      sources_quarantined: new Set(
+        isolatedFailures.flatMap((failure) => failure.source_post_ids),
+      ).size,
     },
     attempt_cap_reached_without_commit: false,
     selection: {
@@ -2305,6 +2682,10 @@ export async function runDeterministicIntake(
       unmatched_source_allowlist: unmatchedSourceAllowlist.length,
       unmatched_instruction_allowlist: unmatchedInstructionAllowlist.length,
       cap_exposed_instruction_allowlist: capExposedInstructionKeys.length,
+      quarantined_components: isolatedFailures.length,
+      quarantined_sources: new Set(
+        isolatedFailures.flatMap((failure) => failure.source_post_ids),
+      ).size,
     },
     source_read: input.read,
     evidence: {
@@ -2319,8 +2700,15 @@ export async function runDeterministicIntake(
     write_failure_reasons: missingParents.length
       ? { lineage_parent_unselected: missingParents.length }
       : {},
+    isolated_failures: isolatedFailures,
     storage_blockers: [],
   };
+  for (const failure of isolatedFailures) {
+    report.write_failure_reasons[failure.reason] =
+      (report.write_failure_reasons[failure.reason] || 0) + 1;
+    report.totals.write_failures++;
+    report.totals.cases_failed++;
+  }
   if (options.includeSanitizedCases) {
     report.proposed_cases = await sanitizedCases(plan);
   }
@@ -2334,11 +2722,11 @@ export async function runDeterministicIntake(
     return report;
   }
 
-  if (missingParents.length) {
+  if (missingParents.length || isolatedNoOp) {
     report.evidence.caveats.push(
       "scan_page_completed_degraded_retry_next_sweep",
     );
-    await writeHealth(client, nowIso, missingParents.length, 0, 0);
+    await writeHealth(client, nowIso, report.totals.write_failures, 0, 0);
     await commitCompletedCursor();
     return report;
   }
@@ -2396,6 +2784,7 @@ export async function runDeterministicIntake(
   const existingObligationJobs = await readExistingObligationJobs(
     client,
     plan.cases,
+    sourceAuthorities.targetJobByPostId,
   );
   const persisted = await readPersistedCases(client, plan.cases);
   const persistedSources = await readPersistedSourcePostIds(
@@ -2416,6 +2805,19 @@ export async function runDeterministicIntake(
       )
     ) {
       return "fresh";
+    }
+    // The BOX reconciliation migration creates corrected authorities solely to
+    // replace a false shared PO identity. They are deliberately non-operational:
+    // an ordinary catch-up sweep must not turn reconciled history into hundreds
+    // of jobs. Genuinely new, unaccounted evidence still takes the branch above
+    // and can advance the corrected authority normally.
+    if (
+      row.last_decision_provenance === "backfill" &&
+      String(row.normaliser_version || "").includes(
+        "po_box_reconciliation@v1",
+      )
+    ) {
+      return "stuck";
     }
     const obligationJobId = existingObligationJobs.get(
       casePlan.instructionKey,
@@ -2556,6 +2958,7 @@ export async function runDeterministicIntake(
     report.totals.jobs_created,
   );
   if (report.totals.write_failures > 0 || report.totals.cases_failed > 0) {
+    report.completion_status = "completed_degraded";
     // This invocation completed and wrote truthful degraded health, so advance
     // rather than letting one poison case pin every older page. The full sweep
     // resets to the window head and retries it on the next cycle; the caveat keeps

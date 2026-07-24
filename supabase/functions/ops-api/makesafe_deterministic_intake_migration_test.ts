@@ -28,6 +28,12 @@ const fullOpenMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const lineageCorrectionMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260724025815_makesafe_lineage_authority_corrections.sql",
+    import.meta.url,
+  ),
+);
 const rollback = await Deno.readTextFile(
   new URL(
     "../../rollbacks/20260720000002_makesafe_deterministic_intake_mode_rollback.sql",
@@ -361,6 +367,97 @@ Deno.test("full-open is explicit, bounded and distinct from exact-empty fail-clo
     "deterministic full_open mode requires empty exact allowlists",
   );
   assertStringIncludes(index, "selectionMode: rollout.selectionMode");
+});
+
+Deno.test("lineage correction is append-only, snapshot-guarded and side-effect-free", () => {
+  for (
+    const table of [
+      "makesafe_intake_case_authority_corrections",
+      "makesafe_intake_source_authority_corrections",
+    ]
+  ) {
+    assertStringIncludes(
+      lineageCorrectionMigration,
+      `CREATE TABLE public.${table}`,
+    );
+    assertStringIncludes(
+      lineageCorrectionMigration,
+      `ALTER TABLE public.${table}\n  ENABLE ROW LEVEL SECURITY`,
+    );
+    assertStringIncludes(
+      lineageCorrectionMigration,
+      `REVOKE ALL ON public.${table}`,
+    );
+    assertStringIncludes(
+      lineageCorrectionMigration,
+      `GRANT SELECT ON public.${table}`,
+    );
+  }
+  assertEquals(
+    lineageCorrectionMigration.match(
+      /EXECUTE FUNCTION public\.reject_makesafe_intake_append_only_mutation\(\)/g,
+    )?.length,
+    2,
+  );
+  for (
+    const invariant of [
+      "expected 335 cases",
+      "expected 600 sources and 46 sourceless cases",
+      "expected 294 corrected partitions over 600 sources",
+      "correction ledger is not empty",
+      "source is already accounted",
+      "existing job identity changed",
+      "Hugo assignment changed",
+      "side-effect row count changed",
+      "job or assignment changed",
+    ]
+  ) {
+    assertStringIncludes(lineageCorrectionMigration, invariant);
+  }
+  for (
+    const manifest of [
+      "a68ca7336898b806ba09e7343ed0afa0977560e42c737e4def935015da2f686d",
+      "7d2697dca8a87df9b06d674a0bafac8086435abf77133085000d2b927a5d7697",
+      "07ba10f78e94e98e0b7039c4ca6e487c727d121a3be7708b996d20776a76b808",
+      "2b15f65eea187bbcb60d37ab99574d8dac5629408659fa8fe333ab404cfb5926",
+    ]
+  ) assertStringIncludes(lineageCorrectionMigration, manifest);
+
+  assertStringIncludes(lineageCorrectionMigration, "SWMS-261054");
+  assertStringIncludes(
+    lineageCorrectionMigration,
+    "401b97c8-b5e8-49ff-8202-5be5bb0a1135",
+  );
+  assertStringIncludes(
+    lineageCorrectionMigration,
+    "b353f39a-b3cc-495d-a016-50ebf4a8497d",
+  );
+  assertStringIncludes(
+    lineageCorrectionMigration,
+    "'existing_job_binding',\n    'wo:AJBR-70062'",
+  );
+  assertStringIncludes(
+    lineageCorrectionMigration,
+    "A migration-provisioned database has neither the historical BOX footprint",
+  );
+  for (
+    const forbidden of [
+      "UPDATE public.jobs",
+      "UPDATE public.job_assignments",
+      "UPDATE public.makesafe_intake_drafts",
+      "INSERT INTO public.jobs",
+      "INSERT INTO public.job_assignments",
+      "INSERT INTO public.makesafe_intake_drafts",
+      "INSERT INTO public.outbound_message_queue",
+      "INSERT INTO public.makesafe_notify_log",
+      "DELETE FROM public.",
+    ]
+  ) {
+    assert(
+      !lineageCorrectionMigration.includes(forbidden),
+      `correction migration contains forbidden operational write: ${forbidden}`,
+    );
+  }
 });
 
 Deno.test("attachment staging uses a content hash and append-only artifact ledger", () => {

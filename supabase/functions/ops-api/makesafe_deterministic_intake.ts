@@ -24,9 +24,10 @@ import {
   textHasExplicitReportRequest,
 } from "./makesafe_intake_gate.ts";
 import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
+import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-21.v2";
+  "makesafe-deterministic-intake@2026-07-24.v3";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 
 export type AdapterId = "mlb" | "ajs_ajbr" | "prime" | "rapid" | "chatter";
@@ -275,8 +276,6 @@ const PRIME_SIGNAL =
   /\bprime(?:eco|\s+ecosystem|\s+notification|\s+portal)?\b/i;
 const AJS_SIGNAL = /\b(?:AJBR|AJS)[-\s#]*\d{3,}\b/i;
 const MLB_SIGNAL = /\bMLB[-\s#]*\d{3,}\b/i;
-const PO_RE =
-  /\b(?:p\s*[./]?\s*o\s*\.(?=\s|:|#|-)|p\s*[./]?\s*o\b|purchase\s+order\b)\s*(?:number|no\.?)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9._-]{2,})\b/i;
 // Require an explicit label delimiter/number token. Bare "NEW WORK ORDER
 // MLB-123" proves an instruction and claim, but must not silently promote that
 // claim to a builder WO identity.
@@ -405,11 +404,19 @@ function extractRawIdentity(
     : adapterId === "rapid"
     ? "RAPID"
     : "MLB";
-  const externalRef = family
+  const familyExternalRef = family
     ? `${prefix}-${family[1]}${family[2] ? `-${family[2]}` : ""}`
     : null;
   const labelledWo = hay.match(WO_RE)?.[1] || null;
   const jobNo = hay.match(JOB_NO_RE)?.[1] || null;
+  // AJ's production subjects use "Job No 70062" without repeating AJBR in the
+  // subject. The sender-selected adapter supplies that builder scope, so the
+  // numeric job number is strong AJBR identity for both the planner and the
+  // existing-obligation lookup.
+  const externalRef = familyExternalRef ||
+    (adapterId === "ajs_ajbr" && /^\d{3,}$/.test(jobNo || "")
+      ? `AJBR-${jobNo}`
+      : null);
   const attachmentWo = item.attachments
     .map((a) => a.name || "")
     .map((name) => name.match(WO_RE)?.[1] || null)
@@ -429,11 +436,16 @@ function extractRawIdentity(
       ? `RAPID-${jobNo}`
       : jobNo
     : null;
-  const po = hay.match(PO_RE)?.[1] || item.attachments
-    .map((a) => a.name || "")
-    .map((name) => name.match(PO_RE)?.[1] || null)
-    .find(Boolean) ||
-    null;
+  // PO identity has one grammar for every make-safe path. In particular, the
+  // canonical extractor accepts only a numeric PO token and deliberately leaves
+  // postal addresses such as "PO Box 2143" empty. Keeping a second permissive
+  // planner regex here previously turned every MLB signature into PO "BOX".
+  const po = extractBuilderWorkOrderIdentity({
+    externalRef,
+    subject: item.subject,
+    bodyText: item.body,
+    attachmentNames: item.attachments.map((attachment) => attachment.name),
+  }).builder_po_number;
   // A labelled WO outranks a claim/reference. A claim is not silently promoted to
   // a WO: claim-only evidence must remain outside confirmed-live state.
   return {
@@ -892,7 +904,17 @@ function correlatedWithinBuilder(
     a.identity.externalRefCanonical === b.identity.externalRefCanonical;
   const samePo = !!a.identity.builderPoCanonical &&
     a.identity.builderPoCanonical === b.identity.builderPoCanonical;
-  if (sameWo || sameRef || samePo) return true;
+  if (sameWo || sameRef) return true;
+  if (samePo) {
+    // A PO is supporting identity, not permission to merge two explicit claims.
+    // This keeps legitimate same-claim/same-PO copies together while preventing
+    // one reused or misread PO from becoming a cross-claim union edge.
+    const distinctExplicitRefs = !!a.identity.externalRefCanonical &&
+      !!b.identity.externalRefCanonical &&
+      a.identity.externalRefCanonical !== b.identity.externalRefCanonical;
+    if (distinctExplicitRefs && !sameWo) return false;
+    return true;
+  }
   // Address-only is never enough. Supporting address evidence may correlate only
   // with builder plus client/contact, and never across conflicting strong identity.
   return !!ka.address && ka.address === kb.address &&
