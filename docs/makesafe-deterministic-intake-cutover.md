@@ -125,6 +125,11 @@ Runtime components:
 
 - `supabase/functions/ops-api/makesafe_deterministic_intake.ts`
 - `supabase/functions/ops-api/makesafe_deterministic_intake_runtime.ts`
+- `supabase/functions/ops-api/makesafe_pdf_text.ts`, bounded zero-AI PDF text-layer
+  extraction (pinned `unpdf@1.6.2` PDF.js build with the original content-stream
+  reader kept as a dependency-free fallback)
+- `supabase/functions/ops-api/makesafe_pdf_gap_fill.ts` /
+  `makesafe_pdf_client_fields.ts`, deterministic label-anchored work-order gap-fill
 - `scan_ses_makesafes`, which reads the DB switch once and enters exactly one path
 - `makesafe_deterministic_intake_replay`, a no-write aggregate replay action
 - `makesafe_deterministic_intake_dark_observe`, an authenticated no-write action that
@@ -134,6 +139,20 @@ The deterministic branch imports no model SDK and has no AI fallback. The paid A
 extraction API stays off and is not required by automatic scans, terminal skill runs
 or manual operator checks. Health records `intake_mode=deterministic` and
 `last_scan_model_calls=0`.
+
+Attached digital builder work-order PDFs are text-extracted server-side in the edge
+runtime and used only to gap-fill `client_name`, `client_phone`, `site_address`,
+`site_suburb`, `external_ref` and `description` when email/template parsing left them
+empty. Extraction is deterministic and calls no model and no OCR. Every run is
+bounded: at most 5 MB, 25 pages and 40,000 readable characters per PDF
+(`PDF_TEXT_MAX_BYTES` / `PDF_TEXT_MAX_PAGES` / `PDF_TEXT_MAX_CHARS`), at most two PDF
+attachments per source and 50 extractions per run. Email-derived values always win,
+including across correlated sources, and human `reviewed_fields` remain the final
+authority. Per-field PDF provenance (`pdf_field_provenance` / `pdf_sourced_fields`),
+the readable `work_order_pdf_text` and per-record quarantine reasons are persisted on
+the case, source, draft and review surfaces. A corrupt, image-only, oversized or
+otherwise pathological PDF quarantines only its own record with a fixed reason and
+never aborts the batch.
 
 The terminal skill integration contract is
 `docs/makesafe-intake-terminal-hook.md`. Automatic cron, scoped terminal routine and
