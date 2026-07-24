@@ -251,6 +251,98 @@ Deno.test("canonical row carries report/photos, pack/send, notes, age and separa
   );
 });
 
+Deno.test("captain-applied status is a display overlay and never rewrites declared or raw state", () => {
+  const source = baseJob("new", "overlay", {
+    substatus: "company_contact_required",
+    makesafe_details: {
+      substatus: "company_contact_required",
+      cycle_number: 1,
+    },
+  });
+  const [row] = buildCanonicalMakesafeRows([source], {
+    statusApplicationsByJobId: {
+      overlay: {
+        run_key: "makesafe-stage1-20260724",
+        job_id: "overlay",
+        source_status: "new",
+        before_status: "new",
+        after_status: "allocated",
+        evidence_ref: "review://makesafe-board-review-surface-v1",
+        applied_by: "captain-approved-cutover",
+        applied_at: NOW,
+      },
+    },
+  });
+
+  assertEquals(row.declared_stage, "new");
+  assertEquals(row.canonical_stage, "allocated");
+  assertEquals(row.canonical_stage_label, "Allocated");
+  assertEquals(row.substatus, "company_contact_required");
+  assertEquals(
+    (source.makesafe_details as any).substatus,
+    "company_contact_required",
+  );
+  assertEquals(row.status_application, {
+    run_key: "makesafe-stage1-20260724",
+    before_status: "new",
+    after_status: "allocated",
+    evidence_ref: "review://makesafe-board-review-surface-v1",
+    applied_by: "captain-approved-cutover",
+    applied_at: NOW,
+  });
+});
+
+Deno.test("display overlay fails closed when its source is stale or the card is terminal", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseJob("new", "stale"),
+    baseJob("archive", "terminal"),
+    baseJob("new", "closed-job", { status: "closed" }),
+  ], {
+    statusApplicationsByJobId: {
+      stale: {
+        source_status: "allocated",
+        before_status: "allocated",
+        after_status: "trade_report_in",
+      },
+      terminal: {
+        source_status: "archive",
+        before_status: "archive",
+        after_status: "allocated",
+      },
+      "closed-job": {
+        source_status: "new",
+        before_status: "new",
+        after_status: "allocated",
+      },
+    },
+  });
+
+  assertEquals(rows[0].canonical_stage, "new");
+  assertEquals(rows[0].status_application, null);
+  assertEquals(rows[1].canonical_stage, "archive");
+  assertEquals(rows[1].computed_status, "archive");
+  assertEquals(rows[1].status_application, null);
+  assertEquals(rows[2].canonical_stage, "new");
+  assertEquals(rows[2].computed_status, "completed");
+  assertEquals(rows[2].status_application, null);
+});
+
+Deno.test("computed closeout reads the actual ACCREC status, not a synthetic board invoice label", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "no-invoice", {
+      invoice_status: "invoiced",
+      invoice_raw_status: null,
+      pack_sent: true,
+      report_pack: { status: "sent", sent_at: NOW },
+      has_invoice_doc: false,
+      has_report_doc: false,
+    }),
+  ]);
+
+  assertEquals(row.canonical_stage, "allocated");
+  assertEquals(row.computed_status, "allocated");
+});
+
 Deno.test("same property claim keeps one card per PO and links siblings", () => {
   const rows = buildCanonicalMakesafeRows([
     baseJob("allocated", "po-a", {

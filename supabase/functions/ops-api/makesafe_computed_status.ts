@@ -52,6 +52,8 @@ export interface MakesafeStatusEvidence {
     sent_at?: string | null;
   } | null;
   invoiceStatus?: string | null;
+  invoiceDate?: string | null;
+  invoiceCreatedAt?: string | null;
   packSent?: boolean;
   documents?: {
     report?: boolean;
@@ -67,15 +69,18 @@ export interface MakesafeStatusInput {
     status?: string | null;
     completed_at?: string | null;
     archived_at?: string | null;
+    updated_at?: string | null;
     metadata?: any;
   } | null;
   detail?: {
     report_type?: string | null;
     cycle_number?: number | null;
     report_sent_at?: string | null;
+    invoice_ready_at?: string | null;
     external_links?: any[];
   } | null;
   evidence?: MakesafeStatusEvidence;
+  displayedStatus?: string | null;
   nowIso?: string;
 }
 
@@ -211,12 +216,19 @@ function closeoutSatisfied(input: MakesafeStatusInput): boolean {
   const authorised = ["AUTHORISED", "SUBMITTED", "PAID"].includes(
     invoiceStatus,
   );
+  const durableCloseoutInvoice = ["AUTHORISED", "PAID"].includes(
+    invoiceStatus,
+  );
   const sent = input.evidence?.packSent === true || [
     "sent",
     "sent_marker_failed",
     "sent_not_closed",
     "close_failed",
   ].includes(String(input.evidence?.pack?.status || "").toLowerCase());
+  // A durable send record plus an issued/paid ACCREC invoice is authoritative
+  // close-out evidence. Missing historical portal captures or re-attached PDFs
+  // must not revive work that demonstrably went out the door.
+  if (sent && durableCloseoutInvoice) return true;
   const docs = input.evidence?.documents || {};
   if (!sent || !authorised || docs.invoice !== true) return false;
   if (kind === "physical_makesafe" && docs.report !== true) return false;
@@ -225,8 +237,14 @@ function closeoutSatisfied(input: MakesafeStatusInput): boolean {
 }
 
 function completedAt(input: MakesafeStatusInput): number | null {
-  const raw = input.evidence?.pack?.sent_at || input.job?.completed_at ||
-    input.detail?.report_sent_at || null;
+  const raw = input.evidence?.pack?.sent_at ||
+    input.evidence?.invoiceDate ||
+    input.evidence?.invoiceCreatedAt ||
+    input.detail?.invoice_ready_at ||
+    input.job?.completed_at ||
+    input.job?.updated_at ||
+    input.detail?.report_sent_at ||
+    null;
   if (!raw) return null;
   const value = new Date(raw).getTime();
   return Number.isFinite(value) ? value : null;
@@ -240,6 +258,38 @@ export function computeMakesafeStatus(
   const hold = input.evidence?.hold || null;
   const reasons: string[] = [];
   const missing: string[] = [];
+  const displayedStatus = String(input.displayedStatus || "").toLowerCase();
+
+  // Structural no-revival invariant. The display stage is the board's current
+  // operator truth; terminal cards retain that exact terminal stage even if
+  // operational job state and sparse historical evidence disagree.
+  if (displayedStatus === "archive") {
+    return {
+      status: "archive",
+      job_type: kind,
+      reasons: ["displayed card is already archived"],
+      missing,
+      hold,
+    };
+  }
+  if (displayedStatus === "completed") {
+    return {
+      status: "completed",
+      job_type: kind,
+      reasons: ["displayed card is already completed"],
+      missing,
+      hold,
+    };
+  }
+  if (displayedStatus === "cancelled") {
+    return {
+      status: "cancelled",
+      job_type: kind,
+      reasons: ["displayed card is already cancelled"],
+      missing,
+      hold,
+    };
+  }
 
   if (["cancelled", "canceled"].includes(jobStatus)) {
     return {
@@ -259,15 +309,26 @@ export function computeMakesafeStatus(
       hold,
     };
   }
+  if (["complete", "completed", "closed"].includes(jobStatus)) {
+    return {
+      status: "completed",
+      job_type: kind,
+      reasons: ["job is already completed or closed"],
+      missing,
+      hold,
+    };
+  }
 
   if (closeoutSatisfied(input)) {
     reasons.push(
-      "PACK_SENT marker, authorised invoice, and required documents agree",
+      "durable sent-pack evidence and authorised invoice agree",
     );
     const at = completedAt(input);
     const now = new Date(input.nowIso || new Date().toISOString()).getTime();
-    const withinSevenDays = at != null && Number.isFinite(now) &&
-      now - at <= 7 * 86_400_000;
+    // Match the displayed model: an unknown completion timestamp stays visible
+    // in Completed for operator repair; it never falls straight into Archive.
+    const withinSevenDays = at == null ||
+      (Number.isFinite(now) && now - at < 7 * 86_400_000);
     return {
       status: withinSevenDays ? "completed" : "archive",
       job_type: kind,

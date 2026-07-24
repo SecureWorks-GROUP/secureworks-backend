@@ -168,6 +168,120 @@ Deno.test("computed status: close-out truth splits Completed and Archive at seve
   );
 });
 
+Deno.test("computed status: durable sent-pack plus issued invoice beats missing report-type captures", () => {
+  const result = computeMakesafeStatus({
+    job: {
+      status: "processing",
+      metadata: { makesafe_job_family: "roof_report" },
+    },
+    detail: {
+      report_type: "roof_report",
+      cycle_number: 1,
+      external_links: [{ kind: "roof_report", url: "https://portal.test/r" }],
+    },
+    evidence: {
+      assignments: [{ id: "assignment-1" }],
+      portalCaptures: [],
+      invoiceStatus: "PAID",
+      invoiceDate: "2026-07-01T00:00:00.000Z",
+      packSent: true,
+      pack: { status: "sent" },
+      documents: { report: false, invoice: false, swms: false },
+    },
+    nowIso: NOW,
+  });
+
+  assertEquals(result.status, "archive");
+  assertStringIncludes(
+    result.reasons[0],
+    "durable sent-pack evidence and authorised invoice",
+  );
+  assertEquals(result.missing, []);
+});
+
+Deno.test("computed status: completion timestamp follows invoice, detail, and job fallbacks", () => {
+  const closeout = {
+    invoiceStatus: "AUTHORISED",
+    packSent: true,
+    pack: { status: "sent" },
+  };
+  assertEquals(
+    computeMakesafeStatus(physical({
+      ...closeout,
+      invoiceDate: "2026-07-21T00:00:00.000Z",
+    })).status,
+    "completed",
+  );
+  assertEquals(
+    computeMakesafeStatus(physical({
+      ...closeout,
+      invoiceCreatedAt: "2026-07-01T00:00:00.000Z",
+    })).status,
+    "archive",
+  );
+  assertEquals(
+    computeMakesafeStatus({
+      ...physical(closeout),
+      detail: {
+        report_type: null,
+        cycle_number: 1,
+        invoice_ready_at: "2026-07-21T00:00:00.000Z",
+      },
+    }).status,
+    "completed",
+  );
+  assertEquals(
+    computeMakesafeStatus({
+      ...physical(closeout),
+      job: {
+        status: "processing",
+        updated_at: "2026-07-01T00:00:00.000Z",
+        metadata: { makesafe_job_family: "general_makesafe" },
+      },
+    }).status,
+    "archive",
+  );
+  assertEquals(
+    computeMakesafeStatus(physical(closeout)).status,
+    "completed",
+    "unknown completion time must remain visible in Completed",
+  );
+});
+
+Deno.test("computed status: displayed terminal cards and closed jobs never revive", () => {
+  assertEquals(
+    computeMakesafeStatus({ ...physical(), displayedStatus: "archive" }).status,
+    "archive",
+  );
+  assertEquals(
+    computeMakesafeStatus({ ...physical(), displayedStatus: "completed" })
+      .status,
+    "completed",
+  );
+  assertEquals(
+    computeMakesafeStatus({
+      ...physical(),
+      displayedStatus: "archive",
+      job: {
+        status: "closed",
+        metadata: { makesafe_job_family: "general_makesafe" },
+      },
+    }).status,
+    "archive",
+    "the displayed terminal stage wins over a different terminal job state",
+  );
+  assertEquals(
+    computeMakesafeStatus({
+      ...physical(),
+      job: {
+        status: "closed",
+        metadata: { makesafe_job_family: "general_makesafe" },
+      },
+    }).status,
+    "completed",
+  );
+});
+
 Deno.test("computed status: D3 hold stays a badge on the evidence column", () => {
   const result = computeMakesafeStatus(physical({
     serviceReports: [{ status: "submitted", cycle_number: 1 }],
