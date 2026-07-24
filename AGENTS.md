@@ -261,7 +261,7 @@ matching `ops-api`: the runtime reads effective source authority (and the guarde
 `makesafe_intake_source_authority_corrections` /
 `makesafe_intake_case_authority_corrections` ledgers. The migration only installs
 those tables on a non-production database and applies the reviewed 335-case /
-600-source false-`po:BOX` and AJ 70062 → SWMS-261054 data correction against the
+600-source false-`po:BOX` and AJ 70062 → SWMS-261055 data correction against the
 exact production snapshot; it never writes a job, assignment, draft, status or
 communication row.
 Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual
