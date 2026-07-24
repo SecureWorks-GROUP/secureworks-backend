@@ -81,6 +81,10 @@ export interface DeterministicIsolatedFailure {
 // and both DB and runtime reject caps outside this explicit canary/batch bound.
 const DEFAULT_MAX_CASES_PER_RUN = 1;
 const MAX_CASES_PER_RUN = 10;
+// Standing full-open cap that migration 20260724070000 writes to the singleton row.
+// It is the cap synthesised for a pre-migration schema whose row has not yet been
+// stamped, so deploy order cannot change the standing bound.
+const STANDING_DEFAULT_MAX_CASES = MAX_CASES_PER_RUN;
 const MAX_ALLOWLIST_ITEMS = 50;
 // Repeat failures must not spend the commit budget, but they still cost time, so
 // one run stops after this many attempts regardless of how many committed.
@@ -283,8 +287,28 @@ function exactAllowlist(values: unknown, label: string): string[] {
   return result;
 }
 
+// Standing full-open authority, synthesised when the DB row is still in the known
+// pre-20260724070000 shape. Deploy order stays harmless: the runtime resolves the
+// same bounded, zero-AI full-open behavior whether or not the migration has landed.
+function standingFullOpenControls(
+  maxCases = STANDING_DEFAULT_MAX_CASES,
+): DeterministicRolloutControls {
+  return {
+    mode: "deterministic",
+    selectionMode: "full_open",
+    maxCases,
+    sourcePostIds: [],
+    instructionKeys: [],
+  };
+}
+
 /** Reads bounded deterministic selection controls from the single DB settings row.
- * Missing controls fail closed; there is no legacy standing fallback. */
+ * The permanent-standing migration (20260724070000) pins selection to full_open with
+ * empty allowlists via CHECK constraints, so any full_open row is validated strictly
+ * and genuinely contradictory post-migration state fails closed. The known
+ * pre-migration legacy default (missing permanent-standing columns, or selection_mode
+ * still holding its 'exact' column default with empty allowlists) resolves to the same
+ * bounded full-open behavior rather than throwing, so deploy order never matters. */
 export async function loadDeterministicRolloutControls(
   client: any,
 ): Promise<DeterministicRolloutControls> {
@@ -308,25 +332,9 @@ export async function loadDeterministicRolloutControls(
         `deterministic rollout controls read failed: ${error.message || error}`,
       );
     }
-    throw new Error(
-      "deterministic standing intake requires DB rollout controls",
-    );
+    return standingFullOpenControls();
   }
-  const mode = "deterministic" as const;
   const selectionMode = data?.deterministic_selection_mode;
-  if (selectionMode !== "full_open") {
-    throw new Error(
-      "deterministic standing selection mode must be full_open",
-    );
-  }
-  const maxCases = Number(data?.deterministic_max_cases_per_run);
-  if (
-    !Number.isInteger(maxCases) || maxCases < 1 || maxCases > MAX_CASES_PER_RUN
-  ) {
-    throw new Error(
-      `deterministic rollout cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
-    );
-  }
   const sourcePostIds = exactAllowlist(
     data?.deterministic_source_allowlist,
     "deterministic source allowlist",
@@ -336,14 +344,34 @@ export async function loadDeterministicRolloutControls(
     "deterministic instruction allowlist",
   );
   const hasAllowlist = sourcePostIds.length > 0 || instructionKeys.length > 0;
+  const maxCases = Number(data?.deterministic_max_cases_per_run);
+  const capValid = Number.isInteger(maxCases) &&
+    maxCases >= 1 && maxCases <= MAX_CASES_PER_RUN;
+  // Pre-migration legacy default: selection_mode still holds its 'exact' column
+  // default and both allowlists are empty. The migration's CHECK constraint makes
+  // 'exact' unreachable once applied, so this shape can only be the not-yet-migrated
+  // row; resolve it to the bounded standing full-open behavior.
+  if (selectionMode === "exact" && !hasAllowlist) {
+    return standingFullOpenControls(capValid ? maxCases : STANDING_DEFAULT_MAX_CASES);
+  }
+  if (selectionMode !== "full_open") {
+    throw new Error(
+      "deterministic standing selection mode must be full_open",
+    );
+  }
+  if (!capValid) {
+    throw new Error(
+      `deterministic rollout cap must be an integer between 1 and ${MAX_CASES_PER_RUN}`,
+    );
+  }
   if (hasAllowlist) {
     throw new Error(
       "deterministic standing full_open mode requires empty exact allowlists",
     );
   }
   return {
-    mode,
-    selectionMode,
+    mode: "deterministic",
+    selectionMode: "full_open",
     maxCases,
     sourcePostIds,
     instructionKeys,

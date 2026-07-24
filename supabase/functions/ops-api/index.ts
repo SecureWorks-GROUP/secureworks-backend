@@ -3197,9 +3197,32 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'reject_intake_draft': return json(await rejectIntakeDraft(client, body))
       case 'create_intake_draft': return json(await createIntakeDraft(client, body))
-      case 'makesafe_reporting_intake_pass':
+      // Amendment 46: this pass composes the same guarded approveIntakeDraft as the
+      // sibling approval actions (auto_approve_clean_intake_drafts / approve_intake_draft),
+      // so it enforces the same privileged boundary. Allowed callers: the master ops
+      // key, the scoped make-safe reporting routine (its sole cross-approval exception,
+      // allow-listed above), or an admin/owner JWT. A non-admin JWT is rejected before
+      // any scan or advancement side effect, exactly as on the two approval actions.
+      case 'makesafe_reporting_intake_pass': {
+        const reportingIsPrivileged = authMode === 'api_key' || authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!reportingIsPrivileged) {
+          return json({ error: 'forbidden: makesafe_reporting_intake_pass requires the privileged ops key, the make-safe reporting routine, or an admin/owner session; a non-admin session cannot run the intake scan and advancement sweep' }, 403)
+        }
         return json(await runMakesafeReportingIntakePass(client))
-      case 'scan_ses_makesafes': return json(await scanSesMakesafes(client))
+      }
+      // scan_ses_makesafes now advances clean drafts inline (Amendment 46), so it
+      // crosses the same live-job approval boundary. It is no longer routine-allow-listed
+      // (the routine uses makesafe_reporting_intake_pass): the master ops key or an
+      // admin/owner JWT only, with a non-admin JWT rejected.
+      case 'scan_ses_makesafes': {
+        const scanIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!scanIsPrivileged) {
+          return json({ error: 'forbidden: scan_ses_makesafes requires the privileged ops key or an admin/owner session; the make-safe automation routine uses makesafe_reporting_intake_pass' }, 403)
+        }
+        return json(await scanSesMakesafes(client))
+      }
       case 'submit_makesafe_report':
         return json(await submitMakesafeReport(client, {
           ...body,
