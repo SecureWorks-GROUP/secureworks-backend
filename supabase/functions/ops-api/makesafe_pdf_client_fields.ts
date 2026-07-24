@@ -24,21 +24,12 @@
 // It NEVER throws; every failure path returns "nothing found" so intake degrades to
 // manual review, never corrupts.
 //
-// KNOWN LIMIT (documented for the reviewer). Many builder WOs — including today's
-// live MLB work orders — are generated with Type0 / Identity-H CID subset fonts
-// whose glyphs are only recoverable through a per-font ToUnicode CMap + text-layout
-// engine that makesafe_pdf_text.ts intentionally does not run (the recovered text
-// layer is just repeated "en-AU" locale tokens). On such a PDF this reader finds no
-// labels and correctly returns nothing. It becomes the live client-fill the moment
-// a builder ships a text-layer WO, or a ToUnicode decode lands upstream.
-//
-// LIVE-VERIFIED 2026-07-07 (mission M-A). All 35 live MLB WO PDFs sampled decode to
-// EXACTLY `Array(100).fill("en-AU").join(" ")` (599 chars, zero digits/residue), so this
-// reader fails closed on every one — it fills nothing and never invents a homeowner.
-// What actually makes live MLB WOs born-clean is the PRIMARY model reading the WO as a
-// DOCUMENT block (vision): extractPdfText returns mode:'none' on that noise (#294
-// looksLikeText gate) so the PDF is handed to the model, which fills client_name/
-// site_address/phone before the gate runs. Proof + regression: makesafe_intake_clean_fill_test.ts.
+// TEXT EXTRACTION. makesafe_pdf_text.ts now uses the pinned serverless PDF.js build
+// first, so generated Type0 / Identity-H work orders are decoded through their
+// ToUnicode maps. Its original content-stream reader remains the fail-closed
+// fallback. This reader therefore still treats repeated locale tokens or missing
+// labels as unusable, while ordinary digital builder PDFs reach these label guards
+// without any model call.
 
 export interface PdfClientFields {
   client_name: string | null;

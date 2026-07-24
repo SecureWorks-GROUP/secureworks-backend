@@ -13432,13 +13432,20 @@ function enrichIntakeDraftForReview(draft: any): any {
   if (!draft) return draft
   const detected = effectiveIntakeReportType(draft)
   const hasStored = !!cleanReviewedString(draft.report_type)
+  const extraction = parseJsonObject(draft.extraction_json)
+  const pdfDocuments = parseJsonArray(extraction.work_order_pdf_text)
   const reportEnriched = {
     ...draft,
     report_type: draft.report_type || detected || null,
     detected_report_type: detected || null,
     report_type_source: detected ? (hasStored ? 'stored' : 'fallback_classifier') : (hasStored ? 'stored' : null),
+    work_order_pdf_text: pdfDocuments,
+    pdf_field_provenance: parseJsonObject(extraction.pdf_field_provenance),
+    pdf_sourced_fields: parseJsonArray(extraction.pdf_sourced_fields),
+    pdf_extraction_quarantine: pdfDocuments.filter((document: any) =>
+      document?.status === 'quarantined'
+    ),
   }
-  const extraction = parseJsonObject(draft.extraction_json)
   const prefill = _deriveAjIntakePrefill({
     fromEmail: draft.from_email,
     subject: draft.subject,

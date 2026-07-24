@@ -4,6 +4,7 @@
 // PDF content stream with the Web `CompressionStream` and decode it back through the
 // extractor's `DecompressionStream` path — proving the extractor's core dependency runs
 // under this runtime (the same Deno family the Supabase edge function executes on).
+// deno-lint-ignore-file no-import-prefix
 import {
   assert,
   assertEquals,
@@ -11,6 +12,7 @@ import {
 import {
   extractPdfText,
   looksLikeText,
+  PDF_TEXT_MAX_BYTES,
   PDF_TEXT_MIN_CHARS,
 } from "./makesafe_pdf_text.ts";
 
@@ -51,6 +53,37 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+function validTextPdf(lines: string[]): Uint8Array {
+  const escaped = lines.map((line) =>
+    line.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")
+  );
+  const content = `BT /F1 10 Tf 72 760 Td ${
+    escaped.map((line) => `(${line}) Tj 0 -14 Td`).join(" ")
+  } ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${enc(content).length} >>\nstream\n${content}\nendstream`,
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let index = 0; index < objects.length; index++) {
+    offsets.push(enc(pdf).length);
+    pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
+  }
+  const xrefOffset = enc(pdf).length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets.slice(1)) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${
+    objects.length + 1
+  } /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return enc(pdf);
+}
+
 // Build a minimal single-object PDF whose content stream is FlateDecode-compressed.
 async function flatePdf(content: string): Promise<Uint8Array> {
   let deflated = await deflate(enc(content));
@@ -76,6 +109,24 @@ const WO_CONTENT = "BT /F1 12 Tf 72 720 Td (Client: Jane Doe) Tj 0 -14 Td " +
   "(Reference MLB-25795 make safe roof works after storm damage) Tj 0 -14 Td " +
   "(Scope: tarp the damaged roof section and make the site safe for the homeowner) Tj 0 -14 Td " +
   "(Contact phone 0400 000 000 attend within 24 hours per the insurer instruction) Tj ET";
+
+Deno.test("valid generated work-order PDF uses the pinned PDF.js text extractor", async () => {
+  const pdf = validTextPdf([
+    "Work Order Number MLB-26770PO-55296",
+    "Policyholders Name Amanda Parker",
+    "Policyholders Contact Mobile 0422636182",
+    "Site Address 8 Syrinx Pl, Mullaloo, WA 6027",
+    "Scope of Works tarp the damaged roof and make the property safe",
+    "Attend within twenty four hours and protect the occupants from weather damage",
+  ]);
+  const result = await extractPdfText(pdf);
+  assertEquals(result.mode, "text");
+  assertEquals(result.extractor, "unpdf@1.6.2");
+  assertEquals(result.pageCount, 1);
+  assert(result.text.includes("MLB-26770PO-55296"));
+  assert(result.text.includes("Amanda Parker"));
+  assert(result.text.includes("8 Syrinx Pl"));
+});
 
 Deno.test("FlateDecode text-layer PDF -> mode 'text' with the recovered fields (Deno DecompressionStream proof)", async () => {
   const pdf = await flatePdf(WO_CONTENT);
@@ -115,6 +166,18 @@ Deno.test("non-PDF bytes -> mode 'none' (never throws)", async () => {
   const r = await extractPdfText(enc("<html><body>not a pdf</body></html>"));
   assertEquals(r.mode, "none");
   assertEquals(r.note, "not_pdf");
+});
+
+Deno.test("corrupt and over-size PDFs fail closed with bounded reasons", async () => {
+  const corrupt = await extractPdfText(enc("%PDF-1.7\nbroken"));
+  assertEquals(corrupt.mode, "none");
+  assertEquals(corrupt.note, "pdf_parse_failed");
+
+  const oversized = new Uint8Array(PDF_TEXT_MAX_BYTES + 1);
+  oversized.set(enc("%PDF-"));
+  const bounded = await extractPdfText(oversized);
+  assertEquals(bounded.mode, "none");
+  assertEquals(bounded.note, "pdf_too_large");
 });
 
 Deno.test("empty / tiny input -> mode 'none'", async () => {
