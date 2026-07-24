@@ -51,6 +51,9 @@ export interface DeterministicRuntimeOptions {
   includeSanitizedCases?: boolean;
   requireAllAllowlistMatches?: boolean;
   maxSources?: number;
+  // Parsing/accounting stays live when this brake is false, but a clean draft is
+  // parked for review instead of crossing the guarded approval boundary.
+  advanceDrafts?: boolean;
   approveDraft?: (client: any, body: any) => Promise<any>;
 }
 
@@ -251,15 +254,14 @@ export async function loadDeterministicIntakeMode(
     .eq("id", true)
     .maybeSingle();
   if (error) {
-    // Pre-migration safe only for the known missing-column shape. Any network,
-    // auth, timeout, or other read failure aborts the scan: it must never turn a
-    // configured deterministic deployment into a silent legacy/AI fallback.
+    // A pre-migration database is still deterministic at the application boundary.
+    // Any other read failure aborts rather than guessing at rollout controls.
     if (
       String(error.code || "") === "42703" ||
       /intake_mode.*(?:does not exist|schema cache|column)/i.test(
         error.message || "",
       )
-    ) return "legacy";
+    ) return "deterministic";
     throw new Error(`intake mode read failed: ${error.message || error}`);
   }
   return selectIntakeMode(data?.intake_mode);
@@ -281,9 +283,8 @@ function exactAllowlist(values: unknown, label: string): string[] {
   return result;
 }
 
-/** Reads rollout authority from the single DB settings row. An old schema may
- * continue in legacy mode, but deterministic mode is never allowed to run when
- * the cap/allowlist columns cannot be proved. */
+/** Reads bounded deterministic selection controls from the single DB settings row.
+ * Missing controls fail closed; there is no legacy standing fallback. */
 export async function loadDeterministicRolloutControls(
   client: any,
 ): Promise<DeterministicRolloutControls> {
@@ -307,25 +308,15 @@ export async function loadDeterministicRolloutControls(
         `deterministic rollout controls read failed: ${error.message || error}`,
       );
     }
-    const mode = await loadDeterministicIntakeMode(client);
-    if (mode === "deterministic") {
-      throw new Error(
-        "deterministic mode is set but DB rollout controls are unavailable",
-      );
-    }
-    return {
-      mode: "legacy",
-      selectionMode: "exact",
-      maxCases: 1,
-      sourcePostIds: [],
-      instructionKeys: [],
-    };
-  }
-  const mode = selectIntakeMode(data?.intake_mode);
-  const selectionMode = data?.deterministic_selection_mode;
-  if (selectionMode !== "exact" && selectionMode !== "full_open") {
     throw new Error(
-      "deterministic selection mode must be exact or full_open",
+      "deterministic standing intake requires DB rollout controls",
+    );
+  }
+  const mode = "deterministic" as const;
+  const selectionMode = data?.deterministic_selection_mode;
+  if (selectionMode !== "full_open") {
+    throw new Error(
+      "deterministic standing selection mode must be full_open",
     );
   }
   const maxCases = Number(data?.deterministic_max_cases_per_run);
@@ -345,14 +336,9 @@ export async function loadDeterministicRolloutControls(
     "deterministic instruction allowlist",
   );
   const hasAllowlist = sourcePostIds.length > 0 || instructionKeys.length > 0;
-  if (selectionMode === "full_open" && hasAllowlist) {
+  if (hasAllowlist) {
     throw new Error(
-      "deterministic full_open mode requires empty exact allowlists",
-    );
-  }
-  if (mode === "deterministic" && selectionMode === "exact" && !hasAllowlist) {
-    throw new Error(
-      "deterministic exact mode requires a non-empty exact allowlist",
+      "deterministic standing full_open mode requires empty exact allowlists",
     );
   }
   return {
@@ -2354,15 +2340,17 @@ async function ensureDraftAndJob(
   caseId: string,
   plan: DeterministicCasePlan,
   sourceMap: Map<string, DeterministicSourceItem>,
-  approveDraft: (client: any, body: any) => Promise<any>,
+  approveDraft: ((client: any, body: any) => Promise<any>) | undefined,
   onStorageBlocker: (blocker: string) => void,
   onPersistedOutcome: (outcome: PersistedOutcome) => void,
+  advanceDrafts = true,
 ): Promise<
   {
-    jobId: string;
+    jobId: string | null;
     draftCreated: boolean;
     jobCreated: boolean;
     resumed: boolean;
+    parked: boolean;
   }
 > {
   // Run the same required-field gate as approval before storage, artifact-ledger
@@ -2479,6 +2467,7 @@ async function ensureDraftAndJob(
       draftCreated,
       jobCreated: false,
       resumed: true,
+      parked: false,
     };
   }
   if (draft.status === "approved") {
@@ -2489,10 +2478,25 @@ async function ensureDraftAndJob(
         draftCreated,
         jobCreated: false,
         resumed: true,
+        parked: false,
       };
     }
     throw new Error(
       "approved deterministic draft has no job link; reconciliation required",
+    );
+  }
+  if (!advanceDrafts) {
+    return {
+      jobId: null,
+      draftCreated,
+      jobCreated: false,
+      resumed: !draftCreated,
+      parked: true,
+    };
+  }
+  if (!approveDraft) {
+    throw new Error(
+      "deterministic live mode requires the guarded approval callback",
     );
   }
   const approved = await approveDraft(client, {
@@ -2503,7 +2507,13 @@ async function ensureDraftAndJob(
   });
   const jobId = approved?.job?.id;
   if (!jobId) throw new Error("guarded approval returned no job id");
-  return { jobId, draftCreated, jobCreated: true, resumed: !draftCreated };
+  return {
+    jobId,
+    draftCreated,
+    jobCreated: true,
+    resumed: !draftCreated,
+    parked: false,
+  };
 }
 
 export const _ensureDraftAndJobForTest = ensureDraftAndJob;
@@ -2994,11 +3004,18 @@ export async function runDeterministicIntake(
     return report;
   }
   if (!plan.cases.length) {
+    // A standing full-open scan over a quiet mailbox is a successful bounded no-op,
+    // not the exact-allowlist configuration error below.
+    if (selectionMode === "full_open") {
+      await writeHealth(client, nowIso, 0, 0, 0);
+      await commitCompletedCursor();
+      return report;
+    }
     throw new Error(
       `exact deterministic allowlist resolved no cases (${report.selection.unmatched_source_allowlist} source ids, ${report.selection.unmatched_instruction_allowlist} instruction keys unmatched, ${report.selection.cap_exposed_instruction_allowlist} instruction keys unread inside the per-run cap)`,
     );
   }
-  if (!options.approveDraft) {
+  if (options.advanceDrafts !== false && !options.approveDraft) {
     throw new Error(
       "deterministic live mode requires the guarded approval callback",
     );
@@ -3146,20 +3163,24 @@ export async function runDeterministicIntake(
             if (outcome === "artifact") report.totals.artifacts_created++;
             if (outcome === "draft") report.totals.drafts_created++;
           },
+          options.advanceDrafts !== false,
         );
         jobId = live.jobId;
         if (live.jobCreated) report.totals.jobs_created++;
+        if (live.parked) report.totals.job_creation_deferred++;
         resumedCase = resumedCase || live.resumed;
-        // Sources were already accounted by the pre-job hop above, so this call
-        // only moves the case onto its job.
-        saved = await insertCaseAndSources(
-          client,
-          casePlan,
-          jobId,
-          sourceMap,
-          saved.caseRow,
-          true,
-        );
+        if (jobId) {
+          // Sources were already accounted by the pre-job hop above, so this call
+          // only moves the case onto its job.
+          saved = await insertCaseAndSources(
+            client,
+            casePlan,
+            jobId,
+            sourceMap,
+            saved.caseRow,
+            true,
+          );
+        }
       }
       committed++;
       // One case counts once, however many of its artefacts already existed.

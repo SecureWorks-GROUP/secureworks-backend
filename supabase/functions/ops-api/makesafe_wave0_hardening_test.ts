@@ -111,7 +111,7 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   "makesafe_deterministic_intake_replay",
   "makesafe_deterministic_intake_dark_observe",
   "list_makesafe_companies",
-  "scan_ses_makesafes",
+  "makesafe_reporting_intake_pass",
   "create_intake_draft",
   "create_makesafe_job", // reaches its case -> redirected to a draft (never a live job)
   "attach_makesafe_document",
@@ -208,7 +208,7 @@ Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach fe
     const action of [
       "job_detail",
       "create_intake_draft",
-      "scan_ses_makesafes",
+      "makesafe_reporting_intake_pass",
       "list_intake_drafts",
       "makesafe_deterministic_intake_replay",
       "makesafe_deterministic_intake_dark_observe",

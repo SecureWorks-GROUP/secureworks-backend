@@ -360,7 +360,7 @@ Deno.test("AC6 (structural): recapture_intake_draft is NOT in ROUTINE_ALLOWED_AC
     "job_detail",
     "list_intake_drafts",
     "list_makesafe_companies",
-    "scan_ses_makesafes",
+    "makesafe_reporting_intake_pass",
     "create_intake_draft",
     "create_makesafe_job",
     "attach_makesafe_document",
