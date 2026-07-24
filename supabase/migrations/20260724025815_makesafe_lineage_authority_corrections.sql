@@ -340,10 +340,13 @@ DECLARE
   v_jobs_count bigint;
   v_assignments_count bigint;
   v_drafts_count bigint;
+  v_documents_count bigint;
   v_notify_count bigint;
   v_outbound_count bigint;
-  v_aj_job_hash text;
+  v_aj_jobs_hash text;
   v_aj_assignment_hash text;
+  v_aj_drafts_hash text;
+  v_aj_document_hash text;
 BEGIN
   -- A migration-provisioned database has neither the historical BOX footprint
   -- nor the production-only AJ incident rows. Install the correction schema but
@@ -359,7 +362,10 @@ BEGIN
     AND NOT EXISTS (
       SELECT 1
       FROM public.jobs
-      WHERE id = '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
+      WHERE id IN (
+        '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid,
+        '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+      )
     )
   THEN
     RETURN;
@@ -566,12 +572,16 @@ BEGIN
     FROM public.jobs job
     JOIN public.makesafe_job_details details
       ON details.job_id = job.id
-    WHERE job.id = '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
+    WHERE job.id = '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
       AND job.org_id =
         '00000000-0000-0000-0000-000000000001'::uuid
-      AND job.job_number = 'SWMS-261054'
+      AND job.job_number = 'SWMS-261055'
       AND job.type = 'makesafe'
-      AND job.status = 'processing'
+      AND lower(coalesce(job.status, '')) NOT IN (
+        'cancelled', 'canceled', 'void', 'voided', 'superseded'
+      )
+      AND job.client_name = 'Emma Clingan'
+      AND job.client_phone = '0448855228'
       AND regexp_replace(
         lower(coalesce(job.site_address, '')),
         '[^a-z0-9]+',
@@ -579,12 +589,98 @@ BEGIN
         'g'
       ) = '12railtonplacedianellawa6059'
       AND job.metadata ->> 'external_ref' = '70062'
+      AND job.metadata ->> 'builder_email_subject' =
+        'Make Safe - Dianella - Job No 70062'
       AND details.external_ref = '70062'
-      AND lower(coalesce(details.requesting_company_slug, '')) = 'ajbr'
+      AND lower(coalesce(details.requesting_company_slug, '')) = 'aj'
   ) <> 1
   THEN
     RAISE EXCEPTION
-      'AJ 70062 reconciliation refused: existing job identity changed';
+      'AJ 70062 reconciliation refused: SWMS-261055 identity changed';
+  END IF;
+  IF (
+    SELECT count(*)
+    FROM public.jobs job
+    JOIN public.makesafe_job_details details
+      ON details.job_id = job.id
+    WHERE job.id = '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
+      AND job.org_id =
+        '00000000-0000-0000-0000-000000000001'::uuid
+      AND job.job_number = 'SWMS-261054'
+      AND job.type = 'makesafe'
+      AND lower(coalesce(job.status, '')) IN ('cancelled', 'canceled')
+      AND job.metadata ->> 'external_ref' = '70062'
+      AND details.external_ref = '70062'
+      AND lower(coalesce(details.requesting_company_slug, '')) = 'ajbr'
+  ) <> 1
+    OR EXISTS (
+      SELECT 1
+      FROM public.job_assignments assignment
+      WHERE assignment.job_id =
+        '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
+    )
+  THEN
+    RAISE EXCEPTION
+      'AJ 70062 reconciliation refused: cancelled SWMS-261054 duplicate changed or regained an assignment';
+  END IF;
+  IF (
+    SELECT count(*)
+    FROM public.makesafe_intake_drafts draft
+    WHERE draft.id =
+        'bc114af1-92c1-4f29-adef-2c2b136ea2de'::uuid
+      AND draft.org_id =
+        '00000000-0000-0000-0000-000000000001'::uuid
+      AND draft.graph_message_id =
+        'AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAr9x7QAAA='
+      AND draft.status = 'approved'
+      AND draft.approved_job_id =
+        '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+      AND draft.external_ref = '70062'
+      AND draft.client_name = 'Emma Clingan'
+      AND draft.client_phone = '0448855228'
+      AND regexp_replace(
+        lower(coalesce(draft.site_address, '')),
+        '[^a-z0-9]+',
+        '',
+        'g'
+      ) = '12railtonplacedianellawa6059'
+  ) <> 1
+  THEN
+    RAISE EXCEPTION
+      'AJ 70062 reconciliation refused: approved draft bc114af1 no longer proves SWMS-261055';
+  END IF;
+  IF (
+    SELECT count(*)
+    FROM public.makesafe_intake_drafts draft
+    WHERE draft.id =
+        'd2e8a790-f177-4ec1-97ec-258357ff7f14'::uuid
+      AND draft.org_id =
+        '00000000-0000-0000-0000-000000000001'::uuid
+      AND draft.graph_message_id =
+        'mailbox_264b5ecbedc4e9de97560c373f5fb9941936cc42186dab6d5336d7bb6fd9650d'
+      AND draft.status = 'needs_review'
+      AND draft.approved_job_id IS NULL
+      AND draft.from_email = 'workorders@ajs.build'
+      AND draft.subject = 'Make Safe - Dianella - Job No 70062'
+      AND draft.missing_fields @> ARRAY['extraction_down_key_dead']::text[]
+  ) <> 1
+  THEN
+    RAISE EXCEPTION
+      'AJ 70062 reconciliation refused: mailbox twin review draft changed';
+  END IF;
+  IF (
+    SELECT count(*)
+    FROM public.job_documents document
+    WHERE document.job_id =
+        '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+      AND document.type = 'work_order'
+      AND document.file_name = 'Works Order.pdf'
+      AND document.storage_url =
+        'makesafe-intake/00a15ca1d98389b5b3584982-b3b242db636a7ec1/Works_Order.pdf'
+  ) <> 1
+  THEN
+    RAISE EXCEPTION
+      'AJ 70062 reconciliation refused: SWMS-261055 work-order PDF changed';
   END IF;
   IF EXISTS (
     SELECT 1
@@ -592,7 +688,7 @@ BEGIN
     WHERE org_id =
       '00000000-0000-0000-0000-000000000001'::uuid
       AND job_id =
-        '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
+        '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
   ) THEN
     RAISE EXCEPTION
       'AJ 70062 reconciliation refused: intake case already links the job';
@@ -601,12 +697,12 @@ BEGIN
     SELECT count(*)
     FROM public.job_assignments assignment
     WHERE assignment.id =
-        'b85b19b3-4eaa-4c14-a988-32a1194083f5'::uuid
+        'd413fb96-f442-40c0-bdfd-782f54c096fd'::uuid
       AND assignment.job_id =
-        '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
+        '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
       AND assignment.user_id =
         'b353f39a-b3cc-495d-a016-50ebf4a8497d'::uuid
-      AND assignment.status = 'scheduled'
+      AND lower(coalesce(assignment.status, '')) NOT IN ('cancelled', 'canceled')
   ) <> 1
   THEN
     RAISE EXCEPTION
@@ -617,26 +713,45 @@ BEGIN
   SELECT count(*) INTO v_assignments_count FROM public.job_assignments;
   SELECT count(*) INTO v_drafts_count
     FROM public.makesafe_intake_drafts;
+  SELECT count(*) INTO v_documents_count
+    FROM public.job_documents;
   SELECT count(*) INTO v_notify_count
     FROM public.makesafe_notify_log;
   SELECT count(*) INTO v_outbound_count
     FROM public.outbound_message_queue;
-  SELECT md5(
+  SELECT md5(string_agg(
     (
       to_jsonb(job) - 'scope_json' - 'pricing_json'
-    )::text || to_jsonb(details)::text
-  )
-  INTO v_aj_job_hash
+    )::text || to_jsonb(details)::text,
+    ',' ORDER BY job.id
+  ))
+  INTO v_aj_jobs_hash
   FROM public.jobs job
   JOIN public.makesafe_job_details details
     ON details.job_id = job.id
-  WHERE job.id =
-    '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid;
+  WHERE job.id IN (
+    '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid,
+    '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+  );
   SELECT md5(string_agg(to_jsonb(assignment)::text, ',' ORDER BY assignment.id))
   INTO v_aj_assignment_hash
   FROM public.job_assignments assignment
-  WHERE assignment.job_id =
-    '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid;
+  WHERE assignment.job_id IN (
+    '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid,
+    '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+  );
+  SELECT md5(string_agg(to_jsonb(draft)::text, ',' ORDER BY draft.id))
+  INTO v_aj_drafts_hash
+  FROM public.makesafe_intake_drafts draft
+  WHERE draft.id IN (
+    'bc114af1-92c1-4f29-adef-2c2b136ea2de'::uuid,
+    'd2e8a790-f177-4ec1-97ec-258357ff7f14'::uuid
+  );
+  SELECT md5(string_agg(to_jsonb(document)::text, ',' ORDER BY document.id))
+  INTO v_aj_document_hash
+  FROM public.job_documents document
+  WHERE document.job_id =
+    '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid;
 
   INSERT INTO public.makesafe_intake_cases (
     id,
@@ -872,14 +987,17 @@ BEGIN
     expected.post_id,
     NULL,
     NULL,
-    '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid,
+    '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid,
     'existing_job_binding',
     'wo:AJBR-70062',
     jsonb_build_object(
-      'job_number', 'SWMS-261054',
+      'job_number', 'SWMS-261055',
       'external_ref', '70062',
       'address_key', '12railtonplacedianellawa6059',
-      'operational_job_preexisted', true,
+      'approved_draft_id', 'bc114af1-92c1-4f29-adef-2c2b136ea2de',
+      'cancelled_duplicate_job_id', '401b97c8-b5e8-49ff-8202-5be5bb0a1135',
+      'mailbox_twin_draft_id', 'd2e8a790-f177-4ec1-97ec-258357ff7f14',
+      'intake_born_existing_job', true,
       'migration', '20260724025815'
     )
   FROM _ms_aj_sources expected;
@@ -940,6 +1058,7 @@ BEGIN
   IF (SELECT count(*) FROM public.jobs) <> v_jobs_count
     OR (SELECT count(*) FROM public.job_assignments) <> v_assignments_count
     OR (SELECT count(*) FROM public.makesafe_intake_drafts) <> v_drafts_count
+    OR (SELECT count(*) FROM public.job_documents) <> v_documents_count
     OR (SELECT count(*) FROM public.makesafe_notify_log) <> v_notify_count
     OR (SELECT count(*) FROM public.outbound_message_queue) <> v_outbound_count
   THEN
@@ -947,17 +1066,20 @@ BEGIN
       'lineage reconciliation post-check failed: side-effect row count changed';
   END IF;
   IF (
-    SELECT md5(
+    SELECT md5(string_agg(
       (
         to_jsonb(job) - 'scope_json' - 'pricing_json'
-      )::text || to_jsonb(details)::text
-    )
+      )::text || to_jsonb(details)::text,
+      ',' ORDER BY job.id
+    ))
     FROM public.jobs job
     JOIN public.makesafe_job_details details
       ON details.job_id = job.id
-    WHERE job.id =
-      '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
-  ) IS DISTINCT FROM v_aj_job_hash
+    WHERE job.id IN (
+      '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid,
+      '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+    )
+  ) IS DISTINCT FROM v_aj_jobs_hash
     OR (
       SELECT md5(
         string_agg(
@@ -966,12 +1088,32 @@ BEGIN
         )
       )
       FROM public.job_assignments assignment
-      WHERE assignment.job_id =
-        '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid
+      WHERE assignment.job_id IN (
+        '401b97c8-b5e8-49ff-8202-5be5bb0a1135'::uuid,
+        '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+      )
     ) IS DISTINCT FROM v_aj_assignment_hash
+    OR (
+      SELECT md5(
+        string_agg(to_jsonb(draft)::text, ',' ORDER BY draft.id)
+      )
+      FROM public.makesafe_intake_drafts draft
+      WHERE draft.id IN (
+        'bc114af1-92c1-4f29-adef-2c2b136ea2de'::uuid,
+        'd2e8a790-f177-4ec1-97ec-258357ff7f14'::uuid
+      )
+    ) IS DISTINCT FROM v_aj_drafts_hash
+    OR (
+      SELECT md5(
+        string_agg(to_jsonb(document)::text, ',' ORDER BY document.id)
+      )
+      FROM public.job_documents document
+      WHERE document.job_id =
+        '985708c4-ffae-48e4-aab7-9c8ead7dac0e'::uuid
+    ) IS DISTINCT FROM v_aj_document_hash
   THEN
     RAISE EXCEPTION
-      'AJ 70062 reconciliation post-check failed: job or assignment changed';
+      'AJ 70062 reconciliation post-check failed: job, assignment, draft or document changed';
   END IF;
 END
 $guard$;

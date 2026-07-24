@@ -1285,7 +1285,7 @@ Deno.test("inverse authority binding requires explicit correction across the fou
   assertEquals(staleCorrection.completion_status, "completed_degraded");
 });
 
-Deno.test("a poisoned BOX component cannot block AJ 70062 linking to existing SWMS-261054", async () => {
+Deno.test("a poisoned BOX component links AJ 70062 to SWMS-261055 and never revives cancelled SWMS-261054", async () => {
   const store = baseStore();
   store.makesafe_companies.push({
     id: "22222222-2222-2222-2222-222222222222",
@@ -1348,33 +1348,49 @@ Deno.test("a poisoned BOX component cannot block AJ 70062 linking to existing SW
       source_post_id: postId,
       legacy_case_id: null,
       effective_case_id: null,
-      target_job_id: "401b97c8-b5e8-49ff-8202-5be5bb0a1135",
+      target_job_id: "985708c4-ffae-48e4-aab7-9c8ead7dac0e",
       expected_identity_key: "wo:AJBR-70062",
     });
   }
 
-  const existingJob = {
+  const cancelledDuplicate = {
     id: "401b97c8-b5e8-49ff-8202-5be5bb0a1135",
     job_number: "SWMS-261054",
+    status: "cancelled",
+    type: "makesafe",
+    site_address: "12 Railton Place, Dianella WA 6059",
+    metadata: { external_ref: "70062" },
+  };
+  const existingJob = {
+    id: "985708c4-ffae-48e4-aab7-9c8ead7dac0e",
+    job_number: "SWMS-261055",
     status: "processing",
     type: "makesafe",
     site_address: "12 Railton Place, Dianella WA 6059",
     metadata: { external_ref: "70062" },
   };
   const hugoAssignment = {
-    id: "b85b19b3-4eaa-4c14-a988-32a1194083f5",
+    id: "d413fb96-f442-40c0-bdfd-782f54c096fd",
     job_id: existingJob.id,
     user_id: "b353f39a-b3cc-495d-a016-50ebf4a8497d",
     status: "scheduled",
   };
-  store.jobs = [existingJob];
+  store.jobs = [cancelledDuplicate, existingJob];
   store.job_assignments = [hugoAssignment];
   store.work_orders = [];
   store.outbound_messages = [];
   store.makesafe_job_details.push({
-    job_id: existingJob.id,
+    job_id: cancelledDuplicate.id,
     external_ref: "70062",
     requesting_company_slug: "ajbr",
+    requesting_company_name: "AJ Building & Restoration",
+    report_type: null,
+    jobs: cancelledDuplicate,
+  });
+  store.makesafe_job_details.push({
+    job_id: existingJob.id,
+    external_ref: "70062",
+    requesting_company_slug: "aj",
     requesting_company_name: "AJ Building & Restoration",
     report_type: null,
     jobs: existingJob,

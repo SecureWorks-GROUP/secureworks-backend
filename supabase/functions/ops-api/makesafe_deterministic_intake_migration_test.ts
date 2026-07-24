@@ -406,10 +406,14 @@ Deno.test("lineage correction is append-only, snapshot-guarded and side-effect-f
       "expected 294 corrected partitions over 600 sources",
       "correction ledger is not empty",
       "source is already accounted",
-      "existing job identity changed",
+      "SWMS-261055 identity changed",
+      "cancelled SWMS-261054 duplicate changed or regained an assignment",
+      "approved draft bc114af1 no longer proves SWMS-261055",
+      "mailbox twin review draft changed",
+      "SWMS-261055 work-order PDF changed",
       "Hugo assignment changed",
       "side-effect row count changed",
-      "job or assignment changed",
+      "job, assignment, draft or document changed",
     ]
   ) {
     assertStringIncludes(lineageCorrectionMigration, invariant);
@@ -423,10 +427,23 @@ Deno.test("lineage correction is append-only, snapshot-guarded and side-effect-f
     ]
   ) assertStringIncludes(lineageCorrectionMigration, manifest);
 
+  assertStringIncludes(lineageCorrectionMigration, "SWMS-261055");
+  assertStringIncludes(
+    lineageCorrectionMigration,
+    "985708c4-ffae-48e4-aab7-9c8ead7dac0e",
+  );
   assertStringIncludes(lineageCorrectionMigration, "SWMS-261054");
   assertStringIncludes(
     lineageCorrectionMigration,
     "401b97c8-b5e8-49ff-8202-5be5bb0a1135",
+  );
+  assertStringIncludes(
+    lineageCorrectionMigration,
+    "bc114af1-92c1-4f29-adef-2c2b136ea2de",
+  );
+  assertStringIncludes(
+    lineageCorrectionMigration,
+    "d2e8a790-f177-4ec1-97ec-258357ff7f14",
   );
   assertStringIncludes(
     lineageCorrectionMigration,

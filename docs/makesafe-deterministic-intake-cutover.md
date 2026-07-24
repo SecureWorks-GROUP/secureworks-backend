@@ -67,13 +67,22 @@ Migration 6 is the append-only 2026-07-24 lineage-authority correction. It insta
 the `makesafe_intake_case_authority_corrections` /
 `makesafe_intake_source_authority_corrections` ledgers on every database, but only
 reconciles the reviewed 335-case / 600-source false-`po:BOX` footprint and maps both
-exact AJ 70062 SES sources to the already-created `SWMS-261054` job when applied
+exact AJ 70062 SES sources to the intake-born `SWMS-261055` job when applied
 against the exact production snapshot. It aborts the whole transaction if any
 observed footprint, manifest, AJ source or existing job/assignment invariant no
 longer matches that snapshot, and never inserts or updates a job, assignment, draft,
 status change or communication row. Apply it during deploy and before the matching
 `ops-api`: the runtime reads effective source authority (and the guarded
-`target_job_id` binding) from those ledgers.
+`target_job_id` binding) from those ledgers. The guard also proves `SWMS-261054`
+remains a cancelled, unassigned duplicate and can never become source authority.
+
+The matching `ops-api` deterministically prefills the narrow direct-AJ labelled
+email shape (`Job No`, `Address`, `Contact`, `Mobile`) without raising extraction
+confidence or removing the provider-degraded marker. That keeps the review gate
+usable during the Anthropic usage-cap outage while preserving human approval. If
+the remaining AJ mailbox twin is approved, the append-only correction is validated
+in reverse against the source-derived `AJBR-70062` identity and the live target,
+then the draft is linked to `SWMS-261055`; no job or second PDF row is created.
 
 The intake migrations remain inert because
 `makesafe_cron_settings.intake_mode` defaults to `legacy`. The rollout controls
@@ -289,7 +298,8 @@ migration-contract tests assert both write boundaries share the same canonical r
 PO-core and builder-alias helpers so they cannot drift, and that the 2026-07-24
 lineage-authority correction migration is append-only (RLS-enabled, append-only
 trigger-guarded, `SELECT`-only grants), snapshot-guarded on the reviewed 335-case /
-600-source footprint and AJ 70062 → `SWMS-261054` mapping, and free of any job,
+600-source footprint and AJ 70062 → `SWMS-261055` mapping (with cancelled
+`SWMS-261054` explicitly excluded), and free of any job,
 assignment, draft, status or communication write.
 
 Run the existing migration clone harness before production migration approval:
