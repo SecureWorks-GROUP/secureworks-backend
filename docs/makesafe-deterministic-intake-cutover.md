@@ -62,6 +62,7 @@ Apply in order only after approval:
 4. `supabase/migrations/20260721000001_makesafe_intake_production_controls.sql`
 5. `supabase/migrations/20260721000002_makesafe_intake_full_open.sql`
 6. `supabase/migrations/20260724025815_makesafe_lineage_authority_corrections.sql`
+7. `supabase/migrations/20260724062509_makesafe_lineage_authority_supersessions.sql`
 
 Migration 6 is the append-only 2026-07-24 lineage-authority correction. It installs
 the `makesafe_intake_case_authority_corrections` /
@@ -75,6 +76,36 @@ status change or communication row. Apply it during deploy and before the matchi
 `ops-api`: the runtime reads effective source authority (and the guarded
 `target_job_id` binding) from those ledgers. The guard also proves `SWMS-261054`
 remains a cancelled, unassigned duplicate and can never become source authority.
+
+Migration 7 is a second append-only overlay over the immutable first-round
+correction ledger. It is the reviewed resolution of the first production pass's
+15 `persisted_authority_split_reconciliation_required` components and one
+`source_correction_identity_mismatch_reconciliation_required` component. Against
+the exact guarded production snapshot it creates 33 correction-only case
+authorities, supersedes 58 exact source corrections onto those authorities, and
+clears the stale identity expectation on the two MLB-MW-26873 twin sources while
+leaving their authority unchanged. It inserts no immutable case-source row and no
+job, assignment, draft, document, notification or outbound-message row. Runtime
+accepts a supersession only when its `superseded_correction_id` and
+`prior_authority_case_id` still match the first-round result; either mismatch
+fails loudly with reconciliation required. Apply this migration before the
+matching `ops-api`, because that runtime reads the new table.
+
+After migration 7 and the matching `ops-api` are deployed, the deferred AJ
+materialisation is one separately authorised exact pass, not an automatic retry:
+
+1. Keep `selection_mode=exact` and set `max_cases=1`.
+2. Exact-allowlist both AJ 70062 source ids together:
+   `AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAr9x7QAAA=`
+   and
+   `mailbox_264b5ecbedc4e9de97560c373f5fb9941936cc42186dab6d5336d7bb6fd9650d`.
+3. Invoke the bounded scanner once through the established release procedure.
+4. Restore `intake_mode=legacy` unconditionally after the response; do not retry
+   automatically on an error or degraded result.
+5. Prove one `confirmed_live_job` case bound to job id
+   `985708c4-ffae-48e4-aab7-9c8ead7dac0e` (`SWMS-261055`), both source rows on
+   that case, and zero new jobs, drafts, assignments, communications or links to
+   cancelled `SWMS-261054`.
 
 The matching `ops-api` deterministically prefills the narrow direct-AJ labelled
 email shape (`Job No`, `Address`, `Contact`, `Mobile`) without raising extraction

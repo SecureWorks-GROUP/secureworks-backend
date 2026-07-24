@@ -459,11 +459,20 @@ interface PersistedSourceAuthority {
 }
 
 interface SourceAuthorityCorrection {
+  id: string;
   source_post_id: string;
   legacy_case_id: string | null;
   effective_case_id: string | null;
   target_job_id: string | null;
   expected_identity_key: string;
+}
+
+interface SourceAuthorityCorrectionSupersession {
+  source_post_id: string;
+  superseded_correction_id: string;
+  prior_authority_case_id: string;
+  effective_case_id: string;
+  expected_identity_key: string | null;
 }
 
 // An exact source that is already canonical-accounted is stronger authority than
@@ -493,6 +502,7 @@ async function resolvePersistedSourceAuthorities(
   }
 
   const caseIdByPostId = new Map<string, string>();
+  const correctionIdByPostId = new Map<string, string>();
   for (const ids of chunk(sourcePostIds)) {
     const { data, error } = await client.from("makesafe_intake_case_sources")
       .select("post_id,case_id")
@@ -519,7 +529,7 @@ async function resolvePersistedSourceAuthorities(
       "makesafe_intake_source_authority_corrections",
     )
       .select(
-        "source_post_id,legacy_case_id,effective_case_id,target_job_id,expected_identity_key",
+        "id,source_post_id,legacy_case_id,effective_case_id,target_job_id,expected_identity_key",
       )
       .eq("org_id", DEFAULT_ORG_ID)
       .in("source_post_id", ids);
@@ -542,6 +552,7 @@ async function resolvePersistedSourceAuthorities(
       if (row.effective_case_id) {
         caseIdByPostId.set(row.source_post_id, row.effective_case_id);
       }
+      correctionIdByPostId.set(row.source_post_id, row.id);
       if (row.target_job_id) {
         targetJobByPostId.set(row.source_post_id, row.target_job_id);
       }
@@ -549,6 +560,58 @@ async function resolvePersistedSourceAuthorities(
         row.source_post_id,
         row.expected_identity_key,
       );
+    }
+  }
+
+  // The first correction ledger is deliberately one-row-per-source and
+  // append-only. A reviewed second-round split therefore supersedes its
+  // effective authority in a separate immutable ledger. Validate both the
+  // correction row and its resulting authority before applying the overlay;
+  // stale reconciliation data must fail loudly instead of silently rebinding.
+  for (const ids of chunk(sourcePostIds)) {
+    const { data, error } = await client.from(
+      "makesafe_intake_source_authority_correction_supersessions",
+    )
+      .select(
+        "source_post_id,superseded_correction_id,prior_authority_case_id,effective_case_id,expected_identity_key",
+      )
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("source_post_id", ids);
+    if (error) {
+      throw new Error(
+        `deterministic source correction supersession read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    for (
+      const row of (data || []) as SourceAuthorityCorrectionSupersession[]
+    ) {
+      if (
+        correctionIdByPostId.get(row.source_post_id) !==
+          row.superseded_correction_id
+      ) {
+        throw new Error(
+          "deterministic source correction supersession target mismatch; reconciliation required",
+        );
+      }
+      if (
+        caseIdByPostId.get(row.source_post_id) !==
+          row.prior_authority_case_id
+      ) {
+        throw new Error(
+          "deterministic source correction supersession prior authority mismatch; reconciliation required",
+        );
+      }
+      caseIdByPostId.set(row.source_post_id, row.effective_case_id);
+      if (row.expected_identity_key) {
+        expectedIdentityByPostId.set(
+          row.source_post_id,
+          row.expected_identity_key,
+        );
+      } else {
+        expectedIdentityByPostId.delete(row.source_post_id);
+      }
     }
   }
 
@@ -596,6 +659,24 @@ async function resolvePersistedSourceAuthorities(
     if (error) {
       throw new Error(
         `deterministic corrected source closure read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.source_post_id) correctedSourcePostIds.push(row.source_post_id);
+    }
+  }
+  for (const ids of chunk([...authorityByCaseId.keys()])) {
+    const { data, error } = await client.from(
+      "makesafe_intake_source_authority_correction_supersessions",
+    )
+      .select("source_post_id,effective_case_id")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("effective_case_id", ids);
+    if (error) {
+      throw new Error(
+        `deterministic superseded source closure read failed: ${
           error.message || error
         }`,
       );

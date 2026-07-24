@@ -34,6 +34,12 @@ const lineageCorrectionMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const lineageSupersessionMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260724062509_makesafe_lineage_authority_supersessions.sql",
+    import.meta.url,
+  ),
+);
 const rollback = await Deno.readTextFile(
   new URL(
     "../../rollbacks/20260720000002_makesafe_deterministic_intake_mode_rollback.sql",
@@ -475,6 +481,99 @@ Deno.test("lineage correction is append-only, snapshot-guarded and side-effect-f
       `correction migration contains forbidden operational write: ${forbidden}`,
     );
   }
+});
+
+Deno.test("second-round lineage supersession is exact, append-only and operationally inert", () => {
+  const table = "makesafe_intake_source_authority_correction_supersessions";
+  const manifestMatch = lineageSupersessionMigration.match(
+    /\$manifest\$\n([\s\S]+?)\n\$manifest\$/,
+  );
+  assert(manifestMatch, "reviewed production manifest must be embedded");
+  const manifest = JSON.parse(manifestMatch[1]) as Array<
+    [string, string, string, string, string[]]
+  >;
+  const manifestSources = manifest.flatMap((entry) => entry[4]);
+  assertEquals(manifest.length, 33);
+  assertEquals(manifestSources.length, 58);
+  assertEquals(new Set(manifestSources).size, 58);
+  assertEquals(new Set(manifest.map((entry) => entry[0])).size, 15);
+  assertEquals(
+    manifest.filter((entry) => entry[1].includes("/deliverable:wo%3A")).length,
+    19,
+  );
+
+  assertStringIncludes(
+    lineageSupersessionMigration,
+    `CREATE TABLE public.${table}`,
+  );
+  assertStringIncludes(
+    lineageSupersessionMigration,
+    `public.${table}\n  ENABLE ROW LEVEL SECURITY`,
+  );
+  assertStringIncludes(
+    lineageSupersessionMigration,
+    `public.${table}\n  FROM PUBLIC, anon, authenticated`,
+  );
+  assertStringIncludes(
+    lineageSupersessionMigration,
+    `public.${table}\n  TO service_role`,
+  );
+  assertStringIncludes(
+    lineageSupersessionMigration,
+    "EXECUTE FUNCTION public.reject_makesafe_intake_append_only_mutation()",
+  );
+
+  for (
+    const invariant of [
+      "persisted_authority_split",
+      "identity_expectation_repair",
+      "embedded manifest shape changed",
+      "split authority footprint changed",
+      "correction identity footprint changed",
+      "source/correction hash changed",
+      "prior authority manifest changed",
+      "first-round ledger changed",
+      "target rows already exist",
+      "correction counts",
+      "side-effect footprint changed",
+      "wo:MLB-MW-26873",
+      "ccff4677-1883-48b8-bf4c-cbc2f642487c",
+      "47ac7f941cb5ed5800a9c9877fe73561ace8383961a0b09224ebfe38a1e40525",
+      "1080dba092f7f1ea82d22111404680b634348544c09cf02674d8f0acbeb6f913",
+      "<> 33",
+      "<> 58",
+      "<> 60",
+      "<> 2",
+      "<> 15",
+    ]
+  ) assertStringIncludes(lineageSupersessionMigration, invariant);
+
+  assertStringIncludes(
+    lineageSupersessionMigration,
+    "INSERT INTO public.makesafe_intake_cases",
+  );
+  assert(
+    !lineageSupersessionMigration.includes(
+      "INSERT INTO public.makesafe_intake_case_sources",
+    ),
+    "correction-only authorities must not rewrite immutable source ownership",
+  );
+  assert(
+    !lineageSupersessionMigration.match(
+      /(?:UPDATE|DELETE FROM|INSERT INTO)\s+public\.(?:jobs|job_assignments|makesafe_intake_drafts|job_documents|makesafe_notify_log|outbound_message_queue)/i,
+    ),
+    "second-round migration must not write operational or communication rows",
+  );
+
+  assertStringIncludes(runtime, `"${table}"`);
+  assertStringIncludes(
+    runtime,
+    "source correction supersession target mismatch; reconciliation required",
+  );
+  assertStringIncludes(
+    runtime,
+    "source correction supersession prior authority mismatch; reconciliation required",
+  );
 });
 
 Deno.test("attachment staging uses a content hash and append-only artifact ledger", () => {
