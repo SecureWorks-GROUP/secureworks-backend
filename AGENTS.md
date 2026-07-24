@@ -263,7 +263,15 @@ matching `ops-api`: the runtime reads effective source authority (and the guarde
 those tables on a non-production database and applies the reviewed 335-case /
 600-source false-`po:BOX` and AJ 70062 → SWMS-261055 data correction against the
 exact production snapshot; it never writes a job, assignment, draft, status or
-communication row.
+communication row. The second-round append-only overlay
+`20260724062509_makesafe_lineage_authority_supersessions.sql` lands before its
+matching `ops-api` for the same reason: the runtime reads its
+`makesafe_intake_source_authority_correction_supersessions` ledger to apply the
+reviewed authority splits, and rejects any supersession whose
+`superseded_correction_id` or `prior_authority_case_id` no longer matches the
+first-round result. It installs the table only on a non-production database,
+records 33 correction-only authorities plus 2 cleared identity expectations
+against the guarded snapshot, and likewise writes no operational row.
 Captain ruling 5 keeps paid AI extraction off: automatic, terminal-skill and manual
 intake checks all use the deterministic contract in
 `docs/makesafe-intake-terminal-hook.md`.
