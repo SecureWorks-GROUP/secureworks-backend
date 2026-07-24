@@ -335,6 +335,7 @@ function baseStore(): Store {
     makesafe_intake_health: [],
     makesafe_job_details: [],
     makesafe_intake_source_authority_corrections: [],
+    makesafe_intake_source_authority_correction_supersessions: [],
   };
 }
 
@@ -1174,6 +1175,7 @@ Deno.test("inverse authority binding requires explicit correction across the fou
         });
         if (corrected) {
           store.makesafe_intake_source_authority_corrections.push({
+            id: `correction-${postId}`,
             org_id: "00000000-0000-0000-0000-000000000001",
             source_post_id: postId,
             legacy_case_id: legacyCaseId,
@@ -1283,6 +1285,129 @@ Deno.test("inverse authority binding requires explicit correction across the fou
   );
   assert(staleCorrection.totals.sources_quarantined > 0);
   assertEquals(staleCorrection.completion_status, "completed_degraded");
+
+  const secondRoundStore = buildCrossedStore(true, false, false);
+  const splitSources = secondRoundStore
+    .makesafe_intake_source_authority_corrections.filter((row) =>
+      row.source_post_id.endsWith("-26948")
+    );
+  for (const correction of splitSources) {
+    correction.effective_case_id = "box-effective-26947";
+  }
+  secondRoundStore.makesafe_intake_cases.push({
+    id: "box-v2-effective-26948",
+    org_id: "00000000-0000-0000-0000-000000000001",
+    instruction_key: "fingerprint:v2-26948/deliverable:wo%3AWO-26948/cycle:1",
+    lineage_id: "box-v2-effective-26948",
+    cycle: 1,
+    parent_relation: null,
+    source_fingerprint: "v2-26948",
+    state: "exception",
+    job_id: null,
+    last_decision_provenance: "backfill",
+    normaliser_version:
+      "makesafe_refs.normaliseRef+wo_po_precedence@v2+lineage_reconciliation@v2",
+  });
+  for (const correction of splitSources) {
+    secondRoundStore
+      .makesafe_intake_source_authority_correction_supersessions.push({
+        org_id: "00000000-0000-0000-0000-000000000001",
+        source_post_id: correction.source_post_id,
+        superseded_correction_id: correction.id,
+        prior_authority_case_id: "box-effective-26947",
+        effective_case_id: "box-v2-effective-26948",
+        expected_identity_key: "wo:WO-26948",
+      });
+  }
+  const secondRound = await runDeterministicIntake(
+    fakeClient(secondRoundStore),
+    {
+      dryRun: true,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxCases: 10,
+    },
+  );
+  assertEquals(secondRound.isolated_failures, []);
+  assertEquals(secondRound.totals.sources_quarantined, 0);
+
+  const repairedIdentityStore = buildCrossedStore(true, true, false);
+  const stale = repairedIdentityStore
+    .makesafe_intake_source_authority_corrections.find((row) =>
+      row.expected_identity_key === "wo:WO-99999"
+    );
+  repairedIdentityStore
+    .makesafe_intake_source_authority_correction_supersessions.push({
+      org_id: "00000000-0000-0000-0000-000000000001",
+      source_post_id: stale.source_post_id,
+      superseded_correction_id: stale.id,
+      prior_authority_case_id: stale.effective_case_id,
+      effective_case_id: stale.effective_case_id,
+      expected_identity_key: null,
+    });
+  const repairedIdentity = await runDeterministicIntake(
+    fakeClient(repairedIdentityStore),
+    {
+      dryRun: true,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxCases: 10,
+    },
+  );
+  assertEquals(repairedIdentity.isolated_failures, []);
+  assertEquals(repairedIdentity.totals.sources_quarantined, 0);
+
+  const staleSupersessionStore = buildCrossedStore(true, false, false);
+  const correctedSource =
+    staleSupersessionStore.makesafe_intake_source_authority_corrections[0];
+  staleSupersessionStore
+    .makesafe_intake_source_authority_correction_supersessions.push({
+      org_id: "00000000-0000-0000-0000-000000000001",
+      source_post_id: correctedSource.source_post_id,
+      superseded_correction_id: "not-the-reviewed-correction",
+      prior_authority_case_id: correctedSource.effective_case_id,
+      effective_case_id: correctedSource.effective_case_id,
+      expected_identity_key: correctedSource.expected_identity_key,
+    });
+  await assertRejects(
+    () =>
+      runDeterministicIntake(fakeClient(staleSupersessionStore), {
+        dryRun: true,
+        selectionMode: "full_open",
+        days: 30,
+        nowIso: NOW,
+        maxCases: 10,
+      }),
+    Error,
+    "source correction supersession target mismatch",
+  );
+
+  const stalePriorStore = buildCrossedStore(true, false, false);
+  const stalePriorCorrection =
+    stalePriorStore.makesafe_intake_source_authority_corrections[0];
+  stalePriorStore
+    .makesafe_intake_source_authority_correction_supersessions.push({
+      org_id: "00000000-0000-0000-0000-000000000001",
+      source_post_id: stalePriorCorrection.source_post_id,
+      superseded_correction_id: stalePriorCorrection.id,
+      prior_authority_case_id: "not-the-current-authority",
+      effective_case_id: stalePriorCorrection.effective_case_id,
+      expected_identity_key: stalePriorCorrection.expected_identity_key,
+    });
+  await assertRejects(
+    () =>
+      runDeterministicIntake(fakeClient(stalePriorStore), {
+        dryRun: true,
+        selectionMode: "full_open",
+        days: 30,
+        nowIso: NOW,
+        maxCases: 10,
+      }),
+    Error,
+    "source correction supersession prior authority mismatch",
+  );
 });
 
 Deno.test("a poisoned BOX component links AJ 70062 to SWMS-261055 and never revives cancelled SWMS-261054", async () => {
@@ -1395,6 +1520,7 @@ Deno.test("a poisoned BOX component links AJ 70062 to SWMS-261055 and never revi
     report_type: null,
     jobs: existingJob,
   });
+  const exactAjStore = structuredClone(store);
   const jobsBefore = JSON.stringify(store.jobs);
   const assignmentsBefore = JSON.stringify(store.job_assignments);
   let approvalCalls = 0;
@@ -1456,6 +1582,42 @@ Deno.test("a poisoned BOX component links AJ 70062 to SWMS-261055 and never revi
       "scan_page_completed_degraded_retry_next_sweep",
     ),
   );
+
+  let exactApprovalCalls = 0;
+  const exactAjReport = await runDeterministicIntake(
+    fakeClient(exactAjStore),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      days: 30,
+      nowIso: "2026-07-24T12:00:00.000Z",
+      maxCases: 1,
+      allowSourcePostIds: ajSourceIds,
+      requireAllAllowlistMatches: true,
+      approveDraft: () => {
+        exactApprovalCalls++;
+        throw new Error("exact AJ continuation must not approve a draft");
+      },
+    },
+  );
+  assertEquals(exactAjReport.selection.mode, "exact");
+  assertEquals(exactAjReport.selection.source_allowlist_count, 2);
+  assertEquals(exactAjReport.selection.selected_cases, 1);
+  assertEquals(exactAjReport.isolated_failures, []);
+  assertEquals(exactAjReport.completion_status, "completed");
+  assertEquals(exactAjReport.totals.case_rows_created, 1);
+  assertEquals(exactAjReport.totals.source_rows_created, 2);
+  assertEquals(exactAjReport.totals.jobs_created, 0);
+  assertEquals(exactAjReport.totals.drafts_created, 0);
+  assertEquals(exactApprovalCalls, 0);
+  assertEquals(
+    exactAjStore.makesafe_intake_cases.find((row: any) =>
+      row.job_id === existingJob.id
+    )?.state,
+    "confirmed_live_job",
+  );
+  assertEquals(JSON.stringify(exactAjStore.jobs), jobsBefore);
+  assertEquals(JSON.stringify(exactAjStore.job_assignments), assignmentsBefore);
 });
 
 Deno.test("a confirmed grouped plan binds no-job exception secondaries but quarantines a genuine state divergence", async () => {
