@@ -893,6 +893,12 @@ function logEmailToGHL(contactId: string | null, subject: string, recipient: str
   }).catch(() => {})
 }
 
+// A trade invoice in one of these statuses holds nothing: its work order,
+// assignments and charge lines are released for re-invoicing. Single source of
+// truth for every released/live invoice rule in this file.
+const RELEASED_INVOICE_STATUSES: readonly string[] = ['draft', 'failed', 'ops-reject']
+const RELEASED_INVOICE_STATUS_SET: ReadonlySet<string> = new Set(RELEASED_INVOICE_STATUSES)
+
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 
@@ -4650,6 +4656,8 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── Trade (mobile) — JWT auth required ──
       case 'trade_calendar':
         return await handleTradeCalendarAction(req, client)
+      case 'my_work_orders':
+        return await handleTradeWorkOrdersAction(req, client)
       case 'my_jobs':
       case 'trade_job_detail':
       case 'upload_photo':
@@ -4673,7 +4681,6 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'dispute_hours':
       case 'crew_charges_on_my_jobs':
       case 'review_crew_charge':
-      case 'my_work_orders':
       case 'submit_work_order_invoice':
       case 'search_all_jobs':
       case 'generate_trade_invoice':
@@ -4939,85 +4946,80 @@ if (import.meta.main) serve(async (req: Request) => {
             return json({ success: true })
           }
 
-          case 'my_work_orders': {
-            // Get work orders assigned to this user (as lead trade)
-            const woStatus = url.searchParams.get('status') // optional filter
-            let woQuery = client.from('work_orders')
-              .select('id, job_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, jobs!inner(job_number, client_name, type, status)')
-              .eq('assigned_user_id', tradeUser.id)
-              .not('status', 'in', '("cancelled","deleted")')
-              .order('created_at', { ascending: false })
-            if (woStatus) woQuery = woQuery.eq('status', woStatus)
-            const { data: workOrders, error: woErr } = await woQuery.limit(30)
-            if (woErr) throw new Error('Failed to load work orders: ' + woErr.message)
-
-            // For each work order, check if already invoiced
-            const woIds = (workOrders || []).map((wo: any) => wo.id)
-            const { data: existingInvoices } = await client.from('trade_invoices')
-              .select('work_order_id, status, xero_bill_id')
-              .in('work_order_id', woIds.length > 0 ? woIds : ['00000000-0000-0000-0000-000000000000'])
-              .eq('user_id', tradeUser.id)
-              .not('status', 'in', '("draft","failed")')
-            const invoicedWOs = new Set((existingInvoices || []).map((i: any) => i.work_order_id))
-
-            const mapped = (workOrders || []).map((wo: any) => {
-              // Calculate total from scope_items
-              const items = wo.scope_items || []
-              const subtotal = items.reduce((sum: number, item: any) => {
-                const qty = Number(item.quantity || item.metres || item.qty || 0)
-                const price = Number(item.unit_price || item.rate || item.price || 0)
-                return sum + (qty * price)
-              }, 0)
-              const gst = Math.round(subtotal * 0.1 * 100) / 100 // 10% GST
-              return {
-                id: wo.id,
-                wo_number: wo.wo_number,
-                job_id: wo.job_id,
-                job_number: wo.jobs?.job_number || '',
-                client_name: wo.jobs?.client_name || '',
-                job_type: wo.jobs?.type || '',
-                job_status: wo.jobs?.status || '',
-                status: wo.status,
-                site_address: wo.site_address || '',
-                scheduled_date: wo.scheduled_date,
-                scope_items: items,
-                subtotal: Math.round(subtotal * 100) / 100,
-                gst: Math.round(gst * 100) / 100,
-                total: Math.round((subtotal + gst) * 100) / 100,
-                already_invoiced: invoicedWOs.has(wo.id),
-                can_invoice: wo.status === 'complete' && !invoicedWOs.has(wo.id),
-              }
-            })
-            return json({ work_orders: mapped })
-          }
-
           case 'submit_work_order_invoice': {
             const { work_order_id } = body
             if (!work_order_id) throw new ApiError('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.', 400)
 
-            // Get the work order (include address fields for rich descriptions)
+            // The selector may widen a fencing manager past their own work
+            // orders, but tenant and canonical job vertical remain hard server
+            // boundaries at submission time too.
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
-              .select('id, job_id, wo_number, status, scope_items, site_address, assigned_user_id, jobs!inner(job_number, client_name, type, site_address, site_suburb)')
+              .select('id, org_id, job_id, wo_number, status, scope_items, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
               .eq('id', work_order_id)
+              .eq('org_id', tradeUser.orgId)
+              .eq('jobs.org_id', tradeUser.orgId)
               .single()
             if (woFetchErr || !wo) throw new ApiError('Work order not found', 404)
-            if (wo.assigned_user_id !== tradeUser.id) throw new ApiError('Not authorised — you are not assigned to this work order', 403)
+            const woJob = Array.isArray(wo.jobs) ? wo.jobs[0] : wo.jobs
+            if (!_canSubmitWorkOrderInvoice(
+              tradeUser,
+              { ...wo, jobs: woJob },
+              isDispatcher,
+            )) {
+              throw new ApiError('Not authorised — this work order is outside your assigned or managed work', 403)
+            }
             if (wo.status !== 'complete') throw new ApiError('Work order must be complete before invoicing', 400)
 
-            // Check not already invoiced — allow retry if previous attempt failed
-            const { data: existingWoInv } = await client.from('trade_invoices')
-              .select('id, status')
+            // One live invoice per work order across the tenant, regardless of
+            // which authorised manager/trade submitted it. The caller's own
+            // draft may be cleaned up and retried exactly as before.
+            const { data: existingWoInvoices, error: existingWoInvErr } = await client.from('trade_invoices')
+              .select('id, user_id, status')
+              .eq('org_id', tradeUser.orgId)
               .eq('work_order_id', work_order_id)
-              .eq('user_id', tradeUser.id)
-              .maybeSingle()
-            if (existingWoInv) {
-              if (existingWoInv.status === 'draft') {
-                // Clean up failed attempt so we can retry
-                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', existingWoInv.id)
-                await client.from('trade_invoices').delete().eq('id', existingWoInv.id)
-              } else {
-                throw new ApiError('This work order has already been invoiced', 400)
-              }
+            if (existingWoInvErr) throw existingWoInvErr
+            const blockingWoInvoice = _findBlockingWorkOrderInvoice(existingWoInvoices || [], tradeUser.id)
+            if (blockingWoInvoice) {
+              throw new ApiError(
+                String(blockingWoInvoice.status || '') === 'draft'
+                  ? 'Another trade has an unfinished invoice on this work order — the office must clear it first'
+                  : 'This work order has already been invoiced',
+                409,
+              )
+            }
+            const retryDrafts = (existingWoInvoices || []).filter((invoice: any) =>
+              invoice.status === 'draft' && String(invoice.user_id || '') === String(tradeUser.id)
+            )
+            for (const retryDraft of retryDrafts) {
+              await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', retryDraft.id)
+              await client.from('trade_invoices').delete().eq('id', retryDraft.id)
+            }
+
+            const requestedNegativeChargeIds: string[] = [
+              ...new Set<string>(
+                (Array.isArray(body.negative_charge_line_ids)
+                  ? body.negative_charge_line_ids
+                  : Array.isArray(body.charge_line_ids)
+                  ? body.charge_line_ids
+                  : [])
+                  .map((id: unknown) => String(id || ''))
+                  .filter(Boolean),
+              ),
+            ]
+            let selectedNegativeCharges: any[] = []
+            if (requestedNegativeChargeIds.length > 0) {
+              const { data: selectedChargeRows, error: selectedChargeErr } = await client
+                .from('trade_invoice_lines')
+                .select('id, job_id, line_total_ex, override_amount, acknowledgment_status, description, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+                .in('id', requestedNegativeChargeIds)
+                .eq('trade_invoices.org_id', tradeUser.orgId)
+              if (selectedChargeErr) throw selectedChargeErr
+              selectedNegativeCharges = _selectWorkOrderNegativeCharges(selectedChargeRows || [], {
+                jobId: String(wo.job_id),
+                orgId: tradeUser.orgId,
+                viewerId: tradeUser.id,
+                selectedIds: requestedNegativeChargeIds,
+              })
             }
 
             // Get user info (include email for contact auto-create)
@@ -5051,15 +5053,14 @@ if (import.meta.main) serve(async (req: Request) => {
 
             // Build line items from scope_items — rich descriptions, correct codes
             const scopeItems = wo.scope_items || []
-            const woJobNum = wo.jobs?.job_number || ''
+            const woJobNum = woJob?.job_number || ''
             const woDivision = trackingCategoryForJob(woJobNum)
-            const woClientLine = [wo.jobs?.client_name, wo.jobs?.site_address, wo.jobs?.site_suburb].filter(Boolean).join(', ')
+            const woClientLine = [woJob?.client_name, woJob?.site_address, woJob?.site_suburb].filter(Boolean).join(', ')
             const woGstRegistered = tradeXeroUser?.trade_details?.gstRegistered !== false
             const woTaxType = woGstRegistered ? 'INPUT' : 'NONE'
 
             const lineItems = scopeItems.map((item: any) => {
-              const qty = Number(item.quantity || item.metres || item.qty || 1)
-              const price = Number(item.unit_price || item.rate || item.price || 0)
+              const { qty, price } = _resolveWorkOrderScopeLine(item)
               const desc = item.description || item.name || 'Work order item'
               return {
                 Description: [
@@ -5074,21 +5075,28 @@ if (import.meta.main) serve(async (req: Request) => {
                 Tracking: xeroTracking(woJobNum),
               }
             })
-
-            const subtotal = lineItems.reduce((sum: number, li: any) => sum + (li.Quantity * li.UnitAmount), 0)
-            const gst = Math.round(subtotal * 0.1 * 100) / 100
-            const total = subtotal + gst
-
-            // ── M0 WO GUARD (2026-06-12) ──
-            // WO path: job attribution is already guaranteed (wo.job_id is required
-            // to load the WO). Guard checks scope items are non-empty and non-zero.
-            if (scopeItems.length === 0) {
-              throw new ApiError('Invoice rejected: work order has no scope items to invoice.', 422)
+            for (const charge of selectedNegativeCharges) {
+              lineItems.push({
+                Description: [
+                  `${wo.wo_number} | ${woJobNum} | ${woDivision || 'Construction'}`,
+                  `Less: ${charge.description} (${charge.trade_name})`,
+                  woClientLine,
+                ].filter(Boolean).join('\n'),
+                Quantity: 1,
+                UnitAmount: charge.amount_ex,
+                AccountCode: '620',
+                TaxType: woTaxType,
+                Tracking: xeroTracking(woJobNum),
+              })
             }
-            if (Math.abs(subtotal) < 0.01) {
-              throw new ApiError('Invoice rejected: work order scope items sum to zero. Check unit prices.', 422)
-            }
-            // ── END M0 WO GUARD ──
+
+            const invoiceTotals = _calculateWorkOrderInvoiceTotals(
+              scopeItems,
+              selectedNegativeCharges,
+            )
+            const subtotal = invoiceTotals.subtotal_ex
+            const gst = invoiceTotals.gst
+            const total = invoiceTotals.total_inc
 
             // Push directly to Xero as DRAFT ACCPAY bill
             const tradeName = tradeXeroUser?.name || 'Trade'
@@ -5108,7 +5116,12 @@ if (import.meta.main) serve(async (req: Request) => {
 
             // Stable key prevents duplicate bills — if previous push succeeded but we missed the response,
             // Xero returns the cached success (same bill ID, no duplicate). Cached errors expire after 12hrs.
-            const woIdempotencyKey = `wo-inv-${tradeUser.id}-${work_order_id}`
+            const woIdempotencyKey = _workOrderInvoiceIdempotencyKey(
+              tradeUser.id,
+              work_order_id,
+              selectedNegativeCharges,
+              total,
+            )
             let xeroSuccess = false
             let xeroBillId = ''
             let xeroBillNumber = ''
@@ -5124,13 +5137,20 @@ if (import.meta.main) serve(async (req: Request) => {
 
             // Save local trade_invoices record
             const { data: tradeInv } = await client.from('trade_invoices').insert({
-              org_id: '00000000-0000-0000-0000-000000000001',
+              org_id: tradeUser.orgId,
               user_id: tradeUser.id,
               work_order_id: work_order_id,
               invoice_source: 'work_order',
-              subtotal_ex: Math.round(subtotal * 100) / 100,
-              gst: Math.round(gst * 100) / 100,
-              total_inc: Math.round(total * 100) / 100,
+              subtotal_ex: subtotal,
+              gst,
+              total_inc: total,
+              has_manual_overrides: selectedNegativeCharges.length > 0,
+              override_details: selectedNegativeCharges.length > 0
+                ? {
+                  negative_charge_line_ids: selectedNegativeCharges.map((charge: any) => charge.line_id),
+                  negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
+                }
+                : null,
               status: xeroSuccess ? 'pushed_to_xero' : 'draft',
               xero_bill_id: xeroBillId || null,
               xero_pushed_at: xeroSuccess ? new Date().toISOString() : null,
@@ -5143,12 +5163,24 @@ if (import.meta.main) serve(async (req: Request) => {
                 trade_invoice_id: tradeInv.id,
                 job_id: wo.job_id,
                 job_number: woJobNum,
-                client_name: wo.jobs?.client_name || '',
+                client_name: woJob?.client_name || '',
                 description: item.description || item.name || 'Work order item',
                 total_hours: 0,
                 hourly_rate: 0,
-                line_total_ex: Number(item.quantity || item.metres || 1) * Number(item.unit_price || item.rate || 0),
+                line_total_ex: _resolveWorkOrderScopeLine(item).amount_ex,
               }))
+              for (const charge of selectedNegativeCharges) {
+                lines.push({
+                  trade_invoice_id: tradeInv.id,
+                  job_id: wo.job_id,
+                  job_number: woJobNum,
+                  client_name: woJob?.client_name || '',
+                  description: `Less: ${charge.description} (${charge.trade_name})`,
+                  total_hours: 0,
+                  hourly_rate: 0,
+                  line_total_ex: charge.amount_ex,
+                })
+              }
               await client.from('trade_invoice_lines').insert(lines)
             }
 
@@ -5161,6 +5193,9 @@ if (import.meta.main) serve(async (req: Request) => {
                 work_order_id,
                 wo_number: wo.wo_number,
                 subtotal, gst, total,
+                work_order_subtotal_ex: invoiceTotals.work_order_subtotal_ex,
+                negative_charge_line_ids: selectedNegativeCharges.map((charge: any) => charge.line_id),
+                negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 xero_bill_id: xeroBillId,
                 xero_bill_number: xeroBillNumber,
               },
@@ -5176,7 +5211,8 @@ if (import.meta.main) serve(async (req: Request) => {
                 // Backward-compat fields
                 success: true,
                 xero_bill_number: null,
-                total: Math.round(total * 100) / 100,
+                total,
+                negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 error: 'Xero push failed — contact admin',
               })
             }
@@ -5185,7 +5221,8 @@ if (import.meta.main) serve(async (req: Request) => {
               ok: true,
               success: true,
               xero_bill_number: xeroBillNumber,
-              total: Math.round(total * 100) / 100,
+              total,
+              negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
             })
           }
 
@@ -5427,7 +5464,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 .eq('user_id', tradeUser.id)            // ownership check (unchanged)  [F2]
                 .in('id', wantedIds)
               const HOURLY_STATUS_WHITELIST = ['scheduled', 'confirmed', 'in_progress', 'complete']
-              const RELEASED = ['draft', 'failed', 'ops-reject']
               // Resolve referencing-invoice statuses for the dup-assignment guard.
               const refIds = [...new Set((asn || []).map((a: any) => a.invoiced_in).filter(Boolean))]
               let liveRefIds = new Set<string>()
@@ -5435,7 +5471,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 const { data: refInv } = await client.from('trade_invoices')
                   .select('id, status').in('id', refIds)
                 liveRefIds = new Set((refInv || [])
-                  .filter((ti: any) => !RELEASED.includes(ti.status)).map((ti: any) => ti.id))
+                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || ''))).map((ti: any) => ti.id))
               }
               const hoursById: Record<string, number> = {}
               const manualById: Record<string, any> = {}
@@ -5867,9 +5903,8 @@ if (import.meta.main) serve(async (req: Request) => {
                   .select('id, status, invoice_number, user_id')
                   .in('id', duplicateInvoiceIds)
                 if (duplicateInvErr) throw duplicateInvErr
-                const releasedDuplicateStatuses = new Set(['draft', 'failed', 'ops-reject'])
                 const liveDuplicateInvoices = new Map((duplicateInvoices || [])
-                  .filter((ti: any) => !releasedDuplicateStatuses.has(ti.status))
+                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
                   .map((ti: any) => [ti.id, ti]))
                 duplicateExtraMatches = [...duplicateLineMap.values()]
                   .filter((line: any) => liveDuplicateInvoices.has(line.trade_invoice_id))
@@ -6033,7 +6068,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 await failAssignmentStamp('Only found ' + (stampCandidates || []).length + ' of ' + expectedAssignmentIds.length + ' assignments')
               }
               const stampRefIds = [...new Set((stampCandidates || []).map((a: any) => a.invoiced_in).filter(Boolean))]
-              const RELEASED_STAMP_STATUSES = ['draft', 'failed', 'ops-reject']
               let releasedStampInvoiceIds: string[] = []
               if (stampRefIds.length > 0) {
                 const { data: stampRefInvoices, error: stampRefErr } = await client.from('trade_invoices')
@@ -6041,7 +6075,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   .in('id', stampRefIds)
                 if (stampRefErr) await failAssignmentStamp(stampRefErr.message)
                 releasedStampInvoiceIds = (stampRefInvoices || [])
-                  .filter((ti: any) => RELEASED_STAMP_STATUSES.includes(ti.status))
+                  .filter((ti: any) => RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
                   .map((ti: any) => ti.id)
               }
               let stampQuery = client.from('job_assignments')
@@ -7506,6 +7540,16 @@ export async function tradeCalendarEvents(
   }
 
   const CAL_EVENT_LIMIT = 500
+  const requestedPageSize = Number(params.get('page_size') || CAL_EVENT_LIMIT)
+  const requestedOffset = Number(params.get('offset') || 0)
+  if (!Number.isInteger(requestedPageSize) || requestedPageSize < 1) {
+    throw new ApiError('page_size must be a positive integer', 400)
+  }
+  if (!Number.isInteger(requestedOffset) || requestedOffset < 0) {
+    throw new ApiError('offset must be a non-negative integer', 400)
+  }
+  const pageSize = Math.min(requestedPageSize, CAL_EVENT_LIMIT)
+  const offset = requestedOffset
   const overlapOr = `scheduled_end.gte.${from},and(scheduled_end.is.null,scheduled_date.gte.${from})`
   let query = client
     .from('calendar_events')
@@ -7515,7 +7559,10 @@ export async function tradeCalendarEvents(
     .eq('org_id', viewer.orgId)
     .neq('assignment_status', 'cancelled')
     .order('scheduled_date', { ascending: true })
-    .limit(CAL_EVENT_LIMIT)
+    .order('assignment_id', { ascending: true })
+    // Read one row beyond the requested page so `truncated` and `next_offset`
+    // describe actual continuation rather than guessing from a full page.
+    .range(offset, offset + pageSize)
 
   if (mode === 'mine') {
     query = query.eq('user_id', viewer.id)
@@ -7535,7 +7582,8 @@ export async function tradeCalendarEvents(
   if (error) throw error
 
   const rows = data || []
-  const events = rows.map((event: any) => {
+  const hasMore = rows.length > pageSize
+  const events = rows.slice(0, pageSize).map((event: any) => {
     const { org_id, ...safeEvent } = event
     return safeEvent
   })
@@ -7544,7 +7592,441 @@ export async function tradeCalendarEvents(
     mode,
     type: requestedType,
     events,
-    truncated: rows.length >= CAL_EVENT_LIMIT,
+    truncated: hasMore,
+    next_offset: hasMore ? offset + pageSize : null,
+  }
+}
+
+const WORK_ORDER_PAGE_DEFAULT = 30
+const WORK_ORDER_PAGE_MAX = 500
+const WORK_ORDER_READ_PAGE = 1000
+const WORK_ORDER_ID_CHUNK = 25
+
+function roundMoney(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100
+}
+
+function firstNumericValue(candidates: unknown[], fallback: number): number {
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined) continue
+    if (typeof candidate === 'string' && candidate.trim() === '') continue
+    const numeric = Number(candidate)
+    if (!Number.isFinite(numeric)) continue
+    return numeric
+  }
+  return fallback
+}
+
+// The only reader of a scope item's quantity and price. The Xero line items,
+// the invoice totals and the saved invoice lines all resolve through this, so
+// the pushed bill, the trade_invoices record and the audit event agree.
+export function _resolveWorkOrderScopeLine(
+  item: any,
+): { qty: number; price: number; amount_ex: number } {
+  const qty = firstNumericValue([item?.quantity, item?.metres, item?.qty], 1)
+  const price = firstNumericValue([item?.unit_price, item?.rate, item?.price], 0)
+  return { qty, price, amount_ex: roundMoney(qty * price) }
+}
+
+function workOrderScopeSubtotal(scopeItems: any[]): number {
+  return roundMoney((scopeItems || []).reduce((sum: number, item: any) => {
+    const { qty, price } = _resolveWorkOrderScopeLine(item)
+    return sum + (qty * price)
+  }, 0))
+}
+
+export function _canSubmitWorkOrderInvoice(
+  viewer: TradeAuthContext,
+  workOrder: any,
+  isDispatcher = false,
+): boolean {
+  const job = Array.isArray(workOrder?.jobs) ? workOrder.jobs[0] : workOrder?.jobs
+  if (!workOrder?.org_id || String(workOrder.org_id) !== String(viewer.orgId)) return false
+  if (!job?.org_id || String(job.org_id) !== String(viewer.orgId)) return false
+  if (String(workOrder.assigned_user_id || '') === String(viewer.id)) return true
+  if (isDispatcher) return true
+  return _normalizeManagedVerticals(viewer.managedVerticals).includes(_jobVertical(job))
+}
+
+// A negative work-order charge is never supplied as an arbitrary amount by the
+// browser. It is a signed projection of an existing acknowledged line from
+// another trade's live invoice, in the same tenant and on the same job.
+export function _selectWorkOrderNegativeCharges(
+  rows: any[],
+  args: {
+    jobId: string
+    orgId: string
+    viewerId: string
+    selectedIds?: string[]
+  },
+): any[] {
+  const selectedIds = args.selectedIds
+    ? [...new Set(args.selectedIds.map((id) => String(id || '')).filter(Boolean))]
+    : null
+  const selectedSet = selectedIds ? new Set(selectedIds) : null
+  const valid = new Map<string, any>()
+
+  for (const row of rows || []) {
+    const id = String(row?.id || '')
+    const parentRaw = row?.trade_invoices
+    const parent = Array.isArray(parentRaw) ? parentRaw[0] : parentRaw
+    if (!id || !parent) continue
+    if (String(row.job_id || '') !== String(args.jobId)) continue
+    if (String(parent.org_id || '') !== String(args.orgId)) continue
+    if (String(parent.user_id || '') === String(args.viewerId)) continue
+    if (String(row.acknowledgment_status || '') !== 'acknowledged') continue
+    if (RELEASED_INVOICE_STATUS_SET.has(String(parent.status || ''))) continue
+
+    const overrideApplied = row.override_amount !== null && row.override_amount !== undefined
+    const sourceAmount = Number(overrideApplied ? row.override_amount : row.line_total_ex)
+    if (!Number.isFinite(sourceAmount) || sourceAmount <= 0) continue
+    if (selectedSet && !selectedSet.has(id)) continue
+
+    valid.set(id, {
+      line_id: id,
+      job_id: String(row.job_id),
+      trade_name: parent?.users?.name || 'Trade',
+      description: row.description || 'Trade charge',
+      source_amount_ex: roundMoney(sourceAmount),
+      amount_ex: -roundMoney(sourceAmount),
+      override_applied: overrideApplied,
+      invoice_status: String(parent.status || ''),
+    })
+  }
+
+  if (selectedIds) {
+    const missing = selectedIds.filter((id) => !valid.has(id))
+    if (missing.length > 0) {
+      throw new ApiError('One or more selected trade charges are no longer valid for this work order', 422)
+    }
+    return selectedIds.map((id) => valid.get(id))
+  }
+  return [...valid.values()]
+}
+
+export function _calculateWorkOrderInvoiceTotals(
+  scopeItems: any[],
+  negativeCharges: Array<{ amount_ex: number }> = [],
+): {
+  work_order_subtotal_ex: number
+  negative_charge_total_ex: number
+  subtotal_ex: number
+  gst: number
+  total_inc: number
+} {
+  if (!Array.isArray(scopeItems) || scopeItems.length === 0) {
+    throw new ApiError('Invoice rejected: work order has no scope items to invoice.', 422)
+  }
+  const workOrderSubtotal = workOrderScopeSubtotal(scopeItems)
+  if (workOrderSubtotal <= 0) {
+    throw new ApiError('Invoice rejected: work order scope items must total more than zero.', 422)
+  }
+  const negativeChargeTotal = roundMoney((negativeCharges || []).reduce((sum, charge) => {
+    const amount = Number(charge?.amount_ex)
+    if (!Number.isFinite(amount) || amount > 0) {
+      throw new ApiError('Invoice rejected: invalid trade charge amount.', 422)
+    }
+    return sum + amount
+  }, 0))
+  const subtotal = roundMoney(workOrderSubtotal + negativeChargeTotal)
+  if (subtotal <= 0) {
+    throw new ApiError('Invoice rejected: trade charges cannot reduce the work order invoice to zero or below.', 422)
+  }
+  const gst = roundMoney(subtotal * 0.1)
+  return {
+    work_order_subtotal_ex: workOrderSubtotal,
+    negative_charge_total_ex: negativeChargeTotal,
+    subtotal_ex: subtotal,
+    gst,
+    total_inc: roundMoney(subtotal + gst),
+  }
+}
+
+// A work order is only free to invoice when no live invoice holds it. A stale
+// draft releases it for its OWN submitter only: the Xero idempotency key is
+// per submitter, so another trade's unresolved draft may still correspond to a
+// bill Xero created, and a second submitter would raise a duplicate. A live
+// invoice outranks a foreign draft, so the caller is always told the reason
+// that actually holds the work order.
+export function _findBlockingWorkOrderInvoice(
+  invoices: any[],
+  viewerId: string,
+): any | null {
+  const rows = invoices || []
+  const liveInvoice = rows.find((invoice: any) =>
+    !RELEASED_INVOICE_STATUS_SET.has(String(invoice?.status || ''))
+  )
+  if (liveInvoice) return liveInvoice
+  return rows.find((invoice: any) =>
+    String(invoice?.status || '') === 'draft' &&
+    String(invoice?.user_id || '') !== String(viewerId)
+  ) || null
+}
+
+// Xero replays the cached response for a repeated Idempotency-Key, so the key
+// must cover everything that determines the pushed amount — the invoice total
+// and the selected negative charges — not just the submitter and work order.
+export function _workOrderInvoiceIdempotencyKey(
+  userId: string,
+  workOrderId: string,
+  negativeCharges: Array<{ line_id?: string; amount_ex?: number }> = [],
+  totalInc = 0,
+): string {
+  const fingerprintSource = [
+    roundMoney(Number(totalInc) || 0).toFixed(2),
+    ...(negativeCharges || [])
+      .map((charge) =>
+        `${String(charge?.line_id || '')}:${roundMoney(Number(charge?.amount_ex) || 0).toFixed(2)}`
+      )
+      .sort(),
+  ].join('|')
+  let hash = 0x811c9dc5
+  for (let i = 0; i < fingerprintSource.length; i++) {
+    hash ^= fingerprintSource.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `wo-inv-${userId}-${workOrderId}-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+async function readWorkOrderInvoiceRows(
+  client: any,
+  workOrderIds: string[],
+  orgId: string,
+): Promise<any[]> {
+  const rows: any[] = []
+  for (let i = 0; i < workOrderIds.length; i += WORK_ORDER_ID_CHUNK) {
+    const ids = workOrderIds.slice(i, i + WORK_ORDER_ID_CHUNK)
+    const { data, error } = await client
+      .from('trade_invoices')
+      .select('id, org_id, user_id, work_order_id, status, xero_bill_id')
+      .eq('org_id', orgId)
+      .in('work_order_id', ids)
+    if (error) throw error
+    rows.push(...(data || []))
+  }
+  return rows
+}
+
+async function readWorkOrderChargeRows(
+  client: any,
+  jobIds: string[],
+  orgId: string,
+  viewerId: string,
+): Promise<any[]> {
+  const rows: any[] = []
+  for (let i = 0; i < jobIds.length; i += WORK_ORDER_ID_CHUNK) {
+    const ids = jobIds.slice(i, i + WORK_ORDER_ID_CHUNK)
+    const { data, error } = await client
+      .from('trade_invoice_lines')
+      .select('id, job_id, line_total_ex, override_amount, acknowledgment_status, description, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+      .in('job_id', ids)
+      .eq('trade_invoices.org_id', orgId)
+      .neq('trade_invoices.user_id', viewerId)
+    if (error) throw error
+    rows.push(...(data || []))
+  }
+  return rows
+}
+
+// Actual authenticated boundary for the Trade work-order selector. Authorization
+// comes exclusively from the JWT profile, matching trade_calendar and my_jobs.
+export async function handleTradeWorkOrdersAction(req: Request, client: any): Promise<Response> {
+  const url = new URL(req.url)
+  if (url.searchParams.get('action') !== 'my_work_orders') {
+    throw new ApiError('my_work_orders action required', 400)
+  }
+  const viewer = await authTrade(req, client)
+  const { isDispatcher } = _resolveManagerVisibility({
+    role: viewer.role,
+    managedVerticals: viewer.managedVerticals,
+  })
+  return json(await tradeWorkOrders(client, url.searchParams, viewer, isDispatcher))
+}
+
+export async function tradeWorkOrders(
+  client: any,
+  params: URLSearchParams,
+  viewer: TradeAuthContext,
+  isDispatcher = false,
+): Promise<any> {
+  const requestedMode = String(params.get('mode') || 'mine').toLowerCase()
+  if (!['all', 'mine'].includes(requestedMode)) {
+    throw new ApiError("mode must be 'all' or 'mine'", 400)
+  }
+  const managedVerticals = _normalizeManagedVerticals(viewer.managedVerticals)
+  const canSeeEveryone = isDispatcher || managedVerticals.length > 0
+  const mode: 'all' | 'mine' = requestedMode === 'all' && canSeeEveryone ? 'all' : 'mine'
+
+  const requestedTypeRaw = String(params.get('type') || '').trim().toLowerCase()
+  const requestedType = requestedTypeRaw
+    ? _normalizeManagedVerticals([requestedTypeRaw])[0] || null
+    : null
+  if (requestedTypeRaw && !requestedType) {
+    throw new ApiError('type must be a supported Trade vertical', 400)
+  }
+  if (
+    mode === 'all' &&
+    !isDispatcher &&
+    requestedType &&
+    !managedVerticals.includes(requestedType)
+  ) {
+    throw new ApiError('Not authorized: requested vertical is not managed by this user', 403)
+  }
+
+  const requestedPageSize = Number(params.get('page_size') || WORK_ORDER_PAGE_DEFAULT)
+  const requestedOffset = Number(params.get('offset') || 0)
+  if (!Number.isInteger(requestedPageSize) || requestedPageSize < 1) {
+    throw new ApiError('page_size must be a positive integer', 400)
+  }
+  if (!Number.isInteger(requestedOffset) || requestedOffset < 0) {
+    throw new ApiError('offset must be a non-negative integer', 400)
+  }
+  const pageSize = Math.min(requestedPageSize, WORK_ORDER_PAGE_MAX)
+  const status = String(params.get('status') || '').trim()
+  const search = String(params.get('q') || params.get('search') || '').trim().toLowerCase()
+  const verticals = requestedType
+    ? [requestedType]
+    : mode === 'all' && !isDispatcher
+    ? managedVerticals
+    : []
+  const workOrderVerticalFilter = verticals.flatMap((vertical) =>
+    vertical === 'makesafe'
+      ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%']
+      : [`type.eq.${vertical}`]
+  ).join(',')
+
+  const allRows: any[] = []
+  let readOffset = 0
+  while (true) {
+    let query = client
+      .from('work_orders')
+      .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb)')
+      .eq('org_id', viewer.orgId)
+      .eq('jobs.org_id', viewer.orgId)
+      .not('status', 'in', '("cancelled","deleted")')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(readOffset, readOffset + WORK_ORDER_READ_PAGE - 1)
+    if (mode === 'mine') query = query.eq('assigned_user_id', viewer.id)
+    if (status) query = query.eq('status', status)
+    if (verticals.length > 0) {
+      query = query.or(workOrderVerticalFilter, { referencedTable: 'jobs' })
+    }
+    const { data, error } = await query
+    if (error) throw new ApiError('Failed to load work orders: ' + error.message, 500)
+    const page = data || []
+    allRows.push(...page)
+    if (page.length < WORK_ORDER_READ_PAGE) break
+    readOffset += WORK_ORDER_READ_PAGE
+  }
+
+  // Defensive de-duplication protects external offset paging if a database view
+  // or retry ever repeats a row at a page boundary.
+  let authorizedRows = [...new Map(allRows.map((row: any) => [String(row.id), row])).values()]
+  if (search) {
+    authorizedRows = authorizedRows.filter((row: any) => [
+      row.wo_number,
+      row.jobs?.job_number,
+      row.jobs?.client_name,
+      row.site_address,
+      row.jobs?.site_address,
+      row.jobs?.site_suburb,
+    ].some((value) => String(value || '').toLowerCase().includes(search)))
+  }
+
+  const total = authorizedRows.length
+  const pageRows = authorizedRows.slice(requestedOffset, requestedOffset + pageSize)
+  const workOrderIds = pageRows.map((row: any) => String(row.id)).filter(Boolean)
+  const jobIds = [...new Set(pageRows.map((row: any) => String(row.job_id || '')).filter(Boolean))]
+  const [invoiceRows, chargeRows] = await Promise.all([
+    readWorkOrderInvoiceRows(client, workOrderIds, viewer.orgId),
+    readWorkOrderChargeRows(client, jobIds, viewer.orgId, viewer.id),
+  ])
+  // The listing must answer "can this be invoiced?" with the same rule the
+  // submit path enforces, or a card offers an action that 409s.
+  const invoiceRowsByWorkOrder = new Map<string, any[]>()
+  for (const invoice of invoiceRows) {
+    const invoiceWorkOrderId = String(invoice?.work_order_id || '')
+    if (!invoiceWorkOrderId) continue
+    const bucket = invoiceRowsByWorkOrder.get(invoiceWorkOrderId)
+    if (bucket) bucket.push(invoice)
+    else invoiceRowsByWorkOrder.set(invoiceWorkOrderId, [invoice])
+  }
+
+  // The charge selector only varies by job, so resolve it once per distinct job
+  // rather than re-scanning every charge row for each work order on the page.
+  const chargeRowsByJob = new Map<string, any[]>()
+  for (const row of chargeRows) {
+    const chargeJobId = String(row?.job_id || '')
+    if (!chargeJobId) continue
+    const bucket = chargeRowsByJob.get(chargeJobId)
+    if (bucket) bucket.push(row)
+    else chargeRowsByJob.set(chargeJobId, [row])
+  }
+  const negativeChargesByJob = new Map<string, any[]>()
+  for (const jobId of jobIds) {
+    negativeChargesByJob.set(
+      jobId,
+      _selectWorkOrderNegativeCharges(chargeRowsByJob.get(jobId) || [], {
+        jobId,
+        orgId: viewer.orgId,
+        viewerId: viewer.id,
+      }),
+    )
+  }
+
+  const mapped = pageRows.map((workOrder: any) => {
+    const scopeItems = Array.isArray(workOrder.scope_items) ? workOrder.scope_items : []
+    const subtotal = workOrderScopeSubtotal(scopeItems)
+    const gst = roundMoney(subtotal * 0.1)
+    const negativeCharges = negativeChargesByJob.get(String(workOrder.job_id || '')) || []
+    const blockingInvoice = _findBlockingWorkOrderInvoice(
+      invoiceRowsByWorkOrder.get(String(workOrder.id)) || [],
+      viewer.id,
+    )
+    const alreadyInvoiced = !!blockingInvoice &&
+      !RELEASED_INVOICE_STATUS_SET.has(String(blockingInvoice.status || ''))
+    return {
+      id: workOrder.id,
+      wo_number: workOrder.wo_number,
+      job_id: workOrder.job_id,
+      job_number: workOrder.jobs?.job_number || '',
+      client_name: workOrder.jobs?.client_name || '',
+      job_type: _jobVertical(workOrder.jobs),
+      job_status: workOrder.jobs?.status || '',
+      assigned_user_id: workOrder.assigned_user_id || null,
+      assigned_user_name: workOrder.assigned_user?.name || workOrder.trade_name || '',
+      status: workOrder.status,
+      site_address: workOrder.site_address || workOrder.jobs?.site_address || '',
+      site_suburb: workOrder.jobs?.site_suburb || '',
+      scheduled_date: workOrder.scheduled_date,
+      scope_items: scopeItems,
+      subtotal,
+      gst,
+      total: roundMoney(subtotal + gst),
+      negative_charges: negativeCharges,
+      available_negative_charge_total_ex: roundMoney(negativeCharges.reduce(
+        (sum: number, charge: any) => sum + Number(charge.amount_ex || 0),
+        0,
+      )),
+      already_invoiced: alreadyInvoiced,
+      invoice_block_reason: blockingInvoice
+        ? (alreadyInvoiced ? 'invoiced' : 'other_trade_draft')
+        : null,
+      can_invoice: workOrder.status === 'complete' && !blockingInvoice,
+    }
+  })
+  const hasMore = requestedOffset + mapped.length < total
+  return {
+    schema: 'trade-work-orders.v1',
+    mode,
+    type: requestedType,
+    work_orders: mapped,
+    total,
+    offset: requestedOffset,
+    page_size: pageSize,
+    truncated: hasMore,
+    next_offset: hasMore ? requestedOffset + mapped.length : null,
   }
 }
 
@@ -22448,7 +22930,14 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
 }
 
 export function _groupTradeAssignmentsForTest(assignments: any[], today: string, weekEnd: string) {
-  const grouped: any = { today: [] as any[], thisWeek: [] as any[], upcoming: [] as any[], recent: [] as any[], makesafePool: [] as any[] }
+  const grouped: any = {
+    today: [] as any[],
+    thisWeek: [] as any[],
+    upcoming: [] as any[],
+    recent: [] as any[],
+    unscheduled: [] as any[],
+    makesafePool: [] as any[],
+  }
   for (const a of (assignments || [])) {
     // Open-pool cards (make-safe OR any managed vertical: fencing_open /
     // patio_open / decking_open) go to the pool bucket, never the dated
@@ -22461,6 +22950,10 @@ export function _groupTradeAssignmentsForTest(assignments: any[], today: string,
       continue
     }
     const d = a?.scheduled_date || ''
+    if (!d) {
+      grouped.unscheduled.push(a)
+      continue
+    }
     if (d < today) grouped.recent.push(a)
     else if (d === today) grouped.today.push(a)
     else if (d <= weekEnd) grouped.thisWeek.push(a)
@@ -22881,23 +23374,64 @@ export async function myJobs(
     // carries the crew user, needed for the board's lanes). Scope is strictly
     // managerScope (their managed_verticals), matching allocate_job authz: a
     // fencing manager gets fencing only, etc. Make-safe is matched by type OR an
-    // SWMS- job_number, mirroring _jobVertical + the open-pool query. The 30-day
-    // window matches the dispatcher board. Because the open pools below de-dupe
+    // SWMS- job_number, mirroring _jobVertical + the open-pool query.
+    //
+    // Fencing is the planning range: managers need every historic, future, and
+    // unscheduled allocation. Other verticals retain the existing rolling
+    // window/backstop behavior. Splitting the query preserves the conservative
+    // MakeSafe model while allowing mixed-vertical managers a complete fencing
+    // lane without widening their other lanes.
+    //
+    // Because the open pools below de-dupe
     // against this same (now vertical-wide) `assignments` set, jobs already
     // assigned to OTHER crew can no longer show as false "available" cards.
-    const jobVerticalFilter = managerScope.flatMap((v) =>
+    const verticalFilter = (verticals: string[]) => verticals.flatMap((v) =>
       v === 'makesafe' ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%'] : [`type.eq.${v}`]
     ).join(',')
-    const res = await client
-      .from('job_assignments')
-      .select(ASSIGNMENT_SELECT_ADMIN_INNER)
-      .neq('status', 'cancelled')
-      .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
-      .eq('jobs.org_id', orgId)
-      .or(jobVerticalFilter, { referencedTable: 'jobs' })
-      .order('scheduled_date', { ascending: true })
-    assignments = res.data
-    error = res.error
+    const rollingVerticals = managerScope.filter((vertical) => vertical !== 'fencing')
+    assignments = []
+    error = null
+
+    if (rollingVerticals.length > 0) {
+      const rolling = await client
+        .from('job_assignments')
+        .select(ASSIGNMENT_SELECT_ADMIN_INNER)
+        .neq('status', 'cancelled')
+        .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+        .eq('jobs.org_id', orgId)
+        .or(verticalFilter(rollingVerticals), { referencedTable: 'jobs' })
+        .order('scheduled_date', { ascending: true })
+      assignments.push(...(rolling.data || []))
+      error = rolling.error
+    }
+
+    if (!error && managerScope.includes('fencing')) {
+      const FENCING_ASSIGNMENT_PAGE = 1000
+      let offset = 0
+      while (true) {
+        const pageResult = await client
+          .from('job_assignments')
+          .select(ASSIGNMENT_SELECT_ADMIN_INNER)
+          .neq('status', 'cancelled')
+          .eq('jobs.org_id', orgId)
+          .or(verticalFilter(['fencing']), { referencedTable: 'jobs' })
+          .order('scheduled_date', { ascending: true })
+          .order('id', { ascending: true })
+          .range(offset, offset + FENCING_ASSIGNMENT_PAGE - 1)
+        if (pageResult.error) {
+          error = pageResult.error
+          break
+        }
+        const pageRows = pageResult.data || []
+        assignments.push(...pageRows)
+        if (pageRows.length < FENCING_ASSIGNMENT_PAGE) break
+        offset += FENCING_ASSIGNMENT_PAGE
+      }
+    }
+
+    // Mixed scopes can overlap only through malformed data, but de-duplicating
+    // by the canonical assignment id also makes retries/page boundaries safe.
+    assignments = [...new Map(assignments.map((row: any) => [row.id, row])).values()]
   } else {
     // ── Normal mode: only this user's assignments ──
     const res = await client
@@ -29749,7 +30283,6 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   // An assignment whose referencing invoice is terminal (failed/ops-reject) or a
   // draft is released and may be re-invoiced. We resolve the referenced invoice
   // statuses in one batch.                                                  [F3]
-  const RELEASED_INVOICE_STATUSES = ['draft', 'failed', 'ops-reject']
   const referencedInvoiceIds = [...new Set((rawAssignments || [])
     .map((a: any) => a.invoiced_in).filter(Boolean))]
   let liveInvoiceIds = new Set<string>()
@@ -29759,7 +30292,7 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
       .select('id, status')
       .in('id', referencedInvoiceIds)
     liveInvoiceIds = new Set((refInvoices || [])
-      .filter((ti: any) => !RELEASED_INVOICE_STATUSES.includes(ti.status))
+      .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
       .map((ti: any) => ti.id))
   }
   const assignments = (rawAssignments || [])

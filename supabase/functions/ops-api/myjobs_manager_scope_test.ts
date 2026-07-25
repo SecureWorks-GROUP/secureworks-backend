@@ -70,7 +70,13 @@ type RecordedQuery = {
   inCol: string | null;
   inVals: unknown[] | null;
   select: string;
+  range: [number, number] | null;
 };
+
+function pageRows<T>(rows: T[], st: RecordedQuery): T[] {
+  if (st.range) return rows.slice(st.range[0], st.range[1] + 1);
+  return rows.slice(0, 1000);
+}
 
 function todayISO(): string {
   // Mirror getAWSTDate()'s +8h shift; a plain "today" is safely inside the
@@ -131,7 +137,7 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     // list; it returns the occupying assignment, not just the id.
     if (st.inCol === "job_id" && st.inVals) {
       return {
-        data: joined
+        data: pageRows(joined
           .filter((x) => st.inVals!.includes(x.a.job_id))
           .map(({ a }) => ({
             id: a.id,
@@ -148,13 +154,13 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
             clocked_off_at: a.completed_at ?? null,
             updated_at: a.updated_at ?? null,
             user: { id: a.user_id, name: a.user_name ?? a.user_id },
-          })),
+          })), st),
         error: null,
       };
     }
     const isAdminSelect = String(st.select || "").includes("user:user_id");
     return {
-      data: joined.map(({ a, job }) => ({
+      data: pageRows(joined.map(({ a, job }) => ({
         id: a.id,
         scheduled_date: a.scheduled_date,
         status: a.status,
@@ -167,7 +173,7 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
         updated_at: a.updated_at ?? null,
         jobs: { ...job },
         ...(isAdminSelect ? { user: { id: a.user_id, name: a.user_name ?? a.user_id } } : {}),
-      })),
+      })), st),
       error: null,
     };
   }
@@ -186,12 +192,12 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
       const ex = parseNotInSet(st.notIn);
       rows = rows.filter((j) => !ex.has(j.status));
     }
-    return { data: rows.map((j) => ({ ...j })), error: null };
+    return { data: pageRows(rows.map((j) => ({ ...j })), st), error: null };
   }
   if (st.table === "makesafe_job_details") {
     let rows = (fx.details || []).slice();
     if (st.inCol === "job_id" && st.inVals) rows = rows.filter((d) => st.inVals!.includes(d.job_id));
-    return { data: rows.map((d) => ({ ...d })), error: null };
+    return { data: pageRows(rows.map((d) => ({ ...d })), st), error: null };
   }
   // job_contacts / purchase_orders → not needed by these fixtures.
   return { data: [], error: null };
@@ -201,7 +207,7 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[]) {
   function from(table: string) {
     const st: RecordedQuery = {
       table, eq: {}, neq: {}, gte: null, lt: null, refOr: null,
-      notIn: null, inCol: null, inVals: null, select: "",
+      notIn: null, inCol: null, inVals: null, select: "", range: null,
     };
     // deno-lint-ignore no-explicit-any
     const b: any = {
@@ -219,7 +225,10 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[]) {
       ilike: () => b,
       order: () => b,
       limit: () => b,
-      range: () => b,
+      range: (from: number, to: number) => {
+        st.range = [from, to];
+        return b;
+      },
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
       // deno-lint-ignore no-explicit-any
       then: (resolve: any) => { recorded.push(st); resolve(resolveQuery(fx, st)); },
@@ -231,7 +240,15 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[]) {
 
 // ── grouped-output helpers ───────────────────────────────────────────────────
 // deno-lint-ignore no-explicit-any
-function nonPool(g: any): any[] { return [...g.today, ...g.thisWeek, ...g.upcoming, ...g.recent]; }
+function nonPool(g: any): any[] {
+  return [
+    ...g.today,
+    ...g.thisWeek,
+    ...g.upcoming,
+    ...g.recent,
+    ...(g.unscheduled || []),
+  ];
+}
 // deno-lint-ignore no-explicit-any
 function assignedJobIds(g: any): string[] { return nonPool(g).map((a) => a.jobs?.id); }
 // deno-lint-ignore no-explicit-any
@@ -1161,4 +1178,153 @@ Deno.test("FIX1: fencing manager unaffected — no make-safe backstop query issu
   // Board content identical to the U2b contract.
   assertEquals(assignedJobIds(g).includes("job-f1"), true);
   assertEquals(poolJobIds(g).includes("job-f3"), true);
+});
+
+Deno.test("fencing manager Everyone includes historical, future, and unscheduled assignments", async () => {
+  const fixtures: Fixtures = {
+    assignments: [
+      {
+        id: "a-historical",
+        user_id: "crew-old",
+        status: "complete",
+        scheduled_date: "2024-01-08",
+        job_id: "job-historical",
+      },
+      {
+        id: "a-future",
+        user_id: "crew-future",
+        status: "scheduled",
+        scheduled_date: "2032-02-09",
+        job_id: "job-future",
+      },
+      {
+        id: "a-unscheduled",
+        user_id: "crew-unscheduled",
+        status: "scheduled",
+        scheduled_date: null,
+        job_id: "job-unscheduled",
+      },
+      {
+        id: "a-patio",
+        user_id: "crew-patio",
+        status: "scheduled",
+        scheduled_date: "2032-02-09",
+        job_id: "job-patio",
+      },
+      {
+        id: "a-tenant-b",
+        user_id: "crew-b",
+        status: "scheduled",
+        scheduled_date: "2032-02-09",
+        job_id: "job-tenant-b",
+      },
+    ],
+    jobs: [
+      {
+        id: "job-historical",
+        type: "fencing",
+        status: "complete",
+        job_number: "SWF-OLD",
+      },
+      {
+        id: "job-future",
+        type: "fencing",
+        status: "in_progress",
+        job_number: "SWF-FUTURE",
+      },
+      {
+        id: "job-unscheduled",
+        type: "fencing",
+        status: "in_progress",
+        job_number: "SWF-UNSCHEDULED",
+      },
+      {
+        id: "job-patio",
+        type: "patio",
+        status: "in_progress",
+        job_number: "SWP-OTHER",
+      },
+      {
+        id: "job-tenant-b",
+        org_id: TENANT_B,
+        type: "fencing",
+        status: "in_progress",
+        job_number: "SWF-TENANT-B",
+      },
+    ],
+  };
+  const managerScope = _managerBoardVerticals({
+    isDispatcher: HENRY.isDispatcher,
+    mode: "all",
+    managedVerticals: ["fencing"],
+  });
+  const grouped = await myJobs(
+    makeClient(fixtures, []),
+    "u-henry",
+    false,
+    HENRY.isDispatcher,
+    HENRY.isMakesafeManager,
+    HENRY.poolVerticals,
+    managerScope,
+    TENANT_A,
+  );
+
+  assertEquals(assignedJobIds(grouped).sort(), [
+    "job-future",
+    "job-historical",
+    "job-unscheduled",
+  ]);
+  assertEquals(
+    grouped.unscheduled.map((
+      assignment: { jobs?: { id?: string } },
+    ) => assignment.jobs?.id),
+    ["job-unscheduled"],
+  );
+});
+
+Deno.test("fencing manager Everyone pages the complete range without duplicates", async () => {
+  const count = 1005;
+  const fixtures: Fixtures = {
+    assignments: Array.from({ length: count }, (_, index) => ({
+      id: `a-page-${String(index).padStart(4, "0")}`,
+      user_id: `crew-${index}`,
+      status: "scheduled",
+      scheduled_date: "2032-02-09",
+      job_id: `job-page-${String(index).padStart(4, "0")}`,
+    })),
+    jobs: Array.from({ length: count }, (_, index) => ({
+      id: `job-page-${String(index).padStart(4, "0")}`,
+      type: "fencing",
+      status: "in_progress",
+      job_number: `SWF-PAGE-${String(index).padStart(4, "0")}`,
+    })),
+  };
+  const recorded: RecordedQuery[] = [];
+  const managerScope = _managerBoardVerticals({
+    isDispatcher: HENRY.isDispatcher,
+    mode: "all",
+    managedVerticals: ["fencing"],
+  });
+  const grouped = await myJobs(
+    makeClient(fixtures, recorded),
+    "u-henry",
+    false,
+    HENRY.isDispatcher,
+    HENRY.isMakesafeManager,
+    HENRY.poolVerticals,
+    managerScope,
+    TENANT_A,
+  );
+  const ids = assignedJobIds(grouped);
+
+  assertEquals(ids.length, count);
+  assertEquals(new Set(ids).size, count);
+  const primaryPages = recorded
+    .filter((query) =>
+      query.table === "job_assignments" &&
+      query.refOr?.str.includes("type.eq.fencing") &&
+      query.lt == null
+    )
+    .map((query) => query.range);
+  assertEquals(primaryPages, [[0, 999], [1000, 1999]]);
 });

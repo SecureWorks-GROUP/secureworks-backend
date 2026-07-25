@@ -82,8 +82,8 @@
   are never taken from request params. A failed profile lookup is 503 (transient,
   retry); a profile with no `org_id` is 403.
 - The board/list reads (`my_jobs` incl. the dispatcher see-all feed and every open
-  pool, `trade_calendar`) are filtered to the caller's `org_id`, so another tenant's
-  work is never listed. `trade_job_detail` checks the job's `org_id` first and
+  pool, `trade_calendar`, `my_work_orders`) are filtered to the caller's `org_id`,
+  so another tenant's work is never listed. `trade_job_detail` checks the job's `org_id` first and
   refuses a cross-tenant job outright.
 - Job access (`trade_job_detail`) is granted by: own assignment (`assertAssigned`),
   dispatcher/admin, an explicit managed vertical matching the job's vertical
@@ -96,8 +96,10 @@
 ## ops-api Trade Endpoints (JWT auth required)
 | Action | Method | Purpose |
 |--------|--------|---------|
-| `my_jobs` | GET | Jobs assigned to authenticated user, grouped by date. `mode=all` is the managed Board list: a dispatcher sees every crew's work in their tenant, a vertical manager sees every crew's work in their `managed_verticals` (other-crew cards carry crew attribution). Ordinary installers stay own-only whatever `mode` says. Open-pool cards are de-duplicated against assignments that still hold the job at any date — including null/old scheduled dates — so an allocated job is never offered as available |
-| `trade_calendar` | GET | Tenant-scoped calendar assignments for the Trade Schedule view. Params: `from`/`to` (`YYYY-MM-DD`, default today → +14 days), `mode=mine` (default) or `all`, optional `type` vertical filter. `all` is honoured for a dispatcher (whole tenant) or a vertical manager (bounded to their `managed_verticals`; asking for an unmanaged `type` there is 403) and is downgraded to `mine` for an ordinary installer. Multi-day assignments overlapping the window are included, as are rows with a null `scheduled_end`. Cancelled assignments are excluded. Returns `{ schema: 'trade-calendar.v1', mode, type, events, truncated }` with `org_id` stripped, capped at 500 rows |
+| `my_jobs` | GET | Jobs assigned to authenticated user, grouped by date. `mode=all` is the managed Board list: a dispatcher sees every crew's work in their tenant, a fencing manager sees the complete historical/future/unscheduled fencing range, and other vertical managers retain their existing rolling/backstop range. Ordinary installers stay own-only whatever `mode` says. Null-dated allocations reach the `unscheduled` group only through that fencing range — the own-only, dispatcher and other-vertical reads keep their 30-day floor, which excludes a null `scheduled_date`. Open-pool cards are de-duplicated against assignments that still hold the job at any date, so allocated work is never offered as available |
+| `trade_calendar` | GET | Tenant-scoped calendar assignments for the Trade Schedule view. Params: `from`/`to` (`YYYY-MM-DD`, default today → +14 days), `mode=mine` (default) or `all`, optional `type`, `page_size` (max 500) and `offset`. `all` is honoured for a dispatcher or bounded to a manager's `managed_verticals` (asking for an unmanaged `type` there is 403); ordinary installers are downgraded to `mine`. Multi-day overlap and null `scheduled_end` semantics are preserved. Returns `trade-calendar.v1` with `org_id` stripped plus deterministic `truncated`/`next_offset` paging |
+| `my_work_orders` | GET | Manual work-order selector. Default/mine remains own-only; `mode=all` widens only for dispatchers or vertical managers and stays tenant/vertical scoped. It is intentionally independent of the selected invoice week, supports search (`q`) and deterministic offset paging, and reports any live same-tenant invoice plus server-derived acknowledged negative-charge candidates. Returns `trade-work-orders.v1` with `total`, `offset`, `page_size` (default 30, max 500) and `truncated`/`next_offset` |
+| `submit_work_order_invoice` | POST | Existing Xero draft work-order invoice path. Authorises own work, dispatchers, or same-tenant managed-vertical work; 409s on a second live invoice for the work order across all trades and on another trade's unfinished draft (only the office can clear that one); the caller's own stale draft is still deleted and retried. Optional `negative_charge_line_ids` are revalidated against acknowledged same-job/same-tenant live invoice lines and deducted before GST, but can never pull the invoice to zero or below; arbitrary client amounts are never accepted |
 | `trade_job_detail` | GET | Full job view: client, docs, media, notes, POs, crew, work order, report |
 | `add_note` | POST | Add note to job timeline (via job_events) |
 | `upload_photo` | POST | Upload photo (base64 dataUrl) — supports po_id for receipts |
