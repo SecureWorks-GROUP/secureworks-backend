@@ -1632,7 +1632,11 @@ async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
     .select('org_id, role, managed_verticals')
     .eq('id', user.id)
     .maybeSingle()
-  if (profileError || !profile?.org_id) throw new ApiError('Trade profile not found', 403)
+  // A failed lookup is an outage, not a deauthorization — surface it as 503 so a
+  // transient DB blip never reads to the field as "your account was revoked".
+  // A genuinely absent profile carries no tenant, so it still fails closed.
+  if (profileError) throw new ApiError('Trade profile lookup failed — please try again', 503)
+  if (!profile?.org_id) throw new ApiError('Trade profile not found', 403)
   return {
     id: user.id,
     email: user.email || '',
@@ -7513,9 +7517,13 @@ export async function tradeCalendarEvents(
     query = query.eq('user_id', viewer.id)
   }
 
+  // The managed-vertical filter BOUNDS the Everyone view (it is what widens a
+  // manager past their own rows). Mine is already bounded by user_id, so
+  // applying it there would hide a manager's OWN out-of-vertical work — making
+  // their personal calendar smaller than an ordinary installer's.
   if (requestedType) {
     query = query.or(tradeCalendarVerticalFilter([requestedType]))
-  } else if (!isDispatcher && managedVerticals.length > 0) {
+  } else if (mode === 'all' && !isDispatcher && managedVerticals.length > 0) {
     query = query.or(tradeCalendarVerticalFilter(managedVerticals))
   }
 
@@ -22515,6 +22523,43 @@ export function _resolveAllocationAuthz(input: {
   return { allowed: false, reason: 'not_authorized' }
 }
 
+// Availability is an identity fact, not a display-window fact: a pool job is
+// "available" only when it has NO active assignment at ANY date, including rows
+// whose scheduled_date is NULL or older than the feed's display window. Every
+// open pool must answer that question the same way, so both the make-safe and
+// the generic per-vertical pool route through this probe.
+//
+// The probe is chunked AND paged: job_assignments holds one row per crew per
+// date, so an 80-job pool of long multi-day jobs can blow past PostgREST's
+// 1000-row cap. A silently truncated probe would re-introduce exactly the false
+// "available" card it exists to prevent, so never issue it as one unbounded read.
+const OCCUPANCY_PROBE_CHUNK = 25
+const OCCUPANCY_PROBE_PAGE = 1000
+async function fetchOccupiedJobIds(client: any, jobIds: string[]): Promise<Set<string>> {
+  const occupied = new Set<string>()
+  const ids = Array.from(new Set((jobIds || []).filter(Boolean).map((id: any) => String(id))))
+  for (let i = 0; i < ids.length; i += OCCUPANCY_PROBE_CHUNK) {
+    const chunk = ids.slice(i, i + OCCUPANCY_PROBE_CHUNK)
+    let offset = 0
+    while (true) {
+      const { data, error } = await client
+        .from('job_assignments')
+        .select('job_id')
+        .in('job_id', chunk)
+        .neq('status', 'cancelled')
+        .order('job_id', { ascending: true })
+        .range(offset, offset + OCCUPANCY_PROBE_PAGE - 1)
+      if (error) throw error
+      const rows = data || []
+      for (const row of rows) if (row?.job_id) occupied.add(String(row.job_id))
+      if (rows.length < OCCUPANCY_PROBE_PAGE) break
+      offset += OCCUPANCY_PROBE_PAGE
+    }
+  }
+  return occupied
+}
+export const _fetchOccupiedJobIdsForTest = fetchOccupiedJobIds
+
 export async function myJobs(
   client: any,
   userId: string,
@@ -22767,6 +22812,21 @@ export async function myJobs(
       }
     }
 
+    // Same all-date occupancy rule as the generic pool below: the assignment
+    // feed above is windowed (30-day, plus the 180-day make-safe backstop) and
+    // both windows drop NULL-dated rows, so de-duping against it alone still
+    // lets an already-allocated make-safe reappear as a synthetic "available"
+    // card — the double-allocation risk. Ask job_assignments directly.
+    try {
+      for (const occupiedId of await fetchOccupiedJobIds(client, openMakesafes.map((job: any) => job?.id))) {
+        assignedJobIds.add(occupiedId)
+      }
+    } catch (occErr: any) {
+      // Non-blocking: a failed probe must not take the make-safe board down. The
+      // windowed de-dupe below still applies.
+      console.log('[ops-api] myJobs make-safe occupancy probe failed (non-blocking):', occErr?.message)
+    }
+
     for (const job of openMakesafes) {
       if (!job?.id || assignedJobIds.has(job.id)) continue
       assignments.push({
@@ -22889,22 +22949,12 @@ export async function myJobs(
           .order('created_at', { ascending: false })
           .limit(80)
         if (poolErr) throw poolErr
-        // Availability is an identity fact, not a display-window fact. The
-        // manager assignment feed intentionally remains 30-day windowed, but a
-        // crew-ready job is available only when it has NO active assignment at
-        // any date (including scheduled_date NULL). Scope this all-date probe to
-        // the already tenant+vertical-authorized pool ids.
+        // The manager assignment feed intentionally remains 30-day windowed, so
+        // ask job_assignments directly whether these already tenant+vertical-
+        // authorized pool ids are occupied at any date.
         const poolJobIds = (openJobs || []).map((job: any) => job?.id).filter(Boolean)
-        if (poolJobIds.length > 0) {
-          const { data: occupiedRows, error: occupiedErr } = await client
-            .from('job_assignments')
-            .select('job_id')
-            .in('job_id', poolJobIds)
-            .neq('status', 'cancelled')
-          if (occupiedErr) throw occupiedErr
-          for (const row of (occupiedRows || [])) {
-            if (row?.job_id) assignedJobIdsPool.add(row.job_id)
-          }
+        for (const occupiedId of await fetchOccupiedJobIds(client, poolJobIds)) {
+          assignedJobIdsPool.add(occupiedId)
         }
         for (const job of (openJobs || [])) {
           if (!job?.id || assignedJobIdsPool.has(job.id)) continue

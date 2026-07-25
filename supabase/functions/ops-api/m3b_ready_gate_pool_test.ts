@@ -116,6 +116,7 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[]) {
       ilike: () => b,
       order: () => b,
       limit: () => b,
+      range: () => b,
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
       // deno-lint-ignore no-explicit-any
       then: (resolve: any) => { recorded.push(st); resolve(resolveQuery(fx, st)); },

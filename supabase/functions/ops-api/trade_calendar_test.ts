@@ -305,16 +305,44 @@ Deno.test("trade calendar Everyone returns same-tenant managed fencing with over
 });
 
 Deno.test("trade calendar Mine returns only the viewer's assignments", async () => {
-  const { client } = calendarClient(HENRY);
+  const { client, captures } = calendarClient(HENRY);
   const result = await tradeCalendarEvents(
     client,
     params("mine"),
     HENRY,
     false,
   );
+  // Nobody else's work, and none of the viewer's OWN work withheld: the
+  // managed-vertical filter widens the Everyone view, so applying it to Mine
+  // would make a manager's personal calendar smaller than an installer's.
   assertEquals(result.events.map((row: any) => row.assignment_id), [
     "henry-fence",
+    "henry-patio",
   ]);
+  assertEquals(captures[0].eq.user_id, "henry");
+  assertEquals(captures[0].eq.org_id, TENANT_A);
+  assertEquals(
+    captures[0].or.some((clause: string) => clause.includes("job_type")),
+    false,
+    "Mine is bounded by user_id, not by managed verticals",
+  );
+});
+
+Deno.test("Mine is identical for a manager and an ordinary installer with the same assignments", async () => {
+  const installer = { ...HENRY, managedVerticals: [] };
+  const manager = await tradeCalendarEvents(
+    calendarClient(HENRY).client,
+    params("mine"),
+    HENRY,
+    false,
+  );
+  const ordinary = await tradeCalendarEvents(
+    calendarClient(installer).client,
+    params("mine"),
+    installer,
+    false,
+  );
+  assertEquals(manager.events, ordinary.events);
 });
 
 Deno.test("ordinary installer remains own-only even when requesting Everyone", async () => {
@@ -365,6 +393,90 @@ Deno.test("manager denies an unmanaged requested vertical in Everyone or Mine", 
       "not managed",
     );
   }
+});
+
+Deno.test("a manager never sees another tenant's managed-vertical work", async () => {
+  const tenantBManager = { ...HENRY, id: "tenant-b-user", orgId: TENANT_B };
+  const { client, captures } = calendarClient(tenantBManager);
+  const result = await tradeCalendarEvents(
+    client,
+    params("all"),
+    tenantBManager,
+    false,
+  );
+  assertEquals(result.events.map((row: any) => row.assignment_id), ["fence-b"]);
+  assertEquals(captures[0].eq.org_id, TENANT_B);
+});
+
+// ── negative authority at the action boundary ────────────────────────────────
+// Any client that reaches calendar_events without a resolved profile is a
+// tenant-scoping hole, so the fixture throws if the read is ever attempted.
+function profileClient(profile: { data: unknown; error: unknown }): any {
+  return {
+    auth: {
+      getUser: () =>
+        Promise.resolve({
+          data: { user: { id: "henry", email: "henry@example.com" } },
+          error: null,
+        }),
+    },
+    from: (table: string) => {
+      if (table !== "users") {
+        throw new Error(`unscoped read attempted without a profile: ${table}`);
+      }
+      const b: any = {
+        select: () => b,
+        eq: () => b,
+        maybeSingle: () => Promise.resolve(profile),
+      };
+      return b;
+    },
+  };
+}
+
+const CAL_URL =
+  "https://example.test/functions/v1/ops-api?action=trade_calendar&from=2026-07-13&to=2026-07-21&mode=all";
+
+Deno.test("trade_calendar refuses an unauthenticated request", async () => {
+  const error = await assertRejects(
+    () =>
+      handleTradeCalendarAction(
+        new Request(CAL_URL),
+        calendarClient(HENRY).client,
+      ),
+    Error,
+    "Login required",
+  );
+  assertEquals((error as any).status, 401);
+});
+
+Deno.test("trade_calendar refuses a JWT with no trade profile", async () => {
+  const error = await assertRejects(
+    () =>
+      handleTradeCalendarAction(
+        new Request(CAL_URL, {
+          headers: { Authorization: "Bearer fixture-jwt" },
+        }),
+        profileClient({ data: null, error: null }),
+      ),
+    Error,
+    "Trade profile not found",
+  );
+  assertEquals((error as any).status, 403);
+});
+
+Deno.test("a profile lookup outage is a 503, never a silent deauthorization", async () => {
+  const error = await assertRejects(
+    () =>
+      handleTradeCalendarAction(
+        new Request(CAL_URL, {
+          headers: { Authorization: "Bearer fixture-jwt" },
+        }),
+        profileClient({ data: null, error: { message: "connection reset" } }),
+      ),
+    Error,
+  );
+  assertEquals((error as any).status, 503);
 });
 
 Deno.test("authenticated trade_calendar action carries JWT tenant and manager scope end to end", async () => {

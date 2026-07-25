@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _fetchOccupiedJobIdsForTest,
   _managerBoardVerticals,
   _resolveManagerVisibility,
   myJobs,
@@ -174,6 +175,7 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[]) {
       ilike: () => b,
       order: () => b,
       limit: () => b,
+      range: () => b,
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
       // deno-lint-ignore no-explicit-any
       then: (resolve: any) => { recorded.push(st); resolve(resolveQuery(fx, st)); },
@@ -452,6 +454,95 @@ Deno.test("FIX1: make-safe manager board runs the 180-day backstop vertical-wide
   const backstop = recorded.find((q) => q.table === "job_assignments" && q.lt != null);
   assertEquals(backstop?.eq.user_id, undefined, "manager backstop has no user_id filter");
   assertEquals(backstop?.refOr?.str, "type.eq.makesafe,job_number.ilike.SWMS-%");
+});
+
+// A single unbounded probe would hit PostgREST's 1000-row cap (job_assignments
+// holds one row per crew PER DATE), and a silently truncated probe re-creates
+// the very false-"available" card it exists to prevent.
+Deno.test("occupancy probe chunks pool ids and pages past the 1000-row cap", async () => {
+  const ids = Array.from({ length: 80 }, (_, i) => `job-${i}`);
+  const calls: { ids: string[]; from: number }[] = [];
+  const client = {
+    from: () => {
+      const st = { ids: [] as string[], from: 0 };
+      // deno-lint-ignore no-explicit-any
+      const b: any = {
+        select: () => b,
+        in: (_col: string, arr: string[]) => { st.ids = arr; return b; },
+        neq: () => b,
+        order: () => b,
+        range: (fromRow: number) => { st.from = fromRow; return b; },
+        // deno-lint-ignore no-explicit-any
+        then: (resolve: any) => {
+          calls.push({ ids: st.ids, from: st.from });
+          // Saturate the first page of the first chunk so a second page is required.
+          const rows = st.ids.includes("job-0") && st.from === 0
+            ? Array.from({ length: 1000 }, () => ({ job_id: "job-0" }))
+            : [{ job_id: st.from > 0 ? "job-past-page-1" : st.ids[0] }];
+          resolve({ data: rows, error: null });
+        },
+      };
+      return b;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const occupied = await _fetchOccupiedJobIdsForTest(client as any, ids);
+  assertEquals(calls.every((c) => c.ids.length <= 25), true, "pool ids are chunked well under the row cap");
+  assertEquals(calls.some((c) => c.from === 1000), true, "a saturated page is followed by the next range");
+  assertEquals(occupied.has("job-past-page-1"), true, "rows past the first page are never silently dropped");
+  assertEquals(occupied.has("job-0"), true);
+});
+
+// The 180-day backstop still leaves two holes the make-safe pool used to fall
+// through: an allocation older than the backstop, and one with a NULL
+// scheduled_date (dropped by every .gte('scheduled_date') window). Both must be
+// treated as occupied, in Everyone AND in the personal union.
+function occupiedMakesafeFixtures(): Fixtures {
+  const ANCIENT = new Date(Date.now() + 8 * 3600 * 1000 - 300 * 86400 * 1000).toISOString().slice(0, 10);
+  return {
+    assignments: [
+      { id: "a-ms-ancient", user_id: "u-crew5", user_name: "Crew E", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-ancient" },
+      { id: "a-ms-null", user_id: "u-crew6", user_name: "Crew F", status: "scheduled", scheduled_date: null, job_id: "job-ms-null" },
+      { id: "a-ms-cancelled", user_id: "u-crew7", user_name: "Crew G", status: "cancelled", scheduled_date: null, job_id: "job-ms-open" },
+    ],
+    jobs: [
+      { id: "job-ms-ancient", type: "makesafe", status: "accepted", job_number: "SWMS-200" },
+      { id: "job-ms-null", type: "makesafe", status: "accepted", job_number: "SWMS-201" },
+      { id: "job-ms-open", type: "makesafe", status: "accepted", job_number: "SWMS-202" }, // truly open
+    ],
+  };
+}
+
+Deno.test("make-safe pool never labels beyond-backstop or null-dated assigned work as available", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const recorded: RecordedQuery[] = [];
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), recorded), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
+  );
+  const pool = poolJobIds(g);
+  assertEquals(pool.includes("job-ms-ancient"), false, ">180-day allocation stays occupied");
+  assertEquals(pool.includes("job-ms-null"), false, "null-dated allocation stays occupied");
+  assertEquals(pool.includes("job-ms-open"), true, "a cancelled allocation does not occupy a genuinely open make-safe");
+  const occupancy = recorded.find((q) =>
+    q.table === "job_assignments" && q.select.trim() === "job_id" && q.inCol === "job_id"
+  );
+  assertEquals(occupancy?.gte, null, "make-safe occupancy probe is deliberately all-date");
+  assertEquals(occupancy?.neq.status, "cancelled", "cancelled assignments never occupy a job");
+});
+
+Deno.test("make-safe personal union also refuses to re-surface occupied work as available", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, [], TENANT_A,
+  );
+  const pool = poolJobIds(g);
+  assertEquals(pool.includes("job-ms-ancient"), false, "other crew's old allocation is not available in mode:'mine'");
+  assertEquals(pool.includes("job-ms-null"), false, "other crew's null-dated allocation is not available in mode:'mine'");
+  assertEquals(pool.includes("job-ms-open"), true);
 });
 
 Deno.test("FIX1: fencing manager unaffected — no make-safe backstop query issued", async () => {
