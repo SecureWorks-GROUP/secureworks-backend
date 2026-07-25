@@ -22203,16 +22203,18 @@ export type PoolOccupancyKind = 'makesafe' | 'vertical'
 // later completion holds the job again. No stamp, or timestamps we cannot read,
 // means still occupied: unfinished work is never re-offered.
 //
-// "When it finished" is the LATEST timestamp the row can show, never the first
-// one found. completed_at / clocked_off_at only exist on the trade clock path:
-// ops closing a row from the dashboard (updateAssignment) and
-// closeOpenAssignmentsForJob both write status without them. updated_at is
-// maintained on every write by trg_job_assignments_updated, so it is the
-// backstop that makes the comparison total — and taking the max means an extra
-// write can only ever hold the job, never release it.
+// "When it finished" is answered ONLY by the two stamps that record finishing
+// the work — completed_at and clocked_off_at, both written by the trade clock
+// path and by nothing else. updated_at is deliberately NOT consulted: the
+// trg_job_assignments_updated trigger bumps it on every write to the row, so
+// stamping invoiced_in (submit_trade_invoice), acknowledged_at, a confirmation
+// change or any dashboard edit would silently re-date a long-finished visit past
+// the re-attend and strand the card as occupied forever. Rows closed without
+// either stamp (closeOpenAssignmentsForJob, a dashboard status edit) carry no
+// evidence of when the work finished, so they keep holding the job.
 export function _assignmentFinishedAt(assignment: any): number | null {
   let latest: number | null = null
-  for (const raw of [assignment?.completed_at, assignment?.clocked_off_at, assignment?.updated_at]) {
+  for (const raw of [assignment?.completed_at, assignment?.clocked_off_at]) {
     const parsed = Date.parse(String(raw ?? ''))
     if (Number.isFinite(parsed) && (latest === null || parsed > latest)) latest = parsed
   }
@@ -22643,7 +22645,6 @@ const OCCUPANCY_PROBE_PAGE = 1000
 const OCCUPANCY_PROBE_SELECT = `
         job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
         started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
-        updated_at,
         user:user_id ( id, name )
       `
 
@@ -22825,12 +22826,9 @@ export async function myJobs(
   const poolLens: 'everyone' | 'mine' = showAll || managerScope.length > 0 ? 'everyone' : 'mine'
   const poolRecoveryUserId = poolLens === 'mine' ? userId : ''
 
-  // updated_at rides on every feed select: it is the only timestamp a row closed
-  // outside the trade clock path carries, and the make-safe de-dupe seed needs it
-  // to date a finished visit against the re-attend stamp.
   const ASSIGNMENT_SELECT_ADMIN = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, updated_at,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         user:user_id ( id, name ),
         jobs:job_id (
           id, type, status, client_name, client_phone, client_email,
@@ -22839,7 +22837,7 @@ export async function myJobs(
       `
   const ASSIGNMENT_SELECT_USER = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, updated_at,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id (
           id, type, status, client_name, client_phone, client_email,
           site_address, site_suburb, notes, job_number
@@ -22928,7 +22926,7 @@ export async function myJobs(
   // would either error or return ALL of the trade's old assignments — both wrong.
   const ASSIGNMENT_SELECT_USER_MAKESAFE = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, updated_at,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id!inner (
           id, type, status, client_name, client_phone, client_email,
           site_address, site_suburb, notes, job_number

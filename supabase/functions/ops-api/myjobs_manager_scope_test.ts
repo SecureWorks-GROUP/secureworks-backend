@@ -756,38 +756,51 @@ Deno.test("a completed make-safe visit releases only on durable re-attend proof"
     "only a finished visit is ever a release candidate",
   );
 
-  // A row closed off the trade clock path (ops via update_assignment,
-  // closeOpenAssignmentsForJob) has no completed_at at all. updated_at is written
-  // by the job_assignments trigger on every write, so it dates the closure — and
-  // a row with no readable timestamp anywhere keeps holding.
+  // clocked_off_at is the other authoritative finishing stamp, and the later of
+  // the two is what dates the visit.
   assertEquals(
-    _makesafeReattendReleases({ status: "complete", completed_at: null, updated_at: "2026-07-20T02:00:00Z" }, REATTEND),
-    false,
-    "a dashboard closure AFTER the re-attend holds the job",
-  );
-  assertEquals(
-    _makesafeReattendReleases({ status: "complete", completed_at: null, updated_at: "2026-07-10T02:00:00Z" }, REATTEND),
+    _makesafeReattendReleases({ status: "complete", completed_at: null, clocked_off_at: "2026-07-10T02:00:00Z" }, REATTEND),
     true,
-    "a closure BEFORE the re-attend still releases it",
+    "a clock-off before the re-attend hands the job back",
   );
+  assertEquals(
+    _makesafeReattendReleases(
+      { status: "complete", completed_at: "2026-07-10T02:00:00Z", clocked_off_at: "2026-07-20T02:00:00Z" },
+      REATTEND,
+    ),
+    false,
+    "the later of the two finishing stamps decides",
+  );
+
+  // A row closed off the trade clock path (ops via update_assignment,
+  // closeOpenAssignmentsForJob) carries neither stamp, so nothing on it says when
+  // the work finished — it keeps holding.
   assertEquals(
     _makesafeReattendReleases(done(null), REATTEND),
     false,
-    "no readable completion timestamp at all means occupied, never re-offered",
+    "no readable completion timestamp means occupied, never re-offered",
   );
   assertEquals(
-    _makesafeReattendReleases({ status: "complete", completed_at: "nonsense", updated_at: "also-nonsense" }, REATTEND),
+    _makesafeReattendReleases({ status: "complete", completed_at: "nonsense", clocked_off_at: null }, REATTEND),
     false,
-    "and unparseable timestamps are treated the same way",
+    "and an unparseable one is treated the same way",
   );
-  // The latest stamp on the row wins, so a later write can only ever hold.
+
+  // updated_at is NOT a completion stamp: trg_job_assignments_updated bumps it on
+  // every write to the row, so invoicing / acknowledging / editing a long-finished
+  // visit must not silently re-date it past the re-attend.
   assertEquals(
     _makesafeReattendReleases(
       { status: "complete", completed_at: "2026-07-10T02:00:00Z", updated_at: "2026-07-20T02:00:00Z" },
       REATTEND,
     ),
+    true,
+    "a later unrelated write never strands a genuinely re-attended make-safe",
+  );
+  assertEquals(
+    _makesafeReattendReleases({ status: "complete", completed_at: null, updated_at: "2026-07-10T02:00:00Z" }, REATTEND),
     false,
-    "a row touched after the re-attend is not released by its older completion stamp",
+    "and updated_at alone is never proof that the work finished",
   );
 });
 
@@ -802,9 +815,11 @@ function occupiedMakesafeFixtures(): Fixtures {
   const REDO_DONE_AT = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
   const REDO_REATTEND_AT = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
   const JUST_CLOCKED_OFF_AT = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  // Closures off the trade clock path carry no completed_at — only updated_at.
+  // Closures off the trade clock path carry no completed_at — only updated_at,
+  // which the trigger also bumps for writes that say nothing about the work.
   const DASHBOARD_CLOSED_AT = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
   const AUTO_CLOSED_AT = new Date(Date.now() - 3 * 86400 * 1000).toISOString();
+  const INVOICE_STAMPED_AT = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   return {
     assignments: [
       { id: "a-ms-ancient", user_id: "u-crew5", user_name: "Crew E", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-ancient" },
@@ -826,12 +841,16 @@ function occupiedMakesafeFixtures(): Fixtures {
       // AFTER the stamp, so the job is occupied again.
       { id: "a-ms-recycle-done", user_id: "u-crew13", user_name: "Crew M", status: "complete", scheduled_date: TODAY, completed_at: JUST_CLOCKED_OFF_AT, job_id: "job-ms-recycled" },
       // Re-attended, re-allocated, then closed by ops from the dashboard before
-      // the crew ever clocked on: status='complete' with NO completed_at, only
-      // the trigger-maintained updated_at, which post-dates the re-attend.
+      // the crew ever clocked on: status='complete' with NO finishing stamp at
+      // all, so nothing says when the work was done.
       { id: "a-ms-dashclosed", user_id: "u-crew14", user_name: "Crew N", status: "complete", scheduled_date: TODAY, updated_at: DASHBOARD_CLOSED_AT, job_id: "job-ms-dashclosed" },
-      // The same stamp-less shape from closeOpenAssignmentsForJob, but closed
-      // BEFORE the re-attend — that one really was handed back.
+      // The same stamp-less shape from closeOpenAssignmentsForJob, whose only
+      // timestamp happens to pre-date the re-attend.
       { id: "a-ms-autoclosed", user_id: "u-crew15", user_name: "Crew O", status: "complete", scheduled_date: ANCIENT, updated_at: AUTO_CLOSED_AT, job_id: "job-ms-autoclosed" },
+      // Genuinely finished long before the re-attend, then touched again by the
+      // crew's weekly trade invoice (submit_trade_invoice stamps invoiced_in),
+      // which bumps updated_at past the re-attend.
+      { id: "a-ms-invoiced", user_id: "u-crew16", user_name: "Crew P", status: "complete", scheduled_date: ANCIENT, completed_at: ANCIENT_DONE_AT, updated_at: INVOICE_STAMPED_AT, job_id: "job-ms-invoiced" },
       // The viewer's OWN beyond-backstop allocation.
       { id: "a-ms-hugo", user_id: "u-hugo", user_name: "Hugo", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-mine" },
       // A CURRENT allocation on a legacy detail-backed make-safe: the feed's
@@ -852,6 +871,7 @@ function occupiedMakesafeFixtures(): Fixtures {
       { id: "job-ms-recycled", type: "makesafe", status: "in_progress", job_number: "SWMS-209" },
       { id: "job-ms-dashclosed", type: "makesafe", status: "accepted", job_number: "SWMS-210" },
       { id: "job-ms-autoclosed", type: "makesafe", status: "accepted", job_number: "SWMS-211" },
+      { id: "job-ms-invoiced", type: "makesafe", status: "accepted", job_number: "SWMS-212" },
       { id: "job-ms-mine", type: "makesafe", status: "accepted", job_number: "SWMS-204" },
       // Legacy import: neither type='makesafe' nor an SWMS- number, reachable
       // only through the makesafe_job_details backstop.
@@ -869,6 +889,7 @@ function occupiedMakesafeFixtures(): Fixtures {
       { job_id: "job-ms-recycled", substatus: "waiting_on_trade_report", last_reattend_at: REDO_DONE_AT },
       { job_id: "job-ms-dashclosed", substatus: "waiting_on_trade_report", last_reattend_at: OLD_REATTEND_AT },
       { job_id: "job-ms-autoclosed", substatus: "waiting_on_trade_report", last_reattend_at: OLD_REATTEND_AT },
+      { job_id: "job-ms-invoiced", substatus: "waiting_on_trade_report", last_reattend_at: OLD_REATTEND_AT },
     ],
   };
 }
@@ -939,11 +960,11 @@ Deno.test("a clocked-off make-safe stays occupied until an explicit re-attend", 
   assertEquals(recycled.map((a) => a.id), ["a-ms-recycle-done"], "and still shows exactly once");
 });
 
-// Only the trade clock path writes completed_at. Ops closing a row from the
-// dashboard (update_assignment) and closeOpenAssignmentsForJob write status
-// alone, so without the trigger-maintained updated_at a re-attended job's fresh
-// closure looked timestamp-less and was handed straight back to the pool.
-Deno.test("a stamp-less closure is dated by updated_at, not treated as a release", async () => {
+// Only the trade clock path writes completed_at / clocked_off_at. A row ops
+// closed from the dashboard (update_assignment) or closeOpenAssignmentsForJob
+// closed carries neither, so nothing on it dates the work — those keep holding
+// rather than being guessed at from a mutable column.
+Deno.test("a closure with no finishing stamp keeps holding its make-safe", async () => {
   const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
   const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
   const g = await myJobs(
@@ -951,14 +972,33 @@ Deno.test("a stamp-less closure is dated by updated_at, not treated as a release
     false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
   );
 
-  // Closed AFTER the re-attend → the second cycle is under way, so it holds.
-  assertEquals(poolJobIds(g).includes("job-ms-dashclosed"), false, "a closure after the re-attend is never re-offered");
+  // In-window, so the de-dupe seed answers: exactly one card, never a pool card.
+  assertEquals(poolJobIds(g).includes("job-ms-dashclosed"), false, "a stamp-less closure is never re-offered");
   const dashClosed = nonPool(g).filter((a) => a.jobs?.id === "job-ms-dashclosed");
   assertEquals(dashClosed.map((a) => a.id), ["a-ms-dashclosed"], "and shows exactly once, as the crew's card");
 
-  // Closed BEFORE the re-attend → genuinely handed back.
-  assertEquals(poolJobIds(g).includes("job-ms-autoclosed"), true, "a closure before the re-attend still releases");
-  assertEquals(assignedJobIds(g).includes("job-ms-autoclosed"), false, "and the released visit is not also rendered");
+  // Beyond every window, so the probe answers — same conservative result, even
+  // though the row's only timestamp pre-dates the re-attend.
+  assertEquals(poolJobIds(g).includes("job-ms-autoclosed"), false, "an older stamp-less closure is held too");
+  const autoClosed = nonPool(g).find((a) => a.jobs?.id === "job-ms-autoclosed");
+  assertEquals(autoClosed?.id, "a-ms-autoclosed", "recovered as the crew's card rather than vanishing");
+});
+
+// updated_at is bumped by trg_job_assignments_updated on EVERY write to the row,
+// including ones that say nothing about the work: stamping invoiced_in from the
+// crew's weekly trade invoice, acknowledging, confirming, any dashboard edit.
+// Dating a visit by it would let those silently strand a re-attended make-safe
+// outside the pool, so the manager could never allocate the second visit.
+Deno.test("an unrelated later write never strands a re-attended make-safe", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
+  );
+
+  assertEquals(poolJobIds(g).includes("job-ms-invoiced"), true, "the visit finished before the re-attend, so it is allocatable");
+  assertEquals(assignedJobIds(g).includes("job-ms-invoiced"), false, "and the released visit is not also rendered as a live card");
 });
 
 // The stamp is the ONLY thing that releases a finished visit, so it must be read
@@ -1038,7 +1078,7 @@ Deno.test("a failed re-attend stamp read keeps finished make-safe work occupied"
 
   // deno-lint-ignore no-explicit-any
   const g = await myJobs(client as any, "u-hugo", false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A);
-  for (const held of ["job-ms-reattend", "job-ms-redo", "job-ms-clockedoff", "job-ms-dashclosed", "job-ms-autoclosed"]) {
+  for (const held of ["job-ms-reattend", "job-ms-redo", "job-ms-clockedoff", "job-ms-dashclosed", "job-ms-autoclosed", "job-ms-invoiced"]) {
     assertEquals(poolJobIds(g).includes(held), false, `${held} stays occupied when the stamp read fails`);
   }
   assertEquals(poolJobIds(g).includes("job-ms-open"), true, "genuinely open work is unaffected");
