@@ -60,7 +60,8 @@ function makeClient(store: Store) {
       limit: () => b,
       maybeSingle: () => Promise.resolve({ data: resolveSingle(), error: null }),
       single: () => Promise.resolve({ data: resolveSingle(), error: null }),
-      then: (resolve: any) => resolve({ data: resolveArray(), error: null }),
+      then: (resolve: any) =>
+        Promise.resolve({ data: resolveArray(), error: null }).then(resolve),
     };
     return b;
   }
@@ -280,6 +281,40 @@ Deno.test("allocateJob: idempotent double-tap returns the existing assignment, n
   assertEquals(res.assignment.id, "existing-a");
   // No new job_assignments row was inserted.
   assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 0);
+});
+
+Deno.test("allocateJob: new allocation returns the canonical saved date and times", async () => {
+  const store: Store = {
+    jobs: { "job-fen": FENCING_JOB },
+    users: { "inst-1": { id: "inst-1" } },
+  };
+  const client = makeClient(store);
+  const result = await allocateJob(client, {
+    body: {
+      jobId: "job-fen",
+      userId: "inst-1",
+      scheduledDate: "2026-08-03",
+      startTime: "07:30",
+      endTime: "15:00",
+      confirmationStatus: "placeholder",
+    },
+    callerRole: "lead_installer",
+    managedVerticals: ["fencing"],
+    actorUserId: "u-henry",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.mode, "create");
+  assertEquals(result.assignment.scheduled_date, "2026-08-03");
+  assertEquals(result.assignment.start_time, "07:30");
+  assertEquals(result.assignment.end_time, "15:00");
+  const inserts = store.inserts!.filter((entry) =>
+    entry.table === "job_assignments"
+  );
+  assertEquals(inserts.length, 1);
+  assertEquals(inserts[0].row.scheduled_date, "2026-08-03");
+  assertEquals(inserts[0].row.start_time, "07:30");
+  assertEquals(inserts[0].row.end_time, "15:00");
 });
 
 Deno.test("allocateJob: reassign to the SAME installer is a no-op (deduped)", async () => {

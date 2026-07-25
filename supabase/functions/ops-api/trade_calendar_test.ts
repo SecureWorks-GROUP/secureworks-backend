@@ -144,7 +144,9 @@ type QueryCapture = {
   neq: Record<string, unknown>;
   lte: Record<string, string>;
   or: string[];
+  orders: string[];
   limit: number | null;
+  range: [number, number] | null;
 };
 
 function calendarClient(
@@ -182,7 +184,9 @@ function calendarClient(
       neq: {},
       lte: {},
       or: [],
+      orders: [],
       limit: null,
+      range: null,
     };
     captures.push(capture);
     const b: any = {
@@ -206,9 +210,16 @@ function calendarClient(
         capture.or.push(value);
         return b;
       },
-      order: () => b,
+      order: (column: string) => {
+        capture.orders.push(column);
+        return b;
+      },
       limit: (value: number) => {
         capture.limit = value;
+        return b;
+      },
+      range: (from: number, to: number) => {
+        capture.range = [from, to];
         return b;
       },
       then: (resolve: (value: unknown) => void) => {
@@ -251,8 +262,23 @@ function calendarClient(
             })
           );
         }
+        if (capture.orders.includes("assignment_id")) {
+          result.sort((a: any, b: any) =>
+            String(a.scheduled_date || "").localeCompare(
+              String(b.scheduled_date || ""),
+            ) ||
+            String(a.assignment_id || "").localeCompare(
+              String(b.assignment_id || ""),
+            )
+          );
+        }
+        if (capture.range) {
+          result = result.slice(capture.range[0], capture.range[1] + 1);
+        } else if (capture.limit != null) {
+          result = result.slice(0, capture.limit);
+        }
         resolve({
-          data: result.slice(0, capture.limit || result.length),
+          data: result,
           error: null,
         });
       },
@@ -292,8 +318,8 @@ Deno.test("trade calendar Everyone returns same-tenant managed fencing with over
   assertEquals(result.schema, "trade-calendar.v1");
   assertEquals(result.mode, "all");
   assertEquals(result.events.map((row: any) => row.assignment_id), [
-    "henry-fence",
     "other-fence-overlap",
+    "henry-fence",
     "other-fence-null-end",
   ]);
   assertEquals(result.events.some((row: any) => "org_id" in row), false);
@@ -302,6 +328,26 @@ Deno.test("trade calendar Everyone returns same-tenant managed fencing with over
   assertEquals(captures[0].select.includes("pricing_json"), false);
   assertEquals(captures[0].select.includes("scope_json"), false);
   assertEquals(captures[0].select.includes("client_phone"), false);
+});
+
+Deno.test("trade calendar accepts an exact Perth Monday-to-Sunday planning week", async () => {
+  const { client } = calendarClient(HENRY);
+  const result = await tradeCalendarEvents(
+    client,
+    new URLSearchParams({
+      from: "2026-07-13",
+      to: "2026-07-19",
+      mode: "all",
+      type: "fencing",
+    }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.events.map((row: any) => row.assignment_id), [
+    "other-fence-overlap",
+    "henry-fence",
+  ]);
 });
 
 Deno.test("trade calendar Mine returns only the viewer's assignments", async () => {
@@ -373,13 +419,13 @@ Deno.test("dispatcher Everyone behavior remains tenant-wide", async () => {
   assertEquals(
     result.events.map((row: any) => row.assignment_id),
     [
-      "henry-fence",
       "other-fence-overlap",
-      "other-fence-null-end",
-      "patio-a",
-      "henry-patio",
+      "henry-fence",
       "decking-a",
       "makesafe-a",
+      "patio-a",
+      "henry-patio",
+      "other-fence-null-end",
     ],
   );
 });
@@ -518,10 +564,72 @@ Deno.test("authenticated trade_calendar action carries JWT tenant and manager sc
   assertEquals(payload.mode, "all");
   assertEquals(payload.type, "fencing");
   assertEquals(payload.events.map((row: any) => row.assignment_id), [
-    "henry-fence",
     "other-fence-overlap",
+    "henry-fence",
     "other-fence-null-end",
   ]);
   assertEquals(service.captures[0].eq.org_id, TENANT_A);
   assertEquals(service.captures[0].eq.user_id, undefined);
+});
+
+Deno.test("trade calendar pages deterministically without missing or duplicating a range", async () => {
+  const rows = Array.from({ length: 5 }, (_, index) => ({
+    assignment_id: `page-${index + 1}`,
+    job_id: `page-job-${index + 1}`,
+    user_id: `crew-${index + 1}`,
+    job_number: `SWF-P${index + 1}`,
+    job_type: "fencing",
+    org_id: TENANT_A,
+    assignment_status: "scheduled",
+    scheduled_date: index < 3 ? "2026-07-15" : "2026-07-16",
+    scheduled_end: null,
+  })).reverse();
+  const service = calendarClient(HENRY, rows);
+
+  const fetchPage = async (offset: number) =>
+    await tradeCalendarEvents(
+      service.client,
+      new URLSearchParams({
+        from: "2026-07-13",
+        to: "2026-07-21",
+        mode: "all",
+        type: "fencing",
+        page_size: "2",
+        offset: String(offset),
+      }),
+      HENRY,
+      false,
+    );
+
+  const first = await fetchPage(0);
+  const second = await fetchPage(2);
+  const third = await fetchPage(4);
+
+  assertEquals(first.events.map((row: any) => row.assignment_id), [
+    "page-1",
+    "page-2",
+  ]);
+  assertEquals(first.truncated, true);
+  assertEquals(first.next_offset, 2);
+  assertEquals(second.events.map((row: any) => row.assignment_id), [
+    "page-3",
+    "page-4",
+  ]);
+  assertEquals(second.truncated, true);
+  assertEquals(second.next_offset, 4);
+  assertEquals(third.events.map((row: any) => row.assignment_id), ["page-5"]);
+  assertEquals(third.truncated, false);
+  assertEquals(third.next_offset, null);
+
+  const combined = [...first.events, ...second.events, ...third.events].map(
+    (row: any) => row.assignment_id,
+  );
+  assertEquals(combined, ["page-1", "page-2", "page-3", "page-4", "page-5"]);
+  assertEquals(new Set(combined).size, combined.length);
+  assertEquals(
+    service.captures.every((capture) =>
+      capture.orders.join(",") === "scheduled_date,assignment_id"
+    ),
+    true,
+  );
 });
