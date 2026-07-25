@@ -37,40 +37,22 @@ json_post() {
   "$CURL_BIN" -sS --max-time 30 -X POST -H "x-api-key: ${SW_API_KEY}" -H "Content-Type: application/json" -d "$body" "$url"
 }
 
-action_probe_url() {
-  local action="$1"
-  case "$action" in
-    makesafe_deterministic_intake_replay)
-      # Recognition must never launch the 60-day / 500-source default replay.
-      # Dry-run still advances only its observe cursor, so keep this probe tiny.
-      printf '%s/ops-api?action=%s&days=1&max_sources=1' "$BASE" "$action"
-      ;;
-    *)
-      printf '%s/ops-api?action=%s' "$BASE" "$action"
-      ;;
-  esac
+# Probe policy is declared per action in the manifest, never in a list here. A
+# second copy of the action names in this script would drift the moment someone
+# adds a Trade action or a new sweep-triggering handler to the manifest, and the
+# drift would look like a pass.
+manifest_action() {
+  printf '%s' "$1" | awk '{print $1}'
 }
 
-is_jwt_read_only_action() {
-  case "$1" in
-    trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+manifest_probe_policy() {
+  local policy
+  policy="$(printf '%s' "$1" | sed -n 's/.*#[[:space:]]*probe=\([A-Za-z-]*\).*/\1/p')"
+  printf '%s' "${policy:-live}"
 }
 
-is_get_only_action() {
-  case "$1" in
-    makesafe_deterministic_intake_replay | trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+manifest_probe_args() {
+  printf '%s' "$1" | sed -n 's/.*probe-args=\([^[:space:]]*\).*/\1/p'
 }
 
 assert_not_unknown() {
@@ -109,43 +91,98 @@ if [[ ! -f "$REQUIRED_ACTIONS_FILE" ]]; then
 else
   drift=0
   total=0
-  while IFS= read -r action; do
+  source_gated=0
+  while IFS= read -r manifest_line; do
+    action="$(manifest_action "$manifest_line")"
     [[ -z "$action" ]] && continue
+    policy="$(manifest_probe_policy "$manifest_line")"
+    probe_args="$(manifest_probe_args "$manifest_line")"
     total=$((total + 1))
-    probe_url="$(action_probe_url "$action")"
+
+    case "$policy" in
+      live | jwt-fail-closed | bounded-refusal | source-only) ;;
+      *)
+        record_fail "ops-api manifest: action '${action}' declares unknown probe policy '${policy}'"
+        drift=$((drift + 1))
+        continue
+        ;;
+    esac
+
+    # A bound with no policy behind it is a typo, and the fallback would be the
+    # unbounded live probe the bound was written to prevent.
+    if [[ "$policy" == "live" && -n "$probe_args" ]]; then
+      record_fail "ops-api manifest: action '${action}' declares probe-args without a probe policy"
+      drift=$((drift + 1))
+      continue
+    fi
+
+    if [[ "$policy" == "source-only" ]]; then
+      # Calling these with the master key mutates business data on a bare
+      # request, so verification stays on the pre-deploy source gate rather
+      # than buying drift detection with a production write.
+      source_gated=$((source_gated + 1))
+      record_pass "ops-api action '${action}' source-gated (deliberately not probed against production)"
+      continue
+    fi
+
+    probe_url="${BASE}/ops-api?action=${action}"
+    if [[ -n "$probe_args" ]]; then
+      probe_url="${probe_url}&${probe_args}"
+    fi
     body="$(json_get "$probe_url")"
+
     if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
       record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
       drift=$((drift + 1))
-    elif printf '%s' "$body" | grep -qi 'Unknown action'; then
-      if is_get_only_action "$action"; then
+      continue
+    fi
+
+    if printf '%s' "$body" | grep -qi 'Unknown action'; then
+      if [[ "$policy" != "live" ]]; then
         record_fail "ops-api drift: read-only probe for action '${action}' returns Unknown action"
         drift=$((drift + 1))
-      else
-        # Some write handlers only prove recognition on POST. Use an empty body;
-        # handlers should fail validation before any business mutation.
-        body="$(json_post "$probe_url" '{}')"
-        if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
-          record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
-          drift=$((drift + 1))
-        elif printf '%s' "$body" | grep -qi 'Unknown action'; then
-          record_fail "ops-api drift: action '${action}' returns Unknown action"
-          drift=$((drift + 1))
-        else
-          record_pass "ops-api action '${action}' recognised"
-        fi
+        continue
       fi
-    elif is_jwt_read_only_action "$action" &&
-      ! printf '%s' "$body" | grep -Eqi '"error"[[:space:]]*:[[:space:]]*"Login required"'; then
-      record_fail "ops-api drift: JWT action '${action}' did not fail closed at authentication"
-      drift=$((drift + 1))
-    else
-      record_pass "ops-api action '${action}' recognised"
+      # Some write handlers only prove recognition on POST. Use an empty body;
+      # handlers should fail validation before any business mutation.
+      body="$(json_post "$probe_url" '{}')"
+      if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
+        record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
+        drift=$((drift + 1))
+      elif printf '%s' "$body" | grep -qi 'Unknown action'; then
+        record_fail "ops-api drift: action '${action}' returns Unknown action"
+        drift=$((drift + 1))
+      else
+        record_pass "ops-api action '${action}' recognised"
+      fi
+      continue
     fi
-  done < <(grep -vE '^\s*(#|$)' "$REQUIRED_ACTIONS_FILE" | awk '{print $1}')
+
+    case "$policy" in
+      jwt-fail-closed)
+        if printf '%s' "$body" | grep -Eqi '"error"[[:space:]]*:[[:space:]]*"Login required"'; then
+          record_pass "ops-api action '${action}' recognised and refused at authTrade"
+        else
+          record_fail "ops-api drift: JWT action '${action}' did not fail closed at authentication"
+          drift=$((drift + 1))
+        fi
+        ;;
+      bounded-refusal)
+        if printf '%s' "$body" | grep -q '"error"'; then
+          record_pass "ops-api action '${action}' recognised and refused its invalid probe bound"
+        else
+          record_fail "ops-api drift: action '${action}' ran instead of refusing probe bound '${probe_args}'"
+          drift=$((drift + 1))
+        fi
+        ;;
+      *)
+        record_pass "ops-api action '${action}' recognised"
+        ;;
+    esac
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$REQUIRED_ACTIONS_FILE")
 
   if [[ "$drift" -eq 0 ]]; then
-    record_pass "ops-api action-surface: all ${total} required actions recognised"
+    record_pass "ops-api action-surface: all ${total} required actions recognised (${source_gated} source-gated, not probed against production)"
   fi
 fi
 
