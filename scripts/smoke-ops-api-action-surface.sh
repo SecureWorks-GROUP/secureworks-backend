@@ -2,8 +2,12 @@
 # Read-only ops-api action-surface smoke check for GitHub Actions.
 #
 # This intentionally does not use the Supabase CLI. It proves the deployed
-# function recognises the required action names by calling each action with the
-# normal dashboard API key and failing on "Unknown action".
+# function recognises the required action names using the normal dashboard API
+# key. How each action is proved is declared per line in
+# scripts/_ops-api-required-actions.txt — see the probe policy table in its
+# header. An unannotated action must not answer "Unknown action"; a probed
+# action must refuse in its declared way; an action that a bare call would
+# mutate is proved by the pre-deploy source gate and never called here.
 
 set -euo pipefail
 

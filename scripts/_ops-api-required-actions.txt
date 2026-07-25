@@ -1,8 +1,11 @@
 # Canonical required ops-api action surface.
 #
-# Single source of truth for both scripts/deploy-edge-function.sh (source-side
-# pre-deploy gate via require_ops_actions) and scripts/smoke-edge-functions.sh
-# (deployed-binary post-deploy verification via action-surface iteration).
+# Single source of truth for the source-side pre-deploy gates
+# (scripts/deploy-edge-function.sh via require_ops_actions, and
+# scripts/check-ops-api-source-actions.sh) and for deployed-binary post-deploy
+# verification via action-surface iteration, which lives in
+# scripts/smoke-ops-api-action-surface.sh and is invoked by both
+# scripts/smoke-edge-functions.sh and the production deploy workflow.
 #
 # Format: one action name per line. Lines starting with '#' and blank lines are
 # ignored. Add the action name (no quotes, no commas), nothing else.
@@ -33,7 +36,7 @@
 # the cockpit, or the canonical reader (sw_job_context_v2) depends on, add it
 # here too. The deploy guard then refuses to deploy a source tree missing the
 # action; smoke then refuses to mark the deploy green if the deployed binary
-# returns "Unknown action" for it.
+# fails the probe policy declared for that action above.
 #
 # Drift history: on 2026-05-14 the deployed binary returned "Unknown action"
 # for ops_api_version, daily_coverage_audit, and assemble_job_dossier despite
