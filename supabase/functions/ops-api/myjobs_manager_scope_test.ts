@@ -3,6 +3,7 @@ import {
   _fetchOccupyingAssignmentsForTest,
   _managerBoardVerticals,
   _resolveManagerVisibility,
+  _shouldRecoverOccupiedPoolJob,
   myJobs,
 } from "./index.ts";
 
@@ -98,6 +99,10 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     let rows = fx.assignments.slice();
     if (st.eq.user_id != null) rows = rows.filter((a) => a.user_id === st.eq.user_id);
     if (st.neq.status != null) rows = rows.filter((a) => a.status !== st.neq.status);
+    if (st.notIn) {
+      const closed = parseNotInSet(st.notIn);
+      rows = rows.filter((a) => !closed.has(a.status));
+    }
     if (st.gte != null) rows = rows.filter((a) => a.scheduled_date != null && a.scheduled_date >= st.gte!);
     if (st.lt != null) rows = rows.filter((a) => a.scheduled_date != null && a.scheduled_date < st.lt!);
     // Inner join to jobs (drop job-less rows) + referenced-table or() constrains parent.
@@ -152,6 +157,7 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     let rows = fx.jobs.slice();
     if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
     if (st.eq.org_id != null) rows = rows.filter((j) => jobOrg(j) === st.eq.org_id);
+    if (st.eq.status != null) rows = rows.filter((j) => j.status === st.eq.status);
     if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
     if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.id));
     if (st.inCol === "status" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.status));
@@ -229,6 +235,12 @@ function fencingFixtures(): Fixtures {
       // though they stay outside the 30-day manager display window.
       { id: "a-old-f4", user_id: "u-crew3", user_name: "Crew C", status: "scheduled", scheduled_date: OLD_DATE, job_id: "job-f4" },
       { id: "a-null-f5", user_id: "u-crew4", user_name: "Crew D", status: "scheduled", scheduled_date: null, job_id: "job-f5" },
+      // A finished visit releases the job: closeOpenAssignmentsForJob writes
+      // 'complete', so job-f6 is allocatable again.
+      { id: "a-done-f6", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: OLD_DATE, job_id: "job-f6" },
+      // The manager's OWN out-of-window allocation — the only occupancy the
+      // personal lens may recover.
+      { id: "a-henry-old-f7", user_id: "u-henry", user_name: "Henry", status: "scheduled", scheduled_date: OLD_DATE, job_id: "job-f7" },
       // Same vertical, different tenant — must never surface.
       { id: "a-tenant-b", user_id: "u-crew-b", user_name: "Crew B2", status: "scheduled", scheduled_date: TODAY, job_id: "job-f-b" },
     ],
@@ -238,6 +250,8 @@ function fencingFixtures(): Fixtures {
       { id: "job-f3", type: "fencing", status: "schedule_install", job_number: "SWF-3", site_suburb: "Morley" }, // truly open
       { id: "job-f4", type: "fencing", status: "schedule_install", job_number: "SWF-26101", site_suburb: "Shenton Park" },
       { id: "job-f5", type: "fencing", status: "scheduled", job_number: "SWF-NULL", site_suburb: "Balcatta" },
+      { id: "job-f6", type: "fencing", status: "schedule_install", job_number: "SWF-REDO", site_suburb: "Yokine" },
+      { id: "job-f7", type: "fencing", status: "schedule_install", job_number: "SWF-MINE", site_suburb: "Osborne Park" },
       { id: "job-p1", type: "patio", status: "schedule_install", job_number: "SWP-1", site_suburb: "Cannington" },
       { id: "job-d1", type: "decking", status: "schedule_install", job_number: "SWD-1", site_suburb: "Bayswater" },
       { id: "job-ms1", type: "general", status: "accepted", job_number: "SWMS-1", site_suburb: "Midland" },
@@ -266,10 +280,9 @@ Deno.test("U2b-1: fencing manager mode:'all' now sees ANOTHER crew's fencing ass
   assertEquals(newAssigned.includes("job-f2"), true, "widened set still includes the manager's own job");
   assertEquals(assignedUserIds(gNew).includes("u-crew"), true, "other crew member is attributed on the card");
 
-  // OLD (pre-U2b): same call with managerScope=[] → the ASSIGNMENT QUERY stays
-  // own-only, which is the gap U2b closes. job-f1 still reaches this manager's
-  // board, but only via the pool's occupancy probe, and never as a false
-  // "available" card — it carries the owning crew.
+  // OLD (pre-U2b): same call with managerScope=[] → own assignments only. The
+  // other crew's current job-f1 is neither an assigned card nor a false
+  // "available" one; the manager reaches it via mode:'all'.
   const recOld: RecordedQuery[] = [];
   const gOld = await myJobs(
     makeClient(fencingFixtures(), recOld), "u-henry",
@@ -280,8 +293,51 @@ Deno.test("U2b-1: fencing manager mode:'all' now sees ANOTHER crew's fencing ass
   );
   assertEquals(primaryOld?.eq.user_id, "u-henry", "old path's assignment query is own-only");
   assertEquals(primaryOld?.refOr, null, "old path issues no vertical widening");
-  assertEquals(assignedJobIds(gOld).includes("job-f2"), true, "old path shows the manager's own job");
+  const oldAssigned = assignedJobIds(gOld);
+  assertEquals(oldAssigned.includes("job-f2"), true, "old path shows the manager's own job");
+  assertEquals(oldAssigned.includes("job-f1"), false, "old path did NOT show other crew's assignment (the gap U2b closes)");
   assertEquals(poolJobIds(gOld).includes("job-f1"), false, "job-f1 is never a false-available card");
+});
+
+// ── the personal lens keeps other crews' CURRENT work out of the dated lanes ──
+// An occupied pool job is never available, but only occupancy the personal feed
+// cannot show — and only the viewer's own — is recovered as an assigned card.
+Deno.test("personal view recovers only the viewer's own out-of-window allocation", async () => {
+  const g = await myJobs(
+    makeClient(fencingFixtures(), []), "u-henry",
+    false, HENRY.isDispatcher, HENRY.isMakesafeManager, HENRY.poolVerticals, [],
+  );
+  const assigned = nonPool(g);
+  const assignedIds = assigned.map((a) => a.jobs?.id);
+  const pool = poolJobIds(g);
+
+  // Henry's own 60-day-old allocation: outside the 30-day feed, so recovered.
+  const own = assigned.find((a) => a.jobs?.id === "job-f7");
+  assertEquals(own?.id, "a-henry-old-f7", "the viewer's own stale allocation still renders");
+  assertEquals(own?.user?.id, "u-henry");
+  assertEquals(pool.includes("job-f7"), false, "and is never offered as available");
+
+  // Other crews' work — current or stale — stays out of the personal lanes.
+  for (const otherCrewJob of ["job-f1", "job-f4", "job-f5"]) {
+    assertEquals(assignedIds.includes(otherCrewJob), false, `${otherCrewJob} is not the viewer's work`);
+    assertEquals(pool.includes(otherCrewJob), false, `${otherCrewJob} is occupied, never available`);
+  }
+});
+
+// closeOpenAssignmentsForJob writes 'complete', not 'cancelled'. A finished
+// visit must release the job so re-attend work can be allocated again.
+Deno.test("a completed assignment does not occupy a crew-ready job", async () => {
+  const managerScope = _managerBoardVerticals({ isDispatcher: HENRY.isDispatcher, mode: "all", managedVerticals: ["fencing"] });
+  const recorded: RecordedQuery[] = [];
+  const g = await myJobs(
+    makeClient(fencingFixtures(), recorded), "u-henry",
+    false, HENRY.isDispatcher, HENRY.isMakesafeManager, HENRY.poolVerticals, managerScope, TENANT_A,
+  );
+  assertEquals(poolJobIds(g).includes("job-f6"), true, "a job whose only row is 'complete' is allocatable again");
+  assertEquals(assignedJobIds(g).includes("job-f6"), false, "and is not re-rendered as the finished crew's card");
+  const occupancy = recorded.find((q) => q.table === "job_assignments" && q.inCol === "job_id");
+  assertEquals(parseNotInSet(occupancy?.notIn || "").has("complete"), true, "probe excludes completed rows");
+  assertEquals(parseNotInSet(occupancy?.notIn || "").has("cancelled"), true, "probe excludes cancelled rows");
 });
 
 // ── 2. the open pool no longer false-lists an already-assigned job ───────────
@@ -346,7 +402,7 @@ Deno.test("fencing manager pool never labels old or null-dated assigned work as 
     q.table === "job_assignments" && q.inCol === "job_id"
   );
   assertEquals(occupancy?.gte, null, "occupancy probe is deliberately all-date");
-  assertEquals(occupancy?.neq.status, "cancelled");
+  assertEquals(parseNotInSet(occupancy?.notIn || "").has("cancelled"), true);
 });
 
 // ── 5. strict vertical scope: a fencing manager gets no patio anywhere ───────
@@ -509,6 +565,7 @@ Deno.test("occupancy probe chunks pool ids and pages past the 1000-row cap", asy
         select: () => b,
         in: (_col: string, arr: string[]) => { st.ids = arr; return b; },
         neq: () => b,
+        not: () => b,
         order: () => b,
         range: (fromRow: number) => { st.from = fromRow; return b; },
         // deno-lint-ignore no-explicit-any
@@ -547,9 +604,9 @@ Deno.test("occupancy probe chunks pool ids and pages past the 1000-row cap", asy
 
 Deno.test("occupancy probe picks the latest active assignment for a job", async () => {
   const rows = [
-    { id: "a-early", job_id: "job-x", scheduled_date: "2026-01-01" },
-    { id: "a-late", job_id: "job-x", scheduled_date: "2026-06-01" },
-    { id: "a-null", job_id: "job-x", scheduled_date: null },
+    { id: "a-early", job_id: "job-x", scheduled_date: "2026-01-01", user: { id: "u-mine" } },
+    { id: "a-late", job_id: "job-x", scheduled_date: "2026-06-01", user: { id: "u-other" } },
+    { id: "a-null", job_id: "job-x", scheduled_date: null, user: { id: "u-other" } },
   ];
   const client = {
     from: () => {
@@ -558,6 +615,7 @@ Deno.test("occupancy probe picks the latest active assignment for a job", async 
         select: () => b,
         in: () => b,
         neq: () => b,
+        not: () => b,
         order: () => b,
         range: () => b,
         // deno-lint-ignore no-explicit-any
@@ -569,6 +627,29 @@ Deno.test("occupancy probe picks the latest active assignment for a job", async 
   // deno-lint-ignore no-explicit-any
   const occupied = await _fetchOccupyingAssignmentsForTest(client as any, ["job-x"]);
   assertEquals(occupied.get("job-x")?.id, "a-late");
+
+  // On the personal lens the viewer's own row represents the job, since it is
+  // the only occupancy that lens may recover.
+  // deno-lint-ignore no-explicit-any
+  const mine = await _fetchOccupyingAssignmentsForTest(client as any, ["job-x"], "u-mine");
+  assertEquals(mine.get("job-x")?.id, "a-early");
+});
+
+Deno.test("occupied-pool recovery is scoped by lens and window", () => {
+  const windowStart = "2026-06-01";
+  const otherCrewOld = { scheduled_date: "2026-01-01", user: { id: "u-other" } };
+  const otherCrewNow = { scheduled_date: "2026-07-01", user: { id: "u-other" } };
+  const ownNullDated = { scheduled_date: null, user: { id: "u-me" } };
+
+  const recover = (occupying: unknown, lens: "everyone" | "mine") =>
+    _shouldRecoverOccupiedPoolJob({ occupying, lens, userId: "u-me", windowStart });
+
+  assertEquals(recover(otherCrewOld, "everyone"), true, "Everyone recovers same-tenant managed-vertical stale work");
+  assertEquals(recover(otherCrewOld, "mine"), false, "Mine never recovers another crew's work");
+  assertEquals(recover(ownNullDated, "mine"), true, "Mine recovers the viewer's own null-dated work");
+  assertEquals(recover(otherCrewNow, "everyone"), false, "in-window work is already on the windowed feed");
+  assertEquals(recover(otherCrewNow, "mine"), false, "and never enters the personal dated lanes");
+  assertEquals(recover(null, "everyone"), false, "an unoccupied job is not a recovery case");
 });
 
 // The 180-day backstop still leaves two holes the make-safe pool used to fall
@@ -582,14 +663,32 @@ function occupiedMakesafeFixtures(): Fixtures {
       { id: "a-ms-ancient", user_id: "u-crew5", user_name: "Crew E", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-ancient" },
       { id: "a-ms-null", user_id: "u-crew6", user_name: "Crew F", status: "scheduled", scheduled_date: null, job_id: "job-ms-null" },
       { id: "a-ms-cancelled", user_id: "u-crew7", user_name: "Crew G", status: "cancelled", scheduled_date: null, job_id: "job-ms-open" },
+      // Re-attend (M-F): cycle 1 closed to 'complete' and reattendMakesafe
+      // deliberately creates no new assignment, so the job must pool again.
+      { id: "a-ms-done", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: ANCIENT, job_id: "job-ms-reattend" },
+      // The viewer's OWN beyond-backstop allocation.
+      { id: "a-ms-hugo", user_id: "u-hugo", user_name: "Hugo", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-mine" },
     ],
     jobs: [
       { id: "job-ms-ancient", type: "makesafe", status: "accepted", job_number: "SWMS-200" },
       { id: "job-ms-null", type: "makesafe", status: "accepted", job_number: "SWMS-201" },
       { id: "job-ms-open", type: "makesafe", status: "accepted", job_number: "SWMS-202" }, // truly open
+      { id: "job-ms-reattend", type: "makesafe", status: "accepted", job_number: "SWMS-203" },
+      { id: "job-ms-mine", type: "makesafe", status: "accepted", job_number: "SWMS-204" },
     ],
   };
 }
+
+Deno.test("a re-attended make-safe returns to the allocatable pool", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
+  );
+  assertEquals(poolJobIds(g).includes("job-ms-reattend"), true, "a completed visit releases the make-safe");
+  assertEquals(assignedJobIds(g).includes("job-ms-reattend"), false, "the closed visit is not re-rendered as a live card");
+});
 
 Deno.test("make-safe pool never labels beyond-backstop or null-dated assigned work as available", async () => {
   const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
@@ -618,10 +717,10 @@ Deno.test("make-safe pool never labels beyond-backstop or null-dated assigned wo
     q.table === "job_assignments" && q.inCol === "job_id"
   );
   assertEquals(occupancy?.gte, null, "make-safe occupancy probe is deliberately all-date");
-  assertEquals(occupancy?.neq.status, "cancelled", "cancelled assignments never occupy a job");
+  assertEquals(parseNotInSet(occupancy?.notIn || "").has("cancelled"), true, "cancelled assignments never occupy a job");
 });
 
-Deno.test("make-safe personal union also refuses to re-surface occupied work as available", async () => {
+Deno.test("make-safe personal union refuses occupied work as available and recovers only the viewer's own", async () => {
   const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
   const g = await myJobs(
     makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
@@ -631,9 +730,15 @@ Deno.test("make-safe personal union also refuses to re-surface occupied work as 
   assertEquals(pool.includes("job-ms-ancient"), false, "other crew's old allocation is not available in mode:'mine'");
   assertEquals(pool.includes("job-ms-null"), false, "other crew's null-dated allocation is not available in mode:'mine'");
   assertEquals(pool.includes("job-ms-open"), true);
-  const assignedIds = nonPool(g).map((a) => a.jobs?.id);
-  assertEquals(assignedIds.includes("job-ms-ancient"), true, "still visible, now honestly attributed");
-  assertEquals(assignedIds.includes("job-ms-null"), true);
+  assertEquals(pool.includes("job-ms-mine"), false, "the viewer's own allocation is not available either");
+
+  const assigned = nonPool(g);
+  const assignedIds = assigned.map((a) => a.jobs?.id);
+  assertEquals(assignedIds.includes("job-ms-ancient"), false, "other crew's work stays off the personal lanes");
+  assertEquals(assignedIds.includes("job-ms-null"), false);
+  const own = assigned.find((a) => a.jobs?.id === "job-ms-mine");
+  assertEquals(own?.id, "a-ms-hugo", "the viewer's own beyond-backstop allocation still renders");
+  assertEquals(own?.user?.id, "u-hugo");
 });
 
 Deno.test("FIX1: fencing manager unaffected — no make-safe backstop query issued", async () => {

@@ -59,6 +59,10 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     let rows = fx.assignments.slice();
     if (st.eq.user_id != null) rows = rows.filter((a) => a.user_id === st.eq.user_id);
     if (st.neq.status != null) rows = rows.filter((a) => a.status !== st.neq.status);
+    if (st.notIn) {
+      const closed = parseNotInSet(st.notIn);
+      rows = rows.filter((a) => !closed.has(a.status));
+    }
     if (st.gte != null) rows = rows.filter((a) => a.scheduled_date >= st.gte!);
     if (st.lt != null) rows = rows.filter((a) => a.scheduled_date < st.lt!);
     let joined = rows
@@ -93,6 +97,7 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
   if (st.table === "jobs") {
     let rows = fx.jobs.slice();
     if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
+    if (st.eq.status != null) rows = rows.filter((j) => j.status === st.eq.status);
     if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
     if (st.inCol === "status" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.status));
     if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.id));
