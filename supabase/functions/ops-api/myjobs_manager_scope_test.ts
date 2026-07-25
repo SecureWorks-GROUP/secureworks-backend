@@ -1,6 +1,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _activeAssignedJobIds,
+  _fetchMakesafeReattendStampsForTest,
   _fetchOccupyingAssignmentsForTest,
   _makesafeReattendReleases,
   _managerBoardVerticals,
@@ -49,6 +50,7 @@ type Assignment = {
   assignment_type?: string;
   role?: string;
   completed_at?: string | null;
+  updated_at?: string | null;
 };
 type MakesafeDetail = {
   job_id: string;
@@ -144,6 +146,7 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
             crew_name: null,
             completed_at: a.completed_at ?? null,
             clocked_off_at: a.completed_at ?? null,
+            updated_at: a.updated_at ?? null,
             user: { id: a.user_id, name: a.user_name ?? a.user_id },
           })),
         error: null,
@@ -161,6 +164,7 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
         notes: null,
         completed_at: a.completed_at ?? null,
         clocked_off_at: a.completed_at ?? null,
+        updated_at: a.updated_at ?? null,
         jobs: { ...job },
         ...(isAdminSelect ? { user: { id: a.user_id, name: a.user_name ?? a.user_id } } : {}),
       })),
@@ -732,28 +736,58 @@ Deno.test("only a dead allocation releases a pool job by status alone", () => {
 
 Deno.test("a completed make-safe visit releases only on durable re-attend proof", () => {
   const done = (completed_at: string | null) => ({ status: "complete", completed_at });
+  const REATTEND = "2026-07-15T04:00:00Z";
   assertEquals(_makesafeReattendReleases(done("2026-07-10T02:00:00Z"), null), false, "no stamp, no release");
   assertEquals(_makesafeReattendReleases(done("2026-07-10T02:00:00Z"), ""), false, "an empty stamp is not proof");
   assertEquals(_makesafeReattendReleases(done("2026-07-10T02:00:00Z"), "not-a-date"), false, "nor is an unreadable one");
   assertEquals(
-    _makesafeReattendReleases(done("2026-07-10T02:00:00Z"), "2026-07-15T04:00:00Z"),
+    _makesafeReattendReleases(done("2026-07-10T02:00:00Z"), REATTEND),
     true,
     "a re-attend after the visit hands the job back",
   );
   assertEquals(
-    _makesafeReattendReleases(done("2026-07-20T02:00:00Z"), "2026-07-15T04:00:00Z"),
+    _makesafeReattendReleases(done("2026-07-20T02:00:00Z"), REATTEND),
     false,
     "a visit finished AFTER the re-attend holds the job",
   );
   assertEquals(
-    _makesafeReattendReleases(done(null), "2026-07-15T04:00:00Z"),
-    true,
-    "an auto-closed row carries no completion stamp, so the marker is the only evidence",
-  );
-  assertEquals(
-    _makesafeReattendReleases({ status: "in_progress", completed_at: null }, "2026-07-15T04:00:00Z"),
+    _makesafeReattendReleases({ status: "in_progress", completed_at: null }, REATTEND),
     false,
     "only a finished visit is ever a release candidate",
+  );
+
+  // A row closed off the trade clock path (ops via update_assignment,
+  // closeOpenAssignmentsForJob) has no completed_at at all. updated_at is written
+  // by the job_assignments trigger on every write, so it dates the closure — and
+  // a row with no readable timestamp anywhere keeps holding.
+  assertEquals(
+    _makesafeReattendReleases({ status: "complete", completed_at: null, updated_at: "2026-07-20T02:00:00Z" }, REATTEND),
+    false,
+    "a dashboard closure AFTER the re-attend holds the job",
+  );
+  assertEquals(
+    _makesafeReattendReleases({ status: "complete", completed_at: null, updated_at: "2026-07-10T02:00:00Z" }, REATTEND),
+    true,
+    "a closure BEFORE the re-attend still releases it",
+  );
+  assertEquals(
+    _makesafeReattendReleases(done(null), REATTEND),
+    false,
+    "no readable completion timestamp at all means occupied, never re-offered",
+  );
+  assertEquals(
+    _makesafeReattendReleases({ status: "complete", completed_at: "nonsense", updated_at: "also-nonsense" }, REATTEND),
+    false,
+    "and unparseable timestamps are treated the same way",
+  );
+  // The latest stamp on the row wins, so a later write can only ever hold.
+  assertEquals(
+    _makesafeReattendReleases(
+      { status: "complete", completed_at: "2026-07-10T02:00:00Z", updated_at: "2026-07-20T02:00:00Z" },
+      REATTEND,
+    ),
+    false,
+    "a row touched after the re-attend is not released by its older completion stamp",
   );
 });
 
@@ -768,6 +802,9 @@ function occupiedMakesafeFixtures(): Fixtures {
   const REDO_DONE_AT = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
   const REDO_REATTEND_AT = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
   const JUST_CLOCKED_OFF_AT = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  // Closures off the trade clock path carry no completed_at — only updated_at.
+  const DASHBOARD_CLOSED_AT = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
+  const AUTO_CLOSED_AT = new Date(Date.now() - 3 * 86400 * 1000).toISOString();
   return {
     assignments: [
       { id: "a-ms-ancient", user_id: "u-crew5", user_name: "Crew E", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-ancient" },
@@ -788,6 +825,13 @@ function occupiedMakesafeFixtures(): Fixtures {
       // A re-attend the second crew has already worked: their visit finished
       // AFTER the stamp, so the job is occupied again.
       { id: "a-ms-recycle-done", user_id: "u-crew13", user_name: "Crew M", status: "complete", scheduled_date: TODAY, completed_at: JUST_CLOCKED_OFF_AT, job_id: "job-ms-recycled" },
+      // Re-attended, re-allocated, then closed by ops from the dashboard before
+      // the crew ever clocked on: status='complete' with NO completed_at, only
+      // the trigger-maintained updated_at, which post-dates the re-attend.
+      { id: "a-ms-dashclosed", user_id: "u-crew14", user_name: "Crew N", status: "complete", scheduled_date: TODAY, updated_at: DASHBOARD_CLOSED_AT, job_id: "job-ms-dashclosed" },
+      // The same stamp-less shape from closeOpenAssignmentsForJob, but closed
+      // BEFORE the re-attend — that one really was handed back.
+      { id: "a-ms-autoclosed", user_id: "u-crew15", user_name: "Crew O", status: "complete", scheduled_date: ANCIENT, updated_at: AUTO_CLOSED_AT, job_id: "job-ms-autoclosed" },
       // The viewer's OWN beyond-backstop allocation.
       { id: "a-ms-hugo", user_id: "u-hugo", user_name: "Hugo", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-mine" },
       // A CURRENT allocation on a legacy detail-backed make-safe: the feed's
@@ -806,6 +850,8 @@ function occupiedMakesafeFixtures(): Fixtures {
       { id: "job-ms-clockedoff", type: "makesafe", status: "in_progress", job_number: "SWMS-207" },
       { id: "job-ms-ancient-done", type: "makesafe", status: "in_progress", job_number: "SWMS-208" },
       { id: "job-ms-recycled", type: "makesafe", status: "in_progress", job_number: "SWMS-209" },
+      { id: "job-ms-dashclosed", type: "makesafe", status: "accepted", job_number: "SWMS-210" },
+      { id: "job-ms-autoclosed", type: "makesafe", status: "accepted", job_number: "SWMS-211" },
       { id: "job-ms-mine", type: "makesafe", status: "accepted", job_number: "SWMS-204" },
       // Legacy import: neither type='makesafe' nor an SWMS- number, reachable
       // only through the makesafe_job_details backstop.
@@ -821,6 +867,8 @@ function occupiedMakesafeFixtures(): Fixtures {
       { job_id: "job-ms-clockedoff", substatus: "waiting_on_trade_report" },
       { job_id: "job-ms-ancient-done", substatus: "waiting_on_trade_report" },
       { job_id: "job-ms-recycled", substatus: "waiting_on_trade_report", last_reattend_at: REDO_DONE_AT },
+      { job_id: "job-ms-dashclosed", substatus: "waiting_on_trade_report", last_reattend_at: OLD_REATTEND_AT },
+      { job_id: "job-ms-autoclosed", substatus: "waiting_on_trade_report", last_reattend_at: OLD_REATTEND_AT },
     ],
   };
 }
@@ -889,6 +937,111 @@ Deno.test("a clocked-off make-safe stays occupied until an explicit re-attend", 
   assertEquals(poolJobIds(g).includes("job-ms-recycled"), false, "a visit finished after the re-attend re-occupies the job");
   const recycled = nonPool(g).filter((a) => a.jobs?.id === "job-ms-recycled");
   assertEquals(recycled.map((a) => a.id), ["a-ms-recycle-done"], "and still shows exactly once");
+});
+
+// Only the trade clock path writes completed_at. Ops closing a row from the
+// dashboard (update_assignment) and closeOpenAssignmentsForJob write status
+// alone, so without the trigger-maintained updated_at a re-attended job's fresh
+// closure looked timestamp-less and was handed straight back to the pool.
+Deno.test("a stamp-less closure is dated by updated_at, not treated as a release", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
+  );
+
+  // Closed AFTER the re-attend → the second cycle is under way, so it holds.
+  assertEquals(poolJobIds(g).includes("job-ms-dashclosed"), false, "a closure after the re-attend is never re-offered");
+  const dashClosed = nonPool(g).filter((a) => a.jobs?.id === "job-ms-dashclosed");
+  assertEquals(dashClosed.map((a) => a.id), ["a-ms-dashclosed"], "and shows exactly once, as the crew's card");
+
+  // Closed BEFORE the re-attend → genuinely handed back.
+  assertEquals(poolJobIds(g).includes("job-ms-autoclosed"), true, "a closure before the re-attend still releases");
+  assertEquals(assignedJobIds(g).includes("job-ms-autoclosed"), false, "and the released visit is not also rendered");
+});
+
+// The stamp is the ONLY thing that releases a finished visit, so it must be read
+// for exactly the ids being resolved. Piggybacking on the capped, unordered
+// legacy detail scan left arbitrary re-attended jobs stranded as occupied.
+Deno.test("re-attend stamps are read job-scoped, chunked and paged", async () => {
+  const ids = Array.from({ length: 60 }, (_, i) => `job-${i}`);
+  const calls: { table: string; select: string; inCol: string | null; inVals: unknown[]; from: number }[] = [];
+  const client = {
+    from: (table: string) => {
+      const st = { select: "", inCol: null as string | null, inVals: [] as unknown[], from: 0 };
+      // deno-lint-ignore no-explicit-any
+      const b: any = {
+        select: (s: string) => { st.select = s; return b; },
+        in: (col: string, arr: unknown[]) => { st.inCol = col; st.inVals = arr; return b; },
+        order: () => b,
+        range: (fromRow: number) => { st.from = fromRow; return b; },
+        // deno-lint-ignore no-explicit-any
+        then: (resolve: any) => {
+          calls.push({ table, ...st });
+          const rows = st.inVals.includes("job-0") && st.from === 0
+            ? Array.from({ length: 1000 }, () => ({ job_id: "job-0", last_reattend_at: "2026-07-15T04:00:00Z" }))
+            : [
+              { job_id: st.from > 0 ? "job-past-page-1" : String(st.inVals[0]), last_reattend_at: "2026-07-15T04:00:00Z" },
+              { job_id: "job-never-reattended", last_reattend_at: null },
+            ];
+          queueMicrotask(() => resolve({ data: rows, error: null }));
+        },
+      };
+      return b;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const stamps = await _fetchMakesafeReattendStampsForTest(client as any, ids);
+  assertEquals(calls.every((c) => c.table === "makesafe_job_details"), true);
+  assertEquals(calls.every((c) => c.inCol === "job_id"), true, "the read is scoped to the ids asked about");
+  assertEquals(calls.every((c) => c.inVals.length <= 25), true, "ids are chunked well under the URL limit");
+  assertEquals(calls.every((c) => !c.select.includes("*")), true, "and asks for only the two columns it uses");
+  assertEquals(calls.some((c) => c.from === 1000), true, "a saturated page is followed by the next range");
+  assertEquals(stamps["job-past-page-1"], "2026-07-15T04:00:00Z", "rows past the first page are never dropped");
+  assertEquals(stamps["job-0"], "2026-07-15T04:00:00Z");
+  assertEquals("job-never-reattended" in stamps, false, "a job that was never re-attended carries no stamp");
+});
+
+// A failed stamp read must degrade to "nothing releases", never to a pool card
+// for work a crew already holds.
+Deno.test("a failed re-attend stamp read keeps finished make-safe work occupied", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const fx = occupiedMakesafeFixtures();
+  const base = makeClient(fx, []);
+  const client = {
+    from: (table: string) => {
+      const b = base.from(table);
+      // deno-lint-ignore no-explicit-any
+      const anyB = b as any;
+      if (table !== "makesafe_job_details") return b;
+      const guarded = { ...anyB };
+      guarded.select = (s: string) => {
+        if (String(s).includes("last_reattend_at") && !String(s).includes("*")) {
+          // deno-lint-ignore no-explicit-any
+          const failing: any = {
+            in: () => failing,
+            order: () => failing,
+            range: () => failing,
+            // deno-lint-ignore no-explicit-any
+            then: (resolve: any) => resolve({ data: null, error: { message: "probe down" } }),
+          };
+          return failing;
+        }
+        return anyB.select(s);
+      };
+      return guarded;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const g = await myJobs(client as any, "u-hugo", false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A);
+  for (const held of ["job-ms-reattend", "job-ms-redo", "job-ms-clockedoff", "job-ms-dashclosed", "job-ms-autoclosed"]) {
+    assertEquals(poolJobIds(g).includes(held), false, `${held} stays occupied when the stamp read fails`);
+  }
+  assertEquals(poolJobIds(g).includes("job-ms-open"), true, "genuinely open work is unaffected");
 });
 
 // The detail backstop exists for imports the feed's type/SWMS- filter cannot

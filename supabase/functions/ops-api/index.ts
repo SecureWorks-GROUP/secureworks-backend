@@ -22202,14 +22202,29 @@ export type PoolOccupancyKind = 'makesafe' | 'vertical'
 // releases only when it finished BEFORE that stamp — the re-attend crew's own
 // later completion holds the job again. No stamp, or timestamps we cannot read,
 // means still occupied: unfinished work is never re-offered.
+//
+// "When it finished" is the LATEST timestamp the row can show, never the first
+// one found. completed_at / clocked_off_at only exist on the trade clock path:
+// ops closing a row from the dashboard (updateAssignment) and
+// closeOpenAssignmentsForJob both write status without them. updated_at is
+// maintained on every write by trg_job_assignments_updated, so it is the
+// backstop that makes the comparison total — and taking the max means an extra
+// write can only ever hold the job, never release it.
+export function _assignmentFinishedAt(assignment: any): number | null {
+  let latest: number | null = null
+  for (const raw of [assignment?.completed_at, assignment?.clocked_off_at, assignment?.updated_at]) {
+    const parsed = Date.parse(String(raw ?? ''))
+    if (Number.isFinite(parsed) && (latest === null || parsed > latest)) latest = parsed
+  }
+  return latest
+}
+
 export function _makesafeReattendReleases(assignment: any, reattendAt: unknown): boolean {
   if (String(assignment?.status || '').toLowerCase() !== 'complete') return false
   const reopenedAt = Date.parse(String(reattendAt ?? ''))
   if (!Number.isFinite(reopenedAt)) return false
-  const finishedAt = Date.parse(String(assignment?.completed_at ?? assignment?.clocked_off_at ?? ''))
-  // A row closed by closeOpenAssignmentsForJob carries no completion stamp, so
-  // the re-attend marker is the only evidence available — and it is proof.
-  if (!Number.isFinite(finishedAt)) return true
+  const finishedAt = _assignmentFinishedAt(assignment)
+  if (finishedAt === null) return false
   return reopenedAt > finishedAt
 }
 
@@ -22628,6 +22643,7 @@ const OCCUPANCY_PROBE_PAGE = 1000
 const OCCUPANCY_PROBE_SELECT = `
         job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
         started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        updated_at,
         user:user_id ( id, name )
       `
 
@@ -22689,6 +22705,47 @@ async function fetchOccupyingAssignments(
   return byJobId
 }
 export const _fetchOccupyingAssignmentsForTest = fetchOccupyingAssignments
+
+// The re-attend stamps for exactly the pool ids being resolved. This is the only
+// signal that ever hands a finished make-safe back to the pool, so it must be
+// COMPLETE for every id asked about: a stamp missing because a capped, unordered
+// scan happened not to return that job's row would strand a genuinely re-attended
+// card as permanently occupied (reattendMakesafe creates no assignment, so
+// tap-to-allocate would never come back). Keyed by job_id, which is the table's
+// primary key, and chunked + paged on the same guards as the occupancy probe.
+async function fetchMakesafeReattendStamps(client: any, jobIds: string[]): Promise<Record<string, unknown>> {
+  const stamps: Record<string, unknown> = {}
+  const ids = Array.from(new Set((jobIds || []).filter(Boolean).map((id: any) => String(id))))
+  const chunks: string[][] = []
+  for (let i = 0; i < ids.length; i += OCCUPANCY_PROBE_CHUNK) {
+    chunks.push(ids.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+  }
+  const chunkRows = await Promise.all(chunks.map(async (chunk) => {
+    const rows: any[] = []
+    let offset = 0
+    while (true) {
+      const { data, error } = await client
+        .from('makesafe_job_details')
+        .select('job_id, last_reattend_at')
+        .in('job_id', chunk)
+        .order('job_id', { ascending: true })
+        .range(offset, offset + OCCUPANCY_PROBE_PAGE - 1)
+      if (error) throw error
+      const page = data || []
+      rows.push(...page)
+      if (page.length < OCCUPANCY_PROBE_PAGE) break
+      offset += OCCUPANCY_PROBE_PAGE
+    }
+    return rows
+  }))
+  for (const row of chunkRows.flat()) {
+    const jobId = row?.job_id ? String(row.job_id) : ''
+    if (!jobId || !row?.last_reattend_at) continue
+    stamps[jobId] = row.last_reattend_at
+  }
+  return stamps
+}
+export const _fetchMakesafeReattendStampsForTest = fetchMakesafeReattendStamps
 
 // An occupied pool job is NEVER emitted as available. Whether it is additionally
 // recovered as an assigned card depends on the lens. Callers only reach this for
@@ -22768,9 +22825,12 @@ export async function myJobs(
   const poolLens: 'everyone' | 'mine' = showAll || managerScope.length > 0 ? 'everyone' : 'mine'
   const poolRecoveryUserId = poolLens === 'mine' ? userId : ''
 
+  // updated_at rides on every feed select: it is the only timestamp a row closed
+  // outside the trade clock path carries, and the make-safe de-dupe seed needs it
+  // to date a finished visit against the re-attend stamp.
   const ASSIGNMENT_SELECT_ADMIN = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, updated_at,
         user:user_id ( id, name ),
         jobs:job_id (
           id, type, status, client_name, client_phone, client_email,
@@ -22779,7 +22839,7 @@ export async function myJobs(
       `
   const ASSIGNMENT_SELECT_USER = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, updated_at,
         jobs:job_id (
           id, type, status, client_name, client_phone, client_email,
           site_address, site_suburb, notes, job_number
@@ -22868,7 +22928,7 @@ export async function myJobs(
   // would either error or return ALL of the trade's old assignments — both wrong.
   const ASSIGNMENT_SELECT_USER_MAKESAFE = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
-        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, updated_at,
         jobs:job_id!inner (
           id, type, status, client_name, client_phone, client_email,
           site_address, site_suburb, notes, job_number
@@ -22947,17 +23007,7 @@ export async function myJobs(
       .limit(120)
     if (detailErr) throw detailErr
     const detailByJobId: Record<string, any> = {}
-    // Durable re-attend stamps, written only by reattendMakesafe: the sole signal
-    // that lets a finished visit release its make-safe back to the open pool.
-    const reattendAtByJobId: Record<string, unknown> = {}
-    for (const row of (detailRows || [])) {
-      if (!row?.job_id) continue
-      detailByJobId[String(row.job_id)] = row
-      if (row.last_reattend_at) reattendAtByJobId[String(row.job_id)] = row.last_reattend_at
-    }
-    // Seeded only now: whether a finished make-safe visit still holds its job is
-    // a question about that job's re-attend history, not about status alone.
-    const assignedJobIds = _activeAssignedJobIds(assignments, 'makesafe', reattendAtByJobId)
+    for (const row of (detailRows || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
     for (const id of Object.keys(openMakesafeById)) {
       // U2c: pool = allocatable only. Excludes finished substatuses (as before)
       // AND company_contact_required (ops's admin queue). Report access is a
@@ -23008,6 +23058,21 @@ export async function myJobs(
         console.log('[ops-api] open MakeSafe contact backfill skipped:', e?.message)
       }
     }
+
+    // Whether a finished make-safe visit still holds its job is a question about
+    // that job's re-attend history, not about status alone — so resolve the
+    // stamps for exactly this pool's ids before either the de-dupe seed or the
+    // probe answers it. A failed read degrades to "no stamp", which holds every
+    // finished visit: a card that stays occupied for one load is recoverable, a
+    // job re-offered to a second crew is not.
+    const poolJobIdsForStamps = openMakesafes.map((job: any) => job?.id).filter(Boolean)
+    let reattendAtByJobId: Record<string, unknown> = {}
+    try {
+      reattendAtByJobId = await fetchMakesafeReattendStamps(client, poolJobIdsForStamps)
+    } catch (stampErr: any) {
+      console.log('[ops-api] myJobs make-safe re-attend stamp read failed (non-blocking, work stays occupied):', stampErr?.message)
+    }
+    const assignedJobIds = _activeAssignedJobIds(assignments, 'makesafe', reattendAtByJobId)
 
     // Same all-date occupancy rule as the generic pool below: the assignment
     // feed above is windowed (30-day, plus the 180-day make-safe backstop) and
