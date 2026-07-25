@@ -6,6 +6,11 @@ on:
       - main
     paths:
       - 'supabase/functions/**'
+      - 'scripts/identify-edge-deploy-changes.sh'
+      - 'scripts/check-ops-api-source-actions.sh'
+      - 'scripts/smoke-ops-api-action-surface.sh'
+      - 'scripts/_ops-api-required-actions.txt'
+      - '.github/workflows/deploy-edge-functions.yml'
 
 permissions:
   contents: read
@@ -21,7 +26,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Identify function-source and verification-only changes
+        id: changed
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          bash scripts/identify-edge-deploy-changes.sh
+
       - uses: supabase/setup-cli@v1
+        if: steps.changed.outputs.functions != ''
         with:
           # Pinned to a concrete recent-stable release. `version: latest` made
           # setup-cli resolve the newest release at deploy time, which started
@@ -29,41 +44,8 @@ jobs:
           # removes that network dependency and keeps deploys deterministic.
           version: 2.105.0
 
-      - name: Identify changed function directories
-        id: changed
-        run: |
-          # Handle first push to main (before is all zeros)
-          BEFORE="${{ github.event.before }}"
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            echo "Initial push — listing all function directories"
-            CHANGED=$(find supabase/functions -mindepth 1 -maxdepth 1 -type d ! -name '_shared' -exec basename {} \; | sort -u | tr '\n' ' ')
-          else
-            # Diff against the previous commit on main.
-            # Detect a change to ANY file inside a function directory, not just
-            # index.ts. PR #164 changed ops-api/makesafe_compact_reads.ts (NOT
-            # index.ts); the old `-- '.../*/index.ts'` glob produced an empty
-            # CHANGED, so "Deploy changed edge functions" was skipped and the
-            # fix silently never deployed. Diff the whole functions tree and take
-            # the function name (3rd path segment), excluding _shared (handled by
-            # its own warning below). NF>=4 drops top-level non-function files
-            # like supabase/functions/README.md.
-            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/' | awk -F/ 'NF>=4 && $3!="_shared" {print $3}' | sort -u | tr '\n' ' ')
-          fi
-
-          echo "functions=$CHANGED" >> "$GITHUB_OUTPUT"
-          echo "Changed functions: $CHANGED"
-
-          # Also check if _shared changed — warn but don't auto-deploy all
-          SHARED_CHANGED=""
-          if [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            SHARED_CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/_shared/**' | head -1)
-          fi
-          if [ -n "$SHARED_CHANGED" ]; then
-            echo "::warning::_shared directory changed — functions that import from it may need manual redeployment"
-          fi
-
       - name: Pre-deploy check ops-api source action surface
-        if: contains(steps.changed.outputs.functions, 'ops-api')
+        if: steps.changed.outputs.verify_ops_api == 'true'
         run: |
           bash scripts/check-ops-api-source-actions.sh
 
@@ -157,7 +139,7 @@ jobs:
           echo "All smoke tests passed"
 
       - name: Smoke test ops-api action surface
-        if: contains(steps.changed.outputs.functions, 'ops-api')
+        if: steps.changed.outputs.verify_ops_api == 'true'
         env:
           SW_API_KEY: ${{ secrets.SW_API_KEY }}
         run: |
