@@ -160,8 +160,10 @@ draft_makesafe_report_pack
 # Bare call drafts a pack for every due job (dry_run defaults to false).
 draft_makesafe_report_pack_due # probe=source-only
 makesafe_send_pack
-allocate_job
-reattend_makesafe
+# Both call authTrade before anything else, so an API-key probe must be refused
+# at authentication rather than answered with tenant data.
+allocate_job                  # probe=jwt-fail-closed
+reattend_makesafe             # probe=jwt-fail-closed
 mark_makesafe_portal_report_done
 # W2-C portal-truth honest fallback (this PR):
 makesafe_portal_recheck_queue

@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SMOKE_SCRIPT="$REPO_ROOT/scripts/smoke-ops-api-action-surface.sh"
 MANIFEST="$REPO_ROOT/scripts/_ops-api-required-actions.txt"
 SOURCE_CHECK="$REPO_ROOT/scripts/check-ops-api-source-actions.sh"
+OPS_API_SOURCE="$REPO_ROOT/supabase/functions/ops-api/index.ts"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -89,7 +90,7 @@ if [[ "$action" == "makesafe_deterministic_intake_replay" ]]; then
 fi
 
 case "$action" in
-  trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice)
+  trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe)
     printf '%s\n' '{"error":"Login required"}'
     ;;
   *)
@@ -129,6 +130,40 @@ manifest_policy_probed_actions() {
     grep -E '#[[:space:]]*probe=' |
     grep -v 'probe=source-only' |
     awk '{print $1}'
+}
+
+# The dispatch block an action actually reaches: its own case label, any labels
+# it falls through from, and the shared body up to the next case that follows
+# real code. Only the FIRST label for a name is read, because a duplicate case
+# later in the same switch is dead code.
+action_dispatch_block() {
+  awk -v action="$1" '
+    BEGIN {
+      caseRe = "^[[:space:]]*case \047[A-Za-z_]+\047:"
+      target = "^[[:space:]]*case \047" action "\047:"
+    }
+    !started { if ($0 ~ target) { started = 1; startNr = NR } else next }
+    {
+      if ($0 ~ caseRe && sawBody) exit
+      if (NR - startNr > 12) exit
+      print
+      line = $0
+      sub(caseRe, "", line)
+      if (line ~ /[^[:space:]]/) sawBody = 1
+    }
+  ' "$OPS_API_SOURCE"
+}
+
+# Manifest actions whose dispatch block guards on authTrade, so an API-key probe
+# is refused at authentication instead of reaching a tenant read.
+authtrade_gated_actions() {
+  local action
+  while IFS= read -r action; do
+    [[ -z "$action" ]] && continue
+    if action_dispatch_block "$action" | grep -q 'authTrade(req'; then
+      printf '%s\n' "$action"
+    fi
+  done < <(manifest_actions)
 }
 
 run_smoke() {
@@ -350,6 +385,41 @@ test_bounded_probe_that_runs_instead_of_refusing_fails() {
   pass "$name"
 }
 
+test_authtrade_gated_actions_declare_jwt_fail_closed() {
+  local name="test_authtrade_gated_actions_declare_jwt_fail_closed"
+  local gated="$TEST_TMP/authtrade-gated"
+  local declared="$TEST_TMP/authtrade-declared"
+
+  authtrade_gated_actions | sort -u > "$gated"
+
+  if [[ ! -s "$gated" ]]; then
+    fail "$name" "found no authTrade-gated manifest actions; the source scan has stopped matching"
+    return
+  fi
+
+  manifest_actions_with_policy jwt-fail-closed | sort -u > "$declared"
+
+  local action
+  while IFS= read -r action; do
+    [[ -z "$action" ]] && continue
+    if ! grep -Fxq "$action" "$declared"; then
+      fail "$name" "authTrade-gated action inherits the live policy instead of declaring probe=jwt-fail-closed: $action"
+      return
+    fi
+  done < "$gated"
+
+  # allocate_job and reattend_makesafe are the pair that reached production
+  # unasserted; keep them named so a scan regression cannot quietly pass.
+  for action in allocate_job reattend_makesafe; do
+    if ! grep -Fxq "$action" "$gated"; then
+      fail "$name" "source scan no longer recognises $action as authTrade-gated"
+      return
+    fi
+  done
+
+  pass "$name"
+}
+
 test_unknown_probe_policy_fails_closed() {
   local name="test_unknown_probe_policy_fails_closed"
   local manifest="$TEST_TMP/bad-policy.txt"
@@ -380,6 +450,7 @@ main() {
   test_source_only_actions_are_never_sent_to_production
   test_jwt_policy_is_enforced_for_any_manifest_action
   test_bounded_probe_that_runs_instead_of_refusing_fails
+  test_authtrade_gated_actions_declare_jwt_fail_closed
   test_unknown_probe_policy_fails_closed
 
   echo
