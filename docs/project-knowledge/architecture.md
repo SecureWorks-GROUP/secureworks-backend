@@ -2,7 +2,11 @@
 
 ## Overview
 SecureWorks WA — multi-division outdoor living construction (patios, fencing, decking, renovations).
-Single-tenant system. All hardcoded to org_id `00000000-0000-0000-0000-000000000001`.
+One live production tenant, org_id `00000000-0000-0000-0000-000000000001` (see Key
+IDs), but tenant is enforced as a boundary rather than assumed: Trade reads derive
+`org_id` from the authenticated user's `users` row and refuse another tenant's rows
+(see `trade-app.md`), and the scoping tools' test lab routes to a separate test org
+(see `edge-functions.md`).
 
 ## Tech Stack
 - **Frontend**: Vanilla HTML/JS dashboards (no framework)

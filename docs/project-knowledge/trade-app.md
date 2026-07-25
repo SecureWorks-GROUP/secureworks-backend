@@ -76,15 +76,28 @@
 - Android back button support via `history.pushState`
 
 ### Auth & Security
-- JWT auth on all trade endpoints (via `authTrade` in ops-api)
-- `assertAssigned` check — trades can only access jobs they're assigned to
+- JWT auth on all trade endpoints (via `authTrade` in ops-api). `authTrade` also
+  loads the caller's `users` row and returns the server-owned authorization
+  context (`orgId`, `role`, `managedVerticals`). Tenant, role, and manager scope
+  are never taken from request params. A failed profile lookup is 503 (transient,
+  retry); a profile with no `org_id` is 403.
+- The board/list reads (`my_jobs` incl. the dispatcher see-all feed and every open
+  pool, `trade_calendar`) are filtered to the caller's `org_id`, so another tenant's
+  work is never listed. `trade_job_detail` checks the job's `org_id` first and
+  refuses a cross-tenant job outright.
+- Job access (`trade_job_detail`) is granted by: own assignment (`assertAssigned`),
+  dispatcher/admin, an explicit managed vertical matching the job's vertical
+  (e.g. a `lead_installer` with `managed_verticals = ['fencing']` may open any
+  same-tenant fencing job), or the open-MakeSafe field-report exception. An
+  ordinary installer with none of these is still refused.
 - Session expiry detection (401/403 → auto sign-out + redirect to login)
 - Prices stripped from PO line items (trades see items + quantities, not costs)
 
 ## ops-api Trade Endpoints (JWT auth required)
 | Action | Method | Purpose |
 |--------|--------|---------|
-| `my_jobs` | GET | Jobs assigned to authenticated user, grouped by date |
+| `my_jobs` | GET | Jobs assigned to authenticated user, grouped by date. `mode=all` is the managed Board list: a dispatcher sees every crew's work in their tenant, a vertical manager sees every crew's work in their `managed_verticals` (other-crew cards carry crew attribution). Ordinary installers stay own-only whatever `mode` says. Open-pool cards are de-duplicated against assignments that still hold the job at any date — including null/old scheduled dates — so an allocated job is never offered as available |
+| `trade_calendar` | GET | Tenant-scoped calendar assignments for the Trade Schedule view. Params: `from`/`to` (`YYYY-MM-DD`, default today → +14 days), `mode=mine` (default) or `all`, optional `type` vertical filter. `all` is honoured for a dispatcher (whole tenant) or a vertical manager (bounded to their `managed_verticals`; asking for an unmanaged `type` there is 403) and is downgraded to `mine` for an ordinary installer. Multi-day assignments overlapping the window are included, as are rows with a null `scheduled_end`. Cancelled assignments are excluded. Returns `{ schema: 'trade-calendar.v1', mode, type, events, truncated }` with `org_id` stripped, capped at 500 rows |
 | `trade_job_detail` | GET | Full job view: client, docs, media, notes, POs, crew, work order, report |
 | `add_note` | POST | Add note to job timeline (via job_events) |
 | `upload_photo` | POST | Upload photo (base64 dataUrl) — supports po_id for receipts |
