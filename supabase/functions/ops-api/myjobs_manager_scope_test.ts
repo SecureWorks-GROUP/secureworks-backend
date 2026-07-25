@@ -27,6 +27,7 @@ import {
 // exercised, not assumed. Every issued query is recorded for shape assertions.
 type Job = {
   id: string;
+  org_id?: string;
   type: string;
   status: string;
   job_number?: string;
@@ -38,7 +39,7 @@ type Assignment = {
   user_id: string;
   user_name?: string;
   status: string;
-  scheduled_date: string;
+  scheduled_date: string | null;
   job_id: string;
   assignment_type?: string;
   role?: string;
@@ -61,6 +62,13 @@ function todayISO(): string {
   // Mirror getAWSTDate()'s +8h shift; a plain "today" is safely inside the
   // handler's 30-day window regardless of the exact bucket it lands in.
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+const TENANT_A = "00000000-0000-0000-0000-000000000001";
+const TENANT_B = "00000000-0000-0000-0000-000000000002";
+
+function jobOrg(job: Job): string {
+  return job.org_id || TENANT_A;
 }
 
 // A referenced/plain or() string is comma-separated `col.op.val`, OR-combined.
@@ -89,14 +97,23 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     let rows = fx.assignments.slice();
     if (st.eq.user_id != null) rows = rows.filter((a) => a.user_id === st.eq.user_id);
     if (st.neq.status != null) rows = rows.filter((a) => a.status !== st.neq.status);
-    if (st.gte != null) rows = rows.filter((a) => a.scheduled_date >= st.gte!);
-    if (st.lt != null) rows = rows.filter((a) => a.scheduled_date < st.lt!);
+    if (st.gte != null) rows = rows.filter((a) => a.scheduled_date != null && a.scheduled_date >= st.gte!);
+    if (st.lt != null) rows = rows.filter((a) => a.scheduled_date != null && a.scheduled_date < st.lt!);
     // Inner join to jobs (drop job-less rows) + referenced-table or() constrains parent.
     let joined = rows
       .map((a) => ({ a, job: fx.jobs.find((j) => j.id === a.job_id) }))
       .filter((x) => x.job) as { a: Assignment; job: Job }[];
+    if (st.eq["jobs.org_id"] != null) {
+      joined = joined.filter((x) => jobOrg(x.job) === st.eq["jobs.org_id"]);
+    }
     if (st.refOr && st.refOr.referencedTable === "jobs") {
       joined = joined.filter((x) => matchOr(x.job as unknown as Record<string, unknown>, st.refOr!.str));
+    }
+    if (st.inCol === "job_id" && st.inVals) {
+      joined = joined.filter((x) => st.inVals!.includes(x.a.job_id));
+    }
+    if (st.select.trim() === "job_id") {
+      return { data: joined.map(({ a }) => ({ job_id: a.job_id })), error: null };
     }
     const isAdminSelect = String(st.select || "").includes("user:user_id");
     return {
@@ -117,8 +134,10 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
   if (st.table === "jobs") {
     let rows = fx.jobs.slice();
     if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
+    if (st.eq.org_id != null) rows = rows.filter((j) => jobOrg(j) === st.eq.org_id);
     if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
     if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.id));
+    if (st.inCol === "status" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.status));
     if (st.refOr && st.refOr.referencedTable == null) {
       rows = rows.filter((j) => matchOr(j as unknown as Record<string, unknown>, st.refOr!.str));
     }
@@ -177,6 +196,7 @@ function poolJobIds(g: any): string[] { return (g.makesafePool as any[]).map((a)
 const TODAY = todayISO();
 
 function fencingFixtures(): Fixtures {
+  const OLD_DATE = new Date(Date.now() + 8 * 3600 * 1000 - 60 * 86400 * 1000).toISOString().slice(0, 10);
   return {
     assignments: [
       // Another crew member's fencing assignment (the manager does NOT own it).
@@ -185,12 +205,25 @@ function fencingFixtures(): Fixtures {
       { id: "a-henry-f2", user_id: "u-henry", user_name: "Henry", status: "scheduled", scheduled_date: TODAY, job_id: "job-f2" },
       // A patio assignment for someone else — must stay invisible to a fencing manager.
       { id: "a-crew-p1", user_id: "u-crew2", user_name: "Crew B", status: "scheduled", scheduled_date: TODAY, job_id: "job-p1" },
+      { id: "a-crew-d1", user_id: "u-deck", user_name: "Deck Crew", status: "scheduled", scheduled_date: TODAY, job_id: "job-d1" },
+      { id: "a-crew-ms1", user_id: "u-ms", user_name: "Make Safe Crew", status: "scheduled", scheduled_date: TODAY, job_id: "job-ms1" },
+      // Old and null-dated assignments must still occupy crew-ready jobs even
+      // though they stay outside the 30-day manager display window.
+      { id: "a-old-f4", user_id: "u-crew3", user_name: "Crew C", status: "scheduled", scheduled_date: OLD_DATE, job_id: "job-f4" },
+      { id: "a-null-f5", user_id: "u-crew4", user_name: "Crew D", status: "scheduled", scheduled_date: null, job_id: "job-f5" },
+      // Same vertical, different tenant — must never surface.
+      { id: "a-tenant-b", user_id: "u-crew-b", user_name: "Crew B2", status: "scheduled", scheduled_date: TODAY, job_id: "job-f-b" },
     ],
     jobs: [
-      { id: "job-f1", type: "fencing", status: "accepted", job_number: "SWF-1", site_suburb: "Balga" },
-      { id: "job-f2", type: "fencing", status: "accepted", job_number: "SWF-2", site_suburb: "Dianella" },
-      { id: "job-f3", type: "fencing", status: "accepted", job_number: "SWF-3", site_suburb: "Morley" }, // truly open
-      { id: "job-p1", type: "patio", status: "accepted", job_number: "SWP-1", site_suburb: "Cannington" },
+      { id: "job-f1", type: "fencing", status: "schedule_install", job_number: "SWF-1", site_suburb: "Balga" },
+      { id: "job-f2", type: "fencing", status: "in_progress", job_number: "SWF-2", site_suburb: "Dianella" },
+      { id: "job-f3", type: "fencing", status: "schedule_install", job_number: "SWF-3", site_suburb: "Morley" }, // truly open
+      { id: "job-f4", type: "fencing", status: "schedule_install", job_number: "SWF-26101", site_suburb: "Shenton Park" },
+      { id: "job-f5", type: "fencing", status: "scheduled", job_number: "SWF-NULL", site_suburb: "Balcatta" },
+      { id: "job-p1", type: "patio", status: "schedule_install", job_number: "SWP-1", site_suburb: "Cannington" },
+      { id: "job-d1", type: "decking", status: "schedule_install", job_number: "SWD-1", site_suburb: "Bayswater" },
+      { id: "job-ms1", type: "general", status: "accepted", job_number: "SWMS-1", site_suburb: "Midland" },
+      { id: "job-f-b", org_id: TENANT_B, type: "fencing", status: "schedule_install", job_number: "SWF-B", site_suburb: "Joondalup" },
     ],
   };
 }
@@ -240,19 +273,45 @@ Deno.test("U2b-2: open pool no longer shows a job already assigned to another cr
   assertEquals(newPool.includes("job-f1"), false, "assigned-elsewhere job is NOT a false-available card");
   assertEquals(newPool.includes("job-f3"), true, "genuinely-open job still appears in the pool");
 
-  // OLD (pre-U2b): pool dedupes only against the manager's own assignments →
-  // job-f1 wrongly shows as available.
-  const gOld = await myJobs(
+  // The all-date occupancy probe also protects the default My Jobs union, so
+  // de-duplication no longer depends on the 30-day display assignment set.
+  const gMine = await myJobs(
     makeClient(fencingFixtures(), []), "u-henry",
     false, HENRY.isDispatcher, HENRY.isMakesafeManager, HENRY.poolVerticals, [],
   );
-  const oldPool = poolJobIds(gOld);
-  assertEquals(oldPool.includes("job-f1"), true, "old path wrongly lists the assigned job as available (the bug U2b fixes)");
-  assertEquals(oldPool.includes("job-f3"), true);
+  assertEquals(poolJobIds(gMine).includes("job-f1"), false);
+});
+
+Deno.test("fencing manager pool never labels old or null-dated assigned work as available", async () => {
+  const managerScope = _managerBoardVerticals({
+    isDispatcher: HENRY.isDispatcher,
+    mode: "all",
+    managedVerticals: ["fencing"],
+  });
+  const recorded: RecordedQuery[] = [];
+  const grouped = await myJobs(
+    makeClient(fencingFixtures(), recorded),
+    "u-henry",
+    false,
+    HENRY.isDispatcher,
+    HENRY.isMakesafeManager,
+    HENRY.poolVerticals,
+    managerScope,
+    TENANT_A,
+  );
+
+  const pool = poolJobIds(grouped);
+  assertEquals(pool.includes("job-f4"), false, "SWF-26101-shaped old assignment stays occupied");
+  assertEquals(pool.includes("job-f5"), false, "null-dated assignment stays occupied");
+  assertEquals(pool.includes("job-f3"), true, "genuinely unassigned crew-ready work remains available");
+  const occupancy = recorded.find((q) =>
+    q.table === "job_assignments" && q.select.trim() === "job_id" && q.inCol === "job_id"
+  );
+  assertEquals(occupancy?.gte, null, "occupancy probe is deliberately all-date");
 });
 
 // ── 5. strict vertical scope: a fencing manager gets no patio anywhere ───────
-Deno.test("U2b-5: fencing manager sees ONLY fencing — no patio assignment, no patio pool query", async () => {
+Deno.test("U2b-5: fencing manager sees ONLY same-tenant fencing — no other vertical or tenant", async () => {
   const recorded: RecordedQuery[] = [];
   const managerScope = _managerBoardVerticals({ isDispatcher: HENRY.isDispatcher, mode: "all", managedVerticals: ["fencing"] });
   const g = await myJobs(
@@ -262,11 +321,20 @@ Deno.test("U2b-5: fencing manager sees ONLY fencing — no patio assignment, no 
   // The patio assignment + patio job never surface.
   assertEquals(assignedJobIds(g).includes("job-p1"), false, "no patio assignment leaks onto the fencing board");
   assertEquals(poolJobIds(g).includes("job-p1"), false, "no patio pool card leaks onto the fencing board");
+  assertEquals(assignedJobIds(g).includes("job-d1"), false, "no decking assignment leaks onto the fencing board");
+  assertEquals(poolJobIds(g).includes("job-d1"), false, "no decking pool card leaks onto the fencing board");
+  assertEquals(assignedJobIds(g).includes("job-ms1"), false, "no make-safe assignment leaks onto the fencing board");
+  assertEquals(poolJobIds(g).includes("job-ms1"), false, "no make-safe pool card leaks onto the fencing board");
+  assertEquals(assignedJobIds(g).includes("job-f-b"), false, "tenant-B assignment never leaks");
+  assertEquals(poolJobIds(g).includes("job-f-b"), false, "tenant-B pool card never leaks");
   // The widened assignment query was scoped to fencing only.
   const primary = recorded.find((q) => q.table === "job_assignments" && q.refOr?.referencedTable === "jobs");
   assertEquals(primary?.refOr?.str, "type.eq.fencing", "assignment query is scoped to jobs.type = fencing");
+  assertEquals(primary?.eq["jobs.org_id"], TENANT_A, "assignment query is scoped to the viewer tenant");
   // No pool query was issued for the patio type.
   assertEquals(recorded.some((q) => q.table === "jobs" && q.eq.type === "patio"), false, "patio pool is never queried");
+  const fencingPool = recorded.find((q) => q.table === "jobs" && q.eq.type === "fencing");
+  assertEquals(fencingPool?.eq.org_id, TENANT_A, "pool query is scoped to the viewer tenant");
 });
 
 // ── make-safe vertical widening resolves by type OR SWMS- prefix ─────────────

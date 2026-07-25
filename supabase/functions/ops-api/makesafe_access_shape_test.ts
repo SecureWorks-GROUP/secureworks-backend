@@ -105,3 +105,71 @@ Deno.test("Unassigned ordinary jobs remain allocation-gated", async () => {
     "You are not assigned to this job",
   );
 });
+
+Deno.test("same-tenant fencing manager may read an unassigned managed fencing job", async () => {
+  await _assertAssignedOrMakesafeAccessForTest(
+    makeAccessClient({
+      id: "job-fence",
+      org_id: "tenant-a",
+      type: "fencing",
+      job_number: "SWF-26593",
+    }),
+    "job-fence",
+    "henry",
+    false,
+    { orgId: "tenant-a", managedVerticals: ["fencing"] },
+  );
+});
+
+Deno.test("fencing manager is denied an unmanaged same-tenant vertical", async () => {
+  await assertRejects(
+    () => _assertAssignedOrMakesafeAccessForTest(
+      makeAccessClient({
+        id: "job-patio",
+        org_id: "tenant-a",
+        type: "patio",
+        job_number: "SWP-1",
+      }),
+      "job-patio",
+      "henry",
+      false,
+      { orgId: "tenant-a", managedVerticals: ["fencing"] },
+    ),
+    Error,
+    "You are not assigned to this job",
+  );
+});
+
+Deno.test("fencing manager is denied a managed vertical in another tenant", async () => {
+  await assertRejects(
+    () => _assertAssignedOrMakesafeAccessForTest(
+      makeAccessClient({
+        id: "job-fence-b",
+        org_id: "tenant-b",
+        type: "fencing",
+        job_number: "SWF-B",
+      }),
+      "job-fence-b",
+      "henry",
+      false,
+      { orgId: "tenant-a", managedVerticals: ["fencing"] },
+    ),
+    Error,
+    "not authorized",
+  );
+});
+
+Deno.test("dispatcher retains same-tenant unassigned detail access", async () => {
+  await _assertAssignedOrMakesafeAccessForTest(
+    makeAccessClient({
+      id: "job-patio",
+      org_id: "tenant-a",
+      type: "patio",
+      job_number: "SWP-1",
+    }),
+    "job-patio",
+    "dispatcher",
+    true,
+    { orgId: "tenant-a", managedVerticals: [] },
+  );
+});
