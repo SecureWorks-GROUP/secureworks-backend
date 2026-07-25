@@ -266,10 +266,73 @@ test_missing_push_base_fails_safe_without_an_invalid_diff() {
   pass "$name"
 }
 
+verification_trigger_paths() {
+  sed -n '1,/^jobs:/p' "$DEPLOY_WORKFLOW" |
+    sed -n "s/^      - '\(.*\)'\$/\1/p" |
+    grep -v '^supabase/functions/' || true
+}
+
+test_every_verification_trigger_path_is_classified() {
+  local name="test_every_verification_trigger_path_is_classified"
+  local repo output base_sha head_sha trigger_path
+  local checked=0
+
+  while IFS= read -r trigger_path; do
+    [[ -n "$trigger_path" ]] || continue
+    case "$trigger_path" in
+      *'*'* | *'?'* | *'['*)
+        fail "$name" "verification trigger path is a glob this parity check cannot exercise: $trigger_path"
+        return
+        ;;
+    esac
+
+    repo="$(make_fixture_repo)"
+    output="$TEST_TMP/trigger-parity-${checked}.out"
+
+    (
+      cd "$repo" || exit 1
+      git rev-parse HEAD > "$TEST_TMP/trigger-parity-shas"
+      mkdir -p "$(dirname "$trigger_path")"
+      printf '%s\n' '# trigger parity probe' >> "$trigger_path"
+      git add "$trigger_path"
+      git commit -q -m trigger-parity
+      git rev-parse HEAD >> "$TEST_TMP/trigger-parity-shas"
+    )
+    base_sha="$(sed -n '1p' "$TEST_TMP/trigger-parity-shas")"
+    head_sha="$(sed -n '2p' "$TEST_TMP/trigger-parity-shas")"
+
+    if ! run_classifier "$repo" "$base_sha" "$head_sha" push "$output"; then
+      fail "$name" "classifier failed for verification trigger path: $trigger_path"
+      return
+    fi
+    if [[ "$(output_value "$output" verification_contract_changed)" != "true" ]]; then
+      fail "$name" "verification trigger path is not recognised by the classifier: $trigger_path"
+      return
+    fi
+    if [[ "$(output_value "$output" verify_ops_api)" != "true" ]]; then
+      fail "$name" "verification trigger path did not request ops-api verification: $trigger_path"
+      return
+    fi
+    if [[ -n "$(output_value "$output" functions)" ]]; then
+      fail "$name" "verification trigger path selected a function for deploy: $trigger_path"
+      return
+    fi
+
+    checked=$((checked + 1))
+  done < <(verification_trigger_paths)
+
+  if [[ "$checked" -eq 0 ]]; then
+    fail "$name" "no verification trigger paths were parsed from $DEPLOY_WORKFLOW"
+    return
+  fi
+
+  pass "$name"
+}
+
 test_workflow_wires_verification_without_a_deploy() {
   local name="test_workflow_wires_verification_without_a_deploy"
 
-  if ! DEPLOY_WORKFLOW="$DEPLOY_WORKFLOW" PR_WORKFLOW="$PR_WORKFLOW" node <<'NODE'
+  if ! DEPLOY_WORKFLOW="$DEPLOY_WORKFLOW" PR_WORKFLOW="$PR_WORKFLOW" CLASSIFIER="$CLASSIFIER" node <<'NODE'
 const fs = require('fs');
 
 const deployPath = process.env.DEPLOY_WORKFLOW;
@@ -294,10 +357,17 @@ for (const triggerPath of [
 }
 
 requireText(deploy, 'bash scripts/identify-edge-deploy-changes.sh', 'change classifier');
-requireText(deploy, "if: steps.changed.outputs.verify_ops_api == 'true'", 'source/action verification condition');
 requireText(deploy, "if: steps.changed.outputs.functions != ''", 'function deploy condition');
 requireText(deploy, 'bash scripts/check-ops-api-source-actions.sh', 'authoritative source check');
 requireText(deploy, 'bash scripts/smoke-ops-api-action-surface.sh', 'authoritative live action smoke');
+
+const preDeployCheckStep = deploy.match(/- name: Pre-deploy check ops-api source action surface[\s\S]*?(?=\n      - name:)/);
+if (!preDeployCheckStep || !preDeployCheckStep[0].includes("if: steps.changed.outputs.verify_ops_api == 'true'")) {
+  throw new Error('pre-deploy source check does not run for verification-only changes');
+}
+if (!preDeployCheckStep[0].includes('bash scripts/check-ops-api-source-actions.sh')) {
+  throw new Error('pre-deploy source check does not run the authoritative source check');
+}
 
 const deployStep = deploy.match(/- name: Deploy changed edge functions[\s\S]*?(?=\n      - name:)/);
 if (!deployStep || !deployStep[0].includes("if: steps.changed.outputs.functions != ''")) {
@@ -314,11 +384,44 @@ if (!actionSmokeStep || !actionSmokeStep[0].includes("if: steps.changed.outputs.
   throw new Error('action-surface smoke does not run for verification-only changes');
 }
 
+const preDeployCheckIndex = deploy.indexOf('- name: Pre-deploy check ops-api source action surface');
 const deployIndex = deploy.indexOf('- name: Deploy changed edge functions');
 const basicSmokeIndex = deploy.indexOf('- name: Smoke test deployed functions');
 const actionSmokeIndex = deploy.indexOf('- name: Smoke test ops-api action surface');
-if (!(deployIndex < basicSmokeIndex && basicSmokeIndex < actionSmokeIndex)) {
-  throw new Error('ops-api source path lost deploy -> basic smoke -> action-surface smoke order');
+if (!(preDeployCheckIndex < deployIndex && deployIndex < basicSmokeIndex && basicSmokeIndex < actionSmokeIndex)) {
+  throw new Error('ops-api source path lost source check -> deploy -> basic smoke -> action-surface smoke order');
+}
+
+const triggerBlock = deploy.match(/\n    paths:\n((?:      - '[^']*'\n)+)/);
+if (!triggerBlock) {
+  throw new Error('deploy workflow push trigger has no parseable paths list');
+}
+const verificationTriggerPaths = triggerBlock[1]
+  .split('\n')
+  .map((line) => line.trim())
+  .filter(Boolean)
+  .map((line) => line.replace(/^- '/, '').replace(/'$/, ''))
+  .filter((triggerPath) => !triggerPath.startsWith('supabase/functions/'))
+  .sort();
+
+const classifierSource = fs.readFileSync(process.env.CLASSIFIER, 'utf8');
+const contractArm = classifierSource.match(
+  /is_verification_contract_path\(\)[\s\S]*?case "\$1" in\s*([\s\S]*?)\)\s*\n\s*return 0/
+);
+if (!contractArm) {
+  throw new Error('classifier verification-contract path list is not parseable');
+}
+const classifierContractPaths = contractArm[1]
+  .split('|')
+  .map((entry) => entry.replace(/\\/g, '').trim())
+  .filter(Boolean)
+  .sort();
+
+if (JSON.stringify(verificationTriggerPaths) !== JSON.stringify(classifierContractPaths)) {
+  throw new Error(
+    `verification trigger paths drifted from the classifier contract list: ` +
+      `${JSON.stringify(verificationTriggerPaths)} vs ${JSON.stringify(classifierContractPaths)}`
+  );
 }
 
 for (const requiredTest of [
@@ -348,6 +451,7 @@ main() {
     test_other_function_change_keeps_existing_deploy_scope
     test_unusual_event_uses_a_valid_fallback_range
     test_missing_push_base_fails_safe_without_an_invalid_diff
+    test_every_verification_trigger_path_is_classified
   fi
   test_workflow_wires_verification_without_a_deploy
 
