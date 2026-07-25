@@ -18022,12 +18022,15 @@ async function intakeHealth(client: any) {
 // Shared by the ops-dashboard create/update/delete_assignment actions. Resolves
 // the affected job's vertical, then applies _resolveAllocationAuthz. api_key
 // (dashboard / service) and dispatchers short-circuit with no DB read; only a
-// JWT vertical manager needs the job + their managed_verticals looked up. Closes
-// the pre-existing hole where ANY logged-in JWT user could mutate assignments.
+// JWT vertical manager needs the job looked up. Their managed_verticals come
+// from the authenticated context the dispatch already read from the server-owned
+// users row (never from the request), so no second round trip per mutation.
+// Closes the pre-existing hole where ANY logged-in JWT user could mutate
+// assignments.
 export async function assertAssignmentMutationAuthz(
   client: any,
   authMode: 'api_key' | 'jwt' | 'routine',
-  authUser: { id: string; email?: string; role: string } | null,
+  authUser: { id: string; email?: string; role: string; managedVerticals?: unknown } | null,
   ref: { jobId?: string | null; assignmentId?: string | null },
 ): Promise<void> {
   // Fast paths: no DB read required.
@@ -18049,13 +18052,10 @@ export async function assertAssignmentMutationAuthz(
     const { data: job } = await client.from('jobs').select('id, type, job_number').eq('id', jobId).maybeSingle()
     if (job) jobVertical = _jobVertical(job)
   }
-  const { data: userRec } = authUser?.id
-    ? await client.from('users').select('managed_verticals').eq('id', authUser.id).maybeSingle()
-    : { data: null as any }
   const decision = _resolveAllocationAuthz({
     authMode: 'jwt',
     callerRole: role,
-    managedVerticals: userRec?.managed_verticals,
+    managedVerticals: authUser?.managedVerticals,
     jobVertical,
   })
   if (!decision.allowed) {
@@ -22179,53 +22179,70 @@ export const _MAKESAFE_SUBSTATUS_FINISHED = [
 // board's open columns and the U1 script's OPEN set.
 export const _OPEN_ASSIGNMENT_STATUSES = ['scheduled', 'confirmed', 'draft'] as const
 
-// Assignment statuses that no longer HOLD a job. closeOpenAssignmentsForJob
-// writes exactly these two — 'complete' when the work finished, 'cancelled' when
-// it died — so a job whose only rows are closed is allocatable again. This is
-// what lets a re-attended make-safe (reattendMakesafe deliberately creates no
-// assignment) return to the open pool for the manager to tap-to-allocate.
-// Deliberately NOT the inverse of _OPEN_ASSIGNMENT_STATUSES: 'in_progress' and
-// the report statuses still hold the job.
-export const _CLOSED_ASSIGNMENT_STATUSES = ['cancelled', 'complete'] as const
+// Which assignment statuses RELEASE a job back to an open pool by status ALONE.
+// Only 'cancelled', in BOTH pools: a dead allocation never holds a job, but a
+// FINISHED one still does. Status cannot distinguish a finished visit from a
+// re-opened one — clock_event('clock_off') writes job_assignments.status =
+// 'complete' (and the trade app's updateMyAssignment / updateJobPhase do the
+// same) without touching jobs.status or makesafe_job_details. Releasing on
+// status would re-offer work a crew has just done to a second crew, and render
+// it twice, since the windowed feed still carries that 'complete' card.
+export const _POOL_RELEASING_STATUSES = ['cancelled'] as const
 
-// Which assignment statuses RELEASE a job back to an open pool. Occupancy is a
-// domain question, not a status-vocabulary one, so the two pools answer it
-// differently:
-//
-//  - 'makesafe': 'complete' releases. That pool gates every card on
-//    isAllocatableMakesafePoolDetail, which drops a make-safe the moment
-//    report_received_at / report_sent_at is set and which ONLY reattendMakesafe
-//    clears. So a make-safe that reaches the pool loop carrying a finished visit
-//    has genuinely been re-opened for another attendance.
-//  - 'vertical' (fencing / patio / decking): 'complete' still HOLDS. That pool
-//    gates on jobs.status alone, and the trade app writes
-//    job_assignments.status='complete' (updateMyAssignment / updateJobPhase)
-//    without advancing jobs.status — so releasing here would re-offer work a
-//    crew has just finished to a second crew before the office moves the job on.
-//
-// 'cancelled' releases in both: a dead allocation never holds a job.
-export type PoolOccupancyKind = 'makesafe' | 'vertical'
-
-export function _poolReleasingStatuses(pool: PoolOccupancyKind): readonly string[] {
-  return pool === 'makesafe' ? _CLOSED_ASSIGNMENT_STATUSES : ['cancelled']
+export function _poolReleasingStatusFilter(): string {
+  return '(' + _POOL_RELEASING_STATUSES.map((s) => `"${s}"`).join(',') + ')'
 }
 
-export function _poolReleasingStatusFilter(pool: PoolOccupancyKind): string {
-  return '(' + _poolReleasingStatuses(pool).map((s) => `"${s}"`).join(',') + ')'
+export type PoolOccupancyKind = 'makesafe' | 'vertical'
+
+// The ONE durable proof that a finished make-safe visit was deliberately sent
+// back to the pool: reattendMakesafe stamps makesafe_job_details.last_reattend_at
+// (nothing else writes that column) and deliberately creates no assignment, so
+// the card must become tap-to-allocate again. A completed visit therefore
+// releases only when it finished BEFORE that stamp — the re-attend crew's own
+// later completion holds the job again. No stamp, or timestamps we cannot read,
+// means still occupied: unfinished work is never re-offered.
+export function _makesafeReattendReleases(assignment: any, reattendAt: unknown): boolean {
+  if (String(assignment?.status || '').toLowerCase() !== 'complete') return false
+  const reopenedAt = Date.parse(String(reattendAt ?? ''))
+  if (!Number.isFinite(reopenedAt)) return false
+  const finishedAt = Date.parse(String(assignment?.completed_at ?? assignment?.clocked_off_at ?? ''))
+  // A row closed by closeOpenAssignmentsForJob carries no completion stamp, so
+  // the re-attend marker is the only evidence available — and it is proof.
+  if (!Number.isFinite(finishedAt)) return true
+  return reopenedAt > finishedAt
+}
+
+// Does this assignment still HOLD its job for this pool's semantics? Both the
+// de-dupe seed and the DB occupancy probe route through this one predicate; if
+// they ever answered differently the pool would re-emit an occupied job as an
+// 'available' card while the feed still showed the crew's own card.
+export function _assignmentHoldsPoolJob(
+  assignment: any,
+  pool: PoolOccupancyKind,
+  reattendAtByJobId: Record<string, unknown> = {},
+): boolean {
+  const status = String(assignment?.status || '').toLowerCase()
+  if ((_POOL_RELEASING_STATUSES as readonly string[]).includes(status)) return false
+  if (pool !== 'makesafe') return true
+  const jobId = String(assignment?.jobs?.id || assignment?.job_id || '')
+  return !_makesafeReattendReleases(assignment, reattendAtByJobId[jobId])
 }
 
 // The windowed assignment feed is NOT status-filtered beyond 'cancelled', so it
 // still carries finished visits. A pool's de-duplication seed must therefore ask
 // the same question its occupancy probe does: does a row that still HOLDS this
 // job (for this pool's semantics) exist in the feed?
-export function _activeAssignedJobIds(assignments: any[], pool: PoolOccupancyKind): Set<string> {
-  const releasing = _poolReleasingStatuses(pool)
+export function _activeAssignedJobIds(
+  assignments: any[],
+  pool: PoolOccupancyKind,
+  reattendAtByJobId: Record<string, unknown> = {},
+): Set<string> {
   const ids = new Set<string>()
   for (const assignment of (assignments || [])) {
     const jobId = assignment?.jobs?.id
     if (!jobId) continue
-    const status = String(assignment?.status || '').toLowerCase()
-    if (releasing.includes(status)) continue
+    if (!_assignmentHoldsPoolJob(assignment, pool, reattendAtByJobId)) continue
     ids.add(jobId)
   }
   return ids
@@ -22585,9 +22602,10 @@ export function _resolveAllocationAuthz(input: {
 // open pool must answer that question the same way, so both the make-safe and
 // the generic per-vertical pool route through this probe.
 //
-// "Active" here means NOT closed: a 'complete' or 'cancelled' row has released
-// the job, so a finished-then-reopened job (the make-safe re-attend flow) pools
-// again instead of being held forever by its last visit.
+// "Active" here means STILL HOLDING (_assignmentHoldsPoolJob): a 'cancelled' row
+// has released the job, and a make-safe's 'complete' row releases only once a
+// re-attend stamp proves the card was deliberately reopened — so the re-attend
+// flow pools again without a plain clock-off re-offering unfinished work.
 //
 // It returns the OCCUPYING ASSIGNMENT, not just the id, because a pool job that
 // is occupied outside the display window must still render — as an assigned card
@@ -22601,6 +22619,10 @@ export function _resolveAllocationAuthz(input: {
 // "available" card it exists to prevent, so never issue it as one unbounded read.
 // Chunking is only a URL-length guard and the chunks are independent, so they run
 // concurrently; the page loop inside each chunk is what guarantees completeness.
+// Paging also demands a TOTAL order: job_id is highly non-unique here (that is the
+// very reason paging exists), and Postgres may return rows tied on it in a
+// different order per LIMIT/OFFSET query, silently skipping a row on a page
+// boundary. The unique id tiebreak below closes that seam.
 const OCCUPANCY_PROBE_CHUNK = 25
 const OCCUPANCY_PROBE_PAGE = 1000
 const OCCUPANCY_PROBE_SELECT = `
@@ -22629,6 +22651,7 @@ async function fetchOccupyingAssignments(
   jobIds: string[],
   preferUserId = '',
   pool: PoolOccupancyKind = 'vertical',
+  reattendAtByJobId: Record<string, unknown> = {},
 ): Promise<Map<string, any>> {
   const byJobId = new Map<string, any>()
   const ids = Array.from(new Set((jobIds || []).filter(Boolean).map((id: any) => String(id))))
@@ -22644,8 +22667,9 @@ async function fetchOccupyingAssignments(
         .from('job_assignments')
         .select(OCCUPANCY_PROBE_SELECT)
         .in('job_id', chunk)
-        .not('status', 'in', _poolReleasingStatusFilter(pool))
+        .not('status', 'in', _poolReleasingStatusFilter())
         .order('job_id', { ascending: true })
+        .order('id', { ascending: true })
         .range(offset, offset + OCCUPANCY_PROBE_PAGE - 1)
       if (error) throw error
       const page = data || []
@@ -22658,6 +22682,7 @@ async function fetchOccupyingAssignments(
   for (const row of chunkRows.flat()) {
     const jobId = row?.job_id ? String(row.job_id) : ''
     if (!jobId) continue
+    if (!_assignmentHoldsPoolJob(row, pool, reattendAtByJobId)) continue
     const current = byJobId.get(jobId)
     if (!current || occupancyOutranks(row, current, preferUserId)) byJobId.set(jobId, row)
   }
@@ -22776,12 +22801,17 @@ export async function myJobs(
   let error: any
 
   if (showAll) {
-    // ── Admin mode: show ALL assignments across all users ──
+    // ── Admin mode: show ALL assignments across all users, ONE tenant ──
+    // "See everything" is bounded by the dispatcher's own org: tenant is a
+    // boundary, not a display preference, and every pool below is already
+    // org-scoped. Uses the INNER select so the jobs.org_id filter constrains the
+    // parent job_assignments rows (PostgREST semantics — see the note below).
     const res = await client
       .from('job_assignments')
-      .select(ASSIGNMENT_SELECT_ADMIN)
+      .select(ASSIGNMENT_SELECT_ADMIN_INNER)
       .neq('status', 'cancelled')
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .eq('jobs.org_id', orgId)
       .order('scheduled_date', { ascending: true })
     assignments = res.data
     error = res.error
@@ -22895,7 +22925,6 @@ export async function myJobs(
   // de-duplicated via assignedJobIds below. Keep this specific to MakeSafe and
   // expose only the same slim job fields the mobile job list already uses.
   if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
-    const assignedJobIds = _activeAssignedJobIds(assignments, 'makesafe')
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
@@ -22918,7 +22947,17 @@ export async function myJobs(
       .limit(120)
     if (detailErr) throw detailErr
     const detailByJobId: Record<string, any> = {}
-    for (const row of (detailRows || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
+    // Durable re-attend stamps, written only by reattendMakesafe: the sole signal
+    // that lets a finished visit release its make-safe back to the open pool.
+    const reattendAtByJobId: Record<string, unknown> = {}
+    for (const row of (detailRows || [])) {
+      if (!row?.job_id) continue
+      detailByJobId[String(row.job_id)] = row
+      if (row.last_reattend_at) reattendAtByJobId[String(row.job_id)] = row.last_reattend_at
+    }
+    // Seeded only now: whether a finished make-safe visit still holds its job is
+    // a question about that job's re-attend history, not about status alone.
+    const assignedJobIds = _activeAssignedJobIds(assignments, 'makesafe', reattendAtByJobId)
     for (const id of Object.keys(openMakesafeById)) {
       // U2c: pool = allocatable only. Excludes finished substatuses (as before)
       // AND company_contact_required (ops's admin queue). Report access is a
@@ -22982,6 +23021,7 @@ export async function myJobs(
         openMakesafes.map((job: any) => job?.id),
         poolRecoveryUserId,
         'makesafe',
+        reattendAtByJobId,
       )
     } catch (occErr: any) {
       // Non-blocking: a failed probe must not take the make-safe board down. The

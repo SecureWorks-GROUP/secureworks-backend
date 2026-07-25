@@ -2,8 +2,9 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _activeAssignedJobIds,
   _fetchOccupyingAssignmentsForTest,
+  _makesafeReattendReleases,
   _managerBoardVerticals,
-  _poolReleasingStatuses,
+  _POOL_RELEASING_STATUSES,
   _resolveManagerVisibility,
   _shouldRecoverOccupiedPoolJob,
   myJobs,
@@ -47,8 +48,14 @@ type Assignment = {
   job_id: string;
   assignment_type?: string;
   role?: string;
+  completed_at?: string | null;
 };
-type MakesafeDetail = { job_id: string; substatus?: string; cancel_reason?: string };
+type MakesafeDetail = {
+  job_id: string;
+  substatus?: string;
+  cancel_reason?: string;
+  last_reattend_at?: string;
+};
 type Fixtures = { assignments: Assignment[]; jobs: Job[]; details?: MakesafeDetail[] };
 type RecordedQuery = {
   table: string;
@@ -135,6 +142,8 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
             notes: null,
             assignment_type: a.assignment_type ?? "install",
             crew_name: null,
+            completed_at: a.completed_at ?? null,
+            clocked_off_at: a.completed_at ?? null,
             user: { id: a.user_id, name: a.user_name ?? a.user_id },
           })),
         error: null,
@@ -150,6 +159,8 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
         assignment_type: a.assignment_type ?? "install",
         crew_name: null,
         notes: null,
+        completed_at: a.completed_at ?? null,
+        clocked_off_at: a.completed_at ?? null,
         jobs: { ...job },
         ...(isAdminSelect ? { user: { id: a.user_id, name: a.user_name ?? a.user_id } } : {}),
       })),
@@ -493,16 +504,21 @@ Deno.test("U2b-3 (regression): an installer is unaffected — mode:'all' and mod
   assertEquals(primary?.refOr, null);
 });
 
-// ── 4. dispatcher global see-all is untouched ────────────────────────────────
-Deno.test("U2b-4 (regression): a dispatcher keeps the global see-all path across every vertical", async () => {
+// ── 4. dispatcher see-all is untouched, except that it stops at the tenant ──
+// "See everything" is every crew and every vertical, NOT every tenant: the pools
+// below are all org-scoped, so leaving the dispatcher feed global would hand
+// another tenant's whole board to whoever holds a dispatcher role here.
+Deno.test("U2b-4 (regression): a dispatcher keeps the see-all path across every vertical, within their tenant", async () => {
   const fx: Fixtures = {
     assignments: [
       { id: "a1", user_id: "u-crew", status: "scheduled", scheduled_date: TODAY, job_id: "job-f1" },
       { id: "a2", user_id: "u-henry", status: "scheduled", scheduled_date: TODAY, job_id: "job-p1" },
+      { id: "a3", user_id: "u-crew-b", status: "scheduled", scheduled_date: TODAY, job_id: "job-b1" },
     ],
     jobs: [
       { id: "job-f1", type: "fencing", status: "accepted" },
       { id: "job-p1", type: "patio", status: "accepted" },
+      { id: "job-b1", org_id: TENANT_B, type: "fencing", status: "accepted" },
     ],
   };
   const admin = _resolveManagerVisibility({ role: "admin", managedVerticals: [] });
@@ -511,16 +527,20 @@ Deno.test("U2b-4 (regression): a dispatcher keeps the global see-all path across
 
   const recorded: RecordedQuery[] = [];
   const showAll = admin.isDispatcher; // mode 'all' → showAll = isDispatcher && mode!=='mine'
-  const g = await myJobs(makeClient(fx, recorded), "u-admin", showAll, admin.isDispatcher, admin.isMakesafeManager, admin.poolVerticals, []);
+  const g = await myJobs(makeClient(fx, recorded), "u-admin", showAll, admin.isDispatcher, admin.isMakesafeManager, admin.poolVerticals, [], TENANT_A);
 
-  // Sees every crew's assignment across BOTH verticals (global, unchanged).
+  // Sees every crew's assignment across BOTH verticals (global, unchanged)…
   const seen = assignedJobIds(g).sort();
   assertEquals(seen, ["job-f1", "job-p1"]);
-  // The primary assignment query is the plain showAll query: no user_id scope,
-  // no vertical widening.
+  // …and never the other tenant's.
+  assertEquals(seen.includes("job-b1"), false, "a dispatcher's see-all stops at their own tenant");
+  // The primary assignment query is the showAll query: no user_id scope, no
+  // vertical widening, org-bounded.
   const primary = recorded.find((q) => q.table === "job_assignments" && q.lt == null);
   assertEquals(primary?.eq.user_id, undefined);
   assertEquals(primary?.refOr, null);
+  assertEquals(primary?.eq["jobs.org_id"], TENANT_A, "the see-all feed is tenant-scoped");
+  assertEquals(String(primary?.select || "").includes("jobs:job_id!inner"), true, "via an inner join, so the filter constrains the assignments");
 });
 
 // ── FIX 1 (ship review): manager's Board must keep the 180-day make-safe backstop ──
@@ -666,26 +686,37 @@ Deno.test("occupied-pool recovery is scoped by lens", () => {
   assertEquals(recover(null, "everyone"), false, "an unoccupied job is not a recovery case");
 });
 
-// Occupancy is a domain question. Make-safe carries its own reopen signal
-// (isAllocatableMakesafePoolDetail), so a finished visit there really does
-// release the job; a generic vertical has no such signal, so it must not.
-Deno.test("de-dupe seeds release a finished visit only where a reopen signal exists", () => {
+// A make-safe clock_off writes assignment status='complete' and touches nothing
+// else, so status alone can never mean "released". Only a durable re-attend stamp
+// (reattendMakesafe) that post-dates the visit hands the job back to the pool.
+Deno.test("de-dupe seeds release a finished visit only on a durable re-attend stamp", () => {
   const feed = [
     { status: "scheduled", jobs: { id: "job-live" } },
     { status: "in_progress", jobs: { id: "job-working" } },
-    { status: "complete", jobs: { id: "job-finished" } },
+    { status: "complete", completed_at: "2026-07-20T02:00:00Z", jobs: { id: "job-clocked-off" } },
+    { status: "complete", completed_at: "2026-07-10T02:00:00Z", jobs: { id: "job-reattended" } },
+    { status: "complete", completed_at: "2026-07-24T02:00:00Z", jobs: { id: "job-reworked" } },
     { status: "cancelled", jobs: { id: "job-dead" } },
     { status: "available", jobs: { id: "job-pool-card" } },
     { status: "scheduled", jobs: null },
   ];
+  const reattendAt = {
+    "job-reattended": "2026-07-15T04:00:00Z",
+    "job-reworked": "2026-07-15T04:00:00Z",
+  };
 
-  const makesafeSeed = _activeAssignedJobIds(feed, "makesafe");
-  assertEquals(makesafeSeed.has("job-finished"), false, "make-safe: a finished visit is re-attendable");
-  assertEquals(makesafeSeed.size, 3);
+  const makesafeSeed = _activeAssignedJobIds(feed, "makesafe", reattendAt);
+  assertEquals(makesafeSeed.has("job-clocked-off"), true, "a plain clock-off keeps holding the make-safe");
+  assertEquals(makesafeSeed.has("job-reattended"), false, "a visit that finished before the re-attend releases it");
+  assertEquals(makesafeSeed.has("job-reworked"), true, "the re-attend crew's own later visit holds it again");
+  assertEquals(makesafeSeed.size, 5);
 
-  const verticalSeed = _activeAssignedJobIds(feed, "vertical");
-  assertEquals(verticalSeed.has("job-finished"), true, "vertical: a finished visit still holds the job");
-  assertEquals(verticalSeed.size, 4);
+  // Without the stamp map (the generic pool, and any make-safe whose detail row
+  // never reached the caller) nothing finished is ever released.
+  assertEquals(_activeAssignedJobIds(feed, "makesafe").has("job-reattended"), true, "no stamp means occupied");
+  const verticalSeed = _activeAssignedJobIds(feed, "vertical", reattendAt);
+  assertEquals(verticalSeed.has("job-reattended"), true, "vertical: a finished visit always holds the job");
+  assertEquals(verticalSeed.size, 6);
 
   for (const seed of [makesafeSeed, verticalSeed]) {
     assertEquals(seed.has("job-live"), true);
@@ -695,9 +726,35 @@ Deno.test("de-dupe seeds release a finished visit only where a reopen signal exi
   }
 });
 
-Deno.test("only cancelled releases a vertical job; make-safe also releases complete", () => {
-  assertEquals([..._poolReleasingStatuses("vertical")], ["cancelled"]);
-  assertEquals([..._poolReleasingStatuses("makesafe")].sort(), ["cancelled", "complete"]);
+Deno.test("only a dead allocation releases a pool job by status alone", () => {
+  assertEquals([..._POOL_RELEASING_STATUSES], ["cancelled"]);
+});
+
+Deno.test("a completed make-safe visit releases only on durable re-attend proof", () => {
+  const done = (completed_at: string | null) => ({ status: "complete", completed_at });
+  assertEquals(_makesafeReattendReleases(done("2026-07-10T02:00:00Z"), null), false, "no stamp, no release");
+  assertEquals(_makesafeReattendReleases(done("2026-07-10T02:00:00Z"), ""), false, "an empty stamp is not proof");
+  assertEquals(_makesafeReattendReleases(done("2026-07-10T02:00:00Z"), "not-a-date"), false, "nor is an unreadable one");
+  assertEquals(
+    _makesafeReattendReleases(done("2026-07-10T02:00:00Z"), "2026-07-15T04:00:00Z"),
+    true,
+    "a re-attend after the visit hands the job back",
+  );
+  assertEquals(
+    _makesafeReattendReleases(done("2026-07-20T02:00:00Z"), "2026-07-15T04:00:00Z"),
+    false,
+    "a visit finished AFTER the re-attend holds the job",
+  );
+  assertEquals(
+    _makesafeReattendReleases(done(null), "2026-07-15T04:00:00Z"),
+    true,
+    "an auto-closed row carries no completion stamp, so the marker is the only evidence",
+  );
+  assertEquals(
+    _makesafeReattendReleases({ status: "in_progress", completed_at: null }, "2026-07-15T04:00:00Z"),
+    false,
+    "only a finished visit is ever a release candidate",
+  );
 });
 
 // The 180-day backstop still leaves two holes the make-safe pool used to fall
@@ -706,17 +763,31 @@ Deno.test("only cancelled releases a vertical job; make-safe also releases compl
 // treated as occupied, in Everyone AND in the personal union.
 function occupiedMakesafeFixtures(): Fixtures {
   const ANCIENT = new Date(Date.now() + 8 * 3600 * 1000 - 300 * 86400 * 1000).toISOString().slice(0, 10);
+  const ANCIENT_DONE_AT = new Date(Date.now() - 300 * 86400 * 1000).toISOString();
+  const OLD_REATTEND_AT = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+  const REDO_DONE_AT = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
+  const REDO_REATTEND_AT = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
+  const JUST_CLOCKED_OFF_AT = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   return {
     assignments: [
       { id: "a-ms-ancient", user_id: "u-crew5", user_name: "Crew E", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-ancient" },
       { id: "a-ms-null", user_id: "u-crew6", user_name: "Crew F", status: "scheduled", scheduled_date: null, job_id: "job-ms-null" },
       { id: "a-ms-cancelled", user_id: "u-crew7", user_name: "Crew G", status: "cancelled", scheduled_date: null, job_id: "job-ms-open" },
-      // Re-attend (M-F): cycle 1 closed to 'complete' and reattendMakesafe
-      // deliberately creates no new assignment, so the job must pool again.
-      { id: "a-ms-done", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: ANCIENT, job_id: "job-ms-reattend" },
+      // Re-attend (M-F): cycle 1 closed to 'complete', reattendMakesafe stamped
+      // last_reattend_at AFTER it and deliberately creates no new assignment, so
+      // the job must pool again.
+      { id: "a-ms-done", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: ANCIENT, completed_at: ANCIENT_DONE_AT, job_id: "job-ms-reattend" },
       // The same re-attend at the COMMON timing: the finished visit is still
       // inside the 30-day feed and the 180-day backstop.
-      { id: "a-ms-redo-done", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: TODAY, job_id: "job-ms-redo" },
+      { id: "a-ms-redo-done", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: TODAY, completed_at: REDO_DONE_AT, job_id: "job-ms-redo" },
+      // A PLAIN clock_off: status='complete', nothing reopened. The crew has
+      // worked it and the report is still outstanding.
+      { id: "a-ms-clockoff", user_id: "u-crew11", user_name: "Crew K", status: "complete", scheduled_date: TODAY, completed_at: JUST_CLOCKED_OFF_AT, job_id: "job-ms-clockedoff" },
+      // The same clock_off, beyond every window — reachable only via the probe.
+      { id: "a-ms-ancient-done", user_id: "u-crew12", user_name: "Crew L", status: "complete", scheduled_date: ANCIENT, completed_at: ANCIENT_DONE_AT, job_id: "job-ms-ancient-done" },
+      // A re-attend the second crew has already worked: their visit finished
+      // AFTER the stamp, so the job is occupied again.
+      { id: "a-ms-recycle-done", user_id: "u-crew13", user_name: "Crew M", status: "complete", scheduled_date: TODAY, completed_at: JUST_CLOCKED_OFF_AT, job_id: "job-ms-recycled" },
       // The viewer's OWN beyond-backstop allocation.
       { id: "a-ms-hugo", user_id: "u-hugo", user_name: "Hugo", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-mine" },
       // A CURRENT allocation on a legacy detail-backed make-safe: the feed's
@@ -732,6 +803,9 @@ function occupiedMakesafeFixtures(): Fixtures {
       { id: "job-ms-open", type: "makesafe", status: "accepted", job_number: "SWMS-202" }, // truly open
       { id: "job-ms-reattend", type: "makesafe", status: "accepted", job_number: "SWMS-203" },
       { id: "job-ms-redo", type: "makesafe", status: "accepted", job_number: "SWMS-205" },
+      { id: "job-ms-clockedoff", type: "makesafe", status: "in_progress", job_number: "SWMS-207" },
+      { id: "job-ms-ancient-done", type: "makesafe", status: "in_progress", job_number: "SWMS-208" },
+      { id: "job-ms-recycled", type: "makesafe", status: "in_progress", job_number: "SWMS-209" },
       { id: "job-ms-mine", type: "makesafe", status: "accepted", job_number: "SWMS-204" },
       // Legacy import: neither type='makesafe' nor an SWMS- number, reachable
       // only through the makesafe_job_details backstop.
@@ -741,6 +815,12 @@ function occupiedMakesafeFixtures(): Fixtures {
     details: [
       { job_id: "job-ms-legacy" },
       { job_id: "job-ms-worked-cancelled", cancel_reason: "builder_recalled" },
+      { job_id: "job-ms-reattend", substatus: "waiting_on_trade_report", last_reattend_at: OLD_REATTEND_AT },
+      { job_id: "job-ms-redo", substatus: "waiting_on_trade_report", last_reattend_at: REDO_REATTEND_AT },
+      // No stamp: the report is simply outstanding after the visit.
+      { job_id: "job-ms-clockedoff", substatus: "waiting_on_trade_report" },
+      { job_id: "job-ms-ancient-done", substatus: "waiting_on_trade_report" },
+      { job_id: "job-ms-recycled", substatus: "waiting_on_trade_report", last_reattend_at: REDO_DONE_AT },
     ],
   };
 }
@@ -770,15 +850,45 @@ Deno.test("a re-attended make-safe returns to the allocatable pool", async () =>
     makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
     false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
   );
-  assertEquals(poolJobIds(g).includes("job-ms-reattend"), true, "a completed visit releases the make-safe");
+  assertEquals(poolJobIds(g).includes("job-ms-reattend"), true, "a re-attended visit releases the make-safe");
   assertEquals(assignedJobIds(g).includes("job-ms-reattend"), false, "the closed visit is not re-rendered as a live card");
 
   // The common timing: the finished visit is still INSIDE the feed window, so
-  // the de-dupe seed — not just the probe — has to ignore closed rows.
+  // the de-dupe seed — not just the probe — has to honour the re-attend stamp.
   assertEquals(poolJobIds(g).includes("job-ms-redo"), true, "re-attend is allocatable without waiting out the 180-day window");
   const redoCards = nonPool(g).filter((a) => a.jobs?.id === "job-ms-redo");
   assertEquals(redoCards.map((a) => a.id), ["a-ms-redo-done"], "the finished visit still shows once, as history");
   assertEquals(redoCards[0]?.status, "complete");
+});
+
+// The regression this rule exists for: clock_off writes assignment
+// status='complete' and touches makesafe_job_details not at all, so treating
+// 'complete' as "released" re-offered worked make-safes for a second allocation
+// AND rendered them twice (pool card + the crew's own feed card).
+Deno.test("a clocked-off make-safe stays occupied until an explicit re-attend", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
+  );
+
+  // In-window: the de-dupe seed has to hold it, or the crew's card and a pool
+  // card both render.
+  assertEquals(poolJobIds(g).includes("job-ms-clockedoff"), false, "unfinished work is never re-offered as available");
+  const workedCards = nonPool(g).filter((a) => a.jobs?.id === "job-ms-clockedoff");
+  assertEquals(workedCards.map((a) => a.id), ["a-ms-clockoff"], "it shows exactly once, as the crew's card");
+
+  // Beyond every window: only the occupancy probe can see this one.
+  assertEquals(poolJobIds(g).includes("job-ms-ancient-done"), false, "the probe holds it too");
+  const ancientDone = nonPool(g).find((a) => a.jobs?.id === "job-ms-ancient-done");
+  assertEquals(ancientDone?.id, "a-ms-ancient-done", "recovered as the crew's card rather than vanishing");
+  assertEquals(ancientDone?.user?.id, "u-crew12", "with the crew that worked it attributed");
+
+  // A re-attend already worked by the second crew is occupied again.
+  assertEquals(poolJobIds(g).includes("job-ms-recycled"), false, "a visit finished after the re-attend re-occupies the job");
+  const recycled = nonPool(g).filter((a) => a.jobs?.id === "job-ms-recycled");
+  assertEquals(recycled.map((a) => a.id), ["a-ms-recycle-done"], "and still shows exactly once");
 });
 
 // The detail backstop exists for imports the feed's type/SWMS- filter cannot
