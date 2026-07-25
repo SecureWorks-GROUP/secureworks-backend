@@ -384,15 +384,41 @@ Deno.test("dispatcher Everyone behavior remains tenant-wide", async () => {
   );
 });
 
-Deno.test("manager denies an unmanaged requested vertical in Everyone or Mine", async () => {
+Deno.test("manager denies an unmanaged requested vertical in Everyone", async () => {
   const { client } = calendarClient(HENRY);
-  for (const mode of ["all", "mine"] as const) {
-    await assertRejects(
-      () => tradeCalendarEvents(client, params(mode, "patio"), HENRY, false),
-      Error,
-      "not managed",
-    );
-  }
+  const error = await assertRejects(
+    () => tradeCalendarEvents(client, params("all", "patio"), HENRY, false),
+    Error,
+    "not managed",
+  );
+  assertEquals((error as any).status, 403);
+});
+
+Deno.test("Mine may filter by any vertical the viewer is personally assigned to", async () => {
+  // `type` in Mine is a display filter over rows already bounded by user_id, not
+  // a claim on the vertical, so a manager must not be narrower than an installer.
+  const { client, captures } = calendarClient(HENRY);
+  const result = await tradeCalendarEvents(
+    client,
+    params("mine", "patio"),
+    HENRY,
+    false,
+  );
+  assertEquals(result.mode, "mine");
+  assertEquals(result.type, "patio");
+  assertEquals(result.events.map((row: any) => row.assignment_id), [
+    "henry-patio",
+  ]);
+  assertEquals(captures[0].eq.user_id, "henry", "still bounded to the viewer");
+
+  const installer = { ...HENRY, managedVerticals: [] };
+  const ordinary = await tradeCalendarEvents(
+    calendarClient(installer).client,
+    params("mine", "patio"),
+    installer,
+    false,
+  );
+  assertEquals(ordinary.events, result.events);
 });
 
 Deno.test("a manager never sees another tenant's managed-vertical work", async () => {

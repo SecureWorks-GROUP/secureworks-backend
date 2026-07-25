@@ -67,6 +67,20 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     if (st.refOr && st.refOr.referencedTable === "jobs") {
       joined = joined.filter((x) => matchOr(x.job as unknown as Record<string, unknown>, st.refOr!.str));
     }
+    // Occupancy probe: filters by an explicit job_id list, returns the
+    // occupying assignment rather than the board-card shape.
+    if (st.inCol === "job_id" && st.inVals) {
+      return {
+        data: joined
+          .filter((x) => st.inVals!.includes(x.a.job_id))
+          .map(({ a }) => ({
+            id: a.id, job_id: a.job_id, scheduled_date: a.scheduled_date,
+            status: a.status, role: "lead", assignment_type: "install",
+            crew_name: null, user: { id: a.user_id, name: a.user_id },
+          })),
+        error: null,
+      };
+    }
     return {
       data: joined.map(({ a, job }) => ({
         id: a.id, scheduled_date: a.scheduled_date, status: a.status,

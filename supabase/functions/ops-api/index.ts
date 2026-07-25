@@ -7497,7 +7497,11 @@ export async function tradeCalendarEvents(
   if (requestedTypeRaw && !requestedType) {
     throw new ApiError('type must be a supported Trade vertical', 400)
   }
-  if (!isDispatcher && managedVerticals.length > 0 && requestedType && !managedVerticals.includes(requestedType)) {
+  // Vertical authority only matters when the request widens past `user_id`. In
+  // Mine the rows are already the viewer's own, so `type` is a display filter
+  // there, not an authority claim — refusing it would make a manager's personal
+  // calendar narrower than an ordinary installer's on the same axis.
+  if (mode === 'all' && !isDispatcher && managedVerticals.length > 0 && requestedType && !managedVerticals.includes(requestedType)) {
     throw new ApiError('Not authorized: requested vertical is not managed by this user', 403)
   }
 
@@ -22529,36 +22533,97 @@ export function _resolveAllocationAuthz(input: {
 // open pool must answer that question the same way, so both the make-safe and
 // the generic per-vertical pool route through this probe.
 //
+// It returns the OCCUPYING ASSIGNMENT, not just the id, because a pool job that
+// is occupied outside the display window must still render — as an assigned card
+// with crew attribution. Dropping it would trade a wrongly-clickable card for an
+// invisible one, against the B2 rationale above ("never drop off the trade's
+// list silently").
+//
 // The probe is chunked AND paged: job_assignments holds one row per crew per
 // date, so an 80-job pool of long multi-day jobs can blow past PostgREST's
 // 1000-row cap. A silently truncated probe would re-introduce exactly the false
 // "available" card it exists to prevent, so never issue it as one unbounded read.
+// Chunking is only a URL-length guard and the chunks are independent, so they run
+// concurrently; the page loop inside each chunk is what guarantees completeness.
 const OCCUPANCY_PROBE_CHUNK = 25
 const OCCUPANCY_PROBE_PAGE = 1000
-async function fetchOccupiedJobIds(client: any, jobIds: string[]): Promise<Set<string>> {
-  const occupied = new Set<string>()
+const OCCUPANCY_PROBE_SELECT = `
+        job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
+        started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        user:user_id ( id, name )
+      `
+
+// Deterministic pick when a job carries several active assignments: the latest
+// scheduled row wins (NULL dates sort lowest), id as the tiebreak.
+function occupancyOutranks(candidate: any, current: any): boolean {
+  const candidateDate = String(candidate?.scheduled_date || '')
+  const currentDate = String(current?.scheduled_date || '')
+  if (candidateDate !== currentDate) return candidateDate > currentDate
+  return String(candidate?.id || '') > String(current?.id || '')
+}
+
+async function fetchOccupyingAssignments(client: any, jobIds: string[]): Promise<Map<string, any>> {
+  const byJobId = new Map<string, any>()
   const ids = Array.from(new Set((jobIds || []).filter(Boolean).map((id: any) => String(id))))
+  const chunks: string[][] = []
   for (let i = 0; i < ids.length; i += OCCUPANCY_PROBE_CHUNK) {
-    const chunk = ids.slice(i, i + OCCUPANCY_PROBE_CHUNK)
+    chunks.push(ids.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+  }
+  const chunkRows = await Promise.all(chunks.map(async (chunk) => {
+    const rows: any[] = []
     let offset = 0
     while (true) {
       const { data, error } = await client
         .from('job_assignments')
-        .select('job_id')
+        .select(OCCUPANCY_PROBE_SELECT)
         .in('job_id', chunk)
         .neq('status', 'cancelled')
         .order('job_id', { ascending: true })
         .range(offset, offset + OCCUPANCY_PROBE_PAGE - 1)
       if (error) throw error
-      const rows = data || []
-      for (const row of rows) if (row?.job_id) occupied.add(String(row.job_id))
-      if (rows.length < OCCUPANCY_PROBE_PAGE) break
+      const page = data || []
+      rows.push(...page)
+      if (page.length < OCCUPANCY_PROBE_PAGE) break
       offset += OCCUPANCY_PROBE_PAGE
     }
+    return rows
+  }))
+  for (const row of chunkRows.flat()) {
+    const jobId = row?.job_id ? String(row.job_id) : ''
+    if (!jobId) continue
+    const current = byJobId.get(jobId)
+    if (!current || occupancyOutranks(row, current)) byJobId.set(jobId, row)
   }
-  return occupied
+  return byJobId
 }
-export const _fetchOccupiedJobIdsForTest = fetchOccupiedJobIds
+export const _fetchOccupyingAssignmentsForTest = fetchOccupyingAssignments
+
+// An occupied pool job rendered honestly: the real assignment (crew, dates,
+// clock state) carried on the already tenant+vertical-authorized pool job. Never
+// an `_open` assignment_type/role, so the grouper keeps it out of the pool lane.
+function occupiedPoolAssignmentCard(assignment: any, job: any) {
+  return {
+    id: assignment?.id,
+    scheduled_date: assignment?.scheduled_date ?? null,
+    scheduled_end: assignment?.scheduled_end ?? null,
+    start_time: assignment?.start_time ?? null,
+    status: assignment?.status ?? 'scheduled',
+    role: assignment?.role ?? null,
+    notes: assignment?.notes ?? null,
+    assignment_type: assignment?.assignment_type ?? null,
+    crew_name: assignment?.crew_name ?? null,
+    started_at: assignment?.started_at ?? null,
+    completed_at: assignment?.completed_at ?? null,
+    clocked_on_at: assignment?.clocked_on_at ?? null,
+    clocked_off_at: assignment?.clocked_off_at ?? null,
+    travel_started_at: assignment?.travel_started_at ?? null,
+    arrived_at: assignment?.arrived_at ?? null,
+    break_minutes: assignment?.break_minutes ?? null,
+    job_phase: assignment?.job_phase ?? null,
+    user: assignment?.user ?? null,
+    jobs: job,
+  }
+}
 
 export async function myJobs(
   client: any,
@@ -22817,10 +22882,9 @@ export async function myJobs(
     // both windows drop NULL-dated rows, so de-duping against it alone still
     // lets an already-allocated make-safe reappear as a synthetic "available"
     // card — the double-allocation risk. Ask job_assignments directly.
+    let makesafeOccupancy = new Map<string, any>()
     try {
-      for (const occupiedId of await fetchOccupiedJobIds(client, openMakesafes.map((job: any) => job?.id))) {
-        assignedJobIds.add(occupiedId)
-      }
+      makesafeOccupancy = await fetchOccupyingAssignments(client, openMakesafes.map((job: any) => job?.id))
     } catch (occErr: any) {
       // Non-blocking: a failed probe must not take the make-safe board down. The
       // windowed de-dupe below still applies.
@@ -22829,6 +22893,14 @@ export async function myJobs(
 
     for (const job of openMakesafes) {
       if (!job?.id || assignedJobIds.has(job.id)) continue
+      // Occupied outside the display window: still show it, but as the crew's
+      // real allocation rather than as open work anyone may take.
+      const occupying = makesafeOccupancy.get(job.id)
+      if (occupying) {
+        assignedJobIds.add(job.id)
+        assignments.push(occupiedPoolAssignmentCard(occupying, job))
+        continue
+      }
       assignments.push({
         id: `makesafe-open-${job.id}`,
         scheduled_date: today,
@@ -22953,12 +23025,17 @@ export async function myJobs(
         // ask job_assignments directly whether these already tenant+vertical-
         // authorized pool ids are occupied at any date.
         const poolJobIds = (openJobs || []).map((job: any) => job?.id).filter(Boolean)
-        for (const occupiedId of await fetchOccupiedJobIds(client, poolJobIds)) {
-          assignedJobIdsPool.add(occupiedId)
-        }
+        const occupancy = await fetchOccupyingAssignments(client, poolJobIds)
         for (const job of (openJobs || [])) {
           if (!job?.id || assignedJobIdsPool.has(job.id)) continue
           assignedJobIdsPool.add(job.id)
+          // Occupied outside the display window: still show it, but as the
+          // crew's real allocation rather than as open work anyone may take.
+          const occupying = occupancy.get(job.id)
+          if (occupying) {
+            assignments.push(occupiedPoolAssignmentCard(occupying, job))
+            continue
+          }
           assignments.push({
             id: `${vertical}-open-${job.id}`,
             scheduled_date: today,

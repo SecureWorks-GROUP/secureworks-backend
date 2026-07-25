@@ -1,6 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  _fetchOccupiedJobIdsForTest,
+  _fetchOccupyingAssignmentsForTest,
   _managerBoardVerticals,
   _resolveManagerVisibility,
   myJobs,
@@ -110,11 +110,27 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     if (st.refOr && st.refOr.referencedTable === "jobs") {
       joined = joined.filter((x) => matchOr(x.job as unknown as Record<string, unknown>, st.refOr!.str));
     }
+    // The occupancy probe is the only query that filters by an explicit job_id
+    // list; it returns the occupying assignment, not just the id.
     if (st.inCol === "job_id" && st.inVals) {
-      joined = joined.filter((x) => st.inVals!.includes(x.a.job_id));
-    }
-    if (st.select.trim() === "job_id") {
-      return { data: joined.map(({ a }) => ({ job_id: a.job_id })), error: null };
+      return {
+        data: joined
+          .filter((x) => st.inVals!.includes(x.a.job_id))
+          .map(({ a }) => ({
+            id: a.id,
+            job_id: a.job_id,
+            scheduled_date: a.scheduled_date,
+            scheduled_end: null,
+            start_time: null,
+            status: a.status,
+            role: a.role ?? "lead",
+            notes: null,
+            assignment_type: a.assignment_type ?? "install",
+            crew_name: null,
+            user: { id: a.user_id, name: a.user_name ?? a.user_id },
+          })),
+        error: null,
+      };
     }
     const isAdminSelect = String(st.select || "").includes("user:user_id");
     return {
@@ -250,15 +266,22 @@ Deno.test("U2b-1: fencing manager mode:'all' now sees ANOTHER crew's fencing ass
   assertEquals(newAssigned.includes("job-f2"), true, "widened set still includes the manager's own job");
   assertEquals(assignedUserIds(gNew).includes("u-crew"), true, "other crew member is attributed on the card");
 
-  // OLD (pre-U2b): same call with managerScope=[] → own assignments only.
+  // OLD (pre-U2b): same call with managerScope=[] → the ASSIGNMENT QUERY stays
+  // own-only, which is the gap U2b closes. job-f1 still reaches this manager's
+  // board, but only via the pool's occupancy probe, and never as a false
+  // "available" card — it carries the owning crew.
   const recOld: RecordedQuery[] = [];
   const gOld = await myJobs(
     makeClient(fencingFixtures(), recOld), "u-henry",
     false, HENRY.isDispatcher, HENRY.isMakesafeManager, HENRY.poolVerticals, [],
   );
-  const oldAssigned = assignedJobIds(gOld);
-  assertEquals(oldAssigned.includes("job-f2"), true, "old path shows the manager's own job");
-  assertEquals(oldAssigned.includes("job-f1"), false, "old path did NOT show other crew's assignment (the gap U2b closes)");
+  const primaryOld = recOld.find((q) =>
+    q.table === "job_assignments" && q.lt == null && q.inCol == null
+  );
+  assertEquals(primaryOld?.eq.user_id, "u-henry", "old path's assignment query is own-only");
+  assertEquals(primaryOld?.refOr, null, "old path issues no vertical widening");
+  assertEquals(assignedJobIds(gOld).includes("job-f2"), true, "old path shows the manager's own job");
+  assertEquals(poolJobIds(gOld).includes("job-f1"), false, "job-f1 is never a false-available card");
 });
 
 // ── 2. the open pool no longer false-lists an already-assigned job ───────────
@@ -306,10 +329,24 @@ Deno.test("fencing manager pool never labels old or null-dated assigned work as 
   assertEquals(pool.includes("job-f4"), false, "SWF-26101-shaped old assignment stays occupied");
   assertEquals(pool.includes("job-f5"), false, "null-dated assignment stays occupied");
   assertEquals(pool.includes("job-f3"), true, "genuinely unassigned crew-ready work remains available");
+
+  // Occupied is not the same as invisible: both render as the crew's real
+  // allocation, so a stale allocation nobody actioned stays on the board.
+  const assigned = nonPool(grouped);
+  const f4 = assigned.find((a) => a.jobs?.id === "job-f4");
+  const f5 = assigned.find((a) => a.jobs?.id === "job-f5");
+  assertEquals(f4?.id, "a-old-f4", "the old allocation renders as its real assignment");
+  assertEquals(f4?.user?.id, "u-crew3", "with the occupying crew attributed");
+  assertEquals(String(f4?.assignment_type || "").endsWith("_open"), false, "never a synthetic open card");
+  assertEquals(f5?.id, "a-null-f5", "the null-dated allocation renders as its real assignment");
+  assertEquals(f5?.user?.id, "u-crew4");
+  assertEquals(f5?.scheduled_date, null, "its null date is carried, not invented");
+
   const occupancy = recorded.find((q) =>
-    q.table === "job_assignments" && q.select.trim() === "job_id" && q.inCol === "job_id"
+    q.table === "job_assignments" && q.inCol === "job_id"
   );
   assertEquals(occupancy?.gte, null, "occupancy probe is deliberately all-date");
+  assertEquals(occupancy?.neq.status, "cancelled");
 });
 
 // ── 5. strict vertical scope: a fencing manager gets no patio anywhere ───────
@@ -462,6 +499,8 @@ Deno.test("FIX1: make-safe manager board runs the 180-day backstop vertical-wide
 Deno.test("occupancy probe chunks pool ids and pages past the 1000-row cap", async () => {
   const ids = Array.from({ length: 80 }, (_, i) => `job-${i}`);
   const calls: { ids: string[]; from: number }[] = [];
+  let inFlight = 0;
+  let peakInFlight = 0;
   const client = {
     from: () => {
       const st = { ids: [] as string[], from: 0 };
@@ -475,11 +514,19 @@ Deno.test("occupancy probe chunks pool ids and pages past the 1000-row cap", asy
         // deno-lint-ignore no-explicit-any
         then: (resolve: any) => {
           calls.push({ ids: st.ids, from: st.from });
+          inFlight++;
+          peakInFlight = Math.max(peakInFlight, inFlight);
           // Saturate the first page of the first chunk so a second page is required.
           const rows = st.ids.includes("job-0") && st.from === 0
-            ? Array.from({ length: 1000 }, () => ({ job_id: "job-0" }))
-            : [{ job_id: st.from > 0 ? "job-past-page-1" : st.ids[0] }];
-          resolve({ data: rows, error: null });
+            ? Array.from({ length: 1000 }, () => ({ id: "a-0", job_id: "job-0" }))
+            : [{
+              id: st.from > 0 ? "a-past-page-1" : `a-${st.ids[0]}`,
+              job_id: st.from > 0 ? "job-past-page-1" : st.ids[0],
+            }];
+          queueMicrotask(() => {
+            inFlight--;
+            resolve({ data: rows, error: null });
+          });
         },
       };
       return b;
@@ -487,11 +534,41 @@ Deno.test("occupancy probe chunks pool ids and pages past the 1000-row cap", asy
   };
 
   // deno-lint-ignore no-explicit-any
-  const occupied = await _fetchOccupiedJobIdsForTest(client as any, ids);
+  const occupied = await _fetchOccupyingAssignmentsForTest(client as any, ids);
   assertEquals(calls.every((c) => c.ids.length <= 25), true, "pool ids are chunked well under the row cap");
   assertEquals(calls.some((c) => c.from === 1000), true, "a saturated page is followed by the next range");
   assertEquals(occupied.has("job-past-page-1"), true, "rows past the first page are never silently dropped");
+  assertEquals(occupied.get("job-past-page-1")?.id, "a-past-page-1", "the occupying assignment is carried, not just the id");
   assertEquals(occupied.has("job-0"), true);
+  // Chunking is only a URL-length guard, so the independent chunks must not
+  // serialize into extra round trips on the my_jobs hot path.
+  assertEquals(peakInFlight > 1, true, "independent chunks are probed concurrently");
+});
+
+Deno.test("occupancy probe picks the latest active assignment for a job", async () => {
+  const rows = [
+    { id: "a-early", job_id: "job-x", scheduled_date: "2026-01-01" },
+    { id: "a-late", job_id: "job-x", scheduled_date: "2026-06-01" },
+    { id: "a-null", job_id: "job-x", scheduled_date: null },
+  ];
+  const client = {
+    from: () => {
+      // deno-lint-ignore no-explicit-any
+      const b: any = {
+        select: () => b,
+        in: () => b,
+        neq: () => b,
+        order: () => b,
+        range: () => b,
+        // deno-lint-ignore no-explicit-any
+        then: (resolve: any) => resolve({ data: rows, error: null }),
+      };
+      return b;
+    },
+  };
+  // deno-lint-ignore no-explicit-any
+  const occupied = await _fetchOccupyingAssignmentsForTest(client as any, ["job-x"]);
+  assertEquals(occupied.get("job-x")?.id, "a-late");
 });
 
 // The 180-day backstop still leaves two holes the make-safe pool used to fall
@@ -526,8 +603,19 @@ Deno.test("make-safe pool never labels beyond-backstop or null-dated assigned wo
   assertEquals(pool.includes("job-ms-ancient"), false, ">180-day allocation stays occupied");
   assertEquals(pool.includes("job-ms-null"), false, "null-dated allocation stays occupied");
   assertEquals(pool.includes("job-ms-open"), true, "a cancelled allocation does not occupy a genuinely open make-safe");
+
+  // B2's rationale still holds: an allocated make-safe never drops off the
+  // trade's list silently — it moves from the pool lane to an assigned card.
+  const assigned = nonPool(g);
+  const ancient = assigned.find((a) => a.jobs?.id === "job-ms-ancient");
+  const nullDated = assigned.find((a) => a.jobs?.id === "job-ms-null");
+  assertEquals(ancient?.id, "a-ms-ancient", "beyond-backstop allocation still renders");
+  assertEquals(ancient?.user?.id, "u-crew5", "with the occupying crew attributed");
+  assertEquals(nullDated?.id, "a-ms-null", "null-dated allocation still renders");
+  assertEquals(nullDated?.user?.id, "u-crew6");
+
   const occupancy = recorded.find((q) =>
-    q.table === "job_assignments" && q.select.trim() === "job_id" && q.inCol === "job_id"
+    q.table === "job_assignments" && q.inCol === "job_id"
   );
   assertEquals(occupancy?.gte, null, "make-safe occupancy probe is deliberately all-date");
   assertEquals(occupancy?.neq.status, "cancelled", "cancelled assignments never occupy a job");
@@ -543,6 +631,9 @@ Deno.test("make-safe personal union also refuses to re-surface occupied work as 
   assertEquals(pool.includes("job-ms-ancient"), false, "other crew's old allocation is not available in mode:'mine'");
   assertEquals(pool.includes("job-ms-null"), false, "other crew's null-dated allocation is not available in mode:'mine'");
   assertEquals(pool.includes("job-ms-open"), true);
+  const assignedIds = nonPool(g).map((a) => a.jobs?.id);
+  assertEquals(assignedIds.includes("job-ms-ancient"), true, "still visible, now honestly attributed");
+  assertEquals(assignedIds.includes("job-ms-null"), true);
 });
 
 Deno.test("FIX1: fencing manager unaffected — no make-safe backstop query issued", async () => {
