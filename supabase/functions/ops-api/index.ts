@@ -22188,22 +22188,44 @@ export const _OPEN_ASSIGNMENT_STATUSES = ['scheduled', 'confirmed', 'draft'] as 
 // the report statuses still hold the job.
 export const _CLOSED_ASSIGNMENT_STATUSES = ['cancelled', 'complete'] as const
 
-export function _closedAssignmentStatusFilter(): string {
-  return '(' + _CLOSED_ASSIGNMENT_STATUSES.map((s) => `"${s}"`).join(',') + ')'
+// Which assignment statuses RELEASE a job back to an open pool. Occupancy is a
+// domain question, not a status-vocabulary one, so the two pools answer it
+// differently:
+//
+//  - 'makesafe': 'complete' releases. That pool gates every card on
+//    isAllocatableMakesafePoolDetail, which drops a make-safe the moment
+//    report_received_at / report_sent_at is set and which ONLY reattendMakesafe
+//    clears. So a make-safe that reaches the pool loop carrying a finished visit
+//    has genuinely been re-opened for another attendance.
+//  - 'vertical' (fencing / patio / decking): 'complete' still HOLDS. That pool
+//    gates on jobs.status alone, and the trade app writes
+//    job_assignments.status='complete' (updateMyAssignment / updateJobPhase)
+//    without advancing jobs.status — so releasing here would re-offer work a
+//    crew has just finished to a second crew before the office moves the job on.
+//
+// 'cancelled' releases in both: a dead allocation never holds a job.
+export type PoolOccupancyKind = 'makesafe' | 'vertical'
+
+export function _poolReleasingStatuses(pool: PoolOccupancyKind): readonly string[] {
+  return pool === 'makesafe' ? _CLOSED_ASSIGNMENT_STATUSES : ['cancelled']
+}
+
+export function _poolReleasingStatusFilter(pool: PoolOccupancyKind): string {
+  return '(' + _poolReleasingStatuses(pool).map((s) => `"${s}"`).join(',') + ')'
 }
 
 // The windowed assignment feed is NOT status-filtered beyond 'cancelled', so it
-// still carries finished visits. Every de-duplication seed built from that feed
-// must therefore ask the same question the occupancy probe does: does a LIVE
-// assignment hold this job? Seeding from closed rows is what kept a re-attended
-// make-safe out of the pool until its last visit aged out of the window.
-export function _activeAssignedJobIds(assignments: any[]): Set<string> {
+// still carries finished visits. A pool's de-duplication seed must therefore ask
+// the same question its occupancy probe does: does a row that still HOLDS this
+// job (for this pool's semantics) exist in the feed?
+export function _activeAssignedJobIds(assignments: any[], pool: PoolOccupancyKind): Set<string> {
+  const releasing = _poolReleasingStatuses(pool)
   const ids = new Set<string>()
   for (const assignment of (assignments || [])) {
     const jobId = assignment?.jobs?.id
     if (!jobId) continue
     const status = String(assignment?.status || '').toLowerCase()
-    if ((_CLOSED_ASSIGNMENT_STATUSES as readonly string[]).includes(status)) continue
+    if (releasing.includes(status)) continue
     ids.add(jobId)
   }
   return ids
@@ -22606,6 +22628,7 @@ async function fetchOccupyingAssignments(
   client: any,
   jobIds: string[],
   preferUserId = '',
+  pool: PoolOccupancyKind = 'vertical',
 ): Promise<Map<string, any>> {
   const byJobId = new Map<string, any>()
   const ids = Array.from(new Set((jobIds || []).filter(Boolean).map((id: any) => String(id))))
@@ -22621,7 +22644,7 @@ async function fetchOccupyingAssignments(
         .from('job_assignments')
         .select(OCCUPANCY_PROBE_SELECT)
         .in('job_id', chunk)
-        .not('status', 'in', _closedAssignmentStatusFilter())
+        .not('status', 'in', _poolReleasingStatusFilter(pool))
         .order('job_id', { ascending: true })
         .range(offset, offset + OCCUPANCY_PROBE_PAGE - 1)
       if (error) throw error
@@ -22872,7 +22895,7 @@ export async function myJobs(
   // de-duplicated via assignedJobIds below. Keep this specific to MakeSafe and
   // expose only the same slim job fields the mobile job list already uses.
   if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
-    const assignedJobIds = _activeAssignedJobIds(assignments)
+    const assignedJobIds = _activeAssignedJobIds(assignments, 'makesafe')
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
@@ -22958,6 +22981,7 @@ export async function myJobs(
         client,
         openMakesafes.map((job: any) => job?.id),
         poolRecoveryUserId,
+        'makesafe',
       )
     } catch (occErr: any) {
       // Non-blocking: a failed probe must not take the make-safe board down. The
@@ -23037,16 +23061,36 @@ export async function myJobs(
         if (row?.job_id) cancelledDetailByJobId[String(row.job_id)] = row
       }
 
-      // Dedup against the user's own named assignments (a cancelled job should not
-      // appear twice if it somehow still carries a LIVE assignment row). A closed
-      // row is a finished visit, not ownership: cancelMakesafe only closes rows in
-      // _OPEN_ASSIGNMENT_STATUSES, so a worked-then-cancelled make-safe keeps its
-      // 'complete' row and would otherwise never reach the Cancelled column.
-      const assignedCancelledIds = _activeAssignedJobIds(assignments)
+      // Dedup against every card already emitted — the classifier routes on
+      // job.status='cancelled', so a job that reached the board by ANY route is
+      // already in the Cancelled column and a synthetic card would double it.
+      // cancelMakesafe only closes rows in _OPEN_ASSIGNMENT_STATUSES, so a
+      // worked-then-cancelled make-safe still rides the feed on its 'complete'
+      // row; what that card lacks is the cancel_* attribution, so hand it the
+      // details instead of appending a second card.
+      const emittedCardsByJobId = new Map<string, any[]>()
+      for (const emitted of (assignments || [])) {
+        const emittedJobId = emitted?.jobs?.id
+        if (!emittedJobId) continue
+        const bucket = emittedCardsByJobId.get(emittedJobId)
+        if (bucket) bucket.push(emitted)
+        else emittedCardsByJobId.set(emittedJobId, [emitted])
+      }
+      const cancelledHandled = new Set<string>()
       for (const job of cancelledJobs) {
-        if (!job?.id || assignedCancelledIds.has(job.id)) continue
-        assignedCancelledIds.add(job.id)
-        if (cancelledDetailByJobId[job.id]) job.makesafe_details = cancelledDetailByJobId[job.id]
+        if (!job?.id || cancelledHandled.has(job.id)) continue
+        cancelledHandled.add(job.id)
+        const cancelDetail = cancelledDetailByJobId[job.id]
+        const alreadyEmitted = emittedCardsByJobId.get(job.id)
+        if (alreadyEmitted && alreadyEmitted.length > 0) {
+          if (cancelDetail) {
+            for (const card of alreadyEmitted) {
+              if (card?.jobs) card.jobs.makesafe_details = cancelDetail
+            }
+          }
+          continue
+        }
+        if (cancelDetail) job.makesafe_details = cancelDetail
         assignments.push({
           id: `makesafe-cancelled-${job.id}`,
           scheduled_date: today,
@@ -23081,7 +23125,7 @@ export async function myJobs(
   // make-safe pool via _makesafePoolExcludedStatusFilter().
   const genericPoolVerticals = (poolVerticals || []).filter((v) => v !== 'makesafe')
   if (genericPoolVerticals.length > 0) {
-    const assignedJobIdsPool = _activeAssignedJobIds(assignments)
+    const assignedJobIdsPool = _activeAssignedJobIds(assignments, 'vertical')
     for (const vertical of genericPoolVerticals) {
       try {
         // M3b U1 (D1+G1): INCLUDE filter — the fencing/patio/decking pool shows
@@ -23104,7 +23148,7 @@ export async function myJobs(
         // ask job_assignments directly whether these already tenant+vertical-
         // authorized pool ids are occupied at any date.
         const poolJobIds = (openJobs || []).map((job: any) => job?.id).filter(Boolean)
-        const occupancy = await fetchOccupyingAssignments(client, poolJobIds, poolRecoveryUserId)
+        const occupancy = await fetchOccupyingAssignments(client, poolJobIds, poolRecoveryUserId, 'vertical')
         for (const job of (openJobs || [])) {
           if (!job?.id || assignedJobIdsPool.has(job.id)) continue
           assignedJobIdsPool.add(job.id)

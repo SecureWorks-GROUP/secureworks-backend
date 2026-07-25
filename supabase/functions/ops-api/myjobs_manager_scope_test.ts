@@ -3,6 +3,7 @@ import {
   _activeAssignedJobIds,
   _fetchOccupyingAssignmentsForTest,
   _managerBoardVerticals,
+  _poolReleasingStatuses,
   _resolveManagerVisibility,
   _shouldRecoverOccupiedPoolJob,
   myJobs,
@@ -47,7 +48,7 @@ type Assignment = {
   assignment_type?: string;
   role?: string;
 };
-type MakesafeDetail = { job_id: string; substatus?: string };
+type MakesafeDetail = { job_id: string; substatus?: string; cancel_reason?: string };
 type Fixtures = { assignments: Assignment[]; jobs: Job[]; details?: MakesafeDetail[] };
 type RecordedQuery = {
   table: string;
@@ -241,8 +242,8 @@ function fencingFixtures(): Fixtures {
       // though they stay outside the 30-day manager display window.
       { id: "a-old-f4", user_id: "u-crew3", user_name: "Crew C", status: "scheduled", scheduled_date: OLD_DATE, job_id: "job-f4" },
       { id: "a-null-f5", user_id: "u-crew4", user_name: "Crew D", status: "scheduled", scheduled_date: null, job_id: "job-f5" },
-      // A finished visit releases the job: closeOpenAssignmentsForJob writes
-      // 'complete', so job-f6 is allocatable again.
+      // A finished fencing visit on a job the office has not advanced yet: it
+      // must NOT be re-offered as available.
       { id: "a-done-f6", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: OLD_DATE, job_id: "job-f6" },
       // The manager's OWN out-of-window allocation — the only occupancy the
       // personal lens may recover.
@@ -330,20 +331,24 @@ Deno.test("personal view recovers only the viewer's own out-of-window allocation
   }
 });
 
-// closeOpenAssignmentsForJob writes 'complete', not 'cancelled'. A finished
-// visit must release the job so re-attend work can be allocated again.
-Deno.test("a completed assignment does not occupy a crew-ready job", async () => {
+// The generic pool gates on jobs.status alone, and the trade app marks an
+// assignment 'complete' without advancing the job — so a finished fencing visit
+// must keep holding its job or the crew that just finished it gets its work
+// re-offered to a second crew.
+Deno.test("a completed assignment still holds a crew-ready fencing job", async () => {
   const managerScope = _managerBoardVerticals({ isDispatcher: HENRY.isDispatcher, mode: "all", managedVerticals: ["fencing"] });
   const recorded: RecordedQuery[] = [];
   const g = await myJobs(
     makeClient(fencingFixtures(), recorded), "u-henry",
     false, HENRY.isDispatcher, HENRY.isMakesafeManager, HENRY.poolVerticals, managerScope, TENANT_A,
   );
-  assertEquals(poolJobIds(g).includes("job-f6"), true, "a job whose only row is 'complete' is allocatable again");
-  assertEquals(assignedJobIds(g).includes("job-f6"), false, "and is not re-rendered as the finished crew's card");
+  assertEquals(poolJobIds(g).includes("job-f6"), false, "just-finished fencing work is never re-offered as available");
+  const finished = nonPool(g).find((a) => a.jobs?.id === "job-f6");
+  assertEquals(finished?.id, "a-done-f6", "it renders as the finishing crew's card");
+  assertEquals(finished?.user?.id, "u-crew8");
   const occupancy = recorded.find((q) => q.table === "job_assignments" && q.inCol === "job_id");
-  assertEquals(parseNotInSet(occupancy?.notIn || "").has("complete"), true, "probe excludes completed rows");
-  assertEquals(parseNotInSet(occupancy?.notIn || "").has("cancelled"), true, "probe excludes cancelled rows");
+  assertEquals(parseNotInSet(occupancy?.notIn || "").has("complete"), false, "a completed row still occupies a vertical job");
+  assertEquals(parseNotInSet(occupancy?.notIn || "").has("cancelled"), true, "a dead allocation never occupies");
 });
 
 // ── 2. the open pool no longer false-lists an already-assigned job ───────────
@@ -661,21 +666,38 @@ Deno.test("occupied-pool recovery is scoped by lens", () => {
   assertEquals(recover(null, "everyone"), false, "an unoccupied job is not a recovery case");
 });
 
-Deno.test("de-dupe seeds count only LIVE assignments as holding a job", () => {
-  const seeded = _activeAssignedJobIds([
+// Occupancy is a domain question. Make-safe carries its own reopen signal
+// (isAllocatableMakesafePoolDetail), so a finished visit there really does
+// release the job; a generic vertical has no such signal, so it must not.
+Deno.test("de-dupe seeds release a finished visit only where a reopen signal exists", () => {
+  const feed = [
     { status: "scheduled", jobs: { id: "job-live" } },
     { status: "in_progress", jobs: { id: "job-working" } },
     { status: "complete", jobs: { id: "job-finished" } },
     { status: "cancelled", jobs: { id: "job-dead" } },
     { status: "available", jobs: { id: "job-pool-card" } },
     { status: "scheduled", jobs: null },
-  ]);
-  assertEquals(seeded.has("job-live"), true);
-  assertEquals(seeded.has("job-working"), true, "in_progress still holds the job");
-  assertEquals(seeded.has("job-finished"), false, "a finished visit releases the job");
-  assertEquals(seeded.has("job-dead"), false);
-  assertEquals(seeded.has("job-pool-card"), true, "an already-emitted pool card is not re-emitted");
-  assertEquals(seeded.size, 3);
+  ];
+
+  const makesafeSeed = _activeAssignedJobIds(feed, "makesafe");
+  assertEquals(makesafeSeed.has("job-finished"), false, "make-safe: a finished visit is re-attendable");
+  assertEquals(makesafeSeed.size, 3);
+
+  const verticalSeed = _activeAssignedJobIds(feed, "vertical");
+  assertEquals(verticalSeed.has("job-finished"), true, "vertical: a finished visit still holds the job");
+  assertEquals(verticalSeed.size, 4);
+
+  for (const seed of [makesafeSeed, verticalSeed]) {
+    assertEquals(seed.has("job-live"), true);
+    assertEquals(seed.has("job-working"), true, "in_progress always holds the job");
+    assertEquals(seed.has("job-dead"), false, "a dead allocation never holds a job");
+    assertEquals(seed.has("job-pool-card"), true, "an already-emitted pool card is not re-emitted");
+  }
+});
+
+Deno.test("only cancelled releases a vertical job; make-safe also releases complete", () => {
+  assertEquals([..._poolReleasingStatuses("vertical")], ["cancelled"]);
+  assertEquals([..._poolReleasingStatuses("makesafe")].sort(), ["cancelled", "complete"]);
 });
 
 // The 180-day backstop still leaves two holes the make-safe pool used to fall
@@ -700,6 +722,9 @@ function occupiedMakesafeFixtures(): Fixtures {
       // A CURRENT allocation on a legacy detail-backed make-safe: the feed's
       // type/SWMS- filter can never carry it, at any date.
       { id: "a-ms-legacy", user_id: "u-crew9", user_name: "Crew I", status: "scheduled", scheduled_date: TODAY, job_id: "job-ms-legacy" },
+      // Worked, THEN recalled: cancelMakesafe closes only open rows, so this
+      // 'complete' row survives and still rides the windowed feed.
+      { id: "a-ms-worked", user_id: "u-crew10", user_name: "Crew J", status: "complete", scheduled_date: TODAY, job_id: "job-ms-worked-cancelled" },
     ],
     jobs: [
       { id: "job-ms-ancient", type: "makesafe", status: "accepted", job_number: "SWMS-200" },
@@ -711,10 +736,32 @@ function occupiedMakesafeFixtures(): Fixtures {
       // Legacy import: neither type='makesafe' nor an SWMS- number, reachable
       // only through the makesafe_job_details backstop.
       { id: "job-ms-legacy", type: "general", status: "accepted", job_number: "LEG-1" },
+      { id: "job-ms-worked-cancelled", type: "makesafe", status: "cancelled", job_number: "SWMS-206" },
     ],
-    details: [{ job_id: "job-ms-legacy" }],
+    details: [
+      { job_id: "job-ms-legacy" },
+      { job_id: "job-ms-worked-cancelled", cancel_reason: "builder_recalled" },
+    ],
   };
 }
+
+// The trade classifier routes on job.status='cancelled', so a job already on the
+// board is already in the Cancelled column. The synthetic feed must hand it the
+// cancel_* attribution it lacks, not append a second card.
+Deno.test("a worked-then-cancelled make-safe shows once, carrying its cancel attribution", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
+  );
+  const cards = [...nonPool(g), ...(g.makesafePool as any[])]
+    .filter((a) => a.jobs?.id === "job-ms-worked-cancelled");
+  assertEquals(cards.length, 1, "the Cancelled column shows the job exactly once");
+  assertEquals(cards[0].id, "a-ms-worked", "the crew's real completed card is the one kept");
+  assertEquals(cards[0].jobs?.status, "cancelled", "which is what the classifier routes on");
+  assertEquals(cards[0].jobs?.makesafe_details?.cancel_reason, "builder_recalled", "and it gains the cancel attribution");
+});
 
 Deno.test("a re-attended make-safe returns to the allocatable pool", async () => {
   const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
