@@ -7745,16 +7745,22 @@ export function _calculateWorkOrderInvoiceTotals(
 // A work order is only free to invoice when no live invoice holds it. A stale
 // draft releases it for its OWN submitter only: the Xero idempotency key is
 // per submitter, so another trade's unresolved draft may still correspond to a
-// bill Xero created, and a second submitter would raise a duplicate.
+// bill Xero created, and a second submitter would raise a duplicate. A live
+// invoice outranks a foreign draft, so the caller is always told the reason
+// that actually holds the work order.
 export function _findBlockingWorkOrderInvoice(
   invoices: any[],
   viewerId: string,
 ): any | null {
-  return (invoices || []).find((invoice: any) => {
-    const status = String(invoice?.status || '')
-    if (!RELEASED_INVOICE_STATUS_SET.has(status)) return true
-    return status === 'draft' && String(invoice?.user_id || '') !== String(viewerId)
-  }) || null
+  const rows = invoices || []
+  const liveInvoice = rows.find((invoice: any) =>
+    !RELEASED_INVOICE_STATUS_SET.has(String(invoice?.status || ''))
+  )
+  if (liveInvoice) return liveInvoice
+  return rows.find((invoice: any) =>
+    String(invoice?.status || '') === 'draft' &&
+    String(invoice?.user_id || '') !== String(viewerId)
+  ) || null
 }
 
 // Xero replays the cached response for a repeated Idempotency-Key, so the key
@@ -7936,9 +7942,16 @@ export async function tradeWorkOrders(
     readWorkOrderInvoiceRows(client, workOrderIds, viewer.orgId),
     readWorkOrderChargeRows(client, jobIds, viewer.orgId, viewer.id),
   ])
-  const invoicedWorkOrders = new Set(invoiceRows
-    .filter((invoice: any) => !RELEASED_INVOICE_STATUS_SET.has(String(invoice.status || '')))
-    .map((invoice: any) => String(invoice.work_order_id)))
+  // The listing must answer "can this be invoiced?" with the same rule the
+  // submit path enforces, or a card offers an action that 409s.
+  const invoiceRowsByWorkOrder = new Map<string, any[]>()
+  for (const invoice of invoiceRows) {
+    const invoiceWorkOrderId = String(invoice?.work_order_id || '')
+    if (!invoiceWorkOrderId) continue
+    const bucket = invoiceRowsByWorkOrder.get(invoiceWorkOrderId)
+    if (bucket) bucket.push(invoice)
+    else invoiceRowsByWorkOrder.set(invoiceWorkOrderId, [invoice])
+  }
 
   // The charge selector only varies by job, so resolve it once per distinct job
   // rather than re-scanning every charge row for each work order on the page.
@@ -7967,7 +7980,12 @@ export async function tradeWorkOrders(
     const subtotal = workOrderScopeSubtotal(scopeItems)
     const gst = roundMoney(subtotal * 0.1)
     const negativeCharges = negativeChargesByJob.get(String(workOrder.job_id || '')) || []
-    const alreadyInvoiced = invoicedWorkOrders.has(String(workOrder.id))
+    const blockingInvoice = _findBlockingWorkOrderInvoice(
+      invoiceRowsByWorkOrder.get(String(workOrder.id)) || [],
+      viewer.id,
+    )
+    const alreadyInvoiced = !!blockingInvoice &&
+      !RELEASED_INVOICE_STATUS_SET.has(String(blockingInvoice.status || ''))
     return {
       id: workOrder.id,
       wo_number: workOrder.wo_number,
@@ -7992,7 +8010,10 @@ export async function tradeWorkOrders(
         0,
       )),
       already_invoiced: alreadyInvoiced,
-      can_invoice: workOrder.status === 'complete' && !alreadyInvoiced,
+      invoice_block_reason: blockingInvoice
+        ? (alreadyInvoiced ? 'invoiced' : 'other_trade_draft')
+        : null,
+      can_invoice: workOrder.status === 'complete' && !blockingInvoice,
     }
   })
   const hasMore = requestedOffset + mapped.length < total

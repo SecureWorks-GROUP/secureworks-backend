@@ -7,7 +7,9 @@ import {
 import {
   _calculateWorkOrderInvoiceTotals,
   _canSubmitWorkOrderInvoice,
+  _findBlockingWorkOrderInvoice,
   _selectWorkOrderNegativeCharges,
+  _workOrderInvoiceIdempotencyKey,
   handleTradeWorkOrdersAction,
   type TradeAuthContext,
   tradeWorkOrders,
@@ -392,7 +394,135 @@ Deno.test("work order invoiced by any same-tenant trade cannot be duplicated", a
   );
 
   assertEquals(result.work_orders[0].already_invoiced, true);
+  assertEquals(result.work_orders[0].invoice_block_reason, "invoiced");
   assertEquals(result.work_orders[0].can_invoice, false);
+});
+
+Deno.test("a work order held by another trade's stale draft is not offered as invoiceable", async () => {
+  const wo = workOrder("held", { assigned: "other-crew" });
+  const { client } = makeClient({
+    workOrders: [wo],
+    invoices: [{
+      id: "invoice-foreign-draft",
+      org_id: TENANT_A,
+      user_id: "different-trade",
+      work_order_id: wo.id,
+      status: "draft",
+      xero_bill_id: null,
+    }],
+  });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders[0].already_invoiced, false);
+  assertEquals(result.work_orders[0].invoice_block_reason, "other_trade_draft");
+  assertEquals(result.work_orders[0].can_invoice, false);
+});
+
+Deno.test("the caller's own stale draft still leaves the work order invoiceable", async () => {
+  const wo = workOrder("retry", { assigned: HENRY.id });
+  const { client } = makeClient({
+    workOrders: [wo],
+    invoices: [{
+      id: "invoice-own-draft",
+      org_id: TENANT_A,
+      user_id: HENRY.id,
+      work_order_id: wo.id,
+      status: "draft",
+      xero_bill_id: null,
+    }],
+  });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders[0].already_invoiced, false);
+  assertEquals(result.work_orders[0].invoice_block_reason, null);
+  assertEquals(result.work_orders[0].can_invoice, true);
+});
+
+Deno.test("only a live invoice or another trade's draft holds a work order", () => {
+  const ownDraft = { id: "own-draft", user_id: HENRY.id, status: "draft" };
+  const foreignDraft = {
+    id: "foreign-draft",
+    user_id: "other-crew",
+    status: "draft",
+  };
+  const live = { id: "live", user_id: "other-crew", status: "pushed_to_xero" };
+  const foreignFailed = {
+    id: "foreign-failed",
+    user_id: "other-crew",
+    status: "failed",
+  };
+
+  assertEquals(_findBlockingWorkOrderInvoice([], HENRY.id), null);
+  assertEquals(_findBlockingWorkOrderInvoice([ownDraft], HENRY.id), null);
+  assertEquals(_findBlockingWorkOrderInvoice([foreignFailed], HENRY.id), null);
+  assertEquals(
+    _findBlockingWorkOrderInvoice([foreignDraft], HENRY.id)?.id,
+    "foreign-draft",
+  );
+  assertEquals(_findBlockingWorkOrderInvoice([live], HENRY.id)?.id, "live");
+  assertEquals(
+    _findBlockingWorkOrderInvoice([foreignDraft, live], HENRY.id)?.id,
+    "live",
+  );
+  assertEquals(
+    _findBlockingWorkOrderInvoice([live, foreignDraft], HENRY.id)?.id,
+    "live",
+  );
+});
+
+Deno.test("the Xero idempotency key covers the submitter, work order, total and charge selection", () => {
+  const charges = [
+    { line_id: "line-b", amount_ex: -100 },
+    { line_id: "line-a", amount_ex: -50 },
+  ];
+  const key = _workOrderInvoiceIdempotencyKey("henry", "wo-1", charges, 961.9);
+
+  assertEquals(key.startsWith("wo-inv-henry-wo-1-"), true);
+  assertEquals(key.length <= 128, true);
+  assertEquals(
+    _workOrderInvoiceIdempotencyKey(
+      "henry",
+      "wo-1",
+      [charges[1], charges[0]],
+      961.9,
+    ),
+    key,
+  );
+  assertEquals(
+    _workOrderInvoiceIdempotencyKey("henry", "wo-1", [], 961.9) === key,
+    false,
+  );
+  assertEquals(
+    _workOrderInvoiceIdempotencyKey("henry", "wo-1", charges, 1000) === key,
+    false,
+  );
+  assertEquals(
+    _workOrderInvoiceIdempotencyKey(
+      "henry",
+      "wo-1",
+      [charges[0], { line_id: "line-a", amount_ex: -75 }],
+      961.9,
+    ) === key,
+    false,
+  );
+  assertEquals(
+    _workOrderInvoiceIdempotencyKey("other", "wo-1", charges, 961.9) === key,
+    false,
+  );
+  assertEquals(
+    _workOrderInvoiceIdempotencyKey("henry", "wo-2", charges, 961.9) === key,
+    false,
+  );
 });
 
 Deno.test("negative work-order charges are server-selected from acknowledged same-job tenant lines", () => {
