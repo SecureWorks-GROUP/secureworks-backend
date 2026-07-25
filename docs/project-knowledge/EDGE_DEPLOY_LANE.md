@@ -32,8 +32,25 @@ This was a source-control/deploy-lane problem, not a database corruption problem
 Preferred path:
 
 1. Merge reviewed changes to `secureworks-site/main`.
-2. Run the GitHub Actions production edge deploy workflow.
-3. Confirm the post-deploy smoke test passes.
+2. The GitHub Actions production edge deploy workflow
+   (`.github/workflows/deploy-edge-functions.yml`) runs automatically on that
+   push, in the `production` environment.
+3. Confirm its smoke checks pass.
+
+What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:
+
+- A merge touching `supabase/functions/**` deploys only the changed functions
+  and runs the post-deploy smoke for them. If `ops-api` is one of them, the
+  pre-deploy source check runs first and the action-surface smoke runs last.
+- A merge touching only the ops-api verification contract (the deploy workflow
+  itself, the classifier, `scripts/check-ops-api-source-actions.sh`,
+  `scripts/smoke-ops-api-action-surface.sh`, or
+  `scripts/_ops-api-required-actions.txt`) deploys zero functions but still runs
+  the pre-deploy ops-api source check and the live action-surface smoke. A
+  repair to a verifier therefore cannot go green without being exercised
+  against production, and cannot silently redeploy a function nobody changed.
+- If the push base commit cannot be resolved, the run fails before any deploy
+  selection rather than guessing an empty or repo-wide function set.
 
 Approved local break-glass path:
 
