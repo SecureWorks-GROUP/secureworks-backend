@@ -893,6 +893,12 @@ function logEmailToGHL(contactId: string | null, subject: string, recipient: str
   }).catch(() => {})
 }
 
+// A trade invoice in one of these statuses holds nothing: its work order,
+// assignments and charge lines are released for re-invoicing. Single source of
+// truth for every released/live invoice rule in this file.
+const RELEASED_INVOICE_STATUSES: readonly string[] = ['draft', 'failed', 'ops-reject']
+const RELEASED_INVOICE_STATUS_SET: ReadonlySet<string> = new Set(RELEASED_INVOICE_STATUSES)
+
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 
@@ -4965,18 +4971,21 @@ if (import.meta.main) serve(async (req: Request) => {
             if (wo.status !== 'complete') throw new ApiError('Work order must be complete before invoicing', 400)
 
             // One live invoice per work order across the tenant, regardless of
-            // which authorised manager/trade submitted it. A local draft may be
-            // cleaned up and retried exactly as before.
+            // which authorised manager/trade submitted it. The caller's own
+            // draft may be cleaned up and retried exactly as before.
             const { data: existingWoInvoices, error: existingWoInvErr } = await client.from('trade_invoices')
               .select('id, user_id, status')
               .eq('org_id', tradeUser.orgId)
               .eq('work_order_id', work_order_id)
             if (existingWoInvErr) throw existingWoInvErr
-            const liveWorkOrderInvoice = (existingWoInvoices || []).find((invoice: any) =>
-              !RELEASED_WORK_ORDER_INVOICE_STATUSES.has(String(invoice.status || ''))
-            )
-            if (liveWorkOrderInvoice) {
-              throw new ApiError('This work order has already been invoiced', 409)
+            const blockingWoInvoice = _findBlockingWorkOrderInvoice(existingWoInvoices || [], tradeUser.id)
+            if (blockingWoInvoice) {
+              throw new ApiError(
+                String(blockingWoInvoice.status || '') === 'draft'
+                  ? 'Another trade has an unfinished invoice on this work order — the office must clear it first'
+                  : 'This work order has already been invoiced',
+                409,
+              )
             }
             const retryDrafts = (existingWoInvoices || []).filter((invoice: any) =>
               invoice.status === 'draft' && String(invoice.user_id || '') === String(tradeUser.id)
@@ -5051,8 +5060,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const woTaxType = woGstRegistered ? 'INPUT' : 'NONE'
 
             const lineItems = scopeItems.map((item: any) => {
-              const qty = Number(item.quantity || item.metres || item.qty || 1)
-              const price = Number(item.unit_price || item.rate || item.price || 0)
+              const { qty, price } = _resolveWorkOrderScopeLine(item)
               const desc = item.description || item.name || 'Work order item'
               return {
                 Description: [
@@ -5108,7 +5116,12 @@ if (import.meta.main) serve(async (req: Request) => {
 
             // Stable key prevents duplicate bills — if previous push succeeded but we missed the response,
             // Xero returns the cached success (same bill ID, no duplicate). Cached errors expire after 12hrs.
-            const woIdempotencyKey = `wo-inv-${tradeUser.id}-${work_order_id}`
+            const woIdempotencyKey = _workOrderInvoiceIdempotencyKey(
+              tradeUser.id,
+              work_order_id,
+              selectedNegativeCharges,
+              total,
+            )
             let xeroSuccess = false
             let xeroBillId = ''
             let xeroBillNumber = ''
@@ -5154,7 +5167,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 description: item.description || item.name || 'Work order item',
                 total_hours: 0,
                 hourly_rate: 0,
-                line_total_ex: Number(item.quantity || item.metres || 1) * Number(item.unit_price || item.rate || 0),
+                line_total_ex: _resolveWorkOrderScopeLine(item).amount_ex,
               }))
               for (const charge of selectedNegativeCharges) {
                 lines.push({
@@ -5451,7 +5464,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 .eq('user_id', tradeUser.id)            // ownership check (unchanged)  [F2]
                 .in('id', wantedIds)
               const HOURLY_STATUS_WHITELIST = ['scheduled', 'confirmed', 'in_progress', 'complete']
-              const RELEASED = ['draft', 'failed', 'ops-reject']
               // Resolve referencing-invoice statuses for the dup-assignment guard.
               const refIds = [...new Set((asn || []).map((a: any) => a.invoiced_in).filter(Boolean))]
               let liveRefIds = new Set<string>()
@@ -5459,7 +5471,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 const { data: refInv } = await client.from('trade_invoices')
                   .select('id, status').in('id', refIds)
                 liveRefIds = new Set((refInv || [])
-                  .filter((ti: any) => !RELEASED.includes(ti.status)).map((ti: any) => ti.id))
+                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || ''))).map((ti: any) => ti.id))
               }
               const hoursById: Record<string, number> = {}
               const manualById: Record<string, any> = {}
@@ -5891,9 +5903,8 @@ if (import.meta.main) serve(async (req: Request) => {
                   .select('id, status, invoice_number, user_id')
                   .in('id', duplicateInvoiceIds)
                 if (duplicateInvErr) throw duplicateInvErr
-                const releasedDuplicateStatuses = new Set(['draft', 'failed', 'ops-reject'])
                 const liveDuplicateInvoices = new Map((duplicateInvoices || [])
-                  .filter((ti: any) => !releasedDuplicateStatuses.has(ti.status))
+                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
                   .map((ti: any) => [ti.id, ti]))
                 duplicateExtraMatches = [...duplicateLineMap.values()]
                   .filter((line: any) => liveDuplicateInvoices.has(line.trade_invoice_id))
@@ -6057,7 +6068,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 await failAssignmentStamp('Only found ' + (stampCandidates || []).length + ' of ' + expectedAssignmentIds.length + ' assignments')
               }
               const stampRefIds = [...new Set((stampCandidates || []).map((a: any) => a.invoiced_in).filter(Boolean))]
-              const RELEASED_STAMP_STATUSES = ['draft', 'failed', 'ops-reject']
               let releasedStampInvoiceIds: string[] = []
               if (stampRefIds.length > 0) {
                 const { data: stampRefInvoices, error: stampRefErr } = await client.from('trade_invoices')
@@ -6065,7 +6075,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   .in('id', stampRefIds)
                 if (stampRefErr) await failAssignmentStamp(stampRefErr.message)
                 releasedStampInvoiceIds = (stampRefInvoices || [])
-                  .filter((ti: any) => RELEASED_STAMP_STATUSES.includes(ti.status))
+                  .filter((ti: any) => RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
                   .map((ti: any) => ti.id)
               }
               let stampQuery = client.from('job_assignments')
@@ -7591,17 +7601,36 @@ const WORK_ORDER_PAGE_DEFAULT = 30
 const WORK_ORDER_PAGE_MAX = 500
 const WORK_ORDER_READ_PAGE = 1000
 const WORK_ORDER_ID_CHUNK = 25
-const RELEASED_WORK_ORDER_INVOICE_STATUSES = new Set(['draft', 'failed', 'ops-reject'])
 
 function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100
 }
 
+function firstNumericValue(candidates: unknown[], fallback: number): number {
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined) continue
+    if (typeof candidate === 'string' && candidate.trim() === '') continue
+    const numeric = Number(candidate)
+    if (!Number.isFinite(numeric)) continue
+    return numeric
+  }
+  return fallback
+}
+
+// The only reader of a scope item's quantity and price. The Xero line items,
+// the invoice totals and the saved invoice lines all resolve through this, so
+// the pushed bill, the trade_invoices record and the audit event agree.
+export function _resolveWorkOrderScopeLine(
+  item: any,
+): { qty: number; price: number; amount_ex: number } {
+  const qty = firstNumericValue([item?.quantity, item?.metres, item?.qty], 1)
+  const price = firstNumericValue([item?.unit_price, item?.rate, item?.price], 0)
+  return { qty, price, amount_ex: roundMoney(qty * price) }
+}
+
 function workOrderScopeSubtotal(scopeItems: any[]): number {
   return roundMoney((scopeItems || []).reduce((sum: number, item: any) => {
-    const qty = Number(item?.quantity ?? item?.metres ?? item?.qty ?? 1)
-    const price = Number(item?.unit_price ?? item?.rate ?? item?.price ?? 0)
-    if (!Number.isFinite(qty) || !Number.isFinite(price)) return sum
+    const { qty, price } = _resolveWorkOrderScopeLine(item)
     return sum + (qty * price)
   }, 0))
 }
@@ -7646,7 +7675,7 @@ export function _selectWorkOrderNegativeCharges(
     if (String(parent.org_id || '') !== String(args.orgId)) continue
     if (String(parent.user_id || '') === String(args.viewerId)) continue
     if (String(row.acknowledgment_status || '') !== 'acknowledged') continue
-    if (RELEASED_WORK_ORDER_INVOICE_STATUSES.has(String(parent.status || ''))) continue
+    if (RELEASED_INVOICE_STATUS_SET.has(String(parent.status || ''))) continue
 
     const overrideApplied = row.override_amount !== null && row.override_amount !== undefined
     const sourceAmount = Number(overrideApplied ? row.override_amount : row.line_total_ex)
@@ -7711,6 +7740,46 @@ export function _calculateWorkOrderInvoiceTotals(
     gst,
     total_inc: roundMoney(subtotal + gst),
   }
+}
+
+// A work order is only free to invoice when no live invoice holds it. A stale
+// draft releases it for its OWN submitter only: the Xero idempotency key is
+// per submitter, so another trade's unresolved draft may still correspond to a
+// bill Xero created, and a second submitter would raise a duplicate.
+export function _findBlockingWorkOrderInvoice(
+  invoices: any[],
+  viewerId: string,
+): any | null {
+  return (invoices || []).find((invoice: any) => {
+    const status = String(invoice?.status || '')
+    if (!RELEASED_INVOICE_STATUS_SET.has(status)) return true
+    return status === 'draft' && String(invoice?.user_id || '') !== String(viewerId)
+  }) || null
+}
+
+// Xero replays the cached response for a repeated Idempotency-Key, so the key
+// must cover everything that determines the pushed amount — the invoice total
+// and the selected negative charges — not just the submitter and work order.
+export function _workOrderInvoiceIdempotencyKey(
+  userId: string,
+  workOrderId: string,
+  negativeCharges: Array<{ line_id?: string; amount_ex?: number }> = [],
+  totalInc = 0,
+): string {
+  const fingerprintSource = [
+    roundMoney(Number(totalInc) || 0).toFixed(2),
+    ...(negativeCharges || [])
+      .map((charge) =>
+        `${String(charge?.line_id || '')}:${roundMoney(Number(charge?.amount_ex) || 0).toFixed(2)}`
+      )
+      .sort(),
+  ].join('|')
+  let hash = 0x811c9dc5
+  for (let i = 0; i < fingerprintSource.length; i++) {
+    hash ^= fingerprintSource.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `wo-inv-${userId}-${workOrderId}-${(hash >>> 0).toString(16).padStart(8, '0')}`
 }
 
 async function readWorkOrderInvoiceRows(
@@ -7868,18 +7937,36 @@ export async function tradeWorkOrders(
     readWorkOrderChargeRows(client, jobIds, viewer.orgId, viewer.id),
   ])
   const invoicedWorkOrders = new Set(invoiceRows
-    .filter((invoice: any) => !RELEASED_WORK_ORDER_INVOICE_STATUSES.has(String(invoice.status || '')))
+    .filter((invoice: any) => !RELEASED_INVOICE_STATUS_SET.has(String(invoice.status || '')))
     .map((invoice: any) => String(invoice.work_order_id)))
+
+  // The charge selector only varies by job, so resolve it once per distinct job
+  // rather than re-scanning every charge row for each work order on the page.
+  const chargeRowsByJob = new Map<string, any[]>()
+  for (const row of chargeRows) {
+    const chargeJobId = String(row?.job_id || '')
+    if (!chargeJobId) continue
+    const bucket = chargeRowsByJob.get(chargeJobId)
+    if (bucket) bucket.push(row)
+    else chargeRowsByJob.set(chargeJobId, [row])
+  }
+  const negativeChargesByJob = new Map<string, any[]>()
+  for (const jobId of jobIds) {
+    negativeChargesByJob.set(
+      jobId,
+      _selectWorkOrderNegativeCharges(chargeRowsByJob.get(jobId) || [], {
+        jobId,
+        orgId: viewer.orgId,
+        viewerId: viewer.id,
+      }),
+    )
+  }
 
   const mapped = pageRows.map((workOrder: any) => {
     const scopeItems = Array.isArray(workOrder.scope_items) ? workOrder.scope_items : []
     const subtotal = workOrderScopeSubtotal(scopeItems)
     const gst = roundMoney(subtotal * 0.1)
-    const negativeCharges = _selectWorkOrderNegativeCharges(chargeRows, {
-      jobId: String(workOrder.job_id || ''),
-      orgId: viewer.orgId,
-      viewerId: viewer.id,
-    })
+    const negativeCharges = negativeChargesByJob.get(String(workOrder.job_id || '')) || []
     const alreadyInvoiced = invoicedWorkOrders.has(String(workOrder.id))
     return {
       id: workOrder.id,
@@ -30175,7 +30262,6 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   // An assignment whose referencing invoice is terminal (failed/ops-reject) or a
   // draft is released and may be re-invoiced. We resolve the referenced invoice
   // statuses in one batch.                                                  [F3]
-  const RELEASED_INVOICE_STATUSES = ['draft', 'failed', 'ops-reject']
   const referencedInvoiceIds = [...new Set((rawAssignments || [])
     .map((a: any) => a.invoiced_in).filter(Boolean))]
   let liveInvoiceIds = new Set<string>()
@@ -30185,7 +30271,7 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
       .select('id, status')
       .in('id', referencedInvoiceIds)
     liveInvoiceIds = new Set((refInvoices || [])
-      .filter((ti: any) => !RELEASED_INVOICE_STATUSES.includes(ti.status))
+      .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
       .map((ti: any) => ti.id))
   }
   const assignments = (rawAssignments || [])
