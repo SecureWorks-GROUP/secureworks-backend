@@ -13,8 +13,10 @@ on:
       - 'scripts/deploy-edge-function.sh'
       - 'scripts/smoke-edge-functions.sh'
       - 'scripts/smoke-ops-api-action-surface.sh'
+      - 'scripts/_ops-api-required-actions.txt'
       - 'scripts/check-edge-deploy-guardrails.sh'
       - 'scripts/check-ops-api-source-actions.sh'
+      - 'scripts/test/test-smoke-ops-api-action-surface.sh'
       - '.github/workflows/deploy-edge-functions.yml'
       - '.github/workflows/pr-check.yml'
 
@@ -131,3 +133,7 @@ jobs:
               fi
             fi
           done
+
+      - name: Test ops-api action-surface smoke contract
+        run: |
+          bash scripts/test/test-smoke-ops-api-action-surface.sh

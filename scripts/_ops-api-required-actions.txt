@@ -83,6 +83,14 @@ job_detail
 update_job_status
 log_business_event
 
+# ── Trade authenticated surface ──
+# Post-deploy recognition uses API-key-only GET requests and must fail closed at
+# authTrade before any tenant read or invoice submission path can run.
+trade_calendar
+my_jobs
+my_work_orders
+submit_work_order_invoice
+
 # ── Job P&L (M3) — read-only; pairs with ops.html #119 + M1 migration ──
 job_financials
 job_financials_detail

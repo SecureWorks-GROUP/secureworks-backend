@@ -11,6 +11,7 @@ PROJECT_REF="${PROJECT_REF:-kevgrhcjxspbxgovpmfl}"
 BASE="${SUPABASE_FUNCTIONS_BASE:-https://${PROJECT_REF}.supabase.co/functions/v1}"
 SW_API_KEY="${SW_API_KEY:?Set SW_API_KEY before running ops-api action-surface smoke checks}"
 REQUIRED_ACTIONS_FILE="${REQUIRED_ACTIONS_FILE:-scripts/_ops-api-required-actions.txt}"
+CURL_BIN="${CURL_BIN:-curl}"
 
 PASS=0
 FAIL=0
@@ -27,13 +28,49 @@ record_fail() {
 
 json_get() {
   local url="$1"
-  curl -sS --max-time 30 -H "x-api-key: ${SW_API_KEY}" -H "Content-Type: application/json" "$url"
+  "$CURL_BIN" -sS --max-time 30 -H "x-api-key: ${SW_API_KEY}" -H "Content-Type: application/json" "$url"
 }
 
 json_post() {
   local url="$1"
   local body="${2:-{}}"
-  curl -sS --max-time 30 -X POST -H "x-api-key: ${SW_API_KEY}" -H "Content-Type: application/json" -d "$body" "$url"
+  "$CURL_BIN" -sS --max-time 30 -X POST -H "x-api-key: ${SW_API_KEY}" -H "Content-Type: application/json" -d "$body" "$url"
+}
+
+action_probe_url() {
+  local action="$1"
+  case "$action" in
+    makesafe_deterministic_intake_replay)
+      # Recognition must never launch the 60-day / 500-source default replay.
+      # Dry-run still advances only its observe cursor, so keep this probe tiny.
+      printf '%s/ops-api?action=%s&days=1&max_sources=1' "$BASE" "$action"
+      ;;
+    *)
+      printf '%s/ops-api?action=%s' "$BASE" "$action"
+      ;;
+  esac
+}
+
+is_jwt_read_only_action() {
+  case "$1" in
+    trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_get_only_action() {
+  case "$1" in
+    makesafe_deterministic_intake_replay | trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 assert_not_unknown() {
@@ -75,23 +112,33 @@ else
   while IFS= read -r action; do
     [[ -z "$action" ]] && continue
     total=$((total + 1))
-    body="$(json_get "${BASE}/ops-api?action=${action}")"
+    probe_url="$(action_probe_url "$action")"
+    body="$(json_get "$probe_url")"
     if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
       record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
       drift=$((drift + 1))
     elif printf '%s' "$body" | grep -qi 'Unknown action'; then
-      # Some write handlers only prove recognition on POST. Use an empty body;
-      # handlers should fail validation before any business mutation.
-      body="$(json_post "${BASE}/ops-api?action=${action}" '{}')"
-      if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
-        record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
-        drift=$((drift + 1))
-      elif printf '%s' "$body" | grep -qi 'Unknown action'; then
-        record_fail "ops-api drift: action '${action}' returns Unknown action"
+      if is_get_only_action "$action"; then
+        record_fail "ops-api drift: read-only probe for action '${action}' returns Unknown action"
         drift=$((drift + 1))
       else
-        record_pass "ops-api action '${action}' recognised"
+        # Some write handlers only prove recognition on POST. Use an empty body;
+        # handlers should fail validation before any business mutation.
+        body="$(json_post "$probe_url" '{}')"
+        if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
+          record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
+          drift=$((drift + 1))
+        elif printf '%s' "$body" | grep -qi 'Unknown action'; then
+          record_fail "ops-api drift: action '${action}' returns Unknown action"
+          drift=$((drift + 1))
+        else
+          record_pass "ops-api action '${action}' recognised"
+        fi
       fi
+    elif is_jwt_read_only_action "$action" &&
+      ! printf '%s' "$body" | grep -Eqi '"error"[[:space:]]*:[[:space:]]*"Login required"'; then
+      record_fail "ops-api drift: JWT action '${action}' did not fail closed at authentication"
+      drift=$((drift + 1))
     else
       record_pass "ops-api action '${action}' recognised"
     fi
