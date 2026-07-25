@@ -76,6 +76,7 @@
 //
 //   ── Trade (mobile) ──
 //   my_jobs             — Jobs assigned to a user
+//   trade_calendar      — Tenant-scoped calendar assignments for Trade
 //   trade_job_detail    — Trimmed job view for trades
 //   add_note            — Add note to job timeline
 //   upload_photo        — Upload completion photo (base64)
@@ -1608,8 +1609,17 @@ function getAWSTWeekEnd(): string {
   return now.toISOString().slice(0, 10)
 }
 
-// Verify JWT token for trade endpoints — returns authenticated user
-async function authTrade(req: Request, client: any): Promise<{ id: string; email: string }> {
+export type TradeAuthContext = {
+  id: string
+  email: string
+  orgId: string
+  role: string
+  managedVerticals: string[]
+}
+
+// Verify the Trade JWT and carry the server-owned authorization context used by
+// every Trade read. The browser never supplies tenant, role, or manager scope.
+async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
   const authHeader = req.headers.get('Authorization')
   if (!authHeader?.startsWith('Bearer ')) {
     throw new ApiError('Login required', 401)
@@ -1617,7 +1627,23 @@ async function authTrade(req: Request, client: any): Promise<{ id: string; email
   const token = authHeader.slice(7)
   const { data: { user }, error } = await client.auth.getUser(token)
   if (error || !user) throw new ApiError('Session expired — please log in again', 401)
-  return { id: user.id, email: user.email || '' }
+  const { data: profile, error: profileError } = await client
+    .from('users')
+    .select('org_id, role, managed_verticals')
+    .eq('id', user.id)
+    .maybeSingle()
+  // A failed lookup is an outage, not a deauthorization — surface it as 503 so a
+  // transient DB blip never reads to the field as "your account was revoked".
+  // A genuinely absent profile carries no tenant, so it still fails closed.
+  if (profileError) throw new ApiError('Trade profile lookup failed — please try again', 503)
+  if (!profile?.org_id) throw new ApiError('Trade profile not found', 403)
+  return {
+    id: user.id,
+    email: user.email || '',
+    orgId: String(profile.org_id),
+    role: String(profile.role || 'unknown'),
+    managedVerticals: _normalizeManagedVerticals(profile.managed_verticals),
+  }
 }
 
 // Pagination helper — Supabase limits to 1000 rows per request
@@ -2313,7 +2339,7 @@ if (import.meta.main) serve(async (req: Request) => {
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
   let authMode: 'api_key' | 'jwt' | 'routine' = 'api_key'
-  let authUser: { id: string; email: string; role: string } | null = null
+  let authUser: TradeAuthContext | null = null
   // Bearer-over-x-api-key precedence is scoped to the make-safe Trade board read
   // ONLY (action=makesafe_board&projection=trade). Every other action keeps the
   // pre-existing x-api-key-first precedence so mixed-credential calls to privileged
@@ -2344,13 +2370,20 @@ if (import.meta.main) serve(async (req: Request) => {
           status: 401, headers: { ...CORS, 'Content-Type': 'application/json' }
         })
       }
-      // Look up user role
+      // Carry the authenticated Trade authorization context from the server-owned
+      // profile. Request params never determine tenant, role, or manager scope.
       const { data: profile } = await adminClient.from('users')
-        .select('role')
+        .select('org_id, role, managed_verticals')
         .eq('id', user.id)
         .maybeSingle()
       authMode = 'jwt'
-      authUser = { id: user.id, email: user.email || '', role: profile?.role || 'unknown' }
+      authUser = {
+        id: user.id,
+        email: user.email || '',
+        orgId: String(profile?.org_id || ''),
+        role: profile?.role || 'unknown',
+        managedVerticals: _normalizeManagedVerticals(profile?.managed_verticals),
+      }
     } catch (_e) {
       return new Response(JSON.stringify({ error: 'Authentication failed' }), {
         status: 401, headers: { ...CORS, 'Content-Type': 'application/json' }
@@ -3405,12 +3438,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // archived-job refusal. Wires to the trade app's reassign flow in Wave 2-3.
       case 'allocate_job': {
         const tradeUser = await authTrade(req, client)
-        const { data: caller } = await client.from('users')
-          .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
         return json(await allocateJob(client, {
           body,
-          callerRole: caller?.role,
-          managedVerticals: caller?.managed_verticals,
+          callerRole: tradeUser.role,
+          managedVerticals: tradeUser.managedVerticals,
           // M3b U2c: SERVER-derived actor identity (the authed trade user), so
           // createAssignment can skip the allocation SMS on a self-assign
           // (allocator == assignee). Never taken from the request body.
@@ -3423,12 +3454,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // assignment/SMS here — the manager then taps-to-allocate as normal.
       case 'reattend_makesafe': {
         const tradeUser = await authTrade(req, client)
-        const { data: caller } = await client.from('users')
-          .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
         return json(await reattendMakesafe(client, {
           body,
-          callerRole: caller?.role,
-          managedVerticals: caller?.managed_verticals,
+          callerRole: tradeUser.role,
+          managedVerticals: tradeUser.managedVerticals,
         }))
       }
       // Cancel a make-safe (M-F). Retire a card a builder recalled / reallocated /
@@ -3446,13 +3475,11 @@ if (import.meta.main) serve(async (req: Request) => {
           })
         } else {
           const tradeUser = await authTrade(req, client)
-          const { data: caller } = await client.from('users')
-            .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
           cancelResult = await cancelMakesafe(client, {
             body,
             authMode: 'jwt',
-            callerRole: caller?.role,
-            managedVerticals: caller?.managed_verticals,
+            callerRole: tradeUser.role,
+            managedVerticals: tradeUser.managedVerticals,
             operatorEmail: body.operator_email || body.user_email || tradeUser.email,
           })
         }
@@ -4427,13 +4454,11 @@ if (import.meta.main) serve(async (req: Request) => {
         // managed_verticals (reattend pattern); reopenMakesafe 403s if the caller
         // is not a manager of this job's vertical or the job is not cancelled.
         const tradeUser = await authTrade(req, client)
-        const { data: caller } = await client.from('users')
-          .select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
         return json(await reopenMakesafe(client, body, {
           privileged: false,
           authMode: 'jwt',
-          callerRole: caller?.role,
-          managedVerticals: caller?.managed_verticals,
+          callerRole: tradeUser.role,
+          managedVerticals: tradeUser.managedVerticals,
           operatorEmail: body.reopened_by || tradeUser.email,
         }))
       }
@@ -4623,6 +4648,8 @@ if (import.meta.main) serve(async (req: Request) => {
       }
 
       // ── Trade (mobile) — JWT auth required ──
+      case 'trade_calendar':
+        return await handleTradeCalendarAction(req, client)
       case 'my_jobs':
       case 'trade_job_detail':
       case 'upload_photo':
@@ -4658,8 +4685,6 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'clock_event':
       case 'submit_makesafe_report': {
         const tradeUser = await authTrade(req, client)
-        // Look up user role + managed verticals for trade-app visibility.
-        const { data: userRec } = await client.from('users').select('role, managed_verticals').eq('id', tradeUser.id).maybeSingle()
         // Dispatcher = the ops manager / admin who runs the board: see-all view of
         // every job plus the full open MakeSafe pool (other trades see only their
         // own). A vertical manager (users.managed_verticals contains the vertical,
@@ -4669,8 +4694,8 @@ if (import.meta.main) serve(async (req: Request) => {
         // pure _resolveManagerVisibility helper. makesafe_manager is legacy input
         // only (backfilled into managed_verticals); the runtime reads the list.
         const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals, managedVerticals } = _resolveManagerVisibility({
-          role: userRec?.role,
-          managedVerticals: userRec?.managed_verticals,
+          role: tradeUser.role,
+          managedVerticals: tradeUser.managedVerticals,
         })
         switch (action) {
           case 'my_jobs': {
@@ -4682,9 +4707,19 @@ if (import.meta.main) serve(async (req: Request) => {
             // dispatchers (global showAll) and for the personal Jobs view
             // (mode:'mine' / no mode) so those paths are unchanged.
             const managerBoardVerticals = _managerBoardVerticals({ isDispatcher, mode, managedVerticals })
-            return json(await myJobs(client, tradeUser.id, showAll, isDispatcher, isMakesafeManager, poolVerticals, managerBoardVerticals))
+            return json(await myJobs(
+              client,
+              tradeUser.id,
+              showAll,
+              isDispatcher,
+              isMakesafeManager,
+              poolVerticals,
+              managerBoardVerticals,
+              tradeUser.orgId,
+            ))
           }
-          case 'trade_job_detail': return json(await tradeJobDetail(client, url.searchParams, tradeUser.id, isDispatcher))
+          case 'trade_job_detail':
+            return json(await tradeJobDetail(client, url.searchParams, tradeUser, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
           case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin))
           case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin))
@@ -7377,6 +7412,141 @@ const CAL_LIGHT_COLUMNS = [
   'assignment_type', 'assignment_status', 'confirmation_status', 'job_type', 'job_status',
   'ghl_contact_id', 'org_id',
 ]
+
+export const TRADE_CALENDAR_SCHEMA = 'trade-calendar.v1'
+const TRADE_CALENDAR_COLUMNS = [
+  'assignment_id', 'job_id', 'user_id', 'job_number', 'client_name', 'site_address', 'site_suburb',
+  'scheduled_date', 'scheduled_end', 'start_time', 'end_time', 'crew_name', 'assigned_to',
+  'assignment_type', 'assignment_status', 'confirmation_status', 'job_type', 'job_status',
+  'org_id',
+]
+
+function tradeCalendarVerticalFilter(verticals: string[]): string {
+  return verticals.flatMap((vertical) =>
+    vertical === 'makesafe'
+      ? ['job_type.eq.makesafe', 'job_number.ilike.SWMS-%']
+      : [`job_type.eq.${vertical}`]
+  ).join(',')
+}
+
+function requireTradeCalendarDate(value: string, field: string): string {
+  const parsed = new Date(`${value}T00:00:00Z`)
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+    Number.isNaN(parsed.getTime()) ||
+    parsed.toISOString().slice(0, 10) !== value
+  ) {
+    throw new ApiError(`${field} must be YYYY-MM-DD`, 400)
+  }
+  return value
+}
+
+// Actual authenticated action boundary used by the request switch and the
+// end-to-end fixture test. It derives every authorization field from the JWT
+// profile before calling the read model.
+export async function handleTradeCalendarAction(req: Request, client: any): Promise<Response> {
+  const url = new URL(req.url)
+  if (url.searchParams.get('action') !== 'trade_calendar') {
+    throw new ApiError('trade_calendar action required', 400)
+  }
+  const viewer = await authTrade(req, client)
+  const { isDispatcher } = _resolveManagerVisibility({
+    role: viewer.role,
+    managedVerticals: viewer.managedVerticals,
+  })
+  return json(await tradeCalendarEvents(client, url.searchParams, viewer, isDispatcher))
+}
+
+// JWT-only Trade calendar read model. Unlike the operator `calendar` action,
+// every row is server-scoped to the authenticated user's tenant and authority.
+// `mode=all` means Everyone for a dispatcher or vertical manager; an ordinary
+// installer is deliberately held to Mine even if they ask for `all`.
+export async function tradeCalendarEvents(
+  client: any,
+  params: URLSearchParams,
+  viewer: TradeAuthContext,
+  isDispatcher = false,
+) {
+  const from = requireTradeCalendarDate(
+    params.get('from') || params.get('start_date') || new Date().toISOString().slice(0, 10),
+    'from',
+  )
+  const to = requireTradeCalendarDate(
+    params.get('to') || params.get('end_date') || (() => {
+      const d = new Date(`${from}T00:00:00Z`)
+      d.setUTCDate(d.getUTCDate() + 14)
+      return d.toISOString().slice(0, 10)
+    })(),
+    'to',
+  )
+  if (from > to) throw new ApiError('from must be on or before to', 400)
+
+  const requestedMode = String(params.get('mode') || 'mine').toLowerCase()
+  if (!['all', 'mine'].includes(requestedMode)) {
+    throw new ApiError("mode must be 'all' or 'mine'", 400)
+  }
+
+  const managedVerticals = _normalizeManagedVerticals(viewer.managedVerticals)
+  const canSeeEveryone = isDispatcher || managedVerticals.length > 0
+  const mode: 'all' | 'mine' = requestedMode === 'all' && canSeeEveryone ? 'all' : 'mine'
+
+  const requestedTypeRaw = String(params.get('type') || '').trim().toLowerCase()
+  const requestedType = requestedTypeRaw
+    ? _normalizeManagedVerticals([requestedTypeRaw])[0] || null
+    : null
+  if (requestedTypeRaw && !requestedType) {
+    throw new ApiError('type must be a supported Trade vertical', 400)
+  }
+  // Vertical authority only matters when the request widens past `user_id`. In
+  // Mine the rows are already the viewer's own, so `type` is a display filter
+  // there, not an authority claim — refusing it would make a manager's personal
+  // calendar narrower than an ordinary installer's on the same axis.
+  if (mode === 'all' && !isDispatcher && managedVerticals.length > 0 && requestedType && !managedVerticals.includes(requestedType)) {
+    throw new ApiError('Not authorized: requested vertical is not managed by this user', 403)
+  }
+
+  const CAL_EVENT_LIMIT = 500
+  const overlapOr = `scheduled_end.gte.${from},and(scheduled_end.is.null,scheduled_date.gte.${from})`
+  let query = client
+    .from('calendar_events')
+    .select(TRADE_CALENDAR_COLUMNS.join(', '))
+    .lte('scheduled_date', to)
+    .or(overlapOr)
+    .eq('org_id', viewer.orgId)
+    .neq('assignment_status', 'cancelled')
+    .order('scheduled_date', { ascending: true })
+    .limit(CAL_EVENT_LIMIT)
+
+  if (mode === 'mine') {
+    query = query.eq('user_id', viewer.id)
+  }
+
+  // The managed-vertical filter BOUNDS the Everyone view (it is what widens a
+  // manager past their own rows). Mine is already bounded by user_id, so
+  // applying it there would hide a manager's OWN out-of-vertical work — making
+  // their personal calendar smaller than an ordinary installer's.
+  if (requestedType) {
+    query = query.or(tradeCalendarVerticalFilter([requestedType]))
+  } else if (mode === 'all' && !isDispatcher && managedVerticals.length > 0) {
+    query = query.or(tradeCalendarVerticalFilter(managedVerticals))
+  }
+
+  const { data, error } = await query
+  if (error) throw error
+
+  const rows = data || []
+  const events = rows.map((event: any) => {
+    const { org_id, ...safeEvent } = event
+    return safeEvent
+  })
+  return {
+    schema: TRADE_CALENDAR_SCHEMA,
+    mode,
+    type: requestedType,
+    events,
+    truncated: rows.length >= CAL_EVENT_LIMIT,
+  }
+}
 
 export async function calendarEvents(client: any, params: URLSearchParams) {
   const from = params.get('from') || params.get('start_date') || new Date().toISOString().slice(0, 10)
@@ -17852,12 +18022,15 @@ async function intakeHealth(client: any) {
 // Shared by the ops-dashboard create/update/delete_assignment actions. Resolves
 // the affected job's vertical, then applies _resolveAllocationAuthz. api_key
 // (dashboard / service) and dispatchers short-circuit with no DB read; only a
-// JWT vertical manager needs the job + their managed_verticals looked up. Closes
-// the pre-existing hole where ANY logged-in JWT user could mutate assignments.
+// JWT vertical manager needs the job looked up. Their managed_verticals come
+// from the authenticated context the dispatch already read from the server-owned
+// users row (never from the request), so no second round trip per mutation.
+// Closes the pre-existing hole where ANY logged-in JWT user could mutate
+// assignments.
 export async function assertAssignmentMutationAuthz(
   client: any,
   authMode: 'api_key' | 'jwt' | 'routine',
-  authUser: { id: string; email?: string; role: string } | null,
+  authUser: { id: string; email?: string; role: string; managedVerticals?: unknown } | null,
   ref: { jobId?: string | null; assignmentId?: string | null },
 ): Promise<void> {
   // Fast paths: no DB read required.
@@ -17879,13 +18052,10 @@ export async function assertAssignmentMutationAuthz(
     const { data: job } = await client.from('jobs').select('id, type, job_number').eq('id', jobId).maybeSingle()
     if (job) jobVertical = _jobVertical(job)
   }
-  const { data: userRec } = authUser?.id
-    ? await client.from('users').select('managed_verticals').eq('id', authUser.id).maybeSingle()
-    : { data: null as any }
   const decision = _resolveAllocationAuthz({
     authMode: 'jwt',
     callerRole: role,
-    managedVerticals: userRec?.managed_verticals,
+    managedVerticals: authUser?.managedVerticals,
     jobVertical,
   })
   if (!decision.allowed) {
@@ -22009,6 +22179,92 @@ export const _MAKESAFE_SUBSTATUS_FINISHED = [
 // board's open columns and the U1 script's OPEN set.
 export const _OPEN_ASSIGNMENT_STATUSES = ['scheduled', 'confirmed', 'draft'] as const
 
+// Which assignment statuses RELEASE a job back to an open pool by status ALONE.
+// Only 'cancelled', in BOTH pools: a dead allocation never holds a job, but a
+// FINISHED one still does. Status cannot distinguish a finished visit from a
+// re-opened one — clock_event('clock_off') writes job_assignments.status =
+// 'complete' (and the trade app's updateMyAssignment / updateJobPhase do the
+// same) without touching jobs.status or makesafe_job_details. Releasing on
+// status would re-offer work a crew has just done to a second crew, and render
+// it twice, since the windowed feed still carries that 'complete' card.
+export const _POOL_RELEASING_STATUSES = ['cancelled'] as const
+
+export function _poolReleasingStatusFilter(): string {
+  return '(' + _POOL_RELEASING_STATUSES.map((s) => `"${s}"`).join(',') + ')'
+}
+
+export type PoolOccupancyKind = 'makesafe' | 'vertical'
+
+// The ONE durable proof that a finished make-safe visit was deliberately sent
+// back to the pool: reattendMakesafe stamps makesafe_job_details.last_reattend_at
+// (nothing else writes that column) and deliberately creates no assignment, so
+// the card must become tap-to-allocate again. A completed visit therefore
+// releases only when it finished BEFORE that stamp — the re-attend crew's own
+// later completion holds the job again. No stamp, or timestamps we cannot read,
+// means still occupied: unfinished work is never re-offered.
+//
+// "When it finished" is answered ONLY by the two stamps that record finishing
+// the work — completed_at and clocked_off_at, both written by the trade clock
+// path and by nothing else. updated_at is deliberately NOT consulted: the
+// trg_job_assignments_updated trigger bumps it on every write to the row, so
+// stamping invoiced_in (submit_trade_invoice), acknowledged_at, a confirmation
+// change or any dashboard edit would silently re-date a long-finished visit past
+// the re-attend and strand the card as occupied forever. Rows closed without
+// either stamp (closeOpenAssignmentsForJob, a dashboard status edit) carry no
+// evidence of when the work finished, so they keep holding the job.
+export function _assignmentFinishedAt(assignment: any): number | null {
+  let latest: number | null = null
+  for (const raw of [assignment?.completed_at, assignment?.clocked_off_at]) {
+    const parsed = Date.parse(String(raw ?? ''))
+    if (Number.isFinite(parsed) && (latest === null || parsed > latest)) latest = parsed
+  }
+  return latest
+}
+
+export function _makesafeReattendReleases(assignment: any, reattendAt: unknown): boolean {
+  if (String(assignment?.status || '').toLowerCase() !== 'complete') return false
+  const reopenedAt = Date.parse(String(reattendAt ?? ''))
+  if (!Number.isFinite(reopenedAt)) return false
+  const finishedAt = _assignmentFinishedAt(assignment)
+  if (finishedAt === null) return false
+  return reopenedAt > finishedAt
+}
+
+// Does this assignment still HOLD its job for this pool's semantics? Both the
+// de-dupe seed and the DB occupancy probe route through this one predicate; if
+// they ever answered differently the pool would re-emit an occupied job as an
+// 'available' card while the feed still showed the crew's own card.
+export function _assignmentHoldsPoolJob(
+  assignment: any,
+  pool: PoolOccupancyKind,
+  reattendAtByJobId: Record<string, unknown> = {},
+): boolean {
+  const status = String(assignment?.status || '').toLowerCase()
+  if ((_POOL_RELEASING_STATUSES as readonly string[]).includes(status)) return false
+  if (pool !== 'makesafe') return true
+  const jobId = String(assignment?.jobs?.id || assignment?.job_id || '')
+  return !_makesafeReattendReleases(assignment, reattendAtByJobId[jobId])
+}
+
+// The windowed assignment feed is NOT status-filtered beyond 'cancelled', so it
+// still carries finished visits. A pool's de-duplication seed must therefore ask
+// the same question its occupancy probe does: does a row that still HOLDS this
+// job (for this pool's semantics) exist in the feed?
+export function _activeAssignedJobIds(
+  assignments: any[],
+  pool: PoolOccupancyKind,
+  reattendAtByJobId: Record<string, unknown> = {},
+): Set<string> {
+  const ids = new Set<string>()
+  for (const assignment of (assignments || [])) {
+    const jobId = assignment?.jobs?.id
+    if (!jobId) continue
+    if (!_assignmentHoldsPoolJob(assignment, pool, reattendAtByJobId)) continue
+    ids.add(jobId)
+  }
+  return ids
+}
+
 // Map a jobs.status to the assignment close mode, or null when not terminal.
 export function _closeAsForJobStatus(status: string | null | undefined): 'complete' | 'cancelled' | null {
   const s = String(status || '').toLowerCase()
@@ -22076,7 +22332,7 @@ export const _closeOpenAssignmentsForJobForTest = closeOpenAssignmentsForJob
 async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   const { data, error } = await client
     .from('jobs')
-    .select('id, type, job_number, status')
+    .select('id, org_id, type, job_number, status')
     .eq('id', jobId)
     .maybeSingle()
   if (error) throw error
@@ -22084,17 +22340,37 @@ async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   return data
 }
 
-async function assertAssignedOrMakesafeAccess(client: any, jobId: string, userId: string, isAdmin = false) {
+export type TradeJobAccessContext = {
+  orgId: string
+  managedVerticals?: unknown
+}
+
+async function assertAssignedOrMakesafeAccess(
+  client: any,
+  jobId: string,
+  userId: string,
+  isAdmin = false,
+  access?: TradeJobAccessContext,
+) {
+  let job: any = null
+  if (access?.orgId) {
+    job = await getTradeJobForAccess(client, jobId)
+    if (String(job.org_id || '') !== access.orgId) {
+      throw new Error('You are not authorized to access this job')
+    }
+  }
+  if (isAdmin) return
   try {
     await assertAssigned(client, jobId, userId, isAdmin)
     return
   } catch (err) {
-    if (isAdmin) return
+    if (!job) job = await getTradeJobForAccess(client, jobId)
+    const managedVerticals = _normalizeManagedVerticals(access?.managedVerticals)
+    if (managedVerticals.includes(_jobVertical(job))) return
     // MakeSafe report fallback: any logged-in trade may open/report an open
     // MakeSafe even before ops has created a named assignment. This keeps the
     // field-report flow moving when the board/admin upload step is behind, while
     // ordinary patio/fencing/decking jobs remain allocation-gated below.
-    const job = await getTradeJobForAccess(client, jobId)
     if (await isMakesafeAccessJobForClient(client, job)) return
     throw err
   }
@@ -22337,7 +22613,201 @@ export function _resolveAllocationAuthz(input: {
   return { allowed: false, reason: 'not_authorized' }
 }
 
-export async function myJobs(client: any, userId: string, showAll = false, isDispatcher = false, isMakesafeManager = false, poolVerticals: string[] = [], managerScopeVerticals: string[] = []) {
+// Availability is an identity fact, not a display-window fact: a pool job is
+// "available" only when it has NO active assignment at ANY date, including rows
+// whose scheduled_date is NULL or older than the feed's display window. Every
+// open pool must answer that question the same way, so both the make-safe and
+// the generic per-vertical pool route through this probe.
+//
+// "Active" here means STILL HOLDING (_assignmentHoldsPoolJob): a 'cancelled' row
+// has released the job, and a make-safe's 'complete' row releases only once a
+// re-attend stamp proves the card was deliberately reopened — so the re-attend
+// flow pools again without a plain clock-off re-offering unfinished work.
+//
+// It returns the OCCUPYING ASSIGNMENT, not just the id, because a pool job that
+// is occupied outside the display window must still render — as an assigned card
+// with crew attribution. Dropping it would trade a wrongly-clickable card for an
+// invisible one, against the B2 rationale above ("never drop off the trade's
+// list silently").
+//
+// The probe is chunked AND paged: job_assignments holds one row per crew per
+// date, so an 80-job pool of long multi-day jobs can blow past PostgREST's
+// 1000-row cap. A silently truncated probe would re-introduce exactly the false
+// "available" card it exists to prevent, so never issue it as one unbounded read.
+// Chunking is only a URL-length guard and the chunks are independent, so they run
+// concurrently; the page loop inside each chunk is what guarantees completeness.
+// Paging also demands a TOTAL order: job_id is highly non-unique here (that is the
+// very reason paging exists), and Postgres may return rows tied on it in a
+// different order per LIMIT/OFFSET query, silently skipping a row on a page
+// boundary. The unique id tiebreak below closes that seam.
+const OCCUPANCY_PROBE_CHUNK = 25
+const OCCUPANCY_PROBE_PAGE = 1000
+const OCCUPANCY_PROBE_SELECT = `
+        job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
+        started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
+        user:user_id ( id, name )
+      `
+
+// Deterministic pick when a job carries several active assignments: on the
+// personal lens the viewer's OWN row wins (it is the only one they may recover),
+// then the latest scheduled row (NULL dates sort lowest), id as the tiebreak.
+function occupancyOutranks(candidate: any, current: any, preferUserId = ''): boolean {
+  if (preferUserId) {
+    const candidateIsViewer = String(candidate?.user?.id || '') === preferUserId
+    const currentIsViewer = String(current?.user?.id || '') === preferUserId
+    if (candidateIsViewer !== currentIsViewer) return candidateIsViewer
+  }
+  const candidateDate = String(candidate?.scheduled_date || '')
+  const currentDate = String(current?.scheduled_date || '')
+  if (candidateDate !== currentDate) return candidateDate > currentDate
+  return String(candidate?.id || '') > String(current?.id || '')
+}
+
+async function fetchOccupyingAssignments(
+  client: any,
+  jobIds: string[],
+  preferUserId = '',
+  pool: PoolOccupancyKind = 'vertical',
+  reattendAtByJobId: Record<string, unknown> = {},
+): Promise<Map<string, any>> {
+  const byJobId = new Map<string, any>()
+  const ids = Array.from(new Set((jobIds || []).filter(Boolean).map((id: any) => String(id))))
+  const chunks: string[][] = []
+  for (let i = 0; i < ids.length; i += OCCUPANCY_PROBE_CHUNK) {
+    chunks.push(ids.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+  }
+  const chunkRows = await Promise.all(chunks.map(async (chunk) => {
+    const rows: any[] = []
+    let offset = 0
+    while (true) {
+      const { data, error } = await client
+        .from('job_assignments')
+        .select(OCCUPANCY_PROBE_SELECT)
+        .in('job_id', chunk)
+        .not('status', 'in', _poolReleasingStatusFilter())
+        .order('job_id', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + OCCUPANCY_PROBE_PAGE - 1)
+      if (error) throw error
+      const page = data || []
+      rows.push(...page)
+      if (page.length < OCCUPANCY_PROBE_PAGE) break
+      offset += OCCUPANCY_PROBE_PAGE
+    }
+    return rows
+  }))
+  for (const row of chunkRows.flat()) {
+    const jobId = row?.job_id ? String(row.job_id) : ''
+    if (!jobId) continue
+    if (!_assignmentHoldsPoolJob(row, pool, reattendAtByJobId)) continue
+    const current = byJobId.get(jobId)
+    if (!current || occupancyOutranks(row, current, preferUserId)) byJobId.set(jobId, row)
+  }
+  return byJobId
+}
+export const _fetchOccupyingAssignmentsForTest = fetchOccupyingAssignments
+
+// The re-attend stamps for exactly the pool ids being resolved. This is the only
+// signal that ever hands a finished make-safe back to the pool, so it must be
+// COMPLETE for every id asked about: a stamp missing because a capped, unordered
+// scan happened not to return that job's row would strand a genuinely re-attended
+// card as permanently occupied (reattendMakesafe creates no assignment, so
+// tap-to-allocate would never come back). Keyed by job_id, which is the table's
+// primary key, and chunked + paged on the same guards as the occupancy probe.
+async function fetchMakesafeReattendStamps(client: any, jobIds: string[]): Promise<Record<string, unknown>> {
+  const stamps: Record<string, unknown> = {}
+  const ids = Array.from(new Set((jobIds || []).filter(Boolean).map((id: any) => String(id))))
+  const chunks: string[][] = []
+  for (let i = 0; i < ids.length; i += OCCUPANCY_PROBE_CHUNK) {
+    chunks.push(ids.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+  }
+  const chunkRows = await Promise.all(chunks.map(async (chunk) => {
+    const rows: any[] = []
+    let offset = 0
+    while (true) {
+      const { data, error } = await client
+        .from('makesafe_job_details')
+        .select('job_id, last_reattend_at')
+        .in('job_id', chunk)
+        .order('job_id', { ascending: true })
+        .range(offset, offset + OCCUPANCY_PROBE_PAGE - 1)
+      if (error) throw error
+      const page = data || []
+      rows.push(...page)
+      if (page.length < OCCUPANCY_PROBE_PAGE) break
+      offset += OCCUPANCY_PROBE_PAGE
+    }
+    return rows
+  }))
+  for (const row of chunkRows.flat()) {
+    const jobId = row?.job_id ? String(row.job_id) : ''
+    if (!jobId || !row?.last_reattend_at) continue
+    stamps[jobId] = row.last_reattend_at
+  }
+  return stamps
+}
+export const _fetchMakesafeReattendStampsForTest = fetchMakesafeReattendStamps
+
+// An occupied pool job is NEVER emitted as available. Whether it is additionally
+// recovered as an assigned card depends on the lens. Callers only reach this for
+// a job ALREADY absent from the emitted assignment set — the pool loops skip
+// anything the feed carried — so this deliberately does not second-guess the
+// feed's window. The make-safe pool's legacy `detailJobIds` backstop surfaces
+// jobs the feed's `type.eq.makesafe,job_number.ilike.SWMS-%` filter can never
+// match at ANY date, and those must still render as the crew's card.
+//  - 'everyone' (dispatcher showAll / vertical manager on mode:'all'): recover
+//    the allocation; the pool query already bounded it to same-tenant
+//    managed-vertical work.
+//  - 'mine' (personal view): the feed is own-only, so recover only the viewer's
+//    OWN allocation. Another crew's work stays out of the personal dated lanes;
+//    the manager sees it on the Board (mode:'all').
+export function _shouldRecoverOccupiedPoolJob(input: {
+  occupying: any
+  lens: 'everyone' | 'mine'
+  userId: string
+}): boolean {
+  if (!input.occupying) return false
+  if (input.lens === 'everyone') return true
+  return String(input.occupying?.user?.id || '') === String(input.userId || '')
+}
+
+// An occupied pool job rendered honestly: the real assignment (crew, dates,
+// clock state) carried on the already tenant+vertical-authorized pool job. Never
+// an `_open` assignment_type/role, so the grouper keeps it out of the pool lane.
+function occupiedPoolAssignmentCard(assignment: any, job: any) {
+  return {
+    id: assignment?.id,
+    scheduled_date: assignment?.scheduled_date ?? null,
+    scheduled_end: assignment?.scheduled_end ?? null,
+    start_time: assignment?.start_time ?? null,
+    status: assignment?.status ?? 'scheduled',
+    role: assignment?.role ?? null,
+    notes: assignment?.notes ?? null,
+    assignment_type: assignment?.assignment_type ?? null,
+    crew_name: assignment?.crew_name ?? null,
+    started_at: assignment?.started_at ?? null,
+    completed_at: assignment?.completed_at ?? null,
+    clocked_on_at: assignment?.clocked_on_at ?? null,
+    clocked_off_at: assignment?.clocked_off_at ?? null,
+    travel_started_at: assignment?.travel_started_at ?? null,
+    arrived_at: assignment?.arrived_at ?? null,
+    break_minutes: assignment?.break_minutes ?? null,
+    job_phase: assignment?.job_phase ?? null,
+    user: assignment?.user ?? null,
+    jobs: job,
+  }
+}
+
+export async function myJobs(
+  client: any,
+  userId: string,
+  showAll = false,
+  isDispatcher = false,
+  isMakesafeManager = false,
+  poolVerticals: string[] = [],
+  managerScopeVerticals: string[] = [],
+  orgId = DEFAULT_ORG_ID,
+) {
   // U2b: manager's-Board widening. When set (non-dispatcher manager on
   // mode:'all'), the assignment query returns ALL in-vertical assignments across
   // every crew, not just this user's — scoped strictly to these verticals. Never
@@ -22352,6 +22822,9 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
   // Non-make-safe assignments keep the original 30-day window.
   const makesafeSixMonthsAgo = new Date(Date.now() + AWST_OFFSET_MS)
   makesafeSixMonthsAgo.setDate(makesafeSixMonthsAgo.getDate() - 180)
+  // Which allocations the open pools are entitled to re-surface as assigned cards.
+  const poolLens: 'everyone' | 'mine' = showAll || managerScope.length > 0 ? 'everyone' : 'mine'
+  const poolRecoveryUserId = poolLens === 'mine' ? userId : ''
 
   const ASSIGNMENT_SELECT_ADMIN = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
@@ -22386,12 +22859,17 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
   let error: any
 
   if (showAll) {
-    // ── Admin mode: show ALL assignments across all users ──
+    // ── Admin mode: show ALL assignments across all users, ONE tenant ──
+    // "See everything" is bounded by the dispatcher's own org: tenant is a
+    // boundary, not a display preference, and every pool below is already
+    // org-scoped. Uses the INNER select so the jobs.org_id filter constrains the
+    // parent job_assignments rows (PostgREST semantics — see the note below).
     const res = await client
       .from('job_assignments')
-      .select(ASSIGNMENT_SELECT_ADMIN)
+      .select(ASSIGNMENT_SELECT_ADMIN_INNER)
       .neq('status', 'cancelled')
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .eq('jobs.org_id', orgId)
       .order('scheduled_date', { ascending: true })
     assignments = res.data
     error = res.error
@@ -22415,6 +22893,7 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
       .select(ASSIGNMENT_SELECT_ADMIN_INNER)
       .neq('status', 'cancelled')
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .eq('jobs.org_id', orgId)
       .or(jobVerticalFilter, { referencedTable: 'jobs' })
       .order('scheduled_date', { ascending: true })
     assignments = res.data
@@ -22476,6 +22955,7 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
         .neq('status', 'cancelled')
         .gte('scheduled_date', makesafeSixMonthsAgo.toISOString().slice(0, 10))
         .lt('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+        .eq('jobs.org_id', orgId)
         // Filter on the EMBEDDED jobs relation (inner join) so only assignments whose
         // job is a make-safe come back. Column names are relative to `jobs`.
         .or('type.eq.makesafe,job_number.ilike.SWMS-%', { referencedTable: 'jobs' })
@@ -22503,10 +22983,10 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
   // de-duplicated via assignedJobIds below. Keep this specific to MakeSafe and
   // expose only the same slim job fields the mobile job list already uses.
   if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
-    const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+      .eq('org_id', orgId)
       .or('type.eq.makesafe,job_number.ilike.SWMS-%')
       .not('status', 'in', _makesafePoolExcludedStatusFilter())
       .order('created_at', { ascending: false })
@@ -22540,6 +23020,7 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
       const { data: detailJobs, error: detailJobsErr } = await client
         .from('jobs')
         .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+        .eq('org_id', orgId)
         .in('id', detailJobIds)
         .not('status', 'in', _makesafePoolExcludedStatusFilter())
         .order('created_at', { ascending: false })
@@ -22576,8 +23057,53 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
       }
     }
 
+    // Whether a finished make-safe visit still holds its job is a question about
+    // that job's re-attend history, not about status alone — so resolve the
+    // stamps for exactly this pool's ids before either the de-dupe seed or the
+    // probe answers it. A failed read degrades to "no stamp", which holds every
+    // finished visit: a card that stays occupied for one load is recoverable, a
+    // job re-offered to a second crew is not.
+    const poolJobIdsForStamps = openMakesafes.map((job: any) => job?.id).filter(Boolean)
+    let reattendAtByJobId: Record<string, unknown> = {}
+    try {
+      reattendAtByJobId = await fetchMakesafeReattendStamps(client, poolJobIdsForStamps)
+    } catch (stampErr: any) {
+      console.log('[ops-api] myJobs make-safe re-attend stamp read failed (non-blocking, work stays occupied):', stampErr?.message)
+    }
+    const assignedJobIds = _activeAssignedJobIds(assignments, 'makesafe', reattendAtByJobId)
+
+    // Same all-date occupancy rule as the generic pool below: the assignment
+    // feed above is windowed (30-day, plus the 180-day make-safe backstop) and
+    // both windows drop NULL-dated rows, so de-duping against it alone still
+    // lets an already-allocated make-safe reappear as a synthetic "available"
+    // card — the double-allocation risk. Ask job_assignments directly.
+    let makesafeOccupancy = new Map<string, any>()
+    try {
+      makesafeOccupancy = await fetchOccupyingAssignments(
+        client,
+        openMakesafes.map((job: any) => job?.id),
+        poolRecoveryUserId,
+        'makesafe',
+        reattendAtByJobId,
+      )
+    } catch (occErr: any) {
+      // Non-blocking: a failed probe must not take the make-safe board down. The
+      // windowed de-dupe below still applies.
+      console.log('[ops-api] myJobs make-safe occupancy probe failed (non-blocking):', occErr?.message)
+    }
+
     for (const job of openMakesafes) {
       if (!job?.id || assignedJobIds.has(job.id)) continue
+      // Held by a live allocation: never open work anyone may take. Recovered as
+      // that crew's real card only when this lens is entitled to show it.
+      const occupying = makesafeOccupancy.get(job.id)
+      if (occupying) {
+        assignedJobIds.add(job.id)
+        if (_shouldRecoverOccupiedPoolJob({ occupying, lens: poolLens, userId })) {
+          assignments.push(occupiedPoolAssignmentCard(occupying, job))
+        }
+        continue
+      }
       assignments.push({
         id: `makesafe-open-${job.id}`,
         scheduled_date: today,
@@ -22617,6 +23143,7 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
     const { data: cancelledMakesafes, error: cancelErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+      .eq('org_id', orgId)
       .eq('type', 'makesafe')
       .eq('status', 'cancelled')
       .gte('updated_at', cancelledSinceIso)
@@ -22637,13 +23164,36 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
         if (row?.job_id) cancelledDetailByJobId[String(row.job_id)] = row
       }
 
-      // Dedup against the user's own named assignments (a cancelled job should not
-      // appear twice if it somehow still carries an assignment row).
-      const assignedCancelledIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+      // Dedup against every card already emitted — the classifier routes on
+      // job.status='cancelled', so a job that reached the board by ANY route is
+      // already in the Cancelled column and a synthetic card would double it.
+      // cancelMakesafe only closes rows in _OPEN_ASSIGNMENT_STATUSES, so a
+      // worked-then-cancelled make-safe still rides the feed on its 'complete'
+      // row; what that card lacks is the cancel_* attribution, so hand it the
+      // details instead of appending a second card.
+      const emittedCardsByJobId = new Map<string, any[]>()
+      for (const emitted of (assignments || [])) {
+        const emittedJobId = emitted?.jobs?.id
+        if (!emittedJobId) continue
+        const bucket = emittedCardsByJobId.get(emittedJobId)
+        if (bucket) bucket.push(emitted)
+        else emittedCardsByJobId.set(emittedJobId, [emitted])
+      }
+      const cancelledHandled = new Set<string>()
       for (const job of cancelledJobs) {
-        if (!job?.id || assignedCancelledIds.has(job.id)) continue
-        assignedCancelledIds.add(job.id)
-        if (cancelledDetailByJobId[job.id]) job.makesafe_details = cancelledDetailByJobId[job.id]
+        if (!job?.id || cancelledHandled.has(job.id)) continue
+        cancelledHandled.add(job.id)
+        const cancelDetail = cancelledDetailByJobId[job.id]
+        const alreadyEmitted = emittedCardsByJobId.get(job.id)
+        if (alreadyEmitted && alreadyEmitted.length > 0) {
+          if (cancelDetail) {
+            for (const card of alreadyEmitted) {
+              if (card?.jobs) card.jobs.makesafe_details = cancelDetail
+            }
+          }
+          continue
+        }
+        if (cancelDetail) job.makesafe_details = cancelDetail
         assignments.push({
           id: `makesafe-cancelled-${job.id}`,
           scheduled_date: today,
@@ -22678,7 +23228,7 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
   // make-safe pool via _makesafePoolExcludedStatusFilter().
   const genericPoolVerticals = (poolVerticals || []).filter((v) => v !== 'makesafe')
   if (genericPoolVerticals.length > 0) {
-    const assignedJobIdsPool = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+    const assignedJobIdsPool = _activeAssignedJobIds(assignments, 'vertical')
     for (const vertical of genericPoolVerticals) {
       try {
         // M3b U1 (D1+G1): INCLUDE filter — the fencing/patio/decking pool shows
@@ -22691,14 +23241,29 @@ export async function myJobs(client: any, userId: string, showAll = false, isDis
         const { data: openJobs, error: poolErr } = await client
           .from('jobs')
           .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+          .eq('org_id', orgId)
           .eq('type', vertical)
           .in('status', _CREW_READY_STATUSES as unknown as string[])
           .order('created_at', { ascending: false })
           .limit(80)
         if (poolErr) throw poolErr
+        // The manager assignment feed intentionally remains 30-day windowed, so
+        // ask job_assignments directly whether these already tenant+vertical-
+        // authorized pool ids are occupied at any date.
+        const poolJobIds = (openJobs || []).map((job: any) => job?.id).filter(Boolean)
+        const occupancy = await fetchOccupyingAssignments(client, poolJobIds, poolRecoveryUserId, 'vertical')
         for (const job of (openJobs || [])) {
           if (!job?.id || assignedJobIdsPool.has(job.id)) continue
           assignedJobIdsPool.add(job.id)
+          // Held by a live allocation: never open work anyone may take. Recovered
+          // as that crew's real card only when this lens is entitled to show it.
+          const occupying = occupancy.get(job.id)
+          if (occupying) {
+            if (_shouldRecoverOccupiedPoolJob({ occupying, lens: poolLens, userId })) {
+              assignments.push(occupiedPoolAssignmentCard(occupying, job))
+            }
+            continue
+          }
           assignments.push({
             id: `${vertical}-open-${job.id}`,
             scheduled_date: today,
@@ -22841,17 +23406,27 @@ async function extractScopePhotos(client: any, jobId: string, scopeJson: any): P
   return count
 }
 
-async function tradeJobDetail(client: any, params: URLSearchParams, userId: string, isAdmin = false) {
+async function tradeJobDetail(
+  client: any,
+  params: URLSearchParams,
+  viewer: TradeAuthContext,
+  isAdmin = false,
+) {
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
 
-  // Verify user is assigned, or this is a MakeSafe field-report job.
-  await assertAssignedOrMakesafeAccess(client, jobId, userId, isAdmin)
+  // Verify the job belongs to the viewer's tenant, then allow an assignment,
+  // dispatcher access, the existing MakeSafe exception, or explicit
+  // managed-vertical authority.
+  await assertAssignedOrMakesafeAccess(client, jobId, viewer.id, isAdmin, {
+    orgId: viewer.orgId,
+    managedVerticals: viewer.managedVerticals,
+  })
 
   const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes] = await Promise.all([
     client.from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, ghl_opportunity_id, ghl_contact_id, metadata')
-      .eq('id', jobId).single(),
+      .eq('id', jobId).eq('org_id', viewer.orgId).single(),
     client.from('job_documents')
       .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
       .eq('job_id', jobId).order('created_at', { ascending: false }),

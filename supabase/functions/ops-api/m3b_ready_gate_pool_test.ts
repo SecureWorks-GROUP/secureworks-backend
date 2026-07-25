@@ -59,6 +59,10 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     let rows = fx.assignments.slice();
     if (st.eq.user_id != null) rows = rows.filter((a) => a.user_id === st.eq.user_id);
     if (st.neq.status != null) rows = rows.filter((a) => a.status !== st.neq.status);
+    if (st.notIn) {
+      const closed = parseNotInSet(st.notIn);
+      rows = rows.filter((a) => !closed.has(a.status));
+    }
     if (st.gte != null) rows = rows.filter((a) => a.scheduled_date >= st.gte!);
     if (st.lt != null) rows = rows.filter((a) => a.scheduled_date < st.lt!);
     let joined = rows
@@ -66,6 +70,20 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
       .filter((x) => x.job) as { a: Assignment; job: Job }[];
     if (st.refOr && st.refOr.referencedTable === "jobs") {
       joined = joined.filter((x) => matchOr(x.job as unknown as Record<string, unknown>, st.refOr!.str));
+    }
+    // Occupancy probe: filters by an explicit job_id list, returns the
+    // occupying assignment rather than the board-card shape.
+    if (st.inCol === "job_id" && st.inVals) {
+      return {
+        data: joined
+          .filter((x) => st.inVals!.includes(x.a.job_id))
+          .map(({ a }) => ({
+            id: a.id, job_id: a.job_id, scheduled_date: a.scheduled_date,
+            status: a.status, role: "lead", assignment_type: "install",
+            crew_name: null, user: { id: a.user_id, name: a.user_id },
+          })),
+        error: null,
+      };
     }
     return {
       data: joined.map(({ a, job }) => ({
@@ -79,6 +97,7 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
   if (st.table === "jobs") {
     let rows = fx.jobs.slice();
     if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
+    if (st.eq.status != null) rows = rows.filter((j) => j.status === st.eq.status);
     if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
     if (st.inCol === "status" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.status));
     if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.id));
@@ -116,6 +135,7 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[]) {
       ilike: () => b,
       order: () => b,
       limit: () => b,
+      range: () => b,
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
       // deno-lint-ignore no-explicit-any
       then: (resolve: any) => { recorded.push(st); resolve(resolveQuery(fx, st)); },

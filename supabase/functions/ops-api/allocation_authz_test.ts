@@ -133,34 +133,72 @@ Deno.test("gate: dispatcher JWT passes with no job/user lookup", async () => {
   assertEquals(store.calls, []);
 });
 
+// managed_verticals rides on the AUTHENTICATED context (read server-side from
+// the users row at auth time, never from the request body), so the gate reads the
+// job and nothing else.
 Deno.test("gate: vertical manager passes only for a job in their vertical", async () => {
-  const store: Store = {
-    jobs: { "job-fen": FENCING_JOB },
-    users: { "u-henry": { id: "u-henry", managed_verticals: ["fencing"] } },
-  };
+  const store: Store = { jobs: { "job-fen": FENCING_JOB } };
   const client = makeClient(store);
   // Right vertical → resolves.
-  await assertAssignmentMutationAuthz(client, "jwt", { id: "u-henry", role: "lead_installer" }, { jobId: "job-fen" });
+  await assertAssignmentMutationAuthz(
+    client,
+    "jwt",
+    { id: "u-henry", role: "lead_installer", managedVerticals: ["fencing"] },
+    { jobId: "job-fen" },
+  );
+  assertEquals(store.calls!.includes("users"), false, "the authed context already carries managed_verticals");
 
   // Wrong vertical → 403.
-  const store2: Store = {
-    jobs: { "job-fen": FENCING_JOB },
-    users: { "u-nithin": { id: "u-nithin", managed_verticals: ["patio"] } },
-  };
   await assertRejects(
-    () => assertAssignmentMutationAuthz(makeClient(store2), "jwt", { id: "u-nithin", role: "sales" }, { jobId: "job-fen" }),
+    () =>
+      assertAssignmentMutationAuthz(
+        makeClient({ jobs: { "job-fen": FENCING_JOB } }),
+        "jwt",
+        { id: "u-nithin", role: "sales", managedVerticals: ["patio"] },
+        { jobId: "job-fen" },
+      ),
     Error,
     "Not authorized",
   );
 });
 
 Deno.test("gate: plain installer JWT is refused", async () => {
-  const store: Store = {
-    jobs: { "job-fen": FENCING_JOB },
-    users: { "u-plain": { id: "u-plain", managed_verticals: [] } },
-  };
+  const store: Store = { jobs: { "job-fen": FENCING_JOB } };
   await assertRejects(
-    () => assertAssignmentMutationAuthz(makeClient(store), "jwt", { id: "u-plain", role: "lead_installer" }, { jobId: "job-fen" }),
+    () =>
+      assertAssignmentMutationAuthz(
+        makeClient(store),
+        "jwt",
+        { id: "u-plain", role: "lead_installer", managedVerticals: [] },
+        { jobId: "job-fen" },
+      ),
+    Error,
+    "Not authorized",
+  );
+});
+
+// A context with no manager scope at all must never fall through to "allowed":
+// an absent list is an empty list, not a wildcard.
+Deno.test("gate: a JWT carrying no managed verticals at all is refused", async () => {
+  await assertRejects(
+    () =>
+      assertAssignmentMutationAuthz(
+        makeClient({ jobs: { "job-fen": FENCING_JOB } }),
+        "jwt",
+        { id: "u-plain", role: "lead_installer" },
+        { jobId: "job-fen" },
+      ),
+    Error,
+    "Not authorized",
+  );
+  await assertRejects(
+    () =>
+      assertAssignmentMutationAuthz(
+        makeClient({ jobs: { "job-fen": FENCING_JOB } }),
+        "jwt",
+        null,
+        { jobId: "job-fen" },
+      ),
     Error,
     "Not authorized",
   );
@@ -170,14 +208,19 @@ Deno.test("gate: update/delete resolve the job via the assignment id", async () 
   const store: Store = {
     assignments: { "a1": { id: "a1", job_id: "job-fen", user_id: "someone" } },
     jobs: { "job-fen": FENCING_JOB },
-    users: { "u-henry": { id: "u-henry", managed_verticals: ["fencing"] } },
   };
   const client = makeClient(store);
-  await assertAssignmentMutationAuthz(client, "jwt", { id: "u-henry", role: "lead_installer" }, { assignmentId: "a1" });
-  // It had to look up the assignment (for job_id), the job (for vertical), and the user.
+  await assertAssignmentMutationAuthz(
+    client,
+    "jwt",
+    { id: "u-henry", role: "lead_installer", managedVerticals: ["fencing"] },
+    { assignmentId: "a1" },
+  );
+  // It had to look up the assignment (for job_id) and the job (for vertical) —
+  // and only those two.
   assertEquals(store.calls!.includes("job_assignments"), true);
   assertEquals(store.calls!.includes("jobs"), true);
-  assertEquals(store.calls!.includes("users"), true);
+  assertEquals(store.calls!.includes("users"), false);
 });
 
 // ── allocateJob ────────────────────────────────────────────────────────────

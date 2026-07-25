@@ -889,6 +889,7 @@ function makeMyJobsClient(fx: { jobs: MjJob[]; details: MjDetail[] }) {
       ilike: () => b,
       order: () => b,
       limit: () => b,
+      range: () => b,
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
       then: (res: (v: any) => any) => res(resolve(st)),
     };
