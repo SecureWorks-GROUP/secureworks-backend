@@ -85,6 +85,12 @@ if [[ "$FULL_TREE" == "true" ]]; then
   SHARED_CHANGED=false
 else
   CHANGED_FILES="$(git diff --name-only "$DIFF_BASE" "$HEAD_COMMIT" --)"
+  # Select on ANY file inside a function directory, not just index.ts. PR #164
+  # changed ops-api/makesafe_compact_reads.ts, an index.ts-only match produced
+  # an empty function set, and the deploy step was skipped so the fix silently
+  # never reached production. NF>=4 drops top-level files such as
+  # supabase/functions/README.md; _shared is excluded here and warned about
+  # below rather than auto-deploying every function that imports it.
   CHANGED_FUNCTIONS="$(
     printf '%s\n' "$CHANGED_FILES" |
       awk -F/ '$1=="supabase" && $2=="functions" && NF>=4 && $3!="_shared" {print $3}' |

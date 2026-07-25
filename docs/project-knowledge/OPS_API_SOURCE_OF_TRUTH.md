@@ -41,12 +41,10 @@ the GitHub production workflow and smoke checks, not from a local CLI session.
 
 ## Allowed Deploy Paths
 
-Normal path:
-
-1. Merge reviewed changes into `secureworks-site/main`.
-2. Use the GitHub Actions workflow `deploy production edge functions`.
-3. Type the explicit approval phrase when dispatching the workflow.
-4. Confirm smoke checks pass.
+Normal path: merge reviewed changes into `secureworks-site/main` and let the
+production edge deploy workflow run. `docs/project-knowledge/EDGE_DEPLOY_LANE.md`
+("Allowed Production Deploy Paths") owns what that push triggers, including when
+a merge verifies `ops-api` without deploying anything.
 
 Break-glass local path:
 
