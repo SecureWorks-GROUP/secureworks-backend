@@ -22192,6 +22192,23 @@ export function _closedAssignmentStatusFilter(): string {
   return '(' + _CLOSED_ASSIGNMENT_STATUSES.map((s) => `"${s}"`).join(',') + ')'
 }
 
+// The windowed assignment feed is NOT status-filtered beyond 'cancelled', so it
+// still carries finished visits. Every de-duplication seed built from that feed
+// must therefore ask the same question the occupancy probe does: does a LIVE
+// assignment hold this job? Seeding from closed rows is what kept a re-attended
+// make-safe out of the pool until its last visit aged out of the window.
+export function _activeAssignedJobIds(assignments: any[]): Set<string> {
+  const ids = new Set<string>()
+  for (const assignment of (assignments || [])) {
+    const jobId = assignment?.jobs?.id
+    if (!jobId) continue
+    const status = String(assignment?.status || '').toLowerCase()
+    if ((_CLOSED_ASSIGNMENT_STATUSES as readonly string[]).includes(status)) continue
+    ids.add(jobId)
+  }
+  return ids
+}
+
 // Map a jobs.status to the assignment close mode, or null when not terminal.
 export function _closeAsForJobStatus(status: string | null | undefined): 'complete' | 'cancelled' | null {
   const s = String(status || '').toLowerCase()
@@ -22626,24 +22643,24 @@ async function fetchOccupyingAssignments(
 export const _fetchOccupyingAssignmentsForTest = fetchOccupyingAssignments
 
 // An occupied pool job is NEVER emitted as available. Whether it is additionally
-// recovered as an assigned card depends on the lens:
-//  - 'everyone' (dispatcher showAll / vertical manager on mode:'all'): the
-//    windowed feed already carries every in-window same-tenant managed-vertical
-//    allocation, so only occupancy that feed CANNOT show — null-dated or older
-//    than the 30-day cutoff — needs recovering.
+// recovered as an assigned card depends on the lens. Callers only reach this for
+// a job ALREADY absent from the emitted assignment set — the pool loops skip
+// anything the feed carried — so this deliberately does not second-guess the
+// feed's window. The make-safe pool's legacy `detailJobIds` backstop surfaces
+// jobs the feed's `type.eq.makesafe,job_number.ilike.SWMS-%` filter can never
+// match at ANY date, and those must still render as the crew's card.
+//  - 'everyone' (dispatcher showAll / vertical manager on mode:'all'): recover
+//    the allocation; the pool query already bounded it to same-tenant
+//    managed-vertical work.
 //  - 'mine' (personal view): the feed is own-only, so recover only the viewer's
-//    OWN out-of-window allocation. Another crew's current work stays out of the
-//    personal dated lanes; the manager sees it on the Board (mode:'all').
+//    OWN allocation. Another crew's work stays out of the personal dated lanes;
+//    the manager sees it on the Board (mode:'all').
 export function _shouldRecoverOccupiedPoolJob(input: {
   occupying: any
   lens: 'everyone' | 'mine'
   userId: string
-  windowStart: string
 }): boolean {
   if (!input.occupying) return false
-  const scheduled = String(input.occupying?.scheduled_date || '')
-  const outsideWindow = !scheduled || scheduled < input.windowStart
-  if (!outsideWindow) return false
   if (input.lens === 'everyone') return true
   return String(input.occupying?.user?.id || '') === String(input.userId || '')
 }
@@ -22699,11 +22716,9 @@ export async function myJobs(
   // Non-make-safe assignments keep the original 30-day window.
   const makesafeSixMonthsAgo = new Date(Date.now() + AWST_OFFSET_MS)
   makesafeSixMonthsAgo.setDate(makesafeSixMonthsAgo.getDate() - 180)
-  // Which allocations the open pools are entitled to re-surface as assigned
-  // cards, and the cutoff below which the windowed feed cannot show them.
+  // Which allocations the open pools are entitled to re-surface as assigned cards.
   const poolLens: 'everyone' | 'mine' = showAll || managerScope.length > 0 ? 'everyone' : 'mine'
   const poolRecoveryUserId = poolLens === 'mine' ? userId : ''
-  const assignmentWindowStart = thirtyDaysAgo.toISOString().slice(0, 10)
 
   const ASSIGNMENT_SELECT_ADMIN = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
@@ -22857,7 +22872,7 @@ export async function myJobs(
   // de-duplicated via assignedJobIds below. Keep this specific to MakeSafe and
   // expose only the same slim job fields the mobile job list already uses.
   if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
-    const assignedJobIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+    const assignedJobIds = _activeAssignedJobIds(assignments)
     const { data: openMakesafesByShape, error: msErr } = await client
       .from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
@@ -22957,12 +22972,7 @@ export async function myJobs(
       const occupying = makesafeOccupancy.get(job.id)
       if (occupying) {
         assignedJobIds.add(job.id)
-        if (_shouldRecoverOccupiedPoolJob({
-          occupying,
-          lens: poolLens,
-          userId,
-          windowStart: assignmentWindowStart,
-        })) {
+        if (_shouldRecoverOccupiedPoolJob({ occupying, lens: poolLens, userId })) {
           assignments.push(occupiedPoolAssignmentCard(occupying, job))
         }
         continue
@@ -23028,8 +23038,11 @@ export async function myJobs(
       }
 
       // Dedup against the user's own named assignments (a cancelled job should not
-      // appear twice if it somehow still carries an assignment row).
-      const assignedCancelledIds = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+      // appear twice if it somehow still carries a LIVE assignment row). A closed
+      // row is a finished visit, not ownership: cancelMakesafe only closes rows in
+      // _OPEN_ASSIGNMENT_STATUSES, so a worked-then-cancelled make-safe keeps its
+      // 'complete' row and would otherwise never reach the Cancelled column.
+      const assignedCancelledIds = _activeAssignedJobIds(assignments)
       for (const job of cancelledJobs) {
         if (!job?.id || assignedCancelledIds.has(job.id)) continue
         assignedCancelledIds.add(job.id)
@@ -23068,7 +23081,7 @@ export async function myJobs(
   // make-safe pool via _makesafePoolExcludedStatusFilter().
   const genericPoolVerticals = (poolVerticals || []).filter((v) => v !== 'makesafe')
   if (genericPoolVerticals.length > 0) {
-    const assignedJobIdsPool = new Set((assignments || []).map((a: any) => a.jobs?.id).filter(Boolean))
+    const assignedJobIdsPool = _activeAssignedJobIds(assignments)
     for (const vertical of genericPoolVerticals) {
       try {
         // M3b U1 (D1+G1): INCLUDE filter — the fencing/patio/decking pool shows
@@ -23099,12 +23112,7 @@ export async function myJobs(
           // as that crew's real card only when this lens is entitled to show it.
           const occupying = occupancy.get(job.id)
           if (occupying) {
-            if (_shouldRecoverOccupiedPoolJob({
-              occupying,
-              lens: poolLens,
-              userId,
-              windowStart: assignmentWindowStart,
-            })) {
+            if (_shouldRecoverOccupiedPoolJob({ occupying, lens: poolLens, userId })) {
               assignments.push(occupiedPoolAssignmentCard(occupying, job))
             }
             continue

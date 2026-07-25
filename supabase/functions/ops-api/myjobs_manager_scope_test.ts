@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _activeAssignedJobIds,
   _fetchOccupyingAssignmentsForTest,
   _managerBoardVerticals,
   _resolveManagerVisibility,
@@ -46,7 +47,8 @@ type Assignment = {
   assignment_type?: string;
   role?: string;
 };
-type Fixtures = { assignments: Assignment[]; jobs: Job[] };
+type MakesafeDetail = { job_id: string; substatus?: string };
+type Fixtures = { assignments: Assignment[]; jobs: Job[]; details?: MakesafeDetail[] };
 type RecordedQuery = {
   table: string;
   eq: Record<string, unknown>;
@@ -170,8 +172,12 @@ function resolveQuery(fx: Fixtures, st: RecordedQuery): { data: unknown[]; error
     }
     return { data: rows.map((j) => ({ ...j })), error: null };
   }
-  // makesafe_job_details / job_contacts / purchase_orders → not needed by these
-  // fencing/patio/installer/dispatcher fixtures.
+  if (st.table === "makesafe_job_details") {
+    let rows = (fx.details || []).slice();
+    if (st.inCol === "job_id" && st.inVals) rows = rows.filter((d) => st.inVals!.includes(d.job_id));
+    return { data: rows.map((d) => ({ ...d })), error: null };
+  }
+  // job_contacts / purchase_orders → not needed by these fixtures.
   return { data: [], error: null };
 }
 
@@ -635,21 +641,41 @@ Deno.test("occupancy probe picks the latest active assignment for a job", async 
   assertEquals(mine.get("job-x")?.id, "a-early");
 });
 
-Deno.test("occupied-pool recovery is scoped by lens and window", () => {
-  const windowStart = "2026-06-01";
+// Callers only reach the predicate for a job the emitted assignment set does not
+// already carry, so it tests the lens and nothing else. Second-guessing the
+// feed's date window here hid legacy detail-backed make-safes entirely — the
+// feed's type/SWMS- filter can never match them at any date.
+Deno.test("occupied-pool recovery is scoped by lens", () => {
   const otherCrewOld = { scheduled_date: "2026-01-01", user: { id: "u-other" } };
   const otherCrewNow = { scheduled_date: "2026-07-01", user: { id: "u-other" } };
   const ownNullDated = { scheduled_date: null, user: { id: "u-me" } };
 
   const recover = (occupying: unknown, lens: "everyone" | "mine") =>
-    _shouldRecoverOccupiedPoolJob({ occupying, lens, userId: "u-me", windowStart });
+    _shouldRecoverOccupiedPoolJob({ occupying, lens, userId: "u-me" });
 
   assertEquals(recover(otherCrewOld, "everyone"), true, "Everyone recovers same-tenant managed-vertical stale work");
   assertEquals(recover(otherCrewOld, "mine"), false, "Mine never recovers another crew's work");
   assertEquals(recover(ownNullDated, "mine"), true, "Mine recovers the viewer's own null-dated work");
-  assertEquals(recover(otherCrewNow, "everyone"), false, "in-window work is already on the windowed feed");
-  assertEquals(recover(otherCrewNow, "mine"), false, "and never enters the personal dated lanes");
+  assertEquals(recover(otherCrewNow, "everyone"), true, "Everyone recovers work its feed cannot reach at any date");
+  assertEquals(recover(otherCrewNow, "mine"), false, "and it never enters the personal dated lanes");
   assertEquals(recover(null, "everyone"), false, "an unoccupied job is not a recovery case");
+});
+
+Deno.test("de-dupe seeds count only LIVE assignments as holding a job", () => {
+  const seeded = _activeAssignedJobIds([
+    { status: "scheduled", jobs: { id: "job-live" } },
+    { status: "in_progress", jobs: { id: "job-working" } },
+    { status: "complete", jobs: { id: "job-finished" } },
+    { status: "cancelled", jobs: { id: "job-dead" } },
+    { status: "available", jobs: { id: "job-pool-card" } },
+    { status: "scheduled", jobs: null },
+  ]);
+  assertEquals(seeded.has("job-live"), true);
+  assertEquals(seeded.has("job-working"), true, "in_progress still holds the job");
+  assertEquals(seeded.has("job-finished"), false, "a finished visit releases the job");
+  assertEquals(seeded.has("job-dead"), false);
+  assertEquals(seeded.has("job-pool-card"), true, "an already-emitted pool card is not re-emitted");
+  assertEquals(seeded.size, 3);
 });
 
 // The 180-day backstop still leaves two holes the make-safe pool used to fall
@@ -666,16 +692,27 @@ function occupiedMakesafeFixtures(): Fixtures {
       // Re-attend (M-F): cycle 1 closed to 'complete' and reattendMakesafe
       // deliberately creates no new assignment, so the job must pool again.
       { id: "a-ms-done", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: ANCIENT, job_id: "job-ms-reattend" },
+      // The same re-attend at the COMMON timing: the finished visit is still
+      // inside the 30-day feed and the 180-day backstop.
+      { id: "a-ms-redo-done", user_id: "u-crew8", user_name: "Crew H", status: "complete", scheduled_date: TODAY, job_id: "job-ms-redo" },
       // The viewer's OWN beyond-backstop allocation.
       { id: "a-ms-hugo", user_id: "u-hugo", user_name: "Hugo", status: "scheduled", scheduled_date: ANCIENT, job_id: "job-ms-mine" },
+      // A CURRENT allocation on a legacy detail-backed make-safe: the feed's
+      // type/SWMS- filter can never carry it, at any date.
+      { id: "a-ms-legacy", user_id: "u-crew9", user_name: "Crew I", status: "scheduled", scheduled_date: TODAY, job_id: "job-ms-legacy" },
     ],
     jobs: [
       { id: "job-ms-ancient", type: "makesafe", status: "accepted", job_number: "SWMS-200" },
       { id: "job-ms-null", type: "makesafe", status: "accepted", job_number: "SWMS-201" },
       { id: "job-ms-open", type: "makesafe", status: "accepted", job_number: "SWMS-202" }, // truly open
       { id: "job-ms-reattend", type: "makesafe", status: "accepted", job_number: "SWMS-203" },
+      { id: "job-ms-redo", type: "makesafe", status: "accepted", job_number: "SWMS-205" },
       { id: "job-ms-mine", type: "makesafe", status: "accepted", job_number: "SWMS-204" },
+      // Legacy import: neither type='makesafe' nor an SWMS- number, reachable
+      // only through the makesafe_job_details backstop.
+      { id: "job-ms-legacy", type: "general", status: "accepted", job_number: "LEG-1" },
     ],
+    details: [{ job_id: "job-ms-legacy" }],
   };
 }
 
@@ -688,6 +725,28 @@ Deno.test("a re-attended make-safe returns to the allocatable pool", async () =>
   );
   assertEquals(poolJobIds(g).includes("job-ms-reattend"), true, "a completed visit releases the make-safe");
   assertEquals(assignedJobIds(g).includes("job-ms-reattend"), false, "the closed visit is not re-rendered as a live card");
+
+  // The common timing: the finished visit is still INSIDE the feed window, so
+  // the de-dupe seed — not just the probe — has to ignore closed rows.
+  assertEquals(poolJobIds(g).includes("job-ms-redo"), true, "re-attend is allocatable without waiting out the 180-day window");
+  const redoCards = nonPool(g).filter((a) => a.jobs?.id === "job-ms-redo");
+  assertEquals(redoCards.map((a) => a.id), ["a-ms-redo-done"], "the finished visit still shows once, as history");
+  assertEquals(redoCards[0]?.status, "complete");
+});
+
+// The detail backstop exists for imports the feed's type/SWMS- filter cannot
+// match, so "in-window occupancy is already on the feed" is false for them.
+Deno.test("a currently-allocated legacy make-safe renders as the crew's card, not nothing", async () => {
+  const hugo = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: ["makesafe"] });
+  const managerScope = _managerBoardVerticals({ isDispatcher: hugo.isDispatcher, mode: "all", managedVerticals: ["makesafe"] });
+  const g = await myJobs(
+    makeClient(occupiedMakesafeFixtures(), []), "u-hugo",
+    false, hugo.isDispatcher, hugo.isMakesafeManager, hugo.poolVerticals, managerScope, TENANT_A,
+  );
+  const legacy = nonPool(g).find((a) => a.jobs?.id === "job-ms-legacy");
+  assertEquals(legacy?.id, "a-ms-legacy", "the allocation renders instead of vanishing");
+  assertEquals(legacy?.user?.id, "u-crew9", "with the occupying crew attributed");
+  assertEquals(poolJobIds(g).includes("job-ms-legacy"), false, "and is never offered as available");
 });
 
 Deno.test("make-safe pool never labels beyond-backstop or null-dated assigned work as available", async () => {
