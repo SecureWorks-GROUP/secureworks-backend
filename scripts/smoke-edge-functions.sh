@@ -103,41 +103,18 @@ else
   echo "[warn] EXPECTED_COMMIT_SHA not set; skipping commit_sha drift assertion"
 fi
 
-# S6 drift detection — full action-surface iteration.
-#
-# Reads scripts/_ops-api-required-actions.txt (single source of truth shared
-# with deploy-edge-function.sh's source-side require_ops_actions check). For
-# every required action, fires a no-op request and asserts no "Unknown
-# action" in the response. Detects stale-binary drift where the deployed
-# function is missing a handler that exists in source.
+# S6 drift detection — full action-surface iteration. Keep the action requests
+# in the dedicated smoke script so CI and guarded release verification share the
+# same bounded replay and JWT-only Trade recognition contract.
 REQUIRED_ACTIONS_FILE="${REQUIRED_ACTIONS_FILE:-scripts/_ops-api-required-actions.txt}"
-if [[ -f "$REQUIRED_ACTIONS_FILE" ]]; then
-  drift=0
-  total=0
-  while IFS= read -r action; do
-    [[ -z "$action" ]] && continue
-    total=$((total + 1))
-    body="$(json_get "${BASE}/ops-api?action=${action}")"
-    if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
-      record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
-      drift=$((drift + 1))
-    elif printf '%s' "$body" | grep -qi 'Unknown action'; then
-      # Try POST as some action handlers gate on method.
-      body="$(json_post "${BASE}/ops-api?action=${action}" '{}')"
-      if printf '%s' "$body" | grep -Eqi 'Missing authorization header|Invalid JWT|JWT expired'; then
-        record_fail "ops-api drift: action '${action}' blocked by gateway/JWT"
-        drift=$((drift + 1))
-      elif printf '%s' "$body" | grep -qi 'Unknown action'; then
-        record_fail "ops-api drift: action '${action}' returns Unknown action"
-        drift=$((drift + 1))
-      fi
-    fi
-  done < <(grep -vE '^\s*(#|$)' "$REQUIRED_ACTIONS_FILE" | awk '{print $1}')
-  if [[ "$drift" -eq 0 ]]; then
-    record_pass "ops-api action-surface: all ${total} required actions recognised"
-  fi
+if SUPABASE_FUNCTIONS_BASE="$BASE" \
+  SW_API_KEY="$SW_API_KEY" \
+  REQUIRED_ACTIONS_FILE="$REQUIRED_ACTIONS_FILE" \
+  CURL_BIN="${CURL_BIN:-curl}" \
+  bash scripts/smoke-ops-api-action-surface.sh; then
+  record_pass "ops-api action-surface smoke"
 else
-  echo "[warn] required-actions manifest missing at $REQUIRED_ACTIONS_FILE; skipping action-surface drift check"
+  record_fail "ops-api action-surface smoke"
 fi
 
 quote_view_code="$(curl -sS -o /tmp/send_quote_view_smoke.out -w '%{http_code}' --max-time 30 --max-redirs 0 "${BASE}/send-quote/view?token=definitely-invalid" || true)"

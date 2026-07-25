@@ -114,6 +114,13 @@ The live function must prove:
 - `commit_sha` matches the approved deploy commit
 - all required actions in `scripts/_ops-api-required-actions.txt` are recognised
 
+Recognition is proved without changing production data. Each manifest line may
+declare how it is probed (`probe=jwt-fail-closed`, `probe=bounded-refusal`,
+`probe=source-only`); actions that mutate business data on a bare no-argument
+call carry `probe=source-only` and are proved by the pre-deploy source gate
+(`scripts/check-ops-api-source-actions.sh`) instead of a live request. The smoke
+run prints how many actions were source-gated rather than probed.
+
 Use:
 
 ```bash

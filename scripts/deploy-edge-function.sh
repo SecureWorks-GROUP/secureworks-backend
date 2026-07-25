@@ -54,10 +54,10 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-# Single source of truth for required ops-api actions. Both this script
-# (pre-deploy source-side gate) and scripts/smoke-edge-functions.sh
-# (post-deploy live binary check) read the same file. Add or remove actions
-# there, not here.
+# Single source of truth for required ops-api actions, shared by this
+# pre-deploy source-side gate and the post-deploy live binary check. Add or
+# remove actions in the manifest, not here; its header documents every reader
+# and the per-action post-deploy probe policy.
 REQUIRED_ACTIONS_FILE="${REQUIRED_ACTIONS_FILE:-scripts/_ops-api-required-actions.txt}"
 
 # Read the canonical action list (strips comments + blank lines).

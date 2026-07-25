@@ -1,17 +1,42 @@
 # Canonical required ops-api action surface.
 #
-# Single source of truth for both scripts/deploy-edge-function.sh (source-side
-# pre-deploy gate via require_ops_actions) and scripts/smoke-edge-functions.sh
-# (deployed-binary post-deploy verification via action-surface iteration).
+# Single source of truth for the source-side pre-deploy gates
+# (scripts/deploy-edge-function.sh via require_ops_actions, and
+# scripts/check-ops-api-source-actions.sh) and for deployed-binary post-deploy
+# verification via action-surface iteration, which lives in
+# scripts/smoke-ops-api-action-surface.sh and is invoked by both
+# scripts/smoke-edge-functions.sh and the production deploy workflow.
 #
 # Format: one action name per line. Lines starting with '#' and blank lines are
 # ignored. Add the action name (no quotes, no commas), nothing else.
+#
+# An action line may carry an optional post-deploy probe policy in a trailing
+# comment. Every other reader of this file strips comments, so the policy only
+# changes how scripts/smoke-ops-api-action-surface.sh proves recognition:
+#
+#   (no policy)           GET the action; if the deployed binary says "Unknown
+#                         action", retry once as a POST with an empty body.
+#   probe=jwt-fail-closed GET only. Recognition means the deployed binary
+#                         refused the API-key caller at authTrade with
+#                         "Login required" — a tenant read that answers with
+#                         data instead is drift, not a pass.
+#   probe=bounded-refusal GET only, with probe-args appended. Recognition means
+#                         the handler refused a deliberately invalid bound
+#                         before touching any business data.
+#   probe=source-only     Never called against production. Use this when a bare
+#                         no-argument call mutates business data, so the only
+#                         honest recognition proof is the pre-deploy source gate
+#                         (scripts/check-ops-api-source-actions.sh).
+#   probe-args=<query>    Extra query string appended to the GET probe.
+#
+# Declare the policy here rather than in the smoke script: an action the script
+# has never heard of must not silently inherit "fire it at production".
 #
 # When you add a handler to supabase/functions/ops-api/index.ts that JARVIS,
 # the cockpit, or the canonical reader (sw_job_context_v2) depends on, add it
 # here too. The deploy guard then refuses to deploy a source tree missing the
 # action; smoke then refuses to mark the deploy green if the deployed binary
-# returns "Unknown action" for it.
+# fails the probe policy declared for that action above.
 #
 # Drift history: on 2026-05-14 the deployed binary returned "Unknown action"
 # for ops_api_version, daily_coverage_audit, and assemble_job_dossier despite
@@ -83,6 +108,14 @@ job_detail
 update_job_status
 log_business_event
 
+# ── Trade authenticated surface ──
+# Post-deploy recognition uses API-key-only GET requests and must fail closed at
+# authTrade before any tenant read or invoice submission path can run.
+trade_calendar            # probe=jwt-fail-closed
+my_jobs                   # probe=jwt-fail-closed
+my_work_orders            # probe=jwt-fail-closed
+submit_work_order_invoice # probe=jwt-fail-closed
+
 # ── Job P&L (M3) — read-only; pairs with ops.html #119 + M1 migration ──
 job_financials
 job_financials_detail
@@ -92,11 +125,17 @@ job_financials_detail
 makesafe_audit
 # Deterministic replay/observe are production cutover hard gates. Both are
 # read-only; dark observe additionally requires an exact source/key allowlist.
-makesafe_deterministic_intake_replay
+# Replay writes no business data, but a dry run still commits its observe sweep
+# position, so any replay a verifier fires would move the cutover gate's own
+# cursor. max_sources=0 is refused before the first read, which proves the
+# handler exists without starting a sweep at all.
+makesafe_deterministic_intake_replay # probe=bounded-refusal probe-args=max_sources=0
 makesafe_deterministic_intake_dark_observe
 # SES reporting skill coupling: one bounded deterministic scan followed by the
-# existing guarded clean-draft advancement sweep.
-makesafe_reporting_intake_pass
+# existing guarded clean-draft advancement sweep. A bare privileged call runs
+# the live scan and can promote up to 100 clean drafts into live make-safe jobs,
+# so post-deploy recognition stays on the source gate.
+makesafe_reporting_intake_pass # probe=source-only
 
 # ── Make-safe compact READ endpoints (Mission makesafe-live-truth-2026-06-14, M2)
 #    GAP-1..6: let the make-safe skills read the email-sync Supabase projection
@@ -121,17 +160,22 @@ create_makesafe_draft_invoice
 makesafe_render_report
 makesafe_report_drafts
 draft_makesafe_report_pack
-draft_makesafe_report_pack_due
+# Bare call drafts a pack for every due job (dry_run defaults to false).
+draft_makesafe_report_pack_due # probe=source-only
 makesafe_send_pack
-allocate_job
-reattend_makesafe
+# Both call authTrade before anything else, so an API-key probe must be refused
+# at authentication rather than answered with tenant data.
+allocate_job                  # probe=jwt-fail-closed
+reattend_makesafe             # probe=jwt-fail-closed
 mark_makesafe_portal_report_done
 # W2-C portal-truth honest fallback (this PR):
 makesafe_portal_recheck_queue
-makesafe_portal_recheck_enqueue
+# Bare call stamps a recheck marker on up to 200 makesafe_job_details rows.
+makesafe_portal_recheck_enqueue # probe=source-only
 
 # ── Make-safe board truth reconciliation + captain-applied display cutover ──
-makesafe_status_shadow_refresh
+# Bare call rewrites computed_status across the whole board.
+makesafe_status_shadow_refresh # probe=source-only
 makesafe_status_disagreements
 makesafe_status_canary
 makesafe_status_apply

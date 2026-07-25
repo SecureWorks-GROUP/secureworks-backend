@@ -119,15 +119,17 @@ After every production deploy:
 SW_API_KEY=... scripts/smoke-edge-functions.sh
 ```
 
-The smoke must prove:
+The smoke must prove, for `send-quote`:
 
-- `ops-api` has `verify_jwt=false`
 - `send-quote` has `verify_jwt=false`
-- `ops_api_version` is recognised
-- `ops_api_version` reports `source_repo: secureworks-site`
-- Ops notes, sales, finance, evidence, and scope-freeze actions are recognised
 - `send-quote /view` is not blocked by Supabase gateway JWT
 - `send-quote /send-runs` reaches in-handler validation
+
+The `ops-api` half of the contract is owned elsewhere, so it is not restated
+here: `docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md` ("Live Drift Proof")
+owns what the live function must prove, and the header of
+`scripts/_ops-api-required-actions.txt` owns the per-action post-deploy probe
+policy.
 
 ## If Something Breaks Again
 
