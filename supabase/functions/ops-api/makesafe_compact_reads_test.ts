@@ -54,6 +54,14 @@ import {
 // .eq/.in/.is/.neq/.gte filters that the compact reads actually use. Adding the
 // filter logic (vs the reconcile stub's pass-through) lets the dedup + window
 // assertions be meaningful. `.storage.from().createSignedUrl()` is stubbed too.
+type OrderSpec = { column: string; ascending: boolean };
+type InCall = {
+  table: string;
+  column: string;
+  values: any[];
+  encodedBytes: number;
+};
+
 function makeClient(
   seed: Record<string, any[]>,
   opts: {
@@ -61,6 +69,10 @@ function makeClient(
     signedUrl?: string | null;
     signError?: string | null;
     signCalls?: Array<{ path: string; ttl: number }>;
+    // When set, any .in() whose encoded id-list exceeds this budget fails the way
+    // the live Supabase gateway does ("error sending request…") — used to prove
+    // allocated-trade restrict chunking stays under IN_URL_BUDGET.
+    maxInEncodedBytes?: number;
   } = {},
 ) {
   const readErrors = opts.readErrors || {};
@@ -68,6 +80,8 @@ function makeClient(
   // builders for that table. Used to assert multi-chunk behaviour (each chunk is a
   // fresh builder, so one .in() == one chunk == one would-be `.in()` request URL).
   const inCalls: Record<string, number> = {};
+  const inCallLog: InCall[] = [];
+  const orderLog: Array<{ table: string; orders: OrderSpec[] }> = [];
   function builder(table: string) {
     const rows = (seed[table] || []).slice();
     const eqs: Array<[string, any]> = [];
@@ -76,7 +90,9 @@ function makeClient(
     const isNotNull: string[] = [];
     const neqs: Array<[string, any]> = [];
     const gtes: Array<[string, any]> = [];
+    const orders: OrderSpec[] = [];
     const readErr = readErrors[table] ? { message: readErrors[table] } : null;
+    let queryError: { message: string } | null = readErr;
 
     function apply(): any[] {
       let out = rows;
@@ -87,6 +103,24 @@ function makeClient(
       for (const [c, v] of neqs) out = out.filter((r) => r[c] !== v);
       for (const [c, v] of gtes) {
         out = out.filter((r) => r[c] != null && r[c] >= v);
+      }
+      // Apply ORDER BY so multi-page OFFSET with a total order is deterministic
+      // (mirrors PostgREST / the audit-test stub). Without a unique final key,
+      // tied primary-sort values keep seed insertion order — which is exactly
+      // the non-total order the hostile regressions attack.
+      if (orders.length) {
+        out = out.slice().sort((a, b) => {
+          for (const { column, ascending } of orders) {
+            const av = a?.[column];
+            const bv = b?.[column];
+            if (av === bv) continue;
+            if (av == null) return 1;
+            if (bv == null) return -1;
+            const direction = av < bv ? -1 : 1;
+            return ascending ? direction : -direction;
+          }
+          return 0;
+        });
       }
       return out;
     }
@@ -102,8 +136,23 @@ function makeClient(
         return b;
       },
       in: (c: string, vs: any[]) => {
+        const encodedBytes = vs.reduce(
+          (n, id) => n + _encodedIdCost(String(id)),
+          0,
+        );
         ins.push([c, vs]);
         inCalls[table] = (inCalls[table] ?? 0) + 1;
+        inCallLog.push({ table, column: c, values: vs.slice(), encodedBytes });
+        if (
+          opts.maxInEncodedBytes != null &&
+          encodedBytes > opts.maxInEncodedBytes
+        ) {
+          queryError = {
+            message:
+              `${table}.${c} encoded .in() list is ${encodedBytes} bytes ` +
+              `(budget ${opts.maxInEncodedBytes})`,
+          };
+        }
         return b;
       },
       gte: (c: string, v: any) => {
@@ -118,25 +167,31 @@ function makeClient(
       },
       not: () => b,
       or: () => b,
-      order: () => b,
+      // Records ORDER BY so PAGE-1 unique-key regressions can prove the reader
+      // appends the stable PK after any caller primary sort.
+      order: (c: string, o?: { ascending?: boolean }) => {
+        orders.push({ column: c, ascending: o?.ascending !== false });
+        return b;
+      },
       limit: () => b,
       // Paginated read terminal (fetchAllRows / fetchAllRowsInChunks): applies the
-      // recorded filters then returns the rows in [from, to] inclusive. Mirrors
-      // PostgREST .range(): a page shorter than the window ends pagination.
-      range: async (from: number, to: number) =>
-        readErr
-          ? ({ data: null, error: readErr })
-          : ({ data: apply().slice(from, to + 1), error: null }),
+      // recorded filters + ORDER BY then returns the rows in [from, to] inclusive.
+      // Mirrors PostgREST .range(): a page shorter than the window ends pagination.
+      range: async (from: number, to: number) => {
+        orderLog.push({ table, orders: orders.slice() });
+        if (queryError) return { data: null, error: queryError };
+        return { data: apply().slice(from, to + 1), error: null };
+      },
       maybeSingle: async () =>
-        readErr
-          ? ({ data: null, error: readErr })
+        queryError
+          ? ({ data: null, error: queryError })
           : ({ data: apply()[0] ?? null, error: null }),
       single: async () =>
-        readErr
-          ? ({ data: null, error: readErr })
+        queryError
+          ? ({ data: null, error: queryError })
           : ({ data: apply()[0] ?? null, error: null }),
       then: (resolve: (v: any) => any) => {
-        if (readErr) return resolve({ data: null, error: readErr });
+        if (queryError) return resolve({ data: null, error: queryError });
         return resolve({ data: apply(), error: null });
       },
     };
@@ -166,6 +221,8 @@ function makeClient(
     client: { from: (t: string) => builder(t), storage },
     signCalls,
     inCalls,
+    inCallLog,
+    orderLog,
   };
 }
 
@@ -1293,6 +1350,7 @@ Deno.test("fetchAllRowsInChunks: a duplicate id straddling a chunk boundary retu
         chunkIds,
       ),
     "widgets read",
+    "widget_id",
   );
 
   // Total rows == distinct ids (no double-count from the straddling duplicate).
@@ -1448,6 +1506,7 @@ Deno.test("fetchAllRowsInChunks: LONG post-ids are split into multiple small .in
       );
     },
     "widgets read",
+    "widget_id",
   );
 
   // Multiple `.in()` reads were issued (multi-chunk for long ids).
@@ -1484,6 +1543,7 @@ Deno.test("fetchAllRowsInChunks: many short ids split by the count cap into mult
     (chunkIds) =>
       client.from("widgets").select("widget_id").in("widget_id", chunkIds),
     "widgets read",
+    "widget_id",
   );
 
   // Count-cap split: one .in() per cap-sized chunk.
@@ -1494,6 +1554,291 @@ Deno.test("fetchAllRowsInChunks: many short ids split by the count cap into mult
   );
   assertEquals(rows.length, N);
   assertEquals(new Set(rows.map((r) => r.widget_id)).size, N);
+});
+
+// ════════════════════════════════════════════════════════════
+// PAGE-1 residual — unique total-order key inside fetchAllRows*
+// (adversary F6). Every multi-row compact-read must end on a stable PK so a
+// >1000-row page pair with collisions on the primary sort cannot skip/dupe.
+// ════════════════════════════════════════════════════════════
+
+function assertUniquePageKey(
+  orderLog: Array<{ table: string; orders: OrderSpec[] }>,
+  table: string,
+  expectedFinalKey: string,
+  label: string,
+) {
+  const reads = orderLog.filter((r) =>
+    r.table === table && r.orders.length > 0
+  );
+  assert(reads.length > 0, `${label}: expected paginated ${table} reads`);
+  for (const r of reads) {
+    const last = r.orders[r.orders.length - 1];
+    assertEquals(
+      last.column,
+      expectedFinalKey,
+      `${label}: ${table} page order must end on unique key ${expectedFinalKey}, got ${
+        r.orders.map((o) => o.column).join(",")
+      }`,
+    );
+  }
+}
+
+Deno.test("PAGE-1 GAP-1 emails: >1000 same-second received_at rows return exact cardinality under post_id total order", async () => {
+  // 1500 inbound emails share one received_at (builder batch). Without the
+  // post_id tie-breaker a multi-page OFFSET read can drop or duplicate ties.
+  const N = 1500;
+  const TIE = "2026-06-14T12:00:00.000Z";
+  const emails = Array.from({ length: N }, (_, i) => ({
+    // Deliberately reverse-lexicographic post_ids vs insertion so order-by-id
+    // differs from seed order — proves the unique key is applied, not insertion.
+    post_id: `post-${String(N - i).padStart(6, "0")}`,
+    received_at: TIE,
+    from_email: "dispatch@mlb.com.au",
+    has_attachments: false,
+    mailbox: "ses@secureworkswa.com.au",
+    pii_purged_at: null,
+  }));
+  const { client, orderLog } = makeClient({
+    emails,
+    makesafe_intake_drafts: [],
+    email_attachments: [],
+  });
+  const res = await _makesafeNewEmails(client, {
+    since: "2026-06-01T00:00:00Z",
+    nowIso: "2026-06-15T00:00:00Z",
+  });
+  assertEquals(res.count, N, "exact cardinality: every tied email survives");
+  assertEquals(res.emails.length, N);
+  const ids = res.emails.map((e: any) => e.post_id);
+  assertEquals(new Set(ids).size, N, "no duplicates");
+  // Deterministic precedence: received_at desc (all equal) then post_id asc.
+  const expected = emails.map((e) => e.post_id).sort();
+  assertEquals(ids, expected, "deterministic post_id precedence across pages");
+  assertUniquePageKey(orderLog, "emails", "post_id", "GAP-1 emails");
+});
+
+Deno.test("PAGE-1 GAP-1 drafts: >1000 known drafts all contribute to dedup (id total order)", async () => {
+  // 1500 already-drafted emails + 1 undrafted. If a draft page drops a row the
+  // corresponding email resurfaces as "new" (duplicate intake).
+  const N = 1500;
+  const drafts = Array.from({ length: N }, (_, i) => ({
+    id: `draft-${String(i).padStart(6, "0")}`,
+    graph_message_id: `known-${String(i).padStart(6, "0")}`,
+    status: i % 2 === 0 ? "approved" : "needs_review",
+  }));
+  const emails = [
+    ...drafts.map((d, i) => ({
+      post_id: d.graph_message_id,
+      received_at: "2026-06-14T12:00:00.000Z",
+      from_email: "dispatch@mlb.com.au",
+      has_attachments: false,
+      mailbox: "ses@secureworkswa.com.au",
+      pii_purged_at: null,
+      // Noise so the emails page is large too — not the under-test path.
+      _i: i,
+    })),
+    {
+      post_id: "brand-new-inbound",
+      received_at: "2026-06-14T13:00:00.000Z",
+      from_email: "dispatch@mlb.com.au",
+      has_attachments: false,
+      mailbox: "ses@secureworkswa.com.au",
+      pii_purged_at: null,
+    },
+  ];
+  const { client, orderLog } = makeClient({
+    emails,
+    makesafe_intake_drafts: drafts,
+    email_attachments: [],
+  });
+  const res = await _makesafeNewEmails(client, {
+    since: "2026-06-01T00:00:00Z",
+    nowIso: "2026-06-15T00:00:00Z",
+  });
+  assertEquals(res.count, 1, "only the undrafted email is new");
+  assertEquals(res.emails[0].post_id, "brand-new-inbound");
+  assertUniquePageKey(
+    orderLog,
+    "makesafe_intake_drafts",
+    "id",
+    "GAP-1 drafts",
+  );
+});
+
+Deno.test("PAGE-1 GAP-3 pipeline_items: >1000 items return exact cardinality under id total order", async () => {
+  const N = 1500;
+  const pipeline_items = Array.from({ length: N }, (_, i) => ({
+    id: `pi-${String(i).padStart(6, "0")}`,
+    ref: `REF-${i}`,
+    target_job: null,
+    sent_status: "not_sent",
+    attachment_refs: [],
+    match_score: null,
+    match_method: null,
+    source_event_ids: [],
+    mailbox: "ses@secureworkswa.com.au",
+  }));
+  const { client, orderLog } = makeClient({
+    pipeline_items,
+    email_events_raw: [],
+    emails: [],
+    email_attachments: [],
+  });
+  const res = await _makesafePipelineItems(client, {
+    since: "2020-01-01T00:00:00Z",
+    nowIso: "2026-06-15T00:00:00Z",
+  });
+  // Unresolved items are included (no-silent-drops). Exact cardinality.
+  assertEquals(res.count, N);
+  assertEquals(res.items.length, N);
+  assertEquals(
+    new Set(res.items.map((it: any) => it.ref)).size,
+    N,
+    "no duplicate refs",
+  );
+  assertUniquePageKey(orderLog, "pipeline_items", "id", "GAP-3 pipeline_items");
+});
+
+Deno.test("PAGE-1 GAP-3 event→post + email joins: multi-page chunked reads end on unique keys", async () => {
+  // One pipeline item per event, 1100 events so the events join spills a page
+  // inside a single URL-budget chunk of short UUIDs is impossible (cap 200) —
+  // instead force many short event ids across chunks AND a multi-page
+  // attachment-free email join by using 1100 post_ids with uniqueKey coverage.
+  const N = 1100;
+  const eventIds = Array.from(
+    { length: N },
+    (_, i) => `${String(i).padStart(8, "0")}-1234-5678-9abc-def012345678`,
+  );
+  const postIds = eventIds.map((_, i) => `post-${String(i).padStart(6, "0")}`);
+  const pipeline_items = eventIds.map((eid, i) => ({
+    id: `pi-${String(i).padStart(6, "0")}`,
+    ref: `REF-${i}`,
+    target_job: null,
+    sent_status: "not_sent",
+    attachment_refs: [],
+    match_score: null,
+    match_method: null,
+    source_event_ids: [eid],
+    mailbox: "ses@secureworkswa.com.au",
+  }));
+  const email_events_raw = eventIds.map((id, i) => ({
+    id,
+    post_id: postIds[i],
+  }));
+  const emails = postIds.map((post_id) => ({
+    post_id,
+    from_email: "dispatch@mlb.com.au",
+    received_at: "2026-06-14T12:00:00.000Z",
+    mailbox: "ses@secureworkswa.com.au",
+  }));
+  const { client, orderLog } = makeClient({
+    pipeline_items,
+    email_events_raw,
+    emails,
+    email_attachments: [],
+  });
+  const res = await _makesafePipelineItems(client, {
+    since: "2020-01-01T00:00:00Z",
+    nowIso: "2026-06-15T00:00:00Z",
+  });
+  assertEquals(res.count, N);
+  assertEquals(
+    res.items.filter((it: any) => it.email_link === "resolved").length,
+    N,
+    "every event→post→email link resolves across multi-chunk pages",
+  );
+  assertUniquePageKey(
+    orderLog,
+    "email_events_raw",
+    "id",
+    "GAP-3 email_events_raw",
+  );
+  assertUniquePageKey(orderLog, "emails", "post_id", "GAP-3 emails join");
+});
+
+Deno.test("PAGE-1 GAP-6 + GAP-5 attachments: >1000 rows with tied non-unique seed order end on id", async () => {
+  const N = 1500;
+  // Insert attachments in reverse id order so a non-total page order would
+  // scramble; the reader forces id asc.
+  const email_attachments = Array.from({ length: N }, (_, i) => ({
+    id: `att-${String(N - i).padStart(6, "0")}`,
+    email_id: "post-big",
+    graph_attachment_id: `g-${i}`,
+    name: `file-${i}.pdf`,
+    content_type: "application/pdf",
+    size_bytes: 100,
+    status: "uploaded",
+    attachment_kind: "fileAttachment",
+  }));
+  const { client, orderLog } = makeClient({
+    emails: [
+      {
+        post_id: "post-big",
+        mailbox: "ses@secureworkswa.com.au",
+        subject: "many attachments",
+        body_preview: "p",
+        from_email: "x@mlb.com.au",
+        received_at: "2026-06-14T00:00:00Z",
+        has_attachments: true,
+        pii_purged_at: null,
+      },
+    ],
+    email_attachments,
+  });
+  const res = await _getMakesafeEmail(client, { post_id: "post-big" });
+  assertEquals(res.found, true);
+  assertEquals(res.attachments!.length, N);
+  assertEquals(
+    new Set(res.attachments!.map((a: any) => a.attachment_id)).size,
+    N,
+  );
+  // Deterministic precedence: id ascending across page boundary.
+  const expectedIds = email_attachments.map((a) => a.id).sort();
+  assertEquals(
+    res.attachments!.map((a: any) => a.attachment_id),
+    expectedIds,
+  );
+  assertEquals(res.attachment_status_summary!.uploaded, N);
+  assertUniquePageKey(orderLog, "email_attachments", "id", "GAP-6 attachments");
+});
+
+Deno.test("PAGE-1 loadAttachmentSummaries (GAP-5): multi-page attachments all count under id total order", async () => {
+  // Drive GAP-5 via GAP-1: one email with 1500 uploaded attachments. Summary
+  // must count all of them (under-count would mark a WO-bearing email empty).
+  const N = 1500;
+  const email_attachments = Array.from({ length: N }, (_, i) => ({
+    id: `att-sum-${String(i).padStart(6, "0")}`,
+    email_id: "post-sum",
+    status: "uploaded",
+  }));
+  const { client, orderLog } = makeClient({
+    emails: [
+      {
+        post_id: "post-sum",
+        received_at: "2026-06-14T12:00:00.000Z",
+        from_email: "dispatch@mlb.com.au",
+        has_attachments: true,
+        mailbox: "ses@secureworkswa.com.au",
+        pii_purged_at: null,
+      },
+    ],
+    makesafe_intake_drafts: [],
+    email_attachments,
+  });
+  const res = await _makesafeNewEmails(client, {
+    since: "2026-06-01T00:00:00Z",
+    nowIso: "2026-06-15T00:00:00Z",
+  });
+  assertEquals(res.count, 1);
+  assertEquals(res.emails[0].attachment_count, N);
+  assertEquals(res.emails[0].attachment_status_summary.uploaded, N);
+  assertUniquePageKey(
+    orderLog,
+    "email_attachments",
+    "id",
+    "GAP-5 attachment summaries",
+  );
 });
 
 // ════════════════════════════════════════════════════════════

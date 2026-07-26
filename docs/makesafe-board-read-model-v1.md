@@ -222,54 +222,6 @@ Each entry below is a real, understood defect this change deliberately leaves
 alone. Every one of them sits on a path with no regression coverage, so fixing
 them here would widen blast radius ahead of the live run.
 
-### PAGE-1 — non-total OFFSET pagination in `makesafe_compact_reads.ts`
-
-`fetchAllRows` / `fetchAllRowsInChunks` state the unique-sort-key obligation as a
-caller contract in comments only; nothing enforces it. `_fetchAllByJobIdChunked`
-in `index.ts` appends the tie-breaker for its callers, the compact-read module
-does not, and every multi-row read it issues still paginates on a non-total
-order. A row tied on the ordering column can then land on neither `.range()`
-page once the read spills past 1000 rows — it reads as absent, not as an error.
-The U2 review named five sites; a module-complete sweep finds seven:
-
-1. `makesafeNewEmails` (GAP-1) → `emails` (`"emails read"`), orders
-   `received_at desc` only, PK `post_id` never appended. Once the ses@ window
-   exceeds 1000 rows, an email tied on `received_at` (a same-second builder
-   batch) can appear on neither page, so a genuine inbound work-order email
-   never shows in `makesafe_new_emails` and the make-safe is never drafted.
-2. `makesafeNewEmails` (GAP-1) → `makesafe_intake_drafts`
-   (`"makesafe_intake_drafts read"`), no `ORDER BY`, PK `id`. This read carries
-   no time window so it reaches the cap first. A dropped row is missing from
-   `knownIds`, its already-drafted email resurfaces as "new", and intake
-   duplicates the work order — the same failure the audit-side `.order('id')`
-   closed.
-3. `makesafePipelineItems` (GAP-3) → `pipeline_items` (`"pipeline_items read"`),
-   no `ORDER BY`, PK `id`. A per-mailbox projection above 1000 rows can drop an
-   item, so intake-audit reads a received ref as never received and loses that
-   ref's `sent_status` verdict.
-4. `makesafePipelineItems` (GAP-3) → `email_events_raw`
-   (`"email_events_raw (event->post) read"`, chunked), no `ORDER BY`, PK `id`. A
-   dropped event breaks event→post resolution, so a resolvable item is reported
-   `email_link: "unresolved"` with null `sender_domain` / `received_at` and
-   bypasses the `since` window rule.
-5. `makesafePipelineItems` (GAP-3) → `emails`
-   (`"emails (pipeline join) read"`, chunked), no `ORDER BY`, PK `post_id`. Same
-   unresolved outcome as (4), reached from the email side.
-6. `getMakesafeEmail` (GAP-6) → `email_attachments`
-   (`"email_attachments read"`), no `ORDER BY`, PK `id`. An email carrying more
-   than 1000 attachment rows can drop one, so the work-order PDF reads as absent
-   and `attachment_status_summary` undercounts.
-7. `loadAttachmentSummaries` (shared by GAP-1 and GAP-3) → `email_attachments`
-   (`"email_attachments (status summary) read"`, chunked), no `ORDER BY`, PK
-   `id`. Same undercount, so `has_attachments` / `attachment_count` understate
-   and an email with a servable WO PDF reads as attachment-free.
-
-Preferred fix when this is taken up: make the unique key a required parameter of
-`fetchAllRows` / `fetchAllRowsInChunks` and append it inside the reader, the way
-`_fetchAllByJobIdChunked` already does with `stableKey`, so it cannot be
-forgotten. Seven per-caller `.order()` patches leave the same class of bug one
-new caller away.
-
 ### MAJOR-2 — global ACCREC full-history read in `makesafe_audit`
 
 - Concurrency: the audit's `xero_invoices` ACCREC read has no job filter and no
@@ -293,15 +245,6 @@ The audit's ACCREC read ends on `invoice_date desc, id desc`; the board's
 invoices on one job therefore resolve differently: the audit picks the newer id,
 the board the older. Both orders are total and stable, and today's first-wins
 consumers tolerate either, so the direction is left unreconciled.
-
-### Allocated-trade restrict list — unchunked `.in('id', restrict)`
-
-`makesafePipeline` passes a scoped caller's allowed job ids as a single
-`.in('id', restrict)` on both its active and cancelled queries. At ~37 encoded
-bytes per UUID, 163 ids already exceed the 6000-byte `IN_URL_BUDGET`, and a
-750-id history is about 27,750 bytes. The gateway rejects an over-long URL
-before the request is sent, so that trade's board request fails outright rather
-than truncating. Not reached at today's per-trade allocation counts.
 
 ## Parity gate
 
