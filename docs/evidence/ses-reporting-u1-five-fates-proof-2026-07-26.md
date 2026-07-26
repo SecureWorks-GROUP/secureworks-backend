@@ -20,7 +20,7 @@ The revised evidence uses the independent 36-shape SES corpus catalogue as the o
 The result is diagnostic, not a pass:
 
 - all 36 catalogue shapes have one unique expected fate
-- only 13 of 36 example emails match that expected fate in the candidate planner
+- only 13 of 36 example emails matched that expected fate in the candidate planner, measured on the pre-hardening replay
 - only 10 of 36 match in the production durable ledger
 - 8 of 1,396 production sources have no durable fate
 - only 1 of 13 independently expected live examples is currently Hugo-visible
@@ -52,11 +52,12 @@ Evidence: `docs/evidence/ses-reporting-u1-five-fates-replay.json`
 Provenance caveat: that artifact carries `generated_at=2026-07-26T14:42:02.814Z`, which
 predates the later review hardening that narrowed `REVISION_SIGNAL` to explicit wording
 plus a subject-scoped chase signal, widened `BUILDERWEST_SIGNAL` to accept a separator,
-and added the `western-building` profile alias. The production-side columns below are
-read from the live ledger and are unaffected, and were independently re-observed (see
-below). The planner-side figures (planner fate counts, the 13/36 planner match, and the
-candidate-result column of the seven-shape table) were produced by the pre-hardening
-planner and must be regenerated before they are cited again.
+and added the `western-building` profile alias. Those are fate-bearing planner changes,
+so every planner-derived figure a planner change could move carries a **(pre-hardening)**
+marker below. Each is a record of the replayed run, not a claim about the current
+working tree. Regenerating them needs another read-only production replay, which has not
+been run since the hardening landed. The production-side columns are read from the live
+ledger, are unaffected by planner code, and were independently re-observed (see below).
 
 | Measure | Result |
 |---|---:|
@@ -67,7 +68,7 @@ planner and must be regenerated before they are cited again.
 | Sources receiving one planner fate | 1,396 |
 | Sources with a durable production fate | 1,388 |
 | Sources missing a durable production fate | 8 |
-| Independent example planner matches | 13 / 36 |
+| Independent example planner matches (pre-hardening) | 13 / 36 |
 | Independent example durable matches | 10 / 36 |
 | Independent examples missing a durable fate | 4 / 36 |
 
@@ -75,7 +76,7 @@ Planner self-consistency is reported only as planner self-consistency. It is not
 
 ### Candidate planner versus durable production ledger
 
-| Fate | Candidate planner | Durable production |
+| Fate | Candidate planner (pre-hardening) | Durable production |
 |---|---:|---:|
 | Live job | 43 | 1 |
 | Blocked live job | 0 | 0 |
@@ -90,7 +91,7 @@ The large disagreement with the independent expected distribution is unresolved.
 
 The catalogue identified seven shapes as unhandled before this patch. Candidate code now routes all seven through a named adapter and exactly one planner fate. That closes the silent unknown-builder path, but it does **not** make six incorrect outcomes correct.
 
-| Shape | Independent expected fate | Candidate path | Candidate result |
+| Shape | Independent expected fate | Candidate path | Candidate result (pre-hardening) |
 |---|---|---|---|
 | `BW-NEW-MS-WO-NO-PDF` | Blocked live job | `builderwest` | Reason-coded exception: `below_identity_floor` |
 | `MLB-INFO-REQUIRED-OUR-REF` | Revision or reattendance | `mlb` revision signal | Reason-coded exception: `below_identity_floor` |
@@ -102,11 +103,13 @@ The catalogue identified seven shapes as unhandled before this patch. Candidate 
 
 The dedicated BuilderWest adapter requires a BuilderWest identity signal. It does not select on the shared PrimeEco sender domain alone, which avoids stealing MLB and generic portal traffic. A regression test pins that boundary.
 
+The candidate path column is pinned against the current planner by `makesafe_builder_shape_adapters_test.ts`, which asserts the named adapter, the work-versus-revision intent, and exactly one terminal fate for each of the seven shapes. The specific reason codes in the last column come from the pre-hardening replay and are not pinned by any regression.
+
 The honest conclusion is:
 
 - 7 of 7 baseline-unhandled examples now have an explicit candidate path
 - 7 of 7 have a terminal candidate fate
-- only 1 of 7 currently matches the independent expected fate
+- only 1 of 7 matched the independent expected fate in the pre-hardening replay
 - the other 6 remain product or parsing gaps, but they are visible and reason-coded rather than silently dropped
 
 ## Confirmed production parsing-rule drift
@@ -230,6 +233,7 @@ re-observation confirms the same gaps, so `proof_status` stays **NOT PROVED**.
 
 ### Not established
 
+- any planner-side figure against the post-hardening planner; the retained replay predates the adapter and revision-signal hardening and has not been regenerated
 - U1 correctness across the 36-shape oracle
 - zero durable source gaps in production
 - semantic correctness for six of the seven baseline-unhandled examples
@@ -246,7 +250,7 @@ re-observation confirms the same gaps, so `proof_status` stays **NOT PROVED**.
 4. Confirm the deployed monitor and ops-api revisions match the reviewed main commit.
 5. Let ordinary intake account or explicitly exception-record the eight existing durable gaps.
 6. Run a supervised clean builder-email probe and observe the same source on Hugo's canonical board within 300 seconds.
-7. Rerun the independent 36-shape report. U1 can pass only when agreed acceptance thresholds are met against the independent oracle, durable source gaps are zero, and the Hugo-visible probe satisfies the law.
+7. Regenerate `ses-reporting-u1-five-fates-replay.json` with a read-only replay against the post-hardening planner, then rerun the independent 36-shape report. U1 can pass only when agreed acceptance thresholds are met against the independent oracle, durable source gaps are zero, and the Hugo-visible probe satisfies the law.
 
 ## Regression commands
 

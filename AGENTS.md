@@ -311,10 +311,12 @@ matching deterministic-intake edge code. Production slugs are `aj`, `bw`, and `w
 not the aliases targeted by the original seed. Every active company must have field
 rules or both `intentionally_no_fields:true` and a non-empty `no_fields_reason`.
 
-The 50-document PDF budget must prioritise exact diagnostic sources and the bounded
-recent email half, newest first. Non-priority sweep rows remain oldest first. Without
-that split, old replay PDFs consume the budget before a clean new builder work order
-and break the five-minute live-job law. The GET-only regression harness is
+The 50-document PDF budget runs three strict tiers, never one flat priority set: exact
+diagnostic seeds, then the bounded recent email half newest first, then sweep rows
+oldest first. Seeds are old by construction, so folding them into the recent tier lets a
+newer burst spend the whole budget before an explicitly seeded re-plan. Without the
+tiering, old replay PDFs consume the budget before a clean new builder work order and
+break the five-minute live-job law. The GET-only regression harness is
 `scripts/replay-makesafe-five-fates.ts`; do not use runtime `dryRun` for a strictly
 read-only production proof because dark observe intentionally advances its own cursor.
 
