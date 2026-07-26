@@ -6,6 +6,7 @@ import { _classifyPost } from "../monitor-ses-makesafes/index.ts";
 import {
   _deriveMakesafeBoardStage,
   _isAllocatableMakesafePoolDetailForTest,
+  _makesafeBoardTradeRouteForTest,
   _resolveManagerVisibility,
   _shouldAutoApproveCleanIntakeDraftRowForTest,
 } from "./index.ts";
@@ -20,7 +21,7 @@ import { summarizeMakesafeIntakeReconciliation } from "./makesafe_intake_reconci
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const TRADE_BOARD_CLIENT_CACHE_MS = 90_000;
 
-Deno.test("integration: clean instruction reaches authorised manager Board L2 within five minutes", () => {
+Deno.test("fixture: clean instruction reaches authorised manager Board L2", async () => {
   const emailReceivedAt = "2026-06-24T10:00:00.000Z";
   const jobCreatedAt = "2026-06-24T10:03:30.000Z";
   const boardProjectedAt = "2026-06-24T10:04:30.000Z";
@@ -139,14 +140,57 @@ Deno.test("integration: clean instruction reaches authorised manager Board L2 wi
   assertEquals(managerScope.isMakesafeManager, true);
   assertEquals(managerScope.canSeeMakesafePool, true);
 
-  const boardResponse = {
-    projection: "trade",
-    generated_at: boardProjectedAt,
-    ...projectTradeMakesafeBoard(canonicalRows, hugoShapedViewer),
+  const profileClient = {
+    from(table: string) {
+      assertEquals(table, "users");
+      return {
+        select(columns: string) {
+          assertEquals(columns, "id, name, role, managed_verticals");
+          return {
+            eq(column: string, value: string) {
+              assertEquals(column, "id");
+              assertEquals(value, hugoShapedViewer.userId);
+              return {
+                maybeSingle: () => Promise.resolve({
+                  data: {
+                    id: hugoShapedViewer.userId,
+                    name: "Hugo Fixture",
+                    role: hugoShapedViewer.role,
+                    managed_verticals: hugoShapedViewer.managedVerticals,
+                  },
+                  error: null,
+                }),
+              };
+            },
+          };
+        },
+      };
+    },
   };
+  const boardResponse = await _makesafeBoardTradeRouteForTest(
+    profileClient,
+    "jwt",
+    {
+      id: hugoShapedViewer.userId,
+      email: "hugo.fixture@example.invalid",
+      orgId: "fixture-org",
+      role: hugoShapedViewer.role,
+      managedVerticals: hugoShapedViewer.managedVerticals,
+    },
+    {
+      loadBoard: async (_client, options) => {
+        assertEquals(options, undefined);
+        return canonicalRows;
+      },
+      generatedAt: boardProjectedAt,
+    },
+  );
+  const boardBody = JSON.parse(await boardResponse.text());
+  assertEquals(boardResponse.status, 200);
+  assertEquals(boardBody.projection, "trade");
   const stopRows = [
-    ...boardResponse.columns.New,
-    ...boardResponse.columns.Allocated,
+    ...boardBody.columns.New,
+    ...boardBody.columns.Allocated,
   ].filter((row) => row.id === jobId);
   assertEquals(stopRows.length, 1, "the exact created job_id must appear once");
   assertEquals(stopRows[0].id, liveJobIdentity.job_id);
@@ -154,10 +198,11 @@ Deno.test("integration: clean instruction reaches authorised manager Board L2 wi
 
   const timingProof = {
     cohort: "clean_automated",
+    evidence_type: "deterministic_fixture_timing",
     email_received_at: post.receivedDateTime,
     job_created_at: createdJob.created_at,
-    board_projection_at: boardResponse.generated_at,
-    elapsed_to_board_ms: Date.parse(boardResponse.generated_at) -
+    board_projection_at: boardBody.generated_at,
+    elapsed_to_board_ms: Date.parse(boardBody.generated_at) -
       Date.parse(post.receivedDateTime),
     maximum_ms: FIVE_MINUTES_MS,
     client_board_cache: {
