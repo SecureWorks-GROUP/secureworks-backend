@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-env --allow-net --allow-write
+#!/usr/bin/env -S deno run --allow-env --allow-net --allow-read --allow-write
 // SES Reporting U1 production replay harness.
 //
 // Safety contract: production access is GET/HEAD only. The harness rejects every
@@ -6,6 +6,7 @@
 // existing durable ledger, and writes a PII-free local evidence report.
 
 import {
+  adaptDeterministicSource,
   buildDeterministicIntakePlan,
   type DeterministicAttachment,
   type DeterministicCompanyProfile,
@@ -18,19 +19,85 @@ import {
   type DurableCaseRow,
   type DurableCaseSourceRow,
   type DurableJobRow,
+  type DurableSourceExceptionRow,
   type HistoricalShapeInput,
+  type HugoBoardObservation,
+  type IndependentShapeExpectation,
+  structuralHash,
 } from "../supabase/functions/ops-api/makesafe_intake_five_fates_replay.ts";
 import {
   deriveFromDomain,
   isOwnDomain,
 } from "../supabase/functions/ops-api/makesafe_compact_reads.ts";
 import { stripEmailHtmlForTrade } from "../supabase/functions/ops-api/makesafe_email_links.ts";
+import {
+  MAKESAFE_BOARD_CONTRACT_VERSION,
+  projectTradeMakesafeBoard,
+} from "../supabase/functions/ops-api/makesafe_board_read_model.ts";
 
 const MAILBOX = "ses@secureworkswa.com.au";
 const PAGE_SIZE = 500;
 const IN_FILTER_CHUNK = 25;
 
 type JsonRow = Record<string, unknown>;
+
+const COMMON_CORRECTED_FIELDS = {
+  client_name: {
+    regex:
+      "(?:client|insured|customer|home\\s*owner|homeowner|owner)\\s*(?:name)?\\s*[:\\-]\\s*([A-Za-z][A-Za-z'\\-\\. ]{1,60})",
+    source: "all" as const,
+    group: 1,
+    transform: "collapse_ws" as const,
+  },
+  client_phone: {
+    regex:
+      "(?:phone|mobile|contact|ph|tel)\\s*(?:no\\.?|number)?\\s*[:\\-]\\s*(\\+?[0-9][0-9 ()\\-]{6,})",
+    source: "all" as const,
+    group: 1,
+    transform: "collapse_ws" as const,
+  },
+  site_address: {
+    regex:
+      "(?:site\\s*address|risk\\s*address|property\\s*address|address|property|site)\\s*[:\\-]\\s*([0-9][^\\n\\r]{4,80})",
+    source: "all" as const,
+    group: 1,
+    transform: "collapse_ws" as const,
+  },
+};
+
+function applyPendingCompanyRuleCorrection(
+  profiles: readonly DeterministicCompanyProfile[],
+): DeterministicCompanyProfile[] {
+  const externalRefBySlug: Record<string, string> = {
+    aj:
+      "\\b((?:AJBR|AJS)[-\\s]?\\d{3,8}|Job\\s*No\\.?\\s*[:#-]?\\s*\\d{3,8})\\b",
+    bw: "\\b((?:BWCWA|BWC|BW)[-\\s]?\\d{3,8})\\b",
+    wb: "\\b(WB[-\\s]?\\d{3,8})\\b",
+  };
+  return profiles.map((profile) => {
+    if (profile.parsingRules?.fields || !externalRefBySlug[profile.slug]) {
+      return profile;
+    }
+    return {
+      ...profile,
+      parsingRules: {
+        version: 2,
+        template_first: false,
+        confidence: "high",
+        required: ["external_ref", "client_name", "site_address"],
+        fields: {
+          ...COMMON_CORRECTED_FIELDS,
+          external_ref: {
+            regex: externalRefBySlug[profile.slug],
+            source: "all",
+            group: 1,
+            transform: "upper",
+          },
+        },
+      },
+    };
+  });
+}
 
 export function assertReadOnlyRequest(init: RequestInit = {}): void {
   const method = String(init.method || "GET").toUpperCase();
@@ -187,6 +254,71 @@ function storageObjectUrl(baseUrl: string, bucket: string, path: string): URL {
   );
 }
 
+async function observeHugoBoard(input: {
+  baseUrl: string;
+  key: string;
+}): Promise<HugoBoardObservation> {
+  const profiles = await restAll({
+    baseUrl: input.baseUrl,
+    key: input.key,
+    table: "users",
+    params: {
+      select: "id,name,role,managed_verticals",
+      name: "ilike.Hugo",
+    },
+  });
+  if (profiles.length !== 1) {
+    throw new Error(`Hugo profile read resolved ${profiles.length} rows`);
+  }
+  const profile = profiles[0];
+  const supabaseModuleUrl = "https://esm.sh/@supabase/supabase-js@2";
+  const supabaseModule = await import(supabaseModuleUrl);
+  const client = supabaseModule.createClient(input.baseUrl, input.key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { fetch: readOnlyFetch },
+  });
+  // The function is already a test-only export used by board parity tests. A
+  // variable dynamic import avoids making this standalone proof inherit the
+  // monolithic ops-api index's unrelated typecheck debt.
+  const opsModuleUrl = new URL(
+    "../supabase/functions/ops-api/index.ts",
+    import.meta.url,
+  ).href;
+  const opsModule = await import(opsModuleUrl);
+  const canonicalRows = await opsModule._loadCanonicalMakesafeBoardForTest(
+    client,
+  );
+  const viewer = {
+    userId: String(profile.id),
+    role: String(profile.role || ""),
+    managedVerticals: Array.isArray(profile.managed_verticals)
+      ? profile.managed_verticals.map(String)
+      : [],
+  };
+  const projection = projectTradeMakesafeBoard(canonicalRows, viewer);
+  if (
+    !projection.permissions.sees_all_makesafes ||
+    !projection.permissions.can_allocate
+  ) {
+    throw new Error(
+      "production Hugo profile lacks all-makesafe board authority",
+    );
+  }
+  return {
+    observed_at: new Date().toISOString(),
+    method: "shared_server_read_model_with_production_hugo_profile",
+    contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+    viewer_profile_hash: structuralHash(String(profile.id)),
+    visible_job_ids: projection.rows.map((row: { id?: unknown }) =>
+      String(row.id || "")
+    ).filter(Boolean),
+    permissions: {
+      sees_all_makesafes: projection.permissions.sees_all_makesafes,
+      can_allocate: projection.permissions.can_allocate,
+    },
+  };
+}
+
 async function run(): Promise<void> {
   const baseUrl = requiredEnv("SUPABASE_URL");
   const key = requiredEnv("SUPABASE_SERVICE_ROLE_KEY");
@@ -199,6 +331,34 @@ async function run(): Promise<void> {
     "--output",
     "docs/evidence/ses-reporting-u1-five-fates-replay.json",
   )!;
+  const cataloguePath = option(
+    "--catalogue",
+    "docs/evidence/ses-reporting-u1-independent-shape-catalogue.json",
+  )!;
+  const catalogue = JSON.parse(await Deno.readTextFile(cataloguePath)) as {
+    shapes: IndependentShapeExpectation[];
+  };
+  if (!Array.isArray(catalogue.shapes) || catalogue.shapes.length !== 36) {
+    throw new Error(
+      "independent corpus catalogue must contain exactly 36 shapes",
+    );
+  }
+  const allowedFates = new Set([
+    "live_job",
+    "blocked_live_job",
+    "reason_coded_exception",
+    "revision_or_reattendance",
+    "accounted_non_work",
+  ]);
+  const shapeIds = new Set(catalogue.shapes.map((item) => item.shape_id));
+  if (
+    shapeIds.size !== 36 ||
+    catalogue.shapes.some((item) => !allowedFates.has(item.expected_fate))
+  ) {
+    throw new Error(
+      "each independent corpus shape must have one unique id and exactly one valid expected fate",
+    );
+  }
   const nowIso = option("--now", new Date().toISOString())!;
   const since = new Date(Date.parse(nowIso) - days * 86_400_000).toISOString();
 
@@ -210,7 +370,6 @@ async function run(): Promise<void> {
       select:
         "post_id,internet_message_id,conversation_id,thread_id,subject,body_content,body_preview,from_email,from_name,received_at",
       mailbox: `eq.${MAILBOX}`,
-      pii_purged_at: "is.null",
       received_at: `gte.${since}`,
       order: "received_at.asc,post_id.asc",
     },
@@ -218,7 +377,12 @@ async function run(): Promise<void> {
   });
   const postIds = emailRows.map((row) => String(row.post_id));
 
-  const [attachmentRows, companyRows, caseSourceRows] = await Promise.all([
+  const [
+    attachmentRows,
+    companyRows,
+    caseSourceRows,
+    sourceExceptionRows,
+  ] = await Promise.all([
     rowsForValues({
       baseUrl,
       key,
@@ -244,6 +408,16 @@ async function run(): Promise<void> {
       column: "post_id",
       values: postIds,
     }),
+    restAll({
+      baseUrl,
+      key,
+      table: "email_events_raw",
+      params: {
+        select: "post_id,change_type,exclusion_reason,observed_at",
+        mailbox: `eq.${MAILBOX}`,
+        change_type: "like.intake_exception_%",
+      },
+    }),
   ]);
 
   const attachmentsByPost = new Map<string, DeterministicAttachment[]>();
@@ -254,7 +428,9 @@ async function run(): Promise<void> {
       item,
     ]);
   }
-  const profiles: DeterministicCompanyProfile[] = companyRows.map((row) => ({
+  const liveProfiles: DeterministicCompanyProfile[] = companyRows.map((
+    row,
+  ) => ({
     id: String(row.id),
     slug: String(row.slug),
     name: String(row.name),
@@ -265,6 +441,7 @@ async function run(): Promise<void> {
       ? row.parsing_rules as DeterministicCompanyProfile["parsingRules"]
       : null,
   }));
+  const profiles = applyPendingCompanyRuleCorrection(liveProfiles);
 
   const rawBodyByPost = new Map<string, string>();
   const baseSources: DeterministicSourceItem[] = emailRows.map((row) => {
@@ -352,27 +529,73 @@ async function run(): Promise<void> {
     values: jobIds,
   });
 
-  const historicalSources: HistoricalShapeInput[] = sources.map((source) => ({
-    source,
-    rawBody: rawBodyByPost.get(source.postId) || "",
-  }));
+  const historicalSources: HistoricalShapeInput[] = sources.map((source) => {
+    const adapted = adaptDeterministicSource(source, profiles);
+    return {
+      source,
+      rawBody: rawBodyByPost.get(source.postId) || "",
+      adapterId: adapted.adapterId,
+      adapterVersion: adapted.adapterVersion,
+    };
+  });
+  const hugoBoard = await observeHugoBoard({ baseUrl, key });
   const report = buildFiveFatesReplayReport({
     plan,
     sources: historicalSources,
     caseSources: caseSourceRows as unknown as DurableCaseSourceRow[],
     cases: caseRows as unknown as DurableCaseRow[],
     jobs: jobRows as unknown as DurableJobRow[],
+    sourceExceptions:
+      sourceExceptionRows as unknown as DurableSourceExceptionRow[],
+    independentShapes: catalogue.shapes,
+    hugoBoard,
     nowIso,
   });
 
-  await Deno.writeTextFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
+  const liveRuleCoverage = liveProfiles.map((profile) => ({
+    slug: profile.slug,
+    has_field_rules: Boolean(profile.parsingRules?.fields),
+    intentionally_no_fields: Boolean(
+      (profile.parsingRules as Record<string, unknown> | null)
+        ?.intentionally_no_fields,
+    ),
+  }));
+  const artifact = {
+    ...report,
+    execution_context: {
+      production_access: "read_only_get_head_only",
+      planner_code: "working_tree_candidate",
+      company_rule_input:
+        "live_profiles_plus_unapplied_20260726000001_slug_correction_overlay",
+    },
+    company_parsing_rule_coverage: {
+      live_observed_read_only: liveRuleCoverage,
+      live_missing_field_rules: liveRuleCoverage.filter((item) =>
+        !item.has_field_rules && !item.intentionally_no_fields
+      ).map((item) => item.slug),
+      candidate_missing_field_rules: profiles.filter((profile) =>
+        !profile.parsingRules?.fields &&
+        !(profile.parsingRules as Record<string, unknown> | null)
+          ?.intentionally_no_fields
+      ).map((profile) => profile.slug),
+      correction_migration:
+        "supabase/migrations/20260726000001_makesafe_company_parsing_rules_slug_correction.sql",
+      production_migration_applied: false,
+    },
+  };
+  await Deno.writeTextFile(
+    outputPath,
+    `${JSON.stringify(artifact, null, 2)}\n`,
+  );
   console.log(JSON.stringify(
     {
       output: outputPath,
       corpus: report.corpus,
-      fate_counts: report.fate_counts,
+      proof_status: report.proof_status,
+      planner_fate_counts: report.planner_fate_counts,
       durable_fate_counts: report.durable_fate_counts,
-      five_minute_live_job: report.five_minute_live_job,
+      independent_ground_truth: report.independent_ground_truth,
+      five_minute_hugo_visibility: report.five_minute_hugo_visibility,
     },
     null,
     2,

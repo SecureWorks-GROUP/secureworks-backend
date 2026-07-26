@@ -78,10 +78,12 @@ function pdf(postId: string, id = `${postId}-pdf`) {
   };
 }
 
-Deno.test("registry order is MLB, AJS/AJBR, Prime, RAPID, then chatter", () => {
+Deno.test("registry keeps specific builder adapters ahead of shared Prime transport", () => {
   assertEquals(DETERMINISTIC_ADAPTER_REGISTRY.map((a) => a.id), [
     "mlb",
     "ajs_ajbr",
+    "western",
+    "builderwest",
     "prime",
     "rapid",
     "chatter",

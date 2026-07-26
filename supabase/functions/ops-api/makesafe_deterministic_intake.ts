@@ -36,7 +36,14 @@ export const DETERMINISTIC_INTAKE_VERSION =
   "makesafe-deterministic-intake@2026-07-24.v4";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 
-export type AdapterId = "mlb" | "ajs_ajbr" | "prime" | "rapid" | "chatter";
+export type AdapterId =
+  | "mlb"
+  | "ajs_ajbr"
+  | "builderwest"
+  | "western"
+  | "prime"
+  | "rapid"
+  | "chatter";
 export type StoryEventKind =
   | "instruction"
   | "revision"
@@ -136,7 +143,7 @@ export interface AdaptedSource {
   source: DeterministicSourceItem;
   adapterId: AdapterId | null;
   adapterVersion: string;
-  intent: "work" | "cancellation" | "chatter" | "ambiguous";
+  intent: "work" | "revision" | "cancellation" | "chatter" | "ambiguous";
   identity: ExtractedIdentity;
   evidence: readonly EvidenceCandidate[];
   story: readonly StoryEvent[];
@@ -294,7 +301,7 @@ const APPOINTMENT_SIGNAL =
 const ACCESS_SIGNAL =
   /\b(no\s+access|unable\s+to\s+access|access\s+denied|tenant\s+not\s+home|keys?\s+(?:available|unavailable)|access\s+code)\b/i;
 const REVISION_SIGNAL =
-  /\b(revis(?:ed|ion)|amend(?:ed|ment)|updated\s+(?:work\s+order|scope|instruction)|supersed(?:e|ed))\b/i;
+  /(?:^\s*re\s*:[^\n]*\b(?:MLB|AJBR|AJS|BWCWA|WB|RAPID)[-\s#]*\d{3,}\b|\b(?:revis(?:ed|ion)|amend(?:ed|ment)|updated\s+(?:work\s+order|scope|instruction)|supersed(?:e|ed)|info\s+required|follow\s*up|booking\s+(?:update|request)|any\s+update)\b)/i;
 const REOPEN_SIGNAL =
   /\b(re-?attend|reopen|return\s+(?:visit|to\s+site)|attend\s+again)\b/i;
 const REPORT_SIGNAL =
@@ -303,6 +310,9 @@ const RAPID_SIGNAL = /\brapid(?:\s+repair(?:s)?)?\b/i;
 const PRIME_SIGNAL =
   /\bprime(?:eco|\s+ecosystem|\s+notification|\s+portal)?\b/i;
 const AJS_SIGNAL = /\b(?:AJBR|AJS)[-\s#]*\d{3,}\b/i;
+const BUILDERWEST_SIGNAL = /\bBWCWA\d{3,}\b|\bbuilderwest\b/i;
+const WESTERN_SIGNAL =
+  /\bmake\s+safe\s+work\s+order\s*:\s*WB\d{3,}\b|\bwestern\.mailer\b/i;
 const MLB_SIGNAL = /\bMLB[-\s#]*\d{3,}\b/i;
 // Require an explicit label delimiter/number token. Bare "NEW WORK ORDER
 // MLB-123" proves an instruction and claim, but must not silently promote that
@@ -367,7 +377,13 @@ function profileFor(
   item: DeterministicSourceItem,
   profiles: readonly DeterministicCompanyProfile[],
 ): DeterministicCompanyProfile | null {
-  const aliases = adapterId === "ajs_ajbr" ? ["ajs-ajbr"] : [adapterId];
+  const aliases = adapterId === "ajs_ajbr"
+    ? ["ajs-ajbr"]
+    : adapterId === "builderwest"
+    ? ["builderwest", "bw"]
+    : adapterId === "western"
+    ? ["western", "wb"]
+    : [adapterId];
   const sender = profiles.find((p) =>
     p.senderPatterns.some((pattern) =>
       domainMatches(item.fromEmail, pattern)
@@ -440,11 +456,19 @@ function extractRawIdentity(
     ? hay.match(
       /\b(?:AJBR|AJS)[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i,
     )
+    : adapterId === "builderwest"
+    ? hay.match(/\bBWCWA[-\s#]*(\d{3,})\b/i)
+    : adapterId === "western"
+    ? hay.match(/\bWB[-\s#]*(\d{3,})\b/i)
     : hay.match(
       /\b(?:RAPID|RR)[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i,
     );
   const prefix = adapterId === "ajs_ajbr"
     ? "AJBR"
+    : adapterId === "builderwest"
+    ? "BWCWA"
+    : adapterId === "western"
+    ? "WB"
     : adapterId === "rapid"
     ? "RAPID"
     : "MLB";
@@ -476,6 +500,10 @@ function extractRawIdentity(
   const builderScopedJobNo = jobNo
     ? adapterId === "ajs_ajbr"
       ? `AJBR-${jobNo}`
+      : adapterId === "builderwest"
+      ? `BWCWA-${jobNo}`
+      : adapterId === "western"
+      ? `WB-${jobNo}`
       : adapterId === "rapid"
       ? `RAPID-${jobNo}`
       : jobNo
@@ -735,14 +763,34 @@ function buildKnown(
   const profile = profileFor(adapterId, item, profiles);
   const raw = extractRawIdentity(item, adapterId);
   const parsed = fieldCandidates(item, profile);
-  const fields = parsed.fields;
+  const fields = { ...parsed.fields };
+  if (adapterId === "western") {
+    const western = String(item.subject || "").match(
+      /make\s+safe\s+work\s+order\s*:\s*(WB\d{3,})\s*[|/]\s*([^|/]+?)\s*[|/]\s*(.+)$/i,
+    );
+    if (western) {
+      fields.external_ref ||= western[1];
+      fields.client_name ||= western[2].trim();
+      fields.site_address ||= western[3].trim();
+    }
+  }
+  if (adapterId === "builderwest") {
+    const claim = String(item.subject || "").match(
+      /^\s*\d{5,}\s*-\s*(BWCWA\d{3,})\s*-\s*([^-]+?)\s*-\s*(.+)$/i,
+    );
+    if (claim) {
+      fields.external_ref ||= claim[1];
+      fields.client_name ||= claim[2].trim();
+      fields.site_address ||= claim[3].trim();
+    }
+  }
   const deliverable = inferDeliverable(item);
   const canonical = normaliseMakesafeIdentity({
     externalRefRaw: raw.externalRef || fields.external_ref || null,
     builderWoRaw: raw.wo,
     builderPoRaw: raw.po,
     deliverableRefRaw: deliverable,
-    prefixes: ["MLB", "AJBR", "AJS", "RAPID", "RR"],
+    prefixes: ["MLB", "AJBR", "AJS", "BWCWA", "WB", "RAPID", "RR"],
   });
   const identity: ExtractedIdentity = {
     // Persist the actual profile slug used by the existing guarded job creator.
@@ -772,6 +820,8 @@ function buildKnown(
     ? "cancellation"
     : isChatter(item)
     ? "chatter"
+    : REVISION_SIGNAL.test(hay)
+    ? "revision"
     : WORK_SIGNAL.test(hay) || item.attachments.length > 0 ||
         extractLinks(item).length > 0 || raw.externalRef || raw.wo || raw.po
     ? "work"
@@ -837,6 +887,24 @@ const AJS_ADAPTER: Adapter = {
     senderMatchesAdapter("ajs_ajbr", item, profiles),
   build: (item, profiles) => buildKnown(item, profiles, "ajs_ajbr"),
 };
+const BUILDERWEST_ADAPTER: Adapter = {
+  id: "builderwest",
+  version: "builderwest@v1",
+  // BuilderWest shares PrimeEco transport with other builders. Require a
+  // BuilderWest identity signal; sender-domain matching alone would steal MLB and
+  // generic portal notifications from their existing adapters.
+  matches: (item) => BUILDERWEST_SIGNAL.test(text(item)),
+  build: (item, profiles) => buildKnown(item, profiles, "builderwest"),
+};
+const WESTERN_ADAPTER: Adapter = {
+  id: "western",
+  version: "western@v1",
+  matches: (item, profiles) =>
+    WESTERN_SIGNAL.test(
+      `${item.fromEmail || ""} ${item.fromName || ""} ${text(item)}`,
+    ) || senderMatchesAdapter("western", item, profiles),
+  build: (item, profiles) => buildKnown(item, profiles, "western"),
+};
 const PRIME_ADAPTER: Adapter = {
   id: "prime",
   version: "prime@v1",
@@ -877,6 +945,8 @@ export const DETERMINISTIC_ADAPTER_REGISTRY: readonly Adapter[] = Object.freeze(
   [
     MLB_ADAPTER,
     AJS_ADAPTER,
+    WESTERN_ADAPTER,
+    BUILDERWEST_ADAPTER,
     PRIME_ADAPTER,
     RAPID_ADAPTER,
     CHATTER_ADAPTER,

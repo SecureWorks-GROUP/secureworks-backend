@@ -1,166 +1,242 @@
-# SES Reporting U1: Five-fates intake proof
+# SES Reporting U1: revised five-fates evidence
 
-**Mission:** `ses-reporting-end-to-end-2026-07`, unit U1  
-**Backend baseline:** `df1d13a`  
-**Contract read:** U1 and the binding correlation spine  
-**Safety:** production reads only. No job, draft, case, cursor, email, storage or communication write was made.
+**Mission:** `ses-reporting-end-to-end-2026-07`, unit U1
+**Branch:** `fm/ses-u1-intake-five-fates-v1`
+**Evidence generated:** 2026-07-26
+**Proof status:** **NOT PROVED**
+**Safety:** Production access was read-only. The replay transport permits GET and HEAD only. No email, job, case, cursor, storage object, or communication was created or changed.
 
-## What we did
+## Architect's verdict
 
-We gave the intake sea a chart.
+The first U1 report confused planner and ledger agreement with correctness. That claim is withdrawn.
 
-The new replay harness reads the real SES mailbox projection with GET requests only, runs the same deterministic planner and PDF extraction boundary used by intake, joins the existing intake case ledger and emits a PII-free verdict for every source email.
+The revised evidence uses the independent 36-shape SES corpus catalogue as the oracle. It keeps four questions separate:
 
-The first voyage replayed all **1,394** retained SES emails. It found **78 real historical email shapes**, not invented fixtures. Every shape has an observed count and a hashed example source in `ses-reporting-u1-five-fates-replay.json`.
+1. What fate does the independent catalogue expect?
+2. What fate does the working-tree planner produce?
+3. What fate is durable in production?
+4. Is an independently expected live job visible through Hugo's canonical board projection within five minutes?
 
-The replay exposed two code defects, one stale contract test and one release-state failure:
+The result is diagnostic, not a pass:
 
-1. **Newest builder PDFs lost the extraction budget.** A standing scan reads an old sweep half and a recent half. PDF extraction sorted both oldest first, so the 50-document budget was consumed by old sweep mail before a newly-arrived clean work order was parsed. The fix gives exact diagnostic sources and the recent half first claim on the budget, newest first, while old non-priority sweep rows retain oldest-first progress.
-2. **A failed scan handoff could exist only in edge logs.** `fetch` resolves on HTTP 401, 403, 409 and 5xx. The monitor logged that status, released the mailbox lease and wrote no durable alarm. The fix records `makesafe.intake.scan_handoff_failed` with the mailbox watermark, failure class, HTTP status and included-source count. Source content is never copied into the alarm.
-3. **The late-PDF test still treated an absent advancement env value as OFF.** Captain Amendment 46 made clean-draft advancement default ON and retained exact `false` as the brake. The test now exercises that explicit brake instead of deleting the variable. Runtime semantics are unchanged.
-4. **Production is not on the backend reality replayed here.** Six latest source emails have no durable intake fate. The intake health row still reports a legacy `usage_cap` result and model call, despite the repository's standing deterministic code. This leg did not deploy or mutate production. Closing that release drift is a supervised post-merge step.
+- all 36 catalogue shapes have one unique expected fate
+- only 13 of 36 example emails match that expected fate in the candidate planner
+- only 10 of 36 match in the production durable ledger
+- 8 of 1,396 production sources have no durable fate
+- only 1 of 13 independently expected live examples is currently Hugo-visible
+- that one observation gives an upper bound of 4,090,812 seconds, not evidence of a five-minute transition
 
-## What correct means
+U1 therefore remains open.
 
-Every builder email has one and only one terminal intake fate:
+## Independent ground truth
 
-1. `live_job`
-2. `blocked_live_job`, with a visible blocking reason
-3. `reason_coded_exception`
-4. `revision_or_reattendance`, attached to an existing lineage
-5. `accounted_non_work`
+Authority: `docs/evidence/ses-reporting-u1-independent-shape-catalogue.json`, derived independently from the retained SES corpus catalogue rather than planner output or the deterministic case ledger.
 
-For U1, the available correlation chain is:
+The replay loader rejects the catalogue unless it contains exactly 36 unique shape IDs and every shape has exactly one valid expected fate.
 
-`source_instruction_id -> instruction_id -> lineage_id -> case_id -> job_id`
+| Expected fate | Independent volume |
+|---|---:|
+| Live job | 644 |
+| Blocked live job | 23 |
+| Reason-coded exception | 0 |
+| Revision or reattendance | 42 |
+| Accounted non-work | 687 |
+| **Total** | **1,396** |
 
-The replay fails an email when any of these are true:
+These counts are expectations. They are not inferred from current planner results.
 
-- the deterministic plan gives it zero or multiple fates
-- the source has zero or multiple durable case links
-- an exception has no reason code
-- a blocked job has no blocker
-- a live fate has no job
-- the durable fate disagrees with the current deterministic replay
-- a clean live job has no measurable job-created timestamp
-- a clean live job takes more than 300 seconds from source receipt to job creation
+## Read-only corpus replay
 
-Later correlation links from attendance cycle through closeout remain owned by U2 to U8. U1 does not invent them.
-
-## What the Captain will see
-
-Once the two functions are released from the authorised main release worktree:
-
-- a new clean builder work order gets PDF capacity ahead of old replay traffic
-- the existing guarded draft approval remains the only live-job boundary
-- no invoice, send, allocation or close action is added
-- a rejected or unreachable scan handoff creates a durable operational alarm instead of disappearing into logs
-- the replay command can be rerun without changing any production row
-- Hugo's five-minute promise has a countable result rather than a comment
-
-## Current path map against the five fates
-
-| Stage and exit | Durable record | Five-fates classification | Verdict |
-|---|---|---|---|
-| Graph post matches a configured builder sender, watched sender, reference or work-order subject | `emails` plus append-only `email_events_raw`; attachments settle before the mailbox watermark | Enters deterministic planning | Correct, retry-safe |
-| Graph post is excluded | `email_events_raw(change_type=excluded)` plus `email_classifier_exclusions` | Accounted non-work | Correct, no silent exclusion |
-| Email, raw-event, attachment, projection, sync-state or watermark write fails | Failing poll aborts before completed watermark; any earlier email row remains durable | Retried, not a terminal exit | Correct, fail loud |
-| Mail read fails | `business_events(makesafe.intake.mail_read_failed)` | No unseen source can be fated yet | Correct operational alarm |
-| Mailbox lease is held | No cursor movement; next poll retries | Deferred, not terminal | Correct |
-| Scan continuation returns non-2xx or throws | Synced email rows plus new `business_events(makesafe.intake.scan_handoff_failed)` | Deferred to next poll with a durable handoff alarm | Fixed in U1 |
-| Own-domain copy or deterministic chatter/noise | Canonical case plus case-source row | Accounted non-work | Fate 5 |
-| Cancellation | Canonical case plus reason `cancellation` | Reason-coded exception | Fate 3 |
-| Unknown builder, conflict, claim-only identity or parse gap | Canonical case plus typed reason and evidence map | Reason-coded exception | Fate 3 |
-| Complete identity but required secondary field is absent | Live job-linked case plus `blocked_reasons` | Visible blocked live job | Fate 2 |
-| Complete clean instruction | Guarded draft approval, live job, canonical case and source links | Live job | Fate 1 |
-| Revision or reopen | Typed parent relation and existing lineage/job binding | Revision or reattendance | Fate 4 |
-| Per-case job creation fails after source accounting | Case remains a visible `awaiting_job_creation` exception and ranks as a bounded job retry | Reason-coded exception until promoted | Fate 3, retryable |
-| Isolated authority conflict or missing parent | Degraded health/caveat; existing source email and any prior authority remain durable; sweep retries | Not terminal while unresolved | Visible retry, not a silent drop |
-| Scan health write fails | Request throws before completion cursor commit | Retried idempotently | Correct, fail loud |
-| Scan cursor write fails | Cases/fates remain durable and response carries `scan_cursor_unavailable` | Completed fates remain valid | Correct, coverage caveat visible |
-
-## Real replay evidence
-
-### Corpus
+Evidence: `docs/evidence/ses-reporting-u1-five-fates-replay.json`
 
 | Measure | Result |
 |---|---:|
-| Retained real SES emails replayed | 1,394 |
-| Real historical shape combinations | 78 |
-| Sources assigned exactly one replay fate | 1,394 |
+| Real SES sources | 1,396 |
+| Independent catalogue shapes | 36 |
+| Shapes with exactly one expected fate | 36 |
+| Structural diagnostic combinations | 79 |
+| Sources receiving one planner fate | 1,396 |
 | Sources with a durable production fate | 1,388 |
-| Silent production source gaps | 6 |
-| Overall correct against replay, durable fate and latency law | 1,347 |
-| Overall incorrect | 47 |
+| Sources missing a durable production fate | 8 |
+| Independent example planner matches | 13 / 36 |
+| Independent example durable matches | 10 / 36 |
+| Independent examples missing a durable fate | 4 / 36 |
 
-### Replay fate table summary
+Planner self-consistency is reported only as planner self-consistency. It is not named correctness.
 
-| Fate | Current deterministic replay | Durable production ledger |
+### Candidate planner versus durable production ledger
+
+| Fate | Candidate planner | Durable production |
 |---|---:|---:|
 | Live job | 43 | 1 |
 | Blocked live job | 0 | 0 |
-| Reason-coded exception | 668 | 706 |
+| Reason-coded exception | 670 | 706 |
 | Revision or reattendance | 0 | 0 |
 | Accounted non-work | 683 | 681 |
-| **Total** | **1,394** | **1,388** |
+| **Total fated** | **1,396** | **1,388** |
 
-The 47 incorrect verdicts overlap by reason:
+The large disagreement with the independent expected distribution is unresolved. In particular, the candidate still produces no fate-4 examples and no fate-2 examples across this retained replay.
 
-- 6 sources have no durable fate at all
-- 40 durable exception fates disagree with the repaired replay's clean live-job fate
-- 42 clean live-job replays have no production live-job timestamp
-- the one measurable historical live job took 3,802,333 seconds because it was a backlog promotion, so it is not evidence of steady-state speed and it fails the literal law
+## Seven catalogue-baseline unhandled shapes
 
-The latest six missing sources comprise two own-domain copies, a twin-captured clean inbound work order and a twin-captured inbound builder-reference message. The clean work-order twin is the real-email regression that exposed PDF-budget starvation.
+The catalogue identified seven shapes as unhandled before this patch. Candidate code now routes all seven through a named adapter and exactly one planner fate. That closes the silent unknown-builder path, but it does **not** make six incorrect outcomes correct.
 
-### Five-minute law
+| Shape | Independent expected fate | Candidate path | Candidate result |
+|---|---|---|---|
+| `BW-NEW-MS-WO-NO-PDF` | Blocked live job | `builderwest` | Reason-coded exception: `below_identity_floor` |
+| `MLB-INFO-REQUIRED-OUR-REF` | Revision or reattendance | `mlb` revision signal | Reason-coded exception: `below_identity_floor` |
+| `BW-REPLY-THREAD` | Revision or reattendance | `builderwest` revision signal | Reason-coded exception: `below_identity_floor` |
+| `BW-CLAIM-REF-ADDRESS` | Live job | `builderwest` | Reason-coded exception: `below_identity_floor` |
+| `BW-MAKE-SAFE-AND-REPORT` | Live job | `builderwest` | Reason-coded exception: `below_identity_floor` |
+| `WESTERN-MS-WO-SUBJECT` | Live job | `western` | Live job, matches oracle |
+| `BW-NEW-MS-WO-PDF` | Live job | `builderwest` | Reason-coded exception: `below_identity_floor` |
 
-**Current production verdict: FAIL.**
+The dedicated BuilderWest adapter requires a BuilderWest identity signal. It does not select on the shared PrimeEco sender domain alone, which avoids stealing MLB and generic portal traffic. A regression test pins that boundary.
+
+The honest conclusion is:
+
+- 7 of 7 baseline-unhandled examples now have an explicit candidate path
+- 7 of 7 have a terminal candidate fate
+- only 1 of 7 currently matches the independent expected fate
+- the other 6 remain product or parsing gaps, but they are visible and reason-coded rather than silently dropped
+
+## Confirmed production parsing-rule drift
+
+A read-only production GET independently confirmed the slug mismatch:
+
+| Live slug | Field rules present |
+|---|---|
+| `aj` | No |
+| `bw` | No |
+| `wb` | No |
+| `mlb` | Yes |
+| `kba` | Yes |
+
+The original seed targeted `ajs` / `ajbr`, `builderwest`, and `western-building`, while live production uses `aj`, `bw`, and `wb`.
+
+Candidate migration:
+
+`supabase/migrations/20260726000001_makesafe_company_parsing_rules_slug_correction.sql`
+
+It:
+
+- targets both the live slugs and legacy aliases
+- keeps `template_first:false`
+- does not overwrite an existing `fields` rule set
+- adds the observed AJ `Job No` form
+- fails closed if any active company has neither field rules nor an explicit reviewed exception
+- accepts an intentional exception only when both `intentionally_no_fields:true` and a non-empty `no_fields_reason` are present
+
+The replay applies the pending migration rules as a local candidate overlay. It records the distinction in `execution_context` and reports:
+
+- production live missing rules: `aj`, `bw`, `wb`
+- candidate missing rules after overlay: none
+- production migration applied: false
+
+The migration has not been applied to production. It must land before matching edge code.
+
+## Hugo-visible five-minute law
+
+The old report stopped at `jobs.created_at`. That metric is withdrawn.
+
+The revised observer runs the canonical shared make-safe board read model with Hugo's current production profile and records the observation timestamp. It measures:
+
+`email received -> observed in Hugo-equivalent server board projection`
+
+This is an upper bound because historical first-visible timestamps are not persisted.
 
 | Measure | Result |
 |---|---:|
-| Clean live-job source verdicts in repaired shadow replay | 43 |
-| Measured production live jobs | 1 |
+| Independently expected live examples | 13 |
+| Visible at observation | 1 |
+| Measured upper bounds | 1 |
 | Within 300 seconds | 0 |
-| Over 300 seconds | 1 |
-| Unmeasured because no live job exists | 42 |
+| Above 300 seconds | 1 |
+| Unmeasured because not visible | 12 |
+| Measured upper bound | 4,090,812 seconds |
 
-This does not claim the repaired code is live. It proves where the law stands now and gives the final proving run a fixed calculation.
+This does not prove the exact first moment the card entered Hugo's board. It proves current projection membership under Hugo's server profile. It is not a Hugo browser session and does not substitute service-role access for Hugo authentication.
+
+A supervised, non-synthetic live probe is still required to prove the five-minute promise. It must preserve one correlation chain from email receipt through case, job, canonical board projection, and Hugo-visible card observation.
+
+## PDF extraction budget
+
+The production-shaped replay saw:
+
+- 584 eligible PDF documents
+- 50 extracted under the run cap
+- 534 deferred
+- 527 sources carrying at least one cap-deferred document
+
+A causal regression now exercises the exact code boundary: a full old sweep ahead of a newest recent work order, through `_readInputsForTest` and `enrichSourcesWithPdfText`. It proves the candidate ordering gives the recent work order a slot before old sweep PDFs.
+
+It does **not** prove this ordering defect caused the historical production outcome. The corpus shows severe cap pressure, but the production causal claim remains unproved until source selection, attachment eligibility, deployed revision, and scan timing are observed together.
+
+## Silent-disappearance hardening
+
+The candidate monitor now treats source accounting as the completion boundary:
+
+1. Every included source is retained with its post, receipt, conversation, and thread coordinates.
+2. Non-2xx and network handoff failures append a reason-coded `email_events_raw` exception for every included source, plus the aggregate business event.
+3. HTTP 200 triggers a canonical `makesafe_intake_case_sources` check.
+4. Any included source still lacking a case gets `intake_exception_scan_completed_without_case_fate`.
+5. Missing `EdgeRuntime.waitUntil` is no longer log-only. The source exceptions are written synchronously before success is returned.
+6. If source exception or aggregate alarm persistence fails, the continuation rejects and retains the expiring mailbox lease. It does not acknowledge a log-only failure as settled.
+
+This closes the code paths identified by the adversary. It is not yet production proof because the code is not deployed and the existing eight source gaps remain.
+
+## What is proved, and what is not
+
+### Established
+
+- the independent catalogue contains 36 unique real-email shapes with one expected fate each
+- the current candidate and production durable outcomes disagree materially with that oracle
+- live parsing rules are absent for `aj`, `bw`, and `wb`
+- the corrective migration covers all current live slugs and fails closed on future uncovered active companies
+- all seven baseline-unhandled examples now enter an explicit named candidate path
+- each of those seven receives one candidate fate, with six still reason-coded as below the identity floor
+- the candidate continuation no longer accepts source-level disappearance after a failed or partial scan handoff
+- the PDF ordering regression passes at the exact old-sweep versus recent-work boundary
+
+### Not established
+
+- U1 correctness across the 36-shape oracle
+- zero durable source gaps in production
+- semantic correctness for six of the seven baseline-unhandled examples
+- production deployment of the slug correction, adapters, handoff accounting, or PDF ordering change
+- causal attribution of historical misses to PDF budget ordering
+- a clean email reaching Hugo-visible state within five minutes
+- browser-level Hugo authentication and rendering parity
+
+## Release and proof sequence
+
+1. Apply `20260726000001_makesafe_company_parsing_rules_slug_correction.sql` first.
+2. Merge through review. Do not deploy from this feature worktree.
+3. Release only from `/Users/marninstobbe/Projects/_release/secureworks-site-main` on `main`.
+4. Confirm the deployed monitor and ops-api revisions match the reviewed main commit.
+5. Let ordinary intake account or explicitly exception-record the eight existing durable gaps.
+6. Run a supervised clean builder-email probe and observe the same source on Hugo's canonical board within 300 seconds.
+7. Rerun the independent 36-shape report. U1 can pass only when agreed acceptance thresholds are met against the independent oracle, durable source gaps are zero, and the Hugo-visible probe satisfies the law.
 
 ## Regression commands
 
 ```bash
-npx -y deno test --no-check --allow-all \
+~/.deno/bin/deno test --allow-all --no-check \
   supabase/functions/ops-api/makesafe_deterministic_intake_test.ts \
-  supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts \
-  supabase/functions/ops-api/makesafe_deterministic_intake_migration_test.ts \
-  supabase/functions/ops-api/makesafe_reporting_intake_pass_test.ts \
-  supabase/functions/ops-api/makesafe_intake_late_pdf_test.ts \
+  supabase/functions/ops-api/makesafe_builder_shape_adapters_test.ts \
+  supabase/functions/ops-api/makesafe_company_parsing_rules_migration_test.ts \
   supabase/functions/ops-api/makesafe_intake_five_fates_replay_test.ts \
+  supabase/functions/ops-api/makesafe_intake_late_pdf_test.ts \
+  supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts \
   supabase/functions/ops-api/monitor_ses_makesafes_test.ts
+# 181 passed, 0 failed
 
-npx -y deno check \
-  supabase/functions/monitor-ses-makesafes/index.ts \
-  supabase/functions/ops-api/makesafe_deterministic_intake_runtime.ts \
-  supabase/functions/ops-api/makesafe_intake_five_fates_replay.ts \
-  scripts/replay-makesafe-five-fates.ts
-
-SUPABASE_URL=https://kevgrhcjxspbxgovpmfl.supabase.co \
-SUPABASE_SERVICE_ROLE_KEY=... \
-npx -y deno run --allow-env --allow-net --allow-write \
+~/.deno/bin/deno check --config deno.jsonc \
   scripts/replay-makesafe-five-fates.ts \
-  --days 180 --max-sources 2000 \
-  --output docs/evidence/ses-reporting-u1-five-fates-replay.json
+  supabase/functions/monitor-ses-makesafes/index.ts \
+  supabase/functions/ops-api/makesafe_deterministic_intake.ts \
+  supabase/functions/ops-api/makesafe_deterministic_intake_runtime.ts \
+  supabase/functions/ops-api/makesafe_intake_five_fates_replay.ts
 ```
 
-The transport guard rejects POST, PATCH, PUT and DELETE before network fetch. The service key is read from the environment and never written to evidence.
-
-The seven-file behavioural suite passes **198 tests**. Every changed runtime and harness module passes normal `deno check`. Importing the monolithic `ops-api/index.ts` under normal typecheck still reports nine pre-existing errors outside this change; the behavioural suite therefore uses `--no-check`. CP1 cannot claim whole-index typecheck closure until that existing debt is repaired.
-
-## What the next island needs
-
-1. Merge and release the authorised main branch through the production release worktree. Do not deploy from this feature worktree.
-2. Confirm the monitor and ops-api deployed revisions match main, then allow the ordinary poll to account the six durable source gaps. No manual source mutation is required.
-3. Run one supervised clean builder-email probe. Record source receipt, canonical case creation, guarded job creation and Hugo board visibility. The same correlation record must cross all four timestamps and complete within 300 seconds. This leg did not send that probe because live sends and job creation were forbidden.
-4. U2 must consume the same source, lineage, case and job coordinates when proving Hugo's board projection. A job row alone is not the final visibility proof.
-5. Rerun this exact 1,394-row harness, plus all newly-arrived sources. The gate is zero silent disappearances, zero fate disagreement and every clean live-job sample measured at or below 300 seconds.
+The replay key is supplied by environment and is never written to evidence.

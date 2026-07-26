@@ -1,11 +1,11 @@
-// SES Reporting U1: pure five-fates replay adjudicator.
+// SES Reporting U1: pure five-fates replay diagnostics.
 //
-// This module receives the side-effect-free deterministic plan plus read-only
-// snapshots of the durable intake ledger. It emits only structural hashes and
-// shape labels. Source subjects, bodies, addresses, names and email addresses
-// never enter the report.
+// This is not an oracle. Planner output, the planner-family durable ledger and
+// independent corpus expectations are deliberately reported as three separate
+// facts. The module never turns planner/ledger agreement into "correct".
 
 import type {
+  AdapterId,
   DeterministicAttachment,
   DeterministicCasePlan,
   DeterministicIntakePlan,
@@ -13,7 +13,7 @@ import type {
 } from "./makesafe_deterministic_intake.ts";
 
 export const FIVE_FATES_REPLAY_VERSION =
-  "ses-reporting-u1-five-fates@2026-07-26.v1";
+  "ses-reporting-u1-five-fates@2026-07-26.v2";
 export const FIVE_MINUTES_SECONDS = 300;
 
 export type IntakeFate =
@@ -50,9 +50,42 @@ export interface DurableJobRow {
   status?: string | null;
 }
 
+export interface DurableSourceExceptionRow {
+  post_id: string;
+  change_type: string;
+  exclusion_reason?: string | null;
+  observed_at?: string | null;
+}
+
 export interface HistoricalShapeInput {
   source: DeterministicSourceItem;
   rawBody?: string | null;
+  adapterId?: AdapterId | null;
+  adapterVersion?: string | null;
+}
+
+export interface IndependentShapeExpectation {
+  shape_id: string;
+  count: number;
+  builder: string;
+  tail: boolean;
+  expected_fate: IntakeFate;
+  fate_reason: string;
+  independent_handling_assessment: "handled" | "partial" | "unhandled";
+  identifies: string;
+  example_source_hash: string;
+}
+
+export interface HugoBoardObservation {
+  observed_at: string;
+  method: "shared_server_read_model_with_production_hugo_profile";
+  contract_version: string;
+  viewer_profile_hash: string;
+  visible_job_ids: readonly string[];
+  permissions: {
+    sees_all_makesafes: boolean;
+    can_allocate: boolean;
+  };
 }
 
 export interface HistoricalEmailShape {
@@ -91,17 +124,30 @@ export interface HistoricalEmailShape {
 export interface FiveFatesVerdict {
   source_hash: string;
   received_at: string;
-  shape_key: string;
-  replay_fate: IntakeFate | null;
+  diagnostic_axis_shape: string;
+  planner_fate: IntakeFate | null;
+  planner_adapter_id: AdapterId | null;
   durable_fate: IntakeFate | null;
-  correct: boolean;
-  why: string[];
-  replay_reason_code: string | null;
+  planner_self_consistent: boolean;
+  durable_present: boolean;
+  durable_matches_planner: boolean | null;
+  diagnostics: string[];
+  planner_reason_code: string | null;
   durable_reason_code: string | null;
-  five_minute_live_job: {
+  independent_ground_truth: {
+    shape_id: string;
+    expected_fate: IntakeFate;
+    expected_volume: number;
+    handling_assessment: "handled" | "partial" | "unhandled";
+    planner_matches: boolean;
+    durable_matches: boolean | null;
+  } | null;
+  five_minute_hugo_visibility: {
     applicable: boolean;
     measured: boolean;
-    latency_seconds: number | null;
+    hugo_visible_at_observation: boolean;
+    job_created_latency_seconds: number | null;
+    visibility_upper_bound_seconds: number | null;
     within_law: boolean | null;
   };
   correlation: {
@@ -116,42 +162,80 @@ export interface FiveFatesVerdict {
 
 export interface FiveFatesReplayReport {
   ok: true;
+  proof_status: "not_proved";
   version: string;
   generated_at: string;
   corpus: {
     sources: number;
-    historical_shapes: number;
-    replay_fated: number;
+    planner_fated: number;
+    planner_self_consistent: number;
     durable_fated: number;
-    correct: number;
-    incorrect: number;
-    silent_disappearances: number;
+    durable_missing: number;
+    durable_matches_planner: number;
+    diagnostic_axis_shapes: number;
   };
-  fate_counts: Record<IntakeFate, number>;
+  planner_fate_counts: Record<IntakeFate, number>;
   durable_fate_counts: Record<IntakeFate, number>;
-  five_minute_live_job: {
+  independent_ground_truth: {
+    authority: "independent_corpus_swarm";
+    catalogue_shapes: number;
+    shapes_with_exactly_one_expected_fate: number;
+    examples_found: number;
+    examples_missing: number;
+    planner_matches: number;
+    durable_matches: number;
+    durable_missing: number;
+    catalogue_baseline_unhandled_shapes: number;
+    candidate_closed_baseline_unhandled_shapes: number;
+    expected_volume_fate_counts: Record<IntakeFate, number>;
+    checks: Array<{
+      shape_id: string;
+      expected_fate: IntakeFate;
+      expected_volume: number;
+      example_source_hash: string;
+      planner_fate: IntakeFate | null;
+      planner_adapter_id: AdapterId | null;
+      planner_reason_code: string | null;
+      candidate_path_closed: boolean;
+      durable_fate: IntakeFate | null;
+      planner_matches: boolean;
+      durable_matches: boolean | null;
+      handling_assessment: "handled" | "partial" | "unhandled";
+    }>;
+  };
+  pdf_extraction_diagnostics: {
+    documents: number;
+    extracted: number;
+    quarantined: number;
+    deferred: number;
+    run_extraction_cap: number;
+    sources_with_run_extraction_cap: number;
+  };
+  five_minute_hugo_visibility: {
     law_seconds: 300;
-    expected_clean_sources: number;
+    measurement: "email_received_to_hugo_projection_observed_upper_bound";
+    ground_truth_live_examples: number;
     measured: number;
     within_law: number;
     breached: number;
     unmeasured: number;
+    visible_at_observation: number;
     p50_seconds: number | null;
     p95_seconds: number | null;
     max_seconds: number | null;
+    board_observation: Omit<HugoBoardObservation, "visible_job_ids">;
   };
-  shape_catalogue: Array<{
+  proof_gaps: string[];
+  diagnostic_axis_catalogue: Array<{
     shape_key: string;
     observed_count: number;
     example_source_hash: string;
-    replay_fates: Partial<Record<IntakeFate, number>>;
+    planner_fates: Partial<Record<IntakeFate, number>>;
   }>;
   verdicts: FiveFatesVerdict[];
 }
 
-function structuralHash(value: string): string {
-  // FNV-1a 64-bit represented as two 32-bit lanes. Source ids are long opaque
-  // Graph coordinates; this keeps reports correlatable without publishing them.
+export function structuralHash(value: string): string {
   let h1 = 0x811c9dc5;
   let h2 = 0x811c9dc5;
   for (let i = 0; i < value.length; i++) {
@@ -190,8 +274,7 @@ function senderFamily(
 ): HistoricalEmailShape["sender_family"] {
   if (source.direction === "own_outbound") return "secureworks_own_copy";
   const domain =
-    String(source.fromEmail || "").toLowerCase().split("@").pop() ||
-    "";
+    String(source.fromEmail || "").toLowerCase().split("@").pop() || "";
   if (domain === "ajs.build" || domain.endsWith(".ajs.build")) return "ajs";
   if (domain === "notifications.primeeco.tech") return "prime_notifications";
   if (domain === "primeeco.tech" || domain.endsWith(".primeeco.tech")) {
@@ -285,9 +368,6 @@ function fateForCase(
     "state" | "parentRelation" | "reasonCode" | "blockedReasons"
   >,
 ): IntakeFate | null {
-  // A revision signal alone is not fate 4. It reaches that fate only after the
-  // case is live-capable and attached to lineage; an unresolved revision remains
-  // a reason-coded exception rather than masquerading as attached work.
   if (intakeCase.state === "exception") return "reason_coded_exception";
   if (intakeCase.state === "accounted_non_wo") return "accounted_non_work";
   if (
@@ -329,6 +409,9 @@ export function buildFiveFatesReplayReport(input: {
   caseSources: readonly DurableCaseSourceRow[];
   cases: readonly DurableCaseRow[];
   jobs: readonly DurableJobRow[];
+  sourceExceptions: readonly DurableSourceExceptionRow[];
+  independentShapes: readonly IndependentShapeExpectation[];
+  hugoBoard: HugoBoardObservation;
   nowIso: string;
 }): FiveFatesReplayReport {
   const planCases = new Map(input.plan.cases.map((item) => [
@@ -347,6 +430,10 @@ export function buildFiveFatesReplayReport(input: {
   }
   const durableCases = new Map(input.cases.map((item) => [item.id, item]));
   const jobs = new Map(input.jobs.map((item) => [item.id, item]));
+  const sourceExceptionByPost = new Map(
+    input.sourceExceptions.map((item) => [item.post_id, item]),
+  );
+  const visibleJobIds = new Set(input.hugoBoard.visible_job_ids);
   const linksBySource = new Map<string, DurableCaseSourceRow[]>();
   for (const item of input.caseSources) {
     linksBySource.set(item.post_id, [
@@ -354,36 +441,40 @@ export function buildFiveFatesReplayReport(input: {
       item,
     ]);
   }
+  const independentBySource = new Map(
+    input.independentShapes.map((item) => [item.example_source_hash, item]),
+  );
 
-  const fateCounts = emptyFateCounts();
+  const plannerFateCounts = emptyFateCounts();
   const durableFateCounts = emptyFateCounts();
-  const shapeRows = new Map<
+  const axisRows = new Map<
     string,
     {
       observed_count: number;
       example_source_hash: string;
-      replay_fates: Partial<Record<IntakeFate, number>>;
+      planner_fates: Partial<Record<IntakeFate, number>>;
     }
   >();
-  const liveLatencies: number[] = [];
+  const visibilityLatencies: number[] = [];
   const verdicts: FiveFatesVerdict[] = [];
 
   for (const historical of input.sources) {
     const source = historical.source;
     const sourceHash = structuralHash(source.postId);
     const shape = catalogueHistoricalEmailShape(historical);
-    const replayRows = classifications.get(source.postId) || [];
-    const replayCase = replayRows.length === 1
-      ? planCases.get(replayRows[0].instructionKey) || null
+    const plannerRows = classifications.get(source.postId) || [];
+    const plannerCase = plannerRows.length === 1
+      ? planCases.get(plannerRows[0].instructionKey) || null
       : null;
-    const replayFate = replayCase ? fateForCase(replayCase) : null;
-    if (replayFate) fateCounts[replayFate]++;
+    const plannerFate = plannerCase ? fateForCase(plannerCase) : null;
+    if (plannerFate) plannerFateCounts[plannerFate]++;
 
     const sourceLinks = linksBySource.get(source.postId) || [];
     const uniqueCaseIds = [...new Set(sourceLinks.map((item) => item.case_id))];
     const durableCase = uniqueCaseIds.length === 1
       ? durableCases.get(uniqueCaseIds[0]) || null
       : null;
+    const sourceException = sourceExceptionByPost.get(source.postId) || null;
     const durableFate = durableCase
       ? fateForCase({
         state: durableCase.state,
@@ -391,154 +482,293 @@ export function buildFiveFatesReplayReport(input: {
         reasonCode: durableCase.reason_code,
         blockedReasons: durableCase.blocked_reasons || [],
       })
+      : sourceException
+      ? "reason_coded_exception"
       : null;
     if (durableFate) durableFateCounts[durableFate]++;
 
-    const why: string[] = [];
-    if (replayRows.length !== 1) {
-      why.push(
-        replayRows.length === 0
-          ? "replay_has_no_fate"
-          : "replay_has_multiple_fates",
+    const diagnostics: string[] = [];
+    if (plannerRows.length !== 1) {
+      diagnostics.push(
+        plannerRows.length === 0
+          ? "planner_has_no_fate"
+          : "planner_has_multiple_fates",
       );
     }
-    if (!replayCase) why.push("replay_has_no_canonical_case");
+    if (!plannerCase) diagnostics.push("planner_has_no_canonical_case");
     if (
-      replayFate === "reason_coded_exception" && !replayCase?.reasonCode
-    ) why.push("replay_exception_has_no_reason_code");
+      plannerFate === "reason_coded_exception" && !plannerCase?.reasonCode
+    ) diagnostics.push("planner_exception_has_no_reason_code");
     if (
-      replayFate === "blocked_live_job" &&
-      !replayCase?.blockedReasons.length
-    ) why.push("replay_blocked_job_has_no_visible_reason");
-
-    if (uniqueCaseIds.length === 0) why.push("source_has_no_durable_fate");
-    if (uniqueCaseIds.length > 1) why.push("source_has_multiple_durable_fates");
+      plannerFate === "blocked_live_job" &&
+      !plannerCase?.blockedReasons.length
+    ) diagnostics.push("planner_blocked_job_has_no_visible_reason");
+    if (uniqueCaseIds.length === 0 && !sourceException) {
+      diagnostics.push("source_has_no_durable_fate");
+    }
+    if (uniqueCaseIds.length > 1) {
+      diagnostics.push("source_has_multiple_durable_fates");
+    }
     if (uniqueCaseIds.length === 1 && !durableCase) {
-      why.push("durable_source_points_to_missing_case");
+      diagnostics.push("durable_source_points_to_missing_case");
     }
     if (
       durableFate === "reason_coded_exception" &&
-      !durableCase?.reason_code
-    ) why.push("durable_exception_has_no_reason_code");
+      !(durableCase?.reason_code || sourceException?.exclusion_reason)
+    ) diagnostics.push("durable_exception_has_no_reason_code");
     if (
       durableFate === "blocked_live_job" &&
       !(durableCase?.blocked_reasons || []).length
-    ) why.push("durable_blocked_job_has_no_visible_reason");
+    ) diagnostics.push("durable_blocked_job_has_no_visible_reason");
     if (
       durableFate === "live_job" &&
       (!durableCase?.job_id || !jobs.has(durableCase.job_id))
-    ) why.push("durable_live_fate_has_no_job");
-    if (
-      durableFate === "revision_or_reattendance" &&
-      (!durableCase?.parent_case_id || !durableCase.job_id ||
-        !jobs.has(durableCase.job_id))
-    ) why.push("durable_revision_is_not_attached_to_existing_job");
-    if (
-      replayFate && durableFate && replayFate !== durableFate
-    ) why.push("durable_fate_disagrees_with_replay");
+    ) diagnostics.push("durable_live_fate_has_no_job");
+    if (plannerFate && durableFate && plannerFate !== durableFate) {
+      diagnostics.push("durable_fate_disagrees_with_planner");
+    }
 
-    const cleanLiveApplicable = replayFate === "live_job";
+    const independent = independentBySource.get(sourceHash) || null;
     const job = durableCase?.job_id ? jobs.get(durableCase.job_id) : null;
-    const latency = cleanLiveApplicable && durableFate === "live_job" && job
+    const hugoVisible = Boolean(
+      durableCase?.job_id && visibleJobIds.has(durableCase.job_id),
+    );
+    const visibilityApplicable = independent?.expected_fate === "live_job";
+    const jobCreatedLatency = visibilityApplicable && job
       ? secondsBetween(source.receivedAt, job.created_at)
       : null;
-    if (latency !== null) liveLatencies.push(latency);
-    if (cleanLiveApplicable && latency === null) {
-      why.push("clean_live_job_latency_unmeasured");
-    } else if (latency !== null && latency > FIVE_MINUTES_SECONDS) {
-      why.push("clean_live_job_exceeded_five_minutes");
+    const visibilityUpperBound = visibilityApplicable && hugoVisible
+      ? secondsBetween(source.receivedAt, input.hugoBoard.observed_at)
+      : null;
+    if (visibilityUpperBound !== null) {
+      visibilityLatencies.push(visibilityUpperBound);
     }
+    if (visibilityApplicable && !hugoVisible) {
+      diagnostics.push("ground_truth_live_example_not_hugo_visible");
+    }
+    if (
+      visibilityUpperBound !== null &&
+      visibilityUpperBound > FIVE_MINUTES_SECONDS
+    ) diagnostics.push("hugo_visibility_upper_bound_exceeded_five_minutes");
 
-    const correct = why.length === 0;
-    const shapeRow = shapeRows.get(shape.key) || {
+    const axisRow = axisRows.get(shape.key) || {
       observed_count: 0,
       example_source_hash: sourceHash,
-      replay_fates: {},
+      planner_fates: {},
     };
-    shapeRow.observed_count++;
-    if (replayFate) {
-      shapeRow.replay_fates[replayFate] =
-        (shapeRow.replay_fates[replayFate] || 0) + 1;
+    axisRow.observed_count++;
+    if (plannerFate) {
+      axisRow.planner_fates[plannerFate] =
+        (axisRow.planner_fates[plannerFate] || 0) + 1;
     }
-    shapeRows.set(shape.key, shapeRow);
+    axisRows.set(shape.key, axisRow);
 
     verdicts.push({
       source_hash: sourceHash,
       received_at: source.receivedAt,
-      shape_key: shape.key,
-      replay_fate: replayFate,
+      diagnostic_axis_shape: shape.key,
+      planner_fate: plannerFate,
+      planner_adapter_id: historical.adapterId || null,
       durable_fate: durableFate,
-      correct,
-      why,
-      replay_reason_code: replayCase?.reasonCode || null,
-      durable_reason_code: durableCase?.reason_code || null,
-      five_minute_live_job: {
-        applicable: cleanLiveApplicable,
-        measured: latency !== null,
-        latency_seconds: latency,
-        within_law: latency === null ? null : latency <= FIVE_MINUTES_SECONDS,
+      planner_self_consistent: plannerRows.length === 1 && plannerCase !== null,
+      durable_present: durableFate !== null,
+      durable_matches_planner: plannerFate && durableFate
+        ? plannerFate === durableFate
+        : null,
+      diagnostics,
+      planner_reason_code: plannerCase?.reasonCode || null,
+      durable_reason_code: durableCase?.reason_code ||
+        sourceException?.exclusion_reason || null,
+      independent_ground_truth: independent
+        ? {
+          shape_id: independent.shape_id,
+          expected_fate: independent.expected_fate,
+          expected_volume: independent.count,
+          handling_assessment: independent.independent_handling_assessment,
+          planner_matches: plannerFate === independent.expected_fate,
+          durable_matches: durableFate
+            ? durableFate === independent.expected_fate
+            : null,
+        }
+        : null,
+      five_minute_hugo_visibility: {
+        applicable: visibilityApplicable,
+        measured: visibilityUpperBound !== null,
+        hugo_visible_at_observation: hugoVisible,
+        job_created_latency_seconds: jobCreatedLatency,
+        visibility_upper_bound_seconds: visibilityUpperBound,
+        within_law: visibilityUpperBound === null
+          ? null
+          : visibilityUpperBound <= FIVE_MINUTES_SECONDS,
       },
       correlation: {
         source_instruction_id: `source:${sourceHash}`,
         instruction_id: hashedCoordinate(
           "instruction",
-          replayCase?.instructionKey || durableCase?.instruction_key,
+          plannerCase?.instructionKey || durableCase?.instruction_key,
         ),
         lineage_id: hashedCoordinate(
           "lineage",
-          durableCase?.lineage_id || replayCase?.lineageClusterKey,
+          durableCase?.lineage_id || plannerCase?.lineageClusterKey,
         ),
         case_id: hashedCoordinate("case", durableCase?.id),
         job_id: hashedCoordinate("job", durableCase?.job_id),
-        parent_relation: replayCase?.parentRelation ||
+        parent_relation: plannerCase?.parentRelation ||
           durableCase?.parent_relation || null,
       },
     });
   }
 
-  const expectedClean =
-    verdicts.filter((item) => item.five_minute_live_job.applicable).length;
+  const verdictBySource = new Map(
+    verdicts.map((item) => [item.source_hash, item]),
+  );
+  const independentChecks = input.independentShapes.map((shape) => {
+    const verdict = verdictBySource.get(shape.example_source_hash) || null;
+    return {
+      shape_id: shape.shape_id,
+      expected_fate: shape.expected_fate,
+      expected_volume: shape.count,
+      example_source_hash: shape.example_source_hash,
+      planner_fate: verdict?.planner_fate || null,
+      planner_adapter_id: verdict?.planner_adapter_id || null,
+      planner_reason_code: verdict?.planner_reason_code || null,
+      candidate_path_closed: Boolean(
+        verdict?.planner_fate &&
+          (verdict.planner_adapter_id ||
+            shape.expected_fate === "accounted_non_work"),
+      ),
+      durable_fate: verdict?.durable_fate || null,
+      planner_matches: verdict?.planner_fate === shape.expected_fate,
+      durable_matches: verdict?.durable_fate
+        ? verdict.durable_fate === shape.expected_fate
+        : null,
+      handling_assessment: shape.independent_handling_assessment,
+    };
+  });
+  const groundTruthLive = verdicts.filter((item) =>
+    item.independent_ground_truth?.expected_fate === "live_job"
+  );
   const withinLaw =
-    liveLatencies.filter((value) => value <= FIVE_MINUTES_SECONDS).length;
-  const shapeCatalogue = [...shapeRows.entries()].map(([shapeKey, row]) => ({
+    visibilityLatencies.filter((value) => value <= FIVE_MINUTES_SECONDS).length;
+  const documents = input.sources.flatMap((item) =>
+    item.source.pdfDocuments || []
+  );
+  const capSources = new Set(
+    input.sources.filter((item) =>
+      (item.source.pdfDocuments || []).some((document) =>
+        document.reason === "run_extraction_cap"
+      )
+    ).map((item) => item.source.postId),
+  );
+  const expectedVolumeFates = emptyFateCounts();
+  for (const shape of input.independentShapes) {
+    expectedVolumeFates[shape.expected_fate] += shape.count;
+  }
+  const diagnosticAxisCatalogue = [...axisRows.entries()].map(([
+    shapeKey,
+    row,
+  ]) => ({
     shape_key: shapeKey,
     ...row,
   })).sort((a, b) =>
     b.observed_count - a.observed_count ||
     a.shape_key.localeCompare(b.shape_key)
   );
+  const boardObservation = {
+    observed_at: input.hugoBoard.observed_at,
+    method: input.hugoBoard.method,
+    contract_version: input.hugoBoard.contract_version,
+    viewer_profile_hash: input.hugoBoard.viewer_profile_hash,
+    permissions: input.hugoBoard.permissions,
+  } as const;
 
   return {
     ok: true,
+    proof_status: "not_proved",
     version: FIVE_FATES_REPLAY_VERSION,
     generated_at: input.nowIso,
     corpus: {
       sources: input.sources.length,
-      historical_shapes: shapeCatalogue.length,
-      replay_fated: verdicts.filter((item) => item.replay_fate !== null).length,
+      planner_fated:
+        verdicts.filter((item) => item.planner_fate !== null).length,
+      planner_self_consistent:
+        verdicts.filter((item) => item.planner_self_consistent).length,
       durable_fated:
         verdicts.filter((item) => item.durable_fate !== null).length,
-      correct: verdicts.filter((item) => item.correct).length,
-      incorrect: verdicts.filter((item) => !item.correct).length,
-      silent_disappearances:
-        verdicts.filter((item) =>
-          item.why.includes("source_has_no_durable_fate")
-        ).length,
+      durable_missing:
+        verdicts.filter((item) => item.durable_fate === null).length,
+      durable_matches_planner:
+        verdicts.filter((item) => item.durable_matches_planner === true).length,
+      diagnostic_axis_shapes: diagnosticAxisCatalogue.length,
     },
-    fate_counts: fateCounts,
+    planner_fate_counts: plannerFateCounts,
     durable_fate_counts: durableFateCounts,
-    five_minute_live_job: {
-      law_seconds: FIVE_MINUTES_SECONDS,
-      expected_clean_sources: expectedClean,
-      measured: liveLatencies.length,
-      within_law: withinLaw,
-      breached: liveLatencies.length - withinLaw,
-      unmeasured: expectedClean - liveLatencies.length,
-      p50_seconds: percentile(liveLatencies, 0.5),
-      p95_seconds: percentile(liveLatencies, 0.95),
-      max_seconds: liveLatencies.length ? Math.max(...liveLatencies) : null,
+    independent_ground_truth: {
+      authority: "independent_corpus_swarm",
+      catalogue_shapes: input.independentShapes.length,
+      shapes_with_exactly_one_expected_fate: input.independentShapes.length,
+      examples_found:
+        independentChecks.filter((item) => item.planner_fate !== null)
+          .length,
+      examples_missing:
+        independentChecks.filter((item) => item.planner_fate === null)
+          .length,
+      planner_matches: independentChecks.filter((item) => item.planner_matches)
+        .length,
+      durable_matches:
+        independentChecks.filter((item) => item.durable_matches === true)
+          .length,
+      durable_missing:
+        independentChecks.filter((item) => item.durable_fate === null).length,
+      catalogue_baseline_unhandled_shapes:
+        independentChecks.filter((item) =>
+          item.handling_assessment === "unhandled"
+        ).length,
+      candidate_closed_baseline_unhandled_shapes:
+        independentChecks.filter((item) =>
+          item.handling_assessment === "unhandled" &&
+          item.candidate_path_closed
+        ).length,
+      expected_volume_fate_counts: expectedVolumeFates,
+      checks: independentChecks,
     },
-    shape_catalogue: shapeCatalogue,
+    pdf_extraction_diagnostics: {
+      documents: documents.length,
+      extracted: documents.filter((item) => item.status === "extracted").length,
+      quarantined:
+        documents.filter((item) => item.status === "quarantined").length,
+      deferred: documents.filter((item) => item.status === "deferred").length,
+      run_extraction_cap:
+        documents.filter((item) => item.reason === "run_extraction_cap").length,
+      sources_with_run_extraction_cap: capSources.size,
+    },
+    five_minute_hugo_visibility: {
+      law_seconds: FIVE_MINUTES_SECONDS,
+      measurement: "email_received_to_hugo_projection_observed_upper_bound",
+      ground_truth_live_examples: groundTruthLive.length,
+      measured: visibilityLatencies.length,
+      within_law: withinLaw,
+      breached: visibilityLatencies.length - withinLaw,
+      unmeasured: groundTruthLive.length - visibilityLatencies.length,
+      visible_at_observation:
+        groundTruthLive.filter((item) =>
+          item.five_minute_hugo_visibility.hugo_visible_at_observation
+        ).length,
+      p50_seconds: percentile(visibilityLatencies, 0.5),
+      p95_seconds: percentile(visibilityLatencies, 0.95),
+      max_seconds: visibilityLatencies.length
+        ? Math.max(...visibilityLatencies)
+        : null,
+      board_observation: boardObservation,
+    },
+    proof_gaps: [
+      "No supervised clean-email probe has measured first Hugo visibility within 300 seconds.",
+      "The independent corpus contains seven unhandled shapes and no deployed-path closure evidence.",
+      "Historical board observation provides only a current visibility upper bound, not the first-visible timestamp.",
+      "A bounded PDF budget still defers older recent sources when more than 50 eligible PDFs arrive in one run.",
+      "Production deployment drift remains unresolved and no production mutation was authorised in U1 replay.",
+    ],
+    diagnostic_axis_catalogue: diagnosticAxisCatalogue,
     verdicts,
   };
 }

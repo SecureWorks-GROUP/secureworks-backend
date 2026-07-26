@@ -293,9 +293,16 @@ remains bounded by its 500-source read cap, 1..10 case cap and attempt ceiling.
 
 Transfer the existing 10-minute mailbox lease to that continuation and release it
 only when the nested scan settles, so the two-minute poll cannot launch overlapping
-batches. A non-2xx or network-failed continuation must write the durable
-`makesafe.intake.scan_handoff_failed` business event; a resolved `fetch` is not proof
-that intake ran.
+batches. A non-2xx or network-failed continuation must write both the aggregate
+`makesafe.intake.scan_handoff_failed` event and a reason-coded `email_events_raw`
+exception for every included source. HTTP 200 is not enough: verify each source has a
+canonical case-source row and exception-record any remainder. If source/accounting or
+alarm persistence fails, reject the continuation and retain the expiring lease.
+
+Apply `20260726000001_makesafe_company_parsing_rules_slug_correction.sql` before the
+matching deterministic-intake edge code. Production slugs are `aj`, `bw`, and `wb`,
+not the aliases targeted by the original seed. Every active company must have field
+rules or both `intentionally_no_fields:true` and a non-empty `no_fields_reason`.
 
 The 50-document PDF budget must prioritise exact diagnostic sources and the bounded
 recent email half, newest first. Non-priority sweep rows remain oldest first. Without

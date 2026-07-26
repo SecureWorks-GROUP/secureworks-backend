@@ -22,6 +22,7 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _auditExclusion,
@@ -32,6 +33,7 @@ import {
   _DEFAULT_REF_PREFIXES,
   _extractRef,
   _extractRefPrefixes,
+  _findIntakeSourcesWithoutCaseForTest,
   _graphGetAll,
   _handler,
   _isAuthorized,
@@ -41,6 +43,7 @@ import {
   _parseSenderDomain,
   _persistPost,
   _processAttachments,
+  _recordIntakeSourceExceptionsForTest,
   _runBackfillFull,
   _scheduleIntakeScanContinuation,
   _senderMatchesPattern,
@@ -123,6 +126,74 @@ Deno.test("intake scan continuation returns before a scan beyond pg_net's five-s
   assertEquals(captured.leaseReleased, true);
 });
 
+Deno.test("successful handoff accounting check returns only sources without a canonical case", async () => {
+  const sb = {
+    from: () => ({
+      select: () => ({
+        in: () =>
+          Promise.resolve({
+            data: [{ post_id: "accounted" }],
+            error: null,
+          }),
+      }),
+    }),
+  };
+  const sources = [
+    {
+      postId: "accounted",
+      receivedAt: null,
+      conversationId: null,
+      threadId: null,
+    },
+    {
+      postId: "missing",
+      receivedAt: null,
+      conversationId: null,
+      threadId: null,
+    },
+  ];
+
+  const missing = await _findIntakeSourcesWithoutCaseForTest(sb, sources);
+
+  assertEquals(missing.map((item) => item.postId), ["missing"]);
+});
+
+Deno.test("intake source exception writer records one reason-coded source fate plus aggregate alarm", async () => {
+  const inserted: Array<{ table: string; row: Record<string, unknown> }> = [];
+  const sb = {
+    from: (table: string) => ({
+      insert: (row: Record<string, unknown>) => {
+        inserted.push({ table, row });
+        return Promise.resolve({ error: null });
+      },
+    }),
+  };
+
+  await _recordIntakeSourceExceptionsForTest(
+    sb,
+    [{
+      postId: "source-one",
+      receivedAt: "2026-07-26T00:00:00Z",
+      conversationId: "conversation-one",
+      threadId: "thread-one",
+    }],
+    "scan_completed_without_case_fate",
+    "Scanner returned but source fate was missing.",
+  );
+
+  assertEquals(inserted.length, 2);
+  assertEquals(inserted[0].table, "email_events_raw");
+  assertEquals(
+    inserted[0].row.change_type,
+    "intake_exception_scan_completed_without_case_fate",
+  );
+  assertEquals(
+    (inserted[0].row.page_meta as Record<string, unknown>).source_fate,
+    "reason_coded_exception",
+  );
+  assertEquals(inserted[1].table, "business_events");
+});
+
 Deno.test("intake continuation durably reports non-2xx and network handoff failures", async () => {
   const observed: Array<{ kind: "http" | "network"; status: number | null }> =
     [];
@@ -160,6 +231,29 @@ Deno.test("intake continuation durably reports non-2xx and network handoff failu
     { kind: "http", status: 503 },
     { kind: "network", status: null },
   ]);
+});
+
+Deno.test("intake continuation retains the lease when durable exception persistence fails", async () => {
+  let registered: Promise<void> | undefined;
+  let settled = false;
+  _scheduleIntakeScanContinuation(
+    (() =>
+      Promise.resolve(
+        new Response("unavailable", { status: 503 }),
+      )) as typeof fetch,
+    (promise) => registered = promise,
+    "https://example.invalid/ops-api?action=scan_ses_makesafes",
+    {},
+    () => {
+      settled = true;
+      return Promise.resolve();
+    },
+    () => Promise.reject(new Error("source ledger unavailable")),
+  );
+
+  assert(registered);
+  await assertRejects(() => registered!, Error, "source ledger unavailable");
+  assertEquals(settled, false);
 });
 
 // ── Classifier: domain-boundary matching ──────────────────────────────────────

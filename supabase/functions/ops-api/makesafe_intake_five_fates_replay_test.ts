@@ -13,6 +13,9 @@ import {
   buildFiveFatesReplayReport,
   catalogueHistoricalEmailShape,
   type DurableCaseRow,
+  type HugoBoardObservation,
+  type IndependentShapeExpectation,
+  structuralHash,
 } from "./makesafe_intake_five_fates_replay.ts";
 import { assertReadOnlyRequest } from "../../../scripts/replay-makesafe-five-fates.ts";
 
@@ -92,7 +95,39 @@ function deterministicPlan(
   };
 }
 
-Deno.test("U1 five-fates replay proves exactly one durable fate and correlation per source", () => {
+function shapeExpectation(
+  item: DeterministicSourceItem,
+  shapeId: string,
+  expectedFate: IndependentShapeExpectation["expected_fate"],
+): IndependentShapeExpectation {
+  return {
+    shape_id: shapeId,
+    count: 1,
+    builder: "fixture",
+    tail: false,
+    expected_fate: expectedFate,
+    fate_reason: "independent fixture expectation",
+    independent_handling_assessment: "handled",
+    identifies: "sanitized fixture",
+    example_source_hash: structuralHash(item.postId),
+  };
+}
+
+function hugoBoard(
+  visibleJobIds: string[],
+  observedAt = "2026-07-26T00:04:00.000Z",
+): HugoBoardObservation {
+  return {
+    observed_at: observedAt,
+    method: "shared_server_read_model_with_production_hugo_profile",
+    contract_version: "makesafe-board@fixture",
+    viewer_profile_hash: "hugo-profile-fixture",
+    visible_job_ids: visibleJobIds,
+    permissions: { sees_all_makesafes: true, can_allocate: true },
+  };
+}
+
+Deno.test("U1 diagnostics keep planner, durable ledger and independent ground truth separate", () => {
   const sources = [
     source("live"),
     source("blocked"),
@@ -128,6 +163,17 @@ Deno.test("U1 five-fates replay proves exactly one durable fate and correlation 
       ? `job-${index}`
       : null,
   }));
+  const expectations = [
+    shapeExpectation(sources[0], "REAL-LIVE", "live_job"),
+    shapeExpectation(sources[1], "REAL-BLOCKED", "blocked_live_job"),
+    shapeExpectation(sources[2], "REAL-EXCEPTION", "reason_coded_exception"),
+    shapeExpectation(
+      sources[3],
+      "REAL-REVISION",
+      "revision_or_reattendance",
+    ),
+    shapeExpectation(sources[4], "REAL-NONWORK", "accounted_non_work"),
+  ];
   const report = buildFiveFatesReplayReport({
     plan: deterministicPlan(cases),
     sources: sources.map((item) => ({
@@ -143,38 +189,44 @@ Deno.test("U1 five-fates replay proves exactly one durable fate and correlation 
       item.job_id
         ? [{
           id: item.job_id,
-          // Revision jobs legitimately pre-date the revision source. The clean
-          // five-minute metric applies only to the root live-job fate.
           created_at: index === 3
             ? "2026-07-25T00:00:00.000Z"
             : "2026-07-26T00:02:00.000Z",
         }]
         : []
     ),
-    nowIso: "2026-07-26T00:03:00.000Z",
+    sourceExceptions: [],
+    independentShapes: expectations,
+    hugoBoard: hugoBoard(["job-0", "job-1", "job-3"]),
+    nowIso: "2026-07-26T00:04:00.000Z",
   });
 
-  assertEquals(report.corpus.sources, 5);
-  assertEquals(report.corpus.correct, 5);
-  assertEquals(report.corpus.silent_disappearances, 0);
-  assertEquals(report.fate_counts, {
+  assertEquals(report.proof_status, "not_proved");
+  assertEquals(report.corpus.planner_self_consistent, 5);
+  assertEquals(report.corpus.durable_fated, 5);
+  assertEquals(report.independent_ground_truth.catalogue_shapes, 5);
+  assertEquals(report.independent_ground_truth.planner_matches, 5);
+  assertEquals(report.independent_ground_truth.durable_matches, 5);
+  assertEquals(report.planner_fate_counts, {
     live_job: 1,
     blocked_live_job: 1,
     reason_coded_exception: 1,
     revision_or_reattendance: 1,
     accounted_non_work: 1,
   });
-  assertEquals(report.five_minute_live_job.measured, 1);
-  assertEquals(report.five_minute_live_job.within_law, 1);
+  assertEquals(report.five_minute_hugo_visibility.measured, 1);
+  assertEquals(report.five_minute_hugo_visibility.within_law, 1);
+  assertEquals("correct" in report.corpus, false);
   for (const verdict of report.verdicts) {
     assert(verdict.correlation.source_instruction_id.startsWith("source:"));
     assert(verdict.correlation.instruction_id?.startsWith("instruction:"));
+    assertEquals("correct" in verdict, false);
     assert(!JSON.stringify(verdict).includes("primeeco.tech"));
     assert(!JSON.stringify(verdict).includes("Example Person"));
   }
 });
 
-Deno.test("U1 five-fates replay calls an email with no durable case a silent disappearance", () => {
+Deno.test("U1 diagnostics name a missing durable fate without converting planner agreement into correctness", () => {
   const item = source("real-shape-unaccounted");
   const intakeCase = planCase(
     "instruction-unaccounted",
@@ -188,16 +240,65 @@ Deno.test("U1 five-fates replay calls an email with no durable case a silent dis
     caseSources: [],
     cases: [],
     jobs: [],
+    sourceExceptions: [],
+    independentShapes: [
+      shapeExpectation(item, "REAL-UNACCOUNTED", "live_job"),
+    ],
+    hugoBoard: hugoBoard([]),
     nowIso: "2026-07-26T01:00:00.000Z",
   });
 
-  assertEquals(report.corpus.silent_disappearances, 1);
-  assertEquals(report.corpus.incorrect, 1);
-  assertEquals(report.verdicts[0].why, ["source_has_no_durable_fate"]);
+  assertEquals(report.corpus.durable_missing, 1);
+  assertEquals(report.independent_ground_truth.planner_matches, 0);
+  assertEquals(report.independent_ground_truth.durable_missing, 1);
+  assert(report.verdicts[0].diagnostics.includes("source_has_no_durable_fate"));
+  assert(
+    report.verdicts[0].diagnostics.includes(
+      "ground_truth_live_example_not_hugo_visible",
+    ),
+  );
 });
 
-Deno.test("U1 clean live-job replay fails the measured five-minute law", () => {
-  const item = source("real-shape-late-live");
+Deno.test("a source-level handoff exception is a durable reason-coded fate without a case", () => {
+  const item = source("source-handoff-exception");
+  const intakeCase = planCase(
+    "instruction-handoff-exception",
+    item.postId,
+    "exception",
+    { reasonCode: "below_identity_floor" },
+  );
+  const report = buildFiveFatesReplayReport({
+    plan: deterministicPlan([intakeCase]),
+    sources: [{ source: item }],
+    caseSources: [],
+    cases: [],
+    jobs: [],
+    sourceExceptions: [{
+      post_id: item.postId,
+      change_type: "intake_exception_scan_completed_without_case_fate",
+      exclusion_reason: "scan_completed_without_case_fate",
+    }],
+    independentShapes: [
+      shapeExpectation(item, "HANDOFF-EXCEPTION", "reason_coded_exception"),
+    ],
+    hugoBoard: hugoBoard([]),
+    nowIso: "2026-07-26T01:00:00.000Z",
+  });
+
+  assertEquals(report.corpus.durable_missing, 0);
+  assertEquals(report.verdicts[0].durable_fate, "reason_coded_exception");
+  assertEquals(
+    report.verdicts[0].durable_reason_code,
+    "scan_completed_without_case_fate",
+  );
+  assertEquals(
+    report.verdicts[0].diagnostics.includes("source_has_no_durable_fate"),
+    false,
+  );
+});
+
+Deno.test("U1 five-minute law stops at Hugo projection observation, not job creation", () => {
+  const item = source("real-shape-late-visible");
   const intakeCase = planCase(
     "instruction-late",
     item.postId,
@@ -216,18 +317,21 @@ Deno.test("U1 clean live-job replay fails the measured five-minute law", () => {
       blocked_reasons: [],
       job_id: "job-late",
     }],
-    jobs: [{ id: "job-late", created_at: "2026-07-26T00:05:01.000Z" }],
+    jobs: [{ id: "job-late", created_at: "2026-07-26T00:01:00.000Z" }],
+    sourceExceptions: [],
+    independentShapes: [shapeExpectation(item, "REAL-LIVE", "live_job")],
+    hugoBoard: hugoBoard(["job-late"], "2026-07-26T00:05:01.000Z"),
     nowIso: "2026-07-26T00:06:00.000Z",
   });
 
-  assertEquals(report.five_minute_live_job.breached, 1);
-  assertEquals(report.verdicts[0].correct, false);
-  assertEquals(report.verdicts[0].why, [
-    "clean_live_job_exceeded_five_minutes",
-  ]);
+  const latency = report.verdicts[0].five_minute_hugo_visibility;
+  assertEquals(latency.job_created_latency_seconds, 60);
+  assertEquals(latency.visibility_upper_bound_seconds, 301);
+  assertEquals(latency.within_law, false);
+  assertEquals(report.five_minute_hugo_visibility.breached, 1);
 });
 
-Deno.test("historical shape catalogue is structural and contains no source content", () => {
+Deno.test("diagnostic axis catalogue is structural and contains no source content", () => {
   const item = source("shape", "FWD: NEW WORK ORDER - MLB-REDACTED");
   const shape = catalogueHistoricalEmailShape({
     source: {
@@ -258,24 +362,11 @@ Deno.test("historical shape catalogue is structural and contains no source conte
 Deno.test("production replay transport rejects every mutation method", () => {
   assertReadOnlyRequest();
   assertReadOnlyRequest({ method: "HEAD" });
-  assertThrows(
-    () => assertReadOnlyRequest({ method: "POST" }),
-    Error,
-    "forbids",
-  );
-  assertThrows(
-    () => assertReadOnlyRequest({ method: "PATCH" }),
-    Error,
-    "forbids",
-  );
-  assertThrows(
-    () => assertReadOnlyRequest({ method: "PUT" }),
-    Error,
-    "forbids",
-  );
-  assertThrows(
-    () => assertReadOnlyRequest({ method: "DELETE" }),
-    Error,
-    "forbids",
-  );
+  for (const method of ["POST", "PATCH", "PUT", "DELETE"]) {
+    assertThrows(
+      () => assertReadOnlyRequest({ method }),
+      Error,
+      "forbids",
+    );
+  }
 });
