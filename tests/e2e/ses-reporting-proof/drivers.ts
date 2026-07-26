@@ -153,6 +153,11 @@ export class FixtureProofDriver implements ProofDriver {
   private readonly cards = new Map<string, FixtureCard>()
   private boardJobs = new Map<string, Record<string, unknown>>()
   private boardDetails = new Map<string, Record<string, unknown>>()
+  private boardAssignments = new Map<string, Record<string, unknown>[]>()
+  private boardReports = new Map<string, Record<string, unknown>>()
+  private boardInvoices = new Map<string, Record<string, unknown>>()
+  private boardDocuments = new Map<string, Record<string, unknown>[]>()
+  private boardPacks = new Map<string, Record<string, unknown>>()
   private boardConfirmedIds = new Set<string>()
   private boardGeneratedAt: string | null = null
   private approvalCurrent = false
@@ -195,6 +200,8 @@ export class FixtureProofDriver implements ProofDriver {
       requesting_company_name: 'Fixture Builder',
       report_type: 'roof_report',
     })
+    this.boardAssignments.set(jobId, [])
+    this.boardDocuments.set(jobId, [])
   }
 
   private runBoardSeam(expectedJobIds: string[]): DriverResponse {
@@ -227,11 +234,11 @@ export class FixtureProofDriver implements ProofDriver {
       rowsByTable: {
         jobs: [...this.boardJobs.values()],
         makesafe_job_details: [...this.boardDetails.values()],
-        job_service_reports: [],
-        xero_invoices: [],
-        job_documents: [],
-        makesafe_report_packs: [],
-        job_assignments: [],
+        job_service_reports: [...this.boardReports.values()],
+        xero_invoices: [...this.boardInvoices.values()],
+        job_documents: [...this.boardDocuments.values()].flat(),
+        makesafe_report_packs: [...this.boardPacks.values()],
+        job_assignments: [...this.boardAssignments.values()].flat(),
         job_events: [],
         job_media: [],
         job_contacts: [],
@@ -441,6 +448,31 @@ export class FixtureProofDriver implements ProofDriver {
             : 'waiting_on_trade_report'
           const job = this.boardJobs.get(card.jobId)
           if (job) job.status = 'scheduled'
+          if (String(payload.targetStage) === 'Allocated / Waiting on Trade') {
+            this.boardAssignments.set(card.jobId, [{
+              id: `assignment:${card.jobId}`,
+              job_id: card.jobId,
+              user_id: HUGO_FIXTURE_USER,
+              status: 'scheduled',
+              scheduled_date: new Date().toISOString().slice(0, 10),
+              attendance_cycle_id: null,
+              cycle_attribution: 'unbound',
+              users: { id: HUGO_FIXTURE_USER, name: 'Hugo Fixture' },
+            }])
+          }
+          if (String(payload.targetStage) === 'Trade Report In') {
+            if (this.boardDetails.has(card.jobId)) {
+              this.boardDetails.get(card.jobId)!.substatus = 'admin_to_send_report'
+            }
+            this.boardReports.set(card.jobId, {
+              id: `report:${card.jobId}`,
+              job_id: card.jobId,
+              status: 'submitted',
+              submitted_at: new Date().toISOString(),
+              created_at: new Date().toISOString(),
+              cycle_number: 1,
+            })
+          }
         }
         return { success: true, card: { ...card }, createdArtifacts: [] }
       }
@@ -449,6 +481,28 @@ export class FixtureProofDriver implements ProofDriver {
         const pack = this.add(artifact(this.context, 'pack:complete', 'pack', 'family-correct synthetic document pack'))
         const report = this.add(artifact(this.context, 'report:complete', 'document', 'rendered completion report'))
         this.findPrimary().stage = 'Docs Ready'
+        const primaryJobId = this.findPrimary().jobId
+        if (primaryJobId) {
+          const detail = this.boardDetails.get(primaryJobId)
+          if (detail) detail.substatus = 'admin_to_send_report'
+          this.boardInvoices.set(primaryJobId, {
+            id: `invoice:${primaryJobId}`,
+            job_id: primaryJobId,
+            invoice_type: 'ACCREC',
+            status: 'DRAFT',
+            total: 275,
+            created_at: new Date().toISOString(),
+          })
+          this.boardPacks.set(primaryJobId, {
+            id: `pack:${primaryJobId}`,
+            job_id: primaryJobId,
+            pack_kind: 'main',
+            status: 'drafted',
+            report_doc_id: report.id,
+            invoice_doc_id: `invoice-doc:${primaryJobId}`,
+            swms_doc_id: `swms-doc:${primaryJobId}`,
+          })
+        }
         return {
           success: true,
           completed: { produced: true, packId: pack.id, artifacts: ['work_order', 'completion_report', 'photo_story', 'swms', 'invoice_proposal'] },
@@ -520,7 +574,32 @@ export class FixtureProofDriver implements ProofDriver {
         if (!this.approvalCurrent) throw new Error('send refused because current docket revision is not approved')
         const operatorBand = String(payload.operatorBand)
         const mail = this.add(artifact(this.context, `mail:${operatorBand}`, 'mail', `${operatorBand} delivery to Captain inbox`))
+        const primaryJobId = this.findPrimary().jobId
         this.findPrimary().stage = 'Completed'
+        if (primaryJobId) {
+          const job = this.boardJobs.get(primaryJobId)
+          if (job) {
+            job.status = 'complete'
+            job.completed_at = new Date().toISOString()
+          }
+          const detail = this.boardDetails.get(primaryJobId)
+          if (detail) {
+            detail.substatus = 'complete'
+            detail.report_sent_at = new Date().toISOString()
+          }
+          const invoice = this.boardInvoices.get(primaryJobId)
+          if (invoice) invoice.status = 'AUTHORISED'
+          const pack = this.boardPacks.get(primaryJobId)
+          if (pack) {
+            pack.status = 'sent'
+            pack.sent_at = new Date().toISOString()
+          }
+          this.boardDocuments.set(primaryJobId, [
+            { id: `report-doc:${primaryJobId}`, job_id: primaryJobId, type: 'makesafe_report', file_name: 'make safe report.pdf' },
+            { id: `invoice-doc:${primaryJobId}`, job_id: primaryJobId, type: 'invoice', file_name: 'invoice.pdf' },
+            { id: `swms-doc:${primaryJobId}`, job_id: primaryJobId, type: 'swms', file_name: 'swms.pdf' },
+          ])
+        }
         return {
           success: true,
           messageId: mail.id,
@@ -559,6 +638,11 @@ export class FixtureProofDriver implements ProofDriver {
         this.cards.clear()
         this.boardJobs.clear()
         this.boardDetails.clear()
+        this.boardAssignments.clear()
+        this.boardReports.clear()
+        this.boardInvoices.clear()
+        this.boardDocuments.clear()
+        this.boardPacks.clear()
         this.boardConfirmedIds.clear()
         return { success: true, cleanedArtifacts, createdArtifacts: [] }
       }
