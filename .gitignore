@@ -1,6 +1,7 @@
 .env
 .env.*
 node_modules/
+artifacts/ses-reporting-proof/
 supabase/.temp/
 .DS_Store
 *.pdf
