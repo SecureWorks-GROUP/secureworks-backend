@@ -148,7 +148,10 @@ export function filterHoldsForCurrentCycle(
   for (const hold of holds || []) {
     if (hold?.lifted_at) continue;
     if (hold?.attendance_cycle_id && currentAttendanceCycleId) {
-      if (String(hold.attendance_cycle_id) === String(currentAttendanceCycleId)) {
+      if (
+        String(hold.attendance_cycle_id) === String(currentAttendanceCycleId) &&
+        String(hold.cycle_attribution || "") === CYCLE_ATTRIBUTION.BOUND
+      ) {
         return hold;
       }
       continue;

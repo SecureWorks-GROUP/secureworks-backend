@@ -220,6 +220,22 @@ Deno.test("R9c reattend hold requires bound attribution and identity", () => {
   );
 });
 
+Deno.test("R9d matching hold UUID still requires bound attribution", () => {
+  const detail = { cycle_number: 2, reattend_count: 1 };
+  assertEquals(
+    projectCycleScopedEvidence({
+      detail,
+      attendanceCycleId: "cycle-2",
+      holds: [{
+        cycle_number: 2,
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED,
+      }],
+    }).hold,
+    null,
+  );
+});
+
 Deno.test("R10 readiness_revision changes when evidence changes", () => {
   const base = {
     attendanceCycleId: "c1",

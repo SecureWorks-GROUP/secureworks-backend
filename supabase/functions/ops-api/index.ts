@@ -11490,8 +11490,9 @@ function firstByJobId(rows: any[] | null | undefined): Record<string, any> {
 function currentCycleReportMap(
   rows: any[] | null | undefined,
   detailsMap: Record<string, any>,
+  cycleIdByJobId?: Record<string, string | null>,
 ): Record<string, any> {
-  return cycleEvidenceReportMap(rows, detailsMap)
+  return cycleEvidenceReportMap(rows, detailsMap, cycleIdByJobId)
 }
 
 function makesafeCrew(assignments: any[] = []) {
@@ -12504,7 +12505,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   // packMap: the durable makesafe_report_packs row (status + report_doc_id) used
   // by the shared surfacing predicate (drafted-not-sent / resume / sent-closed).
   let packMap: Record<string, MakesafeReportPackLike> = {}
-  let packCycleMap: Record<string, any> = {}
+  let packCycleByPackId: Record<string, any> = {}
   if (jobIds.length > 0) {
     // T1 — id-chunked (details list is one-per-job so row count ~= job count,
     // but chunk the .in() anyway so a multi-thousand-job set can't exceed the
@@ -12549,7 +12550,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       _fetchAllByJobIdChunked(
         client,
         'makesafe_report_packs',
-        'job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
+        'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
         jobIds,
       ),
       _fetchAllByJobIdChunked(
@@ -12574,8 +12575,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if ((p.pack_kind || 'main') === 'main') packMap[p.job_id] = p
     }
     for (const pc of (packCycles || [])) {
-      if (!pc?.job_id || !pc?.pack_id) continue
-      if (!packCycleMap[pc.job_id] || pc.cycle_attribution === 'bound') packCycleMap[pc.job_id] = pc
+      if (pc?.pack_id) packCycleByPackId[pc.pack_id] = pc
     }
   }
 
@@ -12613,8 +12613,12 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
 
   for (const j of (jobs || [])) {
     const rowPack = packMap[j.id]
-    const packCycle = packCycleMap[j.id]
-    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, rowPack ? { ...rowPack, ...packCycle } : null)
+    const detail = detailsMap[j.id] || null
+    const packCycle = rowPack?.id ? packCycleByPackId[rowPack.id] : null
+    const packIsCurrent = !!packCycle &&
+      packCycle.cycle_attribution === 'bound' &&
+      String(packCycle.attendance_cycle_id || '') === String(detail?.attendance_cycle_id || '')
+    const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, rowPack ? { ...rowPack, cycle_attribution: packIsCurrent ? 'bound' : null } : null)
     columns[enriched.board_stage].push(enriched)
   }
 
@@ -13134,7 +13138,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   let reportRows: any[] = []
   let invoiceRows: any[] = []
   let packMap: Record<string, any> = {}
-  let packCycleMap: Record<string, any> = {}
+  let packCycleByPackId: Record<string, any> = {}
   // GAP-4 — pack_sent (notes-based MAKESAFE_PACK_SENT marker, via buildPackSentMap)
   // and pipeline_item_sent_status (the sync-system verdict from pipeline_items,
   // joined on the target job) surfaced on each audit jobs[] row.
@@ -13165,7 +13169,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
         client,
         'job_service_reports',
         // cycle_number is required for the current-cycle report filter below.
-        'job_id, status, cycle_number',
+        'job_id, status, cycle_number, attendance_cycle_id, cycle_attribution',
         jobIds,
         (q) => q.neq('status', 'draft'),
       ),
@@ -13212,7 +13216,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       if (pack?.job_id && (pack.pack_kind || 'main') === 'main') packMap[pack.job_id] = pack
     }
     for (const cycle of packCycles || []) {
-      if (cycle?.job_id && (!packCycleMap[cycle.job_id] || cycle.cycle_attribution === 'bound')) packCycleMap[cycle.job_id] = cycle
+      if (cycle?.pack_id) packCycleByPackId[cycle.pack_id] = cycle
     }
     // Same cycle boundary as the board path (currentCycleReportMap): when
     // reattend_count > 0 only the current cycle's non-draft service report counts.
@@ -13241,13 +13245,18 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // object literal shape. Runtime shape is unchanged.
   let jobRows: any[] = (jobs || []).map((j: any) => {
     const detail = detailsMap[j.id] || null
+    const auditPack = packMap[j.id] || null
+    const auditPackCycle = auditPack?.id ? packCycleByPackId[auditPack.id] : null
+    const auditPackIsCurrent = !!auditPackCycle &&
+      auditPackCycle.cycle_attribution === 'bound' &&
+      String(auditPackCycle.attendance_cycle_id || '') === String(detail?.attendance_cycle_id || '')
     const cycleEvidence = projectCycleScopedEvidence({
       detail,
       reports: reportRows.filter((r: any) => r?.job_id === j.id),
       docs: docsMap[j.id] || [],
-      pack: packMap[j.id] || null,
+      pack: auditPack,
       packSent: packSentMap[j.id] === true,
-      packCycleBound: packCycleMap[j.id]?.cycle_attribution === 'bound',
+      packCycleBound: auditPackIsCurrent,
       attendanceCycleId: detail?.attendance_cycle_id || null,
     })
     const docFlags = makesafeDocBooleans(docsMap[j.id] || [])
@@ -18943,7 +18952,17 @@ async function createAssignment(client: any, body: any) {
     status: 'scheduled',
     confirmation_status: finalConfStatus,
   }
-  if (isMakesafe) insertRow.visible_to_trades = true
+  if (isMakesafe) {
+    insertRow.visible_to_trades = true
+    const { data: makesafeDetail, error: makesafeDetailErr } = await client.from('makesafe_job_details')
+      .select('cycle_number, attendance_cycle_id').eq('job_id', jId).maybeSingle()
+    if (makesafeDetailErr) throw makesafeDetailErr
+    if (makesafeDetail) {
+      const cycle = await ensureMakesafeAttendanceCycle(client, jId, Number(makesafeDetail.cycle_number || 1), 'allocate_job')
+      insertRow.attendance_cycle_id = cycle.id
+      insertRow.cycle_attribution = 'bound'
+    }
+  }
 
   const { data, error } = await client.from('job_assignments').insert(insertRow).select().single()
 

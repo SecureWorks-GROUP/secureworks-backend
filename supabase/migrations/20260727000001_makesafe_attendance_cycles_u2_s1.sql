@@ -38,6 +38,29 @@ CREATE POLICY service_role_all_makesafe_attendance_cycles
   ON public.makesafe_attendance_cycles FOR ALL TO service_role
   USING (true) WITH CHECK (true);
 
+CREATE OR REPLACE FUNCTION public.prevent_makesafe_attendance_cycle_identity_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'makesafe attendance cycle identities are immutable';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+    OR NEW.job_id IS DISTINCT FROM OLD.job_id
+    OR NEW.cycle_number IS DISTINCT FROM OLD.cycle_number THEN
+    RAISE EXCEPTION 'makesafe attendance cycle identities are immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS makesafe_attendance_cycles_identity_guard
+  ON public.makesafe_attendance_cycles;
+CREATE TRIGGER makesafe_attendance_cycles_identity_guard
+  BEFORE UPDATE OR DELETE ON public.makesafe_attendance_cycles
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_makesafe_attendance_cycle_identity_change();
+
 -- Deterministic backfill: for each make-safe detail row, ensure cycles 1..N exist.
 -- Does not invent evidence; only materialises identity rows from the counter.
 INSERT INTO public.makesafe_attendance_cycles (job_id, cycle_number, opened_at, open_reason)
