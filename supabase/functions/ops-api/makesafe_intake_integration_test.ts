@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 import {
   assert,
   assertEquals,
@@ -90,12 +91,17 @@ function makeCanonicalBoardFixtureClient(
       },
       order: () => query,
       range: async (from: number, to: number) => ({
-        data: rows.filter((row) => predicates.every((predicate) => predicate(row)))
+        data: rows.filter((row) =>
+          predicates.every((predicate) => predicate(row))
+        )
           .slice(from, to + 1),
         error: null,
       }),
       maybeSingle: async () => ({
-        data: rows.filter((row) => predicates.every((predicate) => predicate(row)))[0] ||
+        data:
+          rows.filter((row) =>
+            predicates.every((predicate) => predicate(row))
+          )[0] ||
           null,
         error: null,
       }),
@@ -300,7 +306,10 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
     true,
     "canonical loader must query jobs — no prebuilt Board injection",
   );
-  assertEquals(fixtureClient.tableCalls().includes("makesafe_job_details"), true);
+  assertEquals(
+    fixtureClient.tableCalls().includes("makesafe_job_details"),
+    true,
+  );
   assertEquals(fixtureClient.tableCalls().includes("users"), true);
   // Production route options accept only generatedAt — TypeScript and the
   // runtime signature reject loadBoard. Structural proof: jobs was read.
@@ -401,7 +410,10 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
   assertEquals(wrongVerticalResponse.status, 200);
   assertEquals(fixtureClient.tableCalls().includes("job_assignments"), true);
   assertEquals(wrongVerticalBody.permissions.visibility, "allocated_only");
-  assertEquals(wrongVerticalBody.rows.some((row: any) => row.id === jobId), false);
+  assertEquals(
+    wrongVerticalBody.rows.some((row: any) => row.id === jobId),
+    false,
+  );
   assertEquals(wrongVerticalBody.rows.length, 0);
 
   const wrongRoleResponse = await _makesafeBoardActionForTest(
@@ -669,8 +681,13 @@ Deno.test("assigned-only: ordinary trade sees only cycle-bound makesafe assignme
   assertEquals(body.permissions.can_allocate, false);
 
   // Assigned-id restriction must have hit job_assignments with nested type filter.
-  const assignmentCalls = client.calls.filter((c) => c.table === "job_assignments");
-  assert(assignmentCalls.length > 0, "allocated-only must query job_assignments");
+  const assignmentCalls = client.calls.filter((c) =>
+    c.table === "job_assignments"
+  );
+  assert(
+    assignmentCalls.length > 0,
+    "allocated-only must query job_assignments",
+  );
   assert(
     assignmentCalls.some((c) =>
       c.eqs.some((eq) => eq.column === "jobs.type" && eq.value === "makesafe")

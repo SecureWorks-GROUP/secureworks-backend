@@ -1,4 +1,5 @@
 #!/usr/bin/env -S deno run --allow-read --allow-env
+// deno-lint-ignore-file no-explicit-any require-await
 // Deterministic Board seam for the SES e2e fixture driver.
 // Calls the production makesafe board trade route (canonical loader + auth).
 // stdin JSON: { profiles, rowsByTable, authUser, generatedAt? }
