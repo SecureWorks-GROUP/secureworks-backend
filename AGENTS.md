@@ -472,7 +472,8 @@ and rationale: `docs/ses-reporting-proof-harness.md`.
 gate for honest validation of SES and other edge work. Do not re-accept a
 non-zero error baseline.
 
-Load-bearing type rules (see `index_deno_type_baseline_test.ts`):
+Load-bearing type rules (see
+`supabase/functions/ops-api/index_deno_type_baseline_test.ts`):
 
 - Every live trade-portal action that has an inner `switch (action)` case must
   also appear on the outer trade fall-through list (`my_jobs` …
