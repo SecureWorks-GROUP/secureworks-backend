@@ -51,10 +51,7 @@ export function isEvidenceBoundToCurrentCycle(
     : null;
 
   if (rowCycleId && currentId) return rowCycleId === currentId;
-  if (rowCycleId && !currentId) {
-    // Row is bound to some cycle id but we lack the current id: require number match.
-    return Number(row.cycle_number ?? 1) === cycle;
-  }
+  if (rowCycleId && !currentId) return false;
 
   // Unbound by UUID — fall back to cycle_number when present.
   if (row.cycle_number != null && Number(row.cycle_number) !== cycle) {
@@ -63,7 +60,7 @@ export function isEvidenceBoundToCurrentCycle(
     return true;
   }
   if (row.cycle_number != null && Number(row.cycle_number) === cycle) {
-    return true;
+    return !hasReattendBoundary(detail) || attribution === CYCLE_ATTRIBUTION.BOUND;
   }
 
   // Fully unbound (no cycle_number, no attendance_cycle_id).
@@ -156,7 +153,13 @@ export function filterHoldsForCurrentCycle(
       }
       continue;
     }
-    if (Number(hold?.cycle_number || 1) === cycle) return hold;
+    if (Number(hold?.cycle_number || 1) === cycle) {
+      if (hasReattendBoundary(detail)) {
+        if (String(hold?.cycle_attribution || "") !== CYCLE_ATTRIBUTION.BOUND) continue;
+        if (!hold?.attendance_cycle_id || !currentAttendanceCycleId) continue;
+      }
+      return hold;
+    }
   }
   return null;
 }

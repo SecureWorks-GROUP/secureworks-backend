@@ -138,6 +138,7 @@ import {
   currentCycleReportMap as cycleEvidenceReportMap,
   hasReattendBoundary,
   isLegacyMakesafeCard,
+  filterHoldsForCurrentCycle,
   projectCycleScopedEvidence,
 } from './makesafe_cycle_evidence.ts'
 
@@ -11749,7 +11750,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     // Without a loaded pack-cycle junction row, reattend never trusts job-global
     // pack/sent as current-cycle readiness (fail closed). First attendance keeps
     // legacy packCycleBound=true so existing sent behaviour is preserved.
-    packCycleBound: !hasReattendBoundary(detail),
+    packCycleBound: !hasReattendBoundary(detail) || pack?.cycle_attribution === 'bound',
     attendanceCycleId: detail?.attendance_cycle_id ?? null,
   })
   const scopedAssignments = scoped.assignments
@@ -12503,6 +12504,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   // packMap: the durable makesafe_report_packs row (status + report_doc_id) used
   // by the shared surfacing predicate (drafted-not-sent / resume / sent-closed).
   let packMap: Record<string, MakesafeReportPackLike> = {}
+  let packCycleMap: Record<string, any> = {}
   if (jobIds.length > 0) {
     // T1 — id-chunked (details list is one-per-job so row count ~= job count,
     // but chunk the .in() anyway so a multi-thousand-job set can't exceed the
@@ -12521,7 +12523,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     // job_documents ROW count can exceed 1000 across full history, so it MUST be
     // row-paginated (not just id-chunked). The chunked helper does both. We keep
     // the original predicate/order via applyFilters.
-    const [reports, invoices, docs, packs] = await Promise.all([
+    const [reports, invoices, docs, packs, packCycles] = await Promise.all([
       _fetchAllByJobIdChunked(
         client,
         'job_service_reports',
@@ -12550,8 +12552,16 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
         'job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
         jobIds,
       ),
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_report_pack_cycles',
+        'pack_id, job_id, attendance_cycle_id, cycle_attribution',
+        jobIds,
+      ),
     ])
-    reportMap = currentCycleReportMap(reports || [], detailsMap)
+    const cycleIdByJobId: Record<string, string | null> = {}
+    for (const d of details || []) cycleIdByJobId[d.job_id] = d.attendance_cycle_id ?? null
+    reportMap = currentCycleReportMap(reports || [], detailsMap, cycleIdByJobId)
     invoiceMap = firstByJobId(invoices || [])
     for (const doc of (docs || [])) {
       if (!doc?.job_id) continue
@@ -12562,6 +12572,10 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if (!p?.job_id) continue
       // 'main' is the close-out pack; only the main pack drives board surfacing.
       if ((p.pack_kind || 'main') === 'main') packMap[p.job_id] = p
+    }
+    for (const pc of (packCycles || [])) {
+      if (!pc?.job_id || !pc?.pack_id) continue
+      if (!packCycleMap[pc.job_id] || pc.cycle_attribution === 'bound') packCycleMap[pc.job_id] = pc
     }
   }
 
@@ -12598,7 +12612,9 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   }
 
   for (const j of (jobs || [])) {
-    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packMap[j.id] || null)
+    const rowPack = packMap[j.id]
+    const packCycle = packCycleMap[j.id]
+    const enriched = enrichMakesafeBoardJob(j, detailsMap[j.id] || null, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, rowPack ? { ...rowPack, ...packCycle } : null)
     columns[enriched.board_stage].push(enriched)
   }
 
@@ -12851,8 +12867,9 @@ async function loadCanonicalMakesafeBoard(
   ]))
   for (const hold of holds) {
     if (hold?.lifted_at) continue
-    const currentCycle = cycleByJobId.get(hold?.job_id) || 1
-    if (hold?.job_id && Number(hold?.cycle_number || 1) === currentCycle && !holdsByJobId[hold.job_id]) {
+    const row = baseRows.find((candidate) => candidate.id === hold?.job_id)
+    const detail = row?.makesafe_details || { cycle_number: cycleByJobId.get(hold?.job_id) || 1, reattend_count: row?.reattend_count || 0 }
+    if (hold?.job_id && filterHoldsForCurrentCycle([hold], detail, detail.attendance_cycle_id) && !holdsByJobId[hold.job_id]) {
       holdsByJobId[hold.job_id] = hold
     }
   }
@@ -13114,7 +13131,10 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   let detailsMap: Record<string, any> = {}
   let docsMap: Record<string, any[]> = {}
   let reportSet: Set<string> = new Set()
+  let reportRows: any[] = []
   let invoiceRows: any[] = []
+  let packMap: Record<string, any> = {}
+  let packCycleMap: Record<string, any> = {}
   // GAP-4 — pack_sent (notes-based MAKESAFE_PACK_SENT marker, via buildPackSentMap)
   // and pipeline_item_sent_status (the sync-system verdict from pipeline_items,
   // joined on the target job) surfaced on each audit jobs[] row.
@@ -13125,14 +13145,14 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // reader. A reported query error rejects Promise.all and therefore the whole
     // request instead of being mapped to empty facts. A successful empty result
     // remains an empty result; this path adds no per-job completeness checksum.
-    const [details, docs, reports, loadedInvoiceRows, psMap, pisMap] = await Promise.all([
+    const [details, docs, reports, packs, packCycles, loadedInvoiceRows, psMap, pisMap] = await Promise.all([
       _fetchAllByJobIdChunked(
         client,
         'makesafe_job_details',
         // reattend_count + cycle_number feed currentCycleReportMap so a prior
         // visit's report cannot falsify current-cycle has_report_record /
         // pack_effectively_sent on a reattendance card (board already gates this).
-        'job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, reattend_count, cycle_number, makesafe_companies:requesting_company_id(slug, name)',
+        'job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, reattend_count, cycle_number, attendance_cycle_id, makesafe_companies:requesting_company_id(slug, name)',
         jobIds,
       ),
       _fetchAllByJobIdChunked(
@@ -13148,6 +13168,18 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
         'job_id, status, cycle_number',
         jobIds,
         (q) => q.neq('status', 'draft'),
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_report_packs',
+        'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
+        jobIds,
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_report_pack_cycles',
+        'pack_id, job_id, attendance_cycle_id, cycle_attribution',
+        jobIds,
       ),
       // AUDIT path: pull ALL ACCREC invoices INCLUDING VOIDED/DELETED (item
       // 2.4) so duplicate, reference-only and void-history checks can fire.
@@ -13176,13 +13208,22 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
       docsMap[doc.job_id].push(doc)
     }
+    for (const pack of packs || []) {
+      if (pack?.job_id && (pack.pack_kind || 'main') === 'main') packMap[pack.job_id] = pack
+    }
+    for (const cycle of packCycles || []) {
+      if (cycle?.job_id && (!packCycleMap[cycle.job_id] || cycle.cycle_attribution === 'bound')) packCycleMap[cycle.job_id] = cycle
+    }
     // Same cycle boundary as the board path (currentCycleReportMap): when
     // reattend_count > 0 only the current cycle's non-draft service report counts.
     // Legacy / reopen-only cards (reattend_count 0 or absent) keep any-cycle
     // first-match behaviour so single-visit rows stay byte-compatible.
-    const currentReports = currentCycleReportMap(reports || [], detailsMap)
+    const cycleIdByJobId: Record<string, string | null> = {}
+    for (const d of details || []) cycleIdByJobId[d.job_id] = d.attendance_cycle_id ?? null
+    const currentReports = currentCycleReportMap(reports || [], detailsMap, cycleIdByJobId)
     for (const jobId of Object.keys(currentReports)) reportSet.add(jobId)
     invoiceRows = loadedInvoiceRows
+    reportRows = reports || []
     packSentMap = {}
     for (const job of (jobs || [])) {
       if (isLegacyMakesafeCard(detailsMap[job.id])) packSentMap[job.id] = psMap[job.id] === true
@@ -13200,6 +13241,15 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // object literal shape. Runtime shape is unchanged.
   let jobRows: any[] = (jobs || []).map((j: any) => {
     const detail = detailsMap[j.id] || null
+    const cycleEvidence = projectCycleScopedEvidence({
+      detail,
+      reports: reportRows.filter((r: any) => r?.job_id === j.id),
+      docs: docsMap[j.id] || [],
+      pack: packMap[j.id] || null,
+      packSent: packSentMap[j.id] === true,
+      packCycleBound: packCycleMap[j.id]?.cycle_attribution === 'bound',
+      attendanceCycleId: detail?.attendance_cycle_id || null,
+    })
     const docFlags = makesafeDocBooleans(docsMap[j.id] || [])
     // A filed close-out report can show up two ways: (a) a job_service_reports
     // row (legacy / submit_makesafe_report path), or (b) a typed
@@ -13208,9 +13258,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // files the report as a typed doc and never writes a job_service_reports
     // row, so the audit must count the typed doc too — otherwise every report
     // the skill produces reads as missing. See sw-makesafe-audit-tool-spec.md.
-    const hasReportDocTyped = isLegacyMakesafeCard(detail) && (docsMap[j.id] || []).some(
-      (d: any) => String(d?.type || '').toLowerCase() === 'makesafe_report',
-    )
+    const hasReportDocTyped = cycleEvidence.hasReportDocTyped
     const company = detail?.requesting_company_name || detail?.makesafe_companies?.name ||
       j.metadata?.requesting_company?.name || null
     const externalRef = detail?.external_ref || j.metadata?.external_ref || null
@@ -13261,7 +13309,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
         (docFlags.has_report_doc || hasReportDocTyped || reportSet.has(j.id)) &&
         docFlags.has_invoice_doc)
     )
-    const hasReportDoc = isLegacyMakesafeCard(detail) && docFlags.has_report_doc
+    const hasReportDoc = cycleEvidence.hasReportDoc
     return {
       job_id: j.id,
       job_number: j.job_number,
@@ -13276,6 +13324,11 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       has_invoice_doc: docFlags.has_invoice_doc,
       has_swms_doc: docFlags.has_swms_doc,
       has_report_record: reportSet.has(j.id) || hasReportDocTyped,
+      attendance_cycle_id: cycleEvidence.attendance_cycle_id,
+      cycle_number: cycleEvidence.cycle_number,
+      cycle_attribution_flags: cycleEvidence.cycle_attribution_flags,
+      readiness_revision: cycleEvidence.readiness_revision,
+      commercial_warning: cycleEvidence.commercial_warning,
       invoice_status: distinctStatuses.length ? distinctStatuses.join(',') : null,
       invoice_no: distinctNumbers.length ? distinctNumbers.join(',') : null,
       // M3 — current LIVE (non-voided) invoice resolved by job link, AUTHORISED-first.
@@ -13681,6 +13734,22 @@ async function makesafeSentMirrorAction(client: any, body: any) {
 }
 export const _makesafeSentMirrorActionForTest = makesafeSentMirrorAction
 
+async function ensureMakesafeAttendanceCycle(
+  client: any,
+  jobId: string,
+  cycleNumber: number,
+  openReason: string,
+): Promise<{ id: string; cycle_number: number }> {
+  const { data, error } = await client.from('makesafe_attendance_cycles')
+    .upsert({ job_id: jobId, cycle_number: cycleNumber, open_reason: openReason }, { onConflict: 'job_id,cycle_number' })
+    .select('id, cycle_number')
+    .single()
+  if (error || !data?.id) {
+    throw new ApiError(`attendance cycle bind failed: ${error?.message || 'missing cycle identity'}`, 500)
+  }
+  return data
+}
+
 // ── Slice 5: make-safe completion report ──
 async function submitMakesafeReport(client: any, body: any) {
   const {
@@ -13704,12 +13773,15 @@ async function submitMakesafeReport(client: any, body: any) {
   // scoped to the same cycle, so a prior-cycle submitted report never blocks the
   // second visit's submission and is never overwritten).
   const { data: cycleDetail } = await client.from('makesafe_job_details')
-    .select('cycle_number, substatus').eq('job_id', jId).maybeSingle()
+    .select('cycle_number, substatus, attendance_cycle_id').eq('job_id', jId).maybeSingle()
   const currentCycle = (cycleDetail as { cycle_number?: number } | null)?.cycle_number ?? 1
   const detailSubstatus = (cycleDetail as { substatus?: string } | null)?.substatus || null
+  const attendanceCycle = await ensureMakesafeAttendanceCycle(client, jId, currentCycle, 'submit_makesafe_report')
 
   const reportFields: Record<string, any> = {
     cycle_number: currentCycle,
+    attendance_cycle_id: attendanceCycle.id,
+    cycle_attribution: 'bound',
     checklist_json: {
       arrival_time: arrival_time || '',
       damage_description: damage_description || '',
@@ -13820,6 +13892,8 @@ async function submitMakesafeReport(client: any, body: any) {
         .insert({
           job_id: jId,
           user_id: uId,
+          attendance_cycle_id: attendanceCycle.id,
+          cycle_attribution: 'bound',
           role: 'lead_installer',
           status: 'complete',
           completed_at: syncAt,
@@ -13835,6 +13909,8 @@ async function submitMakesafeReport(client: any, body: any) {
 
     const { data: detailSync, error: detailSyncErr } = await client.from('makesafe_job_details')
       .update({
+        attendance_cycle_id: attendanceCycle.id,
+        cycle_attribution: 'bound',
         substatus: 'admin_to_send_report',
         report_received_at: syncAt,
         invoice_notes: invoice_notes || null,
@@ -13939,7 +14015,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
   // read-only enrichment queries for the map; write mutations remain untouched.
   const [detailsRes, assignsRes, reportsRes, invoicesRes] = await Promise.all([
     client.from('makesafe_job_details')
-      .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_ready_at, reattend_count, last_reattend_at, cycle_number, makesafe_companies:requesting_company_id(slug, name)')
+      .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_ready_at, reattend_count, last_reattend_at, cycle_number, attendance_cycle_id, makesafe_companies:requesting_company_id(slug, name)')
       .in('job_id', jobIds),
     client.from('job_assignments')
       .select('job_id, user_id, scheduled_date, status, role, crew_name, travel_started_at, arrived_at, clocked_on_at, completed_at, users:user_id(name, phone)')
@@ -13947,7 +14023,7 @@ async function makesafeMap(client: any, params: URLSearchParams) {
       .neq('status', 'cancelled')
       .order('scheduled_date', { ascending: true }),
     client.from('job_service_reports')
-      .select('job_id, status, submitted_at, created_at, cycle_number')
+      .select('job_id, status, submitted_at, created_at, cycle_number, attendance_cycle_id, cycle_attribution')
       .in('job_id', jobIds)
       .neq('status', 'draft')
       .order('submitted_at', { ascending: false }),
@@ -13966,7 +14042,9 @@ async function makesafeMap(client: any, params: URLSearchParams) {
     if (!assignMap[a.job_id]) assignMap[a.job_id] = []
     assignMap[a.job_id].push(a)
   }
-  const reportMap = currentCycleReportMap(reportsRes.data || [], detailsMap)
+  const cycleIdByJobId: Record<string, string | null> = {}
+  for (const d of detailsRes.data || []) cycleIdByJobId[d.job_id] = d.attendance_cycle_id ?? null
+  const reportMap = currentCycleReportMap(reportsRes.data || [], detailsMap, cycleIdByJobId)
   const invoiceMap = firstByJobId(invoicesRes.data || [])
 
   const today = new Date().toISOString().slice(0, 10)
@@ -28593,6 +28671,21 @@ async function makesafeSendPack(
 // injected network seams (TASK E).
 export const _makesafeSendPackForTest = makesafeSendPack
 
+async function bindMakesafePackCycle(client: any, jobId: string, packId: string | null | undefined, packKind: string) {
+  if (!packId) return
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
+    .select('cycle_number, attendance_cycle_id').eq('job_id', jobId).maybeSingle()
+  if (detailErr || !detail) throw new ApiError(`pack cycle detail read failed (${packKind}): ${detailErr?.message || 'missing detail'}`, 500)
+  const cycle = await ensureMakesafeAttendanceCycle(client, jobId, Number(detail.cycle_number || 1), 'pack_bind')
+  const { error } = await client.from('makesafe_report_pack_cycles').upsert({
+    pack_id: packId,
+    job_id: jobId,
+    attendance_cycle_id: cycle.id,
+    cycle_attribution: 'bound',
+  }, { onConflict: 'pack_id,attendance_cycle_id' })
+  if (error) throw new ApiError(`pack cycle bind failed (${packKind}): ${error.message}`, 500)
+}
+
 // Upsert a pack row, leaving it in a lockable 'drafted' state if it does not yet
 // exist. Never downgrades a terminal/in-flight status: the lock UPDATE is the
 // real gate, this only guarantees a row is present to lock.
@@ -28600,14 +28693,16 @@ async function _ensurePackRow(client: any, jobId: string, packKind: string, extr
   const { data: existing } = await client.from('makesafe_report_packs')
     .select('id, status').eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
   if (!existing) {
-    await client.from('makesafe_report_packs').insert({
+    const { data: inserted, error: insertErr } = await client.from('makesafe_report_packs').insert({
       org_id: DEFAULT_ORG_ID,
       job_id: jobId,
       pack_kind: packKind,
       status: 'drafted',
       ...(extra || {}),
       updated_at: new Date().toISOString(),
-    })
+    }).select('id').single()
+    if (insertErr) throw insertErr
+    await bindMakesafePackCycle(client, jobId, inserted?.id, packKind)
     return
   }
   // Row exists — only patch the supplied diagnostic fields; never touch status here.
@@ -28616,6 +28711,7 @@ async function _ensurePackRow(client: any, jobId: string, packKind: string, extr
       .update({ ...extra, updated_at: new Date().toISOString() })
       .eq('id', existing.id)
   }
+  await bindMakesafePackCycle(client, jobId, existing.id, packKind)
 }
 
 async function _ensurePackRowStrict(client: any, jobId: string, packKind: string, extra?: Record<string, any>) {
@@ -28636,6 +28732,10 @@ async function _ensurePackRowStrict(client: any, jobId: string, packKind: string
     if (insertErr && insertErr.code !== '23505') {
       throw new ApiError(`pack row insert failed (${packKind}): ${insertErr.message}`, 500)
     }
+    const { data: row, error: rowErr } = await client.from('makesafe_report_packs')
+      .select('id').eq('job_id', jobId).eq('pack_kind', packKind).single()
+    if (rowErr || !row?.id) throw new ApiError(`pack row reread failed (${packKind}): ${rowErr?.message || 'missing row'}`, 500)
+    await bindMakesafePackCycle(client, jobId, row.id, packKind)
     return
   }
   if (extra && Object.keys(extra).length > 0) {
@@ -28644,6 +28744,7 @@ async function _ensurePackRowStrict(client: any, jobId: string, packKind: string
       .eq('id', existing.id)
     if (patchErr) throw new ApiError(`pack row patch failed (${packKind}): ${patchErr.message}`, 500)
   }
+  await bindMakesafePackCycle(client, jobId, existing.id, packKind)
 }
 
 async function _patchPackStrict(client: any, jobId: string, packKind: string, patch: Record<string, any>) {
@@ -29732,6 +29833,7 @@ export async function reattendMakesafe(client: any, args: {
   const nowIso = new Date().toISOString()
   const nextCycle = (detail.cycle_number ?? 1) + 1
   const nextReattend = (detail.reattend_count ?? 0) + 1
+  const nextAttendanceCycle = await ensureMakesafeAttendanceCycle(client, jobId, nextCycle, 'reattend_makesafe')
 
   // Reactivate a closed job so it flows through the board again.
   if (_MAKESAFE_REATTEND_CLOSED_STATUSES.includes(jobStatus)) {
@@ -29748,13 +29850,15 @@ export async function reattendMakesafe(client: any, args: {
       report_received_at: null,
       report_sent_at: null,
       cycle_number: nextCycle,
+      attendance_cycle_id: nextAttendanceCycle.id,
+      cycle_attribution: 'bound',
       reattend_count: nextReattend,
       last_reattend_at: nowIso,
       last_reattend_reason: reason,
       updated_at: nowIso,
     })
     .eq('job_id', jobId)
-    .select('job_id, substatus, cycle_number, reattend_count, last_reattend_at')
+    .select('job_id, substatus, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at')
     .single()
   if (upErr) throw new ApiError('reattendMakesafe: detail update failed: ' + upErr.message, 500)
 

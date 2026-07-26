@@ -196,6 +196,30 @@ Deno.test("R9 ambiguous backfill rows never satisfy current cycle", () => {
   assertEquals(scoped.serviceReport, null);
 });
 
+Deno.test("R9b reattend unscoped same-number evidence fails closed", () => {
+  const detail = { cycle_number: 2, reattend_count: 1 };
+  assertEquals(
+    isEvidenceBoundToCurrentCycle({ cycle_number: 2 }, detail, "cycle-2"),
+    false,
+  );
+  assertEquals(
+    filterAssignmentsForCurrentCycle([{ id: "a", cycle_number: 2 }], detail, "cycle-2").assignments,
+    [],
+  );
+});
+
+Deno.test("R9c reattend hold requires bound attribution and identity", () => {
+  const detail = { cycle_number: 2, reattend_count: 1 };
+  assertEquals(
+    projectCycleScopedEvidence({
+      detail,
+      attendanceCycleId: "cycle-2",
+      holds: [{ cycle_number: 2, cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED }],
+    }).hold,
+    null,
+  );
+});
+
 Deno.test("R10 readiness_revision changes when evidence changes", () => {
   const base = {
     attendanceCycleId: "c1",

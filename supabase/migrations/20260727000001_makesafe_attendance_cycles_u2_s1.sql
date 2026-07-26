@@ -74,6 +74,26 @@ ALTER TABLE public.job_assignments
       'bound', 'backfill_cycle_scope', 'legacy_unscoped'
     ));
 
+ALTER TABLE public.makesafe_job_details
+  ADD COLUMN IF NOT EXISTS attendance_cycle_id uuid
+    REFERENCES public.makesafe_attendance_cycles(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS cycle_attribution text
+    CHECK (cycle_attribution IS NULL OR cycle_attribution IN (
+      'bound', 'backfill_cycle_scope', 'legacy_unscoped'
+    ));
+
+CREATE INDEX IF NOT EXISTS idx_makesafe_job_details_attendance_cycle
+  ON public.makesafe_job_details (attendance_cycle_id)
+  WHERE attendance_cycle_id IS NOT NULL;
+
+UPDATE public.makesafe_job_details d
+SET attendance_cycle_id = c.id,
+    cycle_attribution = 'bound'
+FROM public.makesafe_attendance_cycles c
+WHERE d.attendance_cycle_id IS NULL
+  AND c.job_id = d.job_id
+  AND c.cycle_number = COALESCE(d.cycle_number, 1);
+
 CREATE INDEX IF NOT EXISTS idx_job_service_reports_attendance_cycle
   ON public.job_service_reports (attendance_cycle_id)
   WHERE attendance_cycle_id IS NOT NULL;
