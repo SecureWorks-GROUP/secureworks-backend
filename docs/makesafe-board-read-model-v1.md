@@ -222,16 +222,6 @@ Each entry below is a real, understood defect this change deliberately leaves
 alone. Every one of them sits on a path with no regression coverage, so fixing
 them here would widen blast radius ahead of the live run.
 
-### PAGE-1 — non-total OFFSET pagination in `makesafe_compact_reads.ts` (CLOSED)
-
-`fetchAllRows` / `fetchAllRowsInChunks` now **require** a unique page-order key
-and append it after any caller-supplied primary sort. Every multi-row compact
-read (GAP-1 emails + drafts, GAP-3 pipeline_items + event/email joins, GAP-6
-attachments, GAP-5 attachment summaries, plus audit/story/intake callers in
-`index.ts`) therefore paginates under a total order. Hostile >1000-row
-regressions with collisions on the primary sort key live in
-`makesafe_compact_reads_test.ts`.
-
 ### MAJOR-2 — global ACCREC full-history read in `makesafe_audit`
 
 - Concurrency: the audit's `xero_invoices` ACCREC read has no job filter and no
@@ -255,17 +245,6 @@ The audit's ACCREC read ends on `invoice_date desc, id desc`; the board's
 invoices on one job therefore resolve differently: the audit picks the newer id,
 the board the older. Both orders are total and stable, and today's first-wins
 consumers tolerate either, so the direction is left unreconciled.
-
-### Allocated-trade restrict list — unchunked `.in('id', restrict)` (CLOSED)
-
-`makesafePipeline` chunks a scoped caller's allowed job ids through
-`chunkByUrlBudget` (same `IN_URL_BUDGET` / `IN_MAX_COUNT` contract as every
-other encoded `.in()` list) on both its active and cancelled queries, merges
-chunks, and re-sorts to the Board total order (`created_at`/`updated_at` desc,
-`id` desc). Hostile >163-UUID multi-chunk regressions live in
-`makesafe_pagination_test.ts`. Wrong-type and unassigned jobs remain excluded
-by the `type=makesafe` filter plus the already-authorised restrict set from
-`loadMakesafeAssignedJobIds`.
 
 ## Parity gate
 
