@@ -13,6 +13,7 @@ import {
   _deriveMakesafeBoardStage,
   _makesafeAuditForTest,
   _makesafePipelineForTest,
+  _prepareMakesafeInvoiceRefsForTest,
   _resolveMakesafeJobInvoicesForTest,
 } from "./index.ts";
 import { IN_URL_BUDGET } from "./makesafe_compact_reads.ts";
@@ -35,10 +36,12 @@ const RECENT_DATE = RECENT_ISO.slice(0, 10); // YYYY-MM-DD for invoice_date
 // makesafe_intake_drafts: pending vs approved) returns the correct subset —
 // matching real PostgREST behaviour, which makesafeAudit relies on.
 type InCall = { table: string; column: string; values: any[]; encodedBytes: number };
+type OrderCall = { table: string; column: string; ascending: boolean };
 type QueryClientOptions = {
   maxInEncodedBytes?: number;
   forceInErrorTables?: Set<string>;
   inCalls?: InCall[];
+  orderCalls?: OrderCall[];
 };
 
 function encodedInBytes(values: any[]): number {
@@ -89,7 +92,12 @@ function makeQueryClient(
         preds.push((r) => r?.[col] >= val);
         return b;
       },
-      order: () => b,
+      // Records the ORDER BY key chain per table. .range() is LIMIT/OFFSET, so a
+      // paginated read is only page-stable when its last order key is unique.
+      order: (col: string, opts?: { ascending?: boolean }) => {
+        options.orderCalls?.push({ table, column: col, ascending: opts?.ascending !== false });
+        return b;
+      },
       limit: (count: number) => {
         rowLimit = count;
         return b;
@@ -418,6 +426,39 @@ Deno.test("2.4 reference + substring tiers tag correctly; <5-char ref does not s
   );
 });
 
+// The whole-board audit resolves EVERY job against EVERY ACCREC invoice, so the
+// reference normalisation is hoisted to one pass per read. Prove the hoisted keys
+// are byte-identical in effect to normalising inside the loop (and that a short /
+// absent key list still falls back per row rather than silently losing a match).
+Deno.test("2.4 hoisted invoice reference keys resolve identically to per-row normalisation", () => {
+  const rows = [
+    { job_id: "j1", status: "AUTHORISED", invoice_number: "INV-1", reference: "AJBR 67457" },
+    { job_id: null, status: "PAID", invoice_number: "INV-2", reference: "Job AJBR-67457 makesafe" },
+    { job_id: "other", status: "VOIDED", invoice_number: "INV-3", reference: null },
+  ];
+  const keys = _prepareMakesafeInvoiceRefsForTest(rows);
+  assertEquals(keys, ["ajbr67457", "jobajbr67457makesafe", ""]);
+
+  const cases: Array<[string | null, string | null]> = [
+    ["j1", "AJBR-67457"],
+    ["nojob", "67457"],
+    ["nojob", null],
+    ["j1", null],
+    [null, "ajbr67457"],
+  ];
+  for (const [jobId, ref] of cases) {
+    const hoisted = _resolveMakesafeJobInvoicesForTest(rows, jobId, ref, keys);
+    assertEquals(hoisted, _resolveMakesafeJobInvoicesForTest(rows, jobId, ref));
+    // A truncated key list must recompute the missing rows, never drop them.
+    assertEquals(hoisted, _resolveMakesafeJobInvoicesForTest(rows, jobId, ref, keys.slice(0, 1)));
+  }
+  assertEquals(
+    _resolveMakesafeJobInvoicesForTest(rows, "j1", "AJBR-67457", keys)
+      .map((m: any) => m.match_tier),
+    ["job_id", "reference_substring"],
+  );
+});
+
 // ─────────────────────────────────────────────────────────────────
 // Item 2.1 — sw_makesafe_audit jobs[] + known_refs[] shape
 // ─────────────────────────────────────────────────────────────────
@@ -483,6 +524,84 @@ Deno.test("2.1 makesafeAudit paginates above the legacy 500-job cap", async () =
   assertEquals(audit.jobs.length, count);
   assertEquals(audit.jobs.every((row: any) => row.substatus != null), true);
   assertEquals(audit.jobs.every((row: any) => row.has_wo === true), true);
+});
+
+// .range() pagination is LIMIT/OFFSET: two pages of the SAME query are only
+// guaranteed to partition the rows when the ORDER BY is a TOTAL order. A
+// non-unique sort key (invoice_date, or no ORDER BY at all) lets a tied row land
+// on neither page — a dropped job_documents row reads as has_wo=false, a dropped
+// invoice reads as uninvoiced. Every paginated audit read must therefore END on a
+// unique key: `id`, or `job_id` for the two tables keyed BY the job id (they have
+// no `id` column at all, so ordering by `id` there would be a PostgREST 400).
+const AUDIT_PAGE_TIE_BREAKER: Record<string, string> = {
+  jobs: "id",
+  makesafe_job_details: "job_id",
+  makesafe_card_story: "job_id",
+  job_documents: "id",
+  job_service_reports: "id",
+  job_events: "id",
+  xero_invoices: "id",
+  makesafe_intake_drafts: "id",
+};
+
+Deno.test("2.1 every paginated makesafe_audit read ends on a unique page tie-breaker", async () => {
+  const orderCalls: OrderCall[] = [];
+  const seed = volumeSeed(3);
+  const firstJobId = seed.jobs[0].id;
+  seed.xero_invoices = [{
+    job_id: firstJobId,
+    status: "AUTHORISED",
+    invoice_number: "INV-1",
+    reference: "AJBR-70000",
+    invoice_type: "ACCREC",
+    invoice_date: RECENT_DATE,
+  }];
+  seed.makesafe_intake_drafts = [
+    {
+      external_ref: "AJBR-79999",
+      graph_message_id: "msg-pending",
+      internet_message_id: null,
+      status: "needs_review",
+      approved_job_id: null,
+    },
+    {
+      external_ref: "AJBR-70000",
+      graph_message_id: "msg-approved",
+      internet_message_id: null,
+      status: "approved",
+      approved_job_id: firstJobId,
+    },
+  ];
+  seed.makesafe_card_story = [{
+    job_id: firstJobId,
+    story_verdict: "OK",
+    needs_agent: false,
+    recheck_enqueued: false,
+    evidence_gaps: [],
+    blockers: [],
+    computed_at: NOW,
+  }];
+
+  await _makesafeAuditForTest(makeQueryClient(seed, { orderCalls }), new URLSearchParams());
+
+  const keysFor = (table: string) =>
+    orderCalls.filter((c) => c.table === table).map((c) => c.column);
+  for (const [table, tieBreaker] of Object.entries(AUDIT_PAGE_TIE_BREAKER)) {
+    const keys = keysFor(table);
+    assert(keys.length > 0, `${table} read must be explicitly ordered`);
+    assertEquals(keys.at(-1), tieBreaker, `${table} must end its ORDER BY on ${tieBreaker}`);
+  }
+  // The two job-keyed tables carry no `id` column — ordering by it would 400.
+  assertEquals(keysFor("makesafe_job_details").includes("id"), false);
+  assertEquals(keysFor("makesafe_card_story").includes("id"), false);
+  // Sort semantics preserved: newest-first jobs and newest-first invoices, with
+  // the PK only breaking ties (_resolveLiveMakesafeInvoice relies on that order).
+  assertEquals(keysFor("jobs"), ["created_at", "id"]);
+  assertEquals(keysFor("xero_invoices"), ["invoice_date", "id"]);
+  assertEquals(
+    orderCalls.filter((c) => c.table === "xero_invoices").every((c) => c.ascending === false),
+    true,
+  );
 });
 
 Deno.test("2.1 makesafeAudit rejects a required join failure instead of returning partial rows", async () => {

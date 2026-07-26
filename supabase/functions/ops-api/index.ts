@@ -11665,6 +11665,17 @@ function resolveMakesafeReportRecipient(args: {
 // .eq('event_type','note')); the helper owns the .in() chunking + .range()
 // pagination so callers never re-implement the cap-safe loop. The shared reader
 // also labels and throws every query error, preventing plausible partial boards.
+//
+// STABLE ORDER (required, not optional): .range() is LIMIT/OFFSET, and Postgres
+// guarantees NO ordering between two separate LIMIT/OFFSET queries unless the
+// ORDER BY is a TOTAL order. Without a unique sort key a chunk that spills past
+// one page can return a row on neither page — e.g. a job_documents `work_order`
+// row silently dropped, so a card with its WO filed reads has_wo=false. The
+// reader therefore always appends a unique tie-breaker column, AFTER any
+// caller-supplied ordering (so the caller's sort stays primary and this only
+// breaks its ties). Every table read through here has an `id` PK except the ones
+// keyed BY the job id, listed below.
+const MAKESAFE_JOB_KEYED_TABLES = new Set(['makesafe_job_details', 'makesafe_card_story'])
 const MAKESAFE_PAGE_SIZE = 1000
 async function _fetchAllByJobIdChunked(
   client: any,
@@ -11674,12 +11685,15 @@ async function _fetchAllByJobIdChunked(
   applyFilters?: (q: any) => any,
   idColumn = 'job_id',
 ): Promise<any[]> {
+  // One row per job and no separate `id` column, so the join column IS the
+  // unique key; ordering by `id` there would be a PostgREST 400.
+  const stableKey = MAKESAFE_JOB_KEYED_TABLES.has(table) ? idColumn : 'id'
   return await _fetchAllRowsInChunks<any>(
     jobIds,
     (idBatch) => {
       let query = client.from(table).select(select).in(idColumn, idBatch)
       if (applyFilters) query = applyFilters(query)
-      return query
+      return query.order(stableKey, { ascending: true })
     },
     `${table} (${idColumn} join)`,
   )
@@ -12911,6 +12925,18 @@ function _makesafeNormRef(s: any): string {
   return String(s ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')
 }
 
+// Normalise every invoice row's reference ONCE per read, index-aligned with
+// invoiceRows. The whole-board audit resolves invoices for EVERY job against
+// EVERY ACCREC invoice, so normalising inside the per-job loop costs
+// jobs x invoices regex passes (500 x ~3000 = 1.5M) on an edge function with a
+// ~2s CPU budget — and makesafeStoryRecompute re-runs the whole audit. Hoisting
+// it leaves only cheap string compares in the loop; the resolver still
+// normalises on demand when no prepared list is supplied, so every caller
+// (including the tests) behaves identically either way.
+function _prepareMakesafeInvoiceRefs(invoiceRows: any[]): string[] {
+  return (invoiceRows || []).map((inv: any) => _makesafeNormRef(inv?.reference))
+}
+
 // AUDIT-MODE invoice resolution (item 2.4). Returns the FULL mapped invoice list
 // for a job INCLUDING VOIDED/DELETED, each row tagged with status + match_tier,
 // so the audit's duplicate + void-history checks can fire (Erskine / Sorrento).
@@ -12926,15 +12952,18 @@ function _resolveMakesafeJobInvoices(
   invoiceRows: any[],
   jobId: string | null | undefined,
   externalRef: string | null | undefined,
+  normalizedRefs?: string[],
 ): Array<{ status: string | null; invoice_number: string | null; reference: string | null; match_tier: string; voided: boolean }> {
   const nref = _makesafeNormRef(externalRef)
   const out: Array<any> = []
-  for (const inv of (invoiceRows || [])) {
+  const rows = invoiceRows || []
+  for (let i = 0; i < rows.length; i++) {
+    const inv = rows[i]
     let tier: string | null = null
     if (jobId && inv?.job_id === jobId) {
       tier = 'job_id'
     } else if (nref) {
-      const invRef = _makesafeNormRef(inv?.reference)
+      const invRef = normalizedRefs?.[i] ?? _makesafeNormRef(inv?.reference)
       if (invRef && invRef === nref) tier = 'reference'
       else if (nref.length >= 5 && invRef && invRef.includes(nref)) tier = 'reference_substring'
     }
@@ -12953,6 +12982,7 @@ function _resolveMakesafeJobInvoices(
 // Test-only exports.
 export const _resolveMakesafeJobInvoicesForTest = _resolveMakesafeJobInvoices
 export const _makesafeNormRefForTest = _makesafeNormRef
+export const _prepareMakesafeInvoiceRefsForTest = _prepareMakesafeInvoiceRefs
 
 // M3 marker-integrity. From the full per-job mapped invoice list (which keeps
 // VOIDED/DELETED for the void-history checks), pick the SINGLE current LIVE
@@ -13047,11 +13077,17 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       // AUDIT path: pull ALL ACCREC invoices INCLUDING VOIDED/DELETED (item
       // 2.4) so duplicate, reference-only and void-history checks can fire.
       // Paginate this required global join too and reject its query errors.
+      // invoice_date is DAY-granularity and non-unique, so it cannot order
+      // .range() pages on its own — dozens of invoices share a date and a tie
+      // straddling row 1000 could land on neither page, blanking a real
+      // invoice_status. `id` (the PK) breaks the tie without disturbing the
+      // newest-first contract _resolveLiveMakesafeInvoice relies on.
       _fetchAllRows<any>(
         () => client.from('xero_invoices')
           .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
           .eq('invoice_type', 'ACCREC')
-          .order('invoice_date', { ascending: false }),
+          .order('invoice_date', { ascending: false })
+          .order('id', { ascending: false }),
         'makesafe_audit xero_invoices',
       ),
       // GAP-4 — reuse the existing buildPackSentMap (batch job_events query).
@@ -13070,6 +13106,10 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     packSentMap = psMap
     pipelineSentStatusMap = pisMap
   }
+
+  // One normalisation pass over the whole invoice read, reused by every job's
+  // resolution below (the per-job loop then does string compares only).
+  const invoiceRefKeys = _prepareMakesafeInvoiceRefs(invoiceRows)
 
   let jobRows = (jobs || []).map((j: any) => {
     const detail = detailsMap[j.id] || null
@@ -13097,7 +13137,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // report card). Two cards sharing a builder ref used to both inherit the one
     // invoice's status/number, so an uninvoiced card read as PAID at a glance and
     // batch tooling built on this compact read described invoice state wrongly.
-    const allMatched = _resolveMakesafeJobInvoices(invoiceRows, j.id, externalRef)
+    const allMatched = _resolveMakesafeJobInvoices(invoiceRows, j.id, externalRef, invoiceRefKeys)
     // Own = job_id-linked only (incl. voided/deleted for void-history, item 2.4).
     // Drives every scalar invoice field below.
     const invoices = allMatched.filter((i) => i.match_tier === 'job_id')
@@ -13192,11 +13232,15 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   const knownRefs: Array<{ external_ref: string | null; source_email_id: string | null; job_number: string | null; substatus: string | null }> = []
   // Drafts: needs_review or draft (not yet a job). Both sides of the known-ref
   // union are required audit truth, so paginate and reject instead of silently
-  // returning an incomplete reference index on a query error or row cap.
+  // returning an incomplete reference index on a query error or row cap. Both
+  // reads order by the `id` PK: an unordered .range() page pair can drop a row
+  // once either side outgrows one page, and a dropped draft ref reads as an
+  // unknown ref (duplicate intake) on the audit side.
   const drafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
       .select('external_ref, graph_message_id, internet_message_id, status, approved_job_id')
-      .in('status', ['needs_review', 'draft']),
+      .in('status', ['needs_review', 'draft'])
+      .order('id', { ascending: true }),
     'makesafe_audit pending intake drafts',
   )
   const draftEmailByJob: Record<string, string | null> = {}
@@ -13204,7 +13248,8 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   const approvedDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
       .select('graph_message_id, internet_message_id, approved_job_id')
-      .eq('status', 'approved'),
+      .eq('status', 'approved')
+      .order('id', { ascending: true }),
     'makesafe_audit approved intake drafts',
   )
   for (const d of (approvedDrafts || [])) {
