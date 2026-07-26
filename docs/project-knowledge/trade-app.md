@@ -108,6 +108,7 @@
 | `submit_service_report` | POST | Save checklist + notes + signature (draft or submitted) |
 | `get_service_report` | GET | Load existing report for a job |
 | `update_my_assignment` | POST | Change own assignment status (confirm/in_progress/complete) + GPS |
+| `clock_event` | POST | Timer/stage events on the caller's OWN assignment (`clock_on`, `clock_off`, `start_travel`, `arrived`, `pause`, `resume`, `materials_check`, `manual_override`). Ownership is asserted before any idempotency lookup or return, assignment mutation or event write, so a foreign caller gets `Not your assignment` and cannot even learn another crew's replay state from an `idempotency_key`. There is deliberately no manager/dispatcher override: cross-crew stage authority would need its own reviewed action and audit contract |
 | `view_shared_report` | GET | **Public (no auth)** — rendered HTML page for homeowner via share_token |
 
 ## Database (Migrations 011, 013, 014, 015)
