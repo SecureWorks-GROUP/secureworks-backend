@@ -621,6 +621,25 @@ function refMatchesExternalRef(inputRef: string, externalRef: string): boolean {
 
 export const _refMatchesExternalRefForTest = refMatchesExternalRef
 
+/**
+ * Narrow a loosely-typed id list (PostgREST row fields, line.job_id, etc.) to
+ * unique non-empty strings. Used where `.filter(Boolean)` / untyped Set spreads
+ * would leave `unknown[]` and reject string callbacks (Deno check TS2769/TS2345).
+ */
+function collectUniqueStringIds(values: unknown[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const v of values) {
+    if (typeof v === 'string' && v.length > 0 && !seen.has(v)) {
+      seen.add(v)
+      out.push(v)
+    }
+  }
+  return out
+}
+
+export const _collectUniqueStringIdsForTest = collectUniqueStringIds
+
 // Shared external_ref resolver: given a supabase client, a set of ref strings,
 // and an activeJobStatusExclude clause, returns:
 //   byId:  { [job.id]: job }  — every active job that matched any input ref
@@ -4722,6 +4741,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'my_hours':
       case 'submit_trade_invoice':
       case 'my_trade_invoices':
+      // Live trade-invoice detail + draft save — must be on this outer list so the
+      // inner switch cases are reachable under the narrowed action discriminant
+      // (Deno check: unreachable get_trade_invoice / save_trade_invoice_draft).
+      case 'get_trade_invoice':
+      case 'save_trade_invoice_draft':
       case 'set_trade_rate':
       case 'update_trade_profile':
       case 'attach_invoice_pdf':
@@ -4811,7 +4835,11 @@ if (import.meta.main) serve(async (req: Request) => {
             // makesafe_job_details.external_ref first, fallback jobs.metadata->>'external_ref'.
             // Batched by distinct job_id to avoid N+1. Null-guarded (left undefined when no ref).
             const detailLines = Array.isArray(inv.lines) ? inv.lines : []
-            const detailJobIds = [...new Set(detailLines.map((l: any) => l?.job_id).filter(Boolean))]
+            // Narrow unknown line.job_id values before filter/in — Supabase row maps
+            // are not string[] without a source-aligned guard (Deno check TS2769).
+            const detailJobIds = collectUniqueStringIds(
+              detailLines.map((l: { job_id?: unknown } | null | undefined) => l?.job_id),
+            )
             if (detailJobIds.length > 0) {
               const refByJob: Record<string, string> = {}
               const { data: msRefs } = await client.from('makesafe_job_details')
@@ -4821,7 +4849,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 if (r.job_id && r.external_ref) refByJob[r.job_id] = r.external_ref
               }
               // Fallback to jobs.metadata->>'external_ref' for any job_id not covered above
-              const missingJobIds = detailJobIds.filter((id: string) => !refByJob[id])
+              const missingJobIds = detailJobIds.filter((id) => !refByJob[id])
               if (missingJobIds.length > 0) {
                 const { data: jobRows } = await client.from('jobs')
                   .select('id, metadata')
@@ -6691,6 +6719,9 @@ if (import.meta.main) serve(async (req: Request) => {
       }
 
       case 'reconcile_transaction': {
+        // Return Response directly — a bare `result = …; break` left the serve
+        // handler returning undefined (Deno check: Handler vs Response | undefined)
+        // and referenced an undeclared `result` (TS2304). Shape matches reporting-api.
         const { xero_txn_id, job_id, cost_centre, action: txnAction } = body
         if (!xero_txn_id) throw new ApiError('xero_txn_id required', 400)
 
@@ -6704,8 +6735,7 @@ if (import.meta.main) serve(async (req: Request) => {
           })
         } catch (e) { /* non-blocking */ }
 
-        result = { success: true, transaction_id: xero_txn_id, status: txnAction || 'reconciled' }
-        break
+        return json({ success: true, transaction_id: xero_txn_id, status: txnAction || 'reconciled' })
       }
 
       // ── Clear Debt: Payment Chase ──
@@ -37988,7 +38018,16 @@ async function disputeHours(client: any, leadUserId: string, body: any) {
 // FENCING NEIGHBOUR SYNC — populate job_contacts from pricing_json.neighbour_splits
 // ══════════════════════════════════════════════════════════════
 
-async function syncFencingNeighbours(client: any, body: any) {
+/** Result of syncFencingNeighbours / syncFromScopeJson (mutual recursion). */
+type FencingNeighbourSyncResult = {
+  success: boolean
+  message?: string
+  synced_count: number
+  contacts?: unknown[]
+  ghl_created_count?: number
+}
+
+async function syncFencingNeighbours(client: any, body: any): Promise<FencingNeighbourSyncResult> {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
@@ -38160,8 +38199,10 @@ async function syncFencingNeighbours(client: any, body: any) {
   }
 }
 
+export const _syncFencingNeighboursForTest = syncFencingNeighbours
+
 // Fallback: calculate splits from scope_json when pricing_json doesn't have neighbour_splits
-async function syncFromScopeJson(client: any, job: any, jobData: any) {
+async function syncFromScopeJson(client: any, job: any, jobData: any): Promise<FencingNeighbourSyncResult> {
   const runs = jobData.runs || []
   const neighbours = jobData.neighbours || []
   const pricePerMetre = jobData.pricePerMetre || 125
@@ -38207,6 +38248,8 @@ async function syncFromScopeJson(client: any, job: any, jobData: any) {
   // Re-run with the splits now in place
   return syncFencingNeighbours(client, { job_id: job.id })
 }
+
+export const _syncFromScopeJsonForTest = syncFromScopeJson
 
 // ══════════════════════════════════════════════════════════════
 // EMAIL COMMUNICATIONS — list, read tracking, inbox
@@ -38332,7 +38375,11 @@ async function listOverdueInvoices(client: any) {
   }
 
   // 3. Resolve contact info via contact_matches (for GHL ID, phone, email)
-  const xeroContactIds = [...new Set(invoices.filter((i: any) => i.xero_contact_id).map((i: any) => i.xero_contact_id))]
+  // Collect as string[] via the shared guard — Set+map of unknown row fields is
+  // unknown[] and rejects a (id: string) forEach callback (Deno check TS2345).
+  const xeroContactIds = collectUniqueStringIds(
+    invoices.map((i: { xero_contact_id?: unknown }) => i.xero_contact_id),
+  )
   let contactInfo: Record<string, any> = {}
   if (xeroContactIds.length > 0) {
     const { data: matches } = await client.from('contact_matches')
@@ -38378,7 +38425,7 @@ async function listOverdueInvoices(client: any) {
       .eq('status', 'PAID')
       .in('xero_contact_id', xeroContactIds)
     const paidSet = new Set((paidContacts || []).map((p: any) => p.xero_contact_id))
-    xeroContactIds.forEach((id: string) => { if (!paidSet.has(id)) firstClientSet.add(id) })
+    xeroContactIds.forEach((id) => { if (!paidSet.has(id)) firstClientSet.add(id) })
   }
 
   // 4c. Get personality notes (latest per contact)
