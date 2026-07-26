@@ -1,4 +1,7 @@
 import crypto from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   CAPTAIN_EMAIL,
   type CapabilityMap,
@@ -10,6 +13,7 @@ import {
   type ProofRunContext,
 } from './types'
 import { SafetyViolation } from './guards'
+import { REPO_ROOT } from './paths'
 
 const ALL_CAPABILITIES: CapabilityMap = {
   synthetic_intake_v1: { available: true },
@@ -19,6 +23,9 @@ const ALL_CAPABILITIES: CapabilityMap = {
   ses_captain_delivery_v1: { available: true },
   synthetic_cleanup_v1: { available: true },
 }
+
+const HUGO_FIXTURE_USER = 'ses-proof-hugo-fixture'
+const BOARD_SEAM_SCRIPT = path.join(REPO_ROOT, 'scripts', 'ses-board-fixture-seam.ts')
 
 function artifactId(context: ProofRunContext, key: string): string {
   return `ses-proof-${crypto.createHash('sha256').update(`${context.runId}:${key}`).digest('hex').slice(0, 20)}`
@@ -32,6 +39,19 @@ function artifact(context: ProofRunContext, key: string, kind: CreatedArtifact['
     description,
     ...(accountingStatus ? { accountingStatus } : {}),
   }
+}
+
+function resolveDenoBinary(): string | null {
+  const candidates = [
+    process.env.DENO_BIN,
+    path.join(process.env.HOME || '', '.deno', 'bin', 'deno'),
+    'deno',
+  ].filter(Boolean) as string[]
+  for (const candidate of candidates) {
+    if (candidate === 'deno') return 'deno'
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return null
 }
 
 export class UnavailableDriver implements ProofDriver {
@@ -118,12 +138,28 @@ interface FixtureCard {
   person: string
   reasonCode: string | null
   revisionCount: number
+  arrivedAt: string | null
 }
 
+/**
+ * In-memory harness driver that still confirms Board containment through the
+ * production trade route seam (scripts/ses-board-fixture-seam.ts). Synthetic
+ * visibility timestamps are only emitted after that seam returns the same job
+ * identity. Fixture clocks remain non-SLA evidence.
+ */
 export class FixtureProofDriver implements ProofDriver {
   readonly mode: ProofMode = 'fixture'
   private readonly created = new Map<string, CreatedArtifact>()
   private readonly cards = new Map<string, FixtureCard>()
+  private boardJobs = new Map<string, Record<string, unknown>>()
+  private boardDetails = new Map<string, Record<string, unknown>>()
+  private boardAssignments = new Map<string, Record<string, unknown>[]>()
+  private boardReports = new Map<string, Record<string, unknown>>()
+  private boardInvoices = new Map<string, Record<string, unknown>>()
+  private boardDocuments = new Map<string, Record<string, unknown>[]>()
+  private boardPacks = new Map<string, Record<string, unknown>>()
+  private boardConfirmedIds = new Set<string>()
+  private boardGeneratedAt: string | null = null
   private approvalCurrent = false
   private docketRevision = 1
   private cleaned = false
@@ -141,6 +177,158 @@ export class FixtureProofDriver implements ProofDriver {
     return card
   }
 
+  private plantBoardIdentity(jobId: string, stage: string, fate: ProofFixture['fate']): void {
+    const substatus = fate === 'blocked_live_job'
+      ? 'company_contact_required'
+      : stage.startsWith('New')
+        ? null
+        : 'waiting_on_trade_report'
+    this.boardJobs.set(jobId, {
+      id: jobId,
+      job_number: `SWMS-${jobId.slice(-8).toUpperCase()}`,
+      type: 'makesafe',
+      status: stage.startsWith('New') ? 'accepted' : 'scheduled',
+      created_at: new Date().toISOString(),
+      client_name: `${this.context.marker} client`,
+      site_address: '10 Fixture Street',
+      metadata: { marker: this.context.marker, fate },
+    })
+    this.boardDetails.set(jobId, {
+      job_id: jobId,
+      substatus,
+      requesting_company_slug: 'fixture',
+      requesting_company_name: 'Fixture Builder',
+      report_type: 'roof_report',
+    })
+    this.boardAssignments.set(jobId, [])
+    this.boardDocuments.set(jobId, [])
+  }
+
+  private runBoardSeam(expectedJobIds: string[]): DriverResponse {
+    const deno = resolveDenoBinary()
+    if (!deno || !fs.existsSync(BOARD_SEAM_SCRIPT)) {
+      return {
+        success: false,
+        visibleToHugo: false,
+        source: 'not_built',
+        evidence: 'NOT BUILT YET',
+        reason: !deno
+          ? 'Deno binary not found for the authorised Board route seam'
+          : `Board seam script missing at ${BOARD_SEAM_SCRIPT}`,
+        rows: [],
+        syntheticCount: this.cards.size,
+        live_sla_claim: false,
+      }
+    }
+
+    const generatedAt = new Date().toISOString()
+    const payload = {
+      profiles: {
+        [HUGO_FIXTURE_USER]: {
+          id: HUGO_FIXTURE_USER,
+          name: 'Hugo Fixture',
+          role: 'lead_installer',
+          managed_verticals: ['makesafe'],
+        },
+      },
+      rowsByTable: {
+        jobs: [...this.boardJobs.values()],
+        makesafe_job_details: [...this.boardDetails.values()],
+        job_service_reports: [...this.boardReports.values()],
+        xero_invoices: [...this.boardInvoices.values()],
+        job_documents: [...this.boardDocuments.values()].flat(),
+        makesafe_report_packs: [...this.boardPacks.values()],
+        job_assignments: [...this.boardAssignments.values()].flat(),
+        job_events: [],
+        job_media: [],
+        job_contacts: [],
+        makesafe_status_holds: [],
+        makesafe_intake_cases: [],
+        makesafe_board_status_current: [],
+      },
+      authUser: {
+        id: HUGO_FIXTURE_USER,
+        email: 'hugo.fixture@example.invalid',
+        orgId: 'fixture-org',
+        role: 'lead_installer',
+        managedVerticals: ['makesafe'],
+      },
+      expectedJobIds,
+      generatedAt,
+    }
+
+    const result = spawnSync(
+      deno,
+      ['run', '--no-check', '--allow-read', '--allow-env', BOARD_SEAM_SCRIPT],
+      {
+        input: JSON.stringify(payload),
+        encoding: 'utf8',
+        cwd: REPO_ROOT,
+        timeout: 120_000,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+    )
+
+    if (result.error || result.status !== 0) {
+      return {
+        success: false,
+        visibleToHugo: false,
+        source: 'not_built',
+        evidence: 'NOT BUILT YET',
+        reason: `Board seam failed: ${result.error?.message || result.stderr || `exit ${result.status}`}`,
+        rows: [],
+        syntheticCount: this.cards.size,
+        live_sla_claim: false,
+      }
+    }
+
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(result.stdout || '{}')
+    } catch {
+      return {
+        success: false,
+        visibleToHugo: false,
+        source: 'not_built',
+        evidence: 'NOT BUILT YET',
+        reason: 'Board seam returned non-JSON output',
+        rows: [],
+        syntheticCount: this.cards.size,
+        live_sla_claim: false,
+      }
+    }
+
+    const visible = parsed.visibleToHugo === true
+    const rows = Array.isArray(parsed.body && (parsed.body as Record<string, unknown>).rows)
+      ? (parsed.body as Record<string, unknown>).rows as unknown[]
+      : []
+    const boardIds = Array.isArray(parsed.boardJobIds)
+      ? parsed.boardJobIds.map(String)
+      : []
+    this.boardConfirmedIds = new Set(boardIds)
+    this.boardGeneratedAt = typeof parsed.generated_at === 'string'
+      ? parsed.generated_at
+      : visible
+        ? generatedAt
+        : null
+
+    return {
+      success: visible,
+      visibleToHugo: visible,
+      source: visible ? 'makesafe_board' : 'fixture_memory_not_confirmed',
+      rows,
+      syntheticCount: this.cards.size,
+      boardJobIds: boardIds,
+      missingJobIds: parsed.missingJobIds || [],
+      jobsQueried: parsed.jobsQueried === true,
+      generated_at: this.boardGeneratedAt,
+      seam: parsed.seam || 'scripts/ses-board-fixture-seam.ts',
+      evidence_type: 'deterministic_fixture_board_route',
+      live_sla_claim: false,
+      ...(visible ? {} : { evidence: 'NOT BUILT YET', reason: 'Authorised Board route did not confirm every expected job identity' }),
+    }
+  }
+
   async call(action: string, payload: Record<string, unknown> = {}): Promise<DriverResponse> {
     switch (action) {
       case 'proof_capabilities':
@@ -153,7 +341,6 @@ export class FixtureProofDriver implements ProofDriver {
           const source = this.add(artifact(this.context, `source:${fixture.fixtureId}`, 'source', `${fixture.fate} source email`))
           const document = this.add(artifact(this.context, `pdf:${fixture.fixtureId}`, 'document', `${fixture.fate} PDF`))
           const arrivedAt = new Date(base + index * 100).toISOString()
-          const hugoVisibleAt = fixture.fate === 'accounted_non_work' ? null : new Date(base + 2_000 + index * 350).toISOString()
           let jobId: string | null = null
           let revisionCount: number | null = null
           let attachedToExistingJob = false
@@ -170,6 +357,7 @@ export class FixtureProofDriver implements ProofDriver {
               person: fixture.expected.person,
               reasonCode: fixture.expected.reasonCode,
               revisionCount: 0,
+              arrivedAt,
             })
           } else if (fixture.expected.boardStage) {
             const job = this.add(artifact(this.context, `job:${fixture.fixtureId}`, 'job', `${fixture.fate} synthetic job`))
@@ -177,6 +365,7 @@ export class FixtureProofDriver implements ProofDriver {
             revisionCount = fixture.fate === 'revision_existing_job' ? 2 : 1
             attachedToExistingJob = fixture.fate === 'revision_existing_job'
             newJobCreated = !attachedToExistingJob
+            this.plantBoardIdentity(jobId, fixture.expected.boardStage, fixture.fate)
             this.cards.set(fixture.fixtureId, {
               fixtureId: fixture.fixtureId,
               cardId: job.id,
@@ -187,8 +376,14 @@ export class FixtureProofDriver implements ProofDriver {
               person: fixture.expected.person,
               reasonCode: fixture.expected.reasonCode,
               revisionCount,
+              arrivedAt,
             })
+          } else {
+            // accounted_non_work — no board card
           }
+
+          // hugoVisibleAt is filled only after the authorised Board seam confirms
+          // the same server-minted fixture job id. Intake alone does not invent it.
           return {
             fixtureId: fixture.fixtureId,
             sourceId: source.id,
@@ -200,26 +395,85 @@ export class FixtureProofDriver implements ProofDriver {
             attachedToExistingJob,
             newJobCreated,
             arrivedAt,
-            hugoVisibleAt,
+            hugoVisibleAt: null as string | null,
             accounted: true,
+            boardVisibility: 'pending_authorised_route_seam',
           }
         })
-        return { success: true, outcomes, nothingDisappeared: outcomes.length === fixtures.length, createdArtifacts: [...this.created.values()] }
-      }
 
-      case 'proof_read_board':
+        // Confirm Board containment for every planted job identity immediately so
+        // latency stage can use seam-minted generated_at rather than invented times.
+        const expectedJobIds = outcomes
+          .map((item) => item.jobId)
+          .filter((id): id is string => Boolean(id))
+        const board = this.runBoardSeam(expectedJobIds)
+        if (board.visibleToHugo === true && this.boardGeneratedAt) {
+          for (const outcome of outcomes) {
+            if (outcome.jobId && this.boardConfirmedIds.has(outcome.jobId)) {
+              outcome.hugoVisibleAt = this.boardGeneratedAt
+              outcome.boardVisibility = 'confirmed_by_makesafe_board_route'
+            }
+          }
+        }
+
         return {
           success: true,
-          visibleToHugo: true,
-          source: 'makesafe_board',
-          cards: [...this.cards.values()],
-          syntheticCount: this.cards.size,
+          outcomes,
+          nothingDisappeared: outcomes.length === fixtures.length,
+          createdArtifacts: [...this.created.values()],
+          boardSeam: {
+            visibleToHugo: board.visibleToHugo === true,
+            source: board.source,
+            live_sla_claim: false,
+            evidence_type: 'deterministic_fixture_board_route',
+          },
         }
+      }
+
+      case 'proof_read_board': {
+        const expectedJobIds = [...this.cards.values()]
+          .map((card) => card.jobId)
+          .filter((id): id is string => Boolean(id))
+        return this.runBoardSeam(expectedJobIds)
+      }
 
       case 'proof_advance_board': {
         const card = this.findPrimary()
         card.stage = String(payload.targetStage)
         if (payload.person) card.person = String(payload.person)
+        if (card.jobId && this.boardDetails.has(card.jobId)) {
+          const detail = this.boardDetails.get(card.jobId)!
+          detail.substatus = String(payload.targetStage).includes('Trade Report')
+            ? 'trade_report_in'
+            : 'waiting_on_trade_report'
+          const job = this.boardJobs.get(card.jobId)
+          if (job) job.status = 'scheduled'
+          if (String(payload.targetStage) === 'Allocated / Waiting on Trade') {
+            this.boardAssignments.set(card.jobId, [{
+              id: `assignment:${card.jobId}`,
+              job_id: card.jobId,
+              user_id: HUGO_FIXTURE_USER,
+              status: 'scheduled',
+              scheduled_date: new Date().toISOString().slice(0, 10),
+              attendance_cycle_id: null,
+              cycle_attribution: 'unbound',
+              users: { id: HUGO_FIXTURE_USER, name: 'Hugo Fixture' },
+            }])
+          }
+          if (String(payload.targetStage) === 'Trade Report In') {
+            if (this.boardDetails.has(card.jobId)) {
+              this.boardDetails.get(card.jobId)!.substatus = 'admin_to_send_report'
+            }
+            this.boardReports.set(card.jobId, {
+              id: `report:${card.jobId}`,
+              job_id: card.jobId,
+              status: 'submitted',
+              submitted_at: new Date().toISOString(),
+              created_at: new Date().toISOString(),
+              cycle_number: 1,
+            })
+          }
+        }
         return { success: true, card: { ...card }, createdArtifacts: [] }
       }
 
@@ -227,6 +481,28 @@ export class FixtureProofDriver implements ProofDriver {
         const pack = this.add(artifact(this.context, 'pack:complete', 'pack', 'family-correct synthetic document pack'))
         const report = this.add(artifact(this.context, 'report:complete', 'document', 'rendered completion report'))
         this.findPrimary().stage = 'Docs Ready'
+        const primaryJobId = this.findPrimary().jobId
+        if (primaryJobId) {
+          const detail = this.boardDetails.get(primaryJobId)
+          if (detail) detail.substatus = 'admin_to_send_report'
+          this.boardInvoices.set(primaryJobId, {
+            id: `invoice:${primaryJobId}`,
+            job_id: primaryJobId,
+            invoice_type: 'ACCREC',
+            status: 'DRAFT',
+            total: 275,
+            created_at: new Date().toISOString(),
+          })
+          this.boardPacks.set(primaryJobId, {
+            id: `pack:${primaryJobId}`,
+            job_id: primaryJobId,
+            pack_kind: 'main',
+            status: 'drafted',
+            report_doc_id: report.id,
+            invoice_doc_id: `invoice-doc:${primaryJobId}`,
+            swms_doc_id: `swms-doc:${primaryJobId}`,
+          })
+        }
         return {
           success: true,
           completed: { produced: true, packId: pack.id, artifacts: ['work_order', 'completion_report', 'photo_story', 'swms', 'invoice_proposal'] },
@@ -298,7 +574,32 @@ export class FixtureProofDriver implements ProofDriver {
         if (!this.approvalCurrent) throw new Error('send refused because current docket revision is not approved')
         const operatorBand = String(payload.operatorBand)
         const mail = this.add(artifact(this.context, `mail:${operatorBand}`, 'mail', `${operatorBand} delivery to Captain inbox`))
+        const primaryJobId = this.findPrimary().jobId
         this.findPrimary().stage = 'Completed'
+        if (primaryJobId) {
+          const job = this.boardJobs.get(primaryJobId)
+          if (job) {
+            job.status = 'complete'
+            job.completed_at = new Date().toISOString()
+          }
+          const detail = this.boardDetails.get(primaryJobId)
+          if (detail) {
+            detail.substatus = 'complete'
+            detail.report_sent_at = new Date().toISOString()
+          }
+          const invoice = this.boardInvoices.get(primaryJobId)
+          if (invoice) invoice.status = 'AUTHORISED'
+          const pack = this.boardPacks.get(primaryJobId)
+          if (pack) {
+            pack.status = 'sent'
+            pack.sent_at = new Date().toISOString()
+          }
+          this.boardDocuments.set(primaryJobId, [
+            { id: `report-doc:${primaryJobId}`, job_id: primaryJobId, type: 'makesafe_report', file_name: 'make safe report.pdf' },
+            { id: `invoice-doc:${primaryJobId}`, job_id: primaryJobId, type: 'invoice', file_name: 'invoice.pdf' },
+            { id: `swms-doc:${primaryJobId}`, job_id: primaryJobId, type: 'swms', file_name: 'swms.pdf' },
+          ])
+        }
         return {
           success: true,
           messageId: mail.id,
@@ -335,6 +636,14 @@ export class FixtureProofDriver implements ProofDriver {
           finalState: item.kind === 'invoice' ? 'VOIDED' : 'REMOVED',
         }))
         this.cards.clear()
+        this.boardJobs.clear()
+        this.boardDetails.clear()
+        this.boardAssignments.clear()
+        this.boardReports.clear()
+        this.boardInvoices.clear()
+        this.boardDocuments.clear()
+        this.boardPacks.clear()
+        this.boardConfirmedIds.clear()
         return { success: true, cleanedArtifacts, createdArtifacts: [] }
       }
 

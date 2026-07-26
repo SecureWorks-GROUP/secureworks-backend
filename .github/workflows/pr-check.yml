@@ -193,6 +193,11 @@ jobs:
             echo "$CHANGED"
           fi
 
+      - uses: denoland/setup-deno@v2
+        if: steps.changed.outputs.has_changes == 'true'
+        with:
+          deno-version: v2.x
+
       - uses: actions/setup-node@v4
         if: steps.changed.outputs.has_changes == 'true'
         with:

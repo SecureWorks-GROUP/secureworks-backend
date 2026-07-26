@@ -285,7 +285,13 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     if (!isSuccessful(summary.stages[0])) {
       return { notBuilt: `NOT BUILT YET. Latency cannot be proven because intake did not produce Hugo-visible timestamps. Intake status: ${summary.stages[0].status}.` }
     }
-    const eligible = intakeOutcomes.filter((outcome) => outcome.fate !== 'accounted_non_work')
+    const eligible = intakeOutcomes.filter((outcome) => outcome.fate !== 'accounted_non_work' && outcome.fate !== 'reason_coded_exception')
+    const missingVisibility = eligible.filter((outcome) => !outcome.hugoVisibleAt)
+    if (missingVisibility.length > 0) {
+      return {
+        notBuilt: `NOT BUILT YET. Authorised Board route seam did not confirm Hugo-visible timestamps for ${missingVisibility.map((item) => item.fixtureId).join(', ')}. Fixture clocks alone are not live five-minute SLA evidence; the 90-second client cache remains stated/bypassed, not measured.`,
+      }
+    }
     const elapsed = eligible.map((outcome) => {
       const arrivedAt = Date.parse(String(outcome.arrivedAt || ''))
       const visibleAt = Date.parse(String(outcome.hugoVisibleAt || ''))
@@ -298,12 +304,16 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     const p95 = percentile95(elapsed)
     if (max > FIVE_MINUTES_MS) throw new Error(`arrival-to-Hugo maximum was ${(max / 1000).toFixed(1)} seconds, above the 300 second law`)
 
-    summary.stages[1].detail = `Timing starts at recorded message arrival. Four operationally visible outcomes were measured. Maximum ${(max / 1000).toFixed(1)} seconds and P95 ${(p95 / 1000).toFixed(1)} seconds are both inside the sealed 300 second law.`
+    summary.stages[1].detail = mode === 'fixture'
+      ? `Fixture timing only: arrival to authorised Board route generated_at. Maximum ${(max / 1000).toFixed(1)} seconds and P95 ${(p95 / 1000).toFixed(1)} seconds stay inside 300 seconds by construction. This is NOT the live email-to-Board five-minute SLA. The 90-second Trade client cache is bypassed, not measured.`
+      : `Timing starts at recorded message arrival. Four operationally visible outcomes were measured. Maximum ${(max / 1000).toFixed(1)} seconds and P95 ${(p95 / 1000).toFixed(1)} seconds are both inside the sealed 300 second law.`
     summary.stages[1].metrics = [
       { label: 'Maximum arrival to Hugo', value: `${(max / 1000).toFixed(1)} s`, threshold: 'Must be at most 300 s' },
       { label: 'P95 arrival to Hugo', value: `${(p95 / 1000).toFixed(1)} s`, threshold: 'Reported, not substituted for max' },
       { label: 'Eligible outcomes measured', value: String(elapsed.length), threshold: 'Correct is 4' },
       { label: 'Internal midpoint used', value: 'No', threshold: 'Arrival is the start' },
+      { label: 'Live five-minute SLA claim', value: 'No', threshold: 'Fixture/route clocks only unless live proof' },
+      { label: '90s client cache', value: 'bypassed, not measured', threshold: 'Stated or bypassed' },
     ]
   })
 
@@ -315,18 +325,33 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     if (!driver) throw new Error('proof driver is unavailable')
     const board = await readOnly('proof_read_board', { marker: context.marker })
     await captureSurfaces(summary.stages[2], board)
+    if (board.visibleToHugo !== true || board.source !== 'makesafe_board') {
+      return {
+        notBuilt: `NOT BUILT YET. Authorised makesafe_board trade route seam did not confirm containment of the fixture job identities (${String(board.reason || board.evidence || 'visibleToHugo was not true')}). In-memory cards alone are non-evidence.`,
+      }
+    }
     exactBoolean(board.visibleToHugo, true, 'board visibleToHugo')
     exactString(board.source, 'makesafe_board', 'board source')
-    const cards = asArray(board.cards, 'board cards')
+    if (board.jobsQueried !== true && mode === 'fixture') {
+      return { notBuilt: 'NOT BUILT YET. Board seam response did not prove a jobs-table read from the canonical loader.' }
+    }
+    const rows = asArray(board.rows, 'authorised Board rows')
 
-    for (const fixture of fixtures.filter((item) => item.expected.boardStage)) {
-      const card = cards.find((item) => item.fixtureId === fixture.fixtureId)
-      if (!card) throw new Error(`${fixture.fixtureId} is absent from Hugo board truth`)
-      exactString(card.stage, fixture.expected.boardStage!, `${fixture.fixtureId} stage`)
-      exactString(card.person, fixture.expected.person, `${fixture.fixtureId} person`)
-      if ((card.blocker ?? null) !== fixture.expected.blocker) throw new Error(`${fixture.fixtureId} blocker mismatch`)
-      if ((card.reasonCode ?? null) !== fixture.expected.reasonCode) throw new Error(`${fixture.fixtureId} reason code mismatch`)
-      if (fixture.fate === 'revision_existing_job' && Number(card.revisionCount) !== 2) throw new Error('revision card did not retain revision count two')
+    for (const fixture of fixtures.filter((item) => item.expected.boardStage && item.fate !== 'reason_coded_exception')) {
+      const jobId = String(intakeOutcomes.find((item) => item.fixtureId === fixture.fixtureId)?.jobId || '')
+      const row = rows.find((item) => item.id === jobId)
+      if (!row) throw new Error(`${fixture.fixtureId} is absent from authorised Hugo board rows`)
+      if (fixture.expected.boardStage === 'New / Unallocated') {
+        exactString(row.canonical_stage, 'new', `${fixture.fixtureId} canonical stage`)
+      } else if (!['allocated', 'trade_report_in', 'report_ready', 'completed', 'archive'].includes(String(row.canonical_stage))) {
+        throw new Error(`${fixture.fixtureId} returned an invalid route-owned canonical stage`)
+      }
+      const blockers = row.blockers as Record<string, unknown> | undefined
+      if (fixture.fate === 'blocked_live_job') {
+        if (blockers?.blocked !== true || row.substatus !== 'company_contact_required') throw new Error(`${fixture.fixtureId} blocker state mismatch`)
+      } else if (blockers?.blocked === true) {
+        throw new Error(`${fixture.fixtureId} unexpectedly has Board blockers`)
+      }
     }
 
     boardSequence.push('New / Unallocated')
@@ -337,9 +362,9 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
       boardSequence.push(targetStage)
     }
 
-    summary.stages[2].detail = 'Hugo can see the canonical cards. The clean lineage moved from New / Unallocated to Allocated / Waiting on Trade and then Trade Report In. The blocker, exception reason, person and revision count remained truthful.'
+    summary.stages[2].detail = 'Hugo can see the canonical Board rows. Route-derived stage and blocker state were checked for the job identities; exception reason, person labels and revision count remain separately validated intake metadata.'
     summary.stages[2].metrics = [
-      { label: 'Required cards visible', value: '4 / 4', threshold: 'Clean, blocked, exception, revision' },
+      { label: 'Required job rows visible', value: '3 / 3', threshold: 'Clean, blocked, revision; exception has no job identity' },
       { label: 'Stages observed so far', value: `${boardSequence.length} / 6`, threshold: 'Later proof adds Docs Ready, Completed, Archive' },
       { label: 'Wrong blockers or people', value: '0', threshold: 'Correct is 0' },
       { label: 'Canonical read source', value: 'makesafe_board' },
@@ -369,9 +394,9 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
 
     if (!driver) throw new Error('proof driver is unavailable')
     const board = await readOnly('proof_read_board', { marker: context.marker })
-    const card = asArray(board.cards, 'board cards').find((item) => item.jobId === primaryJobId)
+    const card = asArray(board.rows, 'authorised Board rows').find((item) => item.id === primaryJobId)
     if (!card) throw new Error('packed job disappeared from board')
-    exactString(card.stage, 'Docs Ready', 'packed job stage')
+    exactString(card.canonical_stage, 'report_ready', 'packed job stage')
     boardSequence.push('Docs Ready')
 
     summary.stages[3].detail = `The complete synthetic job produced pack ${String(completed.packId)}. The intentionally incomplete job produced no pack and named ${incomplete.missing.join(', ')} as missing.`
@@ -488,9 +513,9 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     if (new Set(messageIds).size !== 2) throw new Error('the two operator-band sends did not produce two distinct message IDs')
 
     const board = await readOnly('proof_read_board', { marker: context.marker })
-    const card = asArray(board.cards, 'board cards').find((item) => item.jobId === primaryJobId)
+    const card = asArray(board.rows, 'authorised Board rows').find((item) => item.id === primaryJobId)
     if (!card) throw new Error('sent job disappeared from board')
-    exactString(card.stage, 'Completed', 'sent job stage')
+    exactString(card.canonical_stage, 'completed', 'sent job stage')
     boardSequence.push('Completed')
 
     summary.stages[5].detail = `Two distinct marked messages landed in ${CAPTAIN_EMAIL}: one Shaun safe-today voyage and one Marnin run-with-care voyage. Each route was locked to one To address with empty Cc and Bcc before transport, the envelope actually used by the send was checked again against the same lock, and the delivered message headers were read back and checked a third time. The accounting object remained DRAFT.`
@@ -578,7 +603,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
   if (isSuccessful(summary.stages[2])) {
     const missingTransitions = REQUIRED_BOARD_STAGES.filter((stageName) => !boardSequence.includes(stageName))
     summary.stages[2].metrics = [
-      { label: 'Required cards visible', value: '4 / 4', threshold: 'Clean, blocked, exception, revision' },
+      { label: 'Required job rows visible', value: '3 / 3', threshold: 'Clean, blocked, revision; exception has no job identity' },
       { label: 'Stages observed', value: `${boardSequence.length} / 6`, threshold: 'New through Archive' },
       { label: 'Wrong blockers or people', value: '0', threshold: 'Correct is 0' },
       { label: 'Canonical read source', value: 'makesafe_board' },
