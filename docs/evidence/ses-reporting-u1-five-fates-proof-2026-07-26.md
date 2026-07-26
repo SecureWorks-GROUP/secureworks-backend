@@ -185,6 +185,27 @@ The candidate monitor now treats source accounting as the completion boundary:
 
 This closes the code paths identified by the adversary. It is not yet production proof because the code is not deployed and the existing eight source gaps remain.
 
+## Independent production re-verification
+
+The three production-side numbers above were re-observed by a second reader, read-only, without reusing
+`ses-reporting-u1-five-fates-replay.json`. Queries were `SELECT` only against project `kevgrhcjxspbxgovpmfl`
+over the same window (`ses@secureworkswa.com.au`, `received_at` in `[2026-01-27T14:42:02.814Z, 2026-07-26T14:42:02.814Z)`).
+Nothing was written, deployed, or migrated.
+
+| Report claim | Independent re-observation | Agrees |
+|---|---|---|
+| `aj`, `bw`, `wb` have no field rules; `mlb`, `kba` do | all five companies active; `parsing_rules ? 'fields'` false for `aj`/`bw`/`wb`, true for `mlb`/`kba` (`template_first` `false`) | Yes |
+| 1,396 sources, 1,388 durable, 8 missing a durable fate | 1,396 in-window sources, 1,388 with a canonical `makesafe_intake_case_sources` row, 8 with neither a case source nor an `intake_exception_%` event | Yes |
+| Durable ledger: 706 exception, 681 accounted non-work, 1 live job | case states `exception` 706, `accounted_non_wo` 681, `confirmed_live_job` 1 | Yes |
+| Only 1 of 13 independently expected live examples is Hugo-visible | exactly one in-window durable case carries a `job_id`, so at most one can be board-visible; the catalogue holds exactly 13 `live_job` shapes | Yes |
+| Measured upper bound 4,090,812 seconds | that source's `received_at` is `2026-06-09T06:22:27Z`; to the recorded board observation at `2026-07-26T14:42:38.751Z` is 4,090,812 seconds | Yes |
+
+The last row also confirms the metric is email receipt to board observation, not `jobs.created_at`: that job's
+`created_at` is `2026-07-23T06:34:40Z`, which would have produced a different and much smaller number.
+
+This raises the confidence in the reported production observations. It does not change the verdict: the
+re-observation confirms the same gaps, so `proof_status` stays **NOT PROVED**.
+
 ## What is proved, and what is not
 
 ### Established
@@ -229,7 +250,7 @@ This closes the code paths identified by the adversary. It is not yet production
   supabase/functions/ops-api/makesafe_intake_late_pdf_test.ts \
   supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts \
   supabase/functions/ops-api/monitor_ses_makesafes_test.ts
-# 181 passed, 0 failed
+# 189 passed, 0 failed
 
 ~/.deno/bin/deno check --config deno.jsonc \
   scripts/replay-makesafe-five-fates.ts \
