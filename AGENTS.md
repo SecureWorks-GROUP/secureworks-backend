@@ -466,6 +466,27 @@ This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a roo
 and keep its `package.json` / lockfile there — never at the root. Current example
 and rationale: `docs/ses-reporting-proof-harness.md`.
 
+## `ops-api/index.ts` Deno Check Must Stay Clean
+
+`deno check --config deno.jsonc supabase/functions/ops-api/index.ts` is the
+gate for honest validation of SES and other edge work. Do not re-accept a
+non-zero error baseline.
+
+Load-bearing type rules (see
+`supabase/functions/ops-api/index_deno_type_baseline_test.ts`):
+
+- Every live trade-portal action that has an inner `switch (action)` case must
+  also appear on the outer trade fall-through list (`my_jobs` …
+  `submit_makesafe_report`); otherwise TypeScript marks the inner case
+  unreachable while the handler still exists.
+- The `serve` handler must return a `Response` on every path — never
+  `result = …; break` with an undeclared `result`.
+- Mutual recursion (`syncFencingNeighbours` / `syncFromScopeJson`) needs an
+  explicit `Promise<…>` return type.
+- PostgREST id lists: use `collectUniqueStringIds` (or an equivalent
+  source-aligned string guard), not `.filter(Boolean)` / untyped `Set` spreads
+  that leave `unknown[]`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
