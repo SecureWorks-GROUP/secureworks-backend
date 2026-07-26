@@ -12626,7 +12626,12 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
 // trade's own worked-then-cancelled make-safes would otherwise never load into
 // their Archive. Returned ids feed the canonical loader so the full make-safe
 // history is never loaded for a caller who can only see their own jobs.
-// Row-paginated for the cap.
+// Row-paginated for the cap, and — like every other paginated make-safe read —
+// terminated on a UNIQUE key. job_id is NOT unique in job_assignments (a job
+// carries one row per assigned user/date), so ordering by job_id alone is not a
+// total order: a trade whose make-safe assignment set spills past one page could
+// have rows tied on job_id land on neither page, dropping that job id from the
+// restrict set and vanishing their own card from their board. `id` is the PK.
 async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<string[]> {
   const ids = new Set<string>()
   let offset = 0
@@ -12636,6 +12641,7 @@ async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<
       .eq('user_id', userId)
       .eq('jobs.type', 'makesafe')
       .order('job_id', { ascending: true })
+      .order('id', { ascending: true })
       .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
     if (error) throw error
     const batch = data || []
@@ -12645,6 +12651,10 @@ async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<
   }
   return Array.from(ids)
 }
+// Test-only export for the allocated-only trade scope read. It is the one
+// .range()-paginated make-safe read the audit/board page-order guard cannot see
+// (neither stub issues it), so it carries its own page-stability regression.
+export const _loadMakesafeAssignedJobIdsForTest = loadMakesafeAssignedJobIds
 
 // One audience-independent read. makesafePipeline remains the stage authority;
 // this loader adds only presentation facts (contacts/actions, report photo count,
@@ -12740,7 +12750,7 @@ async function loadCanonicalMakesafeBoard(
       'makesafe_board_status_current',
       'id, run_key, job_id, source_status, before_status, after_status, evidence_ref, applied_by, applied_at',
       jobIds,
-      (q) => q.order('applied_at', { ascending: false }).order('id', { ascending: false }),
+      (q) => q.order('applied_at', { ascending: false }),
     )
   } catch (error) {
     console.error('[ops-api] makesafe_board status application read unavailable:', (error as Error).message)

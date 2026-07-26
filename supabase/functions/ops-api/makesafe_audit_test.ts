@@ -11,6 +11,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _deriveMakesafeBoardStage,
+  _loadMakesafeAssignedJobIdsForTest,
   _makesafeAuditForTest,
   _makesafePipelineForTest,
   _prepareMakesafeInvoiceRefsForTest,
@@ -144,6 +145,45 @@ function jobRow(over: Record<string, any> = {}) {
   };
 }
 
+// A uniform volume fixture cannot prove reconciliation: if every job carries the
+// same substatus and the same four documents, a mis-KEYED detailsMap/docsMap (the
+// right row count attached to the wrong job) is invisible, and a truncation that
+// drops the same rows from BOTH the audit and the fallback read reconciles as
+// null === null. So each job gets its own substatus and its own document set, and
+// the assertions below are derived per job id from the seed rather than being
+// hard-coded true.
+//
+// The legacy `pending_allocation` alias is deliberately NOT in this list:
+// makesafeAudit returns the RAW substatus while enrichMakesafeBoardJob returns the
+// NORMALISED one, so seeding the alias would make audit and fallback diverge by
+// design and the reconciliation assertion would have to be weakened.
+const VOLUME_SUBSTATUSES = [
+  "company_contact_required",
+  "company_contact_done",
+  "waiting_on_trade_report",
+  "admin_to_send_report",
+  "ready_to_invoice",
+  "complete",
+];
+// job_documents.type -> the board/audit close-out flag it drives.
+const VOLUME_DOC_FLAG_BY_TYPE: Record<string, string> = {
+  work_order: "has_wo",
+  makesafe_report: "has_report_doc",
+  invoice: "has_invoice_doc",
+  swms: "has_swms_doc",
+};
+const VOLUME_DOC_TYPES = Object.keys(VOLUME_DOC_FLAG_BY_TYPE);
+
+// Every 5th job is missing exactly one document, rotating through all four types,
+// so each has_* flag is proven false somewhere and true elsewhere. All rows stay
+// TYPED, so the filename fallback in makesafeDocBooleans can never re-supply an
+// omitted type.
+function volumeDocTypes(index: number): string[] {
+  if (index % 5 !== 4) return VOLUME_DOC_TYPES;
+  const dropped = VOLUME_DOC_TYPES[Math.floor(index / 5) % VOLUME_DOC_TYPES.length];
+  return VOLUME_DOC_TYPES.filter((type) => type !== dropped);
+}
+
 function volumeSeed(count: number): Record<string, any[]> {
   const jobs: any[] = [];
   const details: any[] = [];
@@ -163,14 +203,11 @@ function volumeSeed(count: number): Record<string, any[]> {
       external_ref: `AJBR-${String(70000 + i)}`,
       requesting_company_name: "AJ Grant Building",
       requesting_company_slug: "aj-grant",
-      substatus: "company_contact_required",
+      substatus: VOLUME_SUBSTATUSES[i % VOLUME_SUBSTATUSES.length],
     });
-    documents.push(
-      { job_id: jobId, type: "work_order", file_name: `WO-${i}.pdf` },
-      { job_id: jobId, type: "makesafe_report", file_name: `REPORT-${i}.pdf` },
-      { job_id: jobId, type: "invoice", file_name: `INV-${i}.pdf` },
-      { job_id: jobId, type: "swms", file_name: `SWMS document ${i}.pdf` },
-    );
+    for (const type of volumeDocTypes(i)) {
+      documents.push({ job_id: jobId, type, file_name: `${type}-${i}.pdf` });
+    }
     reports.push({ job_id: jobId, status: "submitted", submitted_at: NOW });
   }
   return {
@@ -471,9 +508,63 @@ Deno.test("2.4 hoisted invoice reference keys resolve identically to per-row nor
 // Item 2.1 — sw_makesafe_audit jobs[] + known_refs[] shape
 // ─────────────────────────────────────────────────────────────────
 
+// Per-job expectations read straight off the seed, so an assertion can only pass
+// when THIS job's own detail/document rows survived the chunked, paginated joins
+// and were keyed back onto the right card.
+function volumeExpectations(seed: Record<string, any[]>) {
+  const substatusByJobId = new Map<string, string>(
+    seed.makesafe_job_details.map((detail: any) => [detail.job_id, detail.substatus]),
+  );
+  const docTypesByJobId = new Map<string, Set<string>>();
+  for (const doc of seed.job_documents) {
+    if (!docTypesByJobId.has(doc.job_id)) docTypesByJobId.set(doc.job_id, new Set());
+    docTypesByJobId.get(doc.job_id)!.add(doc.type);
+  }
+  return { substatusByJobId, docTypesByJobId };
+}
+
+// Assert a row carries THIS job's seeded substatus and exactly the close-out flags
+// its seeded document set implies (absolute, not just audit-vs-fallback equality:
+// a truncation that drops the same rows from both reads would otherwise reconcile).
+function assertVolumeRowMatchesSeed(
+  row: any,
+  jobId: string,
+  expectations: ReturnType<typeof volumeExpectations>,
+  label: string,
+) {
+  assertEquals(
+    row.substatus,
+    expectations.substatusByJobId.get(jobId),
+    `${label} substatus is this job's own seeded value for ${jobId}`,
+  );
+  const seededTypes = expectations.docTypesByJobId.get(jobId) ?? new Set<string>();
+  for (const [type, flag] of Object.entries(VOLUME_DOC_FLAG_BY_TYPE)) {
+    assertEquals(
+      row[flag],
+      seededTypes.has(type),
+      `${label} ${flag} matches this job's own seeded documents for ${jobId}`,
+    );
+  }
+}
+
+// The fixture is only a reconciliation proof while it actually varies: prove every
+// substatus in the vocabulary and both values of every close-out flag are present.
+function assertVolumeFixtureVaries(rows: any[]) {
+  assertEquals(
+    new Set(rows.map((row: any) => row.substatus)).size,
+    VOLUME_SUBSTATUSES.length,
+    "volume fixture must span the whole substatus vocabulary",
+  );
+  for (const flag of Object.values(VOLUME_DOC_FLAG_BY_TYPE)) {
+    assert(rows.some((row: any) => row[flag] === true), `fixture must carry a filed ${flag}`);
+    assert(rows.some((row: any) => row[flag] === false), `fixture must carry a missing ${flag}`);
+  }
+}
+
 async function assertWholeBoardVolume(count: number) {
   const inCalls: InCall[] = [];
   const seed = volumeSeed(count);
+  const expectations = volumeExpectations(seed);
   const client = makeQueryClient(seed, {
     // Reproduce the live gateway constraint: the old single 392/500 UUID joins
     // fail here. Every repaired job-scoped read must stay within this budget.
@@ -496,13 +587,14 @@ async function assertWholeBoardVolume(count: number) {
   for (const auditRow of audit.jobs) {
     const fallbackRow = fallbackById.get(auditRow.job_id);
     assert(fallbackRow, `fallback row ${auditRow.job_id} present`);
+    assertVolumeRowMatchesSeed(auditRow, auditRow.job_id, expectations, "audit");
+    assertVolumeRowMatchesSeed(fallbackRow, auditRow.job_id, expectations, "fallback");
     assertEquals(
       auditRow.substatus,
       fallbackRow.substatus,
       `substatus reconciles for ${auditRow.job_id}`,
     );
-    for (const flag of ["has_wo", "has_report_doc", "has_invoice_doc", "has_swms_doc"]) {
-      assertEquals(auditRow[flag], true, `${flag} populated for ${auditRow.job_id}`);
+    for (const flag of Object.values(VOLUME_DOC_FLAG_BY_TYPE)) {
       assertEquals(
         auditRow[flag],
         fallbackRow[flag],
@@ -510,6 +602,7 @@ async function assertWholeBoardVolume(count: number) {
       );
     }
   }
+  assertVolumeFixtureVaries(audit.jobs);
   assert(inCalls.length > 3, "volume fixture must exercise chunked joins");
   assert(
     inCalls.every((call) => call.encodedBytes <= IN_URL_BUDGET),
@@ -525,13 +618,18 @@ for (const count of [392, 500]) {
 
 Deno.test("2.1 makesafeAudit paginates above the legacy 500-job cap", async () => {
   const count = 501;
-  const client = makeQueryClient(volumeSeed(count), {
+  const seed = volumeSeed(count);
+  const expectations = volumeExpectations(seed);
+  const client = makeQueryClient(seed, {
     maxInEncodedBytes: IN_URL_BUDGET,
   });
   const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
   assertEquals(audit.jobs.length, count);
   assertEquals(audit.jobs.every((row: any) => row.substatus != null), true);
-  assertEquals(audit.jobs.every((row: any) => row.has_wo === true), true);
+  for (const auditRow of audit.jobs) {
+    assertVolumeRowMatchesSeed(auditRow, auditRow.job_id, expectations, "audit");
+  }
+  assertVolumeFixtureVaries(audit.jobs);
 });
 
 // .range() pagination is LIMIT/OFFSET: two pages of the SAME query are only
@@ -686,6 +784,41 @@ Deno.test("2.1 every paginated makesafe board read ends on a unique page tie-bre
     true,
     "board jobs pages stay newest-first",
   );
+});
+
+// The allocated-only trade scope read feeds restrictToJobIds into the canonical
+// board loader, so a job id dropped here silently removes that trade's OWN card
+// from their board. job_id is NOT unique in job_assignments (one row per assigned
+// user/date), so ordering by job_id alone is not a total order and a .range() page
+// pair can return a tied row on neither page. It must end on the `id` PK.
+Deno.test("2.1 the allocated-only trade scope read paginates on a unique page tie-breaker", async () => {
+  const reads: ReadCall[] = [];
+  const assignments: any[] = [];
+  const expectedJobIds = new Set<string>();
+  // 1500 rows > the 1000-row page cap, and every job carries two assignment rows
+  // so job_id is genuinely tied across the page boundary.
+  for (let i = 0; i < 1500; i++) {
+    const jobId = `00000000-0000-4000-8000-${String(Math.floor(i / 2)).padStart(12, "0")}`;
+    expectedJobIds.add(jobId);
+    assignments.push({
+      id: `assignment-${String(i).padStart(6, "0")}`,
+      job_id: jobId,
+      user_id: "trade-1",
+      // The stub matches embedded filters by their literal PostgREST column path.
+      "jobs.type": "makesafe",
+    });
+  }
+  const jobIds = await _loadMakesafeAssignedJobIdsForTest(
+    makeQueryClient({ job_assignments: assignments }, { reads }),
+    "trade-1",
+  );
+
+  assertEquals(jobIds.length, expectedJobIds.size, "every assigned make-safe job id survives");
+  assertEquals(jobIds.slice().sort(), Array.from(expectedJobIds).sort());
+  assertPaginatedReadsAreTotallyOrdered(reads, "makesafe trade scope");
+  const scopeReads = reads.filter((r) => r.table === "job_assignments" && r.paginated);
+  assert(scopeReads.length > 1, "the 1500-row fixture must span more than one page");
+  assertEquals(scopeReads.map((r) => r.orders.map((o) => o.column))[0], ["job_id", "id"]);
 });
 
 Deno.test("2.1 makesafeAudit rejects a required join failure instead of returning partial rows", async () => {
