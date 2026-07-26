@@ -425,6 +425,14 @@ display stages and terminal job states are structurally read-only. The release
 sequence and seven-card first tranche are in
 `docs/makesafe-board-truth-cutover-2026-07-24.md`.
 
+## The Repository Root Stays npm-Package-Free
+
+This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root
+`package.json` and would drag an npm toolchain into `deno check`, `deno cache` and
+`deno task test:ops-api`. Any Node/npm project must therefore own a subdirectory
+and keep its `package.json` / lockfile there — never at the root. Current example
+and rationale: `docs/ses-reporting-proof-harness.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
