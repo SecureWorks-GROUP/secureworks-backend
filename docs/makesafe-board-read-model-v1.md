@@ -127,14 +127,14 @@ Render actions from `contact.actions`, not locally assembled stale values:
   `docs/project-knowledge/gotchas.md`).
 - Regression owner: the `2.1` cases in
   `supabase/functions/ops-api/makesafe_audit_test.ts` cover 392/500 URL-budget
-  volume, multi-page job/document merges, and required-query error rejection.
+  volume, a 1001-job second page, multi-page job/document merges, and
+  required-query error rejection.
 
 ## Known gaps (deferred, not fixed in this change)
 
 Each entry below is a real, understood defect this change deliberately leaves
 alone. Every one of them sits on a path with no regression coverage, so fixing
-them here would widen blast radius ahead of the live run. The PR body repeats
-this inventory.
+them here would widen blast radius ahead of the live run.
 
 ### PAGE-1 — non-total OFFSET pagination in `makesafe_compact_reads.ts`
 
