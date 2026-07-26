@@ -57,18 +57,33 @@ const PAGE_SIZE = 1000;
 // reader (PostgREST 1000-row cap) for its candidate window over the `emails`
 // projection, mirroring makesafeNewEmails' sourcing. Pure DB read; no module-load
 // side effects.
+//
+// UNIQUE TOTAL ORDER (required, not optional): `.range()` is LIMIT/OFFSET.
+// Postgres only orders two separate LIMIT/OFFSET pages relative to each other
+// under a TOTAL order. A non-unique primary sort (e.g. `received_at` alone) can
+// put a tied row on neither page once the read spills past 1000 — it reads as
+// absent, not as an error. The reader therefore ALWAYS appends `uniqueKey` AFTER
+// any caller-supplied `.order()` chain so the caller's sort stays primary and
+// the key only breaks ties. Prefer the table's stable primary key (`id`,
+// `post_id`, …).
 export async function fetchAllRows<T = any>(
   buildQuery: () => any,
   label: string,
+  uniqueKey: string,
+  uniqueAscending = true,
 ): Promise<T[]> {
+  if (!uniqueKey || typeof uniqueKey !== "string") {
+    throw new Error(
+      `${label}: fetchAllRows requires a unique page-order key (table PK)`,
+    );
+  }
   const all: T[] = [];
   let offset = 0;
   // Hard ceiling so a misbehaving range terminal can't loop forever.
   for (let guard = 0; guard < 100_000; guard++) {
-    const { data, error } = await buildQuery().range(
-      offset,
-      offset + PAGE_SIZE - 1,
-    );
+    const { data, error } = await buildQuery()
+      .order(uniqueKey, { ascending: uniqueAscending })
+      .range(offset, offset + PAGE_SIZE - 1);
     if (error) throw new Error(`${label} failed: ${error.message ?? error}`);
     const page: T[] = data || [];
     all.push(...page);
@@ -118,7 +133,9 @@ function encodedIdCost(id: string): number {
 // Split ids into chunks by URL-length budget (IN_URL_BUDGET) with a secondary
 // hard count cap (IN_MAX_COUNT). A single id whose encoded cost alone exceeds the
 // budget still gets its own 1-element chunk (never an empty/infinite chunk).
-function chunkByUrlBudget(ids: string[]): string[][] {
+// Exported: allocated-trade restrict lists and other `.in(id, …)` splices reuse
+// this same budget so gateway URL length never silently 500s a scoped board.
+export function chunkByUrlBudget(ids: string[]): string[][] {
   const out: string[][] = [];
   let cur: string[] = [];
   let curBytes = 0;
@@ -143,22 +160,19 @@ function chunkByUrlBudget(ids: string[]): string[][] {
 }
 
 // Run a paginated read for each budgeted chunk of `ids` and merge all rows. The
-// factory receives one chunk and must return a fresh query builder whose
-// terminal is .range() (i.e. it includes the .in(col, chunk) filter).
-//
-// CALLER OBLIGATION: the returned builder's .order() chain must END on a UNIQUE
-// column (normally the `id` PK). .range() is LIMIT/OFFSET and Postgres orders two
-// separate LIMIT/OFFSET queries relative to each other only under a TOTAL order,
-// so a chunk that spills past one page can return a row tied on a non-unique sort
-// key on neither page — an absent row, not an error. Add it AFTER any meaningful
-// ordering so the caller's sort stays primary.
+// factory receives one chunk and must return a fresh query builder (including the
+// `.in(col, chunk)` filter). `uniqueKey` is required and is appended inside
+// `fetchAllRows` after any caller-supplied ordering — same total-order law as the
+// unchunked reader.
 //
 // Exported: `ops-api/index.ts` reuses this same reader for its make-safe job-id
-// joins (`_fetchAllByJobIdChunked`), which appends the unique key for its callers.
+// joins (`_fetchAllByJobIdChunked`).
 export async function fetchAllRowsInChunks<T = any>(
   ids: string[],
   buildQueryForChunk: (chunkIds: string[]) => any,
   label: string,
+  uniqueKey: string,
+  uniqueAscending = true,
 ): Promise<T[]> {
   // Dedup ids FIRST. A duplicate id that straddles a chunk boundary would
   // otherwise land in two different `.in(col, chunk)` reads and return the same
@@ -167,7 +181,12 @@ export async function fetchAllRowsInChunks<T = any>(
   if (!uniqueIds.length) return [];
   const all: T[] = [];
   for (const ch of chunkByUrlBudget(uniqueIds)) {
-    const rows = await fetchAllRows<T>(() => buildQueryForChunk(ch), label);
+    const rows = await fetchAllRows<T>(
+      () => buildQueryForChunk(ch),
+      label,
+      uniqueKey,
+      uniqueAscending,
+    );
     all.push(...rows);
   }
   return all;
@@ -355,6 +374,8 @@ export async function makesafeNewEmails(
 
   // All ses@ emails in the window (exclude tombstoned — no PII to intake).
   // Paginated: the window can hold >1000 emails (PostgREST 1000-row cap).
+  // Primary sort is newest-first received_at; uniqueKey post_id (emails PK)
+  // breaks same-second ties so a multi-page window cannot drop an inbound WO.
   const emails = await fetchAllRows<any>(
     () =>
       client.from("emails")
@@ -364,6 +385,7 @@ export async function makesafeNewEmails(
         .gte("received_at", since)
         .order("received_at", { ascending: false }),
     "emails read",
+    "post_id",
   );
 
   // Already-known Graph post ids: any intake draft (draft/needs_review/approved/
@@ -371,13 +393,15 @@ export async function makesafeNewEmails(
   // A rejected draft IS eligible to resurface, so rejected ids are NOT excluded.
   // PAGINATED — this read has no time window, so it is the FIRST to hit the
   // 1000-row cap; truncation here drops known ids -> already-drafted emails
-  // resurface as "new" -> duplicate intake. Must read every draft.
+  // resurface as "new" -> duplicate intake. Must read every draft. Order on the
+  // `id` PK so multi-page OFFSET is a total order.
   const drafts = await fetchAllRows<any>(
     () =>
       client.from("makesafe_intake_drafts")
         .select("graph_message_id, status")
         .neq("status", "rejected"),
     "makesafe_intake_drafts read",
+    "id",
   );
   const knownIds = new Set<string>();
   for (const d of (drafts || [])) {
@@ -457,6 +481,8 @@ export async function makesafePipelineItems(
   const since = params.since || sinceFromDays(60, params.nowIso);
 
   // Paginated: the full pipeline_items projection for a mailbox can exceed 1000.
+  // Total order on the `id` PK so a multi-page mailbox projection cannot drop a
+  // ref (lost sent_status / unresolved link).
   const pi = await fetchAllRows<any>(
     () => {
       let q = client.from("pipeline_items")
@@ -468,12 +494,13 @@ export async function makesafePipelineItems(
       return q;
     },
     "pipeline_items read",
+    "id",
   );
 
   // Resolve each pipeline item's originating email post_id via source_event_ids
   // -> email_events_raw.post_id (the highest-trust linkage, same as reconcile D1).
   // The eventIds list can be large -> chunk the .in() (URL safety) AND paginate
-  // each chunk (1000-row result cap).
+  // each chunk (1000-row result cap). `id` is the PK.
   const eventIds = Array.from(
     new Set(
       (pi || []).flatMap((p: any) => (p.source_event_ids || [])).filter(
@@ -486,11 +513,13 @@ export async function makesafePipelineItems(
     eventIds,
     (ch) => client.from("email_events_raw").select("id, post_id").in("id", ch),
     "email_events_raw (event->post) read",
+    "id",
   );
   for (const ev of evs) if (ev?.id) eventToPost.set(ev.id, ev.post_id);
 
   // Resolve the post ids -> emails (sender_domain + received_at), windowed.
-  // postIds can be large -> chunk the .in() AND paginate each chunk.
+  // postIds can be large -> chunk the .in() AND paginate each chunk. emails PK
+  // is post_id.
   const postIds = Array.from(
     new Set(Array.from(eventToPost.values())),
   ) as string[];
@@ -506,6 +535,7 @@ export async function makesafePipelineItems(
         .eq("mailbox", mailbox)
         .in("post_id", ch),
     "emails (pipeline join) read",
+    "post_id",
   );
   for (const e of joinedEmails) {
     emailById.set(e.post_id, {
@@ -622,7 +652,9 @@ export async function getMakesafeEmail(
 
   // PAGINATED: a single email can carry >1000 attachments (PostgREST 1000-row
   // cap), so an unpaginated read would silently truncate the attachment list and
-  // undercount the status summary. fetchAllRows loops .range() to the last page.
+  // undercount the status summary. fetchAllRows loops .range() to the last page
+  // under a total order on the `id` PK so a multi-page attachment set cannot drop
+  // a work-order PDF mid-list.
   const atts = await fetchAllRows<any>(
     () =>
       client.from("email_attachments")
@@ -631,6 +663,7 @@ export async function getMakesafeEmail(
         )
         .eq("email_id", postId),
     "email_attachments read",
+    "id",
   );
 
   const summary = (buildAttachmentSummaries(
@@ -775,19 +808,18 @@ export async function buildPipelineSentStatusMap(
 ): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   if (!jobIds.length) return map;
-  // Chunk the job-id .in() list AND paginate each chunk (1000-row cap). .range()
-  // is LIMIT/OFFSET, so the read must end on a unique key (`id`, the PK) or a
-  // chunk spilling past one page could return a row on neither page and a job's
-  // sent verdict would read as absent.
+  // Chunk the job-id .in() list AND paginate each chunk (1000-row cap). The
+  // shared reader appends the `id` PK as the unique page key so a multi-row
+  // collision per target_job cannot vanish on a page boundary.
   const data = await fetchAllRowsInChunks<any>(
     jobIds,
     (ch) =>
       client.from("pipeline_items").select("target_job, sent_status").in(
         "target_job",
         ch,
-      )
-        .order("id", { ascending: true }),
+      ),
     "pipeline_items (sent_status by job) read",
+    "id",
   );
   for (const p of (data || [])) {
     if (!p?.target_job || !p.sent_status) continue; // mere row existence ≠ sent
@@ -809,6 +841,8 @@ async function loadAttachmentSummaries(
   postIds: string[],
 ): Promise<Record<string, AttachmentStatusSummary>> {
   if (!postIds.length) return {};
+  // Total order on attachment `id` so multi-page attachment sets cannot undercount
+  // status (WO PDF reading as absent / attachment-free).
   const rows = await fetchAllRowsInChunks<
     { email_id?: string | null; status?: string | null }
   >(
@@ -819,6 +853,7 @@ async function loadAttachmentSummaries(
         ch,
       ),
     "email_attachments (status summary) read",
+    "id",
   );
   return buildAttachmentSummaries(rows);
 }

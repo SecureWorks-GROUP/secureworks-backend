@@ -819,6 +819,8 @@ const PAGE_UNIQUE_KEY: Record<string, string> = {
   job_events: "id",
   job_assignments: "id",
   makesafe_report_packs: "id",
+  // U2 pack-cycle junction: one row per (pack, attendance cycle); PK `id`.
+  makesafe_report_pack_cycles: "id",
   xero_invoices: "id",
   pipeline_items: "id",
   makesafe_intake_drafts: "id",

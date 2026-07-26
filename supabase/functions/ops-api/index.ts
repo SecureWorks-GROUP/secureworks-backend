@@ -326,6 +326,7 @@ import {
   SES_MAILBOX as _SES_MAILBOX,
   fetchAllRows as _fetchAllRows,
   fetchAllRowsInChunks as _fetchAllRowsInChunks,
+  chunkByUrlBudget as _chunkByUrlBudget,
   deriveFromDomain as _deriveFromDomain,
   isOwnDomain as _isOwnDomain,
 } from './makesafe_compact_reads.ts'
@@ -11725,16 +11726,18 @@ async function _fetchAllByJobIdChunked(
   idColumn = 'job_id',
 ): Promise<any[]> {
   // One row per job and no separate `id` column, so the join column IS the
-  // unique key; ordering by `id` there would be a PostgREST 400.
+  // unique key; ordering by `id` there would be a PostgREST 400. The shared
+  // reader appends this key after any caller-supplied primary sort.
   const stableKey = MAKESAFE_JOB_KEYED_TABLES.has(table) ? idColumn : 'id'
   return await _fetchAllRowsInChunks<any>(
     jobIds,
     (idBatch) => {
       let query = client.from(table).select(select).in(idColumn, idBatch)
       if (applyFilters) query = applyFilters(query)
-      return query.order(stableKey, { ascending: true })
+      return query
     },
     `${table} (${idColumn} join)`,
+    stableKey,
   )
 }
 // Test-only export for the cap-safe chunked reader (proves >1000-row pagination).
@@ -12504,6 +12507,10 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   // Optional server-authorised scope: when present, BOTH the active and cancelled
   // job queries are constrained to this id set so an allocated-only caller never
   // loads make-safes it can't see. A caller passing an empty set gets nothing.
+  // Allocated-only restrict lists are chunked by the shared PostgREST URL-budget
+  // contract (~37 encoded bytes/UUID → 163 ids exceed IN_URL_BUDGET=6000). A
+  // single unchunked `.in('id', restrict)` hard-fails at the gateway with no
+  // partial board for a highly-allocated trade.
   const restrict = Array.isArray(restrictJobIds) ? restrictJobIds : null
   if (restrict && restrict.length === 0) {
     return { columns: { new: [], allocated: [], trade_report_in: [], report_ready: [], completed: [], archive: [], cancelled: [] }, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: 0 }
@@ -12512,24 +12519,39 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   // make-safes from the archive column. Paginate the jobs query so the board
   // shows the COMPLETE history; T1's row-paginated dependent reads keep this
   // money-safe even as the job set (and its events/docs) grows past the cap.
+  // When restrict is set, walk budgeted id chunks and merge; re-sort after merge
+  // so Board order stays created_at desc, id desc across chunks.
   const jobsRaw: any[] = []
   {
-    let offset = 0
-    for (let guard = 0; guard < 1000; guard++) {
-      let activeQuery = client.from('jobs')
-        .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
-        .eq('type', 'makesafe')
-        .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
-      if (restrict) activeQuery = activeQuery.in('id', restrict)
-      const { data, error } = await activeQuery
-        .order('created_at', { ascending: false })
-        .order('id', { ascending: false })
-        .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-      if (error) throw error
-      const batch = data || []
-      jobsRaw.push(...batch)
-      if (batch.length < MAKESAFE_PAGE_SIZE) break
-      offset += MAKESAFE_PAGE_SIZE
+    const idChunks: Array<string[] | null> = restrict
+      ? _chunkByUrlBudget(restrict)
+      : [null]
+    for (const idChunk of idChunks) {
+      let offset = 0
+      for (let guard = 0; guard < 1000; guard++) {
+        let activeQuery = client.from('jobs')
+          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+          .eq('type', 'makesafe')
+          .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
+        if (idChunk) activeQuery = activeQuery.in('id', idChunk)
+        const { data, error } = await activeQuery
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
+          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+        if (error) throw error
+        const batch = data || []
+        jobsRaw.push(...batch)
+        if (batch.length < MAKESAFE_PAGE_SIZE) break
+        offset += MAKESAFE_PAGE_SIZE
+      }
+    }
+    if (restrict && idChunks.length > 1) {
+      jobsRaw.sort((a: any, b: any) => {
+        const ca = String(a?.created_at || '')
+        const cb = String(b?.created_at || '')
+        if (ca !== cb) return cb.localeCompare(ca)
+        return String(b?.id || '').localeCompare(String(a?.id || ''))
+      })
     }
   }
   const jobs = jobsRaw
@@ -12680,23 +12702,37 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   const cancelledSinceIso = new Date(Date.now() - CANCELLED_WINDOW_DAYS * 86_400_000).toISOString()
   const cancelledRaw: any[] = []
   {
-    let offset = 0
-    for (let guard = 0; guard < 100; guard++) {
-      let cancelledQuery = client.from('jobs')
-        .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
-        .eq('type', 'makesafe')
-        .eq('status', 'cancelled')
-      if (restrict) cancelledQuery = cancelledQuery.in('id', restrict)
-      if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
-      const { data, error } = await cancelledQuery
-        .order('updated_at', { ascending: false })
-        .order('id', { ascending: false })
-        .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-      if (error) throw error
-      const batch = data || []
-      cancelledRaw.push(...batch)
-      if (batch.length < MAKESAFE_PAGE_SIZE) break
-      offset += MAKESAFE_PAGE_SIZE
+    // Same URL-budget chunking as the active restrict path (F7).
+    const idChunks: Array<string[] | null> = restrict
+      ? _chunkByUrlBudget(restrict)
+      : [null]
+    for (const idChunk of idChunks) {
+      let offset = 0
+      for (let guard = 0; guard < 100; guard++) {
+        let cancelledQuery = client.from('jobs')
+          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+          .eq('type', 'makesafe')
+          .eq('status', 'cancelled')
+        if (idChunk) cancelledQuery = cancelledQuery.in('id', idChunk)
+        if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
+        const { data, error } = await cancelledQuery
+          .order('updated_at', { ascending: false })
+          .order('id', { ascending: false })
+          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+        if (error) throw error
+        const batch = data || []
+        cancelledRaw.push(...batch)
+        if (batch.length < MAKESAFE_PAGE_SIZE) break
+        offset += MAKESAFE_PAGE_SIZE
+      }
+    }
+    if (restrict && idChunks.length > 1) {
+      cancelledRaw.sort((a: any, b: any) => {
+        const ua = String(a?.updated_at || '')
+        const ub = String(b?.updated_at || '')
+        if (ua !== ub) return ub.localeCompare(ua)
+        return String(b?.id || '').localeCompare(String(a?.id || ''))
+      })
     }
   }
   if (cancelledRaw.length > 0) {
@@ -13166,16 +13202,17 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // Paginate the jobs matching the request instead of silently capping at 500.
   // This removes the fixed row limit; it does not claim broader U2 state-model
   // parity or turn a successful empty dependent read into an error.
+  // Unique page key `id` (PK) is appended by the shared reader after the
+  // newest-first created_at primary sort so multi-page OFFSET cannot drop a job.
   const jobs = await _fetchAllRows<any>(() => {
     let query = client.from('jobs')
       .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
       .eq('type', 'makesafe')
       .order('created_at', { ascending: false })
-      .order('id', { ascending: false })
     if (since) query = query.gte('created_at', since)
     if (statusFilter) query = query.eq('status', statusFilter)
     return query
-  }, 'makesafe_audit jobs')
+  }, 'makesafe_audit jobs', 'id', false)
 
   const jobIds = (jobs || []).map((j: any) => j.id)
   let detailsMap: Record<string, any> = {}
@@ -13237,15 +13274,17 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       // invoice_date is DAY-granularity and non-unique, so it cannot order
       // .range() pages on its own — dozens of invoices share a date and a tie
       // straddling row 1000 could land on neither page, blanking a real
-      // invoice_status. `id` (the PK) breaks the tie without disturbing the
-      // newest-first contract _resolveLiveMakesafeInvoice relies on.
+      // invoice_status. The shared reader appends `id` (PK) DESC after the
+      // invoice_date primary sort so newest-id still wins equal-rank ties for
+      // _resolveLiveMakesafeInvoice.
       _fetchAllRows<any>(
         () => client.from('xero_invoices')
           .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
           .eq('invoice_type', 'ACCREC')
-          .order('invoice_date', { ascending: false })
-          .order('id', { ascending: false }),
+          .order('invoice_date', { ascending: false }),
         'makesafe_audit xero_invoices',
+        'id',
+        false,
       ),
       // GAP-4 — reuse the existing buildPackSentMap (batch job_events query).
       buildPackSentMap(client, jobIds),
@@ -13444,18 +13483,18 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   const drafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
       .select('external_ref, graph_message_id, internet_message_id, status, approved_job_id')
-      .in('status', ['needs_review', 'draft'])
-      .order('id', { ascending: true }),
+      .in('status', ['needs_review', 'draft']),
     'makesafe_audit pending intake drafts',
+    'id',
   )
   const draftEmailByJob: Record<string, string | null> = {}
   // Also map approved drafts -> their job, to recover each job's source_email_id.
   const approvedDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
       .select('graph_message_id, internet_message_id, approved_job_id')
-      .eq('status', 'approved')
-      .order('id', { ascending: true }),
+      .eq('status', 'approved'),
     'makesafe_audit approved intake drafts',
+    'id',
   )
   for (const d of (approvedDrafts || [])) {
     if (d?.approved_job_id) draftEmailByJob[d.approved_job_id] = d.graph_message_id || d.internet_message_id || null
@@ -13613,14 +13652,14 @@ async function makesafeStoryRecompute(client: any, opts: StoryRecomputeOpts = {}
   const sentSinceIso = new Date(
     nowMs - (opts.sentLookbackDays ?? STORY_SENT_LOOKBACK_DAYS) * 86_400_000,
   ).toISOString()
+  // post_id is the emails PK; the shared reader appends it as the unique page key
+  // so a .range() page pair cannot drop a Sent row (a real send reading as unsent).
   const sentRows = await _fetchAllRows(
     () => client.from('emails')
       .select('post_id, subject, body_preview, body_content, to_recipients, has_attachments, received_at')
-      .eq('mailbox', _ADMIN_SENT_MAILBOX).eq('folder', _SENT_FOLDER).gte('received_at', sentSinceIso)
-      // post_id is the emails PK; the paginated read must end on a unique key or
-      // a .range() page pair can drop a Sent row (a real send reads as unsent).
-      .order('post_id', { ascending: true }),
+      .eq('mailbox', _ADMIN_SENT_MAILBOX).eq('folder', _SENT_FOLDER).gte('received_at', sentSinceIso),
     'story sent-mirror read',
+    'post_id',
   )
 
   // 4) prior story rows (the delta rule).
@@ -16604,12 +16643,14 @@ async function landLateWorkOrderPdfOntoDraft(
   const approve = deps?.approve || approveIntakeDraft
 
   // Live drafts that could receive a late PDF (draft | needs_review only).
+  // Total order on `id` so multi-page draft sets cannot miss a landing target.
   const liveDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
       .select('id, status, external_ref, requesting_company_slug, requesting_company_name, attachments_json, extraction_json, missing_fields, client_name, client_phone, site_address, site_suburb, description, safety_requirements, confidence, report_type, subject')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', ['draft', 'needs_review']),
     'makesafe_intake_drafts (late-pdf landing) read',
+    'id',
   )
   // Normalise each row's ref/identity/family the SAME way the dedup index does, so the
   // matcher sees the builder_claim_ref + WO/PO identity carried in extraction_json.
@@ -16807,6 +16848,8 @@ async function retiredPaidAiIntakeImplementation(client: any) {
   let scannedColumnAvailable = true
   let emailRows: any[]
   try {
+    // Newest-first received_at; uniqueKey post_id (emails PK) breaks same-second
+    // ties so a multi-page intake window cannot drop a genuine inbound WO.
     emailRows = await _fetchAllRows<any>(
       () => client.from('emails')
         .select(`${EMAILS_BASE_COLS}, makesafe_scanned_at`)
@@ -16815,6 +16858,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
         .gte('received_at', sevenDaysAgo)
         .order('received_at', { ascending: false }),
       'emails (intake scan) read',
+      'post_id',
     )
   } catch (e) {
     scannedColumnAvailable = false
@@ -16827,6 +16871,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
         .gte('received_at', sevenDaysAgo)
         .order('received_at', { ascending: false }),
       'emails (intake scan) read (fallback)',
+      'post_id',
     )
   }
 
@@ -16910,12 +16955,15 @@ async function retiredPaidAiIntakeImplementation(client: any) {
   // (normalised external_ref + requesting_company) OR an existing job's external_ref.
   // internet_message_id is null on the group-sync path (group posts don't expose it),
   // so (ref + company) is the workhorse cross-path key. See makesafe_intake_dedup.ts.
+  // Total order on `id` so multi-page draft indices cannot miss a live/rejected
+  // draft and re-intake a known work order.
   const existingDrafts = await _fetchAllRows<any>(
     () => client.from('makesafe_intake_drafts')
       .select('graph_message_id, internet_message_id, external_ref, requesting_company_slug, requesting_company_name, status, report_type, subject, body_preview, description, extraction_json, from_email, received_at')
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _LIVE_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (dedup index) read',
+    'id',
   )
   // F1 (re-spam guard): also fetch rejected/superseded drafts so the cron does not
   // endlessly resurrect them. A normal scan candidate matching a rejected/superseded
@@ -16927,6 +16975,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       .eq('org_id', DEFAULT_ORG_ID)
       .in('status', _SUPPRESSED_DRAFT_STATES as unknown as string[]),
     'makesafe_intake_drafts (rejected dedup index) read',
+    'id',
   )
   // Already-created jobs with a matching external ref (a live job already covers it).
   // Fetch job_id + jobs.status + requesting_company_slug so a job_external_ref hit:
