@@ -27,8 +27,34 @@ Every card originates as one canonical job row with:
 - `age`: current age, target, hard maximum and overdue state
 - `blockers.real[]` and `blockers.stale_artifacts[]` as separate facts
 - `contact`: current client name, phone, full address and linked Call/Text/Navigate actions
+- U2-S1 additive spine (nullable-safe before/without migration apply):
+  `attendance_cycle_id`, `cycle_number`, `cycle_attribution_flags[]`,
+  `readiness_revision` (pure fingerprint; not yet an approval-invalidation gate),
+  `commercial_warning` when prior-cycle commercial is visible but non-closing
 
 A stale `company_contact_required` substatus on an already allocated/scheduled job is reported as `stale_company_contact_substatus`. It is not presented as a real client blocker.
+
+### U2-S1 cycle-scoped evidence (board + audit)
+
+One pure helper (`makesafe_cycle_evidence.ts`) owns the current-attendance
+boundary for both the board enrich path and audit compact flags:
+
+- When `reattend_count > 0`, only evidence bound to the current attendance
+  (by `attendance_cycle_id` or matching `cycle_number`) may satisfy report,
+  assignment, pack/sent, typed report-doc or photo readiness. Unscoped /
+  `backfill_cycle_scope` rows fail closed with attribution flags.
+- First attendance / reopen-only cards (`reattend_count = 0`) keep the legacy
+  any-cycle first-match behaviour proven by prior regressions.
+- Prior-cycle invoice/commercial may remain visible as a warning fact but must
+  not close the current attendance or imply current-cycle send readiness.
+- Holds for the current cycle are exposed on **ops** (`computed_status_hold`)
+  and **trade** (`hold: { reason_code, note, held_since, cycle_number }`).
+- Migration `20260727000001_makesafe_attendance_cycles_u2_s1.sql` materialises
+  immutable `makesafe_attendance_cycles` rows and nullable attribution columns.
+  Apply the migration **before** deploying the matching `ops-api`. Code rollback
+  is the previous edge version; additive schema is harmless if left in place.
+- This slice does **not** complete full U2 (single display authority,
+  cryptographic approval invalidation, docket revisions, obligation ids).
 
 ## Derived status and captain-applied display truth
 
@@ -164,10 +190,10 @@ Render actions from `contact.actions`, not locally assembled stale values:
   invoices, pipeline_items sent status, intake drafts, card story) hard-fail;
   only `recheck_queue_depth` is optional (null when its auxiliary COUNT fails).
 - Current-cycle report truth: when `reattend_count > 0`, `has_report_record` and
-  the report leg of `pack_effectively_sent` use the same cycle boundary as the
-  board (`currentCycleReportMap`) so a prior visit's service report cannot
-  falsify the current reattendance cycle. Cards with no reattend boundary keep
-  the legacy any-cycle first-match behaviour.
+  the report leg of `pack_effectively_sent` use the shared
+  `makesafe_cycle_evidence.ts` boundary as the board, so a prior visit's service
+  report cannot falsify the current reattendance cycle. Cards with no reattend
+  boundary keep the legacy any-cycle first-match behaviour.
 - Multi-row `pipeline_items.sent_status` for one job is reduced by explicit rank
   (`verified_sent` > `needs_review` > `not_sent`); input order cannot demote a
   stronger verdict, and a row with empty status never invents "sent".

@@ -11,6 +11,10 @@ import {
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
 } from "./makesafe_status_apply.ts";
+import {
+  photoCountForCurrentCycle,
+  tradeSafeHold,
+} from "./makesafe_cycle_evidence.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 export const OPS_MAKESAFE_STAGES = [
@@ -392,12 +396,21 @@ export function buildCanonicalMakesafeRows(
 ): any[] {
   const computedAt = extras.computedAt || new Date().toISOString();
   const rows = (baseRows || []).map((base) => {
+    // enrichMakesafeBoardJob already cycle-scopes assignments/report/pack on the
+    // base row; re-apply photo fail-closed for reattend here (photos are not
+    // cycle-keyed yet).
     const assignments = assignmentFacts(base?.assignments || []);
     const report = base?.report || null;
     const pack = base?.report_pack || null;
     const detail = base?.makesafe_details || {};
     const portalCaptures = portalCapturesFromDetail(base);
     const hold = extras.holdsByJobId?.[base?.id] || null;
+    const rawPhotoCount = Number(extras.photoCountByJobId?.[base?.id] || 0);
+    const photoCount = photoCountForCurrentCycle(
+      rawPhotoCount,
+      detail,
+      false, // no photo attendance_cycle_id write path yet → reattend fail-closed
+    );
     const swmsRequired = base?.has_swms_doc === true || !!pack?.swms_doc_id ||
       (Array.isArray(base?.missing_docs) && base.missing_docs.includes("swms"));
     const declaredStage = String(base?.board_stage || "new").toLowerCase();
@@ -409,20 +422,23 @@ export function buildCanonicalMakesafeRows(
     const displayStage = applicationApplies
       ? String(application.after_status || declaredStage).toLowerCase()
       : declaredStage;
+    // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
+    const invoiceStatus = rawInvoiceStatus(base);
+    const packSent = base?.pack_sent === true;
     const statusInput = {
       job: base,
       detail,
       evidence: {
         assignments,
         serviceReports: report ? [report] : [],
-        completionPhotoCount: Number(extras.photoCountByJobId?.[base?.id] || 0),
+        completionPhotoCount: photoCount,
         portalCaptures,
         packState: pack?.review_state || null,
         pack,
-        invoiceStatus: rawInvoiceStatus(base),
+        invoiceStatus,
         invoiceDate: base?.invoice_date || null,
         invoiceCreatedAt: base?.invoice_created_at || null,
-        packSent: base?.pack_sent === true,
+        packSent,
         documents: {
           report: base?.has_report_doc === true,
           invoice: base?.has_invoice_doc === true,
@@ -475,6 +491,16 @@ export function buildCanonicalMakesafeRows(
           computation.job_type !== "physical_makesafe" &&
           reportIn.satisfied,
       },
+      // U2-S1 additive spine keys (nullable-safe for pre-migration rows).
+      attendance_cycle_id: base?.attendance_cycle_id ?? null,
+      cycle_number: Number(
+        base?.cycle_number || detail?.cycle_number || report?.cycle_number || 1,
+      ),
+      cycle_attribution_flags: Array.isArray(base?.cycle_attribution_flags)
+        ? base.cycle_attribution_flags
+        : [],
+      readiness_revision: base?.readiness_revision ?? null,
+      commercial_warning: base?.commercial_warning ?? null,
       makesafe_type: base?.metadata?.makesafe_job_family_label ||
         base?.metadata?.makesafe_job_family ||
         base?.makesafe_details?.report_type ||
@@ -493,14 +519,15 @@ export function buildCanonicalMakesafeRows(
           "waiting_on_trade_report",
         submitted_at: report?.submitted_at || report?.created_at ||
           base?.makesafe_details?.report_received_at || null,
-        photo_count: Number(extras.photoCountByJobId?.[base?.id] || 0),
+        photo_count: photoCount,
         cycle_number: Number(report?.cycle_number || base?.cycle_number || 1),
       },
       pack: {
         state: pack?.status || (base?.sent_to_builder ? "sent" : "not_started"),
-        sent: base?.sent_to_builder === true,
-        sent_at: pack?.sent_at || base?.makesafe_details?.report_sent_at ||
-          null,
+        sent: packSent,
+        sent_at: packSent
+          ? (pack?.sent_at || base?.makesafe_details?.report_sent_at || null)
+          : null,
         drafted: !!pack?.report_doc_id ||
           ["drafted", "authorised_not_sent"].includes(
             String(pack?.status || ""),
@@ -647,6 +674,12 @@ function tradeSafe(row: any, viewer: MakesafeBoardViewer, all: boolean) {
     age: row?.age,
     blockers: row?.blockers,
     cancelled: row?.cancelled,
+    // U2-S1: holds visible to both ops and trade (allow-listed shape only).
+    hold: tradeSafeHold(row?.computed_status_hold),
+    attendance_cycle_id: row?.attendance_cycle_id ?? null,
+    cycle_number: row?.cycle_number ?? null,
+    cycle_attribution_flags: row?.cycle_attribution_flags || [],
+    readiness_revision: row?.readiness_revision ?? null,
   };
 }
 

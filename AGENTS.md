@@ -35,6 +35,14 @@ and the Trade `New / Allocated / Complete / Archive` columns are parity-checked
 from the same canonical rows. Keep trade payloads allow-listed and free of pricing
 and trade-invoice data.
 
+U2-S1 cycle-scoped evidence lives in `makesafe_cycle_evidence.ts` and is shared by
+board enrich and `makesafe_audit`. Apply
+`20260727000001_makesafe_attendance_cycles_u2_s1.sql` **before** the matching
+`ops-api` (new selects include `attendance_cycle_id` / `cycle_attribution`). Do not
+add a second status engine; later U2 slices own readiness-approval invalidation and
+display-authority cutover. Consumer contract:
+`docs/makesafe-board-read-model-v1.md`.
+
 ## Deterministic Make-Safe Replay Measures Identity, Not Job Readiness
 
 The canonical diagnosis and sanitized production projection are in
