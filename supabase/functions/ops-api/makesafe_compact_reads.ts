@@ -65,7 +65,10 @@ export async function fetchAllRows<T = any>(
   let offset = 0;
   // Hard ceiling so a misbehaving range terminal can't loop forever.
   for (let guard = 0; guard < 100_000; guard++) {
-    const { data, error } = await buildQuery().range(offset, offset + PAGE_SIZE - 1);
+    const { data, error } = await buildQuery().range(
+      offset,
+      offset + PAGE_SIZE - 1,
+    );
     if (error) throw new Error(`${label} failed: ${error.message ?? error}`);
     const page: T[] = data || [];
     all.push(...page);
@@ -124,7 +127,10 @@ function chunkByUrlBudget(ids: string[]): string[][] {
     // Start a new chunk if adding this id would exceed the byte budget OR the hard
     // count cap — but only if the current chunk already has at least one id (so a
     // lone over-budget id is not dropped and we never loop forever).
-    if (cur.length > 0 && (curBytes + cost > IN_URL_BUDGET || cur.length >= IN_MAX_COUNT)) {
+    if (
+      cur.length > 0 &&
+      (curBytes + cost > IN_URL_BUDGET || cur.length >= IN_MAX_COUNT)
+    ) {
       out.push(cur);
       cur = [];
       curBytes = 0;
@@ -171,7 +177,9 @@ export async function fetchAllRowsInChunks<T = any>(
 
 // Derive the sender domain from a full email address. emails carries no
 // from_domain column; this mirrors makesafe_reconcile.ts (lastIndexOf('@')).
-export function deriveFromDomain(fromEmail: string | null | undefined): string | null {
+export function deriveFromDomain(
+  fromEmail: string | null | undefined,
+): string | null {
   if (!fromEmail) return null;
   const v = String(fromEmail);
   const at = v.lastIndexOf("@");
@@ -225,7 +233,9 @@ export function isOwnDomain(fromDomain: string | null | undefined): boolean {
 
 // "outbound" when the sender is one of our own domains, else "inbound".
 export type EmailDirection = "inbound" | "outbound";
-export function directionForDomain(fromDomain: string | null | undefined): EmailDirection {
+export function directionForDomain(
+  fromDomain: string | null | undefined,
+): EmailDirection {
   return isOwnDomain(fromDomain) ? "outbound" : "inbound";
 }
 
@@ -275,7 +285,9 @@ export function buildAttachmentSummaries(
 
 // Total live attachment count for an email (everything except purged — purged
 // bytes are gone, so they are not a "has attachments" signal for the skills).
-export function liveAttachmentCount(s: AttachmentStatusSummary | undefined): number {
+export function liveAttachmentCount(
+  s: AttachmentStatusSummary | undefined,
+): number {
   if (!s) return 0;
   return s.uploaded + s.pending + s.failed + s.needs_review;
 }
@@ -291,18 +303,28 @@ export function attachmentUrlGuard(
   const s = String(status || "").toLowerCase();
   if (s !== "uploaded") {
     const reason: Record<string, string> = {
-      pending: "attachment pending (bytes not yet stored); retry after sync, or fall back to a live Graph fetch",
-      failed: "attachment failed (fetch/upload/validation error); fall back to a live Graph fetch",
-      needs_review: "attachment needs_review (reference/item/inline kind); not a stored PDF, manual review required",
+      pending:
+        "attachment pending (bytes not yet stored); retry after sync, or fall back to a live Graph fetch",
+      failed:
+        "attachment failed (fetch/upload/validation error); fall back to a live Graph fetch",
+      needs_review:
+        "attachment needs_review (reference/item/inline kind); not a stored PDF, manual review required",
       purged: "attachment purged (90-day PII tombstone); bytes no longer exist",
     };
     return {
       ok: false,
-      error: reason[s] || `attachment status '${status ?? "unknown"}' is not 'uploaded'; cannot mint signed URL`,
+      error: reason[s] ||
+        `attachment status '${
+          status ?? "unknown"
+        }' is not 'uploaded'; cannot mint signed URL`,
     };
   }
   if (!storagePath) {
-    return { ok: false, error: "attachment is 'uploaded' but has no storage_path; cannot mint signed URL" };
+    return {
+      ok: false,
+      error:
+        "attachment is 'uploaded' but has no storage_path; cannot mint signed URL",
+    };
   }
   return { ok: true };
 }
@@ -322,7 +344,11 @@ export function attachmentUrlGuard(
 // Params: since (default 30d), mailbox (default ses@).
 export async function makesafeNewEmails(
   client: SB,
-  params: { since?: string | null; mailbox?: string | null; nowIso?: string | null },
+  params: {
+    since?: string | null;
+    mailbox?: string | null;
+    nowIso?: string | null;
+  },
 ) {
   const mailbox = params.mailbox || SES_MAILBOX;
   const since = params.since || sinceFromDays(30, params.nowIso);
@@ -330,12 +356,13 @@ export async function makesafeNewEmails(
   // All ses@ emails in the window (exclude tombstoned — no PII to intake).
   // Paginated: the window can hold >1000 emails (PostgREST 1000-row cap).
   const emails = await fetchAllRows<any>(
-    () => client.from("emails")
-      .select("post_id, received_at, from_email, has_attachments")
-      .eq("mailbox", mailbox)
-      .is("pii_purged_at", null)
-      .gte("received_at", since)
-      .order("received_at", { ascending: false }),
+    () =>
+      client.from("emails")
+        .select("post_id, received_at, from_email, has_attachments")
+        .eq("mailbox", mailbox)
+        .is("pii_purged_at", null)
+        .gte("received_at", since)
+        .order("received_at", { ascending: false }),
     "emails read",
   );
 
@@ -346,13 +373,16 @@ export async function makesafeNewEmails(
   // 1000-row cap; truncation here drops known ids -> already-drafted emails
   // resurface as "new" -> duplicate intake. Must read every draft.
   const drafts = await fetchAllRows<any>(
-    () => client.from("makesafe_intake_drafts")
-      .select("graph_message_id, status")
-      .neq("status", "rejected"),
+    () =>
+      client.from("makesafe_intake_drafts")
+        .select("graph_message_id, status")
+        .neq("status", "rejected"),
     "makesafe_intake_drafts read",
   );
   const knownIds = new Set<string>();
-  for (const d of (drafts || [])) if (d?.graph_message_id) knownIds.add(d.graph_message_id);
+  for (const d of (drafts || [])) {
+    if (d?.graph_message_id) knownIds.add(d.graph_message_id);
+  }
 
   // INBOUND CONTAMINATION FILTER: ses@ is a group that receives a COPY of every
   // pack WE send, so the window is ~79% our own outbound mail. This feed is an
@@ -360,7 +390,9 @@ export async function makesafeNewEmails(
   // own/outbound domains BEFORE dedup/summary work (smaller batched reads too).
   // Un-drafted AND inbound is the candidate set.
   const undrafted = (emails || []).filter((e: any) => !knownIds.has(e.post_id));
-  const newEmails = undrafted.filter((e: any) => !isOwnDomain(deriveFromDomain(e.from_email)));
+  const newEmails = undrafted.filter((e: any) =>
+    !isOwnDomain(deriveFromDomain(e.from_email))
+  );
   const excluded_outbound = undrafted.length - newEmails.length;
   const postIds = newEmails.map((e: any) => e.post_id);
 
@@ -428,7 +460,9 @@ export async function makesafePipelineItems(
   const pi = await fetchAllRows<any>(
     () => {
       let q = client.from("pipeline_items")
-        .select("ref, target_job, sent_status, attachment_refs, match_score, match_method, source_event_ids")
+        .select(
+          "ref, target_job, sent_status, attachment_refs, match_score, match_method, source_event_ids",
+        )
         .eq("mailbox", mailbox);
       if (params.sent_status) q = q.eq("sent_status", params.sent_status);
       return q;
@@ -441,7 +475,11 @@ export async function makesafePipelineItems(
   // The eventIds list can be large -> chunk the .in() (URL safety) AND paginate
   // each chunk (1000-row result cap).
   const eventIds = Array.from(
-    new Set((pi || []).flatMap((p: any) => (p.source_event_ids || [])).filter(Boolean)),
+    new Set(
+      (pi || []).flatMap((p: any) => (p.source_event_ids || [])).filter(
+        Boolean,
+      ),
+    ),
   ) as string[];
   const eventToPost = new Map<string, string>();
   const evs = await fetchAllRowsInChunks<any>(
@@ -453,18 +491,27 @@ export async function makesafePipelineItems(
 
   // Resolve the post ids -> emails (sender_domain + received_at), windowed.
   // postIds can be large -> chunk the .in() AND paginate each chunk.
-  const postIds = Array.from(new Set(Array.from(eventToPost.values()))) as string[];
-  const emailById = new Map<string, { from_email: string | null; received_at: string | null }>();
+  const postIds = Array.from(
+    new Set(Array.from(eventToPost.values())),
+  ) as string[];
+  const emailById = new Map<
+    string,
+    { from_email: string | null; received_at: string | null }
+  >();
   const joinedEmails = await fetchAllRowsInChunks<any>(
     postIds,
-    (ch) => client.from("emails")
-      .select("post_id, from_email, received_at")
-      .eq("mailbox", mailbox)
-      .in("post_id", ch),
+    (ch) =>
+      client.from("emails")
+        .select("post_id, from_email, received_at")
+        .eq("mailbox", mailbox)
+        .in("post_id", ch),
     "emails (pipeline join) read",
   );
   for (const e of joinedEmails) {
-    emailById.set(e.post_id, { from_email: e.from_email ?? null, received_at: e.received_at ?? null });
+    emailById.set(e.post_id, {
+      from_email: e.from_email ?? null,
+      received_at: e.received_at ?? null,
+    });
   }
 
   // GAP-5 — attachment status summary per originating email.
@@ -472,20 +519,29 @@ export async function makesafePipelineItems(
 
   const mapped = (pi || []).map((p: any) => {
     const firstEventId = (p.source_event_ids || []).find(
-      (id: string) => eventToPost.has(id) && emailById.has(eventToPost.get(id) as string),
+      (id: string) =>
+        eventToPost.has(id) && emailById.has(eventToPost.get(id) as string),
     );
-    const postId = firstEventId ? (eventToPost.get(firstEventId) ?? null) : null;
+    const postId = firstEventId
+      ? (eventToPost.get(firstEventId) ?? null)
+      : null;
     const email = postId ? emailById.get(postId) : null;
     // A usable link requires BOTH event->post resolution AND the email row itself
     // (sender_domain/received_at live on the email). If either is missing the
     // item is unresolved and must NOT silently vanish (no-silent-drops).
     const resolved = !!email;
-    const summary = postId ? (summaries[postId] ?? emptyAttachmentSummary()) : emptyAttachmentSummary();
+    const summary = postId
+      ? (summaries[postId] ?? emptyAttachmentSummary())
+      : emptyAttachmentSummary();
     // attachment_count: prefer the live store summary; fall back to the
     // pipeline_items.attachment_refs length when the email join is missing.
-    const refsCount = Array.isArray(p.attachment_refs) ? p.attachment_refs.length : 0;
+    const refsCount = Array.isArray(p.attachment_refs)
+      ? p.attachment_refs.length
+      : 0;
     const attachment_count = liveAttachmentCount(summary) || refsCount;
-    const sender_domain = resolved ? deriveFromDomain(email?.from_email ?? null) : null;
+    const sender_domain = resolved
+      ? deriveFromDomain(email?.from_email ?? null)
+      : null;
     return {
       ref: p.ref ?? null,
       source_email_id: resolved ? postId : null,
@@ -516,7 +572,9 @@ export async function makesafePipelineItems(
   //     its received_at is null.
   // (sent_status, if supplied, was already applied server-side above.)
   const rows = mapped
-    .filter((r: any) => !r._resolved || (r.received_at != null && r.received_at >= since))
+    .filter((r: any) =>
+      !r._resolved || (r.received_at != null && r.received_at >= since)
+    )
     .map((r: any) => {
       const { _resolved: _omit, ...rest } = r;
       return rest;
@@ -554,7 +612,9 @@ export async function getMakesafeEmail(
   if (!postId) throw new ApiBadRequest("post_id required");
 
   const { data: email, error: emailErr } = await client.from("emails")
-    .select("post_id, mailbox, subject, body_preview, from_email, received_at, has_attachments, pii_purged_at")
+    .select(
+      "post_id, mailbox, subject, body_preview, from_email, received_at, has_attachments, pii_purged_at",
+    )
     .eq("post_id", postId)
     .maybeSingle();
   if (emailErr) throw new Error(`emails read failed: ${emailErr.message}`);
@@ -564,9 +624,12 @@ export async function getMakesafeEmail(
   // cap), so an unpaginated read would silently truncate the attachment list and
   // undercount the status summary. fetchAllRows loops .range() to the last page.
   const atts = await fetchAllRows<any>(
-    () => client.from("email_attachments")
-      .select("id, graph_attachment_id, name, content_type, size_bytes, status, attachment_kind")
-      .eq("email_id", postId),
+    () =>
+      client.from("email_attachments")
+        .select(
+          "id, graph_attachment_id, name, content_type, size_bytes, status, attachment_kind",
+        )
+        .eq("email_id", postId),
     "email_attachments read",
   );
 
@@ -623,18 +686,27 @@ export async function getMakesafeAttachmentUrl(
 ) {
   const { attachment_id, post_id, graph_attachment_id } = params;
   if (!attachment_id && !(post_id && graph_attachment_id)) {
-    throw new ApiBadRequest("attachment_id, or (post_id and graph_attachment_id), required");
+    throw new ApiBadRequest(
+      "attachment_id, or (post_id and graph_attachment_id), required",
+    );
   }
 
   let q = client.from("email_attachments")
-    .select("id, email_id, graph_attachment_id, status, storage_path, name, content_type");
+    .select(
+      "id, email_id, graph_attachment_id, status, storage_path, name, content_type",
+    );
   if (attachment_id) {
     q = q.eq("id", attachment_id);
   } else {
-    q = q.eq("email_id", post_id).eq("graph_attachment_id", graph_attachment_id);
+    q = q.eq("email_id", post_id).eq(
+      "graph_attachment_id",
+      graph_attachment_id,
+    );
   }
   const { data: att, error: attErr } = await q.maybeSingle();
-  if (attErr) throw new Error(`email_attachments read failed: ${attErr.message}`);
+  if (attErr) {
+    throw new Error(`email_attachments read failed: ${attErr.message}`);
+  }
   if (!att) {
     return { ok: false, error: "attachment not found" };
   }
@@ -652,7 +724,9 @@ export async function getMakesafeAttachmentUrl(
   const { data: signed, error: signErr } = await client.storage
     .from(MAKESAFE_BUCKET)
     .createSignedUrl(att.storage_path, SIGNED_URL_TTL_SECONDS);
-  if (signErr) throw new Error(`createSignedUrl failed: ${signErr.message ?? signErr}`);
+  if (signErr) {
+    throw new Error(`createSignedUrl failed: ${signErr.message ?? signErr}`);
+  }
 
   return {
     ok: true,
@@ -708,13 +782,19 @@ export async function buildPipelineSentStatusMap(
   const data = await fetchAllRowsInChunks<any>(
     jobIds,
     (ch) =>
-      client.from("pipeline_items").select("target_job, sent_status").in("target_job", ch)
+      client.from("pipeline_items").select("target_job, sent_status").in(
+        "target_job",
+        ch,
+      )
         .order("id", { ascending: true }),
     "pipeline_items (sent_status by job) read",
   );
   for (const p of (data || [])) {
     if (!p?.target_job || !p.sent_status) continue; // mere row existence ≠ sent
-    const preferred = preferPipelineSentStatus(map[p.target_job], p.sent_status);
+    const preferred = preferPipelineSentStatus(
+      map[p.target_job],
+      p.sent_status,
+    );
     if (preferred) map[p.target_job] = preferred;
   }
   return map;
@@ -729,9 +809,15 @@ async function loadAttachmentSummaries(
   postIds: string[],
 ): Promise<Record<string, AttachmentStatusSummary>> {
   if (!postIds.length) return {};
-  const rows = await fetchAllRowsInChunks<{ email_id?: string | null; status?: string | null }>(
+  const rows = await fetchAllRowsInChunks<
+    { email_id?: string | null; status?: string | null }
+  >(
     postIds,
-    (ch) => client.from("email_attachments").select("email_id, status").in("email_id", ch),
+    (ch) =>
+      client.from("email_attachments").select("email_id, status").in(
+        "email_id",
+        ch,
+      ),
     "email_attachments (status summary) read",
   );
   return buildAttachmentSummaries(rows);
