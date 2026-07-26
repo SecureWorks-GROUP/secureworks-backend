@@ -159,15 +159,27 @@ Render actions from `contact.actions`, not locally assembled stale values:
   all row pages. Global ACCREC and intake-draft reads paginate separately.
 - A reported error from a required query rejects the request instead of becoming
   an empty map. A successful empty query still surfaces as absent facts; this is
-  not a per-job completeness or full U2 board-truth guarantee.
+  not a per-job completeness or full U2 board-truth guarantee. Required joins
+  (jobs, details, documents, service reports, job_events pack markers, ACCREC
+  invoices, pipeline_items sent status, intake drafts, card story) hard-fail;
+  only `recheck_queue_depth` is optional (null when its auxiliary COUNT fails).
+- Current-cycle report truth: when `reattend_count > 0`, `has_report_record` and
+  the report leg of `pack_effectively_sent` use the same cycle boundary as the
+  board (`currentCycleReportMap`) so a prior visit's service report cannot
+  falsify the current reattendance cycle. Cards with no reattend boundary keep
+  the legacy any-cycle first-match behaviour.
+- Multi-row `pipeline_items.sent_status` for one job is reduced by explicit rank
+  (`verified_sent` > `needs_review` > `not_sent`); input order cannot demote a
+  stronger verdict, and a row with empty status never invents "sent".
 - `recheck_queue_depth` is a number when its auxiliary count succeeds and `null`
   when the count errors or is unavailable.
 - Paginated reads end on a unique sort key (see the PostgREST entry in
   `docs/project-knowledge/gotchas.md`).
 - Regression owner: the `2.1` cases in
   `supabase/functions/ops-api/makesafe_audit_test.ts` cover 392/500 URL-budget
-  volume, a 1001-job second page, multi-page job/document merges, and
-  required-query error rejection.
+  volume, a 1001-job second page, multi-page job/document merges,
+  required-query error rejection (full required-join matrix), cycle-aware
+  report / pack_effectively_sent, and multi-row pipeline sent precedence.
 
 ## Known gaps (deferred, not fixed in this change)
 

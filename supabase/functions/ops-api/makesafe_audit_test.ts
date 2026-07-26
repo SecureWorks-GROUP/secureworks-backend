@@ -42,13 +42,23 @@ const RECENT_DATE = RECENT_ISO.slice(0, 10); // YYYY-MM-DD for invoice_date
 // .eq()/.in() predicates so a table queried twice with different filters (e.g.
 // makesafe_intake_drafts: pending vs approved) returns the correct subset —
 // matching real PostgREST behaviour, which makesafeAudit relies on.
-type InCall = { table: string; column: string; values: any[]; encodedBytes: number };
+type InCall = {
+  table: string;
+  column: string;
+  values: any[];
+  encodedBytes: number;
+};
 type OrderCall = { column: string; ascending: boolean };
 type RangeCall = { from: number; to: number };
 // One issued read (one builder). `ranges` records its LIMIT/OFFSET terminal so
 // volume tests can prove page 2 was requested and merged, not merely that the
 // encoded-id budget caused more than one query.
-type ReadCall = { table: string; orders: OrderCall[]; ranges: RangeCall[]; paginated: boolean };
+type ReadCall = {
+  table: string;
+  orders: OrderCall[];
+  ranges: RangeCall[];
+  paginated: boolean;
+};
 type QueryClientOptions = {
   maxInEncodedBytes?: number;
   forceInErrorTables?: Set<string>;
@@ -59,7 +69,10 @@ type QueryClientOptions = {
 };
 
 function encodedInBytes(values: any[]): number {
-  return values.reduce((total, value) => total + encodeURIComponent(String(value)).length + 1, 0);
+  return values.reduce(
+    (total, value) => total + encodeURIComponent(String(value)).length + 1,
+    0,
+  );
 }
 
 function makeQueryClient(
@@ -95,8 +108,12 @@ function makeQueryClient(
       return rowLimit == null ? filtered : filtered.slice(0, rowLimit);
     };
     const b: any = {
-      select: (_columns?: string, selectOptions?: { head?: boolean; count?: string }) => {
-        exactHeadCount = selectOptions?.head === true && selectOptions?.count === "exact";
+      select: (
+        _columns?: string,
+        selectOptions?: { head?: boolean; count?: string },
+      ) => {
+        exactHeadCount = selectOptions?.head === true &&
+          selectOptions?.count === "exact";
         if (options.forceReadErrorTables?.has(table)) {
           queryError = { message: `forced ${table} read failure` };
         }
@@ -114,7 +131,9 @@ function makeQueryClient(
         return b;
       },
       not: (col: string, operator: string, val: any) => {
-        if (operator === "is" && val == null) preds.push((r) => r?.[col] != null);
+        if (operator === "is" && val == null) {
+          preds.push((r) => r?.[col] != null);
+        }
         return b;
       },
       is: (col: string, val: any) => {
@@ -123,14 +142,21 @@ function makeQueryClient(
       },
       in: (col: string, vals: any[]) => {
         const encodedBytes = encodedInBytes(vals);
-        options.inCalls?.push({ table, column: col, values: vals.slice(), encodedBytes });
+        options.inCalls?.push({
+          table,
+          column: col,
+          values: vals.slice(),
+          encodedBytes,
+        });
         if (options.forceInErrorTables?.has(table)) {
           queryError = { message: `forced ${table} join failure` };
         } else if (
-          options.maxInEncodedBytes != null && encodedBytes > options.maxInEncodedBytes
+          options.maxInEncodedBytes != null &&
+          encodedBytes > options.maxInEncodedBytes
         ) {
           queryError = {
-            message: `${table}.${col} encoded .in() list is ${encodedBytes} bytes ` +
+            message:
+              `${table}.${col} encoded .in() list is ${encodedBytes} bytes ` +
               `(budget ${options.maxInEncodedBytes})`,
           };
         }
@@ -153,7 +179,7 @@ function makeQueryClient(
       },
       // Paginated read terminal (fetchAllRows): applies the recorded predicates
       // and ORDER BY, then returns rows in [from, to] inclusive.
-      range: async (from: number, to: number) => {
+      range: (from: number, to: number) => {
         read.paginated = true;
         read.ranges.push({ from, to });
         if (queryError) return { data: null, error: queryError };
@@ -162,7 +188,11 @@ function makeQueryClient(
       then: (resolve: (v: any) => any) => {
         if (queryError) return resolve({ data: null, error: queryError });
         const data = filteredRows();
-        return resolve({ data: exactHeadCount ? null : data, count: exactHeadCount ? data.length : null, error: null });
+        return resolve({
+          data: exactHeadCount ? null : data,
+          count: exactHeadCount ? data.length : null,
+          error: null,
+        });
       },
     };
     return b;
@@ -222,7 +252,8 @@ const VOLUME_DOC_TYPES = Object.keys(VOLUME_DOC_FLAG_BY_TYPE);
 // stay TYPED, so the filename fallback can never re-supply an omitted type.
 function volumeDocTypes(index: number): string[] {
   if (index % 5 !== 4) return VOLUME_DOC_TYPES;
-  const dropped = VOLUME_DOC_TYPES[Math.floor(index / 5) % VOLUME_DOC_TYPES.length];
+  const dropped =
+    VOLUME_DOC_TYPES[Math.floor(index / 5) % VOLUME_DOC_TYPES.length];
   return VOLUME_DOC_TYPES.filter((type) => type !== dropped);
 }
 
@@ -543,9 +574,24 @@ Deno.test("2.4 reference + substring tiers tag correctly; <5-char ref does not s
 // absent key list still falls back per row rather than silently losing a match).
 Deno.test("2.4 hoisted invoice reference keys resolve identically to per-row normalisation", () => {
   const rows = [
-    { job_id: "j1", status: "AUTHORISED", invoice_number: "INV-1", reference: "AJBR 67457" },
-    { job_id: null, status: "PAID", invoice_number: "INV-2", reference: "Job AJBR-67457 makesafe" },
-    { job_id: "other", status: "VOIDED", invoice_number: "INV-3", reference: null },
+    {
+      job_id: "j1",
+      status: "AUTHORISED",
+      invoice_number: "INV-1",
+      reference: "AJBR 67457",
+    },
+    {
+      job_id: null,
+      status: "PAID",
+      invoice_number: "INV-2",
+      reference: "Job AJBR-67457 makesafe",
+    },
+    {
+      job_id: "other",
+      status: "VOIDED",
+      invoice_number: "INV-3",
+      reference: null,
+    },
   ];
   const keys = _prepareMakesafeInvoiceRefsForTest(rows);
   assertEquals(keys, ["ajbr67457", "jobajbr67457makesafe", ""]);
@@ -561,7 +607,10 @@ Deno.test("2.4 hoisted invoice reference keys resolve identically to per-row nor
     const hoisted = _resolveMakesafeJobInvoicesForTest(rows, jobId, ref, keys);
     assertEquals(hoisted, _resolveMakesafeJobInvoicesForTest(rows, jobId, ref));
     // A truncated key list must recompute the missing rows, never drop them.
-    assertEquals(hoisted, _resolveMakesafeJobInvoicesForTest(rows, jobId, ref, keys.slice(0, 1)));
+    assertEquals(
+      hoisted,
+      _resolveMakesafeJobInvoicesForTest(rows, jobId, ref, keys.slice(0, 1)),
+    );
   }
   assertEquals(
     _resolveMakesafeJobInvoicesForTest(rows, "j1", "AJBR-67457", keys)
@@ -579,11 +628,15 @@ Deno.test("2.4 hoisted invoice reference keys resolve identically to per-row nor
 // and were keyed back onto the right card.
 function volumeExpectations(seed: Record<string, any[]>) {
   const substatusByJobId = new Map<string, string>(
-    seed.makesafe_job_details.map((detail: any) => [detail.job_id, detail.substatus]),
+    seed.makesafe_job_details.map((
+      detail: any,
+    ) => [detail.job_id, detail.substatus]),
   );
   const docTypesByJobId = new Map<string, Set<string>>();
   for (const doc of seed.job_documents) {
-    if (!docTypesByJobId.has(doc.job_id)) docTypesByJobId.set(doc.job_id, new Set());
+    if (!docTypesByJobId.has(doc.job_id)) {
+      docTypesByJobId.set(doc.job_id, new Set());
+    }
     docTypesByJobId.get(doc.job_id)!.add(doc.type);
   }
   return { substatusByJobId, docTypesByJobId };
@@ -603,7 +656,8 @@ function assertVolumeRowMatchesSeed(
     expectations.substatusByJobId.get(jobId),
     `${label} substatus is this job's own seeded value for ${jobId}`,
   );
-  const seededTypes = expectations.docTypesByJobId.get(jobId) ?? new Set<string>();
+  const seededTypes = expectations.docTypesByJobId.get(jobId) ??
+    new Set<string>();
   for (const [type, flag] of Object.entries(VOLUME_DOC_FLAG_BY_TYPE)) {
     assertEquals(
       row[flag],
@@ -622,8 +676,14 @@ function assertVolumeFixtureVaries(rows: any[]) {
     "volume fixture must span the whole substatus vocabulary",
   );
   for (const flag of Object.values(VOLUME_DOC_FLAG_BY_TYPE)) {
-    assert(rows.some((row: any) => row[flag] === true), `fixture must carry a filed ${flag}`);
-    assert(rows.some((row: any) => row[flag] === false), `fixture must carry a missing ${flag}`);
+    assert(
+      rows.some((row: any) => row[flag] === true),
+      `fixture must carry a filed ${flag}`,
+    );
+    assert(
+      rows.some((row: any) => row[flag] === false),
+      `fixture must carry a missing ${flag}`,
+    );
   }
 }
 
@@ -641,12 +701,19 @@ async function assertWholeBoardVolume(count: number) {
   });
 
   const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
-  const fallback: any = await _makesafePipelineForTest(client, new URLSearchParams());
+  const fallback: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
   const fallbackJobs = Object.values(fallback.columns).flat() as any[];
   const fallbackById = new Map(fallbackJobs.map((row: any) => [row.id, row]));
 
   assertEquals(audit.jobs.length, count, "whole audit must return every job");
-  assertEquals(fallbackJobs.length, count, "fallback board must return every job");
+  assertEquals(
+    fallbackJobs.length,
+    count,
+    "fallback board must return every job",
+  );
   assertEquals(
     audit.jobs.map((row: any) => row.job_id).sort(),
     fallbackJobs.map((row: any) => row.id).sort(),
@@ -655,8 +722,18 @@ async function assertWholeBoardVolume(count: number) {
   for (const auditRow of audit.jobs) {
     const fallbackRow = fallbackById.get(auditRow.job_id);
     assert(fallbackRow, `fallback row ${auditRow.job_id} present`);
-    assertVolumeRowMatchesSeed(auditRow, auditRow.job_id, expectations, "audit");
-    assertVolumeRowMatchesSeed(fallbackRow, auditRow.job_id, expectations, "fallback");
+    assertVolumeRowMatchesSeed(
+      auditRow,
+      auditRow.job_id,
+      expectations,
+      "audit",
+    );
+    assertVolumeRowMatchesSeed(
+      fallbackRow,
+      auditRow.job_id,
+      expectations,
+      "fallback",
+    );
     assertEquals(
       auditRow.substatus,
       fallbackRow.substatus,
@@ -677,7 +754,8 @@ async function assertWholeBoardVolume(count: number) {
     "no issued .in() join may exceed the encoded URL budget",
   );
   const documentPageTwos = reads.filter((read) =>
-    read.table === "job_documents" && read.ranges.some((range) => range.from === 1000)
+    read.table === "job_documents" &&
+    read.ranges.some((range) => range.from === 1000)
   );
   assert(
     documentPageTwos.length >= 2,
@@ -704,7 +782,12 @@ Deno.test("2.1 makesafeAudit merges a second jobs page beyond the old 500-row ca
   assertEquals(audit.jobs.length, count);
   assertEquals(audit.jobs.every((row: any) => row.substatus != null), true);
   for (const auditRow of audit.jobs) {
-    assertVolumeRowMatchesSeed(auditRow, auditRow.job_id, expectations, "audit");
+    assertVolumeRowMatchesSeed(
+      auditRow,
+      auditRow.job_id,
+      expectations,
+      "audit",
+    );
   }
   assertVolumeFixtureVaries(audit.jobs);
   assert(
@@ -741,7 +824,10 @@ const PAGE_UNIQUE_KEY: Record<string, string> = {
   makesafe_intake_drafts: "id",
 };
 
-function assertPaginatedReadsAreTotallyOrdered(reads: ReadCall[], label: string) {
+function assertPaginatedReadsAreTotallyOrdered(
+  reads: ReadCall[],
+  label: string,
+) {
   const paginated = reads.filter((r) => r.paginated);
   assert(paginated.length > 0, `${label} must issue paginated reads`);
   for (const read of paginated) {
@@ -799,9 +885,15 @@ Deno.test("2.1 every paginated makesafe_audit read ends on a unique page tie-bre
     computed_at: NOW,
   }];
 
-  await _makesafeAuditForTest(makeQueryClient(seed, { reads }), new URLSearchParams());
+  await _makesafeAuditForTest(
+    makeQueryClient(seed, { reads }),
+    new URLSearchParams(),
+  );
 
-  const paginated = assertPaginatedReadsAreTotallyOrdered(reads, "makesafe_audit");
+  const paginated = assertPaginatedReadsAreTotallyOrdered(
+    reads,
+    "makesafe_audit",
+  );
   // Coverage: the audit's required joins must all have been issued as paginated
   // reads, so the guard above is actually asserting something for each of them.
   const paginatedTables = new Set(paginated.map((r) => r.table));
@@ -818,10 +910,15 @@ Deno.test("2.1 every paginated makesafe_audit read ends on a unique page tie-bre
       "makesafe_card_story",
     ]
   ) {
-    assert(paginatedTables.has(table), `makesafe_audit must paginate its ${table} read`);
+    assert(
+      paginatedTables.has(table),
+      `makesafe_audit must paginate its ${table} read`,
+    );
   }
   const keysFor = (table: string) =>
-    paginated.filter((r) => r.table === table).flatMap((r) => r.orders.map((o) => o.column));
+    paginated.filter((r) => r.table === table).flatMap((r) =>
+      r.orders.map((o) => o.column)
+    );
   // The two job-keyed tables carry no `id` column — ordering by it would 400.
   assertEquals(keysFor("makesafe_job_details").includes("id"), false);
   assertEquals(keysFor("makesafe_card_story").includes("id"), false);
@@ -854,7 +951,10 @@ Deno.test("2.1 every paginated makesafe board read ends on a unique page tie-bre
     new URLSearchParams("history=all"),
   );
 
-  const paginated = assertPaginatedReadsAreTotallyOrdered(reads, "makesafe board");
+  const paginated = assertPaginatedReadsAreTotallyOrdered(
+    reads,
+    "makesafe board",
+  );
   const jobsReads = paginated.filter((r) => r.table === "jobs");
   // Active board page + cancelled-column page, both newest-first with the PK only
   // breaking ties (the board renders in this order).
@@ -881,7 +981,9 @@ Deno.test("2.1 the allocated-only trade scope read paginates on a unique page ti
   // 1500 rows > the 1000-row page cap, and every job carries two assignment rows
   // so job_id is genuinely tied across the page boundary.
   for (let i = 0; i < 1500; i++) {
-    const jobId = `00000000-0000-4000-8000-${String(Math.floor(i / 2)).padStart(12, "0")}`;
+    const jobId = `00000000-0000-4000-8000-${
+      String(Math.floor(i / 2)).padStart(12, "0")
+    }`;
     expectedJobIds.add(jobId);
     assignments.push({
       id: `assignment-${String(i).padStart(6, "0")}`,
@@ -896,12 +998,24 @@ Deno.test("2.1 the allocated-only trade scope read paginates on a unique page ti
     "trade-1",
   );
 
-  assertEquals(jobIds.length, expectedJobIds.size, "every assigned make-safe job id survives");
+  assertEquals(
+    jobIds.length,
+    expectedJobIds.size,
+    "every assigned make-safe job id survives",
+  );
   assertEquals(jobIds.slice().sort(), Array.from(expectedJobIds).sort());
   assertPaginatedReadsAreTotallyOrdered(reads, "makesafe trade scope");
-  const scopeReads = reads.filter((r) => r.table === "job_assignments" && r.paginated);
-  assert(scopeReads.length > 1, "the 1500-row fixture must span more than one page");
-  assertEquals(scopeReads.map((r) => r.orders.map((o) => o.column))[0], ["job_id", "id"]);
+  const scopeReads = reads.filter((r) =>
+    r.table === "job_assignments" && r.paginated
+  );
+  assert(
+    scopeReads.length > 1,
+    "the 1500-row fixture must span more than one page",
+  );
+  assertEquals(scopeReads.map((r) => r.orders.map((o) => o.column))[0], [
+    "job_id",
+    "id",
+  ]);
 });
 
 Deno.test("2.1 makesafeAudit rejects a required join query error instead of returning partial rows", async () => {
@@ -1012,7 +1126,9 @@ Deno.test("2.1 makesafeAudit returns compact jobs[] with raw substatus, doc bool
 // Mirrabooka, SWMS-26584 AJBR-67713 Ferndale are real jobs in this exact state.)
 Deno.test("2.1 has_report_record is TRUE for a typed makesafe_report doc with no job_service_reports row", async () => {
   const client = makeQueryClient({
-    jobs: [jobRow({ id: "j-rep", job_number: "SWMS-26582", status: "complete" })],
+    jobs: [
+      jobRow({ id: "j-rep", job_number: "SWMS-26582", status: "complete" }),
+    ],
     makesafe_job_details: [
       {
         job_id: "j-rep",
@@ -1043,13 +1159,19 @@ Deno.test("2.1 has_report_record is TRUE for a typed makesafe_report doc with no
 
 Deno.test("2.1 has_report_record stays FALSE with neither a report row nor a makesafe_report doc", async () => {
   const client = makeQueryClient({
-    jobs: [jobRow({ id: "j-none", job_number: "SWMS-27000", status: "complete" })],
+    jobs: [
+      jobRow({ id: "j-none", job_number: "SWMS-27000", status: "complete" }),
+    ],
     makesafe_job_details: [
       { job_id: "j-none", external_ref: "MLB-27000", substatus: "complete" },
     ],
     // Only a work-order doc and an unrelated invoice doc — neither is a report.
     job_documents: [
-      { job_id: "j-none", type: "work_order", file_name: "Work Order SWMS-27000.pdf" },
+      {
+        job_id: "j-none",
+        type: "work_order",
+        file_name: "Work Order SWMS-27000.pdf",
+      },
       { job_id: "j-none", type: "invoice", file_name: "INV-9999 invoice.pdf" },
     ],
     job_service_reports: [],
@@ -1134,8 +1256,18 @@ for (
         jobRow({ id: "jB", job_number: "SWMS-90002", status: "complete" }),
       ],
       makesafe_job_details: [
-        { job_id: "jA", external_ref: c.ref, requesting_company_slug: "mlb", substatus: "complete" },
-        { job_id: "jB", external_ref: c.ref, requesting_company_slug: "mlb", substatus: "waiting_on_trade_report" },
+        {
+          job_id: "jA",
+          external_ref: c.ref,
+          requesting_company_slug: "mlb",
+          substatus: "complete",
+        },
+        {
+          job_id: "jB",
+          external_ref: c.ref,
+          requesting_company_slug: "mlb",
+          substatus: "waiting_on_trade_report",
+        },
       ],
       job_documents: [],
       job_service_reports: [],
@@ -1189,8 +1321,18 @@ Deno.test("W2-D MLB-25911: substring-ref invoice does NOT bleed onto the uninvoi
       jobRow({ id: "jB", job_number: "SWMS-91002", status: "complete" }),
     ],
     makesafe_job_details: [
-      { job_id: "jA", external_ref: "MLB-25911", requesting_company_slug: "mlb", substatus: "complete" },
-      { job_id: "jB", external_ref: "MLB-25911", requesting_company_slug: "mlb", substatus: "waiting_on_trade_report" },
+      {
+        job_id: "jA",
+        external_ref: "MLB-25911",
+        requesting_company_slug: "mlb",
+        substatus: "complete",
+      },
+      {
+        job_id: "jB",
+        external_ref: "MLB-25911",
+        requesting_company_slug: "mlb",
+        substatus: "waiting_on_trade_report",
+      },
     ],
     job_documents: [],
     job_service_reports: [],
@@ -1233,14 +1375,38 @@ Deno.test("W2-D two invoiced siblings: each owns only its own invoice, no cross-
       jobRow({ id: "jB", job_number: "SWMS-92002", status: "invoiced" }),
     ],
     makesafe_job_details: [
-      { job_id: "jA", external_ref: "MLB-26999", requesting_company_slug: "mlb", substatus: "complete" },
-      { job_id: "jB", external_ref: "MLB-26999", requesting_company_slug: "mlb", substatus: "complete" },
+      {
+        job_id: "jA",
+        external_ref: "MLB-26999",
+        requesting_company_slug: "mlb",
+        substatus: "complete",
+      },
+      {
+        job_id: "jB",
+        external_ref: "MLB-26999",
+        requesting_company_slug: "mlb",
+        substatus: "complete",
+      },
     ],
     job_documents: [],
     job_service_reports: [],
     xero_invoices: [
-      { job_id: "jA", status: "AUTHORISED", invoice_number: "INV-0900", reference: "MLB-26999", invoice_type: "ACCREC", invoice_date: "2026-06-21" },
-      { job_id: "jB", status: "PAID", invoice_number: "INV-0901", reference: "MLB-26999", invoice_type: "ACCREC", invoice_date: "2026-06-22" },
+      {
+        job_id: "jA",
+        status: "AUTHORISED",
+        invoice_number: "INV-0900",
+        reference: "MLB-26999",
+        invoice_type: "ACCREC",
+        invoice_date: "2026-06-21",
+      },
+      {
+        job_id: "jB",
+        status: "PAID",
+        invoice_number: "INV-0901",
+        reference: "MLB-26999",
+        invoice_type: "ACCREC",
+        invoice_date: "2026-06-22",
+      },
     ],
     makesafe_intake_drafts: [],
   });
@@ -1263,4 +1429,378 @@ Deno.test("W2-D two invoiced siblings: each owns only its own invoice, no cross-
   assertEquals(a.sibling_invoices[0].invoice_number, "INV-0901");
   assertEquals(b.sibling_invoices.length, 1);
   assertEquals(b.sibling_invoices[0].invoice_number, "INV-0900");
+});
+
+// ════════════════════════════════════════════════════════════
+// Residual truth (post-PR #382) — cycle-aware report + join matrix
+// ════════════════════════════════════════════════════════════
+// A reattendance card's current cycle must not inherit a prior visit's service
+// report (or the paid-filed pack_effectively_sent path that ORs report presence).
+// Legacy cards with no reattend boundary keep any-cycle report behaviour.
+
+Deno.test("2.1 reattend cycle: prior-cycle service report does NOT set has_report_record", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({
+      id: "j-reattend",
+      job_number: "SWMS-28001",
+      status: "pending",
+      completed_at: null,
+    })],
+    makesafe_job_details: [{
+      job_id: "j-reattend",
+      external_ref: "AJBR-68001",
+      substatus: "waiting_on_trade_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [],
+    job_service_reports: [{
+      id: "rep-c1",
+      job_id: "j-reattend",
+      status: "submitted",
+      cycle_number: 1,
+    }],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    job_events: [],
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_record, false);
+  assertEquals(j.pack_effectively_sent, false);
+});
+
+Deno.test("2.1 reattend cycle: current-cycle service report DOES set has_report_record", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({
+      id: "j-reattend-cur",
+      job_number: "SWMS-28002",
+      status: "pending",
+      completed_at: null,
+    })],
+    makesafe_job_details: [{
+      job_id: "j-reattend-cur",
+      external_ref: "AJBR-68002",
+      substatus: "admin_to_send_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [],
+    // Prior + current: only current should satisfy readiness.
+    job_service_reports: [
+      {
+        id: "rep-old",
+        job_id: "j-reattend-cur",
+        status: "submitted",
+        cycle_number: 1,
+      },
+      {
+        id: "rep-new",
+        job_id: "j-reattend-cur",
+        status: "submitted",
+        cycle_number: 2,
+      },
+    ],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    job_events: [],
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].has_report_record, true);
+});
+
+Deno.test("2.1 reattend cycle: prior-cycle report + PAID cannot mint pack_effectively_sent", async () => {
+  // Old visit was paid+filed; current reattend still waits on the trade report.
+  // Without a current-cycle report (and without a MAKESAFE_PACK_SENT marker), the
+  // paid-filed path must not claim effectively-sent from the old report alone.
+  const client = makeQueryClient({
+    jobs: [jobRow({
+      id: "j-reattend-paid",
+      job_number: "SWMS-28003",
+      status: "invoiced",
+      completed_at: null,
+    })],
+    makesafe_job_details: [{
+      job_id: "j-reattend-paid",
+      external_ref: "AJBR-68003",
+      substatus: "waiting_on_trade_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [
+      {
+        job_id: "j-reattend-paid",
+        type: "invoice",
+        file_name: "INV-0999 invoice.pdf",
+      },
+    ],
+    job_service_reports: [{
+      id: "rep-old-paid",
+      job_id: "j-reattend-paid",
+      status: "submitted",
+      cycle_number: 1,
+    }],
+    xero_invoices: [{
+      job_id: "j-reattend-paid",
+      status: "PAID",
+      invoice_number: "INV-0999",
+      reference: "AJBR-68003",
+      invoice_type: "ACCREC",
+      invoice_date: RECENT_DATE,
+    }],
+    makesafe_intake_drafts: [],
+    job_events: [], // no pack_sent marker
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_record, false);
+  assertEquals(j.pack_sent, false);
+  assertEquals(j.pack_effectively_sent, false);
+});
+
+Deno.test("2.1 reattend cycle: typed prior report and pack marker stay legacy-only", async () => {
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({
+        id: "j-reattend-stale",
+        job_number: "SWMS-28005",
+        status: "complete",
+      }),
+    ],
+    makesafe_job_details: [{
+      job_id: "j-reattend-stale",
+      external_ref: "AJBR-68005",
+      substatus: "waiting_on_trade_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [{
+      job_id: "j-reattend-stale",
+      type: "makesafe_report",
+      file_name: "old-report.pdf",
+    }],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    job_events: [packSentNote("j-reattend-stale")],
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_doc, false);
+  assertEquals(j.has_report_record, false);
+  assertEquals(j.pack_sent, false);
+  assertEquals(j.pack_effectively_sent, false);
+});
+
+Deno.test("2.1 legacy (no reattend boundary): any-cycle report still sets has_report_record", async () => {
+  // Explicit fallback: reattend_count 0 / absent keeps first-match any-cycle
+  // behaviour so single-visit and reopen-only cards are unchanged.
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({ id: "j-legacy", job_number: "SWMS-28004", status: "complete" }),
+    ],
+    makesafe_job_details: [{
+      job_id: "j-legacy",
+      external_ref: "AJBR-68004",
+      substatus: "complete",
+      reattend_count: 0,
+      cycle_number: 1,
+    }],
+    job_documents: [],
+    job_service_reports: [{
+      id: "rep-leg",
+      job_id: "j-legacy",
+      status: "submitted",
+      cycle_number: 1,
+    }],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].has_report_record, true);
+});
+
+Deno.test("2.1 pipeline multi-row: verified_sent is not demoted by later not_sent (id order)", async () => {
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({ id: "j-pipe", job_number: "SWMS-28010", status: "complete" }),
+    ],
+    makesafe_job_details: [{
+      job_id: "j-pipe",
+      external_ref: "AJBR-68010",
+      substatus: "complete",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    // Ascending id order walks verified_sent then not_sent — last-write used to
+    // demote to not_sent.
+    pipeline_items: [
+      { id: "pi-1", target_job: "j-pipe", sent_status: "verified_sent" },
+      { id: "pi-2", target_job: "j-pipe", sent_status: "not_sent" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, "verified_sent");
+});
+
+Deno.test("2.1 pipeline multi-row: reversed seed order still yields verified_sent", async () => {
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({ id: "j-pipe2", job_number: "SWMS-28011", status: "complete" }),
+    ],
+    makesafe_job_details: [{
+      job_id: "j-pipe2",
+      external_ref: "AJBR-68011",
+      substatus: "complete",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    // Higher id is verified_sent; lower id is not_sent — order independence.
+    pipeline_items: [
+      { id: "pi-z", target_job: "j-pipe2", sent_status: "not_sent" },
+      { id: "pi-a", target_job: "j-pipe2", sent_status: "verified_sent" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, "verified_sent");
+});
+
+Deno.test("2.1 pipeline multi-row: duplicate verified_sent rows stay verified_sent", async () => {
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({ id: "j-pipe3", job_number: "SWMS-28012", status: "complete" }),
+    ],
+    makesafe_job_details: [{
+      job_id: "j-pipe3",
+      external_ref: "AJBR-68012",
+      substatus: "complete",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    pipeline_items: [
+      { id: "pi-d1", target_job: "j-pipe3", sent_status: "verified_sent" },
+      { id: "pi-d2", target_job: "j-pipe3", sent_status: "verified_sent" },
+      { id: "pi-d3", target_job: "j-pipe3", sent_status: "needs_review" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, "verified_sent");
+});
+
+Deno.test("2.1 pipeline multi-row: empty sent_status does not invent a sent verdict", async () => {
+  const client = makeQueryClient({
+    jobs: [
+      jobRow({ id: "j-pipe4", job_number: "SWMS-28013", status: "pending" }),
+    ],
+    makesafe_job_details: [{
+      job_id: "j-pipe4",
+      external_ref: "AJBR-68013",
+      substatus: "waiting_on_trade_report",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    // Row exists but carries no status — mere existence must not claim sent.
+    pipeline_items: [
+      { id: "pi-empty", target_job: "j-pipe4", sent_status: null },
+      { id: "pi-blank", target_job: "j-pipe4", sent_status: "" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, null);
+});
+
+// Required-join matrix: every join the production contract treats as required must
+// fail the WHOLE makesafe_audit request when unavailable — never a plausible
+// partial board. recheck_queue_depth is the only intentional optional join and is
+// proven soft-null separately below.
+const REQUIRED_IN_JOIN_TABLES: Array<
+  { table: string; messageIncludes: string }
+> = [
+  {
+    table: "makesafe_job_details",
+    messageIncludes: "makesafe_job_details (job_id join) failed",
+  },
+  {
+    table: "job_documents",
+    messageIncludes: "job_documents (job_id join) failed",
+  },
+  {
+    table: "job_service_reports",
+    messageIncludes: "job_service_reports (job_id join) failed",
+  },
+  { table: "job_events", messageIncludes: "job_events (job_id join) failed" },
+  {
+    table: "pipeline_items",
+    messageIncludes: "pipeline_items (sent_status by job) read failed",
+  },
+  {
+    table: "makesafe_card_story",
+    messageIncludes: "makesafe_card_story (job_id join) failed",
+  },
+];
+const REQUIRED_READ_TABLES: Array<{ table: string; messageIncludes: string }> =
+  [
+    { table: "jobs", messageIncludes: "forced jobs read failure" },
+    {
+      table: "xero_invoices",
+      messageIncludes: "forced xero_invoices read failure",
+    },
+    {
+      table: "makesafe_intake_drafts",
+      messageIncludes: "forced makesafe_intake_drafts read failure",
+    },
+  ];
+
+for (const { table, messageIncludes } of REQUIRED_IN_JOIN_TABLES) {
+  Deno.test(`2.1 required-join matrix: ${table} .in() failure rejects whole audit (no partial board)`, async () => {
+    const client = makeQueryClient(volumeSeed(3), {
+      forceInErrorTables: new Set([table]),
+    });
+    await assertRejects(
+      () => _makesafeAuditForTest(client, new URLSearchParams()),
+      Error,
+      messageIncludes,
+    );
+  });
+}
+
+for (const { table, messageIncludes } of REQUIRED_READ_TABLES) {
+  Deno.test(`2.1 required-join matrix: ${table} read failure rejects whole audit (no partial board)`, async () => {
+    const client = makeQueryClient(volumeSeed(3), {
+      forceReadErrorTables: new Set([table]),
+    });
+    await assertRejects(
+      () => _makesafeAuditForTest(client, new URLSearchParams()),
+      Error,
+      messageIncludes,
+    );
+  });
+}
+
+Deno.test("2.1 optional-join: recheck_queue_depth head failure soft-nulls depth, still returns jobs", async () => {
+  // Contract distinction: recheck_queue_depth is auxiliary COUNT truth, not a
+  // required card join. Failure must NOT reject the board; depth is null (unknown),
+  // never the truthful numeric 0.
+  const client = makeQueryClient(volumeSeed(3), {
+    forceHeadErrorTables: new Set(["makesafe_job_details"]),
+  });
+  const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(audit.jobs.length, 3);
+  assertEquals(audit.recheck_queue_depth, null);
 });
