@@ -21,6 +21,7 @@ import {
   _buildPackSentMapForTest,
   _createMakesafeDraftInvoiceForTest,
   _fetchAllByJobIdChunkedForTest,
+  _makesafeBoardTradeRouteForTest,
   _makesafeDraftIdempotencyKey,
   _makesafeNormRefForTest,
   _makesafePipelineForTest,
@@ -38,6 +39,7 @@ function makePagingClient(rowsByTable: Record<string, any[]>) {
   function builder(table: string) {
     let rows = (rowsByTable[table] || []).slice();
     const preds: Array<(r: any) => boolean> = [];
+    const orders: Array<{ column: string; ascending: boolean }> = [];
     const b: any = {
       select: () => b,
       eq: (col: string, val: any) => {
@@ -54,9 +56,19 @@ function makePagingClient(rowsByTable: Record<string, any[]>) {
         preds.push((r) => vals.includes(r?.[col]));
         return b;
       },
-      order: () => b,
+      order: (column: string, options: { ascending?: boolean } = {}) => {
+        orders.push({ column, ascending: options.ascending !== false });
+        return b;
+      },
       range: async (from: number, to: number) => {
-        const filtered = rows.filter((r) => preds.every((p) => p(r)));
+        const filtered = rows.filter((r) => preds.every((p) => p(r))).sort((a, z) => {
+          for (const order of orders) {
+            if (a?.[order.column] === z?.[order.column]) continue;
+            const direction = a?.[order.column] < z?.[order.column] ? -1 : 1;
+            return order.ascending ? direction : -direction;
+          }
+          return 0;
+        });
         // PostgREST .range is inclusive of `to`; cap page size at 1000 like prod.
         const data = filtered.slice(from, to + 1);
         return { data, error: null };
@@ -124,6 +136,26 @@ Deno.test("T1: _fetchAllByJobIdChunked returns ALL rows across pages (no truncat
     out.some((r: any) => r.n === 3209),
     "the final row past the cap is present",
   );
+});
+
+Deno.test("F6: _fetchAllByJobIdChunked keeps exact cardinality across tied primary sort pages", async () => {
+  const JOB = "job-tied";
+  const rows = Array.from({ length: 2305 }, (_, i) => ({
+    id: `event-${String(i).padStart(4, "0")}`,
+    job_id: JOB,
+    event_type: "note",
+    created_at: "2026-07-27T00:00:00.000Z",
+  }));
+  const out = await _fetchAllByJobIdChunkedForTest(
+    makePagingClient({ job_events: rows }),
+    "job_events",
+    "id, job_id, event_type, created_at",
+    [JOB],
+    (q: any) => q.eq("event_type", "note").order("created_at", { ascending: false }),
+  );
+  assertEquals(out.length, rows.length, "tied primary sort must not lose rows");
+  assertEquals(new Set(out.map((row: any) => row.id)).size, rows.length, "no duplicate rows");
+  assertEquals(out.map((row: any) => row.id), rows.map((row) => row.id), "stable id precedence");
 });
 
 Deno.test("T1: _fetchAllByJobIdChunked chunks the id list (>200 ids) and still returns all matching rows", async () => {
@@ -557,6 +589,7 @@ Deno.test("F7: >163 allocated job ids chunk under IN_URL_BUDGET and return exact
   }> = [];
   const client = makePipelineClient(
     {
+      users: [{ id: "trade-f7", name: "F7 Trade", role: "crew", managed_verticals: [] }],
       jobs,
       makesafe_job_details: details,
       xero_invoices: [],
@@ -564,18 +597,52 @@ Deno.test("F7: >163 allocated job ids chunk under IN_URL_BUDGET and return exact
       job_documents: [],
       makesafe_report_packs: [],
       makesafe_report_pack_cycles: [],
-      job_assignments: [],
+      job_assignments: [
+        ...assignedIds.map((id) => ({
+          id: `assignment-${id}`,
+          job_id: id,
+          user_id: "trade-f7",
+          status: "scheduled",
+          scheduled_date: "2026-07-27",
+          attendance_cycle_id: "cycle-f7",
+          cycle_attribution: "bound",
+          "jobs.type": "makesafe",
+        })),
+        {
+          id: "assignment-wrong-user",
+          job_id: UNASSIGNED,
+          user_id: "other-trade",
+          status: "scheduled",
+          "jobs.type": "makesafe",
+        },
+        {
+          id: "assignment-wrong-type",
+          job_id: PATIO,
+          user_id: "trade-f7",
+          status: "scheduled",
+          "jobs.type": "patio",
+        },
+      ],
       job_events: [],
     },
     { maxInEncodedBytes: IN_URL_BUDGET, inCalls },
   );
 
-  // Ordinary trade: restrict to assigned make-safe ids only (as loadMakesafeAssignedJobIds returns).
-  const res: any = await _makesafePipelineForTest(
+  // Ordinary trade: discover ownership through the real profile + assignment
+  // route; do not pass a pre-authorized id list around the loader under test.
+  const response = await _makesafeBoardTradeRouteForTest(
     client,
-    new URLSearchParams("history=all"),
-    assignedIds,
+    "jwt",
+    {
+      id: "trade-f7",
+      email: "trade-f7@example.invalid",
+      orgId: "fixture-org",
+      role: "crew",
+      managedVerticals: [],
+    },
   );
+  const res: any = JSON.parse(await response.text());
+  assertEquals(response.status, 200);
 
   const allCards = Object.values(res.columns).flat() as any[];
   const returnedIds = allCards.map((c) => c.id);
@@ -600,24 +667,15 @@ Deno.test("F7: >163 allocated job ids chunk under IN_URL_BUDGET and return exact
   );
   assert(!returnedIds.includes(PATIO), "patio job must not leak");
   assert(!returnedIds.includes(FENCE), "fencing job must not leak");
-  // Stable Board ordering inside the stage column: jobs are walked in
-  // created_at desc, id desc after multi-chunk merge (all unassigned-contact
-  // fixtures land in `new`).
-  const newCol = res.columns.new as any[];
-  assertEquals(newCol.length, ASSIGNED_N, "all fixtures land in new");
-  for (let i = 1; i < newCol.length; i++) {
-    const prev = newCol[i - 1];
-    const cur = newCol[i];
-    const cmpCreated = String(cur.created_at || "").localeCompare(
-      String(prev.created_at || ""),
-    );
-    assert(
-      cmpCreated < 0 ||
-        (cmpCreated === 0 &&
-          String(cur.id || "").localeCompare(String(prev.id || "")) <= 0),
-      "Board order must stay created_at desc, id desc across chunks",
-    );
-  }
+  // Stable Board ordering: jobs are walked in created_at desc, id desc after
+  // multi-chunk merge.
+  assertEquals(res.rows.length, ASSIGNED_N, "all assigned cards are projected");
+  const orderedCards = res.rows as any[];
+  assertEquals(
+    orderedCards.map((card) => card.id),
+    assignedIds,
+    "Board order must stay created_at desc, id desc across chunks",
+  );
 
   // Every issued jobs.id .in() stayed under the URL budget (multi-chunk).
   const jobsIdIns = inCalls.filter((c) =>
