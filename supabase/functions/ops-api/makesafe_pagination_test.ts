@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
+
 // T1 (money-safety) — pagination of the make-safe pack-sent map.
 //
 // THE BUG THIS GUARDS: buildPackSentMap did ONE unpaginated .in() read over
@@ -37,7 +39,7 @@ import {
 // applies .in()/.eq() predicates the way the real client does.
 function makePagingClient(rowsByTable: Record<string, any[]>) {
   function builder(table: string) {
-    let rows = (rowsByTable[table] || []).slice();
+    const rows = (rowsByTable[table] || []).slice();
     const preds: Array<(r: any) => boolean> = [];
     const orders: Array<{ column: string; ascending: boolean }> = [];
     const b: any = {
@@ -61,14 +63,16 @@ function makePagingClient(rowsByTable: Record<string, any[]>) {
         return b;
       },
       range: async (from: number, to: number) => {
-        const filtered = rows.filter((r) => preds.every((p) => p(r))).sort((a, z) => {
-          for (const order of orders) {
-            if (a?.[order.column] === z?.[order.column]) continue;
-            const direction = a?.[order.column] < z?.[order.column] ? -1 : 1;
-            return order.ascending ? direction : -direction;
-          }
-          return 0;
-        });
+        const filtered = rows.filter((r) => preds.every((p) => p(r))).sort(
+          (a, z) => {
+            for (const order of orders) {
+              if (a?.[order.column] === z?.[order.column]) continue;
+              const direction = a?.[order.column] < z?.[order.column] ? -1 : 1;
+              return order.ascending ? direction : -direction;
+            }
+            return 0;
+          },
+        );
         // PostgREST .range is inclusive of `to`; cap page size at 1000 like prod.
         const data = filtered.slice(from, to + 1);
         return { data, error: null };
@@ -151,11 +155,20 @@ Deno.test("F6: _fetchAllByJobIdChunked keeps exact cardinality across tied prima
     "job_events",
     "id, job_id, event_type, created_at",
     [JOB],
-    (q: any) => q.eq("event_type", "note").order("created_at", { ascending: false }),
+    (q: any) =>
+      q.eq("event_type", "note").order("created_at", { ascending: false }),
   );
   assertEquals(out.length, rows.length, "tied primary sort must not lose rows");
-  assertEquals(new Set(out.map((row: any) => row.id)).size, rows.length, "no duplicate rows");
-  assertEquals(out.map((row: any) => row.id), rows.map((row) => row.id), "stable id precedence");
+  assertEquals(
+    new Set(out.map((row: any) => row.id)).size,
+    rows.length,
+    "no duplicate rows",
+  );
+  assertEquals(
+    out.map((row: any) => row.id),
+    rows.map((row) => row.id),
+    "stable id precedence",
+  );
 });
 
 Deno.test("T1: _fetchAllByJobIdChunked chunks the id list (>200 ids) and still returns all matching rows", async () => {
@@ -589,7 +602,12 @@ Deno.test("F7: >163 allocated job ids chunk under IN_URL_BUDGET and return exact
   }> = [];
   const client = makePipelineClient(
     {
-      users: [{ id: "trade-f7", name: "F7 Trade", role: "crew", managed_verticals: [] }],
+      users: [{
+        id: "trade-f7",
+        name: "F7 Trade",
+        role: "crew",
+        managed_verticals: [],
+      }],
       jobs,
       makesafe_job_details: details,
       xero_invoices: [],
