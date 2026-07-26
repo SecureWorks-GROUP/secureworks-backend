@@ -11717,10 +11717,10 @@ async function buildPackSentMap(client: any, jobIds: string[]): Promise<Record<s
     'job_events',
     'job_id, event_type, detail_json',
     jobIds,
-    // STABLE order so .range() pagination cannot skip/duplicate a row under
-    // concurrent inserts — a skipped row could drop a MAKESAFE_PACK_SENT marker
-    // and re-surface a sent job. id is the monotonic PK. (Adversarial review #5.)
-    (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
+    // The shared reader owns the stable `id` tie-breaker that keeps .range()
+    // pagination from skipping a row (which could drop a MAKESAFE_PACK_SENT
+    // marker and re-surface a sent job). (Adversarial review #5.)
+    (q) => q.eq('event_type', 'note'),
   )
   for (const ev of (events || [])) {
     if (ev?.job_id && _sendPackIsPackSentTriageEvent(ev)) map[ev.job_id] = true
@@ -12426,6 +12426,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if (restrict) activeQuery = activeQuery.in('id', restrict)
       const { data, error } = await activeQuery
         .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
         .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
       if (error) throw error
       const batch = data || []
@@ -12567,6 +12568,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
       const { data, error } = await cancelledQuery
         .order('updated_at', { ascending: false })
+        .order('id', { ascending: false })
         .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
       if (error) throw error
       const batch = data || []
@@ -12677,21 +12679,21 @@ async function loadCanonicalMakesafeBoard(
       'job_events',
       'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
       jobIds,
-      (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
+      (q) => q.eq('event_type', 'note'),
     ),
     _fetchAllByJobIdChunked(
       client,
       'job_media',
       'id, job_id, type, phase',
       jobIds,
-      (q) => q.eq('type', 'photo').eq('phase', 'completion').order('id', { ascending: true }),
+      (q) => q.eq('type', 'photo').eq('phase', 'completion'),
     ),
     _fetchAllByJobIdChunked(
       client,
       'job_contacts',
       'job_id, client_name, client_phone, is_primary, contact_label, status',
       jobIds,
-      (q) => q.eq('status', 'active').order('id', { ascending: true }),
+      (q) => q.eq('status', 'active'),
     ),
   ])
 
@@ -12723,7 +12725,7 @@ async function loadCanonicalMakesafeBoard(
       'makesafe_intake_cases',
       'id, job_id, lineage_id, parent_case_id, parent_relation, cycle, updated_at',
       jobIds,
-      (q) => q.order('cycle', { ascending: false }).order('id', { ascending: true }),
+      (q) => q.order('cycle', { ascending: false }),
     )
   } catch (error) {
     console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
@@ -13407,7 +13409,10 @@ async function makesafeStoryRecompute(client: any, opts: StoryRecomputeOpts = {}
   const sentRows = await _fetchAllRows(
     () => client.from('emails')
       .select('post_id, subject, body_preview, body_content, to_recipients, has_attachments, received_at')
-      .eq('mailbox', _ADMIN_SENT_MAILBOX).eq('folder', _SENT_FOLDER).gte('received_at', sentSinceIso),
+      .eq('mailbox', _ADMIN_SENT_MAILBOX).eq('folder', _SENT_FOLDER).gte('received_at', sentSinceIso)
+      // post_id is the emails PK; the paginated read must end on a unique key or
+      // a .range() page pair can drop a Sent row (a real send reads as unsent).
+      .order('post_id', { ascending: true }),
     'story sent-mirror read',
   )
 

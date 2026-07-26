@@ -36,12 +36,15 @@ const RECENT_DATE = RECENT_ISO.slice(0, 10); // YYYY-MM-DD for invoice_date
 // makesafe_intake_drafts: pending vs approved) returns the correct subset —
 // matching real PostgREST behaviour, which makesafeAudit relies on.
 type InCall = { table: string; column: string; values: any[]; encodedBytes: number };
-type OrderCall = { table: string; column: string; ascending: boolean };
+type OrderCall = { column: string; ascending: boolean };
+// One issued read (one builder). `paginated` records whether the read terminated
+// on .range() — i.e. whether page stability depends on its ORDER BY being total.
+type ReadCall = { table: string; orders: OrderCall[]; paginated: boolean };
 type QueryClientOptions = {
   maxInEncodedBytes?: number;
   forceInErrorTables?: Set<string>;
   inCalls?: InCall[];
-  orderCalls?: OrderCall[];
+  reads?: ReadCall[];
 };
 
 function encodedInBytes(values: any[]): number {
@@ -57,6 +60,10 @@ function makeQueryClient(
     const preds: Array<(r: any) => boolean> = [];
     let rowLimit: number | null = null;
     let queryError: { message: string } | null = null;
+    // Recorded for EVERY read, ordered or not, so a paginated read that emits no
+    // ORDER BY at all is visible to the page-stability guard below.
+    const read: ReadCall = { table, orders: [], paginated: false };
+    options.reads?.push(read);
     const filteredRows = () => {
       const filtered = rows.filter((r) => preds.every((p) => p(r)));
       return rowLimit == null ? filtered : filtered.slice(0, rowLimit);
@@ -92,10 +99,10 @@ function makeQueryClient(
         preds.push((r) => r?.[col] >= val);
         return b;
       },
-      // Records the ORDER BY key chain per table. .range() is LIMIT/OFFSET, so a
+      // Records this read's ORDER BY key chain. .range() is LIMIT/OFFSET, so a
       // paginated read is only page-stable when its last order key is unique.
       order: (col: string, opts?: { ascending?: boolean }) => {
-        options.orderCalls?.push({ table, column: col, ascending: opts?.ascending !== false });
+        read.orders.push({ column: col, ascending: opts?.ascending !== false });
         return b;
       },
       limit: (count: number) => {
@@ -105,6 +112,7 @@ function makeQueryClient(
       // Paginated read terminal (fetchAllRows): applies the recorded predicates
       // then returns rows in [from, to] inclusive (real PostgREST .range()).
       range: async (from: number, to: number) => {
+        read.paginated = true;
         if (queryError) return { data: null, error: queryError };
         return { data: filteredRows().slice(from, to + 1), error: null };
       },
@@ -533,19 +541,47 @@ Deno.test("2.1 makesafeAudit paginates above the legacy 500-job cap", async () =
 // invoice reads as uninvoiced. Every paginated audit read must therefore END on a
 // unique key: `id`, or `job_id` for the two tables keyed BY the job id (they have
 // no `id` column at all, so ordering by `id` there would be a PostgREST 400).
-const AUDIT_PAGE_TIE_BREAKER: Record<string, string> = {
+//
+// This is a per-COLUMN declaration, not a per-table allowlist: the guard walks
+// every read the stub actually observed and fails on any paginated read that ends
+// on something else — including one that emits NO ORDER BY at all, and including a
+// table nobody has declared a unique key for yet.
+const PAGE_UNIQUE_KEY: Record<string, string> = {
   jobs: "id",
   makesafe_job_details: "job_id",
   makesafe_card_story: "job_id",
   job_documents: "id",
   job_service_reports: "id",
   job_events: "id",
+  job_assignments: "id",
+  makesafe_report_packs: "id",
   xero_invoices: "id",
+  pipeline_items: "id",
   makesafe_intake_drafts: "id",
 };
 
+function assertPaginatedReadsAreTotallyOrdered(reads: ReadCall[], label: string) {
+  const paginated = reads.filter((r) => r.paginated);
+  assert(paginated.length > 0, `${label} must issue paginated reads`);
+  for (const read of paginated) {
+    const uniqueKey = PAGE_UNIQUE_KEY[read.table];
+    assert(
+      uniqueKey !== undefined,
+      `${label}: paginated ${read.table} read declares no unique page key ` +
+        `(add it to PAGE_UNIQUE_KEY)`,
+    );
+    assertEquals(
+      read.orders.at(-1)?.column,
+      uniqueKey,
+      `${label}: paginated ${read.table} read must end its ORDER BY on ${uniqueKey}, ` +
+        `got [${read.orders.map((o) => o.column).join(", ")}]`,
+    );
+  }
+  return paginated;
+}
+
 Deno.test("2.1 every paginated makesafe_audit read ends on a unique page tie-breaker", async () => {
-  const orderCalls: OrderCall[] = [];
+  const reads: ReadCall[] = [];
   const seed = volumeSeed(3);
   const firstJobId = seed.jobs[0].id;
   seed.xero_invoices = [{
@@ -582,15 +618,29 @@ Deno.test("2.1 every paginated makesafe_audit read ends on a unique page tie-bre
     computed_at: NOW,
   }];
 
-  await _makesafeAuditForTest(makeQueryClient(seed, { orderCalls }), new URLSearchParams());
+  await _makesafeAuditForTest(makeQueryClient(seed, { reads }), new URLSearchParams());
 
-  const keysFor = (table: string) =>
-    orderCalls.filter((c) => c.table === table).map((c) => c.column);
-  for (const [table, tieBreaker] of Object.entries(AUDIT_PAGE_TIE_BREAKER)) {
-    const keys = keysFor(table);
-    assert(keys.length > 0, `${table} read must be explicitly ordered`);
-    assertEquals(keys.at(-1), tieBreaker, `${table} must end its ORDER BY on ${tieBreaker}`);
+  const paginated = assertPaginatedReadsAreTotallyOrdered(reads, "makesafe_audit");
+  // Coverage: the audit's required joins must all have been issued as paginated
+  // reads, so the guard above is actually asserting something for each of them.
+  const paginatedTables = new Set(paginated.map((r) => r.table));
+  for (
+    const table of [
+      "jobs",
+      "makesafe_job_details",
+      "job_documents",
+      "job_service_reports",
+      "job_events",
+      "xero_invoices",
+      "pipeline_items",
+      "makesafe_intake_drafts",
+      "makesafe_card_story",
+    ]
+  ) {
+    assert(paginatedTables.has(table), `makesafe_audit must paginate its ${table} read`);
   }
+  const keysFor = (table: string) =>
+    paginated.filter((r) => r.table === table).flatMap((r) => r.orders.map((o) => o.column));
   // The two job-keyed tables carry no `id` column — ordering by it would 400.
   assertEquals(keysFor("makesafe_job_details").includes("id"), false);
   assertEquals(keysFor("makesafe_card_story").includes("id"), false);
@@ -599,8 +649,42 @@ Deno.test("2.1 every paginated makesafe_audit read ends on a unique page tie-bre
   assertEquals(keysFor("jobs"), ["created_at", "id"]);
   assertEquals(keysFor("xero_invoices"), ["invoice_date", "id"]);
   assertEquals(
-    orderCalls.filter((c) => c.table === "xero_invoices").every((c) => c.ascending === false),
+    paginated.filter((r) => r.table === "xero_invoices")
+      .every((r) => r.orders.every((o) => o.ascending === false)),
     true,
+  );
+});
+
+// The fallback board is the surface the audit reconciles against (2.1 above), so
+// its own paginated reads have to be page-stable too: a jobs page pair ordered
+// only by the non-unique created_at / updated_at can drop a card the audit still
+// returns, breaking the reconciliation invariant in production.
+Deno.test("2.1 every paginated makesafe board read ends on a unique page tie-breaker", async () => {
+  const reads: ReadCall[] = [];
+  const seed = volumeSeed(3);
+  seed.jobs.push(jobRow({
+    id: "00000000-0000-4000-8000-0000000000ff",
+    job_number: "SWMS-39999",
+    status: "cancelled",
+  }));
+
+  await _makesafePipelineForTest(
+    makeQueryClient(seed, { reads }),
+    new URLSearchParams("history=all"),
+  );
+
+  const paginated = assertPaginatedReadsAreTotallyOrdered(reads, "makesafe board");
+  const jobsReads = paginated.filter((r) => r.table === "jobs");
+  // Active board page + cancelled-column page, both newest-first with the PK only
+  // breaking ties (the board renders in this order).
+  assertEquals(jobsReads.map((r) => r.orders.map((o) => o.column)), [
+    ["created_at", "id"],
+    ["updated_at", "id"],
+  ]);
+  assertEquals(
+    jobsReads.every((r) => r.orders.every((o) => o.ascending === false)),
+    true,
+    "board jobs pages stay newest-first",
   );
 });
 

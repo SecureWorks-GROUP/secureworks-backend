@@ -665,10 +665,15 @@ export async function buildPipelineSentStatusMap(
 ): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   if (!jobIds.length) return map;
-  // Chunk the job-id .in() list AND paginate each chunk (1000-row cap).
+  // Chunk the job-id .in() list AND paginate each chunk (1000-row cap). .range()
+  // is LIMIT/OFFSET, so the read must end on a unique key (`id`, the PK) or a
+  // chunk spilling past one page could return a row on neither page and a job's
+  // sent verdict would read as absent.
   const data = await fetchAllRowsInChunks<any>(
     jobIds,
-    (ch) => client.from("pipeline_items").select("target_job, sent_status").in("target_job", ch),
+    (ch) =>
+      client.from("pipeline_items").select("target_job, sent_status").in("target_job", ch)
+        .order("id", { ascending: true }),
     "pipeline_items (sent_status by job) read",
   );
   for (const p of (data || [])) {
