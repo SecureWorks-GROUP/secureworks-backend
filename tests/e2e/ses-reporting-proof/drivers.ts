@@ -204,7 +204,7 @@ export class FixtureProofDriver implements ProofDriver {
             accounted: true,
           }
         })
-        return { success: true, outcomes, nothingDisappeared: outcomes.length === fixtures.length, createdArtifacts: this.createdArtifactsSince([]) }
+        return { success: true, outcomes, nothingDisappeared: outcomes.length === fixtures.length, createdArtifacts: [...this.created.values()] }
       }
 
       case 'proof_read_board':
@@ -303,6 +303,7 @@ export class FixtureProofDriver implements ProofDriver {
           success: true,
           messageId: mail.id,
           deliveredTo: CAPTAIN_EMAIL,
+          executedRoute: { to: [CAPTAIN_EMAIL], cc: [], bcc: [] },
           xeroStatus: 'DRAFT',
           operatorBand,
           attachments: ['approved_pack', 'draft_invoice'],
@@ -316,6 +317,7 @@ export class FixtureProofDriver implements ProofDriver {
           delivered: true,
           inbox: CAPTAIN_EMAIL,
           messageId: String(payload.messageId),
+          observedRecipients: { to: [CAPTAIN_EMAIL], cc: [], bcc: [] },
           markerFound: true,
           attachments: ['approved_pack', 'draft_invoice'],
           xeroStatus: 'DRAFT',
@@ -347,10 +349,6 @@ export class FixtureProofDriver implements ProofDriver {
       default:
         throw new Error(`fixture proof driver does not implement ${action}`)
     }
-  }
-
-  private createdArtifactsSince(_ids: string[]): CreatedArtifact[] {
-    return [...this.created.values()]
   }
 }
 

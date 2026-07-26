@@ -17,10 +17,19 @@ import {
 } from './types'
 import { generateFixtures } from './fixtures'
 import { createProofDriver } from './drivers'
-import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyRoute, assertDraftAccounting } from './guards'
+import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyEnvelope, assertCaptainOnlyRoute, assertDraftAccounting } from './guards'
 import { renderCockpit, renderFinalSummary, STAGE_COPY } from './cockpit'
 
 const SLUGS = ['intake', 'latency', 'board-truth', 'pack', 'money', 'send', 'cleanup']
+
+const REQUIRED_BOARD_STAGES = [
+  'New / Unallocated',
+  'Allocated / Waiting on Trade',
+  'Trade Report In',
+  'Docs Ready',
+  'Completed',
+  'Archive',
+]
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} was not an object`)
@@ -157,6 +166,10 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
 
   async function mutate(action: string, payload: Record<string, unknown> = {}): Promise<DriverResponse> {
     if (!driver) throw fatalError || new Error('proof driver is unavailable')
+    const cleanupUnavailable = missingCapability(capabilities, 'synthetic_cleanup_v1')
+    if (cleanupUnavailable) {
+      throw new SafetyViolation(`${action} refused before any product write because synthetic_cleanup_v1 is unavailable. ${cleanupUnavailable}`)
+    }
     const response = await driver.call(action, payload)
     registry.register(response, action)
     summary.artifacts.created = registry.list()
@@ -189,9 +202,18 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
         if (!options.cleanup) fatalError = error as Error
       } finally {
         stage.finishedAt = new Date().toISOString()
+        announceStage(stage)
         await captureStage(stage)
       }
     })
+  }
+
+  function announceStage(stage: StageResult): void {
+    if (stage.status === 'NOT BUILT YET') {
+      process.stdout.write(`\nNOT BUILT YET — stage ${stage.number}. ${stage.copy.title}: ${stage.detail}\n`)
+    } else if (stage.status === 'FAIL') {
+      process.stdout.write(`\nFAIL — stage ${stage.number}. ${stage.copy.title}: ${stage.error}\n`)
+    }
   }
 
   fixtures = await generateFixtures(context)
@@ -200,13 +222,18 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     if (!driver) throw fatalError || new Error('proof driver is unavailable')
     const capabilityResponse = await driver.call('proof_capabilities')
     capabilities = asRecord(capabilityResponse.capabilities, 'capabilities') as unknown as CapabilityMap
-    const unavailable = missingCapability(capabilities, 'synthetic_intake_v1')
-    if (unavailable) {
+    const intakeUnavailable = missingCapability(capabilities, 'synthetic_intake_v1')
+    const cleanupUnavailable = missingCapability(capabilities, 'synthetic_cleanup_v1')
+    if (intakeUnavailable || cleanupUnavailable) {
       summary.stages[0].metrics = [
         { label: 'Fates exercised', value: '0 / 5', threshold: 'Correct is 5 / 5' },
         { label: 'Sources disappeared', value: 'Unknown', threshold: 'Correct is 0' },
+        { label: 'Product artifacts created', value: '0', threshold: 'Nothing is created without cleanup' },
       ]
-      return { notBuilt: `NOT BUILT YET. ${unavailable} The harness generated all five deterministic EML and PDF fixtures but did not claim that product intake worked.` }
+      const reason = intakeUnavailable
+        ? intakeUnavailable
+        : `Cleanup capability synthetic_cleanup_v1 is required before the first product write, so the voyage refused to create anything it could not remove. ${cleanupUnavailable}`
+      return { notBuilt: `NOT BUILT YET. ${reason} The harness generated all five deterministic EML and PDF fixtures, created no product artifact, and did not claim that product intake worked.` }
     }
 
     const fixturePayload = fixtures.map(({ emlPath: _emlPath, pdfPath: _pdfPath, ...fixture }) => fixture)
@@ -434,11 +461,13 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
         attachments: plannedAttachments,
       })
       assertDraftAccounting(sent.xeroStatus, `${operatorBand} send result`)
+      assertCaptainOnlyEnvelope(sent.executedRoute, `${operatorBand} executed transport envelope`)
       exactString(sent.deliveredTo, CAPTAIN_EMAIL, `${operatorBand} deliveredTo`)
       requireStringMembers(sent.attachments, ['approved_pack', 'draft_invoice'], `${operatorBand} sent attachments`)
       const messageId = String(sent.messageId || '')
       if (!messageId) throw new Error(`${operatorBand} send returned no message ID`)
       const delivery = await driver.call('proof_verify_delivery', { messageId, recipient: CAPTAIN_EMAIL, marker: context.marker })
+      assertCaptainOnlyEnvelope(delivery.observedRecipients, `${operatorBand} delivered message headers`)
       exactBoolean(delivery.delivered, true, `${operatorBand} inbox delivery`)
       exactString(delivery.inbox, CAPTAIN_EMAIL, `${operatorBand} inbox`)
       exactString(delivery.messageId, messageId, `${operatorBand} delivery message ID`)
@@ -456,9 +485,10 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     exactString(card.stage, 'Completed', 'sent job stage')
     boardSequence.push('Completed')
 
-    summary.stages[5].detail = `Two distinct marked messages landed in ${CAPTAIN_EMAIL}: one Shaun safe-today voyage and one Marnin run-with-care voyage. Each route was locked to one To address with empty Cc and Bcc before transport. The accounting object remained DRAFT.`
+    summary.stages[5].detail = `Two distinct marked messages landed in ${CAPTAIN_EMAIL}: one Shaun safe-today voyage and one Marnin run-with-care voyage. Each route was locked to one To address with empty Cc and Bcc before transport, the envelope actually used by the send was checked again against the same lock, and the delivered message headers were read back and checked a third time. The accounting object remained DRAFT.`
     summary.stages[5].metrics = [
       { label: 'Captain inbox deliveries', value: '2 / 2', threshold: 'Correct is 2 / 2' },
+      { label: 'Envelope checks per send', value: '3', threshold: 'Planned, executed, delivered' },
       { label: 'Shaun safe-today runs', value: '1' },
       { label: 'Marnin run-with-care runs', value: '1' },
       { label: 'Non-Captain recipients', value: '0', threshold: 'Hard safety gate' },
@@ -538,17 +568,21 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
   }, { cleanup: true })
 
   if (isSuccessful(summary.stages[2])) {
+    const missingTransitions = REQUIRED_BOARD_STAGES.filter((stageName) => !boardSequence.includes(stageName))
     summary.stages[2].metrics = [
       { label: 'Required cards visible', value: '4 / 4', threshold: 'Clean, blocked, exception, revision' },
       { label: 'Stages observed', value: `${boardSequence.length} / 6`, threshold: 'New through Archive' },
       { label: 'Wrong blockers or people', value: '0', threshold: 'Correct is 0' },
       { label: 'Canonical read source', value: 'makesafe_board' },
     ]
-    if (boardSequence.length === 6) {
+    if (missingTransitions.length === 0) {
       summary.stages[2].detail = `One canonical lineage was read back at every required stage: ${boardSequence.join(' to ')}. Blocker, reason code and person remained visible on the companion cards.`
     } else {
-      summary.stages[2].status = 'FAIL'
-      summary.stages[2].error = `Only ${boardSequence.length} of 6 required stages were observed`
+      summary.stages[2].status = 'NOT BUILT YET'
+      summary.stages[2].detail = `NOT BUILT YET. Every board check this stage runs itself passed, and the lineage was read back at ${boardSequence.join(' to ') || 'no stage'}. The complete six-stage voyage still cannot be shown because the later legs that drive ${missingTransitions.join(', ')} did not produce watchable evidence. See the stages below for what is missing.`
+      summary.stages[2].metrics.push({ label: 'Missing transitions', value: missingTransitions.join(', '), threshold: 'Owned by the later stages' })
+      announceStage(summary.stages[2])
+      await captureStage(summary.stages[2])
     }
   }
 

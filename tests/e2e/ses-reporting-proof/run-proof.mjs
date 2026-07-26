@@ -9,7 +9,7 @@ if (!['live', 'fixture'].includes(mode)) {
   process.exit(2)
 }
 
-const now = new Date().toISOString().replace(/[-:.]/g, '').replace('Z', 'Z')
+const now = new Date().toISOString().replace(/[-:.]/g, '')
 const runId = process.env.SES_PROOF_RUN_ID || `${now}-${mode}`
 const runRoot = path.resolve(process.env.SES_PROOF_RUN_ROOT || path.join('artifacts', 'ses-reporting-proof', runId))
 const playwright = path.resolve('node_modules', '.bin', process.platform === 'win32' ? 'playwright.cmd' : 'playwright')

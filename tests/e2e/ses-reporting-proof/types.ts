@@ -119,10 +119,13 @@ export interface ProofRunContext {
   runRoot: string
 }
 
-export interface ResolvedRoute {
+export interface RecipientEnvelope {
   to: string[]
   cc: string[]
   bcc: string[]
+}
+
+export interface ResolvedRoute extends RecipientEnvelope {
   subject: string
   releaseRevisionId: string
 }

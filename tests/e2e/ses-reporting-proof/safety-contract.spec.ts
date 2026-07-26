@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyRoute, assertDraftAccounting, assertSyntheticMarker } from './guards'
+import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyEnvelope, assertCaptainOnlyRoute, assertDraftAccounting, assertSyntheticMarker } from './guards'
 import { CAPTAIN_EMAIL } from './types'
 
 const marker = 'SWG-SES-E2E-TEST-ONLY-SAFETY-CONTRACT'
@@ -20,6 +20,25 @@ test('recipient gate allows only one Captain To address and no Cc or Bcc', () =>
     { to: [], cc: [], bcc: [] },
   ]) {
     expect(() => assertCaptainOnlyRoute({ ...route, subject: 'unsafe test', releaseRevisionId: 'release-unsafe' })).toThrow(SafetyViolation)
+  }
+})
+
+test('recipient gate also guards the executed and delivered envelopes', () => {
+  expect(() => assertCaptainOnlyEnvelope({ to: [CAPTAIN_EMAIL], cc: [], bcc: [] }, 'executed send')).not.toThrow()
+
+  for (const envelope of [
+    undefined,
+    null,
+    'marninms98@gmail.com',
+    {},
+    { to: [CAPTAIN_EMAIL] },
+    { to: [CAPTAIN_EMAIL], cc: [] },
+    { to: CAPTAIN_EMAIL, cc: [], bcc: [] },
+    { to: [CAPTAIN_EMAIL], cc: ['crew@example.com'], bcc: [] },
+    { to: [CAPTAIN_EMAIL], cc: [], bcc: ['archive@example.com'] },
+    { to: [CAPTAIN_EMAIL, 'ses@example.com'], cc: [], bcc: [] },
+  ]) {
+    expect(() => assertCaptainOnlyEnvelope(envelope, 'executed send')).toThrow(SafetyViolation)
   }
 })
 

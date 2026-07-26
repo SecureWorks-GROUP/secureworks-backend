@@ -3,6 +3,7 @@ import {
   MARKER_PREFIX,
   type CleanedArtifact,
   type CreatedArtifact,
+  type RecipientEnvelope,
   type ResolvedRoute,
 } from './types'
 
@@ -17,20 +18,32 @@ function normaliseEmail(value: string): string {
   return value.trim().toLowerCase()
 }
 
-export function assertCaptainOnlyRoute(route: ResolvedRoute): void {
-  const to = route.to.map(normaliseEmail)
-  const cc = route.cc.map(normaliseEmail)
-  const bcc = route.bcc.map(normaliseEmail)
-  const allRecipients = [...to, ...cc, ...bcc]
+function requireAddressList(value: unknown, field: string, operation: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new SafetyViolation(`${operation} refused because the ${field} envelope field was not a declared list of addresses`)
+  }
+  return value.map(normaliseEmail)
+}
+
+export function assertCaptainOnlyEnvelope(envelope: unknown, operation: string): RecipientEnvelope {
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    throw new SafetyViolation(`${operation} refused because no To, Cc and Bcc envelope was declared`)
+  }
+  const candidate = envelope as Record<string, unknown>
+  const to = requireAddressList(candidate.to, 'To', operation)
+  const cc = requireAddressList(candidate.cc, 'Cc', operation)
+  const bcc = requireAddressList(candidate.bcc, 'Bcc', operation)
 
   if (to.length !== 1 || to[0] !== CAPTAIN_EMAIL || cc.length !== 0 || bcc.length !== 0) {
     throw new SafetyViolation(
-      `send refused before transport. Expected To ${CAPTAIN_EMAIL} with empty Cc and Bcc, received To ${JSON.stringify(route.to)}, Cc ${JSON.stringify(route.cc)}, Bcc ${JSON.stringify(route.bcc)}`,
+      `${operation} refused. Expected To ${CAPTAIN_EMAIL} with empty Cc and Bcc, received To ${JSON.stringify(candidate.to)}, Cc ${JSON.stringify(candidate.cc)}, Bcc ${JSON.stringify(candidate.bcc)}`,
     )
   }
-  if (allRecipients.some((recipient) => recipient !== CAPTAIN_EMAIL)) {
-    throw new SafetyViolation(`send refused before transport because ${allRecipients.join(', ')} is outside the one-address allowlist`)
-  }
+  return { to, cc, bcc }
+}
+
+export function assertCaptainOnlyRoute(route: ResolvedRoute): void {
+  assertCaptainOnlyEnvelope(route, 'send refused before transport')
 }
 
 export function assertDraftAccounting(status: unknown, operation: string): void {

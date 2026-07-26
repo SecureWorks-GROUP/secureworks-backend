@@ -25,6 +25,15 @@ on:
       # path that can be changed alone must trigger it or the PR is unmergeable.
       # A watchdog-only PR hit exactly that and sat at BLOCKED with zero checks.
       - '.github/workflows/makesafe-intake-watchdog.yml'
+      # Same reason again for the SES Reporting proof harness: these paths can be
+      # changed alone, and the ses-proof-harness job below is the only automated
+      # coverage the harness has.
+      - 'tests/e2e/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'playwright.config.ts'
+      - 'tsconfig.playwright.json'
+      - 'docs/ses-reporting-proof-harness.md'
 
 permissions:
   contents: read
@@ -147,3 +156,80 @@ jobs:
       - name: Test edge deploy workflow classification
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh
+
+  # Automated coverage for the SES Reporting proof harness. This runs the fast
+  # TypeScript check, the recipient / DRAFT / marker / cleanup safety contract,
+  # and the fixture voyage (which proves harness mechanics only and is labelled
+  # SIMULATED, NOT PROOF). The live seven-stage credentialed proof is never run
+  # here: it writes real product artifacts and sends real email, so it stays a
+  # deliberate one-command manual run — see docs/ses-reporting-proof-harness.md.
+  ses-proof-harness:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Identify changed harness files
+        id: changed
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          CHANGED=$(git diff --name-only --diff-filter=d "${BASE_SHA}" "${HEAD_SHA}" -- \
+            'tests/e2e/**' \
+            'package.json' \
+            'package-lock.json' \
+            'playwright.config.ts' \
+            'tsconfig.playwright.json' | sort -u)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No proof harness files changed"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Changed files:"
+            echo "$CHANGED"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.has_changes == 'true'
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.changed.outputs.has_changes == 'true'
+        run: npm ci
+
+      # Only chromium. The harness never drives firefox or webkit, so installing
+      # the full browser set would just make every PR slower.
+      - name: Install Chromium for Playwright
+        if: steps.changed.outputs.has_changes == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: TypeScript check
+        if: steps.changed.outputs.has_changes == 'true'
+        run: npm run typecheck:ses-proof
+
+      - name: Safety contract (recipient, DRAFT, marker, cleanup gates)
+        if: steps.changed.outputs.has_changes == 'true'
+        env:
+          SES_PROOF_RUN_ID: ci-safety-contract-${{ github.run_id }}
+        run: npm run test:ses-proof-safety
+
+      - name: Fixture voyage (SIMULATED, NOT PROOF)
+        if: steps.changed.outputs.has_changes == 'true'
+        env:
+          SES_PROOF_RUN_ID: ci-fixture-${{ github.run_id }}
+        run: npm run proof:ses:fixture
+
+      - name: Upload fixture voyage evidence
+        if: always() && steps.changed.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ses-proof-fixture-evidence
+          path: artifacts/ses-reporting-proof/
+          if-no-files-found: ignore
+          retention-days: 7

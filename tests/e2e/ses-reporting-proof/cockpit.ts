@@ -41,14 +41,14 @@ export const STAGE_COPY: StageCopy[] = [
     whatWeDid: 'We preflighted and delivered one Shaun safe-today release and one Marnin run-with-care release, both carrying the approved pack and draft invoice.',
     correctMeans: 'Exactly two messages arrive in the Captain inbox. To is marninms98@gmail.com. Cc and Bcc are empty. No other address is accepted.',
     whatYouSee: 'The two operator bands, recipient envelope, message identity and delivery verification.',
-    howWeKnow: 'The route is inspected before transport. A second inbox read proves the exact message identity and marker arrived.',
+    howWeKnow: 'The route is inspected before transport, the envelope the send actually used is inspected again afterwards, and the delivered message headers are read back from the inbox. Any extra To, Cc or Bcc at any of the three points stops the run.',
   },
   {
     title: 'Cleanup',
     whatWeDid: 'We reconciled the creation ledger, removed every synthetic source, case, job, document, approval and message, voided every test invoice, then read the board again.',
     correctMeans: 'Created and cleaned totals match, invoice final state is VOIDED, survivor count is zero, and the board contains zero rows with the marker.',
     whatYouSee: 'The created-versus-cleaned ledger, void count, survivor count and final board count.',
-    howWeKnow: 'Cleanup is checked against the harness registry by artifact ID. Missing, unknown or surviving artifacts fail the entire run.',
+    howWeKnow: 'Cleanup is checked against the harness registry by artifact ID. Missing, unknown or surviving artifacts fail the entire run. The run also refuses to create the first product artifact at all unless the cleanup capability is available up front.',
   },
 ]
 
