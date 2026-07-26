@@ -13086,7 +13086,10 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       _fetchAllByJobIdChunked(
         client,
         'makesafe_job_details',
-        'job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)',
+        // reattend_count + cycle_number feed currentCycleReportMap so a prior
+        // visit's report cannot falsify current-cycle has_report_record /
+        // pack_effectively_sent on a reattendance card (board already gates this).
+        'job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, reattend_count, cycle_number, makesafe_companies:requesting_company_id(slug, name)',
         jobIds,
       ),
       _fetchAllByJobIdChunked(
@@ -13098,7 +13101,8 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       _fetchAllByJobIdChunked(
         client,
         'job_service_reports',
-        'job_id, status',
+        // cycle_number is required for the current-cycle report filter below.
+        'job_id, status, cycle_number',
         jobIds,
         (q) => q.neq('status', 'draft'),
       ),
@@ -13129,7 +13133,12 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
       docsMap[doc.job_id].push(doc)
     }
-    for (const r of reports) if (r?.job_id) reportSet.add(r.job_id)
+    // Same cycle boundary as the board path (currentCycleReportMap): when
+    // reattend_count > 0 only the current cycle's non-draft service report counts.
+    // Legacy / reopen-only cards (reattend_count 0 or absent) keep any-cycle
+    // first-match behaviour so single-visit rows stay byte-compatible.
+    const currentReports = currentCycleReportMap(reports || [], detailsMap)
+    for (const jobId of Object.keys(currentReports)) reportSet.add(jobId)
     invoiceRows = loadedInvoiceRows
     packSentMap = psMap
     pipelineSentStatusMap = pisMap

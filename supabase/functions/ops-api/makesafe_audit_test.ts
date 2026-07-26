@@ -1264,3 +1264,293 @@ Deno.test("W2-D two invoiced siblings: each owns only its own invoice, no cross-
   assertEquals(b.sibling_invoices.length, 1);
   assertEquals(b.sibling_invoices[0].invoice_number, "INV-0900");
 });
+
+// ════════════════════════════════════════════════════════════
+// Residual truth (post-PR #382) — cycle-aware report + join matrix
+// ════════════════════════════════════════════════════════════
+// A reattendance card's current cycle must not inherit a prior visit's service
+// report (or the paid-filed pack_effectively_sent path that ORs report presence).
+// Legacy cards with no reattend boundary keep any-cycle report behaviour.
+
+Deno.test("2.1 reattend cycle: prior-cycle service report does NOT set has_report_record", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({
+      id: "j-reattend",
+      job_number: "SWMS-28001",
+      status: "pending",
+      completed_at: null,
+    })],
+    makesafe_job_details: [{
+      job_id: "j-reattend",
+      external_ref: "AJBR-68001",
+      substatus: "waiting_on_trade_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [],
+    job_service_reports: [{
+      id: "rep-c1",
+      job_id: "j-reattend",
+      status: "submitted",
+      cycle_number: 1,
+    }],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    job_events: [],
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_record, false);
+  assertEquals(j.pack_effectively_sent, false);
+});
+
+Deno.test("2.1 reattend cycle: current-cycle service report DOES set has_report_record", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({
+      id: "j-reattend-cur",
+      job_number: "SWMS-28002",
+      status: "pending",
+      completed_at: null,
+    })],
+    makesafe_job_details: [{
+      job_id: "j-reattend-cur",
+      external_ref: "AJBR-68002",
+      substatus: "admin_to_send_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [],
+    // Prior + current: only current should satisfy readiness.
+    job_service_reports: [
+      { id: "rep-old", job_id: "j-reattend-cur", status: "submitted", cycle_number: 1 },
+      { id: "rep-new", job_id: "j-reattend-cur", status: "submitted", cycle_number: 2 },
+    ],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    job_events: [],
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].has_report_record, true);
+});
+
+Deno.test("2.1 reattend cycle: prior-cycle report + PAID cannot mint pack_effectively_sent", async () => {
+  // Old visit was paid+filed; current reattend still waits on the trade report.
+  // Without a current-cycle report (and without a MAKESAFE_PACK_SENT marker), the
+  // paid-filed path must not claim effectively-sent from the old report alone.
+  const client = makeQueryClient({
+    jobs: [jobRow({
+      id: "j-reattend-paid",
+      job_number: "SWMS-28003",
+      status: "invoiced",
+      completed_at: null,
+    })],
+    makesafe_job_details: [{
+      job_id: "j-reattend-paid",
+      external_ref: "AJBR-68003",
+      substatus: "waiting_on_trade_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [
+      { job_id: "j-reattend-paid", type: "invoice", file_name: "INV-0999 invoice.pdf" },
+    ],
+    job_service_reports: [{
+      id: "rep-old-paid",
+      job_id: "j-reattend-paid",
+      status: "submitted",
+      cycle_number: 1,
+    }],
+    xero_invoices: [{
+      job_id: "j-reattend-paid",
+      status: "PAID",
+      invoice_number: "INV-0999",
+      reference: "AJBR-68003",
+      invoice_type: "ACCREC",
+      invoice_date: RECENT_DATE,
+    }],
+    makesafe_intake_drafts: [],
+    job_events: [], // no pack_sent marker
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_record, false);
+  assertEquals(j.pack_sent, false);
+  assertEquals(j.pack_effectively_sent, false);
+});
+
+Deno.test("2.1 legacy (no reattend boundary): any-cycle report still sets has_report_record", async () => {
+  // Explicit fallback: reattend_count 0 / absent keeps first-match any-cycle
+  // behaviour so single-visit and reopen-only cards are unchanged.
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-legacy", job_number: "SWMS-28004", status: "complete" })],
+    makesafe_job_details: [{
+      job_id: "j-legacy",
+      external_ref: "AJBR-68004",
+      substatus: "complete",
+      reattend_count: 0,
+      cycle_number: 1,
+    }],
+    job_documents: [],
+    job_service_reports: [{
+      id: "rep-leg",
+      job_id: "j-legacy",
+      status: "submitted",
+      cycle_number: 1,
+    }],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].has_report_record, true);
+});
+
+Deno.test("2.1 pipeline multi-row: verified_sent is not demoted by later not_sent (id order)", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-pipe", job_number: "SWMS-28010", status: "complete" })],
+    makesafe_job_details: [{
+      job_id: "j-pipe",
+      external_ref: "AJBR-68010",
+      substatus: "complete",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    // Ascending id order walks verified_sent then not_sent — last-write used to
+    // demote to not_sent.
+    pipeline_items: [
+      { id: "pi-1", target_job: "j-pipe", sent_status: "verified_sent" },
+      { id: "pi-2", target_job: "j-pipe", sent_status: "not_sent" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, "verified_sent");
+});
+
+Deno.test("2.1 pipeline multi-row: reversed seed order still yields verified_sent", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-pipe2", job_number: "SWMS-28011", status: "complete" })],
+    makesafe_job_details: [{
+      job_id: "j-pipe2",
+      external_ref: "AJBR-68011",
+      substatus: "complete",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    // Higher id is verified_sent; lower id is not_sent — order independence.
+    pipeline_items: [
+      { id: "pi-z", target_job: "j-pipe2", sent_status: "not_sent" },
+      { id: "pi-a", target_job: "j-pipe2", sent_status: "verified_sent" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, "verified_sent");
+});
+
+Deno.test("2.1 pipeline multi-row: duplicate verified_sent rows stay verified_sent", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-pipe3", job_number: "SWMS-28012", status: "complete" })],
+    makesafe_job_details: [{
+      job_id: "j-pipe3",
+      external_ref: "AJBR-68012",
+      substatus: "complete",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    pipeline_items: [
+      { id: "pi-d1", target_job: "j-pipe3", sent_status: "verified_sent" },
+      { id: "pi-d2", target_job: "j-pipe3", sent_status: "verified_sent" },
+      { id: "pi-d3", target_job: "j-pipe3", sent_status: "needs_review" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, "verified_sent");
+});
+
+Deno.test("2.1 pipeline multi-row: empty sent_status does not invent a sent verdict", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-pipe4", job_number: "SWMS-28013", status: "pending" })],
+    makesafe_job_details: [{
+      job_id: "j-pipe4",
+      external_ref: "AJBR-68013",
+      substatus: "waiting_on_trade_report",
+    }],
+    job_documents: [],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    // Row exists but carries no status — mere existence must not claim sent.
+    pipeline_items: [
+      { id: "pi-empty", target_job: "j-pipe4", sent_status: null },
+      { id: "pi-blank", target_job: "j-pipe4", sent_status: "" },
+    ],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(res.jobs[0].pipeline_item_sent_status, null);
+});
+
+// Required-join matrix: every join the production contract treats as required must
+// fail the WHOLE makesafe_audit request when unavailable — never a plausible
+// partial board. recheck_queue_depth is the only intentional optional join and is
+// proven soft-null separately below.
+const REQUIRED_IN_JOIN_TABLES: Array<{ table: string; messageIncludes: string }> = [
+  { table: "makesafe_job_details", messageIncludes: "makesafe_job_details (job_id join) failed" },
+  { table: "job_documents", messageIncludes: "job_documents (job_id join) failed" },
+  { table: "job_service_reports", messageIncludes: "job_service_reports (job_id join) failed" },
+  { table: "job_events", messageIncludes: "job_events (job_id join) failed" },
+  { table: "pipeline_items", messageIncludes: "pipeline_items (sent_status by job) read failed" },
+  { table: "makesafe_card_story", messageIncludes: "makesafe_card_story (job_id join) failed" },
+];
+const REQUIRED_READ_TABLES: Array<{ table: string; messageIncludes: string }> = [
+  { table: "jobs", messageIncludes: "forced jobs read failure" },
+  { table: "xero_invoices", messageIncludes: "forced xero_invoices read failure" },
+  { table: "makesafe_intake_drafts", messageIncludes: "forced makesafe_intake_drafts read failure" },
+];
+
+for (const { table, messageIncludes } of REQUIRED_IN_JOIN_TABLES) {
+  Deno.test(`2.1 required-join matrix: ${table} .in() failure rejects whole audit (no partial board)`, async () => {
+    const client = makeQueryClient(volumeSeed(3), {
+      forceInErrorTables: new Set([table]),
+    });
+    await assertRejects(
+      () => _makesafeAuditForTest(client, new URLSearchParams()),
+      Error,
+      messageIncludes,
+    );
+  });
+}
+
+for (const { table, messageIncludes } of REQUIRED_READ_TABLES) {
+  Deno.test(`2.1 required-join matrix: ${table} read failure rejects whole audit (no partial board)`, async () => {
+    const client = makeQueryClient(volumeSeed(3), {
+      forceReadErrorTables: new Set([table]),
+    });
+    await assertRejects(
+      () => _makesafeAuditForTest(client, new URLSearchParams()),
+      Error,
+      messageIncludes,
+    );
+  });
+}
+
+Deno.test("2.1 optional-join: recheck_queue_depth head failure soft-nulls depth, still returns jobs", async () => {
+  // Contract distinction: recheck_queue_depth is auxiliary COUNT truth, not a
+  // required card join. Failure must NOT reject the board; depth is null (unknown),
+  // never the truthful numeric 0.
+  const client = makeQueryClient(volumeSeed(3), {
+    forceHeadErrorTables: new Set(["makesafe_job_details"]),
+  });
+  const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(audit.jobs.length, 3);
+  assertEquals(audit.recheck_queue_depth, null);
+});

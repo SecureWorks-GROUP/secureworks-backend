@@ -669,6 +669,32 @@ export async function getMakesafeAttachmentUrl(
 // Returns a map of job_id -> pipeline_items.sent_status for the given job ids, so
 // makesafe_audit can surface the sync-system sent verdict alongside the
 // notes-based pack_sent marker. (verified_sent | not_sent | needs_review.)
+//
+// Multi-row collision: one target_job can carry several pipeline_items rows
+// (historical sync projections, duplicates). Input order must NEVER demote a
+// stronger verdict to a weaker one — e.g. a later `not_sent` must not overwrite
+// an earlier `verified_sent`. Rank is explicit and total for known statuses;
+// unknown/intermediate strings keep honest intermediate strength (0) and never
+// invent "sent" from mere row existence (null/empty sent_status is ignored).
+export const PIPELINE_SENT_STATUS_RANK: Readonly<Record<string, number>> = {
+  verified_sent: 3,
+  needs_review: 2,
+  not_sent: 1,
+};
+
+/** Pure merge: keep the stronger sent_status; on equal rank keep the first. */
+export function preferPipelineSentStatus(
+  current: string | undefined | null,
+  next: string | null | undefined,
+): string | undefined {
+  if (!next) return current ?? undefined;
+  if (!current) return next;
+  const cr = PIPELINE_SENT_STATUS_RANK[current] ?? 0;
+  const nr = PIPELINE_SENT_STATUS_RANK[next] ?? 0;
+  if (nr > cr) return next;
+  return current;
+}
+
 export async function buildPipelineSentStatusMap(
   client: SB,
   jobIds: string[],
@@ -687,7 +713,9 @@ export async function buildPipelineSentStatusMap(
     "pipeline_items (sent_status by job) read",
   );
   for (const p of (data || [])) {
-    if (p?.target_job && p.sent_status) map[p.target_job] = p.sent_status;
+    if (!p?.target_job || !p.sent_status) continue; // mere row existence ≠ sent
+    const preferred = preferPipelineSentStatus(map[p.target_job], p.sent_status);
+    if (preferred) map[p.target_job] = preferred;
   }
   return map;
 }
@@ -727,6 +755,7 @@ export const _makesafePipelineItems = makesafePipelineItems;
 export const _getMakesafeEmail = getMakesafeEmail;
 export const _getMakesafeAttachmentUrl = getMakesafeAttachmentUrl;
 export const _buildPipelineSentStatusMap = buildPipelineSentStatusMap;
+export const _preferPipelineSentStatus = preferPipelineSentStatus;
 export const _fetchAllRowsInChunks = fetchAllRowsInChunks;
 export const _chunkByUrlBudget = chunkByUrlBudget;
 export const _encodedIdCost = encodedIdCost;

@@ -33,11 +33,13 @@ import {
   _getMakesafeEmail,
   _makesafeNewEmails,
   _makesafePipelineItems,
+  _preferPipelineSentStatus,
   _directionForDomain,
   _isOwnDomain,
   attachmentUrlGuard,
   buildAttachmentSummaries,
   deriveFromDomain,
+  PIPELINE_SENT_STATUS_RANK,
   emptyAttachmentSummary,
   IN_MAX_COUNT,
   IN_URL_BUDGET,
@@ -484,6 +486,52 @@ Deno.test("GAP-4: buildPipelineSentStatusMap maps target_job -> sent_status", as
 Deno.test("GAP-4: empty job list short-circuits to {}", async () => {
   const { client } = makeClient({});
   assertEquals(await _buildPipelineSentStatusMap(client, []), {});
+});
+
+// Multi-row precedence: verified_sent > needs_review > not_sent. Input order must
+// never demote a stronger verdict (the last-write bug that let not_sent overwrite
+// verified_sent when rows walked ascending id).
+Deno.test("GAP-4: preferPipelineSentStatus ranks verified_sent above not_sent", () => {
+  assertEquals(PIPELINE_SENT_STATUS_RANK.verified_sent > PIPELINE_SENT_STATUS_RANK.not_sent, true);
+  assertEquals(_preferPipelineSentStatus("verified_sent", "not_sent"), "verified_sent");
+  assertEquals(_preferPipelineSentStatus("not_sent", "verified_sent"), "verified_sent");
+  assertEquals(_preferPipelineSentStatus("needs_review", "not_sent"), "needs_review");
+  assertEquals(_preferPipelineSentStatus("not_sent", "needs_review"), "needs_review");
+  assertEquals(_preferPipelineSentStatus(undefined, "not_sent"), "not_sent");
+  assertEquals(_preferPipelineSentStatus("verified_sent", ""), "verified_sent");
+});
+
+Deno.test("GAP-4: multi-row last-id not_sent does not demote verified_sent", async () => {
+  const { client } = makeClient({
+    pipeline_items: [
+      { id: "pi-1", target_job: "job-1", sent_status: "verified_sent" },
+      { id: "pi-2", target_job: "job-1", sent_status: "not_sent" },
+    ],
+  });
+  const m = await _buildPipelineSentStatusMap(client, ["job-1"]);
+  assertEquals(m["job-1"], "verified_sent");
+});
+
+Deno.test("GAP-4: multi-row reversed order still yields verified_sent", async () => {
+  const { client } = makeClient({
+    pipeline_items: [
+      { id: "pi-9", target_job: "job-1", sent_status: "not_sent" },
+      { id: "pi-1", target_job: "job-1", sent_status: "verified_sent" },
+    ],
+  });
+  const m = await _buildPipelineSentStatusMap(client, ["job-1"]);
+  assertEquals(m["job-1"], "verified_sent");
+});
+
+Deno.test("GAP-4: empty/null sent_status rows do not invent a sent verdict", async () => {
+  const { client } = makeClient({
+    pipeline_items: [
+      { id: "pi-e", target_job: "job-1", sent_status: null },
+      { id: "pi-b", target_job: "job-1", sent_status: "" },
+    ],
+  });
+  const m = await _buildPipelineSentStatusMap(client, ["job-1"]);
+  assertEquals("job-1" in m, false);
 });
 
 // ════════════════════════════════════════════════════════════
