@@ -59,6 +59,10 @@ Deno.test("U2-S1 migration never guesses multi-cycle assignments onto current cy
   );
   // Only first-attendance assignments get bound
   assertStringIncludes(migration, "COALESCE(d.reattend_count, 0) = 0");
+  assertStringIncludes(migration, "r.cycle_number IS NOT NULL");
+  assertStringIncludes(migration, "h.cycle_number IS NOT NULL");
+  assert(!migration.includes("c.cycle_number = COALESCE(r.cycle_number, 1)"));
+  assert(!migration.includes("c.cycle_number = COALESCE(h.cycle_number, 1)"));
 });
 
 Deno.test("U2-S1 rollback documents safe reverse without requiring production drop", () => {

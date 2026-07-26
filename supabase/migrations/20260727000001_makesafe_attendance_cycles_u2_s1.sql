@@ -134,7 +134,8 @@ SET attendance_cycle_id = c.id,
 FROM public.makesafe_attendance_cycles c
 WHERE r.attendance_cycle_id IS NULL
   AND c.job_id = r.job_id
-  AND c.cycle_number = COALESCE(r.cycle_number, 1);
+  AND r.cycle_number IS NOT NULL
+  AND c.cycle_number = r.cycle_number;
 
 -- Holds: bind by matching cycle_number.
 UPDATE public.makesafe_status_holds h
@@ -143,7 +144,8 @@ SET attendance_cycle_id = c.id,
 FROM public.makesafe_attendance_cycles c
 WHERE h.attendance_cycle_id IS NULL
   AND c.job_id = h.job_id
-  AND c.cycle_number = COALESCE(h.cycle_number, 1);
+  AND h.cycle_number IS NOT NULL
+  AND c.cycle_number = h.cycle_number;
 
 -- Assignments: only bind when the job has exactly one attendance cycle (first
 -- attendance only). Multi-cycle jobs leave assignments unbound so runtime fails
