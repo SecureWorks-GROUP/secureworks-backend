@@ -49,6 +49,15 @@ These counts are expectations. They are not inferred from current planner result
 
 Evidence: `docs/evidence/ses-reporting-u1-five-fates-replay.json`
 
+Provenance caveat: that artifact carries `generated_at=2026-07-26T14:42:02.814Z`, which
+predates the later review hardening that narrowed `REVISION_SIGNAL` to explicit wording
+plus a subject-scoped chase signal, widened `BUILDERWEST_SIGNAL` to accept a separator,
+and added the `western-building` profile alias. The production-side columns below are
+read from the live ledger and are unaffected, and were independently re-observed (see
+below). The planner-side figures (planner fate counts, the 13/36 planner match, and the
+candidate-result column of the seven-shape table) were produced by the pre-hardening
+planner and must be regenerated before they are cited again.
+
 | Measure | Result |
 |---|---:|
 | Real SES sources | 1,396 |
@@ -179,7 +188,7 @@ The candidate monitor now treats source accounting as the completion boundary:
 1. Every included source is retained with its post, receipt, conversation, and thread coordinates.
 2. Non-2xx and network handoff failures append a reason-coded `email_events_raw` exception for every included source, plus the aggregate business event.
 3. HTTP 200 triggers a canonical `makesafe_intake_case_sources` check.
-4. Any included source still lacking a case gets `intake_exception_scan_completed_without_case_fate`.
+4. An included source still lacking a case after an unbounded successful run gets `intake_exception_scan_completed_without_case_fate`. If the run stopped at its per-run case or source-read cap it has not reached that source, so it is recorded as the non-terminal `intake_deferred_scan_run_cap_deferred` instead, keeping healthy bursts out of the exception accounting.
 5. Missing `EdgeRuntime.waitUntil` is no longer log-only. The source exceptions are written synchronously before success is returned.
 6. If source exception or aggregate alarm persistence fails, the continuation rejects and retains the expiring mailbox lease. It does not acknowledge a log-only failure as settled.
 

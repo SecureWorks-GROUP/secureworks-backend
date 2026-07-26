@@ -21,10 +21,16 @@ Apply these intake migrations before the matching `ops-api`:
 5. `20260724025815_makesafe_lineage_authority_corrections.sql`
 6. `20260724062509_makesafe_lineage_authority_supersessions.sql`
 7. `20260724070000_makesafe_deterministic_standing_intake.sql`
+8. `20260726000001_makesafe_company_parsing_rules_slug_correction.sql`
 
 Migration 7 makes the singleton settings row and future defaults
 `deterministic/full_open`, clears exact allowlists, sets the bounded case cap to ten,
 and prevents `intake_mode` from returning to `legacy`.
+
+Migration 8 re-points the `20260704000002` parsing-rule seed at the live company
+slugs (`aj`, `bw`, `wb`) without clobbering existing field rules, and installs the
+fail-closed active-company coverage constraint. See `AGENTS.md` for the standing
+coverage invariant.
 
 Production deploys remain restricted to main in
 `/Users/marninstobbe/Projects/_release/secureworks-site-main` using the guarded

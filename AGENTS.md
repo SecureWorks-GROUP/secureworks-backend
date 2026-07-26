@@ -296,8 +296,15 @@ only when the nested scan settles, so the two-minute poll cannot launch overlapp
 batches. A non-2xx or network-failed continuation must write both the aggregate
 `makesafe.intake.scan_handoff_failed` event and a reason-coded `email_events_raw`
 exception for every included source. HTTP 200 is not enough: verify each source has a
-canonical case-source row and exception-record any remainder. If source/accounting or
-alarm persistence fails, reject the continuation and retain the expiring lease.
+canonical case-source row and account for any remainder. Keep the two fates distinct:
+a run that stopped at its per-run case or source-read cap has not reached those
+sources, so they are `intake_deferred_scan_run_cap_deferred` /
+`makesafe.intake.scan_handoff_deferred`; only an unbounded run that returned success
+with sources still unfated writes the terminal
+`intake_exception_scan_completed_without_case_fate`. Labelling deferral as an
+exception alarms on healthy bursts and corrupts the replay accounting. If
+source/accounting or alarm persistence fails, reject the continuation and retain the
+expiring lease.
 
 Apply `20260726000001_makesafe_company_parsing_rules_slug_correction.sql` before the
 matching deterministic-intake edge code. Production slugs are `aj`, `bw`, and `wb`,
