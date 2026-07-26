@@ -6446,25 +6446,19 @@ if (import.meta.main) serve(async (req: Request) => {
             const validEvents = ['clock_on', 'clock_off', 'start_travel', 'arrived', 'pause', 'resume', 'materials_check', 'manual_override']
             if (!validEvents.includes(event)) throw new ApiError('Invalid event: ' + event, 400)
 
-            // Idempotency check
-            if (idempotency_key) {
-              const { data: existing } = await client.from('job_events')
-                .select('id')
-                .eq('detail_json->>idempotency_key', idempotency_key)
-                .limit(1)
-              if (existing && existing.length > 0) {
-                // Already processed — return the assignment as-is
-                const { data: ass } = await client.from('job_assignments').select('*').eq('id', assignment_id).maybeSingle()
-                return json({ success: true, assignment: ass, duplicate: true })
-              }
+            // Ownership is checked before the idempotency lookup/return so a
+            // foreign caller cannot read another crew's event state. Manager
+            // stage authority remains an open Captain decision; any approved
+            // manager path needs its own reviewed action and audit contract.
+            const { assignment, duplicate } = await prepareClockEventAssignment(
+              client,
+              assignment_id,
+              tradeUser.id,
+              idempotency_key,
+            )
+            if (duplicate) {
+              return json({ success: true, assignment, duplicate: true })
             }
-
-            // Get the assignment
-            const { data: assignment, error: assErr } = await client.from('job_assignments')
-              .select('*')
-              .eq('id', assignment_id)
-              .maybeSingle()
-            if (assErr || !assignment) throw new ApiError('Assignment not found', 404)
 
             const now = new Date().toISOString()
             const updateFields: Record<string, any> = {}
@@ -6704,6 +6698,31 @@ if (import.meta.main) serve(async (req: Request) => {
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
 })
+
+export async function prepareClockEventAssignment(
+  client: any,
+  assignmentId: string,
+  tradeUserId: string,
+  idempotencyKey?: string | null,
+): Promise<{ assignment: any; duplicate: boolean }> {
+  const { data: assignment, error: assignmentError } = await client.from('job_assignments')
+    .select('*')
+    .eq('id', assignmentId)
+    .maybeSingle()
+
+  if (assignmentError || !assignment) throw new ApiError('Assignment not found', 404)
+  if (assignment.user_id !== tradeUserId) throw new Error('Not your assignment')
+
+  if (idempotencyKey) {
+    const { data: existing } = await client.from('job_events')
+      .select('id')
+      .eq('detail_json->>idempotency_key', idempotencyKey)
+      .limit(1)
+    if (existing && existing.length > 0) return { assignment, duplicate: true }
+  }
+
+  return { assignment, duplicate: false }
+}
 
 
 // ════════════════════════════════════════════════════════════
