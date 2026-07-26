@@ -50,7 +50,10 @@ export function isEvidenceBoundToCurrentCycle(
     ? String(currentAttendanceCycleId)
     : null;
 
-  if (rowCycleId && currentId) return rowCycleId === currentId;
+  if (rowCycleId && currentId) {
+    return rowCycleId === currentId &&
+      attribution === CYCLE_ATTRIBUTION.BOUND;
+  }
   if (rowCycleId && !currentId) return false;
 
   // Unbound by UUID — fall back to cycle_number when present.

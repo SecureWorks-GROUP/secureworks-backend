@@ -236,6 +236,26 @@ Deno.test("R9d matching hold UUID still requires bound attribution", () => {
   );
 });
 
+Deno.test("R9e matching evidence UUID still requires bound attribution", () => {
+  const detail = { cycle_number: 2, reattend_count: 1 };
+  assertEquals(
+    isEvidenceBoundToCurrentCycle({
+      cycle_number: 2,
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED,
+    }, detail, "cycle-2"),
+    false,
+  );
+  assertEquals(
+    isEvidenceBoundToCurrentCycle({
+      cycle_number: 2,
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+    }, detail, "cycle-2"),
+    true,
+  );
+});
+
 Deno.test("R10 readiness_revision changes when evidence changes", () => {
   const base = {
     attendanceCycleId: "c1",
