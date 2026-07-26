@@ -1976,9 +1976,21 @@ export interface IntakeHandoffSource {
   threadId: string | null;
 }
 
-export async function _recordIntakeSourceExceptionsForTest(
+// A source the scanner returned without accounting is only a lost source when the
+// run actually saw the whole window. A run that stopped at its per-run case or
+// source-read cap simply has not reached that source yet.
+export interface IntakeScanOutcome {
+  boundedRun: boolean;
+  casesDeferred: number | null;
+  sourceReadCapReached: boolean | null;
+}
+
+type IntakeSourceFate = "reason_coded_exception" | "deferred_next_run";
+
+async function recordIntakeSourceFates(
   sb: any,
   sources: readonly IntakeHandoffSource[],
+  fate: IntakeSourceFate,
   reasonCode: string,
   summary: string,
   metadata: Record<string, unknown> = {},
@@ -1986,11 +1998,29 @@ export async function _recordIntakeSourceExceptionsForTest(
   const safeReason = reasonCode.toLowerCase().replace(/[^a-z0-9_]+/g, "_")
     .replace(/^_+|_+$/g, "");
   if (!safeReason) throw new Error("intake source exception reason required");
-  const changeType = `intake_exception_${safeReason}`;
-  // email_events_raw is the existing append-only source replay ledger. The
-  // post_id/change_type unique index makes retries idempotent without updating a
-  // historical row. A failed insert is fatal to the continuation settlement.
+  const deferred = fate === "deferred_next_run";
+  const changeType = `${
+    deferred ? "intake_deferred" : "intake_exception"
+  }_${safeReason}`;
+  // email_events_raw is the existing append-only source replay ledger. Its
+  // uq_email_events_raw_post_change unique index is PARTIAL and covers only the
+  // 'created'/'excluded' change types, so the intake fate rows get no database
+  // dedupe: use the same read-then-insert key persistPost uses, or a sustained
+  // ops-api outage appends a fresh row per post on every two-minute poll.
   for (const source of sources) {
+    const { data: existing, error: existingError } = await sb.from(
+      "email_events_raw",
+    )
+      .select("id")
+      .eq("post_id", source.postId)
+      .eq("change_type", changeType)
+      .maybeSingle();
+    if (existingError) {
+      throw new Error(
+        `intake source fate dedupe read failed for ${source.postId}: ${existingError.message}`,
+      );
+    }
+    if ((existing as { id?: string } | null)?.id) continue;
     const { error } = await sb.from("email_events_raw").insert({
       mailbox: MAILBOX,
       post_id: source.postId,
@@ -1999,7 +2029,7 @@ export async function _recordIntakeSourceExceptionsForTest(
       exclusion_reason: safeReason,
       conversation_id: source.conversationId,
       thread_id: source.threadId,
-      page_meta: { source_fate: "reason_coded_exception", ...metadata },
+      page_meta: { source_fate: fate, ...metadata },
     });
     if (error && String(error.code) !== "23505") {
       throw new Error(
@@ -2008,7 +2038,9 @@ export async function _recordIntakeSourceExceptionsForTest(
     }
   }
   const { error: eventError } = await sb.from("business_events").insert({
-    event_type: "makesafe.intake.scan_handoff_failed",
+    event_type: deferred
+      ? "makesafe.intake.scan_handoff_deferred"
+      : "makesafe.intake.scan_handoff_failed",
     source: "monitor-ses-makesafes",
     entity_type: "mailbox",
     entity_id: MAILBOX,
@@ -2017,6 +2049,7 @@ export async function _recordIntakeSourceExceptionsForTest(
     payload: {
       mailbox: MAILBOX,
       reason_code: safeReason,
+      source_fate: fate,
       affected_source_count: sources.length,
       ...metadata,
     },
@@ -2031,7 +2064,41 @@ export async function _recordIntakeSourceExceptionsForTest(
   }
 }
 
-export async function _findIntakeSourcesWithoutCaseForTest(
+async function recordIntakeSourceExceptions(
+  sb: any,
+  sources: readonly IntakeHandoffSource[],
+  reasonCode: string,
+  summary: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  await recordIntakeSourceFates(
+    sb,
+    sources,
+    "reason_coded_exception",
+    reasonCode,
+    summary,
+    metadata,
+  );
+}
+
+async function recordIntakeSourceDeferrals(
+  sb: any,
+  sources: readonly IntakeHandoffSource[],
+  reasonCode: string,
+  summary: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  await recordIntakeSourceFates(
+    sb,
+    sources,
+    "deferred_next_run",
+    reasonCode,
+    summary,
+    metadata,
+  );
+}
+
+async function findIntakeSourcesWithoutCase(
   sb: any,
   sources: readonly IntakeHandoffSource[],
 ): Promise<IntakeHandoffSource[]> {
@@ -2059,7 +2126,8 @@ export function _scheduleIntakeScanContinuation(
   onSettled: () => Promise<void> = () => Promise.resolve(),
   onFailure: (failure: IntakeScanContinuationFailure) => Promise<void> = () =>
     Promise.resolve(),
-  onSuccess: () => Promise<void> = () => Promise.resolve(),
+  onSuccess: (outcome: IntakeScanOutcome) => Promise<void> = () =>
+    Promise.resolve(),
 ): void {
   let releaseLease = true;
   const continuation = (async () => {
@@ -2086,7 +2154,37 @@ export function _scheduleIntakeScanContinuation(
         await onFailure({ kind: "http", status: scanResp.status });
         return;
       }
-      await onSuccess();
+      // An unreadable report proves nothing about boundedness, so it stays
+      // unbounded: a genuinely dropped source must still raise a loud exception.
+      let outcome: IntakeScanOutcome = {
+        boundedRun: false,
+        casesDeferred: null,
+        sourceReadCapReached: null,
+      };
+      try {
+        const report = await scanResp.json() as {
+          totals?: { cases_deferred?: unknown };
+          source_read?: { cap_reached?: unknown };
+          attempt_cap_reached_without_commit?: unknown;
+        };
+        const casesDeferred = Number(report?.totals?.cases_deferred);
+        const capReached = report?.source_read?.cap_reached;
+        outcome = {
+          casesDeferred: Number.isFinite(casesDeferred) ? casesDeferred : null,
+          sourceReadCapReached: typeof capReached === "boolean"
+            ? capReached
+            : null,
+          boundedRun: (Number.isFinite(casesDeferred) && casesDeferred > 0) ||
+            capReached === true ||
+            report?.attempt_cap_reached_without_commit === true,
+        };
+      } catch (bodyErr) {
+        console.error(
+          "[monitor-ses] intake scan report unreadable; treating run as unbounded:",
+          (bodyErr as Error).message,
+        );
+      }
+      await onSuccess(outcome);
     } catch (recordError) {
       // Do not release the 10-minute lease when the durable source exception or
       // success-accounting check itself failed. The rejected continuation is loud
@@ -2364,7 +2462,7 @@ async function handler(req: Request): Promise<Response> {
       // This path used to be log-only. Record every included source as a typed
       // exception before returning success. If either source-ledger or aggregate
       // alarm persistence fails, throw and let the handler return 500.
-      await _recordIntakeSourceExceptionsForTest(
+      await recordIntakeSourceExceptions(
         sb,
         includedSources,
         "wait_until_unavailable",
@@ -2393,7 +2491,7 @@ async function handler(req: Request): Promise<Response> {
           }
         },
         async (failure) => {
-          await _recordIntakeSourceExceptionsForTest(
+          await recordIntakeSourceExceptions(
             sb,
             includedSources,
             `scan_handoff_${failure.kind}_${failure.status ?? "failed"}`,
@@ -2407,28 +2505,44 @@ async function handler(req: Request): Promise<Response> {
             },
           );
         },
-        async () => {
+        async (outcome) => {
           // HTTP 200 proves only that the scanner returned. Close the source-level
           // handoff by checking the canonical case-source ledger. Anything still
-          // absent receives a durable reason-coded exception instead of relying on
-          // an aggregate response or the next sweep.
-          const missing = await _findIntakeSourcesWithoutCaseForTest(
+          // absent receives a durable reason-coded fate instead of relying on an
+          // aggregate response or the next sweep.
+          const missing = await findIntakeSourcesWithoutCase(
             sb,
             includedSources,
           );
-          if (missing.length) {
-            await _recordIntakeSourceExceptionsForTest(
+          if (!missing.length) return;
+          const fateMetadata = {
+            synced_watermark: maxReceived,
+            included_sources: included,
+            unaccounted_sources: missing.length,
+            cases_deferred: outcome.casesDeferred,
+            source_read_cap_reached: outcome.sourceReadCapReached,
+          };
+          // A run that stopped at its per-run case cap or source-read cap has not
+          // dropped these sources, it has not reached them. Recording that as a
+          // terminal exception would alarm on healthy bursts and would mislabel
+          // deferral as a settled exception fate in the replay accounting.
+          if (outcome.boundedRun) {
+            await recordIntakeSourceDeferrals(
               sb,
               missing,
-              "scan_completed_without_case_fate",
-              "Deterministic intake returned successfully but one or more synced sources still had no canonical case fate.",
-              {
-                synced_watermark: maxReceived,
-                included_sources: included,
-                unaccounted_sources: missing.length,
-              },
+              "scan_run_cap_deferred",
+              "Deterministic intake returned successfully but stopped at a per-run bound; the remaining synced sources are queued for the next run.",
+              fateMetadata,
             );
+            return;
           }
+          await recordIntakeSourceExceptions(
+            sb,
+            missing,
+            "scan_completed_without_case_fate",
+            "Deterministic intake returned successfully but one or more synced sources still had no canonical case fate.",
+            fateMetadata,
+          );
         },
       );
       // Transfer the existing 10-minute mailbox lease to the continuation. The
@@ -2508,6 +2622,7 @@ export {
   DEFAULT_REF_PREFIXES as _DEFAULT_REF_PREFIXES,
   extractRef as _extractRef,
   extractRefPrefixes as _extractRefPrefixes,
+  findIntakeSourcesWithoutCase as _findIntakeSourcesWithoutCase,
   graphGetAll as _graphGetAll,
   handler as _handler,
   isAuthorized as _isAuthorized,
@@ -2517,6 +2632,8 @@ export {
   parseSenderDomain as _parseSenderDomain,
   persistPost as _persistPost,
   processAttachments as _processAttachments,
+  recordIntakeSourceDeferrals as _recordIntakeSourceDeferrals,
+  recordIntakeSourceExceptions as _recordIntakeSourceExceptions,
   resolveGroupId as _resolveGroupId,
   runBackfillFull as _runBackfillFull,
   senderMatchesPattern as _senderMatchesPattern,

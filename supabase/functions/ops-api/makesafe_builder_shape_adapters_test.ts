@@ -89,6 +89,78 @@ Deno.test("shared PrimeEco transport is not sufficient to select BuilderWest", (
   );
 });
 
+Deno.test("a bare shared-transport wb profile never steals BuilderWest or generic PrimeEco mail", () => {
+  // Western shares the PrimeEco transport with BuilderWest, so a wb company row
+  // carrying only the bare domain must not select the western adapter by sender.
+  const bareDomainProfiles = PROFILES.map((profile) =>
+    profile.slug === "wb"
+      ? { ...profile, senderPatterns: ["primeeco.tech"] }
+      : profile
+  );
+
+  assertEquals(
+    adaptDeterministicSource(
+      source(
+        "bw-shared-transport",
+        "notifications@primeeco.tech",
+        "New Make Safe Work Order BWCWA70008",
+      ),
+      bareDomainProfiles,
+    ).adapterId,
+    "builderwest",
+  );
+  assertEquals(
+    adaptDeterministicSource(
+      source(
+        "prime-shared-transport",
+        "notifications@primeeco.tech",
+        "Portal notification",
+        "A portal item is available for review.",
+      ),
+      bareDomainProfiles,
+    ).adapterId,
+    "prime",
+  );
+  assertEquals(
+    adaptDeterministicSource(
+      source(
+        "western-shared-transport",
+        "western.mailer@primeeco.tech",
+        "Make Safe Work Order: WB70009 | Example Resident | 9 Example Street Perth WA 6000",
+      ),
+      bareDomainProfiles,
+    ).adapterId,
+    "western",
+  );
+});
+
+Deno.test("a separated BuilderWest reference still selects the dedicated adapter", () => {
+  for (const subject of ["BWCWA-70010", "BWCWA 70010", "BWCWA70010"]) {
+    assertEquals(
+      adaptDeterministicSource(
+        source(`bw-${subject}`, "notifications@primeeco.tech", subject),
+        PROFILES,
+      ).adapterId,
+      "builderwest",
+      subject,
+    );
+  }
+});
+
+Deno.test("a generic follow-up sentence in a first-time work order body is not a revision", () => {
+  const firstTime = adaptDeterministicSource(
+    source(
+      "mlb-first-time",
+      "workorders@mlb.example",
+      "NEW WORK ORDER - MLB-70011",
+      "Please attend site. We will follow up with the tenant once access is confirmed.",
+    ),
+    PROFILES,
+  );
+
+  assertEquals(firstTime.intent, "work");
+});
+
 Deno.test("seven independently catalogued BuilderWest, Western and MLB shapes enter a dedicated fate path", () => {
   const fixtures: Array<{
     shape: string;

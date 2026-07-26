@@ -503,6 +503,7 @@ async function run(): Promise<void> {
       },
     },
     baseSources,
+    [],
     recentPriority,
   );
   const plan = buildDeterministicIntakePlan(sources, profiles);

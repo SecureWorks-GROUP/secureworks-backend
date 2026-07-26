@@ -403,6 +403,34 @@ function emptyFateCounts(): Record<IntakeFate, number> {
   };
 }
 
+const INTAKE_FATES: ReadonlySet<string> = new Set(
+  Object.keys(emptyFateCounts()),
+);
+
+// The one-fate-per-shape property is the whole point of the independent ground
+// truth, so it is derived here rather than assumed from the catalogue length. A
+// duplicated shape_id or an unrecognised expected_fate must lower this number for
+// every caller, not only the ones that go through the CLI loader.
+function shapesWithExactlyOneExpectedFate(
+  shapes: readonly IndependentShapeExpectation[],
+): number {
+  const fatesById = new Map<string, Set<string>>();
+  for (const shape of shapes) {
+    const id = String(shape?.shape_id ?? "");
+    const fates = fatesById.get(id) || new Set<string>();
+    fates.add(String(shape?.expected_fate ?? ""));
+    fatesById.set(id, fates);
+  }
+  let counted = 0;
+  for (const [id, fates] of fatesById) {
+    if (!id) continue;
+    if (fates.size !== 1) continue;
+    const [fate] = [...fates];
+    if (INTAKE_FATES.has(fate)) counted++;
+  }
+  return counted;
+}
+
 export function buildFiveFatesReplayReport(input: {
   plan: DeterministicIntakePlan;
   sources: readonly HistoricalShapeInput[];
@@ -662,6 +690,7 @@ export function buildFiveFatesReplayReport(input: {
   );
   const expectedVolumeFates = emptyFateCounts();
   for (const shape of input.independentShapes) {
+    if (!INTAKE_FATES.has(String(shape.expected_fate))) continue;
     expectedVolumeFates[shape.expected_fate] += shape.count;
   }
   const diagnosticAxisCatalogue = [...axisRows.entries()].map(([
@@ -706,7 +735,9 @@ export function buildFiveFatesReplayReport(input: {
     independent_ground_truth: {
       authority: "independent_corpus_swarm",
       catalogue_shapes: input.independentShapes.length,
-      shapes_with_exactly_one_expected_fate: input.independentShapes.length,
+      shapes_with_exactly_one_expected_fate: shapesWithExactlyOneExpectedFate(
+        input.independentShapes,
+      ),
       examples_found:
         independentChecks.filter((item) => item.planner_fate !== null)
           .length,

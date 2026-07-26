@@ -830,17 +830,26 @@ export async function enrichSourcesWithPdfText(
   client: any,
   sources: readonly DeterministicSourceItem[],
   priorityPostIds: readonly string[] = [],
+  recentPostIds: readonly string[] = [],
 ): Promise<DeterministicSourceItem[]> {
+  // Three strict tiers, never one flat set. Exact diagnostic seeds are by
+  // construction old (operator allowlist, already-persisted case sources), so
+  // folding them in with the bounded recent half would let a burst of newer mail
+  // spend the whole extraction budget before an explicitly seeded re-plan.
   const priority = new Set(priorityPostIds);
+  const recent = new Set(
+    [...recentPostIds].filter((postId) => !priority.has(postId)),
+  );
+  const tierOf = (postId: string) =>
+    priority.has(postId) ? 0 : recent.has(postId) ? 1 : 2;
   const ordered = [...sources].sort((a, b) => {
-    const priorityDifference = Number(priority.has(b.postId)) -
-      Number(priority.has(a.postId));
-    if (priorityDifference) return priorityDifference;
-    // The standing scan marks the bounded recent half as priority. New builder
-    // work must therefore reach the PDF budget before old replay traffic, and the
-    // newest priority source wins inside a burst. Non-priority sweep rows retain
-    // oldest-first ordering so backlog recovery still makes forward progress.
-    const timeDifference = priority.has(a.postId)
+    const tierA = tierOf(a.postId);
+    const tierB = tierOf(b.postId);
+    if (tierA !== tierB) return tierA - tierB;
+    // New builder work must reach the PDF budget before old replay traffic, so
+    // the newest recent source wins inside a burst. Seeds and non-priority sweep
+    // rows retain oldest-first ordering so backlog recovery makes forward progress.
+    const timeDifference = tierA === 1
       ? b.receivedAt.localeCompare(a.receivedAt)
       : a.receivedAt.localeCompare(b.receivedAt);
     return timeDifference || a.postId.localeCompare(b.postId);
@@ -1087,17 +1096,16 @@ async function readInputs(
         : "inbound",
     };
   });
-  // Exact diagnostic seeds and the bounded recent half own the first PDF slots.
-  // Without the recent ids here, every full-open run spent all 50 extractions on
-  // old sweep rows before it reached a newly-arrived clean builder instruction,
-  // so the two-minute poll could not satisfy the five-minute live-job law.
+  // Exact diagnostic seeds own the first PDF slots, then the bounded recent half.
+  // Without the recent ids in a tier of their own, every full-open run spent all
+  // 50 extractions on old sweep rows before it reached a newly-arrived clean
+  // builder instruction, so the two-minute poll could not satisfy the five-minute
+  // live-job law.
   const sources = await enrichSourcesWithPdfText(
     client,
     sourceRows,
-    [
-      ...options.seedPostIds,
-      ...recentRows.map((row) => String(row.post_id)).filter(Boolean),
-    ],
+    options.seedPostIds,
+    recentRows.map((row) => String(row.post_id)).filter(Boolean),
   );
   const backlogPageFull = backlogRows.length >= backlogCap;
   const recentPageFull = recentCap === 0 || recentRows.length >= recentCap;

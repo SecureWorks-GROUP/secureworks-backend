@@ -370,3 +370,49 @@ Deno.test("production replay transport rejects every mutation method", () => {
     );
   }
 });
+
+Deno.test("the one-fate-per-shape count is derived, not the catalogue length", () => {
+  const item = source("real-shape-one-fate");
+  const build = (independentShapes: IndependentShapeExpectation[]) =>
+    buildFiveFatesReplayReport({
+      plan: deterministicPlan([
+        planCase("instruction-one-fate", item.postId, "confirmed_live_job"),
+      ]),
+      sources: [{ source: item }],
+      caseSources: [],
+      cases: [],
+      jobs: [],
+      sourceExceptions: [],
+      independentShapes,
+      hugoBoard: hugoBoard([]),
+      nowIso: "2026-07-26T01:00:00.000Z",
+    }).independent_ground_truth;
+
+  const clean = build([shapeExpectation(item, "REAL-ONE", "live_job")]);
+  assertEquals(clean.catalogue_shapes, 1);
+  assertEquals(clean.shapes_with_exactly_one_expected_fate, 1);
+
+  const conflicting = build([
+    shapeExpectation(item, "REAL-ONE", "live_job"),
+    shapeExpectation(item, "REAL-ONE", "accounted_non_work"),
+  ]);
+  assertEquals(conflicting.catalogue_shapes, 2);
+  assertEquals(conflicting.shapes_with_exactly_one_expected_fate, 0);
+
+  const invalid = build([
+    {
+      ...shapeExpectation(item, "REAL-INVALID", "live_job"),
+      expected_fate:
+        "not_a_fate" as IndependentShapeExpectation["expected_fate"],
+    },
+  ]);
+  assertEquals(invalid.catalogue_shapes, 1);
+  assertEquals(invalid.shapes_with_exactly_one_expected_fate, 0);
+  assertEquals(invalid.expected_volume_fate_counts, {
+    live_job: 0,
+    blocked_live_job: 0,
+    reason_coded_exception: 0,
+    revision_or_reattendance: 0,
+    accounted_non_work: 0,
+  });
+});
