@@ -1,13 +1,13 @@
-// deno-lint-ignore-file no-explicit-any
+// deno-lint-ignore-file no-import-prefix no-explicit-any
 import {
   assertEquals,
   assertNotEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  CYCLE_ATTRIBUTION,
   commercialCloseoutAllowed,
   computeReadinessRevisionSync,
   currentCycleReportMap,
+  CYCLE_ATTRIBUTION,
   filterAssignmentsForCurrentCycle,
   hasReattendBoundary,
   isEvidenceBoundToCurrentCycle,
@@ -170,15 +170,23 @@ Deno.test("R7 typed makesafe_report fails closed on reattend when unbound", () =
 Deno.test("R8 stale assignment with backfill_cycle_scope never binds", () => {
   const detail = { cycle_number: 2, reattend_count: 1 };
   assertEquals(
-    isEvidenceBoundToCurrentCycle({
-      cycle_attribution: CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE,
-      cycle_number: 2,
-    }, detail, null),
+    isEvidenceBoundToCurrentCycle(
+      {
+        cycle_attribution: CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE,
+        cycle_number: 2,
+      },
+      detail,
+      null,
+    ),
     false,
   );
-  const { assignments, flags } = filterAssignmentsForCurrentCycle([
-    { id: "x", cycle_attribution: CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE },
-  ], detail, null);
+  const { assignments, flags } = filterAssignmentsForCurrentCycle(
+    [
+      { id: "x", cycle_attribution: CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE },
+    ],
+    detail,
+    null,
+  );
   assertEquals(assignments.length, 0);
   assertEquals(flags.includes(CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE), true);
 });
@@ -213,7 +221,11 @@ Deno.test("R9b reattend unscoped same-number evidence fails closed", () => {
     false,
   );
   assertEquals(
-    filterAssignmentsForCurrentCycle([{ id: "a", cycle_number: 2 }], detail, "cycle-2").assignments,
+    filterAssignmentsForCurrentCycle(
+      [{ id: "a", cycle_number: 2 }],
+      detail,
+      "cycle-2",
+    ).assignments,
     [],
   );
 });
@@ -224,7 +236,10 @@ Deno.test("R9c reattend hold requires bound attribution and identity", () => {
     projectCycleScopedEvidence({
       detail,
       attendanceCycleId: "cycle-2",
-      holds: [{ cycle_number: 2, cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED }],
+      holds: [{
+        cycle_number: 2,
+        cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED,
+      }],
     }).hold,
     null,
   );
@@ -249,19 +264,27 @@ Deno.test("R9d matching hold UUID still requires bound attribution", () => {
 Deno.test("R9e matching evidence UUID still requires bound attribution", () => {
   const detail = { cycle_number: 2, reattend_count: 1 };
   assertEquals(
-    isEvidenceBoundToCurrentCycle({
-      cycle_number: 2,
-      attendance_cycle_id: "cycle-2",
-      cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED,
-    }, detail, "cycle-2"),
+    isEvidenceBoundToCurrentCycle(
+      {
+        cycle_number: 2,
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED,
+      },
+      detail,
+      "cycle-2",
+    ),
     false,
   );
   assertEquals(
-    isEvidenceBoundToCurrentCycle({
-      cycle_number: 2,
-      attendance_cycle_id: "cycle-2",
-      cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
-    }, detail, "cycle-2"),
+    isEvidenceBoundToCurrentCycle(
+      {
+        cycle_number: 2,
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+      detail,
+      "cycle-2",
+    ),
     true,
   );
 });

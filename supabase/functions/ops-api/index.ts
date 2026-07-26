@@ -11228,10 +11228,12 @@ export function _makesafeMissingCloseoutDocs(
 // A non-null report_doc_id (written by makesafeRenderReport) means a report
 // draft was rendered. The pack `status` column distinguishes sent vs not.
 export interface MakesafeReportPackLike {
+  id?: string | null
   status?: string | null
   report_doc_id?: string | null
   invoice_doc_id?: string | null
   swms_doc_id?: string | null
+  cycle_attribution?: string | null
   review_state?: string | null
   sent_at?: string | null
 }

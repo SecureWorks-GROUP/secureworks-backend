@@ -24,9 +24,15 @@ Deno.test("U2-S1 migration creates immutable attendance_cycle_id table", () => {
     "CONSTRAINT makesafe_attendance_cycles_job_cycle_unique UNIQUE (job_id, cycle_number)",
   );
   assertStringIncludes(migration, "generate_series");
-  assertStringIncludes(migration, "service_role_all_makesafe_attendance_cycles");
+  assertStringIncludes(
+    migration,
+    "service_role_all_makesafe_attendance_cycles",
+  );
   assertStringIncludes(migration, "makesafe_attendance_cycles_identity_guard");
-  assertStringIncludes(migration, "prevent_makesafe_attendance_cycle_identity_change");
+  assertStringIncludes(
+    migration,
+    "prevent_makesafe_attendance_cycle_identity_change",
+  );
 });
 
 Deno.test("U2-S1 migration adds nullable cycle identity without breaking pack send lock", () => {
