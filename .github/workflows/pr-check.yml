@@ -27,12 +27,11 @@ on:
       - '.github/workflows/makesafe-intake-watchdog.yml'
       # Same reason again for the SES Reporting proof harness: these paths can be
       # changed alone, and the ses-proof-harness job below is the only automated
-      # coverage the harness has.
+      # coverage the harness has. The harness owns its own npm project under
+      # tests/e2e (package.json, package-lock.json, playwright.config.ts and
+      # tsconfig.json all live there) so that the repo root stays npm-free and
+      # Deno 2 does not auto-discover a root package.json.
       - 'tests/e2e/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'playwright.config.ts'
-      - 'tsconfig.playwright.json'
       - 'docs/ses-reporting-proof-harness.md'
 
 permissions:
@@ -166,6 +165,13 @@ jobs:
   ses-proof-harness:
     runs-on: ubuntu-latest
 
+    # The harness npm project lives here, not at the repo root. A root
+    # package.json would make Deno 2 default nodeModulesDir to auto and npm
+    # install the Playwright toolchain inside the deno-check job above.
+    defaults:
+      run:
+        working-directory: tests/e2e
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -173,16 +179,12 @@ jobs:
 
       - name: Identify changed harness files
         id: changed
+        working-directory: .
         run: |
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-          CHANGED=$(git diff --name-only --diff-filter=d "${BASE_SHA}" "${HEAD_SHA}" -- \
-            'tests/e2e/**' \
-            'package.json' \
-            'package-lock.json' \
-            'playwright.config.ts' \
-            'tsconfig.playwright.json' | sort -u)
+          CHANGED=$(git diff --name-only --diff-filter=d "${BASE_SHA}" "${HEAD_SHA}" -- 'tests/e2e/**' | sort -u)
 
           if [ -z "$CHANGED" ]; then
             echo "No proof harness files changed"
@@ -198,6 +200,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
 
       - name: Install dependencies
         if: steps.changed.outputs.has_changes == 'true'

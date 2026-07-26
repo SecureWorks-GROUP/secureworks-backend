@@ -13,6 +13,6 @@
   },
   "include": [
     "playwright.config.ts",
-    "tests/e2e/ses-reporting-proof/**/*.ts"
+    "ses-reporting-proof/**/*.ts"
   ]
 }

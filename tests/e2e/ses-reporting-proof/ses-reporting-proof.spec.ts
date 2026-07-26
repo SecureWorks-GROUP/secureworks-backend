@@ -17,8 +17,9 @@ import {
 } from './types'
 import { generateFixtures } from './fixtures'
 import { createProofDriver } from './drivers'
-import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyEnvelope, assertCaptainOnlyRoute, assertDraftAccounting } from './guards'
+import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyEnvelope, assertCaptainOnlyRoute, assertDraftAccounting, assertNoDeclaredArtifacts } from './guards'
 import { renderCockpit, renderFinalSummary, STAGE_COPY } from './cockpit'
+import { resolveRunRoot } from './paths'
 
 const SLUGS = ['intake', 'latency', 'board-truth', 'pack', 'money', 'send', 'cleanup']
 
@@ -78,7 +79,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
   const mode = (process.env.SES_PROOF_MODE || 'live') as ProofMode
   if (!['live', 'fixture'].includes(mode)) throw new Error(`Unsupported SES_PROOF_MODE ${mode}`)
   const runId = process.env.SES_PROOF_RUN_ID || `unsafe-direct-${Date.now()}`
-  const runRoot = path.resolve(process.env.SES_PROOF_RUN_ROOT || path.join('artifacts', 'ses-reporting-proof', runId))
+  const runRoot = resolveRunRoot(runId)
   const seed = process.env.SES_PROOF_SEED || 'captain-watch-v1'
   const context: ProofRunContext = {
     runId,
@@ -176,6 +177,13 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     return response
   }
 
+  async function readOnly(action: string, payload: Record<string, unknown> = {}): Promise<DriverResponse> {
+    if (!driver) throw fatalError || new Error('proof driver is unavailable')
+    const response = await driver.call(action, payload)
+    assertNoDeclaredArtifacts(response, action)
+    return response
+  }
+
   async function runStage(
     stage: StageResult,
     work: () => Promise<{ notBuilt?: string } | void>,
@@ -220,7 +228,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
 
   await runStage(summary.stages[0], async () => {
     if (!driver) throw fatalError || new Error('proof driver is unavailable')
-    const capabilityResponse = await driver.call('proof_capabilities')
+    const capabilityResponse = await readOnly('proof_capabilities')
     capabilities = asRecord(capabilityResponse.capabilities, 'capabilities') as unknown as CapabilityMap
     const intakeUnavailable = missingCapability(capabilities, 'synthetic_intake_v1')
     const cleanupUnavailable = missingCapability(capabilities, 'synthetic_cleanup_v1')
@@ -305,7 +313,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
       return { notBuilt: `NOT BUILT YET. ${unavailable || 'Board proof depends on successful intake.'}` }
     }
     if (!driver) throw new Error('proof driver is unavailable')
-    const board = await driver.call('proof_read_board', { marker: context.marker })
+    const board = await readOnly('proof_read_board', { marker: context.marker })
     await captureSurfaces(summary.stages[2], board)
     exactBoolean(board.visibleToHugo, true, 'board visibleToHugo')
     exactString(board.source, 'makesafe_board', 'board source')
@@ -360,7 +368,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     exactString(incomplete.reasonCode, 'pack_evidence_incomplete', 'incomplete pack reason')
 
     if (!driver) throw new Error('proof driver is unavailable')
-    const board = await driver.call('proof_read_board', { marker: context.marker })
+    const board = await readOnly('proof_read_board', { marker: context.marker })
     const card = asArray(board.cards, 'board cards').find((item) => item.jobId === primaryJobId)
     if (!card) throw new Error('packed job disappeared from board')
     exactString(card.stage, 'Docs Ready', 'packed job stage')
@@ -385,7 +393,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
       return { notBuilt: `NOT BUILT YET. ${unavailable || 'Money proof depends on a completed pack.'}` }
     }
     if (!driver) throw new Error('proof driver is unavailable')
-    const plan = await driver.call('proof_plan_draft_invoice', { jobId: primaryJobId, marker: context.marker })
+    const plan = await readOnly('proof_plan_draft_invoice', { jobId: primaryJobId, marker: context.marker })
     assertDraftAccounting(plan.plannedStatus, 'invoice preflight')
     const lines = asArray(plan.lines, 'invoice plan lines')
     if (lines.length === 0) throw new Error('invoice preflight returned no confirmed-rate lines')
@@ -440,7 +448,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     if (!driver) throw new Error('proof driver is unavailable')
     const messageIds: string[] = []
     for (const operatorBand of ['shaun_safe_today', 'marnin_run_with_care']) {
-      const plan = await driver.call('proof_plan_send', {
+      const plan = await readOnly('proof_plan_send', {
         jobId: primaryJobId,
         operatorBand,
         requestedRecipient: CAPTAIN_EMAIL,
@@ -466,7 +474,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
       requireStringMembers(sent.attachments, ['approved_pack', 'draft_invoice'], `${operatorBand} sent attachments`)
       const messageId = String(sent.messageId || '')
       if (!messageId) throw new Error(`${operatorBand} send returned no message ID`)
-      const delivery = await driver.call('proof_verify_delivery', { messageId, recipient: CAPTAIN_EMAIL, marker: context.marker })
+      const delivery = await readOnly('proof_verify_delivery', { messageId, recipient: CAPTAIN_EMAIL, marker: context.marker })
       assertCaptainOnlyEnvelope(delivery.observedRecipients, `${operatorBand} delivered message headers`)
       exactBoolean(delivery.delivered, true, `${operatorBand} inbox delivery`)
       exactString(delivery.inbox, CAPTAIN_EMAIL, `${operatorBand} inbox`)
@@ -479,7 +487,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     }
     if (new Set(messageIds).size !== 2) throw new Error('the two operator-band sends did not produce two distinct message IDs')
 
-    const board = await driver.call('proof_read_board', { marker: context.marker })
+    const board = await readOnly('proof_read_board', { marker: context.marker })
     const card = asArray(board.cards, 'board cards').find((item) => item.jobId === primaryJobId)
     if (!card) throw new Error('sent job disappeared from board')
     exactString(card.stage, 'Completed', 'sent job stage')
@@ -520,7 +528,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     }
 
     try {
-      const plan = await driver.call('proof_plan_cleanup', { marker: context.marker, registeredArtifacts: registry.list() })
+      const plan = await readOnly('proof_plan_cleanup', { marker: context.marker, registeredArtifacts: registry.list() })
       const planned = asArray(plan.artifacts, 'cleanup plan artifacts')
       const plannedIds = new Set(planned.map((item) => String(item.id)))
       const omitted = registry.list().filter((item) => !plannedIds.has(item.id))
@@ -540,7 +548,7 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
 
     let verifyError: Error | null = null
     try {
-      const verification = await driver.call('proof_verify_cleanup', { marker: context.marker, registeredArtifacts: registry.list() })
+      const verification = await readOnly('proof_verify_cleanup', { marker: context.marker, registeredArtifacts: registry.list() })
       const survivors = Array.isArray(verification.survivors) ? verification.survivors as typeof summary.artifacts.survivors : []
       summary.artifacts.cleaned = cleaned
       summary.artifacts.survivors = survivors

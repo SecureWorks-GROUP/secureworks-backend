@@ -52,6 +52,20 @@ export function assertDraftAccounting(status: unknown, operation: string): void 
   }
 }
 
+export function assertNoDeclaredArtifacts(response: { createdArtifacts?: unknown }, operation: string): void {
+  const declared = response?.createdArtifacts
+  if (declared === undefined || declared === null) return
+  if (!Array.isArray(declared)) {
+    throw new SafetyViolation(`${operation} is a read-only proof action but returned an invalid createdArtifacts ledger`)
+  }
+  if (declared.length > 0) {
+    const ids = declared.map((item) => String((item as { id?: unknown })?.id ?? '(no id)')).join(', ')
+    throw new SafetyViolation(
+      `${operation} is a read-only proof action but declared ${declared.length} created artifacts: ${ids}. A plan, preflight, read or verification call must never create product state, because anything it creates escapes the harness registry and the cleanup reconciliation.`,
+    )
+  }
+}
+
 export function assertSyntheticMarker(marker: unknown, runMarker: string, operation: string): void {
   const candidate = String(marker || '')
   if (!candidate.startsWith(MARKER_PREFIX) || candidate !== runMarker) {

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { FullResult, Reporter } from '@playwright/test/reporter'
+import { resolveRunRoot } from './paths'
 
 async function findFiles(root: string, suffix: string): Promise<string[]> {
   const found: string[] = []
@@ -25,7 +26,7 @@ export default class SesProofReporter implements Reporter {
   async onEnd(_result: FullResult): Promise<void> {
     const runId = process.env.SES_PROOF_RUN_ID
     if (!runId) return
-    const runRoot = path.resolve(process.env.SES_PROOF_RUN_ROOT || path.join('artifacts', 'ses-reporting-proof', runId))
+    const runRoot = resolveRunRoot(runId)
     const testResults = path.join(runRoot, 'test-results')
     const videos = await findFiles(testResults, '.webm')
     const traces = await findFiles(testResults, 'trace.zip')

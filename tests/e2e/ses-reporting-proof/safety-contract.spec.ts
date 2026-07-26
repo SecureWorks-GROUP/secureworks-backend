@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyEnvelope, assertCaptainOnlyRoute, assertDraftAccounting, assertSyntheticMarker } from './guards'
+import { ArtifactRegistry, SafetyViolation, assertCaptainOnlyEnvelope, assertCaptainOnlyRoute, assertDraftAccounting, assertNoDeclaredArtifacts, assertSyntheticMarker } from './guards'
 import { CAPTAIN_EMAIL } from './types'
 
 const marker = 'SWG-SES-E2E-TEST-ONLY-SAFETY-CONTRACT'
@@ -54,6 +54,16 @@ test('marker gate rejects missing, weak and cross-run markers', () => {
   for (const candidate of ['', 'TEST', 'SWG-SES-E2E-TEST-ONLY-OTHER-RUN']) {
     expect(() => assertSyntheticMarker(candidate, marker, 'test')).toThrow(SafetyViolation)
   }
+})
+
+test('read-only actions may not create product state', () => {
+  expect(() => assertNoDeclaredArtifacts({}, 'proof_plan_send')).not.toThrow()
+  expect(() => assertNoDeclaredArtifacts({ createdArtifacts: [] }, 'proof_plan_send')).not.toThrow()
+
+  expect(() => assertNoDeclaredArtifacts({ createdArtifacts: 'job-1' }, 'proof_plan_send')).toThrow(SafetyViolation)
+  expect(() => assertNoDeclaredArtifacts({ createdArtifacts: [{ id: 'job-1', kind: 'job', marker }] }, 'proof_plan_draft_invoice')).toThrow(SafetyViolation)
+  expect(() => assertNoDeclaredArtifacts({ createdArtifacts: [{ id: 'invoice-1', kind: 'invoice', marker }] }, 'proof_plan_draft_invoice'))
+    .toThrow(/proof_plan_draft_invoice is a read-only proof action but declared 1 created artifacts: invoice-1/)
 })
 
 test('artifact registry requires a declared creation ledger', () => {

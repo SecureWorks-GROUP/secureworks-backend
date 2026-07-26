@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
 const mode = process.argv[2] || 'live'
 if (!['live', 'fixture'].includes(mode)) {
@@ -9,13 +10,17 @@ if (!['live', 'fixture'].includes(mode)) {
   process.exit(2)
 }
 
+const harnessRoot = path.dirname(fileURLToPath(import.meta.url))
+const npmRoot = path.resolve(harnessRoot, '..')
+const repoRoot = path.resolve(npmRoot, '..', '..')
+
 const now = new Date().toISOString().replace(/[-:.]/g, '')
 const runId = process.env.SES_PROOF_RUN_ID || `${now}-${mode}`
-const runRoot = path.resolve(process.env.SES_PROOF_RUN_ROOT || path.join('artifacts', 'ses-reporting-proof', runId))
-const playwright = path.resolve('node_modules', '.bin', process.platform === 'win32' ? 'playwright.cmd' : 'playwright')
+const runRoot = path.resolve(process.env.SES_PROOF_RUN_ROOT || path.join(repoRoot, 'artifacts', 'ses-reporting-proof', runId))
+const playwright = path.join(npmRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'playwright.cmd' : 'playwright')
 
 if (!fs.existsSync(playwright)) {
-  console.error('Playwright is not installed. Run npm ci and npx playwright install chromium once, then rerun this command.')
+  console.error('Playwright is not installed. Run npm --prefix tests/e2e ci and npm --prefix tests/e2e exec playwright install chromium once, then rerun this command.')
   process.exit(2)
 }
 
@@ -28,8 +33,9 @@ if (mode === 'fixture') {
 
 const result = spawnSync(
   playwright,
-  ['test', 'tests/e2e/ses-reporting-proof/ses-reporting-proof.spec.ts'],
+  ['test', path.join('ses-reporting-proof', 'ses-reporting-proof.spec.ts')],
   {
+    cwd: npmRoot,
     stdio: 'inherit',
     env: {
       ...process.env,

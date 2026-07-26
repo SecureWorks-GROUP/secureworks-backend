@@ -1,11 +1,12 @@
 import { defineConfig } from '@playwright/test'
 import path from 'node:path'
+import { resolveRunRoot } from './ses-reporting-proof/paths'
 
 const runId = process.env.SES_PROOF_RUN_ID || 'manual-run-id-required'
-const runRoot = path.resolve(process.env.SES_PROOF_RUN_ROOT || path.join('artifacts', 'ses-reporting-proof', runId))
+const runRoot = resolveRunRoot(runId)
 
 export default defineConfig({
-  testDir: './tests/e2e',
+  testDir: '.',
   fullyParallel: false,
   workers: 1,
   timeout: 12 * 60 * 1000,
@@ -13,7 +14,7 @@ export default defineConfig({
   outputDir: path.join(runRoot, 'test-results'),
   reporter: [
     ['line'],
-    [path.resolve('tests/e2e/ses-reporting-proof/reporter.ts')],
+    ['./ses-reporting-proof/reporter.ts'],
   ],
   use: {
     viewport: { width: 1440, height: 1000 },

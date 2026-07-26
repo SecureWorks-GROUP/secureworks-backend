@@ -4,16 +4,24 @@ This is the Captain acceptance harness for the seven-stage SES Reporting voyage.
 
 The harness is deliberately stricter than a normal test. A product capability that does not exist is shown as **NOT BUILT YET**. It is never skipped and never converted into a pass.
 
+## Where the harness lives
+
+The harness owns its own npm project at `tests/e2e/`. `package.json`, `package-lock.json`, `playwright.config.ts`, `tsconfig.json` and `node_modules/` all live there, never at the repository root.
+
+That placement is deliberate. This repository is Deno-rooted: `deno.jsonc` sits at the root and Deno 2 auto-discovers a root `package.json`, defaulting `nodeModulesDir` to `auto` and installing npm dependencies before it resolves anything. That would pull the Playwright toolchain into `deno check`, the hard-blocking `deno cache` step in CI and `deno task test:ops-api`. Keeping the npm project under `tests/e2e/` leaves root Deno resolution untouched.
+
+Every command below is run from the repository root and passes `--prefix tests/e2e`. Evidence still lands under `<repo-root>/artifacts/ses-reporting-proof/`.
+
 ## Install once
 
 ```bash
-npm ci && npx playwright install chromium
+npm --prefix tests/e2e ci && npm --prefix tests/e2e exec playwright install chromium
 ```
 
 ## Run the Captain proof
 
 ```bash
-SES_PROOF_CONTROL_URL="https://<proof-control-endpoint>" SES_PROOF_API_KEY="<privileged-proof-key>" npm run proof:ses
+SES_PROOF_CONTROL_URL="https://<proof-control-endpoint>" SES_PROOF_API_KEY="<privileged-proof-key>" npm --prefix tests/e2e run proof:ses
 ```
 
 That is the one proof command. It writes a unique run folder under:
@@ -30,12 +38,12 @@ artifacts/ses-reporting-proof/<run-id>/
 
 Set `SES_PROOF_RUN_ID` to repeat the exact marker and fixture identities. Set `SES_PROOF_SEED` to change the deterministic fixture corpus.
 
-If `SES_PROOF_CONTROL_URL` is absent, `npm run proof:ses` still writes an honest summary. Product stages report NOT BUILT YET and the command exits non-zero.
+If `SES_PROOF_CONTROL_URL` is absent, the proof command still writes an honest summary. Product stages report NOT BUILT YET and the command exits non-zero.
 
 ## Harness self-test
 
 ```bash
-npm run proof:ses:fixture
+npm --prefix tests/e2e run proof:ses:fixture
 ```
 
 Fixture mode proves only that orchestration, screenshots, video, the summary renderer and safety gates work. Every stage is labelled **SIMULATED, NOT PROOF** and the final verdict is **HARNESS SELF-TEST ONLY**. It is not Captain acceptance evidence.
@@ -43,12 +51,12 @@ Fixture mode proves only that orchestration, screenshots, video, the summary ren
 Run the focused safety contract with:
 
 ```bash
-npm run test:ses-proof-safety
+npm --prefix tests/e2e run test:ses-proof-safety
 ```
 
 ## What CI runs
 
-The `ses-proof-harness` job in `.github/workflows/pr-check.yml` runs on any pull request that touches the harness, installs only Chromium, and runs three things:
+The `ses-proof-harness` job in `.github/workflows/pr-check.yml` runs on any pull request that touches the harness, works from `tests/e2e`, installs only Chromium, and runs three things:
 
 1. `npm run typecheck:ses-proof`
 2. `npm run test:ses-proof-safety`
@@ -105,6 +113,8 @@ SWG-SES-E2E-TEST-ONLY-<RUN-ID>
 ```
 
 Every mutating action must return `createdArtifacts`, even when it is an empty array. The harness registers each ID, kind and marker. An invoice artifact must additionally declare `accountingStatus: "DRAFT"`.
+
+The split is enforced in both directions. `proof_capabilities`, `proof_read_board`, `proof_plan_draft_invoice`, `proof_plan_send`, `proof_verify_delivery`, `proof_plan_cleanup` and `proof_verify_cleanup` are read-only actions and go through a wrapper that refuses the run if any of them declares a non-empty `createdArtifacts`. A capability check, board read, preflight, plan or verification must never create product state: anything created there escapes the registry, and the failure would otherwise surface much later as a confusing `cleanup claimed unknown artifacts` error instead of naming the action that actually wrote the row.
 
 ### Cleanup
 
