@@ -27,10 +27,8 @@ on:
       - '.github/workflows/makesafe-intake-watchdog.yml'
       # Same reason again for the SES Reporting proof harness: these paths can be
       # changed alone, and the ses-proof-harness job below is the only automated
-      # coverage the harness has. The harness owns its own npm project under
-      # tests/e2e (package.json, package-lock.json, playwright.config.ts and
-      # tsconfig.json all live there) so that the repo root stays npm-free and
-      # Deno 2 does not auto-discover a root package.json.
+      # coverage the harness has. Why the harness owns its own npm project under
+      # tests/e2e is documented in docs/ses-reporting-proof-harness.md.
       - 'tests/e2e/**'
       - 'docs/ses-reporting-proof-harness.md'
 

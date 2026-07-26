@@ -74,7 +74,7 @@ Every live proof submits exactly five marked EML messages with rendered PDF atta
 4. revision two attached to an existing job, with no sibling job minted
 5. accounted non-work with `own_domain_copy`
 
-The generated MIME `To` header is the Captain address. The files enter through the synthetic intake control action, not through an SES mailbox. This matters because test delivery to an SES address is forbidden. The arrival timestamp used for the five-minute law must be recorded by the proof control plane when it accepts the synthetic message. The harness rejects timing from a later internal midpoint.
+The generated MIME `To` header is the Captain address. The files enter through the synthetic intake control action, not through an SES mailbox. This matters because test delivery to an SES address is forbidden. The arrival timestamp used for the five-minute law must be recorded by the proof control plane when it accepts the synthetic message, never at a later internal midpoint. That start point is control-plane policy. The harness checks what it can see: it rejects a missing, unparseable or reversed interval and any interval above 300 seconds.
 
 ## Hard safety gates
 
