@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-explicit-any no-import-prefix
+// (untyped PostgREST-shaped stubs + std URL imports, the ops-api test convention)
 // Tests for the make-safe token-efficiency Phase 2 backend changes:
 //  - pack_sent surfaced + verified-sent board-gate softening (items 2.2 / 2.3),
 //  - sw_makesafe_audit compact reader: jobs[] + known_refs[] (item 2.1),

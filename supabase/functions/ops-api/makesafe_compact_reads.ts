@@ -139,6 +139,16 @@ function chunkByUrlBudget(ids: string[]): string[][] {
 // Run a paginated read for each budgeted chunk of `ids` and merge all rows. The
 // factory receives one chunk and must return a fresh query builder whose
 // terminal is .range() (i.e. it includes the .in(col, chunk) filter).
+//
+// CALLER OBLIGATION: the returned builder's .order() chain must END on a UNIQUE
+// column (normally the `id` PK). .range() is LIMIT/OFFSET and Postgres orders two
+// separate LIMIT/OFFSET queries relative to each other only under a TOTAL order,
+// so a chunk that spills past one page can return a row tied on a non-unique sort
+// key on neither page — an absent row, not an error. Add it AFTER any meaningful
+// ordering so the caller's sort stays primary.
+//
+// Exported: `ops-api/index.ts` reuses this same reader for its make-safe job-id
+// joins (`_fetchAllByJobIdChunked`), which appends the unique key for its callers.
 export async function fetchAllRowsInChunks<T = any>(
   ids: string[],
   buildQueryForChunk: (chunkIds: string[]) => any,
