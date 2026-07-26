@@ -13032,6 +13032,8 @@ function _resolveLiveMakesafeInvoice(
 // Test-only export.
 export const _resolveLiveMakesafeInvoiceForTest = _resolveLiveMakesafeInvoice
 
+// Consumer contract (whole-board coverage + fail-loud joins) is owned by
+// docs/makesafe-board-read-model-v1.md, "Audit read".
 async function makesafeAudit(client: any, params: URLSearchParams) {
   const since = params.get('since')
   const statusFilter = params.get('status')

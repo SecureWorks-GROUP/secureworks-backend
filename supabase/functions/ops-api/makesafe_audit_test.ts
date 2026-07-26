@@ -5,6 +5,10 @@
 //  - sw_makesafe_audit compact reader: jobs[] + known_refs[] (item 2.1),
 //  - audit-mode full invoice list incl. VOIDED/DELETED + match_tier (item 2.4).
 //
+// The makesafe_audit consumer contract these 2.1 cases guard (whole-board
+// pagination, fail-loud required joins) lives in
+// docs/makesafe-board-read-model-v1.md, "Audit read".
+//
 // Run: deno test --allow-all --no-check supabase/functions/ops-api/makesafe_audit_test.ts
 import {
   assert,

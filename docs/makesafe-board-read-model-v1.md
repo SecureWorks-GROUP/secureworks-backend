@@ -1,6 +1,7 @@
 # Make-safe board read model v1
 
-Consumer contract for the Ops and Trade board builds.
+Consumer contract for the Ops and Trade board builds, and for the `makesafe_audit`
+read over the same make-safe jobs.
 
 ## Endpoint
 
@@ -107,6 +108,25 @@ Render actions from `contact.actions`, not locally assembled stale values:
 - An available action has `available: true` and a non-null `href` (`tel:`, `sms:`, or Google Maps URL).
 - A missing source fact has `available: false`, `href: null`, and a stated `unavailable_reason`.
 - A button with a fabricated, blank, or locally cached link is a release blocker.
+
+## Audit read
+
+`GET /functions/v1/ops-api?action=makesafe_audit` — the compact whole-board read
+(`jobs[]` + `known_refs[]`) behind the make-safe skills and the hybrid loop.
+
+- Whole board means the whole board. `jobs[]` paginates over every make-safe job;
+  the old 500-job cap is gone, so volume growth is covered, not silently truncated.
+- Every required join — details/substatus, documents, service reports, ACCREC
+  invoices, pack-sent events, pipeline sent status and intake drafts — is read
+  through the shared encoded-URL-budgeted, row-paginated reader against the
+  complete job id set.
+- A required join that errors rejects the whole request. A card fact that could
+  not be read is never returned as an absent fact, so a filed work order, a sent
+  pack or a live invoice cannot read as missing.
+- Paginated reads end on a unique sort key (see the PostgREST entry in
+  `docs/project-knowledge/gotchas.md`).
+- Regression: the `2.1` cases in `supabase/functions/ops-api/makesafe_audit_test.ts`
+  (above-500 pagination, unique page tie-breaker, forced join-failure rejection).
 
 ## Parity gate
 
