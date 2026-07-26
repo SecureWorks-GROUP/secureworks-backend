@@ -13123,7 +13123,11 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // resolution below (the per-job loop then does string compares only).
   const invoiceRefKeys = _prepareMakesafeInvoiceRefs(invoiceRows)
 
-  let jobRows = (jobs || []).map((j: any) => {
+  // Annotated `any[]` because the paginated job read now yields a concretely
+  // typed array: without this the story_* fields attached further down (after
+  // the makesafe_job_story join) would not type-check against the inferred
+  // object literal shape. Runtime shape is unchanged.
+  let jobRows: any[] = (jobs || []).map((j: any) => {
     const detail = detailsMap[j.id] || null
     const docFlags = makesafeDocBooleans(docsMap[j.id] || [])
     // A filed close-out report can show up two ways: (a) a job_service_reports
