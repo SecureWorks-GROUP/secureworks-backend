@@ -317,6 +317,7 @@ import {
   // and inbound-contamination filter as makesafeNewEmails (GAP-1).
   SES_MAILBOX as _SES_MAILBOX,
   fetchAllRows as _fetchAllRows,
+  fetchAllRowsInChunks as _fetchAllRowsInChunks,
   deriveFromDomain as _deriveFromDomain,
   isOwnDomain as _isOwnDomain,
 } from './makesafe_compact_reads.ts'
@@ -11656,13 +11657,14 @@ function resolveMakesafeReportRecipient(args: {
 // so a single unpaginated .in() read SILENTLY TRUNCATES — dropping (e.g.) a
 // MAKESAFE_PACK_SENT marker that happens to sort beyond row 1000. A dropped
 // marker makes a SENT job look unsent and re-surface as ready-to-send. This
-// helper paginates by ROWS via .range() AND chunks the id list (<=200 ids per
-// call) so neither dimension can exceed the cap. It returns EVERY matching row.
+// helper paginates by ROWS via .range() AND chunks the id list by the shared
+// encoded-URL budget (with a <=200 count backstop), so neither the gateway URL
+// nor the response row cap can truncate the read. It returns EVERY matching row.
 //
 // `applyFilters(query)` lets the caller add column predicates (e.g.
 // .eq('event_type','note')); the helper owns the .in() chunking + .range()
-// pagination so callers never re-implement the cap-safe loop.
-const MAKESAFE_IN_ID_CHUNK = 200
+// pagination so callers never re-implement the cap-safe loop. The shared reader
+// also labels and throws every query error, preventing plausible partial boards.
 const MAKESAFE_PAGE_SIZE = 1000
 async function _fetchAllByJobIdChunked(
   client: any,
@@ -11672,25 +11674,15 @@ async function _fetchAllByJobIdChunked(
   applyFilters?: (q: any) => any,
   idColumn = 'job_id',
 ): Promise<any[]> {
-  const out: any[] = []
-  if (!jobIds.length) return out
-  for (let i = 0; i < jobIds.length; i += MAKESAFE_IN_ID_CHUNK) {
-    const idBatch = jobIds.slice(i, i + MAKESAFE_IN_ID_CHUNK)
-    let offset = 0
-    // Bounded loop — never spin forever even if a job set is pathologically large.
-    for (let guard = 0; guard < 1000; guard++) {
+  return await _fetchAllRowsInChunks<any>(
+    jobIds,
+    (idBatch) => {
       let query = client.from(table).select(select).in(idColumn, idBatch)
       if (applyFilters) query = applyFilters(query)
-      query = query.range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-      const { data, error } = await query
-      if (error) throw error
-      const batch = data || []
-      out.push(...batch)
-      if (batch.length < MAKESAFE_PAGE_SIZE) break
-      offset += MAKESAFE_PAGE_SIZE
-    }
-  }
-  return out
+      return query
+    },
+    `${table} (${idColumn} join)`,
+  )
 }
 // Test-only export for the cap-safe chunked reader (proves >1000-row pagination).
 export const _fetchAllByJobIdChunkedForTest = _fetchAllByJobIdChunked
@@ -13004,15 +12996,19 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   const companyFilter = params.get('company')
 
   // ── jobs[] ── one compact row per make-safe job ──
-  let jobQuery = client.from('jobs')
-    .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
-    .eq('type', 'makesafe')
-    .order('created_at', { ascending: false })
-    .limit(500)
-  if (since) jobQuery = jobQuery.gte('created_at', since)
-  if (statusFilter) jobQuery = jobQuery.eq('status', statusFilter)
-  const { data: jobs, error } = await jobQuery
-  if (error) throw error
+  // Whole-board means the whole board: paginate instead of silently capping at
+  // 500. This makes growth above tonight's 392-card volume explicit and keeps
+  // every dependent join scoped to the complete id set.
+  const jobs = await _fetchAllRows<any>(() => {
+    let query = client.from('jobs')
+      .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
+      .eq('type', 'makesafe')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+    if (since) query = query.gte('created_at', since)
+    if (statusFilter) query = query.eq('status', statusFilter)
+    return query
+  }, 'makesafe_audit jobs')
 
   const jobIds = (jobs || []).map((j: any) => j.id)
   let detailsMap: Record<string, any> = {}
@@ -13025,36 +13021,52 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   let packSentMap: Record<string, boolean> = {}
   let pipelineSentStatusMap: Record<string, string> = {}
   if (jobIds.length > 0) {
-    const [detailsRes, docsRes, reportsRes, invoicesRes, psMap, pisMap] = await Promise.all([
-      client.from('makesafe_job_details')
-        .select('job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)')
-        .in('job_id', jobIds),
-      client.from('job_documents')
-        .select('job_id, type, file_name')
-        .in('job_id', jobIds),
-      client.from('job_service_reports')
-        .select('job_id, status')
-        .in('job_id', jobIds)
-        .neq('status', 'draft'),
-      // AUDIT path: pull ALL ACCREC invoices for these jobs INCLUDING
-      // VOIDED/DELETED (item 2.4) so duplicate + void-history checks can fire.
-      client.from('xero_invoices')
-        .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
-        .eq('invoice_type', 'ACCREC')
-        .order('invoice_date', { ascending: false }),
+    // Every job-scoped join uses the shared encoded-URL-budgeted, row-paginated
+    // reader. Any required join error rejects Promise.all and therefore the
+    // whole request; missing card facts can never masquerade as empty facts.
+    const [details, docs, reports, loadedInvoiceRows, psMap, pisMap] = await Promise.all([
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_job_details',
+        'job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)',
+        jobIds,
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_documents',
+        'job_id, type, file_name',
+        jobIds,
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_service_reports',
+        'job_id, status',
+        jobIds,
+        (q) => q.neq('status', 'draft'),
+      ),
+      // AUDIT path: pull ALL ACCREC invoices INCLUDING VOIDED/DELETED (item
+      // 2.4) so duplicate, reference-only and void-history checks can fire.
+      // Paginate this required global join too and reject its query errors.
+      _fetchAllRows<any>(
+        () => client.from('xero_invoices')
+          .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
+          .eq('invoice_type', 'ACCREC')
+          .order('invoice_date', { ascending: false }),
+        'makesafe_audit xero_invoices',
+      ),
       // GAP-4 — reuse the existing buildPackSentMap (batch job_events query).
       buildPackSentMap(client, jobIds),
       // GAP-4 — sync-system sent verdict per job (pipeline_items.sent_status).
       _buildPipelineSentStatusMap(client, jobIds),
     ])
-    for (const d of (detailsRes.data || [])) detailsMap[d.job_id] = d
-    for (const doc of (docsRes.data || [])) {
+    for (const d of details) detailsMap[d.job_id] = d
+    for (const doc of docs) {
       if (!doc?.job_id) continue
       if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
       docsMap[doc.job_id].push(doc)
     }
-    for (const r of (reportsRes.data || [])) if (r?.job_id) reportSet.add(r.job_id)
-    invoiceRows = invoicesRes.data || []
+    for (const r of reports) if (r?.job_id) reportSet.add(r.job_id)
+    invoiceRows = loadedInvoiceRows
     packSentMap = psMap
     pipelineSentStatusMap = pisMap
   }
@@ -13178,15 +13190,23 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // not currently carry the email id themselves (see PR notes). Drafts contribute
   // {ref, email, job_number: null, substatus: null}.
   const knownRefs: Array<{ external_ref: string | null; source_email_id: string | null; job_number: string | null; substatus: string | null }> = []
-  // Drafts: needs_review or draft (not yet a job).
-  const { data: drafts } = await client.from('makesafe_intake_drafts')
-    .select('external_ref, graph_message_id, internet_message_id, status, approved_job_id')
-    .in('status', ['needs_review', 'draft'])
+  // Drafts: needs_review or draft (not yet a job). Both sides of the known-ref
+  // union are required audit truth, so paginate and reject instead of silently
+  // returning an incomplete reference index on a query error or row cap.
+  const drafts = await _fetchAllRows<any>(
+    () => client.from('makesafe_intake_drafts')
+      .select('external_ref, graph_message_id, internet_message_id, status, approved_job_id')
+      .in('status', ['needs_review', 'draft']),
+    'makesafe_audit pending intake drafts',
+  )
   const draftEmailByJob: Record<string, string | null> = {}
   // Also map approved drafts -> their job, to recover each job's source_email_id.
-  const { data: approvedDrafts } = await client.from('makesafe_intake_drafts')
-    .select('graph_message_id, internet_message_id, approved_job_id')
-    .eq('status', 'approved')
+  const approvedDrafts = await _fetchAllRows<any>(
+    () => client.from('makesafe_intake_drafts')
+      .select('graph_message_id, internet_message_id, approved_job_id')
+      .eq('status', 'approved'),
+    'makesafe_audit approved intake drafts',
+  )
   for (const d of (approvedDrafts || [])) {
     if (d?.approved_job_id) draftEmailByJob[d.approved_job_id] = d.graph_message_id || d.internet_message_id || null
   }

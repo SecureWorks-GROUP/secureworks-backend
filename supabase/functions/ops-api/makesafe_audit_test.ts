@@ -7,6 +7,7 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _deriveMakesafeBoardStage,
@@ -14,6 +15,7 @@ import {
   _makesafePipelineForTest,
   _resolveMakesafeJobInvoicesForTest,
 } from "./index.ts";
+import { IN_URL_BUDGET } from "./makesafe_compact_reads.ts";
 
 const NOW = "2026-06-10T03:00:00Z";
 
@@ -32,10 +34,30 @@ const RECENT_DATE = RECENT_ISO.slice(0, 10); // YYYY-MM-DD for invoice_date
 // .eq()/.in() predicates so a table queried twice with different filters (e.g.
 // makesafe_intake_drafts: pending vs approved) returns the correct subset —
 // matching real PostgREST behaviour, which makesafeAudit relies on.
-function makeQueryClient(resultsByTable: Record<string, any[]>) {
+type InCall = { table: string; column: string; values: any[]; encodedBytes: number };
+type QueryClientOptions = {
+  maxInEncodedBytes?: number;
+  forceInErrorTables?: Set<string>;
+  inCalls?: InCall[];
+};
+
+function encodedInBytes(values: any[]): number {
+  return values.reduce((total, value) => total + encodeURIComponent(String(value)).length + 1, 0);
+}
+
+function makeQueryClient(
+  resultsByTable: Record<string, any[]>,
+  options: QueryClientOptions = {},
+) {
   function builder(table: string) {
     const rows = (resultsByTable[table] || []).slice();
     const preds: Array<(r: any) => boolean> = [];
+    let rowLimit: number | null = null;
+    let queryError: { message: string } | null = null;
+    const filteredRows = () => {
+      const filtered = rows.filter((r) => preds.every((p) => p(r)));
+      return rowLimit == null ? filtered : filtered.slice(0, rowLimit);
+    };
     const b: any = {
       select: () => b,
       eq: (col: string, val: any) => {
@@ -48,6 +70,18 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
       },
       not: () => b,
       in: (col: string, vals: any[]) => {
+        const encodedBytes = encodedInBytes(vals);
+        options.inCalls?.push({ table, column: col, values: vals.slice(), encodedBytes });
+        if (options.forceInErrorTables?.has(table)) {
+          queryError = { message: `forced ${table} join failure` };
+        } else if (
+          options.maxInEncodedBytes != null && encodedBytes > options.maxInEncodedBytes
+        ) {
+          queryError = {
+            message: `${table}.${col} encoded .in() list is ${encodedBytes} bytes ` +
+              `(budget ${options.maxInEncodedBytes})`,
+          };
+        }
         preds.push((r) => vals.includes(r?.[col]));
         return b;
       },
@@ -56,16 +90,19 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
         return b;
       },
       order: () => b,
-      limit: () => b,
+      limit: (count: number) => {
+        rowLimit = count;
+        return b;
+      },
       // Paginated read terminal (fetchAllRows): applies the recorded predicates
       // then returns rows in [from, to] inclusive (real PostgREST .range()).
       range: async (from: number, to: number) => {
-        const data = rows.filter((r) => preds.every((p) => p(r))).slice(from, to + 1);
-        return { data, error: null };
+        if (queryError) return { data: null, error: queryError };
+        return { data: filteredRows().slice(from, to + 1), error: null };
       },
       then: (resolve: (v: any) => any) => {
-        const data = rows.filter((r) => preds.every((p) => p(r)));
-        return resolve({ data, error: null });
+        if (queryError) return resolve({ data: null, error: queryError });
+        return resolve({ data: filteredRows(), error: null });
       },
     };
     return b;
@@ -88,6 +125,50 @@ function jobRow(over: Record<string, any> = {}) {
     updated_at: "2026-06-09T00:00:00Z",
     completed_at: "2026-06-09T00:00:00Z",
     ...over,
+  };
+}
+
+function volumeSeed(count: number): Record<string, any[]> {
+  const jobs: any[] = [];
+  const details: any[] = [];
+  const documents: any[] = [];
+  const reports: any[] = [];
+  for (let i = 0; i < count; i++) {
+    const suffix = String(i).padStart(12, "0");
+    const jobId = `00000000-0000-4000-8000-${suffix}`;
+    jobs.push(jobRow({
+      id: jobId,
+      job_number: `SWMS-${String(30000 + i)}`,
+      status: "pending",
+      completed_at: null,
+    }));
+    details.push({
+      job_id: jobId,
+      external_ref: `AJBR-${String(70000 + i)}`,
+      requesting_company_name: "AJ Grant Building",
+      requesting_company_slug: "aj-grant",
+      substatus: "company_contact_required",
+    });
+    documents.push(
+      { job_id: jobId, type: "work_order", file_name: `WO-${i}.pdf` },
+      { job_id: jobId, type: "makesafe_report", file_name: `REPORT-${i}.pdf` },
+      { job_id: jobId, type: "invoice", file_name: `INV-${i}.pdf` },
+      { job_id: jobId, type: "swms", file_name: `SWMS document ${i}.pdf` },
+    );
+    reports.push({ job_id: jobId, status: "submitted", submitted_at: NOW });
+  }
+  return {
+    jobs,
+    makesafe_job_details: details,
+    job_documents: documents,
+    job_service_reports: reports,
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    makesafe_report_packs: [],
+    job_assignments: [],
+    job_events: [],
+    pipeline_items: [],
+    makesafe_card_story: [],
   };
 }
 
@@ -340,6 +421,80 @@ Deno.test("2.4 reference + substring tiers tag correctly; <5-char ref does not s
 // ─────────────────────────────────────────────────────────────────
 // Item 2.1 — sw_makesafe_audit jobs[] + known_refs[] shape
 // ─────────────────────────────────────────────────────────────────
+
+async function assertWholeBoardVolume(count: number) {
+  const inCalls: InCall[] = [];
+  const seed = volumeSeed(count);
+  const client = makeQueryClient(seed, {
+    // Reproduce the live gateway constraint: the old single 392/500 UUID joins
+    // fail here. Every repaired job-scoped read must stay within this budget.
+    maxInEncodedBytes: IN_URL_BUDGET,
+    inCalls,
+  });
+
+  const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const fallback: any = await _makesafePipelineForTest(client, new URLSearchParams());
+  const fallbackJobs = Object.values(fallback.columns).flat() as any[];
+  const fallbackById = new Map(fallbackJobs.map((row: any) => [row.id, row]));
+
+  assertEquals(audit.jobs.length, count, "whole audit must return every job");
+  assertEquals(fallbackJobs.length, count, "fallback board must return every job");
+  assertEquals(
+    audit.jobs.map((row: any) => row.job_id).sort(),
+    fallbackJobs.map((row: any) => row.id).sort(),
+    "whole audit and fallback board ids must reconcile",
+  );
+  for (const auditRow of audit.jobs) {
+    const fallbackRow = fallbackById.get(auditRow.job_id);
+    assert(fallbackRow, `fallback row ${auditRow.job_id} present`);
+    assertEquals(
+      auditRow.substatus,
+      fallbackRow.substatus,
+      `substatus reconciles for ${auditRow.job_id}`,
+    );
+    for (const flag of ["has_wo", "has_report_doc", "has_invoice_doc", "has_swms_doc"]) {
+      assertEquals(auditRow[flag], true, `${flag} populated for ${auditRow.job_id}`);
+      assertEquals(
+        auditRow[flag],
+        fallbackRow[flag],
+        `${flag} reconciles for ${auditRow.job_id}`,
+      );
+    }
+  }
+  assert(inCalls.length > 3, "volume fixture must exercise chunked joins");
+  assert(
+    inCalls.every((call) => call.encodedBytes <= IN_URL_BUDGET),
+    "no issued .in() join may exceed the encoded URL budget",
+  );
+}
+
+for (const count of [392, 500]) {
+  Deno.test(`2.1 makesafeAudit ${count}-row whole board keeps substatuses and documents complete`, async () => {
+    await assertWholeBoardVolume(count);
+  });
+}
+
+Deno.test("2.1 makesafeAudit paginates above the legacy 500-job cap", async () => {
+  const count = 501;
+  const client = makeQueryClient(volumeSeed(count), {
+    maxInEncodedBytes: IN_URL_BUDGET,
+  });
+  const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(audit.jobs.length, count);
+  assertEquals(audit.jobs.every((row: any) => row.substatus != null), true);
+  assertEquals(audit.jobs.every((row: any) => row.has_wo === true), true);
+});
+
+Deno.test("2.1 makesafeAudit rejects a required join failure instead of returning partial rows", async () => {
+  const client = makeQueryClient(volumeSeed(3), {
+    forceInErrorTables: new Set(["job_documents"]),
+  });
+  await assertRejects(
+    () => _makesafeAuditForTest(client, new URLSearchParams()),
+    Error,
+    "job_documents (job_id join) failed: forced job_documents join failure",
+  );
+});
 
 Deno.test("2.1 makesafeAudit returns compact jobs[] with raw substatus, doc booleans, distinct invoice statuses, generated_at", async () => {
   const client = makeQueryClient({

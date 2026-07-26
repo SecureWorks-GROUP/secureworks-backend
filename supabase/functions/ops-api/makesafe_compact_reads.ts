@@ -139,7 +139,7 @@ function chunkByUrlBudget(ids: string[]): string[][] {
 // Run a paginated read for each budgeted chunk of `ids` and merge all rows. The
 // factory receives one chunk and must return a fresh query builder whose
 // terminal is .range() (i.e. it includes the .in(col, chunk) filter).
-async function fetchAllRowsInChunks<T = any>(
+export async function fetchAllRowsInChunks<T = any>(
   ids: string[],
   buildQueryForChunk: (chunkIds: string[]) => any,
   label: string,
