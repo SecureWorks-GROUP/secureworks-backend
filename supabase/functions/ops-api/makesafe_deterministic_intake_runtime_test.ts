@@ -460,6 +460,65 @@ Deno.test("PDF extraction quarantines bad records without aborting good records"
   );
 });
 
+Deno.test("U1 real-email regression: newest recent work order owns a PDF slot before old sweep mail", async () => {
+  // Derived from production source hash b65f17701ab66ea5 (24 Jul): a genuine
+  // inbound NEW WORK ORDER sat behind old mailbox PDFs. Content is replaced with
+  // the existing non-PII digital fixture; only the observed queue shape remains.
+  const pdfBytes = digitalWorkOrderPdf();
+  const store = baseStore();
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => pdfBytes,
+  );
+  const makeSource = (postId: string, receivedAt: string) => ({
+    postId,
+    fromEmail: "dispatch@mlb.test",
+    subject: "NEW WORK ORDER",
+    body: "Builder work order attached.",
+    receivedAt,
+    attachments: [{
+      id: `${postId}-attachment`,
+      sourcePostId: postId,
+      name: "Work Order.pdf",
+      contentType: "application/pdf",
+      storagePath: `raw/${postId}.pdf`,
+      status: "uploaded",
+      sizeBytes: pdfBytes.length,
+    }],
+    links: [],
+    direction: "inbound" as const,
+  });
+  const oldSources = Array.from({ length: 51 }, (_, index) =>
+    makeSource(
+      `old-${String(index).padStart(2, "0")}`,
+      new Date(Date.parse(NOW) - (60 - index) * 60_000).toISOString(),
+    ));
+  const newest = makeSource(
+    "real-shape-newest-work-order",
+    new Date(Date.parse(NOW) + 60_000).toISOString(),
+  );
+
+  const enriched = await enrichSourcesWithPdfText(
+    client,
+    [...oldSources, newest],
+    [newest.postId],
+  );
+  const byPost = new Map(enriched.map((source) => [source.postId, source]));
+
+  assertEquals(
+    byPost.get(newest.postId)?.pdfDocuments?.[0].status,
+    "extracted",
+  );
+  assertEquals(
+    enriched.flatMap((source) => source.pdfDocuments || []).filter((document) =>
+      document.status === "deferred"
+    ).length,
+    2,
+  );
+});
+
 Deno.test("live deterministic intake fills a draft from PDF and persists readable text provenance", async () => {
   const store = baseStore();
   const pdfBytes = digitalWorkOrderPdf();

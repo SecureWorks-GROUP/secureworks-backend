@@ -1964,13 +1964,30 @@ async function logMailReadFailureEvent(
   }
 }
 
+export interface IntakeScanContinuationFailure {
+  kind: "http" | "network";
+  status: number | null;
+}
+
 export function _scheduleIntakeScanContinuation(
   fetchFn: typeof fetch,
   waitUntil: (promise: Promise<void>) => void,
   url: string,
   headers: Record<string, string>,
   onSettled: () => Promise<void> = () => Promise.resolve(),
+  onFailure: (failure: IntakeScanContinuationFailure) => Promise<void> = () =>
+    Promise.resolve(),
 ): void {
+  const recordFailure = async (failure: IntakeScanContinuationFailure) => {
+    try {
+      await onFailure(failure);
+    } catch (recordError) {
+      console.error(
+        "[monitor-ses] intake scan failure record failed:",
+        (recordError as Error).message,
+      );
+    }
+  };
   const continuation = (async () => {
     try {
       const scanResp = await fetchFn(url, {
@@ -1981,11 +1998,18 @@ export function _scheduleIntakeScanContinuation(
       console.log(
         `[monitor-ses] intake scan continuation status=${scanResp.status}`,
       );
+      // fetch resolves for 401/403/409/5xx. Treating that as success released the
+      // lease with no durable alarm while newly-synced emails had no five-fate
+      // record. Preserve the email rows, but make the failed handoff explicit.
+      if (!scanResp.ok) {
+        await recordFailure({ kind: "http", status: scanResp.status });
+      }
     } catch (scanErr) {
       console.error(
         "[monitor-ses] intake scan continuation failed (non-fatal):",
         (scanErr as Error).message,
       );
+      await recordFailure({ kind: "network", status: null });
     } finally {
       try {
         await onSettled();
@@ -2260,6 +2284,42 @@ async function handler(req: Request): Promise<Response> {
             console.error(
               "[monitor-ses] continuation lock release failed:",
               error.message,
+            );
+          }
+        },
+        async (failure) => {
+          // The source emails are already durable before this continuation is
+          // scheduled. This append-only alarm supplies the missing handoff record
+          // when ops-api rejects or cannot receive the scan, so the gap is visible
+          // and correlated to the exact mailbox watermark instead of living only
+          // in transient edge logs.
+          const { error } = await sb.from("business_events").insert({
+            event_type: "makesafe.intake.scan_handoff_failed",
+            source: "monitor-ses-makesafes",
+            entity_type: "mailbox",
+            entity_id: MAILBOX,
+            body_preview:
+              `Deterministic intake handoff failed (${failure.kind}${
+                failure.status === null ? "" : ` ${failure.status}`
+              }); synced source emails remain queued for retry.`,
+            safe_summary:
+              "SES email sync completed but deterministic intake handoff failed; durable emails remain queued for the next poll.",
+            payload: {
+              mailbox: MAILBOX,
+              failure_kind: failure.kind,
+              http_status: failure.status,
+              synced_watermark: maxReceived,
+              included_sources: included,
+            },
+            metadata: {
+              mission: "ses-reporting-end-to-end-2026-07",
+              unit: "U1",
+            },
+            schema_version: "1.0",
+          });
+          if (error) {
+            throw new Error(
+              `scan handoff alarm write failed: ${error.message}`,
             );
           }
         },

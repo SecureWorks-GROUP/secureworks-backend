@@ -293,7 +293,16 @@ remains bounded by its 500-source read cap, 1..10 case cap and attempt ceiling.
 
 Transfer the existing 10-minute mailbox lease to that continuation and release it
 only when the nested scan settles, so the two-minute poll cannot launch overlapping
-batches.
+batches. A non-2xx or network-failed continuation must write the durable
+`makesafe.intake.scan_handoff_failed` business event; a resolved `fetch` is not proof
+that intake ran.
+
+The 50-document PDF budget must prioritise exact diagnostic sources and the bounded
+recent email half, newest first. Non-priority sweep rows remain oldest first. Without
+that split, old replay PDFs consume the budget before a clean new builder work order
+and break the five-minute live-job law. The GET-only regression harness is
+`scripts/replay-makesafe-five-fates.ts`; do not use runtime `dryRun` for a strictly
+read-only production proof because dark observe intentionally advances its own cursor.
 
 Deterministic instruction keys are long enough that 200 values overflow a reliable
 PostgREST GET URL. Keep all case/lineage `.in()` filters on the runtime's 25-item

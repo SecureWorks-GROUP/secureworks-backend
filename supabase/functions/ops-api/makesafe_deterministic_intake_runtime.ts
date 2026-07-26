@@ -832,11 +832,19 @@ export async function enrichSourcesWithPdfText(
   priorityPostIds: readonly string[] = [],
 ): Promise<DeterministicSourceItem[]> {
   const priority = new Set(priorityPostIds);
-  const ordered = [...sources].sort((a, b) =>
-    Number(priority.has(b.postId)) - Number(priority.has(a.postId)) ||
-    a.receivedAt.localeCompare(b.receivedAt) ||
-    a.postId.localeCompare(b.postId)
-  );
+  const ordered = [...sources].sort((a, b) => {
+    const priorityDifference = Number(priority.has(b.postId)) -
+      Number(priority.has(a.postId));
+    if (priorityDifference) return priorityDifference;
+    // The standing scan marks the bounded recent half as priority. New builder
+    // work must therefore reach the PDF budget before old replay traffic, and the
+    // newest priority source wins inside a burst. Non-priority sweep rows retain
+    // oldest-first ordering so backlog recovery still makes forward progress.
+    const timeDifference = priority.has(a.postId)
+      ? b.receivedAt.localeCompare(a.receivedAt)
+      : a.receivedAt.localeCompare(b.receivedAt);
+    return timeDifference || a.postId.localeCompare(b.postId);
+  });
   const documentsByPost = new Map<string, DeterministicPdfDocument[]>();
   let attempted = 0;
   for (const source of ordered) {
@@ -1079,10 +1087,17 @@ async function readInputs(
         : "inbound",
     };
   });
+  // Exact diagnostic seeds and the bounded recent half own the first PDF slots.
+  // Without the recent ids here, every full-open run spent all 50 extractions on
+  // old sweep rows before it reached a newly-arrived clean builder instruction,
+  // so the two-minute poll could not satisfy the five-minute live-job law.
   const sources = await enrichSourcesWithPdfText(
     client,
     sourceRows,
-    options.seedPostIds,
+    [
+      ...options.seedPostIds,
+      ...recentRows.map((row) => String(row.post_id)).filter(Boolean),
+    ],
   );
   const backlogPageFull = backlogRows.length >= backlogCap;
   const recentPageFull = recentCap === 0 || recentRows.length >= recentCap;

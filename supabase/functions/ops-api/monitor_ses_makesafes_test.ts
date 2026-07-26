@@ -123,6 +123,45 @@ Deno.test("intake scan continuation returns before a scan beyond pg_net's five-s
   assertEquals(captured.leaseReleased, true);
 });
 
+Deno.test("intake continuation durably reports non-2xx and network handoff failures", async () => {
+  const observed: Array<{ kind: "http" | "network"; status: number | null }> =
+    [];
+  for (
+    const fetchStub of [
+      (() =>
+        Promise.resolve(
+          new Response("unavailable", { status: 503 }),
+        )) as typeof fetch,
+      (() => Promise.reject(new Error("connection reset"))) as typeof fetch,
+    ]
+  ) {
+    let registered: Promise<void> | undefined;
+    let settled = false;
+    _scheduleIntakeScanContinuation(
+      fetchStub,
+      (promise) => registered = promise,
+      "https://example.invalid/ops-api?action=scan_ses_makesafes",
+      {},
+      () => {
+        settled = true;
+        return Promise.resolve();
+      },
+      (failure) => {
+        observed.push(failure);
+        return Promise.resolve();
+      },
+    );
+    assert(registered);
+    await registered;
+    assertEquals(settled, true);
+  }
+
+  assertEquals(observed, [
+    { kind: "http", status: 503 },
+    { kind: "network", status: null },
+  ]);
+});
+
 // ── Classifier: domain-boundary matching ──────────────────────────────────────
 // SCHEMA NOTE: a raw group post has NO `subject`; collectPosts sets post.subject
 // from the parent thread `topic`. `withTopic` mirrors that so classifier tests run
