@@ -1501,6 +1501,7 @@ Deno.test("2.1 reattend cycle: current-cycle service report DOES set has_report_
         job_id: "j-reattend-cur",
         status: "submitted",
         cycle_number: 2,
+        cycle_attribution: "bound",
       },
     ],
     xero_invoices: [],

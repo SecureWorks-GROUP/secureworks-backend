@@ -12,7 +12,6 @@ import {
   isMakesafeTerminalJobState,
 } from "./makesafe_status_apply.ts";
 import {
-  hasReattendBoundary,
   photoCountForCurrentCycle,
   tradeSafeHold,
 } from "./makesafe_cycle_evidence.ts";

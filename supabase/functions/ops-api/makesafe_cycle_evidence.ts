@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 // U2-S1: one shared cycle-scoped evidence boundary for board + audit.
 // Pure projection helpers only — no second status engine and no DB writes.
 
@@ -63,7 +64,8 @@ export function isEvidenceBoundToCurrentCycle(
     return true;
   }
   if (row.cycle_number != null && Number(row.cycle_number) === cycle) {
-    return !hasReattendBoundary(detail) || attribution === CYCLE_ATTRIBUTION.BOUND;
+    return !hasReattendBoundary(detail) ||
+      attribution === CYCLE_ATTRIBUTION.BOUND;
   }
 
   // Fully unbound (no cycle_number, no attendance_cycle_id).
@@ -134,9 +136,12 @@ export function filterAssignmentsForCurrentCycle(
   if (dropped > 0) {
     flags.push("stale_assignment_excluded");
   }
-  if (list.some((a) =>
-    String(a?.cycle_attribution || "") === CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE
-  )) {
+  if (
+    list.some((a) =>
+      String(a?.cycle_attribution || "") ===
+        CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE
+    )
+  ) {
     flags.push(CYCLE_ATTRIBUTION.BACKFILL_CYCLE_SCOPE);
   }
   return { assignments: bound, flags };
@@ -161,7 +166,9 @@ export function filterHoldsForCurrentCycle(
     }
     if (Number(hold?.cycle_number || 1) === cycle) {
       if (hasReattendBoundary(detail)) {
-        if (String(hold?.cycle_attribution || "") !== CYCLE_ATTRIBUTION.BOUND) continue;
+        if (String(hold?.cycle_attribution || "") !== CYCLE_ATTRIBUTION.BOUND) {
+          continue;
+        }
         if (!hold?.attendance_cycle_id || !currentAttendanceCycleId) continue;
       }
       return hold;

@@ -190,10 +190,10 @@ Render actions from `contact.actions`, not locally assembled stale values:
   invoices, pipeline_items sent status, intake drafts, card story) hard-fail;
   only `recheck_queue_depth` is optional (null when its auxiliary COUNT fails).
 - Current-cycle report truth: when `reattend_count > 0`, `has_report_record` and
-  the report leg of `pack_effectively_sent` use the same cycle boundary as the
-  board (`currentCycleReportMap`) so a prior visit's service report cannot
-  falsify the current reattendance cycle. Cards with no reattend boundary keep
-  the legacy any-cycle first-match behaviour.
+  the report leg of `pack_effectively_sent` use the shared
+  `makesafe_cycle_evidence.ts` boundary as the board, so a prior visit's service
+  report cannot falsify the current reattendance cycle. Cards with no reattend
+  boundary keep the legacy any-cycle first-match behaviour.
 - Multi-row `pipeline_items.sent_status` for one job is reduced by explicit rank
   (`verified_sent` > `needs_review` > `not_sent`); input order cannot demote a
   stronger verdict, and a row with empty status never invents "sent".

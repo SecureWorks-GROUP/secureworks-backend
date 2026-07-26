@@ -96,11 +96,21 @@ Deno.test("R3b reattend: current-cycle report + bound assignment pass", () => {
     detail,
     reports: [
       { id: "r1", status: "submitted", cycle_number: 1 },
-      { id: "r2", status: "submitted", cycle_number: 2 },
+      {
+        id: "r2",
+        status: "submitted",
+        cycle_number: 2,
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
     ],
     assignments: [
       { id: "a1", cycle_number: 1 },
-      { id: "a2", cycle_number: 2, attendance_cycle_id: "cyc-2" },
+      {
+        id: "a2",
+        cycle_number: 2,
+        attendance_cycle_id: "cyc-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
     ],
     attendanceCycleId: "cyc-2",
     packCycleBound: false,
