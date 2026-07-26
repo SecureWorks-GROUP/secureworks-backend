@@ -1384,6 +1384,32 @@ Deno.test("2.1 reattend cycle: prior-cycle report + PAID cannot mint pack_effect
   assertEquals(j.pack_effectively_sent, false);
 });
 
+Deno.test("2.1 reattend cycle: typed prior report and pack marker stay legacy-only", async () => {
+  const client = makeQueryClient({
+    jobs: [jobRow({ id: "j-reattend-stale", job_number: "SWMS-28005", status: "complete" })],
+    makesafe_job_details: [{
+      job_id: "j-reattend-stale",
+      external_ref: "AJBR-68005",
+      substatus: "waiting_on_trade_report",
+      reattend_count: 1,
+      cycle_number: 2,
+    }],
+    job_documents: [{ job_id: "j-reattend-stale", type: "makesafe_report", file_name: "old-report.pdf" }],
+    job_service_reports: [],
+    xero_invoices: [],
+    makesafe_intake_drafts: [],
+    job_events: [packSentNote("j-reattend-stale")],
+    pipeline_items: [],
+    makesafe_card_story: [],
+  });
+  const res: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  const j = res.jobs[0];
+  assertEquals(j.has_report_doc, false);
+  assertEquals(j.has_report_record, false);
+  assertEquals(j.pack_sent, false);
+  assertEquals(j.pack_effectively_sent, false);
+});
+
 Deno.test("2.1 legacy (no reattend boundary): any-cycle report still sets has_report_record", async () => {
   // Explicit fallback: reattend_count 0 / absent keeps first-match any-cycle
   // behaviour so single-visit and reopen-only cards are unchanged.

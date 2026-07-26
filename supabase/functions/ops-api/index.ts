@@ -11504,6 +11504,10 @@ function currentCycleReportMap(
   return map
 }
 
+function isLegacyMakesafeCard(detail: any): boolean {
+  return !((detail?.reattend_count ?? 0) > 0)
+}
+
 function makesafeCrew(assignments: any[] = []) {
   const names = assignments.map((a: any) => a?.users?.name).filter(Boolean)
   const uniqueNames = Array.from(new Set(names))
@@ -13140,7 +13144,10 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     const currentReports = currentCycleReportMap(reports || [], detailsMap)
     for (const jobId of Object.keys(currentReports)) reportSet.add(jobId)
     invoiceRows = loadedInvoiceRows
-    packSentMap = psMap
+    packSentMap = {}
+    for (const job of (jobs || [])) {
+      if (isLegacyMakesafeCard(detailsMap[job.id])) packSentMap[job.id] = psMap[job.id] === true
+    }
     pipelineSentStatusMap = pisMap
   }
 
@@ -13162,7 +13169,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // files the report as a typed doc and never writes a job_service_reports
     // row, so the audit must count the typed doc too — otherwise every report
     // the skill produces reads as missing. See sw-makesafe-audit-tool-spec.md.
-    const hasReportDocTyped = (docsMap[j.id] || []).some(
+    const hasReportDocTyped = isLegacyMakesafeCard(detail) && (docsMap[j.id] || []).some(
       (d: any) => String(d?.type || '').toLowerCase() === 'makesafe_report',
     )
     const company = detail?.requesting_company_name || detail?.makesafe_companies?.name ||
@@ -13209,10 +13216,13 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // definition (typed makesafe_report doc OR a job_service_reports row). Deposit invoices
     // (ACCRECDEPOSIT) cannot false-trigger this: the invoice query above is ACCREC-only, so a
     // paid deposit never enters `invoices` and can never resolve as the live PAID invoice here.
-    const packEffectivelySent = (packSentMap[j.id] === true) ||
+    const packEffectivelySent = isLegacyMakesafeCard(detail) && (
+      (packSentMap[j.id] === true) ||
       (String(liveInvoice?.status || '').toUpperCase() === 'PAID' &&
         (docFlags.has_report_doc || hasReportDocTyped || reportSet.has(j.id)) &&
         docFlags.has_invoice_doc)
+    )
+    const hasReportDoc = isLegacyMakesafeCard(detail) && docFlags.has_report_doc
     return {
       job_id: j.id,
       job_number: j.job_number,
@@ -13223,7 +13233,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       substatus_legacy: rawSub === 'pending_allocation',
       geocoded: j.site_lat != null && j.site_lng != null,
       has_wo: docFlags.has_wo,
-      has_report_doc: docFlags.has_report_doc,
+      has_report_doc: hasReportDoc,
       has_invoice_doc: docFlags.has_invoice_doc,
       has_swms_doc: docFlags.has_swms_doc,
       has_report_record: reportSet.has(j.id) || hasReportDocTyped,
@@ -13233,7 +13243,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       live_invoice_no: liveInvoice?.invoice_number ?? null,
       live_invoice_status: liveInvoice?.status ?? null,
       // GAP-4 — notes-based pack-sent marker (triage) + the sync-system verdict.
-      pack_sent: packSentMap[j.id] === true,
+      pack_sent: isLegacyMakesafeCard(detail) && packSentMap[j.id] === true,
       // M-G FIX 5 — pack_sent OR (PAID + report doc + invoice doc). Consumed by the
       // skill's outstanding verdict() to retire a stale "outstanding" on a paid+filed job
       // as a DISTINCT "paid-filed — confirm sent" state (not folded into "sent").
