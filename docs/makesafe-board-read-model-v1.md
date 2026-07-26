@@ -101,6 +101,39 @@ Visibility is server-owned. It derives only from the caller's `role` and `manage
 
 The trade projection is an explicit allow-list. It contains no pricing, Xero invoice data, trade invoices, or another trade's invoice data.
 
+## Sealed SES Reporting visibility boundary
+
+For the five-minute clean-automated intake metric, **Board-visible** has one
+server boundary:
+
+- Start: the clean source email's received timestamp.
+- Stop: the same `jobs.id` is contained in an authorised
+  `makesafe_board?projection=trade` response for a profile whose
+  `managed_verticals` contains `makesafe`, in `New` or `Allocated`.
+- A `company_contact_required` card in `New` satisfies Board visibility. It is
+  separately `field_ready: false` because client contact remains a blocker, and
+  separately `open_pool_eligible: false` under the existing pool predicate.
+- A job or reconciliation row by itself does not satisfy this boundary.
+
+The deterministic no-write proof is
+`supabase/functions/ops-api/makesafe_intake_integration_test.ts`. Its one clean
+instruction identity passes the production clean-intake gate, retains the same
+`job_id` through canonical stage derivation and the authorised Trade projector,
+and asserts exact containment plus the negative role/vertical cases. The fixture
+records email-received, job-created and Board-projection timestamps and enforces
+a maximum direct-response elapsed time of 300,000 ms.
+
+The proof calls the authorised server projection directly, so it explicitly
+bypasses the Trade client's 90,000 ms in-memory Board cache. It proves Board L2
+response containment, not browser first paint. Production stores no first-paint
+telemetry, and the test does not manufacture one.
+
+Run:
+
+```bash
+deno test --no-check --allow-all supabase/functions/ops-api/makesafe_intake_integration_test.ts
+```
+
 ## Contact actions
 
 Render actions from `contact.actions`, not locally assembled stale values:
