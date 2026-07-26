@@ -5,8 +5,8 @@
 //  - sw_makesafe_audit compact reader: jobs[] + known_refs[] (item 2.1),
 //  - audit-mode full invoice list incl. VOIDED/DELETED + match_tier (item 2.4).
 //
-// The makesafe_audit consumer contract these 2.1 cases guard (whole-board
-// pagination, fail-loud required joins) lives in
+// The makesafe_audit consumer contract these 2.1 cases guard (uncapped jobs,
+// multi-page dependent reads, required-query error rejection) lives in
 // docs/makesafe-board-read-model-v1.md, "Audit read".
 //
 // Run: deno test --allow-all --no-check supabase/functions/ops-api/makesafe_audit_test.ts
@@ -44,12 +44,16 @@ const RECENT_DATE = RECENT_ISO.slice(0, 10); // YYYY-MM-DD for invoice_date
 // matching real PostgREST behaviour, which makesafeAudit relies on.
 type InCall = { table: string; column: string; values: any[]; encodedBytes: number };
 type OrderCall = { column: string; ascending: boolean };
-// One issued read (one builder). `paginated` records whether the read terminated
-// on .range() — i.e. whether page stability depends on its ORDER BY being total.
-type ReadCall = { table: string; orders: OrderCall[]; paginated: boolean };
+type RangeCall = { from: number; to: number };
+// One issued read (one builder). `ranges` records its LIMIT/OFFSET terminal so
+// volume tests can prove page 2 was requested and merged, not merely that the
+// encoded-id budget caused more than one query.
+type ReadCall = { table: string; orders: OrderCall[]; ranges: RangeCall[]; paginated: boolean };
 type QueryClientOptions = {
   maxInEncodedBytes?: number;
   forceInErrorTables?: Set<string>;
+  forceReadErrorTables?: Set<string>;
+  forceHeadErrorTables?: Set<string>;
   inCalls?: InCall[];
   reads?: ReadCall[];
 };
@@ -66,17 +70,41 @@ function makeQueryClient(
     const rows = (resultsByTable[table] || []).slice();
     const preds: Array<(r: any) => boolean> = [];
     let rowLimit: number | null = null;
+    let exactHeadCount = false;
     let queryError: { message: string } | null = null;
     // Recorded for EVERY read, ordered or not, so a paginated read that emits no
     // ORDER BY at all is visible to the page-stability guard below.
-    const read: ReadCall = { table, orders: [], paginated: false };
+    const read: ReadCall = { table, orders: [], ranges: [], paginated: false };
     options.reads?.push(read);
     const filteredRows = () => {
-      const filtered = rows.filter((r) => preds.every((p) => p(r)));
+      let filtered = rows.filter((r) => preds.every((p) => p(r)));
+      // Apply the recorded PostgREST ORDER BY before each range. Modern JS sort
+      // is stable; walking keys in reverse preserves the declared key priority.
+      for (let i = read.orders.length - 1; i >= 0; i--) {
+        const { column, ascending } = read.orders[i];
+        filtered = filtered.slice().sort((a, b) => {
+          const av = a?.[column];
+          const bv = b?.[column];
+          if (av === bv) return 0;
+          if (av == null) return 1;
+          if (bv == null) return -1;
+          const direction = av < bv ? -1 : 1;
+          return ascending ? direction : -direction;
+        });
+      }
       return rowLimit == null ? filtered : filtered.slice(0, rowLimit);
     };
     const b: any = {
-      select: () => b,
+      select: (_columns?: string, selectOptions?: { head?: boolean; count?: string }) => {
+        exactHeadCount = selectOptions?.head === true && selectOptions?.count === "exact";
+        if (options.forceReadErrorTables?.has(table)) {
+          queryError = { message: `forced ${table} read failure` };
+        }
+        if (selectOptions?.head && options.forceHeadErrorTables?.has(table)) {
+          queryError = { message: `forced ${table} head-count failure` };
+        }
+        return b;
+      },
       eq: (col: string, val: any) => {
         preds.push((r) => r?.[col] === val);
         return b;
@@ -85,7 +113,14 @@ function makeQueryClient(
         preds.push((r) => r?.[col] !== val);
         return b;
       },
-      not: () => b,
+      not: (col: string, operator: string, val: any) => {
+        if (operator === "is" && val == null) preds.push((r) => r?.[col] != null);
+        return b;
+      },
+      is: (col: string, val: any) => {
+        preds.push((r) => val == null ? r?.[col] == null : r?.[col] === val);
+        return b;
+      },
       in: (col: string, vals: any[]) => {
         const encodedBytes = encodedInBytes(vals);
         options.inCalls?.push({ table, column: col, values: vals.slice(), encodedBytes });
@@ -117,15 +152,17 @@ function makeQueryClient(
         return b;
       },
       // Paginated read terminal (fetchAllRows): applies the recorded predicates
-      // then returns rows in [from, to] inclusive (real PostgREST .range()).
+      // and ORDER BY, then returns rows in [from, to] inclusive.
       range: async (from: number, to: number) => {
         read.paginated = true;
+        read.ranges.push({ from, to });
         if (queryError) return { data: null, error: queryError };
         return { data: filteredRows().slice(from, to + 1), error: null };
       },
       then: (resolve: (v: any) => any) => {
         if (queryError) return resolve({ data: null, error: queryError });
-        return resolve({ data: filteredRows(), error: null });
+        const data = filteredRows();
+        return resolve({ data: exactHeadCount ? null : data, count: exactHeadCount ? data.length : null, error: null });
       },
     };
     return b;
@@ -181,14 +218,18 @@ const VOLUME_DOC_FLAG_BY_TYPE: Record<string, string> = {
 const VOLUME_DOC_TYPES = Object.keys(VOLUME_DOC_FLAG_BY_TYPE);
 
 // Every 5th job is missing exactly one document, rotating through all four types,
-// so each has_* flag is proven false somewhere and true elsewhere. All rows stay
-// TYPED, so the filename fallback in makesafeDocBooleans can never re-supply an
-// omitted type.
+// so each has_* flag is proven false somewhere and true elsewhere. Canonical rows
+// stay TYPED, so the filename fallback can never re-supply an omitted type.
 function volumeDocTypes(index: number): string[] {
   if (index % 5 !== 4) return VOLUME_DOC_TYPES;
   const dropped = VOLUME_DOC_TYPES[Math.floor(index / 5) % VOLUME_DOC_TYPES.length];
   return VOLUME_DOC_TYPES.filter((type) => type !== dropped);
 }
+
+// Four unrelated rows per job make a ~162-UUID URL-budget chunk carry >1000
+// job_documents rows. The 392/500 regressions therefore require page 2 to be
+// fetched and merged; dropping page 2 loses later jobs' canonical flags.
+const VOLUME_NOISE_DOCS_PER_JOB = 4;
 
 function volumeSeed(count: number): Record<string, any[]> {
   const jobs: any[] = [];
@@ -211,10 +252,29 @@ function volumeSeed(count: number): Record<string, any[]> {
       requesting_company_slug: "aj-grant",
       substatus: VOLUME_SUBSTATUSES[i % VOLUME_SUBSTATUSES.length],
     });
+    let docOrdinal = 0;
     for (const type of volumeDocTypes(i)) {
-      documents.push({ job_id: jobId, type, file_name: `${type}-${i}.pdf` });
+      documents.push({
+        id: `doc-${suffix}-${String(docOrdinal++).padStart(2, "0")}`,
+        job_id: jobId,
+        type,
+        file_name: `${type}-${i}.pdf`,
+      });
     }
-    reports.push({ job_id: jobId, status: "submitted", submitted_at: NOW });
+    for (let noise = 0; noise < VOLUME_NOISE_DOCS_PER_JOB; noise++) {
+      documents.push({
+        id: `doc-${suffix}-${String(docOrdinal++).padStart(2, "0")}`,
+        job_id: jobId,
+        type: "general",
+        file_name: `site-attachment-${i}-${noise}.jpg`,
+      });
+    }
+    reports.push({
+      id: `report-${suffix}`,
+      job_id: jobId,
+      status: "submitted",
+      submitted_at: NOW,
+    });
   }
   return {
     jobs,
@@ -569,6 +629,7 @@ function assertVolumeFixtureVaries(rows: any[]) {
 
 async function assertWholeBoardVolume(count: number) {
   const inCalls: InCall[] = [];
+  const reads: ReadCall[] = [];
   const seed = volumeSeed(count);
   const expectations = volumeExpectations(seed);
   const client = makeQueryClient(seed, {
@@ -576,6 +637,7 @@ async function assertWholeBoardVolume(count: number) {
     // fail here. Every repaired job-scoped read must stay within this budget.
     maxInEncodedBytes: IN_URL_BUDGET,
     inCalls,
+    reads,
   });
 
   const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
@@ -614,6 +676,13 @@ async function assertWholeBoardVolume(count: number) {
     inCalls.every((call) => call.encodedBytes <= IN_URL_BUDGET),
     "no issued .in() join may exceed the encoded URL budget",
   );
+  const documentPageTwos = reads.filter((read) =>
+    read.table === "job_documents" && read.ranges.some((range) => range.from === 1000)
+  );
+  assert(
+    documentPageTwos.length >= 2,
+    "392/500 volume must merge page 2 of job_documents in both audit and fallback reads",
+  );
 }
 
 for (const count of [392, 500]) {
@@ -622,12 +691,14 @@ for (const count of [392, 500]) {
   });
 }
 
-Deno.test("2.1 makesafeAudit paginates above the legacy 500-job cap", async () => {
-  const count = 501;
+Deno.test("2.1 makesafeAudit merges a second jobs page beyond the old 500-row cap", async () => {
+  const count = 1001;
+  const reads: ReadCall[] = [];
   const seed = volumeSeed(count);
   const expectations = volumeExpectations(seed);
   const client = makeQueryClient(seed, {
     maxInEncodedBytes: IN_URL_BUDGET,
+    reads,
   });
   const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
   assertEquals(audit.jobs.length, count);
@@ -636,6 +707,12 @@ Deno.test("2.1 makesafeAudit paginates above the legacy 500-job cap", async () =
     assertVolumeRowMatchesSeed(auditRow, auditRow.job_id, expectations, "audit");
   }
   assertVolumeFixtureVaries(audit.jobs);
+  assert(
+    reads.some((read) =>
+      read.table === "jobs" && read.ranges.some((range) => range.from === 1000)
+    ),
+    "1001-job audit must fetch and merge the second jobs page",
+  );
 });
 
 // .range() pagination is LIMIT/OFFSET: two pages of the SAME query are only
@@ -827,7 +904,7 @@ Deno.test("2.1 the allocated-only trade scope read paginates on a unique page ti
   assertEquals(scopeReads.map((r) => r.orders.map((o) => o.column))[0], ["job_id", "id"]);
 });
 
-Deno.test("2.1 makesafeAudit rejects a required join failure instead of returning partial rows", async () => {
+Deno.test("2.1 makesafeAudit rejects a required join query error instead of returning partial rows", async () => {
   const client = makeQueryClient(volumeSeed(3), {
     forceInErrorTables: new Set(["job_documents"]),
   });
@@ -836,6 +913,27 @@ Deno.test("2.1 makesafeAudit rejects a required join failure instead of returnin
     Error,
     "job_documents (job_id join) failed: forced job_documents join failure",
   );
+});
+
+for (const table of ["jobs", "xero_invoices", "makesafe_intake_drafts"]) {
+  Deno.test(`2.1 makesafeAudit rejects a reported ${table} read error`, async () => {
+    const client = makeQueryClient(volumeSeed(3), {
+      forceReadErrorTables: new Set([table]),
+    });
+    await assertRejects(
+      () => _makesafeAuditForTest(client, new URLSearchParams()),
+      Error,
+      `forced ${table} read failure`,
+    );
+  });
+}
+
+Deno.test("2.1 makesafeAudit reports unknown recheck depth as null, not zero", async () => {
+  const client = makeQueryClient(volumeSeed(3), {
+    forceHeadErrorTables: new Set(["makesafe_job_details"]),
+  });
+  const audit: any = await _makesafeAuditForTest(client, new URLSearchParams());
+  assertEquals(audit.recheck_queue_depth, null);
 });
 
 Deno.test("2.1 makesafeAudit returns compact jobs[] with raw substatus, doc booleans, distinct invoice statuses, generated_at", async () => {

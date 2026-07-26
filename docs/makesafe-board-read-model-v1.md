@@ -111,22 +111,23 @@ Render actions from `contact.actions`, not locally assembled stale values:
 
 ## Audit read
 
-`GET /functions/v1/ops-api?action=makesafe_audit` — the compact whole-board read
-(`jobs[]` + `known_refs[]`) behind the make-safe skills and the hybrid loop.
+`GET /functions/v1/ops-api?action=makesafe_audit` is the compact audit read
+(`jobs[]` + `known_refs[]`) behind the make-safe skills and hybrid loop.
 
-- Whole board means the whole board. `jobs[]` paginates over every make-safe job;
-  the old 500-job cap is gone, so volume growth is covered, not silently truncated.
-- Every required join — details/substatus, documents, service reports, ACCREC
-  invoices, pack-sent events, pipeline sent status and intake drafts — is read
-  through the shared encoded-URL-budgeted, row-paginated reader against the
-  complete job id set.
-- A required join that errors rejects the whole request. A card fact that could
-  not be read is never returned as an absent fact, so a filed work order, a sent
-  pack or a live invoice cannot read as missing.
+- `jobs[]` walks range pages for make-safe jobs matching the request instead of
+  applying the former fixed 500-row cap.
+- Job-scoped dependent reads are split by the shared encoded-URL budget and merge
+  all row pages. Global ACCREC and intake-draft reads paginate separately.
+- A reported error from a required query rejects the request instead of becoming
+  an empty map. A successful empty query still surfaces as absent facts; this is
+  not a per-job completeness or full U2 board-truth guarantee.
+- `recheck_queue_depth` is a number when its auxiliary count succeeds and `null`
+  when the count errors or is unavailable.
 - Paginated reads end on a unique sort key (see the PostgREST entry in
   `docs/project-knowledge/gotchas.md`).
-- Regression: the `2.1` cases in `supabase/functions/ops-api/makesafe_audit_test.ts`
-  (above-500 pagination, unique page tie-breaker, forced join-failure rejection).
+- Regression owner: the `2.1` cases in
+  `supabase/functions/ops-api/makesafe_audit_test.ts` cover 392/500 URL-budget
+  volume, multi-page job/document merges, and required-query error rejection.
 
 ## Parity gate
 

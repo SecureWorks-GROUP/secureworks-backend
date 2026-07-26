@@ -11658,13 +11658,15 @@ function resolveMakesafeReportRecipient(args: {
 // MAKESAFE_PACK_SENT marker that happens to sort beyond row 1000. A dropped
 // marker makes a SENT job look unsent and re-surface as ready-to-send. This
 // helper paginates by ROWS via .range() AND chunks the id list by the shared
-// encoded-URL budget (with a <=200 count backstop), so neither the gateway URL
-// nor the response row cap can truncate the read. It returns EVERY matching row.
+// encoded-URL budget (with a <=200 count backstop), keeping each URL under budget
+// and walking past the first 1000 response rows. It merges the pages returned by
+// those range reads; concurrent-writer OFFSET semantics are a separate concern.
 //
 // `applyFilters(query)` lets the caller add column predicates (e.g.
 // .eq('event_type','note')); the helper owns the .in() chunking + .range()
 // pagination so callers never re-implement the cap-safe loop. The shared reader
-// also labels and throws every query error, preventing plausible partial boards.
+// labels and throws each query error instead of converting that failed read into
+// an empty row set. A successful empty read still means no matching rows.
 //
 // STABLE ORDER (required, not optional): .range() is LIMIT/OFFSET, and Postgres
 // guarantees NO ordering between two separate LIMIT/OFFSET queries unless the
@@ -13032,17 +13034,17 @@ function _resolveLiveMakesafeInvoice(
 // Test-only export.
 export const _resolveLiveMakesafeInvoiceForTest = _resolveLiveMakesafeInvoice
 
-// Consumer contract (whole-board coverage + fail-loud joins) is owned by
-// docs/makesafe-board-read-model-v1.md, "Audit read".
+// Consumer contract (uncapped jobs[] + required-query error handling) is owned
+// by docs/makesafe-board-read-model-v1.md, "Audit read".
 async function makesafeAudit(client: any, params: URLSearchParams) {
   const since = params.get('since')
   const statusFilter = params.get('status')
   const companyFilter = params.get('company')
 
   // ── jobs[] ── one compact row per make-safe job ──
-  // Whole-board means the whole board: paginate instead of silently capping at
-  // 500. This makes growth above tonight's 392-card volume explicit and keeps
-  // every dependent join scoped to the complete id set.
+  // Paginate the jobs matching the request instead of silently capping at 500.
+  // This removes the fixed row limit; it does not claim broader U2 state-model
+  // parity or turn a successful empty dependent read into an error.
   const jobs = await _fetchAllRows<any>(() => {
     let query = client.from('jobs')
       .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
@@ -13066,8 +13068,9 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   let pipelineSentStatusMap: Record<string, string> = {}
   if (jobIds.length > 0) {
     // Every job-scoped join uses the shared encoded-URL-budgeted, row-paginated
-    // reader. Any required join error rejects Promise.all and therefore the
-    // whole request; missing card facts can never masquerade as empty facts.
+    // reader. A reported query error rejects Promise.all and therefore the whole
+    // request instead of being mapped to empty facts. A successful empty result
+    // remains an empty result; this path adds no per-job completeness checksum.
     const [details, docs, reports, loadedInvoiceRows, psMap, pisMap] = await Promise.all([
       _fetchAllByJobIdChunked(
         client,
@@ -13328,20 +13331,24 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
 
   // Recheck-queue depth: report-type cards stamped for an agent portal re-check
   // (portal_recheck_requested_at set) that are still UNVERIFIED (portal_verified_at
-  // null). A cheap COUNT; reflects the durable W2-C queue the hybrid loop feeds.
-  // Best-effort: this is an auxiliary freshness metric on a READ endpoint — a
-  // failure here (or a driver without count support) degrades to 0, it never
-  // fails the whole audit read.
-  let recheckQueueDepth = 0
+  // null). This auxiliary COUNT stays non-fatal, but failure/unsupported count is
+  // surfaced as null (unknown), never the truthful numeric value 0.
+  let recheckQueueDepth: number | null = null
   try {
     const { count, error: depthErr } = await client.from('makesafe_job_details')
       .select('job_id', { count: 'exact', head: true })
       .not('report_type', 'is', null)
       .not('portal_recheck_requested_at', 'is', null)
       .is('portal_verified_at', null)
-    if (!depthErr && typeof count === 'number') recheckQueueDepth = count
-  } catch (_e) {
-    recheckQueueDepth = 0
+    if (depthErr) {
+      console.error('makesafe_audit recheck_queue_depth failed', depthErr)
+    } else if (typeof count === 'number') {
+      recheckQueueDepth = count
+    } else {
+      console.error('makesafe_audit recheck_queue_depth count unavailable')
+    }
+  } catch (depthErr) {
+    console.error('makesafe_audit recheck_queue_depth failed', depthErr)
   }
 
   return {
