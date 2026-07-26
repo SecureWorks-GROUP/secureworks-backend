@@ -46,7 +46,7 @@ If `SES_PROOF_CONTROL_URL` is absent, the proof command still writes an honest s
 npm --prefix tests/e2e run proof:ses:fixture
 ```
 
-Fixture mode proves only that orchestration, screenshots, video, the summary renderer and safety gates work. Every stage is labelled **SIMULATED, NOT PROOF** and the final verdict is **HARNESS SELF-TEST ONLY**. It is not Captain acceptance evidence.
+Fixture mode proves orchestration, screenshots, video, the summary renderer and safety gates, and exercises the canonical authorised Board route seam against deterministic rows (including an observable `jobs` read). Every stage is labelled **SIMULATED, NOT PROOF** and the final verdict is **HARNESS SELF-TEST ONLY**. The route seam check is not product acceptance evidence or live five-minute email-to-Board SLA evidence.
 
 Run the focused safety contract with:
 

@@ -181,7 +181,7 @@ export class FixtureProofDriver implements ProofDriver {
     const substatus = fate === 'blocked_live_job'
       ? 'company_contact_required'
       : stage.startsWith('New')
-        ? 'company_contact_required'
+        ? null
         : 'waiting_on_trade_report'
     this.boardJobs.set(jobId, {
       id: jobId,
