@@ -10,16 +10,65 @@ import {
   _resolveManagerVisibility,
   _shouldAutoApproveCleanIntakeDraftRowForTest,
 } from "./index.ts";
-import {
-  authorizeMakesafeTradeProjection,
-  buildCanonicalMakesafeRows,
-  projectTradeMakesafeBoard,
-} from "./makesafe_board_read_model.ts";
 import { interleaveOldestNewestForFairScan } from "./makesafe_intake_dedup.ts";
 import { summarizeMakesafeIntakeReconciliation } from "./makesafe_intake_reconciliation.ts";
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const TRADE_BOARD_CLIENT_CACHE_MS = 90_000;
+
+function makeCanonicalBoardFixtureClient(
+  profiles: Record<string, any>,
+  rowsByTable: Record<string, any[]>,
+) {
+  const calls: string[] = [];
+  function builder(table: string) {
+    const rows = (table === "users" ? Object.values(profiles) : rowsByTable[table] || []).slice();
+    const predicates: Array<(row: any) => boolean> = [];
+    const query: any = {
+      select: () => query,
+      eq: (column: string, value: any) => {
+        predicates.push((row) => row?.[column] === value);
+        return query;
+      },
+      neq: (column: string, value: any) => {
+        predicates.push((row) => row?.[column] !== value);
+        return query;
+      },
+      not: (column: string, operator: string, value: string) => {
+        if (operator === "in") {
+          const excluded = value.slice(1, -1).split(",").map((item) => item.replaceAll('"', ""));
+          predicates.push((row) => !excluded.includes(String(row?.[column])));
+        }
+        return query;
+      },
+      gte: (column: string, value: any) => {
+        predicates.push((row) => String(row?.[column] || "") >= String(value));
+        return query;
+      },
+      in: (column: string, values: any[]) => {
+        predicates.push((row) => values.includes(row?.[column]));
+        return query;
+      },
+      order: () => query,
+      range: async (from: number, to: number) => ({
+        data: rows.filter((row) => predicates.every((predicate) => predicate(row))).slice(from, to + 1),
+        error: null,
+      }),
+      maybeSingle: async () => ({
+        data: rows.filter((row) => predicates.every((predicate) => predicate(row)))[0] || null,
+        error: null,
+      }),
+    };
+    return query;
+  }
+  return {
+    calls,
+    from: (table: string) => {
+      calls.push(table);
+      return builder(table);
+    },
+  };
+}
 
 Deno.test("fixture: clean instruction reaches authorised manager Board L2", async () => {
   const emailReceivedAt = "2026-06-24T10:00:00.000Z";
@@ -124,51 +173,49 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
   };
   const boardStage = _deriveMakesafeBoardStage(createdJob, detail, []);
   assertEquals(boardStage, "new");
-  const canonicalRows = buildCanonicalMakesafeRows(
-    [{ ...createdJob, board_stage: boardStage }],
-    { computedAt: boardProjectedAt },
-  );
-
   const hugoShapedViewer = {
     userId: "makesafe-manager-fixture",
     role: "lead_installer",
     managedVerticals: ["makesafe"],
   };
-  const access = authorizeMakesafeTradeProjection("jwt", hugoShapedViewer);
-  assertEquals(access.ok, true);
   const managerScope = _resolveManagerVisibility(hugoShapedViewer);
   assertEquals(managerScope.isMakesafeManager, true);
   assertEquals(managerScope.canSeeMakesafePool, true);
 
-  const profileClient = {
-    from(table: string) {
-      assertEquals(table, "users");
-      return {
-        select(columns: string) {
-          assertEquals(columns, "id, name, role, managed_verticals");
-          return {
-            eq(column: string, value: string) {
-              assertEquals(column, "id");
-              assertEquals(value, hugoShapedViewer.userId);
-              return {
-                maybeSingle: () => Promise.resolve({
-                  data: {
-                    id: hugoShapedViewer.userId,
-                    name: "Hugo Fixture",
-                    role: hugoShapedViewer.role,
-                    managed_verticals: hugoShapedViewer.managedVerticals,
-                  },
-                  error: null,
-                }),
-              };
-            },
-          };
-        },
-      };
+  const fixtureClient = makeCanonicalBoardFixtureClient(
+    {
+      [hugoShapedViewer.userId]: {
+        id: hugoShapedViewer.userId,
+        name: "Hugo Fixture",
+        role: hugoShapedViewer.role,
+        managed_verticals: hugoShapedViewer.managedVerticals,
+      },
+      "fencing-manager-fixture": {
+        id: "fencing-manager-fixture",
+        name: "Fencing Fixture",
+        role: "lead_installer",
+        managed_verticals: ["fencing"],
+      },
+      "wrong-role-fixture": {
+        id: "wrong-role-fixture",
+        name: "Wrong Role Fixture",
+        role: "unexpected_role",
+        managed_verticals: ["makesafe"],
+      },
     },
-  };
+    {
+      jobs: [{ ...createdJob, metadata: { ...createdJob.metadata } }],
+      makesafe_job_details: [detail],
+      job_service_reports: [],
+      xero_invoices: [],
+      job_documents: [],
+      makesafe_report_packs: [],
+      job_assignments: [],
+      job_events: [],
+    },
+  );
   const boardResponse = await _makesafeBoardTradeRouteForTest(
-    profileClient,
+    fixtureClient,
     "jwt",
     {
       id: hugoShapedViewer.userId,
@@ -178,16 +225,14 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
       managedVerticals: hugoShapedViewer.managedVerticals,
     },
     {
-      loadBoard: async (_client, options) => {
-        assertEquals(options, undefined);
-        return canonicalRows;
-      },
       generatedAt: boardProjectedAt,
     },
   );
   const boardBody = JSON.parse(await boardResponse.text());
   assertEquals(boardResponse.status, 200);
   assertEquals(boardBody.projection, "trade");
+  assertEquals(fixtureClient.calls.includes("jobs"), true);
+  assertEquals(fixtureClient.calls.includes("makesafe_job_details"), true);
   const stopRows = [
     ...boardBody.columns.New,
     ...boardBody.columns.Allocated,
@@ -264,28 +309,36 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
     role: "lead_installer",
     managedVerticals: ["fencing"],
   };
-  const wrongVerticalAccess = authorizeMakesafeTradeProjection(
+  const wrongVerticalResponse = await _makesafeBoardTradeRouteForTest(
+    fixtureClient,
     "jwt",
-    wrongVerticalViewer,
+    {
+      id: wrongVerticalViewer.userId,
+      email: "fencing.fixture@example.invalid",
+      orgId: "fixture-org",
+      role: wrongVerticalViewer.role,
+      managedVerticals: wrongVerticalViewer.managedVerticals,
+    },
   );
-  assertEquals(wrongVerticalAccess.ok, true);
-  assertEquals(
-    _resolveManagerVisibility(wrongVerticalViewer).canSeeMakesafePool,
-    false,
-  );
-  const wrongVerticalBoard = projectTradeMakesafeBoard(
-    canonicalRows,
-    wrongVerticalViewer,
-  );
-  assertEquals(wrongVerticalBoard.rows.some((row) => row.id === jobId), false);
+  const wrongVerticalBody = JSON.parse(await wrongVerticalResponse.text());
+  assertEquals(wrongVerticalResponse.status, 200);
+  assertEquals(fixtureClient.calls.includes("job_assignments"), true);
+  assertEquals(wrongVerticalBody.permissions.visibility, "allocated_only");
+  assertEquals(wrongVerticalBody.rows.some((row: any) => row.id === jobId), false);
+  assertEquals(wrongVerticalBody.rows.length, 0);
 
-  const wrongRoleAccess = authorizeMakesafeTradeProjection("jwt", {
-    userId: "wrong-role-fixture",
-    role: "unexpected_role",
-    managedVerticals: ["makesafe"],
-  });
-  assertEquals(wrongRoleAccess.ok, false);
-  assertEquals(wrongRoleAccess.status, 403);
+  const wrongRoleResponse = await _makesafeBoardTradeRouteForTest(
+    fixtureClient,
+    "jwt",
+    {
+      id: "wrong-role-fixture",
+      email: "wrong-role.fixture@example.invalid",
+      orgId: "fixture-org",
+      role: "unexpected_role",
+      managedVerticals: ["makesafe"],
+    },
+  );
+  assertEquals(wrongRoleResponse.status, 403);
 });
 
 Deno.test("integration: bounded scan order samples old backlog before newest flood", () => {
