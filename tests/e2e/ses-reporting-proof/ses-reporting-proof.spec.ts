@@ -286,6 +286,12 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
       return { notBuilt: `NOT BUILT YET. Latency cannot be proven because intake did not produce Hugo-visible timestamps. Intake status: ${summary.stages[0].status}.` }
     }
     const eligible = intakeOutcomes.filter((outcome) => outcome.fate !== 'accounted_non_work')
+    const missingVisibility = eligible.filter((outcome) => !outcome.hugoVisibleAt)
+    if (missingVisibility.length > 0) {
+      return {
+        notBuilt: `NOT BUILT YET. Authorised Board route seam did not confirm Hugo-visible timestamps for ${missingVisibility.map((item) => item.fixtureId).join(', ')}. Fixture clocks alone are not live five-minute SLA evidence; the 90-second client cache remains stated/bypassed, not measured.`,
+      }
+    }
     const elapsed = eligible.map((outcome) => {
       const arrivedAt = Date.parse(String(outcome.arrivedAt || ''))
       const visibleAt = Date.parse(String(outcome.hugoVisibleAt || ''))
@@ -298,12 +304,16 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     const p95 = percentile95(elapsed)
     if (max > FIVE_MINUTES_MS) throw new Error(`arrival-to-Hugo maximum was ${(max / 1000).toFixed(1)} seconds, above the 300 second law`)
 
-    summary.stages[1].detail = `Timing starts at recorded message arrival. Four operationally visible outcomes were measured. Maximum ${(max / 1000).toFixed(1)} seconds and P95 ${(p95 / 1000).toFixed(1)} seconds are both inside the sealed 300 second law.`
+    summary.stages[1].detail = mode === 'fixture'
+      ? `Fixture timing only: arrival to authorised Board route generated_at. Maximum ${(max / 1000).toFixed(1)} seconds and P95 ${(p95 / 1000).toFixed(1)} seconds stay inside 300 seconds by construction. This is NOT the live email-to-Board five-minute SLA. The 90-second Trade client cache is bypassed, not measured.`
+      : `Timing starts at recorded message arrival. Four operationally visible outcomes were measured. Maximum ${(max / 1000).toFixed(1)} seconds and P95 ${(p95 / 1000).toFixed(1)} seconds are both inside the sealed 300 second law.`
     summary.stages[1].metrics = [
       { label: 'Maximum arrival to Hugo', value: `${(max / 1000).toFixed(1)} s`, threshold: 'Must be at most 300 s' },
       { label: 'P95 arrival to Hugo', value: `${(p95 / 1000).toFixed(1)} s`, threshold: 'Reported, not substituted for max' },
       { label: 'Eligible outcomes measured', value: String(elapsed.length), threshold: 'Correct is 4' },
       { label: 'Internal midpoint used', value: 'No', threshold: 'Arrival is the start' },
+      { label: 'Live five-minute SLA claim', value: 'No', threshold: 'Fixture/route clocks only unless live proof' },
+      { label: '90s client cache', value: 'bypassed, not measured', threshold: 'Stated or bypassed' },
     ]
   })
 
@@ -315,8 +325,16 @@ test('SES Reporting whole synthetic voyage', async ({ page }) => {
     if (!driver) throw new Error('proof driver is unavailable')
     const board = await readOnly('proof_read_board', { marker: context.marker })
     await captureSurfaces(summary.stages[2], board)
+    if (board.visibleToHugo !== true || board.source !== 'makesafe_board') {
+      return {
+        notBuilt: `NOT BUILT YET. Authorised makesafe_board trade route seam did not confirm containment of the fixture job identities (${String(board.reason || board.evidence || 'visibleToHugo was not true')}). In-memory cards alone are non-evidence.`,
+      }
+    }
     exactBoolean(board.visibleToHugo, true, 'board visibleToHugo')
     exactString(board.source, 'makesafe_board', 'board source')
+    if (board.jobsQueried !== true && mode === 'fixture') {
+      return { notBuilt: 'NOT BUILT YET. Board seam response did not prove a jobs-table read from the canonical loader.' }
+    }
     const cards = asArray(board.cards, 'board cards')
 
     for (const fixture of fixtures.filter((item) => item.expected.boardStage)) {

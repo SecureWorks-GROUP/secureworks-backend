@@ -2295,12 +2295,15 @@ export function _resolveOpsApiAuthIntent(input: {
   return 'none'
 }
 
+// Trade Board route: always the production canonical loader. There is no
+// injectable loadBoard override on this production-visible path — mission and
+// harness proofs must discover jobs from the jobs table (or a join-capable
+// fixture of it). generatedAt is a deterministic timing fixture only.
 async function makesafeBoardTradeRoute(
   client: any,
   authMode: MakesafeTradeProjectionAuthMode,
   authUser: TradeAuthContext,
   options: {
-    loadBoard?: typeof loadCanonicalMakesafeBoard
     generatedAt?: string
   } = {},
 ) {
@@ -2309,6 +2312,7 @@ async function makesafeBoardTradeRoute(
     .eq('id', authUser.id)
     .maybeSingle()
   if (profileErr || !profile) throw new ApiError('Trade profile not found', 403)
+  // Authority is the users profile row, never JWT claim fields on authUser.
   const viewer = {
     userId: profile.id,
     name: profile.name,
@@ -2320,8 +2324,7 @@ async function makesafeBoardTradeRoute(
   const restrictToJobIds = access.permissions.sees_all_makesafes
     ? undefined
     : await loadMakesafeAssignedJobIds(client, profile.id)
-  const loadBoard = options.loadBoard || loadCanonicalMakesafeBoard
-  const canonicalRows = await loadBoard(
+  const canonicalRows = await loadCanonicalMakesafeBoard(
     client,
     restrictToJobIds ? { restrictToJobIds } : undefined,
   )
@@ -2338,6 +2341,54 @@ async function makesafeBoardTradeRoute(
 }
 
 export const _makesafeBoardTradeRouteForTest = makesafeBoardTradeRoute
+
+// Outer HTTP envelope for action=makesafe_board: projection validation, the
+// trade JWT gate that sits in the serve switch BEFORE the trade route, and the
+// ops role gate. Tests call this so non-JWT modes cannot bypass the case branch.
+async function makesafeBoardAction(
+  client: any,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'none' | MakesafeTradeProjectionAuthMode,
+  authUser: TradeAuthContext | null | undefined,
+  projectionRaw: string | null | undefined,
+  options: {
+    generatedAt?: string
+  } = {},
+) {
+  const projection = String(projectionRaw || 'ops').toLowerCase()
+  if (!['ops', 'trade'].includes(projection)) {
+    return json({ error: "projection must be 'ops' or 'trade'" }, 400)
+  }
+  if (projection === 'trade' && authMode !== 'jwt') {
+    return json({ error: 'trade projection requires an authenticated trade session' }, 403)
+  }
+  if (projection === 'ops' && authMode === 'jwt' &&
+    !['admin', 'owner', 'ops_manager'].includes(String(authUser?.role || '').toLowerCase())) {
+    return json({ error: 'ops projection requires ops access' }, 403)
+  }
+
+  if (projection === 'trade') {
+    // authMode is jwt here; authUser is required by the trade route profile load.
+    return await makesafeBoardTradeRoute(
+      client,
+      'jwt',
+      authUser!,
+      options,
+    )
+  }
+
+  const canonicalRows = await loadCanonicalMakesafeBoard(client)
+  const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
+  if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
+  return json({
+    contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+    projection: 'ops',
+    generated_at: options.generatedAt || new Date().toISOString(),
+    ...ops,
+    parity,
+  })
+}
+
+export const _makesafeBoardActionForTest = makesafeBoardAction
 
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
@@ -2582,36 +2633,18 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'calendar': return json(await calendarEvents(client, url.searchParams))
       case 'pipeline': return json(await pipeline(client, url.searchParams))
       case 'makesafe_board': {
-        const projection = String(url.searchParams.get('projection') || 'ops').toLowerCase()
-        if (!['ops', 'trade'].includes(projection)) {
-          return json({ error: "projection must be 'ops' or 'trade'" }, 400)
-        }
-        if (projection === 'trade' && authMode !== 'jwt') {
-          return json({ error: 'trade projection requires an authenticated trade session' }, 403)
-        }
-        if (projection === 'ops' && authMode === 'jwt' &&
-          !['admin', 'owner', 'ops_manager'].includes(String(authUser?.role || '').toLowerCase())) {
-          return json({ error: 'ops projection requires ops access' }, 403)
-        }
-
-        if (projection === 'trade') {
-          return await makesafeBoardTradeRoute(client, authMode, authUser!)
-        }
-
-        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        // Outer JWT / projection gates live in makesafeBoardAction so the trade
+        // envelope is one function the HTTP case and the deterministic proof share.
         // This frequently-polled read path stays side-effect-free and quiet. Shadow
         // persistence (a WRITE) and the declared≠computed canary (an alarm-level log
         // that would fire on nearly every poll during M1 shadow) are both owned by
         // their dedicated actions and the 30-min cron, not the board GET.
-        const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
-        if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
-        return json({
-          contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
-          projection: 'ops',
-          generated_at: new Date().toISOString(),
-          ...ops,
-          parity,
-        })
+        return await makesafeBoardAction(
+          client,
+          authMode,
+          authUser,
+          url.searchParams.get('projection'),
+        )
       }
       case 'makesafe_status_shadow_refresh': {
         // Shadow-cache WRITE: api_key/cron (service-role) callers ONLY. The

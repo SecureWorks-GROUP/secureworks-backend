@@ -146,9 +146,14 @@ The deterministic no-write fixture proof is
 instruction identity passes the production clean-intake gate, retains the same
 `job_id` through canonical stage derivation and the authorised Trade route seam,
 including profile lookup, the production canonical loader against deterministic
-stub rows, authorization, parity, and the response envelope. It asserts exact
-containment plus route-level negative role/vertical cases, including the
-allocated-id restriction. Its deterministic timestamps are fixture timing
+stub rows, authorization, parity, and the response envelope. The positive path
+goes through the outer `makesafe_board` action envelope
+(`_makesafeBoardActionForTest`) so non-JWT modes fail before the route. There
+is no injectable `loadBoard` override on the production trade route — containment
+requires an observable `jobs` table read. Ordinary allocated-only discovery uses
+join-capable assignment fixtures (nested `jobs.type=makesafe`) and cannot pass
+via an empty restrict list alone. JWT claim fields cannot escalate beyond the
+authoritative `users` profile. Its deterministic timestamps are fixture timing
 evidence only; the real email-received to live authorised Board containment
 measurement remains mandatory in the merged end-to-end harness and sealed
 mission proving run. That harness must enforce a maximum direct-response
@@ -158,7 +163,11 @@ The fixture calls the authorised server route seam directly, so it explicitly
 bypasses the Trade client's 90,000 ms in-memory Board cache. It proves the
 Board L2 response shape and containment seam, not browser first paint.
 Production stores no first-paint telemetry, and the test does not manufacture
-one.
+one. The e2e fixture driver
+(`tests/e2e/ses-reporting-proof/drivers.ts`) confirms Board identity through
+`scripts/ses-board-fixture-seam.ts` (same production action/route); it must not
+green-light visibility from in-memory cards alone. That seam is still not live
+five-minute SLA evidence.
 
 Run:
 
