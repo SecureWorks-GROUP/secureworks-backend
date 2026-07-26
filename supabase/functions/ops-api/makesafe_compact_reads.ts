@@ -139,7 +139,17 @@ function chunkByUrlBudget(ids: string[]): string[][] {
 // Run a paginated read for each budgeted chunk of `ids` and merge all rows. The
 // factory receives one chunk and must return a fresh query builder whose
 // terminal is .range() (i.e. it includes the .in(col, chunk) filter).
-async function fetchAllRowsInChunks<T = any>(
+//
+// CALLER OBLIGATION: the returned builder's .order() chain must END on a UNIQUE
+// column (normally the `id` PK). .range() is LIMIT/OFFSET and Postgres orders two
+// separate LIMIT/OFFSET queries relative to each other only under a TOTAL order,
+// so a chunk that spills past one page can return a row tied on a non-unique sort
+// key on neither page — an absent row, not an error. Add it AFTER any meaningful
+// ordering so the caller's sort stays primary.
+//
+// Exported: `ops-api/index.ts` reuses this same reader for its make-safe job-id
+// joins (`_fetchAllByJobIdChunked`), which appends the unique key for its callers.
+export async function fetchAllRowsInChunks<T = any>(
   ids: string[],
   buildQueryForChunk: (chunkIds: string[]) => any,
   label: string,
@@ -665,10 +675,15 @@ export async function buildPipelineSentStatusMap(
 ): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   if (!jobIds.length) return map;
-  // Chunk the job-id .in() list AND paginate each chunk (1000-row cap).
+  // Chunk the job-id .in() list AND paginate each chunk (1000-row cap). .range()
+  // is LIMIT/OFFSET, so the read must end on a unique key (`id`, the PK) or a
+  // chunk spilling past one page could return a row on neither page and a job's
+  // sent verdict would read as absent.
   const data = await fetchAllRowsInChunks<any>(
     jobIds,
-    (ch) => client.from("pipeline_items").select("target_job, sent_status").in("target_job", ch),
+    (ch) =>
+      client.from("pipeline_items").select("target_job, sent_status").in("target_job", ch)
+        .order("id", { ascending: true }),
     "pipeline_items (sent_status by job) read",
   );
   for (const p of (data || [])) {

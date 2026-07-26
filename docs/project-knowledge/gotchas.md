@@ -31,6 +31,8 @@ Migrations and edge deploys are separate manual steps. Deploy a function that se
 ### PostgREST 1000-row limit
 Supabase REST API returns max 1000 rows by default. MUST use `fetchAll()` helper with `.range()` pagination for any query that might return > 1000 rows.
 
+**A paginated read must also end on a UNIQUE sort key.** `.range()` is LIMIT/OFFSET, and Postgres guarantees no ordering between two separate LIMIT/OFFSET queries unless the `ORDER BY` is a *total* order. Order by a non-unique column alone (a date, `job_id`, `created_at`) and a row tied on that column can come back on neither page — it reads as absent, not as an error: a filed work order shows as missing, a sent pack re-surfaces as unsent. Append the PK (`id`, or `post_id` on `emails`) as the last `.order()` after the caller's own sorting, so the intended sort stays primary and the PK only breaks its ties. `_fetchAllByJobIdChunked` in `ops-api/index.ts` is the reference implementation: it appends the tie-breaker inside the reader, so a caller cannot forget it. `fetchAllRows` / `fetchAllRowsInChunks` in `supabase/functions/ops-api/makesafe_compact_reads.ts` paginate but leave the key to the caller, and seven of their own GAP-1/GAP-3/GAP-5/GAP-6 callers still supply none — enumerated as known gap PAGE-1 in `docs/makesafe-board-read-model-v1.md`. The guards are the "ends on a unique page tie-breaker" tests in `makesafe_audit_test.ts`.
+
 ### Xero FullyPaidOnDate format
 Comes as `/Date(1234567890000+0000)/` — NOT a normal date string. MUST parse with `parseXeroDate()` before inserting into Postgres date column. Otherwise ALL PAID invoice upserts silently fail (no error, just doesn't insert).
 

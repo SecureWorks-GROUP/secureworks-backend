@@ -317,6 +317,7 @@ import {
   // and inbound-contamination filter as makesafeNewEmails (GAP-1).
   SES_MAILBOX as _SES_MAILBOX,
   fetchAllRows as _fetchAllRows,
+  fetchAllRowsInChunks as _fetchAllRowsInChunks,
   deriveFromDomain as _deriveFromDomain,
   isOwnDomain as _isOwnDomain,
 } from './makesafe_compact_reads.ts'
@@ -11656,13 +11657,27 @@ function resolveMakesafeReportRecipient(args: {
 // so a single unpaginated .in() read SILENTLY TRUNCATES — dropping (e.g.) a
 // MAKESAFE_PACK_SENT marker that happens to sort beyond row 1000. A dropped
 // marker makes a SENT job look unsent and re-surface as ready-to-send. This
-// helper paginates by ROWS via .range() AND chunks the id list (<=200 ids per
-// call) so neither dimension can exceed the cap. It returns EVERY matching row.
+// helper paginates by ROWS via .range() AND chunks the id list by the shared
+// encoded-URL budget (with a <=200 count backstop), keeping each URL under budget
+// and walking past the first 1000 response rows. It merges the pages returned by
+// those range reads; concurrent-writer OFFSET semantics are a separate concern.
 //
 // `applyFilters(query)` lets the caller add column predicates (e.g.
 // .eq('event_type','note')); the helper owns the .in() chunking + .range()
-// pagination so callers never re-implement the cap-safe loop.
-const MAKESAFE_IN_ID_CHUNK = 200
+// pagination so callers never re-implement the cap-safe loop. The shared reader
+// labels and throws each query error instead of converting that failed read into
+// an empty row set. A successful empty read still means no matching rows.
+//
+// STABLE ORDER (required, not optional): .range() is LIMIT/OFFSET, and Postgres
+// guarantees NO ordering between two separate LIMIT/OFFSET queries unless the
+// ORDER BY is a TOTAL order. Without a unique sort key a chunk that spills past
+// one page can return a row on neither page — e.g. a job_documents `work_order`
+// row silently dropped, so a card with its WO filed reads has_wo=false. The
+// reader therefore always appends a unique tie-breaker column, AFTER any
+// caller-supplied ordering (so the caller's sort stays primary and this only
+// breaks its ties). Every table read through here has an `id` PK except the ones
+// keyed BY the job id, listed below.
+const MAKESAFE_JOB_KEYED_TABLES = new Set(['makesafe_job_details', 'makesafe_card_story'])
 const MAKESAFE_PAGE_SIZE = 1000
 async function _fetchAllByJobIdChunked(
   client: any,
@@ -11672,25 +11687,18 @@ async function _fetchAllByJobIdChunked(
   applyFilters?: (q: any) => any,
   idColumn = 'job_id',
 ): Promise<any[]> {
-  const out: any[] = []
-  if (!jobIds.length) return out
-  for (let i = 0; i < jobIds.length; i += MAKESAFE_IN_ID_CHUNK) {
-    const idBatch = jobIds.slice(i, i + MAKESAFE_IN_ID_CHUNK)
-    let offset = 0
-    // Bounded loop — never spin forever even if a job set is pathologically large.
-    for (let guard = 0; guard < 1000; guard++) {
+  // One row per job and no separate `id` column, so the join column IS the
+  // unique key; ordering by `id` there would be a PostgREST 400.
+  const stableKey = MAKESAFE_JOB_KEYED_TABLES.has(table) ? idColumn : 'id'
+  return await _fetchAllRowsInChunks<any>(
+    jobIds,
+    (idBatch) => {
       let query = client.from(table).select(select).in(idColumn, idBatch)
       if (applyFilters) query = applyFilters(query)
-      query = query.range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-      const { data, error } = await query
-      if (error) throw error
-      const batch = data || []
-      out.push(...batch)
-      if (batch.length < MAKESAFE_PAGE_SIZE) break
-      offset += MAKESAFE_PAGE_SIZE
-    }
-  }
-  return out
+      return query.order(stableKey, { ascending: true })
+    },
+    `${table} (${idColumn} join)`,
+  )
 }
 // Test-only export for the cap-safe chunked reader (proves >1000-row pagination).
 export const _fetchAllByJobIdChunkedForTest = _fetchAllByJobIdChunked
@@ -11711,10 +11719,10 @@ async function buildPackSentMap(client: any, jobIds: string[]): Promise<Record<s
     'job_events',
     'job_id, event_type, detail_json',
     jobIds,
-    // STABLE order so .range() pagination cannot skip/duplicate a row under
-    // concurrent inserts — a skipped row could drop a MAKESAFE_PACK_SENT marker
-    // and re-surface a sent job. id is the monotonic PK. (Adversarial review #5.)
-    (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
+    // The shared reader owns the stable `id` tie-breaker that keeps .range()
+    // pagination from skipping a row (which could drop a MAKESAFE_PACK_SENT
+    // marker and re-surface a sent job). (Adversarial review #5.)
+    (q) => q.eq('event_type', 'note'),
   )
   for (const ev of (events || [])) {
     if (ev?.job_id && _sendPackIsPackSentTriageEvent(ev)) map[ev.job_id] = true
@@ -12420,6 +12428,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if (restrict) activeQuery = activeQuery.in('id', restrict)
       const { data, error } = await activeQuery
         .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
         .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
       if (error) throw error
       const batch = data || []
@@ -12561,6 +12570,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
       const { data, error } = await cancelledQuery
         .order('updated_at', { ascending: false })
+        .order('id', { ascending: false })
         .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
       if (error) throw error
       const batch = data || []
@@ -12618,7 +12628,12 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
 // trade's own worked-then-cancelled make-safes would otherwise never load into
 // their Archive. Returned ids feed the canonical loader so the full make-safe
 // history is never loaded for a caller who can only see their own jobs.
-// Row-paginated for the cap.
+// Row-paginated for the cap, and — like every other paginated make-safe read —
+// terminated on a UNIQUE key. job_id is NOT unique in job_assignments (a job
+// carries one row per assigned user/date), so ordering by job_id alone is not a
+// total order: a trade whose make-safe assignment set spills past one page could
+// have rows tied on job_id land on neither page, dropping that job id from the
+// restrict set and vanishing their own card from their board. `id` is the PK.
 async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<string[]> {
   const ids = new Set<string>()
   let offset = 0
@@ -12628,6 +12643,7 @@ async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<
       .eq('user_id', userId)
       .eq('jobs.type', 'makesafe')
       .order('job_id', { ascending: true })
+      .order('id', { ascending: true })
       .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
     if (error) throw error
     const batch = data || []
@@ -12637,6 +12653,10 @@ async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<
   }
   return Array.from(ids)
 }
+// Test-only export for the allocated-only trade scope read. It is the one
+// .range()-paginated make-safe read the audit/board page-order guard cannot see
+// (neither stub issues it), so it carries its own page-stability regression.
+export const _loadMakesafeAssignedJobIdsForTest = loadMakesafeAssignedJobIds
 
 // One audience-independent read. makesafePipeline remains the stage authority;
 // this loader adds only presentation facts (contacts/actions, report photo count,
@@ -12671,21 +12691,21 @@ async function loadCanonicalMakesafeBoard(
       'job_events',
       'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
       jobIds,
-      (q) => q.eq('event_type', 'note').order('id', { ascending: true }),
+      (q) => q.eq('event_type', 'note'),
     ),
     _fetchAllByJobIdChunked(
       client,
       'job_media',
       'id, job_id, type, phase',
       jobIds,
-      (q) => q.eq('type', 'photo').eq('phase', 'completion').order('id', { ascending: true }),
+      (q) => q.eq('type', 'photo').eq('phase', 'completion'),
     ),
     _fetchAllByJobIdChunked(
       client,
       'job_contacts',
       'job_id, client_name, client_phone, is_primary, contact_label, status',
       jobIds,
-      (q) => q.eq('status', 'active').order('id', { ascending: true }),
+      (q) => q.eq('status', 'active'),
     ),
   ])
 
@@ -12717,7 +12737,7 @@ async function loadCanonicalMakesafeBoard(
       'makesafe_intake_cases',
       'id, job_id, lineage_id, parent_case_id, parent_relation, cycle, updated_at',
       jobIds,
-      (q) => q.order('cycle', { ascending: false }).order('id', { ascending: true }),
+      (q) => q.order('cycle', { ascending: false }),
     )
   } catch (error) {
     console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
@@ -12732,7 +12752,7 @@ async function loadCanonicalMakesafeBoard(
       'makesafe_board_status_current',
       'id, run_key, job_id, source_status, before_status, after_status, evidence_ref, applied_by, applied_at',
       jobIds,
-      (q) => q.order('applied_at', { ascending: false }).order('id', { ascending: false }),
+      (q) => q.order('applied_at', { ascending: false }),
     )
   } catch (error) {
     console.error('[ops-api] makesafe_board status application read unavailable:', (error as Error).message)
@@ -12919,6 +12939,18 @@ function _makesafeNormRef(s: any): string {
   return String(s ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')
 }
 
+// Normalise every invoice row's reference ONCE per read, index-aligned with
+// invoiceRows. The whole-board audit resolves invoices for EVERY job against
+// EVERY ACCREC invoice, so normalising inside the per-job loop costs
+// jobs x invoices regex passes (500 x ~3000 = 1.5M) on an edge function with a
+// ~2s CPU budget — and makesafeStoryRecompute re-runs the whole audit. Hoisting
+// it leaves only cheap string compares in the loop; the resolver still
+// normalises on demand when no prepared list is supplied, so every caller
+// (including the tests) behaves identically either way.
+function _prepareMakesafeInvoiceRefs(invoiceRows: any[]): string[] {
+  return (invoiceRows || []).map((inv: any) => _makesafeNormRef(inv?.reference))
+}
+
 // AUDIT-MODE invoice resolution (item 2.4). Returns the FULL mapped invoice list
 // for a job INCLUDING VOIDED/DELETED, each row tagged with status + match_tier,
 // so the audit's duplicate + void-history checks can fire (Erskine / Sorrento).
@@ -12934,15 +12966,18 @@ function _resolveMakesafeJobInvoices(
   invoiceRows: any[],
   jobId: string | null | undefined,
   externalRef: string | null | undefined,
+  normalizedRefs?: string[],
 ): Array<{ status: string | null; invoice_number: string | null; reference: string | null; match_tier: string; voided: boolean }> {
   const nref = _makesafeNormRef(externalRef)
   const out: Array<any> = []
-  for (const inv of (invoiceRows || [])) {
+  const rows = invoiceRows || []
+  for (let i = 0; i < rows.length; i++) {
+    const inv = rows[i]
     let tier: string | null = null
     if (jobId && inv?.job_id === jobId) {
       tier = 'job_id'
     } else if (nref) {
-      const invRef = _makesafeNormRef(inv?.reference)
+      const invRef = normalizedRefs?.[i] ?? _makesafeNormRef(inv?.reference)
       if (invRef && invRef === nref) tier = 'reference'
       else if (nref.length >= 5 && invRef && invRef.includes(nref)) tier = 'reference_substring'
     }
@@ -12961,6 +12996,7 @@ function _resolveMakesafeJobInvoices(
 // Test-only exports.
 export const _resolveMakesafeJobInvoicesForTest = _resolveMakesafeJobInvoices
 export const _makesafeNormRefForTest = _makesafeNormRef
+export const _prepareMakesafeInvoiceRefsForTest = _prepareMakesafeInvoiceRefs
 
 // M3 marker-integrity. From the full per-job mapped invoice list (which keeps
 // VOIDED/DELETED for the void-history checks), pick the SINGLE current LIVE
@@ -12998,21 +13034,27 @@ function _resolveLiveMakesafeInvoice(
 // Test-only export.
 export const _resolveLiveMakesafeInvoiceForTest = _resolveLiveMakesafeInvoice
 
+// Consumer contract (uncapped jobs[] + required-query error handling) is owned
+// by docs/makesafe-board-read-model-v1.md, "Audit read".
 async function makesafeAudit(client: any, params: URLSearchParams) {
   const since = params.get('since')
   const statusFilter = params.get('status')
   const companyFilter = params.get('company')
 
   // ── jobs[] ── one compact row per make-safe job ──
-  let jobQuery = client.from('jobs')
-    .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
-    .eq('type', 'makesafe')
-    .order('created_at', { ascending: false })
-    .limit(500)
-  if (since) jobQuery = jobQuery.gte('created_at', since)
-  if (statusFilter) jobQuery = jobQuery.eq('status', statusFilter)
-  const { data: jobs, error } = await jobQuery
-  if (error) throw error
+  // Paginate the jobs matching the request instead of silently capping at 500.
+  // This removes the fixed row limit; it does not claim broader U2 state-model
+  // parity or turn a successful empty dependent read into an error.
+  const jobs = await _fetchAllRows<any>(() => {
+    let query = client.from('jobs')
+      .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
+      .eq('type', 'makesafe')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+    if (since) query = query.gte('created_at', since)
+    if (statusFilter) query = query.eq('status', statusFilter)
+    return query
+  }, 'makesafe_audit jobs')
 
   const jobIds = (jobs || []).map((j: any) => j.id)
   let detailsMap: Record<string, any> = {}
@@ -13025,41 +13067,72 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   let packSentMap: Record<string, boolean> = {}
   let pipelineSentStatusMap: Record<string, string> = {}
   if (jobIds.length > 0) {
-    const [detailsRes, docsRes, reportsRes, invoicesRes, psMap, pisMap] = await Promise.all([
-      client.from('makesafe_job_details')
-        .select('job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)')
-        .in('job_id', jobIds),
-      client.from('job_documents')
-        .select('job_id, type, file_name')
-        .in('job_id', jobIds),
-      client.from('job_service_reports')
-        .select('job_id, status')
-        .in('job_id', jobIds)
-        .neq('status', 'draft'),
-      // AUDIT path: pull ALL ACCREC invoices for these jobs INCLUDING
-      // VOIDED/DELETED (item 2.4) so duplicate + void-history checks can fire.
-      client.from('xero_invoices')
-        .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
-        .eq('invoice_type', 'ACCREC')
-        .order('invoice_date', { ascending: false }),
+    // Every job-scoped join uses the shared encoded-URL-budgeted, row-paginated
+    // reader. A reported query error rejects Promise.all and therefore the whole
+    // request instead of being mapped to empty facts. A successful empty result
+    // remains an empty result; this path adds no per-job completeness checksum.
+    const [details, docs, reports, loadedInvoiceRows, psMap, pisMap] = await Promise.all([
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_job_details',
+        'job_id, external_ref, requesting_company_name, requesting_company_slug, substatus, makesafe_companies:requesting_company_id(slug, name)',
+        jobIds,
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_documents',
+        'job_id, type, file_name',
+        jobIds,
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_service_reports',
+        'job_id, status',
+        jobIds,
+        (q) => q.neq('status', 'draft'),
+      ),
+      // AUDIT path: pull ALL ACCREC invoices INCLUDING VOIDED/DELETED (item
+      // 2.4) so duplicate, reference-only and void-history checks can fire.
+      // Paginate this required global join too and reject its query errors.
+      // invoice_date is DAY-granularity and non-unique, so it cannot order
+      // .range() pages on its own — dozens of invoices share a date and a tie
+      // straddling row 1000 could land on neither page, blanking a real
+      // invoice_status. `id` (the PK) breaks the tie without disturbing the
+      // newest-first contract _resolveLiveMakesafeInvoice relies on.
+      _fetchAllRows<any>(
+        () => client.from('xero_invoices')
+          .select('job_id, status, invoice_number, reference, invoice_type, invoice_date')
+          .eq('invoice_type', 'ACCREC')
+          .order('invoice_date', { ascending: false })
+          .order('id', { ascending: false }),
+        'makesafe_audit xero_invoices',
+      ),
       // GAP-4 — reuse the existing buildPackSentMap (batch job_events query).
       buildPackSentMap(client, jobIds),
       // GAP-4 — sync-system sent verdict per job (pipeline_items.sent_status).
       _buildPipelineSentStatusMap(client, jobIds),
     ])
-    for (const d of (detailsRes.data || [])) detailsMap[d.job_id] = d
-    for (const doc of (docsRes.data || [])) {
+    for (const d of details) detailsMap[d.job_id] = d
+    for (const doc of docs) {
       if (!doc?.job_id) continue
       if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
       docsMap[doc.job_id].push(doc)
     }
-    for (const r of (reportsRes.data || [])) if (r?.job_id) reportSet.add(r.job_id)
-    invoiceRows = invoicesRes.data || []
+    for (const r of reports) if (r?.job_id) reportSet.add(r.job_id)
+    invoiceRows = loadedInvoiceRows
     packSentMap = psMap
     pipelineSentStatusMap = pisMap
   }
 
-  let jobRows = (jobs || []).map((j: any) => {
+  // One normalisation pass over the whole invoice read, reused by every job's
+  // resolution below (the per-job loop then does string compares only).
+  const invoiceRefKeys = _prepareMakesafeInvoiceRefs(invoiceRows)
+
+  // Annotated `any[]` because the paginated job read now yields a concretely
+  // typed array: without this the story_* fields attached further down (after
+  // the makesafe_job_story join) would not type-check against the inferred
+  // object literal shape. Runtime shape is unchanged.
+  let jobRows: any[] = (jobs || []).map((j: any) => {
     const detail = detailsMap[j.id] || null
     const docFlags = makesafeDocBooleans(docsMap[j.id] || [])
     // A filed close-out report can show up two ways: (a) a job_service_reports
@@ -13085,7 +13158,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // report card). Two cards sharing a builder ref used to both inherit the one
     // invoice's status/number, so an uninvoiced card read as PAID at a glance and
     // batch tooling built on this compact read described invoice state wrongly.
-    const allMatched = _resolveMakesafeJobInvoices(invoiceRows, j.id, externalRef)
+    const allMatched = _resolveMakesafeJobInvoices(invoiceRows, j.id, externalRef, invoiceRefKeys)
     // Own = job_id-linked only (incl. voided/deleted for void-history, item 2.4).
     // Drives every scalar invoice field below.
     const invoices = allMatched.filter((i) => i.match_tier === 'job_id')
@@ -13178,15 +13251,28 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // not currently carry the email id themselves (see PR notes). Drafts contribute
   // {ref, email, job_number: null, substatus: null}.
   const knownRefs: Array<{ external_ref: string | null; source_email_id: string | null; job_number: string | null; substatus: string | null }> = []
-  // Drafts: needs_review or draft (not yet a job).
-  const { data: drafts } = await client.from('makesafe_intake_drafts')
-    .select('external_ref, graph_message_id, internet_message_id, status, approved_job_id')
-    .in('status', ['needs_review', 'draft'])
+  // Drafts: needs_review or draft (not yet a job). Both sides of the known-ref
+  // union are required audit truth, so paginate and reject instead of silently
+  // returning an incomplete reference index on a query error or row cap. Both
+  // reads order by the `id` PK: an unordered .range() page pair can drop a row
+  // once either side outgrows one page, and a dropped draft ref reads as an
+  // unknown ref (duplicate intake) on the audit side.
+  const drafts = await _fetchAllRows<any>(
+    () => client.from('makesafe_intake_drafts')
+      .select('external_ref, graph_message_id, internet_message_id, status, approved_job_id')
+      .in('status', ['needs_review', 'draft'])
+      .order('id', { ascending: true }),
+    'makesafe_audit pending intake drafts',
+  )
   const draftEmailByJob: Record<string, string | null> = {}
   // Also map approved drafts -> their job, to recover each job's source_email_id.
-  const { data: approvedDrafts } = await client.from('makesafe_intake_drafts')
-    .select('graph_message_id, internet_message_id, approved_job_id')
-    .eq('status', 'approved')
+  const approvedDrafts = await _fetchAllRows<any>(
+    () => client.from('makesafe_intake_drafts')
+      .select('graph_message_id, internet_message_id, approved_job_id')
+      .eq('status', 'approved')
+      .order('id', { ascending: true }),
+    'makesafe_audit approved intake drafts',
+  )
   for (const d of (approvedDrafts || [])) {
     if (d?.approved_job_id) draftEmailByJob[d.approved_job_id] = d.graph_message_id || d.internet_message_id || null
   }
@@ -13245,20 +13331,24 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
 
   // Recheck-queue depth: report-type cards stamped for an agent portal re-check
   // (portal_recheck_requested_at set) that are still UNVERIFIED (portal_verified_at
-  // null). A cheap COUNT; reflects the durable W2-C queue the hybrid loop feeds.
-  // Best-effort: this is an auxiliary freshness metric on a READ endpoint — a
-  // failure here (or a driver without count support) degrades to 0, it never
-  // fails the whole audit read.
-  let recheckQueueDepth = 0
+  // null). This auxiliary COUNT stays non-fatal, but failure/unsupported count is
+  // surfaced as null (unknown), never the truthful numeric value 0.
+  let recheckQueueDepth: number | null = null
   try {
     const { count, error: depthErr } = await client.from('makesafe_job_details')
       .select('job_id', { count: 'exact', head: true })
       .not('report_type', 'is', null)
       .not('portal_recheck_requested_at', 'is', null)
       .is('portal_verified_at', null)
-    if (!depthErr && typeof count === 'number') recheckQueueDepth = count
-  } catch (_e) {
-    recheckQueueDepth = 0
+    if (depthErr) {
+      console.error('makesafe_audit recheck_queue_depth failed', depthErr)
+    } else if (typeof count === 'number') {
+      recheckQueueDepth = count
+    } else {
+      console.error('makesafe_audit recheck_queue_depth count unavailable')
+    }
+  } catch (depthErr) {
+    console.error('makesafe_audit recheck_queue_depth failed', depthErr)
   }
 
   return {
@@ -13342,7 +13432,10 @@ async function makesafeStoryRecompute(client: any, opts: StoryRecomputeOpts = {}
   const sentRows = await _fetchAllRows(
     () => client.from('emails')
       .select('post_id, subject, body_preview, body_content, to_recipients, has_attachments, received_at')
-      .eq('mailbox', _ADMIN_SENT_MAILBOX).eq('folder', _SENT_FOLDER).gte('received_at', sentSinceIso),
+      .eq('mailbox', _ADMIN_SENT_MAILBOX).eq('folder', _SENT_FOLDER).gte('received_at', sentSinceIso)
+      // post_id is the emails PK; the paginated read must end on a unique key or
+      // a .range() page pair can drop a Sent row (a real send reads as unsent).
+      .order('post_id', { ascending: true }),
     'story sent-mirror read',
   )
 
