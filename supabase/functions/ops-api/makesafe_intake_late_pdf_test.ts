@@ -344,32 +344,39 @@ function makeClient(cfg: { drafts: LatePdfDraftRow[] }) {
   return { from: make, _captured: captured };
 }
 
-Deno.test("orchestration: two-email seq UPDATEs the existing draft in place (no INSERT), no auto-file when disabled", async () => {
-  Deno.env.delete("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE");
-  const client = makeClient({ drafts: [announcementDraft()] });
-  const r = await _landLateWorkOrderPdfOntoDraftForTest(client as any, {
-    candidate: poCandidate(),
-    autoFileEnabled: true,
-    extractionDegraded: false,
-    subject: "PO-53582 MLB-25096",
-  });
-  assertEquals(r.outcome, "landed");
-  if (r.outcome === "landed") {
-    assertEquals(r.draft_id, "d-announce");
-    assertEquals(r.status, "needs_review"); // all required present -> review-ready
-    assertEquals(r.auto_filed, null); // flag OFF -> no promotion
+Deno.test("orchestration: explicit false brake parks the two-email update without auto-file", async () => {
+  // Captain Amendment 46 made an absent env value default ON. Only the exact
+  // deployment brake "false" disables advancement; deleting the variable here
+  // was stale contract logic and accidentally exercised the live default.
+  Deno.env.set("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE", "false");
+  try {
+    const client = makeClient({ drafts: [announcementDraft()] });
+    const r = await _landLateWorkOrderPdfOntoDraftForTest(client as any, {
+      candidate: poCandidate(),
+      autoFileEnabled: true,
+      extractionDegraded: false,
+      subject: "PO-53582 MLB-25096",
+    });
+    assertEquals(r.outcome, "landed");
+    if (r.outcome === "landed") {
+      assertEquals(r.draft_id, "d-announce");
+      assertEquals(r.status, "needs_review"); // all required present -> review-ready
+      assertEquals(r.auto_filed, null); // explicit brake -> no promotion
+    }
+    // UPDATE captured against the existing id; NEVER an INSERT into makesafe_intake_drafts.
+    assertEquals(client._captured.updateId, "d-announce");
+    assertEquals(client._captured.update.client_name, "Jane Homeowner");
+    assertEquals(client._captured.update.attachments_json.length, 1);
+    assertEquals(client._captured.inserts.length, 0);
+    // landing breadcrumb emitted
+    assert(
+      client._captured.events.some((e: any) =>
+        e.event_type === "makesafe.intake_late_pdf_landed"
+      ),
+    );
+  } finally {
+    Deno.env.delete("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE");
   }
-  // UPDATE captured against the existing id; NEVER an INSERT into makesafe_intake_drafts.
-  assertEquals(client._captured.updateId, "d-announce");
-  assertEquals(client._captured.update.client_name, "Jane Homeowner");
-  assertEquals(client._captured.update.attachments_json.length, 1);
-  assertEquals(client._captured.inserts.length, 0);
-  // landing breadcrumb emitted
-  assert(
-    client._captured.events.some((e: any) =>
-      e.event_type === "makesafe.intake_late_pdf_landed"
-    ),
-  );
 });
 
 Deno.test("orchestration: auto-files through the UNCHANGED gate when the flag is ON and the merged draft is clean", async () => {

@@ -293,7 +293,32 @@ remains bounded by its 500-source read cap, 1..10 case cap and attempt ceiling.
 
 Transfer the existing 10-minute mailbox lease to that continuation and release it
 only when the nested scan settles, so the two-minute poll cannot launch overlapping
-batches.
+batches. A non-2xx or network-failed continuation must write both the aggregate
+`makesafe.intake.scan_handoff_failed` event and a reason-coded `email_events_raw`
+exception for every included source. HTTP 200 is not enough: verify each source has a
+canonical case-source row and account for any remainder. Keep the two fates distinct:
+a run that stopped at its per-run case or source-read cap has not reached those
+sources, so they are `intake_deferred_scan_run_cap_deferred` /
+`makesafe.intake.scan_handoff_deferred`; only an unbounded run that returned success
+with sources still unfated writes the terminal
+`intake_exception_scan_completed_without_case_fate`. Labelling deferral as an
+exception alarms on healthy bursts and corrupts the replay accounting. If
+source/accounting or alarm persistence fails, reject the continuation and retain the
+expiring lease.
+
+Apply `20260726000001_makesafe_company_parsing_rules_slug_correction.sql` before the
+matching deterministic-intake edge code. Production slugs are `aj`, `bw`, and `wb`,
+not the aliases targeted by the original seed. Every active company must have field
+rules or both `intentionally_no_fields:true` and a non-empty `no_fields_reason`.
+
+The 50-document PDF budget runs three strict tiers, never one flat priority set: exact
+diagnostic seeds, then the bounded recent email half newest first, then sweep rows
+oldest first. Seeds are old by construction, so folding them into the recent tier lets a
+newer burst spend the whole budget before an explicitly seeded re-plan. Without the
+tiering, old replay PDFs consume the budget before a clean new builder work order and
+break the five-minute live-job law. The GET-only regression harness is
+`scripts/replay-makesafe-five-fates.ts`; do not use runtime `dryRun` for a strictly
+read-only production proof because dark observe intentionally advances its own cursor.
 
 Deterministic instruction keys are long enough that 200 values overflow a reliable
 PostgREST GET URL. Keep all case/lineage `.in()` filters on the runtime's 25-item

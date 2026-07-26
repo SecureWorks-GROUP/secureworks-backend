@@ -830,13 +830,30 @@ export async function enrichSourcesWithPdfText(
   client: any,
   sources: readonly DeterministicSourceItem[],
   priorityPostIds: readonly string[] = [],
+  recentPostIds: readonly string[] = [],
 ): Promise<DeterministicSourceItem[]> {
+  // Three strict tiers, never one flat set. Exact diagnostic seeds are by
+  // construction old (operator allowlist, already-persisted case sources), so
+  // folding them in with the bounded recent half would let a burst of newer mail
+  // spend the whole extraction budget before an explicitly seeded re-plan.
   const priority = new Set(priorityPostIds);
-  const ordered = [...sources].sort((a, b) =>
-    Number(priority.has(b.postId)) - Number(priority.has(a.postId)) ||
-    a.receivedAt.localeCompare(b.receivedAt) ||
-    a.postId.localeCompare(b.postId)
+  const recent = new Set(
+    [...recentPostIds].filter((postId) => !priority.has(postId)),
   );
+  const tierOf = (postId: string) =>
+    priority.has(postId) ? 0 : recent.has(postId) ? 1 : 2;
+  const ordered = [...sources].sort((a, b) => {
+    const tierA = tierOf(a.postId);
+    const tierB = tierOf(b.postId);
+    if (tierA !== tierB) return tierA - tierB;
+    // New builder work must reach the PDF budget before old replay traffic, so
+    // the newest recent source wins inside a burst. Seeds and non-priority sweep
+    // rows retain oldest-first ordering so backlog recovery makes forward progress.
+    const timeDifference = tierA === 1
+      ? b.receivedAt.localeCompare(a.receivedAt)
+      : a.receivedAt.localeCompare(b.receivedAt);
+    return timeDifference || a.postId.localeCompare(b.postId);
+  });
   const documentsByPost = new Map<string, DeterministicPdfDocument[]>();
   let attempted = 0;
   for (const source of ordered) {
@@ -1079,10 +1096,16 @@ async function readInputs(
         : "inbound",
     };
   });
+  // Exact diagnostic seeds own the first PDF slots, then the bounded recent half.
+  // Without the recent ids in a tier of their own, every full-open run spent all
+  // 50 extractions on old sweep rows before it reached a newly-arrived clean
+  // builder instruction, so the two-minute poll could not satisfy the five-minute
+  // live-job law.
   const sources = await enrichSourcesWithPdfText(
     client,
     sourceRows,
     options.seedPostIds,
+    recentRows.map((row) => String(row.post_id)).filter(Boolean),
   );
   const backlogPageFull = backlogRows.length >= backlogCap;
   const recentPageFull = recentCap === 0 || recentRows.length >= recentCap;

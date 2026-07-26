@@ -460,6 +460,127 @@ Deno.test("PDF extraction quarantines bad records without aborting good records"
   );
 });
 
+Deno.test("U1 real-email regression: newest recent work order owns a PDF slot before old sweep mail", async () => {
+  // Derived from production source hash b65f17701ab66ea5 (24 Jul): a genuine
+  // inbound NEW WORK ORDER sat behind old mailbox PDFs. Content is replaced with
+  // the existing non-PII digital fixture; only the observed queue shape remains.
+  const pdfBytes = digitalWorkOrderPdf();
+  const store = baseStore();
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => pdfBytes,
+  );
+  const makeSource = (postId: string, receivedAt: string) => ({
+    postId,
+    fromEmail: "dispatch@mlb.test",
+    subject: "NEW WORK ORDER",
+    body: "Builder work order attached.",
+    receivedAt,
+    attachments: [{
+      id: `${postId}-attachment`,
+      sourcePostId: postId,
+      name: "Work Order.pdf",
+      contentType: "application/pdf",
+      storagePath: `raw/${postId}.pdf`,
+      status: "uploaded",
+      sizeBytes: pdfBytes.length,
+    }],
+    links: [],
+    direction: "inbound" as const,
+  });
+  const oldSources = Array.from({ length: 51 }, (_, index) =>
+    makeSource(
+      `old-${String(index).padStart(2, "0")}`,
+      new Date(Date.parse(NOW) - (60 - index) * 60_000).toISOString(),
+    ));
+  const newest = makeSource(
+    "real-shape-newest-work-order",
+    new Date(Date.parse(NOW) + 60_000).toISOString(),
+  );
+
+  const enriched = await enrichSourcesWithPdfText(
+    client,
+    [...oldSources, newest],
+    [newest.postId],
+  );
+  const byPost = new Map(enriched.map((source) => [source.postId, source]));
+
+  assertEquals(
+    byPost.get(newest.postId)?.pdfDocuments?.[0].status,
+    "extracted",
+  );
+  assertEquals(
+    enriched.flatMap((source) => source.pdfDocuments || []).filter((document) =>
+      document.status === "deferred"
+    ).length,
+    2,
+  );
+});
+
+Deno.test("U1 causal boundary: readInputs gives the newest recent WO a PDF slot ahead of a full old sweep", async () => {
+  // Production source shape: NEW WORK ORDER with one named PDF at the newest edge
+  // of a bounded backlog+recent read. Unlike the lower-level ordering test above,
+  // this drives readInputs and supplies no priority ids. Reverting the
+  // recentRows->priority wiring makes the newest source `run_extraction_cap` and
+  // fails this assertion.
+  const pdfBytes = digitalWorkOrderPdf();
+  const store = baseStore();
+  const oldSources = Array.from({ length: 51 }, (_, index) => {
+    const postId = `old-window-${String(index).padStart(2, "0")}`;
+    return {
+      postId,
+      receivedAt: new Date(
+        Date.parse(NOW) - (180 - index) * 60_000,
+      ).toISOString(),
+    };
+  });
+  const newest = {
+    postId: "real-shape-newest-window-work-order",
+    receivedAt: new Date(Date.parse(NOW) - 60_000).toISOString(),
+  };
+  for (const item of [...oldSources, newest]) {
+    store.emails.push(email({
+      post_id: item.postId,
+      received_at: item.receivedAt,
+      subject: "NEW WORK ORDER - MLB-REDACTED",
+      body_content: "Builder work order attached.",
+    }));
+    store.email_attachments.push({
+      id: `${item.postId}-attachment`,
+      email_id: item.postId,
+      name: "Work Order.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${item.postId}.pdf`,
+      status: "uploaded",
+      size_bytes: pdfBytes.length,
+    });
+  }
+  const client = fakeClient(store, [], undefined, () => pdfBytes);
+
+  const input = await _readInputsForTest(client, {
+    days: 60,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 102,
+    seedPostIds: [],
+    cursor: null,
+  });
+  const byPost = new Map(input.sources.map((item) => [item.postId, item]));
+
+  assertEquals(
+    byPost.get(newest.postId)?.pdfDocuments?.[0].status,
+    "extracted",
+  );
+  assertEquals(
+    input.sources.flatMap((item) => item.pdfDocuments || []).filter((
+      document,
+    ) => document.reason === "run_extraction_cap").length,
+    2,
+  );
+});
+
 Deno.test("live deterministic intake fills a draft from PDF and persists readable text provenance", async () => {
   const store = baseStore();
   const pdfBytes = digitalWorkOrderPdf();

@@ -36,7 +36,14 @@ export const DETERMINISTIC_INTAKE_VERSION =
   "makesafe-deterministic-intake@2026-07-24.v4";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 
-export type AdapterId = "mlb" | "ajs_ajbr" | "prime" | "rapid" | "chatter";
+export type AdapterId =
+  | "mlb"
+  | "ajs_ajbr"
+  | "builderwest"
+  | "western"
+  | "prime"
+  | "rapid"
+  | "chatter";
 export type StoryEventKind =
   | "instruction"
   | "revision"
@@ -136,7 +143,7 @@ export interface AdaptedSource {
   source: DeterministicSourceItem;
   adapterId: AdapterId | null;
   adapterVersion: string;
-  intent: "work" | "cancellation" | "chatter" | "ambiguous";
+  intent: "work" | "revision" | "cancellation" | "chatter" | "ambiguous";
   identity: ExtractedIdentity;
   evidence: readonly EvidenceCandidate[];
   story: readonly StoryEvent[];
@@ -293,8 +300,17 @@ const APPOINTMENT_SIGNAL =
   /\b(appointment|booked|scheduled|attend(?:ance)?\s+(?:on|at)|between\s+\d|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i;
 const ACCESS_SIGNAL =
   /\b(no\s+access|unable\s+to\s+access|access\s+denied|tenant\s+not\s+home|keys?\s+(?:available|unavailable)|access\s+code)\b/i;
+// Explicit revision wording is a revision wherever it appears.
 const REVISION_SIGNAL =
   /\b(revis(?:ed|ion)|amend(?:ed|ment)|updated\s+(?:work\s+order|scope|instruction)|supersed(?:e|ed))\b/i;
+// The independently catalogued chase shapes (INFO REQUIRED / FOLLOW UP / booking
+// chase / RE: on an existing ref) all identify themselves in the SUBJECT. Matching
+// those generic tokens body-wide would demote any first-time work order whose body
+// merely says "we will follow up with the tenant" into a forked revision case and
+// strip it from the strong-instruction anchor that recovers late attachment-only
+// evidence, so they are scoped to the subject line.
+const REVISION_SUBJECT_SIGNAL =
+  /(?:^\s*re\s*:[^\n]*\b(?:MLB|AJBR|AJS|BWCWA|WB|RAPID)[-\s#]*\d{3,}\b|\b(?:info\s+required|follow\s*up|booking\s+(?:update|request)|any\s+update)\b)/i;
 const REOPEN_SIGNAL =
   /\b(re-?attend|reopen|return\s+(?:visit|to\s+site)|attend\s+again)\b/i;
 const REPORT_SIGNAL =
@@ -303,6 +319,9 @@ const RAPID_SIGNAL = /\brapid(?:\s+repair(?:s)?)?\b/i;
 const PRIME_SIGNAL =
   /\bprime(?:eco|\s+ecosystem|\s+notification|\s+portal)?\b/i;
 const AJS_SIGNAL = /\b(?:AJBR|AJS)[-\s#]*\d{3,}\b/i;
+const BUILDERWEST_SIGNAL = /\bBWCWA[-\s#]*\d{3,}\b|\bbuilderwest\b/i;
+const WESTERN_SIGNAL =
+  /\bmake\s+safe\s+work\s+order\s*:\s*WB\d{3,}\b|\bwestern\.mailer\b/i;
 const MLB_SIGNAL = /\bMLB[-\s#]*\d{3,}\b/i;
 // Require an explicit label delimiter/number token. Bare "NEW WORK ORDER
 // MLB-123" proves an instruction and claim, but must not silently promote that
@@ -320,6 +339,11 @@ const LABELLED_ADDRESS_RE =
 
 function text(item: DeterministicSourceItem): string {
   return `${item.subject || ""}\n${item.body || ""}`;
+}
+
+function isRevisionSource(item: DeterministicSourceItem): boolean {
+  return REVISION_SIGNAL.test(text(item)) ||
+    REVISION_SUBJECT_SIGNAL.test(String(item.subject || ""));
 }
 
 function extractedPdfDocuments(
@@ -367,7 +391,13 @@ function profileFor(
   item: DeterministicSourceItem,
   profiles: readonly DeterministicCompanyProfile[],
 ): DeterministicCompanyProfile | null {
-  const aliases = adapterId === "ajs_ajbr" ? ["ajs-ajbr"] : [adapterId];
+  const aliases = adapterId === "ajs_ajbr"
+    ? ["ajs-ajbr"]
+    : adapterId === "builderwest"
+    ? ["builderwest", "bw"]
+    : adapterId === "western"
+    ? ["western", "wb", "western-building"]
+    : [adapterId];
   const sender = profiles.find((p) =>
     p.senderPatterns.some((pattern) =>
       domainMatches(item.fromEmail, pattern)
@@ -440,11 +470,19 @@ function extractRawIdentity(
     ? hay.match(
       /\b(?:AJBR|AJS)[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i,
     )
+    : adapterId === "builderwest"
+    ? hay.match(/\bBWCWA[-\s#]*(\d{3,})\b/i)
+    : adapterId === "western"
+    ? hay.match(/\bWB[-\s#]*(\d{3,})\b/i)
     : hay.match(
       /\b(?:RAPID|RR)[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i,
     );
   const prefix = adapterId === "ajs_ajbr"
     ? "AJBR"
+    : adapterId === "builderwest"
+    ? "BWCWA"
+    : adapterId === "western"
+    ? "WB"
     : adapterId === "rapid"
     ? "RAPID"
     : "MLB";
@@ -476,6 +514,10 @@ function extractRawIdentity(
   const builderScopedJobNo = jobNo
     ? adapterId === "ajs_ajbr"
       ? `AJBR-${jobNo}`
+      : adapterId === "builderwest"
+      ? `BWCWA-${jobNo}`
+      : adapterId === "western"
+      ? `WB-${jobNo}`
       : adapterId === "rapid"
       ? `RAPID-${jobNo}`
       : jobNo
@@ -590,7 +632,7 @@ function storyFor(item: DeterministicSourceItem): StoryEvent[] {
     subjectIsCancellation(item.subject) ||
     /\bcancel(?:led|lation|ling)?\b/i.test(hay)
   ) add("cancellation", "builder_cancelled_instruction");
-  else if (REVISION_SIGNAL.test(hay)) {
+  else if (isRevisionSource(item)) {
     add("revision", "builder_revised_instruction");
   } else add("instruction", "builder_instruction_received");
   if (APPOINTMENT_SIGNAL.test(hay)) {
@@ -735,14 +777,34 @@ function buildKnown(
   const profile = profileFor(adapterId, item, profiles);
   const raw = extractRawIdentity(item, adapterId);
   const parsed = fieldCandidates(item, profile);
-  const fields = parsed.fields;
+  const fields = { ...parsed.fields };
+  if (adapterId === "western") {
+    const western = String(item.subject || "").match(
+      /make\s+safe\s+work\s+order\s*:\s*(WB\d{3,})\s*[|/]\s*([^|/]+?)\s*[|/]\s*(.+)$/i,
+    );
+    if (western) {
+      fields.external_ref ||= western[1];
+      fields.client_name ||= western[2].trim();
+      fields.site_address ||= western[3].trim();
+    }
+  }
+  if (adapterId === "builderwest") {
+    const claim = String(item.subject || "").match(
+      /^\s*\d{5,}\s*-\s*(BWCWA\d{3,})\s*-\s*([^-]+?)\s*-\s*(.+)$/i,
+    );
+    if (claim) {
+      fields.external_ref ||= claim[1];
+      fields.client_name ||= claim[2].trim();
+      fields.site_address ||= claim[3].trim();
+    }
+  }
   const deliverable = inferDeliverable(item);
   const canonical = normaliseMakesafeIdentity({
     externalRefRaw: raw.externalRef || fields.external_ref || null,
     builderWoRaw: raw.wo,
     builderPoRaw: raw.po,
     deliverableRefRaw: deliverable,
-    prefixes: ["MLB", "AJBR", "AJS", "RAPID", "RR"],
+    prefixes: ["MLB", "AJBR", "AJS", "BWCWA", "WB", "RAPID", "RR"],
   });
   const identity: ExtractedIdentity = {
     // Persist the actual profile slug used by the existing guarded job creator.
@@ -772,6 +834,8 @@ function buildKnown(
     ? "cancellation"
     : isChatter(item)
     ? "chatter"
+    : isRevisionSource(item)
+    ? "revision"
     : WORK_SIGNAL.test(hay) || item.attachments.length > 0 ||
         extractLinks(item).length > 0 || raw.externalRef || raw.wo || raw.po
     ? "work"
@@ -837,6 +901,31 @@ const AJS_ADAPTER: Adapter = {
     senderMatchesAdapter("ajs_ajbr", item, profiles),
   build: (item, profiles) => buildKnown(item, profiles, "ajs_ajbr"),
 };
+const BUILDERWEST_ADAPTER: Adapter = {
+  id: "builderwest",
+  version: "builderwest@v1",
+  // BuilderWest shares PrimeEco transport with other builders. Require a
+  // BuilderWest identity signal; sender-domain matching alone would steal MLB and
+  // generic portal notifications from their existing adapters.
+  matches: (item) => BUILDERWEST_SIGNAL.test(text(item)),
+  build: (item, profiles) => buildKnown(item, profiles, "builderwest"),
+};
+const WESTERN_ADAPTER: Adapter = {
+  id: "western",
+  version: "western@v1",
+  // Western also arrives over the shared PrimeEco transport. A Western identity
+  // signal always selects it, but the sender fallback is guarded the same way MLB
+  // guards its own: a wb profile carrying the bare shared domain must not steal
+  // BuilderWest work orders or generic portal notifications from their adapters.
+  matches: (item, profiles) =>
+    WESTERN_SIGNAL.test(
+      `${item.fromEmail || ""} ${item.fromName || ""} ${text(item)}`,
+    ) ||
+    (senderMatchesAdapter("western", item, profiles) &&
+      !PRIME_SIGNAL.test(`${item.fromEmail || ""} ${item.fromName || ""}`) &&
+      !BUILDERWEST_SIGNAL.test(text(item))),
+  build: (item, profiles) => buildKnown(item, profiles, "western"),
+};
 const PRIME_ADAPTER: Adapter = {
   id: "prime",
   version: "prime@v1",
@@ -877,6 +966,8 @@ export const DETERMINISTIC_ADAPTER_REGISTRY: readonly Adapter[] = Object.freeze(
   [
     MLB_ADAPTER,
     AJS_ADAPTER,
+    WESTERN_ADAPTER,
+    BUILDERWEST_ADAPTER,
     PRIME_ADAPTER,
     RAPID_ADAPTER,
     CHATTER_ADAPTER,
@@ -1153,7 +1244,7 @@ function instructionDiscriminator(item: AdaptedSource): string {
   }`;
   // A revision/reopen is a fresh instruction case in the same lineage, not extra
   // evidence silently folded into the original instruction.
-  if (REVISION_SIGNAL.test(text(item.source))) {
+  if (isRevisionSource(item.source)) {
     return `revision:${base}:${item.source.postId}`;
   }
   if (REOPEN_SIGNAL.test(text(item.source))) {
@@ -1399,7 +1490,7 @@ export function buildDeterministicIntakePlan(
         item.identity.woPoIdentityKey || item.identity.externalRefCanonical
       )
       .filter((item) =>
-        item.intent === "work" && !REVISION_SIGNAL.test(text(item.source)) &&
+        item.intent === "work" && !isRevisionSource(item.source) &&
         !REOPEN_SIGNAL.test(text(item.source))
       )
       .map(instructionDiscriminator);
@@ -1414,7 +1505,7 @@ export function buildDeterministicIntakePlan(
       if (
         oneStrongInstruction && item.intent === "work" &&
         !item.identity.woPoIdentityKey && !item.identity.externalRefCanonical &&
-        !REVISION_SIGNAL.test(text(item.source)) &&
+        !isRevisionSource(item.source) &&
         !REOPEN_SIGNAL.test(text(item.source))
       ) discriminator = oneStrongInstruction;
       groups.set(discriminator, [...(groups.get(discriminator) || []), item]);
@@ -1573,7 +1664,7 @@ export function buildDeterministicIntakePlan(
           ? "reopen_of"
           : intent === "cancellation"
           ? "cancellation_of"
-          : instructionItems.some((i) => REVISION_SIGNAL.test(text(i.source)))
+          : instructionItems.some((i) => isRevisionSource(i.source))
           ? "revision_of"
           : "sibling_of";
       }

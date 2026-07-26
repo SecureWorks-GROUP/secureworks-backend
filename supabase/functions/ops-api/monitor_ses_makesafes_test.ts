@@ -22,6 +22,7 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _auditExclusion,
@@ -32,6 +33,7 @@ import {
   _DEFAULT_REF_PREFIXES,
   _extractRef,
   _extractRefPrefixes,
+  _findIntakeSourcesWithoutCase,
   _graphGetAll,
   _handler,
   _isAuthorized,
@@ -41,6 +43,8 @@ import {
   _parseSenderDomain,
   _persistPost,
   _processAttachments,
+  _recordIntakeSourceDeferrals,
+  _recordIntakeSourceExceptions,
   _runBackfillFull,
   _scheduleIntakeScanContinuation,
   _senderMatchesPattern,
@@ -121,6 +125,266 @@ Deno.test("intake scan continuation returns before a scan beyond pg_net's five-s
   releaseScan(new Response("{}", { status: 200 }));
   await registered;
   assertEquals(captured.leaseReleased, true);
+});
+
+Deno.test("successful handoff accounting check returns only sources without a canonical case", async () => {
+  const sb = {
+    from: () => ({
+      select: () => ({
+        in: () =>
+          Promise.resolve({
+            data: [{ post_id: "accounted" }],
+            error: null,
+          }),
+      }),
+    }),
+  };
+  const sources = [
+    {
+      postId: "accounted",
+      receivedAt: null,
+      conversationId: null,
+      threadId: null,
+    },
+    {
+      postId: "missing",
+      receivedAt: null,
+      conversationId: null,
+      threadId: null,
+    },
+  ];
+
+  const missing = await _findIntakeSourcesWithoutCase(sb, sources);
+
+  assertEquals(missing.map((item) => item.postId), ["missing"]);
+});
+
+// email_events_raw's unique index is PARTIAL ('created'/'excluded' only), so the
+// intake fate rows must dedupe in the function or a sustained ops-api outage
+// appends one duplicate row per post per two-minute poll.
+function fateWriterStub(existingChangeTypes: readonly string[] = []) {
+  const inserted: Array<{ table: string; row: Record<string, unknown> }> = [];
+  const existing = new Set(existingChangeTypes);
+  const sb = {
+    from: (table: string) => ({
+      insert: (row: Record<string, unknown>) => {
+        inserted.push({ table, row });
+        return Promise.resolve({ error: null });
+      },
+      select: () => {
+        let changeType = "";
+        const builder = {
+          eq: (column: string, value: string) => {
+            if (column === "change_type") changeType = value;
+            return builder;
+          },
+          maybeSingle: () =>
+            Promise.resolve({
+              data: existing.has(changeType) ? { id: "existing-event" } : null,
+              error: null,
+            }),
+        };
+        return builder;
+      },
+    }),
+  };
+  return { sb, inserted };
+}
+
+const ONE_SOURCE = [{
+  postId: "source-one",
+  receivedAt: "2026-07-26T00:00:00Z",
+  conversationId: "conversation-one",
+  threadId: "thread-one",
+}];
+
+Deno.test("intake source exception writer records one reason-coded source fate plus aggregate alarm", async () => {
+  const { sb, inserted } = fateWriterStub();
+
+  await _recordIntakeSourceExceptions(
+    sb,
+    ONE_SOURCE,
+    "scan_completed_without_case_fate",
+    "Scanner returned but source fate was missing.",
+  );
+
+  assertEquals(inserted.length, 2);
+  assertEquals(inserted[0].table, "email_events_raw");
+  assertEquals(
+    inserted[0].row.change_type,
+    "intake_exception_scan_completed_without_case_fate",
+  );
+  assertEquals(
+    (inserted[0].row.page_meta as Record<string, unknown>).source_fate,
+    "reason_coded_exception",
+  );
+  assertEquals(inserted[1].table, "business_events");
+});
+
+Deno.test("intake source fate writer never appends a duplicate ledger row on retry", async () => {
+  const { sb, inserted } = fateWriterStub([
+    "intake_exception_scan_handoff_http_503",
+  ]);
+
+  await _recordIntakeSourceExceptions(
+    sb,
+    ONE_SOURCE,
+    "scan_handoff_http_503",
+    "Handoff failed again on the overlapping window.",
+  );
+
+  assertEquals(inserted.map((item) => item.table), ["business_events"]);
+});
+
+Deno.test("bounded-run deferrals are a separate non-terminal fate, not an exception", async () => {
+  const { sb, inserted } = fateWriterStub();
+
+  await _recordIntakeSourceDeferrals(
+    sb,
+    ONE_SOURCE,
+    "scan_run_cap_deferred",
+    "Scanner stopped at its per-run cap.",
+  );
+
+  assertEquals(
+    inserted[0].row.change_type,
+    "intake_deferred_scan_run_cap_deferred",
+  );
+  assertEquals(
+    (inserted[0].row.page_meta as Record<string, unknown>).source_fate,
+    "deferred_next_run",
+  );
+  assertEquals(
+    inserted[1].row.event_type,
+    "makesafe.intake.scan_handoff_deferred",
+  );
+});
+
+Deno.test("intake continuation durably reports non-2xx and network handoff failures", async () => {
+  const observed: Array<{ kind: "http" | "network"; status: number | null }> =
+    [];
+  for (
+    const fetchStub of [
+      (() =>
+        Promise.resolve(
+          new Response("unavailable", { status: 503 }),
+        )) as typeof fetch,
+      (() => Promise.reject(new Error("connection reset"))) as typeof fetch,
+    ]
+  ) {
+    let registered: Promise<void> | undefined;
+    let settled = false;
+    _scheduleIntakeScanContinuation(
+      fetchStub,
+      (promise) => registered = promise,
+      "https://example.invalid/ops-api?action=scan_ses_makesafes",
+      {},
+      () => {
+        settled = true;
+        return Promise.resolve();
+      },
+      (failure) => {
+        observed.push(failure);
+        return Promise.resolve();
+      },
+    );
+    assert(registered);
+    await registered;
+    assertEquals(settled, true);
+  }
+
+  assertEquals(observed, [
+    { kind: "http", status: 503 },
+    { kind: "network", status: null },
+  ]);
+});
+
+Deno.test("intake continuation reports a per-run bound so cap deferral is not read as a drop", async () => {
+  const observed: Array<
+    { boundedRun: boolean; casesDeferred: number | null }
+  > = [];
+  for (
+    const body of [
+      { totals: { cases_deferred: 5 }, source_read: { cap_reached: false } },
+      { totals: { cases_deferred: 0 }, source_read: { cap_reached: true } },
+      { totals: { cases_deferred: 0 }, source_read: { cap_reached: false } },
+    ]
+  ) {
+    let registered: Promise<void> | undefined;
+    _scheduleIntakeScanContinuation(
+      (() =>
+        Promise.resolve(
+          new Response(JSON.stringify(body), { status: 200 }),
+        )) as typeof fetch,
+      (promise) => registered = promise,
+      "https://example.invalid/ops-api?action=scan_ses_makesafes",
+      {},
+      () => Promise.resolve(),
+      () => Promise.resolve(),
+      (outcome) => {
+        observed.push({
+          boundedRun: outcome.boundedRun,
+          casesDeferred: outcome.casesDeferred,
+        });
+        return Promise.resolve();
+      },
+    );
+    assert(registered);
+    await registered;
+  }
+
+  assertEquals(observed, [
+    { boundedRun: true, casesDeferred: 5 },
+    { boundedRun: true, casesDeferred: 0 },
+    { boundedRun: false, casesDeferred: 0 },
+  ]);
+});
+
+Deno.test("an unreadable scan report stays unbounded so a genuine drop still alarms", async () => {
+  let registered: Promise<void> | undefined;
+  let bounded: boolean | null = null;
+  _scheduleIntakeScanContinuation(
+    (() =>
+      Promise.resolve(
+        new Response("not json", { status: 200 }),
+      )) as typeof fetch,
+    (promise) => registered = promise,
+    "https://example.invalid/ops-api?action=scan_ses_makesafes",
+    {},
+    () => Promise.resolve(),
+    () => Promise.resolve(),
+    (outcome) => {
+      bounded = outcome.boundedRun;
+      return Promise.resolve();
+    },
+  );
+  assert(registered);
+  await registered;
+
+  assertEquals(bounded, false);
+});
+
+Deno.test("intake continuation retains the lease when durable exception persistence fails", async () => {
+  let registered: Promise<void> | undefined;
+  let settled = false;
+  _scheduleIntakeScanContinuation(
+    (() =>
+      Promise.resolve(
+        new Response("unavailable", { status: 503 }),
+      )) as typeof fetch,
+    (promise) => registered = promise,
+    "https://example.invalid/ops-api?action=scan_ses_makesafes",
+    {},
+    () => {
+      settled = true;
+      return Promise.resolve();
+    },
+    () => Promise.reject(new Error("source ledger unavailable")),
+  );
+
+  assert(registered);
+  await assertRejects(() => registered!, Error, "source ledger unavailable");
+  assertEquals(settled, false);
 });
 
 // ── Classifier: domain-boundary matching ──────────────────────────────────────

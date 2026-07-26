@@ -1964,36 +1964,248 @@ async function logMailReadFailureEvent(
   }
 }
 
+export interface IntakeScanContinuationFailure {
+  kind: "http" | "network";
+  status: number | null;
+}
+
+export interface IntakeHandoffSource {
+  postId: string;
+  receivedAt: string | null;
+  conversationId: string | null;
+  threadId: string | null;
+}
+
+// A source the scanner returned without accounting is only a lost source when the
+// run actually saw the whole window. A run that stopped at its per-run case or
+// source-read cap simply has not reached that source yet.
+export interface IntakeScanOutcome {
+  boundedRun: boolean;
+  casesDeferred: number | null;
+  sourceReadCapReached: boolean | null;
+}
+
+type IntakeSourceFate = "reason_coded_exception" | "deferred_next_run";
+
+async function recordIntakeSourceFates(
+  sb: any,
+  sources: readonly IntakeHandoffSource[],
+  fate: IntakeSourceFate,
+  reasonCode: string,
+  summary: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  const safeReason = reasonCode.toLowerCase().replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!safeReason) throw new Error("intake source exception reason required");
+  const deferred = fate === "deferred_next_run";
+  const changeType = `${
+    deferred ? "intake_deferred" : "intake_exception"
+  }_${safeReason}`;
+  // email_events_raw is the existing append-only source replay ledger. Its
+  // uq_email_events_raw_post_change unique index is PARTIAL and covers only the
+  // 'created'/'excluded' change types, so the intake fate rows get no database
+  // dedupe: use the same read-then-insert key persistPost uses, or a sustained
+  // ops-api outage appends a fresh row per post on every two-minute poll.
+  for (const source of sources) {
+    const { data: existing, error: existingError } = await sb.from(
+      "email_events_raw",
+    )
+      .select("id")
+      .eq("post_id", source.postId)
+      .eq("change_type", changeType)
+      .maybeSingle();
+    if (existingError) {
+      throw new Error(
+        `intake source fate dedupe read failed for ${source.postId}: ${existingError.message}`,
+      );
+    }
+    if ((existing as { id?: string } | null)?.id) continue;
+    const { error } = await sb.from("email_events_raw").insert({
+      mailbox: MAILBOX,
+      post_id: source.postId,
+      change_type: changeType,
+      received_at: source.receivedAt,
+      exclusion_reason: safeReason,
+      conversation_id: source.conversationId,
+      thread_id: source.threadId,
+      page_meta: { source_fate: fate, ...metadata },
+    });
+    if (error && String(error.code) !== "23505") {
+      throw new Error(
+        `intake source exception write failed for ${source.postId}: ${error.message}`,
+      );
+    }
+  }
+  const { error: eventError } = await sb.from("business_events").insert({
+    event_type: deferred
+      ? "makesafe.intake.scan_handoff_deferred"
+      : "makesafe.intake.scan_handoff_failed",
+    source: "monitor-ses-makesafes",
+    entity_type: "mailbox",
+    entity_id: MAILBOX,
+    body_preview: summary.slice(0, 500),
+    safe_summary: summary.slice(0, 280),
+    payload: {
+      mailbox: MAILBOX,
+      reason_code: safeReason,
+      source_fate: fate,
+      affected_source_count: sources.length,
+      ...metadata,
+    },
+    metadata: {
+      mission: "ses-reporting-end-to-end-2026-07",
+      unit: "U1",
+    },
+    schema_version: "1.0",
+  });
+  if (eventError) {
+    throw new Error(`scan handoff alarm write failed: ${eventError.message}`);
+  }
+}
+
+async function recordIntakeSourceExceptions(
+  sb: any,
+  sources: readonly IntakeHandoffSource[],
+  reasonCode: string,
+  summary: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  await recordIntakeSourceFates(
+    sb,
+    sources,
+    "reason_coded_exception",
+    reasonCode,
+    summary,
+    metadata,
+  );
+}
+
+async function recordIntakeSourceDeferrals(
+  sb: any,
+  sources: readonly IntakeHandoffSource[],
+  reasonCode: string,
+  summary: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  await recordIntakeSourceFates(
+    sb,
+    sources,
+    "deferred_next_run",
+    reasonCode,
+    summary,
+    metadata,
+  );
+}
+
+async function findIntakeSourcesWithoutCase(
+  sb: any,
+  sources: readonly IntakeHandoffSource[],
+): Promise<IntakeHandoffSource[]> {
+  const accounted = new Set<string>();
+  for (let offset = 0; offset < sources.length; offset += 25) {
+    const ids = sources.slice(offset, offset + 25).map((item) => item.postId);
+    const { data, error } = await sb.from("makesafe_intake_case_sources")
+      .select("post_id")
+      .in("post_id", ids);
+    if (error) {
+      throw new Error(`intake source accounting read failed: ${error.message}`);
+    }
+    for (const row of data || []) {
+      if (row?.post_id) accounted.add(String(row.post_id));
+    }
+  }
+  return sources.filter((item) => !accounted.has(item.postId));
+}
+
 export function _scheduleIntakeScanContinuation(
   fetchFn: typeof fetch,
   waitUntil: (promise: Promise<void>) => void,
   url: string,
   headers: Record<string, string>,
   onSettled: () => Promise<void> = () => Promise.resolve(),
+  onFailure: (failure: IntakeScanContinuationFailure) => Promise<void> = () =>
+    Promise.resolve(),
+  onSuccess: (outcome: IntakeScanOutcome) => Promise<void> = () =>
+    Promise.resolve(),
 ): void {
+  let releaseLease = true;
   const continuation = (async () => {
     try {
-      const scanResp = await fetchFn(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({}),
-      });
+      let scanResp: Response;
+      try {
+        scanResp = await fetchFn(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({}),
+        });
+      } catch (scanErr) {
+        console.error(
+          "[monitor-ses] intake scan continuation failed (non-fatal):",
+          (scanErr as Error).message,
+        );
+        await onFailure({ kind: "network", status: null });
+        return;
+      }
       console.log(
         `[monitor-ses] intake scan continuation status=${scanResp.status}`,
       );
-    } catch (scanErr) {
-      console.error(
-        "[monitor-ses] intake scan continuation failed (non-fatal):",
-        (scanErr as Error).message,
-      );
-    } finally {
+      if (!scanResp.ok) {
+        await onFailure({ kind: "http", status: scanResp.status });
+        return;
+      }
+      // An unreadable report proves nothing about boundedness, so it stays
+      // unbounded: a genuinely dropped source must still raise a loud exception.
+      let outcome: IntakeScanOutcome = {
+        boundedRun: false,
+        casesDeferred: null,
+        sourceReadCapReached: null,
+      };
       try {
-        await onSettled();
-      } catch (releaseErr) {
+        const report = await scanResp.json() as {
+          totals?: { cases_deferred?: unknown };
+          source_read?: { cap_reached?: unknown };
+          attempt_cap_reached_without_commit?: unknown;
+        };
+        const casesDeferred = Number(report?.totals?.cases_deferred);
+        const capReached = report?.source_read?.cap_reached;
+        outcome = {
+          casesDeferred: Number.isFinite(casesDeferred) ? casesDeferred : null,
+          sourceReadCapReached: typeof capReached === "boolean"
+            ? capReached
+            : null,
+          boundedRun: (Number.isFinite(casesDeferred) && casesDeferred > 0) ||
+            capReached === true ||
+            report?.attempt_cap_reached_without_commit === true,
+        };
+      } catch (bodyErr) {
         console.error(
-          "[monitor-ses] continuation settlement failed:",
-          (releaseErr as Error).message,
+          "[monitor-ses] intake scan report unreadable; treating run as unbounded:",
+          (bodyErr as Error).message,
         );
+      }
+      await onSuccess(outcome);
+    } catch (recordError) {
+      // Do not release the 10-minute lease when the durable source exception or
+      // success-accounting check itself failed. The rejected continuation is loud
+      // and the expiring lease forces a later retry rather than acknowledging a
+      // log-only sink as settled.
+      releaseLease = false;
+      console.error(
+        "[monitor-ses] intake continuation accounting failed; lease retained:",
+        (recordError as Error).message,
+      );
+      throw recordError;
+    } finally {
+      if (releaseLease) {
+        try {
+          await onSettled();
+        } catch (releaseErr) {
+          console.error(
+            "[monitor-ses] continuation settlement failed:",
+            (releaseErr as Error).message,
+          );
+        }
       }
     }
   })();
@@ -2187,6 +2399,7 @@ async function handler(req: Request): Promise<Response> {
     let excluded = 0;
     let totalUnresolved = 0;
     let maxReceived = lastMax || null;
+    const includedSources: IntakeHandoffSource[] = [];
 
     for (const post of posts) {
       const ts = post.receivedDateTime || post.createdDateTime || null;
@@ -2201,6 +2414,12 @@ async function handler(req: Request): Promise<Response> {
       const unresolved = await persistPost(sb, token, groupId, post, cls);
       totalUnresolved += unresolved;
       included++;
+      includedSources.push({
+        postId: post.id,
+        receivedAt: post.receivedDateTime || post.createdDateTime || null,
+        conversationId: post.conversationId || null,
+        threadId: post.conversationThreadId || null,
+      });
     }
 
     // ── Persist watermark ONLY after a full successful drain. ──
@@ -2237,10 +2456,18 @@ async function handler(req: Request): Promise<Response> {
       `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
     const edgeRuntime = (globalThis as any).EdgeRuntime;
     if (typeof edgeRuntime?.waitUntil !== "function") {
-      // Mail sync already committed successfully. Keep continuation failure
-      // non-fatal and let the normal finally block release the mailbox lease.
       console.error(
         "[monitor-ses] EdgeRuntime.waitUntil unavailable; intake scan deferred to next poll",
+      );
+      // This path used to be log-only. Record every included source as a typed
+      // exception before returning success. If either source-ledger or aggregate
+      // alarm persistence fails, throw and let the handler return 500.
+      await recordIntakeSourceExceptions(
+        sb,
+        includedSources,
+        "wait_until_unavailable",
+        "SES email sync completed but EdgeRuntime.waitUntil was unavailable; sources remain queued for intake retry.",
+        { synced_watermark: maxReceived },
       );
     } else {
       _scheduleIntakeScanContinuation(
@@ -2262,6 +2489,60 @@ async function handler(req: Request): Promise<Response> {
               error.message,
             );
           }
+        },
+        async (failure) => {
+          await recordIntakeSourceExceptions(
+            sb,
+            includedSources,
+            `scan_handoff_${failure.kind}_${failure.status ?? "failed"}`,
+            `Deterministic intake handoff failed (${failure.kind}${
+              failure.status === null ? "" : ` ${failure.status}`
+            }); synced sources remain queued for retry.`,
+            {
+              failure_kind: failure.kind,
+              http_status: failure.status,
+              synced_watermark: maxReceived,
+            },
+          );
+        },
+        async (outcome) => {
+          // HTTP 200 proves only that the scanner returned. Close the source-level
+          // handoff by checking the canonical case-source ledger. Anything still
+          // absent receives a durable reason-coded fate instead of relying on an
+          // aggregate response or the next sweep.
+          const missing = await findIntakeSourcesWithoutCase(
+            sb,
+            includedSources,
+          );
+          if (!missing.length) return;
+          const fateMetadata = {
+            synced_watermark: maxReceived,
+            included_sources: included,
+            unaccounted_sources: missing.length,
+            cases_deferred: outcome.casesDeferred,
+            source_read_cap_reached: outcome.sourceReadCapReached,
+          };
+          // A run that stopped at its per-run case cap or source-read cap has not
+          // dropped these sources, it has not reached them. Recording that as a
+          // terminal exception would alarm on healthy bursts and would mislabel
+          // deferral as a settled exception fate in the replay accounting.
+          if (outcome.boundedRun) {
+            await recordIntakeSourceDeferrals(
+              sb,
+              missing,
+              "scan_run_cap_deferred",
+              "Deterministic intake returned successfully but stopped at a per-run bound; the remaining synced sources are queued for the next run.",
+              fateMetadata,
+            );
+            return;
+          }
+          await recordIntakeSourceExceptions(
+            sb,
+            missing,
+            "scan_completed_without_case_fate",
+            "Deterministic intake returned successfully but one or more synced sources still had no canonical case fate.",
+            fateMetadata,
+          );
         },
       );
       // Transfer the existing 10-minute mailbox lease to the continuation. The
@@ -2341,6 +2622,7 @@ export {
   DEFAULT_REF_PREFIXES as _DEFAULT_REF_PREFIXES,
   extractRef as _extractRef,
   extractRefPrefixes as _extractRefPrefixes,
+  findIntakeSourcesWithoutCase as _findIntakeSourcesWithoutCase,
   graphGetAll as _graphGetAll,
   handler as _handler,
   isAuthorized as _isAuthorized,
@@ -2350,6 +2632,8 @@ export {
   parseSenderDomain as _parseSenderDomain,
   persistPost as _persistPost,
   processAttachments as _processAttachments,
+  recordIntakeSourceDeferrals as _recordIntakeSourceDeferrals,
+  recordIntakeSourceExceptions as _recordIntakeSourceExceptions,
   resolveGroupId as _resolveGroupId,
   runBackfillFull as _runBackfillFull,
   senderMatchesPattern as _senderMatchesPattern,
