@@ -124,6 +124,7 @@ import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
   projectTradeMakesafeBoard,
+  type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
 import {
   buildMakesafeDisagreementList,
@@ -2287,6 +2288,50 @@ export function _resolveOpsApiAuthIntent(input: {
   return 'none'
 }
 
+async function makesafeBoardTradeRoute(
+  client: any,
+  authMode: MakesafeTradeProjectionAuthMode,
+  authUser: TradeAuthContext,
+  options: {
+    loadBoard?: typeof loadCanonicalMakesafeBoard
+    generatedAt?: string
+  } = {},
+) {
+  const { data: profile, error: profileErr } = await client.from('users')
+    .select('id, name, role, managed_verticals')
+    .eq('id', authUser.id)
+    .maybeSingle()
+  if (profileErr || !profile) throw new ApiError('Trade profile not found', 403)
+  const viewer = {
+    userId: profile.id,
+    name: profile.name,
+    role: profile.role,
+    managedVerticals: profile.managed_verticals,
+  }
+  const access = authorizeMakesafeTradeProjection(authMode, viewer)
+  if (!access.ok) return json({ error: access.error }, access.status)
+  const restrictToJobIds = access.permissions.sees_all_makesafes
+    ? undefined
+    : await loadMakesafeAssignedJobIds(client, profile.id)
+  const loadBoard = options.loadBoard || loadCanonicalMakesafeBoard
+  const canonicalRows = await loadBoard(
+    client,
+    restrictToJobIds ? { restrictToJobIds } : undefined,
+  )
+  const parity = checkMakesafeBoardParity(canonicalRows)
+  if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
+  const board = projectTradeMakesafeBoard(canonicalRows, viewer)
+  return json({
+    contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+    projection: 'trade',
+    generated_at: options.generatedAt || new Date().toISOString(),
+    ...board,
+    parity: { ok: true, contract_version: MAKESAFE_BOARD_CONTRACT_VERSION },
+  })
+}
+
+export const _makesafeBoardTradeRouteForTest = makesafeBoardTradeRoute
+
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
@@ -2543,41 +2588,7 @@ if (import.meta.main) serve(async (req: Request) => {
         }
 
         if (projection === 'trade') {
-          const { data: profile, error: profileErr } = await client.from('users')
-            .select('id, name, role, managed_verticals')
-            .eq('id', authUser!.id)
-            .maybeSingle()
-          if (profileErr || !profile) throw new ApiError('Trade profile not found', 403)
-          const viewer = {
-            userId: profile.id,
-            name: profile.name,
-            role: profile.role,
-            managedVerticals: profile.managed_verticals,
-          }
-          const access = authorizeMakesafeTradeProjection(authMode, viewer)
-          if (!access.ok) return json({ error: access.error }, access.status)
-          // Server-scope the load BEFORE building the canonical model: allocated-only
-          // trades never load or receive full make-safe history — only the (already
-          // server-authorised) jobs assigned to them. Full-history rows are built
-          // solely for all-makesafe viewers (Hugo/admins) and the Ops projection.
-          const permissions = access.permissions
-          const restrictToJobIds = permissions.sees_all_makesafes
-            ? undefined
-            : await loadMakesafeAssignedJobIds(client, profile.id)
-          const canonicalRows = await loadCanonicalMakesafeBoard(
-            client,
-            restrictToJobIds ? { restrictToJobIds } : undefined,
-          )
-          const parity = checkMakesafeBoardParity(canonicalRows)
-          if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
-          const board = projectTradeMakesafeBoard(canonicalRows, viewer)
-          return json({
-            contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
-            projection: 'trade',
-            generated_at: new Date().toISOString(),
-            ...board,
-            parity: { ok: true, contract_version: MAKESAFE_BOARD_CONTRACT_VERSION },
-          })
+          return await makesafeBoardTradeRoute(client, authMode, authUser!)
         }
 
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
