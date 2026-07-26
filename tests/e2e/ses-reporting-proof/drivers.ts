@@ -208,7 +208,7 @@ export class FixtureProofDriver implements ProofDriver {
         reason: !deno
           ? 'Deno binary not found for the authorised Board route seam'
           : `Board seam script missing at ${BOARD_SEAM_SCRIPT}`,
-        cards: [...this.cards.values()],
+        rows: [],
         syntheticCount: this.cards.size,
         live_sla_claim: false,
       }
@@ -269,7 +269,7 @@ export class FixtureProofDriver implements ProofDriver {
         source: 'not_built',
         evidence: 'NOT BUILT YET',
         reason: `Board seam failed: ${result.error?.message || result.stderr || `exit ${result.status}`}`,
-        cards: [...this.cards.values()],
+        rows: [],
         syntheticCount: this.cards.size,
         live_sla_claim: false,
       }
@@ -285,13 +285,16 @@ export class FixtureProofDriver implements ProofDriver {
         source: 'not_built',
         evidence: 'NOT BUILT YET',
         reason: 'Board seam returned non-JSON output',
-        cards: [...this.cards.values()],
+        rows: [],
         syntheticCount: this.cards.size,
         live_sla_claim: false,
       }
     }
 
     const visible = parsed.visibleToHugo === true
+    const rows = Array.isArray(parsed.body && (parsed.body as Record<string, unknown>).rows)
+      ? (parsed.body as Record<string, unknown>).rows as unknown[]
+      : []
     const boardIds = Array.isArray(parsed.boardJobIds)
       ? parsed.boardJobIds.map(String)
       : []
@@ -306,7 +309,7 @@ export class FixtureProofDriver implements ProofDriver {
       success: visible,
       visibleToHugo: visible,
       source: visible ? 'makesafe_board' : 'fixture_memory_not_confirmed',
-      cards: [...this.cards.values()],
+      rows,
       syntheticCount: this.cards.size,
       boardJobIds: boardIds,
       missingJobIds: parsed.missingJobIds || [],
@@ -402,11 +405,6 @@ export class FixtureProofDriver implements ProofDriver {
             if (outcome.jobId && this.boardConfirmedIds.has(outcome.jobId)) {
               outcome.hugoVisibleAt = this.boardGeneratedAt
               outcome.boardVisibility = 'confirmed_by_makesafe_board_route'
-            } else if (outcome.fate === 'reason_coded_exception') {
-              // Exception cards have no jobs.id. Visibility stop is the same
-              // authorised Hugo trade-session response that confirmed sibling jobs.
-              outcome.hugoVisibleAt = this.boardGeneratedAt
-              outcome.boardVisibility = 'hugo_trade_session_confirmed_no_job_identity'
             }
           }
         }
