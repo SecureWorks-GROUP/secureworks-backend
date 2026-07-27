@@ -348,6 +348,8 @@ function requireText(text, needle, label) {
 
 for (const triggerPath of [
   "scripts/identify-edge-deploy-changes.sh",
+  "scripts/check-edge-schema-preflight.sh",
+  "scripts/edge-function-schema-requirements.txt",
   "scripts/check-ops-api-source-actions.sh",
   "scripts/smoke-ops-api-action-surface.sh",
   "scripts/_ops-api-required-actions.txt",
@@ -358,8 +360,18 @@ for (const triggerPath of [
 
 requireText(deploy, 'bash scripts/identify-edge-deploy-changes.sh', 'change classifier');
 requireText(deploy, "if: steps.changed.outputs.functions != ''", 'function deploy condition');
+requireText(deploy, 'bash scripts/check-edge-schema-preflight.sh', 'production schema preflight');
+requireText(deploy, 'SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}', 'schema preflight credential');
 requireText(deploy, 'bash scripts/check-ops-api-source-actions.sh', 'authoritative source check');
 requireText(deploy, 'bash scripts/smoke-ops-api-action-surface.sh', 'authoritative live action smoke');
+
+const schemaPreflightStep = deploy.match(/- name: Pre-deploy check required production schema[\s\S]*?(?=\n      - (?:uses:|name:))/);
+if (!schemaPreflightStep || !schemaPreflightStep[0].includes("if: steps.changed.outputs.functions != ''")) {
+  throw new Error('production schema preflight is not required for every function deploy');
+}
+if (!schemaPreflightStep[0].includes('bash scripts/check-edge-schema-preflight.sh')) {
+  throw new Error('production schema preflight does not run the authoritative guard');
+}
 
 const preDeployCheckStep = deploy.match(/- name: Pre-deploy check ops-api source action surface[\s\S]*?(?=\n      - name:)/);
 if (!preDeployCheckStep || !preDeployCheckStep[0].includes("if: steps.changed.outputs.verify_ops_api == 'true'")) {
@@ -384,12 +396,13 @@ if (!actionSmokeStep || !actionSmokeStep[0].includes("if: steps.changed.outputs.
   throw new Error('action-surface smoke does not run for verification-only changes');
 }
 
+const schemaPreflightIndex = deploy.indexOf('- name: Pre-deploy check required production schema');
 const preDeployCheckIndex = deploy.indexOf('- name: Pre-deploy check ops-api source action surface');
 const deployIndex = deploy.indexOf('- name: Deploy changed edge functions');
 const basicSmokeIndex = deploy.indexOf('- name: Smoke test deployed functions');
 const actionSmokeIndex = deploy.indexOf('- name: Smoke test ops-api action surface');
-if (!(preDeployCheckIndex < deployIndex && deployIndex < basicSmokeIndex && basicSmokeIndex < actionSmokeIndex)) {
-  throw new Error('ops-api source path lost source check -> deploy -> basic smoke -> action-surface smoke order');
+if (!(schemaPreflightIndex < preDeployCheckIndex && preDeployCheckIndex < deployIndex && deployIndex < basicSmokeIndex && basicSmokeIndex < actionSmokeIndex)) {
+  throw new Error('ops-api source path lost schema preflight -> source check -> deploy -> basic smoke -> action-surface smoke order');
 }
 
 const triggerBlock = deploy.match(/\n    paths:\n((?:      - '[^']*'\n)+)/);
@@ -426,6 +439,7 @@ if (JSON.stringify(verificationTriggerPaths) !== JSON.stringify(classifierContra
 
 for (const requiredTest of [
   'bash scripts/test/test-deploy-edge-functions-workflow.sh',
+  'bash scripts/test/test-edge-schema-preflight.sh',
   'bash scripts/test/test-smoke-ops-api-action-surface.sh',
 ]) {
   requireText(pr, requiredTest, 'PR workflow safety fixture');

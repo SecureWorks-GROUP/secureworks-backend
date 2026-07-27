@@ -26,7 +26,14 @@ PostgREST rejects a select naming a non-existent column with a 400 (`42703`): `d
 **Fix pattern**: verify names against `information_schema.columns` (not the migrations); alias in the select to keep the response shape (`select('date:invoice_date')`) but use the REAL name in `.eq()`/`.gte()`/`.order()`; and check `error` on any read whose emptiness is business-meaningful — `logQueryErrors()` in `_shared/pgrest.ts` labels a `Promise.all` batch. Live names that commonly surprise are listed in `database-schema.md` and `AGENTS.md`.
 
 ### Apply migrations before deploying edge functions
-Migrations and edge deploys are separate manual steps. Deploy a function that selects a column the migration has not added yet and, per the gotcha above, it reports zero instead of failing. `jobs.quoted_value` (`20260717000001`) is the current case — `daily-digest`, `ops-api` and `reporting-api` all read it.
+Migrations and edge deploys are separate manual steps. Follow the authoritative
+production guard and deployment sequence in
+`docs/project-knowledge/EDGE_DEPLOY_LANE.md`; its manifest is
+`scripts/edge-function-schema-requirements.txt`. Deploying a function that
+selects a column the migration has not added can report zero instead of failing.
+The current `jobs.quoted_value` (`20260717000001`) case affects the four
+`daily-digest` reads; `ops-api` derives its response value from `pricing_json`,
+and `reporting-api` derives its `quoted_value` response key from the same source.
 
 ### PostgREST 1000-row limit
 Supabase REST API returns max 1000 rows by default. MUST use `fetchAll()` helper with `.range()` pagination for any query that might return > 1000 rows.

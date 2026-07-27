@@ -244,9 +244,15 @@ and the inbox-to-PO domain matcher in `monitor-inbox`
 ## Migrations Apply Before Edge Deploys
 
 Migrations and edge deploys are separate manual steps in this repo, so ordering
-is not automatic. When a function selects a newly added column, apply the
-migration FIRST — otherwise the query 400s and, per the entry above, silently
-reports zero. `jobs.quoted_value`
+is not automatic. The production guard and its complete marker manifest are
+documented in `docs/project-knowledge/EDGE_DEPLOY_LANE.md` and owned by
+`scripts/check-edge-schema-preflight.sh` plus
+`scripts/edge-function-schema-requirements.txt`. It refuses only when a declared
+migration ledger version or required queryable marker is absent; ledger
+name/checksum drift is advisory. It never applies SQL or runs broad `db push`.
+When a function selects a newly added column, apply the migration FIRST —
+otherwise the query 400s and, per the entry above, silently reports zero.
+`jobs.quoted_value`
 (`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
 `daily-digest` selects it, and as of 2026-07-20 the migration is still NOT
 applied in production (a read-only check returned `42703`). **That means the four
