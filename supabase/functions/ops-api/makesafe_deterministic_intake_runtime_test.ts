@@ -724,6 +724,35 @@ Deno.test("one ambiguous live-job binding files one exception while clean source
   });
   assertEquals(store.makesafe_intake_health[0].extraction_status, "ok");
   assertEquals(store.makesafe_intake_health[0].last_scan_at, NOW);
+
+  store.makesafe_intake_cases[0].job_id = "ambiguous-job-1";
+  let resumedApprovals = 0;
+  const resumed = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      (path) => pdfs.get(path) || ENCODER.encode("%PDF-1.7\nmissing"),
+    ),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["ambiguous-source"],
+      maxCases: 1,
+      nowIso: NOW,
+      approveDraft: () => {
+        resumedApprovals++;
+        return Promise.resolve({ job: { id: "must-not-be-created" } });
+      },
+    },
+  );
+  assertEquals(resumed.totals.cases_attempted, 1);
+  assertEquals(resumedApprovals, 0);
+  assertEquals(store.makesafe_intake_cases[0].state, "exception");
+  assertEquals(
+    store.makesafe_intake_cases[0].conflicting_fields.live_job_binding,
+    ["SWMS-1001", "SWMS-1002"],
+  );
 });
 
 Deno.test("a corrected target mismatch becomes one visible binding exception", async () => {

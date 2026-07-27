@@ -533,6 +533,43 @@ Deno.test("live-job binding ambiguity stays visible and names every candidate jo
   );
 });
 
+Deno.test("grouped binding cards aggregate and cap candidates across member rows", () => {
+  const primary = exceptionCase("grouped-primary", "MLB-26200", {
+    received_at: "2026-07-27T01:00:00.000Z",
+    wo_po_identity_key: "wo:MLB-26200",
+    missing_fields: [],
+  });
+  const laterConflict = exceptionCase("grouped-conflict", "MLB-26200", {
+    received_at: "2026-07-27T02:00:00.000Z",
+    wo_po_identity_key: "wo:MLB-26200",
+    missing_fields: [],
+    conflicting_fields: {
+      live_job_binding: [
+        "SWMS-1003",
+        "SWMS-1004",
+        "SWMS-1005",
+        "SWMS-1006",
+        "SWMS-1007",
+        "SWMS-1008",
+        "SWMS-1009",
+        "SWMS-1010",
+        "SWMS-1011",
+        "SWMS-1003",
+      ],
+    },
+  });
+  const projection = buildIntakeExceptionProjection(projectionInput({
+    cases: [primary, laterConflict],
+    sources: [source("grouped-primary"), source("grouped-conflict")],
+  }));
+
+  assertEquals(projection.cards.length, 1);
+  assertEquals(
+    projection.cards[0].blocker_sentence,
+    "This instruction MLB-26200 matches 9 live jobs (SWMS-1003, SWMS-1004, SWMS-1005, SWMS-1006, SWMS-1007, SWMS-1008, SWMS-1009, SWMS-1010; 9 total, 1 more not shown) - needs human binding.",
+  );
+});
+
 Deno.test("the deterministic floor never guesses weak or accounted non-work into cards", () => {
   const weak = exceptionCase("weak-case", "BWCWA-6648", {
     company_id: null,

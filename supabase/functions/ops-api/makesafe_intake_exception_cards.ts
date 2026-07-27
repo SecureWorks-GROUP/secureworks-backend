@@ -447,19 +447,34 @@ function jobBindingConflict(
   return null;
 }
 
-function jobBindingBlockerSentence(
-  row: IntakeExceptionCaseRow,
+const MAX_DISPLAYED_BINDING_CANDIDATES = 8;
+
+function groupedJobBindingBlockerSentence(
+  rows: readonly IntakeExceptionCaseRow[],
 ): string | null {
-  const conflict = jobBindingConflict(row);
-  if (!conflict) return null;
-  const instruction = row.builder_wo_canonical ||
-    row.external_ref_canonical || row.external_ref_raw || "unknown";
-  const candidates = joinPlainList(conflict.candidates);
-  if (conflict.kind === "corrected_target_job_binding") {
-    return `This instruction ${instruction} has a corrected-target mismatch across ${conflict.candidates.length} candidate jobs (${candidates}) - needs human binding.`;
+  const conflicts = rows.flatMap((row) => {
+    const conflict = jobBindingConflict(row);
+    return conflict ? [conflict] : [];
+  });
+  if (!conflicts.length) return null;
+  const kind = conflicts.some((conflict) =>
+      conflict.kind === "corrected_target_job_binding"
+    )
+    ? "corrected_target_job_binding"
+    : "live_job_binding";
+  const candidates = [...new Set(conflicts.flatMap((conflict) => conflict.candidates))]
+    .sort();
+  const displayed = candidates.slice(0, MAX_DISPLAYED_BINDING_CANDIDATES);
+  const suffix = candidates.length > MAX_DISPLAYED_BINDING_CANDIDATES
+    ? `; ${candidates.length} total, ${candidates.length - displayed.length} more not shown`
+    : "";
+  const instruction = rows[0].builder_wo_canonical ||
+    rows[0].external_ref_canonical || rows[0].external_ref_raw || "unknown";
+  if (kind === "corrected_target_job_binding") {
+    return `This instruction ${instruction} has a corrected-target mismatch across ${candidates.length} candidate jobs (${joinPlainList(displayed)}${suffix}) - needs human binding.`;
   }
-  const noun = conflict.candidates.length === 1 ? "job" : "jobs";
-  return `This instruction ${instruction} matches ${conflict.candidates.length} live ${noun} (${candidates}) - needs human binding.`;
+  const noun = candidates.length === 1 ? "job" : "jobs";
+  return `This instruction ${instruction} matches ${candidates.length} live ${noun} (${joinPlainList(displayed)}${suffix}) - needs human binding.`;
 }
 
 function plainCode(value: string | null, fallback: string): string {
@@ -1100,7 +1115,7 @@ export function buildIntakeExceptionProjection(
         primary.external_ref_canonical || primary.external_ref_raw!,
       received_at: primary.received_at,
       source_email_subject: evidence[0]?.subject || null,
-      blocker_sentence: jobBindingBlockerSentence(primary) ||
+      blocker_sentence: groupedJobBindingBlockerSentence(rows) ||
         intakeBlockerSentence(neededInformation),
       needed_information: neededInformation,
       case_gaps: caseGapDetails.map((detail) => ({

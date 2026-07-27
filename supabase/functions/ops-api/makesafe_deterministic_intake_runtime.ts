@@ -4228,6 +4228,7 @@ export async function runDeterministicIntake(
   const rankCase = (casePlan: DeterministicCasePlan): CaseRank => {
     const row = persisted.get(casePlan.instructionKey);
     if (!row) return "fresh";
+    if (bindingExceptions.has(casePlan.instructionKey)) return "fresh";
     const known = persistedSources.get(row.id) || new Set<string>();
     if (
       casePlan.sourcePostIds.some((postId) =>
