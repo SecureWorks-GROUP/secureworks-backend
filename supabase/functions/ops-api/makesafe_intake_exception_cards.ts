@@ -1222,6 +1222,26 @@ async function loadByPostIds(
   return rows;
 }
 
+async function loadByIds(
+  client: any,
+  table: string,
+  columns: string,
+  column: string,
+  ids: string[],
+  label: string,
+): Promise<any[]> {
+  const rows: any[] = [];
+  for (let offset = 0; offset < ids.length; offset += ID_CHUNK_SIZE) {
+    const { data, error } = await client.from(table).select(columns).in(
+      column,
+      ids.slice(offset, offset + ID_CHUNK_SIZE),
+    );
+    if (error) throw new Error(`${label} read failed: ${error.message || error}`);
+    rows.push(...(data || []));
+  }
+  return rows;
+}
+
 function evidencePostIdsForVisibleItems(
   generatedAt: string,
   visibleCaseIds: Set<string>,
@@ -1277,109 +1297,71 @@ export async function loadIntakeExceptionProjection(
   const orgId = options.orgId || DEFAULT_ORG_ID;
   const mailbox = options.mailbox || DEFAULT_MAILBOX;
   const generatedAt = options.generatedAt || new Date().toISOString();
-  const [
-    facts,
-    cases,
-    sources,
-    sourceCorrections,
-    sourceSupersessions,
-    caseCorrections,
-    companies,
-    jobs,
-    exclusions,
-    refPrefixes,
-  ] = await Promise.all([
+  const generatedAtMs = Date.parse(generatedAt);
+  if (!Number.isFinite(generatedAtMs)) {
+    throw new Error("intake exception projection generatedAt must be ISO time");
+  }
+  const windowFrom = new Date(
+    generatedAtMs - INTAKE_EXCEPTION_RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const [facts, cases] = await Promise.all([
     loadIntakeOperationalFacts(client, {
       orgId,
       mailbox,
       nowIso: generatedAt,
       pageSize: PAGE_SIZE,
+      recentFromIso: windowFrom,
+      recentToIso: generatedAt,
     }),
     loadPaged(
-      (from, to) =>
-        client.from("makesafe_intake_cases")
+      (from, to) => {
+        let query = client.from("makesafe_intake_cases")
           .select(
             "id,company_id,company_slug_raw,external_ref_raw,external_ref_canonical,builder_wo_canonical,builder_po_canonical,wo_po_identity_key,raw_identity_json,story_json,evidence_map,state,reason_code,missing_fields,conflicting_fields,parent_case_id,parent_relation,target_relation,job_id,target_job_id,client_name,client_phone,client_email,site_address,site_suburb,received_at",
           )
           .eq("org_id", orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
+          .gte("received_at", windowFrom)
+          .lte("received_at", generatedAt);
+        return query.order("id", { ascending: true }).range(from, to);
+      },
       "intake exception cases",
     ),
-    loadPaged(
-      (from, to) =>
-        client.from("makesafe_intake_case_sources")
-          .select(
-            "case_id,post_id,role,received_at,attachment_refs",
-          )
-          .eq("org_id", orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
-      "intake exception sources",
-    ),
-    loadPaged(
-      (from, to) =>
-        client.from("makesafe_intake_source_authority_corrections")
-          .select(
-            "id,source_post_id,legacy_case_id,effective_case_id,target_job_id",
-          )
-          .eq("org_id", orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
-      "intake source authority corrections",
-    ),
-    loadPaged(
-      (from, to) =>
-        client.from(
-          "makesafe_intake_source_authority_correction_supersessions",
-        )
-          .select(
-            "source_post_id,superseded_correction_id,prior_authority_case_id,effective_case_id",
-          )
-          .eq("org_id", orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
-      "intake source authority supersessions",
-    ),
-    loadPaged(
-      (from, to) =>
-        client.from("makesafe_intake_case_authority_corrections")
-          .select("legacy_case_id,effective_case_id")
-          .eq("org_id", orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
-      "intake case authority corrections",
-    ),
-    loadPaged(
-      (from, to) =>
-        client.from("makesafe_companies")
-          .select("id,slug,name")
-          .eq("org_id", orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
-      "make-safe companies",
-    ),
-    loadPaged(
-      (from, to) =>
-        client.from("makesafe_job_details")
-          .select(
-            "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(id,status,site_address,type,metadata)",
-          )
-          .order("job_id", { ascending: true })
-          .range(from, to),
-      "make-safe live obligations",
-    ),
-    loadPaged(
-      (from, to) =>
-        client.from("email_classifier_exclusions")
-          .select("post_id")
-          .eq("mailbox", mailbox)
-          .order("id", { ascending: true })
-          .range(from, to),
-      "intake classifier exclusions",
-    ),
-    loadRefPrefixes(client),
   ]);
+
+  const caseIds = [...new Set(cases.map((row) => String(row.id)))];
+  const sources = await loadPaged(
+    (from, to) => client.from("makesafe_intake_case_sources")
+      .select("case_id,post_id,role,received_at,attachment_refs")
+      .eq("org_id", orgId)
+      .gte("received_at", windowFrom)
+      .lte("received_at", generatedAt)
+      .order("id", { ascending: true })
+      .range(from, to),
+    "intake exception sources",
+  );
+  const postIds = [...new Set(sources.map((row) => String(row.post_id)))];
+  const sourceCorrections = await loadByIds(client,
+    "makesafe_intake_source_authority_corrections",
+    "id,source_post_id,legacy_case_id,effective_case_id,target_job_id",
+    "source_post_id", postIds, "intake source authority corrections");
+  const sourceSupersessions = await loadByIds(client,
+    "makesafe_intake_source_authority_correction_supersessions",
+    "source_post_id,superseded_correction_id,prior_authority_case_id,effective_case_id",
+    "source_post_id", postIds, "intake source authority supersessions");
+  const caseCorrections = await loadByIds(client,
+    "makesafe_intake_case_authority_corrections",
+    "legacy_case_id,effective_case_id", "legacy_case_id", caseIds,
+    "intake case authority corrections");
+  const companyIds = [...new Set(cases.map((row) => row.company_id).filter(
+    (id): id is string => !!id,
+  ))];
+  const companies = await loadByIds(client, "makesafe_companies", "id,slug,name",
+    "id", companyIds, "make-safe companies");
+  const { data: jobs, error: jobsError } = await client.from("makesafe_job_details")
+    .select("job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs!inner(id,status,site_address,type,metadata)")
+    .not("jobs.status", "in", "(cancelled,canceled,void,voided,superseded)");
+  if (jobsError) throw new Error(`make-safe live obligations read failed: ${jobsError.message || jobsError}`);
+  const refPrefixes = await loadRefPrefixes(client);
 
   const projectionInput: IntakeExceptionProjectionInput = {
     orgId,
@@ -1394,11 +1376,11 @@ export async function loadIntakeExceptionProjection(
     cases,
     emails: [],
     attachments: [],
-    excludedPostIds: exclusions.map((row) => String(row.post_id)),
+    excludedPostIds: [],
     refPrefixes,
   };
   const outline = buildIntakeExceptionProjection(projectionInput);
-  const postIds = evidencePostIdsForVisibleItems(
+  const evidencePostIds = evidencePostIdsForVisibleItems(
     generatedAt,
     new Set(outline.cards.flatMap((card) => card.case_ids)),
     sources,
@@ -1412,14 +1394,14 @@ export async function loadIntakeExceptionProjection(
       "emails",
       "post_id,subject,from_email,from_name,received_at",
       "post_id",
-      postIds,
+      evidencePostIds,
     ),
     loadByPostIds(
       client,
       "email_attachments",
       "id,email_id,name,content_type,status,size_bytes",
       "email_id",
-      postIds,
+      evidencePostIds,
     ),
   ]);
 
