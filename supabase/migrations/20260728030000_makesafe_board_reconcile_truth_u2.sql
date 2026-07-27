@@ -1489,6 +1489,30 @@ BEGIN
   LOOP
     v_rows := v_rows || v_chunk.rows_json;
   END LOOP;
+  LOCK TABLE
+    public.jobs,
+    public.makesafe_state_identity_revisions,
+    public.makesafe_attendance_cycles,
+    public.job_assignments,
+    public.job_service_reports,
+    public.job_documents,
+    public.job_media,
+    public.makesafe_portal_capture_revisions,
+    public.makesafe_intake_cases,
+    public.makesafe_status_holds,
+    public.makesafe_readiness_revisions,
+    public.makesafe_readiness_current,
+    public.makesafe_readiness_invalidations,
+    public.makesafe_cancellation_decisions,
+    public.makesafe_terminal_proofs,
+    public.makesafe_report_pack_cycles,
+    public.makesafe_report_packs,
+    public.makesafe_revision_approvals,
+    public.makesafe_family_rule_current,
+    public.makesafe_family_rule_revisions,
+    public.makesafe_board_status_applications,
+    public.makesafe_board_attention_marks
+  IN SHARE MODE;
   PERFORM public.validate_makesafe_board_reconciliation_state_tokens(v_rows);
   v_result := public.apply_makesafe_board_reconciliation(
     p_run_key, p_applied_by, p_selection_hash, v_rows
