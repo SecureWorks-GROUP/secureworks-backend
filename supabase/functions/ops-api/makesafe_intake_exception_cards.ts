@@ -428,6 +428,89 @@ export function intakeBlockerSentence(neededInformation: string[]): string {
   } before approving this work order.`;
 }
 
+const JOB_BINDING_CONFLICT_FIELDS = [
+  "live_job_binding",
+  "corrected_target_job_binding",
+] as const;
+
+function jobBindingConflict(
+  row: IntakeExceptionCaseRow,
+): {
+  kind: typeof JOB_BINDING_CONFLICT_FIELDS[number];
+  candidates: string[];
+} | null {
+  const conflicts = row.conflicting_fields || {};
+  for (const kind of JOB_BINDING_CONFLICT_FIELDS) {
+    const candidates = cleanStrings(conflicts[kind]);
+    if (candidates.length) return { kind, candidates };
+  }
+  return null;
+}
+
+const MAX_DISPLAYED_BINDING_CANDIDATES = 8;
+
+function groupedJobBindingBlockerSentence(
+  rows: readonly IntakeExceptionCaseRow[],
+): string | null {
+  const conflicts = rows.flatMap((row) => {
+    const conflict = jobBindingConflict(row);
+    return conflict ? [conflict] : [];
+  });
+  if (!conflicts.length) return null;
+  const candidatesByKind = new Map<
+    typeof JOB_BINDING_CONFLICT_FIELDS[number],
+    string[]
+  >();
+  for (const conflict of conflicts) {
+    candidatesByKind.set(
+      conflict.kind,
+      [
+        ...new Set([
+          ...(candidatesByKind.get(conflict.kind) || []),
+          ...conflict.candidates,
+        ]),
+      ].sort(),
+    );
+  }
+  const renderCandidates = (
+    kind: typeof JOB_BINDING_CONFLICT_FIELDS[number],
+  ) => {
+    const candidates = candidatesByKind.get(kind) || [];
+    const displayed = candidates.slice(0, MAX_DISPLAYED_BINDING_CANDIDATES);
+    const suffix = candidates.length > MAX_DISPLAYED_BINDING_CANDIDATES
+      ? `; ${candidates.length} total, ${
+        candidates.length - displayed.length
+      } more not shown`
+      : "";
+    return `${
+      candidates.length > MAX_DISPLAYED_BINDING_CANDIDATES
+        ? displayed.join(", ")
+        : joinPlainList(displayed)
+    }${suffix}`;
+  };
+  const instruction = rows[0].builder_wo_canonical ||
+    rows[0].external_ref_canonical || rows[0].external_ref_raw || "unknown";
+  const liveCandidates = candidatesByKind.get("live_job_binding") || [];
+  const correctedCandidates =
+    candidatesByKind.get("corrected_target_job_binding") || [];
+  if (liveCandidates.length && correctedCandidates.length) {
+    return `This instruction ${instruction} has mixed binding conflicts: live-job candidates (${
+      renderCandidates("live_job_binding")
+    }); corrected-target candidates (${
+      renderCandidates("corrected_target_job_binding")
+    }) - needs human binding.`;
+  }
+  if (correctedCandidates.length) {
+    return `This instruction ${instruction} has a corrected-target mismatch across ${correctedCandidates.length} candidate jobs (${
+      renderCandidates("corrected_target_job_binding")
+    }) - needs human binding.`;
+  }
+  const noun = liveCandidates.length === 1 ? "job" : "jobs";
+  return `This instruction ${instruction} matches ${liveCandidates.length} live ${noun} (${
+    renderCandidates("live_job_binding")
+  }) - needs human binding.`;
+}
+
 function plainCode(value: string | null, fallback: string): string {
   const plain = String(value || "").trim().replaceAll("_", " ");
   return plain || fallback;
@@ -886,6 +969,9 @@ export function buildIntakeExceptionProjection(
 
     if (!isRecent(row.received_at)) {
       disposition = "out_of_window";
+    } else if (jobBindingConflict(row)) {
+      disposition = "visible_review_card";
+      visibleRows.push(row);
     } else if (row.job_id && liveJobById.has(row.job_id)) {
       disposition = "bound_live_job";
       relatedJobId = row.job_id;
@@ -1063,7 +1149,8 @@ export function buildIntakeExceptionProjection(
         primary.external_ref_canonical || primary.external_ref_raw!,
       received_at: primary.received_at,
       source_email_subject: evidence[0]?.subject || null,
-      blocker_sentence: intakeBlockerSentence(neededInformation),
+      blocker_sentence: groupedJobBindingBlockerSentence(rows) ||
+        intakeBlockerSentence(neededInformation),
       needed_information: neededInformation,
       case_gaps: caseGapDetails.map((detail) => ({
         case_id: detail.row.id,
