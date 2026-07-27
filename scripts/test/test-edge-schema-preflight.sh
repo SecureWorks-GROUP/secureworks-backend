@@ -35,6 +35,19 @@ migration_sha() {
   shasum -a 256 "$MIGRATION" | awk '{print $1}'
 }
 
+ledger_statement_sha() {
+  python3 - <<'PY'
+import hashlib
+import json
+
+statements = [
+    "CREATE TABLE public.makesafe_attendance_cycles (id uuid PRIMARY KEY);",
+    "ALTER TABLE public.job_service_reports ADD COLUMN attendance_cycle_id uuid;",
+]
+print(hashlib.sha256(json.dumps(statements, separators=(",", ":")).encode()).hexdigest())
+PY
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -106,7 +119,7 @@ test_missing_migration_refuses_before_deploy() {
 test_multi_statement_ledger_may_deploy() {
   local name="test_multi_statement_ledger_may_deploy"
   local response="$TEST_TMP/applied.json"
-  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(ledger_statement_sha)" '[]'
   run_preflight "$response" ops-api
   if [[ "$PREFLIGHT_RC" -eq 0 ]] && \
     grep -q 'PASS edge schema preflight' <<<"$PREFLIGHT_OUTPUT"; then
@@ -119,7 +132,7 @@ test_multi_statement_ledger_may_deploy() {
 test_missing_schema_marker_refuses() {
   local name="test_missing_schema_marker_refuses"
   local response="$TEST_TMP/missing-marker.json"
-  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '["table:makesafe_report_pack_cycles"]'
+  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(ledger_statement_sha)" '["table:makesafe_report_pack_cycles"]'
   run_preflight "$response" ops-api
   if [[ "$PREFLIGHT_RC" -ne 0 ]] && \
     grep -q 'required production markers missing' <<<"$PREFLIGHT_OUTPUT"; then
@@ -129,16 +142,16 @@ test_missing_schema_marker_refuses() {
   fi
 }
 
-test_checksum_mismatch_refuses() {
-  local name="test_checksum_mismatch_refuses"
+test_statement_checksum_drift_is_advisory() {
+  local name="test_statement_checksum_drift_is_advisory"
   local response="$TEST_TMP/checksum.json"
   write_response "$response" "makesafe_attendance_cycles_u2_s1" "0000000000000000000000000000000000000000000000000000000000000000" '[]'
   run_preflight "$response" ops-api
-  if [[ "$PREFLIGHT_RC" -ne 0 ]] && \
-    grep -q 'canonical migration checksum mismatch' <<<"$PREFLIGHT_OUTPUT"; then
+  if [[ "$PREFLIGHT_RC" -eq 0 ]] && \
+    grep -q 'ledger statement-set checksum differs' <<<"$PREFLIGHT_OUTPUT"; then
     pass "$name"
   else
-    fail "$name" "checksum mismatch did not stop deployment: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
+    fail "$name" "checksum drift was not advisory: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
   fi
 }
 
@@ -179,7 +192,7 @@ main() {
     test_missing_migration_refuses_before_deploy
     test_multi_statement_ledger_may_deploy
     test_missing_schema_marker_refuses
-    test_checksum_mismatch_refuses
+    test_statement_checksum_drift_is_advisory
     test_unrelated_function_without_requirements_passes_without_credentials
     test_fixture_response_requires_explicit_test_mode
   fi
