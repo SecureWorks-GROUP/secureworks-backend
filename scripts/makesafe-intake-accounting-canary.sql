@@ -79,7 +79,7 @@ case_accounted AS (
   GROUP BY s.post_id
 ),
 issue_accounted AS (
-  SELECT DISTINCT r.post_id
+  SELECT r.post_id, count(*)::integer AS fate_count
   FROM public.email_events_raw r
   JOIN source_window w ON w.post_id = r.post_id
   WHERE r.org_id = :'org_id'::uuid
@@ -88,6 +88,7 @@ issue_accounted AS (
       r.change_type LIKE 'intake\_%' ESCAPE '\'
       OR r.change_type = 'scan_run_cap_deferred'
     )
+  GROUP BY r.post_id
 ),
 nonwork_accounted AS (
   SELECT x.post_id
@@ -108,7 +109,7 @@ accounting_counts AS (
   SELECT
     w.post_id,
     coalesce(c.fate_count, 0) +
-      CASE WHEN i.post_id IS NULL THEN 0 ELSE 1 END +
+      coalesce(i.fate_count, 0) +
       CASE WHEN n.post_id IS NULL THEN 0 ELSE 1 END AS fate_count
   FROM source_window w
   LEFT JOIN case_accounted c USING (post_id)
