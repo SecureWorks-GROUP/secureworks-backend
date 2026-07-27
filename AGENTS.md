@@ -315,6 +315,20 @@ await the scan or paper over batch growth with a larger fixed timeout. The
 standing entry point passes a four-source read cap to the deterministic runtime;
 the runtime still enforces its 1..10 case cap and attempt ceiling.
 
+The standing recent lane is a newest-first queue over physical SES sources without
+a final case-source or classifier-exclusion fate. It pages only
+`post_id,received_at`, then loads bodies/attachments for the two selected rows;
+transient intake issues remain eligible. Keep the two-row historical lane, four
+full-source bound, and eight standing PDF attempts unchanged. A selected source
+that reopens an exception must bring its persisted authority closure inside the
+same cap or receive a reason-coded deferral.
+
+Apply `20260727020000_makesafe_intake_fresh_source_health.sql` before the matching
+`ops-api`. Intake health is fresh-source coverage: it degrades when the oldest
+eligible source without a final fate exceeds five minutes. Do not use the legacy
+`last_inbound_email_at` or a successful function return as proof of current-mail
+coverage.
+
 Transfer the existing 10-minute mailbox lease to that continuation and release it
 only when the nested scan settles, so the two-minute poll cannot launch overlapping
 batches. A non-2xx or network-failed continuation must write both the aggregate

@@ -2,6 +2,7 @@
 
 export const INTAKE_SOURCE_ISSUE_REASONS = [
   "run_cap_deferred",
+  "source_closure_cap",
   "pdf_extraction_cap",
   "pdf_attachment_limit",
   "lineage_quarantine",
@@ -17,6 +18,7 @@ export type IntakeSourceIssueReason =
 
 const DEFERRED_REASONS = new Set<IntakeSourceIssueReason>([
   "run_cap_deferred",
+  "source_closure_cap",
   "pdf_extraction_cap",
   "pdf_attachment_limit",
   "awaiting_parent",
@@ -27,6 +29,7 @@ export const INTAKE_SOURCE_ISSUE_NEXT_ACTION: Readonly<
   Record<IntakeSourceIssueReason, string>
 > = {
   run_cap_deferred: "retry_exact_source",
+  source_closure_cap: "retry_exact_source_with_case_closure",
   pdf_extraction_cap: "retry_exact_source_pdf_priority",
   pdf_attachment_limit: "review_attachment_selection",
   lineage_quarantine: "correct_lineage_authority",

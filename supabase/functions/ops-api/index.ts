@@ -19022,6 +19022,26 @@ async function intakeHealth(client: any) {
   }
 
   const status = String(health?.extraction_status || 'unknown')
+  const unfatedSourceCount = health?.unfated_source_count !== null &&
+      health?.unfated_source_count !== undefined &&
+      Number.isSafeInteger(Number(health.unfated_source_count)) &&
+      Number(health.unfated_source_count) >= 0
+    ? Number(health?.unfated_source_count)
+    : null
+  const freshSourceLagSeconds = health?.fresh_source_lag_seconds !== null &&
+      health?.fresh_source_lag_seconds !== undefined &&
+      Number.isSafeInteger(Number(health.fresh_source_lag_seconds)) &&
+      Number(health.fresh_source_lag_seconds) >= 0
+    ? Number(health?.fresh_source_lag_seconds)
+    : null
+  const oldestUnfatedReceivedAt = health?.oldest_unfated_received_at || null
+  const freshSourceCoverageKnown = unfatedSourceCount !== null &&
+    freshSourceLagSeconds !== null &&
+    ((unfatedSourceCount === 0 && oldestUnfatedReceivedAt === null &&
+      freshSourceLagSeconds === 0) ||
+      (unfatedSourceCount > 0 && oldestUnfatedReceivedAt !== null))
+  const freshSourceCoverageHealthy = freshSourceCoverageKnown &&
+    freshSourceLagSeconds <= 5 * 60
   // Application authority is deterministic even while a pre-migration compatibility
   // row still says legacy. A settings read failure remains unknown because bounded
   // selection controls cannot be proved.
@@ -19033,7 +19053,8 @@ async function intakeHealth(client: any) {
     // No false-ready state: extraction, source accounting, effective authority and
     // fresh authenticated alarm delivery readiness must all be proved.
     healthy: status === 'ok' && (unaccounted?.count === 0) &&
-      intakeMode !== 'unknown' && alarmReadiness.ready,
+      freshSourceCoverageHealthy && intakeMode !== 'unknown' &&
+      alarmReadiness.ready,
     extraction: {
       status,
       degraded_reason: health?.degraded_reason || null,
@@ -19042,6 +19063,16 @@ async function intakeHealth(client: any) {
       last_successful_extraction_at: health?.last_successful_extraction_at || null,
       last_scan_drafts_created: health?.last_scan_drafts_created ?? null,
       last_scan_auto_filed: health?.last_scan_auto_filed ?? null,
+    },
+    fresh_source_coverage: {
+      known: freshSourceCoverageKnown,
+      sla_seconds: 5 * 60,
+      latest_ingested_received_at: health?.latest_ingested_received_at || null,
+      latest_final_fate_received_at: health?.latest_final_fate_received_at || null,
+      unfated_source_count: unfatedSourceCount,
+      oldest_unfated_received_at: oldestUnfatedReceivedAt,
+      fresh_source_lag_seconds: freshSourceLagSeconds,
+      last_fresh_source_accounted_at: health?.last_fresh_source_accounted_at || null,
     },
     cron: {
       cron_enabled: settings?.cron_enabled ?? null,

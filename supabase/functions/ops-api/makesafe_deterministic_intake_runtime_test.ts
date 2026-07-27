@@ -343,6 +343,64 @@ function fakeClient(
   return {
     selectLog,
     store,
+    rpc(name: string, args: any) {
+      if (name !== "makesafe_intake_fresh_source_health") {
+        return Promise.resolve({
+          data: null,
+          error: { message: `unsupported fake rpc ${name}` },
+        });
+      }
+      const eligible = (store.emails || []).filter((row: any) =>
+        row.mailbox === args.p_mailbox &&
+        String(row.received_at) >= String(args.p_since)
+      );
+      const isFinal = (postId: string) => {
+        const caseSourceCount = (store.makesafe_intake_case_sources || [])
+          .filter((row: any) =>
+            row.org_id === args.p_org_id && row.post_id === postId
+          ).length;
+        const classifierExcluded =
+          (store.email_classifier_exclusions || []).some((row: any) =>
+            row.mailbox === args.p_mailbox && row.post_id === postId
+          ) ||
+          (store.email_events_raw || []).some((row: any) =>
+            row.org_id === args.p_org_id && row.post_id === postId &&
+            row.change_type === "excluded"
+          );
+        return caseSourceCount + (classifierExcluded ? 1 : 0) === 1;
+      };
+      const finalRows = eligible.filter((row: any) =>
+        isFinal(String(row.post_id))
+      );
+      const unfatedRows = eligible.filter((row: any) =>
+        !isFinal(String(row.post_id))
+      );
+      const latest = (rows: any[]) =>
+        rows.map((row) => String(row.received_at)).sort().at(-1) ?? null;
+      const oldest = (rows: any[]) =>
+        rows.map((row) => String(row.received_at)).sort()[0] ?? null;
+      const oldestUnfated = oldest(unfatedRows);
+      const cursor = (store.mail_sync_cursors || []).find((row: any) =>
+        row.mailbox === args.p_mailbox
+      );
+      return Promise.resolve({
+        data: [{
+          latest_ingested_received_at: cursor?.last_completed_max ?? null,
+          latest_final_fate_received_at: latest(finalRows),
+          unfated_source_count: unfatedRows.length,
+          oldest_unfated_received_at: oldestUnfated,
+          fresh_source_lag_seconds: oldestUnfated
+            ? Math.max(
+              0,
+              Math.floor(
+                (Date.parse(args.p_now) - Date.parse(oldestUnfated)) / 1000,
+              ),
+            )
+            : 0,
+        }],
+        error: null,
+      });
+    },
     from(table: string) {
       const log = (t: string, c: string) => selectLog.push([t, c]);
       return {
@@ -403,6 +461,7 @@ function baseStore(): Store {
     makesafe_intake_case_events: [],
     email_events_raw: [],
     email_classifier_exclusions: [],
+    mail_sync_cursors: [],
     jobs: [],
     makesafe_job_details: [],
     makesafe_intake_source_authority_corrections: [],
@@ -808,6 +867,305 @@ Deno.test("U1 causal boundary: readInputs gives the newest recent WO a PDF slot 
       document,
     ) => document.reason === "pdf_extraction_cap").length,
     2,
+  );
+});
+
+Deno.test("standing recent queue skips dual-capture final fates and accounts the older unfated instruction within the four-source bound", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "old-final-1",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-25001 Work Order: WO-25001 PO: 250010",
+      body_content: "Address: 1 Old Street, Perth",
+    }),
+    email({
+      post_id: "old-final-2",
+      received_at: "2026-07-01T01:00:01.000Z",
+      subject: "NEW WORK ORDER MLB-25001 Work Order: WO-25001 PO: 250010",
+      body_content: "Address: 1 Old Street, Perth",
+    }),
+    email({
+      post_id: "older-unfated-group",
+      conversation_id: "older-unfated-conversation",
+      received_at: "2026-07-20T00:55:00.000Z",
+      subject: "NEW WORK ORDER MLB-25338 Work Order: WO-25338 PO: 253380",
+      body_content: "Client: Queue Client\nAddress: 38 Queue Street, Perth",
+    }),
+    email({
+      post_id: "older-unfated-mailbox",
+      conversation_id: "older-unfated-conversation",
+      received_at: "2026-07-20T00:55:00.000Z",
+      subject: "NEW WORK ORDER MLB-25338 Work Order: WO-25338 PO: 253380",
+      body_content: "Client: Queue Client\nAddress: 38 Queue Street, Perth",
+    }),
+    email({
+      post_id: "newest-final-group",
+      conversation_id: "newest-final-conversation",
+      received_at: "2026-07-20T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-25321 Work Order: WO-25321 PO: 253210",
+      body_content: "Address: 21 Final Street, Perth",
+    }),
+    email({
+      post_id: "newest-final-mailbox",
+      conversation_id: "newest-final-conversation",
+      received_at: "2026-07-20T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-25321 Work Order: WO-25321 PO: 253210",
+      body_content: "Address: 21 Final Street, Perth",
+    }),
+  );
+  store.makesafe_intake_cases.push(
+    {
+      id: "old-final-case",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      instruction_key: "mlb/wo:WO-25001/po:250010/deliverable:makesafe/cycle:1",
+      lineage_id: "old-final-case",
+      cycle: 1,
+      parent_relation: null,
+      source_fingerprint: null,
+      state: "exception",
+      reason_code: "below_identity_floor",
+      job_id: null,
+    },
+    {
+      id: "newest-final-case",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      instruction_key: "mlb/wo:WO-25321/po:253210/deliverable:makesafe/cycle:1",
+      lineage_id: "newest-final-case",
+      cycle: 1,
+      parent_relation: null,
+      source_fingerprint: null,
+      state: "exception",
+      reason_code: "below_identity_floor",
+      job_id: null,
+    },
+  );
+  store.makesafe_intake_case_sources.push(
+    {
+      id: "old-final-source-1",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: "old-final-case",
+      post_id: "old-final-1",
+    },
+    {
+      id: "old-final-source-2",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: "old-final-case",
+      post_id: "old-final-2",
+    },
+    {
+      id: "newest-final-source-1",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: "newest-final-case",
+      post_id: "newest-final-group",
+    },
+    {
+      id: "newest-final-source-2",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: "newest-final-case",
+      post_id: "newest-final-mailbox",
+    },
+  );
+  for (
+    const postId of ["older-unfated-group", "older-unfated-mailbox"]
+  ) {
+    store.email_attachments.push({
+      id: `${postId}-pdf`,
+      email_id: postId,
+      name: "Work Order.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${postId}.pdf`,
+      status: "uploaded",
+      size_bytes: 1024,
+    });
+  }
+  let pdfAttempts = 0;
+  const selectLog: Array<[string, string]> = [];
+  store.mail_sync_cursors.push({
+    mailbox: "ses@secureworkswa.com.au",
+    last_completed_max: "2026-07-20T01:00:00.000Z",
+  });
+  const client = fakeClient(
+    store,
+    selectLog,
+    undefined,
+    () => {
+      pdfAttempts++;
+      return digitalWorkOrderPdf([
+        "Work Order Number MLB-25338 PO-253380",
+        "Policyholders Name Queue Client",
+        "Site Address 38 Queue Street Perth WA",
+        "Scope of Works Attend and make the property safe",
+      ]);
+    },
+  );
+
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 60,
+    nowIso: NOW,
+    onlyUnscanned: false,
+    maxSources: 4,
+    maxCases: 1,
+    approveDraft,
+  });
+
+  assertEquals(report.source_read.backlog_rows, 2);
+  assertEquals(report.source_read.recent_rows, 2);
+  assert(report.source_read.window_rows <= 4);
+  assert(pdfAttempts <= 8);
+  assert(
+    selectLog.some(([table, columns]) =>
+      table === "emails" && columns === "post_id,received_at"
+    ),
+  );
+  assertEquals(
+    store.makesafe_intake_case_sources
+      .filter((row) =>
+        row.post_id === "older-unfated-group" ||
+        row.post_id === "older-unfated-mailbox"
+      )
+      .map((row) => row.post_id)
+      .sort(),
+    ["older-unfated-group", "older-unfated-mailbox"],
+  );
+  const health = store.makesafe_intake_health[0];
+  assertEquals(health.extraction_status, "ok");
+  assertEquals(
+    health.latest_ingested_received_at,
+    "2026-07-20T01:00:00.000Z",
+  );
+  assertEquals(health.unfated_source_count, 0);
+  assertEquals(health.oldest_unfated_received_at, null);
+  assertEquals(health.fresh_source_lag_seconds, 0);
+  assertEquals(health.last_fresh_source_accounted_at, NOW);
+  assertEquals(health.last_successful_extraction_at, NOW);
+});
+
+Deno.test("standing recent queue pages lightweight identifiers past a final-fated head", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "page-old-final-1",
+      received_at: "2026-07-01T01:00:00.000Z",
+    }),
+    email({
+      post_id: "page-old-final-2",
+      received_at: "2026-07-01T01:00:01.000Z",
+    }),
+    email({
+      post_id: "page-unfated-1",
+      received_at: "2026-07-20T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-25401 Work Order: WO-25401 PO: 254010",
+      body_content: "Address: 1 Page Street, Perth",
+    }),
+    email({
+      post_id: "page-unfated-2",
+      received_at: "2026-07-20T01:00:01.000Z",
+      subject: "NEW WORK ORDER MLB-25402 Work Order: WO-25402 PO: 254020",
+      body_content: "Address: 2 Page Street, Perth",
+    }),
+  );
+  for (
+    const postId of [
+      "page-old-final-1",
+      "page-old-final-2",
+    ]
+  ) {
+    store.makesafe_intake_case_sources.push({
+      id: `${postId}-source`,
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: `${postId}-case`,
+      post_id: postId,
+    });
+  }
+  for (let index = 0; index < 100; index++) {
+    const postId = `page-head-final-${String(index).padStart(3, "0")}`;
+    store.emails.push(email({
+      post_id: postId,
+      received_at: new Date(
+        Date.parse("2026-07-20T02:00:00.000Z") + index * 1000,
+      ).toISOString(),
+    }));
+    store.makesafe_intake_case_sources.push({
+      id: `${postId}-source`,
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: `${postId}-case`,
+      post_id: postId,
+    });
+  }
+  const selectLog: Array<[string, string]> = [];
+  const input = await _readInputsForTest(fakeClient(store, selectLog), {
+    days: 60,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: [],
+    cursor: null,
+  });
+
+  assertEquals(input.read.backlog_rows, 2);
+  assertEquals(input.read.recent_rows, 2);
+  assertEquals(
+    input.sources.map((source) => source.postId).sort(),
+    [
+      "page-old-final-1",
+      "page-old-final-2",
+      "page-unfated-1",
+      "page-unfated-2",
+    ],
+  );
+  assert(
+    selectLog.filter(([table, columns]) =>
+      table === "emails" && columns === "post_id,received_at"
+    ).length >= 2,
+  );
+});
+
+Deno.test("deterministic health degrades when an included source remains unfated beyond five minutes", async () => {
+  const store = baseStore();
+  for (let index = 1; index <= 4; index++) {
+    store.emails.push(email({
+      post_id: `health-unfated-${index}`,
+      received_at: `2026-07-20T0${index}:00:00.000Z`,
+      subject:
+        `NEW WORK ORDER MLB-2600${index} Work Order: WO-2600${index} PO: 2600${index}0`,
+      body_content:
+        `Client: Health Client ${index}\nAddress: ${index} Health Way, Perth`,
+    }));
+  }
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 60,
+    nowIso: "2026-07-20T12:00:00.000Z",
+    onlyUnscanned: false,
+    maxSources: 4,
+    maxCases: 1,
+    approveDraft,
+  });
+
+  assertEquals(report.totals.cases_deferred, 3);
+  const health = store.makesafe_intake_health[0];
+  assertEquals(health.extraction_status, "degraded");
+  assertEquals(
+    health.degraded_reason,
+    "deterministic_fresh_source_lag",
+  );
+  assertEquals(health.unfated_source_count, 3);
+  assertEquals(
+    health.oldest_unfated_received_at,
+    "2026-07-20T02:00:00.000Z",
+  );
+  assertEquals(health.fresh_source_lag_seconds, 10 * 60 * 60);
+  assertEquals(
+    health.last_fresh_source_accounted_at,
+    "2026-07-20T12:00:00.000Z",
+  );
+  assertEquals(
+    health.last_successful_extraction_at,
+    "2026-07-20T12:00:00.000Z",
   );
 });
 
@@ -1260,6 +1618,140 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
   assertEquals(second.totals.write_failures, 0);
   // Now that it is settled, the source is stamped and drops out of the next window.
   assertEquals(store.emails[0].makesafe_scanned_at, NOW);
+});
+
+Deno.test("standing late evidence charges persisted exception closure to the recent source cap", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "closure-old-final-1",
+      received_at: "2026-07-01T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-24001 Work Order: WO-24001 PO: 240010",
+      body_content: "Address: 1 Old Closure Street, Perth",
+    }),
+    email({
+      post_id: "closure-old-final-2",
+      received_at: "2026-07-01T01:00:01.000Z",
+      subject: "NEW WORK ORDER MLB-24002 Work Order: WO-24002 PO: 240020",
+      body_content: "Address: 2 Old Closure Street, Perth",
+    }),
+    email({
+      post_id: "closure-original",
+      conversation_id: "closure-conversation",
+      received_at: "2026-07-10T01:00:00.000Z",
+      subject: "NEW WORK ORDER MLB-57010 Work Order: WO-57010 PO: 570100",
+      body_content: "Client: Closure Client\nAddress: 10 Closure Street, Perth",
+    }),
+  );
+  for (let index = 1; index <= 2; index++) {
+    const caseId = `closure-old-case-${index}`;
+    store.makesafe_intake_cases.push({
+      id: caseId,
+      org_id: "00000000-0000-0000-0000-000000000001",
+      instruction_key:
+        `mlb/wo:WO-2400${index}/po:2400${index}0/deliverable:makesafe/cycle:1`,
+      lineage_id: caseId,
+      cycle: 1,
+      parent_relation: null,
+      source_fingerprint: null,
+      state: "exception",
+      reason_code: "below_identity_floor",
+      job_id: null,
+    });
+    store.makesafe_intake_case_sources.push({
+      id: `closure-old-source-${index}`,
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: caseId,
+      post_id: `closure-old-final-${index}`,
+    });
+  }
+  let closurePdfAttempts = 0;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => {
+      closurePdfAttempts++;
+      return digitalWorkOrderPdf([
+        "Work Order Number MLB-57010 PO-570100",
+        "Policyholders Name Closure Client",
+        "Site Address 10 Closure Street Perth WA",
+        "Scope of Works Attend and make the property safe",
+      ]);
+    },
+  );
+  const first = await runDeterministicIntake(client, {
+    dryRun: false,
+    days: 60,
+    nowIso: NOW,
+    maxSources: 4,
+    allowSourcePostIds: ["closure-original"],
+    approveDraft,
+  });
+  assertEquals(first.totals.jobs_created, 0);
+  const persisted = store.makesafe_intake_cases.find((row: any) =>
+    store.makesafe_intake_case_sources.some((source: any) =>
+      source.case_id === row.id && source.post_id === "closure-original"
+    )
+  );
+  assert(persisted);
+  assertEquals(persisted.state, "exception");
+  store.makesafe_intake_health[0].deterministic_scan_cursor_at = null;
+  store.makesafe_intake_health[0].deterministic_scan_cursor_post_id = null;
+
+  store.emails.push(
+    email({
+      post_id: "closure-unrelated",
+      received_at: "2026-07-20T00:58:00.000Z",
+      subject: "NEW WORK ORDER MLB-57011 Work Order: WO-57011 PO: 570110",
+      body_content: "Client: Other Client\nAddress: 11 Closure Street, Perth",
+    }),
+    email({
+      post_id: "closure-late-pdf",
+      conversation_id: "closure-conversation",
+      received_at: "2026-07-20T00:59:00.000Z",
+      subject: "NEW WORK ORDER MLB-57010 Work Order: WO-57010 PO: 570100",
+      body_content: "Client: Closure Client\nAddress: 10 Closure Street, Perth",
+    }),
+  );
+  store.email_attachments.push({
+    id: "closure-late-pdf-attachment",
+    email_id: "closure-late-pdf",
+    name: "Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/closure-late.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+
+  const second = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "full_open",
+    days: 60,
+    nowIso: NOW,
+    onlyUnscanned: false,
+    maxSources: 4,
+    maxCases: 1,
+    approveDraft,
+  });
+
+  assertEquals(second.source_read.backlog_rows, 2);
+  assertEquals(second.source_read.recent_rows, 2);
+  assert(second.source_read.window_rows <= 4);
+  assert(closurePdfAttempts <= 8);
+  assertEquals(second.totals.jobs_created, 1);
+  assertEquals(persisted.job_id, "job-abc");
+  assert(
+    store.makesafe_intake_case_sources.some((row: any) =>
+      row.case_id === persisted.id && row.post_id === "closure-late-pdf"
+    ),
+  );
+  assert(
+    store.email_events_raw.some((row: any) =>
+      row.post_id === "closure-unrelated" &&
+      row.change_type === "intake_deferred_source_closure_cap"
+    ),
+  );
 });
 
 Deno.test("full-open processes the bounded page while exact-empty and mixed configs fail closed", async () => {
@@ -3461,7 +3953,9 @@ Deno.test("a full backlog page cannot claim a clean sweep while its cursor remai
     maxSources: 10,
   });
   assertEquals(cappedReport.source_read.backlog_rows, 5);
-  assertEquals(cappedReport.source_read.recent_rows, 4);
+  // The unfated queue does not spend recent capacity rereading physical rows
+  // already present in the historical lane.
+  assertEquals(cappedReport.source_read.recent_rows, 1);
   assertEquals(cappedReport.source_read.window_rows, 6);
   assertEquals(cappedReport.source_read.next_cursor_at !== null, true);
   assertEquals(cappedReport.source_read.cap_reached, true);

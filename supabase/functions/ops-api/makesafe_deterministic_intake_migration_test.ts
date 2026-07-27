@@ -46,6 +46,12 @@ const lineageSupersessionMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const freshSourceHealthMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260727020000_makesafe_intake_fresh_source_health.sql",
+    import.meta.url,
+  ),
+);
 const runtime = await Deno.readTextFile(
   new URL("./makesafe_deterministic_intake_runtime.ts", import.meta.url),
 );
@@ -727,14 +733,38 @@ Deno.test("ruling 5 terminal skill hook stays deterministic and non-privileged",
 
 Deno.test("health exposes effective mode and fresh authenticated alarm proof", () => {
   assertStringIncludes(controlsMigration, "alarm_auth_verified_at");
+  for (
+    const column of [
+      "latest_ingested_received_at",
+      "latest_final_fate_received_at",
+      "unfated_source_count",
+      "oldest_unfated_received_at",
+      "fresh_source_lag_seconds",
+      "last_fresh_source_accounted_at",
+    ]
+  ) {
+    assertStringIncludes(freshSourceHealthMigration, column);
+    assertStringIncludes(index, column);
+  }
+  assertStringIncludes(
+    freshSourceHealthMigration,
+    "makesafe_intake_fresh_source_health",
+  );
+  assert(
+    !freshSourceHealthMigration.includes(
+      "unfated_source_count bigint NOT NULL DEFAULT 0",
+    ),
+    "new health columns must remain unknown until the first fresh-source proof",
+  );
   assertStringIncludes(index, "intake_mode: intakeMode");
   assertStringIncludes(
     index,
     "latestAuthenticatedAt: health?.alarm_auth_action === 'makesafe_email_canary'",
   );
-  assertStringIncludes(
-    index,
-    "intakeMode !== 'unknown' && alarmReadiness.ready",
-  );
+  assertStringIncludes(index, "health?.unfated_source_count !== null");
+  assertStringIncludes(index, "health?.fresh_source_lag_seconds !== null");
+  assertStringIncludes(index, "freshSourceCoverageHealthy");
+  assertStringIncludes(index, "intakeMode !== 'unknown'");
+  assertStringIncludes(index, "alarmReadiness.ready");
   assertStringIncludes(index, "recordMakesafeAlarmAuthentication");
 });
