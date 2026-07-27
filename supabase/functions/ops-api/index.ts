@@ -3488,7 +3488,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const comparisonByJob = new Map(
           comparison.rows.map((row: any) => [String(row.id), row]),
         )
-        const rpcRows = orderedOutcomes.map((outcome) => {
+        const rpcRows = await Promise.all(orderedOutcomes.map(async (outcome) => {
           const transition = transitionsByJob.get(outcome.job_id)
           const attention = attentionByJob.get(outcome.job_id)
           const row: any = comparisonByJob.get(outcome.job_id)
@@ -3507,8 +3507,19 @@ if (import.meta.main) serve(async (req: Request) => {
             attention_message: attention?.message || null,
             attention_since: attention?.since || null,
             attention_evidence_refs: attention?.evidence_refs || [],
+            state_token: row?.state_v2
+              ? `sha256:${(await canonicalJsonAndHash({
+                ...row.state_v2,
+                computed_at: null,
+              })).hash}`
+              : null,
           }
-        })
+        }))
+        const tokenPayload = rpcRows.map((row: any) => ({
+          job_id: row.job_id,
+          state_token: row.state_token,
+        }))
+        const { hash: stateTokenHash } = await canonicalJsonAndHash(tokenPayload)
         const rowChunks = chunkMakesafeStateRows(rpcRows)
         const chunkedJobIds = rowChunks.flat().map((row: any) => row.job_id)
         if (
@@ -3520,29 +3531,72 @@ if (import.meta.main) serve(async (req: Request) => {
             error: 'reconciliation chunks did not cover the exact server-selected board',
           }, 503)
         }
-        const appliedChunks: any[] = []
+        const stagedChunks: any[] = []
         for (const [chunkIndex, rowChunk] of rowChunks.entries()) {
-          const chunkRunKey = `${runKey}:chunk-${chunkIndex + 1}-of-${rowChunks.length}`
-          const { data: applied, error: applyError } = await client.rpc(
-            'apply_makesafe_board_reconciliation',
+          const { data: staged, error: stageError } = await client.rpc(
+            'stage_makesafe_board_reconciliation',
             {
-              p_run_key: chunkRunKey,
+              p_run_key: runKey,
               p_applied_by: 'makesafe-state.v2-reconciler',
               p_selection_hash: selectionHash,
+              p_state_token_hash: `sha256:${stateTokenHash}`,
+              p_chunk_index: chunkIndex + 1,
+              p_chunk_count: rowChunks.length,
               p_rows: rowChunk,
             },
           )
-          if (applyError) {
+          if (stageError) {
             return json({
               ...baseResult,
-              completed_chunks: appliedChunks.length,
+              completed_chunks: stagedChunks.length,
               chunk_count: rowChunks.length,
-              error: applyError.message || String(applyError),
+              error: stageError.message || String(stageError),
             }, 409)
           }
-          appliedChunks.push(applied)
+          stagedChunks.push(staged)
         }
-        const accounted = appliedChunks.reduce(
+        const latestRows = await loadCanonicalMakesafeBoard(client)
+        const latestComparison = await attachMakesafeStateV2Comparison(
+          client,
+          latestRows,
+          new Date().toISOString(),
+        )
+        const latestTokenPayload = await Promise.all(latestComparison.rows
+          .map(async (row: any) => ({
+            job_id: String(row.id),
+            state_token: `sha256:${(await canonicalJsonAndHash({
+              ...row.state_v2,
+              computed_at: null,
+            })).hash}`,
+          })))
+        const { hash: latestStateTokenHash } = await canonicalJsonAndHash(
+          latestTokenPayload
+            .sort((a: any, b: any) => a.job_id.localeCompare(b.job_id)),
+        )
+        if (latestStateTokenHash !== stateTokenHash) {
+          return json({
+            ...baseResult,
+            error: 'v2 fact state changed while reconciliation was staged; discard and retry',
+          }, 409)
+        }
+        const { data: finalized, error: finalizeError } = await client.rpc(
+          'finalize_makesafe_board_reconciliation',
+          {
+            p_run_key: runKey,
+            p_applied_by: 'makesafe-state.v2-reconciler',
+            p_selection_hash: selectionHash,
+            p_state_token_hash: `sha256:${stateTokenHash}`,
+          },
+        )
+        if (finalizeError) {
+          return json({
+            ...baseResult,
+            completed_chunks: stagedChunks.length,
+            chunk_count: rowChunks.length,
+            error: finalizeError.message || String(finalizeError),
+          }, 409)
+        }
+        const accounted = stagedChunks.reduce(
           (count, chunk) => count + Number(chunk?.requested || 0),
           0,
         )
@@ -3550,7 +3604,7 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({
             ...baseResult,
             completed: accounted,
-            completed_chunks: appliedChunks.length,
+            completed_chunks: stagedChunks.length,
             chunk_count: rowChunks.length,
             error: 'reconciliation did not account for the exact server-selected board',
           }, 503)
@@ -3560,11 +3614,12 @@ if (import.meta.main) serve(async (req: Request) => {
           dry_run: false,
           run_key: runKey,
           completed: accounted,
-          completed_chunks: appliedChunks.length,
+          completed_chunks: stagedChunks.length,
           chunk_count: rowChunks.length,
-          idempotent_replay: appliedChunks.every((chunk) =>
+          idempotent_replay: stagedChunks.every((chunk) =>
             chunk?.idempotent_replay === true
           ),
+          finalized,
         })
       }
       case 'makesafe_status_apply': {
