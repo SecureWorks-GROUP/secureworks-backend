@@ -1140,8 +1140,10 @@ export function buildIntakeExceptionProjection(
     ).length;
   const resolvedFromExistingEvidence = dispositionCounts.bound_live_job +
     dispositionCounts.existing_job_follow_up;
-  const outOfWindowExceptionCaseRows =
-    input.outOfWindowExceptionCaseRows || dispositionCounts.out_of_window;
+  const outOfWindowExceptionCaseRows = input.outOfWindowExceptionCaseRows ||
+    dispositionCounts.out_of_window;
+  const recentExceptionCaseRows = dispositions.length -
+    dispositionCounts.out_of_window;
   const accountedSilently = outOfWindowExceptionCaseRows +
     dispositionCounts.duplicate_shadow +
     dispositionCounts.correction_residue +
@@ -1166,8 +1168,9 @@ export function buildIntakeExceptionProjection(
       outside_three: outsideThree,
     },
     totals: {
-      exception_case_rows: dispositions.length + outOfWindowExceptionCaseRows,
-      recent_exception_case_rows: dispositions.length,
+      exception_case_rows: recentExceptionCaseRows +
+        outOfWindowExceptionCaseRows,
+      recent_exception_case_rows: recentExceptionCaseRows,
       out_of_window_exception_case_rows: outOfWindowExceptionCaseRows,
       recent_accounted_non_work_rows: recentAccountedNonWorkRows,
       recent_deterministic_non_work_exception_rows:
@@ -1238,7 +1241,9 @@ async function loadByIds(
       column,
       ids.slice(offset, offset + ID_CHUNK_SIZE),
     );
-    if (error) throw new Error(`${label} read failed: ${error.message || error}`);
+    if (error) {
+      throw new Error(`${label} read failed: ${error.message || error}`);
+    }
     rows.push(...(data || []));
   }
   return rows;
@@ -1317,7 +1322,7 @@ export async function loadIntakeExceptionProjection(
     }),
     loadPaged(
       (from, to) => {
-        let query = client.from("makesafe_intake_cases")
+        const query = client.from("makesafe_intake_cases")
           .select(
             "id,company_id,company_slug_raw,external_ref_raw,external_ref_canonical,builder_wo_canonical,builder_po_canonical,wo_po_identity_key,raw_identity_json,story_json,evidence_map,state,reason_code,missing_fields,conflicting_fields,parent_case_id,parent_relation,target_relation,job_id,target_job_id,client_name,client_phone,client_email,site_address,site_suburb,received_at",
           )
@@ -1340,29 +1345,54 @@ export async function loadIntakeExceptionProjection(
     "intake exception sources",
   );
   const postIds = [...new Set(sources.map((row) => String(row.post_id)))];
-  const sourceCorrections = await loadByIds(client,
+  const sourceCorrections = await loadByIds(
+    client,
     "makesafe_intake_source_authority_corrections",
     "id,source_post_id,legacy_case_id,effective_case_id,target_job_id",
-    "source_post_id", postIds, "intake source authority corrections");
-  const sourceSupersessions = await loadByIds(client,
+    "source_post_id",
+    postIds,
+    "intake source authority corrections",
+  );
+  const sourceSupersessions = await loadByIds(
+    client,
     "makesafe_intake_source_authority_correction_supersessions",
     "source_post_id,superseded_correction_id,prior_authority_case_id,effective_case_id",
-    "source_post_id", postIds, "intake source authority supersessions");
-  const caseCorrections = await loadByIds(client,
+    "source_post_id",
+    postIds,
+    "intake source authority supersessions",
+  );
+  const caseCorrections = await loadByIds(
+    client,
     "makesafe_intake_case_authority_corrections",
-    "legacy_case_id,effective_case_id", "legacy_case_id", caseIds,
-    "intake case authority corrections");
-  const companyIds = [...new Set(cases.map((row) => row.company_id).filter(
-    (id): id is string => !!id,
-  ))];
-  const companies = await loadByIds(client, "makesafe_companies", "id,slug,name",
-    "id", companyIds, "make-safe companies");
+    "legacy_case_id,effective_case_id",
+    "legacy_case_id",
+    caseIds,
+    "intake case authority corrections",
+  );
+  const companyIds = [
+    ...new Set(
+      cases.map((row) => row.company_id).filter(
+        (id): id is string => !!id,
+      ),
+    ),
+  ];
+  const companies = await loadByIds(
+    client,
+    "makesafe_companies",
+    "id,slug,name",
+    "id",
+    companyIds,
+    "make-safe companies",
+  );
   const jobs = await loadPaged(
-    (from, to) => client.from("makesafe_job_details")
-      .select("job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs!inner(id,status,site_address,type,metadata)")
-      .not("jobs.status", "in", "(cancelled,canceled,void,voided,superseded)")
-      .order("job_id", { ascending: true })
-      .range(from, to),
+    (from, to) =>
+      client.from("makesafe_job_details")
+        .select(
+          "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs!inner(id,status,site_address,type,metadata)",
+        )
+        .not("jobs.status", "in", "(cancelled,canceled,void,voided,superseded)")
+        .order("job_id", { ascending: true })
+        .range(from, to),
     "make-safe live obligations",
   );
   const { count: outOfWindowExceptionCaseRows, error: archiveCountError } =
@@ -1372,7 +1402,11 @@ export async function loadIntakeExceptionProjection(
       .eq("state", "exception")
       .lt("received_at", windowFrom);
   if (archiveCountError) {
-    throw new Error(`intake exception archive count failed: ${archiveCountError.message || archiveCountError}`);
+    throw new Error(
+      `intake exception archive count failed: ${
+        archiveCountError.message || archiveCountError
+      }`,
+    );
   }
   const refPrefixes = await loadRefPrefixes(client);
 

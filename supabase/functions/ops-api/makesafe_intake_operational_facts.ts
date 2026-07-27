@@ -128,10 +128,10 @@ export async function loadIntakeOperationalFacts(
       (from, to) =>
         (() => {
           let query = client.from("makesafe_intake_cases")
-          .select(
-            "id,instruction_key,lineage_id,parent_case_id,parent_relation,job_id,target_relation,target_job_id,state,reason_code,blocked_reasons,received_at,field_provenance",
-          )
-          .eq("org_id", options.orgId);
+            .select(
+              "id,instruction_key,lineage_id,parent_case_id,parent_relation,job_id,target_relation,target_job_id,state,reason_code,blocked_reasons,received_at,field_provenance",
+            )
+            .eq("org_id", options.orgId);
           if (recentFromIso) query = query.gte("received_at", recentFromIso);
           if (recentToIso) query = query.lte("received_at", recentToIso);
           return query.order("id", { ascending: true }).range(from, to);
@@ -155,11 +155,11 @@ export async function loadIntakeOperationalFacts(
       (from, to) =>
         (() => {
           let query = client.from("email_events_raw")
-          .select(
-            "id,post_id,change_type,exclusion_reason,received_at,observed_at,page_meta",
-          )
-          .eq("org_id", options.orgId)
-          .eq("mailbox", mailbox);
+            .select(
+              "id,post_id,change_type,exclusion_reason,received_at,observed_at,page_meta",
+            )
+            .eq("org_id", options.orgId)
+            .eq("mailbox", mailbox);
           if (recentFromIso) query = query.gte("received_at", recentFromIso);
           if (recentToIso) query = query.lte("received_at", recentToIso);
           return query.order("id", { ascending: true }).range(from, to);
@@ -178,9 +178,13 @@ export async function loadIntakeOperationalFacts(
       .eq("mailbox", mailbox)
       .in("post_id", eventPostIds.slice(offset, offset + 25));
     if (error) {
-      throw new Error(`intake non-work exclusions read failed: ${error.message || error}`);
+      throw new Error(
+        `intake non-work exclusions read failed: ${error.message || error}`,
+      );
     }
-    exclusionPostIds.push(...(data || []).map((row: any) => String(row.post_id)));
+    exclusionPostIds.push(
+      ...(data || []).map((row: any) => String(row.post_id)),
+    );
   }
 
   const sourceIdsByCase = new Map<string, string[]>();
@@ -256,7 +260,11 @@ export async function loadIntakeOperationalFacts(
     )
   );
   const excludedPosts = new Set(exclusionPostIds);
-  for (const issue of issueRows.filter((row) => !excludedPosts.has(String(row.post_id)))) {
+  for (
+    const issue of issueRows.filter((row) =>
+      !excludedPosts.has(String(row.post_id))
+    )
+  ) {
     facts.push(buildSourceIssueOperationalFact(issue, nowIso));
   }
   return facts.sort((a, b) =>
