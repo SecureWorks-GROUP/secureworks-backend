@@ -6,10 +6,10 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _dispatchMakesafeReportForTest,
   _makesafePipelineForTest,
   _normaliseOpsAttachJobPhotoInputForTest,
   _preferBearerForOpsApiAction,
-  _dispatchMakesafeReportForTest,
   _resolveMakesafeReportActor,
   _resolveOpsApiAuthIntent,
   _submitMakesafeReportForTest,
