@@ -16974,10 +16974,10 @@ async function landLateWorkOrderPdfOntoDraft(
 export const _landLateWorkOrderPdfOntoDraftForTest = landLateWorkOrderPdfOntoDraft
 
 // The edge runtime enforces a ~2s CPU budget. Live evidence on 2026-07-27 showed
-// that the runtime default (500 sources -> up to 50 PDF parses) consistently
-// exhausted that budget. Four sources keep the standing scan to at most eight
-// PDF parses while the runtime's completion checkpoint advances the backlog half
-// after every successful invocation.
+// that the runtime's historical 500-source default (up to 50 PDF parses)
+// consistently exhausted that budget. Four physical sources keep the standing
+// scan to at most eight PDF parses while the runtime's completion checkpoint
+// advances the historical backlog and its recent queue preserves fresh coverage.
 const STANDING_SCAN_MAX_SOURCES_PER_RUN = 4
 
 interface StandingScanDeps {
