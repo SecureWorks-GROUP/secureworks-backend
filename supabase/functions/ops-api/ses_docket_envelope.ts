@@ -1,0 +1,352 @@
+import type { SesBuilderKey, SesFamilyId } from "./ses_family_matrix.ts";
+
+export const SES_ASSEMBLER_VERSION = "ses-pack-assembler/v1";
+export const SES_INPUT_CONTRACT_VERSION = "ses.assembler-input/v1";
+export const SES_DOCKET_ENVELOPE_VERSION =
+  "secureworks.makesafe.docket-manifest/v3-envelope";
+export const SES_MANIFEST_V2_VERSION =
+  "secureworks.makesafe.docket-manifest/v2";
+
+export type SesSha256 = `sha256:${string}`;
+
+export interface SesAssemblerInputV1 {
+  contract_version: "ses.assembler-input/v1";
+  identity: {
+    source_instruction_id: string;
+    source_version: string;
+    source_content_hash: SesSha256;
+    lineage_id: string;
+    case_id: string | null;
+    job_id: string;
+    job_number: string | null;
+    card_id: string | null;
+    property_id: string | null;
+  };
+  attendance: {
+    attendance_cycle_ids: string[];
+    current_attendance_cycle_id: string;
+    cycle_number: number;
+    attribution: "bound" | "backfill_cycle_scope" | "legacy_unscoped";
+  };
+  classification: {
+    builder_key: SesBuilderKey;
+    builder_label: string;
+    family: SesFamilyId;
+    subtype: string | null;
+    report_only: boolean;
+    report_delivery: "portal" | "own_document" | null;
+    strata: boolean;
+    own_template_requested: boolean;
+    workflow: "active" | "cancellation" | "revision" | "no_access";
+    lineage_kind: "none" | "revision" | "sibling";
+    family_matrix_version: string;
+    assessment_outbound_recipe_version: string | null;
+  };
+  source: {
+    work_order_sender: string | null;
+    builder_reference: string;
+    po_or_external_ref: string | null;
+    site_address: string | null;
+    site_suburb: string | null;
+    instruction_text: string | null;
+    deliverables: Array<{ id: string; kind: string }>;
+    attachment_pointers: string[];
+    portal_links: Array<{
+      role:
+        | "roof_report"
+        | "assessment"
+        | "photos"
+        | "scope"
+        | "builder_portal"
+        | "other";
+      url: string;
+      source: "intake" | "job_detail" | "email_recovery";
+    }>;
+  };
+  cycle_facts: {
+    trade_report: Record<string, unknown> | null;
+    photos: Array<{
+      id: string;
+      path_or_key: string;
+      caption?: string;
+      order: number;
+    }>;
+    roof_report_fields: Record<string, unknown> | null;
+    hours_and_materials: Record<string, unknown> | null;
+    prior_release: {
+      released: boolean;
+      release_revision_id: string | null;
+      cycle_set_hash: string | null;
+    };
+  };
+  hrcw: {
+    hrcw: boolean;
+    categories: Array<
+      "asbestos" | "work_at_height" | "structural" | "other_registered_hrcw"
+    >;
+    source_hazard_terms: string[];
+  };
+  routing_seed: {
+    report_to: string | null;
+    invoice_to: string | null;
+  };
+  readiness: {
+    readiness_revision: SesSha256 | null;
+    dependency_generation: number | null;
+  };
+}
+
+export interface SesPrepareRequest {
+  selection: {
+    mode: "job_id" | "job_number" | "board_batch";
+    job_id?: string;
+    job_number?: string;
+    limit?: number;
+  };
+  idempotency_key: string;
+  assembler_version: "ses-pack-assembler/v1";
+  dry_run: boolean;
+  force_refresh: boolean;
+}
+
+export interface SesBlocker {
+  state: "blocked";
+  reason: string;
+  reason_code: string;
+  searches_attempted: string[];
+  rejected_candidates: string[];
+  recovery_action: string;
+}
+
+export interface SesReadyState {
+  state: "ready";
+  evidence: string;
+}
+
+export interface SesNotApplicableState {
+  state: "not_applicable";
+  rule: string;
+}
+
+export type SesObligationState =
+  | SesBlocker
+  | SesReadyState
+  | SesNotApplicableState;
+
+export interface SesArtifact {
+  role: string;
+  path: string;
+  media_type: string;
+  bytes: Uint8Array;
+  content_hash: SesSha256;
+  size_bytes: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface SesPortalCapture {
+  status: "done" | "not_done" | "unreachable";
+  role: "roof_report" | "assessment" | "photos" | "scope";
+  url: string;
+  docket_id: string;
+  job_id: string;
+  builder_reference: string;
+  captured_at: string;
+  content_fingerprint: SesSha256;
+  idempotency_key: string;
+  signal: string;
+  screenshot_bytes?: Uint8Array;
+}
+
+export interface SesManifestV2 {
+  version: "secureworks.makesafe.docket-manifest/v2";
+  docket_id: string;
+  classification: Record<string, unknown>;
+  routing: {
+    builder: string;
+    report_to: string;
+    photo_to: string;
+    invoice_to: string;
+  };
+  items: Record<string, SesObligationState>;
+  deliverables: Array<{
+    id: string;
+    kind: string;
+    completion: SesObligationState;
+  }>;
+}
+
+export interface SesDocketEnvelopeV3 {
+  version: "secureworks.makesafe.docket-manifest/v3-envelope";
+  v2: SesManifestV2;
+  spine: {
+    source_instruction_id: string;
+    lineage_id: string;
+    job_id: string;
+    card_id: string | null;
+    property_id: string | null;
+    attendance_cycle_ids: string[];
+    current_attendance_cycle_id: string;
+    readiness_revision: SesSha256 | null;
+    docket_revision_id: string;
+  };
+  pre_xero_docs_ready: boolean;
+  local_invoice_proposal: {
+    state: "ready" | "blocked";
+    evidence: string;
+  };
+  invoice_create_approved: false;
+  client_send_approved: false;
+  family_matrix_version: string;
+  assembler_version: "ses-pack-assembler/v1";
+  input_content_hash: SesSha256;
+  output_content_hash: SesSha256;
+}
+
+export interface SesTiming {
+  job_id: string;
+  accepted_at: string;
+  committed_at: string;
+  duration_ms: number;
+  stages_ms: Record<string, number>;
+  retries: Record<string, number>;
+  degraded_capabilities: string[];
+  within_five_minutes: boolean;
+}
+
+export interface SesPreparedRevision {
+  state: "ready" | "blocked";
+  docket_revision_id: string;
+  input_content_hash: SesSha256;
+  output_content_hash: SesSha256;
+  envelope: SesDocketEnvelopeV3;
+  blockers: SesBlocker[];
+  artifacts: SesArtifact[];
+  portal_evidence: SesPortalCapture[];
+  invoice_proposal: Record<string, unknown> | null;
+  email_drafts: Record<string, string>;
+  review_spec: Record<string, unknown>;
+  release_payload: Record<string, unknown>;
+  timing: SesTiming;
+  persisted: boolean;
+}
+
+function compareText(a: string, b: string): number {
+  const left = Array.from(
+    a.normalize("NFC"),
+    (value) => value.codePointAt(0) as number,
+  );
+  const right = Array.from(
+    b.normalize("NFC"),
+    (value) => value.codePointAt(0) as number,
+  );
+  for (let index = 0; index < Math.min(left.length, right.length); index++) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return left.length - right.length;
+}
+
+function canonicalValue(value: unknown, path: string): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value.normalize("NFC"));
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError(`${path} must be a finite number`);
+    }
+    return Object.is(value, -0) ? "0" : JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${
+      value.map((item, index) => canonicalValue(item, `${path}[${index}]`))
+        .join(",")
+    }]`;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort(compareText);
+    for (const key of keys) {
+      if (record[key] === undefined) {
+        throw new TypeError(
+          `${path}.${key} must be explicit null, not undefined`,
+        );
+      }
+    }
+    return `{${
+      keys.map((key) =>
+        `${JSON.stringify(key.normalize("NFC"))}:${
+          canonicalValue(record[key], `${path}.${key}`)
+        }`
+      ).join(",")
+    }}`;
+  }
+  throw new TypeError(`${path} contains unsupported ${typeof value}`);
+}
+
+export function canonicalSesJson(value: unknown): string {
+  return canonicalValue(value, "$");
+}
+
+export async function sesSha256(
+  value: unknown,
+  domain = "SecureWorks:ses-pack-assembler:v1\n",
+): Promise<SesSha256> {
+  const bytes = new TextEncoder().encode(domain + canonicalSesJson(value));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hex = Array.from(digest).map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+  return `sha256:${hex}`;
+}
+
+export function stableUuidFromSha256(value: SesSha256): string {
+  const chars = value.slice("sha256:".length, "sha256:".length + 32).split("");
+  chars[12] = "5";
+  const variant = parseInt(chars[16], 16);
+  chars[16] = ((variant & 0x3) | 0x8).toString(16);
+  const hex = chars.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
+    hex.slice(16, 20)
+  }-${hex.slice(20, 32)}`;
+}
+
+export async function artifactFromText(args: {
+  role: string;
+  path: string;
+  media_type: string;
+  text: string;
+  metadata?: Record<string, unknown>;
+}): Promise<SesArtifact> {
+  const bytes = new TextEncoder().encode(args.text);
+  const content_hash = await sesSha256(
+    Array.from(bytes),
+    "SecureWorks:ses-docket-artifact-bytes:v1\n",
+  );
+  return {
+    role: args.role,
+    path: args.path,
+    media_type: args.media_type,
+    bytes,
+    content_hash,
+    size_bytes: bytes.byteLength,
+    metadata: args.metadata || {},
+  };
+}
+
+export async function artifactFromBytes(args: {
+  role: string;
+  path: string;
+  media_type: string;
+  bytes: Uint8Array;
+  metadata?: Record<string, unknown>;
+}): Promise<SesArtifact> {
+  const content_hash = await sesSha256(
+    Array.from(args.bytes),
+    "SecureWorks:ses-docket-artifact-bytes:v1\n",
+  );
+  return {
+    ...args,
+    content_hash,
+    size_bytes: args.bytes.byteLength,
+    metadata: args.metadata || {},
+  };
+}

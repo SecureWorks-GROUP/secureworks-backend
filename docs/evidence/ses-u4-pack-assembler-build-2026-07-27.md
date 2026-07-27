@@ -1,0 +1,192 @@
+# SES Reporting U4 build evidence — 2026-07-27
+
+Sections read before implementation:
+
+- U4 design: full document, sections 0–18; implementation contracts applied from §3, §4, §5, §6, §7, §8, §12 and §13.
+- Sealed mission contract: §2a family recipes; §3 unit U4; checkpoint CP3; seal/hold records affecting assessment and timing.
+- North Star: Stage D, “Captain’s Docket.”
+- Working wiki mirror used: `/Users/marninstobbe/Projects/secureworks-wiki` (not the pinned runtime copy).
+- Sealed contract SHA-256: `d076dedb8e5c92932ae386084dac256d9bc1c02668acd760b0eaba34aef95d52`.
+
+## Outcome
+
+This change builds the deterministic U4 assembler core. One function,
+`prepare_ses_docket_revision`, accepts only a job/job-number/batch selection
+plus an idempotency key.
+It obtains the complete `ses.assembler-input/v1` envelope through one resolver;
+callers cannot pass hand-composed family, deliverable, routing or portal-status
+fields into the command.
+
+For each job it produces one content-addressed pre-Xero revision containing:
+
+- the source work order and designated source attachments;
+- the v2 manifest inside the v3 correlation-spine envelope;
+- the applicable SecureWorks report, roof report and/or SWMS artifacts;
+- every current-cycle photo byte plus the complete ordered photo map for
+  physical work only;
+- live portal-capture evidence and screenshots where the family requires them;
+- a local invoice proposal;
+- only the family-applicable draft email slots;
+- the Captain review spec/HTML, an inert release proposal, capability evidence,
+  timing evidence and hashes.
+
+The append-only persistence migration adds the private artifact bucket, revision
+and artifact ledgers, a current-revision view, and one idempotent commit RPC. The
+SQL wall rejects any revision whose envelope or release proposal grants invoice,
+authorise, send, SMS or close authority. RLS and grants restrict the ledgers/RPC
+to `service_role`.
+
+## What the Captain gets
+
+On this branch, the Captain gets the docket below whenever the single assembler
+function is invoked through a versioned `ses.assembler-input/v1` adapter. The
+deployed Captain surface does **not** change yet: the production read-model
+adapter and ops-api/skill binding are named remaining seams, so this branch does
+not pretend the live button exists.
+
+For a ready physical docket the Captain sees the WO, completion report, every
+current-cycle photo, the explicit SWMS decision/artifact, a local invoice
+proposal, and three separate report/photo/invoice drafts on one review page.
+
+For an ordinary roof docket the Captain sees the WO, the captured live portal
+state, screenshot and exact link, plus the local storey-price proposal. There is
+no invented local completion report and no physical photo section.
+
+For an own-template/strata roof docket the Captain sees the WO and the
+SecureWorks roof PDF rendered only from trade-authored facts, plus the local
+storey-price proposal. Portal obligations are named not-applicable.
+
+For temporary fencing the physical recipe is retained and typed panel/base
+counts are mandatory. MLB and Western use their explicit hire-card rows; AJS
+and AJBR use their labour-only rows.
+
+AJS 70062 is fixed as a physical make-safe: “tarp affected areas of water
+leaking” produces the completion-report/photo/SWMS-decision/invoice-proposal
+recipe. Any AJS/AJBR input claiming a report-only roof or assessment family is
+rejected with `ajs_misclassified_as_roof_report`; it is never silently rerouted
+and produces no fallback report, photo, invoice proposal or email draft.
+
+## Repeatability proof
+
+The assembler canonicalises JSON with Unicode NFC, code-point key ordering,
+finite-number enforcement and explicit-null rules. Revision identity and output
+content hashes are domain-separated SHA-256 values. Artifact hashes cover bytes,
+and the append-only commit RPC rejects an idempotency key reused with different
+input or output hashes.
+
+Two independent fixture runs with the same input and intent produced identical
+revision IDs, output hashes and artifact hash lists. Every shippable row in the
+11-row matrix has a ready golden and an intentional stale-matrix negative
+golden. The assessment row has an intentional blocker golden because its
+outbound recipe is not Captain-sealed.
+
+## Family coverage
+
+| Builder | Physical | Temporary fence | Ordinary roof portal | Own-template roof | Assessment |
+| --- | --- | --- | --- | --- | --- |
+| MLB | ready golden | ready golden | ready golden | ready golden | intentionally blocked |
+| AJS | ready golden | ready golden | rejected by rule | rejected by rule | rejected by rule |
+| AJBR | ready golden | ready golden | rejected by rule | rejected by rule | rejected by rule |
+| Western | ready golden | ready golden | closed/unsealed class | closed/unsealed class | closed/unsealed class |
+
+Assessment portal triad capture is implemented, but report/photo/invoice draft
+sets remain empty and blocked with `assessment_recipe_unapproved`. This is the
+required fail-closed behavior until the Captain seals the exact outbound recipe.
+CP3 cannot honestly close for assessment before that decision.
+
+## Portal truth
+
+Portal families cannot become ready without the capture adapter opening every
+typed link. `done` is accepted only with tied JSON **and screenshot** evidence;
+`not_done` blocks with
+`portal_not_submitted`; network/runner failure blocks with
+`portal_unreachable`; mismatched job/docket/reference/URL blocks with
+`portal_wrong_reference`; unavailable capture capability blocks with
+`capability_portal_degraded`. No persisted portal timestamp or prose is accepted
+as a substitute for that read.
+
+The tests prove invocation and all fail-closed mappings with deterministic
+capture fixtures. A credentialed staging/live browser run was not performed in
+this no-production-mutation lane, so real portal latency and selectors remain a
+staging validation item.
+
+## Five-minute promise
+
+The per-job clock starts before input resolution and stops after the append-only
+commit returns. It includes resolver reads, source recovery, portal capture,
+rendering, proposal construction, validation, artifact storage and the commit
+RPC. Ready and reason-coded blocked revisions both stop the clock. Batch jobs run
+in parallel; one job’s stages remain sequential.
+
+`TIMING.json` records accepted/committed timestamps, total duration, T0–T12
+durations, retries and degraded capabilities. The response records count, max
+and P95. The deterministic 20-job synthetic-clock boundary holds max and P95
+between 250 and 300 seconds, with all 20 below the hard five-minute ceiling.
+
+The hard result is `duration_ms <= 300000`; one over-budget job makes the batch
+summary false. This is a CI boundary proof, not a substitute for the required
+credentialed staging wall-clock run with real portal and storage I/O.
+
+## Where the wall sits
+
+The wall is before invoice creation and release:
+
+1. U4 creates only `ARTIFACTS/invoice_proposal.json`; it has no Xero identity.
+2. The TypeScript dependency surface contains no Xero, mail/SMS, board or
+   closeout capability.
+3. `release_payload.json` fixes `invoice_create_approved`,
+   `client_send_approved`, `create_invoice`, `authorise_invoice`, `send_email`,
+   `send_sms` and `close_job` to `false`.
+4. The persistence check constraint enforces those values again and rejects a
+   local proposal containing `xero_invoice_id`.
+5. The static/runtime tripwire verifies the assembler does not call the retired
+   draft-pack, invoice-create or send paths and that persistence invokes only
+   private artifact storage plus `commit_makesafe_docket_revision_v1`.
+
+Nothing in this change creates any Xero object, sends anything to a builder,
+changes the board, changes a job, closes work, applies a migration, schedules a
+cron, deploys, merges or touches production.
+
+## Validation
+
+- `deno check` passed for all five new TypeScript surfaces.
+- `deno fmt --check` passed.
+- `deno lint` passed on the new surfaces.
+- Targeted U4 suite: 14 passed, 0 failed, including full photo-byte recovery,
+  missing-photo rejection and submitted-without-screenshot rejection.
+- Required root gate:
+  `deno check --config deno.jsonc supabase/functions/ops-api/index.ts` passed.
+  This includes the two separately authorised annotation-only baseline repairs:
+  `monitor-ses-makesafes/index.ts:2100-2107` and `ops-api/index.ts:16904`.
+- `deno task test:ops-api` still stops during test-file type-checking on five
+  existing errors outside U4
+  (`makesafe_board_test.ts`, `makesafe_intake_recapture_test.ts`,
+  `makesafe_submit_report_test.ts` twice, and
+  `monitor_ses_makesafes_test.ts`). The runtime-only whole directory run then
+  recorded 2,152 passed and 26 failed; the failures are existing attendance
+  cycle/U3 fixture drift and no U4 test failed. Those files/routes were not
+  changed.
+
+## Release truth and remaining seams
+
+This branch supplies the deterministic assembler, matrix, persistence contract
+and goldens. It does not claim that the Captain can invoke the deployed action
+today:
+
+- the repository does not yet expose a canonical runtime
+  `ses.assembler-input/v1` read-model adapter; U4 therefore consumes the
+  versioned fixture envelope exactly as §16.4 permits rather than rebuilding U1
+  or U2 state;
+- the wiki `prepare_ses_docket_revision.py` front door, real
+  `capture_portal_evidence.py` binding, pre-Xero `pack_state.py` compatibility
+  and release filename/three-draft compatibility live outside this disposable
+  backend worktree and are not mutated here;
+- `ops-api/index.ts` is not wired to a fake or hand-authored envelope;
+- the legacy Xero-DRAFT cron is not disabled until the new runtime adapter is
+  genuinely callable, because disabling the existing path before replacement
+  activation would create an operational hole;
+- the assessment route remains Captain-held.
+
+Accordingly, the code-level docket is deterministic and draft-safe, but the
+mission-wide CP3 verdict remains **BLOCKED**, not PASS, until those named seams
+land and a credentialed staging run proves live portal/storage timing.

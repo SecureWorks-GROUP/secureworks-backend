@@ -74,7 +74,10 @@ boundary for both the board enrich path and audit compact flags:
   current cycle and prior-cycle photos cannot satisfy the current completion
   evidence threshold.
 - This slice does **not** complete full U2 (single display authority,
-  cryptographic approval invalidation, docket revisions, obligation ids).
+  cryptographic approval invalidation, obligation ids). U4 owns the
+  append-only pre-Xero docket-revision assembler and persistence contract;
+  see `docs/evidence/ses-u4-pack-assembler-build-2026-07-27.md` for its
+  current wiring and release holds.
 
 ## Derived status and captain-applied display truth
 
