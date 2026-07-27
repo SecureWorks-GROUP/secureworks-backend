@@ -65,7 +65,7 @@ Deno.test("computed status: physical report fails closed on stale cycle or photo
   assert(short.missing.some((value) => value.includes("found 4")));
 });
 
-Deno.test("computed status: roof requires one typed done capture", () => {
+Deno.test("computed status: roof requires one typed done capture with screenshot", () => {
   const base = {
     job: {
       status: "accepted",
@@ -87,6 +87,9 @@ Deno.test("computed status: roof requires one typed done capture", () => {
         portalCaptures: [{
           status: "done",
           role: "roof_report",
+          locked: true,
+          url: "https://portal.test/r",
+          screenshot: "/tmp/roof.png",
           cycle_number: 1,
         }],
       },
@@ -117,20 +120,78 @@ Deno.test("computed status: assessment is fail-closed until all three typed capt
   };
   const oneOfThree = computeMakesafeStatus(base);
   assertEquals(oneOfThree.status, "allocated");
-  assert(oneOfThree.missing.includes("locked portal capture: photos"));
-  assert(oneOfThree.missing.includes("locked portal capture: quote"));
+  assert(
+    oneOfThree.missing.includes(
+      "The work order email contains no photos link - ask the builder to send it.",
+    ),
+  );
+  assert(
+    oneOfThree.missing.includes(
+      "The work order email contains no quote/scope link - ask the builder to send it.",
+    ),
+  );
 
   const threeOfThree = computeMakesafeStatus({
     ...base,
+    detail: {
+      ...base.detail,
+      external_links: [
+        ...base.detail.external_links,
+        { kind: "photos", url: "https://portal.test/p" },
+        { kind: "scope", url: "https://portal.test/q" },
+      ],
+    },
     evidence: {
       portalCaptures: [
-        { status: "done", role: "assessment_report", cycle_number: 3 },
-        { status: "done", role: "photos", cycle_number: 3 },
-        { status: "done", role: "quote", cycle_number: 3 },
+        {
+          status: "done",
+          role: "assessment_report",
+          locked: true,
+          url: "https://portal.test/a",
+          screenshot: "/tmp/assessment.png",
+          cycle_number: 3,
+        },
+        {
+          status: "done",
+          role: "photos",
+          locked: true,
+          url: "https://portal.test/p",
+          screenshot: "/tmp/photos.png",
+          cycle_number: 3,
+        },
+        {
+          status: "done",
+          role: "quote",
+          locked: true,
+          url: "https://portal.test/q",
+          screenshot: "/tmp/quote.png",
+          cycle_number: 3,
+        },
       ],
     },
   });
   assertEquals(threeOfThree.status, "trade_report_in");
+});
+
+Deno.test("computed status: assessment READY pack still requires triad evidence", () => {
+  const result = computeMakesafeStatus({
+    job: { status: "accepted" },
+    detail: {
+      report_type: "assessment_report",
+      cycle_number: 1,
+      external_links: [{
+        kind: "assessment_report",
+        url: "https://portal.test/a",
+      }],
+    },
+    evidence: {
+      portalCaptures: [],
+      packState: "READY",
+    },
+    nowIso: NOW,
+  });
+  assertEquals(result.status, "allocated");
+  assert(result.missing.some((item) => item.includes("headless capture")));
 });
 
 Deno.test("computed status: Docs Ready reads durable draft-pack records", () => {

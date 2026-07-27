@@ -411,6 +411,7 @@ import {
   portalRecheckDue as _portalRecheckDue,
   portalRecheckEligible as _portalRecheckEligible,
   portalVerificationSatisfied as _portalVerificationSatisfied,
+  validatePortalEvidenceForReportType as _validatePortalEvidenceForReportType,
   reportInSatisfied as _reportInSatisfied,
   substatusAdvanceNeedsPortalVerification as _substatusAdvanceNeedsPortalVerification,
   substatusAdvanceNeedsReportIn as _substatusAdvanceNeedsReportIn,
@@ -12696,7 +12697,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   }
 
   const { data: detail, error } = await client.from('makesafe_job_details')
-    .select('job_id, substatus, report_type, external_links, report_received_at, cycle_number, portal_verified_at, portal_verified_cycle')
+    .select('job_id, substatus, report_type, external_links, report_received_at, cycle_number, portal_verified_at, portal_verified_cycle, portal_verified_signal')
     .eq('job_id', jId)
     .maybeSingle()
   if (error) throw error
@@ -12726,6 +12727,22 @@ async function markMakesafePortalReportDone(client: any, body: any) {
       healReportType = familyType
     }
   }
+
+  const effectiveLinks = mergePortalLink(detail.external_links) ||
+    (Array.isArray(detail.external_links) ? detail.external_links : [])
+  const assessmentProof = reportType === 'assessment_report'
+    ? _validatePortalEvidenceForReportType(
+      reportType,
+      effectiveLinks,
+      body.portal_evidence || body.portalEvidence,
+    )
+    : null
+  if (assessmentProof && !assessmentProof.ready) {
+    throw new ApiError(
+      `assessment triad is not ready: ${assessmentProof.waiting_on.join(' ')}`,
+      409,
+    )
+  }
   if (!reportType) {
     throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real report.', 409)
   }
@@ -12737,12 +12754,36 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   // fresh verification. The item-14 guard (substatus advance + draft invoice) then
   // requires portal_verified_cycle == cycle_number before automation may proceed.
   const currentCycle = Number(detail.cycle_number ?? 1)
+  let priorAssessmentProof = false
+  if (reportType === 'assessment_report' && typeof detail.portal_verified_signal === 'string') {
+    try {
+      const prior = JSON.parse(detail.portal_verified_signal)
+      priorAssessmentProof = _validatePortalEvidenceForReportType(
+        reportType,
+        detail.external_links,
+        prior?.captures || prior?.entries || prior,
+      ).ready
+    } catch {
+      priorAssessmentProof = false
+    }
+  }
   const alreadyVerifiedThisCycle = !!detail.portal_verified_at &&
-    Number(detail.portal_verified_cycle) === currentCycle
+    Number(detail.portal_verified_cycle) === currentCycle &&
+    (reportType !== 'assessment_report' || priorAssessmentProof)
   const nowIso = new Date().toISOString()
-  const verifySignal = String(body.portal_signal || body.portalSignal || '').trim() ||
-    'operator-confirmed portal locked'
-  const verifyActor = body.operator_email || body.user_email || body.operator || 'portal_done_marker'
+  const verifySignal = assessmentProof
+    ? JSON.stringify({
+      version: 'assessment-prime-triad-proof/v1',
+      captures: assessmentProof.evidence.map((entry) => ({
+        ...entry,
+        cycle_number: currentCycle,
+      })),
+    })
+    : String(body.portal_signal || body.portalSignal || '').trim() ||
+      'operator-confirmed portal locked'
+  const verifyActor = body.verified_by || body.verifiedBy ||
+    body.operator_email || body.user_email || body.operator ||
+    'portal_done_marker'
   // The verification stamp, applied on both the advance path and the graf-recovery
   // idempotent path (see below). Only written when not already verified this cycle.
   const verificationStamp = {
@@ -12844,6 +12885,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
       portal_verified: true,
       portal_verified_cycle: currentCycle,
       portal_verified_signal: verifySignal,
+      portal_verified_by: verifyActor,
       changed_at: nowIso,
       operator: verifyActor,
     },
@@ -12876,7 +12918,7 @@ async function loadMakesafePortalVerification(
   jobId: string,
 ): Promise<PortalVerificationState & { reportType: string | null }> {
   const { data: detail } = await client.from('makesafe_job_details')
-    .select('report_type, cycle_number, portal_verified_at, portal_verified_cycle')
+    .select('report_type, cycle_number, external_links, portal_verified_at, portal_verified_cycle, portal_verified_signal')
     .eq('job_id', jobId)
     .maybeSingle()
   let reportType = String(detail?.report_type || '').trim() || null
@@ -12886,15 +12928,55 @@ async function loadMakesafePortalVerification(
     const fam = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
     reportType = _reportTypeForJobFamily(fam) || null
   }
+  const currentCycle = Number(detail?.cycle_number ?? 1)
+  const requiresAssessmentProof = reportType === 'assessment_report' ||
+    reportType === 'assessment_report_quote'
+  const assessmentProofSatisfied = hasStoredAssessmentPortalProof(
+    reportType,
+    detail?.external_links,
+    detail?.portal_verified_signal,
+    currentCycle,
+  )
   return {
     isReportType: !!reportType,
     reportType,
-    currentCycle: Number(detail?.cycle_number ?? 1),
+    currentCycle,
     verifiedAt: detail?.portal_verified_at ?? null,
     verifiedCycle: detail?.portal_verified_cycle ?? null,
+    requiresAssessmentProof,
+    assessmentProofSatisfied,
   }
 }
 export const _loadMakesafePortalVerification = loadMakesafePortalVerification
+
+function hasStoredAssessmentPortalProof(
+  reportType: string | null,
+  externalLinks: unknown,
+  signal: unknown,
+  currentCycle: number,
+): boolean {
+  if (reportType !== 'assessment_report' && reportType !== 'assessment_report_quote') {
+    return true
+  }
+  if (typeof signal !== 'string' || !/^[\[{]/.test(signal.trim())) return false
+  try {
+    const parsed = JSON.parse(signal)
+    const captures = Array.isArray(parsed)
+      ? parsed
+      : parsed?.entries || parsed?.captures
+    if (!Array.isArray(captures) || captures.length !== 3) return false
+    if (!captures.every((capture: any) => Number(capture?.cycle_number) === currentCycle)) {
+      return false
+    }
+    return _validatePortalEvidenceForReportType(
+      reportType,
+      externalLinks,
+      captures,
+    ).ready
+  } catch {
+    return false
+  }
+}
 
 // Item-14 guard for a substatus advance. No-op unless the job is a report-type
 // card advancing to a report-complete substatus without a current-cycle
@@ -13046,19 +13128,19 @@ export const _assertMakesafeReportInForInvoice = assertMakesafeReportInForInvoic
 // cron stamps a rate-limited recheck marker on them.
 const PORTAL_RECHECK_DETAIL_SELECT =
   'job_id, external_ref, substatus, cycle_number, external_links, report_type, ' +
-  'portal_verified_at, portal_verified_cycle, portal_recheck_requested_at, portal_recheck_count'
+  'portal_verified_at, portal_verified_cycle, portal_verified_signal, ' +
+  'portal_recheck_requested_at, portal_recheck_count'
 
 async function scanPortalRecheckCards(client: any): Promise<Array<{
   detail: any; job: any; currentCycle: number; portalLinks: ReturnType<typeof _extractPortalLinks>
 }>> {
   const { data: details, error } = await client.from('makesafe_job_details')
     .select(PORTAL_RECHECK_DETAIL_SELECT)
-    .not('report_type', 'is', null)
   if (error) throw error
   const rows = (details || []).filter((d: any) => d?.job_id)
   const jobIds = rows.map((d: any) => d.job_id)
   const jobs = await _fetchAllByJobIdChunked(
-    client, 'jobs', 'id, job_number, status, site_address, client_name', jobIds,
+    client, 'jobs', 'id, job_number, status, site_address, client_name, metadata', jobIds,
     undefined, 'id',
   )
   const jobsById: Record<string, any> = {}
@@ -13067,6 +13149,11 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
   for (const d of rows) {
     const job = jobsById[d.job_id]
     if (!job) continue
+    const reportType = String(d.report_type || '').trim() ||
+      _reportTypeForJobFamily(
+        parseJsonObject(job.metadata)?.makesafe_job_family,
+      )
+    if (!reportType) continue
     const currentCycle = Number(d.cycle_number ?? 1)
     const eligible = _portalRecheckEligible({
       jobStatus: job.status,
@@ -13075,6 +13162,14 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
       currentCycle,
       verifiedAt: d.portal_verified_at ?? null,
       verifiedCycle: d.portal_verified_cycle ?? null,
+      requiresAssessmentProof: reportType === 'assessment_report' ||
+        reportType === 'assessment_report_quote',
+      assessmentProofSatisfied: hasStoredAssessmentPortalProof(
+        reportType,
+        d.external_links,
+        d.portal_verified_signal,
+        currentCycle,
+      ),
     })
     if (!eligible) continue
     out.push({ detail: d, job, currentCycle, portalLinks: _extractPortalLinks(d.external_links) })
@@ -21414,15 +21509,18 @@ async function assertLegacySesInvoiceSendAllowed(
   }
   if (!docket.data) return
 
-  throw new ApiError(409, {
-    success: false,
-    refusal: {
-      state: 'refused',
-      code: 'u6r_release_required',
-      fact: `The sealed SES invoice cannot use legacy ${action}; U6R SEND IT is the only release and provider-effect path.`,
-      recovery_action: 'Complete the U6 review, approve SEND IT, then use execute_ses_release_revision for the exact route and closeout.',
-    },
-  })
+  const refusal = {
+    state: 'refused',
+    code: 'u6r_release_required',
+    fact:
+      `The sealed SES invoice cannot use legacy ${action}; U6R SEND IT is the only release and provider-effect path.`,
+    recovery_action:
+      'Complete the U6 review, approve SEND IT, then use execute_ses_release_revision for the exact route and closeout.',
+  }
+  throw new ApiError(
+    `${refusal.code}: ${refusal.fact} ${refusal.recovery_action}`,
+    409,
+  )
 }
 
 interface CreateInvoiceInternalOptions {

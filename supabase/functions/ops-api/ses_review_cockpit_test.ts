@@ -94,24 +94,17 @@ Deno.test("API and routine keys cannot record human approvals", () => {
   }
 });
 
-Deno.test("parked assessment and report-only decisions are typed blockers", () => {
+Deno.test("sealed assessment has no recipe or report-only decision blocker", () => {
   const result = evaluateSesMechanicalClean(cleanInput({
     family: "assessment_quote",
-    assessment_recipe_version: null,
+    assessment_recipe_version: "assessment-triad-invoice-only/2026-07-27",
     report_only: true,
     portal_required: true,
-    portal_capture_status: "unreachable",
+    portal_capture_status: "done",
   }));
-  assertEquals(result.approval_band, "decision_blocked");
   assertEquals(
     result.blockers.map((blocker) => blocker.decision_key).filter(Boolean),
-    ["assessment-outbound-recipe", "report-only-email-applicability"],
-  );
-  assert(
-    result.blockers.some((blocker) =>
-      blocker.fact ===
-        "The builder portal link could not be opened, so the portal report is not proven complete."
-    ),
+    [],
   );
 });
 

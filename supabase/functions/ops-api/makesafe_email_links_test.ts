@@ -187,7 +187,8 @@ Deno.test("normalizeReportExternalLinks supports new arrays and legacy portal_li
 const U_2684 = {
   report46: "https://primeeco.tech/share/3aa4a68c-3b5b-495c-9918-808926a47713",
   report47: "https://primeeco.tech/share/6ce66bfb-02ed-41c3-b782-2a1e243be56d",
-  report48: "https://www.primeeco.tech/share/728fb9be-8582-451d-9b0b-09164312bf57",
+  report48:
+    "https://www.primeeco.tech/share/728fb9be-8582-451d-9b0b-09164312bf57",
   report49: "https://primeeco.tech/share/8b6f70ac-fafe-4d51-8ff3-c1f75c04f6c6",
 };
 
@@ -204,11 +205,15 @@ Deno.test("W3-F SWMS-26846: anchor-text labels type the whole prime triad (was 1
   const byUrl = new Map(links.map((l) => [l.url, l]));
   assertEquals(byUrl.get(U_2684.report46)!.kind, "assessment_report");
   assertEquals(
-    byUrl.get("https://primeeco.tech/share/aa11bb22-photos-4d24-c2b6-92050e12abcd")!.kind,
+    byUrl.get(
+      "https://primeeco.tech/share/aa11bb22-photos-4d24-c2b6-92050e12abcd",
+    )!.kind,
     "photos",
   );
   assertEquals(
-    byUrl.get("https://primeeco.tech/share/cc33dd44-quote-4d24-c2b6-92050e34efgh")!.kind,
+    byUrl.get(
+      "https://primeeco.tech/share/cc33dd44-quote-4d24-c2b6-92050e34efgh",
+    )!.kind,
     "quote",
   );
   // No link left generic and nothing flagged — the triad is fully typed.
@@ -244,7 +249,8 @@ Deno.test("W3-F SWMS-26849: a lone unlabelled share link stays generic BUT is fl
   assertEquals(links[0].url, U_2684.report49);
   assertEquals(links[0].kind, "builder_portal"); // not guessed
   assert(
-    typeof links[0].evidence_gap === "string" && links[0].evidence_gap.length > 0,
+    typeof links[0].evidence_gap === "string" &&
+      links[0].evidence_gap.length > 0,
     `expected an evidence-gap flag; got ${JSON.stringify(links[0])}`,
   );
 });
@@ -254,7 +260,9 @@ Deno.test("W3-F triad completion: a bare middle link between typed report+quote 
     "https://primeeco.tech/share/mid-0000\n" +
     "Quote: https://primeeco.tech/share/quo-0000";
   const links = extractBuilderEmailLinks(body);
-  const mid = links.find((l) => l.url === "https://primeeco.tech/share/mid-0000")!;
+  const mid = links.find((l) =>
+    l.url === "https://primeeco.tech/share/mid-0000"
+  )!;
   assertEquals(mid.kind, "photos"); // determined by elimination, not position-guessed
   assertEquals(mid.evidence_gap, undefined); // resolved
   assertEquals(
@@ -285,7 +293,9 @@ Deno.test("W3-F prev-line guard: a stacked sibling link never bleeds its type on
   const body = "Quote: https://primeeco.tech/share/quote-xyz\n" +
     "https://primeeco.tech/share/bare-xyz";
   const links = extractBuilderEmailLinks(body);
-  const bare = links.find((l) => l.url === "https://primeeco.tech/share/bare-xyz")!;
+  const bare = links.find((l) =>
+    l.url === "https://primeeco.tech/share/bare-xyz"
+  )!;
   assertEquals(bare.kind, "builder_portal");
   assert(typeof bare.evidence_gap === "string");
 });
@@ -295,8 +305,13 @@ Deno.test("W3-F canon: kinds are normalised to the extractor's vocabulary at wri
   assertEquals(canonicalizeKind("Photo Schedule"), "photos");
   assertEquals(canonicalizeKind("photos"), "photos");
   assertEquals(canonicalizeKind("quotation"), "quote");
+  assertEquals(canonicalizeKind("scope"), "quote");
+  assertEquals(canonicalizeKind("Scope of Works"), "quote");
   assertEquals(canonicalizeKind("roof-report"), "roof_report");
-  assertEquals(canonicalizeKind("assessment_report_quote"), "assessment_report");
+  assertEquals(
+    canonicalizeKind("assessment_report_quote"),
+    "assessment_report",
+  );
   assertEquals(canonicalizeKind(""), "builder_portal");
   assertEquals(canonicalizeKind("unknown_report"), "builder_portal");
   // A Claude link carrying the legacy photo_schedule alias is stored as `photos`.
@@ -308,6 +323,20 @@ Deno.test("W3-F canon: kinds are normalised to the extractor's vocabulary at wri
     }],
   });
   assertEquals(merged[0].kind, "photos");
+});
+
+Deno.test("assessment triad: Prime's Scope label is stored as the quote member", () => {
+  const links = extractBuilderEmailLinks(`
+    <a href="https://primeeco.tech/share/assessment-1">Assessment Report</a>
+    <a href="https://primeeco.tech/share/photos-1">Photo Schedule</a>
+    <a href="https://primeeco.tech/share/scope-1">Scope of Works</a>
+  `);
+  assertEquals(links.map((link) => link.kind), [
+    "assessment_report",
+    "photos",
+    "quote",
+  ]);
+  assertEquals(links[2].label, "Scope / quote link");
 });
 
 Deno.test("W3-F upgrade-on-rescan: a stored generic link is retyped in place (idempotent, no duplicate)", () => {

@@ -35,6 +35,11 @@ export interface MakesafePortalCapture {
   status?: string | null;
   role?: string | null;
   kind?: string | null;
+  url?: string | null;
+  signal?: string | null;
+  locked?: boolean | null;
+  screenshot?: string | null;
+  screenshot_path?: string | null;
   cycle_number?: number | null;
 }
 
@@ -142,16 +147,83 @@ function captureRole(capture: MakesafePortalCapture): string {
 
 function donePortalRoles(input: MakesafeStatusInput): Set<string> {
   const cycle = Number(input.detail?.cycle_number ?? 1);
+  const requiresTypedAssessmentIdentity =
+    classifyMakesafeJobType(input.detail, input.job) === "assessment_report_quote";
+  const typedLinks = Array.isArray(input.detail?.external_links)
+    ? input.detail.external_links
+    : [];
   return new Set(
     (input.evidence?.portalCaptures || [])
-      .filter((capture) =>
-        String(capture?.status || "").toLowerCase() === "done" &&
-        (capture?.cycle_number == null ||
-          Number(capture.cycle_number) === cycle)
-      )
+      .filter((capture) => {
+        const role = captureRole(capture);
+        const captureUrl = String(capture?.url || "").trim().toLowerCase();
+        return (
+          String(capture?.status || "").toLowerCase() === "done" &&
+          !!String(capture?.screenshot || capture?.screenshot_path || "").trim() &&
+          (capture?.cycle_number == null ||
+            Number(capture.cycle_number) === cycle) &&
+          (!requiresTypedAssessmentIdentity || (
+            capture?.locked === true &&
+            !!captureUrl &&
+            typedLinks.some((link: any) =>
+              captureRole({ role: link?.role, kind: link?.kind }) === role &&
+              String(link?.url || "").trim().toLowerCase() === captureUrl
+            )
+          ))
+        );
+      })
       .map(captureRole)
       .filter(Boolean),
   );
+}
+
+function externalPortalRoles(input: MakesafeStatusInput): Set<string> {
+  return new Set(
+    (Array.isArray(input.detail?.external_links)
+      ? input.detail.external_links
+      : [])
+      .map((link: any) =>
+        captureRole({
+          role: link?.role,
+          kind: link?.kind,
+        })
+      )
+      .filter(Boolean),
+  );
+}
+
+function portalRoleLabel(role: string): string {
+  if (role === "assessment_report") return "assessment";
+  if (role === "photos") return "photos";
+  if (role === "quote") return "quote/scope";
+  return "roof report";
+}
+
+function portalWaitingSentence(
+  input: MakesafeStatusInput,
+  role: string,
+): string {
+  const label = portalRoleLabel(role);
+  const links = externalPortalRoles(input);
+  if (!links.has(role)) {
+    return `The work order email contains no ${label} link - ask the builder to send it.`;
+  }
+  const cycle = Number(input.detail?.cycle_number ?? 1);
+  const capture = (input.evidence?.portalCaptures || []).find((item) =>
+    captureRole(item) === role &&
+    (item.cycle_number == null || Number(item.cycle_number) === cycle)
+  );
+  const signal = String(capture?.signal || "");
+  if (
+    String(capture?.status || "").toLowerCase() === "unreachable" &&
+    /expired|no longer active|no longer available/i.test(signal)
+  ) {
+    return `The builder's ${label} link is expired - ask the builder to send a fresh ${label} link.`;
+  }
+  if (String(capture?.status || "").toLowerCase() === "not_done") {
+    return `The builder's ${label} form is not submitted and locked - ask the trade to finish it in Prime.`;
+  }
+  return `The ${label} link still needs a headless capture proving the Prime form is submitted and locked.`;
 }
 
 export function reportInEvidence(input: MakesafeStatusInput): {
@@ -177,20 +249,22 @@ export function reportInEvidence(input: MakesafeStatusInput): {
   const required = kind === "roof_report"
     ? ["roof_report"]
     : ["assessment_report", "photos", "quote"];
-  const missing = required.filter((role) => !done.has(role)).map((role) =>
-    `locked portal capture: ${role}`
-  );
+  const links = externalPortalRoles(input);
+  const missing = required.filter((role) => !done.has(role) || !links.has(role))
+    .map((role) => portalWaitingSentence(input, role));
   return { satisfied: missing.length === 0, missing };
 }
 
 function docsReady(input: MakesafeStatusInput): boolean {
+  const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
-  if (["READY", "READY_TO_BUILD"].includes(recorded)) return true;
+  if (["READY", "READY_TO_BUILD"].includes(recorded)) {
+    return kind !== "assessment_report_quote" || reportInEvidence(input).satisfied;
+  }
 
   // Legacy durable pack rows predate a persisted pack_state value. Read their
   // already-produced artifacts rather than re-running the reporting skill:
   // first draft pack + DRAFT invoice + SWMS artifact when the docket requires it.
-  const kind = classifyMakesafeJobType(input.detail, input.job);
   const pack = input.evidence?.pack;
   const packStatus = String(pack?.status || "").toLowerCase();
   if (

@@ -11,7 +11,10 @@
 // substatus to a report-complete state, or draft its invoice, without a RECORDED
 // portal-locked verification for the card's CURRENT work cycle.
 
-import { urlIsBuilderPortalLink } from "./makesafe_email_links.ts";
+import {
+  canonicalizeKind,
+  urlIsBuilderPortalLink,
+} from "./makesafe_email_links.ts";
 
 // Report-complete substatuses. Reaching any of these on a report-type card means
 // "the trade's portal report is in / ready to send / ready to invoice" — which is
@@ -33,6 +36,8 @@ export type PortalVerificationState = {
   // Recorded verification (makesafe_job_details.portal_verified_*).
   verifiedAt: string | null;
   verifiedCycle: number | null;
+  requiresAssessmentProof?: boolean;
+  assessmentProofSatisfied?: boolean;
 };
 
 // A report-type card is portal-verified only when a verification was recorded FOR
@@ -44,6 +49,9 @@ export function portalVerificationSatisfied(
 ): boolean {
   if (!state.isReportType) return true;
   if (!state.verifiedAt) return false;
+  if (state.requiresAssessmentProof && !state.assessmentProofSatisfied) {
+    return false;
+  }
   return Number(state.verifiedCycle) === Number(state.currentCycle);
 }
 
@@ -113,6 +121,34 @@ export type ExternalLinkLike =
 
 export type CaptureLink = { url: string; label: string; role: string };
 
+export type PortalCaptureEvidence = {
+  role?: unknown;
+  kind?: unknown;
+  url?: unknown;
+  status?: unknown;
+  locked?: unknown;
+  signal?: unknown;
+  screenshot?: unknown;
+  screenshot_path?: unknown;
+  checked_at?: unknown;
+};
+
+export type ValidatedPortalCapture = {
+  role: "roof_report" | "assessment_report" | "photos" | "quote";
+  url: string;
+  status: "done";
+  locked: true;
+  signal: string;
+  screenshot: string;
+  checked_at: string | null;
+};
+
+export type PortalEvidenceValidation = {
+  ready: boolean;
+  evidence: ValidatedPortalCapture[];
+  waiting_on: string[];
+};
+
 const REPORT_LINK_KINDS = new Set([
   "roof_report",
   "assessment_report",
@@ -134,6 +170,7 @@ export function extractPortalLinks(externalLinks: unknown): CaptureLink[] {
     let url = "";
     let label = "Builder portal";
     let kind = "builder_portal";
+    let declaredPortalKind = false;
     if (typeof raw === "string") {
       url = raw.trim();
     } else if (raw && typeof raw === "object") {
@@ -142,11 +179,17 @@ export function extractPortalLinks(externalLinks: unknown): CaptureLink[] {
         label = raw.label.trim();
       }
       if (typeof raw.kind === "string" && raw.kind.trim()) {
-        kind = raw.kind.trim();
+        const rawKind = raw.kind.trim();
+        kind = canonicalizeKind(rawKind);
+        declaredPortalKind = kind !== "builder_portal" ||
+          ["builder_portal", "portal"].includes(
+            rawKind.toLowerCase().replace(/[\s-]+/g, "_"),
+          );
       }
     }
     if (!url) continue;
-    const isPortal = REPORT_LINK_KINDS.has(kind) || urlIsBuilderPortalLink(url);
+    const isPortal = declaredPortalKind && REPORT_LINK_KINDS.has(kind) ||
+      urlIsBuilderPortalLink(url);
     if (!isPortal) continue;
     const key = url.toLowerCase();
     if (seen.has(key)) continue;
@@ -154,6 +197,120 @@ export function extractPortalLinks(externalLinks: unknown): CaptureLink[] {
     out.push({ url, label, role: kind });
   }
   return out;
+}
+
+const ASSESSMENT_CAPTURE_ROLES = [
+  "assessment_report",
+  "photos",
+  "quote",
+] as const;
+
+function portalRoleLabel(role: string): string {
+  if (role === "assessment_report") return "assessment";
+  if (role === "photos") return "photos";
+  if (role === "quote") return "quote/scope";
+  return "roof report";
+}
+
+function missingPortalSentence(role: string): string {
+  return `The work order email contains no ${
+    portalRoleLabel(role)
+  } link - ask the builder to send it.`;
+}
+
+function captureProblemSentence(
+  role: string,
+  evidence: PortalCaptureEvidence | undefined,
+): string {
+  const label = portalRoleLabel(role);
+  const signal = String(evidence?.signal || "").trim();
+  const status = String(evidence?.status || "").trim().toLowerCase();
+  if (!evidence) {
+    return `The ${label} capture has no screenshot - run the headless capture again.`;
+  }
+  if (
+    status === "unreachable" &&
+    /expired|no longer active|no longer available/i.test(signal)
+  ) {
+    return `The builder's ${label} link is expired - ask the builder to send a fresh ${label} link.`;
+  }
+  if (status === "unreachable") {
+    return `The builder's ${label} link could not be opened - ask the builder to send a working ${label} link.`;
+  }
+  if (status !== "done" || evidence?.locked !== true) {
+    return `The builder's ${label} form is not submitted and locked - ask the trade to finish it in Prime.`;
+  }
+  return `The ${label} capture has no screenshot - run the headless capture again.`;
+}
+
+/**
+ * The money/report floor for builder-portal cards.
+ *
+ * Assessment cards require the three distinct Prime members and tied headless
+ * screenshots. The third member may arrive as "scope" or "quote"; it is stored
+ * and evaluated as quote while Captain-facing wording keeps both names visible.
+ * A human confirmation string is intentionally insufficient.
+ */
+export function validatePortalEvidenceForReportType(
+  reportType: string | null | undefined,
+  externalLinks: unknown,
+  portalEvidence: unknown,
+): PortalEvidenceValidation {
+  const reportToken = String(reportType || "").trim().toLowerCase();
+  const required = reportToken === "assessment_report" ||
+      reportToken === "assessment_report_quote"
+    ? [...ASSESSMENT_CAPTURE_ROLES]
+    : ["roof_report"];
+  const links = extractPortalLinks(externalLinks);
+  const evidenceRows = Array.isArray(portalEvidence)
+    ? portalEvidence.filter((item): item is PortalCaptureEvidence =>
+      !!item && typeof item === "object"
+    )
+    : [];
+  const validated: ValidatedPortalCapture[] = [];
+  const waitingOn: string[] = [];
+
+  for (const role of required) {
+    const roleLinks = links.filter((link) =>
+      canonicalizeKind(link.role) === role
+    );
+    if (roleLinks.length !== 1) {
+      waitingOn.push(missingPortalSentence(role));
+      continue;
+    }
+    const link = roleLinks[0];
+    const capture = evidenceRows.find((candidate) =>
+      canonicalizeKind(String(candidate.role || candidate.kind || "")) ===
+        role &&
+      String(candidate.url || "").trim().toLowerCase() ===
+        link.url.toLowerCase()
+    );
+    const screenshot = String(
+      capture?.screenshot || capture?.screenshot_path || "",
+    ).trim();
+    if (
+      !capture || String(capture.status || "").toLowerCase() !== "done" ||
+      capture.locked !== true || !screenshot
+    ) {
+      waitingOn.push(captureProblemSentence(role, capture));
+      continue;
+    }
+    validated.push({
+      role: role as ValidatedPortalCapture["role"],
+      url: link.url,
+      status: "done",
+      locked: true,
+      signal: String(capture.signal || "form locked/submitted"),
+      screenshot,
+      checked_at: String(capture.checked_at || "").trim() || null,
+    });
+  }
+
+  return {
+    ready: waitingOn.length === 0 && validated.length === required.length,
+    evidence: validated,
+    waiting_on: waitingOn,
+  };
 }
 
 // Terminal job statuses that are never eligible for a portal re-check.
@@ -175,6 +332,8 @@ export type PortalRecheckCard = {
   currentCycle: number;
   verifiedAt: string | null;
   verifiedCycle: number | null;
+  requiresAssessmentProof?: boolean;
+  assessmentProofSatisfied?: boolean;
 };
 
 // Should this card be in the portal-recheck queue an agent run consumes? A card
@@ -194,6 +353,8 @@ export function portalRecheckEligible(card: PortalRecheckCard): boolean {
       currentCycle: card.currentCycle,
       verifiedAt: card.verifiedAt,
       verifiedCycle: card.verifiedCycle,
+      requiresAssessmentProof: card.requiresAssessmentProof,
+      assessmentProofSatisfied: card.assessmentProofSatisfied,
     })
   ) return false; // already verified this cycle
   return extractPortalLinks(card.externalLinks).length > 0;

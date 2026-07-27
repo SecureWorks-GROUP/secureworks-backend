@@ -46,8 +46,10 @@ The U4 action likewise sends nothing, creates or authorises no Xero invoice and
 does not mutate job/substatus/assignment rows. `dry_run:false` appends only the
 draft docket revision and its private artifacts. A ready revision projects the
 card into pre-Xero Docs Ready; a blocked revision remains on its existing board
-stage with named blockers. Assessment stays blocked until the Captain recipe is
-sealed.
+stage with named blockers. Assessment uses the sealed
+`assessment-triad-invoice-only/2026-07-27` recipe and stays blocked only when
+its required work order, typed Prime links, or screenshot-backed locked
+captures are missing.
 
 `MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false` or
 `makesafe_cron_settings.auto_file_enabled=false` remains an explicit emergency brake.

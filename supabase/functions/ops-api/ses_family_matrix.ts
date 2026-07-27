@@ -1,5 +1,7 @@
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-07-27.1";
+  "ses-builder-family-matrix/2026-07-27.2";
+export const SES_ASSESSMENT_RECIPE_VERSION =
+  "assessment-triad-invoice-only/2026-07-27";
 
 export type SesBuilderKey = "MLB" | "AJS" | "AJBR" | "WESTERN" | "UNKNOWN";
 
@@ -142,7 +144,7 @@ function mlbReportRow(
     subtype: null,
     report_only: true,
     report_delivery: assessment
-      ? null
+      ? "portal"
       : ownDocument
       ? "own_document"
       : "portal",
