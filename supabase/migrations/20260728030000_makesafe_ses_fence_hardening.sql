@@ -618,6 +618,10 @@ BEGIN
   WHERE xero_invoice_id = target.xero_invoice_id
     AND job_id = target.job_id
     AND org_id = target.org_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'the invoice mirror binding disappeared before void confirmation'
+      USING ERRCODE = '40001';
+  END IF;
 
   UPDATE public.makesafe_invoice_void_revisions
   SET

@@ -372,6 +372,28 @@ Deno.test("F8 job-link and legacy invoice effects refuse sealed or SES-bound inv
   );
 });
 
+Deno.test("invoice action rejects a caller job that differs from mirror linkage", async () => {
+  const error = await assertRejects(
+    () =>
+      _assertLegacySesInvoiceActionAllowedForTest(
+        lookupClient({
+          invoice: {
+            job_id: JOB_ID,
+            invoice_type: "ACCREC",
+            invoice_obligation_revision_id: null,
+            ses_external_token: null,
+          },
+        }),
+        "xero-linked",
+        "send_invoice_email",
+        "different-job",
+      ),
+    SesActionError,
+  ) as SesActionError;
+  assertEquals(error.status, 409);
+  assertEquals((error.refusal as any).code, "invoice_link_required");
+});
+
 Deno.test("legacy invoice effects fail closed when the invoice mirror is missing", async () => {
   const error = await assertRejects(
     () =>

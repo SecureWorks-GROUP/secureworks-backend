@@ -4614,10 +4614,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'send_invoice_email': {
         const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
         if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
-        await assertLegacySesInvoiceActionAllowed(
+        const directSendInvoice = await assertLegacySesInvoiceActionAllowed(
           client,
           siId,
           'send_invoice_email',
+          siJobId || undefined,
         )
 
         // 2026-04-24 backward-compat fix: if to_email omitted, use Xero-direct email (legacy path).
@@ -4627,7 +4628,7 @@ if (import.meta.main) serve(async (req: Request) => {
           await xeroPost(`/Invoices/${siId}/Email`, sAt, sTi, {}, 'POST')
           try {
             await client.from('job_events').insert({
-              job_id: siJobId || null,
+              job_id: directSendInvoice?.job_id || null,
               event_type: 'invoice.emailed',
               detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
             })
@@ -21973,7 +21974,18 @@ async function assertLegacySesInvoiceActionAllowed(
     })
   }
   const invoiceType = String(invoice.data.invoice_type || '').toUpperCase()
-  if (invoiceType === 'ACCPAY') return
+  if (
+    targetJobId &&
+    invoice.data.job_id &&
+    invoice.data.job_id !== targetJobId
+  ) {
+    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+      xero_invoice_id: xeroInvoiceId,
+      expected_job_id: invoice.data.job_id,
+      received_job_id: targetJobId,
+    }))
+  }
+  if (invoiceType === 'ACCPAY') return invoice.data
   if (
     invoice.data?.invoice_obligation_revision_id ||
     invoice.data?.ses_external_token
@@ -22003,6 +22015,7 @@ async function assertLegacySesInvoiceActionAllowed(
     action,
   )
   await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
+  return invoice.data
 }
 
 async function assertLegacySesInvoiceOrJobActionAllowed(
